@@ -222,7 +222,10 @@ The runtime review half needs a native runtime, so run the preflight from the
 checks run and the review is reported as `skipped`. The review needs no running
 VM. A selected runtime also receives a read-only setup inspection. Incomplete or
 unavailable setup is a `native_runtime_setup` blocker; run the `native setup`
-command its fix prints (it names the launcher you used) before retrying. Without native selection, setup is reported as unavailable.
+command its fix prints (it names the launcher you used) before retrying. While setup is
+`not_set_up` or `partial_resumable`, the runtime review still runs and its
+findings are listed beside that blocker; for any other setup state, or when it
+cannot run, it is `skipped` with `native_setup_incomplete`. Without native selection, setup is reported as unavailable.
 
 Use a matching updated CLI and runtime. A runtime without start-admission review
 is reported as `unavailable` with an update hint and cannot produce `ready: true`.
@@ -303,6 +306,8 @@ preflight. Raw runtime stderr and startup output are not configuration findings.
     `HACK_RUNTIME_BACKEND=native` is set without a candidate, and
     `native_adaptation_invalid` when the adaptation was refused: the unadapted
     document is not reviewed, because its findings would mislead.
+    `native_setup_incomplete` when native setup is not ready and the review
+    could not run before it; the text then lists what was not checked.
   - `unavailable`: the selected runtime did not return a review. `code`, when
     present, is the runtime's own failure code. This says nothing about the
     project.
@@ -316,7 +321,8 @@ preflight. Raw runtime stderr and startup output are not configuration findings.
   `extra_hosts_without_dependencies`, `unsupported_logging`, `invalid_restart`,
   `unsupported_label`, `invalid_http_probe`, `managed_env_unreadable`,
   `environment_delivery`, `native_runtime_setup`, `shared_source_grant_required`,
-  `route_probe_required` and `too_many_bridges`. Runtime findings use the
+  `route_probe_required`, `too_many_bridges`, `gcloud_adc_grant_required` (consent)
+  and `gcloud_adc_mount_refused`. Runtime findings use the
   review's own diagnostic codes, for example `privileged_service` or
   `invalid_mount`, and `review_incompatible` when the review does not admit the
   project and gives no finding this version can show. A code this version has
@@ -1467,10 +1473,22 @@ unless-stopped is not applied. Restart policies are not applied yet to services
 with published ports or routes (HACK-1935); the service starts without automatic
 restarts.` Other services in the same project keep their policy. For the same
 reason the graph refuses a restart policy, with `graph_restart_policy`, on other
-services with a native HTTP probe, services with host dependencies, services
-that receive managed environment values (delivery is single-use and
-time-bounded) and dependency-cache initializers. Remove the `restart` key from
-those services, or keep them on the Compose backend.
+services with a native HTTP probe, services with host dependencies and
+dependency-cache initializers. Remove the `restart` key from those services, or
+keep them on the Compose backend.
+
+A service whose process receives private values (managed environment values or
+privately resolved Compose interpolation) starts without its engine restart
+policy instead of refusing:
+delivery is single-use and time-bounded, and values are never kept at rest in
+the container, so an engine restart would come back without them. Foreground
+`up` and preflight name each such service, for example `Service web: restart:
+unless-stopped is not applied, because the service receives private values that
+native delivers once per container start. If it crashes it stays stopped until
+you run hack restart, which restarts the whole project with a fresh delivery.` Preflight reports it as the warning
+`restart_policy_not_applied`. A service that receives only a private file, such
+as the gcloud ADC snapshot, keeps its restart policy: the file stays mounted for
+the container's lifetime and its entrypoint is unchanged.
 
 Every owned stop first sets the engine policy back to `no` and confirms that with a
 fresh inspection, then requests the stop. A restart that was already pending is
@@ -1945,6 +1963,13 @@ image-declared `VOLUME` path; that cover must be writable. `hack doctor` gives t
 same retained-data advisories for a service with an anonymous volume as for one
 with a named data volume.
 
+A mount whose source the review cannot resolve (`unresolved_mount_source`, for
+example a home-relative file) is also refused by the start review, as
+`graph_subset` on `volumes` with the message "A mount source is interpolated or
+home-relative and was not resolved (unresolved_mount_source)". That refusal is the
+same mount, not an anonymous volume on the service; fix the
+`unresolved_mount_source` finding.
+
 Service CPU and memory limits are optional. Services without an explicit Compose
 limit share the admitted VM pool (Docker `NanoCpus: 0` and `Memory: 0`); the VM's
 CPU and memory admission bounds remain unchanged. Explicit limits retain per-service
@@ -2346,8 +2371,14 @@ hack restart to renew.` `hack exec` keeps exporting fresh values for each reques
 
 For a project whose services bind the gcloud ADC file read-only, for example
 `~/.config/gcloud/application_default_credentials.json:/config/adc.json:ro`,
-explicit `HACK_NATIVE_GCLOUD_ADC=file` applies the gcloud adapter after the normal
-login hook, beside the AWS adapter. Accepted sources are that path written with
+explicit `HACK_NATIVE_GCLOUD_ADC=file`, or `"gcloud": {"mode": "file"}` in the
+[machine settings](#native-settings-files), applies the gcloud adapter after the normal
+login hook, beside the AWS adapter. That one consent is the only step: the Compose file
+keeps its mount line. The variable wins over the machine value; an empty
+`HACK_NATIVE_GCLOUD_ADC=` withholds a machine consent for that command. Native preflight lists a missing consent as
+`gcloud_adc_grant_required` for each service with the mount. It reviews the
+project as the adapter will deliver it, without the host mount, and so does the
+static review that `up` runs before lifecycle hooks. Accepted sources are that path written with
 `~`, `${HOME}`, `$HOME` or the absolute home directory, in short syntax with `:ro`
 or long syntax `{type: bind, source, target, read_only: true}` with no other keys.
 The target must be an absolute container file path outside `/proc`, `/sys`, `/dev`,
@@ -2386,7 +2417,10 @@ container. Google client libraries refresh access tokens from it over normal
 egress. Host re-login or revocation is not propagated; run `hack restart` to deliver
 a fresh snapshot. The run mapping records only `gcloud: {"mode": "file"}`; restart
 and retained restore keep that selection and deliver a fresh copy into new
-allocations. `hack exec` delivers nothing new: the file is already in the
+allocations. On `up`, an empty `HACK_NATIVE_GCLOUD_ADC=` does not restore a retained
+gcloud selection: it refuses ("cannot change the retained run's … gcloud
+selection"), and nothing is read or delivered. Run `hack down` and then `up`
+without the selection. `hack restart` always uses the retained selection. `hack exec` delivers nothing new: the file is already in the
 container, and exec only rechecks the mount and selectors. One-off `run` does not
 apply the adapter. A mapping with a gcloud selection refuses on earlier candidates.
 
@@ -2462,8 +2496,14 @@ an existing pool or guarantee that enough slots are currently free.
 Each routed service needs a matching native route probe (see
 [Native HTTP readiness probe](#native-http-readiness-probe)). If no `healthcheck`
 key was authored, native infers one on the reviewed Caddy route port without
-changing the Compose file. Explicit healthchecks are never replaced; command-only
-or disabled checks on routed services still refuse in this increment. Native review still validates
+changing the Compose file. A routed service with a command healthcheck (`CMD` or
+`CMD-SHELL`) uses the same inferred probe instead: a command check cannot establish
+route readiness, and native never runs an engine check beside an HTTP probe. The
+review reports `route_command_healthcheck_replaced`. As with any inferred route
+probe, a dependent with `condition: service_healthy` on that service still refuses
+(`missing_healthcheck`); `service_started` works. Declare `healthcheck.x-hack-http`
+to probe a specific path. A disabled healthcheck on a routed service still refuses.
+An `x-hack-http` healthcheck is never replaced. Native review still validates
 hostnames, ports, networks and labels. Foreground graph ownership supervises and
 retires Unix route publishers. Without explicit HTTPS selection, this enrollment does not start a hostname authority
 or Caddy HTTPS server. It never installs trust, configures DNS, or widens an existing pool.
@@ -3245,6 +3285,7 @@ the variables:
 | --- | --- |
 | `sharedSource` (`true` or `false`) | `HACK_NATIVE_SHARED_SOURCE=1` |
 | `aws.profile`, `aws.region` | `HACK_NATIVE_AWS_PROFILE`, `HACK_NATIVE_AWS_REGION` |
+| `gcloud.mode` (`file`) | `HACK_NATIVE_GCLOUD_ADC=file` |
 | `dependencies`, `dependenciesByEnv` | `HACK_NATIVE_DEPENDENCIES` |
 | `https.caddyBinary`, `https.caddySha256`, `https.port` | `HACK_NATIVE_CADDY_BINARY`, `HACK_NATIVE_CADDY_SHA256`, `HACK_NATIVE_HTTPS_PORT` |
 | `preparedBase.mode` (`prefer`, `require` or `off`), `preparedBase.store` | `HACK_NATIVE_PREPARED_BASE`, `HACK_NATIVE_PREPARED_BASE_STORE` |
@@ -3252,8 +3293,7 @@ the variables:
 
 `dependencies` and `dependenciesByEnv` name host dependency files (the format above)
 in the same directory: plain file names, never paths. The machine settings do not
-select the adaptation, the native binary or the native home. A `gcloud` field or any
-other field refuses.
+select the adaptation, the native binary or the native home. Any other field refuses.
 
 Hack refuses the machine file with `E_CONFIG_INVALID` before any branch, lifecycle,
 storage or runtime work unless all of these hold:
@@ -3313,7 +3353,7 @@ the machine settings path with your home shown as `~`. With `--json`, the check'
 | --- | --- |
 | `shared_source_not_granted` | Native `up` and `restart` refuse until the project share is granted. |
 | `internal_dns_tls_not_applied` | `internal.dns` and `internal.tls` in `hack.config.json` are not applied on native, so containers cannot reach routes by their HTTPS names. Set both to `false` to silence it. |
-| `routes_without_probes` | `routesWithoutProbes` routed services have no native HTTP probe after the adaptation for the default env; native `up` refuses them. |
+| `routes_without_probes` | `routesWithoutProbes` routed services have a disabled or timing-only healthcheck after the adaptation for the default env; native `up` refuses them. A routed service with no healthcheck or a command healthcheck gets the inferred route probe and is not counted. |
 | `compose_profiles_ignored` | `COMPOSE_PROFILES` is set in the environment, but native selects profiles only from `--profile`. Managed `COMPOSE_PROFILES` values are not inspected. |
 | `aws_region_without_profile` | `HACK_NATIVE_AWS_REGION` is set without `HACK_NATIVE_AWS_PROFILE` and is ignored. |
 | `unread_project_settings_files` | `.hack/native/` holds files other than `adaptation*.json`; Hack does not read them. |

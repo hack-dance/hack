@@ -40,14 +40,18 @@ For that full review, run the command through the `hack-next` launcher described
 on [Install](../install.md). The review needs no running VM.
 The selected runtime also receives a read-only setup inspection. If setup is
 incomplete or unavailable, preflight reports a `native_runtime_setup` blocker;
-run `hack native setup` before retrying. Without native selection, setup is
-reported as unavailable and the runtime review is skipped.
+run `hack native setup` before retrying. The runtime review needs no VM, so
+it still runs while setup is not done or only partly done, and its findings are
+listed beside that blocker. When it cannot run before setup, it is reported as
+skipped with `native_setup_incomplete`, and the text lists the checks that did
+not run. Without native selection, setup is reported as unavailable and the
+runtime review is skipped.
 
 | `runtime_review.status` | Meaning |
 | --- | --- |
 | `completed` | The runtime review finished. |
 | `stopped` | A problem stopped the review early; fix it and rerun for further findings. |
-| `skipped` | No usable runtime was selected, or an input problem prevented review. |
+| `skipped` | No usable runtime was selected, setup was not complete and the review could not run before it (`native_setup_incomplete`), or an input problem prevented review. |
 | `unavailable` | The selected runtime did not return a review. |
 
 With `--json`, the report is inside `data` of the result envelope. Read `ready`,

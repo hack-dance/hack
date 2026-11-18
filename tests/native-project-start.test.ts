@@ -903,6 +903,94 @@ test("a restart policy the runtime does not apply is reported once per service a
   ]);
 });
 
+test("HACK-2324: a privately delivered service starts without its restart policy and is named once", async () => {
+  // The fixture delivers a managed value to web only.
+  const { opts } = await fixture();
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: {
+        web: { image: `sha256:${"e".repeat(64)}`, restart: "unless-stopped" },
+        worker: { image: `sha256:${"e".repeat(64)}`, restart: "always" },
+      },
+    }),
+  });
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) =>
+    await review({
+      ...request,
+      run: (reviewed) =>
+        request.run({
+          ...reviewed,
+          report: {
+            plan: {
+              enrollment_compatible: true,
+              services: {
+                web: { active: true, restart: "unless-stopped" },
+                worker: { active: true, restart: "always" },
+              },
+              diagnostics: [],
+            },
+          },
+        }),
+    });
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(notices.filter((line) => line.includes("private values"))).toEqual([
+    "Service web: restart: unless-stopped is not applied, because the service receives private values that native delivers once per container start. If it crashes it stays stopped until you run hack restart, which restarts the whole project with a fresh delivery.",
+  ]);
+  expect(notices.join("\n")).not.toContain("synthetic-secret");
+});
+
+test("HACK-2324: a service that receives only a private file keeps its restart policy and is not named", async () => {
+  // The fixture delivers a managed value to web; worker gets only a file.
+  const { opts } = await fixture();
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: {
+        web: { image: `sha256:${"e".repeat(64)}` },
+        worker: { image: `sha256:${"e".repeat(64)}`, restart: "always" },
+      },
+    }),
+    managedFiles: {
+      worker: [
+        {
+          name: "gcloud-adc.json",
+          target: "/config/adc.json",
+          content: Buffer.from("synthetic-adc-bytes"),
+        },
+      ],
+    },
+  });
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) =>
+    await review({
+      ...request,
+      run: (reviewed) =>
+        request.run({
+          ...reviewed,
+          report: {
+            plan: {
+              enrollment_compatible: true,
+              services: {
+                web: { active: true },
+                worker: { active: true, restart: "always" },
+              },
+              diagnostics: [],
+            },
+          },
+        }),
+    });
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(notices.filter((line) => line.includes("private values"))).toEqual([]);
+});
+
 test("published, attempted or retained runs never have their data removed", async () => {
   // A successful start publishes its mapping before the graph stops.
   const published = await fixture();
@@ -1538,8 +1626,33 @@ test("AWS profile export follows native login hooks and precedes runtime effects
 
 test("gcloud ADC delivery follows hooks, sends file members privately and persists only the mode", async () => {
   const { opts, events } = await fixture();
-  opts.dependencies.adaptGcloud = async ({ input, mode }) => {
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: {
+        web: {
+          image: `sha256:${"e".repeat(64)}`,
+          volumes: [
+            "~/.config/gcloud/application_default_credentials.json:/config/adc.json:ro",
+          ],
+        },
+      },
+    }),
+  });
+  const reviewed = { normalizedComposeJson: "" };
+  opts.dependencies.adaptGcloud = async ({ input, mode, deliver }) => {
     expect(mode).toBe("file");
+    if (deliver === false) {
+      // HACK-2324: the pre-hook static review sees the input the adapter will
+      // deliver (the host mount removed), and nothing is read for it.
+      events.push("gcloud review");
+      const stripped = JSON.stringify({ services: { web: { image: "x" } } });
+      return {
+        input: { ...input, normalizedComposeJson: stripped },
+        receipt: { mode, types: [], services: ["web"] },
+      };
+    }
     events.push("gcloud");
     return {
       input: {
@@ -1571,9 +1684,29 @@ test("gcloud ADC delivery follows hooks, sends file members privately and persis
   opts.dependencies.remove = async ({ expected }) => {
     expect(saved).toBe(expected);
   };
+  opts.dependencies.staticReview = async ({ input }) => {
+    events.push("static review");
+    reviewed.normalizedComposeJson = input.normalizedComposeJson;
+  };
+  // The only bind is the ADC file, which delivery replaces: no project source
+  // is captured, so the source-size check never runs.
+  opts.dependencies.sourceSize = async () => {
+    events.push("source size");
+    return undefined as never;
+  };
   expect(await startNativeProject({ ...opts, gcloud: { mode: "file" } })).toBe(
     0
   );
+  expect(reviewed.normalizedComposeJson).toBe(
+    JSON.stringify({ services: { web: { image: "x" } } })
+  );
+  expect(events.indexOf("gcloud review")).toBeLessThan(
+    events.indexOf("static review")
+  );
+  expect(events.indexOf("static review")).toBeLessThan(
+    events.indexOf("before")
+  );
+  expect(events).not.toContain("source size");
   expect(events.indexOf("gcloud")).toBeGreaterThan(events.indexOf("before"));
   expect(events.indexOf("gcloud")).toBeLessThan(events.indexOf("runtime up"));
   expect(envelope?.version).toBe(2);
@@ -1602,6 +1735,22 @@ test("gcloud ADC delivery follows hooks, sends file members privately and persis
   });
   await expect(
     startNativeProject({ ...opts, gcloud: { mode: "file" } })
+  ).rejects.toThrow("cannot change the retained run");
+  expect(events).toEqual([]);
+  // A retained graph with a gcloud selection is not restored when the consent
+  // is explicitly withheld for this command; nothing is read or delivered.
+  opts.dependencies.load = async () => ({
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+    effectiveEnvName: null,
+    profiles: [],
+    aws: null,
+    gcloud: { mode: "file" },
+  });
+  await expect(
+    startNativeProject({ ...opts, gcloudWithheld: true })
   ).rejects.toThrow("cannot change the retained run");
   expect(events).toEqual([]);
 });

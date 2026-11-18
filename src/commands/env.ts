@@ -1387,6 +1387,7 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     if (json) {
       // Best effort: an unlistable project dir must not fail the listing.
       const overlays = await listProjectEnvOverlays({
+        projectRoot: project.projectRoot,
         projectDir: project.projectDir,
       }).catch(() => {
         process.stderr.write(
@@ -1843,6 +1844,8 @@ function serializeProjectEnvOverlayForJson(input: {
     exists: input.overlay.exists,
     local_path: input.overlay.localPath,
     local_exists: input.overlay.localExists,
+    inherited_local_path: input.overlay.inheritedLocalPath,
+    inherited_local_exists: input.overlay.inheritedLocalExists,
     default: input.overlay.isDefault,
   };
 }
@@ -3172,6 +3175,7 @@ const handleEnvOverlayList: CommandHandlerFor<typeof overlayListSpec> = async ({
     projectOpt: args.options.project,
   });
   const overlays = await listProjectEnvOverlays({
+    projectRoot: project.projectRoot,
     projectDir: project.projectDir,
   });
   if (args.options.json === true) {
@@ -3196,6 +3200,7 @@ const handleEnvOverlayList: CommandHandlerFor<typeof overlayListSpec> = async ({
     const state = [
       overlay.exists ? "committed" : null,
       overlay.localExists ? "local" : null,
+      overlay.inheritedLocalExists ? "inherited" : null,
       overlay.isDefault ? "default" : null,
     ]
       .filter((value): value is string => value !== null)

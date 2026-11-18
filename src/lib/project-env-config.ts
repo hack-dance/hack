@@ -1767,6 +1767,13 @@ export type ProjectEnvOverlayEntry = {
   /** Machine-local layer, `.hack/hack.env.<name>.local.yaml` (never committed). */
   readonly localPath: string;
   readonly localExists: boolean;
+  /**
+   * In a linked worktree that inherits local inputs, the primary checkout's
+   * machine-local layer for this overlay, which `--env <name>` also reads.
+   * Null when nothing is inherited.
+   */
+  readonly inheritedLocalPath: string | null;
+  readonly inheritedLocalExists: boolean;
   /** The overlay `hack` selects when `--env` is omitted. */
   readonly isDefault: boolean;
 };
@@ -1774,30 +1781,66 @@ export type ProjectEnvOverlayEntry = {
 /**
  * Every overlay a project has: each committed `hack.env.<name>.yaml`, each
  * overlay that exists only as its machine-local layer, and the configured
- * default overlay even when it has no file yet. Layers may be regular files
+ * default overlay even when it has no file yet. In a linked worktree that
+ * inherits local inputs, overlays that exist only as the primary checkout's
+ * machine-local layer are included too, by the same inheritance rule runtime
+ * reads use. Layers may be regular files
  * or in-project symlinks (`exists` reports the entry; a read checks where it
  * leads). Base layers (`default`, the bare local file) are not overlays.
  * Names that the `--env` grammar cannot select are left out. Sorted by name;
  * names only, never values.
  */
+async function listOverlayLayerEntryNames(
+  projectDir: string
+): Promise<string[]> {
+  try {
+    return (
+      (await readdir(projectDir, { withFileTypes: true }))
+        // Regular files and in-project symlinks, which layer reads support
+        // (and refuse when they lead elsewhere); never directories.
+        .filter((entry) => entry.isFile() || entry.isSymbolicLink())
+        .map((entry) => entry.name)
+    );
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+}
+
+/** Overlay names with a machine-local layer among `entries`. */
+function localOverlayLayerNames(entries: readonly string[]): string[] {
+  const localSuffix = `.${PROJECT_ENV_LOCAL_SEGMENT}${PROJECT_ENV_CONFIG_FILENAME_SUFFIX}`;
+  return entries
+    .filter(
+      (name) =>
+        name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+        name.endsWith(localSuffix)
+    )
+    .map((name) =>
+      name.slice(PROJECT_ENV_CONFIG_FILENAME_PREFIX.length, -localSuffix.length)
+    )
+    .filter((name) => name.length > 0 && name !== "default");
+}
+
 export async function listProjectEnvOverlays(opts: {
+  readonly projectRoot: string;
   readonly projectDir: string;
 }): Promise<readonly ProjectEnvOverlayEntry[]> {
   const localSuffix = `.${PROJECT_ENV_LOCAL_SEGMENT}`;
-  let entries: string[];
-  try {
-    entries = (await readdir(opts.projectDir, { withFileTypes: true }))
-      // Regular files and in-project symlinks, which layer reads support
-      // (and refuse when they lead elsewhere); never directories.
-      .filter((entry) => entry.isFile() || entry.isSymbolicLink())
-      .map((entry) => entry.name);
-  } catch (error) {
-    if (isRecord(error) && error.code === "ENOENT") {
-      entries = [];
-    } else {
-      throw error;
-    }
-  }
+  const entries = await listOverlayLayerEntryNames(opts.projectDir);
+  // Best effort, like the rest of this listing: an inheritance that cannot
+  // be resolved adds no names (runtime reads report it).
+  const primaryDir = await resolvePrimaryLocalProjectDir(opts).catch(
+    () => null
+  );
+  const inheritedNames =
+    primaryDir === null
+      ? []
+      : localOverlayLayerNames(
+          await listOverlayLayerEntryNames(primaryDir).catch(() => [])
+        );
   const committed = await listProjectEnvOverlayNames({
     projectDir: opts.projectDir,
   }).catch(() => [] as readonly string[]);
@@ -1830,6 +1873,7 @@ export async function listProjectEnvOverlays(opts: {
   const names = new Set<string>([
     ...committed,
     ...discovered,
+    ...inheritedNames,
     ...(defaultEnv === null ? [] : [defaultEnv]),
   ]);
   const overlays: ProjectEnvOverlayEntry[] = [];
@@ -1847,12 +1891,23 @@ export async function listProjectEnvOverlays(opts: {
       projectDir: opts.projectDir,
       envName: name,
     });
+    const inheritedLocalPath =
+      primaryDir === null
+        ? null
+        : resolveProjectEnvLocalConfigPath({
+            projectDir: primaryDir,
+            envName: name,
+          });
     overlays.push({
       name,
       path,
       exists: (await lstat(path).catch(() => null)) !== null,
       localPath,
       localExists: (await lstat(localPath).catch(() => null)) !== null,
+      inheritedLocalPath,
+      inheritedLocalExists:
+        inheritedLocalPath !== null &&
+        (await lstat(inheritedLocalPath).catch(() => null)) !== null,
       isDefault: name === defaultEnv,
     });
   }

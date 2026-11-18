@@ -340,6 +340,8 @@ describe("R24: every overlay", () => {
           exists: false,
           local_path: resolve(project.projectDir, "hack.env.dev.local.yaml"),
           local_exists: false,
+          inherited_local_path: null,
+          inherited_local_exists: false,
           default: true,
         },
         {
@@ -348,6 +350,8 @@ describe("R24: every overlay", () => {
           exists: true,
           local_path: resolve(project.projectDir, "hack.env.qa.local.yaml"),
           local_exists: false,
+          inherited_local_path: null,
+          inherited_local_exists: false,
           default: false,
         },
         {
@@ -359,6 +363,8 @@ describe("R24: every overlay", () => {
             "hack.env.staging.local.yaml"
           ),
           local_exists: true,
+          inherited_local_path: null,
+          inherited_local_exists: false,
           default: false,
         },
       ];
@@ -771,6 +777,8 @@ describe("R27: overlay creation", () => {
             exists: true,
             local_path: resolve(project.projectDir, "hack.env.qa.local.yaml"),
             local_exists: false,
+            inherited_local_path: null,
+            inherited_local_exists: false,
             default: false,
           },
           committed_path_ignored: false,
@@ -836,6 +844,61 @@ describe("R27: overlay creation", () => {
         args: ["env", "get", "STORED_PLAIN", "--env", "qa"],
       });
       expect(get.exitCode).toBe(0);
+      expect(get.stdout).toBe(PLAIN_VALUE);
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
+    "a linked worktree lists overlays it inherits from the primary checkout",
+    async () => {
+      const project = await createProject();
+      const git = (args: readonly string[]) =>
+        Bun.spawnSync(
+          [
+            "git",
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            ...args,
+          ],
+          { cwd: project.projectRoot, stdout: "ignore", stderr: "ignore" }
+        ).exitCode;
+      expect(git(["init", "-q"])).toBe(0);
+      expect(git(["add", "."])).toBe(0);
+      expect(git(["commit", "-q", "-m", "fixture"])).toBe(0);
+      const worktree = resolve(project.root, "wt");
+      expect(git(["worktree", "add", "-q", "-b", "feat", worktree])).toBe(0);
+      // Only the primary checkout has a machine-local qa layer.
+      await setValue({
+        project,
+        key: "PLAIN",
+        value: PLAIN_VALUE,
+        extraArgs: ["--env", "qa", "--local"],
+      });
+      const primaryLocal = resolve(
+        project.projectDir,
+        "hack.env.qa.local.yaml"
+      );
+      const listed = await listJson({ project, args: ["--path", worktree] });
+      expect(listed.json.overlays).toEqual([
+        {
+          name: "qa",
+          path: resolve(worktree, ".hack", "hack.env.qa.yaml"),
+          exists: false,
+          local_path: resolve(worktree, ".hack", "hack.env.qa.local.yaml"),
+          local_exists: false,
+          inherited_local_path: primaryLocal,
+          inherited_local_exists: true,
+          default: false,
+        },
+      ]);
+      // And --env qa really reads it there.
+      const get = await runHack({
+        project,
+        args: ["env", "get", "PLAIN", "--env", "qa", "--path", worktree],
+      });
       expect(get.stdout).toBe(PLAIN_VALUE);
     },
     CLI_TEST_TIMEOUT_MS

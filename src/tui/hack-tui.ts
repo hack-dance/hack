@@ -124,22 +124,6 @@ type LifecycleInteractionTarget = {
   readonly windowName: string | null;
 };
 
-class WrappedTextRenderable extends TextRenderable {
-  protected override onResize(width: number, height: number): void {
-    super.onResize(width, height);
-    if (this.wrapMode !== "none" && width > 0) {
-      this.textBufferView.setWrapWidth(width);
-    }
-  }
-
-  public syncWrapWidth(): void {
-    const width = Math.floor(this.width);
-    if (this.wrapMode !== "none" && width > 0) {
-      this.textBufferView.setWrapWidth(width);
-    }
-  }
-}
-
 class PausableScrollBoxRenderable extends ScrollBoxRenderable {
   public onScrollChange: ((event: MouseEvent) => void) | null = null;
 
@@ -236,8 +220,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const activeRenderer = await createCliRenderer({
       targetFps: 30,
       exitOnCtrlC: false,
-      useConsole: false,
-      useAlternateScreen: true,
+      consoleMode: "disabled",
+      screenMode: "alternate-screen",
       useMouse: true,
     });
     renderer = activeRenderer;
@@ -436,7 +420,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       },
     });
 
-    const logsText = new WrappedTextRenderable(activeRenderer, {
+    // opentui 0.8 wraps text to its laid-out width natively.
+    const logsText = new TextRenderable(activeRenderer, {
       id: "hack-tui-logs-text",
       width: "100%",
       content: "Waiting for logs...",
@@ -452,16 +437,22 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const footer = new BoxRenderable(activeRenderer, {
       id: "hack-tui-footer",
       width: "100%",
+      // opentui 0.8 lets a padded box shrink below its content, hiding the
+      // hint row. Fixed at 3 rows: the height 0.1 laid out for this box.
+      flexShrink: 0,
       paddingLeft: 2,
       paddingRight: 2,
       paddingTop: 1,
-      paddingBottom: 2,
+      paddingBottom: 1,
       border: false,
       backgroundColor: "#141828",
     });
 
     const footerText = new TextRenderable(activeRenderer, {
       id: "hack-tui-footer-text",
+      // One hint row, clipped at the padding as before opentui 0.8 (which wraps by default).
+      width: "100%",
+      wrapMode: "none",
       content: "",
     });
 
@@ -558,7 +549,6 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const searchQueryInput = new InputRenderable(activeRenderer, {
       id: "hack-tui-search-query-input",
       width: "100%",
-      height: 1,
       backgroundColor: "#0f111a",
       focusedBackgroundColor: "#141c2a",
       textColor: "#c0caf5",
@@ -680,7 +670,6 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const searchSinceInput = new InputRenderable(activeRenderer, {
       id: "hack-tui-search-since-input",
       width: "100%",
-      height: 1,
       backgroundColor: "#0f111a",
       focusedBackgroundColor: "#141c2a",
       textColor: "#c0caf5",
@@ -710,7 +699,6 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const searchUntilInput = new InputRenderable(activeRenderer, {
       id: "hack-tui-search-until-input",
       width: "100%",
-      height: 1,
       backgroundColor: "#0f111a",
       focusedBackgroundColor: "#141c2a",
       textColor: "#c0caf5",
@@ -1999,7 +1987,6 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         selectedIndex: selectedLineIndex,
         collapseMultiline,
       });
-      logsText.syncWrapWidth();
       if (handleSelectionChange) {
         handleSelectionChange();
       }
@@ -2328,14 +2315,11 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       }
     };
 
-    logsScroll.verticalScrollBar.on("change", (payload) => {
+    // opentui 0.8: the scrollbar is a facade whose onChange receives the position.
+    logsScroll.verticalScrollBar.onChange = (position) => {
       if (!isActive || searchOverlayVisible || searchMode === "results") {
         return;
       }
-      const position =
-        typeof payload?.position === "number"
-          ? payload.position
-          : logsScroll.scrollTop;
       const movedUp = position < lastScrollTop - 1;
       const atBottom = isScrollAtBottom();
       if (movedUp && logFollow) {
@@ -2347,7 +2331,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       if (position <= 1) {
         void loadMoreHistory();
       }
-    });
+    };
 
     const refreshRuntime = async () => {
       if (!isActive) {

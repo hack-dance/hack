@@ -114,9 +114,9 @@ chmod 755 "$out/hack-native" "$out/hack-relay-guest"
 python3 scripts/verify-native-relay.py "$out/hack-relay-guest"
 cp packages/runtime-core/provider-pins.json "$out/provider-pins.json"
 if [ -n "$version" ]; then
-  bun build index.ts --compile --define "__HACK_BUILD_VERSION__=\"$version\"" --outfile "$out/hack-cli"
+  bun build index.ts --compile --define 'process.env.OPENTUI_LIBC="glibc"' --define "__HACK_BUILD_VERSION__=\"$version\"" --outfile "$out/hack-cli"
 else
-  bun build index.ts --compile --outfile "$out/hack-cli"
+  bun build index.ts --compile --define 'process.env.OPENTUI_LIBC="glibc"' --outfile "$out/hack-cli"
 fi
 bun scripts/build-lifecycle-supervisor.ts
 cp dist/hack-lifecycle-supervisor "$out/hack-lifecycle-supervisor"

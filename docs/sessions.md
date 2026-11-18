@@ -42,7 +42,7 @@ Detach with the tmux prefix and `d`. The session keeps running. Come back with:
 hack session attach my-project
 ```
 
-Run `hack session` with no arguments for a picker that lists sessions and
+In a terminal, run `hack session` with no arguments for a picker that lists sessions and
 projects. `hack setup tmux` installs a tmux popup binding that opens the same
 picker from inside tmux.
 
@@ -55,6 +55,8 @@ picker from inside tmux.
 | `hack session start my-project` | `my-project` |
 | `hack session start my-project --new` | `my-project--2`, then `--3`, and so on |
 | `hack session start my-project --name agent-1` | `my-project--agent-1` |
+| `hack session start my-project --env qa` | `my-project.env-qa` (`--env base` gives `.env-base`) |
+| `hack session start my-project --service api` | `my-project.svc-api` |
 | `hack session start my-project --env qa --service api` | `my-project.env-qa.svc-api` |
 | `hack up` in a project with lifecycle processes | `my-project--lifecycle` |
 | the same, in a branch instance | `my-project--lifecycle-<branch>` |
@@ -65,7 +67,7 @@ title: What hack session start does
 ---
 flowchart TD
   Start["hack session start"] --> Flags{"--new or --name?"}
-  Flags -->|no| Exists{"Default session exists?"}
+  Flags -->|no| Exists{"Session with this name exists?"}
   Exists -->|yes| Reuse["Reuse it"]
   Exists -->|no| Create["Create it"]
   Flags -->|yes| CreateNew["Create another session"]
@@ -92,6 +94,9 @@ A new session starts in the repository root, not in `.hack/`.
 when it creates the session. Every shell in that session has them. `--env`
 chooses the overlay and `--service` chooses the scope, as on other commands;
 see [Environment and secrets](env.md).
+
+A session keeps the env it was created with. Changing env files does not update
+an existing session; stop it and start it again.
 
 The values then live in the tmux server's memory for that session, including
 secrets. Anything that can attach to the session can read them. Hack passes them
@@ -135,7 +140,9 @@ hack session panes my-project
 | `panes` | The panes in the session: target, window, command, folder | |
 
 All three print JSON lines by default: a `start` event, one `log` event per
-line or pane, then an `end` event. Add `--pretty` for plain text. `--target`
+line or pane, an `error` event if a read fails, then an `end` event. `--pretty`
+prints plain text on `capture` and `tail`, and one JSON object on `panes`.
+`--json` asks for the default and cannot be combined with `--pretty`. `--target`
 picks a pane on `capture` and `tail`.
 
 `hack session list` prints a table. It has no `--json`.
@@ -151,8 +158,10 @@ ends at once; there is no graceful step. Two things to know:
 
 - `hack session list` shows every session on your tmux server, not only the
   ones Hack created. `stop` kills whichever one you name.
-- Do not stop a `--lifecycle` session this way. Use `hack down`, which also
-  stops the processes that session started.
+- Do not stop a `--lifecycle` session this way. Use `hack down`, which stops
+  the session's processes in order. If you kill the session and a process
+  outlives it, `hack down` refuses and keeps the lifecycle state until that
+  process is gone.
 
 ### Lifecycle sessions
 
@@ -195,9 +204,9 @@ If tmux is not installed, a `hack up` that needs a lifecycle session fails
 before it starts one. A project with no lifecycle processes and no persistent
 hooks needs no tmux for `hack up`.
 
-A project can opt in to Hack's built-in supervisor for these processes instead
-of tmux, with `lifecycle.runner: "supervisor"`. See
-[Lifecycle supervisor](lifecycle-supervisor.md).
+A project can opt in to an experimental built-in supervisor for these processes
+instead of tmux, with `lifecycle.runner: "supervisor"`. It needs a matching
+supervisor executable. See [Lifecycle supervisor](lifecycle-supervisor.md).
 
 ### What is stored where
 
@@ -214,7 +223,7 @@ session is gone; start it again.
 
 | Option | On | What it does |
 | --- | --- | --- |
-| `--up` | `start` | Run `hack up -d` first |
+| `--up` | `start` | Run `hack up -d` first, with `--env`. It uses the `hack` on your `PATH`, and the session starts even if `up` fails |
 | `--new` | `start` | Create another numbered session |
 | `--name <suffix>` | `start` | Create another session with this suffix |
 | `--detach`, `-d` | `start` | Do not attach |
@@ -223,7 +232,7 @@ session is gone; start it again.
 | `--target <pane>` | `capture`, `tail` | Choose a pane |
 | `--lines <n>` | `capture`, `tail` | How many lines to read |
 | `--interval-ms`, `--max-ms` | `tail` | How often and how long to poll |
-| `--pretty` | `panes`, `capture`, `tail` | Plain text instead of JSON lines |
+| `--pretty` | `capture`, `tail`, `panes` | Plain text (`panes`: one JSON object) |
 
 The [command reference](reference/cli.md) has every flag.
 
@@ -235,7 +244,7 @@ The [command reference](reference/cli.md) has every flag.
 | `HACK_SESSIONS_MUX` | the same; it wins over both config files | |
 
 `auto` and `tmux` both mean tmux. `none` turns sessions off: `list` shows
-nothing and `start` fails.
+nothing and `start` fails. The project file wins over the global config.
 
 ```bash
 hack config set --global sessions.mux tmux
@@ -244,8 +253,9 @@ hack config set --global sessions.mux tmux
 ### From another machine
 
 `hack ssh` prints the SSH command for this machine and lists its sessions, so
-you can attach from a phone or another computer. Run `hack ssh --help` for its
-options.
+you can attach from a phone or another computer. `--tailscale` or
+`--direct --host <name>` choose the route, and it shows a QR code for a phone
+SSH app. Run `hack ssh --help` for the rest.
 
 ## Limits
 
@@ -270,8 +280,8 @@ v4 could use zellij. v5 uses tmux only. What happens depends on what you have:
 
 | You have | What v5 does | What to do |
 | --- | --- | --- |
-| `sessions.mux` set to `zellij` in a project or the global config, or `HACK_SESSIONS_MUX=zellij` | Every `hack session` command, `hack ssh`, `hack doctor`, `hack global install`, and a `hack up` or `hack restart` that needs a lifecycle session stop with: `sessions.mux=zellij was removed in v5. Install tmux, then unset sessions.mux (and HACK_SESSIONS_MUX) or set it to tmux.` | Install tmux. Remove the setting in each place, or set it to `tmux`. |
-| A project whose lifecycle processes were started under zellij by v4 and are still recorded | `hack up` and `hack down` refuse, because v5 cannot inspect or stop a zellij session. Changing the setting does not clear this. | Stop that project with the v4 CLI while zellij is still installed: run v4's `hack down`. If you already upgraded, go back to the v4 CLI for that one stop. Do not delete or edit Hack's state files. |
+| `sessions.mux` set to `zellij` in a project or the global config, or `HACK_SESSIONS_MUX=zellij` | `hack session` commands, `hack ssh`, and a `hack up` or `hack restart` that needs a lifecycle session stop with: `sessions.mux=zellij was removed in v5. Install tmux, then unset sessions.mux (and HACK_SESSIONS_MUX) or set it to tmux.` `hack doctor` reports the same text as a `sessions mux` error. `hack global install` stops when the global setting or the variable says `zellij`. | Install tmux. Remove the setting in each place, or set it to `tmux`. |
+| A project whose lifecycle processes were started under zellij by v4 and are still recorded | `hack up`, `hack restart` and `hack down` refuse, because v5 cannot inspect or stop a zellij session. Changing the setting does not clear this. | Stop that project with the v4 CLI while zellij is still installed: run v4's `hack down`. If you already upgraded, go back to the v4 CLI for that one stop. Do not delete or edit Hack's state files. |
 | Open zellij sessions | Nothing. v5 does not stop them and does not move them to tmux. | Close them yourself. Start new sessions with `hack session start`. |
 
 The [upgrade guide](versions/v5/guides/upgrade-from-v4.md#breaking-change-zellij-workspaces-removed)

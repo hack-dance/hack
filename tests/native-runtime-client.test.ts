@@ -1522,6 +1522,43 @@ bunTest(
 );
 
 bunTest(
+  "HACK-2324: invalid_state names the state path relative to the native home, and nothing else",
+  () => {
+    expect(
+      nativeFailureDetail({
+        code: "invalid_state",
+        message: "Candidate state component is not a directory: <tmp>/state",
+        state_component: { version: 1, path: ".hack-local/run/graphs" },
+      }).message
+    ).toBe(
+      "The native state path .hack-local/run/graphs exists but is not a directory. Inspect it in the native home; do not delete it to retry."
+    );
+    for (const component of [
+      { version: 1, path: "/absolute/private/path" },
+      { version: 1, path: ".hack-local/../escape" },
+      { version: 1, path: "with space" },
+      { version: 1, path: ".hack-local//double" },
+      { version: 2, path: ".hack-local/run" },
+      { version: 1, path: ".hack-local/run", extra: "secret" },
+    ]) {
+      expect(
+        nativeFailureDetail({
+          code: "invalid_state",
+          state_component: component,
+        }).message
+      ).toBeUndefined();
+    }
+    // Only invalid_state renders it.
+    expect(
+      nativeFailureDetail({
+        code: "registry_image",
+        state_component: { version: 1, path: ".hack-local/run" },
+      }).message
+    ).toBeUndefined();
+  }
+);
+
+bunTest(
   "network diagnostics retain admitted underscore hosts and zero-attempt deadlines",
   () => {
     expect(

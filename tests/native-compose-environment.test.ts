@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { adaptNativeAwsEnvironment } from "../src/backends/native-aws-environment.ts";
+import { readNativeEnvFileSnapshot } from "../src/backends/native-env-file-source.ts";
 import { adaptNativeGcloudEnvironment } from "../src/backends/native-gcloud-environment.ts";
 import { nativePrivateEnvironmentPayload } from "../src/backends/native-private-environment-payload.ts";
 import {
@@ -27,7 +28,12 @@ import {
   selectActiveNativeProjectInput,
 } from "../src/backends/native-project-input.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../src/lib/native-environment-notices.ts";
-import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
+import {
+  classifyMaterializedDotenv,
+  materializeProjectEnv,
+  setProjectEnvValue,
+} from "../src/lib/project-env-config.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 
 const FILE = "synthetic-file-value-canary";
 const DOTENV = "synthetic-dotenv-value-canary";
@@ -1132,6 +1138,88 @@ test("inactive service files are not read, but selected profiles require them", 
   await f.source("missing.env", `TOKEN=${FILE}\n`);
   await chmod(join(f.projectDir, "missing.env"), 0o666);
   expect((await prepareNativeProjectInput(f)).shellEnvironment).toEqual({});
+});
+
+test("HACK-2324: a materialized dotenv refusal says whether removing it can lose values, with the exact command", async () => {
+  const f = await fixture({ env_file: ".env" });
+  await managed(f.projectDir, { global: { FLAG: "on" } });
+  await materializeProjectEnv({
+    projectRoot: f.projectRoot,
+    projectDir: f.projectDir,
+    envName: null,
+    serviceName: null,
+    serviceNames: ["app"],
+  });
+  const current = String(
+    await prepareNativeProjectInput(f).catch((caught: unknown) => caught)
+  );
+  expect(current).toContain("matches the current env layers exactly");
+  expect(current).toContain("rm .hack/.env .hack/.env.state.json");
+  expect(current).not.toContain("on\n");
+  // Hand-edited after materialize: it may hold the user's own values.
+  await f.source(".env", `FLAG=on\nMINE=${DOTENV}\n`);
+  const differs = String(
+    await prepareNativeProjectInput(f).catch((caught: unknown) => caught)
+  );
+  expect(differs).toContain("may hold values of your own");
+  expect(differs).toContain("hack env set --local");
+  expect(differs).not.toContain(DOTENV);
+});
+
+test("HACK-2324: an unsafe materialized dotenv is not read for the comparison", async () => {
+  const f = await fixture({ env_file: ".env" });
+  await managed(f.projectDir, { global: { FLAG: "on" } });
+  await f.source(".env.state.json", "{}\n");
+  // A FIFO would block a read; it must refuse at once without opening it.
+  const fifo = spawnSyncBounded(["mkfifo", join(f.projectDir, ".env")]);
+  expect(fifo.exitCode).toBe(0);
+  const blocked = String(
+    await prepareNativeProjectInput(f).catch((caught: unknown) => caught)
+  );
+  expect(blocked).toContain("cannot be compared");
+  // An oversized file is not read either.
+  await rm(join(f.projectDir, ".env"));
+  await f.source(".env", `FLAG=${"x".repeat(300 * 1024)}\n`);
+  const large = String(
+    await prepareNativeProjectInput(f).catch((caught: unknown) => caught)
+  );
+  expect(large).toContain("cannot be compared");
+});
+
+test("HACK-2324: the materialized dotenv comparison uses one stable snapshot and never reopens the files", async () => {
+  const f = await fixture({ env_file: ".env" });
+  await managed(f.projectDir, { global: { FLAG: "on" } });
+  await materializeProjectEnv({
+    projectRoot: f.projectRoot,
+    projectDir: f.projectDir,
+    envName: null,
+    serviceName: null,
+    serviceNames: ["app"],
+  });
+  const dotenv = await readNativeEnvFileSnapshot(join(f.projectDir, ".env"));
+  const state = await readNativeEnvFileSnapshot(
+    join(f.projectDir, ".env.state.json")
+  );
+  expect(dotenv).not.toBeNull();
+  expect(state).not.toBeNull();
+  // Replace both paths with FIFOs: any reopen would block this test.
+  for (const name of [".env", ".env.state.json"]) {
+    await rm(join(f.projectDir, name));
+    expect(
+      spawnSyncBounded(["mkfifo", join(f.projectDir, name)]).exitCode
+    ).toBe(0);
+  }
+  expect(
+    await readNativeEnvFileSnapshot(join(f.projectDir, ".env"))
+  ).toBeNull();
+  expect(
+    await classifyMaterializedDotenv({
+      projectRoot: f.projectRoot,
+      projectDir: f.projectDir,
+      serviceNames: ["app"],
+      snapshots: { dotenv: dotenv ?? "", state: state ?? "" },
+    })
+  ).toBe("current");
 });
 
 test("materialized dotenv identity aliases are refused before source reading", async () => {

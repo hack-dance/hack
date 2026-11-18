@@ -361,6 +361,7 @@ import {
   nativeDetachedUpHookFailed,
   nativeDetachedUpKeepsHookOutput,
   nativeDetachedUpPrestart,
+  nativeDetachedUpProgress,
   nativeDetachedUpReady,
   startNativeDetachedUp,
 } from "../lib/native-detached-up.ts";
@@ -6726,6 +6727,8 @@ async function handleNativeUp({
         // VM work starts: later failures keep the runtime's own reports.
         nativeDetachedUpPrestart(false);
       }
+      // A detached launcher's clocks follow these phases (HACK-2351).
+      nativeDetachedUpProgress(event.phase);
       reportNativeStartupProgress(event);
     },
     before: async (input) => {

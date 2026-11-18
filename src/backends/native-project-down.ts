@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { ClosedCliError } from "../lib/cli-result.ts";
+import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   resolveProjectEnvConfig,
@@ -31,6 +31,7 @@ import {
   loadNativeRestartIntent,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  nativeProjectStartupPending,
   nativeRunEnvironmentChange,
   removeNativeProjectRun,
 } from "./native-project-run.ts";
@@ -489,6 +490,62 @@ async function resumeSelectedOwner(opts: {
 /** Retaining cleanup only. Success follows confirmed compute absence and the
  * original frontend's finalizers, including a previously recovered stop.
  */
+/** How often a down that waits for an unpublished start checks it again. */
+const STARTUP_WAIT_POLL_MS = 500;
+
+/**
+ * Before a down reports "not started" (HACK-2351): a start of this instance
+ * that has published no run yet may still hold the native runtime (a
+ * detached start whose launcher gave up, still building or unwinding). Wait
+ * for its owner to exit, at most `waitMs` (default 120 s). True when that
+ * start published a run meanwhile, so the down stops it; false when it ended
+ * without one. A start still alive at the end refuses: this down stopped
+ * nothing and must not report success.
+ */
+async function awaitPendingStartup(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly waitMs?: number;
+}): Promise<boolean> {
+  const deadline = performance.now() + (opts.waitMs ?? 120_000);
+  while (await nativeProjectStartupPending(opts.scope)) {
+    if (await loadNativeProjectRun(opts.scope)) {
+      return true;
+    }
+    if (performance.now() >= deadline) {
+      throw new HackCliError({
+        code: "E_DOWN_INCOMPLETE",
+        message:
+          "A native start of this instance is still running or unwinding (its owner process is alive), so nothing was stopped. Run hack down again once it ends; meanwhile hack ps --json reports status pending.",
+      });
+    }
+    await Bun.sleep(STARTUP_WAIT_POLL_MS);
+  }
+  return (await loadNativeProjectRun(opts.scope)) !== null;
+}
+
+/**
+ * The run a down acts on: the published one, or, when there is none yet, the
+ * one a still-alive start of this instance publishes while the down waits
+ * for it (see {@link awaitPendingStartup}); null when that start ended without
+ * one. The restart coordinator, which owns its own start, never waits here.
+ */
+async function downRun(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly deferFinalization?: boolean;
+  readonly startupWaitMs?: number;
+}): Promise<NativeProjectRun | null> {
+  const run = await loadNativeProjectRun(opts.scope);
+  if (run || opts.deferFinalization) {
+    return run;
+  }
+  return (await awaitPendingStartup({
+    scope: opts.scope,
+    waitMs: opts.startupWaitMs,
+  }))
+    ? await loadNativeProjectRun(opts.scope)
+    : null;
+}
+
 export async function nativeProjectDown(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
@@ -528,8 +585,10 @@ export async function nativeProjectDown(opts: {
   /** Only the restart coordinator may defer to its already captured exact wait/recovery. */
   readonly deferFinalization?: boolean;
   readonly finalizationTimeoutMs?: number;
+  /** How long to wait for an unpublished start to end (tests shorten it). */
+  readonly startupWaitMs?: number;
 }) {
-  const run = await loadNativeProjectRun(opts.scope);
+  const run = await downRun(opts);
   if (!run) {
     return {
       backend: "native",

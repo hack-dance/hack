@@ -26,6 +26,14 @@ import {
   okResult,
 } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
+import {
+  isNativeDetachedStartPhase,
+  NATIVE_DETACHED_HEARTBEAT_MS,
+  NativeDetachedStartDeadline,
+  type NativeDetachedStartLimits,
+  type NativeDetachedStartPhase,
+  resolveNativeDetachedStartLimits,
+} from "./native-detached-start-deadline.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "./native-environment-notices.ts";
 
 export const NATIVE_DETACHED_OWNER_ARGUMENT =
@@ -54,6 +62,43 @@ type StartupFailure = {
   readonly startupPhase?: "static-preflight";
 };
 let publishFailure: ((failure: StartupFailure) => Promise<void>) | undefined;
+let publishProgress:
+  | ((phase: Exclude<NativeDetachedStartPhase, "launching">) => void)
+  | undefined;
+let progressHeartbeat: ReturnType<typeof setInterval> | undefined;
+let heartbeatIntervalMs = NATIVE_DETACHED_HEARTBEAT_MS;
+
+/** Test fixtures may report image-work heartbeats faster than every 30 s. */
+export function setNativeDetachedHeartbeatIntervalForTests(ms: number): void {
+  heartbeatIntervalMs = ms;
+}
+
+function stopProgressHeartbeat(): void {
+  clearInterval(progressHeartbeat);
+  progressHeartbeat = undefined;
+}
+
+/**
+ * Report a startup phase to the launcher (HACK-2351): its name only. While the
+ * owner is in `images` (bounded build and load requests) it repeats that
+ * report as a heartbeat, so the launcher does not count image work against its
+ * budget. A foreground start has no launcher and reports nothing.
+ */
+export function nativeDetachedUpProgress(phase: string): void {
+  if (!(publishProgress && isNativeDetachedStartPhase(phase))) {
+    return;
+  }
+  stopProgressHeartbeat();
+  publishProgress(phase);
+  if (phase === "images") {
+    const report = publishProgress;
+    progressHeartbeat = setInterval(
+      () => report("images"),
+      heartbeatIntervalMs
+    );
+    progressHeartbeat.unref?.();
+  }
+}
 const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const FAILURE_MESSAGE = /^[\x20-\x7e]{1,400}$/;
 const FAILURE_SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
@@ -573,6 +618,10 @@ export async function runNativeDetachedOwner(opts: {
           readonly details: BranchDroppedSites;
         }
       | { readonly kind: "prestart-refusal"; readonly data: PrestartRefusal }
+      | {
+          readonly kind: "progress";
+          readonly phase: Exclude<NativeDetachedStartPhase, "launching">;
+        }
   ): Promise<void> =>
     new Promise((resolve) => {
       if (!(process.send && process.connected)) {
@@ -645,6 +694,13 @@ export async function runNativeDetachedOwner(opts: {
       await send({ kind: "prestart-refusal", data });
     }
   };
+  publishProgress = (phase) => {
+    if (ready || stopping) {
+      stopProgressHeartbeat();
+      return;
+    }
+    send({ kind: "progress", phase });
+  };
   try {
     return await opts.run(opts.args);
   } finally {
@@ -658,6 +714,8 @@ export async function runNativeDetachedOwner(opts: {
     publishPrestartRefusal = undefined;
     prestart = false;
     failedHookLines = [];
+    publishProgress = undefined;
+    stopProgressHeartbeat();
     process.off("disconnect", disconnected);
     process.off("message", message);
     if (process.connected) {
@@ -713,6 +771,65 @@ function nativeDetachedReadyLine(action: "up" | "restart"): string {
 }
 
 /**
+ * Feed the owner's phase reports into the start's clocks and reject through
+ * `expire` once one runs out (HACK-2351). Phase reports never resolve a start.
+ */
+function watchStartDeadline(opts: {
+  readonly child: ReturnType<typeof spawn>;
+  readonly limits: NativeDetachedStartLimits;
+  readonly heartbeatStaleMs: number | undefined;
+  readonly expire: (error: HackCliError) => void;
+}): ReturnType<typeof setInterval> {
+  const deadline = new NativeDetachedStartDeadline({
+    limits: opts.limits,
+    now: Date.now(),
+    heartbeatStaleMs: opts.heartbeatStaleMs,
+  });
+  opts.child.on("message", (value: unknown) => {
+    if (
+      isRecord(value) &&
+      Object.keys(value).length === 2 &&
+      value.kind === "progress" &&
+      isNativeDetachedStartPhase(value.phase)
+    ) {
+      deadline.observe(value.phase, Date.now());
+    }
+  });
+  return setInterval(
+    () => {
+      const now = Date.now();
+      const expiry = deadline.check(now);
+      if (expiry) {
+        opts.expire(deadline.timeoutError(expiry, now));
+      }
+    },
+    Math.min(1000, Math.max(50, Math.floor(opts.limits.budgetMs / 20)))
+  );
+}
+
+/** The launch's limits: an explicit override, else the configured ones. */
+function launchLimits(
+  override: NativeDetachedStartLimits | undefined
+): NativeDetachedStartLimits {
+  return override ?? resolveNativeDetachedStartLimits(process.env);
+}
+
+/** Wait for `promise`, but never longer than `ms` (default 120 s). */
+async function settleWithin(
+  promise: Promise<void>,
+  ms = 120_000
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    promise,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]);
+  clearTimeout(timer);
+}
+
+/**
  * Launch only parsed, whole-project native `up` or `restart` arguments; no
  * shell or secret argv. The child becomes the detached owner; this launcher
  * returns once the child reports durable readiness. With `json`, it prints
@@ -727,8 +844,14 @@ export async function startNativeDetachedUp(opts: {
   readonly action?: "up" | "restart";
   /** Synthetic process fixtures may replace the CLI invocation. */
   readonly invocation?: readonly string[];
-  readonly timeoutMs?: number;
+  /** Overrides the configured limits; see `native-detached-start-deadline.ts`. */
+  readonly limits?: NativeDetachedStartLimits;
+  /** How long image work may go without a heartbeat (tests shorten it). */
+  readonly heartbeatStaleMs?: number;
+  /** How long a timed-out launch waits for its owner to exit (tests shorten it). */
+  readonly unwindMs?: number;
 }): Promise<number> {
+  const limits = launchLimits(opts.limits);
   const invocation = opts.invocation ?? [
     process.execPath,
     ...(Bun.main.startsWith("/$bunfs/")
@@ -758,6 +881,10 @@ export async function startNativeDetachedUp(opts: {
   let cancellationCode: number | undefined;
   let shellVariablesReported = false;
   let exitGrace: ReturnType<typeof setTimeout> | undefined;
+  const exited = new Promise<void>((resolve) => {
+    child.once("exit", () => resolve());
+  });
+  let timedOut = false;
   const fail = () => {
     if (committed || failed) {
       return;
@@ -854,7 +981,18 @@ export async function startNativeDetachedUp(opts: {
   });
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", terminate);
-  const timer = setTimeout(fail, opts.timeoutMs ?? 900_000);
+  const timer = watchStartDeadline({
+    child,
+    limits,
+    heartbeatStaleMs: opts.heartbeatStaleMs,
+    expire: (error) => {
+      if (!(committed || failed)) {
+        failed = true;
+        timedOut = true;
+        result.reject(error);
+      }
+    },
+  });
   try {
     const data = await result.promise;
     if (opts.json) {
@@ -892,7 +1030,7 @@ export async function startNativeDetachedUp(opts: {
     }
     return cancellationCode;
   } finally {
-    clearTimeout(timer);
+    clearInterval(timer);
     clearTimeout(exitGrace);
     process.off("SIGINT", interrupt);
     process.off("SIGTERM", terminate);
@@ -912,6 +1050,9 @@ export async function startNativeDetachedUp(opts: {
         });
       }
     }
+    // After a timeout, give the owner a bounded chance to stop what it started
+    // before this command returns; `hack down` waits for a start still unwinding.
+    await settleWithin(timedOut ? exited : Promise.resolve(), opts.unwindMs);
     child.unref();
   }
 }

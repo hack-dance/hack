@@ -11,7 +11,7 @@ COPY packages ./packages
 COPY src ./src
 RUN bun install --frozen-lockfile
 # No autoload: the working directory of this CLI is a mounted project.
-RUN bun build index.ts --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig --no-compile-autoload-package-json --outfile /out/hack
+RUN bun build index.ts --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig --no-compile-autoload-package-json --define 'process.env.OPENTUI_LIBC="glibc"' --outfile /out/hack
 
 FROM docker:27-cli AS docker-cli
 FROM tailscale/tailscale:stable AS tailscale-bin

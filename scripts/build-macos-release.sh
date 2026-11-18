@@ -82,7 +82,7 @@ if [ "$SKIP_CLI" = false ]; then
   mkdir -p "$CLI_BUILD_DIR"
 
   # Build binary
-  bun build index.ts --compile --outfile "$CLI_BUILD_DIR/hack"
+  bun build index.ts --compile --define 'process.env.OPENTUI_LIBC="glibc"' --outfile "$CLI_BUILD_DIR/hack"
 
   # Sign CLI binary with hardened runtime (required for notarization)
   log "Signing CLI binary with certificate: $SIGNING_IDENTITY"

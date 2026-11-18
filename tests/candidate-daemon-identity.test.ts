@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { CLI_COMPILE_DEFINE_ARGS } from "../scripts/lib/cli-compile-define.ts";
 import { fixtureChildren } from "./helpers/fixture-children.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -45,6 +46,7 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
         "build",
         join(REPO, "index.ts"),
         "--compile",
+        ...CLI_COMPILE_DEFINE_ARGS,
         "--define",
         `__HACK_BUILD_VERSION__="${VERSION}"`,
         "--outfile",
@@ -94,6 +96,7 @@ async function compileHack(opts: {
       "build",
       join(REPO, "index.ts"),
       "--compile",
+      ...CLI_COMPILE_DEFINE_ARGS,
       "--define",
       `__HACK_BUILD_VERSION__="${opts.version}"`,
       "--outfile",

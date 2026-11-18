@@ -34,7 +34,7 @@
         "inputs": [
           {
             "path": ".hack/toolchain/run.sh",
-            "sha256": "d71945600ee66cf53a2ffb23f7aa7603fd217fde8a6875e97668b72ccce4fad5"
+            "sha256": "16ccf13400ea98545ac08dd867c64cae7161886c6cfe0a66cd948d35b20a146f"
           },
           {
             "path": ".hack/toolchain/Dockerfile",
@@ -97,7 +97,7 @@
         "inputs": [
           {
             "path": ".hack/toolchain/run.sh",
-            "sha256": "d71945600ee66cf53a2ffb23f7aa7603fd217fde8a6875e97668b72ccce4fad5"
+            "sha256": "16ccf13400ea98545ac08dd867c64cae7161886c6cfe0a66cd948d35b20a146f"
           },
           {
             "path": ".hack/toolchain/Dockerfile",
@@ -154,7 +154,7 @@
         "inputs": [
           {
             "path": ".hack/toolchain/run.sh",
-            "sha256": "d71945600ee66cf53a2ffb23f7aa7603fd217fde8a6875e97668b72ccce4fad5"
+            "sha256": "16ccf13400ea98545ac08dd867c64cae7161886c6cfe0a66cd948d35b20a146f"
           },
           {
             "path": ".hack/toolchain/Dockerfile",

@@ -1527,8 +1527,7 @@ bunTest(
     expect(
       nativeFailureDetail({
         code: "invalid_state",
-        message:
-          "Candidate state component is not a directory: <tmp>/state",
+        message: "Candidate state component is not a directory: <tmp>/state",
         state_component: { version: 1, path: ".hack-local/run/graphs" },
       }).message
     ).toBe(

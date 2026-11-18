@@ -272,7 +272,7 @@ export async function planGlobalInstall(
     ),
     userStep(
       "global-files",
-      "Materialize global Compose files and schemas, prompting before overwriting different files",
+      "Materialize global Compose files and schemas; replace the proxy Compose file rendered from settings (backing up a hand-edited copy) and prompt before overwriting other different files",
       "after network setup"
     )
   );

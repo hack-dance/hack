@@ -7,7 +7,9 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{DEADLINE, TempHome, fake_hack, hermetic, sh, sh_source};
-use hack_desktop_term::launch::{HackCli, Name, SessionKind, container_shell};
+use hack_desktop_term::launch::{
+    HackCli, LoginShell, Name, SessionKind, TermChoice, container_shell, host_shell,
+};
 use hack_desktop_term::stream::StreamSource;
 use hack_desktop_term::terminal::{Status, TerminalCore};
 
@@ -119,6 +121,42 @@ fn container_plan(
     let mut plan = container_shell(&cli, &Name::new("api").unwrap());
     hermetic(&mut plan, home, extra);
     plan
+}
+
+/// The app's path for a host tab on a busy machine (the Mac miss after
+/// #889): `send` right after the tab opens, while the shell is still in a
+/// slow profile. Host tabs do not hold input, so it goes to the terminal at
+/// once; the shell must still run it when it reaches its prompt, once.
+#[test]
+fn a_host_tab_runs_what_was_typed_before_its_slow_shell_was_ready() {
+    let home = TempHome::new();
+    std::fs::write(
+        home.path().join(".profile"),
+        "sleep 2\nPS1='slow-prompt> '\n",
+    )
+    .unwrap();
+    let shell = LoginShell {
+        path: "/bin/sh".into(),
+    };
+    let mut plan = host_shell(home.path(), &shell, TermChoice::default());
+    hermetic(&mut plan, &home, &[]);
+    let mut core = TerminalCore::session(plan).expect("spawn");
+    let ran = home.path().join("ran");
+    core.send(
+        format!(
+            "printf typed-early >> '{}'; echo done-$((40 + 2))\n",
+            ran.display()
+        )
+        .as_bytes(),
+    );
+    let screen = pump_until(&mut core, "done-42");
+    assert!(screen.contains("done-42"), "{screen}");
+    assert_eq!(
+        std::fs::read_to_string(&ran).unwrap_or_default(),
+        "typed-early",
+        "ran once"
+    );
+    assert_eq!(*core.status(), Status::Running, "the shell is still open");
 }
 
 #[test]

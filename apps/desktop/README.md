@@ -424,6 +424,9 @@ Renders: [running, dark](screenshots/window/running-dark.png),
 
 ## Setup
 
+![When Setup checks run](diagrams/setup-evidence.svg)
+([source](diagrams/setup-evidence.mmd))
+
 A live launch checks setup (DESIGN.md section 2) and opens **Set up Hack** when
 something needs attention, unless you have already selected an instance,
 opened Doctor or opened a terminal tab: the check can take seconds and never
@@ -447,8 +450,11 @@ runtime, hackd, routing and DNS, certificate trust, and the login service.
   password passes through the app. **Copy command** works everywhere.
 - Checks and fixes run the CLI that was checked, by absolute path, refused
   when another user can change it, with a clean environment of named,
-  non-secret variables only. Setup checks again when the window comes back
-  after a fix.
+  non-secret variables only.
+- Setup checks again on **Check again**, after each fix it runs, when the
+  window regains focus while Setup is shown or a fix is outstanding (back
+  from an admin step in the terminal), when you switch CLI, and once its
+  result is 10 minutes old while the pane stays open in a visible window. It never checks while a check or a fix runs.
 
 Renders: [setup, light](screenshots/window/setup-light.png),
 [no CLI, dark](screenshots/window/setup-missing-cli-dark.png).

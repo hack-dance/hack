@@ -2027,6 +2027,46 @@ fn retry_registry_preheader_failure(close: bool) {
 }
 
 #[test]
+fn retry_blob_closed_connection_and_name_the_host_when_it_keeps_failing() {
+    // A config blob whose first request loses its connection is fetched on retry.
+    let body = br#"{"architecture":"arm64","os":"linux"}"#;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = calls.clone();
+    let fixture = Registry::serve(Box::new(move |_, _| {
+        if counted.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+            return Reply::new(0, "");
+        }
+        Reply::new(200, std::str::from_utf8(body).unwrap())
+    }));
+    let docker = empty_docker();
+    let policy = fixture.policy(&docker);
+    let named = named(&format!("{}/{REPOSITORY}:latest", fixture.domain())).unwrap();
+    let registry = super::registry(&named, &policy).unwrap();
+    let mut fetch = Fetch::new(&registry, REPOSITORY, &policy).unwrap();
+    fetch.request_timeout = Duration::from_millis(100);
+    fetch.deadline = Instant::now() + Duration::from_secs(3);
+    let descriptor = Descriptor {
+        digest: digest(body),
+        size: body.len() as u64,
+        media_type: String::new(),
+        platform: None,
+        urls: Vec::new(),
+    };
+    assert_eq!(fetch.object("blobs", &descriptor).unwrap(), body);
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+    // A blob host that never answers is named, with its attempt count.
+    drop(fixture);
+    let failure = fetch.object("blobs", &descriptor).unwrap_err();
+    assert_eq!(failure.code, "registry_image");
+    assert!(failure.message.contains("127.0.0.1"), "{}", failure.message);
+    assert!(
+        failure.message.contains("3 attempt(s)"),
+        "{}",
+        failure.message
+    );
+}
+
+#[test]
 fn retry_registry_permanent_failure_names_host_and_attempts() {
     let fixture = Registry::serve(Box::new(|_, _| Reply::new(200, "unused")));
     let docker = empty_docker();

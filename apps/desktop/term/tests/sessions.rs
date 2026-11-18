@@ -114,6 +114,59 @@ fn zsh_loads_its_login_and_interactive_files_when_it_is_installed() {
     rec.done();
 }
 
+/// Wait until `path` holds something (a command typed into the shell ran).
+fn wait_for_file(path: &Path) -> String {
+    let start = std::time::Instant::now();
+    loop {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        if !text.is_empty() || start.elapsed() > DEADLINE {
+            return text;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// What a host tab sees on a busy machine: the shell takes seconds to
+/// reach its first prompt (here its profile sleeps, as a prompt framework
+/// can under load), and the user, or the drive's `type` step, types at
+/// once. The line must run, once, when the shell gets to it.
+fn typeahead_before_the_first_prompt_runs(shell: &str, rc: &str, rc_body: &str) {
+    let home = TempHome::new();
+    std::fs::write(home.path().join(rc), rc_body).unwrap();
+    let shell = LoginShell { path: shell.into() };
+    let mut plan = host_shell(home.path(), &shell, TermChoice::default());
+    hermetic(&mut plan, &home, &[]);
+    let pty = Pty::spawn(&plan.attempts[0].options).expect("spawn");
+    let mut rec = Recorded::session(pty.pid());
+    let ran = home.path().join("ran");
+    // Typed straight after the spawn, long before any prompt.
+    pty.write(format!("printf typed-early >> '{}'\n", ran.display()).as_bytes());
+    let seen = read_until(&pty, |t| t.contains("slow-prompt"));
+    assert!(seen.contains("slow-prompt"), "the shell started: {seen:?}");
+    assert_eq!(wait_for_file(&ran), "typed-early", "ran once: {seen:?}");
+    assert!(pty.terminate_blocking(DEADLINE).gone);
+    rec.done();
+}
+
+#[test]
+fn text_typed_before_a_slow_shells_first_prompt_still_runs() {
+    typeahead_before_the_first_prompt_runs("/bin/sh", ".profile", "sleep 2\nPS1='slow-prompt> '\n");
+}
+
+#[test]
+fn text_typed_before_a_slow_zsh_line_editor_starts_still_runs() {
+    let Some(zsh) = ["/bin/zsh", "/usr/bin/zsh"]
+        .into_iter()
+        .find(|p| Path::new(p).is_file())
+    else {
+        eprintln!("zsh is not installed; skipping");
+        return;
+    };
+    // zsh's line editor takes the terminal only after .zshrc: a slow rc
+    // is where typeahead would be lost if anything flushed the input.
+    typeahead_before_the_first_prompt_runs(zsh, ".zshrc", "sleep 2\nPROMPT='slow-prompt %# '\n");
+}
+
 #[test]
 fn a_container_shell_runs_through_the_cli_and_is_interactive() {
     let home = TempHome::new();

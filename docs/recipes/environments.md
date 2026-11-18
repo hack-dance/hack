@@ -94,8 +94,9 @@ The complete project is in
    hack up -d --env qa
    ```
 
-   `hack restart` and `hack down` reuse the overlay the stack was started with.
-   `hack exec` does not: pass the same `--env`, or it refuses.
+   `hack restart`, `hack down`, `hack exec` and `hack run` reuse the overlay the
+   stack was started with when you leave `--env` out. `hack exec` refuses an
+   `--env` that differs from it.
 
 6. Run host commands with the same values. `--scope` adds one service's
    values; the command still runs on your machine.

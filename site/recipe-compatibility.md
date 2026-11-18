@@ -1,5 +1,9 @@
 # Recipe compatibility on the next.16 site
 
+> The runtime pin has since moved to `v5.0.0-next.22`. The audit below was made
+> against next.15 and next.16 and has not been repeated. Its labels stay as
+> written.
+
 The v5 runtime corpus is pinned to `v5.0.0-next.16`
 (`b21c3b189841c1a3cbb8af2b76414fa347dc7057`). Six recipe pages publish directly
 from their hashed release snapshots. Five retain their next.15 editorial audit and link corrections based on

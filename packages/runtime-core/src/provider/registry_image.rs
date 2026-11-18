@@ -1214,16 +1214,20 @@ impl<'a> Fetch<'a> {
                 Err(LayerAttempt::Refused(failure)) => return Err(failure),
                 Err(LayerAttempt::Failed(reason, status)) => (reason, status),
             };
-            let delay = backoff(attempt);
-            let (reason, status) = if self.remaining().unwrap_or_default() <= delay {
-                // An attempt cut short by the deadline, or a backoff that would
-                // outlast it, ends the transfer because of the deadline.
-                (NetworkFailureReason::Deadline, None)
-            } else {
-                failed
-            };
-            if attempt == ATTEMPTS || reason == NetworkFailureReason::Deadline {
+            let (reason, status) = failed;
+            if attempt == ATTEMPTS {
                 return Err(layer_failure(&host, attempt, reason, status));
+            }
+            let delay = backoff(attempt);
+            if self.remaining().unwrap_or_default() <= delay {
+                // The deadline, not this attempt's failure, is what prevents another
+                // attempt: an attempt it cut short, or a backoff that would outlast it.
+                return Err(layer_failure(
+                    &host,
+                    attempt,
+                    NetworkFailureReason::Deadline,
+                    None,
+                ));
             }
             std::thread::sleep(delay);
         }

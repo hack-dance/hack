@@ -270,6 +270,10 @@ Each entry can be either:
 
 Hooks run on the host as `sh -c <command>`. Failures stop the operation.
 Commands inherit the CLI process environment (including PATH), plus resolved project env vars.
+A hook's stdout goes to the terminal's stdout and its stderr to stderr. With Hack's own
+`--json` (`up`, `restart`, `down`, with or without `--progress`), both go to stderr, so
+stdout holds only the JSON result; see
+[machine-readable output](reference/machine-readable-output.md#output-from-what-hack-runs).
 
 `persistent` behavior:
 - In `lifecycle.up.before`, `persistent: true` starts the command in the lifecycle mux session and immediately continues to the next hook.

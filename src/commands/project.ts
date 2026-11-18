@@ -313,6 +313,7 @@ import { refuseNativeComposeBackendFeatures } from "../lib/native-compose-backen
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
 import {
+  isNativeDetachedOwnerProcess,
   nativeDetachedUpReady,
   startNativeDetachedUp,
 } from "../lib/native-detached-up.ts";
@@ -6766,8 +6767,13 @@ async function handleUpUnlocked({
           branchOption: args.options.branch,
           noticeToStderr: args.options.json === true,
         });
-        // The detached child only sees the slug, so record the name here.
-        await recordBranchUsageIfNeeded({ project, ...identity });
+        // The detached child only sees the slug, so the launcher records
+        // the name and the child keeps it.
+        await recordBranchUsageIfNeeded({
+          project,
+          branch: identity.branch,
+          name: isNativeDetachedOwnerProcess() ? null : identity.name,
+        });
         return identity.branch;
       },
       onBranchResolved: (branch) => {
@@ -6883,7 +6889,9 @@ async function runUpCommand({
   await recordBranchUsageIfNeeded({
     project,
     branch,
-    name: branchIdentity.name,
+    // The detached native child sees only the slug; its launcher recorded
+    // the name.
+    name: isNativeDetachedOwnerProcess() ? null : branchIdentity.name,
   });
   const remoteUpCode = await runRemoteLifecycleCommand({
     project,

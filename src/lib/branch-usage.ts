@@ -63,12 +63,12 @@ export async function readBranchUsage(opts: {
 
 /**
  * Records that a branch instance was just used by a runtime command, and the
- * name it was started with when `name` is given.
+ * name it was started with when `name` is given; without `name`, an earlier
+ * recorded name is kept.
  *
- * A name that is just the slug itself (for example the `--branch=<slug>` a
- * detached native start passes to its child) adds nothing, so it never
- * replaces an earlier recorded name for the same slug. Without `name`, an
- * earlier recorded name is kept.
+ * Best effort: a read-modify-write without a lock, so two commands writing
+ * the same checkout's file at once can drop the other's entry (its name then
+ * reads as unknown until that instance's next `up`).
  */
 export async function recordBranchUsage(opts: {
   readonly projectDir: string;
@@ -80,11 +80,7 @@ export async function recordBranchUsage(opts: {
   try {
     const current = await readBranchUsage(opts);
     const next = new Map(current);
-    const previousName = current.get(opts.branch)?.name;
-    const name =
-      opts.name && !(opts.name === opts.branch && previousName)
-        ? opts.name
-        : previousName;
+    const name = opts.name || current.get(opts.branch)?.name;
     next.set(opts.branch, {
       last_used_at: opts.nowIso ?? new Date().toISOString(),
       ...(name ? { name } : {}),

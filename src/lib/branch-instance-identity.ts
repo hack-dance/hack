@@ -57,8 +57,12 @@ export type BranchInstanceIdentity = {
   readonly checkout: BranchInstanceCheckout | null;
   /** Hosts per service. */
   readonly serviceHosts: Readonly<Record<string, readonly string[]>>;
-  /** `runtime_labels`: the running containers' routes; `config`: from config. */
-  readonly hostsSource: "runtime_labels" | "config";
+  /**
+   * `runtime_labels`: the running containers' routes; `config`: from the
+   * owning checkout's Compose file; `unavailable`: not known without the
+   * native routing store (authored native projects).
+   */
+  readonly hostsSource: "runtime_labels" | "config" | "unavailable";
   /** The URL `hack open --branch <slug>` opens with no target. */
   readonly url: string | null;
   /** Which project host the URL uses: the dev host or the OAuth alias. */
@@ -312,6 +316,10 @@ export async function resolveBranchInstanceName(opts: {
 
 /** One native branch instance found from its saved run mapping (R19). */
 export type NativeBranchRecord = {
+  /**
+   * The instance as the mapping keys it: the branch slug for the native
+   * runtime store, the `--branch` value as given for the authored store.
+   */
   readonly slug: string;
   readonly checkout: BranchInstanceCheckout;
   /** `runtime`: `.internal/native-runs`; `authored`: `.internal/native-authored-runs`. */
@@ -331,19 +339,18 @@ const NATIVE_RUN_RECORD = /^[a-f0-9]{64}\.json$/;
  */
 export async function listNativeBranchRecords(opts: {
   readonly checkout: BranchInstanceCheckout;
+  readonly store: NativeBranchRecord["store"];
 }): Promise<readonly NativeBranchRecord[]> {
   const out: NativeBranchRecord[] = [];
-  const stores = [
-    { store: "runtime", dir: "native-runs" },
-    { store: "authored", dir: "native-authored-runs" },
-  ] as const;
-  for (const { store, dir } of stores) {
-    const root = join(opts.checkout.projectDir, ".internal", dir);
-    for (const name of await listNativeRunRecordNames(root)) {
-      const slug = await readNativeRunRecordBranch(join(root, name));
-      if (slug !== null) {
-        out.push({ slug, checkout: opts.checkout, store });
-      }
+  const root = join(
+    opts.checkout.projectDir,
+    ".internal",
+    opts.store === "runtime" ? "native-runs" : "native-authored-runs"
+  );
+  for (const name of await listNativeRunRecordNames(root)) {
+    const slug = await readNativeRunRecordBranch(join(root, name));
+    if (slug !== null) {
+      out.push({ slug, checkout: opts.checkout, store: opts.store });
     }
   }
   return out;

@@ -342,6 +342,12 @@ async function buildRegisteredProjectView(opts: {
       name: opts.name,
       registration: opts.registration,
       error,
+      nativeBranchRuntime:
+        error.code === "E_NATIVE_PROJECT_UNSUPPORTED"
+          ? await describeAuthoredNativeBranchInstances({
+              registration: opts.registration,
+            })
+          : [],
     });
   }
   const projectDirOk = await pathExists(opts.registration.projectDir);
@@ -377,7 +383,7 @@ async function buildRegisteredProjectView(opts: {
       runtimeProjects: opts.allRuntime,
     }),
     baseServiceHosts: serviceHosts,
-    includeNative: projectDirOk,
+    projectDirOk,
   });
   const sessions = collectProjectSessions({
     projectName: opts.name,
@@ -438,7 +444,8 @@ async function describeBranchInstances(opts: {
   readonly registration: RegisteredProject;
   readonly branchRuntime: readonly BranchRuntime[];
   readonly baseServiceHosts: Readonly<Record<string, readonly string[]>> | null;
-  readonly includeNative: boolean;
+  /** Without its project dir a checkout has no settings `hack open` could use. */
+  readonly projectDirOk: boolean;
 }): Promise<{
   readonly branchRuntime: readonly BranchRuntime[];
   readonly nativeBranchRuntime: readonly NativeBranchRuntime[];
@@ -461,16 +468,18 @@ async function describeBranchInstances(opts: {
     return pending;
   };
   const primary = listRegistrationCheckouts(opts.registration)[0];
-  const primarySettings = primary ? await settingsFor(primary) : null;
+  const primarySettings =
+    primary && opts.projectDirOk ? await settingsFor(primary) : null;
 
   const describe = async (input: {
     readonly slug: string;
     readonly checkout: BranchInstanceCheckout | null;
     readonly runtime: RuntimeProject | null;
   }): Promise<BranchInstanceIdentity> => {
-    const settings = input.checkout
-      ? await settingsFor(input.checkout)
-      : primarySettings;
+    const settings =
+      input.checkout && (await pathExists(input.checkout.projectDir))
+        ? await settingsFor(input.checkout)
+        : primarySettings;
     const named = await resolveBranchInstanceName({
       registration: opts.registration,
       checkout: input.checkout,
@@ -487,8 +496,18 @@ async function describeBranchInstances(opts: {
     if (useRuntimeHosts) {
       serviceHosts = runtimeHosts;
     } else if (settings) {
+      // A worktree's own Compose file, which can differ from the primary's.
+      const baseServiceHosts =
+        input.checkout?.kind === "worktree"
+          ? await readComposeServiceHosts({
+              composeFile: resolve(
+                input.checkout.projectDir,
+                PROJECT_COMPOSE_FILENAME
+              ),
+            })
+          : opts.baseServiceHosts;
       serviceHosts = configBranchServiceHosts({
-        baseServiceHosts: opts.baseServiceHosts,
+        baseServiceHosts,
         settings,
         branch: input.slug,
       });
@@ -519,10 +538,13 @@ async function describeBranchInstances(opts: {
   );
 
   const nativeBranchRuntime: NativeBranchRuntime[] = [];
-  if (opts.includeNative) {
+  if (opts.projectDirOk) {
     const seen = new Set<string>();
     for (const checkout of listRegistrationCheckouts(opts.registration)) {
-      for (const record of await listNativeBranchRecords({ checkout })) {
+      for (const record of await listNativeBranchRecords({
+        checkout,
+        store: "runtime",
+      })) {
         const key = `${record.checkout.projectDir}\0${record.slug}`;
         if (seen.has(key)) {
           continue;
@@ -548,6 +570,41 @@ async function describeBranchInstances(opts: {
       ? resolvePrimaryOpenUrl({ settings: primarySettings, branch: null })
       : null,
   };
+}
+
+/**
+ * Native branch instances of an authored project (`.hack/hack.yaml`), from
+ * `.internal/native-authored-runs` mappings. Their mapping keys the instance
+ * by the `--branch` value as given, so `branch` and `branch_name` are both
+ * that value. `hack open` there reads the saved native routing, which this
+ * read does not open, so `url` and `hosts` are not reported
+ * (`hosts_source: unavailable`) rather than guessed from defaults.
+ */
+async function describeAuthoredNativeBranchInstances(opts: {
+  readonly registration: RegisteredProject;
+}): Promise<readonly NativeBranchRuntime[]> {
+  const out: NativeBranchRuntime[] = [];
+  for (const checkout of listRegistrationCheckouts(opts.registration)) {
+    for (const record of await listNativeBranchRecords({
+      checkout,
+      store: "authored",
+    })) {
+      out.push({
+        branch: record.slug,
+        store: "authored",
+        identity: {
+          name: record.slug,
+          nameSource: "recorded",
+          checkout,
+          serviceHosts: {},
+          hostsSource: "unavailable",
+          url: null,
+          urlHost: null,
+        },
+      });
+    }
+  }
+  return out;
 }
 
 function serializeBranchInstanceIdentity(
@@ -577,6 +634,7 @@ function buildUnavailableProjectView(opts: {
   readonly name: string;
   readonly registration: RegisteredProject;
   readonly error: ProjectInputSelectionError;
+  readonly nativeBranchRuntime?: readonly NativeBranchRuntime[];
 }): ProjectView {
   return {
     projectId: opts.registration.id,
@@ -595,6 +653,8 @@ function buildUnavailableProjectView(opts: {
     inputDiagnostic: { code: opts.error.code, message: opts.error.message },
     runtime: null,
     branchRuntime: [],
+    nativeBranchRuntime: opts.nativeBranchRuntime ?? [],
+    openUrl: null,
     sessions: [],
     lifecycle: null,
     worktrees: opts.registration.worktrees ?? null,

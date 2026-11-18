@@ -386,6 +386,7 @@ test("native: branch instances come from saved run mappings, no subprocess", asy
     branch: "ghost",
     suffix: ".restart",
   });
+  // Authored mappings belong to authored projects only (tested below).
   await writeNativeRun({
     projectDir: registration.projectDir,
     dir: "native-authored-runs",
@@ -406,7 +407,6 @@ test("native: branch instances come from saved run mappings, no subprocess", asy
   expect(branchEntries(payload, "branch_runtime")).toEqual([]);
   const native = branchEntries(payload, "native_branch_runtime");
   expect(native.map((entry) => entry.branch).sort()).toEqual([
-    "authored-b",
     "feat-a",
     "wt-feature",
   ]);
@@ -431,7 +431,6 @@ test("native: branch instances come from saved run mappings, no subprocess", asy
     url: "https://feat-a.alpha.hack.gy",
     url_host: "alias",
   });
-  expect(byBranch["authored-b"]).toMatchObject({ store: "authored" });
   expect(byBranch["wt-feature"]).toMatchObject({
     branch_name: "wt/feature",
     branch_name_source: "worktree_registration",
@@ -439,21 +438,71 @@ test("native: branch instances come from saved run mappings, no subprocess", asy
   });
 });
 
-test("branch usage keeps a recorded name when a later use passes only the slug", async () => {
+test("native authored project: instances by their given name, no guessed URL", async () => {
+  const registration = await createProject({});
+  // An authored project: the native input marker makes legacy inputs unusable.
+  await rm(join(registration.projectDir, PROJECT_COMPOSE_FILENAME));
+  await rm(join(registration.projectDir, PROJECT_CONFIG_FILENAME));
+  await writeFile(join(registration.projectDir, "hack.project.json"), "{}\n");
+  await writeNativeRun({
+    projectDir: registration.projectDir,
+    dir: "native-authored-runs",
+    branch: "Feature/Auth",
+  });
+  await writeNativeRun({
+    projectDir: registration.projectDir,
+    dir: "native-authored-runs",
+    branch: null,
+  });
+  const payload = await serializedProject({ registration, runtime: [] });
+  expect((payload.input_diagnostic as { code: string }).code).toBe(
+    "E_NATIVE_PROJECT_UNSUPPORTED"
+  );
+  expect(payload.open_url).toBeNull();
+  expect(branchEntries(payload, "native_branch_runtime")).toEqual([
+    {
+      branch: "Feature/Auth",
+      backend: "native",
+      state: "recorded",
+      store: "authored",
+      branch_name: "Feature/Auth",
+      branch_name_source: "recorded",
+      checkout: {
+        root: registration.repoRoot,
+        project_dir: registration.projectDir,
+        kind: "primary",
+      },
+      hosts: {},
+      hosts_source: "unavailable",
+      url: null,
+      url_host: null,
+    },
+  ]);
+});
+
+test("a registered project without its .hack dir reports no URLs", async () => {
+  const registration = await createProject({});
+  await rm(registration.projectDir, { recursive: true, force: true });
+  const payload = await serializedProject({ registration, runtime: [] });
+  expect(payload.status).toBe("missing");
+  expect(payload.open_url).toBeNull();
+  expect(payload.open_url_host).toBeNull();
+});
+
+test("branch usage keeps a recorded name unless a new name is given", async () => {
   const registration = await createProject({});
   const projectDir = registration.projectDir;
   await recordBranchUsage({ projectDir, branch: "feat-a", name: "Feat/A" });
-  // A detached native child repeats --branch=<slug>.
-  await recordBranchUsage({ projectDir, branch: "feat-a", name: "feat-a" });
-  // down/run/exec record usage without a name.
+  // down/run/exec (and the detached native child) record usage without a name.
   await recordBranchUsage({ projectDir, branch: "feat-a" });
+  await recordBranchUsage({ projectDir, branch: "feat-a", name: null });
   expect((await readBranchUsage({ projectDir })).get("feat-a")?.name).toBe(
     "Feat/A"
   );
-  // A different name for the same slug replaces it.
-  await recordBranchUsage({ projectDir, branch: "feat-a", name: "feat_a" });
+  // Any name given explicitly replaces it, the bare slug included.
+  await recordBranchUsage({ projectDir, branch: "feat-a", name: "feat-a" });
   expect((await readBranchUsage({ projectDir })).get("feat-a")?.name).toBe(
-    "feat_a"
+    "feat-a"
   );
 });
 

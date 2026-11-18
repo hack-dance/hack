@@ -137,19 +137,36 @@ name `<project>--<slug>`) and `runtime`, and adds:
 | `branch_name_source` | `recorded` (written by `up`/`restart` to the owning checkout's `.hack/.internal/branch-usage.json`), `worktree_registration` (the registered linked worktree's git branch, when it maps to the same slug), or `null`. |
 | `checkout` | `{root, project_dir, kind}` of the checkout that owns the instance, by the same rule `hack projects prune` uses: the container working directory is the registered checkout (`kind: primary`) or one of its registered linked worktrees (`kind: worktree`). `null` when it is neither. |
 | `hosts` | Hosts per service, from the running containers' Caddy site labels (`caddy`, `caddy_<n>`), parsed as the CLI parses them; wildcard, template and port entries are left out. |
-| `hosts_source` | `runtime_labels`, or `config` when no container carries a site label. |
-| `url` | The URL `hack open --branch <branch>` opens with no target in the owning checkout: its `open.prefer` (default `auto`, which prefers the OAuth alias when `oauth.enabled` gives one), then the branch qualification of that host. `null` when the project prefers an alias it cannot serve, where `hack open` refuses. |
+| `hosts_source` | `runtime_labels`; `config` when no container carries a site label (the owning checkout's Compose labels, qualified for the branch); `unavailable` for authored native instances. |
+| `url` | The URL `hack open --branch <branch>` opens with no target in the owning checkout (or the registered checkout when `checkout` is `null`): its `open.prefer` (default `auto`, which prefers the OAuth alias when `oauth.enabled` gives one), then the branch qualification of that host. `null` when the project prefers an alias it cannot serve, where `hack open` refuses, when the checkout's `.hack` directory is missing, and for authored native instances. |
 | `url_host` | `dev` or `alias`: which project host `url` uses. |
 
 The row also has `open_url` and `open_url_host`, the same for the base
 instance (`hack open` with no branch).
 
+`open_url` is `null` when the registered `.hack` directory is missing.
+
 `native_branch_runtime[]` lists native branch instances with the same fields
-plus `backend: "native"`, `store` (`runtime` or `authored`) and
-`state: "recorded"`. An entry means the checkout holds a saved run mapping for
-that branch, which `hack down` uses; it is not proof that the instance is
-running (`hack ps --branch <branch>` observes that). Native `hosts` come from
-configuration (`hosts_source: config`).
+plus `backend: "native"`, `store` and `state: "recorded"`. An entry means the
+checkout holds a saved run mapping for that branch, which `hack down` uses; it
+is not proof that the instance is running (`hack ps --branch <branch>`
+observes that).
+
+- `store: runtime`: the native backend on a project with `hack.config.json`
+  (`.hack/.internal/native-runs`). `branch` is the slug; `hosts` and `url`
+  come from configuration as for Compose (`hosts_source: config`).
+- `store: authored`: an authored project (`.hack/hack.project.json`,
+  `.hack/.internal/native-authored-runs`). Its mapping keys the instance by
+  the `--branch` value as given, so `branch` and `branch_name` are that value
+  and are what `--branch` accepts. `hack open` there reads the saved native
+  routing, which this read does not open, so `url` is `null` and `hosts` is
+  empty (`hosts_source: unavailable`); run `hack open --branch <branch>` for
+  the URL.
+
+The recorded name is best effort: two `up` runs that write the same checkout's
+`branch-usage.json` at once can drop one name until that instance's next `up`.
+A new mapping or recorded name appears with the next runtime refresh, like a
+registry change (see waiting above).
 
 Cost: these fields come from file reads only, with no process spawned and no
 Docker call: the owning checkout's config, one small `branch-usage.json` read

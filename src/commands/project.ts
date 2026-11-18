@@ -11580,9 +11580,10 @@ async function handleOpen({
   const grafanaHost = await resolveOpenGrafanaHost(targetRaw);
   // On the native backend a project host is served by native's own HTTPS
   // frontend, which may listen on another port (for example 18443).
+  // The target first: Grafana and full URLs never consult the native runtime.
   const nativeHost =
-    resolveNativeRuntimeSelection() !== null &&
-    openTargetIsProjectHost(targetRaw);
+    openTargetIsProjectHost(targetRaw) &&
+    resolveNativeRuntimeSelection() !== null;
   const httpsPort = nativeHost
     ? ((
         await resolveNativeHostSettings({

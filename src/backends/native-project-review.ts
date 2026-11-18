@@ -1,6 +1,7 @@
 import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import type { BranchDroppedSites } from "../lib/branch-hosts.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { nativeEnvironmentUnsetsReviewed } from "./native-environment-unsets.ts";
@@ -375,7 +376,7 @@ export async function prepareNativeReviewBranch(opts: {
   readonly invoke?: typeof invokeNativeRuntime;
   readonly select?: typeof selectNativeProjectReviewIdentity;
   /** Told about route sites a branch instance drops, as Compose reports them. */
-  readonly onDropped?: (notice: string) => void;
+  readonly onDropped?: (notice: string, details: BranchDroppedSites) => void;
 }): Promise<{
   input: NativeProjectInput;
   identity?: NativeProjectReviewIdentity;

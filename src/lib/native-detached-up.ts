@@ -8,6 +8,7 @@ import {
   noteActivityFailedServices,
   suppressActivityRecording,
 } from "./activity-log.ts";
+import type { BranchDroppedSites } from "./branch-hosts.ts";
 import { hackReexecEnvironment } from "./child-environment.ts";
 import {
   emitCliResult,
@@ -30,6 +31,7 @@ type Ready = {
   readonly completed?: readonly string[];
 };
 let publishReady: ((ready: Ready) => void) | undefined;
+let publishBranchDropped: ((details: BranchDroppedSites) => void) | undefined;
 let publishShellVariables:
   | ((names: readonly string[], ignoredRootDotenv?: boolean) => void)
   | undefined;
@@ -152,6 +154,58 @@ function startupFailureError(failure: StartupFailure): HackCliError {
   });
 }
 
+/**
+ * Hands a dropped-branch-site notice to the launcher of a detached owner, as
+ * names and a count (no hosts); false otherwise, so the caller prints it.
+ */
+export function nativeDetachedUpBranchDropped(
+  details: BranchDroppedSites
+): boolean {
+  if (!publishBranchDropped) {
+    return false;
+  }
+  publishBranchDropped(details);
+  return true;
+}
+
+const BRANCH_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const SITE_LABEL = /^caddy(?:_\d{1,4})?$/;
+
+/** Names and a bounded count only; anything else is dropped. */
+function isBranchDroppedSites(details: unknown): details is BranchDroppedSites {
+  if (!isRecord(details)) {
+    return false;
+  }
+  const { branch, service, label, count } = details;
+  return (
+    typeof branch === "string" &&
+    BRANCH_SLUG.test(branch) &&
+    typeof service === "string" &&
+    SERVICE_NAME.test(service) &&
+    typeof label === "string" &&
+    SITE_LABEL.test(label) &&
+    Number.isSafeInteger(count) &&
+    Number(count) > 0 &&
+    Number(count) <= 256
+  );
+}
+
+/** Prints a validated dropped-site notice; true when `value` was one. */
+function writeBranchDropped(value: unknown): boolean {
+  if (!(isRecord(value) && value.kind === "branch-dropped")) {
+    return false;
+  }
+  const details = value.details;
+  if (isBranchDroppedSites(details)) {
+    const plural = details.count !== 1;
+    process.stderr.write(
+      `Branch ${details.branch}: service ${details.service} label ${details.label} drops ${details.count} site${plural ? "s" : ""} outside this project's route namespaces; ${plural ? "they stay" : "it stays"} with the base instance.\n`
+    );
+  }
+  return true;
+}
+
 /** Names-only notice: never accepts or forwards an environment map or output text. */
 export function nativeDetachedUpShellVariables(
   names: readonly string[],
@@ -238,6 +292,10 @@ export async function runNativeDetachedOwner(opts: {
           readonly ignoredRootDotenv?: true;
         }
       | { readonly kind: "failure"; readonly data: StartupFailure }
+      | {
+          readonly kind: "branch-dropped";
+          readonly details: BranchDroppedSites;
+        }
   ): Promise<void> =>
     new Promise((resolve) => {
       if (!(process.send && process.connected)) {
@@ -286,6 +344,11 @@ export async function runNativeDetachedOwner(opts: {
       });
     }
   };
+  publishBranchDropped = (details) => {
+    if (!stopping) {
+      send({ kind: "branch-dropped", details });
+    }
+  };
   // A fresh owner starts with no names from any earlier attempt.
   failedStartupServices = [];
   publishFailure = async (data) => {
@@ -299,6 +362,7 @@ export async function runNativeDetachedOwner(opts: {
     stopping = true;
     publishReady = undefined;
     publishShellVariables = undefined;
+    publishBranchDropped = undefined;
     publishFailure = undefined;
     failedStartupServices = [];
     process.off("disconnect", disconnected);
@@ -350,6 +414,11 @@ export function nativeDetachedOwnerArgs(opts: {
   return args;
 }
 
+function nativeDetachedReadyLine(action: "up" | "restart"): string {
+  const done = action === "restart" ? "restarted and is ready" : "is ready";
+  return `Project ${done}. Use hack ps, hack logs SERVICE --no-follow, and hack down.\n`;
+}
+
 /**
  * Launch only parsed, whole-project native `up` or `restart` arguments; no
  * shell or secret argv. The child becomes the detached owner; this launcher
@@ -375,6 +444,7 @@ export async function startNativeDetachedUp(opts: {
     NATIVE_DETACHED_OWNER_ARGUMENT,
   ];
   const startedAt = Date.now();
+  const action = opts.action ?? "up";
   const executable = invocation[0];
   if (!executable) {
     throw new Error("Missing detached owner executable.");
@@ -448,6 +518,9 @@ export async function startNativeDetachedUp(opts: {
       result.reject(startupFailureError(failure));
       return;
     }
+    if (writeBranchDropped(value)) {
+      return;
+    }
     if (isRecord(value) && value.kind === "shell-variables") {
       if (
         !shellVariablesReported &&
@@ -492,7 +565,7 @@ export async function startNativeDetachedUp(opts: {
       emitCliResult({
         result: okResult({
           data: {
-            action: opts.action ?? "up",
+            action,
             project: data.project,
             branch: data.branch,
             composeProject: data.composeProject,
@@ -507,9 +580,7 @@ export async function startNativeDetachedUp(opts: {
         }),
       });
     } else {
-      process.stdout.write(
-        `Project ${opts.action === "restart" ? "restarted and " : ""}is ready. Use hack ps, hack logs SERVICE --no-follow, and hack down.\n`
-      );
+      process.stdout.write(nativeDetachedReadyLine(action));
     }
     return 0;
   } catch (error) {

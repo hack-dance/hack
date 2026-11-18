@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import type { BranchDroppedSites } from "../lib/branch-hosts.ts";
 import {
   BranchCaddyHostsError,
   branchServiceCaddyLabels,
@@ -74,7 +75,9 @@ function branchServiceLabels(opts: {
   readonly labels: Record<string, unknown>;
   readonly branch: string;
   readonly baseHosts: readonly string[];
-  readonly onDropped: ((notice: string) => void) | undefined;
+  readonly onDropped:
+    | ((notice: string, details: BranchDroppedSites) => void)
+    | undefined;
 }): Record<string, unknown> | undefined {
   const sites: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(opts.labels)) {
@@ -110,7 +113,7 @@ export async function prepareNativeProjectBranch(opts: {
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
   /** Told about sites a branch instance drops (outside the project's namespaces). */
-  readonly onDropped?: (notice: string) => void;
+  readonly onDropped?: (notice: string, details: BranchDroppedSites) => void;
 }): Promise<NativeProjectInput> {
   const branch = opts.scope.branch;
   nativeProjectBranchArgs(branch);

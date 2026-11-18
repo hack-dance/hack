@@ -42,6 +42,7 @@ async function stop(root: string): Promise<void> {
 
 for (const mode of [
   "ready",
+  "branch-dropped",
   "restart-action",
   "shell-names",
   "shell-names-empty",
@@ -82,17 +83,20 @@ for (const mode of [
       const stdout = await new Response(launcher.stdout).text();
       const stderr = await new Response(launcher.stderr).text();
       expect(stderr).toBe(
-        mode === "shell-names"
-          ? "Forwarding shell variables: A_TOKEN, Z_TOKEN.\n"
-          : mode === "shell-names-empty"
-            ? "Forwarding shell variables: (none).\n"
-            : mode === "shell-names-root-dotenv"
-              ? `Forwarding shell variables: (none).\n${NATIVE_ROOT_DOTENV_IGNORED_NOTICE}\n`
-              : ""
+        mode === "branch-dropped"
+          ? "Branch feature-a: service web label caddy drops 2 sites outside this project's route namespaces; they stay with the base instance.\n"
+          : mode === "shell-names"
+            ? "Forwarding shell variables: A_TOKEN, Z_TOKEN.\n"
+            : mode === "shell-names-empty"
+              ? "Forwarding shell variables: (none).\n"
+              : mode === "shell-names-root-dotenv"
+                ? `Forwarding shell variables: (none).\n${NATIVE_ROOT_DOTENV_IGNORED_NOTICE}\n`
+                : ""
       );
       if (
         [
           "ready",
+          "branch-dropped",
           "restart-action",
           "shell-names",
           "shell-names-empty",
@@ -153,6 +157,7 @@ for (const mode of [
         expect(await readFile(join(root, "stop-signals"), "utf8")).toBe(
           [
             "ready",
+            "branch-dropped",
             "restart-action",
             "shell-names",
             "shell-names-root-dotenv",

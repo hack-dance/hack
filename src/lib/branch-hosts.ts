@@ -24,12 +24,20 @@ export class BranchCaddyHostsError extends Error {
  * changes. Throws {@link BranchCaddyHostsError} when a label would be left
  * with no site; `onDropped` hears about each dropped site.
  */
+/** A dropped-site notice as names and a count, without the hosts. */
+export type BranchDroppedSites = {
+  readonly branch: string;
+  readonly service: string;
+  readonly label: string;
+  readonly count: number;
+};
+
 export function branchServiceCaddyLabels<T>(opts: {
   readonly service: string;
   readonly labels: Readonly<Record<string, T | string>>;
   readonly branch: string;
   readonly baseHosts: readonly string[];
-  readonly onDropped?: (notice: string) => void;
+  readonly onDropped?: (notice: string, details: BranchDroppedSites) => void;
 }): Record<string, T | string> | undefined {
   const next: Record<string, T | string> = { ...opts.labels };
   let changed = false;
@@ -55,7 +63,13 @@ export function branchServiceCaddyLabels<T>(opts: {
     }
     if (rewritten.dropped.length > 0) {
       opts.onDropped?.(
-        `Branch ${opts.branch}: service ${opts.service} label ${key} drops ${rewritten.dropped.join(", ")}, which is outside this project's route namespaces and stays with the base instance.`
+        `Branch ${opts.branch}: service ${opts.service} label ${key} drops ${rewritten.dropped.join(", ")}, which is outside this project's route namespaces and stays with the base instance.`,
+        {
+          branch: opts.branch,
+          service: opts.service,
+          label: key,
+          count: rewritten.dropped.length,
+        }
       );
     }
     if (rewritten.changed) {

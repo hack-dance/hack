@@ -8,6 +8,7 @@ import {
 import { handleRunCliError } from "../../src/cli/run.ts";
 import { ClosedCliError } from "../../src/lib/cli-result.ts";
 import {
+  nativeDetachedUpBranchDropped,
   nativeDetachedUpFailedServices,
   nativeDetachedUpFailure,
   nativeDetachedUpReady,
@@ -23,6 +24,18 @@ import {
 async function publish(path: string, contents: string): Promise<void> {
   await writeFile(`${path}.tmp`, contents);
   await rename(`${path}.tmp`, path);
+}
+
+/** HACK-2338: a detached owner hands its dropped-branch-site notice to the launcher. */
+function publishFixtureBranchDropped(fixtureMode: string): void {
+  if (fixtureMode === "branch-dropped") {
+    nativeDetachedUpBranchDropped({
+      branch: "feature-a",
+      service: "web",
+      label: "caddy",
+      count: 2,
+    });
+  }
 }
 
 const [role, root, mode] = Bun.argv.slice(2);
@@ -358,9 +371,11 @@ if (role === "channel-holder") {
         // handoff, with the real owner handler still processing that accept.
         process.prependListener("message", cancelAtAccept);
       }
+      publishFixtureBranchDropped(mode);
       if (
         [
           "ready",
+          "branch-dropped",
           "restart-action",
           "cancel-at-accept",
           "shell-names",

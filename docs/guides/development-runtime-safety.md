@@ -195,7 +195,8 @@ hack doctor --fix --only 'polling watchers'        # print the diff, write nothi
 hack doctor --fix --only 'polling watchers' --yes  # apply it, then verify
 ```
 
-Other forms (list entries, comments on the line, other values) are left for you to edit. The
+The diff shows the removed lines as they are and replaces every other value and comment in its
+context with `[REDACTED]`, so a neighbouring credential never reaches the output. Other forms (list entries, comments on the line, other values) are left for you to edit. The
 repair refuses when the change would alter anything else in the parsed Compose document or when
 the file changes while it runs. Recreate the services afterwards (`hack restart`).
 

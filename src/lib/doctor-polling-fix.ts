@@ -18,7 +18,10 @@ import { lstat, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { YAML } from "bun";
 import { HackCliError } from "./cli-result.ts";
-import { scanComposeServiceLines } from "./compose-service-lines.ts";
+import {
+  scanComposeServiceLines,
+  splitYamlKey,
+} from "./compose-service-lines.ts";
 import {
   DEV_PERFORMANCE_GUIDE_URL,
   isLegacyPollingLine,
@@ -154,6 +157,42 @@ function closeEmptiedBlock(opts: {
   );
 }
 
+const REDACTED = "[REDACTED]";
+
+/**
+ * A context line with its value replaced: keys and structure stay, values
+ * and comments never reach the printed or JSON diff (a neighbouring entry
+ * can be a credential). Removed lines are always the generated
+ * `KEY: "true"` form, so they are shown as they are.
+ */
+export function redactContextLine(line: string): string {
+  const body = line.endsWith("\r") ? line.slice(0, -1) : line;
+  const trimmed = body.trim();
+  if (!trimmed) {
+    return line;
+  }
+  const indent = body.slice(0, body.length - body.trimStart().length);
+  if (trimmed.startsWith("#")) {
+    return `${indent}# ${REDACTED}`;
+  }
+  if (trimmed.startsWith("-")) {
+    const item = trimmed.slice(1).trim().replace(QUOTES, "");
+    const eq = item.indexOf("=");
+    return eq > 0
+      ? `${indent}- ${item.slice(0, eq)}=${REDACTED}`
+      : `${indent}- ${REDACTED}`;
+  }
+  const split = splitYamlKey(trimmed);
+  if (!split) {
+    return `${indent}${REDACTED}`;
+  }
+  return split.rest && !split.rest.startsWith("#")
+    ? `${indent}${split.key}: ${REDACTED}`
+    : `${indent}${split.key}:`;
+}
+
+const QUOTES = /^["']|["']$/g;
+
 function unifiedDiff(opts: {
   readonly lines: readonly string[];
   readonly changes: ReadonlyMap<number, LineChange>;
@@ -185,7 +224,7 @@ function unifiedDiff(opts: {
       const change = opts.changes.get(i);
       oldCount += 1;
       if (!change) {
-        body.push(` ${line}`);
+        body.push(` ${redactContextLine(line)}`);
         newCount += 1;
         continue;
       }

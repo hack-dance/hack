@@ -430,11 +430,11 @@ describe("polling fix", () => {
         `--- a/${FILE}`,
         `+++ b/${FILE}`,
         "@@ -10,6 +10,4 @@",
-        "     command: bun dev",
+        "     command: [REDACTED]",
         "     environment:",
         '-      CHOKIDAR_USEPOLLING: "true"',
         '-      WATCHPACK_POLLING: "true"',
-        '       PORT: "3000"',
+        "       PORT: [REDACTED]",
         "   worker:",
         "",
       ].join("\n")
@@ -553,6 +553,35 @@ describe("review follow-ups", () => {
       await annotateEmulatedPsItems({ items, probe: hang, deadlineMs: 20 })
     ).toEqual(items);
   });
+});
+
+test("the repair diff never shows neighbouring values or comments", () => {
+  const text = [
+    "services:",
+    "  web:",
+    "    environment:",
+    "      DATABASE_URL: postgres://user:synthetic-pass@db/app",
+    '      CHOKIDAR_USEPOLLING: "true"',
+    "      # token synthetic-comment-secret",
+    "      API_TOKEN: synthetic-token",
+    "    labels:",
+    "      - LIST_SECRET=synthetic-list",
+    "",
+  ].join("\n");
+  const plan = planPollingFix({ text, file: FILE });
+  expect(plan.removed).toHaveLength(1);
+  for (const secret of [
+    "synthetic-pass",
+    "synthetic-comment-secret",
+    "synthetic-token",
+  ]) {
+    expect(plan.diff).not.toContain(secret);
+  }
+  expect(plan.diff).toContain("      DATABASE_URL: [REDACTED]");
+  expect(plan.diff).toContain("      # [REDACTED]");
+  // The file itself keeps every byte except the removed line.
+  expect(plan.after).toContain("synthetic-pass");
+  expect(plan.after).toContain("synthetic-token");
 });
 
 describe("container architectures", () => {

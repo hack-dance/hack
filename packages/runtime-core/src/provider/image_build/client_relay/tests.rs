@@ -164,18 +164,11 @@ fn a_refused_provider_connection_ends_only_that_client_connection() {
     drop(provider);
     let relay = ClientRelay::start(&path).unwrap();
     let mut client = UnixStream::connect(relay.socket()).unwrap();
-    // The relay may already have closed this connection (its provider connect failed at
-    // once); macOS then refuses socket options with EINVAL. That is the outcome under
-    // test, and the read below returns at once.
-    match client.set_read_timeout(Some(Duration::from_secs(10))) {
-        Ok(()) => {}
-        Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {}
-        Err(error) => panic!("unexpected socket option failure: {error}"),
-    }
-    let mut bytes = Vec::new();
-    // The client sees the connection end, as with an absent engine socket.
-    let _ = client.read_to_end(&mut bytes);
-    assert!(bytes.is_empty());
+    // The client sees the connection end, with no bytes, as with an absent engine
+    // socket. The relay may already have closed it (its provider connect failed at once);
+    // `read_to_end` sets no socket option, so that case needs no special handling, and a
+    // connection left open fails at the deadline instead of passing.
+    assert!(read_to_end(&mut client).is_empty());
     let report = relay.finish(FINISH_GRACE);
     assert_eq!((report.connections, report.refused), (1, 1));
 }

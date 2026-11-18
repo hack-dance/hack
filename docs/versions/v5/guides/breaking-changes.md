@@ -16,12 +16,12 @@ can try v5 on one project and [go back](#how-to-go-back).
 | --- | --- | --- | --- |
 | 1 | **Zellij is gone. `hack session` needs tmux.** `sessions.mux=zellij` and `HACK_SESSIONS_MUX=zellij` are refused. | v5 supports one multiplexer, tmux. It cannot verify or stop zellij sessions, so it refuses them rather than leave processes it cannot clean up. | Install tmux. Remove the setting or set it to `tmux`. Existing zellij sessions are not stopped or migrated. If a project has saved zellij state, stop it with the v4 CLI first: see [the stop procedure](upgrade-from-v4.md#breaking-change-zellij-workspaces-removed). |
 | 2 | **`hack env list` hides every value**, in text and in `--json`, including plaintext values moved from old `.env` files. JSON has `has_value` and no `value`. | Listings exposed migrated plaintext, and they end up in logs and transcripts. | Use `has_value` to test that a value is set. Read one value with `hack env get <KEY>`. For plaintext values in bulk, use `hack env list --json --plaintext-values`. |
-| 3 | **The text columns of `hack env list` changed.** Rows are now `KEY`, `SCOPE`, `set`, `LAYER`, separated by tabs. | It follows row 2: the value column is gone, and a layer column is added. | Do not parse the text. Parse `hack env list --json`. |
+| 3 | **The text columns of `hack env list` changed.** Rows are now `KEY`, `SCOPE`, `set`, `LAYER`, separated by tabs. Projects still on `.hack/hack.env.json` show set state in column 7 and the layer in column 8. | It follows row 2: the value column is gone, and a layer column is added. | Do not parse the text. Parse `hack env list --json`. |
 | 4 | **`hack env set --secret` and `hack env add --secret` refuse a secret typed as an argument.** | An argument stays in shell history and is visible to other processes. | Leave the value out and type it at the hidden prompt in a terminal, or pipe it with `--value-stdin`. `--allow-secret-argv` exists for test fixtures only, not for real values. |
-| 5 | **Legacy lifecycle hooks and processes receive only `global` values.** They no longer receive values that belong to one service. | They received service values outside their scope. | Review hooks that read a service's value. Move only the values they need into the `global` scope. |
-| 6 | **Hack's decryption keys are not passed to child processes.** Hooks and host commands get the application's environment only. | So a hook or a tool that Hack starts cannot read or leak the key. | If a hook read the key from its environment, change it to read the values it needs. |
+| 5 | **In a project that still uses `.hack/hack.env.json`, lifecycle hooks and processes receive only `global` values.** They no longer receive values that belong to one service. Projects on the YAML env files give hooks `global` and `host` values. | They received service values outside their scope. | Review hooks that read a service's value. Move only the values they need into the `global` scope. |
+| 6 | **Hack's decryption keys are not passed to child processes.** Hooks, host commands, session shells and background commands get the application's environment only. | So a hook or a tool that Hack starts cannot read or leak the key. | If a hook read the key from its environment, change it to read the values it needs. |
 | 7 | **Env migration keeps the old files.** v4's `hack doctor --migrate-env-config` deleted `.hack/hack.env.json` and old `.env` files. v5 keeps them, and removal is a separate step. | An interrupted migration could not be resumed or undone. Now it can be previewed, resumed and rolled back. | Preview with `hack env migrate --json`, then `--apply`. Start the project and check it. Only then run `hack env migrate --cleanup --apply`. Undo with `hack env migrate --rollback-manifest <path>`. |
-| 8 | **The daemon's old env routes refuse YAML projects.** `POST /v1/env/set` and `/v1/env/unset` return HTTP 409 `yaml_env_mutation_unsupported`. `GET /v1/env` returns names only. | Writing through these routes would create a second, legacy copy of the values. | Use the `hack env` commands. |
+| 8 | **The daemon's old env routes refuse YAML projects.** `POST /v1/env/set` and `/v1/env/unset` return HTTP 409 `yaml_env_mutation_unsupported`. `GET /v1/env` returns names and metadata, never values. | Writing through these routes would create a second, legacy copy of the values. | Use the `hack env` commands. |
 | 9 | **Hack no longer writes agent files.** It does not write `AGENTS.md` or `CLAUDE.md` sections, Cursor rules, session hooks or global skill copies. `hack setup sync` and `hack agent prime` refuse. | Agent guidance now comes from a plugin that your agent's plugin manager installs and keeps current, instead of files Hack wrote into your repository. | Install the optional plugin: see [Agent integrations](../integrations.md). Your existing files are left alone. Review them with `hack setup migrate`, which previews by default and can be rolled back. |
 | 10 | **Hosted features are retired:** account and team sign-in, the web dashboard, Hack Tickets, and the built-in GitHub and Linear integrations. | v5 is a local-first CLI. Nothing is hosted and you need no account. | Use your own tools for tickets and reviews. |
 
@@ -61,7 +61,7 @@ timeline
   next.6 : Agent files no longer written
   next.17 : tmux only, zellij removed
           : Env listings hide values
-          : Secrets not accepted as arguments
+          : No secrets as arguments
           : Hooks get global values only
   next.18 : Env migration keeps old files
 ```
@@ -77,7 +77,9 @@ your app may have changed its database. Going back means restoring the backup
 you took before the upgrade. Rehearse it on data you can lose first.
 
 1. **Stop the v5 project** with the same v5 CLI, backend, project path, overlay
-   and branch that started it. For a Compose trial:
+   and branch that started it. `$V5` is the v5 CLI you tried. With the
+   prerelease manager, that is `V5="$HOME/.hack-next/bin/hack-next"`. For a
+   Compose trial:
 
    ```sh
    HACK_RUNTIME_BACKEND=compose "$V5" down --path /absolute/project

@@ -43,7 +43,6 @@ export default function Home() {
               part.includes("/") || part.trim() === "" ? (
                 part
               ) : (
-                // biome-ignore lint/suspicious/noArrayIndexKey: fixed list, never reordered
                 <span className="home-word" key={index}>
                   {part}
                 </span>

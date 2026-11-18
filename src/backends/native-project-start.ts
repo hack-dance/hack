@@ -2065,6 +2065,9 @@ async function chooseNativeStartupProfiles(opts: {
     };
   }
   const fromEnv = opts.resolve ? await opts.resolve(opts.envName) : undefined;
+  if (fromEnv?.secretIgnored) {
+    opts.notify({ kind: "secret-selector" });
+  }
   if (!kept) {
     return fromEnv && fromEnv.source !== "none"
       ? {

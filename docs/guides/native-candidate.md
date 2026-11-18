@@ -513,7 +513,10 @@ With it:
   run or any output, and is only counted in the notice (`COMPOSE_PROFILES` can hold a
   value copied from decrypted managed env). Notices never print a profile name that
   came from `COMPOSE_PROFILES` or a retained run, only how many there are; a name you
-  pass with `--profile` is printed.
+  pass with `--profile` is printed. A `COMPOSE_PROFILES` stored as a secret in the
+  managed env is never used as a selector (profile names reach runtime arguments and
+  the saved run): it selects nothing, and `up` says so. Store it as a plain value, or
+  pass `--profile`.
 - As with Compose `up`, only services in the selected profiles are built, pulled and
   pinned. A service in a profile you did not select is neither built nor acquired from
   its registry, and restore and restart need no image for it; selecting its profile in

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   declaredComposeProfiles,
+  NATIVE_SECRET_PROFILE_SELECTOR_NOTICE,
   nativeInactiveServices,
   nativeLeftOutNotice,
   nativeNoticeProfileNames,
@@ -298,4 +299,67 @@ test("an undeclared COMPOSE_PROFILES value is dropped before use, never just hid
       declaredProfiles: ["jobs"],
     }).profiles
   ).toEqual(["custom"]);
+});
+
+test("a COMPOSE_PROFILES stored as a secret in the managed env is never used as a selector", async () => {
+  const { mkdir, mkdtemp, rm, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { findProjectContextAtRoot } = await import("../src/lib/project.ts");
+  const { resolveNativeProfileSelectionForProject } = await import(
+    "../src/backends/native-profile-selection.ts"
+  );
+  const root = await mkdtemp(join(tmpdir(), "native-profiles-secret-"));
+  const original = process.env.COMPOSE_PROFILES;
+  try {
+    const projectDir = join(root, ".hack");
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(
+      join(projectDir, "docker-compose.yml"),
+      "services:\n  web:\n    image: alpine:3.21\n  worker:\n    image: alpine:3.21\n    profiles: [jobs]\n"
+    );
+    await writeFile(
+      join(projectDir, "hack.config.json"),
+      '{"name":"native-profiles-secret","dev_host":"native-profiles-secret.hack"}\n'
+    );
+    const { setProjectEnvValue } = await import(
+      "../src/lib/project-env-config.ts"
+    );
+    // Stored the way `hack env add --secret` stores it (encrypted).
+    await setProjectEnvValue({
+      projectRoot: root,
+      projectDir,
+      envName: null,
+      scope: "global",
+      key: "COMPOSE_PROFILES",
+      value: "jobs",
+      secret: true,
+    });
+    const project = await findProjectContextAtRoot({ projectRoot: root });
+    if (!project) {
+      throw new Error("Expected fixture project context");
+    }
+    // The managed secret overrides the shell, so the shell does not apply.
+    process.env.COMPOSE_PROFILES = "jobs";
+    const selection = await resolveNativeProfileSelectionForProject({
+      project,
+      envName: undefined,
+      cliProfile: undefined,
+    });
+    expect(selection).toMatchObject({
+      profiles: [],
+      source: "none",
+      secretIgnored: true,
+    });
+    expect(renderNativeProfileNotice({ kind: "secret-selector" })).toBe(
+      NATIVE_SECRET_PROFILE_SELECTOR_NOTICE
+    );
+  } finally {
+    if (original === undefined) {
+      Reflect.deleteProperty(process.env, "COMPOSE_PROFILES");
+    } else {
+      process.env.COMPOSE_PROFILES = original;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
 });

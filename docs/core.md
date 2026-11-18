@@ -4,32 +4,43 @@ Hack keeps the parts needed to run a project together: services, environment,
 secrets, local URLs, startup helpers and logs. The setup lives in `.hack/` in the
 repository, so teammates and agents can use the same definition.
 
-Developers and agents use the local CLI to control a local runtime; Hack does not
-require a hosted control service.
+Three words come up on every page:
+
+- A **project** is a repository with a `.hack/` folder. It has a name, which Hack
+  uses for its instances, logs and helpers. By default its address starts with
+  that name too.
+- An **instance** is one running copy of a project: its containers, its
+  addresses, its logs.
+- A **branch instance** is a second instance of the same project, named after a
+  branch. `hack up` in a linked git worktree starts one, named after its branch.
+
+Developers and agents use the local CLI to run projects on their own machine.
+Nothing is hosted.
 
 ```mermaid
 ---
-title: Local runtime context
+title: Who runs what
 ---
 C4Context
   Person(developer, "Developer")
   System_Ext(agent, "Agent harness", "Optional CLI client")
   System(hack, "Hack CLI", "Local project commands")
-  System_Ext(engine, "Local engine", "Compose by default")
+  System_Ext(backend, "Backend", "Compose by default")
   Rel(developer, hack, "Runs commands")
   Rel(agent, hack, "Runs commands")
-  Rel(hack, engine, "Controls services")
+  Rel(hack, backend, "Runs services")
   UpdateLayoutConfig($c4ShapeInRow="2", $c4BoundaryInRow="1")
 ```
 
 ## Project, service and instance
 
-A **project** is a repository with Hack configuration. A **service** is one part of
-that project, such as a web app, API or database. An **instance** is a running copy
-of the project. Branch instances let you run different versions side by side.
+A **service** is one part of a project, such as a web app, API or database. Each
+instance runs its own copy of every service. Branch instances let you run
+different versions of one project side by side.
 
-The supported runtime uses Docker Compose for services and shared local routing
-for HTTPS. New projects use `.hack.local` names. Existing `.hack` names and custom
+A **backend** is what actually runs the containers. Compose is the default; it
+runs services with Docker Compose behind shared local routing for HTTPS. Native
+is an opt-in beta on Apple Silicon macOS. New projects use `.hack.local` names. Existing `.hack` names and custom
 domains keep working. Use `hack open` to find the URL for your instance rather than
 guessing a port or hostname.
 
@@ -53,17 +64,17 @@ state and exit-code columns. An exited one-shot with code `0` completed
 successfully; a nonzero code indicates failure. `hack ps --json` reads Compose
 directly and retains each item's `State` and `ExitCode`, including immediately
 after a failed startup. An item whose image architecture differs from the
-engine's also carries `emulated: true` (the field is absent otherwise); see
+Docker engine's also carries `emulated: true` (the field is absent otherwise); see
 [Check an existing project](guides/development-runtime-safety.md#check-an-existing-project).
 Removed containers are not retained as run history.
 When Compose cannot list containers, `hack ps --json` prints the
 `{ok: false, error}` envelope with a stable code: `E_DOCKER_UNAVAILABLE` when the
-engine is not reachable or does not answer in time, `E_PERMISSION` when the Docker
+Docker engine is not reachable or does not answer in time, `E_PERMISSION` when the Docker
 socket (or a Compose input) refuses your user, `E_COMPOSE_OUTPUT_INVALID` when the
 output is not JSON, otherwise `E_COMPOSE_FAILED`. Only the Docker client's
 connection error is quoted, with secret-looking values redacted; other Compose
 output is left out because Compose can expand project values into it. Without
-`--json`, the engine and permission cases print the same coded line; for the
+`--json`, the Docker engine and permission cases print the same coded line; for the
 other two, `hack ps` runs plain `docker compose ps` and shows its output.
 When finished:
 

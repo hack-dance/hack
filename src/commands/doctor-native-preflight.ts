@@ -6,6 +6,7 @@ import {
   readNativePreflightCompose,
   renderNativePreflightReport,
 } from "../backends/native-preflight.ts";
+import { resolveNativeProfileSelectionForProject } from "../backends/native-profile-selection.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import {
   type NativeHostAliasSource,
@@ -145,6 +146,7 @@ export async function collectProjectNativePreflight(opts: {
   let hasDefaultDependencyFile = false;
   let gcloud: NativeGcloudSelection | undefined;
   let httpsSelected = false;
+  let httpsPort: number | null = null;
   // An unreadable Compose file is reported as `compose_file_unreadable`; the
   // settings lookup needs its project name, so it is skipped then.
   let settingsReadable = false;
@@ -163,6 +165,7 @@ export async function collectProjectNativePreflight(opts: {
       sharedSource = host.sharedSource;
       gcloud = host.gcloud;
       httpsSelected = host.https !== undefined;
+      httpsPort = host.https?.httpsPort ?? null;
       hasDefaultDependencyFile = host.dependencyFile !== undefined;
       hasHostDependencies =
         selectNativeEnvFile({
@@ -231,10 +234,23 @@ export async function collectProjectNativePreflight(opts: {
     sharedSource: sharedSource || !settingsReadable,
     ...(gcloud ? { gcloud } : {}),
     httpsSelected,
+    httpsPort,
     hasHostDependencies,
     hasDefaultDependencyFile,
     effectiveEnvName: effectiveEnv,
-    profiles: opts.profiles,
+    // The profiles a fresh `hack up` selects: an explicit --profile, with
+    // Compose's `*` expanded, else COMPOSE_PROFILES (managed env, then shell),
+    // so the review and the source check judge the services up starts
+    // (HACK-2338 items 7 and 8).
+    profiles: (
+      await resolveNativeProfileSelectionForProject({
+        project,
+        envName: effectiveEnv,
+        cliProfile:
+          opts.profiles.length > 0 ? opts.profiles.join(",") : undefined,
+        shellEnv: env,
+      })
+    ).profiles,
     runtime: opts.runtimeReview === false ? null : selectedRuntime(env),
   });
   return report;

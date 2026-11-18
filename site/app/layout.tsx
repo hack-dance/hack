@@ -4,11 +4,11 @@ import "./global.css";
 export const metadata: Metadata = {
   metadataBase: new URL("https://hack.foo"),
   title: {
-    default: "hack.foo — run the whole project locally",
+    default: "hack.foo — run every project, branch and worktree at once",
     template: "%s | Hack",
   },
   description:
-    "Hack runs a project's services, environment, secrets, local HTTPS and logs from a .hack/ folder committed with the repository. One command per repo, every project at its own local URL.",
+    "Run your whole project locally. Every project, branch and git worktree runs side by side at its own HTTPS address.",
 };
 export default function Layout({ children }: { children: React.ReactNode }) {
   return (

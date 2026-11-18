@@ -39,7 +39,7 @@ drift. Review each repair before `hack doctor --fix`.
 
 ## Native backend
 
-Native execution needs more than `hack init`: a prepared provider pool, an
+Native execution needs more than `hack init`: a prepared native runtime, an
 explicitly adapted project and a private native home. Read
 [Try the native backend](../native/try-it.md) first. `hack config validate`,
 `config plan` and `config import --dry-run` preview native configuration without

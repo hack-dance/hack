@@ -86,7 +86,11 @@ const CONTROL = /[^\P{Cc}\t\n]/u;
 /** A control character other than tab: a hook line never holds a newline. */
 const HOOK_CONTROL = /[^\P{Cc}\t]/u;
 const HOOK_CONTROLS = /[^\P{Cc}\t]/gu;
-const REFUSAL_MESSAGE_LIMIT = 4000;
+/**
+ * Above every bounded closed diagnostic, such as a source-size refusal that
+ * names ten paths of up to 4096 characters each.
+ */
+const REFUSAL_MESSAGE_LIMIT = 64 * 1024;
 const REFUSAL_DETAIL_LIMIT = 16 * 1024;
 const HOOK_LINE_LIMIT = 500;
 const HOOK_LINES_LIMIT = 60;
@@ -110,6 +114,11 @@ export function nativeDetachedUpPrestart(active: boolean): void {
   if (!active) {
     failedHookLines = [];
   }
+}
+
+/** Whether a lifecycle hook's output tail is kept: a detached owner before VM work. */
+export function nativeDetachedUpKeepsHookOutput(): boolean {
+  return publishPrestartRefusal !== undefined && prestart;
 }
 
 /**

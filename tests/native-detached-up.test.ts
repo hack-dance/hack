@@ -448,3 +448,65 @@ test("HACK-2339: a refusal before VM work reaches the launcher as the foreground
     }
   }
 }, 30_000);
+
+/** The fixture's `prestart-long` refusal (the fixture runs on import, so it is not imported). */
+const PRESTART_LONG_MESSAGE = `Selected source is too large. ${"assets/deeply/nested/".repeat(2100)}`;
+
+/** Run one HACK-2339 fixture mode through a real launcher and owner. */
+async function prestartRun(mode: string) {
+  const root = await mkdtemp(join(tmpdir(), "native-detached-prestart-"));
+  const launcher = Bun.spawn(
+    [process.execPath, fixture, "launcher", root, mode],
+    {
+      env: fixtureEnv(root),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  try {
+    const [code, stdout, stderr] = await Promise.all([
+      launcher.exited,
+      new Response(launcher.stdout).text(),
+      new Response(launcher.stderr).text(),
+    ]);
+    return { code, stdout, stderr };
+  } finally {
+    if (launcher.exitCode === null) {
+      launcher.kill("SIGTERM");
+      await launcher.exited;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test("HACK-2339: a refusal longer than one line, such as a long source-size list, crosses whole", async () => {
+  const result = await prestartRun("prestart-long");
+  expect(result.code).toBe(1);
+  expect(JSON.parse(result.stdout).error).toEqual({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message: PRESTART_LONG_MESSAGE,
+  });
+}, 30_000);
+
+test("HACK-2339: a real failed hook's output reaches the launcher bounded per line", async () => {
+  const result = await prestartRun("prestart-hook-long-line");
+  expect(result.code).toBe(1);
+  expect(JSON.parse(result.stdout).error.code).toBe("E_LIFECYCLE_FAILED");
+  expect(result.stderr.split("\n")).toEqual([
+    "Lifecycle (native up before): seed-check: head -c 3000000 /dev/zero | tr '\\000' x; echo; printf 'last line\\n'; exit 3",
+    "x".repeat(500),
+    "last line",
+    "Lifecycle (native up before) failed (exit 3): seed-check: head -c 3000000 /dev/zero | tr '\\000' x; echo; printf 'last line\\n'; exit 3",
+    "",
+  ]);
+}, 30_000);
+
+test("HACK-2339: a persistent up.before command that cannot start shows its step and failure", async () => {
+  const result = await prestartRun("prestart-persistent-hook");
+  expect(result.code).toBe(1);
+  expect(JSON.parse(result.stdout).error.code).toBe("E_LIFECYCLE_FAILED");
+  expect(result.stderr).toBe(
+    "Lifecycle (native up before): session: run-session\nLifecycle session could not start.\n"
+  );
+}, 30_000);

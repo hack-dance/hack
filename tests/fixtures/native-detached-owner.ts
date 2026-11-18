@@ -58,17 +58,80 @@ const PRESTART_MODES = [
   "prestart-refusal",
   "prestart-after-runtime",
   "prestart-plain-error",
+  "prestart-long",
+  "prestart-hook-long-line",
+  "prestart-persistent-hook",
 ];
+
+/**
+ * A closed refusal longer than any one terminal line, like a source-size
+ * list; tests/native-detached-up.test.ts repeats it.
+ */
+const PRESTART_LONG_MESSAGE = `Selected source is too large. ${"assets/deeply/nested/".repeat(2100)}`;
+
+/** Run a real lifecycle phase in this owner, as native up's before hooks do. */
+async function runFixtureHooks(
+  fixtureMode: string,
+  fixtureRoot: string
+): Promise<void> {
+  const { runLifecycleCommands } = await import(
+    "../../src/commands/project.ts"
+  );
+  await runLifecycleCommands({
+    title: "Lifecycle (native up before)",
+    commands: [
+      fixtureMode === "prestart-persistent-hook"
+        ? { name: "session", command: "run-session", persistent: true }
+        : {
+            name: "seed-check",
+            command:
+              "head -c 3000000 /dev/zero | tr '\\000' x; echo; printf 'last line\\n'; exit 3",
+          },
+    ],
+    projectRoot: fixtureRoot,
+    env: {},
+    projectDir: join(fixtureRoot, ".hack"),
+    composeProject: "fixture",
+    onPersistentCommand: () =>
+      Promise.reject(new Error("Lifecycle session could not start.")),
+  });
+}
 
 /**
  * HACK-2339: a refusal before VM work crosses as the foreground prints it;
  * after VM work starts, or for any other error, it does not.
  */
-async function publishFixturePrestartFailure(fixtureMode: string) {
+async function publishFixturePrestartFailure(
+  fixtureMode: string,
+  fixtureRoot: string
+) {
   if (!PRESTART_MODES.includes(fixtureMode)) {
     return;
   }
   nativeDetachedUpPrestart(true);
+  if (fixtureMode === "prestart-long") {
+    await nativeDetachedUpFailure(
+      new HackCliError({
+        code: "E_NATIVE_PROJECT_UNSUPPORTED",
+        message: PRESTART_LONG_MESSAGE,
+      })
+    );
+    return;
+  }
+  if (
+    fixtureMode === "prestart-hook-long-line" ||
+    fixtureMode === "prestart-persistent-hook"
+  ) {
+    await runFixtureHooks(fixtureMode, fixtureRoot);
+    await nativeDetachedUpFailure(
+      new HackCliError({
+        code: "E_LIFECYCLE_FAILED",
+        message:
+          "Lifecycle (native up before) failed (exit 3); values omitted.",
+      })
+    );
+    return;
+  }
   nativeDetachedUpHookFailed({
     step: "Lifecycle (native up before): seed-check: ./seed.sh",
     output: ["\u001b[31mred hook line\u001b[0m", "x".repeat(600)],
@@ -99,7 +162,7 @@ function sendUnsafePrestartRefusals(fixtureMode: string): void {
     { error: "hack", message: "missing code" },
     { error: "closed", code: "E_USAGE", message: "closed with code" },
     { error: "hack", code: "E_USAGE", message: "bad\u001b[2Jcontrol" },
-    { error: "hack", code: "E_USAGE", message: "p".repeat(4001) },
+    { error: "hack", code: "E_USAGE", message: "p".repeat(64 * 1024 + 1) },
     { error: "hack", code: "E_USAGE", message: "m", extra: "x" },
     { error: "hack", code: "E_USAGE", message: "m", hook: ["a\nb"] },
     { error: "hack", code: "E_USAGE", message: "m", hook: [] },
@@ -260,6 +323,9 @@ if (role === "channel-holder") {
       "prestart-refusal",
       "prestart-after-runtime",
       "prestart-plain-error",
+      "prestart-long",
+      "prestart-hook-long-line",
+      "prestart-persistent-hook",
     ].includes(mode)
       ? await handleRunCliError({ error, jsonRequested: true })
       : 1;
@@ -331,7 +397,7 @@ if (role === "channel-holder") {
             : failure
         );
       }
-      await publishFixturePrestartFailure(mode);
+      await publishFixturePrestartFailure(mode, root);
       if (
         [
           ...PRESTART_MODES,

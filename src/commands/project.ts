@@ -359,6 +359,7 @@ import {
   isNativeDetachedOwnerProcess,
   nativeDetachedOwnerArgs,
   nativeDetachedUpHookFailed,
+  nativeDetachedUpKeepsHookOutput,
   nativeDetachedUpPrestart,
   nativeDetachedUpReady,
   startNativeDetachedUp,
@@ -2368,6 +2369,12 @@ export async function runLifecycleCommands(opts: {
             ? error.message
             : `Failed to start persistent lifecycle command: ${serviceName}`;
         logger.error({ message });
+        // The lines the foreground just printed, for a detached owner (HACK-2339).
+        nativeDetachedUpHookFailed({
+          step: `${opts.title}: ${label}`,
+          output: [],
+          failure: message,
+        });
         return 1;
       }
       continue;
@@ -2438,6 +2445,8 @@ export async function runLifecycleCommands(opts: {
 
 /** Output lines of a failed hook a detached native owner keeps for its launcher. */
 const LIFECYCLE_FAILURE_TAIL_LINES = 40;
+/** Characters kept of each such line; the launcher shows no more. */
+const LIFECYCLE_FAILURE_LINE_CHARS = 500;
 
 /**
  * A detached native owner has no terminal: it keeps the last lines of each
@@ -2451,9 +2460,11 @@ function failedHookTail(): {
   const lines: string[] = [];
   return {
     lines,
-    onLine: isNativeDetachedOwnerProcess()
+    // Only while a detached owner is before VM work, and each line bounded
+    // as it is kept: a later hook, or a long record, retains nothing more.
+    onLine: nativeDetachedUpKeepsHookOutput()
       ? (line) => {
-          lines.push(line);
+          lines.push(line.slice(0, LIFECYCLE_FAILURE_LINE_CHARS));
           if (lines.length > LIFECYCLE_FAILURE_TAIL_LINES) {
             lines.shift();
           }

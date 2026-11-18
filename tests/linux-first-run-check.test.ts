@@ -37,7 +37,7 @@ test("requires absolute --hack and --scratch and a bounded one-shot", () => {
       "--one-shot-seconds",
       "0",
     ])
-  ).toThrow("1..1800");
+  ).toThrow("1..1500");
   expect(() => parseCheckArgs(["--sudo"])).toThrow("Unknown argument");
 });
 

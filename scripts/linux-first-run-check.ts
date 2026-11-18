@@ -95,9 +95,11 @@ export function parseCheckArgs(argv: readonly string[]): CheckOptions {
   if (
     !Number.isInteger(oneShotSeconds) ||
     oneShotSeconds < 1 ||
-    oneShotSeconds > 1800
+    oneShotSeconds > 1500
   ) {
-    throw new Error(`--one-shot-seconds must be 1..1800. ${USAGE}`);
+    throw new Error(
+      `--one-shot-seconds must be 1..1500 (the start ceiling is 30 minutes). ${USAGE}`
+    );
   }
   return { hack, scratch, oneShotSeconds, reuseGlobalStack, keep };
 }
@@ -470,8 +472,8 @@ async function preflight(run: FirstRun): Promise<boolean> {
     return false;
   }
   // Stop the global containers at the end only if none existed before, and
-  // remove the global volumes only if none existed before (a reused volume,
-  // such as Caddy's CA, stays).
+  // remove a global project's volumes only if that project had none (a
+  // reused volume, such as Caddy's CA, stays).
   run.startedGlobalStack = !containersExisted;
   run.ownedVolumeProjects = fresh;
   run.record({

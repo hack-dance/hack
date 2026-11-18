@@ -11,6 +11,20 @@ import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseSessionBase } from "../mux/session-names.ts";
 import { serializeProjectAutostart } from "./autostart-view.ts";
 import {
+  type BranchInstanceCheckout,
+  type BranchInstanceIdentity,
+  type CheckoutOpenSettings,
+  configBranchServiceHosts,
+  listNativeBranchRecords,
+  listRegistrationCheckouts,
+  type NativeBranchRecord,
+  readCheckoutOpenSettings,
+  resolveBranchInstanceName,
+  resolveOwningCheckout,
+  resolvePrimaryOpenUrl,
+  runtimeServiceHosts,
+} from "./branch-instance-identity.ts";
+import {
   type ComposeServiceActivation,
   composeServiceActivation,
 } from "./compose-service-activation.ts";
@@ -56,6 +70,15 @@ const NATIVE_OBSERVATION_CONCURRENCY = 4;
 export type BranchRuntime = {
   readonly branch: string;
   readonly runtime: RuntimeProject;
+  /** Explicit identity (R20); absent for unregistered projects. */
+  readonly identity?: BranchInstanceIdentity;
+};
+
+/** A native branch instance from its saved run mapping (R19). */
+export type NativeBranchRuntime = {
+  readonly branch: string;
+  readonly store: NativeBranchRecord["store"];
+  readonly identity: BranchInstanceIdentity;
 };
 
 export type MuxSession = {
@@ -123,6 +146,13 @@ export type ProjectView = {
   };
   readonly runtime: RuntimeProject | null;
   readonly branchRuntime: readonly BranchRuntime[];
+  /** Native branch instances with a saved run mapping (R19). */
+  readonly nativeBranchRuntime?: readonly NativeBranchRuntime[];
+  /** The URL `hack open` opens with no target and no branch (R20). */
+  readonly openUrl?: {
+    readonly url: string;
+    readonly host: "dev" | "alias";
+  } | null;
   readonly sessions: readonly ProjectSession[];
   readonly lifecycle: ProjectLifecycleView | null;
   readonly worktrees: readonly RegisteredProjectWorktree[] | null;
@@ -312,6 +342,12 @@ async function buildRegisteredProjectView(opts: {
       name: opts.name,
       registration: opts.registration,
       error,
+      nativeBranchRuntime:
+        error.code === "E_NATIVE_PROJECT_UNSUPPORTED"
+          ? await describeAuthoredNativeBranchInstances({
+              registration: opts.registration,
+            })
+          : [],
     });
   }
   const projectDirOk = await pathExists(opts.registration.projectDir);
@@ -340,9 +376,13 @@ async function buildRegisteredProjectView(opts: {
     runtimeOk: opts.runtimeOk,
     running,
   });
-  const branchRuntime = collectBranchRuntime({
-    baseName: opts.name,
-    runtimeProjects: opts.allRuntime,
+  const branchIdentity = await describeBranchInstances({
+    registration: opts.registration,
+    branchRuntime: collectBranchRuntime({
+      baseName: opts.name,
+      runtimeProjects: opts.allRuntime,
+    }),
+    projectDirOk,
   });
   const sessions = collectProjectSessions({
     projectName: opts.name,
@@ -378,7 +418,9 @@ async function buildRegisteredProjectView(opts: {
     runtimeConfigured,
     runtimeStatus,
     runtime: opts.runtime,
-    branchRuntime,
+    branchRuntime: branchIdentity.branchRuntime,
+    nativeBranchRuntime: branchIdentity.nativeBranchRuntime,
+    openUrl: branchIdentity.openUrl,
     sessions,
     lifecycle,
     worktrees: opts.registration.worktrees ?? null,
@@ -387,10 +429,224 @@ async function buildRegisteredProjectView(opts: {
   };
 }
 
+/**
+ * Explicit branch instance identity for one registered project (HACK-2281).
+ *
+ * Cost per project: one config read per checkout that owns an instance (at
+ * most the registered checkout plus its worktrees), one small
+ * `branch-usage.json` read per instance, and for native instances two
+ * directory listings per checkout plus one small JSON read per saved run
+ * mapping. No process is spawned and Docker is not contacted, so the read
+ * stays proportional to files, not to native status calls.
+ */
+async function describeBranchInstances(opts: {
+  readonly registration: RegisteredProject;
+  readonly branchRuntime: readonly BranchRuntime[];
+  /** Without its project dir a checkout has no settings `hack open` could use. */
+  readonly projectDirOk: boolean;
+}): Promise<{
+  readonly branchRuntime: readonly BranchRuntime[];
+  readonly nativeBranchRuntime: readonly NativeBranchRuntime[];
+  readonly openUrl: ProjectView["openUrl"];
+}> {
+  const settingsByRoot = new Map<
+    string,
+    Promise<CheckoutOpenSettings | null>
+  >();
+  const settingsFor = (checkout: BranchInstanceCheckout) => {
+    const key = checkout.projectDir;
+    let pending = settingsByRoot.get(key);
+    if (!pending) {
+      pending = readCheckoutOpenSettings({
+        registration: opts.registration,
+        checkout,
+      }).catch(() => null);
+      settingsByRoot.set(key, pending);
+    }
+    return pending;
+  };
+  const siteHostsByDir = new Map<
+    string,
+    Promise<Readonly<Record<string, readonly string[]>> | null>
+  >();
+  const siteHostsFor = (projectDir: string) => {
+    let pending = siteHostsByDir.get(projectDir);
+    if (!pending) {
+      pending = readComposeSiteLabelHosts({
+        composeFile: resolve(projectDir, PROJECT_COMPOSE_FILENAME),
+      }).catch(() => null);
+      siteHostsByDir.set(projectDir, pending);
+    }
+    return pending;
+  };
+  const primary = listRegistrationCheckouts(opts.registration)[0];
+  const primarySettings =
+    primary && opts.projectDirOk ? await settingsFor(primary) : null;
+
+  const describe = async (input: {
+    readonly slug: string;
+    readonly checkout: BranchInstanceCheckout | null;
+    readonly runtime: RuntimeProject | null;
+  }): Promise<BranchInstanceIdentity> => {
+    // A known owner whose project dir is gone has no settings `hack open`
+    // could use there; only an unknown owner falls back to the registered
+    // checkout.
+    let settings: CheckoutOpenSettings | null = primarySettings;
+    if (input.checkout) {
+      settings = (await pathExists(input.checkout.projectDir))
+        ? await settingsFor(input.checkout)
+        : null;
+    }
+    const named = await resolveBranchInstanceName({
+      registration: opts.registration,
+      checkout: input.checkout,
+      slug: input.slug,
+    });
+    const open = settings
+      ? resolvePrimaryOpenUrl({ settings, branch: input.slug })
+      : null;
+    const runtimeHosts = input.runtime
+      ? runtimeServiceHosts(input.runtime)
+      : {};
+    const useRuntimeHosts = Object.keys(runtimeHosts).length > 0;
+    let serviceHosts: Readonly<Record<string, readonly string[]>> = {};
+    if (useRuntimeHosts) {
+      serviceHosts = runtimeHosts;
+    } else if (settings) {
+      // The owning checkout's own Compose file (a worktree's can differ from
+      // the primary's), with every root site label, numbered ones included.
+      const baseServiceHosts = await siteHostsFor(
+        input.checkout?.projectDir ?? opts.registration.projectDir
+      );
+      serviceHosts = configBranchServiceHosts({
+        baseServiceHosts,
+        settings,
+        branch: input.slug,
+      });
+    }
+    return {
+      name: named.name,
+      nameSource: named.source,
+      checkout: input.checkout,
+      serviceHosts,
+      hostsSource: useRuntimeHosts ? "runtime_labels" : "config",
+      url: open?.url ?? null,
+      urlHost: open?.host ?? null,
+    };
+  };
+
+  const branchRuntime = await Promise.all(
+    opts.branchRuntime.map(async (entry) => ({
+      ...entry,
+      identity: await describe({
+        slug: entry.branch,
+        checkout: resolveOwningCheckout({
+          registration: opts.registration,
+          workingDir: entry.runtime.workingDir,
+        }),
+        runtime: entry.runtime,
+      }),
+    }))
+  );
+
+  // Each checkout's store is scanned on its own: a missing registered
+  // checkout does not hide a worktree's instances (an absent store is empty).
+  const nativeBranchRuntime: NativeBranchRuntime[] = [];
+  const seen = new Set<string>();
+  for (const checkout of listRegistrationCheckouts(opts.registration)) {
+    for (const record of await listNativeBranchRecords({
+      checkout,
+      store: "runtime",
+    })) {
+      const key = `${record.checkout.projectDir}\0${record.slug}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      nativeBranchRuntime.push({
+        branch: record.slug,
+        store: record.store,
+        identity: await describe({
+          slug: record.slug,
+          checkout: record.checkout,
+          runtime: null,
+        }),
+      });
+    }
+  }
+
+  return {
+    branchRuntime,
+    nativeBranchRuntime,
+    openUrl: primarySettings
+      ? resolvePrimaryOpenUrl({ settings: primarySettings, branch: null })
+      : null,
+  };
+}
+
+/**
+ * Native branch instances of an authored project (`.hack/hack.project.json`), from
+ * `.internal/native-authored-runs` mappings. Their mapping keys the instance
+ * by the `--branch` value as given, so `branch` and `branch_name` are both
+ * that value. `hack open` there reads the saved native routing, which this
+ * read does not open, so `url` and `hosts` are not reported
+ * (`hosts_source: unavailable`) rather than guessed from defaults.
+ */
+async function describeAuthoredNativeBranchInstances(opts: {
+  readonly registration: RegisteredProject;
+}): Promise<readonly NativeBranchRuntime[]> {
+  const out: NativeBranchRuntime[] = [];
+  for (const checkout of listRegistrationCheckouts(opts.registration)) {
+    for (const record of await listNativeBranchRecords({
+      checkout,
+      store: "authored",
+    })) {
+      out.push({
+        branch: record.slug,
+        store: "authored",
+        identity: {
+          name: record.slug,
+          nameSource: "recorded",
+          checkout,
+          serviceHosts: {},
+          hostsSource: "unavailable",
+          url: null,
+          urlHost: null,
+        },
+      });
+    }
+  }
+  return out;
+}
+
+function serializeBranchInstanceIdentity(
+  identity: BranchInstanceIdentity | undefined
+): Record<string, unknown> {
+  if (!identity) {
+    return {};
+  }
+  return {
+    branch_name: identity.name,
+    branch_name_source: identity.nameSource,
+    checkout: identity.checkout
+      ? {
+          root: identity.checkout.root,
+          project_dir: identity.checkout.projectDir,
+          kind: identity.checkout.kind,
+        }
+      : null,
+    hosts: identity.serviceHosts,
+    hosts_source: identity.hostsSource,
+    url: identity.url,
+    url_host: identity.urlHost,
+  };
+}
+
 function buildUnavailableProjectView(opts: {
   readonly name: string;
   readonly registration: RegisteredProject;
   readonly error: ProjectInputSelectionError;
+  readonly nativeBranchRuntime?: readonly NativeBranchRuntime[];
 }): ProjectView {
   return {
     projectId: opts.registration.id,
@@ -409,6 +665,8 @@ function buildUnavailableProjectView(opts: {
     inputDiagnostic: { code: opts.error.code, message: opts.error.message },
     runtime: null,
     branchRuntime: [],
+    nativeBranchRuntime: opts.nativeBranchRuntime ?? [],
+    openUrl: null,
     sessions: [],
     lifecycle: null,
     worktrees: opts.registration.worktrees ?? null,
@@ -531,7 +789,19 @@ export function serializeProjectView(
     branch_runtime: view.branchRuntime.map((entry) => ({
       branch: entry.branch,
       runtime: serializeRuntimeProject(entry.runtime),
+      backend: "compose",
+      ...serializeBranchInstanceIdentity(entry.identity),
     })),
+    native_branch_runtime: (view.nativeBranchRuntime ?? []).map((entry) => ({
+      branch: entry.branch,
+      backend: "native",
+      // A saved run mapping, not proof that the runtime is alive.
+      state: "recorded",
+      store: entry.store,
+      ...serializeBranchInstanceIdentity(entry.identity),
+    })),
+    open_url: view.openUrl?.url ?? null,
+    open_url_host: view.openUrl?.host ?? null,
     sessions: view.sessions.map((entry) => ({
       name: entry.name,
       backend: entry.backend,
@@ -927,6 +1197,75 @@ async function readComposeServices(opts: {
     readiness: composeServiceReadiness(parsed),
     activation: composeServiceActivation(parsed),
   };
+}
+
+const COMPOSE_SITE_LABEL = /^caddy(?:_\d+)?$/;
+const COMPOSE_SITE_SEPARATORS = /[\s,]+/;
+
+/**
+ * Every root Caddy site label (`caddy`, `caddy_<n>`) per service in a Compose
+ * file, as comma-split entries. Unlike {@link readComposeServiceHosts}, which
+ * keeps the published `service_hosts` shape, numbered site labels count.
+ */
+async function readComposeSiteLabelHosts(opts: {
+  readonly composeFile: string;
+}): Promise<Readonly<Record<string, readonly string[]>> | null> {
+  const text = await readTextFile(opts.composeFile);
+  if (!text) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(text);
+  } catch {
+    return null;
+  }
+  const services = isRecord(parsed) ? parsed.services : null;
+  if (!isRecord(services)) {
+    return null;
+  }
+  const out: Record<string, readonly string[]> = {};
+  for (const [serviceName, service] of Object.entries(services)) {
+    const labels = isRecord(service) ? service.labels : null;
+    const entries: string[] = [];
+    for (const [key, value] of composeLabelEntries(labels)) {
+      // A templated site address names no concrete host (and may hold spaces).
+      if (COMPOSE_SITE_LABEL.test(key) && !value.includes("{{")) {
+        // Whitespace separates sites too, as native branch routing accepts.
+        entries.push(...value.split(COMPOSE_SITE_SEPARATORS).filter(Boolean));
+      }
+    }
+    if (entries.length > 0) {
+      out[serviceName] = entries;
+    }
+  }
+  return out;
+}
+
+/** Key/value pairs of Compose labels in map or `KEY=value` list form. */
+function composeLabelEntries(labels: unknown): [string, string][] {
+  if (isRecord(labels)) {
+    return Object.entries(labels).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string"
+    );
+  }
+  if (!Array.isArray(labels)) {
+    return [];
+  }
+  const out: [string, string][] = [];
+  for (const entry of labels) {
+    if (typeof entry !== "string") {
+      continue;
+    }
+    const separator = entry.indexOf("=");
+    if (separator > 0) {
+      out.push([
+        entry.slice(0, separator).trim(),
+        entry.slice(separator + 1).trim(),
+      ]);
+    }
+  }
+  return out;
 }
 
 async function readComposeServiceHosts(opts: {

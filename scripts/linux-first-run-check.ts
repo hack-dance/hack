@@ -18,16 +18,20 @@
  * (`hack-dev-proxy`, `hack-logging`) and the `hack-dev` network, so HOME does
  * not isolate them. Like `scripts/linux-isolated-home-preflight.sh`, the check
  * refuses when they already exist, unless `--reuse-global-stack` says the
- * operator owns them. It removes only what it created: its `lq-<id>` project
- * containers, networks and volumes, and the global stack when it started it.
+ * operator owns them; existing volumes of those projects count too, since they
+ * hold the operator's state (Caddy's CA). It removes only what it created: its
+ * `lq-<id>` project containers, networks and volumes, and the global stack with
+ * its labeled volumes when none of them existed before. PATH entries holding a
+ * `hack` are dropped, so re-invocations run the CLI under test.
  *
  * Root steps (Linux DNS, system trust) are never run; the check records the
  * codes Hack reports for them. Not covered: published-artifact install,
  * systemd user services, browsers, rootless Docker.
  */
 import { randomBytes } from "node:crypto";
+import { accessSync, constants, statSync } from "node:fs";
 import { chmod, mkdir, readdir, rm, writeFile } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 export type StepResult = "pass" | "fail" | "info";
 
@@ -176,6 +180,61 @@ async function runProcess(opts: {
   };
 }
 
+/**
+ * `path` without the entries that hold an executable `hack`. The CLI prefers a
+ * `hack` on PATH over itself when it re-invokes itself (daemon start, global
+ * up), so an installed Hack would otherwise be tested instead of `--hack`.
+ */
+export function pathWithoutHack(
+  path: string,
+  isExecutable: (file: string) => boolean = executableFile
+): { readonly path: string; readonly dropped: readonly string[] } {
+  const kept: string[] = [];
+  const dropped: string[] = [];
+  for (const entry of path.split(":")) {
+    if (entry !== "" && isExecutable(join(entry, "hack"))) {
+      dropped.push(entry);
+    } else {
+      kept.push(entry);
+    }
+  }
+  return { path: kept.join(":"), dropped };
+}
+
+function executableFile(file: string): boolean {
+  try {
+    accessSync(file, constants.X_OK);
+    return statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Directories on the way to `path` that other users can write (sticky ones
+ * excepted). hackd refuses a HOME below such a directory, which is host setup,
+ * not a product failure, so the check reports it as a precondition.
+ */
+export function groupWritableAncestors(path: string): string[] {
+  const found: string[] = [];
+  let dir = path;
+  for (;;) {
+    try {
+      const mode = statSync(dir).mode;
+      if ((mode & 0o022) !== 0 && (mode & 0o1000) === 0) {
+        found.push(dir);
+      }
+    } catch {
+      // Not created yet.
+    }
+    const parent = dirname(dir);
+    if (parent === dir) {
+      return found;
+    }
+    dir = parent;
+  }
+}
+
 const ANSI = /\x1b\[[0-9;?]*[a-zA-Z]/g;
 
 function plain(text: string): string {
@@ -188,6 +247,8 @@ class FirstRun {
   readonly project: string;
   readonly repo: string;
   readonly env: Record<string, string>;
+  /** PATH entries removed because they hold a `hack` (see pathWithoutHack). */
+  readonly droppedPath: readonly string[];
   startedGlobalStack = false;
 
   readonly opts: CheckOptions;
@@ -199,8 +260,10 @@ class FirstRun {
     this.project = `lq-${id}`;
     this.repo = join(opts.scratch, this.project);
     const budgetMs = Math.max(90_000, (opts.oneShotSeconds + 120) * 1000);
+    const path = pathWithoutHack(process.env.PATH ?? "/usr/bin:/bin");
+    this.droppedPath = path.dropped;
     this.env = {
-      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      PATH: path.path,
       HOME: this.home,
       TMPDIR: join(opts.scratch, "tmp"),
       LANG: "C.UTF-8",
@@ -308,6 +371,8 @@ function firstError(ran: Ran): string {
   return line ? line.slice(0, 160) : "no output";
 }
 
+const GLOBAL_PROJECTS = ["hack-dev-proxy", "hack-logging"] as const;
+
 async function preflight(run: FirstRun): Promise<boolean> {
   if (process.platform !== "linux") {
     run.record({
@@ -335,17 +400,38 @@ async function preflight(run: FirstRun): Promise<boolean> {
     });
     return false;
   }
+  const unsafe = groupWritableAncestors(run.opts.scratch);
+  if (unsafe.length > 0) {
+    run.record({
+      step: "0 preflight",
+      command: "stat <scratch ancestors>",
+      exit: null,
+      result: "fail",
+      note: `precondition: ${unsafe.join(", ")} writable by other users; hackd would refuse a HOME below it. Use a scratch directory under private directories`,
+    });
+    return false;
+  }
   const shared: string[] = [];
-  for (const project of ["hack-dev-proxy", "hack-logging"]) {
-    const ids = await run.sh([
-      "docker",
-      "ps",
-      "-aq",
-      "--filter",
-      `label=com.docker.compose.project=${project}`,
-    ]);
+  let sharedState = false;
+  for (const project of GLOBAL_PROJECTS) {
+    const label = `label=com.docker.compose.project=${project}`;
+    const ids = await run.sh(["docker", "ps", "-aq", "--filter", label]);
     if (ids.stdout.trim() !== "") {
       shared.push(`Compose project ${project}`);
+      sharedState = true;
+    }
+    // Kept volumes hold the operator's state, such as Caddy's CA and key.
+    const volumes = await run.sh([
+      "docker",
+      "volume",
+      "ls",
+      "-q",
+      "--filter",
+      label,
+    ]);
+    if (volumes.stdout.trim() !== "") {
+      shared.push(`${project} volumes`);
+      sharedState = true;
     }
   }
   if ((await run.sh(["docker", "network", "inspect", "hack-dev"])).exit === 0) {
@@ -361,16 +447,15 @@ async function preflight(run: FirstRun): Promise<boolean> {
     });
     return false;
   }
-  // Stop the global stack at the end only if none of its containers existed.
-  run.startedGlobalStack = !shared.some((item) =>
-    item.startsWith("Compose project")
-  );
+  // Remove the global stack and its volumes at the end only if none of its
+  // containers or volumes existed before.
+  run.startedGlobalStack = !sharedState;
   run.record({
     step: "0 preflight",
     command: "docker info",
     exit: 0,
     result: "info",
-    note: `Docker ${info.stdout.trim()}; ${shared.length === 0 ? "no shared Hack stack" : `reusing ${shared.join(", ")}`}`,
+    note: `Docker ${info.stdout.trim()}; ${shared.length === 0 ? "no shared Hack stack" : `reusing ${shared.join(", ")}`}; ${run.droppedPath.length === 0 ? "no hack on PATH" : `dropped ${run.droppedPath.length} PATH entries holding a hack`}`,
   });
   return true;
 }
@@ -648,6 +733,9 @@ async function envFlow(run: FirstRun): Promise<void> {
     (r) => ({ ok: r.exit === 0, note: "" })
   );
   const secret = `s-${randomBytes(12).toString("hex")}`;
+  // Kept in a private file so no later command carries it in argv.
+  const expectedFile = join(run.opts.scratch, "tmp", "expected-secret");
+  await writeFile(expectedFile, secret, { mode: 0o600 });
   await run.step(
     "4 env set SECRET --secret --value-stdin",
     ["env", "set", "LQ_TOKEN", "--secret", "--value-stdin"],
@@ -669,7 +757,8 @@ async function envFlow(run: FirstRun): Promise<void> {
   const leaked = await run.sh([
     "grep",
     "-rlF",
-    secret,
+    "-f",
+    expectedFile,
     join(run.repo, ".hack"),
   ]);
   run.record({
@@ -687,7 +776,8 @@ async function envFlow(run: FirstRun): Promise<void> {
       "--",
       "sh",
       "-c",
-      `[ "$LQ_TOKEN" = "${secret}" ] && echo injected`,
+      // The expected value is read from a private file, never put in argv.
+      `[ "$LQ_TOKEN" = "$(cat '${expectedFile}')" ] && echo injected`,
     ],
     (r) => ({
       ok: r.exit === 0 && r.stdout.includes("injected"),
@@ -779,7 +869,13 @@ async function foregroundInterrupt(run: FirstRun): Promise<void> {
   if (exit === null) {
     proc.kill("SIGKILL");
   }
-  const leftover = await run.sh(["pgrep", "-f", `${run.opts.hack} up$`]);
+  const leftover = await run.sh([
+    "pgrep",
+    "-u",
+    String(process.getuid?.() ?? 0),
+    "-xf",
+    `${run.opts.hack} up`,
+  ]);
   const running = (
     await run.sh([
       "docker",
@@ -856,6 +952,8 @@ async function closingFlow(run: FirstRun): Promise<void> {
 }
 
 async function cleanup(run: FirstRun): Promise<void> {
+  // Always stop hackd before its state under HOME is removed.
+  await run.hack(["daemon", "stop"], { timeoutMs: 60_000 });
   await run.hack(["down", "--branch", "b1"], { timeoutMs: 120_000 });
   await run.hack(["down"], { timeoutMs: 120_000 });
   const removed: string[] = [];
@@ -884,7 +982,23 @@ async function cleanup(run: FirstRun): Promise<void> {
     }
   }
   if (run.startedGlobalStack) {
+    // `global down` keeps named volumes; the check created them, so it
+    // removes them (only these projects' labeled volumes).
     await run.hack(["global", "down"], { timeoutMs: 120_000 });
+    for (const project of GLOBAL_PROJECTS) {
+      const label = `label=com.docker.compose.project=${project}`;
+      const names = (
+        await run.sh(["docker", "volume", "ls", "-q", "--filter", label])
+      ).stdout
+        .split("\n")
+        .filter(Boolean);
+      if (
+        names.length > 0 &&
+        (await run.sh(["docker", "volume", "rm", ...names])).exit === 0
+      ) {
+        removed.push(...names);
+      }
+    }
   }
   const left = await readdir(join(run.home, ".hack")).catch(() => []);
   run.record({
@@ -892,7 +1006,7 @@ async function cleanup(run: FirstRun): Promise<void> {
     command: "hack down; docker rm/volume rm (own labels); hack global down",
     exit: null,
     result: "info",
-    note: `removed ${removed.length} project volumes/networks; global stack ${run.startedGlobalStack ? "stopped" : "left as found"}; ~/.hack holds ${left.length} entries${run.opts.keep ? " (kept)" : ""}`,
+    note: `removed ${removed.length} volumes/networks it created; global stack ${run.startedGlobalStack ? "stopped and its volumes removed" : "left as found"}; ~/.hack holds ${left.length} entries${run.opts.keep ? " (kept)" : ""}`,
   });
   if (!run.opts.keep) {
     await rm(run.home, { recursive: true, force: true });

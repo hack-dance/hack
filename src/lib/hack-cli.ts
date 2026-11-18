@@ -31,6 +31,8 @@ export async function resolveHackInvocation(opts?: {
   // `hack` started by its path with no `hack` on PATH resolved to a bare
   // `hack` that does not exist, and `hack daemon start` failed unseen
   // (HACK-2329).
+  // On Linux `process.execPath` is the resolved real path, so a unit or MCP
+  // config written in this case names that exact (possibly versioned) file.
   if (main.startsWith("/$bunfs/") || main.includes("~BUN")) {
     return { bin: opts?.execPath ?? process.execPath, args: [] };
   }

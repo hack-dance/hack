@@ -426,10 +426,13 @@ Markdown table (step, command, exit, seconds, result, note), writes it to
 
 The fixture's one-shot service sleeps 150 seconds by default
 (`--one-shot-seconds`); the check raises the Compose startup budget to fit.
-Like the isolated-home preflight, it refuses when `hack-dev-proxy`,
-`hack-logging` or the `hack-dev` network already exist, because `HOME` does not
-isolate them; `--reuse-global-stack` overrides that only for an operator who
-owns them. It removes only its own `lq-<id>` project resources, and the global
-stack when it started it. Linux DNS and system trust stay root steps: the table
+Like the isolated-home preflight, it refuses when containers or volumes of
+`hack-dev-proxy` or `hack-logging`, or the `hack-dev` network, already exist,
+because `HOME` does not isolate them; `--reuse-global-stack` overrides that only
+for an operator who owns them. It removes only its own `lq-<id>` project
+resources, and the global stack and its labeled volumes only when none of them
+existed before. It drops PATH entries that hold a `hack`, so the CLI under test
+never re-invokes an installed one, and refuses a scratch directory below a
+directory other users can write (hackd would refuse that HOME). Linux DNS and system trust stay root steps: the table
 records the codes Hack reports for them. This is not a pass of the runbook
 above.

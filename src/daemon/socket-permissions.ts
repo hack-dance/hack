@@ -113,6 +113,10 @@ function unsafeChainMessage(opts: {
  * daemon directory that is a link or another user's. Group or other access on
  * the daemon directory itself is repaired by hackd at start, so it is not a
  * refusal here; neither is a directory that does not exist yet.
+ *
+ * Not diagnosed: planted entries inside the daemon directory (a `hackd.log`
+ * link, another user's file, a directory under `gateway/`). Those still end
+ * in the generic "did not report ready" hint, which names `--foreground`.
  */
 export function diagnoseDaemonDirectory(opts: {
   readonly root: string;

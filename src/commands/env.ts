@@ -1754,9 +1754,7 @@ function buildModernEnvJsonPayload(input: {
       return {
         key,
         required: false,
-        // A modern secret is encrypted with the project key in the YAML
-        // layer, not stored in a keychain (HACK-2329).
-        source: secret ? "project_key" : "plain_env",
+        source: secret ? "keychain" : "plain_env",
         services,
         resolved_from: "project_env_config",
         storage: {

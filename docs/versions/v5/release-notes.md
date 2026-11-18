@@ -105,7 +105,8 @@ has every flag.
   `hack projects --json --observe`, `hack global status --json --observe` and
   `hack update --check --json --observe`.
 
-See [Command and output contracts](reference/command-contracts.md).
+See [Scripts and JSON output](guides/machine-output.md) and
+[Command and output contracts](reference/command-contracts.md).
 
 ## 5. What you can choose to add
 

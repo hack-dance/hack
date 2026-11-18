@@ -200,6 +200,14 @@ The table's labels describe abstract control states and request outcomes. Persis
 phases use lowercase names; `Orphaned` and `StopUnknown` are recovery observations,
 not claims that a dead or paused guard rewrote its receipt.
 
+Fixture processes run in their own sessions, in a private root named after the test
+process (`supervisor-test-<pid>-…`). Teardown stops the fixture, kills each recorded
+session, then kills every remaining process of the test or supervisor binary whose
+working directory is that root, and fails the test if one survives. A run killed before
+teardown (a timeout, Ctrl-C) leaves its fixtures behind; the next run's first fixture
+reaps roots whose test process no longer exists, and the CI Supervisor job fails when
+any `fake_caller` fixture process survives the suites.
+
 | Before | Event and guard | Effect | After | Regression |
 | --- | --- | --- | --- | --- |
 | Absent | Start, instance and command locks acquired | Guard creates session; durable identity precedes command spawn | Starting | `starts_and_records_identity` |

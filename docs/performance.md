@@ -44,6 +44,68 @@ fresh HOME, not a dropped page cache. Idle CPU counts only processes alive throu
 the whole window, so it is a lower bound. Compare runs only on the same host,
 executable build and engine load.
 
+## Runtime footprint benchmark
+
+`scripts/benchmark-runtime-footprint.ts` runs one project on one backend and records
+what a developer waits for and what the runtime holds while idle. Run it once per
+backend with the same CLI build, alternating backends, and compare the result files.
+
+```sh
+cp -R scripts/fixtures/runtime-bench /private/tmp/runtime-bench
+bun scripts/benchmark-runtime-footprint.ts --lane compose \
+  --hack /absolute/bundle/hack-v5 --project /private/tmp/runtime-bench \
+  --out /private/tmp/bench-compose
+bun scripts/benchmark-runtime-footprint.ts --lane native \
+  --hack /absolute/bundle/hack-v5 --project /private/tmp/runtime-bench \
+  --native-tool /absolute/bundle/hack-native --native-home /absolute/native-home \
+  --native-https-port 18443 --out /private/tmp/bench-native
+```
+
+The default workload is the [fixture](../scripts/fixtures/runtime-bench/README.md): a web
+dev server and an API on shared source, Postgres and Redis. `--workload FILE` measures
+another project from a descriptor of its routes and tasks. The native lane needs a
+prepared native home and the project's native settings (project share and HTTPS port);
+see the [native guide](guides/native-candidate.md).
+
+Phases, each optional through `--phases`:
+
+| Phase | What is timed or read |
+| --- | --- |
+| `cold` | first `up --detach` until every route answers. Called cold only when no image was present; otherwise `first-start` |
+| `warm` | `down`, then `up --detach` until ready, repeated |
+| `restart` | `restart --json` until ready, repeated |
+| `watch` | a host edit until a routed endpoint serves it: process restart (`bun --watch`) and directory watch (`fs.watch`), each with an in-place and an atomic save |
+| `latency` | 200 requests through the backend's proxy on one connection, and 200 on new connections |
+| `tasks` | `bun install` and a production build inside a service, on the shared mount. Each runs as a background job timed on the guest clock and polled, because one non-interactive `exec` has a time limit on native |
+| `io` | 512 MiB write with `fsync`, read back, and 5,000 small files, on a bind mount and on a named volume, as the same kind of job |
+| `idle` | memory and CPU over a quiet window (default 300 s after a 60 s settle) |
+| `stop` | `down`, and on native the VM stop |
+
+Read the numbers with these limits:
+
+- A start counts only when the routed checks pass, and a data marker written after the
+  first start must read back after every later start.
+- Each timing carries the 1-minute load before and after. Above `--max-load` (default
+  40) it is flagged, kept in `result.json` and left out of the medians.
+- Memory quantities are reported side by side and never added: per-container cgroup
+  memory (the same read on both backends), the guest's `/proc/meminfo`, and each host VM
+  process's resident size and physical footprint. On Compose the VM is the Docker
+  application's shared VM: its numbers cover every project in it, and the report gives
+  the engine's container count. Physical footprint is not comparable between VM
+  implementations: some map guest memory so that macOS does not charge it to the
+  process, and others are charged twice for pages the VM process wrote on the guest's
+  behalf. Per-container memory and the guest's own counters are the like-for-like
+  figures.
+- Idle CPU is the growth of cumulative CPU time: host VM processes, container cgroups
+  and the guest. The guest counters are read once before and once after the window, and
+  those reads cost a little CPU inside it.
+- The read-back in `io` follows the write, so it is served from the guest page cache.
+- The host page cache is never flushed, and image pulls depend on the network.
+
+The script stops only the project it started. On native it refuses to begin a cold
+start while another provider VM process is running. One run is one sample of a shared
+machine: repeat it and compare medians before drawing a conclusion.
+
 ## Project listing
 
 ```sh

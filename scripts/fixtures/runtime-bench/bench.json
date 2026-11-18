@@ -1,0 +1,67 @@
+{
+  "name": "hack-runtime-bench",
+  "routes": [
+    {
+      "host": "hack-runtime-bench.hack",
+      "path": "/token"
+    },
+    {
+      "host": "api.hack-runtime-bench.hack",
+      "path": "/health"
+    }
+  ],
+  "services": ["db", "cache", "api", "web"],
+  "latency": {
+    "host": "api.hack-runtime-bench.hack",
+    "path": "/health"
+  },
+  "data": {
+    "write": {
+      "host": "api.hack-runtime-bench.hack",
+      "path": "/mark"
+    },
+    "read": {
+      "host": "api.hack-runtime-bench.hack",
+      "path": "/marks"
+    }
+  },
+  "watch": {
+    "file": "web/src/token.ts",
+    "template": "export const TOKEN = \"{token}\";\n",
+    "probes": [
+      {
+        "label": "process-restart",
+        "host": "hack-runtime-bench.hack",
+        "path": "/token"
+      },
+      {
+        "label": "directory-watch",
+        "host": "hack-runtime-bench.hack",
+        "path": "/token-watched"
+      }
+    ]
+  },
+  "tasks": [
+    {
+      "label": "install",
+      "service": "web",
+      "argv": [
+        "sh",
+        "-c",
+        "rm -rf node_modules && bun install --frozen-lockfile"
+      ],
+      "runs": 3
+    },
+    {
+      "label": "build",
+      "service": "web",
+      "argv": ["bun", "run", "build"],
+      "runs": 3
+    }
+  ],
+  "io": {
+    "service": "api",
+    "bind": "/app",
+    "volume": "/scratch"
+  }
+}

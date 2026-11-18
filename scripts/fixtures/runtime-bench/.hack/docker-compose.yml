@@ -1,0 +1,79 @@
+# Benchmark fixture: a web dev server and an API on shared source, Postgres and Redis.
+# Driven by scripts/benchmark-runtime-footprint.ts on both backends; not an example project.
+name: hack-runtime-bench
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_DB: bench
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bench -d bench"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  cache:
+    image: redis:8-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  api:
+    image: oven/bun:1.4.4-alpine
+    working_dir: /app
+    command: ["bun", "--watch", "server.ts"]
+    environment:
+      PORT: "3001"
+      DATABASE_URL: postgres://bench@db:5432/bench
+      REDIS_URL: redis://cache:6379
+    volumes:
+      - ../api:/app
+      - scratch:/scratch
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r = await fetch('http://127.0.0.1:3001/health'); process.exit(r.ok ? 0 : 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    labels:
+      caddy: api.hack-runtime-bench.hack
+      caddy.reverse_proxy: "{{upstreams 3001}}"
+      caddy.tls: internal
+    networks:
+      - hack-dev
+      - default
+  web:
+    image: oven/bun:1.4.4-alpine
+    working_dir: /app
+    command: ["bun", "--watch", "dev.ts"]
+    environment:
+      PORT: "3000"
+      API_URL: http://api:3001
+    volumes:
+      - ../web:/app
+    # service_started: native replaces a routed service's command healthcheck with a
+    # route probe, so it refuses service_healthy on a routed dependency.
+    depends_on:
+      api:
+        condition: service_started
+    labels:
+      caddy: hack-runtime-bench.hack
+      caddy.reverse_proxy: "{{upstreams 3000}}"
+      caddy.tls: internal
+    networks:
+      - hack-dev
+      - default
+volumes:
+  pgdata:
+  scratch:
+networks:
+  hack-dev:
+    external: true

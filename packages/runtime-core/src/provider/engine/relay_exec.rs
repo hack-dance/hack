@@ -140,8 +140,8 @@ fn start_failure(error: &std::io::Error) -> StartFailure {
         _ => StartFailure::Io,
     }
 }
-/// [`start_mode`] without a console.
-#[cfg(test)]
+/// [`start_mode`] without a console. Used by the macOS relay launch and the tests.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn start(
     stream: &mut UnixStream,
     id: &str,

@@ -15,6 +15,7 @@ import {
 import { requireNativeEnvBuildSeparation } from "./native-env-build-context.ts";
 import {
   NativeEnvFileRefusal,
+  nativeEnvFileAdmissible,
   nativeEnvFileSourceLocation,
   readNativeEnvFileSource,
 } from "./native-env-file-source.ts";
@@ -360,8 +361,15 @@ async function materializedDotenvReason(opts: {
 }): Promise<string> {
   const dotenv = relative(opts.opts.projectRoot, opts.automatic);
   const remove = `rm ${dotenv} ${dotenv}.state.json`;
-  let state: Awaited<ReturnType<typeof classifyMaterializedDotenv>>;
+  let state: Awaited<ReturnType<typeof classifyMaterializedDotenv>> = "unknown";
   try {
+    // Compare only files native would admit, so nothing unsafe is read.
+    const admissible =
+      (await nativeEnvFileAdmissible(opts.automatic)) &&
+      (await nativeEnvFileAdmissible(`${opts.automatic}.state.json`));
+    if (!admissible) {
+      throw new Error("not compared");
+    }
     state = await classifyMaterializedDotenv({
       projectRoot: opts.opts.projectRoot,
       projectDir: dirname(opts.automatic),

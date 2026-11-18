@@ -1163,6 +1163,26 @@ test("HACK-2324: a materialized dotenv refusal says whether removing it can lose
   expect(differs).not.toContain(DOTENV);
 });
 
+test("HACK-2324: an unsafe materialized dotenv is not read for the comparison", async () => {
+  const f = await fixture({ env_file: ".env" });
+  await managed(f.projectDir, { global: { FLAG: "on" } });
+  await f.source(".env.state.json", "{}\n");
+  // A FIFO would block a read; it must refuse at once without opening it.
+  const fifo = Bun.spawnSync(["mkfifo", join(f.projectDir, ".env")]);
+  expect(fifo.exitCode).toBe(0);
+  const blocked = String(
+    await prepareNativeProjectInput(f).catch((caught: unknown) => caught)
+  );
+  expect(blocked).toContain("cannot be compared");
+  // An oversized file is not read either.
+  await rm(join(f.projectDir, ".env"));
+  await f.source(".env", `FLAG=${"x".repeat(300 * 1024)}\n`);
+  const large = String(
+    await prepareNativeProjectInput(f).catch((caught: unknown) => caught)
+  );
+  expect(large).toContain("cannot be compared");
+});
+
 test("materialized dotenv identity aliases are refused before source reading", async () => {
   const f = await fixture({ env_file: "alias.env" });
   await f.source(".env", `TOKEN=${DOTENV}\n`);

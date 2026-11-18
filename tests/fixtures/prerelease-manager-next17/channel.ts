@@ -1069,7 +1069,13 @@ export class Channel {
       }
       const code = await child.exited;
       if (child.signalCode) {
-        return 128 + (osConstants.signals[child.signalCode] ?? 0);
+        // bun-types 1.4: an unnamed signal is reported by number.
+        return (
+          128 +
+          (typeof child.signalCode === "number"
+            ? child.signalCode
+            : (osConstants.signals[child.signalCode] ?? 0))
+        );
       }
       return code;
     } finally {

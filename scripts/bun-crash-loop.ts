@@ -1,4 +1,15 @@
 #!/usr/bin/env bun
+import { closeSync, openSync } from "node:fs";
+import {
+  appendFile,
+  copyFile,
+  mkdir,
+  readdir,
+  readFile,
+  stat,
+} from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 /**
  * Fixed-budget Bun crash loop for the gated `bun-crash-experiment` workflow.
  *
@@ -29,17 +40,7 @@
  *
  * Do not run this on a shared host: it is meant for an isolated hosted runner.
  */
-import { closeSync, openSync } from "node:fs";
-import {
-  appendFile,
-  copyFile,
-  mkdir,
-  readdir,
-  readFile,
-  stat,
-} from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { subprocessSignalLabel } from "../src/lib/subprocess-signal.ts";
 import {
   type BunRunOutcome,
   type BunRunReason,
@@ -544,7 +545,7 @@ export function executeWithLog(opts: {
     }
     return {
       exitCode: proc.exitCode,
-      signal: proc.signalCode ?? null,
+      signal: subprocessSignalLabel(proc.signalCode),
       output: await readFile(logPath, "utf8"),
       stoppedAtDeadline,
     };

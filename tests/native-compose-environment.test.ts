@@ -28,6 +28,7 @@ import {
   selectActiveNativeProjectInput,
 } from "../src/backends/native-project-input.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../src/lib/native-environment-notices.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 import {
   classifyMaterializedDotenv,
   materializeProjectEnv,
@@ -1170,7 +1171,7 @@ test("HACK-2324: an unsafe materialized dotenv is not read for the comparison", 
   await managed(f.projectDir, { global: { FLAG: "on" } });
   await f.source(".env.state.json", "{}\n");
   // A FIFO would block a read; it must refuse at once without opening it.
-  const fifo = Bun.spawnSync(["mkfifo", join(f.projectDir, ".env")]);
+  const fifo = spawnSyncBounded(["mkfifo", join(f.projectDir, ".env")]);
   expect(fifo.exitCode).toBe(0);
   const blocked = String(
     await prepareNativeProjectInput(f).catch((caught: unknown) => caught)
@@ -1204,7 +1205,7 @@ test("HACK-2324: the materialized dotenv comparison uses one stable snapshot and
   // Replace both paths with FIFOs: any reopen would block this test.
   for (const name of [".env", ".env.state.json"]) {
     await rm(join(f.projectDir, name));
-    expect(Bun.spawnSync(["mkfifo", join(f.projectDir, name)]).exitCode).toBe(
+    expect(spawnSyncBounded(["mkfifo", join(f.projectDir, name)]).exitCode).toBe(
       0
     );
   }

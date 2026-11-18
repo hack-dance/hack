@@ -50,6 +50,8 @@ impl Candidate {
     pub fn discover(checkout: &Path) -> Result<Self, CandidateError> {
         let checkout = canonical_directory(checkout)?;
         let state_root = checkout.join(".hack-local");
+        // Registered first, so a malformed root is still named in its own refusal.
+        register_state_root(&state_root);
         reject_aliased_state(&state_root)?;
         Ok(Self {
             protocol_version: PROTOCOL_VERSION,
@@ -227,6 +229,32 @@ fn canonical_directory(path: &Path) -> Result<PathBuf, CandidateError> {
     Ok(canonical)
 }
 
+/// Canonical state roots of the candidates this process discovered. Only a path beneath
+/// one of them is named in a diagnostic; project paths never lie inside a native home.
+static STATE_ROOTS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn register_state_root(state_root: &Path) {
+    if let Ok(mut roots) = STATE_ROOTS.lock() {
+        if !roots.iter().any(|root| root == state_root) {
+            roots.push(state_root.to_path_buf());
+        }
+    }
+}
+
+/// A state path for diagnostics, relative to the candidate state root it lies beneath
+/// (`.hack-local/...`). Anything else, a project path or a home directory included, gets
+/// no label, so nothing a user named is ever carried.
+fn state_component_label(component: &Path) -> Option<String> {
+    let roots = STATE_ROOTS.lock().ok()?;
+    let root = roots.iter().find(|root| component.starts_with(root))?;
+    let relative = component.strip_prefix(root).ok()?.to_str()?;
+    Some(if relative.is_empty() {
+        ".hack-local".to_owned()
+    } else {
+        format!(".hack-local/{relative}")
+    })
+}
+
 fn reject_aliased_state(path: &Path) -> Result<(), CandidateError> {
     for component in path.ancestors() {
         match component.symlink_metadata() {
@@ -246,7 +274,8 @@ fn reject_aliased_state(path: &Path) -> Result<(), CandidateError> {
                         "Candidate state component is not a directory: {}",
                         component.display()
                     ),
-                ));
+                )
+                .with_state_component(&state_component_label(component).unwrap_or_default()));
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -293,5 +322,62 @@ mod installed_home_tests {
                 "unsafe_candidate_home"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod state_component_tests {
+    use super::*;
+
+    #[test]
+    fn a_non_directory_state_component_carries_its_path_relative_to_the_state_root() {
+        let root = private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-state-component",
+        );
+        let state = root.join(".hack-local");
+        std::fs::create_dir_all(state.join("run")).unwrap();
+        register_state_root(&state);
+        std::fs::write(state.join("run/graphs"), b"not a directory").unwrap();
+        // The checked path itself is a file: the shape behind `invalid_state`.
+        let error = reject_aliased_state(&state.join("run/graphs")).unwrap_err();
+        assert_eq!(error.code, "invalid_state");
+        let wire = serde_json::to_value(&error).unwrap();
+        assert_eq!(
+            wire["state_component"],
+            serde_json::json!({"version": 1, "path": ".hack-local/run/graphs"})
+        );
+        // A project file, a file directly in the state root, or a project directory that
+        // happens to be named .hack-local, carries no label.
+        let project = root.join("project");
+        std::fs::create_dir_all(project.join(".hack-local")).unwrap();
+        std::fs::create_dir_all(project.join(".hack-local/run")).unwrap();
+        for path in [
+            root.join("confidential-plan.txt"),
+            project.join(".hack-local/notes"),
+            // The allowed state prefix inside a project is still project data.
+            project.join(".hack-local/run/confidential-acquisition.txt"),
+        ] {
+            std::fs::write(&path, b"x").unwrap();
+            let refused = reject_aliased_state(&path).unwrap_err();
+            assert_eq!(refused.code, "invalid_state");
+            let wire = serde_json::to_value(&refused).unwrap();
+            assert!(wire.get("state_component").is_none(), "{wire}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn discovery_names_a_state_root_that_is_a_file() {
+        let home = private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-state-root-file",
+        );
+        std::fs::write(home.join(".hack-local"), b"not a directory").unwrap();
+        let error = Candidate::discover(&home).unwrap_err();
+        assert_eq!(error.code, "invalid_state");
+        let wire = serde_json::to_value(&error).unwrap();
+        assert_eq!(wire["state_component"]["path"], ".hack-local");
+        std::fs::remove_dir_all(&home).unwrap();
     }
 }

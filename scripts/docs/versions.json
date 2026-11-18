@@ -4480,11 +4480,25 @@
         "sourceFile": "docs/reference/cli.md"
       },
       {
+        "slug": "release-notes",
+        "title": "What's new in 5.0",
+        "sourceRevision": "0dd44ca6b59024b5546ca7e755a4210dedb9a106",
+        "sourceLabel": "Draft for 5.0.0 (next 0dd44ca6)",
+        "sourceFile": "docs/guides/v5-release-notes.md"
+      },
+      {
         "slug": "guides/upgrade-from-v4",
         "title": "Upgrade a v4 machine to v5",
         "sourceRevision": "26a142921c9b9aeb8821b7e0a19c2cfb3be0189f",
         "sourceLabel": "Env migration audit (next 26a142921c)",
         "sourceFile": "docs/env.md"
+      },
+      {
+        "slug": "guides/breaking-changes",
+        "title": "Breaking changes from v4",
+        "sourceRevision": "0dd44ca6b59024b5546ca7e755a4210dedb9a106",
+        "sourceLabel": "Current command audit (next 0dd44ca6)",
+        "sourceFile": "docs/guides/v5-release-notes.md"
       },
       {
         "slug": "agent-handoff",
@@ -4520,6 +4534,13 @@
       {
         "slug": "guides/cloud-environments",
         "title": "Cloud and remote environments"
+      },
+      {
+        "slug": "guides/desktop-app",
+        "title": "Desktop app (preview)",
+        "sourceRevision": "0dd44ca6b59024b5546ca7e755a4210dedb9a106",
+        "sourceLabel": "Current command audit (next 0dd44ca6)",
+        "sourceFile": "docs/reference/cli.md"
       },
       {
         "slug": "reference/overview",
@@ -4617,6 +4638,13 @@
         "sourceRevision": "278aeb1cee5b136d7bae0ddfcd5f3741e9579524",
         "sourceLabel": "next.15 recipe link corrections",
         "sourceFile": "docs/recipes/config-examples.md"
+      },
+      {
+        "slug": "guides/slow-mac",
+        "title": "My Mac is slow",
+        "sourceRevision": "0dd44ca6b59024b5546ca7e755a4210dedb9a106",
+        "sourceLabel": "Current command audit (next 0dd44ca6)",
+        "sourceFile": "docs/guides/development-runtime-safety.md"
       },
       {
         "slug": "guides/proxy-network-repair",

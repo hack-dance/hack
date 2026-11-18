@@ -37,6 +37,7 @@ v5 prerelease bundles are Apple Silicon macOS only; see
 - [Start projects at login](https://github.com/hack-dance/hack/blob/next/docs/always-on-projects.md)
 - [Set up a Linux host](../guides/linux-setup.md): local DNS, trust and the daemon.
 - [Configure Linux certificate trust](../guides/linux-certificate-trust.md): distribution and browser trust stores.
+- [Breaking changes from v4](guides/breaking-changes.md): one list, with the reason for each and how to go back.
 - [Upgrade a v4 machine to v5](guides/upgrade-from-v4.md): preparation, rollback and checks awaiting the dogfood run.
 - [Run and inspect a project](guides/run-project.md)
 - [Choose where a command runs](guides/run-commands.md)
@@ -44,7 +45,9 @@ v5 prerelease bundles are Apple Silicon macOS only; see
 - [Work on another branch](guides/parallel-work.md)
 - [Share environment and secrets](guides/share-environment.md)
 - [Manage helpers and tunnels](guides/project-helpers.md)
+- [My Mac is slow](guides/slow-mac.md): start from the symptom, then let `hack doctor` name the cause.
 - [Use a cloud agent or another host](guides/cloud-environments.md)
+- [Desktop app (preview)](guides/desktop-app.md): what the window shows, how it finds the CLI, and what it never does.
 - [Try the native backend (beta)](../guides/native-candidate.md)
 
 ## Recipes

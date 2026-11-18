@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { NATIVE_PROVIDER_PIN_MESSAGE } from "../backends/native-runtime-client.ts";
+import {
+  NATIVE_IDLE_POOL_NOTE,
+  NATIVE_PROVIDER_PIN_MESSAGE,
+} from "../backends/native-runtime-client.ts";
 import {
   noteActivityFailedServices,
   suppressActivityRecording,
@@ -145,7 +148,7 @@ function startupFailureError(failure: StartupFailure): HackCliError {
     : "";
   return new HackCliError({
     code: "E_STARTUP_INCOMPLETE",
-    message: `Native detached startup failed (${failure.code}); inspect hack ps before retrying; retained owners and recovery evidence are preserved.${detail}${failed}`,
+    message: `Native detached startup failed (${failure.code}); inspect hack ps before retrying; retained owners and recovery evidence are preserved.${detail}${failed} ${NATIVE_IDLE_POOL_NOTE}`,
   });
 }
 

@@ -262,6 +262,14 @@ class FirstRun {
   ownedVolumeProjects: string[] = [];
 
   readonly opts: CheckOptions;
+  /**
+   * Per-command limit: ten minutes, or the one-shot's duration plus five
+   * minutes of startup overhead when that is longer, so a healthy `up` or
+   * `restart` waiting on a long one-shot is never killed.
+   */
+  get lifecycleTimeoutMs(): number {
+    return Math.max(600_000, (this.opts.oneShotSeconds + 300) * 1000);
+  }
 
   constructor(opts: CheckOptions) {
     this.opts = opts;
@@ -305,7 +313,7 @@ class FirstRun {
       argv: [this.opts.hack, ...args],
       env: { ...this.env, ...opts?.env },
       cwd: this.repo,
-      timeoutMs: opts?.timeoutMs ?? 600_000,
+      timeoutMs: opts?.timeoutMs ?? this.lifecycleTimeoutMs,
       stdin: opts?.stdin,
     });
   }

@@ -623,6 +623,8 @@ function handlerArguments(path: readonly string[]): readonly string[] {
       return ["API_TOKEN", "value"];
     case "env apply":
       return ["--service", "api"];
+    case "env overlay add":
+      return ["qa"];
     case "env exec":
     case "host exec":
       return ["--", "true"];

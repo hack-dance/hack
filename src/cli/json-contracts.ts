@@ -41,6 +41,8 @@ export const JSON_COMMAND_SHAPES = {
   "dispatch status": "legacy-object",
   "dispatch logs": "legacy-object",
   "env list": "legacy-object",
+  "env overlay add": "schema-envelope",
+  "env overlay list": "schema-envelope",
   "env migrate": "envelope",
   "env protect": "legacy-object",
   "env explain": "legacy-object",
@@ -103,6 +105,8 @@ export const SCHEMA_JSON_VARIANTS = [
   { command: "autostart resume", flags: [], schema: "hack.autostart.v1" },
   { command: "autostart run", flags: [], schema: "hack.autostart.v1" },
   { command: "version", flags: [], schema: "hack.version.v1" },
+  { command: "env overlay add", flags: [], schema: "hack.env-overlays.v1" },
+  { command: "env overlay list", flags: [], schema: "hack.env-overlays.v1" },
   {
     command: "projects",
     flags: ["--observe"],

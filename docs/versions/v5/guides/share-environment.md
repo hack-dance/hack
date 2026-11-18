@@ -13,7 +13,12 @@ checkout's key; a separate host needs its own approved runtime delivery mechanis
 
 `hack env list --json` reports `key_state` (`ok`, `missing`, `unreadable` or
 `not_checked`), so a script or app can tell whether this checkout can read the
-project key without printing it. See [Environment and secrets](../../env.md).
+project key without printing it. It also reports `key_source` (which key file
+or variable NAME answered, never the key) and `overlays` (every overlay the
+project has). Add `--plaintext-values` to include plaintext values in the same
+read; secret values are never included. `--key-file <path>` or
+`--key-env <NAME>` chooses the key for one run. `hack env overlay add <name>`
+creates an empty overlay. See [Environment and secrets](../../env.md).
 
 For encrypted-file storage, possession of the project key grants decryption of
 values encrypted with it. Keep an approved backup separate from the repository.

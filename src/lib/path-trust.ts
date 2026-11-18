@@ -64,6 +64,12 @@ export function walkReplaceableChain(opts: {
   readonly hackHome: string | null;
   readonly stopAtLink?: boolean;
   readonly allowMissing?: boolean;
+  /**
+   * Inspect only: a directory inside `hackHome` that would be repaired is
+   * accepted as it is, without the chmod (HACK-2329). For read-only
+   * observers such as `hack daemon status` and `hack doctor`.
+   */
+  readonly observeOnly?: boolean;
   readonly checked?: Set<string>;
   /**
    * Autostart engine lookup only: also accept a macOS administrator directory
@@ -123,6 +129,7 @@ type ChainWalk = {
     readonly hackHome: string | null;
     readonly stopAtLink?: boolean;
     readonly allowMissing?: boolean;
+    readonly observeOnly?: boolean;
     readonly acceptDarwinAdminDirectories?: boolean;
   };
   readonly checked: Set<string>;
@@ -140,6 +147,7 @@ function checkChainEntry(state: ChainWalk, entry: string): string | null {
     path: entry,
     uid: state.opts.uid,
     hackHome: state.opts.hackHome,
+    observeOnly: state.opts.observeOnly,
     acceptDarwinAdminDirectories: state.opts.acceptDarwinAdminDirectories,
   });
 }
@@ -213,6 +221,7 @@ function checkServicePathEntry(opts: {
   readonly path: string;
   readonly uid: number;
   readonly hackHome: string | null;
+  readonly observeOnly?: boolean;
   readonly acceptDarwinAdminDirectories?: boolean;
 }): string | null {
   let info: Stats;
@@ -258,6 +267,9 @@ function checkServicePathEntry(opts: {
     opts.hackHome !== null &&
     (opts.path === opts.hackHome || opts.path.startsWith(`${opts.hackHome}/`));
   if (insideHackHome && info.isDirectory() && info.uid === opts.uid) {
+    if (opts.observeOnly === true) {
+      return null;
+    }
     try {
       chmodSync(opts.path, info.mode & 0o7755);
       if ((lstatSync(opts.path).mode & 0o022) === 0) {

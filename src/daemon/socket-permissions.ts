@@ -124,6 +124,8 @@ export function diagnoseDaemonDirectory(opts: {
     hackHome: dirname(opts.root),
     allowMissing: true,
     stopAtLink: true,
+    // Never repair while diagnosing: status and doctor only observe.
+    observeOnly: true,
   });
   if ("error" in walk) {
     return unsafeChainMessage({ root: opts.root, chain: walk.error });

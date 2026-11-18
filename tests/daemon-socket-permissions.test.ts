@@ -265,9 +265,13 @@ describe("diagnoseDaemonDirectory (HACK-2329)", () => {
     ).toBeNull();
     await mkdir(join(hackHome, "daemon"));
     await chmod(join(hackHome, "daemon"), 0o775);
+    await chmod(hackHome, 0o775);
     expect(
       diagnoseDaemonDirectory({ root: join(hackHome, "daemon") })
     ).toBeNull();
+    // Diagnosis only observes: modes hackd would repair are left as they were.
+    expect((await stat(hackHome)).mode & 0o777).toBe(0o775);
+    expect((await stat(join(hackHome, "daemon"))).mode & 0o777).toBe(0o775);
   });
 
   test("refuses a daemon directory that is a link", async () => {

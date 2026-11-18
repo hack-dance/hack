@@ -1,11 +1,15 @@
 # Documentation
 
-Hack runs the whole project on your machine: services, environment, secrets,
-local HTTPS URLs, startup helpers and logs, all from a small `.hack/` folder
-committed with the repository. One command starts a repo. Projects and branches
-run side by side without colliding. Nothing is hosted.
+Hack runs your whole project on your own machine, and runs every project, branch
+and git worktree side by side, each at its own HTTPS address. One command
+starts a repo. Nothing is hosted.
 
-v5 is the same CLI and project model as v4 with a new runtime layer underneath.
+A project is its services, settings, secrets, local HTTPS addresses, startup
+helpers and logs, all from a small `.hack/` folder committed with the repository.
+People and coding agents can each run and test their own copy.
+
+v5 is the same CLI and project model as v4, with a new way to run services
+underneath.
 Docker Compose stays the default backend. The native backend (beta, Apple Silicon
 macOS) is opt-in and ships only through the `hack-next` channel, not in the stable
 archives or the Homebrew formula. Read [Upgrade from v4](upgrade.md) for what
@@ -42,7 +46,7 @@ v5 prerelease bundles are Apple Silicon macOS only; see
 - [Run and inspect a project](guides/run-project.md)
 - [Choose where a command runs](guides/run-commands.md)
 - [Scripts and JSON output](guides/machine-output.md): what `--json` prints, and where hook output goes.
-- [Work on another branch](guides/parallel-work.md)
+- [Run a branch or worktree beside main](guides/parallel-work.md)
 - [Share environment and secrets](guides/share-environment.md)
 - [Manage helpers and tunnels](guides/project-helpers.md)
 - [My Mac is slow](guides/slow-mac.md): start from the symptom, then let `hack doctor` name the cause.
@@ -60,9 +64,10 @@ each page distinguishes the compatibility audit from its original execution note
 
 ## Native backend (beta)
 
-A second way to run the same project on an Apple Silicon Mac. Hack starts its own
-Linux virtual machine instead of using a Docker app. It is opt-in, and Compose
-stays the default.
+A second backend for the same project on an Apple Silicon Mac. It runs the same
+Compose file in a lightweight Linux VM that Hack manages, without a Docker app.
+It is opt-in through `hack-next`, and Compose stays the default. It is not a
+sandbox, and we make no speed, memory or battery claim for it.
 
 - [Overview](native/overview.md): what it is, what it is not, and why to try it.
 - [Try it](native/try-it.md): install, run one project on native, switch back.

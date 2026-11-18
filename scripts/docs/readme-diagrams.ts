@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { renderDiagram } from "./diagrams";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
-const names = ["project", "first-run"] as const;
+const names = ["instances", "project", "first-run"] as const;
 
 /** Pele 1.9.0 architecture has no class syntax; tag only these curated nodes. */
 function applyProjectClasses(svg: string): string {

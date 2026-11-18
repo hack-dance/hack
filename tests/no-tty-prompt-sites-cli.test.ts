@@ -69,7 +69,7 @@ const ACTIVE_PROMPT_MARKER = "◆";
 
 type RunResult = {
   readonly exitCode: number;
-  readonly signal: string | null;
+  readonly signal: NodeJS.Signals | number | null;
   readonly stdout: string;
   readonly stderr: string;
   readonly wallMs: number;

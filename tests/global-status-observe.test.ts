@@ -796,7 +796,7 @@ test("macOS DNS adapter: missing files are missing; unreadable files, no Homebre
       return value;
     }
     throw value;
-  }) as typeof fsPromises.readFile);
+  }) as unknown as typeof fsPromises.readFile);
   const whichSpy = spyOn(shell, "findExecutableInPath").mockImplementation(
     (name: string) => (name === "brew" ? "/fake/brew" : null)
   );

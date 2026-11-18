@@ -351,7 +351,7 @@ export function replayJobAdmitted(opts: {
 
 type ReadResult = {
   readonly exitCode: number | null;
-  readonly signalCode?: string | null;
+  readonly signalCode?: NodeJS.Signals | number | null;
   readonly stdout: Uint8Array;
   readonly stderr: Uint8Array;
 };

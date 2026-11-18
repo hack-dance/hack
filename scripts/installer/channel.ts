@@ -13,9 +13,9 @@ import {
   rmSync,
   unlinkSync,
 } from "node:fs";
-import { constants as osConstants } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { quoteShellWord } from "../../src/lib/logs.ts";
+import { subprocessSignalExitStatus } from "../../src/lib/subprocess-signal.ts";
 import {
   extractArchive,
   sameJson,
@@ -1126,7 +1126,7 @@ export class Channel {
       }
       const code = await child.exited;
       if (child.signalCode) {
-        return 128 + (osConstants.signals[child.signalCode] ?? 0);
+        return subprocessSignalExitStatus(child.signalCode, 0);
       }
       return code;
     } finally {

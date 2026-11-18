@@ -1871,8 +1871,10 @@ impl Source for LiveSource {
     }
 
     fn service_usage(&self, root: &Path) -> Result<crate::usage::UsageReport, String> {
+        // Compose only: an inherited HACK_RUNTIME_BACKEND=native must not
+        // change these reads.
         let v: serde_json::Value = self
-            .runner
+            .runner_for(false)
             .fixed()
             .run_json(
                 &["usage", "--json", "--by-service"],
@@ -1894,7 +1896,7 @@ impl Source for LiveSource {
             args.extend(["--branch", b]);
         }
         let v: serde_json::Value = self
-            .runner
+            .runner_for(false)
             .fixed()
             .run_json(&args, Some(root), Self::USAGE)
             .map_err(|e| e.to_string())?;
@@ -5390,7 +5392,7 @@ esac
         crate::test_support::script(
             &hack,
             r#"#!/bin/sh
-printf '%s\n' "$*" >> "$HACK_HOME/calls"
+printf '%s %s\n' "$HACK_RUNTIME_BACKEND" "$*" >> "$HACK_HOME/calls"
 case "$1" in
   usage) echo '{"ok":true,"data":{"schema":"hack.usage.by-service.v1","project":"shop","services":[{"composeProject":"shop","service":"api","containers":1,"cpuPercent":1.5,"memUsedBytes":1048576,"memLimitBytes":null}]}}' ;;
   ps) echo '{"ok":true,"data":{"items":[{"Service":"api","emulated":true},{"Service":"db"}]}}' ;;
@@ -5402,7 +5404,9 @@ esac
             runner: fixture_runner(&hack)
                 .with_env("HACK_HOME", &dir.to_string_lossy())
                 .with_env("HOME", &dir.to_string_lossy())
-                .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1"),
+                .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+                // Inherited from the app's environment: must not leak in.
+                .with_env("HACK_RUNTIME_BACKEND", "native"),
             daemon: None,
         };
         let root = Path::new("/work/shop");
@@ -5420,9 +5424,9 @@ esac
         assert_eq!(
             calls.lines().collect::<Vec<_>>(),
             vec![
-                "usage --json --by-service --path /work/shop",
-                "ps --json --path /work/shop",
-                "ps --json --branch preview --path /work/shop",
+                "compose usage --json --by-service --path /work/shop",
+                "compose ps --json --path /work/shop",
+                "compose ps --json --branch preview --path /work/shop",
             ]
         );
     }

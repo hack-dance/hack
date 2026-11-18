@@ -668,7 +668,10 @@ and the instance total in the header (DESIGN.md section 10). Read-only:
   branch instance shows its own. Memory has the limit in its tooltip when
   Docker reports one.
 - The emulated flag comes from `hack ps --json --path <root> [--branch <name>]`,
-  read again only when the instance or its running services change.
+  read again when the instance or its running services change, and every
+  60 seconds (a recreated container keeps its name). Both reads run with the
+  Compose backend whatever the app inherited, and values are shown only for
+  the checkout and Compose project they were read for.
 - A value the CLI did not report is a dash, never 0, and the tooltip says
   why: not running, not read yet, Docker reported no value, or the read
   failed (Docker not running, say). The total appears only when every

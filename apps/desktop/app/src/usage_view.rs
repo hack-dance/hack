@@ -4,8 +4,10 @@
 //! Read-only. Usage is read every [`EVERY`] only while the Services tab of
 //! a running Compose instance is shown in a visible window, one read at a
 //! time; the emulated flag is read again when the instance or its running
-//! services change. A result for an instance, or a CLI, no longer shown is
-//! dropped.
+//! services change, and every [`EMULATED_EVERY`] (a recreated container can
+//! change architecture under the same name). A result for an instance, a
+//! checkout, a Compose project or a CLI no longer shown is dropped, and a
+//! kept result is shown only while all of them still match.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -20,16 +22,29 @@ use crate::view::HackApp;
 
 /// How often usage is read while it is shown.
 pub(crate) const EVERY: Duration = Duration::from_secs(5);
+/// How often the emulated flag is read again when nothing else changed.
+pub(crate) const EMULATED_EVERY: Duration = Duration::from_secs(60);
 
 /// What the Services tab knows about one instance's resource use.
 #[derive(Debug, Clone)]
 pub(crate) struct UsageState {
     pub key: InstanceKey,
+    /// The checkout and Compose project the values were read for.
+    pub root: PathBuf,
+    pub compose_project: String,
     pub rows: Result<BTreeMap<String, ServiceUsage>, String>,
     pub emulated: BTreeSet<String>,
     /// The running services the emulated flag was read for.
     pub emulated_for: Vec<String>,
+    pub emulated_at: Instant,
     pub at: Instant,
+}
+
+impl UsageState {
+    /// Read for this target's instance, checkout and Compose project.
+    fn is_for(&self, t: &UsageTarget) -> bool {
+        self.key == t.key && self.root == t.root && self.compose_project == t.compose_project
+    }
 }
 
 /// The instance the Services tab shows, when usage applies to it.
@@ -112,14 +127,15 @@ impl HackApp {
         let fresh = self
             .usage
             .as_ref()
-            .is_some_and(|u| u.key == target.key && u.at.elapsed() < EVERY);
+            .is_some_and(|u| u.is_for(&target) && u.at.elapsed() < EVERY);
         if fresh {
             return;
         }
-        let need_emulated = self
-            .usage
-            .as_ref()
-            .is_none_or(|u| u.key != target.key || u.emulated_for != target.running);
+        let need_emulated = self.usage.as_ref().is_none_or(|u| {
+            !u.is_for(&target)
+                || u.emulated_for != target.running
+                || u.emulated_at.elapsed() >= EMULATED_EVERY
+        });
         self.usage_loading = true;
         let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
         let epoch = self.model.source_epoch();
@@ -137,10 +153,13 @@ impl HackApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.usage_loading = false;
-                // Another CLI, or another instance, is shown now.
-                if this.model.source_epoch() != epoch
-                    || this.model.selected_key().as_ref() != Some(&target.key)
-                {
+                // Another CLI, instance, checkout or backend is shown now.
+                let same = this.target(false).is_some_and(|now| {
+                    now.key == target.key
+                        && now.root == target.root
+                        && now.compose_project == target.compose_project
+                });
+                if this.model.source_epoch() != epoch || !same {
                     return;
                 }
                 this.apply_usage(&target, report, emulated);
@@ -156,21 +175,26 @@ impl HackApp {
         report: Result<usage::UsageReport, String>,
         emulated: Option<Result<BTreeSet<String>, String>>,
     ) {
-        let previous = self.usage.take().filter(|u| u.key == target.key);
-        let (emulated, emulated_for) = match emulated {
-            Some(Ok(e)) => (e, target.running.clone()),
-            // Not read this time, or the read failed: keep what was known.
-            Some(Err(_)) | None => previous
-                .as_ref()
-                .map(|p| (p.emulated.clone(), p.emulated_for.clone()))
-                .unwrap_or_default(),
+        let now = Instant::now();
+        let previous = self.usage.take().filter(|u| u.is_for(target));
+        let (emulated, emulated_for, emulated_at) = match emulated {
+            Some(Ok(e)) => (e, target.running.clone(), now),
+            // Not read this time, or the read failed: keep what was known
+            // (and when it was read, so a failed re-read is retried).
+            Some(Err(_)) | None => previous.as_ref().map_or_else(
+                || (BTreeSet::new(), Vec::new(), now),
+                |p| (p.emulated.clone(), p.emulated_for.clone(), p.emulated_at),
+            ),
         };
         self.usage = Some(UsageState {
             key: target.key.clone(),
+            root: target.root.clone(),
+            compose_project: target.compose_project.clone(),
+            emulated_at,
             rows: report.map(|r| r.for_instance(&target.compose_project)),
             emulated,
             emulated_for,
-            at: Instant::now(),
+            at: now,
         });
     }
 
@@ -213,10 +237,12 @@ impl HackApp {
         lines
     }
 
-    /// This instance's usage, when it is the shown one.
+    /// This instance's usage, when it is the shown one and was read for its
+    /// current checkout and Compose project (a native or moved instance
+    /// shows none).
     pub(crate) fn shown_usage(&self) -> Option<&UsageState> {
-        let key = self.model.selected_key()?;
-        self.usage.as_ref().filter(|u| u.key == key)
+        let target = self.target(false)?;
+        self.usage.as_ref().filter(|u| u.is_for(&target))
     }
 
     /// The header's instance total, when every running service has a value.
@@ -426,6 +452,54 @@ mod tests {
                 "the emulated set is kept"
             );
         });
+    }
+
+    #[test]
+    fn values_read_for_another_checkout_or_compose_project_are_not_shown() {
+        let (mut cx, app, source) = window();
+        tick(&mut cx, &app);
+        source.take();
+        cx.update(|cx| {
+            app.update(cx, |a, _| {
+                // As if a refresh moved the instance to another checkout.
+                if let Some(u) = a.usage.as_mut() {
+                    u.root = PathBuf::from("/elsewhere");
+                }
+                assert!(a.shown_usage().is_none(), "another checkout");
+                assert_eq!(a.usage_total_label(), None);
+            });
+        });
+        tick(&mut cx, &app);
+        let calls = source.take();
+        assert_eq!(calls.len(), 2, "read again, ps included: {calls:?}");
+        cx.update(|cx| {
+            app.update(cx, |a, _| {
+                assert!(a.shown_usage().is_some(), "read for this checkout");
+                if let Some(u) = a.usage.as_mut() {
+                    u.compose_project = "other".into();
+                }
+                assert!(a.shown_usage().is_none(), "another Compose project");
+            });
+        });
+    }
+
+    #[test]
+    fn the_emulated_flag_is_read_again_after_a_while_with_the_same_services() {
+        let (mut cx, app, source) = window();
+        tick(&mut cx, &app);
+        source.take();
+        cx.update(|cx| {
+            app.update(cx, |a, _| {
+                if let Some(u) = a.usage.as_mut() {
+                    u.at = Instant::now().checked_sub(EVERY).unwrap();
+                    u.emulated_at = Instant::now().checked_sub(EMULATED_EVERY).unwrap();
+                }
+            });
+        });
+        tick(&mut cx, &app);
+        let calls = source.take();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(calls[1].starts_with("ps "), "{calls:?}");
     }
 
     #[test]

@@ -55,8 +55,8 @@ values:
 | `hack host exec --env qa --scope api -- env` | `qa` | `global`, then `api`, then `host` | `4100` |
 | `hack up` (no default overlay set) | base only | from `.hack/hack.env.default.yaml` | not from this file |
 
-`--scope` exists only on host commands (`hack host exec`, `hack host shell`). It
-only chooses which values Hack injects. The command still runs on the host.
+Only host commands (`hack host exec`, `hack host shell`) take an env scope with
+`--scope`. It only chooses which values Hack injects. The command still runs on the host.
 
 Within each file, Hack applies `global`, then the service, then `host`. A later
 file wins over an earlier one whatever the scope, and machine-local

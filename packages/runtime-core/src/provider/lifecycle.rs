@@ -722,13 +722,47 @@ pub(super) fn amd64_emulation_not_enabled() -> CandidateError {
     )
 }
 
+/// Whether the recorded provider still runs, checked only where a translation request
+/// meets a pool recorded as running without it; elsewhere the answer does not matter.
+/// `false` needs positive evidence that the recorded process is gone. A missing identity,
+/// an uncertain observation or a live process that fails verification is returned as
+/// that error, never as an exit.
+fn emulation_pool_alive(
+    candidate: &Candidate,
+    owner: &Owner,
+    requested: bool,
+) -> Result<bool, CandidateError> {
+    if !(requested && !owner.amd64_emulation && owner.phase == "running") {
+        return Ok(true);
+    }
+    if let Some(process) = &owner.process {
+        if !identity::alive(process.pid)? {
+            return Ok(false);
+        }
+    }
+    verify_live(candidate, owner)?;
+    Ok(true)
+}
+
 /// A running pool cannot gain translation without a restart, and running workloads are never
-/// stopped implicitly to add it.
-fn check_amd64_emulation_request(owner: &Owner, requested: bool) -> Result<(), CandidateError> {
+/// stopped implicitly to add it. `alive` is whether the recorded provider process still runs:
+/// a pool recorded as running whose process has exited only needs its stop recorded, so it is
+/// named as that instead of as a running pool.
+fn check_amd64_emulation_request(
+    owner: &Owner,
+    requested: bool,
+    alive: bool,
+) -> Result<(), CandidateError> {
     if requested && !owner.amd64_emulation && owner.phase == "running" {
+        if !alive {
+            return Err(CandidateError::new(
+                "pool_process_exited",
+                "The native VM pool is recorded as running, but its process has exited, so its stop was never recorded. Run `runtime recover --json` on this native home (it proves the process exited, then records the stop), then start again; nothing was stopped or started.",
+            ));
+        }
         return Err(CandidateError::new(
             "amd64_emulation_restart_required",
-            "The running native VM pool was started without x86_64 translation. Stop every native project that uses it (`hack down`), then start again; nothing was stopped or started.",
+            "The running native VM pool was started without x86_64 translation. Stop every native project that uses it (`hack down` in each), stop the pool (`runtime down --json` on this native home), then start again; nothing was stopped or started.",
         ));
     }
     Ok(())
@@ -1250,7 +1284,10 @@ fn start_pool(
             .map_err(io)?
         {
             let owner = Owner::load(candidate)?;
-            request.check(&owner)?;
+            request.check(
+                &owner,
+                emulation_pool_alive(candidate, &owner, request.amd64_emulation)?,
+            )?;
             (
                 owner.application_bridge,
                 owner.network.clone(),
@@ -1404,7 +1441,8 @@ fn start_pool(
             "Capacity profile changed before the operation lock was acquired.",
         ));
     }
-    check_amd64_emulation_request(&owner, start.amd64_emulation)?;
+    let alive = emulation_pool_alive(candidate, &owner, start.amd64_emulation)?;
+    check_amd64_emulation_request(&owner, start.amd64_emulation, alive)?;
     if fresh_owner {
         super::graph::initialize_owner_registry(candidate, &owner)?;
     } else {
@@ -3138,6 +3176,43 @@ mod tests {
     }
 
     #[test]
+    fn only_a_provably_exited_provider_is_reported_as_an_exited_pool() {
+        let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let owner = |process: Value| -> Owner {
+            serde_json::from_value(json!({
+                "version":1,"checkout":"/fixture","token":"fixture","machine":"fixture",
+                "short_home":"/fixture","created":true,"phase":"running","process":process,
+                "storage":null,"overlay":null,"guest_boot_id":null,
+                "daemon_pid":null,"daemon_start":null,"rootfs_digest":null,
+                "amd64_emulation":false
+            }))
+            .unwrap()
+        };
+        // A process that has exited: positive evidence of absence.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        child.wait().unwrap();
+        let exited = owner(json!({"pid":pid,"start_micros":0,"uid":0,"executable":"/fixture"}));
+        assert!(!emulation_pool_alive(&candidate, &exited, true).unwrap());
+        // No recorded identity is not evidence of exit: the verification error surfaces.
+        let unknown = emulation_pool_alive(&candidate, &owner(Value::Null), true).unwrap_err();
+        assert_eq!(unknown.code, "process_identity_unavailable");
+        // A live process that fails verification keeps its own error.
+        let live = owner(json!({
+            "pid": i32::try_from(std::process::id()).unwrap(),
+            "start_micros":0,"uid":0,"executable":"/fixture"
+        }));
+        assert_ne!(
+            emulation_pool_alive(&candidate, &live, true)
+                .unwrap_err()
+                .code,
+            "pool_process_exited"
+        );
+        // Without a translation request nothing is observed.
+        assert!(emulation_pool_alive(&candidate, &owner(Value::Null), false).unwrap());
+    }
+
+    #[test]
     fn amd64_emulation_is_never_added_to_a_running_pool_and_is_never_dropped() {
         let owner = |phase: &str, emulation: bool| -> Owner {
             serde_json::from_value(json!({
@@ -3149,8 +3224,15 @@ mod tests {
             }))
             .unwrap()
         };
-        let refused = check_amd64_emulation_request(&owner("running", false), true).unwrap_err();
+        let refused =
+            check_amd64_emulation_request(&owner("running", false), true, true).unwrap_err();
         assert_eq!(refused.code, "amd64_emulation_restart_required");
+        assert!(refused.message.contains("runtime down --json"));
+        // A recorded running pool whose process has exited is named as that, with its recovery.
+        let exited =
+            check_amd64_emulation_request(&owner("running", false), true, false).unwrap_err();
+        assert_eq!(exited.code, "pool_process_exited");
+        assert!(exited.message.contains("runtime recover --json"));
         for (phase, emulation, requested) in [
             ("running", false, false),
             ("running", true, true),
@@ -3158,7 +3240,7 @@ mod tests {
             ("stopped", false, true),
             ("initializing", false, true),
         ] {
-            check_amd64_emulation_request(&owner(phase, emulation), requested).unwrap();
+            check_amd64_emulation_request(&owner(phase, emulation), requested, true).unwrap();
         }
         // A pool without translation keeps its original receipt shape.
         let saved = serde_json::to_value(owner("stopped", false)).unwrap();

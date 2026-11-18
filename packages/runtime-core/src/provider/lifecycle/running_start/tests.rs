@@ -284,7 +284,7 @@ fn the_request_is_checked_against_the_receipt_the_fast_path_holds() {
         project_share: None,
         amd64_emulation: false,
     };
-    none.check(&home.owner).unwrap();
+    none.check(&home.owner, true).unwrap();
     // A pool that runs without x86_64 translation refuses a translation request, as the
     // general path does; a pool that runs with it accepts one.
     let translated = StartRequest {
@@ -292,19 +292,24 @@ fn the_request_is_checked_against_the_receipt_the_fast_path_holds() {
         ..none
     };
     assert_eq!(
-        translated.check(&home.owner).unwrap_err().code,
+        translated.check(&home.owner, true).unwrap_err().code,
         "amd64_emulation_restart_required"
+    );
+    // The same receipt with its provider gone is named as an exited pool, not a running one.
+    assert_eq!(
+        translated.check(&home.owner, false).unwrap_err().code,
+        "pool_process_exited"
     );
     let mut owner = home.owner.clone();
     owner.amd64_emulation = true;
-    translated.check(&owner).unwrap();
+    translated.check(&owner, true).unwrap();
     // A network intent other than the pool's is refused, never applied.
     let internet = NetworkIntent::Internet;
     let other_network = StartRequest {
         network: Some(&internet),
         ..none
     };
-    assert!(other_network.check(&home.owner).is_err());
+    assert!(other_network.check(&home.owner, true).is_err());
 }
 
 #[test]

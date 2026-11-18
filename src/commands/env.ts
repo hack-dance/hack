@@ -103,6 +103,7 @@ import {
   type ProjectEnvKeySource,
   type ProjectEnvKeyState,
   type ProjectEnvOverlayEntry,
+  ProjectEnvOverlayExistsError,
   type ProjectEnvResolvedMetadata,
   parseProjectEnvTarget,
   probeProjectEnvKey,
@@ -131,7 +132,7 @@ import {
 } from "../lib/secret-store.ts";
 import { run } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
-import { logger } from "../ui/logger.ts";
+import { logger, setLoggerBackendOverride } from "../ui/logger.ts";
 import { envMigrateCommand } from "./env-migrate.ts";
 import { hostPsCommand } from "./host-ps.ts";
 
@@ -3222,19 +3223,41 @@ const handleEnvOverlayAdd: CommandHandlerFor<typeof overlayAddSpec> = async ({
     pathOpt: args.options.path,
     projectOpt: args.options.project,
   });
-  // The first YAML layer would hide a legacy hack.env.json project from
-  // implicit migration, so migrate first, as the other env writes do.
-  await maybeMigrateLegacyProjectEnv({
-    project,
-    projectName: await resolveProjectName(project),
-    reason: "mutation",
-  });
-  const created = await createProjectEnvOverlay({
-    projectRoot: project.projectRoot,
-    projectDir: project.projectDir,
-    name,
-  });
-  if (args.options.json === true) {
+  const json = args.options.json === true;
+  // With --json, migration and warning lines go to stderr; stdout holds only
+  // the envelope.
+  if (json) {
+    setLoggerBackendOverride({ backend: "console" });
+  }
+  let created: Awaited<ReturnType<typeof createProjectEnvOverlay>>;
+  try {
+    // The first YAML layer would hide a legacy hack.env.json project from
+    // implicit migration, so migrate first, as the other env writes do.
+    const migrated = await maybeMigrateLegacyProjectEnv({
+      project,
+      projectName: await resolveProjectName(project),
+      reason: "mutation",
+    });
+    try {
+      created = await createProjectEnvOverlay({
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        name,
+      });
+    } catch (error) {
+      if (migrated && error instanceof ProjectEnvOverlayExistsError) {
+        throw new ProjectEnvOverlayExistsError(error.path, {
+          afterMigration: true,
+        });
+      }
+      throw error;
+    }
+  } finally {
+    if (json) {
+      setLoggerBackendOverride({ backend: null });
+    }
+  }
+  if (json) {
     emitCliResult({
       result: machineSuccess({
         schema: ENV_OVERLAYS_SCHEMA,

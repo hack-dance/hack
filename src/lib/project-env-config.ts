@@ -1863,12 +1863,18 @@ export async function listProjectEnvOverlays(opts: {
 export const PROJECT_ENV_OVERLAY_NAME_INVALID_MESSAGE = `Invalid overlay name. Overlay names must match ^[a-z0-9]+(-[a-z0-9]+)*$; base, default, none and ${PROJECT_ENV_LOCAL_SEGMENT} are reserved.`;
 
 export class ProjectEnvOverlayExistsError extends HackCliError {
-  constructor(path: string) {
+  readonly path: string;
+
+  /** `afterMigration`: a legacy env migration in the same command wrote files. */
+  constructor(path: string, opts: { readonly afterMigration?: boolean } = {}) {
     super({
       code: "E_PATH_CONFLICT",
-      message: `Overlay already exists: ${path}. Nothing was changed.`,
+      message: opts.afterMigration
+        ? `Overlay already exists: ${path}. The legacy env migration ran first; no overlay was created.`
+        : `Overlay already exists: ${path}. Nothing was changed.`,
     });
     this.name = "ProjectEnvOverlayExistsError";
+    this.path = path;
   }
 }
 

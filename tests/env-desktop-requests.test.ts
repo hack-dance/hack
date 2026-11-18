@@ -818,11 +818,18 @@ describe("R27: overlay creation", () => {
         resolve(project.projectDir, ".env"),
         `STORED_PLAIN=${PLAIN_VALUE}\n`
       );
+      // clack writes log lines to stdout; --json must still print only JSON.
       const created = await runHack({
         project,
-        args: ["env", "overlay", "add", "qa"],
+        args: ["env", "overlay", "add", "qa", "--json"],
+        env: { HACK_LOGGER: "clack" },
       });
       expect(created.exitCode).toBe(0);
+      expect(JSON.parse(created.stdout)).toMatchObject({
+        ok: true,
+        data: { created: { name: "qa", exists: true } },
+      });
+      expect(created.stderr).toContain("Migrated legacy env config");
       // The legacy value is still reachable through the new overlay.
       const get = await runHack({
         project,

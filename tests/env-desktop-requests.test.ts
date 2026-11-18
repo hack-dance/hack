@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { runFixtureGitSync } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -553,17 +554,17 @@ describe("R26: key source and one-run override", () => {
     "an override cannot encrypt with a git-tracked key file",
     async () => {
       const project = await createProject();
-      const init = Bun.spawnSync(["git", "init", "-q", project.projectRoot], {
-        stdout: "ignore",
-        stderr: "ignore",
+      const init = runFixtureGitSync({
+        cwd: project.projectRoot,
+        args: ["init", "-q"],
       });
       expect(init.exitCode).toBe(0);
       const keyFile = resolve(project.projectRoot, "committed.key");
       await writeFile(keyFile, `${OVERRIDE_KEY}\n`, { mode: 0o600 });
-      const add = Bun.spawnSync(
-        ["git", "-C", project.projectRoot, "add", "--", "committed.key"],
-        { stdout: "ignore", stderr: "ignore" }
-      );
+      const add = runFixtureGitSync({
+        cwd: project.projectRoot,
+        args: ["add", "--", "committed.key"],
+      });
       expect(add.exitCode).toBe(0);
       const set = await setValue({
         project,
@@ -588,9 +589,9 @@ describe("R26: key source and one-run override", () => {
     "an override key file inside a checkout must be ignored by git",
     async () => {
       const project = await createProject();
-      const init = Bun.spawnSync(["git", "init", "-q", project.projectRoot], {
-        stdout: "ignore",
-        stderr: "ignore",
+      const init = runFixtureGitSync({
+        cwd: project.projectRoot,
+        args: ["init", "-q"],
       });
       expect(init.exitCode).toBe(0);
       const keyFile = resolve(project.projectRoot, "chosen.key");
@@ -638,18 +639,8 @@ describe("R26: key source and one-run override", () => {
     "an override key file in a linked worktree's common git dir is accepted",
     async () => {
       const project = await createProject();
-      const git = (args: readonly string[], cwd = project.projectRoot) =>
-        Bun.spawnSync(
-          [
-            "git",
-            "-c",
-            "user.name=fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            ...args,
-          ],
-          { cwd, stdout: "ignore", stderr: "ignore" }
-        ).exitCode;
+      const git = (args: readonly string[]) =>
+        runFixtureGitSync({ cwd: project.projectRoot, args }).exitCode;
       expect(git(["init", "-q"])).toBe(0);
       expect(git(["add", "."])).toBe(0);
       expect(git(["commit", "-q", "-m", "fixture"])).toBe(0);
@@ -755,9 +746,9 @@ describe("R27: overlay creation", () => {
     "env overlay add creates an empty overlay and refuses an existing one",
     async () => {
       const project = await createProject();
-      const git = Bun.spawnSync(["git", "init", "-q", project.projectRoot], {
-        stdout: "ignore",
-        stderr: "ignore",
+      const git = runFixtureGitSync({
+        cwd: project.projectRoot,
+        args: ["init", "-q"],
       });
       expect(git.exitCode).toBe(0);
 
@@ -854,17 +845,7 @@ describe("R27: overlay creation", () => {
     async () => {
       const project = await createProject();
       const git = (args: readonly string[]) =>
-        Bun.spawnSync(
-          [
-            "git",
-            "-c",
-            "user.name=fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            ...args,
-          ],
-          { cwd: project.projectRoot, stdout: "ignore", stderr: "ignore" }
-        ).exitCode;
+        runFixtureGitSync({ cwd: project.projectRoot, args }).exitCode;
       expect(git(["init", "-q"])).toBe(0);
       expect(git(["add", "."])).toBe(0);
       expect(git(["commit", "-q", "-m", "fixture"])).toBe(0);

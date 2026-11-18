@@ -130,7 +130,9 @@ async function rewriteLinks(content: string, source: string): Promise<string> {
     const patterns = openLinkText
       ? [wrappedLinkTail, links, definitions]
       : [links, definitions];
-    openLinkText = /\[[^\]\n]*$/.test(line);
+    // Stay open across a middle line of link text that has no bracket at all.
+    openLinkText =
+      /\[[^\]\n]*$/.test(line) || (openLinkText && !/[[\]]/.test(line));
     result.push(await rewriteLine(line, source, patterns));
   }
   return result.join("\n");

@@ -40,7 +40,7 @@ Three changes are not breaking, but they surprise people:
   [First project on Compose](../getting-started.md).
 - **With `--json`, hook output goes to stderr.** In v4, and in v5 up to next.20,
   lines printed by lifecycle hooks could appear on stdout before the JSON. This
-  fix is on the `next` branch and not in a release yet. If a script read hook
+  fix arrived in next.21. If a script read hook
   output from stdout, read stderr instead. See
   [Scripts and JSON output](machine-output.md).
 

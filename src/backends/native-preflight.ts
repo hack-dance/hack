@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   type ComposeBackendFeature,
@@ -42,6 +43,7 @@ import {
   nativeRouteProbeRefusalDetails,
   reviewedNativeRoutes,
 } from "./native-project-routing.ts";
+import { requireCapturedNativeSourceWithinLimit } from "./native-project-source-size.ts";
 import {
   type NativeServicePreparationProblem,
   nativeServicePreparationProblems,
@@ -1904,6 +1906,115 @@ function selectedRuntimeFindings(
 }
 
 /** Runs installation, CLI and runtime gates over the same selected project. */
+/**
+ * The source content limit `up` and `restart` enforce before any hook,
+ * runtime start, image pull or build (HACK-2338 item 7). Same decision and
+ * same text: only a graph that captures source (a selected service
+ * bind-mounts project source or declares a dependency cache) is measured,
+ * and a refusal there is a blocker here, so `ready: true` is never followed
+ * by `up` refusing on size. A measurement `up` could not make refuses too.
+ */
+/** A runtime request error's text is closed; anything else stays generic. */
+function sourceMeasurementDetail(error: unknown): string {
+  if (error instanceof HackCliError) {
+    return `${error.code}: ${error.message}`;
+  }
+  if (error instanceof NativeRuntimeRequestError) {
+    return error.message;
+  }
+  return "Values omitted.";
+}
+
+async function sourceSizeFindings(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly services: Readonly<Record<string, unknown>>;
+  readonly profiles: readonly string[];
+  readonly invoke?: typeof invokeNativeRuntime;
+}): Promise<NativePreflightFinding[]> {
+  const services = Object.fromEntries(
+    Object.entries(opts.services).filter(
+      (entry): entry is [string, Record<string, unknown>] => isRecord(entry[1])
+    )
+  );
+  try {
+    await requireCapturedNativeSourceWithinLimit({
+      runtime: opts.runtime,
+      projectRoot: opts.projectRoot,
+      services,
+      profiles: opts.profiles,
+      invoke: opts.invoke,
+    });
+    return [];
+  } catch (error: unknown) {
+    const over =
+      error instanceof HackCliError &&
+      error.code === "E_NATIVE_PROJECT_UNSUPPORTED";
+    const detail = sourceMeasurementDetail(error);
+    return [
+      {
+        severity: "blocker",
+        gate: "cli",
+        code: over ? "native_source_over_limit" : "native_source_unmeasured",
+        message: over
+          ? (error as HackCliError).message
+          : `Native source size could not be measured, so native up refuses before startup. ${detail}`,
+        fix: over
+          ? "Reduce the selected project source (the message names its largest parts) or raise native.sourceLimitMiB in .hack/hack.config.json, then run this check again."
+          : "Fix what the message names so native can measure the project source, then run this check again.",
+      },
+    ];
+  }
+}
+
+/**
+ * With a native runtime selected: the runtime review, the source limit `up`
+ * enforces, and the findings that need the reviewed plan.
+ */
+async function reviewSelectedRuntime(input: {
+  readonly opts: NativePreflightOptions;
+  readonly runtime: NativeRuntimeSelection;
+  readonly setup: NativeSetupState;
+  readonly document: NonNullable<AdaptedProject["document"]>;
+}): Promise<{
+  readonly runtime: RuntimeReview;
+  readonly findings: NativePreflightFinding[];
+}> {
+  const { opts, document } = input;
+  const findings: NativePreflightFinding[] = [];
+  const runtime = await reviewWithSetup({
+    setup: input.setup,
+    review: () =>
+      collectNativeRuntimeFindings({
+        runtime: input.runtime,
+        projectRoot: opts.projectRoot,
+        composeFile: opts.composeFile,
+        profiles: opts.profiles,
+        adapted: document,
+        invoke: opts.invoke,
+      }),
+  });
+  if (input.setup === "ready") {
+    findings.push(
+      ...(await sourceSizeFindings({
+        runtime: input.runtime,
+        projectRoot: opts.projectRoot,
+        services: document.services,
+        profiles: opts.profiles,
+        invoke: opts.invoke,
+      }))
+    );
+  }
+  if (runtime.plan) {
+    findings.push(...deliveryFindings(document, runtime.plan));
+    findings.push(...managedRestartFindings(document, runtime.plan));
+    findings.push(
+      ...routeFindings({ plan: runtime.plan, services: document.services })
+    );
+  }
+  return { runtime, findings };
+}
+
 export async function collectNativePreflight(
   opts: NativePreflightOptions
 ): Promise<NativePreflightReport> {
@@ -1942,30 +2053,14 @@ export async function collectNativePreflight(
         findings: [],
       };
     } else if (hasSelectedRuntime(opts.runtime)) {
-      const selected = opts.runtime;
-      const document = adapted.document;
-      runtime = await reviewWithSetup({
+      const selected = await reviewSelectedRuntime({
+        opts,
+        runtime: opts.runtime,
         setup: runtimeSetup.state,
-        review: () =>
-          collectNativeRuntimeFindings({
-            runtime: selected,
-            projectRoot: opts.projectRoot,
-            composeFile: opts.composeFile,
-            profiles: opts.profiles,
-            adapted: document,
-            invoke: opts.invoke,
-          }),
+        document: adapted.document,
       });
-      if (runtime.plan) {
-        cli.push(...deliveryFindings(adapted.document, runtime.plan));
-        cli.push(...managedRestartFindings(adapted.document, runtime.plan));
-        cli.push(
-          ...routeFindings({
-            plan: runtime.plan,
-            services: adapted.document.services,
-          })
-        );
-      }
+      runtime = selected.runtime;
+      cli.push(...selected.findings);
     }
   }
   // A runtime finding the CLI already reported for the same service is

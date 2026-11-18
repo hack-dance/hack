@@ -91,13 +91,13 @@ test("renders one Markdown row per step with pipes escaped", () => {
 test("drops PATH entries that hold a hack so the CLI under test is the one re-invoked", () => {
   expect(
     pathWithoutHack(
-      "/opt/hack/bin:/usr/bin::/home/u/.hack/bin",
+      "/opt/hack/bin:/usr/bin::/opt/tools/.hack/bin",
       (file) =>
         file.endsWith("/opt/hack/bin/hack") || file.endsWith("/.hack/bin/hack")
     )
   ).toEqual({
     path: "/usr/bin",
-    dropped: ["/opt/hack/bin", "/home/u/.hack/bin"],
+    dropped: ["/opt/hack/bin", "/opt/tools/.hack/bin"],
   });
 });
 

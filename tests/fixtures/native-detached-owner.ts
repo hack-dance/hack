@@ -53,6 +53,67 @@ function publishFixtureBranchDropped(fixtureMode: string): void {
   }
 }
 
+/** HACK-2339 modes whose owner fails before VM work. */
+const PRESTART_MODES = [
+  "prestart-refusal",
+  "prestart-after-runtime",
+  "prestart-plain-error",
+];
+
+/**
+ * HACK-2339: a refusal before VM work crosses as the foreground prints it;
+ * after VM work starts, or for any other error, it does not.
+ */
+async function publishFixturePrestartFailure(fixtureMode: string) {
+  if (!PRESTART_MODES.includes(fixtureMode)) {
+    return;
+  }
+  nativeDetachedUpPrestart(true);
+  nativeDetachedUpHookFailed({
+    step: "Lifecycle (native up before): seed-check: ./seed.sh",
+    output: ["\u001b[31mred hook line\u001b[0m", "x".repeat(600)],
+    failure:
+      "Lifecycle (native up before) failed (exit 3): seed-check: ./seed.sh",
+  });
+  if (fixtureMode === "prestart-after-runtime") {
+    nativeDetachedUpPrestart(false);
+  }
+  await nativeDetachedUpFailure(
+    fixtureMode === "prestart-plain-error"
+      ? new Error("synthetic-private-value")
+      : new HackCliError({
+          code: "E_LIFECYCLE_FAILED",
+          message:
+            "Lifecycle (native up before) failed (exit 3); values omitted.",
+        })
+  );
+}
+
+/** Malformed pre-VM refusals the launcher must ignore. */
+function sendUnsafePrestartRefusals(fixtureMode: string): void {
+  if (fixtureMode !== "unsafe-prestart-refusal") {
+    return;
+  }
+  for (const data of [
+    { error: "hack", code: "E_NOT_A_CODE", message: "m" },
+    { error: "hack", message: "missing code" },
+    { error: "closed", code: "E_USAGE", message: "closed with code" },
+    { error: "hack", code: "E_USAGE", message: "bad\u001b[2Jcontrol" },
+    { error: "hack", code: "E_USAGE", message: "p".repeat(4001) },
+    { error: "hack", code: "E_USAGE", message: "m", extra: "x" },
+    { error: "hack", code: "E_USAGE", message: "m", hook: ["a\nb"] },
+    { error: "hack", code: "E_USAGE", message: "m", hook: [] },
+    { error: "other", message: "m" },
+  ]) {
+    process.send?.({ kind: "prestart-refusal", data });
+  }
+  process.send?.({
+    kind: "prestart-refusal",
+    data: { error: "hack", code: "E_USAGE", message: "m" },
+    extra: true,
+  });
+}
+
 const [role, root, mode] = Bun.argv.slice(2);
 if (!(root && mode)) {
   process.exit(2);
@@ -270,59 +331,15 @@ if (role === "channel-holder") {
             : failure
         );
       }
+      await publishFixturePrestartFailure(mode);
       if (
         [
-          "prestart-refusal",
-          "prestart-after-runtime",
-          "prestart-plain-error",
+          ...PRESTART_MODES,
+          "fail",
+          "provider-pin",
+          "wrapped-provider-pin",
         ].includes(mode)
       ) {
-        // HACK-2339: a refusal before VM work crosses as the foreground
-        // prints it; after VM work starts, or for any other error, it does not.
-        nativeDetachedUpPrestart(true);
-        nativeDetachedUpHookFailed({
-          step: "Lifecycle (native up before): seed-check: ./seed.sh",
-          output: ["\u001b[31mred hook line\u001b[0m", `${"x".repeat(600)}`],
-          failure:
-            "Lifecycle (native up before) failed (exit 3): seed-check: ./seed.sh",
-        });
-        if (mode === "prestart-after-runtime") {
-          nativeDetachedUpPrestart(false);
-        }
-        await nativeDetachedUpFailure(
-          mode === "prestart-plain-error"
-            ? new Error("synthetic-private-value")
-            : new HackCliError({
-                code: "E_LIFECYCLE_FAILED",
-                message:
-                  "Lifecycle (native up before) failed (exit 3); values omitted.",
-              })
-        );
-        server.stop(true);
-        process.off("SIGTERM", terminate);
-        return 1;
-      }
-      if (mode === "unsafe-prestart-refusal") {
-        for (const data of [
-          { error: "hack", code: "E_NOT_A_CODE", message: "m" },
-          { error: "hack", message: "missing code" },
-          { error: "closed", code: "E_USAGE", message: "closed with code" },
-          { error: "hack", code: "E_USAGE", message: "bad\u001b[2Jcontrol" },
-          { error: "hack", code: "E_USAGE", message: "p".repeat(4001) },
-          { error: "hack", code: "E_USAGE", message: "m", extra: "x" },
-          { error: "hack", code: "E_USAGE", message: "m", hook: ["a\nb"] },
-          { error: "hack", code: "E_USAGE", message: "m", hook: [] },
-          { error: "other", message: "m" },
-        ]) {
-          process.send?.({ kind: "prestart-refusal", data });
-        }
-        process.send?.({
-          kind: "prestart-refusal",
-          data: { error: "hack", code: "E_USAGE", message: "m" },
-          extra: true,
-        });
-      }
-      if (["fail", "provider-pin", "wrapped-provider-pin"].includes(mode)) {
         server.stop(true);
         process.off("SIGTERM", terminate);
         return 1;
@@ -443,6 +460,7 @@ if (role === "channel-holder") {
       }
       publishFixtureProfileNotice(mode);
       publishFixtureBranchDropped(mode);
+      sendUnsafePrestartRefusals(mode);
       if (
         [
           "ready",

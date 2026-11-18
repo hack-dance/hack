@@ -21,7 +21,7 @@ its older behavior.
 | You want to | Native today |
 | --- | --- |
 | Start the whole project | `hack up` in the foreground, or `hack up -d` in the background |
-| Restart the whole project | `hack restart`, in the foreground; with `--json` it runs under a detached owner |
+| Restart the whole project | `hack restart`, in the foreground; with `--json` it runs under a detached owner (since next.22) |
 | Stop the project | `hack down`, and `hack down --recover` after a crash |
 | See what is running | `hack ps` |
 | Read recent logs | `hack logs <service> --no-follow`, a bounded snapshot |

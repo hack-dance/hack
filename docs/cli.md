@@ -718,9 +718,13 @@ deliberately marks that exact Compose volume disposable. Hack deliberately does 
 Containers started by `hack up`, `hack restart`, and `hack run` receive the effective instance and
 public-route metadata. This applies to `.hack/docker-compose.yml` projects, on the default
 Compose backend and on the native backend (beta), and to authored `.hack/hack.project.json`
-projects. The authored `.hack/hack.project.json` file is experimental: it covers a bounded subset of project configuration, mainly for the native backend, and is not the normal way to configure a project. It keeps server-generated links, OAuth callbacks, webhooks, and
+projects. The public-route metadata keeps server-generated links, OAuth callbacks, webhooks, and
 other browser-facing URLs isolated when the same project runs in multiple worktrees. Every path
 emits the same keys and document shape from the same shared builder.
+
+The authored `.hack/hack.project.json` file is experimental. It covers a bounded subset of
+project configuration and is not the normal way to configure a project; most projects use
+`.hack/docker-compose.yml`.
 
 | Variable | Value |
 | --- | --- |

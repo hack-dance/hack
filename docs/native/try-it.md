@@ -42,8 +42,8 @@ setup, ask for download consent, and continue after success. See the
 [first-use guide](../versions/v5/native/setup.md) for default homes and scripts.
 
 A `hack-next` install keeps each version in its own folder. The paths below
-support the manual alternatives; an installed next.16 needs this older command
-with its own version number:
+support the manual alternatives. Set `V` to your installed version; an installed
+next.16 needs this older command:
 
 ```sh
 V=5.0.0-next.22   # the version you installed; `hack-next --manager status` shows it

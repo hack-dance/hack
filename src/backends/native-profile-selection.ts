@@ -12,6 +12,12 @@ export type NativeProfileSource = "cli" | "managed-env" | "shell" | "none";
 export type NativeProfileSelection = {
   readonly profiles: readonly string[];
   readonly source: NativeProfileSource;
+  /**
+   * Every profile the Compose file declares. Notices print only these
+   * names: COMPOSE_PROFILES can come from decrypted managed env, so a
+   * selected name the Compose file does not declare is counted, never shown.
+   */
+  readonly declaredProfiles?: readonly string[];
 };
 
 function parseProfiles(raw: string | undefined): string[] {
@@ -45,16 +51,28 @@ export function selectNativeProfiles(opts: {
       ? [...new Set(opts.declaredProfiles)].sort()
       : [...profiles];
   if (opts.cliProfiles !== undefined && opts.cliProfiles.length > 0) {
-    return { profiles: expand(opts.cliProfiles), source: "cli" };
+    return {
+      profiles: expand(opts.cliProfiles),
+      source: "cli",
+      declaredProfiles: opts.declaredProfiles,
+    };
   }
   if (Object.hasOwn(opts.managedEnv, "COMPOSE_PROFILES")) {
     const profiles = parseProfiles(opts.managedEnv.COMPOSE_PROFILES);
-    return { profiles: expand(profiles), source: "managed-env" };
+    return {
+      profiles: expand(profiles),
+      source: "managed-env",
+      declaredProfiles: opts.declaredProfiles,
+    };
   }
   const shell = parseProfiles(opts.shellEnv.COMPOSE_PROFILES);
   return shell.length > 0
-    ? { profiles: expand(shell), source: "shell" }
-    : { profiles: [], source: "none" };
+    ? {
+        profiles: expand(shell),
+        source: "shell",
+        declaredProfiles: opts.declaredProfiles,
+      }
+    : { profiles: [], source: "none", declaredProfiles: opts.declaredProfiles };
 }
 
 /** Every profile name a Compose document's services declare, sorted. */
@@ -86,8 +104,28 @@ const SOURCE_LABEL: Readonly<Record<NativeProfileNoticeSource, string>> = {
   retained: "the retained run",
 };
 
-function profileList(profiles: readonly string[]): string {
-  return profiles.length === 0 ? "none" : profiles.join(", ");
+/**
+ * Splits profile names for a notice: those the Compose file declares are
+ * shown; the rest (possibly a value copied into COMPOSE_PROFILES from
+ * decrypted managed env) are only counted.
+ */
+export function nativeDeclaredProfileNames(opts: {
+  readonly profiles: readonly string[];
+  readonly declared: readonly string[];
+}): { readonly shown: string[]; readonly hidden: number } {
+  const declared = new Set(opts.declared);
+  const shown = opts.profiles.filter((profile) => declared.has(profile));
+  return { shown, hidden: opts.profiles.length - shown.length };
+}
+
+function profileList(profiles: readonly string[], hidden = 0): string {
+  const parts = [...profiles];
+  if (hidden > 0) {
+    parts.push(
+      `${hidden} name${hidden === 1 ? "" : "s"} not declared by the Compose file`
+    );
+  }
+  return parts.length === 0 ? "none" : parts.join(", ");
 }
 
 /** The services a reviewed plan marks inactive, sorted. Names only. */
@@ -107,14 +145,16 @@ export function nativeInactiveServices(plan: unknown): string[] {
  */
 export function nativeLeftOutNotice(opts: {
   readonly services: readonly string[];
+  /** Declared names only; see {@link nativeDeclaredProfileNames}. */
   readonly profiles: readonly string[];
+  readonly hiddenProfiles?: number;
   readonly source: NativeProfileNoticeSource;
 }): string | null {
   const count = opts.services.length;
   if (count === 0) {
     return null;
   }
-  return `Not starting ${count} service${count === 1 ? "" : "s"} whose Compose profiles are not selected: ${opts.services.join(", ")}. Selected profiles: ${profileList(opts.profiles)} (from ${SOURCE_LABEL[opts.source]}). Select others with --profile or COMPOSE_PROFILES.`;
+  return `Not starting ${count} service${count === 1 ? "" : "s"} whose Compose profiles are not selected: ${opts.services.join(", ")}. Selected profiles: ${profileList(opts.profiles, opts.hiddenProfiles)} (from ${SOURCE_LABEL[opts.source]}). Select others with --profile or COMPOSE_PROFILES.`;
 }
 
 /**
@@ -123,11 +163,14 @@ export function nativeLeftOutNotice(opts: {
  * environment now selects other profiles, say so instead of refusing.
  */
 export function nativeRetainedProfilesNotice(opts: {
+  /** Declared names only; see {@link nativeDeclaredProfileNames}. */
   readonly retained: readonly string[];
+  readonly hiddenRetained?: number;
   readonly selected: readonly string[];
+  readonly hiddenSelected?: number;
   readonly source: "managed-env" | "shell";
 }): string {
-  return `${SOURCE_LABEL[opts.source]} selects profiles ${profileList(opts.selected)}, but this instance's retained run uses ${profileList(opts.retained)}; it keeps those. To start it with the new profiles, stop it with hack down --remove-data (this deletes its data volumes) and run hack up again.`;
+  return `${SOURCE_LABEL[opts.source]} selects profiles ${profileList(opts.selected, opts.hiddenSelected)}, but this instance's retained run uses ${profileList(opts.retained, opts.hiddenRetained)}; it keeps those. To start it with the new profiles, stop it with hack down --remove-data (this deletes its data volumes) and run hack up again.`;
 }
 
 /**
@@ -139,12 +182,15 @@ export type NativeProfileNotice =
       readonly kind: "left-out";
       readonly services: readonly string[];
       readonly profiles: readonly string[];
+      readonly hiddenProfiles?: number;
       readonly source: NativeProfileNoticeSource;
     }
   | {
       readonly kind: "retained";
       readonly retained: readonly string[];
+      readonly hiddenRetained?: number;
       readonly selected: readonly string[];
+      readonly hiddenSelected?: number;
       readonly source: "managed-env" | "shell";
     };
 
@@ -158,6 +204,13 @@ export function renderNativeProfileNotice(
 
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const SOURCES = new Set<string>(Object.keys(SOURCE_LABEL));
+
+function count(value: unknown): value is number | undefined {
+  return (
+    value === undefined ||
+    (Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= 256)
+  );
+}
 
 function names(value: unknown): value is string[] {
   return (
@@ -178,6 +231,7 @@ export function parseNativeProfileNotice(
     value.kind === "left-out" &&
     names(value.services) &&
     names(value.profiles) &&
+    count(value.hiddenProfiles) &&
     typeof value.source === "string" &&
     SOURCES.has(value.source)
   ) {
@@ -185,6 +239,7 @@ export function parseNativeProfileNotice(
       kind: "left-out",
       services: value.services,
       profiles: value.profiles,
+      ...(value.hiddenProfiles ? { hiddenProfiles: value.hiddenProfiles } : {}),
       source: value.source as NativeProfileNoticeSource,
     };
   }
@@ -192,12 +247,16 @@ export function parseNativeProfileNotice(
     value.kind === "retained" &&
     names(value.retained) &&
     names(value.selected) &&
+    count(value.hiddenRetained) &&
+    count(value.hiddenSelected) &&
     (value.source === "managed-env" || value.source === "shell")
   ) {
     return {
       kind: "retained",
       retained: value.retained,
+      ...(value.hiddenRetained ? { hiddenRetained: value.hiddenRetained } : {}),
       selected: value.selected,
+      ...(value.hiddenSelected ? { hiddenSelected: value.hiddenSelected } : {}),
       source: value.source,
     };
   }

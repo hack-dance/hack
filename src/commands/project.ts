@@ -58,6 +58,7 @@ import { createNativeDependencyOwnerResolver } from "../backends/native-dependen
 import { assertNativeLogFlags } from "../backends/native-log-follow.ts";
 import {
   declaredComposeProfiles,
+  nativeDeclaredProfileNames,
   nativeRetainedProfilesNotice,
   resolveNativeProfileSelectionForProject,
   selectNativeProfiles,
@@ -6436,9 +6437,21 @@ async function nativeRetainedProfilesDrift(opts: {
   ) {
     return null;
   }
+  // Only names the Compose file declares; others are counted, never shown.
+  const declared = fromEnv.declaredProfiles ?? [];
+  const shownRetained = nativeDeclaredProfileNames({
+    profiles: retained,
+    declared,
+  });
+  const shownSelected = nativeDeclaredProfileNames({
+    profiles: selected,
+    declared,
+  });
   return nativeRetainedProfilesNotice({
-    retained,
-    selected,
+    retained: shownRetained.shown,
+    hiddenRetained: shownRetained.hidden,
+    selected: shownSelected.shown,
+    hiddenSelected: shownSelected.hidden,
     source: fromEnv.source,
   });
 }

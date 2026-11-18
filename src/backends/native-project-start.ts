@@ -49,9 +49,11 @@ import {
 } from "./native-prepared-base.ts";
 import { nativePrivateEnvironmentPayload } from "./native-private-environment-payload.ts";
 import {
+  declaredComposeProfiles,
   type NativeProfileNotice,
   type NativeProfileNoticeSource,
   type NativeProfileSelection,
+  nativeDeclaredProfileNames,
   nativeInactiveServices,
   renderNativeProfileNotice,
 } from "./native-profile-selection.ts";
@@ -1986,6 +1988,40 @@ async function staticReviewInput(opts: {
   ).input;
 }
 
+/**
+ * The services the reviewed plan leaves out by profile. Selected profile
+ * names are shown only when the Compose file declares them; COMPOSE_PROFILES
+ * may come from decrypted managed env, so any other name is only counted.
+ */
+function emitNativeLeftOutNotice(opts: {
+  readonly plan: unknown;
+  readonly compose: string;
+  readonly profiles: readonly string[];
+  readonly source: NativeProfileNoticeSource;
+  readonly warn: (line: string) => void;
+}): void {
+  let declared: string[] = [];
+  try {
+    declared = declaredComposeProfiles(JSON.parse(opts.compose));
+  } catch {
+    declared = [];
+  }
+  const names = nativeDeclaredProfileNames({
+    profiles: opts.profiles,
+    declared,
+  });
+  emitNativeProfileNotice(
+    {
+      kind: "left-out",
+      services: nativeInactiveServices(opts.plan),
+      profiles: names.shown,
+      hiddenProfiles: names.hidden,
+      source: opts.source,
+    },
+    opts.warn
+  );
+}
+
 /** Prints a profile notice, or hands it to the launcher of a detached owner. */
 function emitNativeProfileNotice(
   notice: NativeProfileNotice,
@@ -2042,10 +2078,22 @@ async function chooseNativeStartupProfiles(opts: {
   ) {
     const selected = normalizeNativeProfiles(fromEnv.profiles);
     if (JSON.stringify(selected) !== JSON.stringify(opts.selected)) {
+      // Only names the Compose file declares; others are counted.
+      const declared = fromEnv.declaredProfiles ?? [];
+      const shownSelected = nativeDeclaredProfileNames({
+        profiles: selected,
+        declared,
+      });
+      const shownRetained = nativeDeclaredProfileNames({
+        profiles: opts.selected,
+        declared,
+      });
       opts.notify({
         kind: "retained",
-        retained: opts.selected,
-        selected,
+        retained: shownRetained.shown,
+        hiddenRetained: shownRetained.hidden,
+        selected: shownSelected.shown,
+        hiddenSelected: shownSelected.hidden,
         source: fromEnv.source,
       });
     }
@@ -2512,15 +2560,13 @@ async function startNativeProjectAttempt(
         });
         reportNativeIgnoredSettingNotices(review.report.plan, deps.warn);
         reportNativeEnvironmentNotices(input, review.report.plan, deps.warn);
-        emitNativeProfileNotice(
-          {
-            kind: "left-out",
-            services: nativeInactiveServices(review.report.plan),
-            profiles,
-            source: profileChoice.source,
-          },
-          deps.warn
-        );
+        emitNativeLeftOutNotice({
+          plan: review.report.plan,
+          compose: input.normalizedComposeJson,
+          profiles,
+          source: profileChoice.source,
+          warn: deps.warn,
+        });
         if (metadata) {
           verifyNativeRuntimeMetadataRoutes({
             plan: review.report.plan,

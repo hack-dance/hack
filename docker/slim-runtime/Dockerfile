@@ -13,7 +13,7 @@ COPY apps ./apps
 COPY packages ./packages
 COPY src ./src
 RUN bun install --frozen-lockfile
-RUN bun build index.ts --compile --outfile /out/hack
+RUN bun build index.ts --compile --define 'process.env.OPENTUI_LIBC="glibc"' --outfile /out/hack
 
 FROM oven/bun:1.4.4
 

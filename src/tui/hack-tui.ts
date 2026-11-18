@@ -835,6 +835,47 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       return new StyledText(chunks);
     };
 
+    /** Footer padding: paddingLeft + paddingRight. */
+    const FOOTER_PADDING_COLUMNS = 4;
+
+    /**
+     * The footer row cut at the last hint boundary (two spaces) that fits the
+     * inner width: opentui 0.8 no longer clips the row at the box padding, so
+     * a long row would otherwise end inside a hint.
+     */
+    const fitFooterRow = (row: StyledText): StyledText => {
+      const width = Math.max(
+        0,
+        Math.floor(activeRenderer.width) - FOOTER_PADDING_COLUMNS
+      );
+      const plain = row.chunks.map((chunk) => chunk.text).join("");
+      const cells = Array.from(plain);
+      if (cells.length <= width) {
+        return row;
+      }
+      const boundary = cells
+        .slice(0, width + 1)
+        .join("")
+        .lastIndexOf("  ");
+      const keep =
+        boundary > 0 ? Array.from(plain.slice(0, boundary)).length : width;
+      const chunks: TextChunk[] = [];
+      let remaining = keep;
+      for (const chunk of row.chunks) {
+        if (remaining <= 0) {
+          break;
+        }
+        const text = Array.from(chunk.text);
+        chunks.push(
+          text.length <= remaining
+            ? chunk
+            : { ...chunk, text: text.slice(0, remaining).join("") }
+        );
+        remaining -= text.length;
+      }
+      return new StyledText(chunks);
+    };
+
     const truncateLine = (line: string, width: number): string => {
       if (width <= 0) {
         return "";
@@ -1143,7 +1184,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         if (toastHint) {
           parts.push(toastHint);
         }
-        footerText.content = joinStyledText({ parts });
+        footerText.content = fitFooterRow(joinStyledText({ parts }));
         return;
       }
 
@@ -1167,7 +1208,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         if (toastHint) {
           parts.push(toastHint);
         }
-        footerText.content = joinStyledText({ parts });
+        footerText.content = fitFooterRow(joinStyledText({ parts }));
         return;
       }
 
@@ -1233,7 +1274,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       if (toastHint) {
         parts.push(toastHint);
       }
-      footerText.content = joinStyledText({ parts });
+      footerText.content = fitFooterRow(joinStyledText({ parts }));
     };
 
     const setActivePane = (pane: "services" | "logs") => {
@@ -2684,6 +2725,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       if (handleSelectionChange) {
         activeRenderer.off("selection", handleSelectionChange);
       }
+      activeRenderer.off("resize", renderFooter);
       activeRenderer.stop();
       activeRenderer.destroy();
 
@@ -2886,6 +2928,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     activeRenderer.on("selection", handleSelectionChange);
+    // Refit the footer hints to the new width.
+    activeRenderer.on("resize", renderFooter);
 
     activeRenderer.keyInput.on("keypress", (key) => {
       if ((key.ctrl || key.meta) && key.name === "f") {

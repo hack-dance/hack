@@ -6945,6 +6945,32 @@ async function handleUp(
   });
 }
 
+/**
+ * Starts the detached native owner. An unconfirmed start is explained by the
+ * instance's run mapping when another native home owns it (HACK-2339).
+ */
+async function launchNativeDetachedUp(opts: {
+  readonly cwd: string;
+  readonly args: readonly string[];
+  readonly json: boolean;
+  readonly scope: Parameters<
+    typeof explainUnconfirmedNativeDetachedStart
+  >[0]["scope"];
+}): Promise<number> {
+  try {
+    return await startNativeDetachedUp({
+      cwd: opts.cwd,
+      args: opts.args,
+      json: opts.json,
+    });
+  } catch (error) {
+    throw await explainUnconfirmedNativeDetachedStart({
+      error,
+      scope: opts.scope,
+    });
+  }
+}
+
 async function handleUpUnlocked({
   ctx,
   args,
@@ -7054,18 +7080,12 @@ async function handleUpUnlocked({
     if (alreadyRunning !== null) {
       return alreadyRunning;
     }
-    try {
-      return await startNativeDetachedUp({
-        cwd: ctx.cwd,
-        args: childArgs,
-        json: args.options.json === true,
-      });
-    } catch (error) {
-      throw await explainUnconfirmedNativeDetachedStart({
-        error,
-        scope: launchScope,
-      });
-    }
+    return await launchNativeDetachedUp({
+      cwd: ctx.cwd,
+      args: childArgs,
+      json: args.options.json === true,
+      scope: launchScope,
+    });
   }
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,

@@ -629,3 +629,61 @@ test("an extends chain past the bound marks the graph incomplete, never complete
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("completion dependencies in included files count", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-oneshot-include-"));
+  try {
+    await writeFile(
+      join(root, "app.yml"),
+      [
+        "services:",
+        "  api:",
+        "    image: app",
+        "    depends_on:",
+        "      migrate:",
+        "        condition: service_completed_successfully",
+        "",
+      ].join("\n")
+    );
+    await writeFile(
+      join(root, "jobs.yml"),
+      [
+        "services:",
+        "  worker:",
+        "    image: app",
+        "    depends_on:",
+        "      seed:",
+        "        condition: service_completed_successfully",
+        "",
+      ].join("\n")
+    );
+    const file = join(root, "docker-compose.yml");
+    await writeFile(
+      file,
+      [
+        "include:",
+        "  - app.yml",
+        "  - path: [jobs.yml]",
+        "services:",
+        "  migrate:",
+        "    image: app",
+        "  seed:",
+        "    image: app",
+        "",
+      ].join("\n")
+    );
+    const graph = await readComposeOneShotGraph([file]);
+    expect([...graph.oneShots].sort()).toEqual(["migrate", "seed"]);
+    expect(graph.incomplete).toBeUndefined();
+
+    // An include Hack cannot follow leaves the graph incomplete.
+    const missing = join(root, "missing.yml");
+    await writeFile(missing, "include:\n  - not-there.yml\nservices: {}\n");
+    expect((await readComposeOneShotGraph([missing])).incomplete).toBe(true);
+    const cycle = join(root, "cycle.yml");
+    await writeFile(cycle, "include:\n  - cycle.yml\nservices: {}\n");
+    expect((await readComposeOneShotGraph([cycle])).incomplete).toBe(true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

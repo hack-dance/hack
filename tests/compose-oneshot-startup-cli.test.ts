@@ -29,6 +29,7 @@ case " $* " in
   *" up "*" --no-start"*) exit 0 ;;
   *" up "*" -d "*|*" up -d"*)
     : > "$state/up-started"
+    printf '%s\\n' 'compose-up-stdout-marker'
     sleep "\${STUB_UP_SECONDS:-1}"
     : > "$state/up-done"
     exit 0 ;;
@@ -156,6 +157,9 @@ test("up -d keeps waiting past its budget while a one-shot runs, and starts ever
   expect(envelope.ok).toBe(true);
   expect(envelope.data.services.started).toEqual(["api"]);
   expect(envelope.data.services.completed).toEqual(["migrate"]);
+  // The watched start keeps the --json stdout reservation (HACK-2311).
+  expect(result.stdout).not.toContain("compose-up-stdout-marker");
+  expect(result.stderr).toContain("compose-up-stdout-marker");
 }, 60_000);
 
 test("the project setting sets the budget when no host variable does", async () => {
@@ -518,4 +522,36 @@ test("a start whose extends chains cannot be resolved is bounded only by the cei
     exitCode: 0,
   });
   expect(result.stderr).toContain("could not be resolved");
+}, 60_000);
+
+test("a migration dependency declared in an included file keeps the wait", async () => {
+  await writeFile(
+    join(project, ".hack", "app.yml"),
+    [
+      "services:",
+      "  api:",
+      "    image: alpine:3.22",
+      "    depends_on:",
+      "      migrate:",
+      "        condition: service_completed_successfully",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    join(project, ".hack", "docker-compose.yml"),
+    "include:\n  - app.yml\nservices:\n  migrate:\n    image: alpine:3.22\n"
+  );
+  const result = await cli(["up", "--detach", "--json"], {
+    HACK_COMPOSE_STARTUP_TIMEOUT_MS: "1000",
+    STUB_UP_SECONDS: "4",
+  });
+  // The start is not cut short: Compose ran to completion past the 1 s
+  // budget. (Post-start readiness reads only the base file, so it may still
+  // classify the included edge differently; that is not the start budget.)
+  expect(result.exitCode).not.toBe(124);
+  const envelope = JSON.parse(result.stdout) as {
+    error?: { code?: string };
+  };
+  expect(envelope.error?.code).not.toBe("E_STARTUP_TIMEOUT");
+  expect(result.stderr).toContain("compose-up-stdout-marker");
 }, 60_000);

@@ -540,13 +540,108 @@ export async function readComposeOneShotGraph(
   const documents: unknown[] = [];
   const resolution = { incomplete: false };
   for (const file of composeFiles) {
-    const document = await readComposeDocument(file);
-    if (document !== null) {
-      documents.push(await resolveExtends({ document, file, resolution }));
-    }
+    await collectComposeDocuments({
+      file,
+      documents,
+      resolution,
+      includeChain: [file],
+    });
   }
   const graph = mergeOneShotGraphs(documents, options);
   return resolution.incomplete ? { ...graph, incomplete: true } : graph;
+}
+
+/**
+ * `file` and, before it, every file its top-level `include` loads (Compose
+ * copies included models into the application), each with `extends`
+ * resolved. An include Hack cannot follow (unreadable, an unsupported
+ * entry, a cycle, too deep) marks the resolution incomplete.
+ */
+async function collectComposeDocuments(input: {
+  readonly file: string;
+  readonly documents: unknown[];
+  readonly resolution: ExtendsResolution;
+  readonly includeChain: readonly string[];
+}): Promise<void> {
+  const document = await readComposeDocument(input.file);
+  if (document === null) {
+    if (input.includeChain.length > 1) {
+      input.resolution.incomplete = true;
+    }
+    return;
+  }
+  for (const included of includedFiles(
+    document,
+    input.file,
+    input.resolution
+  )) {
+    if (
+      input.includeChain.includes(included) ||
+      input.includeChain.length > MAX_EXTENDS_DEPTH
+    ) {
+      input.resolution.incomplete = true;
+      continue;
+    }
+    await collectComposeDocuments({
+      file: included,
+      documents: input.documents,
+      resolution: input.resolution,
+      includeChain: [...input.includeChain, included],
+    });
+  }
+  input.documents.push(
+    await resolveExtends({
+      document,
+      file: input.file,
+      resolution: input.resolution,
+    })
+  );
+}
+
+/** The files a document's top-level `include` names, from its directory. */
+function includedFiles(
+  document: unknown,
+  file: string,
+  resolution: ExtendsResolution
+): string[] {
+  if (!(isRecord(document) && document.include !== undefined)) {
+    return [];
+  }
+  if (!Array.isArray(document.include)) {
+    resolution.incomplete = true;
+    return [];
+  }
+  const paths: string[] = [];
+  for (const entry of document.include) {
+    const named = includeEntryPaths(entry);
+    if (named === null || named.length === 0) {
+      resolution.incomplete = true;
+      continue;
+    }
+    for (const path of named) {
+      paths.push(isAbsolute(path) ? path : resolve(dirname(file), path));
+    }
+  }
+  return paths;
+}
+
+/** The paths of one `include` entry: a string or `{ path }`; null if unsupported. */
+function includeEntryPaths(entry: unknown): string[] | null {
+  if (typeof entry === "string") {
+    return [entry];
+  }
+  if (!isRecord(entry)) {
+    return null;
+  }
+  if (typeof entry.path === "string") {
+    return [entry.path];
+  }
+  if (Array.isArray(entry.path)) {
+    return entry.path.filter(
+      (path): path is string => typeof path === "string"
+    );
+  }
+  return null;
 }
 
 /** A parsed Compose file, or null when it cannot be read or parsed. */

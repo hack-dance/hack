@@ -301,7 +301,7 @@ async function runComposeStartPhase(input: {
   const finished = run(input.cmd, {
     cwd: options.cwd,
     env: options.env,
-    stdout: options.routeStdoutToStderr ? "stderr" : "inherit",
+    stdout: childStdoutTarget(options.routeStdoutToStderr),
     timeoutMs: ceilingMs,
     forwardSignals: true,
     settleProcessGroupOnCancel: true,

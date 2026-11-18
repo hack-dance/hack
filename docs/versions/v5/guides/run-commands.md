@@ -17,6 +17,8 @@ install nothing. The host path needs Node on the host.
 Without `--env`, `exec` and `run` use the env overlay the instance was started
 with, as `down` and `restart` do. An explicit `--env` that differs from the
 running overlay makes `exec` refuse; omit it, or restart with that overlay first.
+An authored `.hack/hack.project.json` project on the Compose backend is the
+exception for `run`: pass the running overlay with `--env`.
 
 Hack options go before the command tail. After the service name or `--`, everything
 is passed through unchanged, so a child's `--json` or `--help` is never read as a

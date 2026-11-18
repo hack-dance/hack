@@ -8959,6 +8959,14 @@ async function runRestartCommand({
     requested: args.positionals.services,
     available: allServiceNames,
   });
+  // Whole-stack and service-scoped restarts both keep the recorded running
+  // selection when --env is omitted (HACK-2280); a targeted restart also
+  // records its selection, so the default must not replace it.
+  const effectiveEnvName = await resolveStoredRuntimeEnvName({
+    requestedEnvName: envName,
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
+  });
   if (requestedServices.length > 0) {
     const result = await runTargetedServiceRestart({
       budgets,
@@ -8969,7 +8977,7 @@ async function runRestartCommand({
       composeProjectName,
       profiles,
       branch,
-      envName,
+      envName: effectiveEnvName,
       services: requestedServices,
       allServiceNames,
       routeStdoutToStderr: json,
@@ -9005,11 +9013,6 @@ async function runRestartCommand({
       exitCode: 0,
     });
   }
-  const effectiveEnvName = await resolveStoredRuntimeEnvName({
-    requestedEnvName: envName,
-    projectDir: project.projectDir,
-    composeProject: lifecycleComposeProject,
-  });
   const lifecycleEnv = await resolveLifecycleEnvForProject({
     project,
     projectName,

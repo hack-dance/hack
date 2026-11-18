@@ -11,6 +11,11 @@ import {
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../lib/native-environment-notices.ts";
 import { NativeEnvFileRefusal } from "./native-env-file-source.ts";
 import { nativeEnvironmentUnsetsReviewed } from "./native-environment-unsets.ts";
+import {
+  adaptNativeGcloudEnvironment,
+  hasNativeGcloudCredentialMount,
+  type NativeGcloudSelection,
+} from "./native-gcloud-environment.ts";
 import { admitNativeHttpProbe } from "./native-http-probe-admission.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import { admitNativeProjectBuild } from "./native-project-builds.ts";
@@ -298,7 +303,7 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
   },
   unresolved_mount_source: {
     message: "A mount source uses a variable or the home directory.",
-    fix: "Use a path relative to the project.",
+    fix: "Use a path inside the project. The gcloud application-default credentials file and the AWS home directory are delivered by credential adapters instead: set gcloud or aws in the native machine settings.",
   },
   undeclared_volume: {
     message: "The service mounts a named volume the file does not declare.",
@@ -905,6 +910,7 @@ async function adaptForPreflight(opts: {
   readonly hasDefaultDependencyFile: boolean;
   readonly effectiveEnvName: string | null;
   readonly profiles: readonly string[];
+  readonly gcloud?: NativeGcloudSelection;
 }): Promise<AdaptedProject> {
   const blocker = { severity: "blocker", gate: "cli" } as const;
   // One bounded read: the parsed document and the digest come from the same bytes.
@@ -1031,6 +1037,11 @@ async function adaptForPreflight(opts: {
       );
     }
   }
+  input = await reviewGcloudCredentialMounts({
+    input,
+    selected: opts.gcloud !== undefined,
+    findings,
+  });
   const adapted: unknown = JSON.parse(input.normalizedComposeJson);
   return {
     findings,
@@ -1052,6 +1063,86 @@ async function adaptForPreflight(opts: {
       adaptationValid,
     },
   };
+}
+
+/** Services whose volumes include the recognized gcloud ADC file mount. */
+function gcloudCredentialServices(input: NativeProjectInput): string[] {
+  const compose: unknown = JSON.parse(input.normalizedComposeJson);
+  if (!(isRecord(compose) && isRecord(compose.services))) {
+    return [];
+  }
+  return Object.entries(compose.services)
+    .filter(([, service]) =>
+      hasNativeGcloudCredentialMount({
+        normalizedComposeJson: JSON.stringify({ services: { service } }),
+      })
+    )
+    .map(([name]) => name)
+    .sort();
+}
+
+/**
+ * A recognized gcloud ADC mount is delivered by the gcloud adapter after
+ * lifecycle hooks, not mounted from the host (HACK-2324). Review the input
+ * the adapter will produce (the same mount removal; nothing is read) and ask
+ * for the one consent the adapter needs when it is not selected.
+ */
+async function reviewGcloudCredentialMounts(opts: {
+  readonly input: NativeProjectInput;
+  readonly selected: boolean;
+  readonly findings: NativePreflightFinding[];
+}): Promise<NativeProjectInput> {
+  const services = gcloudCredentialServices(opts.input);
+  if (services.length === 0) {
+    return opts.input;
+  }
+  const blocker = { severity: "blocker", gate: "cli" } as const;
+  let input = opts.input;
+  try {
+    // As at startup, env-file and shell values are merged first, so a
+    // GOOGLE_APPLICATION_CREDENTIALS selector from env_file is checked as such.
+    // Merging again in checkDelivery is a no-op.
+    input = (
+      await adaptNativeGcloudEnvironment({
+        input: mergeNativeShellEnvironment(opts.input),
+        mode: "file",
+        deliver: false,
+      })
+    ).input;
+  } catch {
+    opts.findings.push(
+      finding(
+        { ...blocker, code: "gcloud_adc_mount_refused" },
+        {
+          message:
+            "A service binds the gcloud application-default credentials file in a form the gcloud adapter does not accept.",
+          fix: "Bind ~/.config/gcloud/application_default_credentials.json read-only (:ro) to one absolute container file path per service, outside /proc, /sys, /dev and /run, with no other mount at or around it.",
+        }
+      )
+    );
+    return opts.input;
+  }
+  if (!opts.selected) {
+    for (const service of services) {
+      opts.findings.push(
+        finding(
+          {
+            ...blocker,
+            severity: "consent",
+            code: "gcloud_adc_grant_required",
+            service,
+            field: `services.${service}.volumes`,
+          },
+          {
+            message:
+              "The service binds the gcloud application-default credentials file. Native delivers that one file as a read-only snapshot after your consent; nothing else under the gcloud directory is shared.",
+            fix: 'Set "gcloud": {"mode": "file"} in the native machine settings for this project, or HACK_NATIVE_GCLOUD_ADC=file. The file must hold authorized_user credentials (gcloud auth application-default login), and the gcloud CLI must be installed.',
+          }
+        )
+      );
+    }
+  }
+  return input;
 }
 
 /** Findings from the CLI's own admission. Reads project files only. */
@@ -1591,6 +1682,8 @@ export type NativePreflightOptions = {
   readonly profiles: readonly string[];
   /** The native runtime, `"incomplete"` for a selection without a candidate, or null. */
   readonly runtime: NativeRuntimeSelection | "incomplete" | null;
+  /** The gcloud ADC consent (`HACK_NATIVE_GCLOUD_ADC=file` or `gcloud` setting). */
+  readonly gcloud?: NativeGcloudSelection;
   readonly invoke?: typeof invokeNativeRuntime;
 };
 

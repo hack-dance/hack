@@ -316,7 +316,8 @@ preflight. Raw runtime stderr and startup output are not configuration findings.
   `extra_hosts_without_dependencies`, `unsupported_logging`, `invalid_restart`,
   `unsupported_label`, `invalid_http_probe`, `managed_env_unreadable`,
   `environment_delivery`, `native_runtime_setup`, `shared_source_grant_required`,
-  `route_probe_required` and `too_many_bridges`. Runtime findings use the
+  `route_probe_required`, `too_many_bridges`, `gcloud_adc_grant_required` (consent)
+  and `gcloud_adc_mount_refused`. Runtime findings use the
   review's own diagnostic codes, for example `privileged_service` or
   `invalid_mount`, and `review_incompatible` when the review does not admit the
   project and gives no finding this version can show. A code this version has
@@ -2336,8 +2337,14 @@ hack restart to renew.` `hack exec` keeps exporting fresh values for each reques
 
 For a project whose services bind the gcloud ADC file read-only, for example
 `~/.config/gcloud/application_default_credentials.json:/config/adc.json:ro`,
-explicit `HACK_NATIVE_GCLOUD_ADC=file` applies the gcloud adapter after the normal
-login hook, beside the AWS adapter. Accepted sources are that path written with
+explicit `HACK_NATIVE_GCLOUD_ADC=file`, or `"gcloud": {"mode": "file"}` in the
+[machine settings](#native-settings-files), applies the gcloud adapter after the normal
+login hook, beside the AWS adapter. That one consent is the only step: the Compose file
+keeps its mount line. The variable wins over the machine value; an empty
+`HACK_NATIVE_GCLOUD_ADC=` withholds a machine consent for that command. Native preflight lists a missing consent as
+`gcloud_adc_grant_required` for each service with the mount. It reviews the
+project as the adapter will deliver it, without the host mount, and so does the
+static review that `up` runs before lifecycle hooks. Accepted sources are that path written with
 `~`, `${HOME}`, `$HOME` or the absolute home directory, in short syntax with `:ro`
 or long syntax `{type: bind, source, target, read_only: true}` with no other keys.
 The target must be an absolute container file path outside `/proc`, `/sys`, `/dev`,
@@ -2376,7 +2383,10 @@ container. Google client libraries refresh access tokens from it over normal
 egress. Host re-login or revocation is not propagated; run `hack restart` to deliver
 a fresh snapshot. The run mapping records only `gcloud: {"mode": "file"}`; restart
 and retained restore keep that selection and deliver a fresh copy into new
-allocations. `hack exec` delivers nothing new: the file is already in the
+allocations. On `up`, an empty `HACK_NATIVE_GCLOUD_ADC=` does not restore a retained
+gcloud selection: it refuses ("cannot change the retained run's … gcloud
+selection"), and nothing is read or delivered. Run `hack down` and then `up`
+without the selection. `hack restart` always uses the retained selection. `hack exec` delivers nothing new: the file is already in the
 container, and exec only rechecks the mount and selectors. One-off `run` does not
 apply the adapter. A mapping with a gcloud selection refuses on earlier candidates.
 
@@ -3227,6 +3237,7 @@ the variables:
 | --- | --- |
 | `sharedSource` (`true` or `false`) | `HACK_NATIVE_SHARED_SOURCE=1` |
 | `aws.profile`, `aws.region` | `HACK_NATIVE_AWS_PROFILE`, `HACK_NATIVE_AWS_REGION` |
+| `gcloud.mode` (`file`) | `HACK_NATIVE_GCLOUD_ADC=file` |
 | `dependencies`, `dependenciesByEnv` | `HACK_NATIVE_DEPENDENCIES` |
 | `https.caddyBinary`, `https.caddySha256`, `https.port` | `HACK_NATIVE_CADDY_BINARY`, `HACK_NATIVE_CADDY_SHA256`, `HACK_NATIVE_HTTPS_PORT` |
 | `preparedBase.mode` (`prefer`, `require` or `off`), `preparedBase.store` | `HACK_NATIVE_PREPARED_BASE`, `HACK_NATIVE_PREPARED_BASE_STORE` |
@@ -3234,8 +3245,7 @@ the variables:
 
 `dependencies` and `dependenciesByEnv` name host dependency files (the format above)
 in the same directory: plain file names, never paths. The machine settings do not
-select the adaptation, the native binary or the native home. A `gcloud` field or any
-other field refuses.
+select the adaptation, the native binary or the native home. Any other field refuses.
 
 Hack refuses the machine file with `E_CONFIG_INVALID` before any branch, lifecycle,
 storage or runtime work unless all of these hold:

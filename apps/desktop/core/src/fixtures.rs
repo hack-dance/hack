@@ -63,10 +63,15 @@ pub enum Fixture {
     Hackd,
     /// hackd stopped with a login service that is out of date.
     HackdOff,
+    // Upgrade pane (HACK-2289).
+    /// A ready upgrade check, with a snapshot to restore.
+    Upgrade,
+    /// A check with a blocker and a check that could not run.
+    UpgradeBlocked,
 }
 
 impl Fixture {
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 34] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -99,6 +104,8 @@ impl Fixture {
         Self::DoctorEmpty,
         Self::Hackd,
         Self::HackdOff,
+        Self::Upgrade,
+        Self::UpgradeBlocked,
     ];
 
     #[must_use]
@@ -136,6 +143,8 @@ impl Fixture {
             Self::DoctorEmpty => "doctor-empty",
             Self::Hackd => "hackd",
             Self::HackdOff => "hackd-off",
+            Self::Upgrade => "upgrade",
+            Self::UpgradeBlocked => "upgrade-blocked",
         }
     }
 
@@ -644,6 +653,104 @@ pub fn opens_doctor(f: Fixture) -> bool {
         f,
         Fixture::Doctor | Fixture::DoctorClean | Fixture::DoctorEmpty
     )
+}
+
+/// Fixtures that open the Upgrade pane.
+#[must_use]
+pub fn opens_upgrade(f: Fixture) -> bool {
+    matches!(f, Fixture::Upgrade | Fixture::UpgradeBlocked)
+}
+
+const UPGRADE_CHECK: &str = include_str!("../tests/fixtures/upgrade/check-v2.json");
+const FIXTURE_SNAPSHOT: &str = "20260101T090000Z-fixture";
+
+/// `hack upgrade check --json` as a fixture reports it.
+///
+/// # Errors
+/// Never for a fixture; the signature matches the live source.
+pub fn upgrade_check(f: Fixture) -> Result<crate::upgrade::CheckReport, String> {
+    let mut v: serde_json::Value =
+        serde_json::from_str(UPGRADE_CHECK).map_err(|e| e.to_string())?;
+    if f == Fixture::UpgradeBlocked {
+        v["data"]["ready"] = false.into();
+        v["data"]["blockers"] = serde_json::json!([
+            {"scope": "alpha", "id": "env-key", "summary": "The env key for alpha is missing; values cannot be read."}
+        ]);
+        v["data"]["incomplete"] = serde_json::json!([
+            {"scope": "machine", "id": "docker", "summary": "Docker did not answer; the engine checks could not run."}
+        ]);
+    }
+    crate::upgrade::CheckReport::parse(&v.to_string())
+}
+
+/// `hack upgrade review --json` as a fixture reports it.
+#[must_use]
+pub fn upgrade_review() -> crate::upgrade::Review {
+    serde_json::from_value(serde_json::json!({
+        "status": "review",
+        "checkouts": [{"scope": "alpha", "project": "alpha", "root": "/work/alpha", "findings": [
+            {"id": "env-format", "status": "warn", "summary": "Legacy .env layers; hack env migrate converts them.", "kind": "manual", "command": "hack env migrate", "action": "Check the converted layers before committing them."}
+        ]}],
+        "reasons": [{"id": "env-format", "reason": "Converting env layers rewrites files the team commits; review the change first."}]
+    }))
+    .unwrap_or_default()
+}
+
+/// `hack upgrade snapshot --json` as a fixture reports it.
+#[must_use]
+pub fn upgrade_snapshot() -> crate::upgrade::Snapshot {
+    crate::upgrade::Snapshot {
+        status: "created".into(),
+        id: Some(FIXTURE_SNAPSHOT.into()),
+        manifest_path: Some(format!(
+            "/work/.hack/upgrade/snapshots/{FIXTURE_SNAPSHOT}/manifest.json"
+        )),
+        files: vec![
+            crate::upgrade::SnapshotFile {
+                path: "/work/.hack/hack.config.json".into(),
+                label: "global: hack.config.json".into(),
+                reason: None,
+            },
+            crate::upgrade::SnapshotFile {
+                path: "/work/.hack/projects.json".into(),
+                label: "global: projects.json".into(),
+                reason: None,
+            },
+        ],
+        complete: true,
+        ..crate::upgrade::Snapshot::default()
+    }
+}
+
+/// The snapshot listing as a fixture reports it.
+#[must_use]
+pub fn upgrade_snapshots() -> crate::upgrade::SnapshotList {
+    crate::upgrade::SnapshotList {
+        status: "choose".into(),
+        snapshots: vec![crate::upgrade::SnapshotEntry {
+            id: FIXTURE_SNAPSHOT.into(),
+            created_at: Some("2026-01-01T09:00:00.000Z".into()),
+            purpose: Some("hack upgrade snapshot".into()),
+            files: 2,
+            manifest_path: format!(
+                "/work/.hack/upgrade/snapshots/{FIXTURE_SNAPSHOT}/manifest.json"
+            ),
+        }],
+    }
+}
+
+/// A restore as a fixture reports it: one file back, one left as it is.
+#[must_use]
+pub fn upgrade_restore() -> crate::upgrade::Rollback {
+    serde_json::from_value(serde_json::json!({
+        "status": "incomplete",
+        "results": [
+            {"path": "/work/.hack/hack.config.json", "label": "global: hack.config.json", "status": "restored"},
+            {"path": "/work/.hack/projects.json", "label": "global: projects.json", "status": "conflict",
+             "message": "changed since the snapshot; left as it is"}
+        ]
+    }))
+    .unwrap_or_default()
 }
 
 /// Fixtures that open the hackd pane.

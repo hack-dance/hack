@@ -50,3 +50,23 @@ test("release config analyzes and renders bang breaking changes", async () => {
   expect(result.notes).toContain("BREAKING CHANGES");
   expect(result.notes).toContain("remove a retired surface");
 });
+
+/**
+ * `@semantic-release/git` passes the commit message as one `git commit -m`
+ * argument. Linux refuses a single argument over 128 KiB (`MAX_ARG_STRLEN`)
+ * with E2BIG, and the generated notes for a release that spans a long-lived
+ * branch are larger than that (v4.3.1 to the first v5 stable: 227 KB). The
+ * notes belong in CHANGELOG.md, which the same commit carries.
+ */
+test("release commit message does not embed the generated notes", async () => {
+  const releaseConfig = (await Bun.file(".releaserc.json").json()) as {
+    plugins: readonly (string | readonly [string, Record<string, unknown>])[];
+  };
+  const git = releaseConfig.plugins.find(
+    (plugin) => Array.isArray(plugin) && plugin[0] === "@semantic-release/git"
+  );
+  expect(Array.isArray(git)).toBe(true);
+  const options = (git as readonly [string, Record<string, unknown>])[1];
+  expect(options.message).toBe("chore(release): ${nextRelease.version}");
+  expect(options.assets).toContain("CHANGELOG.md");
+});

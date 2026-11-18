@@ -78,7 +78,9 @@ The runtime setup item must also say ready. In JSON, this means `ready: true`
 and `runtime_review.status: "completed"`.
 An exit of 0 alone is not enough: runtime review can be skipped or unavailable.
 
-If blocked, fix the named field and rerun. Do not remove a check or delete state
+If blocked, fix the named field and rerun. For a project that already runs on
+Compose, [Run an existing Compose project on native](existing-compose-project.md)
+collects the usual fixes. Do not remove a check or delete state
 to force a start. Keep the project on Compose if it needs unsupported behavior.
 See [Troubleshooting](../troubleshooting.md) and [the preflight reference](preflight.md).
 

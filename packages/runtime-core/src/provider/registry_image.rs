@@ -844,6 +844,7 @@ impl<'a> Fetch<'a> {
         &self,
         request: reqwest::blocking::RequestBuilder,
         url: &Url,
+        timeout: Duration,
         retry: bool,
     ) -> Result<Response, CandidateError> {
         for attempt in 1..=ATTEMPTS {
@@ -863,14 +864,7 @@ impl<'a> Fetch<'a> {
             let request = request
                 .try_clone()
                 .ok_or_else(|| error("Cannot replay registry request."))?;
-            match request
-                .timeout(remaining.min(if retry {
-                    self.request_timeout
-                } else {
-                    REQUEST_TIMEOUT
-                }))
-                .send()
-            {
+            match request.timeout(remaining.min(timeout)).send() {
                 Ok(response) => return Ok(response),
                 Err(failure) => {
                     let classified = transport_error(&failure, "Registry request failed.");
@@ -921,14 +915,12 @@ impl<'a> Fetch<'a> {
                 header.set_sensitive(true);
                 request = request.header(AUTHORIZATION, header);
             }
-            let response = if retry {
-                self.send_headers(request, &url, true)?
-            } else {
-                request
-                    .timeout(self.remaining()?.min(timeout))
-                    .send()
-                    .map_err(|e| transport_error(&e, "Registry request failed or timed out."))?
-            };
+            // Every request here is an idempotent GET of a manifest or a
+            // content-addressed blob, so a transient transport failure is retried
+            // with the same bounded attempts and reports its host. A layer keeps its
+            // size-scaled timeout; manifests and configs use the request timeout.
+            let attempt_timeout = if retry { self.request_timeout } else { timeout };
+            let response = self.send_headers(request, &url, attempt_timeout, true)?;
             if !response.status().is_redirection() {
                 return Ok(response);
             }
@@ -1099,10 +1091,16 @@ impl<'a> Fetch<'a> {
                 request
             }
         };
+        let replayable = !matches!(credential, Some(Credential::IdentityToken(_)));
         let response = self.send_headers(
             request,
             realm,
-            !matches!(credential, Some(Credential::IdentityToken(_))),
+            if replayable {
+                self.request_timeout
+            } else {
+                REQUEST_TIMEOUT
+            },
+            replayable,
         )?;
         if matches!(
             response.status(),

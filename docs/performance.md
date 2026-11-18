@@ -17,6 +17,33 @@ the whole bundle. On the Linux build host this took `hack --version` from about
 320 ms to about 75 ms and made the executable about 22 MB larger. A source run
 (`bun index.ts`) has no such cache and is not a startup measurement.
 
+## End-to-end latency baseline
+
+```sh
+bun run build
+bun scripts/benchmark-cli-latency.ts --out /tmp/hack-latency.json
+bun scripts/benchmark-cli-latency.ts --launcher ~/.hack-next/bin/hack-next
+```
+
+The script reports medians over repeated runs for the costs of daily use: cold and
+warm `--version`, `ps`, `env list`, `open` and `logs`; the candidate launcher against
+the executable it runs; `up -d`, a second `up -d` and `down` on a three-service
+fixture against raw `docker compose` on the same file; `/v1/projects` with at least
+1, 5 and 20 registered projects (other running Hack projects on the engine are
+registered too, and the report shows the real counts); and 60 seconds of idle CPU and
+RSS for hackd and one `hack mcp serve`. Each command's output is checked before its
+time counts.
+
+It runs every Hack process with a private HOME under `/tmp`, never pulls an image
+(the fixture needs a local `alpine:3.20`, or `--image`), and on exit, an error or
+Ctrl-C it brings its two Compose projects down by name and removes its directory. It
+uses the host's real Docker engine through a local unix socket only (it skips the
+Docker sections on a TLS or SSH endpoint), so other running containers add to the
+numbers; the report counts them. "Cold" is a fresh copy of the executable with a
+fresh HOME, not a dropped page cache. Idle CPU counts only processes alive through
+the whole window, so it is a lower bound. Compare runs only on the same host,
+executable build and engine load.
+
 ## Project listing
 
 ```sh

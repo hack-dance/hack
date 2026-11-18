@@ -147,6 +147,14 @@ pub struct NetworkRequestDiagnostic {
     pub attempts: usize,
 }
 
+/// One state path that is not what the runtime requires, relative to the candidate
+/// state root (`.hack-local/...`), or only its final name when it lies outside it.
+#[derive(Debug, Serialize)]
+pub struct StateComponentDiagnostic {
+    pub version: u8,
+    pub path: String,
+}
+
 /// Value-free refusal locations, boxed together so every
 /// `Result<_, CandidateError>` stays small; serialized flat as
 /// `process_refusals`, `plan_change` and `route_probe`.
@@ -154,6 +162,8 @@ pub struct NetworkRequestDiagnostic {
 pub struct RefusalDiagnostics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network_request: Option<NetworkRequestDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_component: Option<StateComponentDiagnostic>,
     /// File-only explanations. Every sentence and field is a compile-time literal;
     /// only validated service names come from the project. Never contains values.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -260,6 +270,26 @@ impl CandidateError {
                     version: 1,
                     host: host.to_owned(),
                     attempts,
+                });
+        }
+        self
+    }
+
+    /// Carry one state path, relative to the state root (see [`StateComponentDiagnostic`]).
+    /// A label outside the bounded path grammar is dropped, never escaped.
+    pub fn with_state_component(mut self, path: &str) -> Self {
+        if !path.is_empty()
+            && path.len() <= 240
+            && !path.starts_with('/')
+            && !path.split('/').any(|part| part.is_empty() || part == "..")
+            && path
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-/".contains(&b))
+        {
+            self.refusals.get_or_insert_default().state_component =
+                Some(StateComponentDiagnostic {
+                    version: 1,
+                    path: path.to_owned(),
                 });
         }
         self

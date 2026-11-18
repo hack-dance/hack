@@ -881,6 +881,67 @@ test(
 );
 
 test(
+  "HACK-2324: host aliases without a binding are counted, explained, and given the entry to add",
+  async () => {
+    const f = await fixture({
+      services: {
+        web: {
+          image: IMAGE,
+          extra_hosts: ["host.docker.internal:host-gateway"],
+        },
+      },
+    });
+    await writeFile(
+      join(f.projectDir, "hack.config.json"),
+      JSON.stringify({
+        name: "preflight-fixture",
+        internal: { extra_hosts: { "api.other.hack": "host-gateway" } },
+      })
+    );
+    const { report } = await preflight(f, GRANT);
+    const service = report.blockers.find(
+      (found) => found.code === "extra_hosts_without_dependencies"
+    );
+    expect(service?.service).toBe("web");
+    expect(service?.message).toContain("host.docker.internal");
+    expect(service?.fix).toContain("a process on this machine");
+    expect(service?.fix).toContain('"aliases": ["host.docker.internal"]');
+    expect(service?.fix).toContain("One alias reaches one host listener;");
+    const project = report.blockers.find(
+      (found) => found.code === "internal_hosts_without_dependencies"
+    );
+    expect(project?.fix).toContain(
+      "1 name(s) ending in .hack are usually Hack routes"
+    );
+    expect(project?.fix).toContain('"aliases": ["<alias>"]');
+    // Authored alias names never reach the report.
+    expect(JSON.stringify(report)).not.toContain("api.other.hack");
+    // One alias declared twice in two spellings still gives a report, with
+    // the fixed text and no authored name.
+    const twice = await fixture({
+      services: {
+        web: {
+          image: IMAGE,
+          extra_hosts: [
+            "private.example:host-gateway",
+            "PRIVATE.EXAMPLE.:host-gateway",
+          ],
+        },
+      },
+    });
+    const duplicate = await preflight(twice, GRANT);
+    expect(codes(duplicate.report, "cli")).toContain(
+      "extra_hosts_without_dependencies:web"
+    );
+    expect(JSON.stringify(duplicate.report).toLowerCase()).not.toContain(
+      "private.example"
+    );
+    expect(project?.fix).toContain("hack internal extra-hosts unset");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
   "HACK-2324: before native setup the static runtime review still runs, and a review that cannot run lists what was not checked",
   async () => {
     const f = await fixture({
@@ -1418,6 +1479,124 @@ test(
     }
   },
   SPAWN_TIMEOUT_MS * 2
+);
+
+test(
+  "HACK-2324: the route note follows the HTTPS selection, and namespace and network notes explain themselves",
+  async () => {
+    const f = await fixture({
+      services: {
+        web: {
+          image: IMAGE,
+          labels: {
+            caddy: "web.example.test",
+            "caddy.reverse_proxy": "{{upstreams 3000}}",
+          },
+        },
+      },
+    });
+    await f.review(
+      [
+        {
+          severity: "warning",
+          code: "route_binding_required",
+          field: "services.web.labels",
+          message: "runtime text",
+        },
+        {
+          severity: "warning",
+          code: "candidate_project_namespace",
+          field: "compose.name",
+          message: "runtime text",
+        },
+        {
+          severity: "warning",
+          code: "hack_network_mapped",
+          field: "networks.hack-dev",
+          message: "runtime text",
+        },
+      ],
+      {
+        services: {
+          web: {
+            active: true,
+            routing: { port: 3000 },
+            healthcheck: {
+              disabled: false,
+              native_http: {
+                policy: "route",
+                port: 3000,
+                path: "/",
+                interval_ms: 30_000,
+                timeout_ms: 1000,
+                retries: 3,
+                start_period_ms: 240_000,
+              },
+            },
+          },
+        },
+      }
+    );
+    const warnings = (report: NativePreflightReport) =>
+      new Map(report.warnings.map((found) => [found.code, found]));
+    const without = warnings(
+      (await preflight(f, { ...f.native, ...GRANT })).report
+    );
+    expect(without.get("route_binding_required")?.message).toContain(
+      "no native HTTPS frontend is selected"
+    );
+    for (const code of ["candidate_project_namespace", "hack_network_mapped"]) {
+      expect(without.get(code)?.fix).not.toContain(
+        "See the native backend guide"
+      );
+    }
+    const selected = warnings(
+      (
+        await preflight(f, {
+          ...f.native,
+          ...GRANT,
+          HACK_NATIVE_CADDY_BINARY: join(f.root, "caddy"),
+          HACK_NATIVE_CADDY_SHA256: "a".repeat(64),
+          HACK_NATIVE_HTTPS_PORT: "18443",
+        })
+      ).report
+    );
+    expect(selected.has("route_binding_required")).toBe(false);
+    expect(selected.has("candidate_project_namespace")).toBe(true);
+    // The same selection from the machine settings file.
+    const home = join(f.root, "user-home");
+    const directory = join(
+      home,
+      ".config",
+      "hack",
+      "native",
+      "preflight-fixture"
+    );
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await chmod(join(home, ".config"), 0o700);
+    await chmod(join(home, ".config", "hack"), 0o700);
+    await chmod(join(home, ".config", "hack", "native"), 0o700);
+    await writeFile(
+      join(directory, "settings.json"),
+      JSON.stringify({
+        version: 1,
+        projectRoots: [f.project],
+        sharedSource: true,
+        https: {
+          caddyBinary: join(f.root, "caddy"),
+          caddySha256: "a".repeat(64),
+          port: 18_443,
+        },
+      }),
+      { mode: 0o600 }
+    );
+    const fromSettings = (await preflight(f, f.native)).report;
+    // The settings file was read: its sharedSource consent applies too.
+    expect(fromSettings.consent_needed).toEqual([]);
+    expect(codes(fromSettings, "cli")).toEqual([]);
+    expect(warnings(fromSettings).has("route_binding_required")).toBe(false);
+  },
+  SPAWN_TIMEOUT_MS
 );
 
 test(

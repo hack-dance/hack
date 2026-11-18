@@ -3,10 +3,12 @@ import {
   afterEach,
   beforeAll,
   beforeEach,
+  describe,
   expect,
   spyOn,
   test,
 } from "bun:test";
+import { readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1079,6 +1081,415 @@ test(
     }
     expect(linuxDnsPrivileged).toEqual([]);
     expect(runCalls.some((call) => call[0] === "sudo")).toBe(false);
+  },
+  { timeout: 20_000 }
+);
+
+function globalCaddyComposePath(): string {
+  return join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+}
+
+/** Runs `hack global install` with no terminal, capturing stdout and stderr. */
+async function runNonInteractiveInstall(): Promise<{
+  readonly code: number;
+  readonly output: string;
+}> {
+  const saved = process.env.HACK_NO_INTERACTIVE;
+  process.env.HACK_NO_INTERACTIVE = "1";
+  process.env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
+  const chunks: string[] = [];
+  const capture = (chunk: string | Uint8Array) => {
+    chunks.push(String(chunk));
+    return true;
+  };
+  const stdout = spyOn(process.stdout, "write").mockImplementation(capture);
+  const stderr = spyOn(process.stderr, "write").mockImplementation(capture);
+  // The proxy file is Hack-managed: no run may ask before replacing it.
+  const confirm = spyOn(interactivity, "confirmSafe").mockImplementation(
+    async (opts) => {
+      if (String(opts.message).includes(GLOBAL_CADDY_COMPOSE_FILENAME)) {
+        throw new Error("The proxy Compose file must not prompt");
+      }
+      return false;
+    }
+  );
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    const code = await runCli(["global", "install"]);
+    return { code, output: chunks.join("") };
+  } finally {
+    confirm.mockRestore();
+    stderr.mockRestore();
+    stdout.mockRestore();
+    restoreEnv("HACK_NO_INTERACTIVE", saved);
+  }
+}
+
+test(
+  "global install without a TTY fails, keeps the bind hint and removes a never-started proxy when :443 is taken (HACK-2328)",
+  async () => {
+    await writeInstallStubs();
+    const caddyCompose = globalCaddyComposePath();
+    runExitResponder = (cmd) =>
+      cmd.includes(caddyCompose) && cmd.includes("up") ? 1 : null;
+    execMockResponder = (cmd) => {
+      if (cmd[0] === "ss") {
+        return {
+          exitCode: 0,
+          stdout:
+            'LISTEN 0 4096 10.8.0.2:443 0.0.0.0:* users:(("vpn-client",pid=4242,fd=7))\n',
+          stderr: "",
+        };
+      }
+      if (
+        cmd[0] === "docker" &&
+        cmd[1] === "ps" &&
+        cmd.includes("status=created")
+      ) {
+        return { exitCode: 0, stdout: "0123456789ab\n", stderr: "" };
+      }
+      return null;
+    };
+
+    const { code, output } = await runNonInteractiveInstall();
+
+    expect(code).not.toBe(0);
+    expect(output).toContain("already in use by");
+    expect(output).toContain("10.8.0.2:443 vpn-client (pid 4242)");
+    expect(output).toContain("proxy.bind_address");
+    expect(output).toContain("Global install did not finish");
+    expect(output).not.toContain("Next:");
+    expect(output).not.toContain("Linux DNS");
+    expect(
+      execCalls.some(
+        (cmd) =>
+          cmd[0] === "docker" &&
+          cmd[1] === "ps" &&
+          cmd.includes("label=com.docker.compose.project=hack-dev-proxy")
+      )
+    ).toBe(true);
+    expect(execCalls).toContainEqual(["docker", "rm", "0123456789ab"]);
+    expect(linuxDnsPrivileged).toEqual([]);
+  },
+  { timeout: 20_000 }
+);
+
+test(
+  "global install without a TTY applies a new proxy.bind_address to the existing proxy file (HACK-2328)",
+  async () => {
+    await writeInstallStubs();
+    // First install: default bind, all interfaces.
+    expect((await runNonInteractiveInstall()).code).toBe(0);
+    const caddyCompose = globalCaddyComposePath();
+    expect(await Bun.file(caddyCompose).text()).toContain('      - "443:443"');
+
+    const configPath = resolveGlobalConfigPath();
+    await mkdir(dirname(configPath), { recursive: true });
+    await writeFile(
+      configPath,
+      `${JSON.stringify({ proxy: { bind_address: "127.0.0.1" } })}\n`
+    );
+    const { code, output } = await runNonInteractiveInstall();
+
+    expect(code).toBe(0);
+    expect(output).toContain("Next:");
+    const compose = await Bun.file(caddyCompose).text();
+    expect(compose).toContain('      - "127.0.0.1:80:80"');
+    expect(compose).toContain('      - "127.0.0.1:443:443"');
+    // A file Hack rendered is replaced without a backup.
+    const { readdir } = await import("node:fs/promises");
+    expect(
+      (await readdir(dirname(caddyCompose))).filter((name) =>
+        name.includes(".bak-")
+      )
+    ).toEqual([]);
+  },
+  { timeout: 20_000 }
+);
+
+test(
+  "global install keeps a backup of a hand-edited proxy file it replaces (HACK-2328)",
+  async () => {
+    await writeInstallStubs();
+    const caddyCompose = globalCaddyComposePath();
+    await mkdir(dirname(caddyCompose), { recursive: true });
+    const handEdited =
+      'services:\n  caddy:\n    image: my/caddy\n    ports:\n      - "443:443"\n';
+    await writeFile(caddyCompose, handEdited);
+
+    const { code, output } = await runNonInteractiveInstall();
+
+    expect(code).toBe(0);
+    expect(output).toContain("differed from Hack's current rendering");
+    const { readdir } = await import("node:fs/promises");
+    const backups = (await readdir(dirname(caddyCompose))).filter((name) =>
+      name.startsWith(`${GLOBAL_CADDY_COMPOSE_FILENAME}.bak-`)
+    );
+    expect(backups).toHaveLength(1);
+    expect(
+      await Bun.file(join(dirname(caddyCompose), backups[0]!)).text()
+    ).toBe(handEdited);
+    expect(await Bun.file(caddyCompose).text()).toContain("caddy-docker-proxy");
+  },
+  { timeout: 20_000 }
+);
+
+const VPN_LISTENER = {
+  exitCode: 0,
+  stdout:
+    'LISTEN 0 4096 10.8.0.2:443 0.0.0.0:* users:(("vpn-client",pid=4242,fd=7))\n',
+  stderr: "",
+};
+
+test(
+  "global install fails while :443 is taken, then succeeds once proxy.bind_address is set (HACK-2328)",
+  async () => {
+    await writeInstallStubs();
+    const caddyCompose = globalCaddyComposePath();
+    // Compose fails to publish on every interface, as Docker does when
+    // another address already holds :443; the loopback bind starts.
+    runExitResponder = (cmd) => {
+      if (!(cmd.includes(caddyCompose) && cmd.includes("up"))) {
+        return null;
+      }
+      const text = readFileSync(caddyCompose, "utf8");
+      return text.includes('"127.0.0.1:443:443"') ? 0 : 1;
+    };
+    execMockResponder = (cmd) => (cmd[0] === "ss" ? VPN_LISTENER : null);
+
+    const failed = await runNonInteractiveInstall();
+    expect(failed.code).not.toBe(0);
+    expect(failed.output).toContain(
+      "hack config set --global proxy.bind_address"
+    );
+    expect(failed.output).not.toContain("Next:");
+
+    const configPath = resolveGlobalConfigPath();
+    await mkdir(dirname(configPath), { recursive: true });
+    await writeFile(
+      configPath,
+      `${JSON.stringify({ proxy: { bind_address: "127.0.0.1" } })}\n`
+    );
+    const fixed = await runNonInteractiveInstall();
+
+    expect(fixed.code).toBe(0);
+    expect(fixed.output).toContain("Next:");
+    const compose = await Bun.file(caddyCompose).text();
+    expect(compose).toContain('      - "127.0.0.1:80:80"');
+    expect(compose).toContain('      - "127.0.0.1:443:443"');
+  },
+  { timeout: 20_000 }
+);
+
+test(
+  "global install sets up host DNS but exits non-zero when only the logging stack fails (HACK-2328)",
+  async () => {
+    await writeInstallStubs();
+    const loggingCompose = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_LOGGING_DIR_NAME,
+      GLOBAL_LOGGING_COMPOSE_FILENAME
+    );
+    runExitResponder = (cmd) =>
+      cmd.includes(loggingCompose) && cmd.includes("up") ? 1 : null;
+
+    const { code, output } = await runNonInteractiveInstall();
+
+    expect(code).not.toBe(0);
+    expect(output).toContain(
+      "the logging stack (Grafana, Loki, Alloy) did not start"
+    );
+    expect(output).not.toContain(
+      "the global proxy (Caddy and CoreDNS) did not start"
+    );
+    expect(output).not.toContain("Next:");
+    if (process.platform === "linux") {
+      expect(output).toContain("Linux DNS result");
+    }
+  },
+  { timeout: 20_000 }
+);
+
+test("never-started proxy cleanup reports listing and removal failures (HACK-2328)", async () => {
+  const { removeUnstartedProxyContainers } = await import(
+    "../src/lib/managed-proxy-compose.ts"
+  );
+  const fail = { exitCode: 1, stdout: "", stderr: "boom" };
+  execMockResponder = (cmd) =>
+    cmd[1] === "ps" ? { exitCode: 0, stdout: "", stderr: "" } : null;
+  expect(await removeUnstartedProxyContainers()).toEqual({ kind: "none" });
+
+  execMockResponder = (cmd) => (cmd[1] === "ps" ? fail : null);
+  const listing = await removeUnstartedProxyContainers();
+  expect(listing.kind).toBe("failed");
+  expect(listing.kind === "failed" && listing.message).toContain(
+    "docker ps --all"
+  );
+
+  execMockResponder = (cmd) =>
+    cmd[1] === "ps"
+      ? { exitCode: 0, stdout: "0123456789ab\nnot-an-id\n", stderr: "" }
+      : cmd[1] === "rm"
+        ? fail
+        : null;
+  const removal = await removeUnstartedProxyContainers();
+  expect(removal).toMatchObject({ kind: "failed", ids: ["0123456789ab"] });
+  expect(removal.kind === "failed" && removal.message).toContain(
+    "docker rm 0123456789ab"
+  );
+  // Only this project's caddy containers that never started are listed.
+  const ps = execCalls.find((cmd) => cmd[1] === "ps") ?? [];
+  expect(ps).toContain("label=com.docker.compose.project=hack-dev-proxy");
+  expect(ps).toContain("label=com.docker.compose.service=caddy");
+  expect(ps).toContain("status=created");
+});
+
+test(
+  "global install never widens a proxy file restricted to one address while proxy.bind_address is unset (HACK-2328)",
+  async () => {
+    await writeInstallStubs();
+    const caddyCompose = globalCaddyComposePath();
+    await mkdir(dirname(caddyCompose), { recursive: true });
+    // An older or hand-edited file that publishes on loopback only.
+    const { renderGlobalCaddyCompose } = await import("../src/templates.ts");
+    await writeFile(
+      caddyCompose,
+      `${renderGlobalCaddyCompose({ bindAddress: "127.0.0.1" })}# local edit\n`
+    );
+
+    const { code, output } = await runNonInteractiveInstall();
+
+    expect(code).toBe(0);
+    expect(output).toContain("Kept the proxy on 127.0.0.1");
+    const compose = await Bun.file(caddyCompose).text();
+    expect(compose).toContain('      - "127.0.0.1:443:443"');
+    expect(compose).not.toContain('      - "443:443"');
+    const config = JSON.parse(
+      await Bun.file(resolveGlobalConfigPath()).text()
+    ) as { proxy?: { bind_address?: string } };
+    expect(config.proxy?.bind_address).toBe("127.0.0.1");
+  },
+  { timeout: 20_000 }
+);
+
+describe("resolveManagedProxyBind (HACK-2328)", () => {
+  async function writeProxyFile(bind: string | null): Promise<string> {
+    const path = globalCaddyComposePath();
+    await mkdir(dirname(path), { recursive: true });
+    const { renderGlobalCaddyCompose } = await import("../src/templates.ts");
+    await writeFile(path, renderGlobalCaddyCompose({ bindAddress: bind }));
+    return path;
+  }
+
+  test("a configured address wins over the file", async () => {
+    const path = await writeProxyFile("127.0.0.1");
+    const configPath = resolveGlobalConfigPath();
+    await mkdir(dirname(configPath), { recursive: true });
+    await writeFile(
+      configPath,
+      `${JSON.stringify({ proxy: { bind_address: "::1" } })}\n`
+    );
+    const { resolveManagedProxyBind } = await import(
+      "../src/lib/managed-proxy-compose.ts"
+    );
+    expect(await resolveManagedProxyBind({ path })).toEqual({
+      bindAddress: "::1",
+      migrated: null,
+    });
+  });
+
+  test.each([
+    "0.0.0.0",
+    "::",
+  ])("a wildcard file (%s) is migrated, never widened to both families", async (bind) => {
+    const path = await writeProxyFile(bind);
+    const { resolveManagedProxyBind } = await import(
+      "../src/lib/managed-proxy-compose.ts"
+    );
+    expect(await resolveManagedProxyBind({ path })).toEqual({
+      bindAddress: bind,
+      migrated: bind,
+    });
+    const config = JSON.parse(
+      await Bun.file(resolveGlobalConfigPath()).text()
+    ) as { proxy?: { bind_address?: string } };
+    expect(config.proxy?.bind_address).toBe(bind);
+  });
+
+  test("a binding it cannot determine leaves the file alone", async () => {
+    const path = globalCaddyComposePath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(
+      path,
+      'services:\n  caddy:\n    ports:\n      - "127.0.0.1:80:80"\n      - "443:443"\n'
+    );
+    const { resolveManagedProxyBind } = await import(
+      "../src/lib/managed-proxy-compose.ts"
+    );
+    const result = await resolveManagedProxyBind({ path });
+    expect(result.bindAddress).toBeNull();
+    expect(result.keep).toContain("left unchanged");
+    expect(await Bun.file(resolveGlobalConfigPath()).exists()).toBe(false);
+  });
+
+  test.each([
+    [
+      "single-quoted with a comment",
+      "      - '127.0.0.1:80:80' # loopback\n      - '127.0.0.1:443:443'\n",
+    ],
+    [
+      "long form",
+      "      - target: 80\n        published: 80\n        host_ip: 127.0.0.1\n      - target: 443\n        published: 443\n        host_ip: 127.0.0.1\n",
+    ],
+  ])("a hand-edited %s mapping keeps its address", async (_label, ports) => {
+    const path = globalCaddyComposePath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, `services:\n  caddy:\n    ports:\n${ports}`);
+    const { resolveManagedProxyBind } = await import(
+      "../src/lib/managed-proxy-compose.ts"
+    );
+    expect(await resolveManagedProxyBind({ path })).toEqual({
+      bindAddress: "127.0.0.1",
+      migrated: "127.0.0.1",
+    });
+  });
+
+  test("an unsavable config still keeps the restricted address", async () => {
+    const path = await writeProxyFile("127.0.0.1");
+    const configPath = resolveGlobalConfigPath();
+    await mkdir(dirname(configPath), { recursive: true });
+    await writeFile(configPath, "{ not json");
+    const { resolveManagedProxyBind } = await import(
+      "../src/lib/managed-proxy-compose.ts"
+    );
+    const result = await resolveManagedProxyBind({ path });
+    expect(result.bindAddress).toBe("127.0.0.1");
+    expect(result.migrated).toBeNull();
+    expect(result.saveError).toBeString();
+    expect(await Bun.file(configPath).text()).toBe("{ not json");
+  });
+});
+
+test(
+  "global install leaves a proxy file with an undeterminable binding unchanged (HACK-2328)",
+  async () => {
+    await writeInstallStubs();
+    const caddyCompose = globalCaddyComposePath();
+    await mkdir(dirname(caddyCompose), { recursive: true });
+    const handEdited =
+      'services:\n  caddy:\n    image: my/caddy\n    ports:\n      - "127.0.0.1:80:80"\n      - "10.0.0.5:443:443"\n';
+    await writeFile(caddyCompose, handEdited);
+
+    const { output } = await runNonInteractiveInstall();
+
+    expect(output).toContain("Proxy file not updated");
+    expect(await Bun.file(caddyCompose).text()).toBe(handEdited);
   },
   { timeout: 20_000 }
 );

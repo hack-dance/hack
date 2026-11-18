@@ -31,6 +31,7 @@ import {
 import {
   applyNativeInternalHostAliases,
   type NativeHostAliasSource,
+  nativeServiceHostAliases,
 } from "./native-project-internal-hosts.ts";
 import {
   nativeBridgeSocketCount,
@@ -470,8 +471,18 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
   },
   route_binding_required: {
     message:
-      "The service declares a route, which needs native HTTPS to be set up.",
-    fix: "Set up native HTTPS (see the guide). A route without an authored healthcheck gets a default route-port probe.",
+      "The service declares a route, but no native HTTPS frontend is selected, so the service starts and the route is not served.",
+    fix: "Set https.caddyBinary, https.caddySha256 and https.port in the native machine settings (or HACK_NATIVE_CADDY_BINARY, HACK_NATIVE_CADDY_SHA256 and HACK_NATIVE_HTTPS_PORT).",
+  },
+  candidate_project_namespace: {
+    message:
+      "Native runs the project under its own namespace, so it never adopts or changes the Compose project of the same name.",
+    fix: "Nothing to do.",
+  },
+  hack_network_mapped: {
+    message:
+      "Hack's shared Compose network becomes a bridge this native project owns, so containers of other projects are not reachable by name; routes are served separately.",
+    fix: "Nothing to do, unless a service calls another project's containers by name: use that project's route instead.",
   },
   route_command_healthcheck_replaced: {
     message:
@@ -790,7 +801,10 @@ function cliServiceFindings(opts: {
     if (problem === "missing_image" && declaresBuild) {
       continue;
     }
-    const text = PREPARATION_FINDINGS[problem];
+    const text =
+      problem === "extra_hosts_without_dependencies"
+        ? serviceHostAliasText(name, service)
+        : PREPARATION_FINDINGS[problem];
     found.push(
       finding(
         {
@@ -893,6 +907,80 @@ function environmentInputFinding(
           : "Check the named source and environment declaration; use owned regular files that are not writable by others.",
     }
   );
+}
+
+/** The one alias name preflight prints: a fixed Docker name, never authored data. */
+const DOCKER_HOST_ALIAS = "host.docker.internal";
+/** Route names that Compose internal DNS sends to the host proxy. */
+const HACK_ROUTE_ALIAS = /\.hack(?:\.local)?$/;
+
+/**
+ * The fix for host aliases without a binding: what such aliases are usually
+ * for, and the dependency entry that admits them. Authored names stay out of
+ * the report (only the fixed host.docker.internal is named); ports and
+ * targets are never printed.
+ */
+function hostAliasGuidance(aliases: readonly string[]): string {
+  const docker = aliases.includes(DOCKER_HOST_ALIAS);
+  const routes = aliases.filter((alias) => HACK_ROUTE_ALIAS.test(alias)).length;
+  const others = aliases.length - routes - (docker ? 1 : 0);
+  const purposes = [
+    docker
+      ? `${DOCKER_HOST_ALIAS} usually reaches a process on this machine (a database proxy, a dev server or a tunnel)`
+      : null,
+    routes
+      ? `${routes} name(s) ending in .hack are usually Hack routes sent to the host proxy (Compose internal DNS compatibility)`
+      : null,
+    others
+      ? `${others} other name(s) are usually tunnels or remote names that a process on this machine serves`
+      : null,
+  ].filter((part) => part !== null);
+  const names = JSON.stringify(
+    docker && aliases.length === 1 ? [DOCKER_HOST_ALIAS] : ["<alias>"]
+  );
+  return `${purposes.length ? `${purposes.join("; ")}. ` : ""}Native has no general route from its VM to this machine, so each alias needs a binding to the one host listener it uses: add {"version": 2, "dependencies": [{"binding": "<name>", "aliases": ${names}, "guest_port": <port the container connects to>, "host_port": <listening port on this machine>, "host_executable": "/absolute/path/to/the/listener"}]} to a file selected by HACK_NATIVE_DEPENDENCIES or the dependencies setting (an entry without "services" covers every service that declares the alias; use host_pid instead of host_executable for a listener that does not change). One alias reaches one host listener; hack up names each unbound alias.`;
+}
+
+/** The project-wide aliases that target host-gateway. */
+function projectHostAliases(
+  hosts: Readonly<Record<string, string>> | null
+): string[] {
+  return Object.entries(hosts ?? {})
+    .filter(([, target]) => target === "host-gateway")
+    .map(([alias]) => alias);
+}
+
+/** The per-service extra_hosts finding, counting that service's aliases. */
+function serviceHostAliasText(
+  name: string,
+  service: unknown
+): Explanation & { readonly field?: string } {
+  let aliases: string[] = [];
+  try {
+    aliases = isRecord(service)
+      ? (nativeServiceHostAliases({
+          services: { [name]: service },
+          profiles: Array.isArray(service.profiles)
+            ? service.profiles.filter(
+                (profile): profile is string => typeof profile === "string"
+              )
+            : [],
+        })[name] ?? [])
+      : [];
+  } catch {
+    // A declaration native refuses (such as one alias declared twice) has
+    // authored names in its error; keep the fixed text and let up name it.
+  }
+  const named = aliases.includes(DOCKER_HOST_ALIAS)
+    ? `, including ${DOCKER_HOST_ALIAS}`
+    : "";
+  return {
+    field: "extra_hosts",
+    message: aliases.length
+      ? `The service declares ${aliases.length} host-gateway alias(es) in extra_hosts${named}, but no host dependency binding is selected.`
+      : PREPARATION_FINDINGS.extra_hosts_without_dependencies.message,
+    fix: `${hostAliasGuidance(aliases)} To drop one instead, remove it from the service's extra_hosts.`,
+  };
 }
 
 /**
@@ -1033,7 +1121,7 @@ async function adaptForPreflight(opts: {
           {
             message:
               "The project declares project-wide extra hosts that native cannot apply: no host dependency binding is selected, or an entry is not an exact host-gateway alias.",
-            fix: "Select a dependency file with HACK_NATIVE_DEPENDENCIES or the dependencies setting, or remove the entries from internal.extra_hosts.",
+            fix: `${hostAliasGuidance(projectHostAliases(opts.internalHosts))} To drop one instead, remove it from internal.extra_hosts or run hack internal extra-hosts unset <alias>.`,
           }
         )
       );
@@ -1686,6 +1774,12 @@ export type NativePreflightOptions = {
   readonly runtime: NativeRuntimeSelection | "incomplete" | null;
   /** The gcloud ADC consent (`HACK_NATIVE_GCLOUD_ADC=file` or `gcloud` setting). */
   readonly gcloud?: NativeGcloudSelection;
+  /**
+   * Whether the native HTTPS frontend is selected (machine `https` setting or
+   * the HACK_NATIVE_CADDY_* variables). Routes are then served, so the
+   * runtime's per-route `route_binding_required` note is not repeated.
+   */
+  readonly httpsSelected?: boolean;
   readonly invoke?: typeof invokeNativeRuntime;
 };
 
@@ -1799,6 +1893,16 @@ async function reviewWithSetup(opts: {
   return reviewed.review.status === "unavailable" ? skipped : reviewed;
 }
 
+/** Runtime findings that still apply to this machine's selections. */
+function selectedRuntimeFindings(
+  findings: readonly NativePreflightFinding[],
+  httpsSelected: boolean
+): readonly NativePreflightFinding[] {
+  return httpsSelected
+    ? findings.filter((found) => found.code !== "route_binding_required")
+    : findings;
+}
+
 /** Runs installation, CLI and runtime gates over the same selected project. */
 export async function collectNativePreflight(
   opts: NativePreflightOptions
@@ -1881,7 +1985,10 @@ export async function collectNativePreflight(
     projectCodes.add(found.code);
     return true;
   });
-  for (const found of runtime.findings) {
+  for (const found of selectedRuntimeFindings(
+    runtime.findings,
+    opts.httpsSelected === true
+  )) {
     const key = `${found.severity}\0${found.code}\0${found.service ?? ""}\0${found.field ?? ""}\0${found.message}`;
     if (
       reported.has(`${found.code}\0${found.service ?? ""}`) ||

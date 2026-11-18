@@ -73,8 +73,25 @@ fn shared_paths(
         ));
     }
     let mut selected = BTreeMap::new();
-    for mount in mounts(plan) {
-        let path = share.bind_path(&mount.source)?;
+    for (service, mount) in plan
+        .services
+        .iter()
+        .filter(|(_, s)| s.active)
+        .flat_map(|(name, s)| {
+            s.mounts
+                .iter()
+                .filter(|m| m.kind == "bind")
+                .map(move |m| (name, m))
+        })
+    {
+        // A refusal here names the service and the rule, never the source path.
+        let path = share.bind_path(&mount.source).map_err(|_| {
+            CandidateError::new(
+                "graph_bind_source",
+                "A bind mount source could not be shared with the native VM: it must be a regular file or directory inside the project root, reached without symlinks.",
+            )
+            .with_service(service)
+        })?;
         engine.guest().execute(
             "set -eu; test \"$(realpath -e -- \"$1\")\" = \"$1\"; test -f \"$1\" || test -d \"$1\"",
             &[&path],

@@ -90,9 +90,9 @@ offered as Run. Host changes and decisions still need review.
    been checked. See [known problems](guides/upgrade-from-v4.md#known-problems-and-the-dogfood-record).
 
 v5 keeps Compose as the default for the ordinary CLI. Retired features include the hosted
-account/team flows, dashboard and Hack Tickets; the
-[release summary](../guides/v5-release-notes.md) covers retired features and
-breaking command changes. Newer source changes are marked as intended for
+account/team flows, dashboard and Hack Tickets; [Breaking changes from v4](guides/breaking-changes.md) lists every breaking
+change in one table, with the reason for each. The
+[release summary](../guides/v5-release-notes.md) has the detail. Newer source changes are marked as intended for
 next.17; an installed next.16 bundle keeps its original behavior.
 
 ## Roll back

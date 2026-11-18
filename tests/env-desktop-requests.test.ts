@@ -1,0 +1,611 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
+
+/**
+ * Contracts for the desktop Env tab (HACK-2287, requests R24 to R27):
+ * every overlay in one read, plaintext values without secrets, the key
+ * source and a one-run key override, and overlay creation. No secret value
+ * or key may reach stdout or stderr on any of these paths, and none is
+ * ever passed on argv (values go through stdin, keys through a file or a
+ * variable NAME).
+ */
+
+const ENTRYPOINT = resolve(import.meta.dir, "..", "index.ts");
+const SECRET_VALUE = ["synthetic", "desktop", "secret", "sentinel"].join("-");
+const PLAIN_VALUE = "plain-visible-value";
+const SERVICE_PLAIN_VALUE = "service-plain-value";
+const OVERRIDE_KEY = ["synthetic", "override", "key", "material"].join("-");
+const OTHER_KEY = ["synthetic", "other", "key", "material"].join("-");
+const CLI_TEST_TIMEOUT_MS = 60_000;
+
+const roots: string[] = [];
+
+afterEach(async () => {
+  for (const root of roots.splice(0)) {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function createProject() {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-env-desktop-"))
+  );
+  roots.push(root);
+  const projectRoot = resolve(root, "repo");
+  const projectDir = resolve(projectRoot, ".hack");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(
+    resolve(projectDir, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.20\n"
+  );
+  await writeFile(
+    resolve(projectDir, "hack.config.json"),
+    `${JSON.stringify({ name: "env-desktop", dev_host: "env-desktop.hack" })}\n`
+  );
+  await writeFile(
+    resolve(projectDir, "hack.env.default.yaml"),
+    "version: 1\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
+  );
+  return { root, projectRoot, projectDir };
+}
+
+type Project = Awaited<ReturnType<typeof createProject>>;
+
+async function runHack(opts: {
+  readonly project: Project;
+  readonly args: readonly string[];
+  readonly stdin?: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+}) {
+  const proc = Bun.spawn([process.execPath, ENTRYPOINT, ...opts.args], {
+    cwd: opts.project.projectRoot,
+    env: privateCliEnv({
+      root: opts.project.root,
+      env: {
+        HACK_GLOBAL_CONFIG_PATH: join(opts.project.root, "hack-config.json"),
+        HACK_HOME: join(opts.project.root, "hack-home"),
+        HACK_NO_INTERACTIVE: "1",
+        HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",
+        NO_COLOR: "1",
+        ...opts.env,
+      },
+    }),
+    stdin: opts.stdin === undefined ? "ignore" : "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (opts.stdin !== undefined && proc.stdin) {
+    proc.stdin.write(opts.stdin);
+    await proc.stdin.end();
+  }
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { stdout, stderr, exitCode };
+}
+
+/** Never on argv: every key and secret value in these tests is a sentinel. */
+function expectNoSecretOutput(result: {
+  readonly stdout: string;
+  readonly stderr: string;
+}) {
+  const output = `${result.stdout}${result.stderr}`;
+  expect(output).not.toContain(SECRET_VALUE);
+  expect(output).not.toContain(OVERRIDE_KEY);
+  expect(output).not.toContain(OTHER_KEY);
+}
+
+async function setValue(opts: {
+  readonly project: Project;
+  readonly key: string;
+  readonly value: string;
+  readonly secret?: boolean;
+  readonly extraArgs?: readonly string[];
+  readonly env?: Readonly<Record<string, string | undefined>>;
+}) {
+  const result = await runHack({
+    project: opts.project,
+    args: [
+      "env",
+      "set",
+      opts.key,
+      ...(opts.secret ? ["--secret"] : []),
+      "--value-stdin",
+      ...(opts.extraArgs ?? []),
+    ],
+    stdin: opts.value,
+    env: opts.env,
+  });
+  expectNoSecretOutput(result);
+  return result;
+}
+
+type ListedVar = {
+  readonly key: string;
+  readonly value?: unknown;
+  readonly storage: { readonly kind: string };
+};
+
+type ListPayload = {
+  readonly key_state: string;
+  readonly key_source: Record<string, unknown> | null;
+  readonly overlays: readonly Record<string, unknown>[];
+  readonly vars: readonly ListedVar[];
+};
+
+async function listJson(opts: {
+  readonly project: Project;
+  readonly args?: readonly string[];
+  readonly env?: Readonly<Record<string, string | undefined>>;
+}): Promise<{ readonly exitCode: number; readonly json: ListPayload }> {
+  const result = await runHack({
+    project: opts.project,
+    args: ["env", "list", "--json", ...(opts.args ?? [])],
+    env: opts.env,
+  });
+  expectNoSecretOutput(result);
+  return {
+    exitCode: result.exitCode,
+    json: JSON.parse(result.stdout) as ListPayload,
+  };
+}
+
+function byKey(json: ListPayload): Record<string, ListedVar> {
+  return Object.fromEntries(json.vars.map((entry) => [entry.key, entry]));
+}
+
+describe("R25: plaintext values in one pipe-safe read", () => {
+  test(
+    "--plaintext-values includes plaintext values only, never secrets",
+    async () => {
+      const project = await createProject();
+      expect(
+        (await setValue({ project, key: "PLAIN", value: PLAIN_VALUE })).exitCode
+      ).toBe(0);
+      expect(
+        (
+          await setValue({
+            project,
+            key: "API_TOKEN",
+            value: SECRET_VALUE,
+            secret: true,
+          })
+        ).exitCode
+      ).toBe(0);
+
+      const plain = await listJson({
+        project,
+        args: ["--plaintext-values"],
+      });
+      expect(plain.exitCode).toBe(0);
+      const vars = byKey(plain.json);
+      expect(vars.PLAIN?.value).toBe(PLAIN_VALUE);
+      expect(vars.API_TOKEN?.storage.kind).toBe("secret");
+      expect(vars.API_TOKEN && "value" in vars.API_TOKEN).toBe(false);
+
+      // Without the flag the listing stays names-only.
+      const names = await listJson({ project });
+      for (const entry of names.json.vars) {
+        expect("value" in entry).toBe(false);
+      }
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
+    "plaintext values do not need the project key",
+    async () => {
+      const project = await createProject();
+      await setValue({ project, key: "PLAIN", value: PLAIN_VALUE });
+      await setValue({
+        project,
+        key: "API_TOKEN",
+        value: SECRET_VALUE,
+        secret: true,
+      });
+      await rm(resolve(project.projectRoot, ".hack.secret.key"));
+
+      const listed = await listJson({
+        project,
+        args: ["--plaintext-values"],
+      });
+      expect(listed.exitCode).toBe(0);
+      expect(listed.json.key_state).toBe("missing");
+      expect(byKey(listed.json).PLAIN?.value).toBe(PLAIN_VALUE);
+      expect("value" in (byKey(listed.json).API_TOKEN ?? {})).toBe(false);
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
+    "--service selects the service scope's winning plaintext values",
+    async () => {
+      const project = await createProject();
+      await setValue({ project, key: "PLAIN", value: PLAIN_VALUE });
+      await setValue({
+        project,
+        key: "PLAIN",
+        value: SERVICE_PLAIN_VALUE,
+        extraArgs: ["--service", "api"],
+      });
+
+      const service = await listJson({
+        project,
+        args: ["--plaintext-values", "--service", "api"],
+      });
+      expect(byKey(service.json).PLAIN?.value).toBe(SERVICE_PLAIN_VALUE);
+      const global = await listJson({
+        project,
+        args: ["--plaintext-values"],
+      });
+      expect(byKey(global.json).PLAIN?.value).toBe(PLAIN_VALUE);
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
+    "--plaintext-values without --json is a usage error",
+    async () => {
+      const project = await createProject();
+      await setValue({ project, key: "PLAIN", value: PLAIN_VALUE });
+      const result = await runHack({
+        project,
+        args: ["env", "list", "--plaintext-values"],
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).not.toContain(PLAIN_VALUE);
+      expect(result.stderr).toContain("--plaintext-values requires --json");
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+});
+
+describe("R24: every overlay", () => {
+  test(
+    "env list --json and env overlay list --json list every overlay",
+    async () => {
+      const project = await createProject();
+      await writeFile(
+        resolve(project.projectDir, "hack.config.json"),
+        `${JSON.stringify({
+          name: "env-desktop",
+          dev_host: "env-desktop.hack",
+          env: { default_overlay: "dev" },
+        })}\n`
+      );
+      await setValue({
+        project,
+        key: "PLAIN",
+        value: PLAIN_VALUE,
+        extraArgs: ["--env", "qa"],
+      });
+      await setValue({
+        project,
+        key: "PLAIN",
+        value: PLAIN_VALUE,
+        extraArgs: ["--env", "staging", "--local"],
+      });
+
+      const expected = [
+        {
+          name: "dev",
+          path: resolve(project.projectDir, "hack.env.dev.yaml"),
+          exists: false,
+          local_path: resolve(project.projectDir, "hack.env.dev.local.yaml"),
+          local_exists: false,
+          default: true,
+        },
+        {
+          name: "qa",
+          path: resolve(project.projectDir, "hack.env.qa.yaml"),
+          exists: true,
+          local_path: resolve(project.projectDir, "hack.env.qa.local.yaml"),
+          local_exists: false,
+          default: false,
+        },
+        {
+          name: "staging",
+          path: resolve(project.projectDir, "hack.env.staging.yaml"),
+          exists: false,
+          local_path: resolve(
+            project.projectDir,
+            "hack.env.staging.local.yaml"
+          ),
+          local_exists: true,
+          default: false,
+        },
+      ];
+      const listed = await listJson({ project });
+      expect(listed.json.overlays).toEqual(expected);
+
+      const overlays = await runHack({
+        project,
+        args: ["env", "overlay", "list", "--json"],
+      });
+      expect(overlays.exitCode).toBe(0);
+      expect(JSON.parse(overlays.stdout)).toEqual({
+        ok: true,
+        data: {
+          project: "env-desktop",
+          overlays: expected,
+          schema: "hack.env-overlays.v1",
+        },
+      });
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+});
+
+describe("R26: key source and one-run override", () => {
+  test(
+    "key_source names the checkout key file, the variable, or none",
+    async () => {
+      const project = await createProject();
+      expect((await listJson({ project })).json.key_source).toEqual({
+        kind: "none",
+      });
+
+      const fromEnv = await listJson({
+        project,
+        env: { HACK_ENV_SECRET_KEY: OTHER_KEY },
+      });
+      expect(fromEnv.json.key_state).toBe("ok");
+      expect(fromEnv.json.key_source).toEqual({
+        kind: "env",
+        origin: "default",
+        name: "HACK_ENV_SECRET_KEY",
+      });
+
+      await setValue({
+        project,
+        key: "API_TOKEN",
+        value: SECRET_VALUE,
+        secret: true,
+      });
+      expect((await listJson({ project })).json.key_source).toEqual({
+        kind: "file",
+        origin: "checkout",
+        path: resolve(project.projectRoot, ".hack.secret.key"),
+        relative_path: ".hack.secret.key",
+      });
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
+    "--key-file and --key-env override discovery for one run",
+    async () => {
+      const project = await createProject();
+      const keyFile = resolve(project.root, "chosen.key");
+      await writeFile(keyFile, `${OVERRIDE_KEY}\n`, { mode: 0o600 });
+      // Encrypt with the override key; no key file may be created.
+      const set = await setValue({
+        project,
+        key: "API_TOKEN",
+        value: SECRET_VALUE,
+        secret: true,
+        extraArgs: ["--key-file", keyFile],
+      });
+      expect(set.exitCode).toBe(0);
+      expect(
+        await stat(resolve(project.projectRoot, ".hack.secret.key")).catch(
+          () => null
+        )
+      ).toBeNull();
+
+      const listed = await listJson({
+        project,
+        args: ["--key-file", keyFile],
+      });
+      expect(listed.json.key_state).toBe("ok");
+      expect(listed.json.key_source).toEqual({
+        kind: "file",
+        origin: "override",
+        path: keyFile,
+        relative_path: null,
+      });
+
+      const get = await runHack({
+        project,
+        args: ["env", "get", "API_TOKEN", "--key-file", keyFile],
+      });
+      expect(get.exitCode).toBe(0);
+      expect(get.stdout).toBe(SECRET_VALUE);
+      expect(get.stderr).not.toContain(OVERRIDE_KEY);
+
+      const byName = await runHack({
+        project,
+        args: ["env", "get", "API_TOKEN", "--key-env", "CHOSEN_KEY"],
+        env: { CHOSEN_KEY: OVERRIDE_KEY },
+      });
+      expect(byName.exitCode).toBe(0);
+      expect(byName.stdout).toBe(SECRET_VALUE);
+
+      const listedByName = await listJson({
+        project,
+        args: ["--key-env", "CHOSEN_KEY"],
+        env: { CHOSEN_KEY: OVERRIDE_KEY },
+      });
+      expect(listedByName.json.key_source).toEqual({
+        kind: "env",
+        origin: "override",
+        name: "CHOSEN_KEY",
+      });
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
+    "an override never falls back to discovered keys",
+    async () => {
+      const project = await createProject();
+      await setValue({
+        project,
+        key: "API_TOKEN",
+        value: SECRET_VALUE,
+        secret: true,
+      });
+      const missing = resolve(project.root, "missing.key");
+      const get = await runHack({
+        project,
+        args: ["env", "get", "API_TOKEN", "--key-file", missing],
+      });
+      expect(get.exitCode).not.toBe(0);
+      expectNoSecretOutput(get);
+
+      const unset = await runHack({
+        project,
+        args: ["env", "get", "API_TOKEN", "--key-env", "UNSET_KEY_NAME"],
+        env: { HACK_ENV_SECRET_KEY: OTHER_KEY },
+      });
+      expect(unset.exitCode).not.toBe(0);
+      expectNoSecretOutput(unset);
+
+      const listed = await listJson({
+        project,
+        args: ["--key-file", missing],
+      });
+      expect(listed.json.key_state).toBe("missing");
+      expect(listed.json.key_source).toMatchObject({
+        kind: "file",
+        origin: "override",
+      });
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
+    "refusals never echo a key passed where a NAME belongs",
+    async () => {
+      const project = await createProject();
+      const keyLike = `${OVERRIDE_KEY}=x`;
+      const result = await runHack({
+        project,
+        args: ["env", "list", "--json", "--key-env", keyLike],
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(`${result.stdout}${result.stderr}`).not.toContain(OVERRIDE_KEY);
+      expect(`${result.stdout}${result.stderr}`).toContain(
+        "Invalid --key-env value"
+      );
+
+      const both = await runHack({
+        project,
+        args: [
+          "env",
+          "list",
+          "--json",
+          "--key-env",
+          "A_KEY",
+          "--key-file",
+          "x.key",
+        ],
+      });
+      expect(both.exitCode).not.toBe(0);
+      expect(`${both.stdout}${both.stderr}`).toContain(
+        "either --key-file or --key-env"
+      );
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+});
+
+describe("R27: overlay creation", () => {
+  test(
+    "env overlay add creates an empty overlay and refuses an existing one",
+    async () => {
+      const project = await createProject();
+      const git = Bun.spawnSync(["git", "init", "-q", project.projectRoot], {
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      expect(git.exitCode).toBe(0);
+
+      const created = await runHack({
+        project,
+        args: ["env", "overlay", "add", "qa", "--json"],
+      });
+      expect(created.exitCode).toBe(0);
+      const path = resolve(project.projectDir, "hack.env.qa.yaml");
+      expect(JSON.parse(created.stdout)).toEqual({
+        ok: true,
+        data: {
+          project: "env-desktop",
+          created: {
+            name: "qa",
+            path,
+            exists: true,
+            local_path: resolve(project.projectDir, "hack.env.qa.local.yaml"),
+            local_exists: false,
+            default: false,
+          },
+          committed_path_ignored: false,
+          local_path_ignored: true,
+          schema: "hack.env-overlays.v1",
+        },
+      });
+      const text = await readFile(path, "utf8");
+      expect(text).toContain("environment: qa");
+      expect(text).toContain("secretsprovider: project_key");
+      expect((await stat(path)).mode & 0o077).toBe(
+        (await stat(resolve(project.projectDir, "hack.env.default.yaml")))
+          .mode & 0o077
+      );
+
+      // The new overlay is selectable and listed.
+      const listed = await listJson({ project, args: ["--env", "qa"] });
+      expect(listed.exitCode).toBe(0);
+      expect(listed.json.overlays.map((entry) => entry.name)).toEqual(["qa"]);
+
+      const again = await runHack({
+        project,
+        args: ["env", "overlay", "add", "qa", "--json"],
+      });
+      expect(again.exitCode).not.toBe(0);
+      expect(again.stdout).toContain("E_PATH_CONFLICT");
+      expect(await readFile(path, "utf8")).toBe(text);
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
+    "env overlay add refuses reserved and invalid names without echoing them",
+    async () => {
+      const project = await createProject();
+      for (const name of [
+        "default",
+        "base",
+        "local",
+        "Qa",
+        `x=${SECRET_VALUE}`,
+      ]) {
+        const result = await runHack({
+          project,
+          args: ["env", "overlay", "add", name],
+        });
+        expect(result.exitCode).not.toBe(0);
+        expectNoSecretOutput(result);
+        expect(result.stderr).toContain("Invalid overlay name");
+      }
+      expect(
+        await stat(resolve(project.projectDir, "hack.env.local.yaml")).catch(
+          () => null
+        )
+      ).toBeNull();
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+});

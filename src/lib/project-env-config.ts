@@ -124,6 +124,10 @@ import {
   parseEnvConfigSelection,
   readProjectDefaultEnvConfig,
 } from "./project.ts";
+import {
+  currentProjectEnvKeyOverride,
+  type ProjectEnvKeyOverride,
+} from "./project-env-key-override.ts";
 import { assertProjectEnvLayerPath } from "./project-env-layer-path.ts";
 import {
   assertLegacyProjectDirectory,
@@ -1680,14 +1684,28 @@ type ProjectEnvLayers = NonNullable<
 export async function resolveProjectEnvMetadata(
   opts: ProjectEnvResolveOptions & { readonly fileDiagnostics?: boolean }
 ): Promise<ProjectEnvResolvedMetadata | null> {
+  return (await readProjectEnvMetadataLayers(opts))?.metadata ?? null;
+}
+
+async function readProjectEnvMetadataLayers(
+  opts: ProjectEnvResolveOptions & { readonly fileDiagnostics?: boolean }
+): Promise<{
+  readonly layers: ProjectEnvLayers;
+  readonly metadata: ProjectEnvResolvedMetadata;
+} | null> {
   try {
     const layers = await readProjectEnvLayers({
       ...opts,
       strictRead: !opts.fileDiagnostics,
     });
     return layers
-      ? projectEnvProjection({ layers, serviceNames: opts.serviceNames })
-          .metadata
+      ? {
+          layers,
+          metadata: projectEnvProjection({
+            layers,
+            serviceNames: opts.serviceNames,
+          }).metadata,
+        }
       : null;
   } catch (error) {
     if (error instanceof EnvMigrationPendingError) {
@@ -1703,6 +1721,213 @@ export async function resolveProjectEnvMetadata(
       "Cannot resolve project env metadata: selected configuration is invalid or unreadable."
     );
   }
+}
+
+/**
+ * Metadata plus plaintext values for one scope from one read of the selected
+ * layers (HACK-2287, R25). `plaintextValues` holds only winning entries
+ * stored as plaintext: a secret entry is never decrypted, never returned,
+ * and no key is acquired, so the result is safe to print to a pipe.
+ * The scope follows `selectProjectEnvMetadata` (global, or global plus one
+ * service scope). Null means no modern config.
+ */
+export async function resolveProjectEnvMetadataWithPlaintext(
+  opts: ProjectEnvResolveOptions & {
+    readonly fileDiagnostics?: boolean;
+    readonly scope: string;
+  }
+): Promise<{
+  readonly metadata: ProjectEnvResolvedMetadata;
+  readonly plaintextValues: Readonly<Record<string, string>>;
+} | null> {
+  const read = await readProjectEnvMetadataLayers(opts);
+  if (read === null) {
+    return null;
+  }
+  const scope = normalizeProjectEnvScopeName({ scopeName: opts.scope });
+  const entries = resolveEffectiveStoredEntries({
+    layers: read.layers.envLayers,
+    scopeNames: scope === "global" ? ["global"] : ["global", scope],
+  });
+  const plaintextValues: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(entries)) {
+    if (!isProjectEnvSecretValue(entry.value)) {
+      plaintextValues[key] = String(entry.value);
+    }
+  }
+  return { metadata: read.metadata, plaintextValues };
+}
+
+/** One overlay of a project's env config (HACK-2287, R24). Paths are absolute. */
+export type ProjectEnvOverlayEntry = {
+  readonly name: string;
+  /** Committed layer, `.hack/hack.env.<name>.yaml`. */
+  readonly path: string;
+  readonly exists: boolean;
+  /** Machine-local layer, `.hack/hack.env.<name>.local.yaml` (never committed). */
+  readonly localPath: string;
+  readonly localExists: boolean;
+  /** The overlay `hack` selects when `--env` is omitted. */
+  readonly isDefault: boolean;
+};
+
+/**
+ * Every overlay a project has: each committed `hack.env.<name>.yaml`, each
+ * overlay that exists only as its machine-local layer, and the configured
+ * default overlay even when it has no file yet. Base layers (`default`,
+ * the bare local file) are not overlays. Names that the `--env` grammar
+ * cannot select are left out. Sorted by name; names only, never values.
+ */
+export async function listProjectEnvOverlays(opts: {
+  readonly projectDir: string;
+}): Promise<readonly ProjectEnvOverlayEntry[]> {
+  const localSuffix = `.${PROJECT_ENV_LOCAL_SEGMENT}`;
+  let entries: string[];
+  try {
+    entries = (await readdir(opts.projectDir, { withFileTypes: true }))
+      .filter((entry) => entry.isFile() || entry.isSymbolicLink())
+      .map((entry) => entry.name);
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      entries = [];
+    } else {
+      throw error;
+    }
+  }
+  const committed = await listProjectEnvOverlayNames({
+    projectDir: opts.projectDir,
+  }).catch(() => [] as readonly string[]);
+  const localOnly = entries
+    .filter(
+      (name) =>
+        name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+        name.endsWith(`${localSuffix}${PROJECT_ENV_CONFIG_FILENAME_SUFFIX}`)
+    )
+    .map((name) =>
+      name.slice(
+        PROJECT_ENV_CONFIG_FILENAME_PREFIX.length,
+        -(localSuffix.length + PROJECT_ENV_CONFIG_FILENAME_SUFFIX.length)
+      )
+    );
+  const defaultEnv = await readProjectDefaultEnvConfig({
+    projectDir: opts.projectDir,
+  });
+  const names = new Set<string>([
+    ...committed,
+    ...localOnly,
+    ...(defaultEnv === null ? [] : [defaultEnv]),
+  ]);
+  const overlays: ProjectEnvOverlayEntry[] = [];
+  for (const name of [...names].sort((left, right) =>
+    left.localeCompare(right)
+  )) {
+    if (parseEnvConfigSelection(name) !== name) {
+      continue;
+    }
+    const path = resolveProjectEnvConfigPath({
+      projectDir: opts.projectDir,
+      envName: name,
+    });
+    const localPath = resolveProjectEnvLocalConfigPath({
+      projectDir: opts.projectDir,
+      envName: name,
+    });
+    overlays.push({
+      name,
+      path,
+      exists: await pathExists(path),
+      localPath,
+      localExists: await pathExists(localPath),
+      isDefault: name === defaultEnv,
+    });
+  }
+  return overlays;
+}
+
+/** Fixed refusal for `hack env overlay add`; names the grammar, not the argument. */
+export const PROJECT_ENV_OVERLAY_NAME_INVALID_MESSAGE = `Invalid overlay name. Overlay names must match ^[a-z0-9]+(-[a-z0-9]+)*$; base, default, none and ${PROJECT_ENV_LOCAL_SEGMENT} are reserved.`;
+
+export class ProjectEnvOverlayExistsError extends HackCliError {
+  constructor(path: string) {
+    super({
+      code: "E_PATH_CONFLICT",
+      message: `Overlay already exists: ${path}. Nothing was changed.`,
+    });
+    this.name = "ProjectEnvOverlayExistsError";
+  }
+}
+
+/**
+ * Create an empty committed overlay layer, `.hack/hack.env.<name>.yaml`
+ * (HACK-2287, R27), the way `hack env set --env <name>` would first write it:
+ * the same layer path checks, layer lock, YAML header and default file mode.
+ * Refuses an existing layer of any type and never overwrites. Makes sure
+ * `.hack/.gitignore` ignores the overlay's machine-local layer, and reports
+ * whether git ignores each path (null when git cannot say).
+ */
+export async function createProjectEnvOverlay(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly name: string;
+}): Promise<{
+  readonly overlay: ProjectEnvOverlayEntry;
+  readonly committedIgnored: boolean | null;
+  readonly localIgnored: boolean | null;
+}> {
+  if (
+    parseEnvConfigSelection(opts.name) !== opts.name ||
+    opts.name === PROJECT_ENV_LOCAL_SEGMENT
+  ) {
+    throw new ClosedCliError(PROJECT_ENV_OVERLAY_NAME_INVALID_MESSAGE);
+  }
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  const path = resolveProjectEnvConfigPath({
+    projectDir: opts.projectDir,
+    envName: opts.name,
+  });
+  await assertProjectEnvLayerPath({ projectRoot: opts.projectRoot, path });
+  await withEnvLayerLock({
+    layerPath: path,
+    run: async () => {
+      if (await lstat(path).catch(() => null)) {
+        throw new ProjectEnvOverlayExistsError(path);
+      }
+      await ensureHackDirGitignoreForLocalEnvWrite({
+        projectDir: opts.projectDir,
+      });
+      try {
+        await writeProjectEnvConfigFile({
+          projectRoot: opts.projectRoot,
+          path,
+          config: defaultProjectEnvConfig({ environment: opts.name }),
+          expectedExisting: null,
+        });
+      } catch (error) {
+        if (error instanceof AtomicWriteConflictError) {
+          throw new ProjectEnvOverlayExistsError(path);
+        }
+        throw error;
+      }
+    },
+  });
+  const overlay = (await listProjectEnvOverlays(opts)).find(
+    (entry) => entry.name === opts.name
+  );
+  if (!overlay) {
+    throw new ClosedCliError(
+      `Created ${path}, but it is not listed as an overlay. Run hack env overlay list to inspect.`
+    );
+  }
+  const localPath = overlay.localPath;
+  const [committedIgnored, localIgnored] = await Promise.all([
+    isGitIgnoredProjectEnvPath({ projectRoot: opts.projectRoot, path }),
+    isGitIgnoredProjectEnvPath({
+      projectRoot: opts.projectRoot,
+      path: localPath,
+    }),
+  ]);
+  return { overlay, committedIgnored, localIgnored };
 }
 
 export type NativeProjectEnvHostTargets = {
@@ -3879,11 +4104,15 @@ async function resolveProjectEnvHydrationKey(opts: {
   readonly secret: boolean;
   readonly refuse: ProjectEnvHydrationRefuse;
 }): Promise<{ readonly keyText: string | null; readonly createdKey: boolean }> {
-  const fileKey = await readExistingProjectEnvKeyFileText({
-    projectRoot: opts.projectRoot,
-  });
-  const environmentKey =
-    process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() || null;
+  const override = currentProjectEnvKeyOverride();
+  const fileKey = override
+    ? null
+    : await readExistingProjectEnvKeyFileText({
+        projectRoot: opts.projectRoot,
+      });
+  const environmentKey = override
+    ? await readProjectEnvKeyOverride({ override })
+    : process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() || null;
   // The same priority `resolveProjectEnvKey` gives readers of this layer.
   const readerKey = fileKey ?? environmentKey;
   const existingSecrets = Object.values(opts.config.values).flatMap(
@@ -3906,6 +4135,15 @@ async function resolveProjectEnvHydrationKey(opts: {
   }
   if (!opts.secret) {
     return { keyText: null, createdKey: false };
+  }
+  if (override) {
+    // One-run override (R26): encrypt with that key; never create a file.
+    if (readerKey === null) {
+      throw new ProjectEnvKeyMissingError(
+        projectEnvKeyOverrideMissingMessage()
+      );
+    }
+    return { keyText: readerKey, createdKey: false };
   }
   if (fileKey === null && readerKey !== null) {
     throw opts.refuse("key_env_only");
@@ -5138,51 +5376,34 @@ async function resolveProjectEnvKey(opts: {
   readonly forEncryption?: boolean;
   readonly nativeSelection?: { readonly signal?: AbortSignal };
 }): Promise<string | null> {
+  const override = currentProjectEnvKeyOverride();
+  if (override) {
+    // One-run override (R26): no discovery fallback, no key file creation.
+    const keyText = await readProjectEnvKeyOverride({ override });
+    if (keyText === null && opts.required) {
+      throw new ProjectEnvKeyMissingError(
+        projectEnvKeyOverrideMissingMessage()
+      );
+    }
+    return keyText;
+  }
   if (opts.nativeSelection) {
     return await resolveNativeProjectEnvKey({
       ...opts,
       signal: opts.nativeSelection.signal,
     });
   }
-  // Priority: checkout-local, shared common-dir, primary checkout, environment.
-  const keyPath = resolveProjectEnvKeyPath({ projectRoot: opts.projectRoot });
-  const localKey = await readLegacyProjectEnvKeyFile({ path: keyPath });
-  if (localKey) {
-    if (opts.forEncryption) {
-      return (await ensureProjectEnvSecretKey(opts)).keyText;
-    }
-    return localKey;
-  }
-  const sharedKeyPath = await resolveProjectEnvSharedKeyPath({
+  const discovered = await discoverProjectEnvKey({
     projectRoot: opts.projectRoot,
   });
-  const sharedKey =
-    sharedKeyPath === null
-      ? null
-      : await readLegacyProjectEnvKeyFile({ path: sharedKeyPath });
-  if (sharedKey) {
-    if (opts.forEncryption) {
+  if (discovered.keyText !== null) {
+    if (opts.forEncryption && discovered.source.kind === "file") {
       return (await ensureProjectEnvSecretKey(opts)).keyText;
     }
-    return sharedKey;
-  }
-  const inheritedKey = await resolveInheritedProjectEnvKey({
-    projectRoot: opts.projectRoot,
-  });
-  if (inheritedKey) {
-    if (opts.forEncryption) {
-      return (await ensureProjectEnvSecretKey(opts)).keyText;
-    }
-    return inheritedKey.keyText;
-  }
-  const envFallback = process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() ?? "";
-  if (envFallback.length > 0) {
-    return envFallback;
+    return discovered.keyText;
   }
   if (opts.required) {
-    const searchedPaths = [keyPath, sharedKeyPath]
-      .filter((value): value is string => typeof value === "string")
-      .join(" or ");
+    const searchedPaths = discovered.searchedPaths.join(" or ");
     // `required` is set only when encrypted values exist (see callers).
     throw new ProjectEnvKeyMissingError(
       `Missing project env key at ${searchedPaths}. ${missingProjectEnvKeyHint()}`
@@ -5192,9 +5413,164 @@ async function resolveProjectEnvKey(opts: {
 }
 
 /**
+ * Where the project env key comes from (R26). Never carries key material.
+ *
+ * - `file`: a key file. `origin` is `override` (`--key-file`), `checkout`
+ *   (`.hack.secret.key` in this checkout), `shared` (the git common dir,
+ *   shared by linked worktrees) or `primary_checkout` (inherited from the
+ *   primary worktree).
+ * - `env`: an environment variable, by NAME. `origin` is `override`
+ *   (`--key-env`) or `default` (`HACK_ENV_SECRET_KEY`).
+ * - `none`: no source was found.
+ */
+export type ProjectEnvKeySource =
+  | {
+      readonly kind: "file";
+      readonly origin: "override" | "checkout" | "shared" | "primary_checkout";
+      readonly path: string;
+    }
+  | {
+      readonly kind: "env";
+      readonly origin: "override" | "default";
+      readonly name: string;
+    }
+  | { readonly kind: "none" };
+
+/** The source a failed key read belongs to, so a refusal can still name it. */
+const projectEnvKeyErrorSources = new WeakMap<object, ProjectEnvKeySource>();
+
+async function readProjectEnvKeyCandidate(opts: {
+  readonly source: ProjectEnvKeySource;
+  readonly read: () => Promise<string | null>;
+}): Promise<string | null> {
+  try {
+    return await opts.read();
+  } catch (error) {
+    if (typeof error === "object" && error !== null) {
+      projectEnvKeyErrorSources.set(error, opts.source);
+    }
+    throw error;
+  }
+}
+
+function projectEnvKeyOverrideSource(
+  override: ProjectEnvKeyOverride
+): ProjectEnvKeySource {
+  return override.kind === "file"
+    ? { kind: "file", origin: "override", path: override.path }
+    : { kind: "env", origin: "override", name: override.name };
+}
+
+function projectEnvKeyOverrideMissingMessage(): string {
+  return "No project env key at the location given by --key-file or --key-env: the file is missing or empty, or the variable is unset or empty. Key discovery is skipped while an override is given; key contents are never included in this message.";
+}
+
+/**
+ * Read the key from a one-run override. Null when the file is absent or the
+ * variable is unset or empty; a file the legacy key rules refuse throws.
+ */
+async function readProjectEnvKeyOverride(opts: {
+  readonly override: ProjectEnvKeyOverride;
+}): Promise<string | null> {
+  const source = projectEnvKeyOverrideSource(opts.override);
+  if (opts.override.kind === "env") {
+    const name = opts.override.name;
+    return await readProjectEnvKeyCandidate({
+      source,
+      read: () => {
+        const value = process.env[name]?.trim() ?? "";
+        if (Buffer.byteLength(value) > NATIVE_CONFIG_INPUT_LIMIT) {
+          throw new ProjectEnvKeyRefusalError(
+            "Refusing project env key: the variable named by --key-env holds more than 1 MiB. Key contents are never included in this message."
+          );
+        }
+        return Promise.resolve(value.length > 0 ? value : null);
+      },
+    });
+  }
+  const path = opts.override.path;
+  return await readProjectEnvKeyCandidate({
+    source,
+    read: async () => await readLegacyProjectEnvKeyFile({ path }),
+  });
+}
+
+/**
+ * Find the project env key by the runtime priority: checkout-local, shared
+ * common-dir, primary checkout, then `HACK_ENV_SECRET_KEY`. Read-only; a
+ * refused file throws (see {@link projectEnvKeySourceOfError}).
+ */
+async function discoverProjectEnvKey(opts: {
+  readonly projectRoot: string;
+}): Promise<
+  | { readonly keyText: string; readonly source: ProjectEnvKeySource }
+  | { readonly keyText: null; readonly searchedPaths: readonly string[] }
+> {
+  const keyPath = resolveProjectEnvKeyPath({ projectRoot: opts.projectRoot });
+  const localKey = await readProjectEnvKeyCandidate({
+    source: { kind: "file", origin: "checkout", path: keyPath },
+    read: async () => await readLegacyProjectEnvKeyFile({ path: keyPath }),
+  });
+  if (localKey) {
+    return {
+      keyText: localKey,
+      source: { kind: "file", origin: "checkout", path: keyPath },
+    };
+  }
+  const sharedKeyPath = await resolveProjectEnvSharedKeyPath({
+    projectRoot: opts.projectRoot,
+  });
+  if (sharedKeyPath !== null) {
+    const source = {
+      kind: "file",
+      origin: "shared",
+      path: sharedKeyPath,
+    } as const;
+    const sharedKey = await readProjectEnvKeyCandidate({
+      source,
+      read: async () =>
+        await readLegacyProjectEnvKeyFile({ path: sharedKeyPath }),
+    });
+    if (sharedKey) {
+      return { keyText: sharedKey, source };
+    }
+  }
+  const inheritedKey = await resolveInheritedProjectEnvKey({
+    projectRoot: opts.projectRoot,
+  });
+  if (inheritedKey) {
+    return {
+      keyText: inheritedKey.keyText,
+      source: {
+        kind: "file",
+        origin: "primary_checkout",
+        path: inheritedKey.keyPath,
+      },
+    };
+  }
+  const envFallback = process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() ?? "";
+  if (envFallback.length > 0) {
+    return {
+      keyText: envFallback,
+      source: {
+        kind: "env",
+        origin: "default",
+        name: PROJECT_ENV_SECRET_KEY_ENV,
+      },
+    };
+  }
+  return {
+    keyText: null,
+    searchedPaths: [keyPath, sharedKeyPath].filter(
+      (value): value is string => typeof value === "string"
+    ),
+  };
+}
+
+/**
  * Whether the project env key can be read, by the same priority the runtime
  * uses (checkout-local, shared common-dir, primary checkout, then
- * `HACK_ENV_SECRET_KEY`).
+ * `HACK_ENV_SECRET_KEY`), or only from a one-run override when one is active.
  *
  * - `ok`: a key is present and readable.
  * - `missing`: no key file and no `HACK_ENV_SECRET_KEY`. An empty or
@@ -5211,16 +5587,43 @@ export type ProjectEnvKeyState = "ok" | "missing" | "unreadable";
 export async function probeProjectEnvKeyState(opts: {
   readonly projectRoot: string;
 }): Promise<ProjectEnvKeyState> {
+  return (await probeProjectEnvKey(opts)).state;
+}
+
+/**
+ * {@link probeProjectEnvKeyState} plus the source that answered (R26). For
+ * `unreadable`, the source is the location that was refused (null if it
+ * cannot be told); for `missing` it is `none`, or the override's location.
+ */
+export async function probeProjectEnvKey(opts: {
+  readonly projectRoot: string;
+}): Promise<{
+  readonly state: ProjectEnvKeyState;
+  readonly source: ProjectEnvKeySource | null;
+}> {
   try {
-    const keyText = await resolveProjectEnvKey({
-      projectRoot: opts.projectRoot,
-      required: false,
-    });
-    return keyText === null ? "missing" : "ok";
-  } catch {
+    const override = currentProjectEnvKeyOverride();
+    if (override) {
+      const keyText = await readProjectEnvKeyOverride({ override });
+      return {
+        state: keyText === null ? "missing" : "ok",
+        source: projectEnvKeyOverrideSource(override),
+      };
+    }
+    const discovered = await discoverProjectEnvKey(opts);
+    return discovered.keyText === null
+      ? { state: "missing", source: { kind: "none" } }
+      : { state: "ok", source: discovered.source };
+  } catch (error) {
     // Every refusal and read failure means the runtime cannot use the key.
     // Listing names must still succeed, so this never throws.
-    return "unreadable";
+    return {
+      state: "unreadable",
+      source:
+        typeof error === "object" && error !== null
+          ? (projectEnvKeyErrorSources.get(error) ?? null)
+          : null,
+    };
   }
 }
 
@@ -5459,6 +5862,12 @@ export type EnsureProjectEnvSecretKeyResult = {
 export async function ensureProjectEnvSecretKey(opts: {
   readonly projectRoot: string;
 }): Promise<EnsureProjectEnvSecretKeyResult> {
+  if (currentProjectEnvKeyOverride()) {
+    // A one-run override never creates, copies or adopts a key file.
+    throw new ProjectEnvKeyRefusalError(
+      "Refusing to create or adopt a project env key file while --key-file or --key-env is given. Run without the override to create one."
+    );
+  }
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const sharedLocation = await resolveProjectEnvSharedKeyLocation({
     projectRoot: opts.projectRoot,

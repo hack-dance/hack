@@ -8,6 +8,7 @@ import {
 import { handleRunCliError } from "../../src/cli/run.ts";
 import { ClosedCliError } from "../../src/lib/cli-result.ts";
 import {
+  nativeDetachedUpBranchDropped,
   nativeDetachedUpFailedServices,
   nativeDetachedUpFailure,
   nativeDetachedUpProfileNotice,
@@ -34,6 +35,18 @@ function publishFixtureProfileNotice(fixtureMode: string): void {
       services: ["jobs"],
       profiles: [],
       source: "none",
+    });
+  }
+}
+
+/** HACK-2338: a detached owner hands its dropped-branch-site notice to the launcher. */
+function publishFixtureBranchDropped(fixtureMode: string): void {
+  if (fixtureMode === "branch-dropped") {
+    nativeDetachedUpBranchDropped({
+      branch: "feature-a",
+      service: "web",
+      label: "caddy",
+      count: 2,
     });
   }
 }
@@ -162,6 +175,7 @@ if (role === "channel-holder") {
       cwd: root,
       args: [],
       json: true,
+      ...(mode === "restart-action" ? { action: "restart" as const } : {}),
       invocation: [
         process.execPath,
         ...(Bun.main.startsWith("/$bunfs/") ? [] : [import.meta.filename]),
@@ -371,10 +385,13 @@ if (role === "channel-holder") {
         process.prependListener("message", cancelAtAccept);
       }
       publishFixtureProfileNotice(mode);
+      publishFixtureBranchDropped(mode);
       if (
         [
           "ready",
           "profile-notice",
+          "branch-dropped",
+          "restart-action",
           "cancel-at-accept",
           "shell-names",
           "shell-names-empty",

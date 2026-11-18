@@ -45,6 +45,7 @@ import { exec, run } from "../lib/shell.ts";
 import { parseTimeInput } from "../lib/time.ts";
 import { copyToClipboard } from "../ui/clipboard.ts";
 import type { LogStreamBackend, LogStreamEvent } from "../ui/log-stream.ts";
+import { runWithTerminalHandoff } from "./terminal-handoff.ts";
 
 /** Matches block characters used in ASCII banners */
 const BLOCK_CHARS_REGEX = /[█░▒▓]/;
@@ -2796,21 +2797,27 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
     const runInteractiveCommand = async (opts: {
       readonly command: readonly string[];
-    }): Promise<number> => {
+      /** False for a command that returns at once (`tmux switch-client`). */
+      readonly handoff: boolean;
+    }): Promise<number | null> => {
       if (!isActive) {
         return 1;
       }
-
-      let exitCode = 1;
-      activeRenderer.stop();
-      try {
-        exitCode = await run(opts.command, {
-          cwd: resolve(project.projectRoot),
-          stdin: "inherit",
-        });
-      } finally {
-        if (isActive) {
-          activeRenderer.start();
+      // suspend() hands the terminal over: it leaves raw mode, turns mouse
+      // tracking off and stops reading stdin, so the attached session gets
+      // every key. stop() only halted rendering and kept all three. Failure
+      // handling and the resume pairing are in terminal-handoff.ts.
+      return await runWithTerminalHandoff({
+        handoff: opts.handoff,
+        suspend: () => activeRenderer.suspend(),
+        resume: () => activeRenderer.resume(),
+        child: () =>
+          run(opts.command, {
+            cwd: resolve(project.projectRoot),
+            stdin: "inherit",
+          }),
+        isActive: () => isActive,
+        afterResume: () => {
           renderHeader();
           renderMetaPanel({ runtime: currentRuntime });
           updateLogsTitle();
@@ -2818,9 +2825,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
           renderFooter();
           layoutSidebar();
           setActivePane(activePane);
-        }
-      }
-      return exitCode;
+        },
+      });
     };
 
     const interactWithSelectedService = async () => {
@@ -2865,7 +2871,23 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
         const exitCode = await runInteractiveCommand({
           command,
+          handoff: !process.env.TMUX,
         });
+
+        if (exitCode === null) {
+          // The dashboard kept the terminal; nothing was started.
+          setToast({
+            message: t`${fg("#e0af68")("Could not hand over the terminal")} ${dim("(try again)")}`,
+            durationMs: 2400,
+          });
+          appendLogEntry(
+            formatSystemLine({
+              message: "[interact] terminal not handed over; nothing started",
+              tone: "warn",
+            })
+          );
+          return;
+        }
 
         if (exitCode !== 0) {
           setToast({

@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import type { BranchDroppedSites } from "../lib/branch-hosts.ts";
 import {
   BranchCaddyHostsError,
   branchServiceCaddyLabels,
@@ -9,6 +10,7 @@ import { isRecord } from "../lib/guards.ts";
 import {
   findProjectContext,
   readProjectConfig,
+  readProjectDevHost,
   resolveProjectOauthAliasHost,
   resolveProjectRouteBaseHosts,
 } from "../lib/project.ts";
@@ -73,7 +75,9 @@ function branchServiceLabels(opts: {
   readonly labels: Record<string, unknown>;
   readonly branch: string;
   readonly baseHosts: readonly string[];
-  readonly onDropped: ((notice: string) => void) | undefined;
+  readonly onDropped:
+    | ((notice: string, details: BranchDroppedSites) => void)
+    | undefined;
 }): Record<string, unknown> | undefined {
   const sites: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(opts.labels)) {
@@ -109,7 +113,7 @@ export async function prepareNativeProjectBranch(opts: {
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
   /** Told about sites a branch instance drops (outside the project's namespaces). */
-  readonly onDropped?: (notice: string) => void;
+  readonly onDropped?: (notice: string, details: BranchDroppedSites) => void;
 }): Promise<NativeProjectInput> {
   const branch = opts.scope.branch;
   nativeProjectBranchArgs(branch);
@@ -126,7 +130,12 @@ export async function prepareNativeProjectBranch(opts: {
     throw refused();
   }
   const cfg = await readProjectConfig(project);
-  const devHost = cfg.devHost;
+  // The same source as Compose's branch hosts (HACK-2338 item 5): dev_host in
+  // hack.config.json, else the legacy DEV_HOST in .hack/.env. DNS names are
+  // case-insensitive; the rewrite and the route check use the lowercase form.
+  const devHost = cfg.parseError
+    ? undefined
+    : (await readProjectDevHost(project))?.toLowerCase();
   if (
     cfg.parseError ||
     !devHost ||

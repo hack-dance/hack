@@ -40,6 +40,7 @@ v5 prerelease bundles are Apple Silicon macOS only; see
 - [Upgrade a v4 machine to v5](guides/upgrade-from-v4.md): preparation, rollback and checks awaiting the dogfood run.
 - [Run and inspect a project](guides/run-project.md)
 - [Choose where a command runs](guides/run-commands.md)
+- [Scripts and JSON output](guides/machine-output.md): what `--json` prints, and where hook output goes.
 - [Work on another branch](guides/parallel-work.md)
 - [Share environment and secrets](guides/share-environment.md)
 - [Manage helpers and tunnels](guides/project-helpers.md)

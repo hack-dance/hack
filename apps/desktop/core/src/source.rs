@@ -412,6 +412,29 @@ pub trait Source: Send + Sync {
         Err("Upgrade restore is unavailable for this source".into())
     }
 
+    /// CPU and memory per service of a Compose project and its branch
+    /// instances (`hack usage --json --by-service --path <root>`).
+    ///
+    /// # Errors
+    /// The CLI could not read it (Docker unavailable, say) or printed no
+    /// report this app reads.
+    fn service_usage(&self, _root: &Path) -> Result<crate::usage::UsageReport, String> {
+        Err("Usage is unavailable for this source".into())
+    }
+
+    /// The services of one instance whose image architecture differs from
+    /// the engine's (`hack ps --json --path <root> [--branch <name>]`).
+    ///
+    /// # Errors
+    /// As [`Self::service_usage`].
+    fn emulated_services(
+        &self,
+        _root: &Path,
+        _branch: Option<&str>,
+    ) -> Result<std::collections::BTreeSet<String>, String> {
+        Ok(std::collections::BTreeSet::new())
+    }
+
     /// Explicit user recovery only; never called by a poll.
     /// # Errors
     /// Failed or unavailable daemon command.
@@ -1678,6 +1701,9 @@ impl LiveSource {
     const READ: Duration = Duration::from_secs(15);
     /// `hack daemon status --json` when the versions differ.
     const DAEMON_STATUS: Duration = Duration::from_secs(10);
+    /// `usage --by-service` takes one `docker stats` sample (about 1–2 s);
+    /// `ps` probes image architectures within 3 s.
+    const USAGE: Duration = Duration::from_secs(15);
     /// `hack upgrade check` and `review` probe the machine and every
     /// registered project.
     const UPGRADE_READ: Duration = Duration::from_secs(180);
@@ -1842,6 +1868,39 @@ impl Source for LiveSource {
             .run_raw(&["daemon", "status", "--json"], None, Self::DAEMON_STATUS)
             .ok()?;
         serde_json::from_str(&out).ok()
+    }
+
+    fn service_usage(&self, root: &Path) -> Result<crate::usage::UsageReport, String> {
+        // Compose only: an inherited HACK_RUNTIME_BACKEND=native must not
+        // change these reads.
+        let v: serde_json::Value = self
+            .runner_for(false)
+            .fixed()
+            .run_json(
+                &["usage", "--json", "--by-service"],
+                Some(root),
+                Self::USAGE,
+            )
+            .map_err(|e| e.to_string())?;
+        crate::usage::UsageReport::from_value(v)
+    }
+
+    fn emulated_services(
+        &self,
+        root: &Path,
+        branch: Option<&str>,
+    ) -> Result<std::collections::BTreeSet<String>, String> {
+        let mut args = vec!["ps", "--json"];
+        if let Some(b) = branch {
+            validate_branch(b).map_err(|_| format!("{b:?} is not a branch name the app runs"))?;
+            args.extend(["--branch", b]);
+        }
+        let v: serde_json::Value = self
+            .runner_for(false)
+            .fixed()
+            .run_json(&args, Some(root), Self::USAGE)
+            .map_err(|e| e.to_string())?;
+        Ok(crate::usage::emulated_services(&v))
     }
 
     fn upgrade_check(&self) -> Result<crate::upgrade::CheckReport, String> {
@@ -2296,6 +2355,18 @@ impl Source for FixtureSource {
 
     fn upgrade_check(&self) -> Result<crate::upgrade::CheckReport, String> {
         fixtures::upgrade_check(self.0)
+    }
+
+    fn service_usage(&self, _root: &Path) -> Result<crate::usage::UsageReport, String> {
+        fixtures::service_usage(self.0)
+    }
+
+    fn emulated_services(
+        &self,
+        _root: &Path,
+        _branch: Option<&str>,
+    ) -> Result<std::collections::BTreeSet<String>, String> {
+        Ok(fixtures::emulated_services(self.0))
     }
 
     fn upgrade_review(&self) -> Result<crate::upgrade::Review, String> {
@@ -5303,5 +5374,60 @@ esac
             }),
             SourceError::Cli { .. }
         ));
+    }
+
+    /// The usage view's two reads, exactly as the CLI receives them.
+    #[test]
+    fn usage_reads_by_service_and_ps_for_the_shown_instance() {
+        let dir = std::env::temp_dir().join(format!(
+            "hack-desktop-usage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hack = dir.join("hack");
+        crate::test_support::script(
+            &hack,
+            r#"#!/bin/sh
+printf '%s %s\n' "$HACK_RUNTIME_BACKEND" "$*" >> "$HACK_HOME/calls"
+case "$1" in
+  usage) echo '{"ok":true,"data":{"schema":"hack.usage.by-service.v1","project":"shop","services":[{"composeProject":"shop","service":"api","containers":1,"cpuPercent":1.5,"memUsedBytes":1048576,"memLimitBytes":null}]}}' ;;
+  ps) echo '{"ok":true,"data":{"items":[{"Service":"api","emulated":true},{"Service":"db"}]}}' ;;
+esac
+"#,
+        );
+        let src = LiveSource {
+            cache: Default::default(),
+            runner: fixture_runner(&hack)
+                .with_env("HACK_HOME", &dir.to_string_lossy())
+                .with_env("HOME", &dir.to_string_lossy())
+                .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+                // Inherited from the app's environment: must not leak in.
+                .with_env("HACK_RUNTIME_BACKEND", "native"),
+            daemon: None,
+        };
+        let root = Path::new("/work/shop");
+        let report = src.service_usage(root).unwrap();
+        assert_eq!(report.for_instance("shop")["api"].cpu_percent, Some(1.5));
+        let base = src.emulated_services(root, None).unwrap();
+        assert_eq!(base, std::collections::BTreeSet::from(["api".to_owned()]));
+        src.emulated_services(root, Some("preview")).unwrap();
+        assert!(
+            src.emulated_services(root, Some("--all")).is_err(),
+            "not a branch name"
+        );
+        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            calls.lines().collect::<Vec<_>>(),
+            vec![
+                "compose usage --json --by-service --path /work/shop",
+                "compose ps --json --path /work/shop",
+                "compose ps --json --branch preview --path /work/shop",
+            ]
+        );
     }
 }

@@ -8,10 +8,16 @@ use std::{
     os::{fd::AsRawFd, unix::fs::MetadataExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{
+        Once,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStrExt;
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const TOKEN: &str = "synthetic-owner-token";
@@ -22,17 +28,28 @@ struct Fixture {
     owned: RefCell<Vec<Identity>>,
 }
 
+/// Name prefix of every fixture root: `supervisor-test-<test pid>-<nonce>-<n>`.
+const ROOT_PREFIX: &str = "supervisor-test-";
+static STALE_SWEEP: Once = Once::new();
+
+fn fixture_parent() -> PathBuf {
+    std::env::var_os("TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
 impl Fixture {
     fn new() -> Self {
-        let parent = std::env::var_os("TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
+        let parent = fixture_parent();
+        // A run killed before its fixtures dropped (timeout, Ctrl-C, SIGKILL)
+        // leaves their processes behind; the next run reaps them once.
+        STALE_SWEEP.call_once(|| reap_stale_fixture_roots(&parent));
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let root = parent.join(format!(
-            "supervisor-test-{}-{nonce}-{}",
+            "{ROOT_PREFIX}{}-{nonce}-{}",
             std::process::id(),
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
@@ -183,8 +200,252 @@ impl Drop for Fixture {
                 }
             }
         }
-        let _ = fs::remove_dir_all(&self.root);
+        // Anchors miss processes whose guard and command both exited (forked
+        // or TERM-ignoring descendants) and launches whose reply was never
+        // recorded (a panic or killed supervisor before `remember`). Every
+        // fixture process runs in this root, so reap by working directory.
+        let survivors = reap_fixture_processes(&self.root);
+        // Keep the root while anything still works in it, so a survivor's
+        // recovery state is not lost.
+        if survivors.is_empty() && occupants(&self.root).is_empty() {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+        if !survivors.is_empty() && !thread::panicking() {
+            panic!(
+                "{} fixture process(es) survived teardown: {survivors:?}",
+                survivors.len()
+            );
+        }
     }
+}
+
+/// A process seen working in a fixture root, keyed by PID and kernel birth.
+/// Unlike [`Identity`] it carries no session: a process that never called
+/// `setsid` can share session 1 (launchd on macOS runners), which `identity`
+/// rejects so session-wide kills can never reach it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Occupant {
+    pid: i32,
+    birth: u64,
+}
+
+/// Live processes (other than this one) whose working directory is `root`,
+/// whatever their executable or session.
+fn occupants(root: &Path) -> Vec<Occupant> {
+    let Ok(root) = root.canonicalize() else {
+        return Vec::new();
+    };
+    all_pids()
+        .into_iter()
+        .filter(|pid| *pid != std::process::id() as i32)
+        .filter(|pid| cwd_of(*pid).as_deref() == Some(root.as_path()))
+        .filter_map(|pid| {
+            Some(Occupant {
+                pid,
+                birth: birth_of(pid)?,
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn all_pids() -> Vec<i32> {
+    fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse().ok())
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn all_pids() -> Vec<i32> {
+    let mut pids = vec![0i32; 65536];
+    // SAFETY: initialized vector provides the supplied writable byte count.
+    let count =
+        unsafe { libc::proc_listpids(1, 0, pids.as_mut_ptr().cast(), (pids.len() * 4) as i32) };
+    if count <= 0 {
+        return Vec::new();
+    }
+    pids.into_iter()
+        .take(count as usize / 4)
+        .filter(|p| *p > 1)
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn birth_of(pid: i32) -> Option<u64> {
+    let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    text.rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+#[cfg(target_os = "macos")]
+fn birth_of(pid: i32) -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    // SAFETY: kernel writes at most the supplied live buffer size.
+    let size = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+        )
+    };
+    if size as usize != std::mem::size_of::<libc::proc_bsdinfo>() {
+        return None;
+    }
+    // SAFETY: fully written above.
+    let info = unsafe { info.assume_init() };
+    Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
+/// SIGKILLs every live process whose working directory is `root` and whose
+/// executable is a fixture test binary or the supervisor, until a census finds
+/// none or the deadline passes. Each identity is rechecked right before its
+/// signal so a reused PID is never hit. Returns the PIDs still present.
+fn reap_fixture_processes(root: &Path) -> Vec<i32> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let matched: Vec<_> = occupants(root)
+            .into_iter()
+            .filter(|p| exe_of(p.pid).is_some_and(|exe| is_fixture_executable(&exe)))
+            .collect();
+        if matched.is_empty() {
+            return Vec::new();
+        }
+        if Instant::now() >= deadline {
+            return matched.into_iter().map(|p| p.pid).collect();
+        }
+        let canonical = root.canonicalize().ok();
+        for member in matched {
+            // Recheck birth and root right before the signal: a reused PID
+            // has a different birth, a moved process a different cwd.
+            if birth_of(member.pid) == Some(member.birth)
+                && cwd_of(member.pid).as_deref() == canonical.as_deref()
+            {
+                // SAFETY: a live fixture or supervisor process working in this
+                // fixture's private root, rechecked by birth and cwd.
+                unsafe {
+                    libc::kill(member.pid, libc::SIGKILL);
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Reaps and removes fixture roots under `parent` whose owning test process
+/// (the PID in the root name) no longer exists.
+fn reap_stale_fixture_roots(parent: &Path) {
+    for entry in fs::read_dir(parent).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        let Some(owner) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(ROOT_PREFIX))
+            .and_then(|rest| rest.split('-').next())
+            .and_then(|pid| pid.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        // SAFETY: signal 0 only probes for existence.
+        let owner_alive = owner == std::process::id() as i32
+            || unsafe { libc::kill(owner, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        if owner_alive {
+            continue;
+        }
+        let root = entry.path();
+        // Remove the root only once nothing at all works in it: a process
+        // this sweep does not recognize keeps the root and its state.
+        if reap_fixture_processes(&root).is_empty() && occupants(&root).is_empty() {
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+}
+
+/// A build of this test binary (`fake_caller-<hex>`, from any worktree or
+/// profile) or the supervisor. Callers also require the process to work in a
+/// fixture root, which only this suite creates.
+fn is_fixture_executable(exe: &Path) -> bool {
+    exe.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| {
+            name == "hack-lifecycle-supervisor"
+                || name.strip_prefix("fake_caller-").is_some_and(|hash| {
+                    !hash.is_empty() && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                })
+        })
+}
+
+/// `/proc/<pid>/<link>`, or the same link of any live task when the main
+/// thread has exited (its own links are then unreadable).
+#[cfg(target_os = "linux")]
+fn task_link(pid: i32, link: &str) -> Option<PathBuf> {
+    fs::read_link(format!("/proc/{pid}/{link}"))
+        .ok()
+        .or_else(|| {
+            fs::read_dir(format!("/proc/{pid}/task"))
+                .ok()?
+                .flatten()
+                .find_map(|task| fs::read_link(task.path().join(link)).ok())
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn cwd_of(pid: i32) -> Option<PathBuf> {
+    task_link(pid, "cwd")
+}
+
+#[cfg(target_os = "linux")]
+fn exe_of(pid: i32) -> Option<PathBuf> {
+    let link = task_link(pid, "exe")?;
+    // A binary rebuilt since the process started reads as "<path> (deleted)".
+    let text = link.to_str()?;
+    Some(PathBuf::from(
+        text.strip_suffix(" (deleted)").unwrap_or(text),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn cwd_of(pid: i32) -> Option<PathBuf> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as i32;
+    // SAFETY: kernel writes at most the supplied live buffer size.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    // SAFETY: fully written above; the path is a NUL-terminated C string.
+    let info = unsafe { info.assume_init() };
+    let path = unsafe { std::ffi::CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr().cast()) };
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
+}
+
+#[cfg(target_os = "macos")]
+fn exe_of(pid: i32) -> Option<PathBuf> {
+    let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: kernel writes at most the supplied live buffer size.
+    let written =
+        unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    if written <= 0 {
+        return None;
+    }
+    buffer.truncate(written as usize);
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(&buffer)))
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -290,6 +551,9 @@ fn command(root: &Path, action: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_hack-lifecycle-supervisor"));
     command
         .arg(action)
+        // Supervisors and the guards they start inherit this, so teardown and
+        // the stale-root sweep find them by working directory too (HACK-2322).
+        .current_dir(root)
         .env_clear()
         .env("HOME", root)
         .env("PATH", "/usr/bin:/bin")
@@ -430,6 +694,213 @@ fn refused(fixture: &Fixture, action: &str, request: Value) {
         !wait(&mut child, TIMEOUT).success(),
         "unsafe operation was accepted"
     );
+}
+
+/// A fixture process started outside the supervisor, so no receipt records it.
+fn stray_fixture_process(cwd: &Path) -> Child {
+    stray_process(&std::env::current_exe().unwrap(), cwd, "hold")
+}
+
+fn stray_process(exe: &Path, cwd: &Path, mode: &str) -> Child {
+    use std::os::unix::process::CommandExt;
+    let mut command = Command::new(exe);
+    command
+        .args(["--exact", "fixture_process", "--nocapture"])
+        .current_dir(cwd)
+        .env_clear()
+        .env("SUPERVISOR_FIXTURE", mode)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: changes only the new child, with no allocated state.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn().unwrap();
+    let root = cwd.canonicalize().unwrap();
+    eventually(|| {
+        cwd_of(child.id() as i32)
+            .filter(|dir| *dir == root)
+            .map(|_| ())
+    });
+    child
+}
+
+#[test]
+fn teardown_reaps_fixture_processes_no_receipt_recorded() {
+    use std::os::unix::process::ExitStatusExt;
+    let f = Fixture::new();
+    let mut stray = stray_fixture_process(&f.root);
+    drop(f);
+    let status = wait(&mut stray, TIMEOUT);
+    assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+}
+
+/// Threads of `pid` that are neither zombie nor dead.
+#[cfg(target_os = "linux")]
+fn live_tasks(pid: u32) -> usize {
+    fs::read_dir(format!("/proc/{pid}/task"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|task| {
+            fs::read_to_string(task.path().join("stat"))
+                .ok()
+                .and_then(|stat| {
+                    let state = stat.rsplit_once(") ")?.1.chars().next()?;
+                    Some(state != 'Z' && state != 'X')
+                })
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn teardown_reaps_a_fixture_whose_main_thread_exited() {
+    use std::os::unix::process::ExitStatusExt;
+    let f = Fixture::new();
+    let mut stray = stray_process(
+        &std::env::current_exe().unwrap(),
+        &f.root,
+        "pthread-main-exit",
+    );
+    // The mode forks a child that ends its main thread and keeps a worker;
+    // that leader's own /proc links are then unreadable.
+    let parent = stray.id();
+    let root = f.root.canonicalize().unwrap();
+    let leader = eventually(|| {
+        census()
+            .into_iter()
+            .map(|p| p.pid as u32)
+            .filter(|pid| *pid != parent && parent_pid(*pid as i32) == Some(parent as i32))
+            .find(|pid| {
+                fs::read_link(format!("/proc/{pid}/cwd")).is_err()
+                    && cwd_of(*pid as i32).as_deref() == Some(root.as_path())
+                    && live_tasks(*pid) > 0
+            })
+    });
+    drop(f);
+    let status = wait(&mut stray, TIMEOUT);
+    assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+    eventually(|| (live_tasks(leader) == 0).then_some(()));
+}
+
+/// A parent directory private to one stale-sweep test. Its dead-owner roots
+/// sit below it, out of reach of the shared parent's one-time sweep and of the
+/// other stale-sweep test, so concurrent tests cannot reap each other's roots.
+struct PrivateParent(PathBuf);
+impl PrivateParent {
+    fn new() -> Self {
+        let path = fixture_parent().join(format!(
+            "fake-caller-sweep-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+        Self(path)
+    }
+}
+impl Drop for PrivateParent {
+    fn drop(&mut self) {
+        reap_stale_fixture_roots(&self.0);
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn stale_sweep_reaps_other_builds_and_keeps_an_occupied_root() {
+    use std::os::unix::process::ExitStatusExt;
+    let mut gone = Command::new("/usr/bin/true").spawn().unwrap();
+    let dead = gone.id();
+    gone.wait().unwrap();
+    let private = PrivateParent::new();
+    let parent = private.0.as_path();
+    let root = parent.join(format!("{ROOT_PREFIX}{dead}-1-0"));
+    fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+    // Another worktree's build of this test binary: same name pattern,
+    // different directory.
+    let other = parent.join(format!("fake-caller-other-build-{}", std::process::id()));
+    fs::DirBuilder::new().mode(0o700).create(&other).unwrap();
+    let copy = other.join("fake_caller-0123456789abcdef");
+    fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+    let mut foreign_build = stray_process(&copy, &root, "hold");
+    // A process the sweep does not recognize keeps the root.
+    let mut bystander = Command::new("/bin/sleep")
+        .arg("30")
+        .current_dir(&root)
+        .spawn()
+        .unwrap();
+    let bystander_pid = bystander.id() as i32;
+    let deadline = Instant::now() + TIMEOUT;
+    while !occupants(&root).iter().any(|p| p.pid == bystander_pid) {
+        assert!(
+            Instant::now() < deadline,
+            "bystander not visible as an occupant: cwd={:?} exe={:?} birth={:?}",
+            cwd_of(bystander_pid),
+            exe_of(bystander_pid),
+            birth_of(bystander_pid),
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    reap_stale_fixture_roots(parent);
+    let status = wait(&mut foreign_build, TIMEOUT);
+    assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+    assert!(bystander.try_wait().unwrap().is_none());
+    assert!(root.exists());
+    bystander.kill().unwrap();
+    bystander.wait().unwrap();
+    reap_stale_fixture_roots(parent);
+    assert!(!root.exists());
+    let _ = fs::remove_dir_all(&other);
+}
+
+#[test]
+fn stale_roots_of_a_dead_test_process_are_reaped_and_removed() {
+    use std::os::unix::process::ExitStatusExt;
+    // A PID that just exited stands in for a test process killed mid-run.
+    let mut gone = Command::new("/usr/bin/true").spawn().unwrap();
+    let dead = gone.id();
+    gone.wait().unwrap();
+    let private = PrivateParent::new();
+    let parent = private.0.as_path();
+    let root = parent.join(format!("{ROOT_PREFIX}{dead}-0-0"));
+    fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+    let mut stray = stray_fixture_process(&root);
+    // A supervisor left stopped mid-request, as a run killed while a test holds
+    // a guard SIGSTOPed would leave it.
+    let mut supervisor = command(&root, "run").spawn().unwrap();
+    let canonical_root = root.canonicalize().unwrap();
+    eventually(|| {
+        cwd_of(supervisor.id() as i32)
+            .filter(|dir| *dir == canonical_root)
+            .map(|_| ())
+    });
+    // SAFETY: stops only the supervisor this test just spawned.
+    assert_eq!(
+        unsafe { libc::kill(supervisor.id() as i32, libc::SIGSTOP) },
+        0
+    );
+    let supervisor_pid = supervisor.id() as i32;
+    let seen = occupants(&root).iter().any(|p| p.pid == supervisor_pid);
+    assert!(
+        seen && exe_of(supervisor_pid).is_some_and(|exe| is_fixture_executable(&exe)),
+        "stopped supervisor not visible to the sweep: occupant={seen} cwd={:?} exe={:?} birth={:?}",
+        cwd_of(supervisor_pid),
+        exe_of(supervisor_pid),
+        birth_of(supervisor_pid),
+    );
+    reap_stale_fixture_roots(parent);
+    for child in [&mut stray, &mut supervisor] {
+        let status = wait(child, TIMEOUT);
+        assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+    }
+    assert!(!root.exists());
 }
 
 #[test]

@@ -8,6 +8,7 @@ import {
 } from "../lib/env-migration.ts";
 import { resolveLifecycleRunner } from "../lib/lifecycle-runner.ts";
 import { preflightLifecycleSupervisor } from "../lib/lifecycle-supervisor.ts";
+import { childStdoutTarget } from "../lib/machine-stdout.ts";
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
@@ -54,7 +55,6 @@ import {
 import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
 import { createNativeDependencyOwnerResolver } from "../backends/native-dependency-owners.ts";
-import { parseNativeGcloudSelection } from "../backends/native-gcloud-environment.ts";
 import { assertNativeLogFlags } from "../backends/native-log-follow.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import {
@@ -2103,7 +2103,12 @@ export async function runLifecycleCommands(opts: {
       command: cmd.command,
       cwd,
       env: await mergeLifecycleCommandEnv(opts.env),
-      output: opts.routeStdoutToStderr ? "stderr" : "stdout",
+      // Under Hack's own `--json`, stdout holds only the envelope
+      // (HACK-2311), whatever this call site passed.
+      output:
+        childStdoutTarget(opts.routeStdoutToStderr) === "stderr"
+          ? "stderr"
+          : "stdout",
       projectDir: opts.projectDir,
       composeProject: opts.composeProject,
       service: serviceName,
@@ -6060,6 +6065,9 @@ async function runRemoteLifecycleCommand(opts: {
   return await runShell([invocation.bin, ...dispatchArgs], {
     cwd: opts.project.projectRoot,
     hackReexec: true,
+    // Under Hack's own --json the dispatch output precedes the envelope
+    // (emitRemoteLifecycleJson), so it goes to stderr (HACK-2311).
+    stdout: childStdoutTarget(undefined),
   });
 }
 
@@ -6243,7 +6251,8 @@ async function handleNativeUp({
     preparedBase: host.preparedBase,
     https: host.https,
     aws: host.aws,
-    gcloud: parseNativeGcloudSelection(process.env.HACK_NATIVE_GCLOUD_ADC),
+    gcloud: host.gcloud,
+    gcloudWithheld: host.gcloud === undefined && host.origins.gcloud === "env",
     runtimeMetadata: {
       devHost,
       aliasHost: resolveBranchAliasHost({ devHost, cfg }),

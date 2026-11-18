@@ -149,6 +149,97 @@ fn standard_route_without_healthcheck_infers_a_reviewed_probe_without_editing_so
 }
 
 #[test]
+fn routed_command_healthcheck_is_replaced_by_the_inferred_route_probe() {
+    // HACK-2324: Compose projects commonly give a routed web service a command
+    // healthcheck. Native route readiness is an HTTP probe, and an engine check
+    // never runs beside one, so the review uses the inferred probe and says so.
+    use hack_runtime_core::provider::http_probe::HttpProbe;
+    for test in [
+        "[CMD, curl, -f, 'http://localhost:3000/health']",
+        "[CMD-SHELL, 'curl -f http://localhost:3000/health']",
+    ] {
+        let document = format!(
+            "{BASIC}    labels:\n      caddy: web.example.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n    healthcheck:\n      test: {test}\n      interval: 10s\n      start_period: 30s\n  app:\n    image: alpine:3.21\n    depends_on:\n      web: {{condition: service_started}}\n"
+        );
+        let fixture = Fixture::new(&document);
+        let report = fixture.plan();
+        let health = report.plan.services["web"].healthcheck.as_ref().unwrap();
+        assert!(!health.disabled);
+        assert!(health.test.is_none());
+        assert_eq!(health.native_http, Some(HttpProbe::inferred_route(3000)));
+        let codes: Vec<_> = report
+            .plan
+            .diagnostics
+            .iter()
+            .map(|d| (d.code.as_str(), d.severity.as_str()))
+            .collect();
+        assert!(codes.contains(&("route_command_healthcheck_replaced", "warning")));
+        assert!(!codes.iter().any(|(_, severity)| *severity == "error"));
+        assert_eq!(
+            fs::read_to_string(fixture.project.join("compose.yaml")).unwrap(),
+            document
+        );
+    }
+}
+
+#[test]
+fn a_replaced_route_command_is_never_resolved_as_an_execution_input() {
+    use project::inputs;
+    use std::collections::BTreeMap;
+    // The command never runs on native, so an input it names that is not
+    // available must not refuse execution (HACK-2324 review).
+    let document = format!(
+        "{BASIC}    labels:\n      caddy: web.example.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n    healthcheck:\n      test: [CMD, curl, -f, '${{HEALTH_URL}}']\n"
+    );
+    let fixture = Fixture::new(&document);
+    let review = fixture.plan();
+    let compiled = inputs::compile(
+        &fixture.candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(compiled.services["web"].health_test, None);
+}
+
+#[test]
+fn replaced_route_probe_still_does_not_satisfy_compose_healthy_dependencies() {
+    // Like any inferred route probe, the replacement is route readiness only;
+    // a service_healthy dependent still needs a healthcheck native can run.
+    let document = format!(
+        "{BASIC}    labels:\n      caddy: web.example.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n    healthcheck:\n      test: [CMD, 'true']\n  app:\n    image: alpine:3.21\n    depends_on:\n      web: {{condition: service_healthy}}\n"
+    );
+    let report = Fixture::new(&document).plan();
+    let refusal = report
+        .plan
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "missing_healthcheck")
+        .unwrap();
+    assert!(refusal.message.contains("service_started"));
+    assert!(refusal.message.contains("x-hack-http"));
+}
+
+#[test]
+fn routed_disabled_healthcheck_is_not_replaced() {
+    let document = format!(
+        "{BASIC}    labels:\n      caddy: web.example.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n    healthcheck:\n      disable: true\n"
+    );
+    let report = Fixture::new(&document).plan();
+    let health = report.plan.services["web"].healthcheck.as_ref().unwrap();
+    assert!(health.disabled);
+    assert!(health.native_http.is_none());
+    assert!(
+        !report
+            .plan
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "route_command_healthcheck_replaced")
+    );
+}
+
+#[test]
 fn inferred_route_probe_does_not_satisfy_compose_healthy_dependencies() {
     let route = format!(
         "{BASIC}    labels:\n      caddy: web.example.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n"
@@ -183,12 +274,9 @@ fn route_inference_never_replaces_authored_healthchecks_or_accepts_an_authored_p
     let route = format!(
         "{BASIC}    labels:\n      caddy: web.example.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n"
     );
-    for authored in [
-        "{}",
-        "{disable: true}",
-        "{test: [CMD, 'true']}",
-        "{test: [NONE]}",
-    ] {
+    // A command healthcheck is replaced instead (see
+    // routed_command_healthcheck_is_replaced_by_the_inferred_route_probe).
+    for authored in ["{}", "{disable: true}", "{test: [NONE]}"] {
         let fixture = Fixture::new(&format!("{route}    healthcheck: {authored}\n"));
         let report = fixture.plan();
         assert!(

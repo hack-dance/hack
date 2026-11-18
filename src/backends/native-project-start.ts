@@ -24,6 +24,7 @@ import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
 import {
   adaptNativeGcloudEnvironment,
+  hasNativeGcloudCredentialMount,
   type NativeGcloudSelection,
 } from "./native-gcloud-environment.ts";
 import {
@@ -166,7 +167,10 @@ import {
   requireNativeSourceWithinLimit,
 } from "./native-project-source-size.ts";
 import { requireNativeStaticStartReview } from "./native-project-start-preflight.ts";
-import { reportNativeRestartPolicyNotices } from "./native-restart-policy-notices.ts";
+import {
+  reportNativeManagedRestartNotices,
+  reportNativeRestartPolicyNotices,
+} from "./native-restart-policy-notices.ts";
 import {
   invokeNativeRuntime,
   NativeRuntimeRequestError,
@@ -1493,6 +1497,7 @@ function retainedStartupSelection(opts: {
   readonly profiles?: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
   readonly gcloud?: NativeGcloudSelection;
+  readonly gcloudWithheld?: boolean;
 }) {
   const { run } = opts;
   if (
@@ -1507,8 +1512,10 @@ function retainedStartupSelection(opts: {
       (opts.aws.profile !== run.aws?.profile ||
         opts.aws.region !== run.aws?.region)) ||
     // Like the AWS selector, an omitted gcloud selection keeps the retained one
-    // (which delivers a fresh file); a different explicit selection refuses.
-    (opts.gcloud !== undefined && opts.gcloud.mode !== run.gcloud?.mode)
+    // (which delivers a fresh file); a different explicit selection refuses,
+    // and so does an explicitly withheld one, so the file is never delivered.
+    (opts.gcloud !== undefined && opts.gcloud.mode !== run.gcloud?.mode) ||
+    (opts.gcloudWithheld === true && run.gcloud != null)
   ) {
     throw new ClosedCliError(
       "Native up cannot change the retained run's environment, profiles, AWS profile or gcloud selection; data was not replaced."
@@ -1530,6 +1537,7 @@ async function selectNativeStartup(opts: {
   readonly requestedProfiles: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
   readonly gcloud?: NativeGcloudSelection;
+  readonly gcloudWithheld?: boolean;
   readonly load: typeof loadNativeProjectRun;
   readonly invoke: typeof invokeNativeRuntime;
   readonly signal?: AbortSignal;
@@ -1543,6 +1551,7 @@ async function selectNativeStartup(opts: {
           profiles: opts.profiles,
           aws: opts.aws,
           gcloud: opts.gcloud,
+          gcloudWithheld: opts.gcloudWithheld,
         })
       : {
           envName: opts.envName,
@@ -1892,6 +1901,12 @@ type NativeProjectStartOptions = {
   readonly aws?: { readonly profile: string; readonly region?: string };
   /** Explicit gcloud Application Default Credentials adapter selection. */
   readonly gcloud?: NativeGcloudSelection;
+  /**
+   * The gcloud consent was explicitly withheld for this command (an empty
+   * `HACK_NATIVE_GCLOUD_ADC=`). A retained run that recorded a selection then
+   * refuses instead of restoring it.
+   */
+  readonly gcloudWithheld?: boolean;
   /** Public instance identity delivered as runtime host metadata; omitted delivers none. */
   readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
   readonly before: (input: NativeProjectInput) => Promise<Hooks>;
@@ -1921,6 +1936,29 @@ type NativeProjectStartOptions = {
   readonly dependencies?: Partial<Dependencies>;
 };
 
+/**
+ * The credential adapter replaces its recognized mounts after lifecycle hooks.
+ * The pre-hook static review sees the input it will produce: the same mount
+ * removal, with nothing read (HACK-2324; the review refused those
+ * home-relative mounts). Without a recognized mount the input is unchanged.
+ */
+async function staticReviewInput(opts: {
+  readonly input: NativeProjectInput;
+  readonly gcloud: NativeGcloudSelection | undefined;
+  readonly adapt: Dependencies["adaptGcloud"];
+}): Promise<NativeProjectInput> {
+  if (!(opts.gcloud && hasNativeGcloudCredentialMount(opts.input))) {
+    return opts.input;
+  }
+  return (
+    await opts.adapt({
+      input: opts.input,
+      mode: opts.gcloud.mode,
+      deliver: false,
+    })
+  ).input;
+}
+
 async function startNativeProjectAttempt(
   opts: NativeProjectStartOptions,
   observeStartup: () => Promise<void>
@@ -1948,6 +1986,7 @@ async function startNativeProjectAttempt(
       requestedProfiles,
       aws: opts.aws,
       gcloud: opts.gcloud,
+      gcloudWithheld: opts.gcloudWithheld,
       load: deps.load,
       invoke: deps.invoke,
       signal: opts.signal,
@@ -2044,8 +2083,16 @@ async function startNativeProjectAttempt(
   // Pure build admission before hooks, VM or provider start; refuses when disabled.
   const builds = admitStartBuilds(input, opts);
   const buildServices = new Set(builds.keys());
-  let specs = prepareNativeProjectServices(
+  // Pre-hook checks (static review, source size, images, bridge capacity) use
+  // the input the credential adapter will produce; delivery after the hooks
+  // still adapts the original input.
+  const reviewInput = await staticReviewInput({
     input,
+    gcloud: selection.gcloud,
+    adapt: deps.adaptGcloud,
+  });
+  let specs = prepareNativeProjectServices(
+    reviewInput,
     selectedDependencyFile !== undefined,
     buildServices
   );
@@ -2053,7 +2100,7 @@ async function startNativeProjectAttempt(
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
     composeFile: opts.composeFile,
-    input,
+    input: reviewInput,
     profiles,
     branch: opts.scope.branch,
     deferredRestore: restore !== undefined,
@@ -2354,6 +2401,11 @@ async function startNativeProjectAttempt(
       run: async (review) => {
         requireEnrollmentCompatible(review.report.plan);
         reportNativeRestartPolicyNotices(review.report.plan, deps.warn);
+        reportNativeManagedRestartNotices({
+          input,
+          plan: review.report.plan,
+          warn: deps.warn,
+        });
         reportNativeIgnoredSettingNotices(review.report.plan, deps.warn);
         reportNativeEnvironmentNotices(input, review.report.plan, deps.warn);
         if (metadata) {

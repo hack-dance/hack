@@ -19,9 +19,9 @@ const MAX_LAYERS: usize = 256;
 const LAYER_ROOT: &str = "/var/lib/docker/overlay2/";
 
 /// Mounts the layers (given by their short `l/` links, top first) read-only, then prints
-/// only the account lines a name needs, so the report stays far below the guest response
-/// limit: `passwd <b64>` holds the first entry with the user's UID followed by the user's
-/// own entry, and `group <b64>` the group's entry. Each is `absent`, `symlink` or `large`
+/// only the fields a name needs, so the report is a few hundred bytes whatever the files
+/// hold: `passwd <b64>` holds `name:x:uid:gid` for the first entry with the user's UID and
+/// for the user's own entry, and `group <b64>` holds `name:x:gid` for the group. Each is `absent`, `symlink` or `large`
 /// instead when the file cannot be used. A single layer is read in place.
 const READ_ACCOUNT_LINES: &str = r#"set -eu
 budget=$1; user=$2; group=$3; shift 3
@@ -49,12 +49,14 @@ report() {
   if ! test -f "$f"; then echo "$name absent"; return; fi
   if test "$(stat -c %s "$f")" -gt "$budget"; then echo "$name large"; return; fi
   if test "$name" = passwd; then
-    lines=$(awk -F: -v n="$key" 'NR == FNR { if ($1 == n && u == "") u = $3; next }
-      u != "" && $3 == u && !first { print; first = 1 }
-      $1 == n && own == "" { own = $0 }
+    lines=$(awk -F: -v n="$key" '
+      function ok() { return length($1) <= 64 && $3 ~ /^[0-9]+$/ && length($3) <= 10 && $4 ~ /^[0-9]+$/ && length($4) <= 10 }
+      NR == FNR { if ($1 == n && u == "" && ok()) u = $3; next }
+      u != "" && $3 == u && !first && ok() { print $1 ":x:" $3 ":" $4; first = 1 }
+      $1 == n && own == "" && ok() { own = $1 ":x:" $3 ":" $4 }
       END { if (own != "") print own }' "$f" "$f")
   else
-    lines=$(awk -F: -v n="$key" '$1 == n { print; exit }' "$f")
+    lines=$(awk -F: -v n="$key" '$1 == n && $3 ~ /^[0-9]+$/ && length($3) <= 10 { print $1 ":x:" $3; exit }' "$f")
   fi
   printf '%s %s\n' "$name" "$(printf '%s\n' "$lines" | base64 -w0)"
 }
@@ -190,7 +192,8 @@ pub(super) fn resolve(
         return Ok(None);
     };
     let passwd = files.get("passwd").cloned().flatten().unwrap_or_default();
-    if !user_name.is_empty() && !first_with_uid_is(&passwd, user_name) {
+    // Only a bare name becomes a bare UID, which Docker maps to the first account with it.
+    if !user.contains(':') && !first_with_uid_is(&passwd, user_name) {
         return Ok(None);
     }
     let group = files.get("group").cloned().flatten();
@@ -280,6 +283,12 @@ mod tests {
         assert!(first_with_uid_is(shared, "first"));
         assert!(first_with_uid_is(PASSWD, "temporal"));
         assert!(!first_with_uid_is(PASSWD, "missing"));
+        // With an explicit group the identity is UID:GID, so a shared UID is not ambiguous.
+        assert_eq!(resolve_text("app:200", shared, None).unwrap(), "1000:200");
+        assert_eq!(
+            resolve_text("app:staff", shared, Some("staff:x:300\n")).unwrap(),
+            "1000:300"
+        );
         // A group-only lookup needs no passwd file.
         assert_eq!(
             resolve_text("1000:shared", "", Some(GROUP)).unwrap(),

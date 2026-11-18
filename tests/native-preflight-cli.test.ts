@@ -881,6 +881,67 @@ test(
 );
 
 test(
+  "HACK-2324: host aliases without a binding are counted, explained, and given the entry to add",
+  async () => {
+    const f = await fixture({
+      services: {
+        web: {
+          image: IMAGE,
+          extra_hosts: ["host.docker.internal:host-gateway"],
+        },
+      },
+    });
+    await writeFile(
+      join(f.projectDir, "hack.config.json"),
+      JSON.stringify({
+        name: "preflight-fixture",
+        internal: { extra_hosts: { "api.other.hack": "host-gateway" } },
+      })
+    );
+    const { report } = await preflight(f, GRANT);
+    const service = report.blockers.find(
+      (found) => found.code === "extra_hosts_without_dependencies"
+    );
+    expect(service?.service).toBe("web");
+    expect(service?.message).toContain("host.docker.internal");
+    expect(service?.fix).toContain("a process on this machine");
+    expect(service?.fix).toContain('"aliases": ["host.docker.internal"]');
+    expect(service?.fix).toContain("One alias reaches one host listener;");
+    const project = report.blockers.find(
+      (found) => found.code === "internal_hosts_without_dependencies"
+    );
+    expect(project?.fix).toContain(
+      "1 name(s) ending in .hack are usually Hack routes"
+    );
+    expect(project?.fix).toContain('"aliases": ["<alias>"]');
+    // Authored alias names never reach the report.
+    expect(JSON.stringify(report)).not.toContain("api.other.hack");
+    // One alias declared twice in two spellings still gives a report, with
+    // the fixed text and no authored name.
+    const twice = await fixture({
+      services: {
+        web: {
+          image: IMAGE,
+          extra_hosts: [
+            "private.example:host-gateway",
+            "PRIVATE.EXAMPLE.:host-gateway",
+          ],
+        },
+      },
+    });
+    const duplicate = await preflight(twice, GRANT);
+    expect(codes(duplicate.report, "cli")).toContain(
+      "extra_hosts_without_dependencies:web"
+    );
+    expect(JSON.stringify(duplicate.report).toLowerCase()).not.toContain(
+      "private.example"
+    );
+    expect(project?.fix).toContain("hack internal extra-hosts unset");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
   "HACK-2324: before native setup the static runtime review still runs, and a review that cannot run lists what was not checked",
   async () => {
     const f = await fixture({

@@ -2946,6 +2946,7 @@ hack env <subcommand> [options]
 | `hack env exec [command...]` | Run a host command with project env injected |
 | `hack env shell` | Open a host shell with project env injected |
 | `hack env unset [key]` | Remove an env value from the canonical config |
+| `hack env overlay` | List or create env overlays |
 | `hack env backend` | Manage env/secret storage backend strategy |
 
 ### Options
@@ -3001,7 +3002,10 @@ hack env list [options]
 | `--json` | Output JSON (machine-readable) |
 | `--show-values` | Reveal resolved values only in an interactive terminal |
 | `--show-secrets` | Alias for --show-values (interactive terminal only) |
+| `--plaintext-values` | With --json, include values of plaintext entries only; secret values are never included (safe for pipes) |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--key-file <path>` | Use this project env key file for this run instead of key discovery (pass a path, never the key) |
+| `--key-env <NAME>` | Use the key held by the environment variable NAME for this run instead of key discovery (pass the NAME, never the key) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -3063,6 +3067,8 @@ Read one global or service value without starting a runtime. Empty values succee
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--key-file <path>` | Use this project env key file for this run instead of key discovery (pass a path, never the key) |
+| `--key-env <NAME>` | Use the key held by the environment variable NAME for this run instead of key discovery (pass the NAME, never the key) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -3151,6 +3157,8 @@ Non-secret values may be passed as arguments. For secrets, pipe the value with -
 | `--value-stdin` | Read the value from piped stdin (max 64 KiB, one trailing newline stripped) so it never appears in argv or shell history |
 | `--local` | Write to the worktree-local env override file instead of the shared repo env file |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--key-file <path>` | Use this project env key file for this run instead of key discovery (pass a path, never the key) |
+| `--key-env <NAME>` | Use the key held by the environment variable NAME for this run instead of key discovery (pass the NAME, never the key) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -3186,6 +3194,8 @@ Same value rules as `hack env add`: pipe secrets with --value-stdin or use the h
 | `--value-stdin` | Read the value from piped stdin (max 64 KiB, one trailing newline stripped) so it never appears in argv or shell history |
 | `--local` | Write to the worktree-local env override file instead of the shared repo env file |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--key-file <path>` | Use this project env key file for this run instead of key discovery (pass a path, never the key) |
+| `--key-env <NAME>` | Use the key held by the environment variable NAME for this run instead of key discovery (pass the NAME, never the key) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -3326,6 +3336,33 @@ hack env unset [key] [options]
 | `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--local` | Write to the worktree-local env override file instead of the shared repo env file |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack env overlay`
+
+List or create env overlays
+
+### Usage
+
+```bash
+hack env overlay <subcommand> [options]
+```
+
+An overlay is a named layer, .hack/hack.env.<name>.yaml, selected with --env <name>. Its machine-local layer, .hack/hack.env.<name>.local.yaml, stays ignored by git.
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack env overlay list` | List every env overlay of the project (names and paths only) |
+| `hack env overlay add <name>` | Create an empty env overlay file |
+
+### Options
+
+| Option | Description |
+| --- | --- |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

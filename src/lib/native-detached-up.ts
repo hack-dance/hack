@@ -192,6 +192,17 @@ export function nativeDetachedUpReady(ready: Ready): void {
  * Losing the launcher before acceptance requests ordinary owner-mediated stop.
  * After acceptance the existing authenticated down/recovery protocols own lifetime.
  */
+let detachedOwnerProcess = false;
+
+/**
+ * True inside the detached native owner child. Its `up` arguments carry only
+ * the branch slug the launcher resolved, so it must not record that slug as
+ * the instance's name (the launcher already recorded the real one).
+ */
+export function isNativeDetachedOwnerProcess(): boolean {
+  return detachedOwnerProcess;
+}
+
 export async function runNativeDetachedOwner(opts: {
   readonly args: string[];
   readonly run: (args: string[]) => Promise<number>;
@@ -199,6 +210,7 @@ export async function runNativeDetachedOwner(opts: {
   if (!(process.send && process.connected) || publishReady) {
     return 1;
   }
+  detachedOwnerProcess = true;
   // This owner re-runs `up` and lives as long as the services; the launcher
   // that started it records the action (HACK-2218).
   suppressActivityRecording();

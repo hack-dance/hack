@@ -1,9 +1,19 @@
 import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import {
+  effectiveComposeProfiles,
+  readComposeInterpolationEnv,
+  readComposeOneShotGraph,
+  runningOneShots,
+  scopeOneShotGraph,
+  startWatchDecision,
+} from "../lib/compose-oneshot-progress.ts";
+import { parseComposePsJson } from "../lib/compose-ps-result.ts";
+import {
   type ComposeStartupPhase,
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
   resolveComposeImageTimeoutMs,
+  resolveComposeStartupCeilingMs,
   resolveComposeStartupTimeoutMs,
 } from "../lib/compose-startup-budget.ts";
 import { withDependencyStartupProgress } from "../lib/dependency-startup-progress.ts";
@@ -61,6 +71,18 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
   readonly startupTimeoutMs?: number;
   /** Detached `images` phase budget (image build/pull and container creation). */
   readonly imageTimeoutMs?: number;
+  /**
+   * Absolute bound on the detached `start` phase while one-shot dependencies
+   * keep it making progress (HACK-2310); see `startupTimeoutMs`.
+   */
+  readonly startupCeilingMs?: number;
+  /** Called each time the start phase sees a one-shot dependency running. */
+  readonly onStartupProgress?: () => void;
+  /**
+   * Called when the start phase is cut short (exit 124) with the one-shot
+   * dependencies it last saw running; empty when none was running.
+   */
+  readonly onStartupStalled?: (inProgress: readonly string[]) => void;
   /**
    * Called before each detached phase begins, so a caller can attribute a
    * non-zero exit (including the 124 deadline) to the phase that produced it.
@@ -205,6 +227,211 @@ async function prepareUnattendedStartup(
   return { ...inputs, exitCode: storage };
 }
 
+/** How often the detached start phase observes one-shot progress. */
+const START_WATCH_POLL_MS = 1000;
+
+/**
+ * The detached `start` phase (HACK-2310). While a one-shot dependency runs,
+ * `up -d` is waiting for it to exit before it starts its dependents: that is
+ * progress, so the start budget then counts only time without progress, up
+ * to an absolute ceiling. A graph without one-shots keeps the plain budget.
+ * Exit 124 (reported through `onStartupStalled` with the one-shots last seen
+ * running) means the wait was cut short; the Compose process group is then
+ * terminated, while the containers it started keep running.
+ */
+async function runComposeStartPhase(input: {
+  readonly cmd: readonly string[];
+  readonly options: RuntimeUpOptions;
+  readonly startupTimeoutMs: number;
+  readonly budgetEnv: Readonly<Record<string, string | undefined>>;
+  readonly runPhase: (
+    cmd: readonly string[],
+    timeoutMs: number
+  ) => Promise<number>;
+}): Promise<number> {
+  const { options } = input;
+  // Compose reads COMPOSE_PROFILES and interpolation variables from its env
+  // files too; read them the same way (none with --env-file /dev/null).
+  const interpolationEnv = await readComposeInterpolationEnv({
+    composeFiles: options.composeFiles,
+    env: { ...process.env, ...options.env },
+    envFileDisabled: options.unattended === true,
+  });
+  const graph = scopeOneShotGraph(
+    await readComposeOneShotGraph(options.composeFiles, {
+      activeProfiles: effectiveComposeProfiles({
+        cliProfiles: options.profiles ?? [],
+        env: interpolationEnv,
+      }),
+      interpolationEnv,
+    }),
+    { services: options.services, noDeps: options.noDeps }
+  );
+  if (graph.incomplete) {
+    // Completion dependencies may be missing from the graph, so the absence
+    // of observed progress proves nothing: only the ceiling bounds this start.
+    const ceilingMs = resolveComposeStartupCeilingMs({
+      startupTimeoutMs: input.startupTimeoutMs,
+      startupCeilingMs: options.startupCeilingMs,
+      env: input.budgetEnv,
+    });
+    process.stderr.write(
+      `Some Compose extends chains could not be resolved, so one-shot progress is unknown; this start may run up to its ${ceilingMs} ms ceiling.\n`
+    );
+    const code = await input.runPhase(input.cmd, ceilingMs);
+    if (code === 124) {
+      options.onStartupStalled?.([]);
+    }
+    return code;
+  }
+  if (graph.oneShots.size === 0) {
+    const code = await input.runPhase(input.cmd, input.startupTimeoutMs);
+    if (code === 124) {
+      options.onStartupStalled?.([]);
+    }
+    return code;
+  }
+  const ceilingMs = resolveComposeStartupCeilingMs({
+    startupTimeoutMs: input.startupTimeoutMs,
+    startupCeilingMs: options.startupCeilingMs,
+    env: input.budgetEnv,
+  });
+  const watchdog = new AbortController();
+  let done = false;
+  const finished = run(input.cmd, {
+    cwd: options.cwd,
+    env: options.env,
+    stdout: childStdoutTarget(options.routeStdoutToStderr),
+    timeoutMs: ceilingMs,
+    forwardSignals: true,
+    settleProcessGroupOnCancel: true,
+    signal: watchdog.signal,
+  }).finally(() => {
+    done = true;
+  });
+  const watch = await watchStartProgress({
+    options,
+    graph,
+    idleBudgetMs: input.startupTimeoutMs,
+    ceilingMs,
+    finished,
+    isDone: () => done,
+  });
+  // Compose may end between the watcher's decision and this point: its own
+  // outcome (success, a signal's exit code) then stands. Only a start the
+  // watchdog actually cut short reports 124.
+  const cutShort = watch.stopped && !done;
+  if (cutShort) {
+    watchdog.abort();
+  }
+  const code = await finished;
+  if ((cutShort && code !== 0) || code === 124) {
+    options.onStartupStalled?.(watch.lastSeen);
+    return 124;
+  }
+  return code;
+}
+
+/**
+ * One `compose ps --all --format json` read for the start-phase watchdog,
+ * owned by it: the poll runs in its own process group, bounded like other
+ * inspections, and is killed (with the Compose plugin process it starts) as
+ * soon as the start ends, so a hung read never keeps the CLI alive after
+ * Compose finished or was interrupted. Null when the read failed.
+ */
+async function pollComposePs(input: {
+  readonly options: RuntimeUpOptions;
+  readonly finished: Promise<number>;
+}): Promise<Record<string, unknown>[] | null> {
+  const proc = Bun.spawn(
+    [...buildComposeArgs(input.options), "ps", "--all", "--format", "json"],
+    {
+      cwd: input.options.cwd,
+      env: mergeSpawnEnv(input.options.env),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+      detached: true,
+    }
+  );
+  let settled = false;
+  const stop = () => {
+    if (settled) {
+      return;
+    }
+    try {
+      process.kill(-proc.pid, "SIGKILL");
+    } catch {
+      // The group already exited.
+    }
+  };
+  const timer = setTimeout(stop, DEFAULT_COMPOSE_INSPECTION_TIMEOUT_MS);
+  // Stop the poll the moment the start ends.
+  void input.finished.then(stop, stop);
+  try {
+    const [stdout, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      proc.exited,
+    ]);
+    return code === 0 ? parseComposePsJson(stdout) : null;
+  } finally {
+    settled = true;
+    clearTimeout(timer);
+  }
+}
+
+/** Poll one-shot progress until the start ends or the watchdog decides to stop. */
+async function watchStartProgress(input: {
+  readonly options: RuntimeUpOptions;
+  readonly graph: Awaited<ReturnType<typeof readComposeOneShotGraph>>;
+  readonly idleBudgetMs: number;
+  readonly ceilingMs: number;
+  readonly finished: Promise<number>;
+  readonly isDone: () => boolean;
+}): Promise<{
+  readonly stopped: boolean;
+  readonly lastSeen: readonly string[];
+}> {
+  const startedAt = performance.now();
+  let lastProgressAt = startedAt;
+  let lastSeen: readonly string[] = [];
+  for (;;) {
+    await Promise.race([input.finished, Bun.sleep(START_WATCH_POLL_MS)]);
+    if (input.isDone()) {
+      return { stopped: false, lastSeen };
+    }
+    const entries = await pollComposePs({
+      options: input.options,
+      finished: input.finished,
+    });
+    if (input.isDone()) {
+      return { stopped: false, lastSeen };
+    }
+    // A failed read is no evidence of progress, never extra time, and no
+    // longer confirms what was running.
+    lastSeen = entries ? runningOneShots({ graph: input.graph, entries }) : [];
+    if (entries && lastSeen.length > 0) {
+      lastProgressAt = performance.now();
+      input.options.onStartupProgress?.();
+    }
+    const decision = startWatchDecision({
+      now: performance.now(),
+      startedAt,
+      lastProgressAt,
+      idleBudgetMs: input.idleBudgetMs,
+      ceilingMs: input.ceilingMs,
+    });
+    if (decision !== "wait") {
+      // Only a ceiling stop leaves one-shots confirmed running by the last
+      // read; an idle stop means none was seen running for the whole budget.
+      return {
+        stopped: true,
+        lastSeen: decision === "ceiling" ? lastSeen : [],
+      };
+    }
+  }
+}
+
 export const composeRuntimeBackend: RuntimeBackend = {
   name: "compose",
   async up(opts) {
@@ -281,18 +508,27 @@ export const composeRuntimeBackend: RuntimeBackend = {
         if (storage !== 0) {
           return storage;
         }
-        return await runPhase(
-          [
-            ...composeArgs,
-            "up",
-            "-d",
-            "--no-build",
-            ...(opts.unattended ? ["--pull", "never"] : []),
-            ...scope,
-          ],
-          startupTimeoutMs
-        );
+        return await runStartPhase([
+          ...composeArgs,
+          "up",
+          "-d",
+          "--no-build",
+          ...(opts.unattended ? ["--pull", "never"] : []),
+          ...scope,
+        ]);
       };
+      // HACK-2310: while a one-shot dependency runs, `up -d` is waiting for
+      // it to exit before it starts its dependents. That is progress: the
+      // start budget then counts only time without progress, up to an
+      // absolute ceiling. A graph without one-shots keeps the plain budget.
+      const runStartPhase = (cmd: readonly string[]) =>
+        runComposeStartPhase({
+          cmd,
+          options: opts,
+          startupTimeoutMs,
+          budgetEnv,
+          runPhase,
+        });
       const progress = opts.dependencyProgress;
       if (!progress) {
         return await launch();

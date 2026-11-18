@@ -101,7 +101,8 @@ does not change.
 
 An entry without `services` covers every service that declares the alias. One
 alias reaches one host listener, so two host ports need two aliases. `hack up`
-names each unbound alias, the services that declare it and where it comes from.
+lists up to eight unbound aliases with their services and sources, and counts any
+others.
 If an alias is not used, remove it from the Compose file, or run
 `hack internal extra-hosts unset <alias>` for one set by a hook.
 

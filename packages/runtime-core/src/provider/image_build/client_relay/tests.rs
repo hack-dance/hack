@@ -36,10 +36,53 @@ impl Drop for Provider {
     }
 }
 
+/// How long a test end waits for the other end's bytes and end of stream.
+const READ_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Every byte up to end of stream, or a panic after [`READ_DEADLINE`].
+///
+/// The wait is in `poll(2)`, never in a blocking `read`: on macOS a blocking read on
+/// an AF_UNIX socket with a receive timeout can sleep through the peer's half-close
+/// under load (the bytes arrive, the end of stream never wakes it, and the read fails
+/// with a timeout), while `poll` reports it. `read` runs only once `poll` reported the
+/// socket readable, so it returns bytes or end of stream at once. The relay itself waits
+/// in `poll` the same way.
 fn read_to_end(stream: &mut UnixStream) -> Vec<u8> {
+    let deadline = Instant::now() + READ_DEADLINE;
     let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).unwrap();
-    bytes
+    let mut buffer = vec![0_u8; CHUNK];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "no end of stream within {READ_DEADLINE:?} after {} bytes",
+            bytes.len()
+        );
+        let mut entry = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let wait = libc::c_int::try_from(remaining.as_millis().max(1)).unwrap_or(libc::c_int::MAX);
+        // SAFETY: `entry` is live, writable storage for one entry, and the descriptor is
+        // owned by `stream` for the call.
+        let ready = unsafe { libc::poll(&mut entry, 1, wait) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            assert_eq!(error.kind(), ErrorKind::Interrupted, "poll failed: {error}");
+            continue;
+        }
+        if ready == 0 {
+            continue;
+        }
+        match stream.read(&mut buffer) {
+            Ok(0) => return bytes,
+            Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+            Err(error)
+                if matches!(error.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) => {}
+            Err(error) => panic!("read failed after {} bytes: {error}", bytes.len()),
+        }
+    }
 }
 
 #[test]
@@ -121,18 +164,11 @@ fn a_refused_provider_connection_ends_only_that_client_connection() {
     drop(provider);
     let relay = ClientRelay::start(&path).unwrap();
     let mut client = UnixStream::connect(relay.socket()).unwrap();
-    // The relay may already have closed this connection (its provider connect failed at
-    // once); macOS then refuses socket options with EINVAL. That is the outcome under
-    // test, and the read below returns at once.
-    match client.set_read_timeout(Some(Duration::from_secs(10))) {
-        Ok(()) => {}
-        Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {}
-        Err(error) => panic!("unexpected socket option failure: {error}"),
-    }
-    let mut bytes = Vec::new();
-    // The client sees the connection end, as with an absent engine socket.
-    let _ = client.read_to_end(&mut bytes);
-    assert!(bytes.is_empty());
+    // The client sees the connection end, with no bytes, as with an absent engine
+    // socket. The relay may already have closed it (its provider connect failed at once);
+    // `read_to_end` sets no socket option, so that case needs no special handling, and a
+    // connection left open fails at the deadline instead of passing.
+    assert!(read_to_end(&mut client).is_empty());
     let report = relay.finish(FINISH_GRACE);
     assert_eq!((report.connections, report.refused), (1, 1));
 }

@@ -123,7 +123,7 @@ pub struct HackApp {
     pub(crate) model: AppModel,
     pub(crate) source: Arc<dyn Source>,
     pub(crate) logs: crate::logs_view::LogsPane,
-    tab: usize,
+    pub(crate) tab: usize,
     pub(crate) env: hack_desktop_core::env::EnvModel,
     /// The Env tab's open edit, if any (`env_view`).
     pub(crate) env_edit: Option<crate::env_view::EnvEdit>,
@@ -144,7 +144,7 @@ pub struct HackApp {
     doctor: DoctorPane,
     /// Is the window visible (not minimised or hidden)? Automatic doctor
     /// runs wait for it.
-    window_visible: bool,
+    pub(crate) window_visible: bool,
     _visibility: Option<gpui_kit::Subscription>,
     _activation: Option<gpui_kit::Subscription>,
     /// One machine action at a time: Setup's actions and Start / Restart
@@ -159,6 +159,9 @@ pub struct HackApp {
     pub(crate) hackd_loading: bool,
     /// The Upgrade pane's reads and results.
     pub(crate) upgrade: crate::upgrade_view::UpgradePane,
+    /// Resource use of the shown instance (Services tab).
+    pub(crate) usage: Option<crate::usage_view::UsageState>,
+    pub(crate) usage_loading: bool,
     /// [`Self::hackd_evidence_key`] when hackd was last read: a project read
     /// that changes it makes the stored read stale.
     pub(crate) hackd_evidence_seen: String,
@@ -215,6 +218,8 @@ impl HackApp {
             hackd_read: false,
             hackd_loading: false,
             upgrade: crate::upgrade_view::UpgradePane::default(),
+            usage: None,
+            usage_loading: false,
             hackd_evidence_seen: String::new(),
             action_started: std::collections::HashMap::new(),
             setup: Default::default(),
@@ -222,6 +227,7 @@ impl HackApp {
         };
         if live {
             this.start_polling(cx);
+            this.start_usage_polling(cx);
             this.start_doctor_refresh(cx);
             this.load_setup(cx);
         } else {
@@ -994,8 +1000,9 @@ impl HackApp {
             if self.pane == Pane::Hackd {
                 self.load_hackd(cx);
             }
-            // The upgrade reads were the previous CLI's.
+            // The upgrade and usage reads were the previous CLI's.
             self.upgrade = crate::upgrade_view::UpgradePane::default();
+            self.usage = None;
             if self.pane == Pane::Upgrade {
                 self.load_upgrade(cx);
             }
@@ -1469,6 +1476,12 @@ impl HackApp {
                     }))
                     .child(state_pill(status, project_label(&d.state), ui))
                     .child(neutral_pill(d.backend.clone(), ui))
+                    .children(self.usage_total_label().filter(|_| !compact).map(|t| {
+                        div()
+                            .type_step(text::SMALL)
+                            .text_color(p.text_secondary)
+                            .child(t)
+                    }))
                     .child(div().flex_1())
                     .child(actions),
             )
@@ -1557,14 +1570,42 @@ impl HackApp {
         let rows: Vec<ServiceRow> = d
             .services
             .iter()
-            .map(|s| ServiceRow {
-                name: s.name.clone(),
-                status: Status::of_service(s),
-                state: service_label(s),
-                // Not reported by the CLI yet: a dash with a tooltip.
-                cpu: None,
-                memory: None,
-                route: s.route.clone().ok_or_else(|| "internal".to_owned()),
+            .map(|s| {
+                let usage = self.shown_usage();
+                let row = usage
+                    .and_then(|u| u.rows.as_ref().ok())
+                    .and_then(|rows| rows.get(&s.name));
+                let native = self.model.selected_row().is_some_and(|r| r.is_native());
+                let usage_note = if native {
+                    crate::usage_view::NATIVE_NOTE
+                } else if !s.running {
+                    crate::usage_view::NOT_RUNNING_NOTE
+                } else {
+                    match usage.map(|u| &u.rows) {
+                        None => hack_desktop_ui::components::UNKNOWN_USAGE,
+                        Some(Err(_)) => "Usage could not be read (is Docker running?)",
+                        Some(Ok(_)) => crate::usage_view::NO_VALUE_NOTE,
+                    }
+                };
+                ServiceRow {
+                    name: s.name.clone(),
+                    status: Status::of_service(s),
+                    state: service_label(s),
+                    cpu: row
+                        .filter(|_| s.running)
+                        .and_then(|r| r.cpu_percent)
+                        .map(hack_desktop_core::usage::cpu),
+                    memory: row
+                        .filter(|_| s.running)
+                        .and_then(|r| r.mem_used_bytes)
+                        .map(hack_desktop_core::usage::bytes),
+                    memory_note: row
+                        .and_then(|r| r.mem_limit_bytes)
+                        .map(|l| format!("limit {}", hack_desktop_core::usage::bytes(l))),
+                    usage_note,
+                    emulated: usage.is_some_and(|u| u.emulated.contains(&s.name)),
+                    route: s.route.clone().ok_or_else(|| "internal".to_owned()),
+                }
             })
             .collect();
         // With the terminal panel, logs live in the panel's Logs tab.

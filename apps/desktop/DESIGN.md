@@ -375,6 +375,38 @@ menu, dock menu and in-window menus). The popover needs a separate crate such as
 | Minimums | macOS 15+. Linux: Wayland or X11 with Vulkan (software Vulkan works), Ubuntu 24.04-era glibc or newer. Windows: not planned. |
 | Version match | The app declares a supported CLI range; outside it, only the "update Hack" card shows. |
 
+## 10. Resource use in the Services tab
+
+Why: a machine can be slow because one project's services use it, or run
+under emulation, and the window gave no sign of it (the CPU and Memory
+columns showed a dash). Read-only; no new CLI flag is needed for Compose.
+
+| Where | Shown | From |
+|---|---|---|
+| Services table, CPU | `3.2%` (one decimal; summed over replicas; can pass 100% on several cores) | `hack usage --json --by-service --path <root>`: `cpuPercent` for the row whose `composeProject` is this instance and whose `service` matches |
+| Services table, Memory | `104 MiB` (binary units), the limit in the tooltip | `memUsedBytes`, `memLimitBytes` |
+| Services table, name | an `emulated` pill, tooltip "image architecture differs from the engine's: runs under emulation, slower; see Doctor" | `hack ps --json --path <root>` (with `--branch <name>` for a branch instance): `items[].emulated: true` (#904), matched on `Service` |
+| Header, after the state pill | instance total, `CPU 12.4% · 1.3 GiB` | the sum of this instance's rows |
+
+- **When.** Only while the Services tab of a running Compose instance is
+  shown: usage every 5 s (one `docker stats` sample takes about 1–2 s),
+  single flight, and `hack ps` for the emulated flag when the instance is
+  selected and when its services change, not every 5 s. A result for an
+  instance or CLI no longer shown is dropped. Nothing reads while the
+  window is hidden.
+- **Unknown, not zero.** A `null` value, a service with no row (not
+  running), a read that failed (`E_DOCKER_UNAVAILABLE`) or a native project
+  shows a dash; the header total appears only when every running service has
+  a value.
+- **Native projects** are not covered by `usage --by-service` (Compose
+  only): the columns keep a dash with the tooltip "not reported for native
+  projects yet (R29)".
+
+Requests (Appendix C): **R28** `emulated` (and the image and engine
+architectures) on each `usage --by-service` row, so one read gives both;
+**R29** native-backend usage per service; **R30** engine capacity (CPUs and
+memory) in the same payload, so a total can read as a share of the machine.
+
 ## Open questions for the lead
 
 1. Cask name `hack-desktop`, opt-in only (recommended), or offered by `hack setup`?
@@ -440,3 +472,6 @@ Each is small enough for one PR.
 31. **R25** Plaintext values in one read. Values come only with `--show-values` on a terminal, and that reveals everything. Request a pipe-safe listing that includes values for plaintext entries only (never secrets), for example `hack env list --json --plaintext-values`. Until then the app runs `hack env get` once per plaintext name (at most 48 per listing).
 32. **R26** Key source: report which source the CLI used for the project secret key (`file` with its path relative to the checkout, or `env` with the variable name), never the key; and accept an override for one run (a key file path or a variable name, for example `--key-file <path>` / `--key-env <NAME>`) so the app can offer "Choose key file" and "Use env var" without reading the key itself.
 33. **R27** Overlay creation: `hack env overlay add <name>` (creates `.hack/hack.env.<name>.yaml` the CLI's way, refusing an existing name), for the Env tab's `+ Overlay`. Slice 2.
+34. **R28** `emulated`, `image_arch` and `engine_arch` on each `hack usage --json --by-service` row (today only `hack ps --json` items carry `emulated`), so the Services tab needs one read. Section 10.
+35. **R29** Native-backend usage: `hack usage --json --by-service` for a native project (CPU and memory per native service). Section 10.
+36. **R30** Engine capacity in the same payload (`engine: {cpus, mem_total_bytes}`), so an instance total can be shown as a share of what Docker has. Section 10.

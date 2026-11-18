@@ -175,9 +175,11 @@ pub(super) fn admit(admission: &Admission<'_>) -> Result<Option<RestartPolicy>, 
         ));
     }
     if admission.managed_environment {
-        return Err(refused(
-            "Services with managed environment delivery cannot yet use an automatic restart policy: delivery is single-incarnation and time-bounded.",
-        ));
+        // Private delivery is single-incarnation and time-bounded, and values are
+        // never kept at rest in the container, so an engine restart would come
+        // back without them. Start without the engine policy instead of refusing
+        // (HACK-2324); the CLI names each such service and what is lost.
+        return Ok(None);
     }
     Ok(Some(policy))
 }
@@ -457,8 +459,14 @@ mod tests {
     #[test]
     fn refuses_incarnation_bound_service_classes_instead_of_dropping_guards() {
         let plain = service("unless-stopped");
-        assert!(admit_with(&plain, Condition::Started, true, false).is_err());
+        // Managed delivery starts without the engine policy (HACK-2324); host
+        // dependencies still refuse, and win when both apply.
+        assert_eq!(
+            admit_with(&plain, Condition::Started, true, false).unwrap(),
+            None
+        );
         assert!(admit_with(&plain, Condition::Started, false, true).is_err());
+        assert!(admit_with(&plain, Condition::Started, true, true).is_err());
         let mut routed = plain.clone();
         routed.routing = Some(
             serde_json::from_value(json!({"hostnames":["worker.example.test"],"port":3000}))
@@ -489,12 +497,12 @@ mod tests {
             plan.restart = "no".into();
             assert_eq!(admit_with(&plan, ready, true, true).unwrap(), None);
         }
-        for error in [
-            admit_with(&plain, Condition::Started, true, false).unwrap_err(),
-            admit_with(&plain, Condition::Started, false, true).unwrap_err(),
-        ] {
-            assert_eq!(error.code, "graph_restart_policy");
-        }
+        assert_eq!(
+            admit_with(&plain, Condition::Started, false, true)
+                .unwrap_err()
+                .code,
+            "graph_restart_policy"
+        );
     }
 
     #[test]
@@ -516,7 +524,10 @@ mod tests {
                     .unwrap()
                     .is_some()
             );
-            assert!(admit_with(plan, Condition::Healthy, true, false).is_err());
+            assert_eq!(
+                admit_with(plan, Condition::Healthy, true, false).unwrap(),
+                None
+            );
             assert!(admit_with(plan, Condition::Healthy, false, true).is_err());
         }
         // A conditional retry of a completion goal still refuses an unconditional

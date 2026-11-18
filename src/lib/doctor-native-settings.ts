@@ -81,7 +81,7 @@ const WARNING_TEXT: Readonly<Record<NativeSettingsWarning, string>> = {
   internal_dns_tls_not_applied:
     "hack.config.json internal DNS and container CA trust are not applied on native, so containers cannot reach routes by their HTTPS names",
   routes_without_probes:
-    "routed service(s) have no native HTTP probe (add httpProbes to the adaptation)",
+    "routed service(s) have a disabled or timing-only healthcheck, which native route readiness cannot use (add httpProbes to the adaptation)",
   compose_profiles_ignored:
     "COMPOSE_PROFILES is ignored on native (pass --profile)",
   aws_region_without_profile:
@@ -150,7 +150,12 @@ async function adaptRawCompose(opts: {
   return JSON.parse(adapted.normalizedComposeJson);
 }
 
-/** Routed services that have no native HTTP probe in an adapted Compose file. */
+/**
+ * Routed services in an adapted Compose file whose healthcheck native route
+ * readiness cannot use: disabled, or neither a command nor `x-hack-http`.
+ * No healthcheck and a command healthcheck both get the inferred route probe
+ * (HACK-2324), so they are not counted.
+ */
 function countRoutesWithoutProbes(compose: Record<string, unknown>): number {
   if (!isRecord(compose.services)) {
     return 0;
@@ -163,14 +168,28 @@ function countRoutesWithoutProbes(compose: Record<string, unknown>): number {
     if (!labelKeys(service.labels).some((key) => ROUTE_LABELS.has(key))) {
       continue;
     }
-    const probed =
-      isRecord(service.healthcheck) &&
-      service.healthcheck["x-hack-http"] !== undefined;
-    if (!probed) {
+    if (!routeReadinessUsable(service.healthcheck)) {
       count += 1;
     }
   }
   return count;
+}
+
+function routeReadinessUsable(healthcheck: unknown): boolean {
+  if (healthcheck === undefined) {
+    return true;
+  }
+  if (!isRecord(healthcheck) || healthcheck.disable === true) {
+    return false;
+  }
+  if (healthcheck["x-hack-http"] !== undefined) {
+    return true;
+  }
+  const test = healthcheck.test;
+  return (
+    (typeof test === "string" && test.length > 0) ||
+    (Array.isArray(test) && test[0] !== "NONE" && test.length > 0)
+  );
 }
 
 /**

@@ -65,3 +65,92 @@ export function reportNativeRestartPolicyNotices(
     warn(line);
   }
 }
+
+/**
+ * One notice per active service that declares an automatic restart policy and
+ * receives private values (managed or privately resolved shell values):
+ * native starts it without the engine policy,
+ * because private delivery is single-incarnation and values are never kept at
+ * rest in the container (HACK-2324). Only the service name and the
+ * closed-grammar policy are printed.
+ */
+export function nativeManagedRestartNotices(opts: {
+  readonly compose: unknown;
+  readonly plan: unknown;
+  /** Services that receive private values. */
+  readonly delivered: ReadonlySet<string>;
+}): { readonly service: string; readonly line: string }[] {
+  const services =
+    isRecord(opts.compose) && isRecord(opts.compose.services)
+      ? opts.compose.services
+      : {};
+  const reviewed =
+    isRecord(opts.plan) && isRecord(opts.plan.services)
+      ? opts.plan.services
+      : {};
+  const notices: { service: string; line: string }[] = [];
+  for (const [service, spec] of Object.entries(services).sort(([a], [b]) =>
+    a.localeCompare(b)
+  )) {
+    const policy = isRecord(spec) ? spec.restart : undefined;
+    const active = reviewed[service];
+    if (
+      SERVICE.test(service) &&
+      typeof policy === "string" &&
+      POLICY.test(policy) &&
+      isRecord(active) &&
+      active.active === true &&
+      opts.delivered.has(service)
+    ) {
+      notices.push({
+        service,
+        line: `Service ${service}: restart: ${policy} is not applied, because the service receives private values that native delivers once per container start. If it crashes it stays stopped until you run hack restart, which restarts the whole project with a fresh delivery.`,
+      });
+    }
+  }
+  return notices;
+}
+
+/**
+ * Services whose process receives private values (managed or privately
+ * resolved shell values): exactly the runtime's managed-environment set,
+ * whose restart policy native drops. A service that only receives a private
+ * file (such as the gcloud ADC snapshot) keeps its entrypoint and its file for
+ * the container's lifetime, so its restart policy still applies.
+ */
+export function nativePrivatelyDeliveredServices(input: {
+  readonly managedEnvironment: Readonly<
+    Record<string, Readonly<Record<string, string>>>
+  >;
+  readonly shellEnvironment?: Readonly<Record<string, unknown>>;
+}): Set<string> {
+  const nonEmpty = (value: unknown) =>
+    typeof value === "object" &&
+    value !== null &&
+    Object.keys(value).length > 0;
+  return new Set([
+    ...Object.entries(input.managedEnvironment)
+      .filter(([, values]) => nonEmpty(values))
+      .map(([name]) => name),
+    ...Object.entries(input.shellEnvironment ?? {})
+      .filter(([, values]) => nonEmpty(values))
+      .map(([name]) => name),
+  ]);
+}
+
+/** Warn once per privately delivered service whose restart policy is dropped. */
+export function reportNativeManagedRestartNotices(opts: {
+  readonly input: Parameters<typeof nativePrivatelyDeliveredServices>[0] & {
+    readonly normalizedComposeJson: string;
+  };
+  readonly plan: unknown;
+  readonly warn: (line: string) => void;
+}): void {
+  for (const notice of nativeManagedRestartNotices({
+    compose: JSON.parse(opts.input.normalizedComposeJson),
+    plan: opts.plan,
+    delivered: nativePrivatelyDeliveredServices(opts.input),
+  })) {
+    opts.warn(notice.line);
+  }
+}

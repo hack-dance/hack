@@ -75,7 +75,16 @@ pub(super) fn validate(
                         && (h.test.is_some() || h.native_http.is_some())
                 })
             {
-                diagnostics.push(Diagnostic::error("missing_healthcheck",&field,"A healthy dependency needs an explicit enabled healthcheck; image health defaults are not assumed."));
+                let inferred_route = target
+                    .healthcheck
+                    .as_ref()
+                    .is_some_and(|h| h.native_http.as_ref().is_some_and(|p| p.policy.is_some()));
+                let message = if inferred_route {
+                    "A healthy dependency cannot wait on an inferred route probe: route readiness is not a healthcheck. Use condition: service_started, or give that service healthcheck.x-hack-http with its health path."
+                } else {
+                    "A healthy dependency needs an explicit enabled healthcheck; image health defaults are not assumed."
+                };
+                diagnostics.push(Diagnostic::error("missing_healthcheck", &field, message));
             }
             if condition.condition == "service_completed_successfully"
                 && ["always", "unless-stopped"].contains(&target.restart.as_str())

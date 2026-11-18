@@ -122,6 +122,7 @@ test("no committed files and no machine directory leave every setting unset", as
       preparedBase: "unset",
       https: "unset",
       aws: "unset",
+      gcloud: "unset",
     },
   });
 });
@@ -295,6 +296,7 @@ test("machine settings supply every grant and host setting", async () => {
     preparedBase: { mode: "prefer" },
     https: { caddyBinary: "/opt/caddy/bin/caddy", caddySha256: SHA, port: 443 },
     aws: { profile: "synthetic-profile", region: "eu-west-1" },
+    gcloud: { mode: "file" },
   });
   const canonical = await realpath(f.machineDir);
   expect(await f.host()).toEqual({
@@ -309,6 +311,7 @@ test("machine settings supply every grant and host setting", async () => {
       httpsPort: 443,
     },
     aws: { profile: "synthetic-profile", region: "eu-west-1" },
+    gcloud: { mode: "file" },
     origins: {
       sharedSource: "machine",
       dependencies: "machine",
@@ -316,6 +319,7 @@ test("machine settings supply every grant and host setting", async () => {
       preparedBase: "machine",
       https: "machine",
       aws: "machine",
+      gcloud: "machine",
     },
     machineFile: join(canonical, "settings.json"),
   });
@@ -382,10 +386,7 @@ test("an invalid machine value refuses even when a variable overrides it", async
 test("machine settings refuse unsupported fields, grants in other shapes and partial HTTPS", async () => {
   const cases: readonly [unknown, string][] = [
     [{ version: 2 }, "require version 1"],
-    [
-      { version: 1, gcloud: { applicationDefault: true } },
-      "contain an unsupported field",
-    ],
+    [{ version: 1, kube: { context: "dev" } }, "contain an unsupported field"],
     [
       { version: 1, isolatedNetworks: ["shared"] },
       "contain an unsupported field",
@@ -750,5 +751,28 @@ test("doctor notes the host listener wait only when a selection and persistent h
     const result = await doctor(unnoted);
     expect(result.nativeSettings?.dependencyWait).toBeUndefined();
     expect(result.message).not.toContain("host_wait_seconds");
+  }
+});
+
+test("HACK-2324: the gcloud ADC consent is a machine setting or the variable, and only file mode", async () => {
+  const f = await fixture();
+  expect((await f.host()).origins.gcloud).toBe("unset");
+  expect((await f.host({ HACK_NATIVE_GCLOUD_ADC: "file" })).gcloud).toEqual({
+    mode: "file",
+  });
+  await f.machine({ version: 1, gcloud: { mode: "file" } });
+  const machine = await f.host();
+  expect(machine.gcloud).toEqual({ mode: "file" });
+  expect(machine.origins.gcloud).toBe("machine");
+  const withheld = await f.host({ HACK_NATIVE_GCLOUD_ADC: "" });
+  expect(withheld.gcloud).toBeUndefined();
+  expect(withheld.origins.gcloud).toBe("env");
+  for (const gcloud of [
+    { mode: "token" },
+    { mode: "file", extra: 1 },
+    "file",
+  ]) {
+    await f.machine({ version: 1, gcloud });
+    await expect(f.host()).rejects.toMatchObject({ code: "E_CONFIG_INVALID" });
   }
 });

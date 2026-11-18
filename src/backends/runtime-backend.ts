@@ -8,6 +8,7 @@ import {
 } from "../lib/compose-startup-budget.ts";
 import { withDependencyStartupProgress } from "../lib/dependency-startup-progress.ts";
 import { reportLifecycleProgress } from "../lib/lifecycle-progress.ts";
+import { childStdoutTarget } from "../lib/machine-stdout.ts";
 import { exec, run } from "../lib/shell.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
 import { createStructuredLogGrouper } from "../ui/log-group.ts";
@@ -237,7 +238,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
         run(cmd, {
           cwd: opts.cwd,
           env: opts.env,
-          stdout: opts.routeStdoutToStderr ? "stderr" : "inherit",
+          stdout: childStdoutTarget(opts.routeStdoutToStderr),
           timeoutMs,
           forwardSignals: true,
           settleProcessGroupOnCancel: true,
@@ -353,9 +354,10 @@ export const composeRuntimeBackend: RuntimeBackend = {
     process.on("SIGINT", forwardInterrupt);
     process.on("SIGTERM", forwardTerminate);
 
-    const stdoutTarget = opts.routeStdoutToStderr
-      ? process.stderr
-      : process.stdout;
+    const stdoutTarget =
+      childStdoutTarget(opts.routeStdoutToStderr) === "stderr"
+        ? process.stderr
+        : process.stdout;
     const stdoutGrouper = createStructuredLogGrouper({
       write: (text) => stdoutTarget.write(text),
     });
@@ -391,7 +393,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
     return await run(cmd, {
       cwd: opts.cwd,
       env: opts.env,
-      stdout: opts.routeStdoutToStderr ? "stderr" : "inherit",
+      stdout: childStdoutTarget(opts.routeStdoutToStderr),
       timeoutMs: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
     });
   },
@@ -424,7 +426,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
       cwd: opts.cwd,
       stdin: "inherit",
       env: opts.env,
-      stdout: opts.routeStdoutToStderr ? "stderr" : "inherit",
+      stdout: childStdoutTarget(opts.routeStdoutToStderr),
       timeoutMs: opts.timeoutMs,
       forwardSignals: opts.forwardSignals,
     });

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import cliPackage from "../packages/cli/package.json";
@@ -11,7 +11,8 @@ import { privateCliEnv } from "./helpers/private-cli-env.ts";
  * The budget is CPU time (user plus system) of the process, not wall time:
  * CPU time stays put when the runner is busy, where wall time does not. It is
  * compared with the CPU time of a fixed JavaScript workload on the same
- * runner, so a slower machine moves both numbers together.
+ * runner, so a slower machine moves both numbers together. Which builds
+ * must carry the bytecode flags is held by `cli-compile-flags.test.ts`.
  *
  * Reference (Linux build host, Nov 2026): the CLI uses about 0.9x the
  * yardstick's CPU with the bytecode cache and about 3.7x without it. The
@@ -38,6 +39,11 @@ for (let round = 0; round < 36; round += 1) {
 }
 process.stdout.write(String(total));
 `;
+
+// Calibrated on Linux x64 only. macOS adds dyld, page-in of a large executable
+// and code-signature checks to the CLI side but not to the yardstick, and arm64
+// runners have a different core mix; record a ratio there before enabling it.
+const calibrated = process.platform === "linux" && process.arch === "x64";
 
 const repository = resolve(import.meta.dir, "..");
 let root = "";
@@ -93,6 +99,9 @@ async function medianCpuMs(argv: string[], runs: number): Promise<number> {
 }
 
 beforeAll(async () => {
+  if (!calibrated) {
+    return;
+  }
   root = await realpath(await mkdtemp(join(tmpdir(), "hack-startup-budget-")));
   binary = join(root, "hack");
   const child = Bun.spawn(
@@ -129,40 +138,21 @@ afterAll(async () => {
   }
 });
 
-test("every CLI build compiles with the bytecode cache", async () => {
-  expect(buildFlags()).toEqual(
-    expect.arrayContaining(["--compile", "--bytecode", "--format=esm"])
-  );
-  const release = await readFile(
-    join(repository, "scripts/build-release.ts"),
-    "utf8"
-  );
-  expect(release).toContain('"--bytecode"');
-  expect(release).toContain('"--format=esm"');
-  const candidate = await readFile(
-    join(repository, "scripts/build-native-candidate.sh"),
-    "utf8"
-  );
-  const compiles = candidate
-    .split("\n")
-    .filter((line) => line.includes("bun build index.ts --compile"));
-  expect(compiles.length).toBeGreaterThan(0);
-  for (const line of compiles) {
-    expect(line).toContain("--bytecode --format=esm");
-  }
-});
-
-test("hack --version stays inside its startup CPU budget", async () => {
-  const yardstick = await medianCpuMs(
-    [process.execPath, "--no-env-file", "-e", YARDSTICK],
-    YARDSTICK_RUNS
-  );
-  const cli = await medianCpuMs([binary, "--version"], CLI_RUNS);
-  const ratio = cli / yardstick;
-  // The numbers are the evidence when this fails.
-  console.info(
-    `startup budget: cli ${cli.toFixed(1)} ms CPU, yardstick ${yardstick.toFixed(1)} ms CPU, ratio ${ratio.toFixed(2)} (limit ${STARTUP_CPU_LIMIT_RATIO})`
-  );
-  expect(yardstick).toBeGreaterThan(20);
-  expect(ratio).toBeLessThan(STARTUP_CPU_LIMIT_RATIO);
-}, 120_000);
+test.skipIf(!calibrated)(
+  "hack --version stays inside its startup CPU budget",
+  async () => {
+    const yardstick = await medianCpuMs(
+      [process.execPath, "--no-env-file", "-e", YARDSTICK],
+      YARDSTICK_RUNS
+    );
+    const cli = await medianCpuMs([binary, "--version"], CLI_RUNS);
+    const ratio = cli / yardstick;
+    // The numbers are the evidence when this fails.
+    console.info(
+      `startup budget: cli ${cli.toFixed(1)} ms CPU, yardstick ${yardstick.toFixed(1)} ms CPU, ratio ${ratio.toFixed(2)} (limit ${STARTUP_CPU_LIMIT_RATIO})`
+    );
+    expect(yardstick).toBeGreaterThan(20);
+    expect(ratio).toBeLessThan(STARTUP_CPU_LIMIT_RATIO);
+  },
+  120_000
+);

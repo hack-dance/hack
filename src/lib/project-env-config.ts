@@ -1785,7 +1785,8 @@ export async function listProjectEnvOverlays(opts: {
   let entries: string[];
   try {
     entries = (await readdir(opts.projectDir, { withFileTypes: true }))
-      .filter((entry) => entry.isFile() || entry.isSymbolicLink())
+      // Regular files only, as listProjectEnvOverlayNames does.
+      .filter((entry) => entry.isFile())
       .map((entry) => entry.name);
   } catch (error) {
     if (isRecord(error) && error.code === "ENOENT") {
@@ -4143,6 +4144,12 @@ async function resolveProjectEnvHydrationKey(opts: {
         projectEnvKeyOverrideMissingMessage()
       );
     }
+    await assertProjectEnvKeyOverrideEncryptable({
+      projectRoot: opts.projectRoot,
+      override,
+      keyText: readerKey,
+      refuse: () => opts.refuse("wrong_key"),
+    });
     return { keyText: readerKey, createdKey: false };
   }
   if (fileKey === null && readerKey !== null) {
@@ -5385,6 +5392,15 @@ async function resolveProjectEnvKey(opts: {
         projectEnvKeyOverrideMissingMessage()
       );
     }
+    if (keyText !== null && opts.forEncryption) {
+      await assertProjectEnvKeyOverrideEncryptable({
+        projectRoot: opts.projectRoot,
+        override,
+        keyText,
+        refuse: () =>
+          new ProjectEnvKeyRefusalError(PROJECT_ENV_KEY_OVERRIDE_SPLIT_MESSAGE),
+      });
+    }
     return keyText;
   }
   if (opts.nativeSelection) {
@@ -5427,7 +5443,8 @@ export type ProjectEnvKeySource =
   | {
       readonly kind: "file";
       readonly origin: "override" | "checkout" | "shared" | "primary_checkout";
-      readonly path: string;
+      /** Null only for an override path that names no entry (never echoed). */
+      readonly path: string | null;
     }
   | {
       readonly kind: "env";
@@ -5459,6 +5476,54 @@ function projectEnvKeyOverrideSource(
   return override.kind === "file"
     ? { kind: "file", origin: "override", path: override.path }
     : { kind: "env", origin: "override", name: override.name };
+}
+
+/**
+ * The override source as reported to callers. A `--key-file` argument that
+ * names no entry at all is not echoed (`path: null`): it may be a key pasted
+ * where a path belongs.
+ */
+async function reportedProjectEnvKeyOverrideSource(
+  override: ProjectEnvKeyOverride
+): Promise<ProjectEnvKeySource> {
+  if (
+    override.kind === "file" &&
+    (await lstat(override.path).catch(() => null)) === null
+  ) {
+    return { kind: "file", origin: "override", path: null };
+  }
+  return projectEnvKeyOverrideSource(override);
+}
+
+export const PROJECT_ENV_KEY_OVERRIDE_SPLIT_MESSAGE =
+  "Refusing to encrypt with the key given by --key-file or --key-env: this checkout already finds a different project env key, so the value would not decrypt without the override and the project would hold secrets under two keys. Use the discovered key, or replace it first; key contents are never included in this message.";
+
+/**
+ * Encryption with a one-run override follows the same rules as discovered
+ * keys: a git-tracked key file is refused, and so is a key that differs from
+ * the one discovery would find (the HACK-2169 mixed-key rule). Discovery is
+ * only compared here, never used, created or adopted; a discovered key that
+ * cannot be read is not a conflict.
+ */
+async function assertProjectEnvKeyOverrideEncryptable(opts: {
+  readonly projectRoot: string;
+  readonly override: ProjectEnvKeyOverride;
+  readonly keyText: string;
+  readonly refuse: () => Error;
+}): Promise<void> {
+  if (opts.override.kind === "file") {
+    await assertProjectEnvKeyUntracked({ keyPath: opts.override.path });
+  }
+  const discovered = await discoverProjectEnvKey({
+    projectRoot: opts.projectRoot,
+  }).catch(() => null);
+  if (
+    discovered !== null &&
+    discovered.keyText !== null &&
+    discovered.keyText !== opts.keyText
+  ) {
+    throw opts.refuse();
+  }
 }
 
 function projectEnvKeyOverrideMissingMessage(): string {
@@ -5607,7 +5672,7 @@ export async function probeProjectEnvKey(opts: {
       const keyText = await readProjectEnvKeyOverride({ override });
       return {
         state: keyText === null ? "missing" : "ok",
-        source: projectEnvKeyOverrideSource(override),
+        source: await reportedProjectEnvKeyOverrideSource(override),
       };
     }
     const discovered = await discoverProjectEnvKey(opts);
@@ -6256,7 +6321,10 @@ async function resolveInheritedProjectEnvKey(opts: {
   }
 
   const keyPath = resolveProjectEnvKeyPath({ projectRoot: primaryRoot });
-  const keyText = await readLegacyProjectEnvKeyFile({ path: keyPath });
+  const keyText = await readProjectEnvKeyCandidate({
+    source: { kind: "file", origin: "primary_checkout", path: keyPath },
+    read: async () => await readLegacyProjectEnvKeyFile({ path: keyPath }),
+  });
   if (keyText === null) {
     return null;
   }

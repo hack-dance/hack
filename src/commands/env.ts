@@ -1384,8 +1384,14 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     });
     const keyState = keyProbe.state;
     if (json) {
+      // Best effort: an unlistable project dir must not fail the listing.
       const overlays = await listProjectEnvOverlays({
         projectDir: project.projectDir,
+      }).catch(() => {
+        process.stderr.write(
+          "WARN: Could not list env overlays; overlays is empty. Run hack doctor.\n"
+        );
+        return [] as const;
       });
       process.stdout.write(
         `${JSON.stringify(
@@ -1785,7 +1791,10 @@ function serializeProjectEnvKeySourceForJson(input: {
     return null;
   }
   if (input.source.kind === "file") {
-    const relativePath = relative(input.project.projectRoot, input.source.path);
+    const relativePath =
+      input.source.path === null
+        ? ""
+        : relative(input.project.projectRoot, input.source.path);
     return {
       kind: "file" as const,
       origin: input.source.origin,
@@ -1815,7 +1824,7 @@ function describeProjectEnvKeySourceForDisplay(input: {
     return "unknown";
   }
   if (source.kind === "file") {
-    return `file ${source.relative_path ?? source.path} (${source.origin})`;
+    return `file ${source.relative_path ?? source.path ?? "(not found)"} (${source.origin})`;
   }
   if (source.kind === "env") {
     return `env ${source.name} (${source.origin})`;
@@ -2139,7 +2148,9 @@ function writeEnvListJson(input: {
           scope: v.services ?? ["global"],
           layer: input.layersByKey[v.key],
           ...(input.showSecrets ||
-          (input.plaintextValues && v.source === "plain_env")
+          (input.plaintextValues &&
+            v.source === "plain_env" &&
+            v.resolvedFrom === "dotenv")
             ? { value: v.value }
             : {}),
         })),

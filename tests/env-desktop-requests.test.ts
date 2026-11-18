@@ -257,6 +257,39 @@ describe("R25: plaintext values in one pipe-safe read", () => {
   );
 
   test(
+    "legacy contract: only stored dotenv values, never ambient ones",
+    async () => {
+      const project = await createProject();
+      await rm(resolve(project.projectDir, "hack.env.default.yaml"));
+      await writeFile(
+        resolve(project.projectDir, "hack.env.json"),
+        `${JSON.stringify({
+          version: 1,
+          vars: [
+            { key: "STORED_PLAIN", source: "plain_env", required: false },
+            { key: "AMBIENT_PLAIN", source: "plain_env", required: false },
+          ],
+        })}\n`
+      );
+      await writeFile(
+        resolve(project.projectDir, ".env"),
+        `STORED_PLAIN=${PLAIN_VALUE}\n`
+      );
+      const ambient = "ambient-process-value";
+      const result = await runHack({
+        project,
+        args: ["env", "list", "--json", "--plaintext-values"],
+        env: { AMBIENT_PLAIN: ambient },
+      });
+      expect(result.stdout).not.toContain(ambient);
+      const vars = byKey(JSON.parse(result.stdout) as ListPayload);
+      expect(vars.STORED_PLAIN?.value).toBe(PLAIN_VALUE);
+      expect("value" in (vars.AMBIENT_PLAIN ?? {})).toBe(false);
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
     "--plaintext-values without --json is a usage error",
     async () => {
       const project = await createProject();
@@ -479,10 +512,97 @@ describe("R26: key source and one-run override", () => {
         args: ["--key-file", missing],
       });
       expect(listed.json.key_state).toBe("missing");
-      expect(listed.json.key_source).toMatchObject({
+      // A path that names nothing is never echoed: it may be a pasted key.
+      expect(listed.json.key_source).toEqual({
         kind: "file",
         origin: "override",
+        path: null,
+        relative_path: null,
       });
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
+    "a missing --key-file argument is not echoed back",
+    async () => {
+      const project = await createProject();
+      const result = await runHack({
+        project,
+        args: ["env", "list", "--json", "--key-file", OVERRIDE_KEY],
+      });
+      expect(result.exitCode).toBe(0);
+      expectNoSecretOutput(result);
+      const display = await runHack({
+        project,
+        args: ["env", "list", "--key-file", OVERRIDE_KEY],
+      });
+      expectNoSecretOutput(display);
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
+    "an override cannot encrypt with a git-tracked key file",
+    async () => {
+      const project = await createProject();
+      const init = Bun.spawnSync(["git", "init", "-q", project.projectRoot], {
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      expect(init.exitCode).toBe(0);
+      const keyFile = resolve(project.projectRoot, "committed.key");
+      await writeFile(keyFile, `${OVERRIDE_KEY}\n`, { mode: 0o600 });
+      const add = Bun.spawnSync(
+        ["git", "-C", project.projectRoot, "add", "--", "committed.key"],
+        { stdout: "ignore", stderr: "ignore" }
+      );
+      expect(add.exitCode).toBe(0);
+      const set = await setValue({
+        project,
+        key: "API_TOKEN",
+        value: SECRET_VALUE,
+        secret: true,
+        extraArgs: ["--key-file", keyFile],
+      });
+      expect(set.exitCode).not.toBe(0);
+      expect(`${set.stdout}${set.stderr}`).toContain("git-tracked");
+      expect(
+        await readFile(
+          resolve(project.projectDir, "hack.env.default.yaml"),
+          "utf8"
+        )
+      ).not.toContain("API_TOKEN");
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
+    "an override cannot split the project across two keys",
+    async () => {
+      const project = await createProject();
+      await setValue({
+        project,
+        key: "API_TOKEN",
+        value: SECRET_VALUE,
+        secret: true,
+      });
+      const keyFile = resolve(project.root, "other.key");
+      await writeFile(keyFile, `${OVERRIDE_KEY}\n`, { mode: 0o600 });
+      // An overlay with no secrets yet: only the discovered-key check stops it.
+      const set = await setValue({
+        project,
+        key: "OTHER_TOKEN",
+        value: SECRET_VALUE,
+        secret: true,
+        extraArgs: ["--env", "qa", "--key-file", keyFile],
+      });
+      expect(set.exitCode).not.toBe(0);
+      expect(
+        await stat(resolve(project.projectDir, "hack.env.qa.yaml")).catch(
+          () => null
+        )
+      ).toBeNull();
     },
     CLI_TEST_TIMEOUT_MS
   );

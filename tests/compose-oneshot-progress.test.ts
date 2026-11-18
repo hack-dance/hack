@@ -515,3 +515,74 @@ test("assignment-looking lines inside a multi-line quoted value are its text", (
     ).toHaveLength(1);
   }
 });
+
+test("a completion dependency inherited through extends counts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-oneshot-extends-"));
+  try {
+    const file = join(root, "docker-compose.yml");
+    await writeFile(
+      join(root, "common.yml"),
+      [
+        "services:",
+        "  app-base:",
+        "    image: app",
+        "    depends_on:",
+        "      seed:",
+        "        condition: service_completed_successfully",
+        "",
+      ].join("\n")
+    );
+    await writeFile(
+      file,
+      [
+        "services:",
+        "  migrate:",
+        "    image: app",
+        "  seed:",
+        "    image: app",
+        "  base:",
+        "    image: app",
+        "    depends_on:",
+        "      migrate:",
+        "        condition: service_completed_successfully",
+        "  api:",
+        "    extends: base",
+        "  worker:",
+        "    extends:",
+        "      file: common.yml",
+        "      service: app-base",
+        "",
+      ].join("\n")
+    );
+    const graph = await readComposeOneShotGraph([file]);
+    expect([...graph.oneShots].sort()).toEqual(["migrate", "seed"]);
+    expect(graph.waitsOn.get("api")).toEqual(["migrate"]);
+    expect(graph.waitsOn.get("worker")).toEqual(["seed"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a service with a container counts whatever the active profiles", () => {
+  const document = {
+    services: {
+      migrate: { image: "app" },
+      api: {
+        image: "app",
+        profiles: ["ops"],
+        depends_on: {
+          migrate: { condition: "service_completed_successfully" },
+        },
+      },
+    },
+  };
+  expect([
+    ...composeOneShotGraph(document, { activeProfiles: [] }).oneShots,
+  ]).toEqual([]);
+  expect([
+    ...composeOneShotGraph(document, {
+      activeProfiles: [],
+      presentServices: new Set(["api"]),
+    }).oneShots,
+  ]).toEqual(["migrate"]);
+});

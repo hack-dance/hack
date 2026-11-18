@@ -1512,3 +1512,24 @@ test("a restart repair keeps the project's start ceiling", async () => {
   );
   expect(ceilings).toEqual([600_000, 600_000]);
 });
+
+test("a one-shot started under another profile is still seen by the restart guard", async () => {
+  // A benchmark run created profiled-worker, which waits for api to complete.
+  // This restart runs without the profile, but the instance still has it.
+  const projectRoot = await createProject();
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 }),
+    JSON.stringify({
+      Service: "profiled-worker",
+      State: "created",
+      ExitCode: 0,
+    })
+  );
+  const { stdout } = await captureStdout(() =>
+    runRestart({ projectRoot, services: ["api"], json: true })
+  );
+  const envelope = JSON.parse(stdout) as {
+    data?: { interrupted?: string[] };
+  };
+  expect(envelope.data?.interrupted).toEqual(["api"]);
+});

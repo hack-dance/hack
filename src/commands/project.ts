@@ -1095,18 +1095,10 @@ async function checkOneShotInterruption(opts: {
   readonly proceed: boolean;
   readonly interruption?: OneShotInterruption;
 }> {
-  const interpolationEnv = await readComposeInterpolationEnv({
-    composeFiles: [opts.project.composeFile],
-    env: { ...process.env, ...opts.env },
-  });
-  const graph = await readComposeOneShotGraph([opts.project.composeFile], {
-    activeProfiles: effectiveComposeProfiles({
-      cliProfiles: opts.profiles,
-      env: interpolationEnv,
-    }),
-    interpolationEnv,
-  });
-  if (graph.oneShots.size === 0) {
+  // Without a completion dependency in any profile there is nothing to
+  // interrupt, and no engine read.
+  const anyProfile = await readComposeOneShotGraph([opts.project.composeFile]);
+  if (anyProfile.oneShots.size === 0) {
     return { proceed: true };
   }
   const ps = await composeRuntimeBackend.psJson({
@@ -1120,6 +1112,26 @@ async function checkOneShotInterruption(opts: {
   // A failed read finds nothing to interrupt: the command goes on unchanged,
   // and its own reads report the engine error as before.
   const entries = ps.exitCode === 0 ? parseComposePsJson(ps.stdout) : null;
+  const interpolationEnv = await readComposeInterpolationEnv({
+    composeFiles: [opts.project.composeFile],
+    env: { ...process.env, ...opts.env },
+  });
+  const graph = await readComposeOneShotGraph([opts.project.composeFile], {
+    activeProfiles: effectiveComposeProfiles({
+      cliProfiles: opts.profiles,
+      env: interpolationEnv,
+    }),
+    interpolationEnv,
+    // Services with containers run whatever this command's profiles are.
+    presentServices: new Set(
+      (entries ?? []).flatMap((entry) =>
+        typeof entry.Service === "string" ? [entry.Service] : []
+      )
+    ),
+  });
+  if (graph.oneShots.size === 0) {
+    return { proceed: true };
+  }
   const services = (entries ? runningOneShots({ graph, entries }) : []).filter(
     (service) => !opts.services || opts.services.includes(service)
   );
@@ -9710,6 +9722,11 @@ async function handlePs({
         env: psInterpolationEnv,
       }),
       interpolationEnv: psInterpolationEnv,
+      presentServices: new Set(
+        entries.flatMap((entry) =>
+          typeof entry.Service === "string" ? [entry.Service] : []
+        )
+      ),
     }),
     entries,
   });

@@ -286,6 +286,12 @@ export type OneShotGraphOptions = {
    * does before applying them. Without it they are taken literally.
    */
   readonly interpolationEnv?: Readonly<Record<string, string | undefined>>;
+  /**
+   * Services that have containers in this instance: they run whatever the
+   * current command's profiles are (a one-shot started under another
+   * `--profile` is still waited on), so they always count.
+   */
+  readonly presentServices?: ReadonlySet<string>;
 };
 
 /** The one-shot graph of one parsed Compose document. */
@@ -331,6 +337,7 @@ export function mergeOneShotGraphs(
     effective,
     serviceProfiles,
     activeProfiles: options.activeProfiles,
+    presentServices: options.presentServices,
   });
 }
 
@@ -339,6 +346,7 @@ function graphFromConditions(input: {
   readonly effective: ReadonlyMap<string, ReadonlyMap<string, string>>;
   readonly serviceProfiles: ReadonlyMap<string, readonly string[]>;
   readonly activeProfiles: readonly string[] | undefined;
+  readonly presentServices: ReadonlySet<string> | undefined;
 }): ComposeOneShotGraph {
   const oneShots = new Set<string>();
   const waitsOn = new Map<string, string[]>();
@@ -347,7 +355,12 @@ function graphFromConditions(input: {
     // A service its profiles leave out never starts, so it waits on nothing:
     // its completion edges would make a long-running service look like a
     // one-shot (HACK-2310).
-    if (!serviceActive(input.serviceProfiles.get(name), input.activeProfiles)) {
+    if (
+      !(
+        input.presentServices?.has(name) ||
+        serviceActive(input.serviceProfiles.get(name), input.activeProfiles)
+      )
+    ) {
       continue;
     }
     if (conditions.size > 0) {
@@ -515,20 +528,131 @@ export async function readComposeOneShotGraph(
 ): Promise<ComposeOneShotGraph> {
   const documents: unknown[] = [];
   for (const file of composeFiles) {
-    const text = await readTextFile(file);
-    if (!text) {
-      continue;
-    }
-    try {
-      // Compose resolves YAML merge keys (`<<: *defaults`), which the yaml
-      // library leaves off by default; a depends_on inherited from an
-      // extension anchor must count too.
-      documents.push(YAML.parse(text, { merge: true }));
-    } catch {
-      // Unreadable: no evidence of one-shots from this file.
+    const document = await readComposeDocument(file);
+    if (document !== null) {
+      documents.push(await resolveExtends({ document, file, depth: 0 }));
     }
   }
   return mergeOneShotGraphs(documents, options);
+}
+
+/** A parsed Compose file, or null when it cannot be read or parsed. */
+async function readComposeDocument(file: string): Promise<unknown> {
+  const text = await readTextFile(file);
+  if (!text) {
+    return null;
+  }
+  try {
+    // Compose resolves YAML merge keys (`<<: *defaults`), which the yaml
+    // library leaves off by default; a depends_on inherited from an
+    // extension anchor must count too.
+    return YAML.parse(text, { merge: true });
+  } catch {
+    return null;
+  }
+}
+
+/** Bound on nested `extends`; deeper (or cyclic) chains stop inheriting. */
+const MAX_EXTENDS_DEPTH = 8;
+
+/**
+ * `document` with each service's `extends` applied to the keys the graph
+ * reads: the base service's `depends_on` entries (the extending service's own
+ * entries win) and its `profiles` (unless the service sets its own), as
+ * Compose merges them. The base may live in this document or, with
+ * `extends.file`, in another file resolved from this file's directory.
+ */
+async function resolveExtends(input: {
+  readonly document: unknown;
+  readonly file: string;
+  readonly depth: number;
+}): Promise<unknown> {
+  const { document } = input;
+  if (!(isRecord(document) && isRecord(document.services))) {
+    return document;
+  }
+  const services: Record<string, unknown> = {};
+  for (const [name, service] of Object.entries(document.services)) {
+    services[name] = await resolveServiceExtends({
+      service,
+      services: document.services,
+      file: input.file,
+      depth: input.depth,
+    });
+  }
+  return { ...document, services };
+}
+
+async function resolveServiceExtends(input: {
+  readonly service: unknown;
+  readonly services: Readonly<Record<string, unknown>>;
+  readonly file: string;
+  readonly depth: number;
+}): Promise<unknown> {
+  const { service } = input;
+  if (!isRecord(service) || service.extends === undefined) {
+    return service;
+  }
+  if (input.depth >= MAX_EXTENDS_DEPTH) {
+    return service;
+  }
+  const target = extendsTarget(service.extends);
+  if (target === null) {
+    return service;
+  }
+  let baseFile = input.file;
+  let baseServices = input.services;
+  if (target.file !== null) {
+    baseFile = isAbsolute(target.file)
+      ? target.file
+      : resolve(dirname(input.file), target.file);
+    const other = await readComposeDocument(baseFile);
+    if (!(isRecord(other) && isRecord(other.services))) {
+      return service;
+    }
+    baseServices = other.services;
+  }
+  const base = await resolveServiceExtends({
+    service: baseServices[target.service],
+    services: baseServices,
+    file: baseFile,
+    depth: input.depth + 1,
+  });
+  if (!isRecord(base)) {
+    return service;
+  }
+  return {
+    ...service,
+    depends_on: Object.fromEntries([
+      ...dependencyConditions(base).map(([dependency, condition]) => [
+        dependency,
+        { condition },
+      ]),
+      ...dependencyConditions(service).map(([dependency, condition]) => [
+        dependency,
+        { condition },
+      ]),
+    ]),
+    ...(service.profiles === undefined && base.profiles !== undefined
+      ? { profiles: base.profiles }
+      : {}),
+  };
+}
+
+/** `extends: name` or `extends: { service, file? }`. */
+function extendsTarget(
+  value: unknown
+): { readonly service: string; readonly file: string | null } | null {
+  if (typeof value === "string" && value.length > 0) {
+    return { service: value, file: null };
+  }
+  if (isRecord(value) && typeof value.service === "string") {
+    return {
+      service: value.service,
+      file: typeof value.file === "string" ? value.file : null,
+    };
+  }
+  return null;
 }
 
 function entryService(entry: Readonly<Record<string, unknown>>): string | null {

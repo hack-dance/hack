@@ -4612,6 +4612,13 @@
         "sourceFile": "docs/recipes/config-examples.md"
       },
       {
+        "slug": "guides/breaking-changes",
+        "title": "Breaking changes from v4",
+        "sourceRevision": "0dd44ca6b59024b5546ca7e755a4210dedb9a106",
+        "sourceLabel": "Current command audit (next 0dd44ca6)",
+        "sourceFile": "docs/guides/v5-release-notes.md"
+      },
+      {
         "slug": "guides/proxy-network-repair",
         "title": "Proxy network repair",
         "sourceRevision": "278aeb1cee5b136d7bae0ddfcd5f3741e9579524",

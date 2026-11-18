@@ -49,6 +49,12 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "No Hack project resolved from the working directory, `--project` or `--path`.",
     readFirst: "`hack projects --json`",
   },
+  E_NATIVE_RUN_MAPPING_FOREIGN_HOME: {
+    meaning:
+      "The instance's last native run belongs to another native home, usually the one an earlier Hack version used; this home neither starts nor stops it until that mapping is released or the owning version stops the run.",
+    readFirst:
+      "The error message (and `detail.releaseCommand` in `--json`) names the way out; `hack doctor --native-run-mapping inspect --json` shows the owner.",
+  },
   E_NATIVE_PROJECT_CONFLICT: {
     meaning:
       "Native project input and legacy Hack inputs coexist; project commands refuse until one is reconciled.",

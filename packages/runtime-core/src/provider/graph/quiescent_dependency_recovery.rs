@@ -41,6 +41,13 @@ fn absent(path: &Path) -> Result<bool, CandidateError> {
 
 type GraphInventory = (Option<(u64, u64)>, Vec<String>);
 
+/// How many graph runs this home records under `run/graphs`, running or
+/// retained; `None` when the inventory cannot be read safely. Zero proves the
+/// pool serves no graph, so `runtime status` can report it as idle.
+pub(crate) fn graph_run_count(candidate: &Candidate) -> Option<usize> {
+    graph_runs(candidate).ok().map(|(_, runs)| runs.len())
+}
+
 fn graph_runs(candidate: &Candidate) -> Result<GraphInventory, CandidateError> {
     let root = candidate.state_root.join("run/graphs");
     if absent(&root)? {
@@ -395,6 +402,22 @@ mod tests {
         fs::remove_file(graphs.join("unknown")).unwrap();
         state::private_directory(&graphs.join("a".repeat(32))).unwrap();
         assert_eq!(graph_runs(&candidate).unwrap().1, vec!["a".repeat(32)]);
+    }
+
+    #[test]
+    fn graph_run_count_is_zero_only_for_a_proven_empty_inventory() {
+        let fixture = super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&fixture.0).unwrap();
+        // No run/graphs directory at all: nothing recorded.
+        assert_eq!(graph_run_count(&candidate), Some(0));
+        let graphs = candidate.state_root.join("run/graphs");
+        state::private_directory(&graphs).unwrap();
+        assert_eq!(graph_run_count(&candidate), Some(0));
+        state::private_directory(&graphs.join("b".repeat(32))).unwrap();
+        assert_eq!(graph_run_count(&candidate), Some(1));
+        // An entry the inventory refuses is unknown, never zero.
+        fs::write(graphs.join("unknown"), b"not a graph").unwrap();
+        assert_eq!(graph_run_count(&candidate), None);
     }
 
     #[test]

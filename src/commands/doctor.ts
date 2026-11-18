@@ -21,6 +21,7 @@ import {
   resolveNativeAdaptationSelection,
 } from "../backends/native-project-settings.ts";
 import {
+  invokeNativeRuntime,
   type NativeRuntimeSelection,
   resolveNativeRuntimeSelection,
 } from "../backends/native-runtime-client.ts";
@@ -150,6 +151,11 @@ import {
   amd64EmulationCheckResult,
 } from "../lib/doctor-native-emulation.ts";
 import {
+  NATIVE_POOL_IDLE_CHECK,
+  type NativePoolReport,
+  nativePoolIdleCheck,
+} from "../lib/doctor-native-pool.ts";
+import {
   checkNativeSettings,
   NATIVE_SETTINGS_CHECK,
   type NativeSettingsReport,
@@ -254,6 +260,7 @@ import {
 } from "../lib/native-process-wrappers.ts";
 import { isLinux, isMac } from "../lib/os.ts";
 import { readPrivateEnvFile } from "../lib/private-env-file.ts";
+import { withProcessDeadline } from "../lib/process-deadline.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -376,6 +383,8 @@ interface CheckResult {
   readonly nativeProcess?: NativeProcessReport;
   /** HACK-2323 dev performance findings: services, files, lines, architectures. */
   readonly devPerformance?: DevPerformanceReport;
+  /** Native pool idleness: state, graph count and memory; no paths. */
+  readonly nativePool?: NativePoolReport;
 }
 
 const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
@@ -590,6 +599,7 @@ const DOCTOR_SUMMARY_GROUPS = [
       "native root trust",
       "native ca repair",
       "native https route",
+      NATIVE_POOL_IDLE_CHECK,
     ]),
   },
   {
@@ -1572,6 +1582,15 @@ async function handleNativeDoctor(opts: {
       )
     );
   }
+  // The pool belongs to the native home: a machine check, in project runs too.
+  results.push(
+    await runCheck(
+      progress,
+      NATIVE_POOL_IDLE_CHECK,
+      () => checkNativePoolIdle({ runtime: opts.runtime }),
+      { timeoutMs: 15_000 }
+    )
+  );
   if (opts.browser.url) {
     results.push(
       await runCheck(
@@ -1700,6 +1719,33 @@ async function appendNativeMachineChecks(opts: {
     )
   );
   markMachineDoctorResults(opts.results);
+}
+
+/**
+ * `native pool idle` (machine scope): reads `runtime status --json` under a
+ * process deadline; any failure is "status unavailable", never a warning.
+ * Never stops the pool.
+ */
+async function checkNativePoolIdle(opts: {
+  readonly runtime: NativeRuntimeSelection;
+}): Promise<CheckResult> {
+  let status: unknown = null;
+  try {
+    status = await withProcessDeadline(Date.now() + 12_000, () =>
+      invokeNativeRuntime({
+        runtime: opts.runtime,
+        cwd: process.cwd(),
+        args: ["runtime", "status", "--json"],
+        timeoutMs: 10_000,
+      })
+    );
+  } catch {
+    status = null;
+  }
+  return {
+    ...nativePoolIdleCheck({ status, runtime: opts.runtime }),
+    scope: "machine",
+  };
 }
 
 /**
@@ -1880,6 +1926,8 @@ export type DoctorJsonCheck = DoctorMetadata & {
   readonly nativeSource?: NativeSourceReport;
   /** Present only on the four dev performance checks (HACK-2323). */
   readonly devPerformance?: DevPerformanceReport;
+  /** Present only on the native pool idle machine check. */
+  readonly nativePool?: NativePoolReport;
 };
 
 export type DoctorJsonData = {
@@ -1910,6 +1958,7 @@ const DOCTOR_REPORT_FIELDS = [
   "nativeProcess",
   "nativeSource",
   "devPerformance",
+  "nativePool",
 ] as const satisfies readonly (keyof CheckResult)[];
 
 type DoctorReportFields = Pick<

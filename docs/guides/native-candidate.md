@@ -1140,7 +1140,11 @@ its retained data, then prepare a fresh home for the new build.
 
 A failed `up` can leave the native VM pool running, and the failure message says how to
 stop it: once no other native project uses the pool, run `runtime down --json` on the
-native home (`runtime status --json` shows whether it runs). An `invalid_state` failure
+native home (`runtime status --json` shows whether it runs, and its `graph_runs` field
+counts the graphs the home records, running or retained; `null` when the inventory cannot
+be read). `hack doctor` warns, as the `native pool idle` machine check, when a running
+pool records no graph, and gives the stop command; it never stops the pool itself, and
+`--fix` does not either. An `invalid_state` failure
 names the state path that exists but is not a directory, relative to the native home
 (for example `.hack-local/run/graphs`), when that path lies in one of the home's own
 state directories. Inspect that path; do not delete it to retry.

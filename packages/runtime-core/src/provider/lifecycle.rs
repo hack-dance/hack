@@ -58,6 +58,23 @@ pub struct RuntimeStatus {
     /// Prepared-base selection and activation, for pools that requested one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prepared_base: Option<super::prepared_start::Status>,
+    /// Graph runs this home records, running or retained; `null` when the
+    /// inventory cannot be read or the platform has no native graphs. Zero
+    /// proves the pool serves no graph.
+    pub graph_runs: Option<usize>,
+}
+
+/// See [`RuntimeStatus::graph_runs`].
+fn graph_run_count(candidate: &Candidate) -> Option<usize> {
+    #[cfg(target_os = "macos")]
+    {
+        super::graph::quiescent_dependency_recovery::graph_run_count(candidate)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = candidate;
+        None
+    }
 }
 fn root(candidate: &Candidate) -> std::path::PathBuf {
     candidate.state_root.join("run/smolvm")
@@ -932,6 +949,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             persistent_disks_identified: false,
             guest_boot_id: None,
             prepared_base: None,
+            graph_runs: graph_run_count(candidate),
         });
     }
     let owner = Owner::load(candidate)?;
@@ -988,6 +1006,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         persistent_disks_identified: owner.storage.is_some(),
         guest_boot_id: owner.guest_boot_id,
         prepared_base: super::prepared_start::status(candidate),
+        graph_runs: graph_run_count(candidate),
     })
 }
 

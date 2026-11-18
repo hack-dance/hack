@@ -54,6 +54,8 @@ pub enum Glyph {
     Restore,
     /// Terminal panel: expand from collapsed.
     ChevronUp,
+    /// Machine: Upgrade.
+    Upgrade,
     /// Sidebar and header: a branch instance.
     Branch,
     /// Header: copy the URL.
@@ -96,6 +98,7 @@ impl Glyph {
             Self::Maximize => "icons/maximize-2.svg",
             Self::Restore => "icons/minimize-2.svg",
             Self::ChevronUp => "icons/chevron-up.svg",
+            Self::Upgrade => "icons/circle-arrow-up.svg",
             Self::Branch => "icons/git-branch.svg",
             Self::Copy => "icons/copy.svg",
             Self::Check => "icons/check.svg",
@@ -133,6 +136,7 @@ icon_assets!(
         Maximize2,
         Minimize2,
         ChevronUp,
+        CircleArrowUp,
         GitBranch,
         Copy,
         Check,
@@ -192,6 +196,7 @@ mod tests {
             Glyph::Maximize,
             Glyph::Restore,
             Glyph::ChevronUp,
+            Glyph::Upgrade,
             Glyph::Branch,
             Glyph::Copy,
             Glyph::Check,

@@ -1,0 +1,400 @@
+{
+  "ok": true,
+  "data": {
+    "report_version": 2,
+    "generated_at": "2026-01-01T00:00:00.000Z",
+    "duration_ms": 0,
+    "cli": {
+      "version": "5.0.0",
+      "channel": "stable",
+      "candidate_run": false,
+      "build": "release",
+      "command": "hack"
+    },
+    "host_probes": "enabled",
+    "machine": [
+      {
+        "id": "installed",
+        "status": "info",
+        "summary": "Running 5.0.0; the hack on PATH is 5.0.0 (standalone) at /usr/local/bin/hack.",
+        "args": null,
+        "action": null,
+        "kind": "manual",
+        "command": null
+      },
+      {
+        "id": "daemon",
+        "status": "info",
+        "summary": "hackd is running, run by systemd; login service registered (systemd: installed, enabled, active).",
+        "args": null,
+        "action": null,
+        "kind": "manual",
+        "command": null
+      },
+      {
+        "id": "global-infra",
+        "status": "ok",
+        "summary": "Hack's global proxy and DNS are installed and running.",
+        "args": null,
+        "action": null,
+        "kind": "manual",
+        "command": null
+      },
+      {
+        "id": "proxy-ports",
+        "status": "ok",
+        "summary": "Ports 80 and 443 reach Hack's proxy.",
+        "args": null,
+        "action": null,
+        "kind": "manual",
+        "command": null
+      },
+      {
+        "id": "secret-store",
+        "status": "ok",
+        "summary": "Secrets use the OS keychain; no file store to check.",
+        "args": null,
+        "action": null,
+        "kind": "manual",
+        "command": null
+      },
+      {
+        "id": "registry",
+        "status": "ok",
+        "summary": "3 registered project(s), 3 checkout(s) with worktrees: 3 live, 0 dead, 0 unreadable.",
+        "args": null,
+        "action": null,
+        "kind": "manual",
+        "command": null
+      }
+    ],
+    "registry": {
+      "state": "valid",
+      "projects": 3,
+      "total": 3,
+      "live": 3,
+      "missing": [],
+      "unreadable": [],
+      "unchecked": [],
+      "rejected": 0
+    },
+    "projects": [
+      {
+        "name": "alpha",
+        "project": "alpha",
+        "root": "/example/alpha",
+        "project_dir": "/example/alpha/.hack",
+        "state": "live",
+        "reason": null,
+        "findings": [
+          {
+            "id": "env-format",
+            "status": "warn",
+            "summary": "Env uses the legacy format (legacy-json); migrate it to YAML layers.",
+            "args": [
+              "doctor",
+              "--migrate-env-config",
+              "--path",
+              "/example/alpha"
+            ],
+            "action": null,
+            "kind": "manual",
+            "command": "hack doctor --migrate-env-config --path /example/alpha"
+          },
+          {
+            "id": "env-key",
+            "status": "ok",
+            "summary": "No env key file (whether one is needed is the env-secrets check).",
+            "args": null,
+            "action": null,
+            "kind": "manual",
+            "command": null
+          },
+          {
+            "id": "tracked-files",
+            "status": "ok",
+            "summary": "No machine-local or sensitive files are tracked.",
+            "args": null,
+            "action": null,
+            "kind": "manual",
+            "command": null
+          },
+          {
+            "id": "ignore-rules",
+            "status": "warn",
+            "summary": "The committed .hack/.gitignore is missing.",
+            "args": ["doctor", "--fix", "--path", "/example/alpha"],
+            "action": null,
+            "kind": "manual",
+            "command": "hack doctor --fix --path /example/alpha"
+          },
+          {
+            "id": "agent-integrations",
+            "status": "ok",
+            "summary": "Agent integrations are current (or not installed).",
+            "args": null,
+            "action": null,
+            "kind": "manual",
+            "command": null
+          },
+          {
+            "id": "env-secrets",
+            "status": "ok",
+            "summary": "No secrets in env layers.",
+            "args": null,
+            "action": null,
+            "kind": "manual",
+            "command": null
+          }
+        ]
+      },
+      {
+        "name": "beta",
+        "project": "beta",
+        "root": "/example/beta",
+        "project_dir": "/example/beta/.hack",
+        "state": "live",
+        "reason": null,
+        "findings": [
+          {
+            "id": "env-format",
+            "status": "warn",
+            "summary": "Env uses the legacy format (legacy-json); migrate it to YAML layers.",
+            "args": [
+              "doctor",
+              "--migrate-env-config",
+              "--path",
+              "/example/beta"
+            ],
+            "action": null,
+            "kind": "manual",
+            "command": "hack doctor --migrate-env-config --path /example/beta"
+          },
+          {
+            "id": "env-key",
+            "status": "ok",
+            "summary": "No env key file (whether one is needed is the env-secrets check).",
+            "args": null,
+            "action": null,
+            "kind": "manual",
+            "command": null
+          },
+          {
+            "id": "tracked-files",
+            "status": "ok",
+            "summary": "No machine-local or sensitive files are tracked.",
+            "args": null,
+            "action": null,
+            "kind": "manual",
+            "command": null
+          },
+          {
+            "id": "ignore-rules",
+            "status": "warn",
+            "summary": "The committed .hack/.gitignore is missing.",
+            "args": ["doctor", "--fix", "--path", "/example/beta"],
+            "action": null,
+            "kind": "manual",
+            "command": "hack doctor --fix --path /example/beta"
+          },
+          {
+            "id": "agent-integrations",
+            "status": "ok",
+            "summary": "Agent integrations are current (or not installed).",
+            "args": null,
+            "action": null,
+            "kind": "manual",
+            "command": null
+          },
+          {
+            "id": "env-secrets",
+            "status": "ok",
+            "summary": "No secrets in env layers.",
+            "args": null,
+            "action": null,
+            "kind": "manual",
+            "command": null
+          }
+        ]
+      },
+      {
+        "name": "gamma",
+        "project": "gamma",
+        "root": "/example/gamma",
+        "project_dir": "/example/gamma/.hack",
+        "state": "live",
+        "reason": null,
+        "findings": [
+          {
+            "id": "env-format",
+            "status": "ok",
+            "summary": "No env configuration.",
+            "args": null,
+            "action": null,
+            "kind": "manual",
+            "command": null
+          },
+          {
+            "id": "env-key",
+            "status": "ok",
+            "summary": "No env key file (whether one is needed is the env-secrets check).",
+            "args": null,
+            "action": null,
+            "kind": "manual",
+            "command": null
+          },
+          {
+            "id": "tracked-files",
+            "status": "ok",
+            "summary": "No machine-local or sensitive files are tracked.",
+            "args": null,
+            "action": null,
+            "kind": "manual",
+            "command": null
+          },
+          {
+            "id": "ignore-rules",
+            "status": "warn",
+            "summary": "The committed .hack/.gitignore is missing.",
+            "args": ["doctor", "--fix", "--path", "/example/gamma"],
+            "action": null,
+            "kind": "manual",
+            "command": "hack doctor --fix --path /example/gamma"
+          },
+          {
+            "id": "agent-integrations",
+            "status": "ok",
+            "summary": "Agent integrations are current (or not installed).",
+            "args": null,
+            "action": null,
+            "kind": "manual",
+            "command": null
+          },
+          {
+            "id": "env-secrets",
+            "status": "ok",
+            "summary": "No secrets in env layers.",
+            "args": null,
+            "action": null,
+            "kind": "manual",
+            "command": null
+          }
+        ]
+      }
+    ],
+    "blockers": [],
+    "incomplete": [],
+    "plan": [
+      {
+        "order": 1,
+        "id": "snapshot",
+        "kind": "safe",
+        "scope": "machine",
+        "status": "step",
+        "count": 0,
+        "targets": [],
+        "command": "hack upgrade snapshot",
+        "args": ["upgrade", "snapshot"],
+        "action": null,
+        "why": "Keep a private copy of the files the following steps change, so the upgrade rollback command can put them back.",
+        "blocker": false,
+        "applies": false
+      },
+      {
+        "order": 2,
+        "id": "env-format",
+        "kind": "manual",
+        "status": "warn",
+        "count": 2,
+        "targets": [
+          {
+            "scope": "alpha",
+            "project": "alpha",
+            "root": "/example/alpha",
+            "status": "warn",
+            "apply_eligible": true,
+            "command": "hack doctor --migrate-env-config --path /example/alpha",
+            "args": [
+              "doctor",
+              "--migrate-env-config",
+              "--path",
+              "/example/alpha"
+            ],
+            "action": null
+          },
+          {
+            "scope": "beta",
+            "project": "beta",
+            "root": "/example/beta",
+            "status": "warn",
+            "apply_eligible": true,
+            "command": "hack doctor --migrate-env-config --path /example/beta",
+            "args": [
+              "doctor",
+              "--migrate-env-config",
+              "--path",
+              "/example/beta"
+            ],
+            "action": null
+          }
+        ],
+        "blocker": false,
+        "scope": "projects",
+        "command": "hack upgrade review --only env-format",
+        "args": ["upgrade", "review", "--only", "env-format"],
+        "action": "Migration must use its resumable env owner; review tracked-file consent and recovery before applying.",
+        "why": "Env uses the legacy format; migrate it to YAML layers.",
+        "applies": false
+      },
+      {
+        "order": 3,
+        "id": "ignore-rules",
+        "kind": "safe",
+        "status": "warn",
+        "count": 3,
+        "targets": [
+          {
+            "scope": "alpha",
+            "project": "alpha",
+            "root": "/example/alpha",
+            "status": "warn",
+            "apply_eligible": true,
+            "command": "hack doctor --fix --path /example/alpha",
+            "args": ["doctor", "--fix", "--path", "/example/alpha"],
+            "action": null
+          },
+          {
+            "scope": "beta",
+            "project": "beta",
+            "root": "/example/beta",
+            "status": "warn",
+            "apply_eligible": true,
+            "command": "hack doctor --fix --path /example/beta",
+            "args": ["doctor", "--fix", "--path", "/example/beta"],
+            "action": null
+          },
+          {
+            "scope": "gamma",
+            "project": "gamma",
+            "root": "/example/gamma",
+            "status": "warn",
+            "apply_eligible": true,
+            "command": "hack doctor --fix --path /example/gamma",
+            "args": ["doctor", "--fix", "--path", "/example/gamma"],
+            "action": null
+          }
+        ],
+        "blocker": false,
+        "scope": "projects",
+        "command": "hack upgrade apply --only ignore-rules",
+        "args": ["upgrade", "apply", "--only", "ignore-rules"],
+        "action": null,
+        "why": "The committed .hack/.gitignore is missing or out of date.",
+        "applies": true
+      }
+    ],
+    "next_command": "hack upgrade snapshot",
+    "next_action": null,
+    "ready": true
+  }
+}

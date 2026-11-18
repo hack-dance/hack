@@ -11,6 +11,11 @@ import {
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../lib/native-environment-notices.ts";
 import { NativeEnvFileRefusal } from "./native-env-file-source.ts";
 import { nativeEnvironmentUnsetsReviewed } from "./native-environment-unsets.ts";
+import {
+  adaptNativeGcloudEnvironment,
+  hasNativeGcloudCredentialMount,
+  type NativeGcloudSelection,
+} from "./native-gcloud-environment.ts";
 import { admitNativeHttpProbe } from "./native-http-probe-admission.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import { admitNativeProjectBuild } from "./native-project-builds.ts";
@@ -40,6 +45,7 @@ import {
   type NativeServicePreparationProblem,
   nativeServicePreparationProblems,
 } from "./native-project-start.ts";
+import { nativeManagedRestartNotices } from "./native-restart-policy-notices.ts";
 import {
   invokeNativeRuntime,
   isNativeRuntimeStopError,
@@ -128,7 +134,8 @@ export type NativePreflightReport = {
      * The closed runtime code when the review stopped or failed. For a
      * skipped review: `native_selection_incomplete` when native is selected
      * without a candidate, `native_adaptation_invalid` when the adaptation was
-     * refused, and absent when native is not selected.
+     * refused, `native_setup_incomplete` when setup is not ready and the
+     * review could not run before it, and absent when native is not selected.
      */
     readonly code?: string;
   };
@@ -298,7 +305,7 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
   },
   unresolved_mount_source: {
     message: "A mount source uses a variable or the home directory.",
-    fix: "Use a path relative to the project.",
+    fix: "Use a path inside the project. The gcloud application-default credentials file and the AWS home directory are delivered by credential adapters instead: set gcloud or aws in the native machine settings.",
   },
   undeclared_volume: {
     message: "The service mounts a named volume the file does not declare.",
@@ -465,6 +472,11 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
     message:
       "The service declares a route, which needs native HTTPS to be set up.",
     fix: "Set up native HTTPS (see the guide). A route without an authored healthcheck gets a default route-port probe.",
+  },
+  route_command_healthcheck_replaced: {
+    message:
+      "The routed service's command healthcheck is not run on native: route readiness is an HTTP probe. Native sends GET / to the route port; a complete HTTP 200-499 response counts as ready, 5xx and timeouts do not.",
+    fix: "Nothing to do if GET / answers. To probe a real health path, replace the healthcheck with healthcheck.x-hack-http, for example {port: <route port>, path: /health, interval_ms: 30000, timeout_ms: 1000, retries: 3, start_period_ms: 240000} (all six fields are required).",
   },
   inferred_route_probe: {
     message:
@@ -900,6 +912,7 @@ async function adaptForPreflight(opts: {
   readonly hasDefaultDependencyFile: boolean;
   readonly effectiveEnvName: string | null;
   readonly profiles: readonly string[];
+  readonly gcloud?: NativeGcloudSelection;
 }): Promise<AdaptedProject> {
   const blocker = { severity: "blocker", gate: "cli" } as const;
   // One bounded read: the parsed document and the digest come from the same bytes.
@@ -1026,6 +1039,11 @@ async function adaptForPreflight(opts: {
       );
     }
   }
+  input = await reviewGcloudCredentialMounts({
+    input,
+    selected: opts.gcloud !== undefined,
+    findings,
+  });
   const adapted: unknown = JSON.parse(input.normalizedComposeJson);
   return {
     findings,
@@ -1047,6 +1065,86 @@ async function adaptForPreflight(opts: {
       adaptationValid,
     },
   };
+}
+
+/** Services whose volumes include the recognized gcloud ADC file mount. */
+function gcloudCredentialServices(input: NativeProjectInput): string[] {
+  const compose: unknown = JSON.parse(input.normalizedComposeJson);
+  if (!(isRecord(compose) && isRecord(compose.services))) {
+    return [];
+  }
+  return Object.entries(compose.services)
+    .filter(([, service]) =>
+      hasNativeGcloudCredentialMount({
+        normalizedComposeJson: JSON.stringify({ services: { service } }),
+      })
+    )
+    .map(([name]) => name)
+    .sort();
+}
+
+/**
+ * A recognized gcloud ADC mount is delivered by the gcloud adapter after
+ * lifecycle hooks, not mounted from the host (HACK-2324). Review the input
+ * the adapter will produce (the same mount removal; nothing is read) and ask
+ * for the one consent the adapter needs when it is not selected.
+ */
+async function reviewGcloudCredentialMounts(opts: {
+  readonly input: NativeProjectInput;
+  readonly selected: boolean;
+  readonly findings: NativePreflightFinding[];
+}): Promise<NativeProjectInput> {
+  const services = gcloudCredentialServices(opts.input);
+  if (services.length === 0) {
+    return opts.input;
+  }
+  const blocker = { severity: "blocker", gate: "cli" } as const;
+  let input = opts.input;
+  try {
+    // As at startup, env-file and shell values are merged first, so a
+    // GOOGLE_APPLICATION_CREDENTIALS selector from env_file is checked as such.
+    // Merging again in checkDelivery is a no-op.
+    input = (
+      await adaptNativeGcloudEnvironment({
+        input: mergeNativeShellEnvironment(opts.input),
+        mode: "file",
+        deliver: false,
+      })
+    ).input;
+  } catch {
+    opts.findings.push(
+      finding(
+        { ...blocker, code: "gcloud_adc_mount_refused" },
+        {
+          message:
+            "A service binds the gcloud application-default credentials file in a form the gcloud adapter does not accept.",
+          fix: "Bind ~/.config/gcloud/application_default_credentials.json read-only (:ro) to one absolute container file path per service, outside /proc, /sys, /dev and /run, with no other mount at or around it.",
+        }
+      )
+    );
+    return opts.input;
+  }
+  if (!opts.selected) {
+    for (const service of services) {
+      opts.findings.push(
+        finding(
+          {
+            ...blocker,
+            severity: "consent",
+            code: "gcloud_adc_grant_required",
+            service,
+            field: `services.${service}.volumes`,
+          },
+          {
+            message:
+              "The service binds the gcloud application-default credentials file. Native delivers that one file as a read-only snapshot after your consent; nothing else under the gcloud directory is shared.",
+            fix: 'Set "gcloud": {"mode": "file"} in the native machine settings for this project, or HACK_NATIVE_GCLOUD_ADC=file. The file must hold authorized_user credentials (gcloud auth application-default login), and the gcloud CLI must be installed.',
+          }
+        )
+      );
+    }
+  }
+  return input;
 }
 
 /** Findings from the CLI's own admission. Reads project files only. */
@@ -1586,6 +1684,8 @@ export type NativePreflightOptions = {
   readonly profiles: readonly string[];
   /** The native runtime, `"incomplete"` for a selection without a candidate, or null. */
   readonly runtime: NativeRuntimeSelection | "incomplete" | null;
+  /** The gcloud ADC consent (`HACK_NATIVE_GCLOUD_ADC=file` or `gcloud` setting). */
+  readonly gcloud?: NativeGcloudSelection;
   readonly invoke?: typeof invokeNativeRuntime;
 };
 
@@ -1627,6 +1727,32 @@ async function collectSetupFinding(
   return runtimeSetup;
 }
 
+/** HACK-2324: a restart policy native does not apply to privately delivered services. */
+function managedRestartFindings(
+  document: NonNullable<AdaptedProject["document"]>,
+  plan: unknown
+): NativePreflightFinding[] {
+  return nativeManagedRestartNotices({
+    compose: JSON.parse(document.normalizedComposeJson),
+    plan,
+    delivered: new Set(document.managedServices),
+  }).map(({ service, line }) =>
+    finding(
+      {
+        severity: "warning",
+        gate: "cli",
+        code: "restart_policy_not_applied",
+        service,
+        field: `services.${service}.restart`,
+      },
+      {
+        message: line,
+        fix: "Nothing to do to start. If the service stops, run hack restart (native restarts the whole project; service names are not accepted). Automatic restart with a fresh delivery is planned.",
+      }
+    )
+  );
+}
+
 function deliveryFindings(
   document: NonNullable<AdaptedProject["document"]>,
   plan: unknown
@@ -1637,6 +1763,40 @@ function deliveryFindings(
   } catch (error: unknown) {
     return [environmentInputFinding(error, true)];
   }
+}
+
+/**
+ * Setup states in which the selected binary answered and only the native home is
+ * incomplete. The runtime's Compose review is static (it reads the project and
+ * starts nothing), so it runs before setup and its findings are listed beside
+ * the setup blocker.
+ */
+const PRE_SETUP_REVIEW_STATES: ReadonlySet<NativeSetupState> = new Set([
+  "not_set_up",
+  "partial_resumable",
+]);
+
+/**
+ * The runtime review, or `skipped` with `native_setup_incomplete` when setup is
+ * not ready and the review could not run (or must not run, for a home that is
+ * invalid or unsafe). The report then names the checks that did not run.
+ */
+async function reviewWithSetup(opts: {
+  readonly setup: NativeSetupState;
+  readonly review: () => Promise<RuntimeReview>;
+}): Promise<RuntimeReview> {
+  const skipped: RuntimeReview = {
+    review: { status: "skipped", code: "native_setup_incomplete" },
+    findings: [],
+  };
+  if (opts.setup === "ready") {
+    return await opts.review();
+  }
+  if (!PRE_SETUP_REVIEW_STATES.has(opts.setup)) {
+    return skipped;
+  }
+  const reviewed = await opts.review();
+  return reviewed.review.status === "unavailable" ? skipped : reviewed;
 }
 
 /** Runs installation, CLI and runtime gates over the same selected project. */
@@ -1677,20 +1837,24 @@ export async function collectNativePreflight(
         review: { status: "skipped", code: "native_adaptation_invalid" },
         findings: [],
       };
-    } else if (
-      hasSelectedRuntime(opts.runtime) &&
-      runtimeSetup.state === "ready"
-    ) {
-      runtime = await collectNativeRuntimeFindings({
-        runtime: opts.runtime,
-        projectRoot: opts.projectRoot,
-        composeFile: opts.composeFile,
-        profiles: opts.profiles,
-        adapted: adapted.document,
-        invoke: opts.invoke,
+    } else if (hasSelectedRuntime(opts.runtime)) {
+      const selected = opts.runtime;
+      const document = adapted.document;
+      runtime = await reviewWithSetup({
+        setup: runtimeSetup.state,
+        review: () =>
+          collectNativeRuntimeFindings({
+            runtime: selected,
+            projectRoot: opts.projectRoot,
+            composeFile: opts.composeFile,
+            profiles: opts.profiles,
+            adapted: document,
+            invoke: opts.invoke,
+          }),
       });
       if (runtime.plan) {
         cli.push(...deliveryFindings(adapted.document, runtime.plan));
+        cli.push(...managedRestartFindings(adapted.document, runtime.plan));
         cli.push(
           ...routeFindings({
             plan: runtime.plan,
@@ -1759,6 +1923,10 @@ function findingLines(found: NativePreflightFinding): string[] {
   ];
 }
 
+/** What the runtime review adds, so a skipped review says what was not checked. */
+const SETUP_SKIPPED_CHECKS =
+  "Not checked: the runtime's review of each service (mount sources, healthchecks and route probes, restart policies, platforms, privileges, devices and capabilities), private environment delivery, and route admission.";
+
 function reviewLine(review: NativePreflightReport["runtime_review"]): string {
   if (review.status === "completed") {
     return "Runtime review: completed.";
@@ -1771,6 +1939,9 @@ function reviewLine(review: NativePreflightReport["runtime_review"]): string {
       return "Runtime review: unavailable; update the selected native runtime to include start-admission checks. Only the CLI's own checks ran.";
     }
     return "Runtime review: unavailable; the selected native runtime did not return a review. Only the CLI's own checks ran.";
+  }
+  if (review.code === "native_setup_incomplete") {
+    return `Runtime review: skipped, because native setup is not complete. Only the CLI's own checks ran. ${SETUP_SKIPPED_CHECKS} Finish setup and run the preflight again.`;
   }
   if (review.code === "native_adaptation_invalid") {
     return "Runtime review: skipped, because the native adaptation is not valid. Fix it and run the preflight again.";

@@ -2,6 +2,7 @@ import { lstat, rename } from "node:fs/promises";
 import { resolve } from "node:path";
 import { readLinesFromStream } from "../ui/lines.ts";
 import { getString, isRecord } from "./guards.ts";
+import { isStdoutReservedForMachineOutput } from "./machine-stdout.ts";
 import {
   appendPrivateFile,
   ensurePrivateDirectory,
@@ -586,10 +587,15 @@ export async function drainLifecycleOutput(opts: {
   if (!opts.stream || typeof opts.stream === "number") {
     return;
   }
+  // Stdout reserved for Hack's machine output never receives hook output
+  // (HACK-2311), even from a caller that passed "stdout".
   const write =
     opts.write ??
     ((output: "stdout" | "stderr", text: string) => {
-      (output === "stderr" ? process.stderr : process.stdout).write(text);
+      (output === "stderr" || isStdoutReservedForMachineOutput()
+        ? process.stderr
+        : process.stdout
+      ).write(text);
     });
   for await (const line of readLinesFromStream(opts.stream)) {
     write(opts.output, `${line}\n`);

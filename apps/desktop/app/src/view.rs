@@ -157,6 +157,8 @@ pub struct HackApp {
     /// A read finished (its result may be `None`: not readable).
     pub(crate) hackd_read: bool,
     pub(crate) hackd_loading: bool,
+    /// The Upgrade pane's reads and results.
+    pub(crate) upgrade: crate::upgrade_view::UpgradePane,
     /// [`Self::hackd_evidence_key`] when hackd was last read: a project read
     /// that changes it makes the stored read stale.
     pub(crate) hackd_evidence_seen: String,
@@ -212,6 +214,7 @@ impl HackApp {
             hackd_status: None,
             hackd_read: false,
             hackd_loading: false,
+            upgrade: crate::upgrade_view::UpgradePane::default(),
             hackd_evidence_seen: String::new(),
             action_started: std::collections::HashMap::new(),
             setup: Default::default(),
@@ -991,6 +994,11 @@ impl HackApp {
             if self.pane == Pane::Hackd {
                 self.load_hackd(cx);
             }
+            // The upgrade reads were the previous CLI's.
+            self.upgrade = crate::upgrade_view::UpgradePane::default();
+            if self.pane == Pane::Upgrade {
+                self.load_upgrade(cx);
+            }
             self.logs.close();
             self.env.begin();
             self.doctor.source_changed();
@@ -1176,6 +1184,17 @@ impl HackApp {
                 .when(self.pane == Pane::Hackd, |d| d.bg(p.surface_1))
                 .on_click(cx.listener(|this, _, _, cx| this.open_hackd(cx)))
             })
+            .child(
+                machine_row(
+                    "upgrade",
+                    Glyph::Upgrade,
+                    "Upgrade",
+                    dot(self.upgrade_status(), ui),
+                    ui,
+                )
+                .when(self.pane == Pane::Upgrade, |d| d.bg(p.surface_1))
+                .on_click(cx.listener(|this, _, _, cx| this.open_upgrade(cx))),
+            )
             .child(
                 machine_row(
                     "doctor",
@@ -1728,6 +1747,7 @@ impl Render for HackApp {
             // Setup applies whatever the project list shows, a missing CLI
             // included.
             _ if self.pane == Pane::Hackd => crate::machine_view::render(self, &ui, cx),
+            _ if self.pane == Pane::Upgrade => crate::upgrade_view::render(self, &ui, cx),
             _ if self.pane == Pane::Setup => {
                 crate::setup_view::render(&self.setup, self.machine.busy(), &ui, cx)
             }

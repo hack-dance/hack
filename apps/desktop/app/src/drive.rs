@@ -40,6 +40,14 @@
 //!                                 wait for the active tab's notice (a
 //!                                 refused paste) to contain text
 //! tab <services|logs|env>        show that detail tab
+//! upgrade                         open the Upgrade pane (runs the check and
+//!                                 lists the snapshots)
+//! expect-upgrade <text> [<seconds>]
+//!                                 wait for a line of the Upgrade pane
+//!                                 (verdict, snapshot or restore result)
+//! upgrade-snapshot                Save snapshot
+//! upgrade-restore                 Restore… then confirm, on the newest
+//!                                 listed snapshot (never --overwrite)
 //! hackd                           open the hackd pane (reads hackd's status)
 //! expect-hackd <text> [<seconds>] wait for the hackd card's title, or a line
 //!                                 of its always-on summary, to contain text
@@ -135,6 +143,13 @@ pub enum Step {
     },
     Wait(Duration),
     Tab(usize),
+    Upgrade,
+    ExpectUpgrade {
+        text: String,
+        within: Duration,
+    },
+    UpgradeSnapshot,
+    UpgradeRestore,
     Hackd,
     ExpectHackd {
         text: String,
@@ -259,7 +274,12 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
                 ),
             },
             ("hackd", []) => Step::Hackd,
-            ("expect" | "expect-notice" | "expect-cli" | "expect-hackd", _) if !rest.is_empty() => {
+            ("upgrade", []) => Step::Upgrade,
+            ("upgrade-snapshot", []) => Step::UpgradeSnapshot,
+            ("upgrade-restore", []) => Step::UpgradeRestore,
+            ("expect" | "expect-notice" | "expect-cli" | "expect-hackd" | "expect-upgrade", _)
+                if !rest.is_empty() =>
+            {
                 let (text, within) = match rest.rsplit_once(char::is_whitespace) {
                     Some((t, secs)) if secs.parse::<u64>().is_ok() => (
                         t.trim(),
@@ -272,6 +292,7 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
                     "expect" => Step::Expect { text, within },
                     "expect-cli" => Step::ExpectCli { text, within },
                     "expect-hackd" => Step::ExpectHackd { text, within },
+                    "expect-upgrade" => Step::ExpectUpgrade { text, within },
                     _ => Step::ExpectNotice { text, within },
                 }
             }
@@ -628,6 +649,53 @@ async fn run_step(handle: &Win, step: &Step, cx: &mut AsyncApp) -> Result<String
             handle
                 .update(cx, |app, _, cx| app.set_tab(*i, cx))
                 .map_err(|e| e.to_string())?;
+            Ok(String::new())
+        }
+        Step::Upgrade => {
+            handle
+                .update(cx, |app, _, cx| app.open_upgrade(cx))
+                .map_err(|e| e.to_string())?;
+            // The check probes the machine: wait for it (and the listing).
+            poll(handle, cx, Duration::from_secs(180), |app, _, _| {
+                (app.upgrade.check.is_some() && !app.upgrade.checking).then_some(())
+            })
+            .await
+            .ok_or("the upgrade check did not finish within 180 s")?;
+            Ok(String::new())
+        }
+        Step::ExpectUpgrade { text, within } => {
+            poll(handle, cx, *within, |app, _, _| {
+                app.upgrade_lines()
+                    .iter()
+                    .any(|l| l.contains(text.as_str()))
+                    .then_some(())
+            })
+            .await
+            .ok_or_else(|| {
+                let now = handle
+                    .update(cx, |app, _, _| app.upgrade_lines())
+                    .unwrap_or_default();
+                format!("Upgrade pane did not show {text:?} within {within:?} (shows: {now:?})")
+            })?;
+            Ok(String::new())
+        }
+        Step::UpgradeSnapshot => {
+            handle
+                .update(cx, |app, _, cx| app.save_upgrade_snapshot(cx))
+                .map_err(|e| e.to_string())?;
+            Ok(String::new())
+        }
+        Step::UpgradeRestore => {
+            handle
+                .update(cx, |app, _, cx| {
+                    let id = app
+                        .newest_upgrade_snapshot()
+                        .ok_or("no snapshot is listed")?;
+                    app.ask_upgrade_restore(id, cx);
+                    app.confirm_upgrade_restore(cx);
+                    Ok::<_, String>(())
+                })
+                .map_err(|e| e.to_string())??;
             Ok(String::new())
         }
         Step::Hackd => {

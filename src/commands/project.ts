@@ -8,6 +8,7 @@ import {
 } from "../lib/env-migration.ts";
 import { resolveLifecycleRunner } from "../lib/lifecycle-runner.ts";
 import { preflightLifecycleSupervisor } from "../lib/lifecycle-supervisor.ts";
+import { childStdoutTarget } from "../lib/machine-stdout.ts";
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
@@ -54,7 +55,6 @@ import {
 import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
 import { createNativeDependencyOwnerResolver } from "../backends/native-dependency-owners.ts";
-import { parseNativeGcloudSelection } from "../backends/native-gcloud-environment.ts";
 import { assertNativeLogFlags } from "../backends/native-log-follow.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import {
@@ -240,6 +240,7 @@ import {
   waitForComposeStartupState,
 } from "../lib/compose-startup-state.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
+import { annotateEmulatedPsItems } from "../lib/container-architecture.ts";
 import { resolveDefaultDomain } from "../lib/default-domain.ts";
 import {
   resolveDependencyCacheBootstrapServices,
@@ -402,6 +403,10 @@ import {
   RegistryCredentialPreflightError,
 } from "../lib/registry-credential-preflight.ts";
 import { canReuseRunningDependencyCache } from "../lib/run-dependency-cache.ts";
+import {
+  buildRunningEnvMismatchMessage,
+  selectEnvForRunningInstance,
+} from "../lib/running-env-selection.ts";
 import { buildRuntimeHostMetadataOverride } from "../lib/runtime-host-metadata.ts";
 import {
   type RuntimeProject,
@@ -2099,7 +2104,12 @@ export async function runLifecycleCommands(opts: {
       command: cmd.command,
       cwd,
       env: await mergeLifecycleCommandEnv(opts.env),
-      output: opts.routeStdoutToStderr ? "stderr" : "stdout",
+      // Under Hack's own `--json`, stdout holds only the envelope
+      // (HACK-2311), whatever this call site passed.
+      output:
+        childStdoutTarget(opts.routeStdoutToStderr) === "stderr"
+          ? "stderr"
+          : "stdout",
       projectDir: opts.projectDir,
       composeProject: opts.composeProject,
       service: serviceName,
@@ -6056,6 +6066,9 @@ async function runRemoteLifecycleCommand(opts: {
   return await runShell([invocation.bin, ...dispatchArgs], {
     cwd: opts.project.projectRoot,
     hackReexec: true,
+    // Under Hack's own --json the dispatch output precedes the envelope
+    // (emitRemoteLifecycleJson), so it goes to stderr (HACK-2311).
+    stdout: childStdoutTarget(undefined),
   });
 }
 
@@ -6239,7 +6252,8 @@ async function handleNativeUp({
     preparedBase: host.preparedBase,
     https: host.https,
     aws: host.aws,
-    gcloud: parseNativeGcloudSelection(process.env.HACK_NATIVE_GCLOUD_ADC),
+    gcloud: host.gcloud,
+    gcloudWithheld: host.gcloud === undefined && host.origins.gcloud === "env",
     runtimeMetadata: {
       devHost,
       aliasHost: resolveBranchAliasHost({ devHost, cfg }),
@@ -8955,6 +8969,14 @@ async function runRestartCommand({
     requested: args.positionals.services,
     available: allServiceNames,
   });
+  // Whole-stack and service-scoped restarts both keep the recorded running
+  // selection when --env is omitted (HACK-2280); a targeted restart also
+  // records its selection, so the default must not replace it.
+  const effectiveEnvName = await resolveStoredRuntimeEnvName({
+    requestedEnvName: envName,
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
+  });
   if (requestedServices.length > 0) {
     const result = await runTargetedServiceRestart({
       budgets,
@@ -8965,7 +8987,7 @@ async function runRestartCommand({
       composeProjectName,
       profiles,
       branch,
-      envName,
+      envName: effectiveEnvName,
       services: requestedServices,
       allServiceNames,
       routeStdoutToStderr: json,
@@ -9001,11 +9023,6 @@ async function runRestartCommand({
       exitCode: 0,
     });
   }
-  const effectiveEnvName = await resolveStoredRuntimeEnvName({
-    requestedEnvName: envName,
-    projectDir: project.projectDir,
-    composeProject: lifecycleComposeProject,
-  });
   const lifecycleEnv = await resolveLifecycleEnvForProject({
     project,
     projectName,
@@ -9211,6 +9228,12 @@ async function runRestartCommand({
   });
 }
 
+/**
+ * The overlay a command against a running instance uses: an explicit
+ * `--env`, else the instance's recorded running selection (base included),
+ * else `undefined` so the configured default applies. See
+ * {@link selectEnvForRunningInstance}.
+ */
 export async function resolveStoredRuntimeEnvName(opts: {
   readonly requestedEnvName: string | null | undefined;
   readonly projectDir: string;
@@ -9224,7 +9247,10 @@ export async function resolveStoredRuntimeEnvName(opts: {
     projectDir: opts.projectDir,
     composeProject: opts.composeProject,
   });
-  return state?.envName ?? undefined;
+  return selectEnvForRunningInstance({
+    requestedEnvName: undefined,
+    running: state,
+  });
 }
 
 export function resolveRestartTarget(opts: {
@@ -9468,7 +9494,7 @@ async function handlePs({
       project: baseProjectName,
       branch,
       composeProject: composeProjectName ?? baseProjectName,
-      items: entries,
+      items: await annotateEmulatedPsItems({ items: entries }),
     };
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
     return 0;
@@ -9601,7 +9627,7 @@ async function handleRun({
     }
     return result.exitCode;
   }
-  const envName = resolveRequestedEnvName({
+  const requestedEnvName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
 
@@ -9641,6 +9667,18 @@ async function handleRun({
     ? [...composeFiles, internalOverride]
     : composeFiles;
   const projectName = sanitizeProjectSlug(baseProjectName);
+  const lifecycleComposeProject = resolveLifecycleComposeProjectName({
+    projectName,
+    branch,
+  });
+  // HACK-2280: with no --env, a one-off uses the overlay the instance runs
+  // with, so it can reuse the running dependencies instead of starting them
+  // under the configured default.
+  const envName = await resolveStoredRuntimeEnvName({
+    requestedEnvName,
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
+  });
   const dependencyCache = await resolveDependencyCacheOverride({
     projectRoot: project.projectRoot,
     projectDir: project.projectDir,
@@ -9705,6 +9743,7 @@ async function handleRun({
     (await resolveCanSkipRunDependencies({
       composeFiles: composeFilesWithEnv,
       composeProjectKey: composeProjectName ?? baseProjectName,
+      runtimeStateKey: lifecycleComposeProject,
       composeProject: composeProjectName,
       project,
       profiles,
@@ -9824,7 +9863,7 @@ async function handleExec({
       composeFile: project.composeFile,
     });
   }
-  const envName = resolveRequestedEnvName({
+  const requestedEnvName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
 
@@ -9880,6 +9919,13 @@ async function handleExec({
     projectName,
     branch,
   });
+  // HACK-2280: with no --env, exec into the overlay the instance runs with,
+  // as down/restart do, instead of the configured default.
+  const envName = await resolveStoredRuntimeEnvName({
+    requestedEnvName,
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
+  });
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const envOverrides = await resolveComposeEnvOverrides({
     project,
@@ -9900,6 +9946,7 @@ async function handleExec({
     project,
     profiles,
     effectiveEnvName: envOverrides.effectiveEnvName,
+    branchOption: args.options.branch,
     service,
     env: envOverrides.env,
   });
@@ -10068,7 +10115,10 @@ function reportDependencyCacheFallback(cache: {
 
 async function resolveCanSkipRunDependencies(opts: {
   readonly composeFiles: readonly string[];
+  /** The Compose project label the running containers carry. */
   readonly composeProjectKey: string;
+  /** The instance's runtime-state key (the lifecycle compose project). */
+  readonly runtimeStateKey: string;
   readonly composeProject: string | null;
   readonly profiles: readonly string[];
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
@@ -10079,7 +10129,7 @@ async function resolveCanSkipRunDependencies(opts: {
 }): Promise<boolean> {
   const runtimeState = await readProjectRuntimeStateEntry({
     projectDir: opts.project.projectDir,
-    composeProject: opts.composeProjectKey,
+    composeProject: opts.runtimeStateKey,
   });
   if (runtimeState && runtimeState.envName !== opts.effectiveEnvName) {
     return false;
@@ -10122,6 +10172,7 @@ async function resolveExecTargetReady(opts: {
   readonly profiles: readonly string[];
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly effectiveEnvName: string | null;
+  readonly branchOption?: string | undefined;
   readonly service: string;
   /**
    * The Compose env, including the `HACK_ENV_*` values the env override
@@ -10136,12 +10187,17 @@ async function resolveExecTargetReady(opts: {
     projectDir: opts.project.projectDir,
     composeProject: opts.composeProjectKey,
   });
+  // Reached only with an explicit --env: an omitted one already resolved to
+  // the running selection.
   if (runtimeState && runtimeState.envName !== opts.effectiveEnvName) {
-    const runningEnv = runtimeState.envName ?? "base";
-    const requestedEnv = opts.effectiveEnvName ?? "base";
     return {
       ok: false,
-      message: `The running stack uses env ${runningEnv}, but this exec request resolves to ${requestedEnv}. Restart the stack with the requested env or omit --env.`,
+      message: buildRunningEnvMismatchMessage({
+        command: "exec",
+        runningEnvName: runtimeState.envName,
+        requestedEnvName: opts.effectiveEnvName,
+        branchOption: opts.branchOption,
+      }),
     };
   }
 

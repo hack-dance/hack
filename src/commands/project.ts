@@ -229,6 +229,11 @@ import {
   listComposeProjectContainers,
 } from "../lib/compose-down-confirmation.ts";
 import {
+  type ComposeEnginePreflightDeps,
+  preflightComposeEngine,
+  preflightSharedNetworks,
+} from "../lib/compose-engine-preflight.ts";
+import {
   inspectComposeEnvOverrideAtRest,
   removePlaintextComposeEnvOverride,
   writeComposeEnvOverride,
@@ -1499,6 +1504,14 @@ export function buildLifecycleJsonErrorResult(opts: {
   }
   if (opts.error instanceof CliUsageError) {
     return errorResult({ code: "E_USAGE", message: opts.error.message });
+  }
+  // A fresh checkout without the key is a setup gap, not a crash: keep the
+  // message (where the key goes) under its own code (HACK-2356).
+  if (opts.error instanceof ProjectEnvKeyMissingError) {
+    return errorResult({
+      code: "E_ENV_KEY_MISSING",
+      message: opts.error.message,
+    });
   }
   if (opts.error instanceof RegistryCredentialPreflightError) {
     return errorResult({
@@ -7346,16 +7359,6 @@ async function runUpCommand({
   const branch = branchIdentity.branch;
   const profiles = parseCsvList(args.options.profile);
 
-  if (json && !findExecutableInPath("docker")) {
-    return emitLifecycleResult({
-      result: errorResult({
-        code: "E_DOCKER_UNAVAILABLE",
-        message: "docker is not installed or not on PATH",
-      }),
-      exitCode: 1,
-    });
-  }
-
   await recordBranchUsageIfNeeded({
     project,
     branch,
@@ -7384,6 +7387,14 @@ async function runUpCommand({
       });
     }
     return remoteUpCode;
+  }
+  // Name a missing engine, socket permission or Compose plugin before any
+  // pull starts (HACK-2356). The error renders as the JSON envelope or one line.
+  const engineRefusal = await preflightComposeEngine({
+    deps: composeEnginePreflightDeps,
+  });
+  if (engineRefusal !== null) {
+    throw engineRefusal;
   }
   await maybeSyncOauthAliasesInCompose({ project });
   // Keep machine-local generated files (.internal/, .branch/, .env, env
@@ -7421,6 +7432,13 @@ async function runUpCommand({
   const aliasHost = resolveBranchAliasHost({ devHost, cfg });
   const internalSettings = resolveInternalSettings(cfg);
   await maybePromptToStartGlobal({ internal: internalSettings });
+  const networkRefusal = await preflightSharedNetworks({
+    composeYaml: await readTextFile(project.composeFile),
+    deps: composeEnginePreflightDeps,
+  });
+  if (networkRefusal !== null) {
+    throw networkRefusal;
+  }
 
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const requestedServices = resolveRequestedComposeServices({
@@ -7892,6 +7910,13 @@ async function runUpCommand({
     signalCleanup.dispose();
   }
 }
+
+/** Real Docker reads for the `up` preflight; tests inject their own. */
+const composeEnginePreflightDeps: ComposeEnginePreflightDeps = {
+  dockerOnPath: () => findExecutableInPath("docker") !== null,
+  run: async (argv, timeoutMs) =>
+    await exec(argv, { stdin: "ignore", timeoutMs }),
+};
 
 async function maybePromptToStartGlobal(opts: {
   readonly internal: { readonly dns: boolean; readonly tls: boolean };

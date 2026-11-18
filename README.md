@@ -224,9 +224,10 @@ instance. See [agent integrations](docs/integrations.md).
 Homebrew or the release installer above.
 
 **v5 is in prerelease.** It keeps the same commands and the same `.hack/` folder
-and replaces the runtime layer underneath. Docker Compose stays the default.
-`5.0.0-next.N` builds install beside stable Hack through the separate `hack-next`
-channel and do not change the stable install. Read
+and replaces the runtime layer underneath. Docker Compose stays the default. The
+current prerelease is `5.0.0-next.22`. Prerelease builds install beside stable
+Hack through the separate `hack-next` channel and do not change the stable
+install. Read
 [what's new in v5](docs/guides/v5-release-notes.md),
 [upgrade to v5](docs/guides/upgrade-to-v5.md) and
 [install a prerelease](docs/guides/candidate-install.md). The `next` branch holds
@@ -235,11 +236,25 @@ v5 work; `main` holds the stable line.
 **Native backend (beta, Apple Silicon macOS).** A second way to run the same
 project. Hack runs the project's containers in a lightweight Linux VM that it
 manages, without Docker Desktop or OrbStack. Your `.hack/` folder and your commands
-stay the same. It is opt-in, ships only through `hack-next`, and supports part of
-what Compose supports. We have not benchmarked it against Compose and make no
-speed, memory or battery claims. Read the [overview](docs/native/README.md),
-[try it](docs/native/try-it.md), or check
-[what works and known limits](docs/native/limits.md).
+stay the same. It is opt-in and ships only through `hack-next`.
+
+- It runs a whole multi-service Compose project: start, stop, restart, logs for
+  every service and `hack open`.
+- It supports part of what Compose supports. When a project needs something
+  outside that part, Hack refuses and names the feature.
+- One project runs in a native pool at a time.
+- Native data does not carry over when you move to a new prerelease, and it does
+  not move between backends.
+- Do not expect it to be faster or lighter than Compose.
+
+Read the [overview](docs/native/README.md), [try it](docs/native/try-it.md), or
+check [what works and known limits](docs/native/limits.md).
+
+**Single project file (experimental).** Hack ships an experimental compiler for a
+bounded subset of a planned `.hack/hack.project.json` format. A successful compile
+is validation of the file. It does not change how existing projects run, and
+projects run from their `.hack/` Compose setup today. See
+[native configuration validation](docs/reference/native-config-compiler.md).
 
 **Managed environments (advanced).** The environment is committed with the repo,
 so another machine or a cloud agent environment can reuse it. That machine still

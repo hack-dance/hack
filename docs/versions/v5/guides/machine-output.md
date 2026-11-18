@@ -34,7 +34,7 @@ hack up --json 2>up.log | jq '.data.services.started'
 Three things to know:
 
 - **Hook output goes to stderr.** With `--json`, both the stdout and the stderr
-  of lifecycle hooks (`up`, `restart` and `down` phases) go to Hack's stderr. The
+  of the lifecycle hooks that `up`, `restart` and `down` run go to Hack's stderr. The
   same holds for host commands and for the Compose client's own output. Read them
   on stderr. Never parse them from stdout.
 - **`hack up --json` starts detached.** It returns when the start finishes; it
@@ -48,7 +48,7 @@ its own result, so that output appears on neither stream.
 
 ## Check the exit code and `ok`
 
-Most commands print an envelope:
+Many commands print an envelope:
 
 ```json
 { "ok": true, "data": { "action": "up", "project": "myapp", "branch": null } }
@@ -75,10 +75,14 @@ schema, `hack.lifecycle-progress.v1`. The last line is the same envelope that
 `--json` alone prints.
 
 ```sh
-hack up --json --progress | while read -r line; do
-  echo "$line" | jq -c 'select(.type == "progress") | {service, phase}'
-done
+set -o pipefail
+hack up --json --progress | tee up.ndjson \
+  | jq -c --unbuffered 'select(.type == "progress") | {service, phase}'
+tail -n 1 up.ndjson | jq -e '.ok' >/dev/null
 ```
+
+The last command fails when the start failed, so the script sees it. A refused
+command, for example one with bad options, prints one envelope and no stream.
 
 Logs are also a stream: see `hack logs --json` in
 [Run and inspect a project](run-project.md).
@@ -107,7 +111,7 @@ On Compose, `hack ps --json` prints one bare object:
 | `branch` | The branch instance name, or `null` for the main instance. |
 | `composeProject` | The Compose project name: `<name>` or `<name>--<branch>`. |
 | `items[]` | One Docker Compose `ps` record per container. Docker owns these keys (`Service`, `Name`, `State`, `ExitCode`, `Status`, `Ports` and more). Ignore keys you do not know. |
-| `items[].emulated` | `true` when the image was built for another CPU architecture than the Docker engine, so the container runs under emulation and is slow. The key is absent when the architectures match, or when Docker could not report them in time. Absent does not prove "not emulated". |
+| `items[].emulated` | `true` when the image was built for another CPU architecture than the Docker engine, so the container runs under emulation and can be much slower. The key is absent when the architectures match, or when Docker could not report them in time. Absent does not prove "not emulated". |
 | `waiting` | A map from a service to the one-shot services it waits for. A service is listed while its container is `created` and that one-shot (for example a migration) still runs. The map is empty when nothing waits. |
 
 `waiting` matters after a start that stopped at its time limit: see

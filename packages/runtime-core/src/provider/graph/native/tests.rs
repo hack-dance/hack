@@ -41,7 +41,7 @@ fn basic() -> Value {
 
 #[test]
 fn retirement_requires_removed_same_owner_and_no_pending_work() {
-    let root = std::env::temp_dir().join(format!(
+    let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
         "native-pool-retirement-{}-{}",
         std::process::id(),
         crate::next_test_scratch()

@@ -1104,11 +1104,12 @@ stopped with the build that started it. For an incompatible stranded home, use t
 started its pool to run `runtime down --json` on that home. Preserve the home for
 its retained data, then prepare a fresh home for the new build.
 
-The native VM pool outlives a failed `up`. The failure message says so; once no other
-native project uses the pool, stop it with `runtime down --json` on the native home.
-An `invalid_state` failure names the state path that exists but is not a directory,
-relative to the native home (for example `.hack-local/run/graphs`). Inspect that path;
-do not delete it to retry.
+A failed `up` can leave the native VM pool running, and the failure message says how to
+stop it: once no other native project uses the pool, run `runtime down --json` on the
+native home (`runtime status --json` shows whether it runs). An `invalid_state` failure
+names the state path that exists but is not a directory, relative to the native home
+(for example `.hack-local/run/graphs`), when that path lies in one of the home's own
+state directories. Inspect that path; do not delete it to retry.
 A retained earlier provider path is diagnosed as `provider_pin_changed`, not as a
 changed PID file. Recovery across provider versions is not supported.
 Prepare a new candidate home with the pinned

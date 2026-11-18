@@ -113,7 +113,7 @@ function networkRequestFailureMessage(
 
 /** The native VM pool outlives a failed start; say how to stop it. */
 export const NATIVE_IDLE_POOL_NOTE =
-  "The native VM pool stays running; when no other native project uses it, stop it with runtime down --json on this native home.";
+  "The native VM pool may still be running; when no other native project uses it, stop it with runtime down --json on this native home.";
 
 /** A state path relative to the native state root, or one final name; never absolute. */
 const STATE_COMPONENT =

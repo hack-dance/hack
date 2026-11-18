@@ -227,25 +227,22 @@ fn canonical_directory(path: &Path) -> Result<PathBuf, CandidateError> {
     Ok(canonical)
 }
 
-/// A state path for diagnostics: relative to its `.hack-local` state root, or only
-/// its final name outside one. Never an absolute path or a home directory.
-fn state_component_label(component: &Path) -> String {
-    for ancestor in component.ancestors() {
-        if ancestor.file_name() == Some(std::ffi::OsStr::new(".hack-local")) {
-            if let Ok(relative) = component.strip_prefix(ancestor) {
-                let relative = relative.to_string_lossy();
-                return if relative.is_empty() {
-                    ".hack-local".to_owned()
-                } else {
-                    format!(".hack-local/{relative}")
-                };
-            }
-        }
+/// Top-level directories of a candidate state root; only paths beneath one are named.
+const STATE_ROOT_ENTRIES: [&str; 5] = ["run", "artifacts", "node", "providers", "setup"];
+
+/// A state path for diagnostics, relative to its `.hack-local` state root and only when it
+/// lies beneath one of that root's own directories. A project path, a home directory or
+/// anything outside a state root gets no label: nothing a user named is ever carried.
+fn state_component_label(component: &Path) -> Option<String> {
+    let root = component
+        .ancestors()
+        .find(|ancestor| ancestor.file_name() == Some(std::ffi::OsStr::new(".hack-local")))?;
+    let relative = component.strip_prefix(root).ok()?;
+    let first = relative.components().next()?.as_os_str().to_str()?;
+    if !STATE_ROOT_ENTRIES.contains(&first) {
+        return None;
     }
-    component
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default()
+    Some(format!(".hack-local/{}", relative.to_str()?))
 }
 
 fn reject_aliased_state(path: &Path) -> Result<(), CandidateError> {
@@ -268,7 +265,7 @@ fn reject_aliased_state(path: &Path) -> Result<(), CandidateError> {
                         component.display()
                     ),
                 )
-                .with_state_component(&state_component_label(component)));
+                .with_state_component(&state_component_label(component).unwrap_or_default()));
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -339,15 +336,21 @@ mod state_component_tests {
             wire["state_component"],
             serde_json::json!({"version": 1, "path": ".hack-local/run/graphs"})
         );
-        // Outside a state root only the final name is carried, never the absolute path.
-        std::fs::write(root.join("plain-file"), b"x").unwrap();
-        let outside = reject_aliased_state(&root.join("plain-file")).unwrap_err();
-        let wire = serde_json::to_value(&outside).unwrap();
-        assert_eq!(wire["state_component"]["path"], "plain-file");
-        assert!(
-            !wire["state_component"]
-                .to_string()
-                .contains(root.to_str().unwrap())
-        );
+        // A project file, a file directly in the state root, or a project directory that
+        // happens to be named .hack-local, carries no label.
+        let project = root.join("project");
+        std::fs::create_dir_all(project.join(".hack-local")).unwrap();
+        for path in [
+            root.join("confidential-plan.txt"),
+            state.join("confidential-plan.txt"),
+            project.join(".hack-local/notes"),
+        ] {
+            std::fs::write(&path, b"x").unwrap();
+            let refused = reject_aliased_state(&path).unwrap_err();
+            assert_eq!(refused.code, "invalid_state");
+            let wire = serde_json::to_value(&refused).unwrap();
+            assert!(wire.get("state_component").is_none(), "{wire}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -1166,8 +1166,10 @@ fully removed native-authored journals are excluded only after strict same-owner
 retirement validation. The count is `null` when the inventory cannot be read.
 Its `pool_idle` field is `true` only when the
 pool runs with a live provider and records no graph, environment allocation or exec
-session, and `null` when that cannot be established. `hack doctor` warns, as the
-`native pool idle` machine check, only for `pool_idle: true`, and gives the stop command;
+session, and `null` when that cannot be established. The `native pool idle` machine
+check warns about an idle pool only for `pool_idle: true`, and gives the stop command.
+Unavailable runtime status or unknown pool state produces an observation warning,
+with `nativePool.state: "unknown"`, instead of an all-clear or a stop suggestion;
 it never stops the pool itself, and `--fix` does not either.
 
 Historical native environment-lease records are conservatively counted as pool users,

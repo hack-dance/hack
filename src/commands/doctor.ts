@@ -1722,7 +1722,7 @@ async function appendNativeMachineChecks(opts: {
 
 /**
  * `native pool idle` (machine scope): reads `runtime status --json`, bounded
- * by its timeout; any failure is "status unavailable", never a warning.
+ * by its timeout; any failure warns that status is unavailable, never claims idle.
  * Never stops the pool.
  */
 async function checkNativePoolIdle(opts: {

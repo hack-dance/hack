@@ -42,7 +42,7 @@ test("a pool the runtime reports idle warns, with its memory and the exact stop 
   );
 });
 
-test("a pool in use, a stopped pool and an unproven answer never warn", () => {
+test("a pool in use or stopped is ok; unproven status warns without claiming idle", () => {
   expect(
     nativePoolIdleCheck({
       status: status({ graph_runs: 2, pool_idle: false }),
@@ -76,6 +76,7 @@ test("a pool in use, a stopped pool and an unproven answer never warn", () => {
   // The runtime alone decides: an older runtime without the field, an
   // unestablished answer, or liveness that is not proven is never idle.
   for (const unknown of [
+    {},
     status({ pool_idle: null }),
     status({ pool_idle: undefined }),
     status({ pool_idle: "true" }),
@@ -83,13 +84,15 @@ test("a pool in use, a stopped pool and an unproven answer never warn", () => {
     status({ process_alive: undefined }),
   ]) {
     expect(nativePoolIdleCheck({ status: unknown, runtime })).toMatchObject({
-      status: "ok",
+      status: "warn",
       nativePool: { state: "unknown" },
     });
   }
   expect(nativePoolIdleCheck({ status: null, runtime })).toMatchObject({
-    status: "ok",
-    message: "Skipped (native runtime status unavailable)",
+    status: "warn",
+    message:
+      "Native runtime status unavailable; pool idleness could not be checked.",
+    nativePool: { state: "unknown" },
   });
 });
 

@@ -7,7 +7,8 @@
  * reports `pool_idle: true` (running, a live provider process, and no graph,
  * Compose or native-authored, running or retained, no environment allocation
  * and no exec session). `false`, `null`, an older runtime without the field
- * or a stopped pool is never a warning. Doctor never stops the pool, and
+ * or a stopped pool never produces an idle warning. Unknown status produces
+ * an observation warning instead of an all-clear. Doctor never stops the pool, and
  * `--fix` does not either: the message gives the exact stop command.
  */
 
@@ -47,7 +48,11 @@ export function readNativePoolReport(status: unknown): NativePoolReport {
     : null;
   const guestMemoryMib = count(status.guest_memory_mib);
   const graphRuns = count(status.graph_runs);
-  const stopped = status.phase !== "running" || status.process_alive === false;
+  const stopped =
+    status.phase === "stopped" ||
+    status.phase === "uninitialized" ||
+    status.phase === "process-exited" ||
+    status.process_alive === false;
   const running = status.phase === "running" && status.process_alive === true;
   let state: NativePoolReport["state"];
   if (stopped) {
@@ -136,11 +141,11 @@ export function nativePoolIdleCheck(opts: {
     default:
       return {
         name,
-        status: "ok",
+        status: "warn",
         message:
           opts.status === null
-            ? "Skipped (native runtime status unavailable)"
-            : "The native VM pool is running; the runtime could not establish whether anything uses it, so idleness is not judged.",
+            ? "Native runtime status unavailable; pool idleness could not be checked."
+            : "The runtime could not establish the native VM pool's state or users; pool idleness could not be checked.",
         nativePool: report,
       };
   }

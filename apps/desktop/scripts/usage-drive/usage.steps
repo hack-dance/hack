@@ -1,0 +1,8 @@
+# The Services tab's resource use (DESIGN.md section 10) against a stand-in
+# CLI (see run.sh): per-service values, the emulated marker and the total.
+select demo
+tab services
+expect-usage api 3.2% 212 MiB 30
+expect-usage db 1.4% 388 MiB 30
+expect-usage emulated api 30
+expect-usage CPU 4.6% · 600 MiB 30

@@ -91,6 +91,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "After start or restart, a service is neither running nor a successful one-shot.",
     readFirst: "`hack ps --json`",
   },
+  E_DOWN_INCOMPLETE: {
+    meaning:
+      "After down, a container of the instance is still running; `error.detail.running` names the services.",
+    readFirst: "`hack ps --json`",
+  },
   E_DEPENDENCY_BOOTSTRAP_FAILED: {
     meaning: "A dependency installer service did not complete successfully.",
     readFirst: "`hack logs <service> --json --no-follow --tail 200`",

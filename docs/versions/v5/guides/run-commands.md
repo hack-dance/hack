@@ -28,8 +28,8 @@ These two words answer two different questions.
 
 - An **overlay** answers "which environment?" It is a named set of values, such
   as `qa` or `staging`, stored in `.hack/hack.env.<name>.yaml`. You choose it
-  with `--env <name>`. Values in an overlay replace the base values in
-  `.hack/hack.env.yaml`.
+  with `--env <name>`. A value in an overlay wins over the same key in the base
+  file, `.hack/hack.env.default.yaml`.
 - A **scope** answers "who receives this value?" Inside every env file, values
   sit under `global` (every service and the host), under a service name (only
   that service), or under `host` (only commands that run on the host).
@@ -49,14 +49,18 @@ values:
 
 | Command | Overlay | Scope it reads | `PORT` |
 | --- | --- | --- | --- |
-| `hack up --env qa` | `qa` | `global`, then each service's own | `4000` in `api`, unset elsewhere |
+| `hack up --env qa` | `qa` | `global`, then each service's own | `4000` in `api`; not set by this file elsewhere |
 | `hack run --env qa api env` | `qa` | `global`, then `api` | `4000` |
 | `hack host exec --env qa -- env` | `qa` | `global`, then `host` | `4100` |
 | `hack host exec --env qa --scope api -- env` | `qa` | `global`, then `api`, then `host` | `4100` |
-| `hack up` (no default overlay set) | base only | from `.hack/hack.env.yaml` | not from this file |
+| `hack up` (no default overlay set) | base only | from `.hack/hack.env.default.yaml` | not from this file |
 
-`--scope` on a host command only chooses which values Hack injects. The command
-still runs on the host. Values under `host` are applied last for host commands.
+`--scope` exists only on host commands (`hack host exec`, `hack host shell`). It
+only chooses which values Hack injects. The command still runs on the host.
+
+Within each file, Hack applies `global`, then the service, then `host`. A later
+file wins over an earlier one whatever the scope, and machine-local
+`.local.yaml` files come last.
 
 To choose the overlay:
 
@@ -83,10 +87,11 @@ flowchart TD
   Start["hack exec or hack run"] --> Given{"--env given?"}
   Given -->|no| Recorded{"Project running?"}
   Recorded -->|yes| Running["Use the running overlay"]
-  Recorded -->|no| Default["Use the default overlay"]
-  Given -->|yes| Match{"Same as running overlay?"}
-  Match -->|yes| Running
-  Match -->|no| Refuse["exec refuses"]
+  Recorded -->|no| Default["Default overlay, else base"]
+  Given -->|yes| Other{"Running with another?"}
+  Other -->|no| UseGiven["Use the given overlay"]
+  Other -->|yes, run| UseGiven
+  Other -->|yes, exec| Refuse["exec refuses"]
   class Running ok
   class Refuse fail
 ```
@@ -102,6 +107,10 @@ The running stack uses env qa, but this exec request asks for env base.
 Omit --env to exec with the running env qa, or restart the stack with
 `hack restart --env base` first.
 ```
+
+`hack run` does not refuse. It uses the overlay you give. Its one-off container
+then does not reuse the running services, and Compose starts the dependencies
+it needs.
 
 `hack logs`, `hack ps` and `hack open` do not read an overlay at all.
 
@@ -120,7 +129,8 @@ commands such as migrations, which need their own project-specific checks.
 On the native backend, `hack exec <service> -- /bin/sh` opens an interactive
 session when stdin and stdout are terminals. Otherwise, or with
 `HACK_NO_INTERACTIVE=1`, it runs the command once with closed stdin. Name the
-shell yourself; Hack never adds one. Native `exec` uses the environment the
-service started with and refuses `--env`. A one-off `run` is bounded and has
-closed stdin. See
+shell yourself; Hack never adds one. Native `exec` and `run` both refuse
+`--env`: they use the overlay the project started with. A one-off `run` has
+closed stdin and no terminal, and it refuses a service with source or data
+mounts. See
 [Native authored commands](../../reference/native-authored-commands.md).

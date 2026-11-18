@@ -149,8 +149,8 @@ Activation asks for confirmation and an administrator prompt.
 **Which CA signs native routes.** Native's Caddy creates its own local CA under
 the native home, at `native-https/data/caddy/pki/authorities/local/root.crt`, the
 first time it serves HTTPS. It is not the Compose proxy's CA, so trust installed
-by `hack global trust` does not cover native routes. You trust it in step 5, once
-the first `up` has created it.
+by `hack global trust` does not cover native routes. Doctor installs it in step 5,
+once the first `up` has created it.
 
 ## 5. Start, trust, check and stop
 
@@ -162,18 +162,18 @@ Finish steps 2 to 4 first: the routes and hostnames are read at `up`.
 ```
 
 Use `HACK_NATIVE_BUILDS=1` on `up` if the project builds images. With HTTPS selected,
-this first `up` creates the native CA. While the project runs, trust it once from
-your own terminal, then check one route:
+this first `up` creates the native CA. While the project runs, let Doctor install it
+and check one route:
 
 ```sh
-sudo security add-trusted-cert -d -r trustRoot \
-  -k /Library/Keychains/System.keychain \
-  /absolute/native-home/native-https/data/caddy/pki/authorities/local/root.crt
-"$CANDIDATE" doctor --browser-url https://web.my-app.v5.example:18443
+"$CANDIDATE" doctor --fix --browser-url https://web.my-app.v5.example:18443
 ```
 
-`hack doctor --json` with native selected reports whether that exact root is
-trusted. Check the app yourself: a running VM does not prove the app works. Stop it
+Doctor installs only the verified live root, after your confirmation and the macOS
+administrator prompt. It checks the owner, root and route again after that prompt, and
+verifies trust afterwards. Do not import `root.crt` by hand: Doctor's checks are what
+keep a substituted file from becoming a trusted root. Check the app yourself: a
+running VM does not prove the app works. Stop it
 when you are done:
 
 ```sh

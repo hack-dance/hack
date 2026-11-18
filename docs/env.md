@@ -351,6 +351,14 @@ decrypted value, whether `up` succeeds, fails or is interrupted. The file is wri
 with mode 0600, and Hack refuses to write through a symlink at that path. A value
 reaches the container literally, `$` included.
 
+The file always declares every service in the Compose graph, whichever command wrote
+it: a targeted `hack up <service>`, `hack restart <service>`, `hack run` or `hack exec`
+rewrites the entries for all services, not only its targets, and passes the values for
+all of them. A Compose command that later recreates another service from this file,
+such as a dependency of a targeted `up`, still declares that service's managed
+variables. A service removed from the Compose file loses its entry the next time the
+file is written.
+
 Only the `docker compose` invocations that read the override (`up`, `run`, `exec`,
 `ps` and the dependency cache initialization) receive the `HACK_ENV_*` values. The other
 `docker` commands Hack runs around Compose, such as `docker inspect`, `docker logs` and

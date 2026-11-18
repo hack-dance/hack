@@ -216,10 +216,18 @@ import {
 } from "../lib/compose-env-at-rest.ts";
 import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
 import { renderComposeEnvReferenceOverride } from "../lib/compose-managed-env.ts";
+import {
+  effectiveComposeProfiles,
+  readComposeInterpolationEnv,
+  readComposeOneShotGraph,
+  runningOneShots,
+  waitingDependents,
+} from "../lib/compose-oneshot-progress.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import {
   composeEnvValuesToRedact,
   composePsTextFallbackAllowed,
+  parseComposePsJson,
   readComposePs,
   readComposePsResult,
 } from "../lib/compose-ps-result.ts";
@@ -232,6 +240,7 @@ import {
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
   describeComposeStartupBudgets,
   resolveComposeImageTimeoutMs,
+  resolveComposeStartupCeilingMs,
   resolveComposeStartupTimeoutMs,
 } from "../lib/compose-startup-budget.ts";
 import {
@@ -1080,8 +1089,103 @@ export type LifecycleJsonData = {
     readonly failed: readonly string[];
   };
   readonly cacheVolumesRemoved?: readonly string[];
+  /** One-shot dependencies this command stopped mid-run (HACK-2310). */
+  readonly interrupted?: readonly string[];
+  readonly warnings?: readonly string[];
   readonly durationMs: number;
 };
+
+/** One-shot dependencies a down or restart is about to stop mid-run. */
+export type OneShotInterruption = {
+  readonly services: readonly string[];
+  readonly warning: string;
+};
+
+/**
+ * Before `down` or `restart` stops containers (HACK-2310): one-shot
+ * dependencies (migrations, seed jobs) still running would be stopped
+ * mid-run, which can leave their work half done. Interactive runs ask first
+ * (`proceed: false` when declined); `--json` and non-interactive runs go on
+ * and report the warning, which also goes to stderr. A failed read finds
+ * nothing to interrupt.
+ */
+async function checkOneShotInterruption(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly composeProjectName: string | null;
+  readonly profiles: readonly string[];
+  readonly action: "down" | "restart";
+  readonly json: boolean;
+  /** A targeted restart interrupts only these services. */
+  readonly services?: readonly string[];
+  /**
+   * The Compose environment the command's other `ps` reads use (delivered
+   * values, `COMPOSE_PROFILES`), so a profile-gated one-shot is seen too.
+   */
+  readonly env?: Readonly<Record<string, string>>;
+}): Promise<{
+  readonly proceed: boolean;
+  readonly interruption?: OneShotInterruption;
+}> {
+  // Without a completion dependency in any profile there is nothing to
+  // interrupt, and no engine read.
+  const anyProfile = await readComposeOneShotGraph([opts.project.composeFile]);
+  if (anyProfile.oneShots.size === 0) {
+    return { proceed: true };
+  }
+  const ps = await composeRuntimeBackend.psJson({
+    composeFiles: [opts.project.composeFile],
+    composeProject: opts.composeProjectName,
+    profiles: opts.profiles,
+    cwd: dirname(opts.project.composeFile),
+    ...(opts.env ? { env: { ...opts.env } } : {}),
+    all: true,
+  });
+  // A failed read finds nothing to interrupt: the command goes on unchanged,
+  // and its own reads report the engine error as before.
+  const entries = ps.exitCode === 0 ? parseComposePsJson(ps.stdout) : null;
+  const interpolationEnv = await readComposeInterpolationEnv({
+    composeFiles: [opts.project.composeFile],
+    env: { ...process.env, ...opts.env },
+  });
+  const graph = await readComposeOneShotGraph([opts.project.composeFile], {
+    activeProfiles: effectiveComposeProfiles({
+      cliProfiles: opts.profiles,
+      env: interpolationEnv,
+    }),
+    interpolationEnv,
+    // Services with containers run whatever this command's profiles are.
+    presentServices: new Set(
+      (entries ?? []).flatMap((entry) =>
+        typeof entry.Service === "string" ? [entry.Service] : []
+      )
+    ),
+  });
+  if (graph.oneShots.size === 0) {
+    return { proceed: true };
+  }
+  const services = (entries ? runningOneShots({ graph, entries }) : []).filter(
+    (service) => !opts.services || opts.services.includes(service)
+  );
+  if (services.length === 0) {
+    return { proceed: true };
+  }
+  const names = services.join(", ");
+  const warning = `hack ${opts.action} interrupted the one-shot service ${names} while it was still running; its work (for example migrations) may be incomplete. Check its logs before relying on it.`;
+  if (!opts.json && canPrompt()) {
+    const ok = await confirm({
+      message: `The one-shot service ${names} is still running (for example migrations). hack ${opts.action} stops it mid-run. Continue?`,
+      initialValue: false,
+    });
+    if (isCancel(ok) || !ok) {
+      logger.info({
+        message: `Not stopped: ${names} keeps running. Run hack ${opts.action} again once hack ps shows it exited.`,
+      });
+      return { proceed: false };
+    }
+  }
+  logger.warn({ message: warning });
+  return { proceed: true, interruption: { services, warning } };
+}
 
 /**
  * Shape the `--json` payload for up/down/restart.
@@ -1096,6 +1200,7 @@ export function buildLifecycleJsonData(opts: {
   readonly stopped?: readonly string[];
   readonly failed?: readonly string[];
   readonly cacheVolumesRemoved?: readonly string[];
+  readonly interruption?: OneShotInterruption;
   readonly durationMs: number;
 }): LifecycleJsonData {
   return {
@@ -1111,6 +1216,12 @@ export function buildLifecycleJsonData(opts: {
     },
     ...(opts.cacheVolumesRemoved
       ? { cacheVolumesRemoved: [...opts.cacheVolumesRemoved].sort() }
+      : {}),
+    ...(opts.interruption && opts.interruption.services.length > 0
+      ? {
+          interrupted: [...opts.interruption.services],
+          warnings: [opts.interruption.warning],
+        }
       : {}),
     durationMs: opts.durationMs,
   };
@@ -1198,15 +1309,48 @@ function reportComposeStartupBudget(opts: {
 
 /** Resolve both detached Compose budgets before any project side effect. */
 function resolveDetachedComposeBudgets(detach: boolean): ComposeStartupBudgets {
-  return detach
-    ? {
-        imageTimeoutMs: resolveComposeImageTimeoutMs(),
-        startupTimeoutMs: resolveComposeStartupTimeoutMs(),
-      }
-    : {
-        imageTimeoutMs: DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
-        startupTimeoutMs: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
-      };
+  if (!detach) {
+    return {
+      imageTimeoutMs: DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
+      startupTimeoutMs: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+    };
+  }
+  const startupTimeoutMs = resolveComposeStartupTimeoutMs();
+  return {
+    imageTimeoutMs: resolveComposeImageTimeoutMs(),
+    startupTimeoutMs,
+    startupCeilingMs: resolveComposeStartupCeilingMs({ startupTimeoutMs }),
+  };
+}
+
+/**
+ * Apply the project's `compose.startupTimeoutMs` and `compose.startupCeilingMs`
+ * (HACK-2310) once the project is known. The host variables still win; an
+ * invalid project value is refused like an invalid variable.
+ */
+async function withProjectComposeBudgets(opts: {
+  readonly budgets: ComposeStartupBudgets;
+  readonly detach: boolean;
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+}): Promise<ComposeStartupBudgets> {
+  if (!opts.detach) {
+    return opts.budgets;
+  }
+  const compose = (await readProjectConfig(opts.project)).compose;
+  if (!compose) {
+    return opts.budgets;
+  }
+  const startupTimeoutMs = resolveComposeStartupTimeoutMs({
+    projectValue: compose.startupTimeoutMs,
+  });
+  return {
+    ...opts.budgets,
+    startupTimeoutMs,
+    startupCeilingMs: resolveComposeStartupCeilingMs({
+      startupTimeoutMs,
+      projectValue: compose.startupCeilingMs,
+    }),
+  };
 }
 
 /**
@@ -1215,11 +1359,24 @@ function resolveDetachedComposeBudgets(detach: boolean): ComposeStartupBudgets {
  */
 function trackComposeStartupPhase(): {
   readonly onStartupPhase: (phase: ComposeStartupPhase) => void;
+  /** The backend saw a one-shot dependency running (HACK-2310). */
+  readonly onStartupProgress: () => void;
+  /** The start was cut short with these one-shots still running. */
+  readonly onStartupStalled: (inProgress: readonly string[]) => void;
   readonly phase: () => ComposeStartupPhase;
   readonly startedAt: () => number;
+  /**
+   * When the start phase last made progress: its start, or the last time a
+   * one-shot dependency was seen running. Budgets that follow the Compose
+   * start measure from here, so a long migration does not consume them.
+   */
+  readonly progressAt: () => number;
+  readonly inProgress: () => readonly string[];
 } {
   let current: ComposeStartupPhase = "start";
   let startedAt = performance.now();
+  let progressAt = startedAt;
+  let inProgress: readonly string[] = [];
   return {
     onStartupPhase: (phase) => {
       current = phase;
@@ -1229,10 +1386,19 @@ function trackComposeStartupPhase(): {
       });
       if (phase === "start") {
         startedAt = performance.now();
+        progressAt = startedAt;
       }
+    },
+    onStartupProgress: () => {
+      progressAt = performance.now();
+    },
+    onStartupStalled: (services) => {
+      inProgress = services;
     },
     phase: () => current,
     startedAt: () => startedAt,
+    progressAt: () => progressAt,
+    inProgress: () => inProgress,
   };
 }
 
@@ -1244,6 +1410,9 @@ function composeStartupFailureDetail(opts: {
     exitCode: opts.exitCode,
     composePhase: opts.failure.phase,
     budgetMs: opts.failure.budgetMs,
+    ...(opts.failure.inProgress.length > 0
+      ? { inProgress: [...opts.failure.inProgress] }
+      : {}),
     budgetEnv: opts.failure.budgetEnv,
   };
 }
@@ -6928,8 +7097,7 @@ async function runUpCommand({
   readonly startedAtMs?: number;
 }): Promise<number> {
   const detach = args.options.detach || json;
-  const budgets = resolveDetachedComposeBudgets(detach);
-  const { startupTimeoutMs } = budgets;
+  let budgets = resolveDetachedComposeBudgets(detach);
   let project: Awaited<ReturnType<typeof requireProjectContext>>;
   try {
     project = await resolveProjectForArgs({
@@ -6951,6 +7119,8 @@ async function runUpCommand({
     }
     throw error;
   }
+  budgets = await withProjectComposeBudgets({ budgets, detach, project });
+  const { startupTimeoutMs } = budgets;
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
@@ -7284,7 +7454,10 @@ async function runUpCommand({
           }),
           startupTimeoutMs,
           imageTimeoutMs: budgets.imageTimeoutMs,
+          startupCeilingMs: budgets.startupCeilingMs,
           onStartupPhase: upPhase.onStartupPhase,
+          onStartupProgress: upPhase.onStartupProgress,
+          onStartupStalled: upPhase.onStartupStalled,
           composeFiles: composeFilesWithEnv,
           composeProject: composeProjectName,
           profiles,
@@ -7348,6 +7521,7 @@ async function runUpCommand({
         action: "docker compose up",
         phase: upPhase.phase(),
         budgets,
+        inProgress: upPhase.inProgress(),
       });
       if (json) {
         return emitLifecycleResult({
@@ -7371,7 +7545,7 @@ async function runUpCommand({
     const observationBudgetMs = detach
       ? Math.max(
           0,
-          budgets.startupTimeoutMs - (performance.now() - upPhase.startedAt())
+          budgets.startupTimeoutMs - (performance.now() - upPhase.progressAt())
         )
       : budgets.startupTimeoutMs;
     const afterCode = serviceScoped
@@ -7972,6 +8146,16 @@ async function runDownCommand({
     envName: effectiveEnvName,
   });
 
+  const interruptionCheck = await checkOneShotInterruption({
+    project,
+    composeProjectName,
+    profiles,
+    action: "down",
+    json,
+  });
+  if (!interruptionCheck.proceed) {
+    return 1;
+  }
   // Snapshot what was running before down so the JSON payload can report
   // which services were actually stopped.
   const statesBeforeDown = json
@@ -8139,6 +8323,7 @@ async function runDownCommand({
         composeProject: composeProjectName ?? baseProjectName,
         stopped: classifyComposeStartupState(statesBeforeDown).running,
         cacheVolumesRemoved: cacheRemoval.removed,
+        interruption: interruptionCheck.interruption,
         durationMs: Date.now() - (startedAtMs ?? Date.now()),
       }),
     }),
@@ -8288,6 +8473,8 @@ export async function repairFailedRestart(opts: {
   readonly budgets: ComposeStartupBudgets;
   readonly upCode: number;
   readonly composePhase: ComposeStartupPhase;
+  /** One-shots the cut-short start left running (HACK-2310). */
+  readonly inProgress?: readonly string[];
   readonly assertCurrent: LifecycleUpResult["assertSharedHelpersCurrent"];
   readonly cleanup: LifecycleOperationCleanup | null;
   /**
@@ -8302,6 +8489,7 @@ export async function repairFailedRestart(opts: {
   readonly code: number;
   readonly phase: "compose" | "lifecycle";
   readonly composePhase?: ComposeStartupPhase;
+  readonly inProgress?: readonly string[];
 }> {
   reportComposeStartupBudget({
     budgets: opts.budgets,
@@ -8340,6 +8528,7 @@ export async function repairFailedRestart(opts: {
     code: opts.upCode,
     phase: "compose",
     composePhase: opts.composePhase,
+    ...(opts.inProgress ? { inProgress: opts.inProgress } : {}),
   };
 }
 
@@ -8417,6 +8606,7 @@ async function runRestartUpPhase(opts: {
   readonly code: number;
   readonly phase: "compose" | "lifecycle";
   readonly composePhase?: ComposeStartupPhase;
+  readonly inProgress?: readonly string[];
   readonly observationBudgetMs?: number;
 }> {
   await maybeSyncOauthAliasesInCompose({ project: opts.project });
@@ -8571,7 +8761,10 @@ async function runRestartUpPhase(opts: {
           }),
           startupTimeoutMs: opts.budgets.startupTimeoutMs,
           imageTimeoutMs: opts.budgets.imageTimeoutMs,
+          startupCeilingMs: opts.budgets.startupCeilingMs,
           onStartupPhase: upPhase.onStartupPhase,
+          onStartupProgress: upPhase.onStartupProgress,
+          onStartupStalled: upPhase.onStartupStalled,
           composeFiles: composeFilesWithEnv,
           composeProject: opts.composeProjectName,
           profiles: opts.profiles,
@@ -8596,6 +8789,7 @@ async function runRestartUpPhase(opts: {
         budgets: opts.budgets,
         upCode,
         composePhase: upPhase.phase(),
+        inProgress: upPhase.inProgress(),
         assertCurrent: assertHelpersCurrent,
         cleanup: lifecycleCleanup,
         retainHelpersIfContainersMayRun,
@@ -8611,6 +8805,8 @@ async function runRestartUpPhase(opts: {
             }),
             startupTimeoutMs: opts.budgets.startupTimeoutMs,
             imageTimeoutMs: opts.budgets.imageTimeoutMs,
+            // The repair keeps the project's resolved ceiling (HACK-2310).
+            startupCeilingMs: opts.budgets.startupCeilingMs,
             composeFiles: composeFilesWithEnv,
             composeProject: opts.composeProjectName,
             profiles: opts.profiles,
@@ -8628,7 +8824,7 @@ async function runRestartUpPhase(opts: {
     }
     const observationBudgetMs = Math.max(
       0,
-      opts.budgets.startupTimeoutMs - (performance.now() - upPhase.startedAt())
+      opts.budgets.startupTimeoutMs - (performance.now() - upPhase.progressAt())
     );
     const upAfter = await runLifecycleCommands({
       title: "Lifecycle (restart up after)",
@@ -8665,6 +8861,8 @@ type TargetedServiceRestartResult =
       readonly code: 0;
       readonly running: readonly string[];
       readonly completed: readonly string[];
+      /** One-shots among the restarted services it stopped mid-run. */
+      readonly interruption?: OneShotInterruption;
     }
   | {
       readonly ok: false;
@@ -8673,7 +8871,8 @@ type TargetedServiceRestartResult =
         | "E_COMPOSE_FAILED"
         | "E_STARTUP_INCOMPLETE"
         | "E_DEPENDENCY_BOOTSTRAP_FAILED"
-        | "E_STARTUP_TIMEOUT";
+        | "E_STARTUP_TIMEOUT"
+        | "E_CANCELLED";
       readonly message: string;
       readonly running: readonly string[];
       readonly completed: readonly string[];
@@ -8697,6 +8896,7 @@ async function runTargetedServiceRestart(opts: {
   readonly services: readonly string[];
   readonly allServiceNames: readonly string[];
   readonly routeStdoutToStderr: boolean;
+  readonly json: boolean;
 }): Promise<TargetedServiceRestartResult> {
   await maybeSyncOauthAliasesInCompose({ project: opts.project });
   const devHost = await resolveRuntimeDevHost({
@@ -8747,6 +8947,26 @@ async function runTargetedServiceRestart(opts: {
     targetServices: preparedServices,
     envByService: envOverrides.preflightEnvByService,
   });
+  // Before anything is recreated, with the environment its own reads use.
+  const interruptionCheck = await checkOneShotInterruption({
+    project: opts.project,
+    composeProjectName: opts.composeProjectName,
+    profiles: opts.profiles,
+    action: "restart",
+    json: opts.json,
+    services: opts.services,
+    env: envOverrides.env,
+  });
+  if (!interruptionCheck.proceed) {
+    return {
+      ok: false,
+      code: 1,
+      errorCode: "E_CANCELLED",
+      message: "Restart cancelled; nothing was stopped.",
+      running: [],
+      completed: [],
+    };
+  }
   reportDependencyCacheFallback(dependencyCache);
   const composeFilesWithRuntimeOverrides = [
     ...composeFiles,
@@ -8802,7 +9022,10 @@ async function runTargetedServiceRestart(opts: {
     }),
     startupTimeoutMs: opts.budgets.startupTimeoutMs,
     imageTimeoutMs: opts.budgets.imageTimeoutMs,
+    startupCeilingMs: opts.budgets.startupCeilingMs,
     onStartupPhase: upPhase.onStartupPhase,
+    onStartupProgress: upPhase.onStartupProgress,
+    onStartupStalled: upPhase.onStartupStalled,
     composeFiles: composeFilesWithEnv,
     composeProject: opts.composeProjectName,
     profiles: opts.profiles,
@@ -8833,6 +9056,7 @@ async function runTargetedServiceRestart(opts: {
       action: "Targeted service restart",
       phase: upPhase.phase(),
       budgets: opts.budgets,
+      inProgress: upPhase.inProgress(),
     });
     return {
       ok: false,
@@ -8857,7 +9081,7 @@ async function runTargetedServiceRestart(opts: {
   );
   const { states, startup } = await waitForComposeStartupState({
     successfulCompletionServices,
-    deadlineMs: upPhase.startedAt() + opts.budgets.startupTimeoutMs,
+    deadlineMs: upPhase.progressAt() + opts.budgets.startupTimeoutMs,
     read: () =>
       readComposeServiceStates({
         project: opts.project,
@@ -8888,6 +9112,9 @@ async function runTargetedServiceRestart(opts: {
     code: 0,
     running: startup.running,
     completed: startup.completed,
+    ...(interruptionCheck.interruption
+      ? { interruption: interruptionCheck.interruption }
+      : {}),
   };
 }
 
@@ -9012,11 +9239,15 @@ async function runRestartCommand({
   readonly json: boolean;
   readonly startedAtMs?: number;
 }): Promise<number> {
-  const budgets = resolveDetachedComposeBudgets(true);
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
+  });
+  const budgets = await withProjectComposeBudgets({
+    budgets: resolveDetachedComposeBudgets(true),
+    detach: true,
+    project,
   });
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
@@ -9107,6 +9338,7 @@ async function runRestartCommand({
       services: requestedServices,
       allServiceNames,
       routeStdoutToStderr: json,
+      json,
     });
     if (!json) {
       if (!result.ok) {
@@ -9133,6 +9365,7 @@ async function runRestartCommand({
           composeProject: composeProjectName ?? baseProjectName,
           started: result.running,
           completed: result.completed,
+          interruption: result.interruption,
           durationMs: Date.now() - (startedAtMs ?? Date.now()),
         }),
       }),
@@ -9158,6 +9391,17 @@ async function runRestartCommand({
     envByService: preflightEnv.preflightEnvByService,
   });
 
+  const interruptionCheck = await checkOneShotInterruption({
+    project,
+    composeProjectName,
+    profiles,
+    action: "restart",
+    json,
+    env: preflightEnv.env,
+  });
+  if (!interruptionCheck.proceed) {
+    return 1;
+  }
   reportLifecycleProgress({ service: null, phase: "stopping" });
   const downPhase = await runRestartDownPhase({
     project,
@@ -9235,6 +9479,7 @@ async function runRestartCommand({
             action: "Restart up phase",
             phase: upOutcome.composePhase ?? "start",
             budgets,
+            inProgress: upOutcome.inProgress,
           })
         : {
             code: "E_LIFECYCLE_FAILED" as const,
@@ -9337,6 +9582,7 @@ async function runRestartCommand({
         composeProject: composeProjectName ?? baseProjectName,
         started: startup.running,
         completed: startup.completed,
+        interruption: interruptionCheck.interruption,
         durationMs: Date.now() - (startedAtMs ?? Date.now()),
       }),
     }),
@@ -9605,12 +9851,34 @@ async function handlePs({
     });
   }
   const entries = read.entries;
+  // A Created service whose one-shot dependency is still running starts only
+  // when it completes and a Compose client waits for it (HACK-2310).
+  const psInterpolationEnv = await readComposeInterpolationEnv({
+    composeFiles: [project.composeFile],
+    env: process.env,
+  });
+  const waiting = waitingDependents({
+    graph: await readComposeOneShotGraph([project.composeFile], {
+      activeProfiles: effectiveComposeProfiles({
+        cliProfiles: profiles,
+        env: psInterpolationEnv,
+      }),
+      interpolationEnv: psInterpolationEnv,
+      presentServices: new Set(
+        entries.flatMap((entry) =>
+          typeof entry.Service === "string" ? [entry.Service] : []
+        )
+      ),
+    }),
+    entries,
+  });
   if (json) {
     const payload = {
       project: baseProjectName,
       branch,
       composeProject: composeProjectName ?? baseProjectName,
       items: await annotateEmulatedPsItems({ items: entries }),
+      waiting,
     };
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
     return 0;
@@ -9618,7 +9886,7 @@ async function handlePs({
   const rows = entries.map((e) => [
     getString(e, "Service") ?? "",
     getString(e, "Name") ?? "",
-    getString(e, "State") ?? "",
+    psStateLabel({ entry: e, waiting }),
     (getString(e, "State") ?? "").toLowerCase() === "exited"
       ? String(parseComposeExitCode(e.ExitCode) ?? "")
       : "",
@@ -9632,6 +9900,22 @@ async function handlePs({
   });
 
   return 0;
+}
+
+/** STATE column: Compose's state, plus the one-shots a Created service waits on. */
+function psStateLabel(opts: {
+  readonly entry: Record<string, unknown>;
+  readonly waiting: Readonly<Record<string, readonly string[]>>;
+}): string {
+  const state = getString(opts.entry, "State") ?? "";
+  const service = getString(opts.entry, "Service") ?? "";
+  // Own entries only: a service named like an Object member is not waiting.
+  const blockers = Object.hasOwn(opts.waiting, service)
+    ? opts.waiting[service]
+    : undefined;
+  return blockers && state.toLowerCase() === "created"
+    ? `${state} (waiting for ${blockers.join(", ")})`
+    : state;
 }
 
 /**
@@ -11031,13 +11315,10 @@ function resolveEffectiveComposeProfiles(opts: {
   readonly cliProfiles: readonly string[];
   readonly composeEnv: Readonly<Record<string, string>>;
 }): string[] {
-  if (opts.cliProfiles.length > 0) {
-    return [...opts.cliProfiles];
-  }
-  const composeProfiles = Object.hasOwn(opts.composeEnv, "COMPOSE_PROFILES")
-    ? opts.composeEnv.COMPOSE_PROFILES
-    : process.env.COMPOSE_PROFILES;
-  return parseCsvList(composeProfiles);
+  return effectiveComposeProfiles({
+    cliProfiles: opts.cliProfiles,
+    env: opts.composeEnv,
+  });
 }
 
 function parseLogTimeRange(opts: {

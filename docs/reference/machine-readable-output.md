@@ -33,6 +33,22 @@ result. Streaming interfaces remain NDJSON and have their own event contracts.
 
 ![JSON command boundary](./machine-readable-output.svg)
 
+## Output from what Hack runs
+
+With Hack's own `--json`, stdout carries only Hack's result: one JSON value,
+or, with `--progress`, only NDJSON lines ending in the envelope. Everything
+Hack runs for the command writes to stderr instead, on both backends:
+lifecycle hooks (`before`, `after` and down phases, both their stdout and their
+stderr), host commands, the Compose client's own output, and a remote lifecycle
+dispatch (`--target remote`). This holds for every command in the inventory
+below, including `up`, `restart`, `down` and `run --detach`. Read stderr for
+that output; never parse it from stdout. One exception: `run --detach` captures
+the Compose client's output for its own result, so that output appears on
+neither stream.
+
+A `--json` that belongs to a child command, as in `hack run web tool --json`,
+is the child's: Hack passes its output through unchanged.
+
 ## Command inventory
 
 This inventory includes every canonical command exposing `--json`, including
@@ -149,3 +165,16 @@ success behavior stays covered by command-specific suites.
 | `hack update --json --check --observe` | Envelope; `data.schema: hack.update-check.v1` |
 | `hack doctor --json --machine` | Envelope; `data.schema: hack.doctor.machine.v1` |
 <!-- json-inventory:end -->
+
+## Additive fields
+
+Additive fields keep a command's row and shape above; consumers ignore keys they do not know.
+
+- Compose `hack ps --json`: each `items[]` entry is a Compose `ps` object. An entry whose image
+  architecture differs from the engine's adds `emulated: true`; the key is absent when the
+  architectures match or Docker could not report them (HACK-2323).
+- `hack doctor --json`: the `emulated services`, `polling watchers`, `shared volume
+  architectures` and `dev image tags` checks add a `devPerformance` object with a `kind`, the
+  services, project-relative files and lines, and architectures. `hack doctor --fix --only
+  'polling watchers' --json` adds `data.fix` with `id`, `applied`, `changed`, `confirmed`,
+  `removed` and `diff`.

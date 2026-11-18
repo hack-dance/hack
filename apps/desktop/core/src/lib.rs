@@ -29,6 +29,7 @@ pub mod setup_io;
 mod setup_login;
 pub mod source;
 pub mod state;
+pub mod upgrade;
 pub mod viewmodel;
 
 pub mod env;

@@ -220,7 +220,7 @@ test("exec rejects env mismatch against the running stack", async () => {
   } as unknown as Parameters<typeof execCommand.handler>[0];
 
   await expect(execCommand.handler(input)).rejects.toThrow(
-    "The running stack uses env base, but this exec request resolves to qa."
+    "The running stack uses env base, but this exec request asks for env qa. Omit --env to exec with the running env base, or restart the stack with `hack restart --env qa` first."
   );
   expect(execCalls).toHaveLength(0);
 });
@@ -259,7 +259,7 @@ test("exec validates env mismatch against the lifecycle compose key", async () =
   } as unknown as Parameters<typeof execCommand.handler>[0];
 
   await expect(execCommand.handler(input)).rejects.toThrow(
-    "The running stack uses env base, but this exec request resolves to qa."
+    "The running stack uses env base, but this exec request asks for env qa. Omit --env to exec with the running env base, or restart the stack with `hack restart --env qa` first."
   );
   expect(execCalls).toHaveLength(0);
 });
@@ -366,6 +366,72 @@ test("exec warns value-free on stderr only after the service env changed since s
   expect(execCalls).toHaveLength(2);
 });
 
+test("exec with no --env uses the overlay the instance runs with (HACK-2280)", async () => {
+  // Started with --env qa; no default overlay is configured, so the
+  // configured default would be base.
+  const projectRoot = await createProject({
+    runningServices: ["api"],
+    runtimeEnvName: "qa",
+  });
+
+  const exitCode = await execCommand.handler(
+    execInput({ projectRoot, env: undefined })
+  );
+
+  expect(exitCode).toBe(0);
+  expect(execCalls).toHaveLength(1);
+  // Names only: the qa overlay adds SERVICE_TOKEN for api.
+  expect(deliveredEnvNames(execCalls[0]?.env)).toEqual([
+    "GLOBAL_FLAG",
+    "PORT",
+    "SERVICE_TOKEN",
+    "SHARED_KEY",
+  ]);
+});
+
+test("exec with no --env keeps a base stack on base despite a default overlay (HACK-2280)", async () => {
+  const projectRoot = await createProject({
+    runningServices: ["api"],
+    runtimeEnvName: null,
+    config: { env: { defaultOverlay: "qa" } },
+  });
+
+  const exitCode = await execCommand.handler(
+    execInput({ projectRoot, env: undefined })
+  );
+
+  expect(exitCode).toBe(0);
+  expect(deliveredEnvNames(execCalls[0]?.env)).toEqual([
+    "GLOBAL_FLAG",
+    "PORT",
+    "SHARED_KEY",
+  ]);
+});
+
+test("exec with an explicit --env that differs from the running overlay refuses and names both ways out", async () => {
+  const projectRoot = await createProject({
+    runningServices: ["api"],
+    runtimeEnvName: "qa",
+  });
+
+  await expect(
+    execCommand.handler(execInput({ projectRoot, env: "base" }))
+  ).rejects.toThrow(
+    "The running stack uses env qa, but this exec request asks for env base. Omit --env to exec with the running env qa, or restart the stack with `hack restart --env base` first."
+  );
+  expect(execCalls).toHaveLength(0);
+});
+
+/** Sorted names of the `HACK_ENV_*` values the env override references. */
+function deliveredEnvNames(
+  env: Record<string, string> | undefined
+): readonly string[] {
+  return Object.keys(env ?? {})
+    .filter((key) => key.startsWith("HACK_ENV_"))
+    .map((key) => key.replace(/^HACK_ENV_[0-9A-F]{12}_/, ""))
+    .sort();
+}
+
 function execInput(opts: {
   readonly projectRoot: string;
   readonly env: string | undefined;
@@ -422,6 +488,7 @@ async function createProject(input?: {
   readonly runningServices?: readonly string[];
   readonly runtimeComposeProject?: string;
   readonly runtimeEnvName?: string | null;
+  readonly config?: Record<string, unknown>;
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "hack-project-exec-"));
   tempDirs.add(root);
@@ -479,6 +546,7 @@ async function createProject(input?: {
       {
         name: "project-exec-test",
         dev_host: "project-exec.hack",
+        ...(input?.config ?? {}),
       },
       null,
       2

@@ -1,0 +1,5 @@
+# Part 1: check, then save a snapshot of the throwaway home and project.
+upgrade
+expect-upgrade Ready to upgrade 30
+upgrade-snapshot
+expect-upgrade Snapshot 120

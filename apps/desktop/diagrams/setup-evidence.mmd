@@ -1,0 +1,23 @@
+---
+title: Setup · when checks run
+---
+flowchart TD
+  L([Launch]) --> R["Fresh checks<br/>(read-only, off the UI thread)"]
+  R --> Q{"Something<br/>needs attention?"}
+  Q -->|no| P([Projects])
+  Q -->|"yes, user not navigated"| S["Set up Hack:<br/>ordered cards"]
+  Q -->|"yes, user navigated"| P
+  P -->|Run setup again| S
+  S -->|Run| F["Fixed daemon start<br/>or install"]
+  F --> R
+  S -->|Admin step| T["Own terminal:<br/>shows command, waits Enter"]
+  T -->|window regains focus| R
+  S -->|Check again| R
+  S -->|"shown 10 min, visible"| R
+  S -->|CLI switched| R
+  S -. Skip, this session .-> S
+  S -->|"Continue (CLI ready)"| P
+  classDef wait stroke-dasharray:2 2
+  classDef ok stroke-width:1.6px
+  class T wait
+  class P ok

@@ -218,6 +218,7 @@ const recipeEntryPoints = new Set([
   "troubleshooting",
   "native/setup",
   "native/log-follow",
+  "native/existing-compose-project",
 ]);
 const v5Slugs = new Set(
   [...versions.v5.entries, ...versions.v5.editorial].map((page) => page.slug)

@@ -109,6 +109,11 @@ import {
 import { inspectMacCaEligibility } from "../lib/mac-ca-trust.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import {
+  removeUnstartedProxyContainers,
+  resolveManagedProxyBind,
+  writeManagedProxyCompose,
+} from "../lib/managed-proxy-compose.ts";
+import {
   ensureBundledMutagenInstalled,
   getMutagenPath,
 } from "../lib/mutagen.ts";
@@ -139,10 +144,7 @@ import { createNativeHackLocalRouteDependencies } from "../lib/native-hack-local
 import { isLinux, isMac } from "../lib/os.ts";
 import { resolveTrustedSudo } from "../lib/privileged-sudo.ts";
 import { withProcessDeadline } from "../lib/process-deadline.ts";
-import {
-  readProxyBindFromCompose,
-  resolveProxyBindAddress,
-} from "../lib/proxy-bind.ts";
+import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
 import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
 import { stopRemoteCaddyRoutesStack } from "../lib/remote-caddy-routes.ts";
 import {
@@ -1063,10 +1065,27 @@ async function globalInstall(): Promise<number> {
   const paths = getGlobalPaths();
   await materializeGlobalInstallFiles({ paths, useStaticIps });
   logger.success({ message: "Global files ready in ~/.hack/" });
-  await globalUp();
+  const up = await runGlobalUp();
+  if (up.failedStage === "routing") {
+    // Host DNS and trust steps would point at a proxy that is not running;
+    // stop before them and before the success next steps (HACK-2328).
+    logger.error({
+      message:
+        "Global install did not finish: the global proxy (Caddy and CoreDNS) did not start. Fix the problem above, then rerun: hack global install",
+    });
+    return up.exit;
+  }
   const hostBootstrapOk = await completeGlobalInstallHostBootstrap({
     useStaticIps,
   });
+  if (up.failedStage === "logging") {
+    // Routing works, so DNS and trust were set up; the logs URL would not.
+    logger.error({
+      message:
+        "Global install did not finish: the proxy is up, but the logging stack (Grafana, Loki, Alloy) did not start. Fix the problem above, then rerun: hack global install",
+    });
+    return up.exit;
+  }
   note(
     [
       "Next:",
@@ -1207,14 +1226,29 @@ async function writeGlobalInstallAssets(opts: {
   readonly useStaticIps: boolean;
 }): Promise<void> {
   const defaultDomain = await resolveDefaultDomain();
-  await writeWithPromptIfDifferent(
-    opts.paths.caddyCompose,
-    renderGlobalCaddyCompose({
-      useStaticCoreDnsIp: opts.useStaticIps,
-      useStaticCaddyIp: opts.useStaticIps,
-      bindAddress: await resolveProxyBindAddress(),
-    })
-  );
+  const bind = await resolveManagedProxyBind({ path: opts.paths.caddyCompose });
+  if (bind.saveError !== undefined) {
+    logger.warn({
+      message: `Kept the proxy on ${bind.bindAddress} from the existing proxy file, but could not save it as proxy.bind_address: ${bind.saveError}. Fix the global config, then run: hack config set --global proxy.bind_address ${bind.bindAddress}`,
+    });
+  }
+  if (bind.migrated !== null) {
+    logger.info({
+      message: `Kept the proxy on ${bind.migrated} from the existing proxy file and saved it as proxy.bind_address. To publish on every IPv4 interface: hack config set --global proxy.bind_address 0.0.0.0`,
+    });
+  }
+  if (bind.keep !== undefined) {
+    logger.warn({ message: `Proxy file not updated: ${bind.keep}` });
+  } else {
+    await writeGlobalProxyCompose({
+      path: opts.paths.caddyCompose,
+      content: renderGlobalCaddyCompose({
+        useStaticCoreDnsIp: opts.useStaticIps,
+        useStaticCaddyIp: opts.useStaticIps,
+        bindAddress: bind.bindAddress,
+      }),
+    });
+  }
   await writeWithPromptIfDifferent(
     opts.paths.coreDnsConfig,
     renderGlobalCoreDnsConfig({
@@ -1794,6 +1828,22 @@ export async function maybeOfferMacHackdLaunchdInstall(): Promise<void> {
   }
 }
 
+/**
+ * The proxy Compose file is rendered from settings, so it is replaced without
+ * a prompt (HACK-2328); see {@link writeManagedProxyCompose}.
+ */
+async function writeGlobalProxyCompose(opts: {
+  readonly path: string;
+  readonly content: string;
+}): Promise<void> {
+  const result = await writeManagedProxyCompose(opts);
+  if (result.kind === "replaced-hand-edit") {
+    logger.warn({
+      message: `Replaced ${opts.path}: it differed from Hack's current rendering (edited by hand, or written by an older Hack). The previous copy is at ${result.backupPath}`,
+    });
+  }
+}
+
 async function writeWithPromptIfDifferent(
   absolutePath: string,
   content: string
@@ -1850,12 +1900,44 @@ async function ensureHackdForGlobalUp(): Promise<void> {
   }
 }
 
+/**
+ * After the proxy's `compose up` failed: a failed start can leave the proxy
+ * created but never started, with no network endpoint, so remove it for the
+ * next attempt to recreate (HACK-2328), then name the listeners on 80/443.
+ */
+async function reportProxyStartFailure(opts: {
+  readonly composeFile: string;
+}): Promise<void> {
+  const cleanup = await removeUnstartedProxyContainers();
+  if (cleanup.kind === "failed") {
+    logger.warn({ message: cleanup.message });
+  }
+  logger.error({
+    message: await diagnoseProxyPortConflict({
+      bindAddress: readProxyBindFromCompose(
+        (await readTextFile(opts.composeFile)) ?? ""
+      ),
+    }),
+  });
+}
+
+/** Which part of `hack global up` failed, for install's decision (HACK-2328). */
+type GlobalUpResult = {
+  readonly exit: number;
+  /** `routing`: proxy/CoreDNS (or a prerequisite); `logging`: only the logging stack. */
+  readonly failedStage: "routing" | "logging" | null;
+};
+
 export async function globalUp(): Promise<number> {
+  return (await runGlobalUp()).exit;
+}
+
+async function runGlobalUp(): Promise<GlobalUpResult> {
   const slimExit = failIfSlimMode({
     feature: "hack global up",
   });
   if (slimExit !== null) {
-    return slimExit;
+    return { exit: slimExit, failedStage: "routing" };
   }
 
   const paths = getGlobalPaths();
@@ -1874,20 +1956,20 @@ export async function globalUp(): Promise<number> {
     logger.error({
       message: `Missing ${paths.caddyCompose}. Run: hack global install`,
     });
-    return 1;
+    return { exit: 1, failedStage: "routing" };
   }
   if (!(await pathExists(paths.loggingCompose))) {
     logger.error({
       message: `Missing ${paths.loggingCompose}. Run: hack global install`,
     });
-    return 1;
+    return { exit: 1, failedStage: "routing" };
   }
 
   const proxyRepairExit = await repairProxyNetworkBeforeUp({
     composeFile: paths.caddyCompose,
   });
   if (proxyRepairExit !== 0) {
-    return proxyRepairExit;
+    return { exit: proxyRepairExit, failedStage: "routing" };
   }
 
   const reservedIps = await resolveReservedIngressIps({
@@ -1922,7 +2004,7 @@ export async function globalUp(): Promise<number> {
         logger.error({
           message: renderIngressConflictMessage({ conflicts: blockers }),
         });
-        return 1;
+        return { exit: 1, failedStage: "routing" };
       }
 
       logger.success({
@@ -1939,13 +2021,8 @@ export async function globalUp(): Promise<number> {
     { cwd: dirname(paths.caddyCompose) }
   );
   if (caddyExit !== 0) {
-    const conflict = await diagnoseProxyPortConflict({
-      bindAddress: readProxyBindFromCompose(
-        (await readTextFile(paths.caddyCompose)) ?? ""
-      ),
-    });
-    logger.error({ message: conflict });
-    return caddyExit;
+    await reportProxyStartFailure({ composeFile: paths.caddyCompose });
+    return { exit: caddyExit, failedStage: "routing" };
   }
   const remainingProxyIssues = await inspectProxyNetwork({
     composeFile: paths.caddyCompose,
@@ -1960,7 +2037,7 @@ export async function globalUp(): Promise<number> {
         "Fix: hack global down && hack global up, then hack doctor",
       ].join("\n"),
     });
-    return 1;
+    return { exit: 1, failedStage: "routing" };
   }
   await reconcileGlobalRoutingBridge({ enabled: !login });
 
@@ -1974,12 +2051,12 @@ export async function globalUp(): Promise<number> {
       cwd: dirname(paths.loggingCompose),
     });
     if (logExit !== 0) {
-      return logExit;
+      return { exit: logExit, failedStage: "logging" };
     }
   }
 
   logger.success({ message: "Global infra is up" });
-  return 0;
+  return { exit: 0, failedStage: null };
 }
 
 type IngressIpConflict = {

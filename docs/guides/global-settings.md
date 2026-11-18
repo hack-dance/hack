@@ -21,21 +21,39 @@ Common settings:
 - `controlPlane.tui.logs.historyTailStep` (default `200`) — history page size.
 - `controlPlane.usage.watchIntervalMs` (default `2000`) — sample interval for `hack usage --watch`.
 - `controlPlane.usage.historySize` (default `24`) — sample history for `hack usage --watch`.
-- `proxy.bind_address` (default unset: every interface) — host address the global
+- `proxy.bind_address` (default unset: Docker's default, every IPv4 and IPv6
+  interface, for a new proxy file) — host address the global
   Caddy proxy publishes ports 80 and 443 on. Accepts one IPv4 or IPv6 address,
   such as `127.0.0.1` or `::1`. Set it when another program already listens on
   :443 on some address (a VPN client, for example) and the proxy fails to start.
   An address other than every interface stops LAN and tunnel clients from
   reaching the proxy through this host, and on macOS a host DNS fallback to
   `127.0.0.1` needs the proxy on loopback. Apply a change with
-  `hack global install` in a terminal and answer yes to rewrite the proxy
-  compose file; Compose then recreates the proxy with the new ports. Install
-  and `hack doctor --fix` render that file from this setting, so they never
-  revert it.
+  `hack global install`, with or without a terminal: it rewrites the proxy
+  compose file (`~/.hack/caddy/docker-compose.yml`) without asking, and Compose
+  recreates the proxy with the new ports. `hack doctor --fix` does the same.
+  That file is Hack's output; when it differs from Hack's current rendering
+  (edited by hand, or written by an older Hack), the previous copy is kept as
+  `docker-compose.yml.bak-<UTC time>` (or `-N` on a name clash) beside it
+  before the rewrite. While this setting is unset, an existing file is never
+  widened: if every proxy port names the same host address (any Compose
+  syntax, `0.0.0.0` and `::` included), that address is saved as
+  `proxy.bind_address` first; if the binding cannot be determined (mixed
+  addresses, no proxy ports, invalid YAML), the file is left unchanged with a
+  warning. Unsetting the setting alone therefore does not widen a restricted
+  proxy. `0.0.0.0` publishes on every IPv4 interface. To return to
+  Docker's default (IPv4 and IPv6), unset the setting and move
+  `~/.hack/caddy/docker-compose.yml` aside before `hack global install`; a
+  missing file is never migrated.
 
-When `hack global up` cannot start the proxy, it lists the listeners holding
-ports 80 and 443 (address, process and pid when the OS reports them) and names
-this setting.
+When `hack global up` or `hack global install` cannot start the proxy, it lists
+the listeners holding ports 80 and 443 (address, process and pid when the OS
+reports them), names this setting and exits non-zero. Install then stops before
+DNS and trust setup and prints no next steps. A proxy container that was created
+but never started is removed, so the next attempt creates it fresh; if Docker
+refuses that, the command prints the `docker rm` to run. `hack doctor --fix`
+does the same when it cannot start the proxy. If only the logging stack fails,
+install still sets up DNS and trust, then exits non-zero without next steps.
 
 Project-level settings live in `.hack/hack.config.json` and override global ones
 where both apply. Settings for the unsupported gateway, cluster and cloud-provider

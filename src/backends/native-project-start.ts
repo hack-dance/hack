@@ -49,12 +49,11 @@ import {
 } from "./native-prepared-base.ts";
 import { nativePrivateEnvironmentPayload } from "./native-private-environment-payload.ts";
 import {
-  declaredComposeProfiles,
   type NativeProfileNotice,
   type NativeProfileNoticeSource,
   type NativeProfileSelection,
-  nativeDeclaredProfileNames,
   nativeInactiveServices,
+  nativeNoticeProfileNames,
   renderNativeProfileNotice,
 } from "./native-profile-selection.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
@@ -2002,15 +2001,9 @@ function emitNativeLeftOutNotice(opts: {
   readonly source: NativeProfileNoticeSource;
   readonly warn: (line: string) => void;
 }): void {
-  let declared: string[] = [];
-  try {
-    declared = declaredComposeProfiles(JSON.parse(opts.compose));
-  } catch {
-    declared = [];
-  }
-  const names = nativeDeclaredProfileNames({
+  const names = nativeNoticeProfileNames({
     profiles: opts.profiles,
-    declared,
+    source: opts.source,
   });
   emitNativeProfileNotice(
     {
@@ -2087,15 +2080,14 @@ async function chooseNativeStartupProfiles(opts: {
   ) {
     const selected = normalizeNativeProfiles(fromEnv.profiles);
     if (JSON.stringify(selected) !== JSON.stringify(opts.selected)) {
-      // Only names the Compose file declares; others are counted.
-      const declared = fromEnv.declaredProfiles ?? [];
-      const shownSelected = nativeDeclaredProfileNames({
+      // Environment-selected and retained names are counted, never shown.
+      const shownSelected = nativeNoticeProfileNames({
         profiles: selected,
-        declared,
+        source: fromEnv.source,
       });
-      const shownRetained = nativeDeclaredProfileNames({
+      const shownRetained = nativeNoticeProfileNames({
         profiles: opts.selected,
-        declared,
+        source: "retained",
       });
       opts.notify({
         kind: "retained",

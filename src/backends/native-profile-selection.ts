@@ -128,12 +128,26 @@ export function nativeDeclaredProfileNames(opts: {
   return { shown, hidden: opts.profiles.length - shown.length };
 }
 
+/**
+ * The profile names a notice may print. Only an explicit `--profile` is the
+ * caller's own text. Names from COMPOSE_PROFILES (managed env or shell), or
+ * kept by a retained run that may have taken them from it, can be decrypted
+ * values; a project can also declare guesses as profiles, so declaring a name
+ * does not make it safe to print. Those are only counted.
+ */
+export function nativeNoticeProfileNames(opts: {
+  readonly profiles: readonly string[];
+  readonly source: NativeProfileNoticeSource;
+}): { readonly shown: string[]; readonly hidden: number } {
+  return opts.source === "cli"
+    ? { shown: [...opts.profiles], hidden: 0 }
+    : { shown: [], hidden: opts.profiles.length };
+}
+
 function profileList(profiles: readonly string[], hidden = 0): string {
   const parts = [...profiles];
   if (hidden > 0) {
-    parts.push(
-      `${hidden} name${hidden === 1 ? "" : "s"} not declared by the Compose file`
-    );
+    parts.push(`${hidden} profile${hidden === 1 ? "" : "s"} (names not shown)`);
   }
   return parts.length === 0 ? "none" : parts.join(", ");
 }

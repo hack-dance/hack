@@ -3705,13 +3705,16 @@ test("a retained run keeps its profiles when the managed env now selects others,
   ).toBe(0);
   // Resolved for the retained run's own env, not the configured default.
   expect(asked).toEqual([saved.effectiveEnvName]);
-  const retained =
-    (saved.profiles ?? []).length === 0
+  // Names from the env or the retained run are counted, never printed.
+  const retained = (saved.profiles ?? []).length;
+  const retainedText =
+    retained === 0
       ? "none"
-      : (saved.profiles ?? []).join(", ");
+      : `${retained} profile${retained === 1 ? "" : "s"} (names not shown)`;
   expect(notices).toContain(
-    `COMPOSE_PROFILES in the managed env selects profiles jobs, but this instance's retained run uses ${retained}; it keeps those. To start it with the new profiles, stop it with hack down --remove-data (this deletes its data volumes) and run hack up again.`
+    `COMPOSE_PROFILES in the managed env selects profiles 1 profile (names not shown), but this instance's retained run uses ${retainedText}; it keeps those. To start it with the new profiles, stop it with hack down --remove-data (this deletes its data volumes) and run hack up again.`
   );
+  expect(notices.join("\n")).not.toContain("jobs");
 });
 
 /**

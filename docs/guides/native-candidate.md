@@ -321,12 +321,30 @@ preflight. Raw runtime stderr and startup output are not configuration findings.
   `extra_hosts_without_dependencies`, `unsupported_logging`, `invalid_restart`,
   `unsupported_label`, `invalid_http_probe`, `managed_env_unreadable`,
   `environment_delivery`, `native_runtime_setup`, `shared_source_grant_required`,
-  `route_probe_required`, `too_many_bridges`, `gcloud_adc_grant_required` (consent)
-  and `gcloud_adc_mount_refused`. Runtime findings use the
+  `route_probe_required`, `too_many_bridges`, `gcloud_adc_grant_required` (consent),
+  `gcloud_adc_mount_refused`, `native_source_over_limit` and
+  `native_source_unmeasured`. Runtime findings use the
   review's own diagnostic codes, for example `privileged_service` or
   `invalid_mount`, and `review_incompatible` when the review does not admit the
   project and gives no finding this version can show. A code this version has
   no sentence for is still listed, by its code and field.
+- With native setup ready, the preflight runs the source content check `hack up`
+  runs (128 MiB by default, `native.sourceLimitMiB` up to 512): only when a
+  selected service bind-mounts project source or declares a dependency cache, as
+  on `up`. Source over the limit is the blocker `native_source_over_limit` with
+  `up`'s own refusal text; a measurement that fails is `native_source_unmeasured`,
+  because `up` refuses then too. An image-only project is not measured.
+- With the native HTTPS frontend selected, the preflight asks this machine's resolver
+  (hosts file and local DNS included) for each active routed hostname. A hostname
+  that resolves to a non-loopback address is the warning
+  `route_host_resolves_elsewhere`: it names the service and the answering address
+  (Hack's Compose proxy is `172.30.0.2`), says native listens on `127.0.0.1:<port>`,
+  and shows how to reach it (`curl --resolve HOST:<port>:127.0.0.1`). A hostname
+  that resolves only to loopback while another listener, such as Hack's Compose
+  proxy, answers on port 443 and native's port is not 443 is the warning
+  `route_default_port_elsewhere`: a URL without a port reaches that other listener;
+  `hack open` adds native's port. Hostnames are never printed, and an unknown
+  lookup reports nothing.
 - The runtime notes `route_binding_required` for every routed service. Preflight
   lists it only when no native HTTPS frontend is selected (machine `https` setting
   or the `HACK_NATIVE_CADDY_*` variables), because the route is then not served.

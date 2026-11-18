@@ -655,6 +655,100 @@ test("preflight requires the same decryption key as start and closes key errors"
   expect((await f.calls()).slice(before.length)).toEqual(["runtime setup"]);
 });
 
+test("HACK-2338 item 7: preflight blocks on the source limit with up's own refusal text", async () => {
+  const f = await fixture({
+    services: { web: { image: IMAGE, volumes: ["./:/app"] } },
+  });
+  await f.review([], { services: { web: { active: true } } });
+  await scriptSourceShare(f);
+  await f.reply(
+    "project-source-size.out",
+    nativeSourceSizeReceipt({ totalBytes: 200 * 1024 * 1024 })
+  );
+  const report = await preflight(f, { ...f.native, ...GRANT });
+  expect(report.report.ready).toBe(false);
+  const blocker = report.report.blockers.find(
+    (found) => found.code === "native_source_over_limit"
+  );
+  expect(blocker?.message).toContain(
+    "Native up refuses source over the limit; no runtime, image or build work was started."
+  );
+  const up = await cli(f, ["up"], { ...f.native, ...GRANT });
+  expect(up.code).toBe(1);
+  expect(up.output).toContain(blocker?.message ?? "missing blocker");
+});
+
+test("HACK-2338: preflight selects profiles from managed COMPOSE_PROFILES as up does, then measures", async () => {
+  const f = await fixture({
+    services: {
+      web: { image: IMAGE },
+      jobs: { image: IMAGE, profiles: ["jobs"], volumes: ["./:/app"] },
+    },
+  });
+  await writeFile(
+    join(f.projectDir, "hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      '    COMPOSE_PROFILES: "jobs"',
+      "",
+    ].join("\n")
+  );
+  await f.review([], {
+    services: { web: { active: true }, jobs: { active: true } },
+  });
+  await scriptSourceShare(f);
+  await f.reply(
+    "project-source-size.out",
+    nativeSourceSizeReceipt({ totalBytes: 200 * 1024 * 1024 })
+  );
+  const report = await preflight(f, { ...f.native, ...GRANT });
+  expect(report.report.ready).toBe(false);
+  expect(report.report.blockers.map((found) => found.code)).toContain(
+    "native_source_over_limit"
+  );
+});
+
+test("HACK-2338: an explicit --profile '*' selects every declared profile in preflight, as on up", async () => {
+  const f = await fixture({
+    services: {
+      web: { image: IMAGE },
+      jobs: { image: IMAGE, profiles: ["jobs"], volumes: ["./:/app"] },
+    },
+  });
+  await f.review([], {
+    services: { web: { active: true }, jobs: { active: true } },
+  });
+  await scriptSourceShare(f);
+  await f.reply(
+    "project-source-size.out",
+    nativeSourceSizeReceipt({ totalBytes: 200 * 1024 * 1024 })
+  );
+  const report = await preflight(f, { ...f.native, ...GRANT }, [
+    "--profile",
+    "*",
+  ]);
+  expect(report.report.ready).toBe(false);
+  expect(report.report.blockers.map((found) => found.code)).toContain(
+    "native_source_over_limit"
+  );
+});
+
+test("HACK-2338 item 7: an image-only project's source is not measured, as on up", async () => {
+  const f = await fixture({ services: { web: { image: IMAGE } } });
+  await f.review([], { services: { web: { active: true } } });
+  const report = await preflight(f, { ...f.native, ...GRANT });
+  expect(
+    report.report.blockers.filter((found) =>
+      found.code.startsWith("native_source_")
+    )
+  ).toEqual([]);
+  expect(await f.calls()).not.toContain("project source-size");
+});
+
 test("old runtimes cannot silently ignore explicit environment unsets", async () => {
   const f = await fixture({
     services: {
@@ -2272,6 +2366,8 @@ test(
       },
     });
     await f.review([], { services: { app: { active: true } } });
+    // A bind mount makes native up measure the source, so preflight does too.
+    await f.reply("project-source-size.out", nativeSourceSizeReceipt());
     const result = await preflight(f, {
       ...f.native,
       ...GRANT,
@@ -2301,6 +2397,7 @@ test(
       },
     });
     await f.review([], { services: { app: { active: true } } });
+    await f.reply("project-source-size.out", nativeSourceSizeReceipt());
     const env = { ...f.native, ...GRANT, HACK_NATIVE_GCLOUD_ADC: "file" };
     await writeFile(
       join(f.projectDir, "app.env"),

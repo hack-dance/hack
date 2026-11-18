@@ -64,9 +64,9 @@ import { assertNativeLogFlags } from "../backends/native-log-follow.ts";
 import {
   declaredComposeProfiles,
   NATIVE_SECRET_PROFILE_SELECTOR_NOTICE,
-  type NativeProfileSelection,
   nativeNoticeProfileNames,
   nativeRetainedProfilesNotice,
+  resolveNativeProfileSelectionForProject,
   selectNativeProfiles,
 } from "../backends/native-profile-selection.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
@@ -6511,41 +6511,6 @@ async function resolveNativeCliProfiles(opts: {
     shellEnv: {},
     declaredProfiles: declaredComposeProfiles(compose),
   }).profiles;
-}
-
-export async function resolveNativeProfileSelectionForProject(opts: {
-  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
-  readonly envName: string | null | undefined;
-  readonly cliProfile: string | undefined;
-}): Promise<NativeProfileSelection> {
-  const compose = await readNativeComposeDocument(
-    opts.project.composeFile
-  ).catch(() => null);
-  const serviceNames =
-    isRecord(compose) && isRecord(compose.services)
-      ? Object.keys(compose.services)
-      : [];
-  const resolved = await resolveProjectEnvConfig({
-    projectRoot: opts.project.projectRoot,
-    projectDir: opts.project.projectDir,
-    envName: opts.envName,
-    serviceNames,
-  }).catch(() => null);
-  return selectNativeProfiles({
-    cliProfiles:
-      opts.cliProfile === undefined ? undefined : parseCsvList(opts.cliProfile),
-    managedEnv: resolved
-      ? selectProjectEnvValuesForExecutionTarget({
-          resolved,
-          scopeName: "global",
-          target: "compose",
-        })
-      : {},
-    shellEnv: process.env,
-    declaredProfiles: declaredComposeProfiles(compose),
-    managedSecret:
-      resolved?.effectiveMetadata.global?.COMPOSE_PROFILES?.secret === true,
-  });
 }
 
 async function handleNativeUp({

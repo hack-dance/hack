@@ -26,9 +26,14 @@ import { join, relative, resolve } from "node:path";
 import { YAML } from "bun";
 import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
 import { COMPOSE_ENV_OVERRIDE_FILENAME } from "./compose-env-at-rest.ts";
+import { resolveComposeProjectName } from "./compose-project-name.ts";
 import { isRecord } from "./guards.ts";
 import { withProcessDeadline } from "./process-deadline.ts";
-import { findProjectContext } from "./project.ts";
+import {
+  findProjectContext,
+  readProjectConfig,
+  sanitizeProjectSlug,
+} from "./project.ts";
 import { resolveProjectEnvMetadata } from "./project-env-config.ts";
 import { readProjectRuntimeState } from "./project-runtime-state.ts";
 import { readRuntimeProjects } from "./runtime-projects.ts";
@@ -252,6 +257,25 @@ export function checkoutRuntimes<
   );
 }
 
+/**
+ * The runtime-state key `hack up` records an instance under: the Compose
+ * project name with its base sanitized (`my_app--feat` is recorded as
+ * `my-app--feat`). An instance of another base keeps its name.
+ */
+export function runtimeStateKey(opts: {
+  readonly instance: string;
+  readonly base: string;
+}): string {
+  const slug = sanitizeProjectSlug(opts.base);
+  if (opts.instance === opts.base) {
+    return slug;
+  }
+  const prefix = `${opts.base}--`;
+  return opts.instance.startsWith(prefix)
+    ? `${slug}--${opts.instance.slice(prefix.length)}`
+    : opts.instance;
+}
+
 /** Instances with at least one running service of the Compose graph. */
 export function runningGraphInstances(opts: {
   readonly graph: readonly string[];
@@ -367,6 +391,10 @@ export async function checkEnvOverrideCoverage(opts: {
     : null;
   const expected =
     containers === null ? graph : runningComposeServices({ graph, containers });
+  const composeBase = await resolveComposeProjectName({
+    project: ctx,
+    cfg: await readProjectConfig(ctx),
+  });
   const selection =
     text === null
       ? null
@@ -375,7 +403,12 @@ export async function checkEnvOverrideCoverage(opts: {
           instances:
             containers === null
               ? null
-              : runningGraphInstances({ graph, containers }),
+              : runningGraphInstances({ graph, containers }).map((instance) =>
+                  runtimeStateKey({
+                    instance,
+                    base: composeBase,
+                  })
+                ),
         });
   const managed =
     selection === null

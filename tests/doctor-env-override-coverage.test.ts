@@ -16,6 +16,7 @@ import {
   recordedSelection,
   runningComposeServices,
   runningGraphInstances,
+  runtimeStateKey,
 } from "../src/lib/doctor-env-override-coverage.ts";
 import { runFixtureGit } from "./helpers/fixture-git.ts";
 
@@ -358,4 +359,15 @@ test("a linked worktree's instances do not count for the primary checkout", () =
       projectDir: "/work/demo/.hack",
     }).map((project) => project.project)
   ).toEqual(["demo", "demo--review"]);
+});
+
+test("an instance maps to the key hack up records it under", () => {
+  expect(runtimeStateKey({ instance: "my_app", base: "my_app" })).toBe(
+    "my-app"
+  );
+  expect(runtimeStateKey({ instance: "my_app--feat", base: "my_app" })).toBe(
+    "my-app--feat"
+  );
+  expect(runtimeStateKey({ instance: "demo", base: "demo" })).toBe("demo");
+  expect(runtimeStateKey({ instance: "other", base: "my_app" })).toBe("other");
 });

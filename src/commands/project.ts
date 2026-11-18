@@ -402,6 +402,10 @@ import {
   RegistryCredentialPreflightError,
 } from "../lib/registry-credential-preflight.ts";
 import { canReuseRunningDependencyCache } from "../lib/run-dependency-cache.ts";
+import {
+  buildRunningEnvMismatchMessage,
+  selectEnvForRunningInstance,
+} from "../lib/running-env-selection.ts";
 import { buildRuntimeHostMetadataOverride } from "../lib/runtime-host-metadata.ts";
 import {
   type RuntimeProject,
@@ -9211,6 +9215,12 @@ async function runRestartCommand({
   });
 }
 
+/**
+ * The overlay a command against a running instance uses: an explicit
+ * `--env`, else the instance's recorded running selection (base included),
+ * else `undefined` so the configured default applies. See
+ * {@link selectEnvForRunningInstance}.
+ */
 export async function resolveStoredRuntimeEnvName(opts: {
   readonly requestedEnvName: string | null | undefined;
   readonly projectDir: string;
@@ -9224,7 +9234,10 @@ export async function resolveStoredRuntimeEnvName(opts: {
     projectDir: opts.projectDir,
     composeProject: opts.composeProject,
   });
-  return state?.envName ?? undefined;
+  return selectEnvForRunningInstance({
+    requestedEnvName: undefined,
+    running: state,
+  });
 }
 
 export function resolveRestartTarget(opts: {
@@ -9601,7 +9614,7 @@ async function handleRun({
     }
     return result.exitCode;
   }
-  const envName = resolveRequestedEnvName({
+  const requestedEnvName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
 
@@ -9641,6 +9654,18 @@ async function handleRun({
     ? [...composeFiles, internalOverride]
     : composeFiles;
   const projectName = sanitizeProjectSlug(baseProjectName);
+  const lifecycleComposeProject = resolveLifecycleComposeProjectName({
+    projectName,
+    branch,
+  });
+  // HACK-2280: with no --env, a one-off uses the overlay the instance runs
+  // with, so it can reuse the running dependencies instead of starting them
+  // under the configured default.
+  const envName = await resolveStoredRuntimeEnvName({
+    requestedEnvName,
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
+  });
   const dependencyCache = await resolveDependencyCacheOverride({
     projectRoot: project.projectRoot,
     projectDir: project.projectDir,
@@ -9705,6 +9730,7 @@ async function handleRun({
     (await resolveCanSkipRunDependencies({
       composeFiles: composeFilesWithEnv,
       composeProjectKey: composeProjectName ?? baseProjectName,
+      runtimeStateKey: lifecycleComposeProject,
       composeProject: composeProjectName,
       project,
       profiles,
@@ -9824,7 +9850,7 @@ async function handleExec({
       composeFile: project.composeFile,
     });
   }
-  const envName = resolveRequestedEnvName({
+  const requestedEnvName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
 
@@ -9880,6 +9906,13 @@ async function handleExec({
     projectName,
     branch,
   });
+  // HACK-2280: with no --env, exec into the overlay the instance runs with,
+  // as down/restart do, instead of the configured default.
+  const envName = await resolveStoredRuntimeEnvName({
+    requestedEnvName,
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
+  });
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const envOverrides = await resolveComposeEnvOverrides({
     project,
@@ -9900,6 +9933,7 @@ async function handleExec({
     project,
     profiles,
     effectiveEnvName: envOverrides.effectiveEnvName,
+    branchOption: args.options.branch,
     service,
     env: envOverrides.env,
   });
@@ -10068,7 +10102,10 @@ function reportDependencyCacheFallback(cache: {
 
 async function resolveCanSkipRunDependencies(opts: {
   readonly composeFiles: readonly string[];
+  /** The Compose project label the running containers carry. */
   readonly composeProjectKey: string;
+  /** The instance's runtime-state key (the lifecycle compose project). */
+  readonly runtimeStateKey: string;
   readonly composeProject: string | null;
   readonly profiles: readonly string[];
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
@@ -10079,7 +10116,7 @@ async function resolveCanSkipRunDependencies(opts: {
 }): Promise<boolean> {
   const runtimeState = await readProjectRuntimeStateEntry({
     projectDir: opts.project.projectDir,
-    composeProject: opts.composeProjectKey,
+    composeProject: opts.runtimeStateKey,
   });
   if (runtimeState && runtimeState.envName !== opts.effectiveEnvName) {
     return false;
@@ -10122,6 +10159,7 @@ async function resolveExecTargetReady(opts: {
   readonly profiles: readonly string[];
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly effectiveEnvName: string | null;
+  readonly branchOption?: string | undefined;
   readonly service: string;
   /**
    * The Compose env, including the `HACK_ENV_*` values the env override
@@ -10136,12 +10174,17 @@ async function resolveExecTargetReady(opts: {
     projectDir: opts.project.projectDir,
     composeProject: opts.composeProjectKey,
   });
+  // Reached only with an explicit --env: an omitted one already resolved to
+  // the running selection.
   if (runtimeState && runtimeState.envName !== opts.effectiveEnvName) {
-    const runningEnv = runtimeState.envName ?? "base";
-    const requestedEnv = opts.effectiveEnvName ?? "base";
     return {
       ok: false,
-      message: `The running stack uses env ${runningEnv}, but this exec request resolves to ${requestedEnv}. Restart the stack with the requested env or omit --env.`,
+      message: buildRunningEnvMismatchMessage({
+        command: "exec",
+        runningEnvName: runtimeState.envName,
+        requestedEnvName: opts.effectiveEnvName,
+        branchOption: opts.branchOption,
+      }),
     };
   }
 

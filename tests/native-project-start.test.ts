@@ -5739,7 +5739,7 @@ test("HACK-1939: a wrapped service whose Compose user cannot be wrapped refuses 
   opts.dependencies.prepare = async (request) => {
     const input = await prepare(request);
     const compose = JSON.parse(input.normalizedComposeJson);
-    compose.services.web.user = "postgres";
+    compose.services.web.user = "not a user";
     return { ...input, normalizedComposeJson: JSON.stringify(compose) };
   };
   const error = await startNativeProject(opts).catch(
@@ -5796,7 +5796,7 @@ async function optionalProfileFixture() {
     const compose = JSON.parse(input.normalizedComposeJson);
     compose.services.optional = {
       image: `sha256:${"e".repeat(64)}`,
-      user: "postgres",
+      user: "not a user",
       profiles: ["extra"],
     };
     return {

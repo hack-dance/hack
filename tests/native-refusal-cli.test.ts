@@ -951,16 +951,39 @@ test(
     });
     const selection: string = inspection.selectionSha256;
     expect(selection).toMatch(/^[a-f0-9]{64}$/);
+    const refusal = `Native project run mapping belongs to run ${run.run} in another native home (${f.scope.nativeHome}), which stopped it cleanly; its retained data stays in that home. To start this instance from this native home, release the mapping with hack doctor --native-run-mapping release --expect-selection ${selection}, or run hack down with the Hack version that owns that home.`;
+    // HACK-2339: up, foreground and detached, refuses like ps and down.
     for (const args of [
       ["ps"],
       ["up"],
+      ["up", "--detach"],
       ["down"],
       ["doctor", "--native-cleanup", "inspect"],
     ]) {
       expectOneClosedLine(
         await cli({ fixture: f, args, env: homeB }),
-        `Native project run mapping belongs to run ${run.run} in another native home (${f.scope.nativeHome}), which stopped it cleanly; its retained data stays in that home. To start this instance from this native home, release the mapping with hack doctor --native-run-mapping release --expect-selection ${selection}, or run hack down with the Hack version that owns that home.`
+        `E_NATIVE_RUN_MAPPING_FOREIGN_HOME: ${refusal}`
       );
+    }
+    for (const args of [
+      ["up", "--json"],
+      ["up", "--detach", "--json"],
+    ]) {
+      const result = await cli({ fixture: f, args, env: homeB });
+      expect(result.code).toBe(1);
+      expect(JSON.parse(result.stdout)).toEqual({
+        ok: false,
+        error: {
+          code: "E_NATIVE_RUN_MAPPING_FOREIGN_HOME",
+          message: refusal,
+          detail: expect.objectContaining({
+            owner: "stopped",
+            selectionSha256: selection,
+            releaseCommand: `hack doctor --native-run-mapping release --expect-selection ${selection}`,
+          }),
+        },
+      });
+      expect(result.stdout).not.toContain("E_STARTUP_INCOMPLETE");
     }
     const released = await cli({
       fixture: f,
@@ -989,10 +1012,10 @@ test(
   async () => {
     const f = await fixture();
     const homeB = await stoppedInAnotherHome(f, false);
-    for (const args of [["ps"], ["up"], ["down"]]) {
+    for (const args of [["ps"], ["up"], ["up", "--detach"], ["down"]]) {
       expectOneClosedLine(
         await cli({ fixture: f, args, env: homeB }),
-        `Native project run mapping is owned by live run ${run.run} in another native home (${f.scope.nativeHome}), frontend pid ${process.pid}. Stop it first: press Ctrl-C in that hack up, or run hack down with the Hack version that owns that home; then retry here.`
+        `E_NATIVE_RUN_MAPPING_FOREIGN_HOME: Native project run mapping is owned by live run ${run.run} in another native home (${f.scope.nativeHome}), frontend pid ${process.pid}. Stop it first: press Ctrl-C in that hack up, or run hack down with the Hack version that owns that home; then retry here.`
       );
     }
     expect(await f.calls()).toEqual([]);

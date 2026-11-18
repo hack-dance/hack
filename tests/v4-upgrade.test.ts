@@ -4,6 +4,7 @@ import { mkdtemp, readdir, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import packageJson from "../package.json";
+import { CLI_COMPILE_DEFINE_ARGS } from "../scripts/lib/cli-compile-define.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import { verifyStagedReleaseVersion } from "../src/lib/release-version.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -24,6 +25,7 @@ beforeAll(async () => {
       "build",
       "tests/fixtures/v4-upgrade-cli.ts",
       "--compile",
+      ...CLI_COMPILE_DEFINE_ARGS,
       "--no-compile-autoload-dotenv",
       "--no-compile-autoload-bunfig",
       "--no-compile-autoload-tsconfig",

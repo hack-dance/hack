@@ -149,6 +149,8 @@ type Ran = {
   readonly stdout: string;
   readonly stderr: string;
   readonly seconds: number;
+  /** The check's own limit (ms) when it killed the command, else null. */
+  readonly killedAtLimitMs: number | null;
 };
 
 async function runProcess(opts: {
@@ -175,11 +177,16 @@ async function runProcess(opts: {
     new Response(proc.stderr).text(),
   ]);
   const exit = await proc.exited;
+  const elapsedMs = performance.now() - started;
+  // Bun kills the command with a signal when `timeout` expires.
+  const killedAtLimit =
+    proc.signalCode !== null && elapsedMs >= opts.timeoutMs - 1000;
   return {
     exit,
     stdout,
     stderr,
-    seconds: (performance.now() - started) / 1000,
+    seconds: elapsedMs / 1000,
+    killedAtLimitMs: killedAtLimit ? opts.timeoutMs : null,
   };
 }
 
@@ -262,6 +269,15 @@ class FirstRun {
   ownedVolumeProjects: string[] = [];
 
   readonly opts: CheckOptions;
+  /**
+   * Per-command limit: ten minutes, or the one-shot's duration plus ten
+   * minutes (image pulls and startup) when that is longer, so a healthy `up`
+   * or `restart` waiting on a long one-shot is not killed before Hack's own
+   * 30-minute start ceiling would report.
+   */
+  get lifecycleTimeoutMs(): number {
+    return Math.max(600_000, (this.opts.oneShotSeconds + 600) * 1000);
+  }
 
   constructor(opts: CheckOptions) {
     this.opts = opts;
@@ -305,7 +321,7 @@ class FirstRun {
       argv: [this.opts.hack, ...args],
       env: { ...this.env, ...opts?.env },
       cwd: this.repo,
-      timeoutMs: opts?.timeoutMs ?? 600_000,
+      timeoutMs: opts?.timeoutMs ?? this.lifecycleTimeoutMs,
       stdin: opts?.stdin,
     });
   }
@@ -330,7 +346,13 @@ class FirstRun {
     opts?: { readonly stdin?: string; readonly display?: string }
   ): Promise<Ran> {
     const ran = await this.hack(args, { stdin: opts?.stdin });
-    const verdict = check(ran);
+    const verdict =
+      ran.killedAtLimitMs === null
+        ? check(ran)
+        : {
+            ok: false,
+            note: `killed by the check's ${Math.round(ran.killedAtLimitMs / 60_000)}-minute command limit, not a Hack result`,
+          };
     this.record({
       step: name,
       command: opts?.display ?? `hack ${args.join(" ")}`,
@@ -830,7 +852,10 @@ async function branchFlow(run: FirstRun, ca: string): Promise<void> {
     exit: mainRan.exit,
     seconds: mainRan.seconds,
     result: oneJson(mainRan).ok ? "pass" : "fail",
-    note: oneJson(mainRan).note,
+    note:
+      mainRan.killedAtLimitMs === null
+        ? oneJson(mainRan).note
+        : `killed by the check's ${Math.round(mainRan.killedAtLimitMs / 60_000)}-minute command limit, not a Hack result`,
   });
   for (const host of [
     `${run.project}.hack.local`,

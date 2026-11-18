@@ -471,7 +471,10 @@ import {
 import { withActivity } from "./lifecycle-activity.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
-import { answerNativeAlreadyRunning } from "./native-up-already-running.ts";
+import {
+  answerNativeAlreadyRunning,
+  explainUnconfirmedNativeDetachedStart,
+} from "./native-up-already-running.ts";
 import {
   assertAutostartEnvironment,
   assertLoginAutostartCurrent,
@@ -6958,6 +6961,32 @@ async function handleUp(
   });
 }
 
+/**
+ * Starts the detached native owner. An unconfirmed start is explained by the
+ * instance's run mapping when another native home owns it (HACK-2339).
+ */
+async function launchNativeDetachedUp(opts: {
+  readonly cwd: string;
+  readonly args: readonly string[];
+  readonly json: boolean;
+  readonly scope: Parameters<
+    typeof explainUnconfirmedNativeDetachedStart
+  >[0]["scope"];
+}): Promise<number> {
+  try {
+    return await startNativeDetachedUp({
+      cwd: opts.cwd,
+      args: opts.args,
+      json: opts.json,
+    });
+  } catch (error) {
+    throw await explainUnconfirmedNativeDetachedStart({
+      error,
+      scope: opts.scope,
+    });
+  }
+}
+
 async function handleUpUnlocked({
   ctx,
   args,
@@ -7005,6 +7034,10 @@ async function handleUpUnlocked({
       action: "up",
       options: args.options,
     });
+    // The instance the child will start, for explaining an unconfirmed start.
+    let launchScope: Parameters<
+      typeof explainUnconfirmedNativeDetachedStart
+    >[0]["scope"] = null;
     const alreadyRunning = await answerNativeAlreadyRunning({
       native,
       json: args.options.json === true,
@@ -7038,6 +7071,12 @@ async function handleUpUnlocked({
           branch: identity.branch,
           name: isNativeDetachedOwnerProcess() ? null : identity.name,
         });
+        launchScope = {
+          projectRoot: project.projectRoot,
+          projectDir: project.projectDir,
+          nativeHome: native.home,
+          branch: identity.branch,
+        };
         return identity.branch;
       },
       onBranchResolved: (branch) => {
@@ -7049,10 +7088,11 @@ async function handleUpUnlocked({
     if (alreadyRunning !== null) {
       return alreadyRunning;
     }
-    return await startNativeDetachedUp({
+    return await launchNativeDetachedUp({
       cwd: ctx.cwd,
       args: childArgs,
       json: args.options.json === true,
+      scope: launchScope,
     });
   }
   const authored = await tryNativeComposeCommand({

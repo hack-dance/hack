@@ -190,7 +190,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\npostgres:x:70:70::/var/lib/postgresql:/bin/sh\ntemporal:x:1000:1000::/home/temporal:/bin/sh\n";
+    const PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\npostgres:x:70:70::/var/lib/postgresql:/bin/sh\ntemporal:x:1000:1000::/srv/temporal:/bin/sh\n";
     const GROUP: &str = "root:x:0:\npostgres:x:70:\ntemporal:x:1000:\nshared:x:2000:temporal\n";
 
     #[test]

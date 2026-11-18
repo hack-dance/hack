@@ -2476,8 +2476,10 @@ fn the_deadline_reached_mid_retry_ends_the_layer_without_extending_it() {
         "{}",
         failure.message
     );
-    // The second attempt's limit was what remained of the deadline: it ends with it.
-    assert!(Instant::now() < deadline + Duration::from_millis(800));
+    // The second attempt's limit was what remained of the deadline, and no backoff
+    // runs past it: the layer ends with the deadline, not a 500 ms backoff later.
+    let overrun = Instant::now().saturating_duration_since(deadline);
+    assert!(overrun < Duration::from_millis(450), "{overrun:?}");
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
     assert!(layer_temporaries(&directory.0).is_empty());
 

@@ -28,12 +28,12 @@ import {
   selectActiveNativeProjectInput,
 } from "../src/backends/native-project-input.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../src/lib/native-environment-notices.ts";
-import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 import {
   classifyMaterializedDotenv,
   materializeProjectEnv,
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 
 const FILE = "synthetic-file-value-canary";
 const DOTENV = "synthetic-dotenv-value-canary";
@@ -1205,9 +1205,9 @@ test("HACK-2324: the materialized dotenv comparison uses one stable snapshot and
   // Replace both paths with FIFOs: any reopen would block this test.
   for (const name of [".env", ".env.state.json"]) {
     await rm(join(f.projectDir, name));
-    expect(spawnSyncBounded(["mkfifo", join(f.projectDir, name)]).exitCode).toBe(
-      0
-    );
+    expect(
+      spawnSyncBounded(["mkfifo", join(f.projectDir, name)]).exitCode
+    ).toBe(0);
   }
   expect(
     await readNativeEnvFileSnapshot(join(f.projectDir, ".env"))

@@ -3043,7 +3043,10 @@ Fresh pools reserve the number of distinct dependency transports from that
 selection. Existing pool capacity cannot be silently widened. The selection is copied into the temporary exact-plan
 dependency request and removed when foreground startup exits. No durable listener
 authority is inferred from a saved selection file. Image-only services omit graph
-shared-source mode; active project bind mounts still use the explicit project share.
+shared-source mode; active project bind mounts still use the explicit project share. A
+bind source may be a directory or a single regular file inside the project root (for
+example `./scripts/entrypoint.sh:/entrypoint.sh:ro`), reached without symlinks; a
+source that is not refuses with `graph_bind_source`, naming the service.
 
 #### Native HTTP readiness probe
 

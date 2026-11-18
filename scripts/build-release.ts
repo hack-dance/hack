@@ -2,7 +2,6 @@
 
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { basename, relative, resolve } from "node:path";
-
 import {
   renderProjectBranchesSchemaJson,
   renderProjectConfigSchemaJson,
@@ -11,6 +10,7 @@ import {
 } from "../src/templates.ts";
 import { buildConfigCompiler } from "./build-config-compiler.ts";
 import { buildLifecycleSupervisor } from "./build-lifecycle-supervisor.ts";
+import { CLI_COMPILE_DEFINE_ARGS } from "./lib/cli-compile-define.ts";
 
 interface BuildArgs {
   readonly outDirRaw: string | null;
@@ -89,6 +89,7 @@ async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
       "build",
       "index.ts",
       "--compile",
+      ...CLI_COMPILE_DEFINE_ARGS,
       // A compiled hack must not load a .env (which could set BUN_OPTIONS)
       // or a bunfig.toml (preloads) from the directory it runs in: that
       // directory may be an untrusted project. Same flags as the prerelease

@@ -1507,19 +1507,63 @@ export function describeNativeForeignHomeMapping(opts: {
   );
 }
 
+/**
+ * The coded foreign-home refusal for this scope, or undefined when no mapping
+ * from another native home is there. Read-only; never releases anything.
+ */
+export async function nativeForeignHomeRefusal(
+  scope: NativeProjectRunScope
+): Promise<Error | undefined> {
+  return await foreignHomeRefusal(scope);
+}
+
+/** The stable code of a run-mapping refusal caused by another native home. */
+export const NATIVE_FOREIGN_HOME_CODE = "E_NATIVE_RUN_MAPPING_FOREIGN_HOME";
+
+/**
+ * True for the refusal {@link foreignHomeRefusal} builds, so callers that
+ * otherwise treat an unreadable mapping as "nothing to report" pass it on.
+ */
+export function isNativeForeignHomeRefusal(error: unknown): boolean {
+  return (
+    error instanceof HackCliError && error.code === NATIVE_FOREIGN_HOME_CODE
+  );
+}
+
 async function foreignHomeRefusal(
   scope: NativeProjectRunScope
 ): Promise<Error | undefined> {
   try {
     const selected = await foreignHomeSelection({ scope });
-    return selected
-      ? new ClosedCliError(
-          describeNativeForeignHomeMapping({
-            inspection: selected.inspection,
+    if (!selected) {
+      return undefined;
+    }
+    const { inspection } = selected;
+    const releaseCommand =
+      inspection.owner === "stopped" && inspection.selectionSha256 !== null
+        ? nativeForeignHomeReleaseCommand({
+            selectionSha256: inspection.selectionSha256,
             branch: scope.branch,
           })
-        )
-      : undefined;
+        : null;
+    // HACK-2339: one stable code for every command that meets the mapping
+    // (ps, down, up foreground and detached), with the way out as data too.
+    return new HackCliError({
+      code: NATIVE_FOREIGN_HOME_CODE,
+      message: describeNativeForeignHomeMapping({
+        inspection,
+        branch: scope.branch,
+      }),
+      detail: {
+        state: inspection.state,
+        owner: inspection.owner,
+        ownerHome: inspection.ownerHome,
+        ownerPid: inspection.ownerPid,
+        run: inspection.run.run,
+        selectionSha256: inspection.selectionSha256,
+        releaseCommand,
+      },
+    });
   } catch {
     return undefined;
   }

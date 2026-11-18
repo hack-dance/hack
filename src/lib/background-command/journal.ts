@@ -744,6 +744,7 @@ export class JournalWriter {
   private seq: number;
   private readonly append: AppendLine;
   private readonly syncEvents: SyncPath;
+  private readonly clock: () => Date;
 
   constructor(
     paths: JournalPaths,
@@ -751,13 +752,16 @@ export class JournalWriter {
     lastSeq: number,
     append: AppendLine = appendLine,
     /** Test seam: the fsync after `command.ended`. */
-    syncEvents: SyncPath = syncPath
+    syncEvents: SyncPath = syncPath,
+    /** Test seam: the time each event records. */
+    clock: () => Date = () => new Date()
   ) {
     this.paths = paths;
     this.meta = meta;
     this.seq = lastSeq;
     this.append = append;
     this.syncEvents = syncEvents;
+    this.clock = clock;
   }
 
   get lastSeq(): number {
@@ -773,6 +777,7 @@ export class JournalWriter {
       seq: this.seq + 1,
       type,
       payload,
+      time: this.clock(),
     });
     const line = `${JSON.stringify(envelope)}\n`;
     try {

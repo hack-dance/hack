@@ -121,6 +121,15 @@ If stop reports retained or unknown cleanup, follow its inspection instructions
 before switching. Keep the home and receipts; use the
 [cleanup reference](full-reference.md#manual-candidate-upgrade-and-rollback).
 
+After installing a newer version, its native home is new, but the project still
+records its last run in the old one. If you did not stop the project with the old
+version first, `hack up`, `hack ps` and `hack down` from the new version refuse with
+`E_NATIVE_RUN_MAPPING_FOREIGN_HOME`. When the old home proves a clean stop, the
+message names the exact command that releases the old mapping
+(`hack doctor --native-run-mapping release --expect-selection <sha> [--branch <name>]`);
+run it, then `hack up` again. The project's data stays in the old home. If the old
+run is still live or its stop cannot be proven, stop it with the old version first.
+
 ## Back to Compose
 
 Once the native stop is confirmed, use the same candidate on Compose:

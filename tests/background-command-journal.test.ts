@@ -2148,7 +2148,16 @@ describe("unconfirmed container stops hold admission", () => {
         root,
         now: new Date(start),
       });
-      await new JournalWriter(paths, meta, 1).write("command.ended", {
+      // The end is recorded at the same fake time as the accept, so the
+      // prune below expires it however slowly the host runs.
+      await new JournalWriter(
+        paths,
+        meta,
+        1,
+        undefined,
+        undefined,
+        () => new Date(start)
+      ).write("command.ended", {
         outcome: "cancelled",
         reason: "cancel_requested",
         exitCode: null,

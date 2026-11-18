@@ -35,7 +35,7 @@ case "$task" in
     # Bun 1.3.9 stages in cwd; its cross-device fallback can emit zero-filled
     # executables when cwd is the host bind mount and dist is a named volume.
     cd /app/dist
-    bun build /app/index.ts --compile --outfile hack "$@"
+    bun build /app/index.ts --compile --define 'process.env.OPENTUI_LIBC="glibc"' --outfile hack "$@"
     # A successful compiler exit does not prove the emitted executable can run.
     exec /app/dist/hack --version
     ;;

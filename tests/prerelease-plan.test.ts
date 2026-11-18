@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractArchive } from "../scripts/installer/bundle.ts";
 import { digest } from "../scripts/installer/integrity.ts";
+import { CLI_COMPILE_DEFINE_ARGS } from "../scripts/lib/cli-compile-define.ts";
 import { packageNativeStorageTool } from "../scripts/package-native-storage-tool.ts";
 import {
   CONFIG_COMPILER_PAYLOAD,
@@ -1692,6 +1693,7 @@ test("compiled CLI reports the embedded candidate version and ordinary source re
         "build",
         "index.ts",
         "--compile",
+        ...CLI_COMPILE_DEFINE_ARGS,
         "--define",
         '__HACK_BUILD_VERSION__="5.0.0-next.22"',
         "--outfile",

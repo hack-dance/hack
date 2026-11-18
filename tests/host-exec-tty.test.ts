@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { CLI_COMPILE_DEFINE_ARGS } from "../scripts/lib/cli-compile-define.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const cases = [
@@ -167,6 +168,7 @@ test.skipIf(!Bun.which("python3"))(
           "build",
           "index.ts",
           "--compile",
+          ...CLI_COMPILE_DEFINE_ARGS,
           "--outfile",
           binary,
         ],

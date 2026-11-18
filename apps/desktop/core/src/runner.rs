@@ -89,7 +89,29 @@ pub struct CliRunner {
     /// What the last [`Self::rediscover`] found, shared by every clone of an
     /// [`Self::on_path`] runner, so a CLI setup finds (installed since
     /// launch, or another one) is the one every read and action runs.
-    pinned: Option<std::sync::Arc<std::sync::Mutex<Option<PathBuf>>>>,
+    pinned: Option<std::sync::Arc<std::sync::Mutex<Pin>>>,
+}
+
+/// What a switchable runner runs, shared by its clones.
+#[derive(Debug, Clone, Default)]
+enum Pin {
+    /// Nothing chosen since launch: the program found then, if any.
+    #[default]
+    Launch,
+    /// Selected, or found and checked by [`CliRunner::rediscover`].
+    Program(PathBuf),
+    /// The last [`CliRunner::rediscover`] found nothing usable: run
+    /// nothing, never the (unchecked) program found at launch.
+    Refused,
+}
+
+impl CliRunner {
+    fn pin(&self) -> Option<std::sync::MutexGuard<'_, Pin>> {
+        self.pinned.as_ref().map(|slot| {
+            slot.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        })
+    }
 }
 
 /// The selected CLI, refused when another user could change it.
@@ -196,7 +218,9 @@ impl CliRunner {
     pub fn selectable(program: impl Into<PathBuf>) -> Self {
         let program = program.into();
         let mut runner = Self::new(program.clone());
-        runner.pinned = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(program))));
+        runner.pinned = Some(std::sync::Arc::new(std::sync::Mutex::new(Pin::Program(
+            program,
+        ))));
         runner
     }
 
@@ -241,22 +265,20 @@ impl CliRunner {
     /// runner that is not [`Self::selectable`] (or [`Self::on_path`]) is
     /// unchanged.
     pub fn select(&self, program: &Path) {
-        if let Some(slot) = &self.pinned
-            && let Ok(mut slot) = slot.lock()
-        {
-            *slot = Some(program.to_path_buf());
+        if let Some(mut pin) = self.pin() {
+            *pin = Pin::Program(program.to_path_buf());
         }
     }
 
     /// The executable to start now: the selected one, else `program`
-    /// (`None` when [`Self::on_path`] found nothing).
+    /// (`None` when [`Self::on_path`] found nothing, or when the last
+    /// [`Self::rediscover`] refused what it found).
     fn current_program(&self) -> Option<PathBuf> {
-        if let Some(slot) = &self.pinned
-            && let Some(found) = slot.lock().ok().and_then(|g| g.clone())
-        {
-            return Some(found);
+        match self.pin().as_deref() {
+            Some(Pin::Program(p)) => Some(p.clone()),
+            Some(Pin::Refused) => None,
+            Some(Pin::Launch) | None => (!self.missing).then(|| self.program.clone()),
         }
-        (!self.missing).then(|| self.program.clone())
     }
 
     /// Run the absolute `program` only after checking that no other user
@@ -307,10 +329,11 @@ impl CliRunner {
         let found = resolve_on_path(name, self.effective_env("PATH").as_deref())
             .ok_or(RunError::NotFound)
             .and_then(|p| trusted_cli(&p).map(|()| p));
-        if let Some(slot) = &self.pinned
-            && let Ok(mut slot) = slot.lock()
-        {
-            *slot = found.as_ref().ok().cloned();
+        if let Some(mut pin) = self.pin() {
+            *pin = match &found {
+                Ok(p) => Pin::Program(p.clone()),
+                Err(_) => Pin::Refused,
+            };
         }
         found
     }
@@ -1704,6 +1727,61 @@ mod tests {
             .parse()
             .unwrap();
         assert_retired(pid);
+    }
+
+    /// HACK-2334: a CLI found on PATH at launch is not checked then. Once
+    /// setup's rediscovery refuses what it finds, no clone may fall back
+    /// to that launch-time program; a later accepted discovery or an
+    /// explicit selection runs again.
+    #[test]
+    fn a_refused_rediscovery_never_falls_back_to_the_program_found_at_launch() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "hack-desktop-refused-{}-{}",
+            std::process::id(),
+            rand_suffix()
+        ));
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let marker = root.join("ran");
+        let hack = bin.join("hack");
+        crate::test_support::script(
+            &hack,
+            format!("#!/bin/sh\n: > '{}'\necho '{{}}'\n", marker.display()),
+        );
+        // `on_path` as it is when the process PATH had this `hack` at
+        // launch (built here so the test never searches the real PATH).
+        let mut runner = CliRunner::new(&hack);
+        runner.path_name = Some("hack".into());
+        runner.pinned = Some(std::sync::Arc::default());
+        let runner = runner.with_env("PATH", bin.to_str().unwrap());
+        let clone = runner.clone();
+        assert_eq!(clone.resolve_program().unwrap(), hack, "positive control");
+        // Another user can now replace it: rediscovery refuses it ...
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(matches!(runner.rediscover(), Err(RunError::Spawn(_))));
+        // ... and nothing, in any clone, runs the launch-time program.
+        for r in [&runner, &clone] {
+            assert!(matches!(r.resolve_program(), Err(RunError::NotFound)));
+            assert!(r.run_raw(&["x"], None, T).is_err());
+            assert!(r.fixed().run_raw(&["x"], None, T).is_err(), "fixed too");
+        }
+        assert!(!marker.exists(), "the refused CLI never ran");
+        // Trusted again: an accepted rediscovery runs it.
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(runner.rediscover().unwrap(), hack);
+        clone
+            .run_raw(&["x"], None, T)
+            .expect("runs after an accepted rediscovery");
+        assert!(marker.exists());
+        // An explicit selection after a refusal runs as well.
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(runner.rediscover().is_err());
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        runner.select(&hack);
+        assert_eq!(clone.resolve_program().unwrap(), hack);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

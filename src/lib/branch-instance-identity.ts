@@ -231,6 +231,10 @@ const CADDY_SITE_SEPARATORS = /[\s,]+/;
  * (`branchServiceLabels`) accept whitespace as well as commas between sites.
  */
 function siteLabelHosts(value: string): readonly string[] {
+  // A templated site address may contain spaces; it names no concrete host.
+  if (value.includes("{{")) {
+    return [];
+  }
   return value
     .split(CADDY_SITE_SEPARATORS)
     .filter(Boolean)

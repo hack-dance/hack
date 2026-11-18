@@ -479,6 +479,7 @@ test("native: numbered site labels count, and a missing primary hides no worktre
       '      - "caddy_0=alpha.hack"',
       '      - "caddy_1=admin.alpha.hack api.alpha.hack,  docs.alpha.hack"',
       '      - "caddy_0.reverse_proxy={{upstreams 3000}}"',
+      `      - 'caddy_2={{ index .Labels "domain" }}'`,
       "",
     ].join("\n")
   );

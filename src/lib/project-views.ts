@@ -1229,7 +1229,8 @@ async function readComposeSiteLabelHosts(opts: {
     const labels = isRecord(service) ? service.labels : null;
     const entries: string[] = [];
     for (const [key, value] of composeLabelEntries(labels)) {
-      if (COMPOSE_SITE_LABEL.test(key)) {
+      // A templated site address names no concrete host (and may hold spaces).
+      if (COMPOSE_SITE_LABEL.test(key) && !value.includes("{{")) {
         // Whitespace separates sites too, as native branch routing accepts.
         entries.push(...value.split(COMPOSE_SITE_SEPARATORS).filter(Boolean));
       }

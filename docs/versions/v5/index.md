@@ -45,6 +45,7 @@ v5 prerelease bundles are Apple Silicon macOS only; see
 - [Work on another branch](guides/parallel-work.md)
 - [Share environment and secrets](guides/share-environment.md)
 - [Manage helpers and tunnels](guides/project-helpers.md)
+- [My Mac is slow](guides/slow-mac.md): start from the symptom, then let `hack doctor` name the cause.
 - [Use a cloud agent or another host](guides/cloud-environments.md)
 - [Try the native backend (beta)](../guides/native-candidate.md)
 

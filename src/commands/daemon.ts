@@ -55,6 +55,7 @@ import {
   serviceSummaryJson,
   summarizeLaunchdService,
 } from "../daemon/service-summary.ts";
+import { diagnoseDaemonDirectory } from "../daemon/socket-permissions.ts";
 import { spawnDetachedDaemon } from "../daemon/spawn.ts";
 import {
   buildDaemonRepairMessage,
@@ -626,7 +627,13 @@ async function sweepOrphanDaemons(opts: {
     return { allStopped: false, stopped: 0 };
   }
   for (const refused of scan.refused) {
-    logger.info({
+    // A process that is provably not this home's hackd (for example a shell
+    // whose command line merely contains "hack daemon start") neither blocks
+    // the start nor gets signalled, so it is debug noise (HACK-2329). One
+    // whose identity could not be read may still be hackd: keep that visible.
+    const unrelated =
+      refused.reason === "not-hackd" || refused.reason === "foreign-socket";
+    (unrelated ? logger.debug : logger.info)({
       message: `Left pid ${refused.pid} running: it looks like a hack daemon start, but ${describeDaemonProcessRefusal(refused.reason)}`,
     });
   }
@@ -897,6 +904,13 @@ async function startDaemonDetached(opts: {
     logger.error({ message: argv });
     return 1;
   }
+  // A detached hackd's output is discarded and it refuses before opening its
+  // log, so name the refusal here instead of a bare "not ready" (HACK-2329).
+  const refusal = diagnoseDaemonDirectory({ root: paths.root });
+  if (refusal !== null) {
+    logger.error({ message: `hackd cannot start: ${refusal}` });
+    return 1;
+  }
   // A directly started hackd never runs the login autostart pass (its
   // environment drops HACK_DAEMON_LOGIN_SERVICE); say so once per launch.
   await reportManualAutostartSkip();
@@ -904,8 +918,12 @@ async function startDaemonDetached(opts: {
 
   const started = await waitForDaemonStart({ paths });
   if (!started) {
+    const late = diagnoseDaemonDirectory({ root: paths.root });
     logger.warn({
-      message: "Started hackd process but it did not report ready yet",
+      message:
+        late === null
+          ? "Started hackd process but it did not report ready yet | Check: hack daemon logs --tail 200, or run hack daemon start --foreground to see its error"
+          : `hackd did not start: ${late}`,
     });
     return 1;
   }
@@ -1110,6 +1128,11 @@ async function handleDaemonStatus({
     : await resolveSystemdSummary({ paths });
   const dockerBackend = await detectDockerBackend();
   const dockerStatus = await buildDockerStatusProbe();
+  // Why a start would be refused, read-only; only meaningful while stopped.
+  const startRefusal =
+    report.status === "running"
+      ? null
+      : diagnoseDaemonDirectory({ root: paths.root });
 
   if (args.options.json) {
     outputDaemonStatusJson({
@@ -1118,6 +1141,7 @@ async function handleDaemonStatus({
       paths,
       launchdStatus,
       service,
+      startRefusal,
     });
     return report.status === "running" ? 0 : 1;
   }
@@ -1128,6 +1152,7 @@ async function handleDaemonStatus({
     service,
     dockerBackendName: dockerBackend?.name ?? null,
     dockerReachable: dockerStatus.reachable,
+    startRefusal,
   });
 }
 
@@ -1169,6 +1194,8 @@ function outputDaemonStatusJson(opts: {
   readonly paths: DaemonPaths;
   readonly launchdStatus: LaunchdServiceStatus | null;
   readonly service: DaemonServiceSummary | null;
+  /** Why `hack daemon start` would be refused (HACK-2329), or null. */
+  readonly startRefusal: string | null;
 }): void {
   const payload = {
     status: opts.report.status,
@@ -1184,6 +1211,7 @@ function outputDaemonStatusJson(opts: {
     stale_reason: opts.report.staleReason,
     issue: opts.report.issue,
     next_step: opts.report.nextStep,
+    start_refusal: opts.startRefusal,
     pid: opts.report.pid,
     socket_path: opts.paths.socketPath,
     socket_exists: opts.report.socketExists,
@@ -1211,6 +1239,7 @@ function reportDaemonStatus(opts: {
   readonly service: DaemonServiceSummary | null;
   readonly dockerBackendName: string | null;
   readonly dockerReachable: boolean;
+  readonly startRefusal: string | null;
 }): number {
   const { report, launchdStatus } = opts;
   if (report.status === "running") {
@@ -1247,6 +1276,9 @@ function reportDaemonStatus(opts: {
       dockerReachable: opts.dockerReachable,
     }),
   });
+  if (opts.startRefusal !== null) {
+    logger.warn({ message: `hackd cannot start: ${opts.startRefusal}` });
+  }
   logLaunchdStatus({ launchdStatus, running: false });
   logSystemdStatus({ service: opts.service });
   return 1;

@@ -135,6 +135,7 @@ async function listJson(opts: {
       readonly key_state: string;
       readonly vars: ReadonlyArray<{
         readonly key: string;
+        readonly source?: string;
         readonly value?: unknown;
       }>;
     },
@@ -155,6 +156,8 @@ test(
     expect(json.key_state).toBe("ok");
     expect(json.vars.map((row) => row.key)).toEqual(["API_TOKEN"]);
     expect(json.vars[0]).not.toHaveProperty("value");
+    // Encrypted with the project key in the YAML layer, not a keychain (HACK-2329).
+    expect(json.vars[0]?.source).toBe("project_key");
   },
   CLI_TEST_TIMEOUT_MS
 );

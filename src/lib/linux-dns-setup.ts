@@ -342,6 +342,44 @@ export type LinuxDnsPlan = {
   readonly notes?: readonly string[];
 };
 
+/**
+ * One plain sentence per root step of `plan`, in the order they run, for a
+ * person deciding whether to run them (HACK-2329). The exact commands stay in
+ * {@link renderManualPlan} and in `hack global install --plan --json`.
+ */
+export function describeLinuxDnsPlanSteps(plan: LinuxDnsPlan): string[] {
+  return [
+    ...plan.files.map((file) => {
+      if (file.path === LINUX_DNS_UNIT_PATH) {
+        return `Install ${file.path}: a systemd unit that sends lookups for Hack's domains to Hack's DNS server (${DEFAULT_COREDNS_IP}) on the Docker bridge.`;
+      }
+      if (file.path === LINUX_DNS_UDEV_RULE_PATH) {
+        return `Install ${file.path}: starts that unit for each new Docker bridge.`;
+      }
+      return `Install ${file.path}.`;
+    }),
+    ...plan.commands.map((argv) => {
+      const [tool, verb] = argv;
+      if (tool === "systemctl" && verb === "daemon-reload") {
+        return "Reload systemd so it sees the unit.";
+      }
+      if (tool === "udevadm" && verb === "control") {
+        return "Reload udev so it sees the rule.";
+      }
+      if (tool === "systemctl" && verb === "restart") {
+        return `Apply the route to the current Docker bridge now (${argv.at(-1)}).`;
+      }
+      if (tool === "systemctl" && verb === "stop") {
+        return "Stop Hack's DNS unit on every bridge.";
+      }
+      if (tool === "resolvectl" && verb === "revert") {
+        return `Remove Hack's DNS route from ${argv.at(-1)}.`;
+      }
+      return `Run ${argv.join(" ")}.`;
+    }),
+  ];
+}
+
 export function renderPrivilegedCommand(argv: readonly string[]): string {
   return ["sudo", ...argv].map(shellQuoteIfNeeded).join(" ");
 }

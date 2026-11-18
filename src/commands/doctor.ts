@@ -61,6 +61,7 @@ import {
   resolveDaemonAutostartAccess,
 } from "../daemon/client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
+import { diagnoseDaemonDirectory } from "../daemon/socket-permissions.ts";
 import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts";
 import {
   resolveSystemdUnitPath,
@@ -2290,7 +2291,14 @@ async function checkDaemonStatus(): Promise<CheckResult> {
     }),
   });
 
-  return buildDoctorDaemonCheck({ report, candidate: isCandidateRun() });
+  return buildDoctorDaemonCheck({
+    report,
+    candidate: isCandidateRun(),
+    startRefusal:
+      report.status === "running"
+        ? null
+        : diagnoseDaemonDirectory({ root: paths.root }),
+  });
 }
 
 /** Retained gateway checks scan registered project configs, so a machine-only audit omits them. */

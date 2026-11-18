@@ -2,7 +2,10 @@ import { constants, lstatSync } from "node:fs";
 import { chmod, type FileHandle, lstat, open, readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
-import { checkReplaceableChain } from "../lib/path-trust.ts";
+import {
+  checkReplaceableChain,
+  walkReplaceableChain,
+} from "../lib/path-trust.ts";
 
 /**
  * hackd's local API is unauthenticated: whoever can connect to its Unix
@@ -43,9 +46,7 @@ export async function secureDaemonDirectory(opts: {
     hackHome: dirname(opts.root),
   });
   if (chain !== null) {
-    throw new Error(
-      `hackd state directory ${opts.root} is not safe from other users: ${chain}`
-    );
+    throw new Error(unsafeChainMessage({ root: opts.root, chain }));
   }
   let handle: FileHandle;
   try {
@@ -91,6 +92,58 @@ export async function secureDaemonDirectory(opts: {
       `hackd state directory ${opts.root} holds ${planted}. Review and remove it, then start hackd again`
     );
   }
+}
+
+function unsafeChainMessage(opts: {
+  readonly root: string;
+  readonly chain: string;
+}): string {
+  return `hackd state directory ${opts.root} is not safe from other users: ${opts.chain}`;
+}
+
+/**
+ * The reason {@link secureDaemonDirectory} would refuse to start hackd, read
+ * without changing anything, or null when it would proceed (HACK-2329).
+ *
+ * A detached `hack daemon start` discards hackd's output, and hackd refuses
+ * before it opens its log, so this is the only way the starting CLI, `hack
+ * daemon status` and `hack doctor` can name the cause and its fix. It covers
+ * the refusals that need the user: a replaceable directory on the way to the
+ * daemon directory (for example a home directory writable by others) and a
+ * daemon directory that is a link or another user's. Group or other access on
+ * the daemon directory itself is repaired by hackd at start, so it is not a
+ * refusal here; neither is a directory that does not exist yet.
+ */
+export function diagnoseDaemonDirectory(opts: {
+  readonly root: string;
+}): string | null {
+  const uid = process.getuid?.() ?? -1;
+  const walk = walkReplaceableChain({
+    path: opts.root,
+    uid,
+    hackHome: dirname(opts.root),
+    allowMissing: true,
+    stopAtLink: true,
+  });
+  if ("error" in walk) {
+    return unsafeChainMessage({ root: opts.root, chain: walk.error });
+  }
+  if (!walk.complete) {
+    return null;
+  }
+  let info: ReturnType<typeof lstatSync>;
+  try {
+    info = lstatSync(opts.root);
+  } catch {
+    return null;
+  }
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    return `hackd state directory ${opts.root} is not a plain directory; review it, remove or rename it, and start hackd again`;
+  }
+  if (uid >= 0 && info.uid !== uid) {
+    return `hackd state directory ${opts.root} is owned by another user (uid ${info.uid}); remove or rename it and start hackd again`;
+  }
+  return null;
 }
 
 /**

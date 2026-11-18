@@ -123,7 +123,9 @@ export function projectEnvKeys(payload: unknown): McpEnvKeysData | null {
     const source = optionalString(row.source);
     keys.push({
       key,
-      secret: source === "keychain",
+      // Legacy contracts report "keychain"; project env config reports
+      // "project_key" for values encrypted with the project key.
+      secret: source === "keychain" || source === "project_key",
       required: optionalBoolean(row.required),
       source,
       resolved_from: optionalString(row.resolved_from),

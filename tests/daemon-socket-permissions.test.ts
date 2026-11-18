@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   chmod,
   link,
@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  diagnoseDaemonDirectory,
   restrictSocketMode,
   secureDaemonDirectory,
 } from "../src/daemon/socket-permissions.ts";
@@ -236,4 +237,46 @@ test("hackd's own writable files are repaired; a writable token store is left to
     expect((await stat(file)).mode & 0o777).toBe(0o644);
   }
   expect((await stat(join(gateway, "tokens.json"))).mode & 0o777).toBe(0o664);
+});
+
+describe("diagnoseDaemonDirectory (HACK-2329)", () => {
+  test("names a home directory writable by others and its fix", async () => {
+    const home = join(root, "home");
+    const daemonRoot = join(home, ".hack", "daemon");
+    await mkdir(daemonRoot, { recursive: true });
+    await chmod(home, 0o775);
+    const message = diagnoseDaemonDirectory({ root: daemonRoot });
+    expect(message).toContain(
+      `hackd state directory ${daemonRoot} is not safe from other users`
+    );
+    expect(message).toContain("chmod go-w");
+    // The same refusal hackd itself gives.
+    await expect(secureDaemonDirectory({ root: daemonRoot })).rejects.toThrow(
+      message ?? "unreachable"
+    );
+  });
+
+  test("is null for a missing directory or one hackd repairs itself", async () => {
+    const hackHome = join(root, "safe", ".hack");
+    await mkdir(hackHome, { recursive: true });
+    await chmod(join(root, "safe"), 0o755);
+    expect(
+      diagnoseDaemonDirectory({ root: join(hackHome, "daemon") })
+    ).toBeNull();
+    await mkdir(join(hackHome, "daemon"));
+    await chmod(join(hackHome, "daemon"), 0o775);
+    expect(
+      diagnoseDaemonDirectory({ root: join(hackHome, "daemon") })
+    ).toBeNull();
+  });
+
+  test("refuses a daemon directory that is a link", async () => {
+    const hackHome = join(root, "linked", ".hack");
+    await mkdir(join(root, "elsewhere"), { recursive: true });
+    await mkdir(hackHome, { recursive: true });
+    await symlink(join(root, "elsewhere"), join(hackHome, "daemon"));
+    expect(
+      diagnoseDaemonDirectory({ root: join(hackHome, "daemon") })
+    ).not.toBeNull();
+  });
 });

@@ -349,7 +349,7 @@ Doctor checks contain id/status/detail/durationMs; status is ok/warn/error. summ
 
 With Hack's own `--json`, stdout is only Hack's result (one JSON value, or NDJSON lines ending in the envelope with `--progress`). Output from lifecycle hooks, host commands and the Compose client goes to stderr on both backends, so read it there and never parse it from stdout.
 
-Daemon status fields: status, running, api_ok, api_reachable, api_compatible, version (what hackd's API reports, or null), cli_version, process_running, stale, stale_reason, issue, next_step, pid, socket_path, socket_exists, log_path, log_exists, launchd. Launchd is null or {installed,loaded,running,pid,exit_status,plist_path}. Unavailable/nullable observations must not be treated as proof of process absence or authority to signal a PID.
+Daemon status fields: status, running, api_ok, api_reachable, api_compatible, version (what hackd's API reports, or null), cli_version, process_running, stale, stale_reason, issue, next_step, start_refusal (why `hack daemon start` would be refused, such as a home directory writable by others, with its fix; null when it would start or hackd is running), pid, socket_path, socket_exists, log_path, log_exists, launchd. Launchd is null or {installed,loaded,running,pid,exit_status,plist_path}. Unavailable/nullable observations must not be treated as proof of process absence or authority to signal a PID.
 
 Env explain: key:string, available/secret:boolean, format:project_env_config_v1/legacy_env_contract; environment/effective_scope/source:string|null; requested_scope:string, target:host/compose, delivered_to/precedence:string[]. It emits no value.
 

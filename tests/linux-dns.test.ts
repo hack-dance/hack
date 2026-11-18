@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +28,7 @@ import {
 } from "../src/lib/linux-dns-host.ts";
 import {
   applyLinuxDns,
+  describeLinuxDnsPlanSteps,
   inspectLinuxDns,
   type LinuxDnsHost,
   type LinuxDnsPlan,
@@ -1238,6 +1239,82 @@ describe("bootstrapLinuxGlobalDns result (install exit status)", () => {
       expect(await run({ resolvedActive: false }, yes).result).toBe("skipped");
     });
   });
+
+  test("a run that cannot prompt summarizes each root step before the exact commands (HACK-2329)", async () => {
+    await withIsolatedHome(async () => {
+      const { bootstrapLinuxGlobalDns } = await import(
+        "../src/commands/global-linux-dns.ts"
+      );
+      const { host } = createFakeHost({});
+      const printed: string[] = [];
+      const logged: string[] = [];
+      const savedLogger = process.env.HACK_LOGGER;
+      process.env.HACK_LOGGER = "console";
+      const stderr = spyOn(process.stderr, "write").mockImplementation(
+        (chunk: string | Uint8Array) => {
+          logged.push(String(chunk));
+          return true;
+        }
+      );
+      try {
+        expect(
+          await bootstrapLinuxGlobalDns({
+            useStaticIps: true,
+            host,
+            prompt: {
+              canPrompt: false,
+              confirm: async () => {
+                throw new Error("must not prompt");
+              },
+            },
+            print: (text) => {
+              printed.push(text);
+            },
+          })
+        ).toBe("skipped");
+      } finally {
+        stderr.mockRestore();
+        restoreEnv("HACK_LOGGER", savedLogger);
+      }
+      const summary = logged.join("");
+      expect(summary).toContain("It needs root (sudo) for these steps:");
+      expect(summary).toContain(
+        `1. Install ${LINUX_DNS_UNIT_PATH}: a systemd unit`
+      );
+      expect(summary).toContain(
+        `2. Install ${LINUX_DNS_UDEV_RULE_PATH}: starts that unit`
+      );
+      expect(summary).toContain("Reload systemd so it sees the unit.");
+      expect(summary).toContain("--plan --json");
+      // The exact, paste-able block is unchanged and printed separately.
+      expect(printed.join("")).toContain("sudo /bin/sh -c");
+      expect(summary).not.toContain("sudo /bin/sh -c");
+    });
+  });
+});
+
+test("describeLinuxDnsPlanSteps gives one sentence per file and command, in order", () => {
+  expect(
+    describeLinuxDnsPlanSteps({
+      files: [
+        { path: LINUX_DNS_UNIT_PATH, content: "x\n" },
+        { path: LINUX_DNS_UDEV_RULE_PATH, content: "y\n" },
+      ],
+      commands: [
+        ["systemctl", "daemon-reload"],
+        ["udevadm", "control", "--reload"],
+        ["systemctl", "restart", "--", "hack-dns@br-0123456789ab.service"],
+        ["true"],
+      ],
+    })
+  ).toEqual([
+    `Install ${LINUX_DNS_UNIT_PATH}: a systemd unit that sends lookups for Hack's domains to Hack's DNS server (172.30.0.53) on the Docker bridge.`,
+    `Install ${LINUX_DNS_UDEV_RULE_PATH}: starts that unit for each new Docker bridge.`,
+    "Reload systemd so it sees the unit.",
+    "Reload udev so it sees the rule.",
+    "Apply the route to the current Docker bridge now (hack-dns@br-0123456789ab.service).",
+    "Run true.",
+  ]);
 });
 
 describe("review round two", () => {

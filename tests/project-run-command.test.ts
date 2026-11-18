@@ -368,7 +368,9 @@ const runDependencyScenarios = [
     expectedNoDeps: false,
   },
   {
-    name: "keeps dependency startup when omitted env resolves to qa but the live stack recorded base",
+    // HACK-2280: an omitted --env reuses the recorded base selection rather
+    // than the configured default overlay.
+    name: "skips dependency startup when omitted env reuses the live stack's recorded base over a default overlay",
     createProjectInput: {
       config: {
         env: {
@@ -380,7 +382,17 @@ const runDependencyScenarios = [
       runningServices: ["api"],
     },
     envName: undefined,
-    expectedNoDeps: false,
+    expectedNoDeps: true,
+  },
+  {
+    name: "skips dependency startup when omitted env reuses a live non-default overlay",
+    createProjectInput: {
+      runtimeComposeProject: "project-run-env-test",
+      runtimeEnvName: "qa",
+      runningServices: ["api"],
+    },
+    envName: undefined,
+    expectedNoDeps: true,
   },
 ] as const;
 
@@ -396,6 +408,38 @@ for (const scenario of runDependencyScenarios) {
     expect(runCalls[0]?.noDeps).toBe(scenario.expectedNoDeps);
   });
 }
+
+test("run with no --env uses the overlay the instance runs with (HACK-2280)", async () => {
+  const projectRoot = await createProject({
+    runtimeComposeProject: "project-run-env-test",
+    runtimeEnvName: "qa",
+    runningServices: ["api"],
+  });
+
+  const exitCode = await runPrintenv({ projectRoot });
+
+  expect(exitCode).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  // Names only: the qa overlay adds SERVICE_TOKEN for api.
+  const overridePath = runCalls[0]?.composeFiles.find((filePath) =>
+    filePath.endsWith("compose.env.override.yml")
+  );
+  if (!overridePath) {
+    throw new Error("Missing env override compose file.");
+  }
+  const override = YAML.parse(await readFile(overridePath, "utf8")) as {
+    readonly services: Record<
+      string,
+      { readonly environment: Record<string, string> }
+    >;
+  };
+  expect(Object.keys(override.services.api?.environment ?? {}).sort()).toEqual([
+    "GLOBAL_FLAG",
+    "PORT",
+    "SERVICE_TOKEN",
+    "SHARED_KEY",
+  ]);
+});
 
 async function createProject(input?: {
   readonly services?: readonly string[];

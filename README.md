@@ -51,8 +51,11 @@ curl -fsSL \
   | bash
 ```
 
-This installs the stable v4 line. v5 is in prerelease and installs beside it; see
-[versions](#versions-and-backends).
+This installs the stable v4 line. This README describes v5, which is in prerelease
+and installs beside v4; see [versions](#versions-and-backends). In v4, new projects
+get `https://myapp.hack` instead of `https://myapp.hack.local`, and a few things
+below arrive with v5: the `hack-mcp` plugin, the doctor's checks for slow settings,
+and agent files that are written only when you ask.
 
 ## Why it exists
 
@@ -81,7 +84,7 @@ label its logs, and keep its instances apart.
 | "How do I run this?" | a README, a Makefile and asking a teammate | the `.hack/` folder and `hack up` |
 | Tunnels, single sign-on, proxies | scripts left running in a terminal tab | processes the project declares; `hack down` stops them |
 | Logs | terminal scrollback, gone on restart | saved history: `hack logs --loki --since 2h` |
-| A script or agent driving the project | parsing terminal output | `--json` results with stable error codes |
+| A script or agent driving the project | parsing terminal output | `--json` results; newer ones carry stable error codes |
 
 ## What you get
 
@@ -92,7 +95,8 @@ label its logs, and keep its instances apart.
   your machine once `hack global install` has run.
 - `hack up --branch review` starts a second instance of the same project with its
   own addresses. In a linked git worktree, `hack up` does this without the flag
-  and names the instance after the branch.
+  and names the instance after the branch. A detached worktree needs
+  `--branch <name>`.
 - An instance has its own containers, so each one has its own database container.
   Instances still share anything outside them: an external database, a
   bind-mounted folder, the same credentials. Hack separates what runs; it is not a
@@ -110,8 +114,9 @@ See [core concepts](docs/core.md) and
   it as `HACK_ENV_SECRET_KEY`.
 - Overlays hold the values that differ, for example for `qa`, and a worktree can
   keep local overrides that are not committed.
-- `hack env` reads and writes values without printing secrets.
-  `hack host exec` runs a command on your machine with the project's settings
+- `hack env list` shows names and whether each is set, never values. Reading a
+  value takes an explicit `hack env get KEY`.
+- `hack host exec` runs a command on your machine with the project's settings
   loaded, so scripts do not need `.env` files.
 
 See [env and secrets](docs/env.md).
@@ -180,10 +185,10 @@ hack logs --pretty                   # tail logs (or: hack logs <service>)
 hack open                            # open the project URL
 hack exec api -- bun test            # run inside a running service
 hack run api -- bun db:migrate       # one-off container command
-hack env list                        # resolved env for the project
+hack env list                        # env names and layers (no values)
 hack host exec --scope api -- bun db:seed   # host command with injected env
 hack up --branch review              # parallel branch instance
-hack dev                             # side-by-side development build
+hack dev                             # run .hack/dev.json beside your installed build
 hack session start myapp             # persistent tmux workspace
 hack doctor                          # diagnose setup
 ```
@@ -198,10 +203,10 @@ A coding agent that can run shell commands can use Hack as it is. Give it a
 worktree, and `hack up` there gives it a running copy of the project that it can
 open, test and read logs from without touching anyone else's.
 
-- Commands accept `--json` for structured results with stable error codes, and
-  `--no-interactive` to avoid prompts. See
-  [machine-readable output](docs/reference/machine-readable-output.md).
-- Hack never writes agent files on its own. Everything below is optional.
+- Many commands accept `--json`. Newer outputs share one envelope with stable
+  error codes; older ones keep their published shapes. `--no-interactive` avoids
+  prompts. See [machine-readable output](docs/reference/machine-readable-output.md).
+- In v5, Hack never writes agent files on its own. Everything below is optional.
 - The `hack` plugin gives Codex, Claude Code and Cursor eight Hack skills through
   the client's own plugin manager. The separate `hack-mcp` plugin is for clients
   without shell access.
@@ -234,18 +239,21 @@ install. Read
 v5 work; `main` holds the stable line.
 
 **Native backend (beta, Apple Silicon macOS).** A second way to run the same
-project. Hack runs the project's containers in a lightweight Linux VM that it
-manages, without Docker Desktop or OrbStack. Your `.hack/` folder and your commands
-stay the same. It is opt-in and ships only through `hack-next`.
+project. Hack runs the project's containers in a Linux VM, without Docker Desktop
+or OrbStack. Preparing that VM is a separate step today. Your `.hack/` folder and
+your commands stay the same. It is opt-in and ships only through `hack-next`.
 
 - It runs a whole multi-service Compose project: start, stop, restart, logs for
   every service and `hack open`.
 - It supports part of what Compose supports. When a project needs something
   outside that part, Hack refuses and names the feature.
 - One project runs in a native pool at a time.
+- Side-by-side branch and worktree instances are a Compose feature today. On
+  native you select a branch explicitly with `--branch`.
 - Native data does not carry over when you move to a new prerelease, and it does
   not move between backends.
-- Do not expect it to be faster or lighter than Compose.
+- We have published no speed, memory or battery comparison with Compose. Do not
+  assume it is faster or lighter.
 
 Read the [overview](docs/native/README.md), [try it](docs/native/try-it.md), or
 check [what works and known limits](docs/native/limits.md).
@@ -272,8 +280,8 @@ it gets the secret key from its own secret store. A slim image,
 
 The command-line tool is the supported product. The remote, gateway, node and
 dispatch commands and the macOS app in this repository are unsupported, and setup
-does not use them. A desktop app is in preview under `apps/desktop` and is not part
-of a release yet.
+does not use them. An unsupported desktop app preview lives under `apps/desktop`
+and is not part of a release yet.
 
 ## Documentation
 

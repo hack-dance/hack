@@ -7,6 +7,7 @@ import {
 } from "../child-environment.ts";
 import { isRecord } from "../guards.ts";
 import { createPrivateFileExclusive } from "../private-file.ts";
+import { subprocessSignalLabel } from "../subprocess-signal.ts";
 import { auditEnd } from "./audit.ts";
 import {
   dockerEnvFor,
@@ -437,7 +438,7 @@ async function superviseChild(opts: {
   const payload = endedPayload({
     stopping,
     exitCode,
-    signal: proc.signalCode ?? null,
+    signal: subprocessSignalLabel(proc.signalCode),
     truncated: capture.truncated,
     suppressed: opts.meta.capture === "metadata",
     backend: opts.meta.backend,

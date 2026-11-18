@@ -544,7 +544,12 @@ export function executeWithLog(opts: {
     }
     return {
       exitCode: proc.exitCode,
-      signal: proc.signalCode ?? null,
+      // Self-contained: the crash workflow relocates only this script and
+      // scripts/lib/bun-crash-classify.ts. Bun reports an unnamed signal by number.
+      signal:
+        typeof proc.signalCode === "number"
+          ? String(proc.signalCode)
+          : (proc.signalCode ?? null),
       output: await readFile(logPath, "utf8"),
       stoppedAtDeadline,
     };

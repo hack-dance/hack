@@ -1575,3 +1575,62 @@ bunTest(
     );
   }
 );
+
+bunTest(
+  "HACK-2330: a failed registry layer download names its host, attempts and closed reason",
+  () => {
+    const layer = (request: Record<string, unknown>) =>
+      nativeFailureDetail({
+        code: "registry_image",
+        message: "synthetic-private-transport-error",
+        network_request: request,
+      }).message;
+    const base = { version: 2, host: "registry.example.test", attempts: 3 };
+    expect(layer({ ...base, reason: "short_read" })).toBe(
+      "Registry layer download from registry.example.test failed after 3 attempt(s): the connection ended before the whole layer arrived."
+    );
+    expect(layer({ ...base, reason: "timeout" })).toBe(
+      "Registry layer download from registry.example.test failed after 3 attempt(s): the transfer timed out."
+    );
+    expect(layer({ ...base, reason: "digest_mismatch" })).toContain(
+      "did not match its digest."
+    );
+    expect(layer({ ...base, reason: "size_mismatch" })).toContain(
+      "did not match its size."
+    );
+    expect(layer({ ...base, attempts: 2, reason: "deadline" })).toBe(
+      "Registry layer download from registry.example.test failed after 2 attempt(s): the 360-second image deadline was reached."
+    );
+    expect(layer({ ...base, reason: "http_status", status: 502 })).toBe(
+      "Registry layer download from registry.example.test failed after 3 attempt(s): the registry answered HTTP 502."
+    );
+    // Anything outside the closed shape renders nothing, never the runtime text.
+    for (const request of [
+      { ...base, reason: "connection reset by peer" },
+      { ...base, reason: "toString" },
+      { ...base, reason: "http_status" },
+      { ...base, reason: "http_status", status: 700 },
+      { ...base, reason: "http_status", status: "502" },
+      { ...base, reason: "timeout", status: 502 },
+      { ...base, reason: "timeout", extra: "secret" },
+      { ...base, version: 1, reason: "timeout" },
+      { ...base, version: 3, reason: "timeout" },
+      { ...base, attempts: 4, reason: "timeout" },
+      {
+        ...base,
+        host: "https://user:secret@example.test/v2?x",
+        reason: "timeout",
+      },
+      { version: 2, host: "registry.example.test", attempts: 3 },
+    ]) {
+      expect(layer(request)).toBeUndefined();
+    }
+    // Version 2 belongs to registry layer downloads only.
+    expect(
+      nativeFailureDetail({
+        code: "setup_download",
+        network_request: { ...base, reason: "timeout" },
+      }).message
+    ).toBeUndefined();
+  }
+);

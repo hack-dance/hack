@@ -3238,6 +3238,11 @@ The mode is part of the reviewed plan. Restart and restored `up` reuse a service
 retained image only when the retained graph recorded the same mode for it; after a mode
 change the service's image is selected again under the new mode.
 
+Each container whose image is linux/amd64 gets the guest's Rosetta 2 runtime bound
+read-only at `/mnt/rosetta`: the translation wrapper starts the translator from that
+path inside the container. A service that mounts anything at `/mnt/rosetta` itself
+refuses with `graph_rosetta_mount`.
+
 Emulated services are slower than native ones and can behave differently from arm64
 builds. `hack doctor` on the native backend reports an `amd64 emulation` warning with
 the number of opted-in services in each mode (counts only, no service names), and
@@ -4241,12 +4246,20 @@ PATH after the environment is applied. A shell-form health check (`CMD-SHELL`
 or a string `test`) runs through the image's shell (`/bin/sh -c` by default), as
 Docker runs it. Stock images therefore need no absolute paths. What a wrapper
 still cannot run is an empty process, a health test that names no executable, a
-named (non-numeric) user, a stop signal other than SIGTERM, SIGINT, SIGQUIT or
+user name the image does not define, a stop signal other than SIGTERM, SIGINT, SIGQUIT or
 SIGKILL, and a volume target at `/`, `/run` or a reserved wrapper path. Native
 `up` refuses the Compose-declared cases before the VM starts, and the runtime
 checks settings inherited from the pinned image before reserving anything. Both
 name every refused service and field at once (for example
-`service db user (use a numeric UID or UID:GID)`). `hack doctor` on the native
+`service db user (use a numeric UID or UID:GID)`). A named user, from Compose `user:`
+or the image's `USER` (`postgres`, `app:staff`, `1000:staff`), is resolved from the
+pinned image's own `/etc/passwd` and `/etc/group` before any reservation: a bare name
+becomes its UID, so the engine still applies the image's groups, and `name:group`
+becomes `UID:GID`. IDs compare as numbers (`01000` is UID 1000). A bare name stays
+unresolved, and so is refused, when an earlier account has the same UID or an earlier
+entry's UID is not plain digits, because the engine would pick that other account and
+its groups. Account lines that start or end with whitespace other than ASCII also leave
+the name unresolved. `hack doctor` on the native
 backend reports the Compose-declared cases in its `native process wrappers`
 check, for every service native may wrap. Only profile-active services are
 checked by `up` and `restart`; a service behind an unselected profile never runs

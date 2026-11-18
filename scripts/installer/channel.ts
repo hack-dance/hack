@@ -148,6 +148,19 @@ interface Hooks {
 export class Channel {
   readonly root: string;
   readonly source: string;
+  /**
+   * What the validation inside `lock()` verified, per version: the directory
+   * and the receipt checksum it was verified against. An entry lets one
+   * launch skip a repeat of the same verification. It is dropped when the
+   * lock is released and by every later `validate()`, which each command
+   * that changes the channel starts with, and `run()` uses it only while the
+   * checksum is still the one in `state`. Validations outside `lock()` never
+   * fill it.
+   */
+  private lockVerified: Map<
+    string,
+    { readonly directory: string; readonly checksum: string }
+  > | null = null;
   state: State = {
     schema: "hack.prerelease-selection/v1",
     installed: {},
@@ -365,19 +378,22 @@ export class Channel {
           after.ino === opened.ino,
         "Manager lock changed."
       );
-      this.validate(managerUpgrade, receiptRoot);
+      this.lockVerified = this.validate(managerUpgrade, receiptRoot);
     } catch (error) {
       closeSync(fd);
       library.close();
       throw error;
     }
     return () => {
+      this.lockVerified = null;
       closeSync(fd);
       library.close();
     };
   }
   /** receiptRoot differs only while validating an uninstalled retained sibling. */
   validate(managerUpgrade = false, receiptRoot = this.root) {
+    // Whatever an earlier validation verified may be about to change.
+    this.lockVerified = null;
     const info = owned(this.root, true, 0o700);
     this.refuseLegacy();
     const pending = lexists(this.path(JOURNAL));
@@ -433,13 +449,20 @@ export class Channel {
       "Too many candidate versions."
     );
     const validated: Record<string, string> = Object.create(null);
+    const verified = new Map<
+      string,
+      { readonly directory: string; readonly checksum: string }
+    >();
     for (const [version, checksum] of Object.entries(installed)) {
       candidateVersion(version);
       requireThat(
         typeof checksum === "string" && SHA256.test(checksum),
         "Malformed receipt hash."
       );
-      this.verifyVersion(version, checksum);
+      verified.set(version, {
+        directory: this.verifyVersion(version, checksum),
+        checksum,
+      });
       validated[version] = checksum;
     }
     for (const key of ["selected", "previous"]) {
@@ -499,6 +522,7 @@ export class Channel {
       selected: state.selected as string | null,
       previous: state.previous as string | null,
     };
+    return verified;
   }
   verifyVersion(version: string, checksum: string) {
     const directory = this.path(`versions/${version}`);
@@ -1067,7 +1091,16 @@ export class Channel {
     }
     const checksum = this.state.installed[version];
     requireThat(checksum, "Missing selected receipt.");
-    const directory = this.verifyVersion(version, checksum);
+    // `lock()` hashed every file of this version against this receipt
+    // checksum, under the lock this launch still holds and with no change to
+    // the channel since. Hashing it again here would only repeat that read.
+    // Any other launch is verified now.
+    const verified = this.lockVerified?.get(version);
+    this.lockVerified?.delete(version);
+    const directory =
+      verified?.checksum === checksum
+        ? verified.directory
+        : this.verifyVersion(version, checksum);
     this.signatures(join(directory, "bundle"));
     const child = Bun.spawn(
       [

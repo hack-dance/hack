@@ -135,6 +135,7 @@ async function listJson(opts: {
       readonly key_state: string;
       readonly vars: ReadonlyArray<{
         readonly key: string;
+        readonly source?: string;
         readonly value?: unknown;
       }>;
     },
@@ -155,6 +156,10 @@ test(
     expect(json.key_state).toBe("ok");
     expect(json.vars.map((row) => row.key)).toEqual(["API_TOKEN"]);
     expect(json.vars[0]).not.toHaveProperty("value");
+    // `keychain` is the documented compatibility secret marker for YAML
+    // secrets (docs/versions/v5/reference/project-env-reports.md); where the
+    // value is really kept is `storage` (HACK-2329).
+    expect(json.vars[0]?.source).toBe("keychain");
   },
   CLI_TEST_TIMEOUT_MS
 );

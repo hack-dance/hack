@@ -102,6 +102,13 @@ export function describeNativeProcessRefusals(
 
 const SIGNALS = new Set(["SIGTERM", "SIGINT", "SIGQUIT", "SIGKILL"]);
 const NUMERIC_USER = /^(\d{1,10})(?::(\d{1,10}))?$/;
+/**
+ * An account name in Docker's user grammar, alone or with a group (`postgres`,
+ * `app:staff`, `1000:staff`). The runtime resolves it from the pinned image's own
+ * account files and refuses a name the image does not define.
+ */
+const NAMED_USER =
+  /^(?:[A-Za-z_][A-Za-z0-9_.-]{0,31}|\d{1,10})(?::(?:[A-Za-z_][A-Za-z0-9_.-]{0,31}|\d{1,10}))?$/;
 const MAX_ID = 2_147_483_647;
 const ENVIRONMENT_RESERVED = ["/run/hack-environment"];
 const DEPENDENCY_RESERVED = [
@@ -133,8 +140,10 @@ function numericUser(value: unknown): boolean | undefined {
     return true;
   }
   const match = NUMERIC_USER.exec(user);
+  if (match === null) {
+    return NAMED_USER.test(user);
+  }
   return (
-    match !== null &&
     Number(match[1]) <= MAX_ID &&
     (match[2] === undefined || Number(match[2]) <= MAX_ID)
   );

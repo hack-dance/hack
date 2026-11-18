@@ -61,6 +61,7 @@ import {
   resolveDaemonAutostartAccess,
 } from "../daemon/client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
+import { diagnoseDaemonDirectory } from "../daemon/socket-permissions.ts";
 import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts";
 import {
   resolveSystemdUnitPath,
@@ -128,6 +129,10 @@ import {
   inspectProjectEnvKey,
   resolveEnvKeyCandidates,
 } from "../lib/doctor-env-key.ts";
+import {
+  checkEnvOverrideCoverage,
+  ENV_OVERRIDE_COVERAGE_CHECK,
+} from "../lib/doctor-env-override-coverage.ts";
 import {
   inspectHackDirGitignoreForDoctor,
   inspectTrackedGeneratedFiles,
@@ -627,6 +632,7 @@ const DOCTOR_SUMMARY_GROUPS = [
       "worktree instances",
       "generated files",
       HACK_GITIGNORE_CHECK,
+      ENV_OVERRIDE_COVERAGE_CHECK,
     ]),
   },
   {
@@ -2296,7 +2302,14 @@ async function checkDaemonStatus(): Promise<CheckResult> {
     }),
   });
 
-  return buildDoctorDaemonCheck({ report, candidate: isCandidateRun() });
+  return buildDoctorDaemonCheck({
+    report,
+    candidate: isCandidateRun(),
+    startRefusal:
+      report.status === "running"
+        ? null
+        : diagnoseDaemonDirectory({ root: paths.root }),
+  });
 }
 
 /** Retained gateway checks scan registered project configs, so a machine-only audit omits them. */
@@ -3904,6 +3917,14 @@ async function runProjectChecks(opts: {
   results.push(
     await runCheck(s, COMPOSE_ENV_AT_REST_CHECK, () =>
       checkComposeEnvOverrideAtRest({ startDir })
+    )
+  );
+  results.push(
+    await runCheck(
+      s,
+      ENV_OVERRIDE_COVERAGE_CHECK,
+      () => checkEnvOverrideCoverage({ startDir, dockerOk }),
+      { timeoutMs: 20_000 }
     )
   );
   results.push(

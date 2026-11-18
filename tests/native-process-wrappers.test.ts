@@ -53,6 +53,9 @@ test("stock images with relative entrypoints and health checks are wrappable", (
       },
       disabled: { image: "nginx", healthcheck: { disable: true, test: [] } },
       interpolated: { image: "nginx", user: "${APP_UID:-1000}" },
+      // Account names are resolved from the image by the runtime.
+      named: { image: "postgres", user: "postgres" },
+      group: { image: "postgres", user: "999:postgres" },
     })
   ).toEqual([]);
 });
@@ -66,8 +69,8 @@ test("Compose settings no wrapper can run are named by service and field", () =>
         slash: { image: "alpine", entrypoint: ["/"] },
         health: { image: "alpine", healthcheck: { test: ["CMD"] } },
         shell: { image: "alpine", healthcheck: { test: "" } },
-        named: { image: "postgres", user: "postgres" },
-        group: { image: "postgres", user: "999:postgres" },
+        named: { image: "postgres", user: "not a user" },
+        group: { image: "postgres", user: "999:" },
         signal: { image: "nginx", stop_signal: "SIGUSR1" },
         run: { image: "nginx", volumes: ["data:/run"] },
         launcher: {
@@ -99,8 +102,8 @@ test("Compose settings no wrapper can run are named by service and field", () =>
 
 test("only wrapped services and private-file owners are checked", () => {
   const services = {
-    plain: { image: "postgres", user: "postgres", entrypoint: [] },
-    files: { image: "postgres", user: "postgres", entrypoint: [] },
+    plain: { image: "postgres", user: "not a user", entrypoint: [] },
+    files: { image: "postgres", user: "not a user", entrypoint: [] },
   };
   expect(
     predictNativeProcessRefusals({
@@ -116,9 +119,9 @@ test("the up preflight refuses before runtime work, naming every service and fie
   try {
     requireWrappableNativeProcesses({
       services: {
-        db: { image: "postgres", user: "postgres" },
+        db: { image: "postgres", user: "not a user" },
         web: { image: "nginx", healthcheck: { test: ["CMD"] } },
-        idle: { image: "nginx", user: "nginx" },
+        idle: { image: "nginx", user: "not a user" },
       },
       profiles: [],
       managedEnvironment: { db: { PASSWORD: "synthetic" }, idle: {} },
@@ -168,20 +171,20 @@ test("the runtime refusal list is accepted only in its closed, bounded form", ()
 test("doctor predicts for every service when project-wide aliases exist", () => {
   const compose = {
     services: {
-      api: { image: "node", user: "node" },
+      api: { image: "node", user: "not a user" },
       gateway: {
         image: "nginx",
-        user: "nginx",
+        user: "not a user",
         extra_hosts: ["api.example.test:host-gateway"],
       },
       secret: {
         image: "postgres",
-        user: "postgres",
+        user: "not a user",
         environment: ["PASSWORD"],
       },
       literal: {
         image: "postgres",
-        user: "postgres",
+        user: "not a user",
         environment: { MODE: "dev" },
       },
     },
@@ -214,7 +217,7 @@ test("doctor predicts for every service when project-wide aliases exist", () => 
 test("only profile-active services can block the up preflight", () => {
   const services = {
     web: { image: "nginx" },
-    optional: { image: "postgres", user: "postgres", profiles: ["extra"] },
+    optional: { image: "postgres", user: "not a user", profiles: ["extra"] },
   };
   const opts = {
     services,
@@ -225,7 +228,9 @@ test("only profile-active services can block the up preflight", () => {
   requireWrappableNativeProcesses({ ...opts, profiles: ["other"] });
   expect(() =>
     requireWrappableNativeProcesses({ ...opts, profiles: ["extra"] })
-  ).toThrow("Refused: service optional user (use a numeric UID or UID:GID).");
+  ).toThrow(
+    "Refused: service optional user (use a numeric UID or UID:GID)."
+  );
   // An empty profiles list always runs, like Compose.
   expect(() =>
     requireWrappableNativeProcesses({
@@ -242,7 +247,7 @@ test("doctor reports profile-gated services as information, never as a warning",
       web: { image: "nginx", environment: ["TOKEN"] },
       optional: {
         image: "postgres",
-        user: "postgres",
+        user: "not a user",
         environment: ["PASSWORD"],
         profiles: ["extra"],
       },
@@ -264,7 +269,7 @@ test("doctor reports profile-gated services as information, never as a warning",
     compose: {
       services: {
         ...compose.services,
-        web: { ...compose.services.web, user: "nginx" },
+        web: { ...compose.services.web, user: "not a user" },
       },
     },
     projectWideAliases: false,

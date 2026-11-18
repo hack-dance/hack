@@ -193,7 +193,11 @@ export function pathWithoutHack(
   const kept: string[] = [];
   const dropped: string[] = [];
   for (const entry of path.split(":")) {
-    if (entry !== "" && isExecutable(join(entry, "hack"))) {
+    // An empty entry means the current directory: never keep it.
+    if (entry === "") {
+      continue;
+    }
+    if (isExecutable(join(entry, "hack"))) {
       dropped.push(entry);
     } else {
       kept.push(entry);
@@ -376,6 +380,7 @@ function firstError(ran: Ran): string {
 }
 
 const GLOBAL_PROJECTS = ["hack-dev-proxy", "hack-logging"] as const;
+const REQUIRED_TOOLS = ["docker", "curl", "sh", "grep", "pgrep"] as const;
 
 async function preflight(run: FirstRun): Promise<boolean> {
   if (process.platform !== "linux") {
@@ -412,6 +417,19 @@ async function preflight(run: FirstRun): Promise<boolean> {
       exit: null,
       result: "fail",
       note: `precondition: ${unsafe.join(", ")} writable by other users; hackd would refuse a HOME below it. Use a scratch directory under private directories`,
+    });
+    return false;
+  }
+  const missing = REQUIRED_TOOLS.filter(
+    (tool) => Bun.which(tool, { PATH: run.env.PATH ?? "" }) === null
+  );
+  if (missing.length > 0) {
+    run.record({
+      step: "0 preflight",
+      command: "which <tools>",
+      exit: null,
+      result: "fail",
+      note: `precondition: ${missing.join(", ")} not on PATH${run.droppedPath.length > 0 ? ` after dropping ${run.droppedPath.join(", ")} (they hold a hack)` : ""}; install them or move the other hack out of those directories`,
     });
     return false;
   }
@@ -792,6 +810,8 @@ async function envFlow(run: FirstRun): Promise<void> {
     }),
     { display: "hack host exec -- sh -c <compare>" }
   );
+  // The throwaway secret is not kept once the comparisons are done.
+  await rm(expectedFile, { force: true });
 }
 
 async function branchFlow(run: FirstRun, ca: string): Promise<void> {

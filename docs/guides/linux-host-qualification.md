@@ -424,16 +424,16 @@ Ctrl-C in a pty, the daemon, the update check and `native setup`. It prints a
 Markdown table (step, command, exit, seconds, result, note), writes it to
 `<scratch>/report.md`, and exits 0 only when no step failed.
 
-The fixture's one-shot service sleeps 150 seconds by default
-(`--one-shot-seconds`); the check raises the Compose startup budget to fit.
-Like the isolated-home preflight, it refuses when containers or volumes of
-`hack-dev-proxy` or `hack-logging`, or the `hack-dev` network, already exist,
-because `HOME` does not isolate them; `--reuse-global-stack` overrides that only
-for an operator who owns them. It removes only its own `lq-<id>` project
-resources. It stops the global stack only when none of its containers existed
-before, and removes the stack's labeled volumes only when none of them existed
-either. It drops PATH entries that hold a `hack`, so the CLI under test
-never re-invokes an installed one, and refuses a scratch directory below a
-directory other users can write (hackd would refuse that HOME). Linux DNS and system trust stay root steps: the table
-records the codes Hack reports for them. This is not a pass of the runbook
-above.
+The fixture's one-shot service sleeps 150 seconds by default (`--one-shot-
+seconds`); the check raises the Compose startup budget to fit. Like the
+isolated-home preflight, it refuses when containers or volumes of `hack-dev-
+proxy` or `hack-logging`, or the `hack-dev` network, already exist, because
+`HOME` does not isolate them; `--reuse-global-stack` overrides that only for an
+operator who owns them. It removes only its own `lq-<id>` project resources. It
+stops the global stack only when none of its containers existed before, and
+removes the stack's labeled volumes only when none of them existed either. It
+drops PATH entries that hold a `hack`, so the CLI under test never re-invokes an
+installed one, and refuses a scratch directory below a directory other users can
+write (hackd would refuse that HOME). Linux DNS and system trust stay root
+steps: the table records the codes Hack reports for them. This is not a pass of
+the runbook above.

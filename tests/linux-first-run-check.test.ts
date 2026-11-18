@@ -76,7 +76,7 @@ test("drops PATH entries that hold a hack so the CLI under test is the one re-in
         file.endsWith("/opt/hack/bin/hack") || file.endsWith("/.hack/bin/hack")
     )
   ).toEqual({
-    path: "/usr/bin:",
+    path: "/usr/bin",
     dropped: ["/opt/hack/bin", "/home/u/.hack/bin"],
   });
 });
@@ -88,13 +88,18 @@ test("reports scratch ancestors other users can write, ignoring sticky ones", as
   const root = await mkdtemp(join(tmpdir(), "hack-frc-"));
   try {
     const shared = join(root, "shared");
-    await mkdir(join(shared, "scratch"), { recursive: true });
+    const sticky = join(shared, "sticky");
+    await mkdir(join(sticky, "scratch"), { recursive: true });
     await chmod(root, 0o700);
     await chmod(shared, 0o775);
-    const found = groupWritableAncestors(join(shared, "scratch", "new"));
-    expect(found).toContain(shared);
-    // /tmp is sticky and world-writable: not reported.
-    expect(found).not.toContain(tmpdir());
+    await chmod(sticky, 0o1777);
+    await chmod(join(sticky, "scratch"), 0o700);
+    // Only paths at or below the test root are asserted: what lies above it
+    // depends on the runner's TMPDIR.
+    const found = groupWritableAncestors(join(sticky, "scratch", "new")).filter(
+      (dir) => dir === root || dir.startsWith(`${root}/`)
+    );
+    expect(found).toEqual([shared]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

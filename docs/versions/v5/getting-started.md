@@ -100,15 +100,75 @@ the older suffix. Follow the hint: use the same Compose-selected v5 CLI to run
 `hack config set dev_host <name>.<suffix>`. Review host-change prompts.
 See [the DNS troubleshooting row](troubleshooting.md).
 
-A first start can take minutes: images build or pull (up to 30 minutes), and
-one-shot services such as migrations run before the services that wait on them
-(`service_completed_successfully`). On Compose, `up -d` keeps waiting while a
-one-shot runs, up to 30 minutes in all; raise that with
-`HACK_COMPOSE_STARTUP_CEILING_MS` or `compose.startupCeilingMs` in
-`.hack/hack.config.json`. If it stops while a one-shot still runs, the error
-names it: do not run `restart` or `down` then, which would interrupt it. Wait
-until `hack ps` shows it exited and run `hack up -d` again. The native backend
-keeps a plain start budget, `HACK_COMPOSE_STARTUP_TIMEOUT_MS`.
+### How long a first start takes
+
+A first start can take minutes. Later starts are faster, because the images
+exist and the database is already migrated. `hack up -d` runs in two phases, and
+each phase has its own time limit:
+
+| Phase | What happens | Limit | Raise it with |
+| --- | --- | --- | --- |
+| Images | Build or pull images, create containers | 30 minutes | `HACK_COMPOSE_IMAGE_TIMEOUT_MS` |
+| Start | Start containers, wait on `depends_on` | 90 seconds without progress | `HACK_COMPOSE_STARTUP_TIMEOUT_MS` |
+| Start, while a one-shot runs | The same phase, counted as a whole | 30 minutes in all | `HACK_COMPOSE_STARTUP_CEILING_MS` |
+
+A **one-shot** is a service that runs once and exits, such as a migration or a
+seed job. Another service waits for it with
+`depends_on: <name>: condition: service_completed_successfully`. While a one-shot
+runs, the start is making progress, so the 90 seconds do not count down. The
+30-minute ceiling limits the whole start phase. A one-shot that keeps restarting
+is not progress.
+
+```mermaid
+---
+title: Detached start with a migration
+---
+sequenceDiagram
+  participant You
+  participant Hack
+  participant Migrate as migrate (one-shot)
+  participant Web as web
+  You->>Hack: hack up -d
+  Hack->>Hack: Build or pull images
+  Hack->>Migrate: Start
+  Note over Hack,Migrate: Budget paused, ceiling runs
+  Migrate-->>Hack: Exited 0
+  Hack->>Web: Start
+  Web-->>Hack: Running
+  Hack-->>You: Project started
+```
+
+Set the limits for one command on the host, or for the project in
+`.hack/hack.config.json`. A host variable wins over the project setting. Values
+are milliseconds.
+
+```sh
+# Migrations that can run longer than 30 minutes
+HACK_COMPOSE_STARTUP_CEILING_MS=3600000 hack up -d
+# A service that is slow to become healthy
+HACK_COMPOSE_STARTUP_TIMEOUT_MS=300000 hack up -d
+```
+
+```json
+{ "compose": { "startupTimeoutMs": 180000, "startupCeilingMs": 3600000 } }
+```
+
+If the start stops at the ceiling while a one-shot still runs, the
+`E_STARTUP_TIMEOUT` error names that service. The one-shot keeps running, but
+nothing starts the services that wait on it. Do this:
+
+1. Run `hack ps`. Waiting services show `created (waiting for <service>)`.
+2. Wait until the one-shot shows `exited`.
+3. Run `hack up -d` again.
+
+Do not run `hack restart` or `hack down` while a one-shot runs. Both stop it
+mid-run, and a half-applied migration is hard to repair. In a terminal, they ask
+first and the default answer is no. With `--json` or `--no-interactive` they go
+on, and report the service in `data.interrupted` and `data.warnings`.
+
+These limits apply to detached Compose starts. Foreground `hack up` has no start
+limit. The native backend keeps a plain start budget,
+`HACK_COMPOSE_STARTUP_TIMEOUT_MS`, with no one-shot ceiling.
 
 A failed startup prints a reason. Read it before retrying; use
 [troubleshooting](troubleshooting.md) and `hack doctor` for setup problems.

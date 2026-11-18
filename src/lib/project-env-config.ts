@@ -4987,7 +4987,15 @@ async function readProjectEnvStateFile(opts: {
   if (text === null) {
     return { ok: false, error: "file missing" };
   }
+  return parseProjectEnvStateText(text);
+}
 
+/** Parse state file text read by the caller. */
+function parseProjectEnvStateText(
+  text: string
+):
+  | { readonly ok: true; readonly state: ProjectEnvStateFile }
+  | { readonly ok: false; readonly error: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text) as unknown;
@@ -10186,18 +10194,31 @@ export async function classifyMaterializedDotenv(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly serviceNames: readonly string[];
+  /**
+   * Texts the caller already read safely; when given, neither file is
+   * opened again (native start reads them with its own bounded reader).
+   */
+  readonly snapshots?: { readonly dotenv: string; readonly state: string };
 }): Promise<"absent" | "current" | "differs" | "unknown"> {
   const statePath = resolveProjectEnvStatePath({ projectDir: opts.projectDir });
-  const read = await readOptionalTextFile(
-    resolve(opts.projectDir, PROJECT_ENV_FILENAME)
-  );
-  if (
-    read.kind !== "text" ||
-    (await readOptionalTextFile(statePath)).kind === "absent"
-  ) {
-    return "absent";
+  let text: string;
+  if (opts.snapshots) {
+    text = opts.snapshots.dotenv;
+  } else {
+    const read = await readOptionalTextFile(
+      resolve(opts.projectDir, PROJECT_ENV_FILENAME)
+    );
+    if (
+      read.kind !== "text" ||
+      (await readOptionalTextFile(statePath)).kind === "absent"
+    ) {
+      return "absent";
+    }
+    text = read.text;
   }
-  const stateRead = await readProjectEnvStateFile({ statePath });
+  const stateRead = opts.snapshots
+    ? parseProjectEnvStateText(opts.snapshots.state)
+    : await readProjectEnvStateFile({ statePath });
   const resolved = await resolveProjectEnvConfig({
     projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,
@@ -10216,7 +10237,7 @@ export async function classifyMaterializedDotenv(opts: {
       scopeName: stateRead.state.selectedService,
     })
   );
-  return generated === read.text ? "current" : "differs";
+  return generated === text ? "current" : "differs";
 }
 
 /**

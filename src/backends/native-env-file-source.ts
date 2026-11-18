@@ -92,19 +92,6 @@ function safeFile(info: Stats): boolean {
   );
 }
 
-/**
- * Whether a path, not followed, is a file native would admit as an env input:
- * an owned single-link regular file within the size limit. Reads no content,
- * so a FIFO or an oversized file is never opened.
- */
-export async function nativeEnvFileAdmissible(path: string): Promise<boolean> {
-  try {
-    return safeFile(await lstat(path));
-  } catch {
-    return false;
-  }
-}
-
 async function readStableBytes(opts: {
   readonly path: string;
   readonly observed: Stats;
@@ -138,6 +125,31 @@ async function readStableBytes(opts: {
     return buffer.subarray(0, size);
   } finally {
     await file.close();
+  }
+}
+
+/**
+ * One stable snapshot of a file native would admit as an env input (an owned
+ * single-link regular file within the size limit), read without following
+ * links, without blocking, and refused if it changes; `null` otherwise. A FIFO
+ * or a file replaced after the check is never read.
+ */
+export async function readNativeEnvFileSnapshot(
+  path: string
+): Promise<string | null> {
+  try {
+    const observed = await lstat(path);
+    if (!safeFile(observed)) {
+      return null;
+    }
+    const bytes = await readStableBytes({
+      path,
+      observed,
+      refusal: () => new Error("changed"),
+    });
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
   }
 }
 

@@ -15,8 +15,8 @@ import {
 import { requireNativeEnvBuildSeparation } from "./native-env-build-context.ts";
 import {
   NativeEnvFileRefusal,
-  nativeEnvFileAdmissible,
   nativeEnvFileSourceLocation,
+  readNativeEnvFileSnapshot,
   readNativeEnvFileSource,
 } from "./native-env-file-source.ts";
 import {
@@ -363,17 +363,19 @@ async function materializedDotenvReason(opts: {
   const remove = `rm ${dotenv} ${dotenv}.state.json`;
   let state: Awaited<ReturnType<typeof classifyMaterializedDotenv>> = "unknown";
   try {
-    // Compare only files native would admit, so nothing unsafe is read.
-    const admissible =
-      (await nativeEnvFileAdmissible(opts.automatic)) &&
-      (await nativeEnvFileAdmissible(`${opts.automatic}.state.json`));
-    if (!admissible) {
+    // Compare one admitted, stable snapshot of each file; never reopen them.
+    const dotenvText = await readNativeEnvFileSnapshot(opts.automatic);
+    const stateText = await readNativeEnvFileSnapshot(
+      `${opts.automatic}.state.json`
+    );
+    if (dotenvText === null || stateText === null) {
       throw new Error("not compared");
     }
     state = await classifyMaterializedDotenv({
       projectRoot: opts.opts.projectRoot,
       projectDir: dirname(opts.automatic),
       serviceNames: Object.keys(opts.opts.services),
+      snapshots: { dotenv: dotenvText, state: stateText },
     });
   } catch {
     state = "unknown";

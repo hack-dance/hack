@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { adaptNativeAwsEnvironment } from "../src/backends/native-aws-environment.ts";
+import { readNativeEnvFileSnapshot } from "../src/backends/native-env-file-source.ts";
 import { adaptNativeGcloudEnvironment } from "../src/backends/native-gcloud-environment.ts";
 import { nativePrivateEnvironmentPayload } from "../src/backends/native-private-environment-payload.ts";
 import {
@@ -28,6 +29,7 @@ import {
 } from "../src/backends/native-project-input.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../src/lib/native-environment-notices.ts";
 import {
+  classifyMaterializedDotenv,
   materializeProjectEnv,
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
@@ -1181,6 +1183,42 @@ test("HACK-2324: an unsafe materialized dotenv is not read for the comparison", 
     await prepareNativeProjectInput(f).catch((caught: unknown) => caught)
   );
   expect(large).toContain("cannot be compared");
+});
+
+test("HACK-2324: the materialized dotenv comparison uses one stable snapshot and never reopens the files", async () => {
+  const f = await fixture({ env_file: ".env" });
+  await managed(f.projectDir, { global: { FLAG: "on" } });
+  await materializeProjectEnv({
+    projectRoot: f.projectRoot,
+    projectDir: f.projectDir,
+    envName: null,
+    serviceName: null,
+    serviceNames: ["app"],
+  });
+  const dotenv = await readNativeEnvFileSnapshot(join(f.projectDir, ".env"));
+  const state = await readNativeEnvFileSnapshot(
+    join(f.projectDir, ".env.state.json")
+  );
+  expect(dotenv).not.toBeNull();
+  expect(state).not.toBeNull();
+  // Replace both paths with FIFOs: any reopen would block this test.
+  for (const name of [".env", ".env.state.json"]) {
+    await rm(join(f.projectDir, name));
+    expect(Bun.spawnSync(["mkfifo", join(f.projectDir, name)]).exitCode).toBe(
+      0
+    );
+  }
+  expect(
+    await readNativeEnvFileSnapshot(join(f.projectDir, ".env"))
+  ).toBeNull();
+  expect(
+    await classifyMaterializedDotenv({
+      projectRoot: f.projectRoot,
+      projectDir: f.projectDir,
+      serviceNames: ["app"],
+      snapshots: { dotenv: dotenv ?? "", state: state ?? "" },
+    })
+  ).toBe("current");
 });
 
 test("materialized dotenv identity aliases are refused before source reading", async () => {

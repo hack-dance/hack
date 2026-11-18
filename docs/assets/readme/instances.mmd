@@ -1,0 +1,25 @@
+---
+title: One repo, three running copies
+---
+flowchart LR
+  subgraph checkouts["Git checkouts"]
+    main["Main checkout"]
+    wt1["Worktree fix-login"]
+    wt2["Worktree try-cache"]
+  end
+  subgraph instances["Hack instances"]
+    i0["myapp: web, api, db"]
+    i1["fix-login: web, api, db"]
+    i2["try-cache: web, api, db"]
+  end
+  subgraph urls["HTTPS addresses"]
+    u0["myapp.hack.local"]
+    u1["fix-login.myapp.hack.local"]
+    u2["try-cache.myapp.hack.local"]
+  end
+  main -->|hack up| i0
+  wt1 -->|hack up| i1
+  wt2 -->|hack up| i2
+  i0 --> u0
+  i1 --> u1
+  i2 --> u2

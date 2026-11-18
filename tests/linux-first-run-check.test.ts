@@ -38,6 +38,26 @@ test("requires absolute --hack and --scratch and a bounded one-shot", () => {
       "0",
     ])
   ).toThrow("1..1500");
+  expect(() =>
+    parseCheckArgs([
+      "--hack",
+      "/x",
+      "--scratch",
+      "/s",
+      "--one-shot-seconds",
+      "1501",
+    ])
+  ).toThrow("1..1500");
+  expect(
+    parseCheckArgs([
+      "--hack",
+      "/x",
+      "--scratch",
+      "/s",
+      "--one-shot-seconds",
+      "1500",
+    ]).oneShotSeconds
+  ).toBe(1500);
   expect(() => parseCheckArgs(["--sudo"])).toThrow("Unknown argument");
 });
 

@@ -466,6 +466,11 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
       "The service declares a route, which needs native HTTPS to be set up.",
     fix: "Set up native HTTPS (see the guide). A route without an authored healthcheck gets a default route-port probe.",
   },
+  route_command_healthcheck_replaced: {
+    message:
+      "The routed service's command healthcheck is not run on native: route readiness is an HTTP probe. Native sends GET / to the route port; a complete HTTP 200-499 response counts as ready, 5xx and timeouts do not.",
+    fix: "Nothing to do if GET / answers. To probe a real health path, replace the healthcheck with healthcheck.x-hack-http, for example {port: <route port>, path: /health, interval_ms: 30000, timeout_ms: 1000, retries: 3, start_period_ms: 240000} (all six fields are required).",
+  },
   inferred_route_probe: {
     message:
       "Native checks TCP and HTTP on the route port because no healthcheck was authored. HTTP 2xx-4xx counts as ready; 5xx does not.",

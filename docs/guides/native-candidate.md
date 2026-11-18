@@ -2452,8 +2452,14 @@ an existing pool or guarantee that enough slots are currently free.
 Each routed service needs a matching native route probe (see
 [Native HTTP readiness probe](#native-http-readiness-probe)). If no `healthcheck`
 key was authored, native infers one on the reviewed Caddy route port without
-changing the Compose file. Explicit healthchecks are never replaced; command-only
-or disabled checks on routed services still refuse in this increment. Native review still validates
+changing the Compose file. A routed service with a command healthcheck (`CMD` or
+`CMD-SHELL`) uses the same inferred probe instead: a command check cannot establish
+route readiness, and native never runs an engine check beside an HTTP probe. The
+review reports `route_command_healthcheck_replaced`. As with any inferred route
+probe, a dependent with `condition: service_healthy` on that service still refuses
+(`missing_healthcheck`); `service_started` works. Declare `healthcheck.x-hack-http`
+to probe a specific path. A disabled healthcheck on a routed service still refuses.
+An `x-hack-http` healthcheck is never replaced. Native review still validates
 hostnames, ports, networks and labels. Foreground graph ownership supervises and
 retires Unix route publishers. Without explicit HTTPS selection, this enrollment does not start a hostname authority
 or Caddy HTTPS server. It never installs trust, configures DNS, or widens an existing pool.
@@ -3289,7 +3295,7 @@ the machine settings path with your home shown as `~`. With `--json`, the check'
 | --- | --- |
 | `shared_source_not_granted` | Native `up` and `restart` refuse until the project share is granted. |
 | `internal_dns_tls_not_applied` | `internal.dns` and `internal.tls` in `hack.config.json` are not applied on native, so containers cannot reach routes by their HTTPS names. Set both to `false` to silence it. |
-| `routes_without_probes` | `routesWithoutProbes` routed services have no native HTTP probe after the adaptation for the default env; native `up` refuses them. |
+| `routes_without_probes` | `routesWithoutProbes` routed services have a disabled or timing-only healthcheck after the adaptation for the default env; native `up` refuses them. A routed service with no healthcheck or a command healthcheck gets the inferred route probe and is not counted. |
 | `compose_profiles_ignored` | `COMPOSE_PROFILES` is set in the environment, but native selects profiles only from `--profile`. Managed `COMPOSE_PROFILES` values are not inspected. |
 | `aws_region_without_profile` | `HACK_NATIVE_AWS_REGION` is set without `HACK_NATIVE_AWS_PROFILE` and is ignored. |
 | `unread_project_settings_files` | `.hack/native/` holds files other than `adaptation*.json`; Hack does not read them. |

@@ -20,8 +20,9 @@
  * refuses when they already exist, unless `--reuse-global-stack` says the
  * operator owns them; existing volumes of those projects count too, since they
  * hold the operator's state (Caddy's CA). It removes only what it created: its
- * `lq-<id>` project containers, networks and volumes, and the global stack with
- * its labeled volumes when none of them existed before. PATH entries holding a
+ * `lq-<id>` project containers, networks and volumes; it stops the global
+ * stack when none of its containers existed before, and removes its labeled
+ * volumes when none of those existed either. PATH entries holding a
  * `hack` are dropped, so re-invocations run the CLI under test.
  *
  * Root steps (Linux DNS, system trust) are never run; the check records the
@@ -249,7 +250,10 @@ class FirstRun {
   readonly env: Record<string, string>;
   /** PATH entries removed because they hold a `hack` (see pathWithoutHack). */
   readonly droppedPath: readonly string[];
+  /** No global container existed before: `global down` at the end. */
   startedGlobalStack = false;
+  /** No global volume existed before: remove those volumes at the end. */
+  ownsGlobalVolumes = false;
 
   readonly opts: CheckOptions;
 
@@ -412,13 +416,14 @@ async function preflight(run: FirstRun): Promise<boolean> {
     return false;
   }
   const shared: string[] = [];
-  let sharedState = false;
+  let containersExisted = false;
+  let volumesExisted = false;
   for (const project of GLOBAL_PROJECTS) {
     const label = `label=com.docker.compose.project=${project}`;
     const ids = await run.sh(["docker", "ps", "-aq", "--filter", label]);
     if (ids.stdout.trim() !== "") {
       shared.push(`Compose project ${project}`);
-      sharedState = true;
+      containersExisted = true;
     }
     // Kept volumes hold the operator's state, such as Caddy's CA and key.
     const volumes = await run.sh([
@@ -431,7 +436,7 @@ async function preflight(run: FirstRun): Promise<boolean> {
     ]);
     if (volumes.stdout.trim() !== "") {
       shared.push(`${project} volumes`);
-      sharedState = true;
+      volumesExisted = true;
     }
   }
   if ((await run.sh(["docker", "network", "inspect", "hack-dev"])).exit === 0) {
@@ -447,9 +452,11 @@ async function preflight(run: FirstRun): Promise<boolean> {
     });
     return false;
   }
-  // Remove the global stack and its volumes at the end only if none of its
-  // containers or volumes existed before.
-  run.startedGlobalStack = !sharedState;
+  // Stop the global containers at the end only if none existed before, and
+  // remove the global volumes only if none existed before (a reused volume,
+  // such as Caddy's CA, stays).
+  run.startedGlobalStack = !containersExisted;
+  run.ownsGlobalVolumes = !volumesExisted;
   run.record({
     step: "0 preflight",
     command: "docker info",
@@ -982,9 +989,11 @@ async function cleanup(run: FirstRun): Promise<void> {
     }
   }
   if (run.startedGlobalStack) {
+    await run.hack(["global", "down"], { timeoutMs: 120_000 });
+  }
+  if (run.startedGlobalStack && run.ownsGlobalVolumes) {
     // `global down` keeps named volumes; the check created them, so it
     // removes them (only these projects' labeled volumes).
-    await run.hack(["global", "down"], { timeoutMs: 120_000 });
     for (const project of GLOBAL_PROJECTS) {
       const label = `label=com.docker.compose.project=${project}`;
       const names = (
@@ -1006,7 +1015,7 @@ async function cleanup(run: FirstRun): Promise<void> {
     command: "hack down; docker rm/volume rm (own labels); hack global down",
     exit: null,
     result: "info",
-    note: `removed ${removed.length} volumes/networks it created; global stack ${run.startedGlobalStack ? "stopped and its volumes removed" : "left as found"}; ~/.hack holds ${left.length} entries${run.opts.keep ? " (kept)" : ""}`,
+    note: `removed ${removed.length} volumes/networks it created; global stack ${run.startedGlobalStack ? "stopped" : "left as found"}${run.startedGlobalStack && run.ownsGlobalVolumes ? " and its volumes removed" : ""}; ~/.hack holds ${left.length} entries${run.opts.keep ? " (kept)" : ""}`,
   });
   if (!run.opts.keep) {
     await rm(run.home, { recursive: true, force: true });

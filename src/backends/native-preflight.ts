@@ -481,7 +481,7 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
   },
   hack_network_mapped: {
     message:
-      "Hack's shared hack-dev network becomes a bridge this project owns on native, so containers of other projects are not reachable by name; routes are served separately.",
+      "Hack's shared Compose network becomes a bridge this native project owns, so containers of other projects are not reachable by name; routes are served separately.",
     fix: "Nothing to do, unless a service calls another project's containers by name: use that project's route instead.",
   },
   route_command_healthcheck_replaced: {

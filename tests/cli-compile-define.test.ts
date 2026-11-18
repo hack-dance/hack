@@ -41,21 +41,30 @@ function isComment(line: string): boolean {
  * array runs from its `"build"` element to its closing `]`; a shell,
  * Dockerfile or package.json command is its line plus `\`-continued lines.
  */
+function continuedLines(lines: readonly string[], index: number): string {
+  const continues = (at: number) => (lines[at] ?? "").trimEnd().endsWith("\\");
+  let start = index;
+  while (start > 0 && continues(start - 1)) {
+    start -= 1;
+  }
+  let end = index;
+  while (end < lines.length - 1 && continues(end)) {
+    end += 1;
+  }
+  return lines.slice(start, end + 1).join("\n");
+}
+
 function commandAt(opts: {
   readonly lines: readonly string[];
   readonly index: number;
   readonly typescript: boolean;
 }): string {
   const { lines, index } = opts;
-  if (!opts.typescript) {
-    let end = index;
-    while (
-      end < lines.length - 1 &&
-      (lines[end] ?? "").trimEnd().endsWith("\\")
-    ) {
-      end += 1;
-    }
-    return lines.slice(index, end + 1).join("\n");
+  const line = lines[index] ?? "";
+  // A shell, Dockerfile or package.json command, or a TypeScript command
+  // string: the line plus its `\`-continuations in both directions.
+  if (!opts.typescript || line.includes("bun build")) {
+    return continuedLines(lines, index);
   }
   let start = index;
   while (
@@ -63,6 +72,10 @@ function commandAt(opts: {
     !(lines[start] ?? "").includes('"build"')
   ) {
     start -= 1;
+  }
+  if (!(lines[start] ?? "").includes('"build"')) {
+    // No argv array found: judge the line alone, never a neighbour's argv.
+    return line;
   }
   let end = index;
   while (
@@ -73,7 +86,7 @@ function commandAt(opts: {
   }
   return lines
     .slice(start, end + 1)
-    .filter((line) => !isComment(line))
+    .filter((candidate) => !isComment(candidate))
     .join("\n");
 }
 
@@ -186,6 +199,26 @@ test("one compile's definition does not cover its neighbour", () => {
   expect(missingDefinitions({ path: "Dockerfile", text: continued })).toEqual({
     checked: 1,
     missing: [],
+  });
+
+  // The entry on the line before `--compile`, joined by a continuation.
+  const split = [
+    "  bun build index.ts \\",
+    "    --compile --outfile out/hack",
+  ].join("\n");
+  expect(missingDefinitions({ path: "build.sh", text: split })).toEqual({
+    checked: 1,
+    missing: ["build.sh:2"],
+  });
+
+  // A TypeScript command string is judged by its own line.
+  const template = [
+    "await $`bun build index.ts --compile --define 'process.env.OPENTUI_LIBC=\"glibc\"' --outfile a`;",
+    "await $`bun build index.ts --compile --outfile b`;",
+  ].join("\n");
+  expect(missingDefinitions({ path: "build.ts", text: template })).toEqual({
+    checked: 2,
+    missing: ["build.ts:2"],
   });
 });
 

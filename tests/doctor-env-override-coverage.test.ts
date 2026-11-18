@@ -12,7 +12,9 @@ import {
   ENV_OVERRIDE_COVERAGE_CHECK,
   envOverrideCoverageCheck,
   inspectEnvOverrideCoverage,
+  recordedSelection,
   runningComposeServices,
+  runningGraphInstances,
 } from "../src/lib/doctor-env-override-coverage.ts";
 import { runFixtureGit } from "./helpers/fixture-git.ts";
 
@@ -219,4 +221,122 @@ test("host lifecycle processes and stopped containers are not expected", () => {
       ],
     })
   ).toEqual(["api"]);
+});
+
+test("the selection comes from what each running instance recorded", () => {
+  const state = [
+    { composeProject: "demo", envName: "staging" },
+    { composeProject: "demo--feature", envName: "staging" },
+    { composeProject: "demo--other", envName: null },
+  ];
+  expect(recordedSelection({ state, instances: ["demo"] })).toEqual({
+    envName: "staging",
+  });
+  expect(
+    recordedSelection({ state, instances: ["demo", "demo--feature"] })
+  ).toEqual({ envName: "staging" });
+  // A stored null is "no overlay", not the default selection.
+  expect(recordedSelection({ state, instances: ["demo--other"] })).toEqual({
+    envName: null,
+  });
+  // Disagreeing or unrecorded instances: the one file cannot be judged.
+  expect(
+    recordedSelection({ state, instances: ["demo", "demo--other"] })
+  ).toBeNull();
+  expect(recordedSelection({ state, instances: ["demo--new"] })).toBeNull();
+  // Nothing running and nothing recorded: the default selection.
+  expect(recordedSelection({ state: [], instances: [] })).toEqual({
+    envName: undefined,
+  });
+  // Without Docker every record counts.
+  expect(recordedSelection({ state, instances: null })).toBeNull();
+  expect(
+    recordedSelection({ state: state.slice(0, 2), instances: null })
+  ).toEqual({ envName: "staging" });
+});
+
+test("instances are the ones running a Compose service", () => {
+  expect(
+    runningGraphInstances({
+      graph: ["api"],
+      containers: [
+        { instance: "demo", service: "api", state: "running" },
+        { instance: "demo--x", service: "api", state: "exited" },
+        { instance: "demo--y", service: "dev-server", state: "running" },
+      ],
+    })
+  ).toEqual(["demo"]);
+});
+
+test("an instance started with an overlay is judged by that overlay", async () => {
+  const root = await fixture(
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      '    LOG_LEVEL: "synthetic-global"',
+      "",
+    ].join("\n")
+  );
+  try {
+    // The staging overlay removes web's only key.
+    await Bun.write(
+      join(root, ".hack/hack.env.staging.yaml"),
+      [
+        "version: 1",
+        "environment: staging",
+        "secretsprovider: project_key",
+        "values:",
+        "  web:",
+        "    LOG_LEVEL: null",
+        "",
+      ].join("\n")
+    );
+    await Bun.write(join(root, FILE), render(["api"]));
+    const state = join(root, ".hack/.internal/runtime-state.json");
+    await Bun.write(
+      state,
+      JSON.stringify({
+        entries: [
+          {
+            composeProject: "demo",
+            envName: "staging",
+            updatedAt: "2026-11-18T00:00:00.000Z",
+          },
+        ],
+      })
+    );
+    const staging = await checkEnvOverrideCoverage({
+      startDir: root,
+      dockerOk: false,
+    });
+    expect(staging.status).toBe("ok");
+    expect(staging.message).toContain(
+      "covers every Compose service with managed env"
+    );
+
+    // Recorded with the default selection, web does have managed env.
+    await Bun.write(
+      state,
+      JSON.stringify({
+        entries: [
+          {
+            composeProject: "demo",
+            envName: null,
+            updatedAt: "2026-11-18T00:00:00.000Z",
+          },
+        ],
+      })
+    );
+    const plain = await checkEnvOverrideCoverage({
+      startDir: root,
+      dockerOk: false,
+    });
+    expect(plain.status).toBe("warn");
+    expect(plain.message).toContain("has no entry for Compose service web");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -31,6 +31,7 @@ import { withProcessDeadline } from "./process-deadline.ts";
 import { findProjectContext } from "./project.ts";
 import { resolveProjectEnvMetadata } from "./project-env-config.ts";
 import { scopeRuntimeHygieneToProject } from "./project-runtime-hygiene.ts";
+import { readProjectRuntimeState } from "./project-runtime-state.ts";
 import { readProjectsRegistry } from "./projects-registry.ts";
 import { readRuntimeProjects } from "./runtime-projects.ts";
 
@@ -165,6 +166,8 @@ async function managedServices(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly serviceNames: readonly string[];
+  /** The selection the file was rendered for; undefined is the default. */
+  readonly envName: string | null | undefined;
 }): Promise<ReadonlySet<string> | null> {
   try {
     const metadata = await resolveProjectEnvMetadata(opts);
@@ -197,7 +200,12 @@ async function observeServiceStates(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
 }): Promise<
-  readonly { readonly service: string; readonly state: string }[] | null
+  | readonly {
+      readonly instance: string;
+      readonly service: string;
+      readonly state: string;
+    }[]
+  | null
 > {
   try {
     return await withProcessDeadline(
@@ -219,6 +227,7 @@ async function observeServiceStates(opts: {
         return scoped.runtime.flatMap((project) =>
           [...project.services.values()].flatMap((service) =>
             service.containers.map((container) => ({
+              instance: project.project,
               service: service.service,
               state: container.state,
             }))
@@ -229,6 +238,63 @@ async function observeServiceStates(opts: {
   } catch {
     return null;
   }
+}
+
+/** Instances with at least one running service of the Compose graph. */
+export function runningGraphInstances(opts: {
+  readonly graph: readonly string[];
+  readonly containers: readonly {
+    readonly instance: string;
+    readonly service: string;
+    readonly state: string;
+  }[];
+}): string[] {
+  const inGraph = new Set(opts.graph);
+  return [
+    ...new Set(
+      opts.containers
+        .filter(
+          (container) =>
+            container.state.toLowerCase() === "running" &&
+            inGraph.has(container.service)
+        )
+        .map((container) => container.instance)
+    ),
+  ].sort();
+}
+
+/**
+ * The env selection the shared override was rendered for, from the selection
+ * Hack records per instance (`runtime-state.json`), or null when it cannot be
+ * told: a running instance without a record, or instances that disagree (the
+ * one file can match only one of them). `instances` null (no Docker) uses
+ * every recorded entry the same way; with no record it is the default.
+ * `envName` undefined means the default selection; null means no overlay.
+ */
+export function recordedSelection(opts: {
+  readonly state: readonly {
+    readonly composeProject: string;
+    readonly envName: string | null;
+  }[];
+  readonly instances: readonly string[] | null;
+}): { readonly envName: string | null | undefined } | null {
+  const entries =
+    opts.instances === null
+      ? opts.state
+      : opts.instances.map((instance) =>
+          opts.state.find((entry) => entry.composeProject === instance)
+        );
+  if (entries.length === 0) {
+    return { envName: undefined };
+  }
+  if (entries.some((entry) => entry === undefined)) {
+    return null;
+  }
+  const names = new Set(entries.map((entry) => entry?.envName ?? null));
+  if (names.size !== 1) {
+    return null;
+  }
+  return { envName: [...names][0] ?? null };
 }
 
 /**
@@ -289,13 +355,24 @@ export async function checkEnvOverrideCoverage(opts: {
     : null;
   const expected =
     containers === null ? graph : runningComposeServices({ graph, containers });
-  const managed =
+  const selection =
     text === null
+      ? null
+      : recordedSelection({
+          state: await readProjectRuntimeState({ projectDir: ctx.projectDir }),
+          instances:
+            containers === null
+              ? null
+              : runningGraphInstances({ graph, containers }),
+        });
+  const managed =
+    selection === null
       ? null
       : await managedServices({
           projectRoot: ctx.projectRoot,
           projectDir: ctx.projectDir,
           serviceNames: graph,
+          envName: selection.envName,
         });
   return envOverrideCoverageCheck({
     coverage: inspectEnvOverrideCoverage({ text, expected, managed }),

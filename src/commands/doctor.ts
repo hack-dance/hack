@@ -4267,9 +4267,15 @@ async function runDoctorFix(opts: {
   const useStaticIps = ingressAfterFix.hasSubnet;
   // Rendered from settings, so replaced without a prompt (HACK-2328).
   const bind = await resolveManagedProxyBind({ path: paths.caddyCompose });
+  if (bind.saveError !== undefined) {
+    note(
+      `Kept the proxy on ${bind.bindAddress} from the existing proxy file, but could not save it as proxy.bind_address: ${bind.saveError}. Fix the global config, then run: hack config set --global proxy.bind_address ${bind.bindAddress}`,
+      "doctor"
+    );
+  }
   if (bind.migrated !== null) {
     note(
-      `Kept the proxy on ${bind.migrated} from the existing proxy file and saved it as proxy.bind_address. To publish on every interface: hack config set --global proxy.bind_address 0.0.0.0`,
+      `Kept the proxy on ${bind.migrated} from the existing proxy file and saved it as proxy.bind_address. To publish on every IPv4 interface: hack config set --global proxy.bind_address 0.0.0.0`,
       "doctor"
     );
   }

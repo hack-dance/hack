@@ -3,6 +3,7 @@ import {
   afterEach,
   beforeAll,
   beforeEach,
+  describe,
   expect,
   spyOn,
   test,
@@ -1375,3 +1376,76 @@ test(
   },
   { timeout: 20_000 }
 );
+
+describe("resolveManagedProxyBind (HACK-2328)", () => {
+  async function writeProxyFile(bind: string | null): Promise<string> {
+    const path = globalCaddyComposePath();
+    await mkdir(dirname(path), { recursive: true });
+    const { renderGlobalCaddyCompose } = await import("../src/templates.ts");
+    await writeFile(path, renderGlobalCaddyCompose({ bindAddress: bind }));
+    return path;
+  }
+
+  test("a configured address wins over the file", async () => {
+    const path = await writeProxyFile("127.0.0.1");
+    const configPath = resolveGlobalConfigPath();
+    await mkdir(dirname(configPath), { recursive: true });
+    await writeFile(
+      configPath,
+      `${JSON.stringify({ proxy: { bind_address: "::1" } })}\n`
+    );
+    const { resolveManagedProxyBind } = await import(
+      "../src/lib/managed-proxy-compose.ts"
+    );
+    expect(await resolveManagedProxyBind({ path })).toEqual({
+      bindAddress: "::1",
+      migrated: null,
+    });
+  });
+
+  test.each([
+    "0.0.0.0",
+    "::",
+  ])("a wildcard file (%s) is not migrated", async (bind) => {
+    const path = await writeProxyFile(bind);
+    const { resolveManagedProxyBind } = await import(
+      "../src/lib/managed-proxy-compose.ts"
+    );
+    expect(await resolveManagedProxyBind({ path })).toEqual({
+      bindAddress: null,
+      migrated: null,
+    });
+    expect(await Bun.file(resolveGlobalConfigPath()).exists()).toBe(false);
+  });
+
+  test("a bind Hack would not render falls back to the default", async () => {
+    const path = globalCaddyComposePath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(
+      path,
+      'services:\n  caddy:\n    ports:\n      - "localhost:443:443"\n'
+    );
+    const { resolveManagedProxyBind } = await import(
+      "../src/lib/managed-proxy-compose.ts"
+    );
+    expect(await resolveManagedProxyBind({ path })).toEqual({
+      bindAddress: null,
+      migrated: null,
+    });
+  });
+
+  test("an unsavable config still keeps the restricted address", async () => {
+    const path = await writeProxyFile("127.0.0.1");
+    const configPath = resolveGlobalConfigPath();
+    await mkdir(dirname(configPath), { recursive: true });
+    await writeFile(configPath, "{ not json");
+    const { resolveManagedProxyBind } = await import(
+      "../src/lib/managed-proxy-compose.ts"
+    );
+    const result = await resolveManagedProxyBind({ path });
+    expect(result.bindAddress).toBe("127.0.0.1");
+    expect(result.migrated).toBeNull();
+    expect(result.saveError).toBeString();
+    expect(await Bun.file(configPath).text()).toBe("{ not json");
+  });
+});

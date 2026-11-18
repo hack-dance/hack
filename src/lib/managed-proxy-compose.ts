@@ -56,8 +56,11 @@ const WILDCARD_BINDS: ReadonlySet<string> = new Set(["0.0.0.0", "::"]);
  * hand edit, or an older setup) must not be widened to every interface: that
  * would expose routes such as the unauthenticated Loki endpoint to LAN and
  * tunnel peers. Such an address is written into `proxy.bind_address`, so the
- * file, login autostart's check and `hack config get` agree on it. To publish
- * on every interface, set `proxy.bind_address` to 0.0.0.0.
+ * file, login autostart's check and `hack config get` agree on it. Only the
+ * 443 mapping is read, so a file with port 80 wider than 443 is narrowed to
+ * the 443 address for both ports (the safe direction). If the address cannot
+ * be saved (for example the global config is not valid JSON), the file is
+ * still rendered with it and `saveError` says why.
  */
 export async function resolveManagedProxyBind(opts: {
   readonly path: string;
@@ -65,6 +68,8 @@ export async function resolveManagedProxyBind(opts: {
   readonly bindAddress: string | null;
   /** The address moved from the file into config, or null. */
   readonly migrated: string | null;
+  /** Why the address could not be saved into config, or null. */
+  readonly saveError?: string;
 }> {
   const configured = await resolveProxyBindAddress();
   if (configured !== null) {
@@ -86,7 +91,16 @@ export async function resolveManagedProxyBind(opts: {
   if (WILDCARD_BINDS.has(address)) {
     return { bindAddress: null, migrated: null };
   }
-  await updateGlobalConfig({ path: PROXY_BIND_CONFIG_KEY, value: address });
+  try {
+    await updateGlobalConfig({ path: PROXY_BIND_CONFIG_KEY, value: address });
+  } catch (error: unknown) {
+    // Never widen: keep rendering the restricted address even unsaved.
+    return {
+      bindAddress: address,
+      migrated: null,
+      saveError: error instanceof Error ? error.message : String(error),
+    };
+  }
   return { bindAddress: address, migrated: address };
 }
 

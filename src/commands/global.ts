@@ -1227,9 +1227,14 @@ async function writeGlobalInstallAssets(opts: {
 }): Promise<void> {
   const defaultDomain = await resolveDefaultDomain();
   const bind = await resolveManagedProxyBind({ path: opts.paths.caddyCompose });
+  if (bind.saveError !== undefined) {
+    logger.warn({
+      message: `Kept the proxy on ${bind.bindAddress} from the existing proxy file, but could not save it as proxy.bind_address: ${bind.saveError}. Fix the global config, then run: hack config set --global proxy.bind_address ${bind.bindAddress}`,
+    });
+  }
   if (bind.migrated !== null) {
     logger.info({
-      message: `Kept the proxy on ${bind.migrated} from the existing proxy file and saved it as proxy.bind_address. To publish on every interface: hack config set --global proxy.bind_address 0.0.0.0`,
+      message: `Kept the proxy on ${bind.migrated} from the existing proxy file and saved it as proxy.bind_address. To publish on every IPv4 interface: hack config set --global proxy.bind_address 0.0.0.0`,
     });
   }
   await writeGlobalProxyCompose({

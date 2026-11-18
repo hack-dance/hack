@@ -21,7 +21,8 @@ Common settings:
 - `controlPlane.tui.logs.historyTailStep` (default `200`) — history page size.
 - `controlPlane.usage.watchIntervalMs` (default `2000`) — sample interval for `hack usage --watch`.
 - `controlPlane.usage.historySize` (default `24`) — sample history for `hack usage --watch`.
-- `proxy.bind_address` (default unset: every interface) — host address the global
+- `proxy.bind_address` (default unset: Docker's default, every IPv4 and IPv6
+  interface, for a new proxy file) — host address the global
   Caddy proxy publishes ports 80 and 443 on. Accepts one IPv4 or IPv6 address,
   such as `127.0.0.1` or `::1`. Set it when another program already listens on
   :443 on some address (a VPN client, for example) and the proxy fails to start.
@@ -36,7 +37,11 @@ Common settings:
   `docker-compose.yml.bak-<UTC time>` (or `-N` on a name clash) beside it
   before the rewrite. A file that publishes on one specific address while this
   setting is unset is never widened: that address is saved as
-  `proxy.bind_address` first. Set `0.0.0.0` to publish on every interface.
+  `proxy.bind_address` first, so unsetting the setting alone does not widen a
+  restricted proxy. `0.0.0.0` publishes on every IPv4 interface. To return to
+  Docker's default (IPv4 and IPv6), unset the setting and move
+  `~/.hack/caddy/docker-compose.yml` aside before `hack global install`; a
+  missing file is never migrated.
 
 When `hack global up` or `hack global install` cannot start the proxy, it lists
 the listeners holding ports 80 and 443 (address, process and pid when the OS

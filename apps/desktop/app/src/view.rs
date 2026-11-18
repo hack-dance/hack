@@ -389,6 +389,22 @@ impl HackApp {
         }));
     }
 
+    /// Once a minute: refresh an old Doctor or Setup result on screen.
+    pub(crate) fn minute_tick(&mut self, cx: &mut Context<Self>) {
+        if hack_desktop_core::setup::should_recheck_periodically(
+            self.pane == Pane::Setup,
+            self.window_visible,
+            &self.setup,
+            Instant::now(),
+        ) {
+            self.load_setup(cx);
+        }
+        if !self.maybe_auto_refresh(cx) && self.pane == Pane::Doctor && self.window_visible {
+            // Keep "Checked N min ago" current.
+            cx.notify();
+        }
+    }
+
     /// Back from the terminal after an admin step: check setup again while
     /// it is shown or a fix is outstanding.
     fn recheck_setup_on_return(&mut self, cx: &mut Context<Self>) {
@@ -402,22 +418,15 @@ impl HackApp {
         }
     }
 
-    /// While the Doctor pane is visible, refresh every 10 minutes.
+    /// While the Doctor or Setup pane is visible, check again every 10
+    /// minutes.
     fn start_doctor_refresh(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(60))
                     .await;
-                let alive = this.update(cx, |this, cx| {
-                    if !this.maybe_auto_refresh(cx)
-                        && this.pane == Pane::Doctor
-                        && this.window_visible
-                    {
-                        // Keep "Checked N min ago" current.
-                        cx.notify();
-                    }
-                });
+                let alive = this.update(cx, |this, cx| this.minute_tick(cx));
                 if alive.is_err() {
                     return;
                 }

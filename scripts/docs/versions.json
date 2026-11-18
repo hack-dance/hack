@@ -4682,6 +4682,13 @@
         "sourceFile": "docs/reference/native-authored-commands.md"
       },
       {
+        "slug": "native/existing-compose-project",
+        "title": "Run an existing Compose project on native",
+        "sourceRevision": "24d3adf5668ea7770ae61ae77e8faff3da6e721d",
+        "sourceLabel": "Current command audit (next 24d3adf5)",
+        "sourceFile": "docs/guides/native-candidate.md"
+      },
+      {
         "slug": "native/start",
         "title": "Try native on Apple Silicon",
         "sourceRevision": "2c1f665157e8645f79fe09812aca84448552e07a",

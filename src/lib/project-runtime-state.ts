@@ -20,6 +20,13 @@ export type ProjectRuntimeStateEntry = {
    * staleness check.
    */
   readonly envFingerprint?: ComposeEnvFingerprintRecord;
+  /**
+   * Compose profiles the last full up/restart activated (`--profile`, else
+   * `COMPOSE_PROFILES` from the env Compose received). `down` reuses them so
+   * a later env change cannot leave profiled containers running (HACK-2340).
+   * Absent in state written before this field existed.
+   */
+  readonly composeProfiles?: readonly string[];
 };
 
 type ProjectRuntimeStateFile = {
@@ -209,12 +216,19 @@ function parseProjectRuntimeStateEntry(
     typeof envNameRaw === "string" ? envNameRaw.trim() || null : null;
 
   const envFingerprint = parseComposeEnvFingerprintRecord(value.envFingerprint);
+  const composeProfiles = Array.isArray(value.composeProfiles)
+    ? value.composeProfiles.filter(
+        (profile): profile is string =>
+          typeof profile === "string" && profile.trim().length > 0
+      )
+    : null;
 
   return {
     composeProject,
     envName,
     updatedAt,
     ...(envFingerprint ? { envFingerprint } : {}),
+    ...(composeProfiles ? { composeProfiles } : {}),
   };
 }
 

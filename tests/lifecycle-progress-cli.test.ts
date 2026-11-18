@@ -13,12 +13,19 @@ const CLI = resolve(import.meta.dir, "..", "index.ts");
  */
 const STUB = `#!/bin/sh
 if [ "$1" != "compose" ]; then exit 0; fi
+# After down, ps lists nothing (HACK-2340: down checks what is left).
+marker="$(dirname "$0")/.compose-down"
 case " $* " in
+  *" down "*)
+    : > "$marker"
+    exit 0 ;;
   *" up "*)
+    rm -f "$marker"
     if [ "\${STUB_UP_FAIL:-}" = "1" ]; then exit 3; fi
     if [ "\${STUB_UP_SLEEP:-}" = "1" ]; then sleep 8; fi
     exit 0 ;;
   *" ps "*)
+    if [ -f "$marker" ]; then exit 0; fi
     case " $* " in
       *" --format "*)
         printf '%s\\n' '{"ID":"c1","Service":"api","Name":"shop-api-1","State":"running","Status":"Up","ExitCode":0}'

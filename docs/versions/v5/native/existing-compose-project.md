@@ -125,22 +125,6 @@ Get the SHA-256 with `shasum -a 256 /absolute/path/to/caddy`. Route URLs then
 carry the port, for example `https://<route host>:18443`. The Compose proxy
 keeps port 443 and its own hostnames.
 
-**Which CA signs native routes.** Native's Caddy creates its own local CA under
-the native home, at `native-https/data/caddy/pki/authorities/local/root.crt`, the
-first time it serves HTTPS. It is not the Compose proxy's CA, so trust installed
-by `hack global trust` does not cover native routes. The file exists only after the
-first `up` with HTTPS selected (step 5), so run that first, then trust the native
-root once, from your own terminal:
-
-```sh
-sudo security add-trusted-cert -d -r trustRoot \
-  -k /Library/Keychains/System.keychain \
-  /absolute/native-home/native-https/data/caddy/pki/authorities/local/root.crt
-```
-
-`hack doctor --json` with native selected reports whether that exact root is
-trusted.
-
 **Hostnames beside v4.** The project's existing route names (for example under
 `hack.local`) keep resolving to the Compose proxy, and DNS activation does not
 rename or copy routes. To open the native routes in a browser while v4 keeps its
@@ -160,20 +144,44 @@ to the service's Caddy labels on native only; the Compose file is unchanged. The
 "$CANDIDATE" global dns activate --domain v5.example
 ```
 
-Activation asks for confirmation and an administrator prompt. Check one route with
-`"$CANDIDATE" doctor --browser-url https://web.my-app.v5.example:18443`.
+Activation asks for confirmation and an administrator prompt.
 
-## 5. Start, check and stop
+**Which CA signs native routes.** Native's Caddy creates its own local CA under
+the native home, at `native-https/data/caddy/pki/authorities/local/root.crt`, the
+first time it serves HTTPS. It is not the Compose proxy's CA, so trust installed
+by `hack global trust` does not cover native routes. You trust it in step 5, once
+the first `up` has created it.
+
+## 5. Start, trust, check and stop
+
+Finish steps 2 to 4 first: the routes and hostnames are read at `up`.
 
 ```sh
 "$CANDIDATE" up --detach --path /absolute/project
 "$CANDIDATE" ps --path /absolute/project
+```
+
+Use `HACK_NATIVE_BUILDS=1` on `up` if the project builds images. With HTTPS selected,
+this first `up` creates the native CA. While the project runs, trust it once from
+your own terminal, then check one route:
+
+```sh
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain \
+  /absolute/native-home/native-https/data/caddy/pki/authorities/local/root.crt
+"$CANDIDATE" doctor --browser-url https://web.my-app.v5.example:18443
+```
+
+`hack doctor --json` with native selected reports whether that exact root is
+trusted. Check the app yourself: a running VM does not prove the app works. Stop it
+when you are done:
+
+```sh
 "$CANDIDATE" down --path /absolute/project
 ```
 
-Use `HACK_NATIVE_BUILDS=1` on `up` if the project builds images. Check the app
-yourself: a running VM does not prove the app works. To go back, run the project
-with `HACK_RUNTIME_BACKEND=compose`, as described in [Try native](start.md#back-to-compose).
+To go back, run the project with `HACK_RUNTIME_BACKEND=compose`, as described in
+[Try native](start.md#back-to-compose).
 
 ## What this page does not cover
 

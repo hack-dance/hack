@@ -511,7 +511,9 @@ With it:
   `COMPOSE_PROFILES` name the Compose file does not declare selects nothing, as in
   Compose, and is dropped before use: it never reaches a runtime argument, the saved
   run or any output, and is only counted in the notice (`COMPOSE_PROFILES` can hold a
-  value copied from decrypted managed env). Notices print only declared names.
+  value copied from decrypted managed env). Notices never print a profile name that
+  came from `COMPOSE_PROFILES` or a retained run, only how many there are; a name you
+  pass with `--profile` is printed.
 - As with Compose `up`, only services in the selected profiles are built, pulled and
   pinned. A service in a profile you did not select is neither built nor acquired from
   its registry, and restore and restart need no image for it; selecting its profile in

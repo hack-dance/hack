@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import {
   declaredComposeProfiles,
-  nativeDeclaredProfileNames,
   nativeInactiveServices,
   nativeLeftOutNotice,
+  nativeNoticeProfileNames,
   nativeRetainedProfilesNotice,
   parseNativeProfileNotice,
   renderNativeProfileNotice,
@@ -226,20 +226,28 @@ test("an empty --profile names no profile, so COMPOSE_PROFILES still applies, as
   expect(nativeProfileOption("jobs,ops")).toBe("jobs,ops");
 });
 
-test("a value copied into COMPOSE_PROFILES that the Compose file does not declare is counted, never printed", () => {
+test("notices print only explicit --profile names; environment and retained names are counted", () => {
   const token = "synthetic-secret-token-value";
-  const selected = nativeDeclaredProfileNames({
-    profiles: ["jobs", token],
-    declared: ["jobs", "ops"],
-  });
-  expect(selected).toEqual({ shown: ["jobs"], hidden: 1 });
+  // A project can declare guesses as profiles, so declaring a name does not
+  // make an environment-selected value safe to print.
+  for (const source of ["managed-env", "shell", "retained"] as const) {
+    expect(
+      nativeNoticeProfileNames({ profiles: ["jobs", token], source })
+    ).toEqual({ shown: [], hidden: 2 });
+  }
+  expect(
+    nativeNoticeProfileNames({ profiles: ["jobs"], source: "cli" })
+  ).toEqual({ shown: ["jobs"], hidden: 0 });
   const notice = nativeRetainedProfilesNotice({
     retained: [],
-    selected: selected.shown,
-    hiddenSelected: selected.hidden,
+    hiddenRetained: 1,
+    selected: [],
+    hiddenSelected: 2,
     source: "managed-env",
   });
-  expect(notice).toContain("jobs, 1 name not declared by the Compose file");
+  expect(notice).toContain(
+    "selects profiles 2 profiles (names not shown), but this instance's retained run uses 1 profile (names not shown)"
+  );
   expect(notice).not.toContain(token);
   const leftOut = nativeLeftOutNotice({
     services: ["worker"],
@@ -247,9 +255,7 @@ test("a value copied into COMPOSE_PROFILES that the Compose file does not declar
     hiddenProfiles: 2,
     source: "managed-env",
   });
-  expect(leftOut).toContain(
-    "Selected profiles: 2 names not declared by the Compose file"
-  );
+  expect(leftOut).toContain("Selected profiles: 2 profiles (names not shown)");
   expect(
     parseNativeProfileNotice({
       kind: "retained",

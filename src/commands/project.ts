@@ -217,6 +217,7 @@ import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprin
 import { renderComposeEnvReferenceOverride } from "../lib/compose-managed-env.ts";
 import {
   effectiveComposeProfiles,
+  readComposeInterpolationEnv,
   readComposeOneShotGraph,
   runningOneShots,
   waitingDependents,
@@ -1094,12 +1095,16 @@ async function checkOneShotInterruption(opts: {
   readonly proceed: boolean;
   readonly interruption?: OneShotInterruption;
 }> {
+  const interpolationEnv = await readComposeInterpolationEnv({
+    composeFiles: [opts.project.composeFile],
+    env: { ...process.env, ...opts.env },
+  });
   const graph = await readComposeOneShotGraph([opts.project.composeFile], {
     activeProfiles: effectiveComposeProfiles({
       cliProfiles: opts.profiles,
-      env: opts.env ?? {},
+      env: interpolationEnv,
     }),
-    interpolationEnv: { ...process.env, ...opts.env },
+    interpolationEnv,
   });
   if (graph.oneShots.size === 0) {
     return { proceed: true };
@@ -9694,13 +9699,17 @@ async function handlePs({
   const entries = read.entries;
   // A Created service whose one-shot dependency is still running starts only
   // when it completes and a Compose client waits for it (HACK-2310).
+  const psInterpolationEnv = await readComposeInterpolationEnv({
+    composeFiles: [project.composeFile],
+    env: process.env,
+  });
   const waiting = waitingDependents({
     graph: await readComposeOneShotGraph([project.composeFile], {
       activeProfiles: effectiveComposeProfiles({
         cliProfiles: profiles,
-        env: {},
+        env: psInterpolationEnv,
       }),
-      interpolationEnv: process.env,
+      interpolationEnv: psInterpolationEnv,
     }),
     entries,
   });

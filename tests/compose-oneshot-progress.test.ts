@@ -7,6 +7,7 @@ import {
   effectiveComposeProfiles,
   interpolateComposeValue,
   mergeOneShotGraphs,
+  readComposeInterpolationEnv,
   readComposeOneShotGraph,
   runningOneShots,
   scopeOneShotGraph,
@@ -392,4 +393,38 @@ test("an interpolated profile decides whether its service counts", () => {
     },
   };
   expect(graph(unknown, ["dev"], {})).toEqual(["migrate"]);
+});
+
+test("the interpolation env reads Compose's env files under the command's env", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-oneshot-envfile-"));
+  try {
+    const file = join(root, "docker-compose.yml");
+    await writeFile(file, "services: {}\n");
+    await writeFile(join(root, ".env"), "COMPOSE_PROFILES=ops\nA=from-file\n");
+    await writeFile(join(root, "extra.env"), "B=extra\n");
+    const implicit = await readComposeInterpolationEnv({
+      composeFiles: [file],
+      env: { A: "from-shell" },
+    });
+    // The command's environment wins over the file, as in Compose.
+    expect(implicit).toMatchObject({
+      COMPOSE_PROFILES: "ops",
+      A: "from-shell",
+    });
+    const named = await readComposeInterpolationEnv({
+      composeFiles: [file],
+      env: { COMPOSE_ENV_FILES: "extra.env" },
+    });
+    // COMPOSE_ENV_FILES replaces the implicit .env.
+    expect(named.B).toBe("extra");
+    expect(named.COMPOSE_PROFILES).toBeUndefined();
+    const disabled = await readComposeInterpolationEnv({
+      composeFiles: [file],
+      env: {},
+      envFileDisabled: true,
+    });
+    expect(disabled.COMPOSE_PROFILES).toBeUndefined();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -1,4 +1,6 @@
+import { dirname, isAbsolute, resolve } from "node:path";
 import YAML from "yaml";
+import { parseDotEnv } from "./env.ts";
 import { readTextFile } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 
@@ -90,6 +92,49 @@ export function effectiveComposeProfiles(opts: {
     .split(",")
     .map((profile) => profile.trim())
     .filter((profile) => profile.length > 0);
+}
+
+/**
+ * The environment Compose interpolates with and reads `COMPOSE_PROFILES`
+ * from: its environment-file variables (the files `COMPOSE_ENV_FILES` names,
+ * else `.env` in the project directory, the first Compose file's directory),
+ * overridden by the command's own environment, as Compose does. With
+ * `envFileDisabled` (Hack passes `--env-file /dev/null`) no file is read.
+ * Values are used only to evaluate profiles; they are never returned to a
+ * caller's output.
+ */
+export async function readComposeInterpolationEnv(opts: {
+  readonly composeFiles: readonly string[];
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly envFileDisabled?: boolean;
+}): Promise<Record<string, string | undefined>> {
+  const projectDir = opts.composeFiles[0]
+    ? dirname(opts.composeFiles[0])
+    : null;
+  if (opts.envFileDisabled || projectDir === null) {
+    return { ...opts.env };
+  }
+  const named = (opts.env.COMPOSE_ENV_FILES ?? "")
+    .split(",")
+    .map((file) => file.trim())
+    .filter((file) => file.length > 0);
+  const files = (named.length > 0 ? named : [".env"]).map((file) =>
+    isAbsolute(file) ? file : resolve(projectDir, file)
+  );
+  const fromFiles: Record<string, string> = {};
+  for (const file of files) {
+    const text = await readTextFile(file);
+    if (text) {
+      Object.assign(fromFiles, parseDotEnv(text));
+    }
+  }
+  const merged: Record<string, string | undefined> = { ...fromFiles };
+  for (const [key, value] of Object.entries(opts.env)) {
+    if (value !== undefined) {
+      merged[key] = value;
+    }
+  }
+  return merged;
 }
 
 /** Which services' `depends_on` count: all, or those active under these profiles. */

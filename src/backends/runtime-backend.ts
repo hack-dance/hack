@@ -2,6 +2,7 @@ import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import {
   effectiveComposeProfiles,
+  readComposeInterpolationEnv,
   readComposeOneShotGraph,
   runningOneShots,
   scopeOneShotGraph,
@@ -248,13 +249,20 @@ async function runComposeStartPhase(input: {
   ) => Promise<number>;
 }): Promise<number> {
   const { options } = input;
+  // Compose reads COMPOSE_PROFILES and interpolation variables from its env
+  // files too; read them the same way (none with --env-file /dev/null).
+  const interpolationEnv = await readComposeInterpolationEnv({
+    composeFiles: options.composeFiles,
+    env: { ...process.env, ...options.env },
+    envFileDisabled: options.unattended === true,
+  });
   const graph = scopeOneShotGraph(
     await readComposeOneShotGraph(options.composeFiles, {
       activeProfiles: effectiveComposeProfiles({
         cliProfiles: options.profiles ?? [],
-        env: options.env ?? {},
+        env: interpolationEnv,
       }),
-      interpolationEnv: { ...process.env, ...options.env },
+      interpolationEnv,
     }),
     { services: options.services, noDeps: options.noDeps }
   );

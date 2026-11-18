@@ -11,6 +11,7 @@
  * `.bak-<UTC>` sibling, so a hand edit is never lost. A file matching some
  * Hack rendering (for other settings) is replaced without a backup.
  */
+import { constants } from "node:fs";
 import { copyFile } from "node:fs/promises";
 
 import { GLOBAL_CADDY_PROJECT_NAME } from "../constants.ts";
@@ -67,10 +68,37 @@ export async function writeManagedProxyCompose(opts: {
     .toISOString()
     .replaceAll(":", "")
     .replace(FRACTIONAL_SECONDS, "Z");
-  const backupPath = `${opts.path}.bak-${stamp}`;
-  await copyFile(opts.path, backupPath);
+  const backupPath = await copyToFreshBackup({
+    path: opts.path,
+    base: `${opts.path}.bak-${stamp}`,
+  });
   await writeTextFileIfChanged(opts.path, opts.content);
   return { kind: "replaced-hand-edit", backupPath };
+}
+
+/**
+ * Copies `path` to `base`, or `base-1`, `base-2`… when that name exists, never
+ * overwriting an earlier backup (two replacements within one second share a
+ * timestamp). Returns the path written.
+ */
+async function copyToFreshBackup(opts: {
+  readonly path: string;
+  readonly base: string;
+}): Promise<string> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const candidate = attempt === 0 ? opts.base : `${opts.base}-${attempt}`;
+    try {
+      await copyFile(opts.path, candidate, constants.COPYFILE_EXCL);
+      return candidate;
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException | null)?.code !== "EEXIST") {
+        throw error;
+      }
+    }
+  }
+  throw new Error(
+    `Too many backups named ${opts.base}; remove old ones and retry`
+  );
 }
 
 /** Outcome of {@link removeUnstartedProxyContainers}. */

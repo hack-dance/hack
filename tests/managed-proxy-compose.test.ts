@@ -77,3 +77,27 @@ test("backs up a hand-edited file before replacing it", async () => {
   expect(await Bun.file(`${path}.bak-2026-11-18T030405Z`).text()).toBe(edited);
   expect(await Bun.file(path).text()).toBe(content);
 });
+
+test("never overwrites an earlier backup taken in the same second", async () => {
+  const path = join(dir, "docker-compose.yml");
+  const now = new Date("2026-11-18T03:04:05.000Z");
+  const content = renderGlobalCaddyCompose({ bindAddress: "127.0.0.1" });
+  await writeFile(path, "first hand edit\n");
+  const first = await writeManagedProxyCompose({ path, content, now });
+  await writeFile(path, "second hand edit\n");
+  const second = await writeManagedProxyCompose({ path, content, now });
+  expect(first).toEqual({
+    kind: "replaced-hand-edit",
+    backupPath: `${path}.bak-2026-11-18T030405Z`,
+  });
+  expect(second).toEqual({
+    kind: "replaced-hand-edit",
+    backupPath: `${path}.bak-2026-11-18T030405Z-1`,
+  });
+  expect(await Bun.file(`${path}.bak-2026-11-18T030405Z`).text()).toBe(
+    "first hand edit\n"
+  );
+  expect(await Bun.file(`${path}.bak-2026-11-18T030405Z-1`).text()).toBe(
+    "second hand edit\n"
+  );
+});

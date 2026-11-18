@@ -269,3 +269,27 @@ test("a value copied into COMPOSE_PROFILES that the Compose file does not declar
     })
   ).toBeNull();
 });
+
+test("an undeclared COMPOSE_PROFILES value is dropped before use, never just hidden", () => {
+  const token = "synthetic-secret-token-value";
+  for (const managedEnv of [{ COMPOSE_PROFILES: `jobs,${token}` }, {}]) {
+    const selection = selectNativeProfiles({
+      cliProfiles: undefined,
+      managedEnv,
+      shellEnv: { COMPOSE_PROFILES: `jobs,${token}` },
+      declaredProfiles: ["jobs", "ops"],
+    });
+    expect(selection.profiles).toEqual(["jobs"]);
+    expect(selection.ignoredUndeclared).toBe(1);
+    expect(JSON.stringify(selection.profiles)).not.toContain(token);
+  }
+  // An explicit --profile is the caller's own text and is kept as typed.
+  expect(
+    selectNativeProfiles({
+      cliProfiles: ["custom"],
+      managedEnv: {},
+      shellEnv: {},
+      declaredProfiles: ["jobs"],
+    }).profiles
+  ).toEqual(["custom"]);
+});

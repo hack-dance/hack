@@ -17,6 +17,7 @@ import {
 } from "../src/backends/native-https-owner.ts";
 import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
 import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-policy.ts";
+import { selectNativeProfiles } from "../src/backends/native-profile-selection.ts";
 import { nativeProjectDown } from "../src/backends/native-project-down.ts";
 import { discardUnpublishedNativeStart } from "../src/backends/native-project-failed-start.ts";
 import {
@@ -3629,6 +3630,57 @@ test("retained startup admits only the acknowledged original frontend before eff
     events.indexOf("runtime up")
   );
   expect(events).toContain("save");
+});
+
+test("an undeclared COMPOSE_PROFILES value never reaches the runtime review (HACK-2338 item 8)", async () => {
+  const token = "synthetic-secret-token-value";
+  const { opts } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: {
+        web: { image: `sha256:${"e".repeat(64)}` },
+        jobs: { image: `sha256:${"e".repeat(64)}`, profiles: ["jobs"] },
+      },
+    }),
+    serviceNames: ["web", "jobs"],
+  });
+  const reviewed: unknown[] = [];
+  opts.dependencies.review = async (request) => {
+    reviewed.push(request.profiles);
+    return await request.run({
+      planId: "a".repeat(64),
+      namespace: "b".repeat(64),
+      projectArgs: ["--project", request.projectRoot],
+      report: {
+        plan: {
+          enrollment_compatible: true,
+          services: { web: { active: true }, jobs: { active: true } },
+        },
+      },
+    });
+  };
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
+  expect(
+    await startNativeProject({
+      ...opts,
+      profiles: undefined,
+      resolveProfiles: () =>
+        Promise.resolve(
+          selectNativeProfiles({
+            cliProfiles: undefined,
+            managedEnv: { COMPOSE_PROFILES: `jobs,${token}` },
+            shellEnv: {},
+            declaredProfiles: ["jobs"],
+          })
+        ),
+    })
+  ).toBe(0);
+  expect(reviewed).toEqual([["jobs"]]);
+  expect(JSON.stringify(reviewed)).not.toContain(token);
+  expect(notices.join("\n")).not.toContain(token);
 });
 
 test("a retained run keeps its profiles when the managed env now selects others, and says so (HACK-2338 item 8)", async () => {

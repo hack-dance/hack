@@ -149,6 +149,7 @@ if (role === "channel-holder") {
       cwd: root,
       args: [],
       json: true,
+      ...(mode === "restart-action" ? { action: "restart" as const } : {}),
       invocation: [
         process.execPath,
         ...(Bun.main.startsWith("/$bunfs/") ? [] : [import.meta.filename]),
@@ -360,6 +361,7 @@ if (role === "channel-holder") {
       if (
         [
           "ready",
+          "restart-action",
           "cancel-at-accept",
           "shell-names",
           "shell-names-empty",

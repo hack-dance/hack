@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NATIVE_PROVIDER_PIN_MESSAGE } from "../src/backends/native-runtime-client.ts";
+import { nativeDetachedOwnerArgs } from "../src/lib/native-detached-up.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../src/lib/native-environment-notices.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -41,6 +42,7 @@ async function stop(root: string): Promise<void> {
 
 for (const mode of [
   "ready",
+  "restart-action",
   "shell-names",
   "shell-names-empty",
   "shell-names-root-dotenv",
@@ -91,6 +93,7 @@ for (const mode of [
       if (
         [
           "ready",
+          "restart-action",
           "shell-names",
           "shell-names-empty",
           "shell-names-root-dotenv",
@@ -98,10 +101,12 @@ for (const mode of [
         ].includes(mode)
       ) {
         expect(code).toBe(0);
+        // HACK native CLI gaps item 2: a detached restart reports the same
+        // envelope as Compose's `restart --json`, with its own action.
         expect(JSON.parse(stdout)).toEqual({
           ok: true,
           data: {
-            action: "up",
+            action: mode === "restart-action" ? "restart" : "up",
             project: "fixture",
             branch: null,
             composeProject: "fixture",
@@ -148,6 +153,7 @@ for (const mode of [
         expect(await readFile(join(root, "stop-signals"), "utf8")).toBe(
           [
             "ready",
+            "restart-action",
             "shell-names",
             "shell-names-root-dotenv",
             "shell-names-empty",
@@ -224,6 +230,29 @@ for (const phase of ["static-preflight", "after-start"] as const) {
     }
   });
 }
+
+test("the detached owner gets only the command and its selection options", () => {
+  expect(
+    nativeDetachedOwnerArgs({
+      action: "restart",
+      options: {
+        path: "/work/app",
+        branch: "feature-x",
+        env: "qa",
+        profile: "web,jobs",
+      },
+    })
+  ).toEqual([
+    "restart",
+    "--path=/work/app",
+    "--branch=feature-x",
+    "--env=qa",
+    "--profile=web,jobs",
+  ]);
+  expect(nativeDetachedOwnerArgs({ action: "up", options: {} })).toEqual([
+    "up",
+  ]);
+});
 
 test("detached failure names the services that failed during startup and how to see their output, never the output", async () => {
   const root = await mkdtemp(

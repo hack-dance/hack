@@ -325,11 +325,44 @@ function isReady(value: unknown): value is Ready {
   );
 }
 
-/** Launch only parsed, whole-project native up arguments; no shell or secret argv. */
+/**
+ * The detached owner child's arguments: the whole-project command and only the
+ * selection options it needs, each as one `--name=value` argument. Values are
+ * names and paths the caller already parsed; no shell, env value or secret.
+ */
+export function nativeDetachedOwnerArgs(opts: {
+  readonly action: "up" | "restart";
+  readonly options: {
+    readonly path?: string;
+    readonly project?: string;
+    readonly branch?: string;
+    readonly env?: string;
+    readonly profile?: string;
+  };
+}): string[] {
+  const args: string[] = [opts.action];
+  for (const name of ["path", "project", "branch", "env", "profile"] as const) {
+    const value = opts.options[name];
+    if (value !== undefined) {
+      args.push(`--${name}=${value}`);
+    }
+  }
+  return args;
+}
+
+/**
+ * Launch only parsed, whole-project native `up` or `restart` arguments; no
+ * shell or secret argv. The child becomes the detached owner; this launcher
+ * returns once the child reports durable readiness. With `json`, it prints
+ * one result envelope with the same fields as Compose (`data.action`,
+ * `data.services`, `durationMs`).
+ */
 export async function startNativeDetachedUp(opts: {
   readonly cwd: string;
   readonly args: readonly string[];
   readonly json: boolean;
+  /** The command the child runs, reported as `data.action`. Defaults to `up`. */
+  readonly action?: "up" | "restart";
   /** Synthetic process fixtures may replace the CLI invocation. */
   readonly invocation?: readonly string[];
   readonly timeoutMs?: number;
@@ -459,7 +492,7 @@ export async function startNativeDetachedUp(opts: {
       emitCliResult({
         result: okResult({
           data: {
-            action: "up",
+            action: opts.action ?? "up",
             project: data.project,
             branch: data.branch,
             composeProject: data.composeProject,
@@ -475,7 +508,7 @@ export async function startNativeDetachedUp(opts: {
       });
     } else {
       process.stdout.write(
-        "Project is ready. Use hack ps, hack logs SERVICE --no-follow, and hack down.\n"
+        `Project ${opts.action === "restart" ? "restarted and " : ""}is ready. Use hack ps, hack logs SERVICE --no-follow, and hack down.\n`
       );
     }
     return 0;

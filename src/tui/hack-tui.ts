@@ -2802,7 +2802,10 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       }
 
       let exitCode = 1;
-      activeRenderer.stop();
+      // suspend() hands the terminal over: it leaves raw mode, turns mouse
+      // tracking off and stops reading stdin, so the attached session gets
+      // every key. stop() only halted rendering and kept all three.
+      await Promise.resolve(activeRenderer.suspend());
       try {
         exitCode = await run(opts.command, {
           cwd: resolve(project.projectRoot),
@@ -2810,7 +2813,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         });
       } finally {
         if (isActive) {
-          activeRenderer.start();
+          await Promise.resolve(activeRenderer.resume());
           renderHeader();
           renderMetaPanel({ runtime: currentRuntime });
           updateLogsTitle();

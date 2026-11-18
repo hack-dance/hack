@@ -52,8 +52,14 @@ body {
 .home .home-word {
   white-space: nowrap;
 }
+/* Darker than the muted index text: this note and its link sit on the first
+   screen and must keep readable contrast in the light theme. */
 .home .home-note {
-  color: var(--color-fd-muted-foreground);
+  color: color-mix(
+    in srgb,
+    var(--color-fd-foreground) 75%,
+    var(--color-fd-background)
+  );
   font-size: 0.875rem;
 }
 .home a {

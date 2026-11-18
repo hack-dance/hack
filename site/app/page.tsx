@@ -15,7 +15,10 @@ const install = installCommand(prereleaseTag(versions.v5.label));
  * between words. Only the download address, which has no spaces, may break
  * inside itself. The text a reader copies is unchanged.
  */
-const installParts = install.split(/(\s+)/).filter((part) => part !== "");
+const installParts = install
+  .split(/(\s+)/)
+  .filter((text) => text !== "")
+  .map((text, position) => ({ position, text }));
 
 export default function Home() {
   return (
@@ -39,12 +42,12 @@ export default function Home() {
         <p>{description}</p>
         <pre className="home-install">
           <code>
-            {installParts.map((part, index) =>
-              part.includes("/") || part.trim() === "" ? (
-                part
+            {installParts.map(({ position, text }) =>
+              text.includes("/") || text.trim() === "" ? (
+                text
               ) : (
-                <span className="home-word" key={index}>
-                  {part}
+                <span className="home-word" key={position}>
+                  {text}
                 </span>
               )
             )}
@@ -70,7 +73,8 @@ export default function Home() {
                 Work on another branch
               </Link>
               <span>
-                An instance per branch; a git worktree gets one automatically.
+                An instance per branch; on Compose, a git worktree gets one
+                automatically.
               </span>
             </li>
             <li>

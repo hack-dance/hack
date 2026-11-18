@@ -789,9 +789,9 @@ for a security fix, so each bump stays small enough to review against upstream n
 4. A home prepared under one pin refuses another pin (`provider_pin_changed`);
    say so in the release notes, because users prepare a fresh candidate home.
 
-### How the qualification script reports failures
+### What the qualification script does
 
-The script qualifies a
+[`scripts/qualify-provider-pin.ts`](../../scripts/qualify-provider-pin.ts) qualifies a
 provider pin on an Apple Silicon Mac using an empty, private, canonical root.
 It previews without `--run`. Foreground startup waits for its own console-ready
 signal before a single `ps --json` confirmation, so qualification does not poll

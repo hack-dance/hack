@@ -301,7 +301,8 @@ Start with [Getting started](docs/guides/getting-started.md) or the
 See [AGENTS.md](AGENTS.md) for how to build, test and propose changes.
 
 Contributor notes for the native runtime, including how a provider pin is
-qualified, are in the [runtime core README](packages/runtime-core/README.md).
+qualified, are in the
+[runtime core README](packages/runtime-core/README.md#how-a-provider-pin-bump-is-qualified).
 
 ## License
 

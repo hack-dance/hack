@@ -176,22 +176,46 @@ export function redactContextLine(line: string): string {
     return `${indent}# ${REDACTED}`;
   }
   if (trimmed.startsWith("-")) {
-    const item = trimmed.slice(1).trim().replace(QUOTES, "");
-    const eq = item.indexOf("=");
-    return eq > 0
-      ? `${indent}- ${item.slice(0, eq)}=${REDACTED}`
-      : `${indent}- ${REDACTED}`;
+    return `${indent}- ${redactScalarLine(trimmed.slice(1).trim())}`;
   }
-  const split = splitYamlKey(trimmed);
-  if (!split) {
-    return `${indent}${REDACTED}`;
+  return `${indent}${redactScalarLine(trimmed)}`;
+}
+
+/**
+ * Keeps a key only when it is a plain identifier (`KEY=` or `key:`), so
+ * block-scalar text such as `psql -W pw -c "x: y"` is never split into a
+ * fake key; everything else is `[REDACTED]`.
+ */
+function redactScalarLine(text: string): string {
+  const unquoted = text.replace(QUOTES, "");
+  const eq = unquoted.indexOf("=");
+  if (eq > 0 && PLAIN_KEY.test(unquoted.slice(0, eq))) {
+    return `${unquoted.slice(0, eq)}=${REDACTED}`;
+  }
+  const split = splitYamlKey(text);
+  if (!(split && PLAIN_KEY.test(split.key))) {
+    return REDACTED;
   }
   return split.rest && !split.rest.startsWith("#")
-    ? `${indent}${split.key}: ${REDACTED}`
-    : `${indent}${split.key}:`;
+    ? `${split.key}: ${REDACTED}`
+    : `${split.key}:`;
+}
+
+/**
+ * A removed or replaced line in the diff. Generated entries carry no
+ * comment; only the `environment:` header can, and its comment is shown
+ * redacted. The written bytes keep it.
+ */
+function redactChangedLine(line: string): string {
+  const eol = line.endsWith("\r") ? "\r" : "";
+  const body = eol ? line.slice(0, -1) : line;
+  const match = HEADER_COMMENT.exec(body);
+  return match ? `${match[1]}# ${REDACTED}${eol}` : line;
 }
 
 const QUOTES = /^["']|["']$/g;
+const PLAIN_KEY = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+const HEADER_COMMENT = /^(\s*environment:\s*(?:\{\}\s*)?)#.*$/;
 
 function unifiedDiff(opts: {
   readonly lines: readonly string[];
@@ -228,9 +252,9 @@ function unifiedDiff(opts: {
         newCount += 1;
         continue;
       }
-      body.push(`-${line}`);
+      body.push(`-${redactChangedLine(line)}`);
       if (change.replacement !== undefined) {
-        body.push(`+${change.replacement}`);
+        body.push(`+${redactChangedLine(change.replacement)}`);
         newCount += 1;
       }
     }

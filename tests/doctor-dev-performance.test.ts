@@ -584,6 +584,42 @@ test("the repair diff never shows neighbouring values or comments", () => {
   expect(plan.after).toContain("synthetic-token");
 });
 
+test("redaction keeps only plain keys: block scalars, list maps and header comments", () => {
+  const text = [
+    "services:",
+    "  web:",
+    "    command: |",
+    '      psql -U admin -W synthetic-pw1 -c "x: y"',
+    "      my token is synthetic-pw2: more",
+    "    environment: # db pw synthetic-pw3",
+    '      CHOKIDAR_USEPOLLING: "true"',
+    "    configs:",
+    "      - url: postgres://u:synthetic-pw4@db/app?sslmode=require",
+    "",
+  ].join("\n");
+  const plan = planPollingFix({ text, file: FILE });
+  expect(plan.removed).toHaveLength(1);
+  for (const secret of [
+    "synthetic-pw1",
+    "synthetic-pw2",
+    "synthetic-pw3",
+    "synthetic-pw4",
+  ]) {
+    expect(plan.diff).not.toContain(secret);
+  }
+  expect(plan.diff).toContain("-    environment: # [REDACTED]");
+  expect(plan.diff).toContain("      - url: [REDACTED]");
+  expect(plan.diff).toContain("      [REDACTED]");
+  // The kept comment stays in the written file.
+  const only = planPollingFix({
+    text: 'services:\n  web:\n    environment: # synthetic-pw5\n      WATCHPACK_POLLING: "true"\n',
+    file: FILE,
+  });
+  expect(only.diff).toContain("+    environment: {} # [REDACTED]");
+  expect(only.diff).not.toContain("synthetic-pw5");
+  expect(only.after).toContain("environment: {} # synthetic-pw5");
+});
+
 describe("container architectures", () => {
   test("normalizes engine and platform spellings", () => {
     expect(normalizeArchitecture("x86_64")).toBe("amd64");

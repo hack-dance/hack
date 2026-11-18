@@ -26,20 +26,28 @@
  * fresh 0700 directory in /tmp and never autostarts a daemon. The Docker
  * engine is the host's real one: the script resolves its endpoint once and
  * passes it as DOCKER_HOST, owns only the Compose projects it names
- * (`hkperf-<id>`), and removes them and its directory on every exit path.
- * Other containers on the engine are counted in the report because they add
- * to Docker list and inspect time.
+ * (`hkperf-<id>`), and on exit, an error or SIGINT/SIGTERM it waits for the
+ * commands in flight, runs `docker compose down` for both projects by name
+ * and removes its directory. Only a local unix-socket engine is used: a TLS
+ * or SSH endpoint needs client settings a private config does not carry, so
+ * the Docker sections are skipped there. Other containers on the engine are
+ * counted in the report because they add to Docker list and inspect time.
  *
  * "Cold" is the first run of a fresh copy of the executable against a fresh
- * HOME. That includes first-use checks of a new file (code signature
- * validation on macOS) and first-use Hack state, but the OS page cache is not
- * dropped, so it is not a cold-disk number. "Warm" samples run round-robin
- * across commands so drift spreads evenly. Lifecycle trials alternate which
- * side runs first.
+ * HOME: first-use Hack state, plus whatever the OS does for a file it has not
+ * run before. It is not a cold-disk number: the page cache is not dropped,
+ * the copy itself leaves the file cached on Linux, and on APFS the copy is a
+ * clone. "Warm" samples run round-robin across commands so drift spreads
+ * evenly. Lifecycle trials alternate which side runs first. p95 is printed
+ * only from 20 samples up; below that it would just repeat the maximum.
  *
- * Idle CPU is cumulative CPU seconds of the process and its descendants over
- * the window; a child that exits inside the window takes its CPU with it.
- * Memory is RSS (resident pages, shared pages included), not footprint.
+ * Idle CPU is the growth in cumulative CPU seconds of the processes that
+ * are in the tree at both ends of the window. A process that starts or exits
+ * inside the window is not counted (the report says how many exited), so the
+ * figure is a lower bound. Idle memory is the tree's summed RSS (resident
+ * pages, shared pages included), not footprint. The per-command RSS column is
+ * the largest single process the command waited for, not a tree total, so
+ * do not compare it between `hack` and `docker compose` rows.
  */
 import {
   chmodSync,
@@ -48,6 +56,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -68,8 +77,9 @@ type Env = Record<string, string>;
 
 type Sample = {
   readonly wallMs: number;
-  readonly cpuMs: number;
-  readonly maxRssKb: number;
+  /** Null where no child process was measured (an in-process request). */
+  readonly cpuMs: number | null;
+  readonly maxRssKb: number | null;
 };
 
 type Summary = {
@@ -107,10 +117,22 @@ type IdleReport = {
   readonly rssMedianMb: number;
   readonly rssMaxMb: number;
   readonly processes: number;
+  /** Processes in the tree at the start that were gone at the end. */
+  readonly exitedDuringWindow: number;
 };
 
 const SERVICES = ["web", "api", "worker"] as const;
 const COMMAND_TIMEOUT_MS = 180_000;
+/** Below this many samples a 95th percentile is the maximum under another name. */
+const P95_MIN_SAMPLES = 20;
+
+/** Thrown in place of a spawn once a signal or cleanup has begun. */
+class Interrupted extends Error {}
+
+/** Set by a signal and by cleanup: no measured process may start after it. */
+let stopping = false;
+/** Every `run` child still alive, so cleanup can wait for it. */
+const inflight = new Set<{ readonly exited: Promise<number> }>();
 
 function quantile(sorted: readonly number[], q: number): number {
   const index = Math.min(
@@ -154,11 +176,21 @@ function summarize(
     failures,
     medianMs: round(median(wall)),
     minMs: has ? round(wall[0] ?? null) : null,
-    p95Ms: has ? round(quantile(wall, 0.95)) : null,
+    p95Ms: wall.length >= P95_MIN_SAMPLES ? round(quantile(wall, 0.95)) : null,
     maxMs: has ? round(wall.at(-1) ?? null) : null,
-    medianCpuMs: round(median(samples.map((sample) => sample.cpuMs))),
+    medianCpuMs: round(
+      median(
+        samples.flatMap((sample) =>
+          sample.cpuMs === null ? [] : [sample.cpuMs]
+        )
+      )
+    ),
     medianMaxRssMb: round(
-      median(samples.map((sample) => sample.maxRssKb / 1024))
+      median(
+        samples.flatMap((sample) =>
+          sample.maxRssKb === null ? [] : [sample.maxRssKb / 1024]
+        )
+      )
     ),
     samplesMs: wall.map((value) => round(value) ?? Number.NaN),
   };
@@ -168,8 +200,12 @@ async function run(opts: {
   readonly argv: readonly string[];
   readonly env: Env;
   readonly cwd: string;
-  readonly stdin?: "ignore" | "pipe";
+  /** Cleanup's own commands run after `stopping` is set. */
+  readonly duringCleanup?: boolean;
 }): Promise<RunResult> {
+  if (stopping && opts.duringCleanup !== true) {
+    throw new Interrupted("interrupted");
+  }
   const started = performance.now();
   const child = Bun.spawn([...opts.argv], {
     cwd: opts.cwd,
@@ -179,17 +215,18 @@ async function run(opts: {
     stderr: "pipe",
     timeout: COMMAND_TIMEOUT_MS,
   });
+  inflight.add(child);
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
     child.exited,
-  ]);
+  ]).finally(() => inflight.delete(child));
   const wallMs = performance.now() - started;
   const usage = child.resourceUsage();
   const cpuMicros = usage
     ? Number(usage.cpuTime.user) + Number(usage.cpuTime.system)
     : 0;
-  // Bun reports maxRSS in bytes on every platform.
+  // Bun reports maxRSS in bytes (checked on Linux; not yet on macOS).
   const maxRssKb = usage ? Number(usage.maxRSS) / 1024 : 0;
   return {
     sample: { wallMs, cpuMs: cpuMicros / 1000, maxRssKb },
@@ -318,6 +355,17 @@ function allContainers(env: Env, project: string): number {
   return text === null ? -1 : text.split("\n").filter(Boolean).length;
 }
 
+function ownedNetworks(env: Env, project: string): number {
+  const text = dockerText(env, [
+    "network",
+    "ls",
+    "-q",
+    "--filter",
+    `label=com.docker.compose.project=${project}`,
+  ]);
+  return text === null ? -1 : text.split("\n").filter(Boolean).length;
+}
+
 type ProcessRow = {
   readonly pid: number;
   readonly ppid: number;
@@ -418,9 +466,21 @@ async function sampleIdle(opts: {
   }
   const windowSeconds = (performance.now() - started) / 1000;
   return opts.targets.map((target, index) => {
-    const cpuSeconds =
-      total(last[index] ?? [], "cpuSeconds") -
-      total(first[index] ?? [], "cpuSeconds");
+    const before = new Map(
+      (first[index] ?? []).map((row) => [row.pid, row.cpuSeconds])
+    );
+    const after = last[index] ?? [];
+    // Only processes present at both ends: one that exited would otherwise
+    // subtract all the CPU it had used before the window.
+    let cpuSeconds = 0;
+    let survivors = 0;
+    for (const row of after) {
+      const earlier = before.get(row.pid);
+      if (earlier !== undefined) {
+        cpuSeconds += row.cpuSeconds - earlier;
+        survivors += 1;
+      }
+    }
     const values = rss[index] ?? [];
     return {
       label: target.label,
@@ -429,7 +489,8 @@ async function sampleIdle(opts: {
       cpuPercentOfOneCore: round((cpuSeconds / windowSeconds) * 100, 2) ?? 0,
       rssMedianMb: round(median(values)) ?? 0,
       rssMaxMb: round(Math.max(0, ...values)) ?? 0,
-      processes: last[index]?.length ?? 0,
+      processes: after.length,
+      exitedDuringWindow: before.size - survivors,
     };
   });
 }
@@ -456,7 +517,7 @@ function latencyTable(summaries: readonly Summary[]): string {
       "p95",
       "max",
       "cpu ms",
-      "peak RSS MB",
+      "max single-process RSS MB",
       "failed",
     ],
     summaries.map((summary) => [
@@ -510,28 +571,6 @@ const lifecycleRuns = positive("lifecycle-runs", flags["lifecycle-runs"]);
 const idleSeconds = positive("idle-seconds", flags["idle-seconds"]);
 const image = flags.image;
 
-// Unix socket paths are short (104 bytes on macOS); keep the root in /tmp.
-const root = mkdtempSync("/tmp/hkperf-");
-chmodSync(root, 0o700);
-const id = root
-  .slice(-6)
-  .toLowerCase()
-  .replace(/[^a-z0-9]/g, "x");
-const projectName = `hkperf-${id}`;
-const rawName = `hkperf-${id}-raw`;
-const home = join(root, "home");
-mkdirSync(home, { mode: 0o700 });
-
-const dockerHost = flags["skip-docker"] ? null : resolveDockerHost();
-const dockerConfig = join(root, "docker-client");
-mkdirSync(join(dockerConfig), { mode: 0o700 });
-// A private HOME hides user-installed CLI plugins (`docker compose`); link
-// only the plugin directory, never the user's config or credentials.
-const userPlugins = join(homedir(), ".docker", "cli-plugins");
-if (existsSync(userPlugins)) {
-  symlinkSync(userPlugins, join(dockerConfig, "cli-plugins"));
-}
-
 const extraEnv: Env = {};
 for (const pair of flags.env) {
   const split = pair.indexOf("=");
@@ -540,6 +579,67 @@ for (const pair of flags.env) {
   }
   extraEnv[pair.slice(0, split)] = pair.slice(split + 1);
 }
+
+type LauncherPlan = {
+  readonly launcher: string;
+  readonly selected: string;
+  readonly bundle: string;
+};
+
+/**
+ * Resolves an installed channel from its launcher before any work starts, so
+ * a wrong path costs nothing and cannot lose the report. Returns the reason
+ * as text when the path is not a usable launcher.
+ */
+function planLauncher(path: string): LauncherPlan | string {
+  try {
+    // The launcher may be reached through a symlink on PATH.
+    const launcher = realpathSync(path);
+    const channel = dirname(dirname(launcher));
+    const selected = record(
+      parseJson(readFileSync(join(channel, ".selection.json"), "utf8"))
+    )?.selected;
+    if (typeof selected !== "string") {
+      return "The launcher has no selected candidate; launcher timing skipped.";
+    }
+    const bundle = join(channel, "versions", selected, "bundle");
+    if (
+      !(
+        existsSync(join(bundle, "hack-cli")) &&
+        existsSync(join(bundle, "hack-v5"))
+      )
+    ) {
+      return "The selected candidate has no hack-cli and hack-v5; launcher timing skipped.";
+    }
+    return { launcher, selected, bundle };
+  } catch {
+    return "--launcher is not a channel launcher (no readable <root>/.selection.json beside its bin directory); launcher timing skipped.";
+  }
+}
+
+const launcherPlan = flags.launcher ? planLauncher(flags.launcher) : null;
+const notes: string[] = [];
+const report: Record<string, unknown> = {};
+const sections: string[] = [];
+let failed = false;
+let signalExit: number | null = null;
+
+// Everything above only validates input. From here the script owns a
+// directory, so every later step runs inside the try below.
+// Unix socket paths are short (104 bytes on macOS); keep the root in /tmp.
+const root = mkdtempSync("/tmp/hkperf-");
+const id = root
+  .slice(-6)
+  .toLowerCase()
+  .replace(/[^a-z0-9]/g, "x");
+const projectName = `hkperf-${id}`;
+const rawName = `hkperf-${id}-raw`;
+const home = join(root, "home");
+const dockerConfig = join(root, "docker-client");
+const project = join(root, projectName);
+const composeFile = join(project, ".hack", "docker-compose.yml");
+let dockerHost: string | null = null;
+let dockerReady = false;
 
 function baseEnv(homeDir: string): Env {
   return {
@@ -554,104 +654,168 @@ function baseEnv(homeDir: string): Env {
   };
 }
 
-const env = baseEnv(home);
-const project = writeProject({ root, name: projectName, image });
-const composeFile = join(project, ".hack", "docker-compose.yml");
-
-const imageLocal =
-  dockerHost !== null &&
-  dockerText(env, ["image", "inspect", "--format", "{{.Id}}", image]) !== null;
-const dockerReady = imageLocal;
-const notes: string[] = [];
-if (!dockerReady) {
-  notes.push(
-    flags["skip-docker"]
-      ? "Docker sections skipped (--skip-docker)."
-      : `Docker sections skipped: no reachable engine with a local ${image} (the script never pulls).`
-  );
+/**
+ * Homebrew and some Docker Desktop or OrbStack installs find `docker compose`
+ * through `cliPluginsExtraDirs` in the user's client config. Copy that one
+ * key, and nothing else, into the private config.
+ */
+function adoptPluginDirectories(): boolean {
+  try {
+    const directories = record(
+      parseJson(readFileSync(join(homedir(), ".docker", "config.json"), "utf8"))
+    )?.cliPluginsExtraDirs;
+    if (
+      !(
+        Array.isArray(directories) &&
+        directories.length > 0 &&
+        directories.every((entry) => typeof entry === "string")
+      )
+    ) {
+      return false;
+    }
+    writeFileSync(
+      join(dockerConfig, "config.json"),
+      `${JSON.stringify({ cliPluginsExtraDirs: directories })}\n`,
+      { mode: 0o600 }
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-const children = new Set<{
+/** hackd and `mcp serve`, which run until stopped. */
+const longLived = new Set<{
   kill(signal?: NodeJS.Signals): void;
   exited: Promise<number>;
 }>();
-let cleaned = false;
+let cleaning: Promise<void> | null = null;
 
-async function cleanup(): Promise<void> {
-  if (cleaned) {
-    return;
-  }
-  cleaned = true;
-  for (const child of children) {
+async function removeOwnedResources(): Promise<void> {
+  stopping = true;
+  for (const child of longLived) {
     child.kill("SIGTERM");
   }
+  // A signal reaches the commands in flight too; let them finish dying so
+  // none of them creates a container after the `down` below.
   await Promise.all(
-    [...children].map((child) =>
-      Promise.race([child.exited, Bun.sleep(10_000)])
+    [...longLived, ...inflight].map((child) =>
+      Promise.race([child.exited, Bun.sleep(15_000)])
     )
   );
-  if (dockerReady) {
+  if (dockerHost !== null) {
     for (const name of [projectName, rawName]) {
-      if (allContainers(env, name) !== 0) {
-        await run({
-          argv: [
-            "docker",
-            "compose",
-            "-p",
-            name,
-            "-f",
-            composeFile,
-            "down",
-            "--remove-orphans",
-            "-t",
-            "1",
-          ],
-          env,
-          cwd: project,
-        });
-      }
+      // By project name, not by file: it also removes a network left by a
+      // start that failed before it created a container.
+      await run({
+        argv: [
+          "docker",
+          "compose",
+          "-p",
+          name,
+          "down",
+          "--remove-orphans",
+          "-t",
+          "1",
+        ],
+        env: baseEnv(home),
+        cwd: root,
+        duringCleanup: true,
+      });
     }
   }
   rmSync(root, { recursive: true, force: true });
 }
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
+function cleanup(): Promise<void> {
+  cleaning ??= removeOwnedResources();
+  return cleaning;
+}
+
+for (const [signal, code] of [
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+] as const) {
   process.on(signal, () => {
-    cleanup().finally(() => process.exit(130));
+    stopping = true;
+    signalExit = code;
+    cleanup().finally(() => process.exit(code));
   });
 }
-
-let failed = false;
-
-async function measure(opts: {
-  readonly label: string;
-  readonly argv: readonly string[];
-  readonly accept: (stdout: string) => boolean;
-  readonly env?: Env;
-  readonly cwd?: string;
-  readonly into: Sample[];
-}): Promise<boolean> {
-  const result = await run({
-    argv: opts.argv,
-    env: opts.env ?? env,
-    cwd: opts.cwd ?? project,
-  });
-  const ok = result.exitCode === 0 && opts.accept(result.stdout);
-  if (ok) {
-    opts.into.push(result.sample);
-  } else {
-    failed = true;
-    process.stderr.write(
-      `[failed] ${opts.label}: exit ${result.exitCode}\n${result.stderr.slice(-600)}\n`
-    );
-  }
-  return ok;
-}
-
-const report: Record<string, unknown> = {};
-const sections: string[] = [];
 
 try {
+  chmodSync(root, 0o700);
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(dockerConfig, { mode: 0o700 });
+  // A private HOME hides user-installed CLI plugins (`docker compose`); link
+  // only the plugin directory, never the user's config or credentials.
+  const userPlugins = join(homedir(), ".docker", "cli-plugins");
+  if (existsSync(userPlugins)) {
+    symlinkSync(userPlugins, join(dockerConfig, "cli-plugins"));
+  }
+  writeProject({ root, name: projectName, image });
+
+  if (flags["skip-docker"]) {
+    notes.push("Docker sections skipped (--skip-docker).");
+  } else {
+    const resolved = resolveDockerHost();
+    if (resolved === null) {
+      notes.push(
+        "Docker sections skipped: no Docker endpoint could be resolved."
+      );
+    } else if (resolved.startsWith("unix://")) {
+      dockerHost = resolved;
+    } else {
+      notes.push(
+        "Docker sections skipped: the engine endpoint is not a local unix socket, and a private client config does not carry its TLS or SSH settings."
+      );
+    }
+  }
+  const env = baseEnv(home);
+  if (dockerHost !== null) {
+    const compose = () =>
+      dockerText(env, ["compose", "version", "--short"]) !== null;
+    if (!(compose() || (adoptPluginDirectories() && compose()))) {
+      notes.push(
+        "Docker sections skipped: `docker compose` is not available with a private client config (plugin not in ~/.docker/cli-plugins or cliPluginsExtraDirs)."
+      );
+    } else if (
+      dockerText(env, ["image", "inspect", "--format", "{{.Id}}", image]) ===
+      null
+    ) {
+      notes.push(
+        `Docker sections skipped: the engine is not reachable or has no local ${image} (the script never pulls).`
+      );
+    } else {
+      dockerReady = true;
+    }
+  }
+
+  const measure = async (opts: {
+    readonly label: string;
+    readonly argv: readonly string[];
+    readonly accept: (stdout: string) => boolean;
+    readonly env?: Env;
+    readonly cwd?: string;
+    readonly into: Sample[];
+  }): Promise<boolean> => {
+    const result = await run({
+      argv: opts.argv,
+      env: opts.env ?? env,
+      cwd: opts.cwd ?? project,
+    });
+    const ok = result.exitCode === 0 && opts.accept(result.stdout);
+    if (ok) {
+      opts.into.push(result.sample);
+    } else {
+      failed = true;
+      process.stderr.write(
+        `[failed] ${opts.label}: exit ${result.exitCode}\n${result.stderr.slice(-600)}\n`
+      );
+    }
+    return ok;
+  };
+
   const versionText = (
     await run({ argv: [hack, "--version"], env, cwd: project })
   ).stdout.trim();
@@ -913,43 +1077,36 @@ try {
     [join(bundle, "hack-v5"), "--version"],
     composeEnv
   );
-  if (flags.launcher) {
-    const launcher = resolve(flags.launcher);
-    const channel = dirname(dirname(launcher));
-    const selected = record(
-      parseJson(readFileSync(join(channel, ".selection.json"), "utf8"))
-    )?.selected;
-    if (typeof selected === "string") {
-      // The launcher owns its own homes; it runs with the caller's real HOME.
-      const realEnv: Env = {
-        PATH: process.env.PATH ?? "",
-        HOME: homedir(),
-        NO_COLOR: "1",
-      };
-      const installed = join(channel, "versions", selected, "bundle");
-      await timeVersion(
-        `installed ${selected} hack-cli directly: --version`,
-        [join(installed, "hack-cli"), "--version"],
-        realEnv
-      );
-      await timeVersion(
-        `installed ${selected} through hack-v5: --version`,
-        [join(installed, "hack-v5"), "--version"],
-        realEnv
-      );
-      await timeVersion(
-        `installed ${selected} through hack-next launcher: --version`,
-        [launcher, "--version"],
-        realEnv
-      );
-    } else {
-      notes.push(
-        "The launcher has no selected candidate; launcher timing skipped."
-      );
-    }
-  } else {
+  if (launcherPlan === null) {
     notes.push(
       "hack-next launcher not measured: pass --launcher <root>/bin/hack-next on a host with the prerelease channel installed (macOS only)."
+    );
+  } else if (typeof launcherPlan === "string") {
+    notes.push(launcherPlan);
+  } else {
+    // The launcher owns its own homes; it runs with the caller's real HOME.
+    // `--version` writes nothing, and no run may start a daemon there.
+    const realEnv: Env = {
+      PATH: process.env.PATH ?? "",
+      HOME: homedir(),
+      NO_COLOR: "1",
+      HACK_DAEMON_AUTOSTART_DISABLE: "1",
+    };
+    const { launcher, selected, bundle: installed } = launcherPlan;
+    await timeVersion(
+      `installed ${selected} hack-cli directly: --version`,
+      [join(installed, "hack-cli"), "--version"],
+      realEnv
+    );
+    await timeVersion(
+      `installed ${selected} through hack-v5: --version`,
+      [join(installed, "hack-v5"), "--version"],
+      realEnv
+    );
+    await timeVersion(
+      `installed ${selected} through hack-next launcher: --version`,
+      [launcher, "--version"],
+      realEnv
     );
   }
   report.launcher = launcherSummaries;
@@ -964,7 +1121,7 @@ try {
       stdout: "ignore",
       stderr: "ignore",
     });
-    children.add(daemon);
+    longLived.add(daemon);
     const socket = join(home, ".hack", "daemon", "hackd.sock");
     const fetchProjects = async (query: string) => {
       const started = performance.now();
@@ -1035,7 +1192,11 @@ try {
           const result = await fetchProjects(query);
           if (result.ok) {
             bytes = result.body.length;
-            samples.push({ wallMs: result.wallMs, cpuMs: 0, maxRssKb: 0 });
+            samples.push({
+              wallMs: result.wallMs,
+              cpuMs: null,
+              maxRssKb: null,
+            });
           }
         }
         daemonSummaries.push(
@@ -1070,7 +1231,7 @@ try {
       stdout: "ignore",
       stderr: "ignore",
     });
-    children.add(mcp);
+    longLived.add(mcp);
     mcp.stdin.write(
       `${JSON.stringify({
         jsonrpc: "2.0",
@@ -1105,6 +1266,7 @@ try {
           "RSS median MB",
           "RSS max MB",
           "processes",
+          "exited in window",
         ],
         idle.map((entry) => [
           entry.label,
@@ -1113,6 +1275,7 @@ try {
           entry.rssMedianMb.toFixed(1),
           entry.rssMaxMb.toFixed(1),
           String(entry.processes),
+          String(entry.exitedDuringWindow),
         ])
       )}`
     );
@@ -1121,10 +1284,16 @@ try {
   if (fixtureUp) {
     await run({ argv: [hack, "down"], env, cwd: project });
   }
+  // After Hack's own `down` and before the script's cleanup: what the
+  // measured commands themselves left behind.
   const leftovers = dockerReady
-    ? allContainers(env, projectName) + allContainers(env, rawName)
+    ? [projectName, rawName].reduce(
+        (sum, name) =>
+          sum + allContainers(env, name) + ownedNetworks(env, name),
+        0
+      )
     : 0;
-  report.cleanup = { containers_left: leftovers };
+  report.cleanup = { containers_and_networks_left: leftovers };
   if (leftovers !== 0) {
     failed = true;
   }
@@ -1140,14 +1309,18 @@ try {
     `- load average at start ${metadata.load_average_start.join(" ")}, at end ${loadavg()
       .map((value) => value.toFixed(2))
       .join(" ")}`,
-    `- cleanup: ${leftovers} fixture containers left`,
+    `- cleanup: ${leftovers} fixture containers and networks left by the measured commands`,
     ...notes.map((note) => `- note: ${note}`),
   ].join("\n");
   process.stdout.write(`${header}\n\n${sections.join("\n\n")}\n`);
   if (flags.out) {
     writeFileSync(resolve(flags.out), `${JSON.stringify(report, null, 2)}\n`);
   }
+} catch (error) {
+  if (!(error instanceof Interrupted)) {
+    throw error;
+  }
 } finally {
   await cleanup();
 }
-process.exit(failed ? 1 : 0);
+process.exit(signalExit ?? (failed ? 1 : 0));

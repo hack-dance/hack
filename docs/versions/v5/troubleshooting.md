@@ -16,7 +16,7 @@ Use `hack doctor --machine --json` for a machine-only audit. It returns the same
 
 The rows marked **next.17 source** describe merged code intended for next.17.
 They do not change an installed next.16 bundle. See the
-[release notes](../guides/v5-release-notes.md) for version boundaries.
+[per-prerelease notes](https://github.com/hack-dance/hack/blob/next/docs/guides/v5-release-notes.md) for version boundaries.
 
 | Finding or message | Cause | What to do |
 | --- | --- | --- |

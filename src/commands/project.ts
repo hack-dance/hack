@@ -210,6 +210,7 @@ import {
   listComposeProjectContainers,
 } from "../lib/compose-down-confirmation.ts";
 import {
+  inspectComposeEnvOverrideAtRest,
   removePlaintextComposeEnvOverride,
   writeComposeEnvOverride,
 } from "../lib/compose-env-at-rest.ts";
@@ -1507,6 +1508,40 @@ async function scrubPlaintextComposeEnvOverride(opts: {
   }
 }
 
+/**
+ * For a render with no managed env for any service: removes an override that
+ * still holds literal values (see {@link scrubPlaintextComposeEnvOverride}),
+ * then replaces a value-free one that remains with an empty override
+ * (HACK-2325). Its entries belong to an earlier graph or selection, and a
+ * Compose command that loads it from a container's `config_files` label would
+ * otherwise merge an environment-only entry for a service that no longer
+ * exists. The file is emptied rather than removed because those labels name
+ * its path. A literal file that a saved adoption pins is left as the scrub
+ * left it.
+ */
+async function clearComposeEnvOverride(opts: {
+  readonly projectDir: string;
+}): Promise<void> {
+  await scrubPlaintextComposeEnvOverride(opts);
+  const atRest = await inspectComposeEnvOverrideAtRest(opts).catch(() => null);
+  if (atRest?.kind !== "references") {
+    return;
+  }
+  try {
+    await writeComposeEnvOverride({
+      projectDir: opts.projectDir,
+      text: EMPTY_COMPOSE_ENV_OVERRIDE,
+    });
+  } catch {
+    logger.warn({
+      message:
+        "Could not empty .hack/.internal/compose.env.override.yml after the last managed env entry was removed; it holds no values. Run 'hack doctor'.",
+    });
+  }
+}
+
+const EMPTY_COMPOSE_ENV_OVERRIDE = "services: {}\n";
+
 async function maybePromptLegacyProjectEnvMigration(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly projectName: string;
@@ -1567,6 +1602,28 @@ async function maybePromptLegacyProjectEnvMigration(opts: {
   return migrated.legacyDetected;
 }
 
+/**
+ * Services the generated env override declares: every service in the Compose
+ * graph, plus any target outside it, in graph order (HACK-2325).
+ *
+ * The override sits at a stable path that Compose records in each container's
+ * `config_files` label, and every Compose command for the instance loads it.
+ * Rendering only a command's targets used to drop the other services' entries,
+ * so a later Compose command that recreated them (a dependency of a targeted
+ * `up`, or a Compose invocation from those labels) did so without their
+ * managed env. Rendering the whole graph each time keeps the file a pure
+ * function of the graph and the env selection: no merge with earlier state,
+ * and a service removed from the graph loses its entry. The file holds only
+ * `${NAME}` references; values travel in the Compose process env alone, which
+ * then carries the same set a full `up` passes.
+ */
+function composeEnvOverrideServices(opts: {
+  readonly targetServices: readonly string[];
+  readonly allServiceNames: readonly string[];
+}): readonly string[] {
+  return [...new Set([...opts.allServiceNames, ...opts.targetServices])];
+}
+
 export async function resolveModernComposeEnvOverrides(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly targetServices: readonly string[];
@@ -1624,8 +1681,10 @@ export async function resolveModernComposeEnvOverrides(opts: {
   // `${NAME}` references (see src/lib/compose-env-at-rest.ts).
   // Global values share one reference across services (HACK-1317), so the
   // Compose environment grows with distinct values, not services times keys.
+  // The file always covers the whole graph (HACK-2325), whatever the command
+  // targets: see composeEnvOverrideServices.
   const override = renderComposeEnvReferenceOverride({
-    targetServices: opts.targetServices,
+    targetServices: composeEnvOverrideServices(opts),
     globalEnv: modern.globalEnv,
     serviceEnv: modern.serviceEnv,
     effectiveScopes: modern.effectiveMetadata,
@@ -1636,7 +1695,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
   // Fail closed before any write or spawn when Compose could not start.
   assertComposeSpawnEnvFits({ env: composeEnv });
   if (override === null) {
-    await scrubPlaintextComposeEnvOverride({
+    await clearComposeEnvOverride({
       projectDir: opts.project.projectDir,
     });
     return {
@@ -1757,7 +1816,7 @@ async function resolveComposeEnvOverrides(opts: {
   );
 
   if (resolved.contract.vars.length === 0) {
-    await scrubPlaintextComposeEnvOverride({
+    await clearComposeEnvOverride({
       projectDir: opts.project.projectDir,
     });
     return {
@@ -1780,7 +1839,7 @@ async function resolveComposeEnvOverrides(opts: {
   }
 
   const overrideServices: Record<string, Record<string, unknown>> = {};
-  for (const service of opts.targetServices) {
+  for (const service of composeEnvOverrideServices(opts)) {
     const env: Record<string, string> = {};
     for (const v of resolved.values) {
       if (v.value === null) {
@@ -1803,7 +1862,7 @@ async function resolveComposeEnvOverrides(opts: {
 
   assertComposeSpawnEnvFits({ env: resolved.envForCompose });
   if (Object.keys(overrideServices).length === 0) {
-    await scrubPlaintextComposeEnvOverride({
+    await clearComposeEnvOverride({
       projectDir: opts.project.projectDir,
     });
     return {

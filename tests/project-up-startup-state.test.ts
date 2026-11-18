@@ -584,6 +584,131 @@ test("up records value-free env digests and a targeted restart refreshes only it
   }
 });
 
+/**
+ * Service name to the env key names its entry in the generated override
+ * declares, and every `${NAME}` reference the file uses. Names only.
+ */
+async function readOverrideShape(projectRoot: string): Promise<{
+  readonly keysByService: Record<string, readonly string[]>;
+  readonly references: readonly string[];
+}> {
+  const text = await readFile(
+    resolve(projectRoot, ".hack/.internal/compose.env.override.yml"),
+    "utf8"
+  );
+  const parsed = YAML.parse(text) as {
+    readonly services?: Record<
+      string,
+      { readonly environment?: Record<string, string> }
+    >;
+  };
+  const keysByService: Record<string, readonly string[]> = {};
+  const references = new Set<string>();
+  for (const [service, entry] of Object.entries(parsed.services ?? {})) {
+    const environment = entry.environment ?? {};
+    keysByService[service] = Object.keys(environment).sort();
+    for (const reference of Object.values(environment)) {
+      references.add(reference.slice(2, -1));
+    }
+  }
+  return { keysByService, references: [...references].sort() };
+}
+
+for (const targeted of ["restart", "up"] as const) {
+  test(`a targeted ${targeted} keeps every service's entry in the env override (HACK-2325)`, async () => {
+    const projectRoot = await createProject();
+    const envPath = resolve(projectRoot, ".hack/hack.env.default.yaml");
+    await writeFile(
+      envPath,
+      `${(await readFile(envPath, "utf8")).trimEnd()}\n  migrate:\n    MIGRATE_ONLY: "1"\n`
+    );
+    psRows.push(
+      JSON.stringify({ Service: "api", State: "running", ExitCode: 0 }),
+      JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
+    );
+
+    expect(await runDetachedUp({ projectRoot })).toBe(0);
+    const afterUp = await readOverrideShape(projectRoot);
+    expect(Object.keys(afterUp.keysByService).sort()).toEqual([
+      "api",
+      "migrate",
+      "profiled-worker",
+    ]);
+    expect(afterUp.keysByService.migrate).toContain("MIGRATE_ONLY");
+
+    runtimeCalls.length = 0;
+    const code =
+      targeted === "restart"
+        ? await runRestart({ projectRoot, services: ["api"] })
+        : await runDetachedUp({ projectRoot, services: ["api"] });
+    expect(code).toBe(0);
+
+    // The other services keep the same entries, so a later Compose command
+    // that recreates them from this file declares the same env names.
+    const afterTargeted = await readOverrideShape(projectRoot);
+    expect(afterTargeted).toEqual(afterUp);
+    // The targeted Compose spawn carries a value for every reference the
+    // file uses, so a dependency Compose recreates is not left blank.
+    const upCall = runtimeCalls.find((call) => call.kind === "up");
+    const spawnNames = Object.keys(upCall?.opts.env ?? {});
+    for (const reference of afterTargeted.references) {
+      expect(spawnNames).toContain(reference);
+    }
+  });
+}
+
+test("a targeted restart drops the entry of a service removed from the graph (HACK-2325)", async () => {
+  const projectRoot = await createProject();
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 }),
+    JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
+  );
+  expect(await runDetachedUp({ projectRoot })).toBe(0);
+  expect(
+    Object.keys((await readOverrideShape(projectRoot)).keysByService)
+  ).toContain("profiled-worker");
+
+  const composePath = resolve(projectRoot, ".hack", PROJECT_COMPOSE_FILENAME);
+  const compose = await readFile(composePath, "utf8");
+  const start = compose.indexOf("  profiled-worker:");
+  await writeFile(composePath, compose.slice(0, start));
+
+  expect(await runRestart({ projectRoot, services: ["api"] })).toBe(0);
+  expect(
+    Object.keys((await readOverrideShape(projectRoot)).keysByService).sort()
+  ).toEqual(["api", "migrate"]);
+});
+
+test("a render with no managed env empties a stale value-free override (HACK-2325)", async () => {
+  const projectRoot = await createProject();
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 }),
+    JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
+  );
+  expect(await runDetachedUp({ projectRoot })).toBe(0);
+  expect(
+    Object.keys((await readOverrideShape(projectRoot)).keysByService)
+  ).toContain("api");
+
+  // No service has managed env any more; only the host scope remains.
+  await writeFile(
+    resolve(projectRoot, ".hack/hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  host:",
+      '    HOST_ONLY: "host-only"',
+      "",
+    ].join("\n")
+  );
+  expect(await runRestart({ projectRoot, services: ["api"] })).toBe(0);
+
+  // Kept (container labels name its path) but declares no service.
+  expect((await readOverrideShape(projectRoot)).keysByService).toEqual({});
+});
+
 test("targeted restart without --env keeps the recorded running overlay (HACK-2280)", async () => {
   const projectRoot = await createProject();
   const projectDir = resolve(projectRoot, ".hack");

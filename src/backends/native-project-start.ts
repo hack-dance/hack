@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { noteActivityFailedServices } from "../lib/activity-log.ts";
+import type { BranchDroppedSites } from "../lib/branch-hosts.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import {
   type ComposeEnvFingerprintRecord,
@@ -10,6 +11,7 @@ import {
 } from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  nativeDetachedUpBranchDropped,
   nativeDetachedUpFailedServices,
   nativeDetachedUpShellVariables,
   nativeShellForwardingNotice,
@@ -1960,6 +1962,20 @@ async function staticReviewInput(opts: {
   ).input;
 }
 
+/**
+ * A dropped branch site: printed in full in the foreground (as Compose
+ * does); a detached owner hands its launcher names and a count only.
+ */
+function emitNativeBranchDroppedNotice(
+  notice: string,
+  details: BranchDroppedSites,
+  warn: (line: string) => void
+): void {
+  if (!nativeDetachedUpBranchDropped(details)) {
+    warn(notice);
+  }
+}
+
 async function startNativeProjectAttempt(
   opts: NativeProjectStartOptions,
   observeStartup: () => Promise<void>
@@ -2079,6 +2095,8 @@ async function startNativeProjectAttempt(
       input,
       retained: restore,
       phase: "before-runtime",
+      onDropped: (notice, details) =>
+        emitNativeBranchDroppedNotice(notice, details, deps.warn),
     })
   ).input;
   // Pure build admission before hooks, VM or provider start; refuses when disabled.
@@ -2333,6 +2351,8 @@ async function startNativeProjectAttempt(
       invoke: deps.invoke,
       select: deps.selectReview,
       phase: "after-runtime",
+      onDropped: (notice, details) =>
+        emitNativeBranchDroppedNotice(notice, details, deps.warn),
     });
     input = reviewedBranch.input;
     const reviewIdentity = reviewedBranch.identity;

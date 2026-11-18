@@ -597,6 +597,14 @@ A ready graph containing only completed one-shots also succeeds without
 launching another start. A running one-shot has not completed its required state.
 
 Restart starts a new foreground generation; `restart --detach` remains unsupported.
+`hack restart --json` instead runs the restart in a detached owner, waits for it to
+be ready and prints one result envelope with the same fields as Compose
+(`ok`, `data.action: "restart"`, `data.services`, `durationMs`); the services keep
+running after it returns. Frontend recovery (`--recover-frontend`) stays in the
+foreground and still refuses `--json`.
+`hack open` on native writes native's HTTPS frontend port into the URL when it is
+not 443 (for example `https://app.example.hack:18443`), from the same host settings
+`hack up` uses.
 Without these flags, `hack up` stays attached and Ctrl-C requests ordinary stop.
 Detached startup has no terminal stdin and suppresses hook/owner output rather
 than persisting potentially private values. Service logs remain available through

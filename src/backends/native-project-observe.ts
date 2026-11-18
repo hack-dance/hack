@@ -1,3 +1,4 @@
+import type { Writable } from "node:stream";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
@@ -373,6 +374,9 @@ export async function followNativeProjectLogs(
     readonly timestamps?: boolean;
     readonly json?: boolean;
     readonly project?: string;
+    /** Injected per service when several services share one output. */
+    readonly stdout?: Writable;
+    readonly stderr?: Writable;
   }
 ): Promise<number> {
   const selected = nativeLogFollowOptions(opts);
@@ -415,7 +419,7 @@ export async function followNativeProjectLogs(
       }),
   });
 }
-/** Native finite logs remain a bounded, single-service snapshot. */
+/** Native finite logs: a bounded snapshot of one service. */
 export async function nativeProjectLogs(
   opts: Options & {
     readonly service?: string;
@@ -423,60 +427,24 @@ export async function nativeProjectLogs(
     readonly follow: boolean;
   }
 ) {
-  if (
-    opts.follow ||
-    !opts.service ||
-    !SERVICE.test(opts.service) ||
-    !Number.isSafeInteger(opts.tail) ||
-    opts.tail < 1 ||
-    opts.tail > 1000
-  ) {
+  assertFiniteLogBounds(opts);
+  if (!(opts.service && SERVICE.test(opts.service))) {
     throw new ClosedCliError(
       "Native logs require one service, --no-follow and --tail 1..1000."
     );
   }
-  const run = await loadNativeProjectRun(opts.scope);
-  if (!run) {
-    throw new ClosedCliError(
-      "Native project has not been started; no owned graph mapping exists."
-    );
-  }
-  let before: Awaited<ReturnType<typeof inspect>>;
-  try {
-    before = await inspect(opts, run);
-  } catch (error: unknown) {
-    throw isNativeRuntimeNotRunning(error) ? runtimeNotRunning() : error;
-  }
+  const run = await requireLogRun(opts);
+  const before = await inspectForLogs(opts, run);
   const service = before.items.find((item) => item.service === opts.service);
   if (!service?.container) {
     throw refused();
   }
-  const result = await (opts.invoke ?? invokeNativeRuntime)({
-    runtime: opts.runtime,
-    cwd: opts.scope.projectRoot,
-    args: [
-      "graph",
-      "logs",
-      "--run-id",
-      run.run,
-      "--service",
-      opts.service,
-      "--tail",
-      String(opts.tail),
-      "--json",
-    ],
-    timeoutMs: 30_000,
-  });
-  if (
-    !isRecord(result) ||
-    result.container !== service.container ||
-    typeof result.stdout !== "string" ||
-    typeof result.stderr !== "string" ||
-    typeof result.truncated !== "boolean"
-  ) {
-    throw refused();
-  }
-  const lines = logLines(result.lines, result.stdout, result.stderr);
+  const logs = await readServiceLogs(
+    opts,
+    run,
+    opts.service,
+    service.container
+  );
   const after = await inspect(opts, run);
   if (
     after.items.find((item) => item.service === opts.service)?.container !==
@@ -488,10 +456,142 @@ export async function nativeProjectLogs(
     backend: "native" as const,
     run: run.run,
     service: opts.service,
-    container: service.container,
+    ...logs,
+  };
+}
+
+/**
+ * Native finite logs for every service that has a container, in service-name
+ * order, as Compose prints all services without a name. Each service is a
+ * bounded snapshot (`tail` lines); a service whose container changed while it
+ * was read is refused as for one service. Services without a container (not
+ * started, or a completed one-shot that was removed) are listed in `skipped`.
+ */
+export async function nativeProjectAllLogs(
+  opts: Options & { readonly tail: number }
+) {
+  assertFiniteLogBounds({ ...opts, follow: false });
+  const run = await requireLogRun(opts);
+  const before = await inspectForLogs(opts, run);
+  const items = [...before.items].sort((a, b) =>
+    a.service.localeCompare(b.service)
+  );
+  const services: Array<
+    { readonly service: string } & Awaited<ReturnType<typeof readServiceLogs>>
+  > = [];
+  const skipped: string[] = [];
+  for (const item of items) {
+    if (!item.container) {
+      skipped.push(item.service);
+      continue;
+    }
+    services.push({
+      service: item.service,
+      ...(await readServiceLogs(opts, run, item.service, item.container)),
+    });
+  }
+  const after = await inspect(opts, run);
+  for (const entry of services) {
+    if (
+      after.items.find((item) => item.service === entry.service)?.container !==
+      entry.container
+    ) {
+      throw refused();
+    }
+  }
+  return {
+    backend: "native" as const,
+    run: run.run,
+    services,
+    skipped,
+  };
+}
+
+/**
+ * Services of the started native run that have a container, in service-name
+ * order: what `hack logs --follow` without a service follows.
+ */
+export async function nativeProjectLogServices(
+  opts: Options
+): Promise<readonly string[]> {
+  const run = await requireLogRun(opts);
+  const observed = await inspectForLogs(opts, run);
+  return observed.items
+    .filter((item) => item.container !== null)
+    .map((item) => item.service)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function assertFiniteLogBounds(opts: {
+  readonly tail: number;
+  readonly follow: boolean;
+}): void {
+  if (
+    opts.follow ||
+    !Number.isSafeInteger(opts.tail) ||
+    opts.tail < 1 ||
+    opts.tail > 1000
+  ) {
+    throw new ClosedCliError(
+      "Native logs require --no-follow and --tail 1..1000 for a snapshot."
+    );
+  }
+}
+
+async function requireLogRun(opts: Options): Promise<NativeProjectRun> {
+  const run = await loadNativeProjectRun(opts.scope);
+  if (!run) {
+    throw new ClosedCliError(
+      "Native project has not been started; no owned graph mapping exists."
+    );
+  }
+  return run;
+}
+
+async function inspectForLogs(opts: Options, run: NativeProjectRun) {
+  try {
+    return await inspect(opts, run);
+  } catch (error: unknown) {
+    throw isNativeRuntimeNotRunning(error) ? runtimeNotRunning() : error;
+  }
+}
+
+async function readServiceLogs(
+  opts: Options & { readonly tail: number },
+  run: NativeProjectRun,
+  service: string,
+  container: string
+) {
+  const result = await (opts.invoke ?? invokeNativeRuntime)({
+    runtime: opts.runtime,
+    cwd: opts.scope.projectRoot,
+    args: [
+      "graph",
+      "logs",
+      "--run-id",
+      run.run,
+      "--service",
+      service,
+      "--tail",
+      String(opts.tail),
+      "--json",
+    ],
+    timeoutMs: 30_000,
+  });
+  if (
+    !isRecord(result) ||
+    result.container !== container ||
+    typeof result.stdout !== "string" ||
+    typeof result.stderr !== "string" ||
+    typeof result.truncated !== "boolean"
+  ) {
+    throw refused();
+  }
+  return {
+    container,
     stdout: result.stdout,
     stderr: result.stderr,
-    lines,
+    lines: logLines(result.lines, result.stdout, result.stderr),
     truncated: result.truncated,
   };
 }

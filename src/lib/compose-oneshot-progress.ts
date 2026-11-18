@@ -21,6 +21,12 @@ export type ComposeOneShotGraph = {
   readonly waitsOn: ReadonlyMap<string, readonly string[]>;
   /** Service to every service it depends on, whatever the condition. */
   readonly dependsOn: ReadonlyMap<string, readonly string[]>;
+  /**
+   * Some `extends` chain could not be resolved (too deep, a cycle, an
+   * unreadable base): completion dependencies may be missing, so a start
+   * must not treat the absence of progress as final.
+   */
+  readonly incomplete?: boolean;
 };
 
 export const EMPTY_ONE_SHOT_GRAPH: ComposeOneShotGraph = {
@@ -70,7 +76,12 @@ export function scopeOneShotGraph(
       oneShots.add(blocker);
     }
   }
-  return { oneShots, waitsOn, dependsOn: graph.dependsOn };
+  return {
+    oneShots,
+    waitsOn,
+    dependsOn: graph.dependsOn,
+    ...(graph.incomplete ? { incomplete: true } : {}),
+  };
 }
 
 /**
@@ -527,13 +538,15 @@ export async function readComposeOneShotGraph(
   options: OneShotGraphOptions = {}
 ): Promise<ComposeOneShotGraph> {
   const documents: unknown[] = [];
+  const resolution = { incomplete: false };
   for (const file of composeFiles) {
     const document = await readComposeDocument(file);
     if (document !== null) {
-      documents.push(await resolveExtends({ document, file, depth: 0 }));
+      documents.push(await resolveExtends({ document, file, resolution }));
     }
   }
-  return mergeOneShotGraphs(documents, options);
+  const graph = mergeOneShotGraphs(documents, options);
+  return resolution.incomplete ? { ...graph, incomplete: true } : graph;
 }
 
 /** A parsed Compose file, or null when it cannot be read or parsed. */
@@ -552,8 +565,13 @@ async function readComposeDocument(file: string): Promise<unknown> {
   }
 }
 
-/** Bound on nested `extends`; deeper (or cyclic) chains stop inheriting. */
-const MAX_EXTENDS_DEPTH = 8;
+/**
+ * Bound on nested `extends`. A chain past it, a cycle or an unreadable base
+ * marks the resolution incomplete instead of being treated as complete.
+ */
+const MAX_EXTENDS_DEPTH = 32;
+
+type ExtendsResolution = { incomplete: boolean };
 
 /**
  * `document` with each service's `extends` applied to the keys the graph
@@ -565,7 +583,7 @@ const MAX_EXTENDS_DEPTH = 8;
 async function resolveExtends(input: {
   readonly document: unknown;
   readonly file: string;
-  readonly depth: number;
+  readonly resolution: ExtendsResolution;
 }): Promise<unknown> {
   const { document } = input;
   if (!(isRecord(document) && isRecord(document.services))) {
@@ -577,7 +595,8 @@ async function resolveExtends(input: {
       service,
       services: document.services,
       file: input.file,
-      depth: input.depth,
+      chain: [`${input.file}#${name}`],
+      resolution: input.resolution,
     });
   }
   return { ...document, services };
@@ -587,17 +606,17 @@ async function resolveServiceExtends(input: {
   readonly service: unknown;
   readonly services: Readonly<Record<string, unknown>>;
   readonly file: string;
-  readonly depth: number;
+  /** `file#service` of each service already in this chain. */
+  readonly chain: readonly string[];
+  readonly resolution: ExtendsResolution;
 }): Promise<unknown> {
   const { service } = input;
   if (!isRecord(service) || service.extends === undefined) {
     return service;
   }
-  if (input.depth >= MAX_EXTENDS_DEPTH) {
-    return service;
-  }
   const target = extendsTarget(service.extends);
-  if (target === null) {
+  if (target === null || input.chain.length > MAX_EXTENDS_DEPTH) {
+    input.resolution.incomplete = true;
     return service;
   }
   let baseFile = input.file;
@@ -608,17 +627,26 @@ async function resolveServiceExtends(input: {
       : resolve(dirname(input.file), target.file);
     const other = await readComposeDocument(baseFile);
     if (!(isRecord(other) && isRecord(other.services))) {
+      input.resolution.incomplete = true;
       return service;
     }
     baseServices = other.services;
+  }
+  const link = `${baseFile}#${target.service}`;
+  if (input.chain.includes(link)) {
+    // A cycle: Compose refuses it; never guess the inherited fields.
+    input.resolution.incomplete = true;
+    return service;
   }
   const base = await resolveServiceExtends({
     service: baseServices[target.service],
     services: baseServices,
     file: baseFile,
-    depth: input.depth + 1,
+    chain: [...input.chain, link],
+    resolution: input.resolution,
   });
   if (!isRecord(base)) {
+    input.resolution.incomplete = true;
     return service;
   }
   return {

@@ -488,3 +488,34 @@ test("an inline comment after COMPOSE_PROFILES in Compose's .env is ignored", as
     exitCode: 0,
   });
 }, 60_000);
+
+test("a start whose extends chains cannot be resolved is bounded only by the ceiling", async () => {
+  const lines = [
+    "services:",
+    "  migrate:",
+    "    image: alpine:3.22",
+    "  level0:",
+    "    image: alpine:3.22",
+    "    depends_on:",
+    "      migrate:",
+    "        condition: service_completed_successfully",
+  ];
+  for (let level = 1; level <= 40; level += 1) {
+    lines.push(`  level${level}:`, `    extends: level${level - 1}`);
+  }
+  lines.push("  api:", "    extends: level40", "");
+  await writeFile(
+    join(project, ".hack", "docker-compose.yml"),
+    lines.join("\n")
+  );
+  // No one-shot is ever observed, but the graph is incomplete: a 1 s budget
+  // must not cut the 4 s start short.
+  const result = await cli(["up", "--detach", "--json"], {
+    HACK_COMPOSE_STARTUP_TIMEOUT_MS: "1000",
+    STUB_UP_SECONDS: "4",
+  });
+  expect({ exitCode: result.exitCode, stdout: result.stdout }).toMatchObject({
+    exitCode: 0,
+  });
+  expect(result.stderr).toContain("could not be resolved");
+}, 60_000);

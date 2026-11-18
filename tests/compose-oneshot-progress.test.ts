@@ -586,3 +586,46 @@ test("a service with a container counts whatever the active profiles", () => {
     }).oneShots,
   ]).toEqual(["migrate"]);
 });
+
+/** A compose file where api reaches a completion dependency through `depth` extends links. */
+function deepExtendsCompose(depth: number): string {
+  const lines = [
+    "services:",
+    "  migrate:",
+    "    image: app",
+    "  level0:",
+    "    image: app",
+    "    depends_on:",
+    "      migrate:",
+    "        condition: service_completed_successfully",
+  ];
+  for (let level = 1; level <= depth; level += 1) {
+    lines.push(`  level${level}:`, `    extends: level${level - 1}`);
+  }
+  lines.push("  api:", `    extends: level${depth}`, "");
+  return lines.join("\n");
+}
+
+test("an extends chain past the bound marks the graph incomplete, never complete", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-oneshot-deep-"));
+  try {
+    const shallow = join(root, "shallow.yml");
+    await writeFile(shallow, deepExtendsCompose(3));
+    const resolved = await readComposeOneShotGraph([shallow]);
+    expect(resolved.waitsOn.get("api")).toEqual(["migrate"]);
+    expect(resolved.incomplete).toBeUndefined();
+
+    const deep = join(root, "deep.yml");
+    await writeFile(deep, deepExtendsCompose(40));
+    expect((await readComposeOneShotGraph([deep])).incomplete).toBe(true);
+
+    const cycle = join(root, "cycle.yml");
+    await writeFile(
+      cycle,
+      "services:\n  a:\n    extends: b\n  b:\n    extends: a\n"
+    );
+    expect((await readComposeOneShotGraph([cycle])).incomplete).toBe(true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

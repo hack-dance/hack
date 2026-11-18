@@ -266,6 +266,23 @@ async function runComposeStartPhase(input: {
     }),
     { services: options.services, noDeps: options.noDeps }
   );
+  if (graph.incomplete) {
+    // Completion dependencies may be missing from the graph, so the absence
+    // of observed progress proves nothing: only the ceiling bounds this start.
+    const ceilingMs = resolveComposeStartupCeilingMs({
+      startupTimeoutMs: input.startupTimeoutMs,
+      startupCeilingMs: options.startupCeilingMs,
+      env: input.budgetEnv,
+    });
+    process.stderr.write(
+      `Some Compose extends chains could not be resolved, so one-shot progress is unknown; this start may run up to its ${ceilingMs} ms ceiling.\n`
+    );
+    const code = await input.runPhase(input.cmd, ceilingMs);
+    if (code === 124) {
+      options.onStartupStalled?.([]);
+    }
+    return code;
+  }
   if (graph.oneShots.size === 0) {
     const code = await input.runPhase(input.cmd, input.startupTimeoutMs);
     if (code === 124) {

@@ -271,7 +271,8 @@ export function configBranchServiceHosts(opts: {
       baseHosts,
     });
     if (next.length > 0) {
-      out[service] = next;
+      // Sorted like runtimeServiceHosts, so the order does not depend on the source.
+      out[service] = [...next].sort((a, b) => a.localeCompare(b));
     }
   }
   return out;

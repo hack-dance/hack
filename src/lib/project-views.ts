@@ -552,28 +552,26 @@ async function describeBranchInstances(opts: {
   // Each checkout's store is scanned on its own: a missing registered
   // checkout does not hide a worktree's instances (an absent store is empty).
   const nativeBranchRuntime: NativeBranchRuntime[] = [];
-  {
-    const seen = new Set<string>();
-    for (const checkout of listRegistrationCheckouts(opts.registration)) {
-      for (const record of await listNativeBranchRecords({
-        checkout,
-        store: "runtime",
-      })) {
-        const key = `${record.checkout.projectDir}\0${record.slug}`;
-        if (seen.has(key)) {
-          continue;
-        }
-        seen.add(key);
-        nativeBranchRuntime.push({
-          branch: record.slug,
-          store: record.store,
-          identity: await describe({
-            slug: record.slug,
-            checkout: record.checkout,
-            runtime: null,
-          }),
-        });
+  const seen = new Set<string>();
+  for (const checkout of listRegistrationCheckouts(opts.registration)) {
+    for (const record of await listNativeBranchRecords({
+      checkout,
+      store: "runtime",
+    })) {
+      const key = `${record.checkout.projectDir}\0${record.slug}`;
+      if (seen.has(key)) {
+        continue;
       }
+      seen.add(key);
+      nativeBranchRuntime.push({
+        branch: record.slug,
+        store: record.store,
+        identity: await describe({
+          slug: record.slug,
+          checkout: record.checkout,
+          runtime: null,
+        }),
+      });
     }
   }
 

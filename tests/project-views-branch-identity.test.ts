@@ -498,7 +498,7 @@ test("native: numbered site labels count, and a missing primary hides no worktre
       branch: "wt-feature",
       checkout: { root: worktreeRoot, kind: "worktree" },
       hosts: {
-        web: ["wt-feature.alpha.hack", "admin.wt-feature.alpha.hack"],
+        web: ["admin.wt-feature.alpha.hack", "wt-feature.alpha.hack"],
       },
       hosts_source: "config",
       url: "https://wt-feature.alpha.hack",

@@ -125,7 +125,11 @@ export async function readComposeInterpolationEnv(opts: {
   for (const file of files) {
     const text = await readTextFile(file);
     if (text) {
-      Object.assign(fromFiles, parseDotEnv(text));
+      expandEnvFileValues({
+        values: parseDotEnv(text),
+        into: fromFiles,
+        env: opts.env,
+      });
     }
   }
   const merged: Record<string, string | undefined> = { ...fromFiles };
@@ -135,6 +139,33 @@ export async function readComposeInterpolationEnv(opts: {
     }
   }
   return merged;
+}
+
+/**
+ * Compose expands `$VAR` references inside env-file values, from earlier
+ * file values and the command's environment. A value that cannot be resolved
+ * here is left unset (unknown), except COMPOSE_PROFILES, which becomes `*`:
+ * an unknown profile selection must keep services active, never exclude
+ * one whose migration Compose is waiting for.
+ */
+function expandEnvFileValues(input: {
+  readonly values: Readonly<Record<string, string>>;
+  readonly into: Record<string, string>;
+  readonly env: Readonly<Record<string, string | undefined>>;
+}): void {
+  for (const [key, raw] of Object.entries(input.values)) {
+    const expanded = interpolateComposeValue(raw, {
+      ...input.into,
+      ...input.env,
+    });
+    if (expanded !== null) {
+      input.into[key] = expanded;
+    } else if (key === "COMPOSE_PROFILES") {
+      input.into[key] = ANY_PROFILE;
+    } else {
+      Reflect.deleteProperty(input.into, key);
+    }
+  }
 }
 
 /** Which services' `depends_on` count: all, or those active under these profiles. */

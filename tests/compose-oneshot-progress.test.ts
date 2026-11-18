@@ -428,3 +428,31 @@ test("the interpolation env reads Compose's env files under the command's env", 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("env-file values are expanded as Compose does, or left unknown", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-oneshot-envexpand-"));
+  try {
+    const file = join(root, "docker-compose.yml");
+    await writeFile(file, "services: {}\n");
+    await writeFile(
+      join(root, ".env"),
+      "ENABLED_PROFILE=ops\nCOMPOSE_PROFILES=${ENABLED_PROFILE}\nREF=${NOT_SET}\n"
+    );
+    const env = await readComposeInterpolationEnv({
+      composeFiles: [file],
+      env: {},
+    });
+    expect(env.COMPOSE_PROFILES).toBe("ops");
+    // Unresolvable here: unknown, not the literal reference.
+    expect(env.REF).toBeUndefined();
+    await writeFile(join(root, ".env"), "COMPOSE_PROFILES=${NOT_SET}\n");
+    const unknown = await readComposeInterpolationEnv({
+      composeFiles: [file],
+      env: {},
+    });
+    // An unknown profile selection keeps every service active.
+    expect(unknown.COMPOSE_PROFILES).toBe("*");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

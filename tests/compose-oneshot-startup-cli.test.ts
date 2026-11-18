@@ -446,3 +446,24 @@ test("COMPOSE_PROFILES set only in Compose's .env enables the waiting service", 
     exitCode: 0,
   });
 }, 60_000);
+
+test("an interpolated COMPOSE_PROFILES in Compose's .env is resolved", async () => {
+  await writeFile(
+    join(project, ".hack", "docker-compose.yml"),
+    ONE_SHOT_COMPOSE.replace(
+      "  api:\n    image: alpine:3.22\n",
+      "  api:\n    image: alpine:3.22\n    profiles: [ops]\n"
+    )
+  );
+  await writeFile(
+    join(project, ".hack", ".env"),
+    "ENABLED_PROFILE=ops\nCOMPOSE_PROFILES=${ENABLED_PROFILE}\n"
+  );
+  const result = await cli(["up", "--detach", "--json"], {
+    HACK_COMPOSE_STARTUP_TIMEOUT_MS: "1000",
+    STUB_UP_SECONDS: "4",
+  });
+  expect({ exitCode: result.exitCode, stdout: result.stdout }).toMatchObject({
+    exitCode: 0,
+  });
+}, 60_000);

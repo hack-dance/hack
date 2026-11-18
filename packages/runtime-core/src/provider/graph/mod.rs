@@ -2687,7 +2687,7 @@ fn mount_rosetta_runtime(config: &mut Value) -> Result<(), CandidateError> {
     });
     // A config verified again (a one-off copies the startup template) already carries the
     // runtime's own mount; an authored bind never has this guest source.
-    if mounts.iter().any(|mount| *mount == runtime) {
+    if mounts.contains(&runtime) {
         return Ok(());
     }
     let claimed = |target: &str| target == ROSETTA_RUNTIME || target.starts_with("/mnt/rosetta/");

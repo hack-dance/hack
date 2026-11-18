@@ -673,6 +673,18 @@ fn review(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
     col.into_any_element()
 }
 
+/// One restore result in words, with where a displaced file was kept.
+fn restore_line(f: &hack_desktop_core::upgrade::RestoredFile) -> String {
+    let mut text = format!("{} · {}", f.label, f.status);
+    if let Some(m) = f.message.as_deref().filter(|m| !m.is_empty()) {
+        text.push_str(&format!(": {m}"));
+    }
+    if let Some(k) = f.kept_as.as_deref().filter(|k| !k.is_empty()) {
+        text.push_str(&format!(" · kept at {k}"));
+    }
+    text
+}
+
 fn restore(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
     let mut col = section("Restore", ui);
     let list = match &app.upgrade.snapshots {
@@ -770,23 +782,12 @@ fn restore(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
                 r.summary(),
                 ui,
             ));
-            for f in r
-                .results
-                .iter()
-                .filter(|f| !matches!(f.status.as_str(), "restored" | "already-restored"))
-            {
-                col = col.child(note(
-                    format!(
-                        "{} · {}{}",
-                        f.label,
-                        f.status,
-                        f.message
-                            .as_deref()
-                            .map(|m| format!(": {m}"))
-                            .unwrap_or_default()
-                    ),
-                    ui,
-                ));
+            // Every file not simply back, and every file with a kept copy:
+            // where the CLI kept a displaced file is how it is found again.
+            for f in r.results.iter().filter(|f| {
+                f.kept_as.is_some() || !matches!(f.status.as_str(), "restored" | "already-restored")
+            }) {
+                col = col.child(note(restore_line(f), ui));
             }
         }
         Some(Err(e)) => col = col.child(line(Status::Failed, e.clone(), ui)),
@@ -929,6 +930,23 @@ mod tests {
         assert_eq!(
             finding.action.as_deref(),
             Some("Check the converted layers before committing them.")
+        );
+    }
+
+    #[test]
+    fn a_restore_result_names_where_a_displaced_file_was_kept() {
+        let f = hack_desktop_core::upgrade::RestoredFile {
+            path: "/work/.hack/hack.config.json".into(),
+            label: "global: hack.config.json".into(),
+            status: "error".into(),
+            kept_as: Some("/work/.hack/upgrade/snapshots/s1/displaced/hack.config.json".into()),
+            message: Some("could not publish the snapshot copy; kept at keptAs".into()),
+        };
+        assert!(
+            restore_line(&f)
+                .ends_with("· kept at /work/.hack/upgrade/snapshots/s1/displaced/hack.config.json"),
+            "{}",
+            restore_line(&f)
         );
     }
 

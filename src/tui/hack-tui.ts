@@ -45,6 +45,7 @@ import { exec, run } from "../lib/shell.ts";
 import { parseTimeInput } from "../lib/time.ts";
 import { copyToClipboard } from "../ui/clipboard.ts";
 import type { LogStreamBackend, LogStreamEvent } from "../ui/log-stream.ts";
+import { beginTerminalHandoff } from "./terminal-handoff.ts";
 
 /** Matches block characters used in ASCII banners */
 const BLOCK_CHARS_REGEX = /[█░▒▓]/;
@@ -2798,7 +2799,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       readonly command: readonly string[];
       /** False for a command that returns at once (`tmux switch-client`). */
       readonly handoff: boolean;
-    }): Promise<number> => {
+    }): Promise<number | null> => {
       if (!isActive) {
         return 1;
       }
@@ -2812,17 +2813,13 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       let exitCode = 1;
       // suspend() hands the terminal over: it leaves raw mode, turns mouse
       // tracking off and stops reading stdin, so the attached session gets
-      // every key. stop() only halted rendering and kept all three.
-      try {
-        await activeRenderer.suspend();
-      } catch {
-        // Terminal setup or another transition still pending: keep the
-        // dashboard and run nothing rather than share the terminal.
-        setToast({
-          message: t`${fg("#e0af68")("Could not hand over the terminal")} ${dim("(try again)")}`,
-          durationMs: 2400,
-        });
-        return 1;
+      // every key. stop() only halted rendering and kept all three. A
+      // rejected transition is rethrown (see terminal-handoff.ts).
+      if (
+        (await beginTerminalHandoff(() => activeRenderer.suspend())) ===
+        "not_handed_over"
+      ) {
+        return null;
       }
       try {
         exitCode = await run(opts.command, {
@@ -2889,6 +2886,21 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
           command,
           handoff: !process.env.TMUX,
         });
+
+        if (exitCode === null) {
+          // The dashboard kept the terminal; nothing was started.
+          setToast({
+            message: t`${fg("#e0af68")("Could not hand over the terminal")} ${dim("(try again)")}`,
+            durationMs: 2400,
+          });
+          appendLogEntry(
+            formatSystemLine({
+              message: "[interact] terminal not handed over; nothing started",
+              tone: "warn",
+            })
+          );
+          return;
+        }
 
         if (exitCode !== 0) {
           setToast({

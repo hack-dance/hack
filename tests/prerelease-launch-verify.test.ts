@@ -128,6 +128,23 @@ test("a launch that did not just verify under the lock verifies itself", async (
   expect(releasedVerify).toHaveBeenCalledTimes(1);
 }, 30_000);
 
+test("a change to the channel under the lock makes the launch verify again", async () => {
+  const fixture = await installedChannel();
+  process.env.HACK_RUNTIME_BACKEND = "compose";
+  const channel = fixture.open();
+  const release = channel.lock(true);
+  try {
+    // `select` starts with a validation of its own, as every command that
+    // changes the channel does; what the lock verified no longer counts.
+    channel.select(VERSION);
+    const verify = spyOn(channel, "verifyVersion");
+    expect(await channel.run(["--version"])).toBe(0);
+    expect(verify).toHaveBeenCalledTimes(1);
+  } finally {
+    release();
+  }
+}, 30_000);
+
 test("a changed candidate still stops the launch", async () => {
   const fixture = await installedChannel();
   process.env.HACK_RUNTIME_BACKEND = "compose";

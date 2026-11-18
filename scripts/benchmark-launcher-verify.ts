@@ -13,15 +13,21 @@
  *   --installed   candidate versions installed in the channel (default 2:
  *                 the selected one and the previous one)
  *   --native-mb   size of the stand-in `hack-native` (default 20)
- *   --manager-mb  size of the stand-in manager executable (default 60)
+ *   --manager-mb  size of the stand-in manager executable (default 90; the
+ *                 published darwin-arm64 manager for 5.0.0-next.20 is 89 MB)
  *
  * Not measured: `codesign --verify` (stubbed, macOS only), the manager's own
  * process start, and the shell launcher. The printed "manager overhead" is
  * therefore a lower bound for a real `hack-next` call. The results go to
  * stderr; the launched CLI's own output goes to stdout.
  *
+ * Both sides of the comparison run the CLI with the environment the manager
+ * gives it. To compare two revisions of `scripts/installer/channel.ts`, run
+ * this script from a checkout of each with the same flags.
+ *
  * Everything is created under one fresh directory in the OS temp directory
- * and removed on exit.
+ * (about three times the bundle size at its peak) and removed on exit, on an
+ * error and on SIGINT or SIGTERM.
  */
 import {
   chmodSync,
@@ -45,7 +51,7 @@ const { values: flags } = parseArgs({
     runs: { type: "string", default: "10" },
     installed: { type: "string", default: "2" },
     "native-mb": { type: "string", default: "20" },
-    "manager-mb": { type: "string", default: "60" },
+    "manager-mb": { type: "string", default: "90" },
   },
 });
 
@@ -88,6 +94,15 @@ function filler(bytes: number, seed: number): Buffer {
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "hack-launcher-bench-")));
 const previousBackend = process.env.HACK_RUNTIME_BACKEND;
+for (const [signal, code] of [
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+] as const) {
+  process.on(signal, () => {
+    rmSync(root, { recursive: true, force: true });
+    process.exit(code);
+  });
+}
 try {
   const repo = resolve(import.meta.dir, "..");
   const manager = join(root, "source-manager");
@@ -179,6 +194,7 @@ try {
   for (let index = -1; index < runs; index += 1) {
     let started = performance.now();
     const child = Bun.spawn([cli, "--version"], {
+      env: channel.environment(selected, "compose"),
       stdin: "ignore",
       stdout: "inherit",
       stderr: "inherit",

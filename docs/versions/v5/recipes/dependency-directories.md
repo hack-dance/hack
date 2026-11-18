@@ -113,8 +113,9 @@ for this page.
 - Workspace installs that write into each package need explicit volume
   mappings. A `workspaceCache` adaptation can mount parts of one dependency
   volume at each workspace's `node_modules`.
-- Native never creates an anonymous volume, and allows at most 16 named
-  volumes, dependency caches included.
+- Native turns an anonymous volume into a project-owned named volume that
+  `hack down` keeps, and that is not refilled from a rebuilt image. It allows at most 16 named volumes, dependency caches and
+  these included.
 - `hack down --remove-data` deletes the data volumes a stopped native project
   created. Shared dependency caches are released, not deleted.
   `--prune-caches` is refused on native.

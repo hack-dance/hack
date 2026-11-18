@@ -159,7 +159,7 @@ The raw ps items[] engine report is a different surface from this normalized pro
 
 ### Sessions and lifecycle in full project rows
 
-Full-row sessions[] uses name:string, backend:tmux|zellij, source:hack|external, attached:boolean, path:string|null, windows:number|null and created_at:number|null. This numeric creation observation is distinct from the metadata MuxSession.createdAt string|null above; do not silently convert one contract into the other.
+Full-row sessions[] uses name:string, backend:tmux|zellij (`zellij` is a legacy tag for state saved before v5; v5 creates tmux sessions only), source:hack|external, attached:boolean, path:string|null, windows:number|null and created_at:number|null. This numeric creation observation is distinct from the metadata MuxSession.createdAt string|null above; do not silently convert one contract into the other.
 
 worktrees is null or an array of path:string, branch:string|null and last_seen_at:string. lifecycle is null or an object with up_before/up_after/down_before/down_after arrays and processes[]. Hook rows carry name:string|null, command:string, cwd:string|null and service:string; persistent:true is emitted only when true. Process rows require name/command/service:string and cwd:string|null.
 

@@ -96,7 +96,8 @@ The native backend selects a verified executor binary and a private native home,
 plans the project through the config compiler, and runs workloads under a
 foreground owner process that holds the run until it is stopped. Its supported
 commands are whole-project `up` and `restart`, owner-mediated `down`, saved-run
-`ps`, finite `logs`, and noninteractive `exec` and `run`. See
+`ps`, `logs` (live following is under verification), `exec` (interactive on a
+terminal since next.17) and finite `run`. See
 [the native backend guide](guides/native-candidate.md) and
 [native authored commands](reference/native-authored-commands.md). A Compose flag
 in these docs does not imply native support.
@@ -125,7 +126,7 @@ in these docs does not imply native support.
 
 `hack up` and `hack down` run more than Compose. Hooks and managed host processes
 declared in `.hack/hack.config.json` run around the services, inside a dedicated
-tmux or zellij session that Hack owns and can tear down. The exact ordering is in
+tmux session that Hack owns and can tear down. The exact ordering is in
 [Lifecycle](lifecycle.md).
 
 The [lifecycle outcome and phase diagrams](lifecycle.md#runtime-behavior) distinguish
@@ -348,7 +349,8 @@ group and other write from its own logs and pid file. The gateway token store
 is written owner-only (`0600`). A store that others could write, such as one
 written before this under umask `0002`, is not used: the gateway accepts no
 token from it until you remove it and issue tokens again
-(`rm ~/.hack/daemon/gateway/tokens.json && hack x gateway token-create`). Closing the terminal, or an agent
+(`rm ~/.hack/daemon/gateway/tokens.json && hack x gateway token-create`; the
+gateway is an unsupported retained surface). Closing the terminal, or an agent
 harness killing the process group that ran the command, does not stop it. It does
 not survive logout or reboot. For that, install it as a login service with
 `hack daemon install`:
@@ -1195,7 +1197,8 @@ qualify the installed binary, real filesystems or an application.
   - `.internal/extra-hosts.json`, `.internal/branch-usage.json`
   - `.internal/lifecycle/state.json` and `.internal/lifecycle/*.log`
   - `.branch/compose.<branch>.override.yml` and `.branch/compose.<branch>.runtime.override.yml`
-  - `hack.project.json` and `native/adaptation.json` (native backend only)
+  - `hack.project.json` (experimental authored project file, a bounded subset) and
+    `native/adaptation.json` (native backend only)
 
 ## Key design choices
 

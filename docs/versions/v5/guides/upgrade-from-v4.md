@@ -12,7 +12,7 @@ project, the v4.2.1 path, env migration, data recovery or rollback. Those remain
 steps are **to be confirmed in the dogfood run**. Native setup and log following
 remain **under verification**.
 
-The next.17 additions below were checked against candidate source `5002cf87bb`.
+The next.17 additions below shipped in next.17 (checked against `5002cf87bb`).
 They do not change the next.16 trial record. The assistant now handles checks and
 selected file repairs; env migration and the runtime trial remain separate.
 
@@ -70,7 +70,7 @@ Sources: [candidate channel contract](https://github.com/hack-dance/hack/blob/26
 
 ### Breaking change: zellij workspaces removed
 
-Next.17 requires tmux for interactive workspaces. Project/global
+v5 requires tmux for interactive workspaces (since next.17). Project/global
 `sessions.mux=zellij` and `HACK_SESSIONS_MUX=zellij` fail with migration guidance.
 Install tmux, then remove the setting and override or set the mode to `tmux`;
 `auto` detects tmux only. Existing zellij sessions are not stopped or migrated.
@@ -406,7 +406,7 @@ to try the prerelease.
 | Older 4.x, including 4.2.1 | Use the same backup and isolated-candidate sequence; inspect legacy env before any env-consuming command. Do not assume every project needs the same migration. | Direct 4.2.1 upgrade, or any need for an intermediate version: **to be confirmed in the dogfood run**. |
 | Homebrew install | Keep the installed v4 formula during the trial. `brew upgrade hack-dance/tap/hack` is the stable-release path, not the native-candidate installer. | Stable v5 formula availability and replacement/rollback: **to be confirmed in the dogfood run**. |
 | Script install | Use the separate reviewed candidate bootstrap on supported Macs. For stable software, the release downloader accepts `HACK_INSTALL_TAG` or `HACK_INSTALL_VERSION`. | Replacing an installed v4 with a stable v5 archive: **to be confirmed in the dogfood run**. |
-| Linux 4.x or a fresh Linux host | next.16 publishes no Linux candidate bundle. Keep stable Compose, or agree on a separately built current-source CLI before testing newer Linux setup. | Published v5 Linux install and full host migration: **to be confirmed in the dogfood run**. |
+| Linux 4.x or a fresh Linux host | No prerelease publishes a Linux bundle. Keep stable Compose, or agree on a separately built current-source CLI before testing newer Linux setup. | Published v5 Linux install and full host migration: **to be confirmed in the dogfood run**. |
 | Intel macOS or a fresh host | Native is unavailable. A fresh stable installation uses the normal Homebrew/release installer and Compose; use the candidate only on its supported host. | First stable v5 install and project initialization: **to be confirmed in the dogfood run**. |
 
 After backups and stable-daemon quiescence, read the migration section below
@@ -464,10 +464,10 @@ Migration entry points: [up prompt](https://github.com/hack-dance/hack/blob/26a1
 
 ### Env command changes: what to change
 
-These source changes are merged for next.17 in HACK-2163/HACK-2166, after the
+These changes shipped in next.17 (HACK-2163/HACK-2166), after the
 next.16 snapshot used above. Check the chosen binary's release notes and help
-before changing scripts; this is not a claim that next.17 is published.
-HACK-2172's live-key preservation fix is also merged for next.17; it cannot
+before changing scripts; an older installed bundle keeps its older behavior.
+HACK-2172's live-key preservation fix also shipped in next.17; it cannot
 recover keys removed by earlier cleanup. Keep the next.16 key-backup warning
 until using a published build containing that fix.
 
@@ -520,7 +520,7 @@ the backup before env-consuming commands that can migrate automatically too.
 The section 2 template already saves the key privately as
 `$BACKUP/project-.hack.secret.key`, outside the working tree. A fix
 for explicit Doctor cleanup is merged in
-[#769](https://github.com/hack-dance/hack/pull/769), intended for next.17.
+[#769](https://github.com/hack-dance/hack/pull/769) (since next.17).
 In a build containing that fix, project/shared env keys and current config/YAML
 inputs, including filesystem aliases, are not cleanup targets, even when an old backend configuration names
 one; cleanup refuses instead. Eligible obsolete contract/dotenv files, stores
@@ -528,7 +528,7 @@ and separate backend keys still need the documented delivery and consent
 checks before removal. This does not repair an installed next.16 bundle
 or recover a key removed earlier. Keep the backup until recovery is verified.
 
-Builds containing HACK-2191 (planned after next.17) add a read-only preview and
+Since next.18 (HACK-2191), builds add a read-only preview and
 resumable migration. Check the chosen executable's help before using them:
 
 ```sh
@@ -626,7 +626,7 @@ HACK_RUNTIME_BACKEND=compose "$V5" doctor --path /absolute/project
 An existing project key can retain group or other access from an older version.
 next.16 Doctor already reports `env-key-weak-permissions` and suggests
 `chmod 600` for the key. Review that finding and keep the backup private too.
-Merged [#764](https://github.com/hack-dance/hack/pull/764), intended for next.17,
+Merged [#764](https://github.com/hack-dance/hack/pull/764) (since next.17)
 adds Doctor's `secrets hygiene` report: loose modes, tracked or unignored files,
 staging leftovers and terminal payloads older than ten minutes. It names files,
 never values. After reviewing the report, `doctor --fix` tightens eligible files'
@@ -642,7 +642,7 @@ In the next.16 trials, most real env entries were stored as plain values.
 Avoid bulk listing when only names or provenance are needed. Plain values
 migrated from v4 are not encrypted merely by upgrading.
 
-Merged [#767](https://github.com/hack-dance/hack/pull/767), intended for next.17,
+Merged [#767](https://github.com/hack-dance/hack/pull/767) (since next.17)
 changes env listings to hide values by default and adds protection in place. This is
 a breaking output change: scripts should use `has_value` to test availability;
 an explicit `env get KEY` is a deliberate plaintext read. Follow that PR's
@@ -653,7 +653,7 @@ output contract or assume the protection command exists in next.16.
 
 A machine upgraded from v4 may still have an encrypted store such as
 `~/.hack/secrets.enc.json` whose key file was lost. Merged
-[#779](https://github.com/hack-dance/hack/pull/779), intended for next.17,
+[#779](https://github.com/hack-dance/hack/pull/779) (since next.17)
 changes Doctor's `secret integrity` finding for that store:
 
 - an **error** in a project whose legacy env contract reads the store, and a
@@ -823,7 +823,7 @@ The complete 4.2.1 automation/exit/JSON transcript is **to be confirmed in the d
 ### Native followed-log format in next.17
 
 The merged [#747](https://github.com/hack-dance/hack/pull/747) changes native
-plain `logs SERVICE --follow` output for the next prerelease. Application-text
+plain `logs SERVICE --follow` output (since next.17). Application-text
 lines no longer get the old `SERVICE | ` prefix; the shape matches a finite
 snapshot. Both service stdout and stderr reach the reader's stdout, while Hack
 notices use stderr. This applies to native followed logs.
@@ -850,7 +850,7 @@ including an application's 404; 5xx, incomplete responses and timeouts cannot.
 This does not establish application correctness.
 Inferred readiness also does not satisfy `depends_on: condition: service_healthy`;
 that dependency still requires an explicit enabled healthcheck.
-After next.20, a command healthcheck (`CMD` or `CMD-SHELL`) on a routed service no
+Since next.21, a command healthcheck (`CMD` or `CMD-SHELL`) on a routed service no
 longer refuses: native uses the inferred probe in its place and reports
 `route_command_healthcheck_replaced`. A disabled check still refuses.
 
@@ -1019,18 +1019,18 @@ The complete restore, including retained data and daemon/service recovery, is
 ## Known problems and the dogfood record
 
 The first macOS trials reported the following next.16 behavior. Fixes below are
-intended for the next prerelease; they do not change an installed
+in next.17 or later; they do not change an installed
 next.16 bundle.
 
 | Symptom | What to check or do |
 | --- | --- |
 | `up` stops with `E_LIFECYCLE_FAILED` and a pre-up hook's message | In one trial, the hook needed its project's cloud credentials refreshed. Check that hook's own dependency and credentials privately, then retry. A failing `up.before` hook blocks startup; do not suppress it to continue. |
-| `up -d` or `restart` exits 1 with `E_STARTUP_INCOMPLETE` although services are up | next.16 can misclassify a one-shot service that finishes in under a second. Check the reported service states and actual exit codes first. In the observed case, rerunning `up -d` succeeded. Merged [#758](https://github.com/hack-dance/hack/pull/758), intended for next.17, addresses short one-shot observation; it does not change next.16, and not every incomplete start is this bug. |
+| `up -d` or `restart` exits 1 with `E_STARTUP_INCOMPLETE` although services are up | next.16 can misclassify a one-shot service that finishes in under a second. Check the reported service states and actual exit codes first. In the observed case, rerunning `up -d` succeeded. Merged [#758](https://github.com/hack-dance/hack/pull/758) (since next.17) addresses short one-shot observation; it does not change next.16, and not every incomplete start is this bug. |
 | HTTP on port 80 works but routed HTTPS on 443 times out | On one Mac, another program listened on 443 on all addresses, including loopback; affected project hostnames resolved to `127.0.0.1`. Check listener ownership and hostname resolution. Hostnames resolving to the proxy container's address were not affected in that trial. next.16 Doctor did not detect this case. Merged [#773](https://github.com/hack-dance/hack/pull/773) adds a `proxy ports` warning for failed published loopback paths; inspect competing listeners, VPN serve/runtime HTTPS settings and DNS/bind configuration. There is no automatic repair. |
 | next.16 candidate Doctor suggests `hack daemon start` | That command names the stable CLI. Keep the stable daemon and its launchd service stopped during the shared-home candidate run. Merged [#776](https://github.com/hack-dance/hack/pull/776) treats the daemon as optional for newer candidate Compose trials. |
 | `env list --json` reveals plain values | This is next.16 behavior. Review the breaking listing changes in [#767](https://github.com/hack-dance/hack/pull/767) before updating scripts for the next prerelease. |
 | next.16 or earlier explicit Doctor migration cleanup can remove `.hack.secret.key` | Keep a private readable key backup before any migration, including `doctor --migrate-env-config`. The merged [#769](https://github.com/hack-dance/hack/pull/769) live-input protection is intended for next.17; an older bundle retains the bug, and upgrading does not recover an already removed key. |
-| An old project key has group or other access | next.16 Doctor reports `env-key-weak-permissions` with a `chmod 600` remedy. Merged [#764](https://github.com/hack-dance/hack/pull/764), intended for next.17, adds `secrets hygiene`; review its findings, then use `doctor --fix` to tighten eligible files and remove only stale Hack artifacts that are not live inputs. |
+| An old project key has group or other access | next.16 Doctor reports `env-key-weak-permissions` with a `chmod 600` remedy. Merged [#764](https://github.com/hack-dance/hack/pull/764) (since next.17) adds `secrets hygiene`; review its findings, then use `doctor --fix` to tighten eligible files and remove only stale Hack artifacts that are not live inputs. |
 
 Sources for startup failures: [next.16 lifecycle and startup handling](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/commands/project.ts).
 The three-project result, credential refresh, daemon-service behavior and HTTPS

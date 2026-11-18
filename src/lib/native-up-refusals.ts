@@ -37,8 +37,12 @@ export function refuseUnsupportedNativeUpOptions(opts: {
     throw nativeForegroundDetachRefusal({ restart: opts.restart });
   }
   if (opts.json) {
+    // Plain `restart --json` runs a detached restart (see handleRestart);
+    // only frontend recovery, which stays in the foreground, reaches here.
     refuse(
-      `Native \`${command}\` does not support --json because it stays in the foreground until stopped. Run it without --json and use \`hack ps --json\` from another terminal for status.`
+      opts.restart
+        ? "Native `hack restart` does not support --json with --recover-frontend, because recovery stays in the foreground until stopped. Run the recovery without --json and use `hack ps --json` from another terminal for status."
+        : `Native \`${command}\` does not support --json because it stays in the foreground until stopped. Run it without --json and use \`hack ps --json\` from another terminal for status.`
     );
   }
   if (opts.target) {

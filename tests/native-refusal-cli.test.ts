@@ -968,6 +968,8 @@ test(
     for (const args of [
       ["up", "--json"],
       ["up", "--detach", "--json"],
+      // HACK-2338 item 2: the detached JSON restart keeps the refusal too.
+      ["restart", "--json"],
     ]) {
       const result = await cli({ fixture: f, args, env: homeB });
       expect(result.code).toBe(1);

@@ -12,7 +12,13 @@ hack-next logs api --follow --tail 50 --path /absolute/project
 hack-next logs api --follow --since 10m --json --path /absolute/project
 ```
 
-Replace `api` with a declared service. Follow is the default. `--tail` accepts
+Replace `api` with a declared service, or leave the service out to follow every
+service that has a container, as on Compose: each line is prefixed with its service
+(`api    | …`), and JSON events already name theirs. One service's follower ending
+or failing does not stop the others; Ctrl-C stops them all. `hack logs --no-follow`
+without a service prints each service's bounded snapshot the same way, and its JSON
+is one object with a `services` array (and `skipped` for services with no
+container). Follow is the default. `--tail` accepts
 0–1000 lines (default 200); `--tail 0` reads only new lines. `--since` accepts a
 timestamp or duration. Its time window is still limited by the selected tail.
 For a finite snapshot, use `--no-follow` instead.
@@ -34,8 +40,8 @@ generation; it does not switch to a replacement after restart.
 
 The reader holds no mutation lease and does not reserve the lifecycle lock
 against `up`, `down` or `restart`. No stream result grants cleanup authority.
-Multiple services, Loki queries, `--until`, profiles and unsupported flags are
-refused by name. Lines above 64 Ki characters retain a prefix marked
+`--services`, Loki queries, `--until`, profiles and unsupported flags are refused
+by name. Lines above 64 Ki characters retain a prefix marked
 `[truncated]`; a trailing fragment is marked `[partial]`. JSON also carries
 `truncated: true` or `partial: true`.
 

@@ -8,7 +8,7 @@ flowchart TD
     inspect -->|unsafe identity| fail
     inspect -->|ready or pending| recheck[Recheck provider]
     recheck -->|identity changed| fail
-    recheck --> deadline{Before 10 seconds?}
+    recheck --> deadline{Before socket deadline?}
     deadline -->|no| fail
     deadline -->|yes| complete{All sockets private?}
     complete -->|no| wait[Wait up to 50ms]

@@ -130,6 +130,10 @@ import {
   resolveEnvKeyCandidates,
 } from "../lib/doctor-env-key.ts";
 import {
+  checkEnvOverrideCoverage,
+  ENV_OVERRIDE_COVERAGE_CHECK,
+} from "../lib/doctor-env-override-coverage.ts";
+import {
   inspectHackDirGitignoreForDoctor,
   inspectTrackedGeneratedFiles,
   untrackGeneratedFiles,
@@ -628,6 +632,7 @@ const DOCTOR_SUMMARY_GROUPS = [
       "worktree instances",
       "generated files",
       HACK_GITIGNORE_CHECK,
+      ENV_OVERRIDE_COVERAGE_CHECK,
     ]),
   },
   {
@@ -3912,6 +3917,14 @@ async function runProjectChecks(opts: {
   results.push(
     await runCheck(s, COMPOSE_ENV_AT_REST_CHECK, () =>
       checkComposeEnvOverrideAtRest({ startDir })
+    )
+  );
+  results.push(
+    await runCheck(
+      s,
+      ENV_OVERRIDE_COVERAGE_CHECK,
+      () => checkEnvOverrideCoverage({ startDir, dockerOk }),
+      { timeoutMs: 20_000 }
     )
   );
   results.push(

@@ -100,16 +100,16 @@ The listener must be your own process with an exclusive listener on
 does not change.
 
 An entry without `services` covers every service that declares the alias. One
-alias reaches one host listener, so two host ports need two aliases. Preflight
-counts the unbound aliases and says what such names are usually for. If an alias
-is not used, remove it from the Compose file, or run
+alias reaches one host listener, so two host ports need two aliases. `hack up`
+names each unbound alias, the services that declare it and where it comes from.
+If an alias is not used, remove it from the Compose file, or run
 `hack internal extra-hosts unset <alias>` for one set by a hook.
 
-**An old `.hack/.env`.** If preflight reports that an `env_file` names
-`hack env materialize` output, follow its text. When the file matches the current
-env layers exactly, remove `.hack/.env` and `.hack/.env.state.json`, then remove
-the `env_file` entry or mark it `required: false`. Native delivers those values
-itself.
+**An old `.hack/.env`.** If preflight reports that an `env_file` names possible
+`hack env materialize` output, first check whether `.hack/.env` holds any value of
+your own, and move such values with `hack env set --local`. Then remove `.hack/.env`
+and `.hack/.env.state.json`, and remove the `env_file` entry or mark it
+`required: false`. Native delivers the env layers' values itself.
 
 ## 4. Serve routes over HTTPS beside the Compose proxy
 

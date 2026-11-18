@@ -15,7 +15,7 @@ exact release tag over HTTPS, review it, then run it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.15/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -104,9 +104,70 @@ Leave `HACK_RUNTIME_BACKEND` unset, or set it to `native`, to return to the nati
 default. A shell that exported `HACK_RUNTIME_BACKEND=compose` for other work also
 selects Compose for `hack-next`; unset it before native testing.
 
-The bundled `hack-v5` entrypoint follows the same rule for manual bundles:
-unset selects native and requires `HACK_NATIVE_HOME`; `compose` needs no native
-home and uses your own Hack home.
+The bundled `hack-v5` entrypoint follows the same backend rule for manual bundles.
+Native defaults to `~/.hack/native-runtime`, or `$HACK_HOME/native-runtime` when
+`HACK_HOME` is selected. An absolute `HACK_NATIVE_HOME` overrides that default.
+Selecting a home creates nothing; setup creates missing directories privately
+after consent. Existing homes must be owned by you, mode 0700, and have no symlink
+components. `compose` needs no native home and uses your own Hack home.
+
+### Prepare the native runtime once
+
+Use the candidate frontend for both setup and project commands:
+
+```sh
+hack-next native setup
+hack-next doctor --native-preflight
+hack-next up -d
+```
+
+The command is `native setup` because it prepares native provider files without
+starting a VM or changing the Compose backend. It lists the pinned downloads,
+sizes, SHA-256 hashes, cache and destination, then asks once. Scripts use
+`hack-next native setup --accept-downloads --json`; JSON never prompts and passes
+the runtime's setup result through unchanged. Completed files are verified and
+reused; interrupted downloads resume. The complete offline archive input form is
+also available; see [provider setup](native-candidate.md).
+
+Preflight reports runtime installation separately from project review, in text
+and in the JSON `runtime_setup` item. A fresh or interrupted home blocks startup
+with `native setup` as its fix, printed for the launcher you ran (see
+[Printed commands name your launcher](#printed-commands-name-your-launcher)). Noninteractive `up` refuses before starting
+an owner; interactive `up` offers the same pinned setup and continues only after
+successful setup and a fresh readiness check. Record readiness is a quick check;
+startup still verifies prepared content before executing it.
+
+![Native first-use flow](native-first-use.svg)
+
+Diagram [source](native-first-use.mmd); rendered with Pele 1.9.0.
+
+Managed `hack-next` keeps its version's receipt-owned `native-home` so upgrades
+can find and stop its runtime. It refuses a differing `HACK_NATIVE_HOME` rather
+than silently ignoring it. Use that version's bundle `hack-v5` launcher for a
+custom home; the refusal prints its path,
+`$HOME/.hack-next/versions/<version>/bundle/hack-v5`. To move a manual bundle's home, stop its projects and runtime using
+the old home and matching executor, preserve the old home for retained data, then
+select a fresh absolute `HACK_NATIVE_HOME` and run `native setup` again. Setup
+does not migrate live receipts, disks or project data. The machine home is
+distinct from each project's `.hack/native/` adaptation directory.
+An explicit `native setup` selects the native home even when the surrounding
+shell sets `HACK_RUNTIME_BACKEND=compose`; ordinary Compose commands still remove
+native selectors.
+
+The frontend passes only system environment variables to setup; project values,
+credentials and proxy variables are excluded. Downloads need direct HTTPS access;
+use the offline inputs where a proxy is required. Invalid prepared trees and pin
+mismatches are preserved and need their own repair or a fresh home, rather than
+an endless setup retry. Setup-only homes permit managed upgrades only after an
+existing-lock quiescence check; unexpected or busy state still refuses. As with
+the previous empty-home check, a detached process that has not created any state
+is outside this observation's proof.
+
+Older candidate executors cannot prove the new setup-only quiescence predicate.
+If an older selected version was set up but never started, finish its setup,
+start a project with that old version's `hack-next up`, then run `hack-next down`
+before upgrading. Its runtime must report `stopped`. An interrupted or unknown
+old home still refuses an upgrade; do not remove its receipts to bypass the check.
 
 ### Stop stable hackd before a Compose run
 
@@ -122,9 +183,13 @@ entrypoint, so the candidate does not start the stable `hackd` on its own, not
 even from a candidate `global up`, `global install` or `doctor --fix`. A
 candidate `hack doctor --fix` skips its `hackd` repair without asking, in a
 terminal or not, and prints the reason and the command to run yourself, such as
-`hack daemon start`. That command runs the stable CLI, so do not run it during a
-Compose candidate run. Older candidate bundles can start `hackd`, so use this
-order with every bundle.
+`hack daemon start`. In a candidate run, `daemon start` starts the candidate's own
+`hackd` through the bundle's `hack-v5` launcher, never the stable `hack` on PATH,
+and it refuses rather than replace a running stable `hackd`; see
+[A candidate's own daemon](../versions/v5/upgrade.md#a-candidates-own-daemon).
+Bundles up to 5.0.0-next.18 start the `hack` first on PATH, which is the stable
+CLI, so do not run their `daemon start` during a Compose candidate run. Older
+candidate bundles can start `hackd`, so use this order with every bundle.
 
 Use this order:
 
@@ -176,6 +241,23 @@ tracked `.hack/.internal/` paths. `hack doctor --fix` removes them from the Git
 index with `git rm --cached` and keeps the files on disk; commit that removal.
 See [ignore rules](../env.md#ignore-rules-committed-hackgitignore).
 
+### Printed commands name your launcher
+
+Stable v4 stays `hack` on your PATH, so a prerelease never tells you to run a
+bare `hack`. Commands it prints, such as the next steps of `upgrade check` and
+`upgrade apply`, the `native setup` fix and the Compose-backend hint, name the
+launcher the command ran through:
+
+| You ran | Printed commands start with |
+| --- | --- |
+| `hack-next` | your channel's launcher by full path, `$HOME/.hack-next/bin/hack-next` by default or `<root>/bin/hack-next` for a `--root` install (it is not on PATH) |
+| a bundle's `hack-v5` | that bundle's `hack-v5`, by its full path |
+| stable `hack` | `hack` |
+
+A Compose run also prints `HACK_RUNTIME_BACKEND=compose` in front. A custom
+`HACK_NATIVE_HOME` is the one exception: `hack-next` refuses it, so that fix
+names the selected bundle's `hack-v5` instead.
+
 ## Upgrade, roll back and return to stable
 
 The standalone manager runs through the launcher:
@@ -184,12 +266,17 @@ The standalone manager runs through the launcher:
 "$HOME/.hack-next/bin/hack-next" --manager status
 "$HOME/.hack-next/bin/hack-next" --manager upgrade --version 5.0.0-next.NEWER
 "$HOME/.hack-next/bin/hack-next" --manager rollback --version 5.0.0-next.OLDER
+"$HOME/.hack-next/bin/hack-next" --manager select --version 5.0.0-next.INSTALLED
 "$HOME/.hack-next/bin/hack-next" --manager stable
 "$HOME/.hack-next/bin/hack-next" --manager upgrade-manager
 ```
 
 `NEWER` and `OLDER` stand for prerelease numbers: `upgrade` takes a version newer than
 the selected one, and `rollback` takes an older version you already installed.
+`select` takes any installed version, older or newer, so after a rollback it moves
+forward again; `upgrade` to an installed version refuses and names this command.
+Managers before `5.0.0-next.20` have no `select`; there, `rollback --version`
+selects any installed version, newer ones included.
 
 Stop every retained version's graphs and runtime first. Version changes take the
 channel's exclusive lock, refuse active launchers and apply quiescence checks to
@@ -201,24 +288,34 @@ candidate that refuses state written by a newer one is not a successful rollback
 selected, all bundles and homes are retained, and your stable `hack` is unchanged.
 
 A bundle whose layout the installed manager does not understand needs a newer
-manager first. The installed manager cannot fetch one: `upgrade-manager` installs
-the executable it is run from. Download the standalone manager from the target
-release, verify it against that release's `INSTALLER-SHA256SUMS`, then run that
-file against your channel root:
+manager first. Such an `upgrade` refuses and changes nothing. Managers from
+`5.0.0-next.19` onward name the unknown file and this step. A `5.0.0-next.17` or
+earlier manager says "Foreign, duplicate or traversing archive entry." for the
+lifecycle supervisor that `5.0.0-next.18` added. The installed manager cannot fetch
+a newer one: `upgrade-manager` installs the executable it is run from. Download the
+standalone manager from the release you are upgrading to, verify it against that
+release's `INSTALLER-SHA256SUMS`, then run that file against your channel root.
+The example names `v5.0.0-next.16`; use the release you are upgrading to in both
+URLs and replace `NEWER` with its number. For a channel that a compiled manager
+installed (`5.0.0-next.6` to `next.17`) that is `5.0.0-next.19` or later: the
+`5.0.0-next.18` manager does not recognize earlier managers. The takeover works only
+on a channel the newer manager can validate. A channel from the `5.0.0-next.1` to
+`next.5` Python installer, or one it refuses, needs a fresh `--root` instead.
 
 ```sh
 dir=$(mktemp -d) && cd "$dir" &&
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.15/hack-next-manager-darwin-arm64 \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/hack-next-manager-darwin-arm64 \
   --output hack-next-manager-darwin-arm64 &&
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.15/INSTALLER-SHA256SUMS \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/INSTALLER-SHA256SUMS \
   --output INSTALLER-SHA256SUMS &&
 grep '[ *]hack-next-manager-darwin-arm64$' INSTALLER-SHA256SUMS > manager.sha256 &&
 shasum -a 256 --check manager.sha256 &&
 codesign --verify --strict hack-next-manager-darwin-arm64 &&
 chmod 0700 hack-next-manager-darwin-arm64 &&
-./hack-next-manager-darwin-arm64 --root "$HOME/.hack-next" upgrade-manager
+./hack-next-manager-darwin-arm64 --root "$HOME/.hack-next" upgrade-manager &&
+"$HOME/.hack-next/bin/hack-next" --manager upgrade --version 5.0.0-next.NEWER
 ```
 
 Run it as one command. Every step is joined with `&&`, so a failed download, a

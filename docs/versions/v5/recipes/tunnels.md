@@ -87,7 +87,7 @@ flowchart LR
    hack down
    ```
 
-Lifecycle processes need tmux (or zellij). See [Lifecycle](../../lifecycle.md).
+Lifecycle processes need tmux. See [Lifecycle](../../lifecycle.md).
 
 ## OAuth callbacks and stable URLs
 

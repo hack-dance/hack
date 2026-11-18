@@ -70,6 +70,8 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 - `.internal/`
 - `.branch/`
 - `.env`
+- `.env.*` (legacy plaintext overlays such as `.env.qa`; `.env.example`,
+  `.env.sample`, `.env.template` and `.env.dist` remain visible as shared templates)
 - `.env.state.json`
 - `hack.env.local.yaml`
 - `hack.env.*.local.yaml`
@@ -78,8 +80,14 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 
 How it is maintained:
 
+Tracked legacy overlays are shared project inputs. `hack doctor --fix` leaves
+their index entries and tracked templates/backups alone. Run
+`hack doctor --migrate-env-config` to preserve overlay values before considering
+removal; committing an automatic index removal would delete teammates' copies.
+
 - created by `hack init` for a new project, and refreshed when you write
   machine-local env overrides (`hack env set --local`, `hack env hydrate`)
+
 - in an existing project without it (for example one an earlier Hack version
   initialized), `hack doctor` reports the "hack gitignore" check as a warning,
   and `hack doctor --fix` creates the file, or restores its managed block,
@@ -101,10 +109,12 @@ How it is maintained:
   does not make it writable for Hack; add a write bit instead. When it lacks
   the managed block, `hack doctor` warns and names the fix (make it writable,
   then run
-  `hack doctor --fix`), and `--fix` leaves it unchanged. `hack env set --local`
-  and `hack env hydrate` still write the local layer, print the same warning
-  on stderr (so `--json` output on stdout stays valid JSON), and leave the
-  file unchanged. Interactive `hack init` that overwrites an existing scaffold
+  `hack doctor --fix`), and `--fix` leaves it unchanged. `hack env set --local`,
+  `add --local`, `unset --local` and `hack env hydrate` print the same warning
+  on stderr (so `--json` output on stdout stays valid JSON) and leave the
+  file unchanged; they write the local layer only when another rule (for
+  example a root `.gitignore` entry) still ignores it, and otherwise refuse
+  (see "Machine-local writes" below). Interactive `hack init` that overwrites an existing scaffold
   prints the same warning and leaves the file unchanged. A read-only file that
   already has the block is fine.
 - runtime commands (`hack up`, `down`, `restart`, `run`, `exec`) never write
@@ -144,6 +154,14 @@ How it is maintained:
   refused
 - older repos that added `.hack/.internal/` to the root `.gitignore` keep
   working; the entries are equivalent and nothing is removed
+
+Existing projects gain the `.env.*` entry on the next operation that maintains
+these rules, including the local `info/exclude` maintenance on runtime commands
+and legacy env writes. `.env.state.json` remains ignored and is still reported
+when tracked. `hack doctor` also reports tracked or unignored legacy overlays;
+ignore rules do not remove files that Git already tracks. The legacy daemon
+`POST /v1/env/set` and `POST /v1/env/unset` routes refuse projects with YAML env layers with
+`yaml_env_mutation_unsupported`; use `hack env set` or `hack env add` for them.
 
 Leak detection and repair:
 
@@ -333,6 +351,14 @@ decrypted value, whether `up` succeeds, fails or is interrupted. The file is wri
 with mode 0600, and Hack refuses to write through a symlink at that path. A value
 reaches the container literally, `$` included.
 
+The file always declares every service in the Compose graph, whichever command wrote
+it: a targeted `hack up <service>`, `hack restart <service>`, `hack run` or `hack exec`
+rewrites the entries for all services, not only its targets, and passes the values for
+all of them. A Compose command that later recreates another service from this file,
+such as a dependency of a targeted `up`, still declares that service's managed
+variables. A service removed from the Compose file loses its entry the next time the
+file is written.
+
 Only the `docker compose` invocations that read the override (`up`, `run`, `exec`,
 `ps` and the dependency cache initialization) receive the `HACK_ENV_*` values. The other
 `docker` commands Hack runs around Compose, such as `docker inspect`, `docker logs` and
@@ -386,8 +412,10 @@ so readers never see a partial file. An existing file with group or other access
 tightened to `0600` even when its contents are unchanged. These write and update paths
 refuse, with a fixed message that names no file or value, an env file that is a symlink
 (including a dangling one) or not a regular file, or one whose `.hack` directory is a
-symlink. Replace the link with a regular file or directory to continue. Code paths
-that only read an env file do not apply this check and still follow a symlink.
+symlink. Replace the link with a regular file or directory to continue. Reads of
+these files, including legacy resolution and `hack env list`, refuse the same links
+before reading, so a link to a dotenv file outside the project is never parsed or
+printed.
 
 For host execution, `hack host exec`, `hack host shell`, and lifecycle hooks/processes use a host-local view.
 That means Hack prefers host-usable values when it can:
@@ -421,6 +449,42 @@ override, removes it. `hack down` removes it before its lifecycle hooks, the rem
 or `docker compose down` run, so a failed hook, a remote target or a failed Compose down
 does not keep it. `hack doctor` reports such a file in its "compose env at rest" check
 (counts only, never values), and `hack doctor --fix` removes it.
+
+### Secrets at rest: the "secrets hygiene" check
+
+`hack doctor` checks the files that hold env values or keys, for the project and for the
+global Hack home, in its "secrets hygiene" section. It names files, never values:
+
+- machine-local layers (`hack.env.local.yaml`, `hack.env.<overlay>.local.yaml`),
+  `.hack/.env` files, the project key (checkout-local and shared) and the encrypted
+  store and its key, when other users can read them, when they are links, or when they
+  belong to another user;
+- those files when git tracks them (an error, except for the encrypted store: it holds
+  only ciphertext, so a tracked store is a warning while its key stays out of git), or
+  when git does not ignore them. Inside the project `--fix` adds the ignore entry; a
+  store or key in another git work tree (a home directory kept in git, say) is
+  checked there and reported for you to ignore by hand, and one in a checkout git
+  cannot name is an error;
+- staging copies an interrupted write left behind, and env values staged for a terminal
+  session that never ran (older than 10 minutes);
+- an encrypted store whose key file is missing: "store present, key missing, cannot be
+  read".
+
+`hack doctor --fix` removes group and other permission bits from eligible files it reports, adds missing ignore
+entries, and removes Hack's own leftovers, and prints each change. It never deletes a
+store, a key or a file you wrote, and never untracks a file.
+
+Hack writes a file that holds a secret by staging the complete contents first. Those
+staging copies live in a private directory next to the file, `.hack-staging/`, which
+holds a `.gitignore` of `*`, so git never lists anything in it. `hack doctor --fix`
+removes copies older than 10 minutes, and stale terminal-session payloads, but never a
+file env resolution reads (a configured store or key, the project or shared key,
+`hack.config.json` or a YAML layer, by its own path or where it resolves), and never
+anything in a retired store (`<store>.retired-<stamp>/`). Before each
+removal it reads the configuration again, so an edit made since the check counts, and
+it removes nothing it cannot confirm; writes themselves remove nothing there. A machine-local layer that a write changes, or
+leaves unchanged, is set to 0600 if other users could read it. Commands that read env
+layers warn on stderr about a machine-local file other users can read.
 
 A legacy adoption (`hack config adopt`) pins the override's exact bytes and file
 identity for as long as the adoption exists, and adopted commands never rewrite it. So:
@@ -490,12 +554,13 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | Command | Selectors | Resolution timing | Refresh path | Native and compose limits |
 | --- | --- | --- | --- | --- |
 | `hack up` | `--env`, `--target` | Once, when services are created; values go into Compose containers and lifecycle hooks/processes, and the selection is recorded for the running stack. | `hack restart` or `hack env apply --service <service>`; editing env files does not change running containers. | Authored native projects receive the same selection before dispatch. |
-| `hack down` | `--env`, `--target` | At teardown, for lifecycle down hooks only; omitted reuses a named overlay recorded for the running stack, else the configured default. | None; nothing is delivered to containers. | The native runtime backend refuses `--env`. |
-| `hack restart` | `--env`, `--target` | When services are recreated; omitted reuses a named overlay recorded for the running stack, else the configured default, and an explicit `--env` (including `base`) wins. | This is the refresh path for the whole stack or the named services. | Authored native projects receive the same selection before dispatch. |
-| `hack run` | `--env` | Per invocation, for the new one-off container. | Each run resolves again. | The native runtime backend refuses `--env`; restart with the selection first. |
-| `hack exec` | `--env` | Checked at invocation against the env recorded for the running stack; the command runs with the env the container was created with. Compose exec and native-runtime exec (Compose-file and authored native projects) warn on stderr when the service's resolved env changed since it started. | `hack restart <service>` (or `hack restart --env <name>`); native projects restart as a whole with `hack restart` | Compose refuses when the requested env differs from the env recorded for the running stack; the native runtime backend refuses `--env`. |
-| `hack env list` | `--env`, `--service` | Per invocation, read-only; secret values are masked unless `--show-secrets`. | Not needed. | Reads files; no runtime required. |
+| `hack down` | `--env`, `--target` | At teardown, for lifecycle down hooks and for Compose itself (interpolation and `COMPOSE_PROFILES`); omitted reuses the selection recorded for the running stack (base included), else the configured default. Down also enables every profile the stack's last `up` activated, so a profiled service started through `COMPOSE_PROFILES` is stopped even after the env changed. | None; nothing is delivered to containers. | The native runtime backend refuses `--env`. |
+| `hack restart` | `--env`, `--target` | When services are recreated; omitted reuses the selection recorded for the running stack (base included), else the configured default, and an explicit `--env` (including `base`) wins. | This is the refresh path for the whole stack or the named services. | Authored native projects receive the same selection before dispatch. |
+| `hack run` | `--env` | Per invocation, for the new one-off container; omitted reuses the selection recorded for the running stack, else the configured default, so the run can use the running dependencies. | Each run resolves again. | The native runtime backend refuses `--env`; restart with the selection first. An authored `.hack/hack.project.json` project on the Compose backend does not yet reuse the recorded selection: omitted `--env` resolves the configured default, so pass the running overlay explicitly. |
+| `hack exec` | `--env` | Omitted uses the env recorded for the running stack (base included), else the configured default; an explicit `--env` is checked against it. The command runs with the env the container was created with. Compose exec and native-runtime exec (Compose-file and authored native projects) warn on stderr when the service's resolved env changed since it started. | `hack restart <service>` (or `hack restart --env <name>`); native projects restart as a whole with `hack restart` | Compose refuses an explicit `--env` that differs from the env recorded for the running stack, naming the running env and the two ways out (omit `--env`, or restart with the requested env); the native runtime backend refuses `--env` and always uses the running selection. |
+| `hack env list` | `--env`, `--service` | Per invocation, read-only metadata; values require `--show-values` in a terminal. | Not needed. | Reads files; no runtime required. |
 | `hack env get` | `--env`, `--service` | Per invocation; prints exactly one plaintext value to stdout. | Not needed. | Reads files; refuses native project inputs. |
+| `hack env protect` | `--env`, `--service` | Per invocation; lists plaintext names or encrypts chosen keys in their original scopes and layers. Omitted `--env` covers all overlays. | Runtime values stay the same. | Requires YAML layers; mutates this checkout only. |
 | `hack env explain` | `--env`, `--service`, `--target` | Per invocation; reports source, precedence and delivery without the value. | Not needed. | Reads files; no runtime required. |
 | `hack env apply` | `--env`, `--service` | Runs `hack restart <service>` with the same `--env`, recreating one service. | This is the refresh path for one service. | `--service` is required. |
 | `hack env add` | `--env`, `--service` | Selects the file written (`hack.env.<name>.yaml`, or the base file for `base`/`default`/`none`; `--local` writes the local variant). | Running workloads keep old values until `hack env apply` or `hack restart`. | Mutates only env files. |
@@ -569,7 +634,10 @@ hack env list
 hack env list --env qa
 hack env list --env qa --service api
 hack env list --json
-hack env list --show-secrets
+hack env list --json --plaintext-values
+hack env list --show-values
+hack env overlay list
+hack env overlay add qa
 hack env explain GITHUB_TOKEN --env runner --service installer --target compose
 ```
 
@@ -581,7 +649,63 @@ lifecycle code or Compose. Recreate just one service after an env change with:
 hack env apply --service api --env qa
 ```
 
-`--show-secrets` prints secret values in plaintext instead of the masked default; use it deliberately.
+`env list` prints names, scopes, source layers and whether each value is set. It hides **all** values, including plaintext entries migrated from legacy dotenv files. JSON omits the `value` field and includes `has_value`. Modern listings do not decrypt values. Legacy backend inspection may require backend access to determine availability.
+
+JSON also reports `key_state`, whether the project env key can be read, without the key or any value. It looks for the key in the same order as the runtime: the checkout's `.hack.secret.key`, the shared or primary-checkout copy, then `HACK_ENV_SECRET_KEY`.
+
+| `key_state` | Meaning |
+| --- | --- |
+| `ok` | A key is present and readable. It is not checked against existing values; `hack doctor` reports a layer the key cannot decrypt. |
+| `missing` | No key file and no `HACK_ENV_SECRET_KEY`. An empty or whitespace-only key file counts as absent, as it does for the runtime, so the next location is used. Names are still listed. Copy the original key from a checkout that has it; a new key cannot decrypt existing values. |
+| `unreadable` | A key file exists but is refused (a symlink, not a regular file, unreadable, not UTF-8 or larger than 1 MiB). Names are still listed. Run `hack doctor`. |
+| `not_checked` | The project uses the legacy `hack.env.json` contract, which does not use this key. |
+
+`key_source` says which source answered, never the key:
+
+| `key_source` | Meaning |
+| --- | --- |
+| `{"kind":"file","origin":…,"path":…,"relative_path":…}` | A key file. `origin` is `checkout` (this checkout's `.hack.secret.key`), `shared` (the git common dir, shared by linked worktrees), `primary_checkout` (inherited from the primary worktree) or `override` (`--key-file`). `relative_path` is relative to the checkout, or null when the file is outside it. `path` is null only for a `--key-file` path that names nothing. |
+| `{"kind":"env","origin":…,"name":…}` | An environment variable, by NAME: `HACK_ENV_SECRET_KEY` (`origin: default`) or the variable given with `--key-env` (`origin: override`). |
+| `{"kind":"none"}` | No key was found (`key_state: missing`). |
+| `null` | A key file was refused and its location cannot be told (`key_state: unreadable`). |
+| `{"kind":"secret_store","backend":…}` | Legacy `hack.env.json` contract; secrets live in the configured secret store. |
+
+`--key-file <path>` or `--key-env <NAME>` on `env list`, `env get`, `env set` and `env add` uses that key for one run instead of the discovery order above. Pass a path or a variable NAME, never the key itself; a refused `--key-env` argument is not echoed. While an override is given, Hack does not fall back to other key locations and never creates or adopts a key file, so `env set --secret` encrypts with the chosen key. Encryption with an override follows the usual key rules: a git-tracked key file is refused, so is a key file inside a git checkout that git does not ignore (Hack does not edit ignore rules for an override), and so is a key that differs from the one this checkout would otherwise find, so a project never ends up with secrets under two keys. A `--key-file` path that names nothing is reported as `path: null` rather than echoed.
+
+JSON also lists `overlays`: every committed `.hack/hack.env.<name>.yaml`, every overlay that exists only as its machine-local `.hack/hack.env.<name>.local.yaml`, and the configured default overlay even before it has a file. In a linked worktree that inherits local inputs, it also lists overlays that exist only as the primary checkout's `.hack/hack.env.<name>.local.yaml`, which `--env <name>` reads there. Each entry has `name`, `path`, `exists`, `local_path`, `local_exists`, `inherited_local_path` (null when nothing is inherited), `inherited_local_exists` and `default`; layers may be regular files or in-project symlinks. `hack env overlay list --json` returns the same list in a `hack.env-overlays.v1` envelope. `hack env overlay add <name>` creates an empty committed overlay file, refuses a name that exists, makes sure `.hack/.gitignore` ignores its machine-local layer, and with `--json` reports whether git ignores each path. `base`, `default`, `none` and `local` are reserved names.
+
+`--plaintext-values` (with `--json` only) adds `value` to rows stored as plaintext, from the same read as the names. Rows stored as secrets never get a `value`, no key is needed, and the output is safe to pipe. Use it instead of one `env get` per plaintext name.
+
+`--show-values` reveals resolved values only when both stdin and stdout are terminals and interaction is enabled. The older `--show-secrets` spelling is an alias. Redirecting or piping the output refuses the reveal, including with `--json`; ordinary `--json` is metadata only. Use `env get KEY` for an explicit single-value read in a script.
+
+This prevents accidental exposure in logs and transcripts; it is **not an access
+control against a local process**. A process can open a pseudo-terminal or call
+`env get` for each key. Both commands run with the caller's filesystem and key
+access. Treat explicit reads as plaintext sinks.
+
+### Updating scripts and lifecycle hooks
+
+- Replace non-interactive `env list --json --show-secrets` with explicit
+  `hack env get KEY` reads for the keys the script needs. Keep the same `--env`
+  and `--service` selection; do not log the resulting plaintext. For availability
+  checks, use ordinary `env list --json` and `has_value` instead of `value`.
+- Send secret writes through `--value-stdin` or the hidden terminal prompt;
+  positional values with `--secret` are refused.
+- Legacy lifecycle hooks and processes now receive **only global contract
+  values**, rather than every service's values. Put only the values those hooks
+  actually need in global scope. Service-scoped values remain with their service.
+- Stop parsing the old tab column positions. Modern text rows are
+  `KEY<TAB>SCOPE<TAB>set<TAB>LAYER`, with a fifth value column only on explicit
+  reveal. Legacy rows keep their metadata columns, replace the seventh value
+  column with `set`/`unset` by default, and add the source layer as column eight.
+  Prefer JSON metadata or an explicit single-key read to positional parsing.
+- Run `hack env protect` to list plaintext names, then choose keys to encrypt in
+  place. This covers all overlays unless `--env` narrows it; it does not erase
+  legacy compatibility copies or make ordinary config entries secret by itself.
+
+The existing `env set KEY value` path can still replace an encrypted entry with
+plaintext when `--secret` is omitted; HACK-2173
+tracks that follow-up. Use `--secret --value-stdin` when updating secrets.
 
 Read one value explicitly:
 
@@ -647,6 +771,8 @@ hack env add SERVICE_TOKEN --service api --secret --value-stdin < token.txt
 hack env add SERVICE_TOKEN --service api --secret
 ```
 
+Secret positional values are refused before any write, with guidance for `--value-stdin`. The explicitly unsafe `--allow-secret-argv` compatibility flag exists for controlled test/script fixtures that cannot supply stdin; it puts the value in process arguments and shell history and should never be used with real secrets.
+
 `--value-stdin` works on `hack env add` and `hack env set`, with or without `--secret`.
 It reads all of stdin, up to 64 KiB, and strips exactly one trailing newline (`\n` or
 `\r\n`), so `printf '%s\n' "$value"` and `printf '%s' "$value"` store the same value; any
@@ -674,9 +800,10 @@ hosts, use the `encrypted_file` secrets backend with its key file in place or
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for
 per-checkout values you don't want to commit. A machine-local layer that `hack env set --local`,
 `hack env unset --local` or `hack env hydrate` creates is private (mode 0600) from creation,
-whatever your umask, because it can hold plaintext values. An existing layer keeps its mode;
-tighten it yourself with `chmod 600` if it was created by an older version. Tracked layers
-keep the umask default. These commands create no new directory for values: the layers live
+whatever your umask, because it can hold plaintext values. An existing layer that other users
+can read (made by an older version or by hand) is set to 0600 by the next of these writes,
+even one that changes nothing; `hack doctor --fix` does it at once. Tracked layers keep the
+umask default. These commands create no new directory for values: the layers live
 in the existing `.hack` directory, whose mode they don't change.
 
 With no env layers yet, `hack env set --local` writes legacy `.hack/.env` (or
@@ -689,6 +816,35 @@ a local destination already tracked by Git. Values declared as `keychain` migrat
 layers as ciphertext.
 Migration requires effective ignore protection before writing plaintext. It refuses
 an outdated read-only `.hack/.gitignore` or a local destination that Git does not ignore.
+
+Machine-local writes (`hack env set`, `add` and `unset` with `--local`, and `hack env
+hydrate`) apply the same protection before every write, to every local layer
+(`hack.env.local.yaml` and each `hack.env.<overlay>.local.yaml`). They refuse, with a
+message that names the file and no value:
+
+- a local layer that is a symbolic link, wherever it points (Git checks the link's
+  name, while a write would replace the file it names, which may be tracked);
+- a local layer that Git tracks, or one whose tracking Git cannot report inside a
+  checkout;
+- a local layer that no effective rule ignores, after Hack has tried once to restore
+  the managed `.hack/.gitignore` block (a read-only file, or a later rule that
+  re-includes the layer, leaves it unignored).
+
+Outside a Git checkout nothing can commit the layer, so these checks pass. Hack decides
+"outside a checkout" only on confirmed absence: it looks for a `.git` entry above both the
+project path you gave and its resolved path, and treats an entry it cannot inspect, or a
+path it cannot resolve, as inside. The same checks apply to a legacy `.hack/.env` (or
+overlay) that `hack env set` or `unset` rewrites in a project without env layers, after
+Hack adds its `info/exclude` entry. A machine-local write replaces the checked path
+itself: it never resolves the destination through a symbolic link.
+
+**What these protections cover.** Hack protects machine-local values and keys against
+accidental collection by Git and against other users of the machine: it refuses or
+reports a file Git tracks, cannot report on, or does not ignore; it keeps files private
+to your user; and it binds each check to the file it actually opens or replaces. A
+process already running as your user is out of scope: it can read the key and every
+machine-local file directly, so Hack adds no machinery whose only purpose is to defeat
+such a process racing its checks.
 Without `hack.env.json`, `set --local` still writes `.hack/.env`; if a contract is
 added later, migration keeps those values machine-local too.
 
@@ -797,7 +953,8 @@ never sees a partial file. If Hack is killed between those two steps, an empty
 `.hack.secret.key` or lock file is left behind. Hack refuses it rather than use or
 replace it; remove it and run the command again. ExFAT and FAT do not store Unix
 permissions, so on such a drive the key file is not limited to your user the way mode
-`0600` limits it elsewhere.
+`0600` limits it elsewhere. The private staging directory (`.hack-staging/`) is the same: Hack still refuses one
+that is a link or belongs to another user, but accepts the drive's mount-wide mode.
 
 If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
 Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the
@@ -813,6 +970,58 @@ hack env unset API_BASE_URL
 hack env unset SERVICE_TOKEN --service api --env qa
 hack env unset API_BASE_URL --local
 ```
+
+## Encrypt existing plaintext entries
+
+List plaintext key names and their scopes/layers without revealing values:
+
+```bash
+hack env protect
+hack env protect --json
+```
+
+Encrypt chosen keys in place:
+
+```bash
+hack env protect API_TOKEN DATABASE_URL
+hack env protect api.API_TOKEN --env qa
+hack env protect API_TOKEN --service api
+```
+
+An unqualified key covers every matching scope and overlay in this checkout.
+`--env default` selects base layers; omitting `--env` covers all overlays.
+For a retained tracked `hack.env.local.yaml` overlay, `--env local` covers both
+that file and its `hack.env.local.local.yaml` override. Base selection leaves
+both overlay files untouched.
+The value, scope and overlay remain the same; only its YAML representation changes
+to an encrypted entry. Already encrypted entries and null removals are unchanged.
+The command re-reads each layer under its write lock and refuses conflicting edits.
+It refuses a missing or incorrect key when existing encrypted entries cannot be
+decrypted, and refuses unknown keys before converting any entries.
+Files commit independently: if a later file fails, retry to finish the remaining
+entries. Inventory and conversion do not require typing or copying values.
+
+Only this checkout's files are mutation targets. Run the command in the primary
+checkout to encrypt inherited primary-local entries. Legacy `.env` compatibility
+copies remain until migration cleanup or explicit removal; encrypting a YAML entry
+does not erase those copies. `doctor --migrate-env-config` prints the remaining
+plaintext key names and a `hack env protect` command after migration.
+
+Migration cleanup keeps content and file-identity receipts from its source
+inventory. After confirmation, it takes the source writer locks, checks those
+receipts and rechecks current YAML delivery and Compose references before
+removing anything. A legacy store and its key use their separate owner locks,
+including the key lock shared by every store using that path.
+Changed sources or delivery refuse cleanup with reconciliation
+advice; migration writes already completed remain. Confirmed removals before a
+failure are named. Implicit commands retain legacy files; cleanup needs the
+separate explicit invocation and its snapshot and successful-project-run checks.
+A completed migration is a no-op on retry. Keep the copies and keys if legacy
+values changed afterward. Restore the snapshot with `--preserve-changes` to keep
+later edits privately, or reconcile chosen values with `env set KEY --value-stdin`
+(use `--local` for machine-local values, add `--secret` for secrets and preserve
+scope/overlay). Check delivery before previewing cleanup again. Editors and older writers
+that do not take Hack's locks can still race a filesystem operation.
 
 ### Concurrent writes to one env file
 
@@ -1027,6 +1236,20 @@ with the original key. Copy `.hack.secret.key` from a machine that has it, or se
 `HACK_ENV_SECRET_KEY` to the same key. Do not run `hack env add --secret` there to
 "generate" a key: a new key cannot decrypt the existing values. When a command needs
 the key and finds none, its error says this instead of suggesting a new key.
+`hack env add --secret` and `hack env set --secret` refuse, before writing anything,
+when `HACK_ENV_SECRET_KEY` is set but no `.hack.secret.key` exists (a new key file
+would be used instead of that key), and when a secret already in the layer does not
+open under the key readers use (the layer would end up with mixed keys). Replacing
+the one entry being set is allowed. `hack doctor`'s `secret integrity` check reports
+a layer whose secrets do not all open under one key, naming the secrets that do not
+open (never a value). To recover, read those values with the key that encrypted
+them, remove each with `hack env unset` (which needs no key), then store it again
+with `hack env set --secret`. A layer that exists but cannot be read or parsed, a
+directory whose layers cannot be listed, or inherited layers that cannot be
+resolved are reported as errors, never as success. In a linked worktree it also
+checks the primary checkout's local layers that the worktree inherits. Legacy env
+migration refuses the same way when `HACK_ENV_SECRET_KEY` is set but no
+`.hack.secret.key` exists.
 
 Linked worktree behavior:
 
@@ -1139,52 +1362,73 @@ Older repos may still have:
 - `.hack/.env.<overlay>`
 - configured secret backends via `hack env backend`
 
-Hack still detects and reads that legacy format, but the preferred migration path is:
+**Before migration, preserve a private readable copy of the original project
+key and env files outside the working tree.** On next.16 or an earlier
+prerelease, do not run `doctor --migrate-env-config` without a copy of
+`.hack.secret.key`: explicit cleanup can remove it when a legacy store's
+`keyPath` names the same file (HACK-2172). The merged live-input protection fix,
+intended for next.17, refuses cleanup of current project/shared keys, config and
+YAML inputs, including filesystem aliases. It does not recover keys already removed. Keep the old encrypted
+files until their original key is recovered; creating a replacement key is not
+recovery.
+
+Hack still detects and reads that legacy format. Preview the migration first:
 
 ```bash
-hack doctor --migrate-env-config
+hack env migrate --json
+hack env migrate --apply --accept-tracked-env-changes
 ```
 
-That migrates the repo into:
+Preview is read-only and lists file actions and key names, never values. Apply
+creates a private snapshot outside the working tree and records idempotent steps
+in a journal. Re-run it after interruption; a finished migration is a no-op.
+`doctor --migrate-env-config` still applies migration; its existing hygiene
+repairs can run before the migration snapshot and are reported separately.
+Use `hack env migrate --apply` for migration-only preview and rollback.
+Both backends use the
+same file migration; Compose users need no native runtime, and neither preview
+nor apply needs Docker or a daemon.
 
-- `.hack/hack.env.default.yaml`
-- `.hack/hack.env.<overlay>.yaml`
-- `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml` for plain values
-- `.hack.secret.key` when needed
+The migration writes tracked `hack.env.default.yaml` and overlay YAML layers,
+private `hack.env.local.yaml` and overlay local layers for plain values, and a
+private project key when required. Tracked layers receive secret-backed
+ciphertext, never legacy plaintext. It can also repair Compose `env_file`
+references and old config keys. A tracked edit always requires consent;
+`--accept-tracked-env-changes` keeps its meaning and never bypasses safety checks.
+Without a prompt, doctor refuses tracked edits before its fix steps write.
 
-Tracked layers receive secret-backed ciphertext, not legacy plaintext.
-
-The migration runs the same way on the Compose and native backends: it changes project
-files only, so native `hack doctor --migrate-env-config` needs no Docker and no native
-runtime.
-
-`hack.env.json` and the Compose file are shared, git-tracked configuration, so the
-migration never deletes or edits a git-tracked file without your consent. Interactively,
-doctor lists the git-tracked files that may change before it migrates, and asks before it
-removes `env_file` entries from a tracked Compose file and, separately, before it removes
-git-tracked legacy files such as `hack.env.json`. A file whose git status can't be read
-inside a git checkout counts as tracked. A run that can't prompt (no TTY,
-`HACK_NO_INTERACTIVE`, or `--no-interactive`) refuses with `E_INTERACTIVE_REQUIRED` before
-any doctor step writes, naming each tracked file it would delete or edit, unless you pass
-`--accept-tracked-env-changes`:
+**Migration keeps all legacy files.** Cleanup is a separate later action:
 
 ```bash
-hack doctor --migrate-env-config --no-interactive --accept-tracked-env-changes
+hack up
+hack env migrate --cleanup --json
+hack env migrate --cleanup --apply --accept-tracked-env-changes
 ```
 
-The list is conservative; with a contract it can include `hack.config.json`, which the
-migration rewrites when it still holds legacy keys such as `defaultEnvConfig`, and a legacy
-dotenv file the migration ends up keeping. Commit the changes so teammates get them.
+Cleanup requires a successful complete-project run on the current layers, an
+intact snapshot, fresh delivery of every migrated value and the live-input guard.
+Current env keys, config and YAML files are never cleanup targets, including
+filesystem aliases. Use `--rollback-manifest <path>` to restore the snapshot;
+later edits are refused. See the [versioned preview and recovery
+contract](reference/env-migration.md) for the JSON shape, journal boundaries and
+partial-cleanup recovery.
+Rollback also restores original file modes, including modes Doctor may have
+tightened since migration. Its result warns to run `hack doctor --fix --path
+<project>` after recovery to review those permissions.
 
-Commands that need env values, such as `hack env exec`, also migrate a
-project that has `hack.env.json` and no env layers, without asking. That migration reports
-each moved key, never its value, and removes a legacy `.hack/.env` or `.hack/.env.<overlay>`
-file only when every entry now lives in an env layer, Compose no longer names it as
-`env_file`, Compose doesn't interpolate a key from it that the env layers now set only for a
-service, and git doesn't track it, so no second plaintext copy stays behind. It keeps
-`hack.env.json`, never edits the Compose file and never deletes a git-tracked file; it names
-a kept file and says why. Run `hack doctor --migrate-env-config` for those
-changes. Like doctor, it rewrites legacy keys in `hack.config.json`.
+Commands that need env values, such as `hack env exec`, can also migrate a
+project that has `hack.env.json` and no env layers. These implicit migrations
+report moved key names, retain every legacy copy and keep Compose `env_file`
+references. They never delete a tracked file or silently edit tracked config.
+Use the explicit preview/apply command when a shared config repair needs consent.
+After an implicit migration, explicit preview and Doctor can still offer the
+deferred Compose repair. That later phase keeps existing layers and legacy
+files, rechecks delivery and snapshot coverage, and requires consent for tracked
+edits. It invalidates an earlier project run, so start the complete project
+again before cleanup.
+If retained legacy inputs have drifted, Doctor reports the deferred repair as
+unavailable and skips it, keeping current layers and legacy files. Explicit
+`env migrate --apply` still refuses that unverified repair.
 
 A repo that has no `.hack/hack.env.json` is migrated as well. Its values live only in
 `.hack/.env` and `.hack/.env.<overlay>`, which are gitignored and may hold passwords or
@@ -1396,6 +1640,8 @@ only, so it runs even when Docker is not reachable; the other `--migrate-env-con
 repairs still need Docker. As with any migration, `hack doctor` then offers to remove the
 legacy `.hack/.env*` files that Compose no longer references (a non-interactive run
 accepts for untracked files, and for git-tracked ones only with `--accept-tracked-env-changes`).
+An untracked legacy store key joins its tracked store's confirmation batch, so
+declining tracked cleanup keeps both files and the store remains readable.
 Files Compose still names as `env_file` are offered only when the Compose repair
 removed those references. Without `hack.env.json`, a legacy file that git tracks, or one
 whose status git cannot report in a git checkout, is never offered, because the migrated
@@ -1441,17 +1687,26 @@ lists the store's entries read-only before it writes anything, without creating 
 An overlay that exists only in the store, such as a value from
 `hack env set KEY --secret --env staging` with no `.hack/.env.staging`, is migrated like an
 overlay file. A stored overlay whose name can't be an env layer name refuses
-(`E_CONFIG_INVALID`). Doctor offers a configured store inside the project for cleanup only
+(`E_CONFIG_INVALID`). The separate cleanup preview lists a configured store inside the project only
 when the env layers now deliver every entry it holds for this project and it holds none for
-another; otherwise it keeps the store and names the entries that would be lost, never their
-values. A store it can't list (its key isn't available, it can't be read, or the backend is
+another; otherwise the store is kept. A store it can't list (its key isn't available, it can't be read, or the backend is
 the keychain) is kept too. A store key file inside the project is offered only when no store
-that needs it stays behind. While a store exists, the migration keeps its pointer in
+that needs it stays behind. Project env keys (including the shared Git key), current
+YAML layers and project config files are never legacy cleanup targets, even when
+an old backend configuration names the same file. Cleanup refuses a request that
+includes one, because migrated values may still depend on it. Migration keeps every
+legacy file and its store pointer in
 `hack.config.json` (`controlPlane.secrets.encryptedFile` and `backend: encrypted_file`) on
 every route, including implicit ones such as `hack env add`, so entries it still holds stay
-readable through the secret store without hand edits; Hack reports the kept pointer with the
-key names still in the store, never values. The pointer is dropped only after doctor's
-cleanup has removed the store, so a declined or failed removal leaves it in place. A `cloud`
+readable through the secret store without hand edits. After a successful full-project
+`hack up`, preview cleanup with `hack env migrate --cleanup --json` and request it
+with `--cleanup --apply`, adding `--accept-tracked-env-changes` for tracked edits.
+The pointer is dropped only after that explicit cleanup removes the store. If a
+later removal or receipt fails, cleanup still attempts pointer repair and reports
+every confirmed removal. If the config cannot be updated, its error also warns
+about the pointer. Restore the snapshot before retrying an incomplete cleanup.
+If the store remains, its pointer stays
+in place. A `cloud`
 backend reads the same pointer, so it always keeps it, and its store and key file are never
 offered for cleanup. The keychain backend can't list its entries, so with it an overlay
 that has no legacy file and isn't the default overlay isn't found; its keychain items are left
@@ -1460,6 +1715,11 @@ as they are, so set those values again with `hack env set --secret --env <name>`
 `hack doctor` also warns when a repo still depends on the old format. Its `env mode`
 check reports an error, not the legacy format, when a `.hack/hack.env.*.yaml` entry is a
 dangling symlink or another non-file.
+Its `secret integrity` check also fails when an env layer cannot be read or
+parsed, or its encrypted entries cannot be opened with the available original
+key. Correct the reported layer or recover that key before retrying runtime
+commands. A hidden value in `env list` is not proof that it decrypts successfully;
+metadata-only inspection does not replace this check.
 For modern env repos, `hack doctor` also warns when materialized compatibility output in
 `.hack/.env` or `.hack/.env.state.json` is stale and points to `hack env materialize`.
 
@@ -1497,7 +1757,42 @@ Some older surfaces are still compatibility-oriented:
   The `encrypted_file` store (also used by the `cloud` shim) is replaced atomically
   with mode `0600`, and set/delete hold an in-process queue plus a cooperative
   `<store>.lock` so concurrent writers, including separate processes, do not lose
-  updates. A store path that is a symlink is refused for writes. Explicit key
+  updates. A store path that is a symlink or not a regular file is refused for reads
+  and writes, and a store that exists but cannot be read is never treated as empty,
+  so a write never replaces it. The key file is read without following a link and is
+  refused when other users can read or write it (use mode `0600`) or when git tracks
+  it. Inside a git work tree whose git cannot answer (it fails, is missing, or takes
+  more than 5 s), the key is refused too, rather than guessed untracked. Whether the
+  key is in a work tree is decided from its real directory (symlinks resolved, as
+  git does); outside any repository git is not run. A key file Hack wrote has always been `0600`, so this refuses only key files
+  made or changed by hand, and the error gives the `chmod`. Explicit key
+  provisioning (`--provision-key`) with `HACK_SECRETS_FILE_KEY` set never replaces
+  a different existing key, or one it cannot read: a key path can serve more than
+  one store (the default one is shared), and a key that does not open one store
+  may be the only key for another. Changing a key is a rotation, which re-encrypts;
+  move a key file aside yourself (keeping a copy) only once no store needs it.
+  With no key file, it writes the key only when the configured store is absent or
+  empty, or opens under that key; a store it cannot read, or a symlinked one, is
+  refused, since a new key file could shadow the key that opens it. Every key
+  writer (explicit provisioning, keychain persistence and the first-use key)
+  holds the key file's own `<key>.lock`, and each write checks the file again just
+  before it lands, so a concurrent writer's key is kept, never overwritten. The
+  process-wide key cache holds only keychain material, so one store's key file never
+  stands in for another store's key. `hack doctor` reports an unreadable or refused
+  store, a missing or refused store key, and a key that does not open the store.
+  A store whose key is missing or wrong is an error only in a project that reads
+  it (its legacy env contract declares a store-backed value, or plaintext is kept
+  in the backend), and a warning elsewhere. The finding names the registered
+  projects that read the store, and offers two ways forward: restore the key, or
+  run `hack secrets retire-store`. That command moves the store into a new
+  directory `<store>.retired-<UTC time>/` beside it, deletes and prints nothing, and says
+  how to move it back. It needs `--yes` without a terminal. It refuses a store that
+  another registered project's key still opens, and, unless `--allow-unchecked` is
+  passed, a store some registered projects could not be checked for. Because
+  `HACK_SECRETS_FILE_KEY` overrides key files and may be set in another shell for a
+  project that selects the store, the command cannot rule it out and also needs
+  `--allow-unchecked` as confirmation that none does. Doctor then lists
+  retired files as information. Explicit key
   provisioning also uses an atomic mode-`0600` replacement and refuses symlinked
   key paths or immediate parent directories. A key generated on first use is
   published only when no key file exists, so concurrent first users adopt the key
@@ -1508,9 +1803,8 @@ Some older surfaces are still compatibility-oriented:
   envelope and legacy `v1:` values authenticate no associated data: they are not
   bound to a path, project or variable name beyond the scoped key inside the
   encrypted store plaintext
-- the daemon's env HTTP route (used by the macOS app) reads and writes the legacy dotenv-shaped
-  contract (`source: 'plain_env'|'keychain'`, `resolvedFrom: 'dotenv'/'process'/'keychain'/'portable_backend'`),
-  not the modern YAML `hack env list --json` shape; there is no web dashboard surface anymore
+- the daemon env GET response identifies the format. For YAML projects it returns names, scopes, encryption flags and availability without decrypting or presenting legacy state. Legacy projects keep the dotenv-shaped metadata response. Legacy set/unset mutations refuse YAML projects until those endpoints use canonical YAML mutation helpers; use the CLI instead.
+- legacy daemon unset reports HTTP 500 with `secret_delete_unconfirmed` and `secretDeleted: null` if backend deletion throws, including an unknown outcome. It preserves `dotenvChanged` for the completed dotenv update; this operation is not atomic across both stores. A failure does not confirm that a backend value is absent.
 
 If you are writing new docs or new project setup flows, document the YAML overlay model first and treat `.hack/hack.env.json` as legacy migration context.
 

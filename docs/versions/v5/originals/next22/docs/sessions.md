@@ -8,7 +8,7 @@ The guided default is **tmux**:
 - `hack session start <project> --env qa --service api` creates a stable env-scoped workspace when you need a specific overlay
 - `hack setup tmux` installs the recommended popup binding so the picker is easy to reach from tmux
 
-Other mux backends still exist. `sessions.mux=auto` prefers tmux and falls back to zellij when tmux is unavailable, and you can explicitly set `sessions.mux=zellij` if that is your preferred backend. The interactive onboarding and pane tooling are tmux-first today.
+Interactive workspaces require tmux in v5. `sessions.mux=auto` detects tmux only; there is no fallback to another multiplexer. `sessions.mux=zellij` fails with migration guidance. Install tmux, then unset the setting or use `sessions.mux=tmux`.
 
 ## Quick start
 
@@ -106,7 +106,6 @@ hack session attach my-project
 ```
 
 Use `attach` when you already know which workspace you want. If you are already inside tmux, hack switches clients instead of nesting tmux inside tmux. When attaching, tmux detaches other clients to avoid terminal size conflicts across multiple devices.
-If the workspace is running in zellij, hack attaches to that named session directly instead.
 
 ### Stop
 
@@ -125,7 +124,6 @@ no graceful shutdown step; if you need cleanup hooks to run first, do that befor
 hack session exec my-project "bun test"
 
 # tmux: sends the command + Enter to the active pane
-# zellij: opens a new pane and runs the command because there is no active-pane equivalent
 
 # Inject a selected overlay/service into the queued command
 hack session exec my-project.env-qa.svc-api --env qa --service api "bun db:migrate"
@@ -248,17 +246,16 @@ Project config: `.hack/hack.config.json`
 ```
 
 Values:
-- `auto` (default): prefer tmux, fall back to zellij
+- `auto` (default): detect tmux only
 - `tmux`: require tmux
-- `zellij`: require zellij
 - `none`: disable sessions
 
-Env override: `HACK_SESSIONS_MUX=auto|tmux|zellij|none`
+Env override: `HACK_SESSIONS_MUX=auto|tmux|none`
 
 Global default:
 
 ```bash
-hack config set --global sessions.mux zellij
+hack config set --global sessions.mux tmux
 ```
 
 Recommended onboarding:
@@ -267,6 +264,10 @@ Recommended onboarding:
 # Install the tmux popup binding that launches the picker
 hack setup tmux
 
-# Keep tmux as the guided default, but switch globally if your team prefers zellij
-hack config set --global sessions.mux zellij
+# Require tmux globally
+hack config set --global sessions.mux tmux
 ```
+
+## Interactive workspace contract
+
+`MuxBackend` is the interactive-workspace adapter: it lists, creates, attaches to, sends input to, and removes tmux workspaces. It is not the v5 lifecycle supervisor contract. Interactive workspaces keep tmux as their default. Non-interactive mux commands have bounded waits; a timeout means the outcome is unknown because a server may still apply the request.

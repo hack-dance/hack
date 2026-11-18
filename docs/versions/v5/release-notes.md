@@ -4,8 +4,8 @@
 > `5.0.0-next.N` prereleases through `hack-next`, a separate channel that
 > installs beside stable. Stable is still v4. See [Install v5](install.md).
 >
-> This draft describes the `next` branch. Items marked **\*** are not in a
-> prerelease yet; an installed `5.0.0-next.20` does not have them.
+> Items marked **\*** arrived in `5.0.0-next.21`. An installed next.20 or
+> earlier does not have them.
 
 Hack 5 keeps the v4 project model. Your `.hack/` folder, your encrypted env
 values, branch instances and lifecycle processes carry over. Docker Compose is

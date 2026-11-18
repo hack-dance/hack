@@ -95,22 +95,35 @@ export async function followAllNativeServices(opts: {
     writers.push(out, err);
     return { service, stdout: out, stderr: err };
   });
-  const dispose = await watchLogConsumer(stdout, () => {
+  const closeAll = () => {
     for (const writer of writers) {
       writer.destroy();
     }
-  });
+  };
+  const dispose = await watchLogConsumer(stdout, closeAll);
+  // The shared targets emit their own errors (EPIPE when the reader of
+  // `hack logs | head` goes away); consume them here so a closed consumer
+  // ends every follower quietly instead of becoming an unhandled error.
+  const targets = [...new Set([stdout, stderr])];
+  if (!opts.json) {
+    for (const target of targets) {
+      target.on("error", closeAll);
+    }
+  }
   try {
     const codes = await Promise.all(
       outputs.map(async (output) => {
+        let code = 1;
         try {
-          return await opts.follow(output);
+          code = await opts.follow(output);
+          return code;
         } finally {
-          for (const writer of [output.stdout, output.stderr]) {
-            if (writer !== stdout && writer !== stderr && !writer.destroyed) {
-              await new Promise<void>((resolve) => writer.end(resolve));
-            }
-          }
+          await finishWriters({
+            writers: [output.stdout, output.stderr].filter(
+              (writer) => writer !== stdout && writer !== stderr
+            ),
+            canceled: code === 130 || code === 143,
+          });
         }
       })
     );
@@ -120,6 +133,48 @@ export async function followAllNativeServices(opts: {
       0
     );
   } finally {
+    if (!opts.json) {
+      for (const target of targets) {
+        target.off("error", closeAll);
+      }
+    }
     dispose();
   }
+}
+
+/** Longest wait for a prefixed writer to flush its last partial line. */
+const FLUSH_BOUND_MS = 1000;
+
+/**
+ * Ends a follower's prefixed writers. After a cancellation, or when a flush
+ * does not finish within {@link FLUSH_BOUND_MS} (a consumer that stays open
+ * but stops reading), the writers are destroyed instead, so follow-all
+ * always returns its code.
+ */
+async function finishWriters(opts: {
+  readonly writers: readonly Writable[];
+  readonly canceled: boolean;
+}): Promise<void> {
+  await Promise.all(
+    opts.writers.map(async (writer) => {
+      if (writer.destroyed) {
+        return;
+      }
+      if (opts.canceled) {
+        writer.destroy();
+        return;
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        new Promise<void>((resolve) => writer.end(resolve)),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, FLUSH_BOUND_MS);
+        }),
+      ]);
+      clearTimeout(timer);
+      if (!writer.writableFinished) {
+        writer.destroy();
+      }
+    })
+  );
 }

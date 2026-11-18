@@ -112,3 +112,48 @@ test("JSON follow passes the shared streams through: events already name their s
   });
   expect(seen).toEqual([out.stream, out.stream]);
 });
+
+test("a reader that goes away (EPIPE on the shared stdout) ends every follower quietly", async () => {
+  const broken = new Writable({
+    write(_chunk, _encoding, done) {
+      const error = Object.assign(new Error("broken pipe"), { code: "EPIPE" });
+      done(error);
+    },
+  });
+  const seen: boolean[] = [];
+  const code = await followAllNativeServices({
+    services: ["api", "web"],
+    json: false,
+    stdout: broken,
+    stderr: broken,
+    follow: async ({ service, stdout }) => {
+      // Like the real follower (logOutput), it listens to its own output.
+      stdout.on("error", () => undefined);
+      await write(stdout, `${service} line\n`).catch(() => undefined);
+      // The follower sees its output closed, as for an ordinary pipe close.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      seen.push(stdout.destroyed);
+      return 0;
+    },
+  });
+  expect(code).toBe(0);
+  expect(seen).toEqual([true, true]);
+});
+
+test("after Ctrl-C a stuck consumer cannot hold follow-all open", async () => {
+  // A consumer that stays open but never accepts a write.
+  const stuck = new Writable({ write() {} });
+  const started = Date.now();
+  const code = await followAllNativeServices({
+    services: ["api"],
+    json: false,
+    stdout: stuck,
+    stderr: stuck,
+    follow: ({ stdout }) => {
+      stdout.write("api line\n");
+      return Promise.resolve(130);
+    },
+  });
+  expect(code).toBe(130);
+  expect(Date.now() - started).toBeLessThan(500);
+});

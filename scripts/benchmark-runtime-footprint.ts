@@ -10,6 +10,7 @@
  *          [--docker-vm-pattern REGEX]
  *          [--phases LIST] [--idle-seconds S] [--warm-runs N] [--max-load L]
  *          [--env KEY=VALUE]... [--hack-arg ARG]... [--keep-running]
+ *          [--attached]
  *
  *   --lane        which backend this run measures. One lane per invocation: the
  *                 caller alternates lanes and owns any host lock between runs.
@@ -21,8 +22,12 @@
  *   --phases      comma list from: cold,warm,restart,idle,watch,tasks,latency,
  *                 io,stop (default: all that the descriptor supports).
  *   --max-load    1-minute load above which a timing is flagged, not dropped
- *                 (default 40). Flagged samples stay in the raw file and are
- *                 left out of the medians.
+ *                 (default 40). `summary` leaves flagged samples out of its
+ *                 medians; each phase's own figures use every completed
+ *                 sample and say how many were flagged.
+ *   --attached    measure a project that is already running (no cold phase).
+ *                 The warm, restart and stop phases, when listed, stop that
+ *                 project; the native VM is never stopped in this mode.
  *
  * Measurement boundary. Readiness is the descriptor's routed HTTP checks
  * returning the expected status through the backend's own proxy, never a
@@ -48,8 +53,11 @@
  * The script records which images were present; a start with any image present
  * is labelled `first` instead. The host page cache is never flushed.
  *
- * The script never stops or removes anything it did not start. On the native
- * lane it refuses to begin while any provider VM process is already running.
+ * The script stops only the project it was pointed at, and the native VM only
+ * when this run booted it. Before a cold start on the native lane it refuses
+ * to begin while any provider VM process is running. The project must be a
+ * copy outside this repository: a run writes state, dependencies and scratch
+ * files into it.
  */
 import {
   appendFileSync,
@@ -58,6 +66,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { arch, cpus, loadavg, release, totalmem } from "node:os";
@@ -113,7 +122,12 @@ type Workload = {
   readonly watch?: {
     readonly file: string;
     readonly template: string;
-    readonly probes: readonly (Route & { readonly label: string })[];
+    /** A probe may name its own file, so one edit moves one mechanism only. */
+    readonly probes: readonly (Route & {
+      readonly label: string;
+      readonly file?: string;
+      readonly template?: string;
+    })[];
   };
   readonly tasks?: readonly Task[];
   /** Container paths for throughput: a bind mount and a named volume. */
@@ -134,7 +148,7 @@ type Timing = {
   readonly commandSeconds?: number;
   readonly cliCpuSeconds?: number | null;
   readonly ok: boolean;
-  /** Load exceeded `--max-load`: kept in the raw file, left out of medians. */
+  /** Load exceeded `--max-load`: kept, and left out of the `summary` medians. */
   readonly flagged: boolean;
   readonly detail?: string;
 };
@@ -191,6 +205,7 @@ const { values } = parseArgs({
     env: { type: "string", multiple: true, default: [] },
     "hack-arg": { type: "string", multiple: true, default: [] },
     "keep-running": { type: "boolean", default: false },
+    attached: { type: "boolean", default: false },
   },
 });
 
@@ -227,6 +242,10 @@ const workloadPath = resolve(
 );
 const workload = JSON.parse(readFileSync(workloadPath, "utf8")) as Workload;
 const project = resolve(values.project ?? dirname(workloadPath));
+if (project === repoRoot || project.startsWith(`${repoRoot}/`)) {
+  // A run writes runtime state, dependencies and I/O scratch files into the project.
+  fail("--project must be outside this repository; copy the fixture first");
+}
 const nativeTool = values["native-tool"]
   ? resolve(values["native-tool"])
   : null;
@@ -449,6 +468,8 @@ async function timed(opts: {
   readonly args: readonly string[];
   readonly expectReady: boolean;
   readonly timeoutSeconds?: number;
+  /** Checked after the timing ends; a false answer fails the sample. */
+  readonly verify?: () => Promise<boolean>;
 }): Promise<Timing> {
   const loadBefore = load1();
   const at = new Date().toISOString();
@@ -460,6 +481,11 @@ async function timed(opts: {
   }
   const seconds = (performance.now() - started) / 1000;
   const loadAfter = load1();
+  let detail = `exit ${result.exitCode}: ${result.stderr.slice(-400)}`;
+  if (ok && opts.verify && !(await opts.verify())) {
+    ok = false;
+    detail = "ready, but the data marker written after the first start is gone";
+  }
   const timing: Timing = {
     phase: opts.phase,
     label: opts.label,
@@ -471,9 +497,7 @@ async function timed(opts: {
     cliCpuSeconds: result.cpuSeconds,
     ok,
     flagged: Math.max(loadBefore, loadAfter) > maxLoad,
-    ...(ok
-      ? {}
-      : { detail: `exit ${result.exitCode}: ${result.stderr.slice(-400)}` }),
+    ...(ok ? {} : { detail }),
   };
   timings.push(timing);
   log(
@@ -537,7 +561,10 @@ function laneProcesses(): { vm: HostProcess[]; helpers: HostProcess[] } {
   const rows = hostProcesses();
   if (lane === "native") {
     const home = nativeHome ?? "\0";
-    const vm = rows.filter(isProviderVm);
+    // Only this home's VM: another pool on the host is not this lane's cost.
+    const vm = rows.filter(
+      (row) => isProviderVm(row) && row.command.includes(home)
+    );
     const helpers = rows.filter(
       (row) =>
         !isProviderVm(row) &&
@@ -599,6 +626,7 @@ const GUEST_SCRIPT = [
   "echo '#memory.current'; cat /sys/fs/cgroup/memory.current",
   "echo '#memory.stat'; cat /sys/fs/cgroup/memory.stat",
   "echo '#cpu.stat'; cat /sys/fs/cgroup/cpu.stat",
+  "echo '#uptime'; cat /proc/uptime",
 ].join("; ");
 
 function sections(text: string): Map<string, string[]> {
@@ -631,6 +659,8 @@ type ServiceCounters = {
   readonly anonBytes: number | null;
   readonly fileBytes: number | null;
   readonly cpuSeconds: number | null;
+  /** Guest uptime when these counters were read. */
+  readonly uptimeSeconds: number | null;
 };
 
 type GuestCounters = {
@@ -660,6 +690,9 @@ async function guestCounters(): Promise<GuestCounters> {
       anonBytes: memory.anon ?? null,
       fileBytes: memory.file ?? null,
       cpuSeconds: cpu.usage_usec === undefined ? null : cpu.usage_usec / 1e6,
+      uptimeSeconds:
+        Number((parts.get("uptime")?.[0] ?? "").split(" ")[0] || Number.NaN) ||
+        null,
     };
     if (meminfoKb === null) {
       meminfoKb = keyed(parts.get("meminfo"));
@@ -742,14 +775,12 @@ async function writeMarker(): Promise<void> {
   }
 }
 
-async function markerSurvives(label: string): Promise<void> {
+/** False when data written after the first start is gone; such a start does not count. */
+async function markerSurvives(): Promise<boolean> {
   if (!(workload.data && marker)) {
-    return;
+    return true;
   }
-  const answer = await fetchRoute(workload.data.read);
-  if (!answer.text.includes(marker)) {
-    notes.push(`data marker missing after ${label}`);
-  }
+  return (await fetchRoute(workload.data.read)).text.includes(marker);
 }
 
 async function imagesPresent(): Promise<Record<string, boolean> | null> {
@@ -814,8 +845,8 @@ async function phaseWarm(): Promise<void> {
       label: `warm up ${index}`,
       args: ["up", "--detach"],
       expectReady: true,
+      verify: markerSurvives,
     });
-    await markerSurvives(`warm up ${index}`);
   }
 }
 
@@ -827,9 +858,28 @@ async function phaseRestart(): Promise<void> {
       // Without --json a native restart stays in the foreground as the owner.
       args: ["restart", "--json"],
       expectReady: true,
+      verify: markerSurvives,
     });
-    await markerSurvives(`restart ${index}`);
   }
+}
+
+/**
+ * One service's CPU between its two counter reads. The reads are further apart
+ * than the host window (the settle pause and the reads themselves), so each
+ * service is divided by its own interval on the guest clock.
+ */
+function idleUsage(
+  a: ServiceCounters,
+  b: ServiceCounters
+): { cpu: number; between: number | null; percent: number | null } {
+  const cpu = (b.cpuSeconds ?? 0) - (a.cpuSeconds ?? 0);
+  const between =
+    a.uptimeSeconds !== null && b.uptimeSeconds !== null
+      ? b.uptimeSeconds - a.uptimeSeconds
+      : null;
+  const percent =
+    between !== null && between > 0 ? (cpu / between) * 100 : null;
+  return { cpu, between, percent };
 }
 
 async function phaseIdle(): Promise<void> {
@@ -860,12 +910,16 @@ async function phaseIdle(): Promise<void> {
       containers[service] = null;
       continue;
     }
-    const cpu = (b.cpuSeconds ?? 0) - (a.cpuSeconds ?? 0);
-    containerCpu += cpu;
+    const usage = idleUsage(a, b);
+    containerCpu =
+      usage.percent === null ? Number.NaN : containerCpu + usage.percent;
     containerMemory += b.memoryCurrentBytes ?? 0;
     containers[service] = {
       ...b,
-      idleCpuSeconds: Math.round(cpu * 1000) / 1000,
+      idleCpuSeconds: Math.round(usage.cpu * 1000) / 1000,
+      betweenReadsSeconds: usage.between,
+      idleCpuPercentOfOneCore:
+        usage.percent === null ? null : Math.round(usage.percent * 10) / 10,
     };
   }
   const ticks =
@@ -892,8 +946,9 @@ async function phaseIdle(): Promise<void> {
       otherEngineContainers: lane === "compose" ? engineContainers() : null,
     },
     containers,
-    containersCpuPercentOfOneCore:
-      Math.round((containerCpu / windowSeconds) * 1000) / 10,
+    containersCpuPercentOfOneCore: Number.isNaN(containerCpu)
+      ? null
+      : Math.round(containerCpu * 10) / 10,
     containersMemoryCurrentBytes: containerMemory,
     guest: {
       meminfoKb: guestAfter.meminfoKb,
@@ -947,30 +1002,50 @@ async function watchEdit(opts: {
   return seen ? seconds : null;
 }
 
+/** Puts edited files back; also run when the script is interrupted. */
+let restoreWatched: (() => void) | null = null;
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    restoreWatched?.();
+    process.exit(130);
+  });
+}
+
 async function phaseWatch(): Promise<void> {
   const watch = workload.watch;
   if (!watch) {
     return;
   }
-  const file = join(project, watch.file);
-  const original = readFileSync(file, "utf8");
+  const originals = new Map<string, string>();
+  for (const probe of watch.probes) {
+    const file = join(project, probe.file ?? watch.file);
+    originals.set(file, readFileSync(file, "utf8"));
+  }
+  restoreWatched = () => {
+    for (const [file, original] of originals) {
+      writeFileSync(file, original);
+      rmSync(`${file}.bench-tmp`, { force: true });
+    }
+  };
   const results: Record<string, unknown> = {};
-  const styles = {
-    "in-place": (content: string) => writeFileSync(file, content),
-    atomic: (content: string) => {
-      writeFileSync(`${file}.bench-tmp`, content);
-      renameSync(`${file}.bench-tmp`, file);
-    },
-  } as const;
   try {
     for (const probe of watch.probes) {
+      const file = join(project, probe.file ?? watch.file);
+      const styles = {
+        "in-place": (content: string) => writeFileSync(file, content),
+        atomic: (content: string) => {
+          writeFileSync(`${file}.bench-tmp`, content);
+          renameSync(`${file}.bench-tmp`, file);
+        },
+      } as const;
       for (const [style, write] of Object.entries(styles)) {
         const samples: number[] = [];
+        const before = timings.length;
         for (let index = 0; index < WATCH_EDITS; index += 1) {
           const seconds = await watchEdit({
             probe,
             label: `${probe.label} ${style} ${index + 1}`,
-            template: watch.template,
+            template: probe.template ?? watch.template,
             write,
           });
           if (seconds !== null) {
@@ -984,6 +1059,7 @@ async function phaseWatch(): Promise<void> {
           maxSeconds: samples.length > 0 ? Math.max(...samples) : null,
           notServedWithinTimeout: WATCH_EDITS - samples.length,
           of: WATCH_EDITS,
+          flaggedForLoad: flaggedSince(before),
         };
         log(
           `watch ${probe.label} ${style}: median ${median(samples)}s, ${WATCH_EDITS - samples.length}/${WATCH_EDITS} not served`
@@ -991,10 +1067,16 @@ async function phaseWatch(): Promise<void> {
       }
     }
   } finally {
-    writeFileSync(file, original);
+    restoreWatched();
+    restoreWatched = null;
   }
   report.watch = { timeoutSeconds: WATCH_TIMEOUT_MS / 1000, results };
   save();
+}
+
+/** How many of the timings recorded since `index` were taken above `--max-load`. */
+function flaggedSince(index: number): number {
+  return timings.slice(index).filter((row) => row.flagged).length;
 }
 
 type JobOutcome = JobResult & {
@@ -1020,37 +1102,49 @@ async function serviceJob(
     stderr,
     failure,
   });
-  const started = await inService(service, jobStartArgv(argv), 60);
+  if (uncertainServices.has(service)) {
+    return failed("skipped: an earlier job in this service may still run");
+  }
+  const id = token().slice(0, 16);
+  const started = await inService(service, jobStartArgv(id, argv), 60);
   if (started.exitCode !== 0) {
-    return failed(
-      execGaveUp(started.stderr) ? "exec gave up at start" : "start failed",
-      started.stderr
-    );
+    if (execGaveUp(started.stderr)) {
+      // The start may have happened; nothing more is measured in this service.
+      uncertainServices.add(service);
+      return failed("exec gave up at start; the job may run", started.stderr);
+    }
+    return failed("start failed", started.stderr);
   }
   const deadline = performance.now() + timeoutSeconds * 1000;
   while (performance.now() < deadline) {
     await Bun.sleep(1000);
-    const poll = await inService(service, jobPollArgv(), 60);
+    const poll = await inService(service, jobPollArgv(id), 60);
     if (poll.exitCode !== 0) {
       // A poll that gave up says nothing about the job; ask again.
       continue;
     }
     try {
-      const result = parseJobPoll(poll.stdout);
+      const result = parseJobPoll(id, poll.stdout);
       if (result) {
         return result;
       }
     } catch {
-      return failed("job record incomplete", poll.stdout.slice(-400));
+      // A cut-off reply is not a result either; the next poll may be whole.
     }
   }
+  uncertainServices.add(service);
   return failed(`no exit within ${timeoutSeconds}s; the job may still run`);
 }
+
+/** Services where a job may still be running; a later job there would overlap it. */
+const uncertainServices = new Set<string>();
 
 async function phaseTasks(): Promise<void> {
   const results: Record<string, unknown> = {};
   for (const task of workload.tasks ?? []) {
     const samples: number[] = [];
+    let first: number | null = null;
+    const before = timings.length;
     for (let index = 0; index < (task.runs ?? 3); index += 1) {
       const loadBefore = load1();
       const result = await serviceJob(task.service, task.argv, 1800);
@@ -1068,21 +1162,22 @@ async function phaseTasks(): Promise<void> {
           ? {}
           : { detail: result.failure ?? result.stderr.slice(-400) }),
       });
-      if (result.exitCode === 0) {
+      if (result.exitCode === 0 && index === 0) {
+        first = result.seconds;
+      } else if (result.exitCode === 0) {
         samples.push(result.seconds);
       }
       log(
         `${task.label} ${index + 1}: ${result.seconds.toFixed(2)}s ${result.failure ?? `exit ${result.exitCode}`}`
       );
-      if (result.failure?.startsWith("no exit")) {
-        // The job may still be running; another sample would overlap it.
-        break;
-      }
     }
-    // The first run of a task can fill a cache the later runs reuse.
+    // The first run of a task can fill a cache the later runs reuse, so it is
+    // reported apart, and only when it was the first run that succeeded.
     results[task.label] = {
-      firstSeconds: samples[0] ?? null,
-      laterMedianSeconds: median(samples.slice(1)),
+      firstSeconds: first,
+      laterMedianSeconds: median(samples),
+      flaggedForLoad: flaggedSince(before),
+      of: timings.length - before,
     };
   }
   report.tasks = results;
@@ -1165,6 +1260,7 @@ const IO_SCRIPT = `
 set -e
 d="$1/.runtime-bench-io"
 rm -rf "$d"; mkdir -p "$d"
+trap 'rm -rf "$d"' EXIT
 now() { cut -d" " -f1 /proc/uptime; }
 t0=$(now); dd if=/dev/zero of="$d/big" bs=1M count=512 conv=fsync 2>/dev/null; t1=$(now)
 dd if="$d/big" of=/dev/null bs=1M 2>/dev/null; t2=$(now)
@@ -1185,6 +1281,7 @@ async function phaseIo(): Promise<void> {
     ["namedVolume", io.volume],
   ] as const) {
     const runs: Record<string, number>[] = [];
+    const before = timings.length;
     for (let index = 0; index < 3; index += 1) {
       const loadBefore = load1();
       const result = await serviceJob(
@@ -1205,9 +1302,6 @@ async function phaseIo(): Promise<void> {
         flagged: Math.max(loadBefore, load1()) > maxLoad,
         ...(ok ? {} : { detail: result.failure ?? result.stderr.slice(-400) }),
       });
-      if (result.failure?.startsWith("no exit")) {
-        break;
-      }
       if (!ok) {
         continue;
       }
@@ -1223,13 +1317,18 @@ async function phaseIo(): Promise<void> {
       });
     }
     const keys = Object.keys(runs[0] ?? {});
-    results[kind] = Object.fromEntries(
-      keys.map((key) => [
-        key,
-        Math.round((median(runs.map((entry) => entry[key] ?? 0)) ?? 0) * 1000) /
-          1000,
-      ])
-    );
+    results[kind] = {
+      ...Object.fromEntries(
+        keys.map((key) => [
+          key,
+          Math.round(
+            (median(runs.map((entry) => entry[key] ?? 0)) ?? 0) * 1000
+          ) / 1000,
+        ])
+      ),
+      completedRuns: runs.length,
+      flaggedForLoad: flaggedSince(before),
+    };
   }
   report.io = results;
   log(`io: ${JSON.stringify(results)}`);
@@ -1244,7 +1343,9 @@ async function phaseStop(): Promise<void> {
     expectReady: false,
     timeoutSeconds: 600,
   });
-  if (lane !== "native" || !(nativeTool && nativeHome)) {
+  // The VM is stopped only when this run booted it: an attached run found the
+  // pool running, and other projects may be in it.
+  if (lane !== "native" || !(nativeTool && nativeHome) || !bootedHere) {
     return;
   }
   const loadBefore = load1();
@@ -1270,7 +1371,7 @@ async function phaseStop(): Promise<void> {
     flagged: Math.max(loadBefore, load1()) > maxLoad,
   });
   await Bun.sleep(3000);
-  const left = hostProcesses().filter(isProviderVm).length;
+  const left = laneProcesses().vm.length;
   report.providerVmProcessesAfterStop = left;
   if (left > 0) {
     notes.push(
@@ -1282,7 +1383,9 @@ async function phaseStop(): Promise<void> {
 function summarizeTimings(): Record<string, unknown> {
   const groups = new Map<string, Timing[]>();
   for (const timing of timings) {
-    groups.set(timing.phase, [...(groups.get(timing.phase) ?? []), timing]);
+    // One group per operation: the label without its run number.
+    const key = `${timing.phase}: ${timing.label.replace(/ \d+$/, "")}`;
+    groups.set(key, [...(groups.get(key) ?? []), timing]);
   }
   const summary: Record<string, unknown> = {};
   for (const [phase, rows] of groups) {
@@ -1298,9 +1401,17 @@ function summarizeTimings(): Record<string, unknown> {
   return summary;
 }
 
-async function main(): Promise<void> {
-  // Attaching to a project that is already running (no cold phase) is the caller's
-  // statement that the running pool is the one under test.
+/** True once this run performed the first start, so the runtime is its own to stop. */
+let bootedHere = false;
+
+function preflight(): void {
+  if (!(phases.has("cold") || values.attached)) {
+    // Without the cold phase the project was started by someone else, and the
+    // warm, restart and stop phases would stop it.
+    fail(
+      "no cold phase: pass --attached to measure a project that is already running"
+    );
+  }
   if (
     lane === "native" &&
     phases.has("cold") &&
@@ -1308,6 +1419,10 @@ async function main(): Promise<void> {
   ) {
     fail("a provider VM process is already running; one pool at a time");
   }
+}
+
+async function main(): Promise<void> {
+  preflight();
   const version = await cli(["--version"], 60);
   report.schema = "hack-runtime-footprint/1";
   report.lane = lane;
@@ -1328,6 +1443,7 @@ async function main(): Promise<void> {
   let running = false;
   try {
     if (phases.has("cold")) {
+      bootedHere = true;
       running = await phaseStart();
       if (!running) {
         notes.push("first start failed; later phases skipped");
@@ -1338,6 +1454,7 @@ async function main(): Promise<void> {
       if (!running) {
         fail("the project is not serving its routes; include the cold phase");
       }
+      await writeMarker();
     }
     if (phases.has("warm")) {
       await phaseWarm();

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -18,36 +18,79 @@ const fixture = join(
 );
 
 // The job scripts read the guest clock from /proc/uptime, so they run on Linux only.
-test.skipIf(process.platform !== "linux")(
-  "a job runs detached and reports its own exit code",
-  async () => {
-    const start = Bun.spawnSync(
-      jobStartArgv(["sh", "-c", "echo out; echo err >&2; exit 7"])
-    );
-    expect(start.exitCode).toBe(0);
+describe.skipIf(process.platform !== "linux")("in a shell", () => {
+  async function finish(id: string): Promise<JobResult | null> {
     let result: JobResult | null = null;
-    for (let index = 0; index < 50 && result === null; index += 1) {
+    for (let index = 0; index < 100 && result === null; index += 1) {
       await Bun.sleep(100);
-      result = parseJobPoll(Bun.spawnSync(jobPollArgv()).stdout.toString());
+      result = parseJobPoll(
+        id,
+        Bun.spawnSync(jobPollArgv(id)).stdout.toString()
+      );
     }
-    expect(result?.exitCode).toBe(7);
-    expect(result?.stdout.trim()).toBe("out");
-    expect(result?.stderr.trim()).toBe("err");
+    return result;
   }
-);
+
+  test("a job runs detached and reports its own exit code and output", async () => {
+    const id = "aaaaaaaa";
+    // No newline ends either stream.
+    const command = ["sh", "-c", "printf out; printf err >&2; exit 7"];
+    expect(Bun.spawnSync(jobStartArgv(id, command)).exitCode).toBe(0);
+    expect(await finish(id)).toMatchObject({
+      exitCode: 7,
+      stdout: "out",
+      stderr: "err",
+    });
+  });
+
+  test("a job still running does not leak into the next job", async () => {
+    const slow = "bbbbbbbb";
+    const fast = "cccccccc";
+    const start = (id: string, script: string): number =>
+      Bun.spawnSync(jobStartArgv(id, ["sh", "-c", script])).exitCode;
+    expect(start(slow, "sleep 2; echo slow; exit 3")).toBe(0);
+    expect(start(fast, "echo fast")).toBe(0);
+    expect(await finish(fast)).toMatchObject({ exitCode: 0, stdout: "fast\n" });
+    expect(await finish(slow)).toMatchObject({ exitCode: 3, stdout: "slow\n" });
+  });
+});
 
 test("a poll reply is running, complete, or rejected", () => {
-  expect(parseJobPoll("#running\n")).toBeNull();
+  const id = "0123abcd";
+  const reply = (body: string): string => body.replaceAll("#", `#${id}:`);
+  expect(parseJobPoll(id, reply("#running\n"))).toBeNull();
   expect(
-    parseJobPoll("#exit\n0\n#start\n10.50\n#end\n12.75\n#err\n\n#out\n1 2 3\n")
+    parseJobPoll(
+      id,
+      reply(
+        "#exit\n0\n#start\n10.50\n#end\n12.75\n#err\n\n#out\n1 2 3\n\n#done\n"
+      )
+    )
   ).toEqual({ exitCode: 0, seconds: 2.25, stdout: "1 2 3\n", stderr: "" });
-  // Output that repeats a marker stays output.
+  // Output that looks like a marker, even this job's own, stays output.
   expect(
-    parseJobPoll("#exit\n1\n#start\n1\n#end\n2\n#err\n#exit\n#out\n#err\n")
-  ).toMatchObject({ exitCode: 1, stderr: "#exit", stdout: "#err\n" });
-  // A reply cut off before the last section is not a result.
-  expect(() => parseJobPoll("#exit\n0\n#start\n10.50\n")).toThrow();
-  expect(() => parseJobPoll("")).toThrow();
+    parseJobPoll(
+      id,
+      `#${id}:exit\n1\n#${id}:start\n1\n#${id}:end\n2\n#${id}:err\n#${id}:exit\n#out\n#${id}:out\n#${id}:err\n#${id}:done\n`
+    )
+  ).toMatchObject({
+    exitCode: 1,
+    stderr: `#${id}:exit\n#out`,
+    stdout: `#${id}:err`,
+  });
+  // A reply cut off before the end marker is not a result.
+  expect(() =>
+    parseJobPoll(id, reply("#exit\n0\n#start\n1\n#end\n2\n#err\n\n#out\n1\n"))
+  ).toThrow();
+  expect(() => parseJobPoll(id, "")).toThrow();
+  // Another job's record is not this job's.
+  expect(() =>
+    parseJobPoll(
+      "ffffffff",
+      reply("#exit\n0\n#start\n1\n#end\n2\n#err\n\n#out\n\n#done\n")
+    )
+  ).toThrow();
+  expect(() => jobStartArgv("../x", ["true"])).toThrow();
 });
 
 test("an exec that gave up is told apart from a command that failed", () => {
@@ -76,5 +119,14 @@ test("the fixture descriptor names only services and paths the fixture has", () 
   for (const route of [...bench.routes, bench.latency, ...bench.watch.probes]) {
     expect(compose).toContain(`caddy: ${route.host}\n`);
   }
-  expect(() => readFileSync(join(fixture, bench.watch.file))).not.toThrow();
+  const watched = [
+    bench.watch.file,
+    ...bench.watch.probes.map((probe: { file?: string }) => probe.file),
+  ].filter((file) => file !== undefined);
+  for (const file of watched) {
+    expect(() => readFileSync(join(fixture, file))).not.toThrow();
+  }
+  // The directory-watch probe must not move when the process restarts.
+  const dev = readFileSync(join(fixture, "web", "dev.ts"), "utf8");
+  expect(dev).not.toContain('from "./watched');
 });

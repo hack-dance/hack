@@ -2,15 +2,16 @@
 // differ in how they watch:
 //   /token          the imported value; changes only when `bun --watch` restarts
 //                   the process (a file-level watcher)
-//   /token-watched  re-read by a recursive directory watch (`fs.watch`), the
-//                   mechanism bundler dev servers use
+//   /token-watched  a file nothing imports, re-read by a recursive directory
+//                   watch (`fs.watch`), the mechanism bundler dev servers use.
+//                   An edit to it does not restart the process.
 import { readFileSync, watch } from "node:fs";
 import { TOKEN } from "./src/token";
 
 const api = process.env.API_URL ?? "http://api:3001";
-const read = (): string => readFileSync("src/token.ts", "utf8");
+const read = (): string => readFileSync("watched/token.txt", "utf8");
 let watched = read();
-watch("src", { recursive: true }, () => {
+watch("watched", { recursive: true }, () => {
   watched = read();
 });
 

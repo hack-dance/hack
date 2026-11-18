@@ -37,7 +37,9 @@
       {
         "label": "directory-watch",
         "host": "hack-runtime-bench.hack",
-        "path": "/token-watched"
+        "path": "/token-watched",
+        "file": "web/watched/token.txt",
+        "template": "{token}\n"
       }
     ]
   },

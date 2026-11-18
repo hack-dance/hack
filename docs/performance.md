@@ -74,19 +74,21 @@ Phases, each optional through `--phases`:
 | `cold` | first `up --detach` until every route answers. Called cold only when no image was present; otherwise `first-start` |
 | `warm` | `down`, then `up --detach` until ready, repeated |
 | `restart` | `restart --json` until ready, repeated |
-| `watch` | a host edit until a routed endpoint serves it: process restart (`bun --watch`) and directory watch (`fs.watch`), each with an in-place and an atomic save |
+| `watch` | a host edit until a routed endpoint serves it: process restart (`bun --watch`) and directory watch (`fs.watch`), each on its own file, with an in-place and an atomic save |
 | `latency` | 200 requests through the backend's proxy on one connection, and 200 on new connections |
 | `tasks` | `bun install` and a production build inside a service, on the shared mount. Each runs as a background job timed on the guest clock and polled, because one non-interactive `exec` has a time limit on native |
 | `io` | 512 MiB write with `fsync`, read back, and 5,000 small files, on a bind mount and on a named volume, as the same kind of job |
 | `idle` | memory and CPU over a quiet window (default 300 s after a 60 s settle) |
-| `stop` | `down`, and on native the VM stop |
+| `stop` | `down`, and on native the VM stop when this run booted it |
 
 Read the numbers with these limits:
 
 - A start counts only when the routed checks pass, and a data marker written after the
   first start must read back after every later start.
 - Each timing carries the 1-minute load before and after. Above `--max-load` (default
-  40) it is flagged, kept in `result.json` and left out of the medians.
+  40) it is flagged and kept in `result.json`. `summary` groups timings by operation and
+  leaves flagged ones out of its medians; each phase's own figures use every completed
+  sample and say how many were flagged.
 - Memory quantities are reported side by side and never added: per-container cgroup
   memory (the same read on both backends), the guest's `/proc/meminfo`, and each host VM
   process's resident size and physical footprint. On Compose the VM is the Docker
@@ -98,12 +100,17 @@ Read the numbers with these limits:
   figures.
 - Idle CPU is the growth of cumulative CPU time: host VM processes, container cgroups
   and the guest. The guest counters are read once before and once after the window, and
-  those reads cost a little CPU inside it.
+  those reads cost a little CPU inside it. Each container's CPU is divided by the guest
+  time between its own two reads, which is longer than the host window.
 - The read-back in `io` follows the write, so it is served from the guest page cache.
 - The host page cache is never flushed, and image pulls depend on the network.
 
-The script stops only the project it started. On native it refuses to begin a cold
-start while another provider VM process is running. One run is one sample of a shared
+The project must be a copy outside the repository: a run writes runtime state,
+dependencies and scratch files into it. The script stops only that project, and the
+native VM only when this run booted it; before a cold start on native it refuses to
+begin while any provider VM process is running. Without the `cold` phase it needs
+`--attached`, and then the `warm`, `restart` and `stop` phases stop the project that was
+already running. One run is one sample of a shared
 machine: repeat it and compare medians before drawing a conclusion.
 
 ## Project listing

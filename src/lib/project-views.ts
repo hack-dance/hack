@@ -11,6 +11,20 @@ import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseSessionBase } from "../mux/session-names.ts";
 import { serializeProjectAutostart } from "./autostart-view.ts";
 import {
+  type BranchInstanceCheckout,
+  type BranchInstanceIdentity,
+  type CheckoutOpenSettings,
+  configBranchServiceHosts,
+  listNativeBranchRecords,
+  listRegistrationCheckouts,
+  type NativeBranchRecord,
+  readCheckoutOpenSettings,
+  resolveBranchInstanceName,
+  resolveOwningCheckout,
+  resolvePrimaryOpenUrl,
+  runtimeServiceHosts,
+} from "./branch-instance-identity.ts";
+import {
   type ComposeServiceActivation,
   composeServiceActivation,
 } from "./compose-service-activation.ts";
@@ -56,6 +70,15 @@ const NATIVE_OBSERVATION_CONCURRENCY = 4;
 export type BranchRuntime = {
   readonly branch: string;
   readonly runtime: RuntimeProject;
+  /** Explicit identity (R20); absent for unregistered projects. */
+  readonly identity?: BranchInstanceIdentity;
+};
+
+/** A native branch instance from its saved run mapping (R19). */
+export type NativeBranchRuntime = {
+  readonly branch: string;
+  readonly store: NativeBranchRecord["store"];
+  readonly identity: BranchInstanceIdentity;
 };
 
 export type MuxSession = {
@@ -123,6 +146,13 @@ export type ProjectView = {
   };
   readonly runtime: RuntimeProject | null;
   readonly branchRuntime: readonly BranchRuntime[];
+  /** Native branch instances with a saved run mapping (R19). */
+  readonly nativeBranchRuntime?: readonly NativeBranchRuntime[];
+  /** The URL `hack open` opens with no target and no branch (R20). */
+  readonly openUrl?: {
+    readonly url: string;
+    readonly host: "dev" | "alias";
+  } | null;
   readonly sessions: readonly ProjectSession[];
   readonly lifecycle: ProjectLifecycleView | null;
   readonly worktrees: readonly RegisteredProjectWorktree[] | null;
@@ -340,9 +370,14 @@ async function buildRegisteredProjectView(opts: {
     runtimeOk: opts.runtimeOk,
     running,
   });
-  const branchRuntime = collectBranchRuntime({
-    baseName: opts.name,
-    runtimeProjects: opts.allRuntime,
+  const branchIdentity = await describeBranchInstances({
+    registration: opts.registration,
+    branchRuntime: collectBranchRuntime({
+      baseName: opts.name,
+      runtimeProjects: opts.allRuntime,
+    }),
+    baseServiceHosts: serviceHosts,
+    includeNative: projectDirOk,
   });
   const sessions = collectProjectSessions({
     projectName: opts.name,
@@ -378,12 +413,163 @@ async function buildRegisteredProjectView(opts: {
     runtimeConfigured,
     runtimeStatus,
     runtime: opts.runtime,
-    branchRuntime,
+    branchRuntime: branchIdentity.branchRuntime,
+    nativeBranchRuntime: branchIdentity.nativeBranchRuntime,
+    openUrl: branchIdentity.openUrl,
     sessions,
     lifecycle,
     worktrees: opts.registration.worktrees ?? null,
     kind: "registered",
     status,
+  };
+}
+
+/**
+ * Explicit branch instance identity for one registered project (HACK-2281).
+ *
+ * Cost per project: one config read per checkout that owns an instance (at
+ * most the registered checkout plus its worktrees), one small
+ * `branch-usage.json` read per instance, and for native instances two
+ * directory listings per checkout plus one small JSON read per saved run
+ * mapping. No process is spawned and Docker is not contacted, so the read
+ * stays proportional to files, not to native status calls.
+ */
+async function describeBranchInstances(opts: {
+  readonly registration: RegisteredProject;
+  readonly branchRuntime: readonly BranchRuntime[];
+  readonly baseServiceHosts: Readonly<Record<string, readonly string[]>> | null;
+  readonly includeNative: boolean;
+}): Promise<{
+  readonly branchRuntime: readonly BranchRuntime[];
+  readonly nativeBranchRuntime: readonly NativeBranchRuntime[];
+  readonly openUrl: ProjectView["openUrl"];
+}> {
+  const settingsByRoot = new Map<
+    string,
+    Promise<CheckoutOpenSettings | null>
+  >();
+  const settingsFor = (checkout: BranchInstanceCheckout) => {
+    const key = checkout.projectDir;
+    let pending = settingsByRoot.get(key);
+    if (!pending) {
+      pending = readCheckoutOpenSettings({
+        registration: opts.registration,
+        checkout,
+      }).catch(() => null);
+      settingsByRoot.set(key, pending);
+    }
+    return pending;
+  };
+  const primary = listRegistrationCheckouts(opts.registration)[0];
+  const primarySettings = primary ? await settingsFor(primary) : null;
+
+  const describe = async (input: {
+    readonly slug: string;
+    readonly checkout: BranchInstanceCheckout | null;
+    readonly runtime: RuntimeProject | null;
+  }): Promise<BranchInstanceIdentity> => {
+    const settings = input.checkout
+      ? await settingsFor(input.checkout)
+      : primarySettings;
+    const named = await resolveBranchInstanceName({
+      registration: opts.registration,
+      checkout: input.checkout,
+      slug: input.slug,
+    });
+    const open = settings
+      ? resolvePrimaryOpenUrl({ settings, branch: input.slug })
+      : null;
+    const runtimeHosts = input.runtime
+      ? runtimeServiceHosts(input.runtime)
+      : {};
+    const useRuntimeHosts = Object.keys(runtimeHosts).length > 0;
+    let serviceHosts: Readonly<Record<string, readonly string[]>> = {};
+    if (useRuntimeHosts) {
+      serviceHosts = runtimeHosts;
+    } else if (settings) {
+      serviceHosts = configBranchServiceHosts({
+        baseServiceHosts: opts.baseServiceHosts,
+        settings,
+        branch: input.slug,
+      });
+    }
+    return {
+      name: named.name,
+      nameSource: named.source,
+      checkout: input.checkout,
+      serviceHosts,
+      hostsSource: useRuntimeHosts ? "runtime_labels" : "config",
+      url: open?.url ?? null,
+      urlHost: open?.host ?? null,
+    };
+  };
+
+  const branchRuntime = await Promise.all(
+    opts.branchRuntime.map(async (entry) => ({
+      ...entry,
+      identity: await describe({
+        slug: entry.branch,
+        checkout: resolveOwningCheckout({
+          registration: opts.registration,
+          workingDir: entry.runtime.workingDir,
+        }),
+        runtime: entry.runtime,
+      }),
+    }))
+  );
+
+  const nativeBranchRuntime: NativeBranchRuntime[] = [];
+  if (opts.includeNative) {
+    const seen = new Set<string>();
+    for (const checkout of listRegistrationCheckouts(opts.registration)) {
+      for (const record of await listNativeBranchRecords({ checkout })) {
+        const key = `${record.checkout.projectDir}\0${record.slug}`;
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        nativeBranchRuntime.push({
+          branch: record.slug,
+          store: record.store,
+          identity: await describe({
+            slug: record.slug,
+            checkout: record.checkout,
+            runtime: null,
+          }),
+        });
+      }
+    }
+  }
+
+  return {
+    branchRuntime,
+    nativeBranchRuntime,
+    openUrl: primarySettings
+      ? resolvePrimaryOpenUrl({ settings: primarySettings, branch: null })
+      : null,
+  };
+}
+
+function serializeBranchInstanceIdentity(
+  identity: BranchInstanceIdentity | undefined
+): Record<string, unknown> {
+  if (!identity) {
+    return {};
+  }
+  return {
+    branch_name: identity.name,
+    branch_name_source: identity.nameSource,
+    checkout: identity.checkout
+      ? {
+          root: identity.checkout.root,
+          project_dir: identity.checkout.projectDir,
+          kind: identity.checkout.kind,
+        }
+      : null,
+    hosts: identity.serviceHosts,
+    hosts_source: identity.hostsSource,
+    url: identity.url,
+    url_host: identity.urlHost,
   };
 }
 
@@ -531,7 +717,19 @@ export function serializeProjectView(
     branch_runtime: view.branchRuntime.map((entry) => ({
       branch: entry.branch,
       runtime: serializeRuntimeProject(entry.runtime),
+      backend: "compose",
+      ...serializeBranchInstanceIdentity(entry.identity),
     })),
+    native_branch_runtime: (view.nativeBranchRuntime ?? []).map((entry) => ({
+      branch: entry.branch,
+      backend: "native",
+      // A saved run mapping, not proof that the runtime is alive.
+      state: "recorded",
+      store: entry.store,
+      ...serializeBranchInstanceIdentity(entry.identity),
+    })),
+    open_url: view.openUrl?.url ?? null,
+    open_url_host: view.openUrl?.host ?? null,
     sessions: view.sessions.map((entry) => ({
       name: entry.name,
       backend: entry.backend,

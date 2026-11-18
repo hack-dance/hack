@@ -977,13 +977,28 @@ export async function resolveEffectiveBranchForCommand(opts: {
   readonly noticeToStderr?: boolean;
   readonly warnOnRetarget?: boolean;
 }): Promise<string | null> {
+  return (await resolveEffectiveBranchIdentityForCommand(opts)).branch;
+}
+
+/**
+ * {@link resolveEffectiveBranchForCommand} plus the name the slug came from:
+ * the trimmed `--branch` argument, or the linked worktree's git branch.
+ * `hack up` and `hack restart` record it so `/v1/projects` can report it
+ * (HACK-2281, R20).
+ */
+export async function resolveEffectiveBranchIdentityForCommand(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly branchOption: string | undefined;
+  readonly noticeToStderr?: boolean;
+  readonly warnOnRetarget?: boolean;
+}): Promise<{ readonly branch: string | null; readonly name: string | null }> {
   const explicit = resolveBranchSlug(opts.branchOption);
   if (explicit) {
-    return explicit;
+    return { branch: explicit, name: (opts.branchOption ?? "").trim() };
   }
   // A saved null instance means base, even when its checkout is a worktree.
   if (process.env.HACK_AUTOSTART_LOGIN === "1") {
-    return null;
+    return { branch: null, name: null };
   }
 
   const cfg = await readProjectConfig(opts.project);
@@ -1032,7 +1047,10 @@ export async function resolveEffectiveBranchForCommand(opts: {
   }
   // Recorded only when the command runs inside an activity record.
   noteActivityBranch(resolved.branch);
-  return resolved.branch;
+  return {
+    branch: resolved.branch,
+    name: resolved.source === "worktree" ? resolved.gitBranch : null,
+  };
 }
 
 export type LifecycleJsonAction = "up" | "down" | "restart";
@@ -3790,6 +3808,8 @@ function resolveBranchAliasHost(opts: {
 async function recordBranchUsageIfNeeded(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly branch: string | null;
+  /** The name the slug came from; only up/restart pass it (HACK-2281). */
+  readonly name?: string | null;
 }): Promise<void> {
   if (!opts.branch) {
     return;
@@ -3798,6 +3818,7 @@ async function recordBranchUsageIfNeeded(opts: {
   const res = await recordBranchUsage({
     projectDir: opts.project.projectDir,
     branch: opts.branch,
+    name: opts.name,
   });
   if (res.error) {
     logger.warn({
@@ -6739,12 +6760,16 @@ async function handleUpUnlocked({
           projectOpt: args.options.project,
           touchRegistration: false,
         }),
-      resolveBranch: (project) =>
-        resolveEffectiveBranchForCommand({
+      resolveBranch: async (project) => {
+        const identity = await resolveEffectiveBranchIdentityForCommand({
           project,
           branchOption: args.options.branch,
           noticeToStderr: args.options.json === true,
-        }),
+        });
+        // The detached child only sees the slug, so record the name here.
+        await recordBranchUsageIfNeeded({ project, ...identity });
+        return identity.branch;
+      },
       onBranchResolved: (branch) => {
         if (args.options.branch === undefined && branch !== null) {
           childArgs.push(`--branch=${branch}`);
@@ -6836,12 +6861,13 @@ async function runUpCommand({
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
-  const branch = await resolveEffectiveBranchForCommand({
+  const branchIdentity = await resolveEffectiveBranchIdentityForCommand({
     project,
     branchOption: args.options.branch,
     noticeToStderr: json,
     warnOnRetarget: true,
   });
+  const branch = branchIdentity.branch;
   const profiles = parseCsvList(args.options.profile);
 
   if (json && !findExecutableInPath("docker")) {
@@ -6854,7 +6880,11 @@ async function runUpCommand({
     });
   }
 
-  await recordBranchUsageIfNeeded({ project, branch });
+  await recordBranchUsageIfNeeded({
+    project,
+    branch,
+    name: branchIdentity.name,
+  });
   const remoteUpCode = await runRemoteLifecycleCommand({
     project,
     action: "up",
@@ -8896,15 +8926,20 @@ async function runRestartCommand({
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
-  const branch = await resolveEffectiveBranchForCommand({
+  const branchIdentity = await resolveEffectiveBranchIdentityForCommand({
     project,
     branchOption: args.options.branch,
     noticeToStderr: json,
     warnOnRetarget: true,
   });
+  const branch = branchIdentity.branch;
   const profiles = parseCsvList(args.options.profile);
 
-  await recordBranchUsageIfNeeded({ project, branch });
+  await recordBranchUsageIfNeeded({
+    project,
+    branch,
+    name: branchIdentity.name,
+  });
   const remoteRestartCode = await runRemoteLifecycleCommand({
     project,
     action: "restart",

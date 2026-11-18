@@ -11,6 +11,12 @@ non-TTY refusal keep their ordinary parser behavior without initializing OpenTUI
 This changes the startup import path; it does not establish a measured CPU or
 memory improvement. The remote surface remains unsupported.
 
+Compiled executables (`bun run build`, release and candidate builds) carry a
+JavaScriptCore bytecode cache (`--bytecode --format=esm`), so a start does not parse
+the whole bundle. On the Linux build host this took `hack --version` from about
+320 ms to about 75 ms and made the executable about 22 MB larger. A source run
+(`bun index.ts`) has no such cache and is not a startup measurement.
+
 ## Project listing
 
 ```sh

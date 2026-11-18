@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildDoctorJsonData } from "../src/commands/doctor.ts";
@@ -370,4 +370,22 @@ test("an instance maps to the key hack up records it under", () => {
   );
   expect(runtimeStateKey({ instance: "demo", base: "demo" })).toBe("demo");
   expect(runtimeStateKey({ instance: "other", base: "my_app" })).toBe("other");
+});
+
+test("a working directory recorded through a symlink still belongs to the checkout", async () => {
+  const root = await mkdtemp(join(tmpdir(), "doctor-env-override-link-"));
+  try {
+    const real = join(root, "real");
+    await mkdir(join(real, ".hack"), { recursive: true });
+    await symlink(real, join(root, "link"));
+    expect(
+      checkoutRuntimes({
+        runtime: [{ project: "demo", workingDir: join(root, "link/.hack") }],
+        projectRoot: real,
+        projectDir: join(real, ".hack"),
+      }).map((project) => project.project)
+    ).toEqual(["demo"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

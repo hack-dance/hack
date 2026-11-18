@@ -21,6 +21,7 @@
  * services only.
  */
 
+import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { YAML } from "bun";
@@ -250,11 +251,24 @@ export function checkoutRuntimes<
   readonly projectRoot: string;
   readonly projectDir: string;
 }): T[] {
-  const own = new Set([resolve(opts.projectDir), resolve(opts.projectRoot)]);
+  const own = new Set([
+    canonicalPath(opts.projectDir),
+    canonicalPath(opts.projectRoot),
+  ]);
   return opts.runtime.filter(
     (project) =>
-      project.workingDir !== null && own.has(resolve(project.workingDir))
+      project.workingDir !== null && own.has(canonicalPath(project.workingDir))
   );
+}
+
+/** A symlinked or logical path (macOS `/var`) compares as its real path. */
+function canonicalPath(path: string): string {
+  const resolved = resolve(path);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
 }
 
 /**

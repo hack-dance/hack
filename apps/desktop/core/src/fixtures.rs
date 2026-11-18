@@ -68,10 +68,12 @@ pub enum Fixture {
     Upgrade,
     /// A check with a blocker and a check that could not run.
     UpgradeBlocked,
+    /// Running, with CPU and memory per service and one emulated service.
+    Usage,
 }
 
 impl Fixture {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -106,6 +108,7 @@ impl Fixture {
         Self::HackdOff,
         Self::Upgrade,
         Self::UpgradeBlocked,
+        Self::Usage,
     ];
 
     #[must_use]
@@ -145,6 +148,7 @@ impl Fixture {
             Self::HackdOff => "hackd-off",
             Self::Upgrade => "upgrade",
             Self::UpgradeBlocked => "upgrade-blocked",
+            Self::Usage => "usage",
         }
     }
 
@@ -653,6 +657,42 @@ pub fn opens_doctor(f: Fixture) -> bool {
         f,
         Fixture::Doctor | Fixture::DoctorClean | Fixture::DoctorEmpty
     )
+}
+
+/// Fixtures that load per-service usage.
+#[must_use]
+pub fn loads_usage(f: Fixture) -> bool {
+    f == Fixture::Usage
+}
+
+/// `hack usage --json --by-service` as a fixture reports it: the
+/// storefront's services (no value for `worker` from one sample) and one
+/// branch instance.
+///
+/// # Errors
+/// Never for a fixture; the signature matches the live source.
+pub fn service_usage(_f: Fixture) -> Result<crate::usage::UsageReport, String> {
+    const MIB: u64 = 1024 * 1024;
+    crate::usage::UsageReport::from_value(serde_json::json!({
+        "schema": crate::usage::USAGE_SCHEMA, "project": "storefront", "backend": "compose",
+        "services": [
+            {"composeProject": "storefront", "service": "api", "containers": 1, "cpuPercent": 3.2, "memUsedBytes": 212 * MIB, "memLimitBytes": 2048 * MIB},
+            {"composeProject": "storefront", "service": "db", "containers": 1, "cpuPercent": 1.4, "memUsedBytes": 388 * MIB, "memLimitBytes": null},
+            {"composeProject": "storefront", "service": "web", "containers": 1, "cpuPercent": 0.6, "memUsedBytes": 96 * MIB, "memLimitBytes": null},
+            {"composeProject": "storefront", "service": "worker", "containers": 1, "cpuPercent": 87.5, "memUsedBytes": 640 * MIB, "memLimitBytes": null},
+            {"composeProject": "storefront--feature-search", "service": "api", "containers": 1, "cpuPercent": 2.0, "memUsedBytes": 180 * MIB, "memLimitBytes": null}
+        ]
+    }))
+}
+
+/// The services `hack ps --json` marks emulated in a fixture.
+#[must_use]
+pub fn emulated_services(f: Fixture) -> std::collections::BTreeSet<String> {
+    if f == Fixture::Usage {
+        std::collections::BTreeSet::from(["worker".to_owned()])
+    } else {
+        std::collections::BTreeSet::new()
+    }
 }
 
 /// Fixtures that open the Upgrade pane.

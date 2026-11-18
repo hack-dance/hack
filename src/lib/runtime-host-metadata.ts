@@ -91,7 +91,7 @@ export function buildRuntimeHostMetadataOverride(opts: {
         serviceName,
         {
           hosts: service.caddy
-            ? extractCaddyHosts({ value: service.caddy })
+            ? extractCaddyLabelHosts({ value: service.caddy })
             : [],
           declaredEnvironmentKeys: service.declaredEnvironmentKeys,
         },
@@ -330,7 +330,11 @@ export function readCaddyLabel(opts: {
   return null;
 }
 
-function extractCaddyHosts(opts: {
+/**
+ * Concrete hosts of one Caddy site label value: schemes and paths stripped;
+ * wildcard, template and port entries skipped.
+ */
+export function extractCaddyLabelHosts(opts: {
   readonly value: string;
 }): readonly string[] {
   const hosts: string[] = [];

@@ -134,6 +134,14 @@ const COMMANDS: Readonly<Record<string, Expectation>> = {
     argv: ["env", "list", "-p", "DIR", "--json"],
   },
   "env explain": { kind: "line", argv: ["env", "explain", "K", "-p", "DIR"] },
+  "env overlay list": {
+    kind: "envelope",
+    argv: ["env", "overlay", "list", "-p", "DIR", "--json"],
+  },
+  "env overlay add": {
+    kind: "envelope",
+    argv: ["env", "overlay", "add", "qa", "-p", "DIR", "--json"],
+  },
   "env protect": {
     kind: "envelope",
     argv: ["env", "protect", "-p", "DIR", "--json"],

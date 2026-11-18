@@ -5,6 +5,8 @@ import { join } from "node:path";
 
 import {
   isHackRenderedProxyCompose,
+  type ProxyBindScope,
+  readProxyBindScope,
   writeManagedProxyCompose,
 } from "../src/lib/managed-proxy-compose.ts";
 import { renderGlobalCaddyCompose } from "../src/templates.ts";
@@ -100,4 +102,41 @@ test("never overwrites an earlier backup taken in the same second", async () => 
   expect(await Bun.file(`${path}.bak-2026-11-18T030405Z-1`).text()).toBe(
     "second hand edit\n"
   );
+});
+
+test.each<[string, ProxyBindScope]>([
+  ['"443:443"', { kind: "all" }],
+  ["443", { kind: "all" }],
+  ['"127.0.0.1:443:443/tcp"', { kind: "address", address: "127.0.0.1" }],
+  ['"[::1]:443:443"', { kind: "address", address: "::1" }],
+  ['"0.0.0.0:443:443"', { kind: "address", address: "0.0.0.0" }],
+  ['"localhost:443:443"', { kind: "unknown" }],
+  ['"fe80::1:443:443"', { kind: "unknown" }],
+])("reads the bind scope of %s", (mapping, expected) => {
+  expect(
+    readProxyBindScope(`services:\n  caddy:\n    ports:\n      - ${mapping}\n`)
+  ).toEqual(expected);
+});
+
+test("Hack's own renderings read as all or their one address", () => {
+  expect(readProxyBindScope(renderGlobalCaddyCompose({}))).toEqual({
+    kind: "all",
+  });
+  expect(
+    readProxyBindScope(renderGlobalCaddyCompose({ bindAddress: "::1" }))
+  ).toEqual({ kind: "address", address: "::1" });
+});
+
+test("no caddy ports, mixed addresses or bad YAML are unknown", () => {
+  expect(readProxyBindScope("services:\n  caddy:\n    image: x\n")).toEqual({
+    kind: "unknown",
+  });
+  expect(
+    readProxyBindScope(
+      'services:\n  caddy:\n    ports:\n      - "127.0.0.1:80:80"\n      - "443:443"\n'
+    )
+  ).toEqual({ kind: "unknown" });
+  expect(readProxyBindScope("services: [unclosed\n")).toEqual({
+    kind: "unknown",
+  });
 });

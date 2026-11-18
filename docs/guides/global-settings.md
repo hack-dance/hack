@@ -35,10 +35,13 @@ Common settings:
   That file is Hack's output; when it differs from Hack's current rendering
   (edited by hand, or written by an older Hack), the previous copy is kept as
   `docker-compose.yml.bak-<UTC time>` (or `-N` on a name clash) beside it
-  before the rewrite. A file that publishes on one specific address while this
-  setting is unset is never widened: that address is saved as
-  `proxy.bind_address` first, so unsetting the setting alone does not widen a
-  restricted proxy. `0.0.0.0` publishes on every IPv4 interface. To return to
+  before the rewrite. While this setting is unset, an existing file is never
+  widened: if every proxy port names the same host address (any Compose
+  syntax, `0.0.0.0` and `::` included), that address is saved as
+  `proxy.bind_address` first; if the binding cannot be determined (mixed
+  addresses, no proxy ports, invalid YAML), the file is left unchanged with a
+  warning. Unsetting the setting alone therefore does not widen a restricted
+  proxy. `0.0.0.0` publishes on every IPv4 interface. To return to
   Docker's default (IPv4 and IPv6), unset the setting and move
   `~/.hack/caddy/docker-compose.yml` aside before `hack global install`; a
   missing file is never migrated.

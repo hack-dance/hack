@@ -1218,7 +1218,8 @@ test(
     await writeInstallStubs();
     const caddyCompose = globalCaddyComposePath();
     await mkdir(dirname(caddyCompose), { recursive: true });
-    const handEdited = "services:\n  caddy:\n    image: my/caddy\n";
+    const handEdited =
+      'services:\n  caddy:\n    image: my/caddy\n    ports:\n      - "443:443"\n';
     await writeFile(caddyCompose, handEdited);
 
     const { code, output } = await runNonInteractiveInstall();
@@ -1406,31 +1407,56 @@ describe("resolveManagedProxyBind (HACK-2328)", () => {
   test.each([
     "0.0.0.0",
     "::",
-  ])("a wildcard file (%s) is not migrated", async (bind) => {
+  ])("a wildcard file (%s) is migrated, never widened to both families", async (bind) => {
     const path = await writeProxyFile(bind);
     const { resolveManagedProxyBind } = await import(
       "../src/lib/managed-proxy-compose.ts"
     );
     expect(await resolveManagedProxyBind({ path })).toEqual({
-      bindAddress: null,
-      migrated: null,
+      bindAddress: bind,
+      migrated: bind,
     });
-    expect(await Bun.file(resolveGlobalConfigPath()).exists()).toBe(false);
+    const config = JSON.parse(
+      await Bun.file(resolveGlobalConfigPath()).text()
+    ) as { proxy?: { bind_address?: string } };
+    expect(config.proxy?.bind_address).toBe(bind);
   });
 
-  test("a bind Hack would not render falls back to the default", async () => {
+  test("a binding it cannot determine leaves the file alone", async () => {
     const path = globalCaddyComposePath();
     await mkdir(dirname(path), { recursive: true });
     await writeFile(
       path,
-      'services:\n  caddy:\n    ports:\n      - "localhost:443:443"\n'
+      'services:\n  caddy:\n    ports:\n      - "127.0.0.1:80:80"\n      - "443:443"\n'
     );
     const { resolveManagedProxyBind } = await import(
       "../src/lib/managed-proxy-compose.ts"
     );
+    const result = await resolveManagedProxyBind({ path });
+    expect(result.bindAddress).toBeNull();
+    expect(result.keep).toContain("left unchanged");
+    expect(await Bun.file(resolveGlobalConfigPath()).exists()).toBe(false);
+  });
+
+  test.each([
+    [
+      "single-quoted with a comment",
+      "      - '127.0.0.1:80:80' # loopback\n      - '127.0.0.1:443:443'\n",
+    ],
+    [
+      "long form",
+      "      - target: 80\n        published: 80\n        host_ip: 127.0.0.1\n      - target: 443\n        published: 443\n        host_ip: 127.0.0.1\n",
+    ],
+  ])("a hand-edited %s mapping keeps its address", async (_label, ports) => {
+    const path = globalCaddyComposePath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, `services:\n  caddy:\n    ports:\n${ports}`);
+    const { resolveManagedProxyBind } = await import(
+      "../src/lib/managed-proxy-compose.ts"
+    );
     expect(await resolveManagedProxyBind({ path })).toEqual({
-      bindAddress: null,
-      migrated: null,
+      bindAddress: "127.0.0.1",
+      migrated: "127.0.0.1",
     });
   });
 
@@ -1449,3 +1475,21 @@ describe("resolveManagedProxyBind (HACK-2328)", () => {
     expect(await Bun.file(configPath).text()).toBe("{ not json");
   });
 });
+
+test(
+  "global install leaves a proxy file with an undeterminable binding unchanged (HACK-2328)",
+  async () => {
+    await writeInstallStubs();
+    const caddyCompose = globalCaddyComposePath();
+    await mkdir(dirname(caddyCompose), { recursive: true });
+    const handEdited =
+      'services:\n  caddy:\n    image: my/caddy\n    ports:\n      - "127.0.0.1:80:80"\n      - "10.0.0.5:443:443"\n';
+    await writeFile(caddyCompose, handEdited);
+
+    const { output } = await runNonInteractiveInstall();
+
+    expect(output).toContain("Proxy file not updated");
+    expect(await Bun.file(caddyCompose).text()).toBe(handEdited);
+  },
+  { timeout: 20_000 }
+);

@@ -4279,19 +4279,23 @@ async function runDoctorFix(opts: {
       "doctor"
     );
   }
-  const proxyCompose = await writeManagedProxyCompose({
-    path: paths.caddyCompose,
-    content: renderGlobalCaddyCompose({
-      useStaticCoreDnsIp: useStaticIps,
-      useStaticCaddyIp: useStaticIps,
-      bindAddress: bind.bindAddress,
-    }),
-  });
-  if (proxyCompose.kind === "replaced-hand-edit") {
-    note(
-      `Replaced ${paths.caddyCompose}: it differed from Hack's current rendering (edited by hand, or written by an older Hack). The previous copy is at ${proxyCompose.backupPath}`,
-      "doctor"
-    );
+  if (bind.keep !== undefined) {
+    note(`Proxy file not updated: ${bind.keep}`, "doctor");
+  } else {
+    const proxyCompose = await writeManagedProxyCompose({
+      path: paths.caddyCompose,
+      content: renderGlobalCaddyCompose({
+        useStaticCoreDnsIp: useStaticIps,
+        useStaticCaddyIp: useStaticIps,
+        bindAddress: bind.bindAddress,
+      }),
+    });
+    if (proxyCompose.kind === "replaced-hand-edit") {
+      note(
+        `Replaced ${paths.caddyCompose}: it differed from Hack's current rendering (edited by hand, or written by an older Hack). The previous copy is at ${proxyCompose.backupPath}`,
+        "doctor"
+      );
+    }
   }
   await writeWithPromptIfDifferent(
     paths.coreDnsConfig,

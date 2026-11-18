@@ -47,20 +47,98 @@ export function isHackRenderedProxyCompose(text: string): boolean {
   return false;
 }
 
-const WILDCARD_BINDS: ReadonlySet<string> = new Set(["0.0.0.0", "::"]);
+/**
+ * Which host addresses an existing proxy Compose file publishes the `caddy`
+ * ports on, read as YAML so any valid Compose syntax counts: short mappings in
+ * any quoting, with comments or a protocol suffix, and the long form with
+ * `host_ip`. `all` when no mapping names a host address (Docker's default);
+ * `address` when every mapping names the same one (wildcards included, since
+ * `0.0.0.0` and `::` each cover one address family only); `unknown` for
+ * anything else (no caddy ports, mixed or different addresses, unparsable).
+ */
+export type ProxyBindScope =
+  | { readonly kind: "all" }
+  | { readonly kind: "address"; readonly address: string }
+  | { readonly kind: "unknown" };
+
+const PROTOCOL_SUFFIX = /\/(?:tcp|udp|sctp)$/;
+
+/** The host address of one Compose port mapping, "" for none, null if unreadable. */
+function mappingHostAddress(mapping: unknown): string | null {
+  if (typeof mapping === "number") {
+    return "";
+  }
+  if (typeof mapping === "string") {
+    const spec = mapping.trim().replace(PROTOCOL_SUFFIX, "");
+    if (spec.startsWith("[")) {
+      const close = spec.indexOf("]");
+      return close > 1 && spec[close + 1] === ":" ? spec.slice(1, close) : null;
+    }
+    const parts = spec.split(":");
+    if (parts.length <= 2) {
+      return "";
+    }
+    return parts.length === 3 ? (parts[0] ?? null) : null;
+  }
+  if (mapping !== null && typeof mapping === "object") {
+    const hostIp = (mapping as { host_ip?: unknown }).host_ip;
+    if (hostIp === undefined) {
+      return "";
+    }
+    return typeof hostIp === "string" ? hostIp : null;
+  }
+  return null;
+}
+
+export function readProxyBindScope(text: string): ProxyBindScope {
+  let parsed: unknown;
+  try {
+    parsed = Bun.YAML.parse(text);
+  } catch {
+    return { kind: "unknown" };
+  }
+  const ports = (
+    parsed as { services?: { caddy?: { ports?: unknown } } } | null
+  )?.services?.caddy?.ports;
+  if (!Array.isArray(ports) || ports.length === 0) {
+    return { kind: "unknown" };
+  }
+  const hosts = new Set<string>();
+  for (const mapping of ports) {
+    const host = mappingHostAddress(mapping);
+    if (host === null) {
+      return { kind: "unknown" };
+    }
+    hosts.add(host);
+  }
+  if (hosts.size !== 1) {
+    return { kind: "unknown" };
+  }
+  const [host] = [...hosts];
+  if (host === "") {
+    return { kind: "all" };
+  }
+  try {
+    return { kind: "address", address: parseProxyBindAddress(host ?? "") };
+  } catch {
+    return { kind: "unknown" };
+  }
+}
 
 /**
  * The address to render the proxy ports with (HACK-2328, Codex security
- * review). Because the file is now rewritten without a prompt, a file that
- * publishes on one specific address while `proxy.bind_address` is unset (a
- * hand edit, or an older setup) must not be widened to every interface: that
- * would expose routes such as the unauthenticated Loki endpoint to LAN and
- * tunnel peers. Such an address is written into `proxy.bind_address`, so the
- * file, login autostart's check and `hack config get` agree on it. Only the
- * 443 mapping is read, so a file with port 80 wider than 443 is narrowed to
- * the 443 address for both ports (the safe direction). If the address cannot
- * be saved (for example the global config is not valid JSON), the file is
- * still rendered with it and `saveError` says why.
+ * reviews). Because the file is now rewritten without a prompt, an existing
+ * file must never be widened while `proxy.bind_address` is unset: that would
+ * expose routes such as the unauthenticated Loki endpoint to LAN and tunnel
+ * peers. So, with the setting unset:
+ * - a file publishing every caddy port on one address (wildcards included) has
+ *   that address written into `proxy.bind_address`, so the file, login
+ *   autostart's check and `hack config get` agree;
+ * - a file whose binding cannot be determined is left as it is (`keep`), with
+ *   the reason, until the user sets the address or moves the file aside;
+ * - a missing file, or one publishing on every interface, renders the default.
+ * If the address cannot be saved (for example the global config is not valid
+ * JSON), the file is still rendered with it and `saveError` says why.
  */
 export async function resolveManagedProxyBind(opts: {
   readonly path: string;
@@ -68,29 +146,31 @@ export async function resolveManagedProxyBind(opts: {
   readonly bindAddress: string | null;
   /** The address moved from the file into config, or null. */
   readonly migrated: string | null;
-  /** Why the address could not be saved into config, or null. */
+  /** Why the address could not be saved into config. */
   readonly saveError?: string;
+  /** Why the existing file must be left unchanged. */
+  readonly keep?: string;
 }> {
   const configured = await resolveProxyBindAddress();
   if (configured !== null) {
     return { bindAddress: configured, migrated: null };
   }
   const existing = await readTextFile(opts.path);
-  const fileBind =
-    existing === null ? null : readProxyBindFromCompose(existing);
-  if (fileBind === null) {
+  if (existing === null) {
     return { bindAddress: null, migrated: null };
   }
-  let address: string;
-  try {
-    address = parseProxyBindAddress(fileBind);
-  } catch {
-    // Not an address Hack renders; the file is replaced and backed up.
+  const scope = readProxyBindScope(existing);
+  if (scope.kind === "all") {
     return { bindAddress: null, migrated: null };
   }
-  if (WILDCARD_BINDS.has(address)) {
-    return { bindAddress: null, migrated: null };
+  if (scope.kind === "unknown") {
+    return {
+      bindAddress: null,
+      migrated: null,
+      keep: `could not tell which addresses ${opts.path} publishes the proxy on, so it was left unchanged. Set the address with hack config set --global proxy.bind_address <address>, or move the file aside, then rerun`,
+    };
   }
+  const address = scope.address;
   try {
     await updateGlobalConfig({ path: PROXY_BIND_CONFIG_KEY, value: address });
   } catch (error: unknown) {

@@ -1237,14 +1237,18 @@ async function writeGlobalInstallAssets(opts: {
       message: `Kept the proxy on ${bind.migrated} from the existing proxy file and saved it as proxy.bind_address. To publish on every IPv4 interface: hack config set --global proxy.bind_address 0.0.0.0`,
     });
   }
-  await writeGlobalProxyCompose({
-    path: opts.paths.caddyCompose,
-    content: renderGlobalCaddyCompose({
-      useStaticCoreDnsIp: opts.useStaticIps,
-      useStaticCaddyIp: opts.useStaticIps,
-      bindAddress: bind.bindAddress,
-    }),
-  });
+  if (bind.keep !== undefined) {
+    logger.warn({ message: `Proxy file not updated: ${bind.keep}` });
+  } else {
+    await writeGlobalProxyCompose({
+      path: opts.paths.caddyCompose,
+      content: renderGlobalCaddyCompose({
+        useStaticCoreDnsIp: opts.useStaticIps,
+        useStaticCaddyIp: opts.useStaticIps,
+        bindAddress: bind.bindAddress,
+      }),
+    });
+  }
   await writeWithPromptIfDifferent(
     opts.paths.coreDnsConfig,
     renderGlobalCoreDnsConfig({

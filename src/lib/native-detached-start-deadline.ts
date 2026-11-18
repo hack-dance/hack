@@ -35,6 +35,7 @@ export const NATIVE_DETACHED_START_PHASES = [
   "input",
   "runtime",
   "images",
+  "plan",
   "services",
   "dependency-wait",
 ] as const;
@@ -56,6 +57,7 @@ const PHASE_LABEL: Readonly<Record<NativeDetachedStartPhase, string>> = {
   input: "preparing project input",
   runtime: "starting the native runtime",
   images: "building and loading service images",
+  plan: "reviewing the native plan after image work",
   services: "starting services",
   "dependency-wait": "waiting for a host listener",
 };
@@ -99,9 +101,11 @@ export function resolveNativeDetachedStartLimits(
 export type NativeDetachedStartExpiry = "budget" | "ceiling";
 
 /**
- * The launcher's clocks. `observe` records a reported phase (each report of
- * `images` is also a heartbeat); `check` advances the budget by the time since
- * the previous check unless image work was in flight with a fresh heartbeat.
+ * The launcher's clocks, on one monotonic clock (`performance.now()`): a wall
+ * clock change must neither expire nor extend a start. `observe` records a
+ * reported phase (each report of `images` is also a heartbeat); `check`
+ * advances the budget by the time since the previous check that was not
+ * image work with a fresh heartbeat.
  */
 export class NativeDetachedStartDeadline {
   readonly #limits: NativeDetachedStartLimits;
@@ -139,12 +143,14 @@ export class NativeDetachedStartDeadline {
   }
 
   check(now: number): NativeDetachedStartExpiry | undefined {
-    const imageWork =
-      this.#phase === "images" && now - this.#heartbeatAt <= this.#staleMs;
-    if (!imageWork) {
-      this.#countedMs += Math.max(0, now - this.#checkedAt);
-    }
-    this.#checkedAt = now;
+    // Image work is exempt only until its heartbeat goes stale: of the time
+    // since the previous check, count just the part after that point.
+    const countedFrom =
+      this.#phase === "images"
+        ? Math.max(this.#checkedAt, this.#heartbeatAt + this.#staleMs)
+        : this.#checkedAt;
+    this.#countedMs += Math.max(0, now - countedFrom);
+    this.#checkedAt = Math.max(this.#checkedAt, now);
     if (now - this.#startedAt >= this.#limits.ceilingMs) {
       return "ceiling";
     }

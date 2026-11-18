@@ -494,21 +494,23 @@ async function resumeSelectedOwner(opts: {
 const STARTUP_WAIT_POLL_MS = 500;
 
 /**
- * Before a down reports "not started" (HACK-2351): a start of this instance
- * that has published no run yet may still hold the native runtime (a
- * detached start whose launcher gave up, still building or unwinding). Wait
- * for its owner to exit, at most `waitMs` (default 120 s). True when that
- * start published a run meanwhile, so the down stops it; false when it ended
- * without one. A start still alive at the end refuses: this down stopped
- * nothing and must not report success.
+ * Wait for a live start of this instance to end (HACK-2351): a detached start
+ * whose launcher gave up can still hold the native runtime while it builds or
+ * unwinds. With `untilPublished`, also return as soon as it has published a
+ * run. Waits at most `waitMs` (default 120 s); a start still alive then
+ * refuses: the down stopped nothing and must not report success. True when
+ * there was a start to wait for.
  */
 async function awaitPendingStartup(opts: {
   readonly scope: NativeProjectRunScope;
   readonly waitMs?: number;
+  readonly untilPublished: boolean;
 }): Promise<boolean> {
   const deadline = performance.now() + (opts.waitMs ?? 120_000);
+  let waited = false;
   while (await nativeProjectStartupPending(opts.scope)) {
-    if (await loadNativeProjectRun(opts.scope)) {
+    waited = true;
+    if (opts.untilPublished && (await loadNativeProjectRun(opts.scope))) {
       return true;
     }
     if (performance.now() >= deadline) {
@@ -520,7 +522,16 @@ async function awaitPendingStartup(opts: {
     }
     await Bun.sleep(STARTUP_WAIT_POLL_MS);
   }
-  return (await loadNativeProjectRun(opts.scope)) !== null;
+  return waited;
+}
+
+/** Whether an inspected graph is stopped with its data retained. */
+function stoppedRetained(snapshot: unknown): boolean {
+  return (
+    isRecord(snapshot) &&
+    isRecord(snapshot.receipt) &&
+    snapshot.receipt.phase === "stopped-data-retained"
+  );
 }
 
 /**
@@ -538,12 +549,12 @@ async function downRun(opts: {
   if (run || opts.deferFinalization) {
     return run;
   }
-  return (await awaitPendingStartup({
+  await awaitPendingStartup({
     scope: opts.scope,
     waitMs: opts.startupWaitMs,
-  }))
-    ? await loadNativeProjectRun(opts.scope)
-    : null;
+    untilPublished: true,
+  });
+  return await loadNativeProjectRun(opts.scope);
 }
 
 export async function nativeProjectDown(opts: {
@@ -726,10 +737,21 @@ export async function nativeProjectDown(opts: {
     } as const;
   }
   if (
-    isRecord(initial) &&
-    isRecord(initial.receipt) &&
-    initial.receipt.phase === "stopped-data-retained"
+    stoppedRetained(initial) &&
+    !opts.deferFinalization &&
+    // A stopped retained run with a live start of the instance: a new `up` is
+    // resuming it. Wait for that start before calling the instance stopped;
+    // if it brought the graph back, stop it below (HACK-2351).
+    (await awaitPendingStartup({
+      scope: opts.scope,
+      waitMs: opts.startupWaitMs,
+      untilPublished: false,
+    }))
   ) {
+    initial = await inspect();
+    verify(initial, run, false);
+  }
+  if (stoppedRetained(initial)) {
     // Recovery or a foreground stop already stopped compute. Guest cleanup and
     // completed hooks must not replay; only journaled owed phases run once.
     verify(initial, run, true);

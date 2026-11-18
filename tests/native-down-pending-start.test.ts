@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { nativeProjectDown } from "../src/backends/native-project-down.ts";
+import { beginNativeProjectFinalization } from "../src/backends/native-project-finalization.ts";
 import {
   beginNativeProjectStartupObservation,
   saveNativeProjectRun,
@@ -83,6 +84,49 @@ test("down stops the run a start publishes while it waits for that start", async
   expect(error).toBeInstanceOf(Error);
   expect(invoked.length).toBeGreaterThan(0);
   expect(invoked[0]?.join(" ")).toContain(run.run);
+});
+
+/** The runtime's inspection of {@link run}'s stopped, retained graph. */
+const stoppedGraph = {
+  receipt: {
+    ...run,
+    plan_id: run.planId,
+    phase: "stopped-data-retained",
+    resources: {
+      "container:web": {
+        kind: "container",
+        key: "web",
+        id: "e".repeat(64),
+        phase: "started",
+      },
+    },
+  },
+  journal_incomplete: false,
+  observations: { "container:web": { state: "absent" } },
+};
+
+test("down does not call a retained run stopped while a new start of it is alive", async () => {
+  // Review finding: a stopped retained mapping, and a new `up` resuming it.
+  const f = await fixture();
+  await saveNativeProjectRun({ ...f.scope, run });
+  const finalization = await beginNativeProjectFinalization({
+    scope: f.scope,
+    run,
+  });
+  await finalization.complete();
+  const finish = await beginNativeProjectStartupObservation(f.scope);
+  const invoke = () => Promise.resolve(stoppedGraph);
+  const error = await nativeProjectDown({
+    ...f,
+    startupWaitMs: 600,
+    invoke,
+  }).catch((caught: unknown) => caught);
+  expect((error as HackCliError).code).toBe("E_DOWN_INCOMPLETE");
+  await finish();
+  // With no start alive, the retained run is reported stopped as before.
+  expect(
+    await nativeProjectDown({ ...f, startupWaitMs: 600, invoke })
+  ).toMatchObject({ status: "stopped", run: run.run });
 });
 
 test("the restart coordinator's down never waits for its own start", async () => {

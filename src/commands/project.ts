@@ -6441,6 +6441,9 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
     case "images":
       logger.step({ message: "Acquiring service images…" });
       return;
+    case "plan":
+      // Only a detached launcher's clocks use it; the terminal shows nothing.
+      return;
     case "services":
       logger.step({
         message: `Starting services: ${event.services.join(", ")}…`,

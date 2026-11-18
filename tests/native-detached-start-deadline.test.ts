@@ -100,3 +100,31 @@ test("limits come from the environment, are validated, and the ceiling is never 
     ).toThrow(NATIVE_DETACHED_START_BUDGET_ENV);
   }
 });
+
+test("a check across the heartbeat's expiry counts only the time after it", () => {
+  // Review finding: a delayed check must not charge the fresh part.
+  const deadline = new NativeDetachedStartDeadline({
+    limits: { budgetMs: 1000, ceilingMs: 600_000 },
+    now: 0,
+    heartbeatStaleMs: 120_000,
+  });
+  deadline.observe("images", 0);
+  expect(deadline.check(120_001)).toBeUndefined();
+  expect(deadline.countedMs).toBe(1);
+});
+
+test("the plan phase after image work counts against the budget again", () => {
+  const deadline = new NativeDetachedStartDeadline({
+    limits: { budgetMs: 1000, ceilingMs: 600_000 },
+    now: 0,
+    heartbeatStaleMs: 120_000,
+  });
+  deadline.observe("images", 0);
+  deadline.observe("plan", 50_000);
+  expect(deadline.countedMs).toBe(0);
+  expect(deadline.check(50_999)).toBeUndefined();
+  expect(deadline.check(51_000)).toBe("budget");
+  expect(deadline.timeoutError("budget", 51_000).message).toContain(
+    "it was reviewing the native plan after image work"
+  );
+});

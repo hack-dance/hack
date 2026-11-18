@@ -780,9 +780,10 @@ function watchStartDeadline(opts: {
   readonly heartbeatStaleMs: number | undefined;
   readonly expire: (error: HackCliError) => void;
 }): ReturnType<typeof setInterval> {
+  // One monotonic clock: a wall clock change must not move either limit.
   const deadline = new NativeDetachedStartDeadline({
     limits: opts.limits,
-    now: Date.now(),
+    now: performance.now(),
     heartbeatStaleMs: opts.heartbeatStaleMs,
   });
   opts.child.on("message", (value: unknown) => {
@@ -792,12 +793,12 @@ function watchStartDeadline(opts: {
       value.kind === "progress" &&
       isNativeDetachedStartPhase(value.phase)
     ) {
-      deadline.observe(value.phase, Date.now());
+      deadline.observe(value.phase, performance.now());
     }
   });
   return setInterval(
     () => {
-      const now = Date.now();
+      const now = performance.now();
       const expiry = deadline.check(now);
       if (expiry) {
         opts.expire(deadline.timeoutError(expiry, now));

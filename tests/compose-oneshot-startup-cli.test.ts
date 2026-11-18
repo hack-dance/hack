@@ -467,3 +467,24 @@ test("an interpolated COMPOSE_PROFILES in Compose's .env is resolved", async () 
     exitCode: 0,
   });
 }, 60_000);
+
+test("an inline comment after COMPOSE_PROFILES in Compose's .env is ignored", async () => {
+  await writeFile(
+    join(project, ".hack", "docker-compose.yml"),
+    ONE_SHOT_COMPOSE.replace(
+      "  api:\n    image: alpine:3.22\n",
+      "  api:\n    image: alpine:3.22\n    profiles: [ops]\n"
+    )
+  );
+  await writeFile(
+    join(project, ".hack", ".env"),
+    "COMPOSE_PROFILES=ops # enable the ops services\n"
+  );
+  const result = await cli(["up", "--detach", "--json"], {
+    HACK_COMPOSE_STARTUP_TIMEOUT_MS: "1000",
+    STUB_UP_SECONDS: "4",
+  });
+  expect({ exitCode: result.exitCode, stdout: result.stdout }).toMatchObject({
+    exitCode: 0,
+  });
+}, 60_000);

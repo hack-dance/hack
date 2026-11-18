@@ -1,6 +1,5 @@
 import { dirname, isAbsolute, resolve } from "node:path";
 import YAML from "yaml";
-import { parseDotEnv } from "./env.ts";
 import { readTextFile } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 
@@ -126,7 +125,7 @@ export async function readComposeInterpolationEnv(opts: {
     const text = await readTextFile(file);
     if (text) {
       expandEnvFileValues({
-        values: parseDotEnv(text),
+        entries: parseComposeEnvFile(text),
         into: fromFiles,
         env: opts.env,
       });
@@ -149,15 +148,15 @@ export async function readComposeInterpolationEnv(opts: {
  * one whose migration Compose is waiting for.
  */
 function expandEnvFileValues(input: {
-  readonly values: Readonly<Record<string, string>>;
+  readonly entries: readonly ComposeEnvFileEntry[];
   readonly into: Record<string, string>;
   readonly env: Readonly<Record<string, string | undefined>>;
 }): void {
-  for (const [key, raw] of Object.entries(input.values)) {
-    const expanded = interpolateComposeValue(raw, {
-      ...input.into,
-      ...input.env,
-    });
+  for (const { key, value: raw, expand } of input.entries) {
+    let expanded: string | null = raw;
+    if (raw !== null && expand) {
+      expanded = interpolateComposeValue(raw, { ...input.into, ...input.env });
+    }
     if (expanded !== null) {
       input.into[key] = expanded;
     } else if (key === "COMPOSE_PROFILES") {
@@ -166,6 +165,80 @@ function expandEnvFileValues(input: {
       Reflect.deleteProperty(input.into, key);
     }
   }
+}
+
+/** One assignment of a Compose env file; a null value is unknown here. */
+type ComposeEnvFileEntry = {
+  readonly key: string;
+  readonly value: string | null;
+  /** False for single-quoted values, which Compose takes literally. */
+  readonly expand: boolean;
+};
+
+const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+const LINE_BREAK = /\r?\n/;
+const INLINE_COMMENT = /\s#/;
+
+/**
+ * Compose's env-file syntax, one assignment per line: `#` comment lines, an
+ * optional `export `, `KEY=VALUE`. A single-quoted value is literal, a
+ * double-quoted one keeps everything up to its closing quote (with `\"`,
+ * `\\` and `\n` escapes) and is expanded, and an unquoted one ends at an
+ * inline ` #` comment and is trimmed. A quote that does not close on its
+ * line (a multi-line value) is unknown.
+ */
+export function parseComposeEnvFile(text: string): ComposeEnvFileEntry[] {
+  const entries: ComposeEnvFileEntry[] = [];
+  for (const rawLine of text.split(LINE_BREAK)) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("#")) {
+      continue;
+    }
+    const assignment = line.startsWith("export ")
+      ? line.slice("export ".length).trimStart()
+      : line;
+    const eq = assignment.indexOf("=");
+    const key = eq > 0 ? assignment.slice(0, eq).trim() : "";
+    if (!ENV_KEY.test(key)) {
+      continue;
+    }
+    entries.push({
+      key,
+      ...parseEnvFileValue(assignment.slice(eq + 1).trimStart()),
+    });
+  }
+  return entries;
+}
+
+function parseEnvFileValue(raw: string): {
+  readonly value: string | null;
+  readonly expand: boolean;
+} {
+  if (raw.startsWith("'")) {
+    const end = raw.indexOf("'", 1);
+    return { value: end < 0 ? null : raw.slice(1, end), expand: false };
+  }
+  if (raw.startsWith('"')) {
+    let value = "";
+    for (let index = 1; index < raw.length; index += 1) {
+      const char = raw[index];
+      if (char === "\\" && index + 1 < raw.length) {
+        const next = raw[index + 1];
+        value += next === "n" ? "\n" : next;
+        index += 1;
+      } else if (char === '"') {
+        return { value, expand: true };
+      } else {
+        value += char;
+      }
+    }
+    return { value: null, expand: true };
+  }
+  const comment = raw.search(INLINE_COMMENT);
+  return {
+    value: (comment < 0 ? raw : raw.slice(0, comment)).trimEnd(),
+    expand: true,
+  };
 }
 
 /** Which services' `depends_on` count: all, or those active under these profiles. */

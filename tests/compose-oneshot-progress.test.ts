@@ -7,6 +7,7 @@ import {
   effectiveComposeProfiles,
   interpolateComposeValue,
   mergeOneShotGraphs,
+  parseComposeEnvFile,
   readComposeInterpolationEnv,
   readComposeOneShotGraph,
   runningOneShots,
@@ -455,4 +456,37 @@ test("env-file values are expanded as Compose does, or left unknown", async () =
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("env files follow Compose's syntax", () => {
+  const entries = Object.fromEntries(
+    parseComposeEnvFile(
+      [
+        "# a comment",
+        "COMPOSE_PROFILES=ops # enable ops",
+        "export EXPORTED=yes",
+        "SINGLE='$LITERAL # kept'",
+        'DOUBLE="a \\"quoted\\" # kept"',
+        "HASH=no#comment",
+        'OPEN="never closed',
+        "not an assignment",
+      ].join("\n")
+    ).map((entry) => [entry.key, entry])
+  );
+  expect(entries.COMPOSE_PROFILES).toEqual({
+    key: "COMPOSE_PROFILES",
+    value: "ops",
+    expand: true,
+  });
+  expect(entries.EXPORTED?.value).toBe("yes");
+  expect(entries.SINGLE).toEqual({
+    key: "SINGLE",
+    value: "$LITERAL # kept",
+    expand: false,
+  });
+  expect(entries.DOUBLE?.value).toBe('a "quoted" # kept');
+  // `#` without whitespace before it is part of the value.
+  expect(entries.HASH?.value).toBe("no#comment");
+  expect(entries.OPEN?.value).toBeNull();
+  expect(Object.keys(entries)).not.toContain("not");
 });

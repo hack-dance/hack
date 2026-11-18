@@ -1,8 +1,10 @@
 //! A named image or Compose user (`USER app`, `user: postgres:postgres`) resolved to the
 //! numeric `UID:GID` that private delivery needs, from the pinned image's own
-//! `/etc/passwd` and `/etc/group`. The files are read from the image's overlay2 layers in
-//! the guest, newest layer first, so nothing is created or started. A name the image does
-//! not define still refuses, as before.
+//! `/etc/passwd` and `/etc/group`. The guest mounts the image's own overlay2 layers as one
+//! read-only overlay, so the kernel applies whiteouts and opaque directories exactly as in a
+//! container, and nothing is created or started. A symlinked `etc` or account file, an
+//! oversized file, or a name the image does not define gets no resolution, so the numeric
+//! check refuses it as before.
 use crate::CandidateError;
 use crate::provider::engine::Engine;
 use serde_json::Value;
@@ -16,17 +18,37 @@ const MAX_LAYERS: usize = 256;
 /// path below the engine's overlay2 root; anything else gets no resolution.
 const LAYER_ROOT: &str = "/var/lib/docker/overlay2/";
 
-/// Reads one account file from the newest layer that has it. Exit 3: the name is hidden
-/// or absent (a whiteout or an opaque `etc` stops the search, as overlayfs does).
-const READ_ACCOUNT_FILE: &str = r#"set -eu
-name=$1; budget=$2; shift 2
-for dir in "$@"; do
-  f="$dir/etc/$name"
-  if test -L "$f"; then exit 4; fi
-  if test -f "$f"; then head -c "$budget" -- "$f"; exit 0; fi
-  if test -e "$dir/etc/.wh.$name" || test -e "$dir/etc/.wh..wh..opq"; then exit 3; fi
+/// Mounts the layers (given by their short `l/` links, top first) read-only, then prints
+/// one line per requested file: `<name> absent|symlink|large|<base64>`. A single layer is
+/// read in place: it has no whiteouts to apply.
+const READ_ACCOUNT_FILES: &str = r#"set -eu
+budget=$1; files=$2; shift 2
+root=/var/lib/docker/overlay2
+cd "$root"
+lower=""
+for id in "$@"; do
+  case "$id" in ""|*[!A-Za-z0-9]*) exit 5;; esac
+  test -d "$id/diff" && test ! -L "$id" && test ! -L "$id/diff" && test -f "$id/link" && test ! -L "$id/link"
+  link=$(head -c 64 "$id/link")
+  case "$link" in ""|*[!A-Za-z0-9]*) exit 5;; esac
+  test -L "l/$link"
+  lower="${lower:+$lower:}l/$link"
 done
-exit 3
+case "$lower" in *:*)
+  mnt=$(mktemp -d)
+  trap 'umount "$mnt" 2>/dev/null || true; rmdir "$mnt" 2>/dev/null || true' EXIT
+  mount -t overlay -o "ro,lowerdir=$lower" overlay "$mnt"
+  ;;
+*) mnt="$root/$1/diff";;
+esac
+for name in $files; do
+  f="$mnt/etc/$name"
+  if test -L "$mnt/etc" || test -L "$f"; then echo "$name symlink"
+  elif test -f "$f"; then
+    if test "$(stat -c %s "$f")" -gt "$budget"; then echo "$name large"
+    else printf '%s %s\n' "$name" "$(base64 -w0 < "$f")"; fi
+  else echo "$name absent"; fi
+done
 "#;
 
 fn numeric(value: &str) -> bool {
@@ -79,7 +101,8 @@ pub(super) fn resolve_text(user: &str, passwd: &str, group: Option<&str>) -> Opt
     Some(format!("{uid}:{gid}"))
 }
 
-/// The image's overlay2 layer directories, newest first, or `None` for any other shape.
+/// The image's overlay2 layer IDs, newest first, or `None` for any other shape. Each
+/// directory must be `<root>/<id>/diff` with a plain alphanumeric ID.
 fn layers(image: &Value) -> Option<Vec<String>> {
     let driver = &image["GraphDriver"];
     if driver["Name"].as_str() != Some("overlay2") {
@@ -87,52 +110,78 @@ fn layers(image: &Value) -> Option<Vec<String>> {
     }
     let mut dirs = Vec::new();
     if let Some(upper) = driver["Data"]["UpperDir"].as_str() {
-        dirs.push(upper.to_owned());
+        dirs.push(upper);
     }
     if let Some(lower) = driver["Data"]["LowerDir"].as_str() {
-        dirs.extend(lower.split(':').map(str::to_owned));
+        dirs.extend(lower.split(':'));
     }
-    let valid = |dir: &String| {
-        dir.starts_with(LAYER_ROOT)
-            && !dir.split('/').any(|part| part == "..")
-            && dir
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"/_-.".contains(&b))
+    let id = |dir: &str| {
+        dir.strip_prefix(LAYER_ROOT)?
+            .strip_suffix("/diff")
+            .filter(|id| {
+                !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+            })
+            .map(str::to_owned)
     };
-    (!dirs.is_empty() && dirs.len() <= MAX_LAYERS && dirs.iter().all(valid)).then_some(dirs)
+    let ids: Option<Vec<String>> = dirs.into_iter().map(id).collect();
+    ids.filter(|ids| !ids.is_empty() && ids.len() <= MAX_LAYERS)
 }
 
-fn read(engine: &Engine<'_>, dirs: &[String], name: &str) -> Option<String> {
-    let budget = ACCOUNT_FILE_BYTES.to_string();
-    let mut arguments: Vec<&str> = vec![name, &budget];
-    arguments.extend(dirs.iter().map(String::as_str));
-    engine
-        .guest()
-        .execute(READ_ACCOUNT_FILE, &arguments, None)
-        .ok()
+/// Account files by name: `Some(text)` when present and readable, `None` when absent.
+/// A symlinked, oversized or unreadable file stops resolution (`Err(())`).
+fn parse_files(output: &str) -> Result<std::collections::BTreeMap<String, Option<String>>, ()> {
+    use base64::Engine as _;
+    let mut files = std::collections::BTreeMap::new();
+    for line in output.lines() {
+        let (name, value) = line.split_once(' ').ok_or(())?;
+        let text = match value {
+            "absent" => None,
+            "symlink" | "large" => return Err(()),
+            encoded => {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(|_| ())?;
+                if bytes.len() > ACCOUNT_FILE_BYTES {
+                    return Err(());
+                }
+                Some(String::from_utf8(bytes).map_err(|_| ())?)
+            }
+        };
+        files.insert(name.to_owned(), text);
+    }
+    Ok(files)
 }
 
 /// The numeric `UID:GID` for a named `user` in the inspected `image`, or `None` when the
-/// image does not define it or its layers cannot be read. Read-only.
+/// image does not define it or its account files cannot be read safely. Read-only.
 pub(super) fn resolve(
     engine: &Engine<'_>,
     image: &Value,
     user: &str,
 ) -> Result<Option<String>, CandidateError> {
-    let Some(dirs) = layers(image) else {
+    let Some(ids) = layers(image) else {
         return Ok(None);
     };
-    let Some(passwd) = read(engine, &dirs, "passwd") else {
+    let (uid, gid) = user.split_once(':').unwrap_or((user, ""));
+    let mut wanted = Vec::new();
+    if !numeric(uid) {
+        wanted.push("passwd");
+    }
+    if !gid.is_empty() && !numeric(gid) {
+        wanted.push("group");
+    }
+    let budget = ACCOUNT_FILE_BYTES.to_string();
+    let files = wanted.join(" ");
+    let mut arguments: Vec<&str> = vec![&budget, &files];
+    arguments.extend(ids.iter().map(String::as_str));
+    let Ok(output) = engine.guest().execute(READ_ACCOUNT_FILES, &arguments, None) else {
         return Ok(None);
     };
-    let needs_group = user
-        .split_once(':')
-        .is_some_and(|(_, gid)| !gid.is_empty() && !numeric(gid));
-    let group = if needs_group {
-        read(engine, &dirs, "group")
-    } else {
-        None
+    let Ok(files) = parse_files(&output) else {
+        return Ok(None);
     };
+    let passwd = files.get("passwd").cloned().flatten().unwrap_or_default();
+    let group = files.get("group").cloned().flatten();
     Ok(resolve_text(user, &passwd, group.as_deref()))
 }
 
@@ -176,19 +225,33 @@ mod tests {
         assert_eq!(
             layers(&image(
                 "overlay2",
-                "/var/lib/docker/overlay2/a/diff",
-                "/var/lib/docker/overlay2/b/diff:/var/lib/docker/overlay2/c/diff"
+                "/var/lib/docker/overlay2/a1/diff",
+                "/var/lib/docker/overlay2/b2/diff:/var/lib/docker/overlay2/c3/diff"
             ))
             .unwrap(),
-            [
-                "/var/lib/docker/overlay2/a/diff",
-                "/var/lib/docker/overlay2/b/diff",
-                "/var/lib/docker/overlay2/c/diff"
-            ]
+            ["a1", "b2", "c3"]
         );
-        assert!(layers(&image("vfs", "/var/lib/docker/overlay2/a", "")).is_none());
-        assert!(layers(&image("overlay2", "/tmp/a", "")).is_none());
-        assert!(layers(&image("overlay2", "/var/lib/docker/overlay2/../x", "")).is_none());
-        assert!(layers(&image("overlay2", "/var/lib/docker/overlay2/a b", "")).is_none());
+        assert!(layers(&image("vfs", "/var/lib/docker/overlay2/a/diff", "")).is_none());
+        assert!(layers(&image("overlay2", "/tmp/a/diff", "")).is_none());
+        assert!(layers(&image("overlay2", "/var/lib/docker/overlay2/../x/diff", "")).is_none());
+        assert!(layers(&image("overlay2", "/var/lib/docker/overlay2/a b/diff", "")).is_none());
+        assert!(layers(&image("overlay2", "/var/lib/docker/overlay2/a/merged", "")).is_none());
+    }
+
+    #[test]
+    fn account_files_are_decoded_and_unsafe_files_stop_resolution() {
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(PASSWD);
+        let files = parse_files(&format!("passwd {encoded}\ngroup absent\n")).unwrap();
+        assert_eq!(files["passwd"].as_deref(), Some(PASSWD));
+        assert_eq!(files["group"], None);
+        assert!(parse_files("passwd symlink\n").is_err());
+        assert!(parse_files("group large\n").is_err());
+        assert!(parse_files("passwd !!notbase64\n").is_err());
+        // A group-only lookup needs no passwd file.
+        assert_eq!(
+            resolve_text("1000:shared", "", Some(GROUP)).unwrap(),
+            "1000:2000"
+        );
     }
 }

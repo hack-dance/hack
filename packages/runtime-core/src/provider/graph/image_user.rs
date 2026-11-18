@@ -11,6 +11,8 @@ use serde_json::Value;
 
 /// At most this many bytes of each account file are read.
 const ACCOUNT_FILE_BYTES: usize = 64 * 1024;
+/// Account names longer than this are not looked up.
+const MAX_NAME: usize = 64;
 /// Images with more layers than this are not searched.
 const MAX_LAYERS: usize = 256;
 
@@ -56,7 +58,7 @@ report() {
       $1 == n && own == "" && ok() { own = $1 ":x:" $3 ":" $4 }
       END { if (own != "") print own }' "$f" "$f")
   else
-    lines=$(awk -F: -v n="$key" '$1 == n && $3 ~ /^[0-9]+$/ && length($3) <= 10 { print $1 ":x:" $3; exit }' "$f")
+    lines=$(awk -F: -v n="$key" '$1 == n && length($1) <= 64 && $3 ~ /^[0-9]+$/ && length($3) <= 10 { print $1 ":x:" $3; exit }' "$f")
   fi
   printf '%s %s\n' "$name" "$(printf '%s\n' "$lines" | base64 -w0)"
 }
@@ -182,6 +184,10 @@ pub(super) fn resolve(
     } else {
         gid
     };
+    // Account names longer than this are never resolved; the guest report stays bounded.
+    if user_name.len() > MAX_NAME || group_name.len() > MAX_NAME {
+        return Ok(None);
+    }
     let budget = ACCOUNT_FILE_BYTES.to_string();
     let mut arguments: Vec<&str> = vec![&budget, user_name, group_name];
     arguments.extend(ids.iter().map(String::as_str));

@@ -573,7 +573,7 @@ async function describeBranchInstances(opts: {
 }
 
 /**
- * Native branch instances of an authored project (`.hack/hack.yaml`), from
+ * Native branch instances of an authored project (`.hack/hack.project.json`), from
  * `.internal/native-authored-runs` mappings. Their mapping keys the instance
  * by the `--branch` value as given, so `branch` and `branch_name` are both
  * that value. `hack open` there reads the saved native routing, which this

@@ -5527,6 +5527,35 @@ async function assertProjectEnvKeyOverrideEncryptable(opts: {
   }
 }
 
+/**
+ * Whether `path` lies inside its repository's git directory or common dir,
+ * which git never adds to a commit. Unknown (git unavailable) is false, so
+ * the caller's ignore check decides.
+ */
+async function isInsideGitAdministrativeDir(opts: {
+  readonly path: string;
+}): Promise<boolean> {
+  const target = await realpath(opts.path).catch(() => null);
+  if (target === null) {
+    return false;
+  }
+  const directory = dirname(target);
+  const [gitDir, commonDir] = await Promise.all([
+    resolveGitWorktreeDir({ repoRoot: directory }),
+    resolveGitRepositoryIdentity({ repoRoot: directory }),
+  ]);
+  for (const candidate of [gitDir, commonDir]) {
+    if (candidate === null) {
+      continue;
+    }
+    const root = await realpath(candidate).catch(() => null);
+    if (root !== null && (target === root || target.startsWith(`${root}/`))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export const PROJECT_ENV_KEY_OVERRIDE_UNIGNORED_MESSAGE =
   "Refusing to encrypt with the key file given by --key-file: it is inside a git checkout that does not ignore it (or git cannot say), so a later commit could publish the key. Move it outside the checkout or add it to .gitignore; key contents are never included in this message.";
 
@@ -5542,6 +5571,11 @@ async function assertProjectEnvKeyOverrideIgnored(opts: {
 }): Promise<void> {
   const directory = dirname(opts.keyPath);
   if (!(await isInsideGitCheckoutMarker({ startDir: directory }))) {
+    return;
+  }
+  // A file inside the git directory (for example the shared key in the
+  // common dir that linked worktrees use) is never part of a commit.
+  if (await isInsideGitAdministrativeDir({ path: opts.keyPath })) {
     return;
   }
   const ignored = await isGitIgnoredProjectEnvPath({

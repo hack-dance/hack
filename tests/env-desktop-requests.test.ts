@@ -628,6 +628,56 @@ describe("R26: key source and one-run override", () => {
   );
 
   test(
+    "an override key file in a linked worktree's common git dir is accepted",
+    async () => {
+      const project = await createProject();
+      const git = (args: readonly string[], cwd = project.projectRoot) =>
+        Bun.spawnSync(
+          [
+            "git",
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            ...args,
+          ],
+          { cwd, stdout: "ignore", stderr: "ignore" }
+        ).exitCode;
+      expect(git(["init", "-q"])).toBe(0);
+      expect(git(["add", "."])).toBe(0);
+      expect(git(["commit", "-q", "-m", "fixture"])).toBe(0);
+      const worktree = resolve(project.root, "wt");
+      expect(git(["worktree", "add", "-q", "-b", "feat", worktree])).toBe(0);
+      // The shared key location discovery reports for linked worktrees.
+      const keyFile = resolve(project.projectRoot, ".git", ".hack.secret.key");
+      await writeFile(keyFile, `${OVERRIDE_KEY}\n`, { mode: 0o600 });
+      const set = await runHack({
+        project,
+        args: [
+          "env",
+          "set",
+          "API_TOKEN",
+          "--secret",
+          "--value-stdin",
+          "--path",
+          worktree,
+          "--key-file",
+          keyFile,
+        ],
+        stdin: SECRET_VALUE,
+      });
+      expectNoSecretOutput(set);
+      expect(set.exitCode).toBe(0);
+      const get = await runHack({
+        project,
+        args: ["env", "get", "API_TOKEN", "--path", worktree],
+      });
+      expect(get.stdout).toBe(SECRET_VALUE);
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
     "an override cannot split the project across two keys",
     async () => {
       const project = await createProject();

@@ -148,6 +148,12 @@ interface Hooks {
 export class Channel {
   readonly root: string;
   readonly source: string;
+  /**
+   * Version directories verified by the validation inside `lock()`, valid
+   * until that lock is released. Each entry lets one launch skip a repeat of
+   * the same verification; validations outside `lock()` never fill it.
+   */
+  private lockVerified: Map<string, string> | null = null;
   state: State = {
     schema: "hack.prerelease-selection/v1",
     installed: {},
@@ -365,13 +371,14 @@ export class Channel {
           after.ino === opened.ino,
         "Manager lock changed."
       );
-      this.validate(managerUpgrade, receiptRoot);
+      this.lockVerified = this.validate(managerUpgrade, receiptRoot);
     } catch (error) {
       closeSync(fd);
       library.close();
       throw error;
     }
     return () => {
+      this.lockVerified = null;
       closeSync(fd);
       library.close();
     };
@@ -433,13 +440,14 @@ export class Channel {
       "Too many candidate versions."
     );
     const validated: Record<string, string> = Object.create(null);
+    const verified = new Map<string, string>();
     for (const [version, checksum] of Object.entries(installed)) {
       candidateVersion(version);
       requireThat(
         typeof checksum === "string" && SHA256.test(checksum),
         "Malformed receipt hash."
       );
-      this.verifyVersion(version, checksum);
+      verified.set(version, this.verifyVersion(version, checksum));
       validated[version] = checksum;
     }
     for (const key of ["selected", "previous"]) {
@@ -499,6 +507,7 @@ export class Channel {
       selected: state.selected as string | null,
       previous: state.previous as string | null,
     };
+    return verified;
   }
   verifyVersion(version: string, checksum: string) {
     const directory = this.path(`versions/${version}`);
@@ -1067,7 +1076,13 @@ export class Channel {
     }
     const checksum = this.state.installed[version];
     requireThat(checksum, "Missing selected receipt.");
-    const directory = this.verifyVersion(version, checksum);
+    // `lock()` has just hashed every file of this version against the same
+    // receipt, under the lock this launch still holds. Hashing it a second
+    // time here would only repeat that read; a launch that did not come
+    // through `lock()` is verified now.
+    const directory =
+      this.lockVerified?.get(version) ?? this.verifyVersion(version, checksum);
+    this.lockVerified?.delete(version);
     this.signatures(join(directory, "bundle"));
     const child = Bun.spawn(
       [

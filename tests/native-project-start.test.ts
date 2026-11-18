@@ -3646,6 +3646,7 @@ test("a retained run keeps its profiles when the managed env now selects others,
         return Promise.resolve({
           profiles: ["jobs"],
           source: "managed-env" as const,
+          declaredProfiles: ["jobs"],
         });
       },
     })

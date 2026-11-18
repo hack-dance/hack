@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   declaredComposeProfiles,
+  nativeDeclaredProfileNames,
   nativeInactiveServices,
   nativeLeftOutNotice,
   nativeRetainedProfilesNotice,
@@ -19,7 +20,7 @@ test("--profile wins over every COMPOSE_PROFILES", () => {
       shellEnv: { COMPOSE_PROFILES: "search" },
       declaredProfiles: declared,
     })
-  ).toEqual({ profiles: ["ops"], source: "cli" });
+  ).toMatchObject({ profiles: ["ops"], source: "cli" });
 });
 
 test("COMPOSE_PROFILES in the managed env overrides the shell, as Compose under Hack", () => {
@@ -30,7 +31,7 @@ test("COMPOSE_PROFILES in the managed env overrides the shell, as Compose under 
       shellEnv: { COMPOSE_PROFILES: "ops" },
       declaredProfiles: declared,
     })
-  ).toEqual({ profiles: ["jobs", "search"], source: "managed-env" });
+  ).toMatchObject({ profiles: ["jobs", "search"], source: "managed-env" });
   // An empty managed value still overrides the shell: no profiles.
   expect(
     selectNativeProfiles({
@@ -39,7 +40,7 @@ test("COMPOSE_PROFILES in the managed env overrides the shell, as Compose under 
       shellEnv: { COMPOSE_PROFILES: "ops" },
       declaredProfiles: declared,
     })
-  ).toEqual({ profiles: [], source: "managed-env" });
+  ).toMatchObject({ profiles: [], source: "managed-env" });
 });
 
 test("the shell is the last source, then none", () => {
@@ -50,7 +51,7 @@ test("the shell is the last source, then none", () => {
       shellEnv: { COMPOSE_PROFILES: "ops" },
       declaredProfiles: declared,
     })
-  ).toEqual({ profiles: ["ops"], source: "shell" });
+  ).toMatchObject({ profiles: ["ops"], source: "shell" });
   expect(
     selectNativeProfiles({
       cliProfiles: undefined,
@@ -58,7 +59,7 @@ test("the shell is the last source, then none", () => {
       shellEnv: {},
       declaredProfiles: declared,
     })
-  ).toEqual({ profiles: [], source: "none" });
+  ).toMatchObject({ profiles: [], source: "none" });
 });
 
 test("* selects every declared profile by name", () => {
@@ -198,14 +199,14 @@ test("a project's managed env selects native profiles, overriding the shell (HAC
         envName: undefined,
         cliProfile: undefined,
       })
-    ).toEqual({ profiles: ["jobs", "search"], source: "managed-env" });
+    ).toMatchObject({ profiles: ["jobs", "search"], source: "managed-env" });
     expect(
       await resolveNativeProfileSelectionForProject({
         project,
         envName: undefined,
         cliProfile: "ops",
       })
-    ).toEqual({ profiles: ["ops"], source: "cli" });
+    ).toMatchObject({ profiles: ["ops"], source: "cli" });
   } finally {
     if (original === undefined) {
       Reflect.deleteProperty(process.env, "COMPOSE_PROFILES");
@@ -223,4 +224,48 @@ test("an empty --profile names no profile, so COMPOSE_PROFILES still applies, as
   }
   expect(nativeProfileOption("jobs")).toBe("jobs");
   expect(nativeProfileOption("jobs,ops")).toBe("jobs,ops");
+});
+
+test("a value copied into COMPOSE_PROFILES that the Compose file does not declare is counted, never printed", () => {
+  const token = "synthetic-secret-token-value";
+  const selected = nativeDeclaredProfileNames({
+    profiles: ["jobs", token],
+    declared: ["jobs", "ops"],
+  });
+  expect(selected).toEqual({ shown: ["jobs"], hidden: 1 });
+  const notice = nativeRetainedProfilesNotice({
+    retained: [],
+    selected: selected.shown,
+    hiddenSelected: selected.hidden,
+    source: "managed-env",
+  });
+  expect(notice).toContain("jobs, 1 name not declared by the Compose file");
+  expect(notice).not.toContain(token);
+  const leftOut = nativeLeftOutNotice({
+    services: ["worker"],
+    profiles: [],
+    hiddenProfiles: 2,
+    source: "managed-env",
+  });
+  expect(leftOut).toContain(
+    "Selected profiles: 2 names not declared by the Compose file"
+  );
+  expect(
+    parseNativeProfileNotice({
+      kind: "retained",
+      retained: [],
+      selected: ["jobs"],
+      hiddenSelected: 1,
+      source: "managed-env",
+    })
+  ).toMatchObject({ hiddenSelected: 1 });
+  expect(
+    parseNativeProfileNotice({
+      kind: "left-out",
+      services: [],
+      profiles: [],
+      hiddenProfiles: -1,
+      source: "none",
+    })
+  ).toBeNull();
 });

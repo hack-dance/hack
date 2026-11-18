@@ -316,6 +316,29 @@ test("compose: a branch started from a linked worktree is owned by that worktree
   });
 });
 
+test("compose: a worktree owner without its .hack dir reports no URL", async () => {
+  const worktreeRoot = join(requireRoot(), "alpha-wt");
+  const worktreeDir = await writeCheckout({
+    checkoutRoot: worktreeRoot,
+    config: { name: "alpha", dev_host: "alpha.hack" },
+  });
+  const registration = await createProject({
+    worktrees: [{ path: worktreeRoot, branch: "fix/login" }],
+  });
+  await rm(worktreeDir, { recursive: true, force: true });
+  const payload = await serializedProject({
+    registration,
+    runtime: [branchRuntime({ slug: "fix-login", workingDir: worktreeDir })],
+  });
+  expect(branchEntries(payload, "branch_runtime")[0]).toMatchObject({
+    checkout: { root: worktreeRoot, kind: "worktree" },
+    url: null,
+    url_host: null,
+    // Routes still come from the running containers.
+    hosts_source: "runtime_labels",
+  });
+});
+
 test("compose: an instance outside every checkout has no owner or name", async () => {
   const registration = await createProject({});
   const foreign = join(requireRoot(), "elsewhere", ".hack");

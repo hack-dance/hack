@@ -476,10 +476,15 @@ async function describeBranchInstances(opts: {
     readonly checkout: BranchInstanceCheckout | null;
     readonly runtime: RuntimeProject | null;
   }): Promise<BranchInstanceIdentity> => {
-    const settings =
-      input.checkout && (await pathExists(input.checkout.projectDir))
+    // A known owner whose project dir is gone has no settings `hack open`
+    // could use there; only an unknown owner falls back to the registered
+    // checkout.
+    let settings: CheckoutOpenSettings | null = primarySettings;
+    if (input.checkout) {
+      settings = (await pathExists(input.checkout.projectDir))
         ? await settingsFor(input.checkout)
-        : primarySettings;
+        : null;
+    }
     const named = await resolveBranchInstanceName({
       registration: opts.registration,
       checkout: input.checkout,

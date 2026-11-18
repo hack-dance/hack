@@ -6212,9 +6212,17 @@ async function handleNativeUp({
       typeof args.options.branch === "string" ? args.options.branch : undefined,
     env: typeof args.options.env === "string" ? args.options.env : undefined,
   });
-  const branch = await resolveEffectiveBranchForCommand({
+  const branchIdentity = await resolveEffectiveBranchIdentityForCommand({
     project,
     branchOption: args.options.branch,
+  });
+  const branch = branchIdentity.branch;
+  // Foreground native up and restart record the name like Compose up does;
+  // the detached owner child keeps the name its launcher recorded.
+  await recordBranchUsageIfNeeded({
+    project,
+    branch,
+    name: isNativeDetachedOwnerProcess() ? null : branchIdentity.name,
   });
   const cfg = await readProjectConfig(project);
   if (cfg.parseError) {

@@ -22,8 +22,9 @@ worktree needs an explicit `--branch <name>`. Stop the instance from its owning
 checkout when finished.
 
 The desktop app and other `/v1/projects` clients read each branch instance's
-original name, owning checkout, hosts and `hack open` URL from the payload; see
-[branch instance identity](../../../reference/project-state.md#branch-instance-identity).
+original name, owning checkout, hosts and `hack open` URL from the payload
+(described under "Branch instance identity" in the repository's
+`docs/reference/project-state.md`).
 
 A branch instance never shares a host with the base instance. Every host in a
 service's Caddy labels under the project's names (`<project>.hack`,

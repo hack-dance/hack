@@ -21,7 +21,10 @@ import {
 } from "../src/constants.ts";
 import { evaluateComposeServiceEnvFreshness } from "../src/lib/compose-env-fingerprint.ts";
 import { isRecord } from "../src/lib/guards.ts";
-import { readProjectRuntimeStateEntry } from "../src/lib/project-runtime-state.ts";
+import {
+  readProjectRuntimeStateEntry,
+  upsertProjectRuntimeStateEntry,
+} from "../src/lib/project-runtime-state.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
@@ -646,6 +649,52 @@ test("up records value-free env digests and a targeted restart refreshes only it
   }
 });
 
+test("targeted restart without --env keeps the recorded running overlay (HACK-2280)", async () => {
+  const projectRoot = await createProject();
+  const projectDir = resolve(projectRoot, ".hack");
+  await writeFile(
+    resolve(projectDir, "hack.env.qa.yaml"),
+    [
+      "version: 1",
+      "environment: qa",
+      "secretsprovider: project_key",
+      "values:",
+      "  api:",
+      '    QA_ONLY: "qa"',
+      "",
+    ].join("\n")
+  );
+  await upsertProjectRuntimeStateEntry({
+    projectDir,
+    entry: {
+      composeProject: "startup-state-test",
+      envName: "qa",
+      updatedAt: "2026-04-01T00:00:00.000Z",
+    },
+  });
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 }),
+    JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
+  );
+
+  expect(await runRestart({ projectRoot, services: ["api"], env: null })).toBe(
+    0
+  );
+
+  const upCall = runtimeCalls.find((call) => call.kind === "up");
+  // Names only: the qa overlay's api-scoped key reaches the recreated api.
+  expect(
+    Object.keys(upCall?.opts.env ?? {}).some((key) =>
+      /^HACK_ENV_[0-9A-F]{12}_QA_ONLY$/.test(key)
+    )
+  ).toBe(true);
+  const entry = await readProjectRuntimeStateEntry({
+    projectDir,
+    composeProject: "startup-state-test",
+  });
+  expect(entry?.envName).toBe("qa");
+});
+
 test("failed targeted restart does not record its service's env as applied", async () => {
   const projectRoot = await createProject();
   const projectDir = resolve(projectRoot, ".hack");
@@ -1053,15 +1102,18 @@ async function runRestart(opts: {
   readonly json?: boolean;
   readonly profiles?: readonly string[];
   readonly services?: readonly string[];
+  /** Defaults to an explicit `base`; `null` omits `--env`. */
+  readonly env?: string | null;
 }): Promise<number> {
   const profile = opts.profiles?.join(",");
+  const env = opts.env === undefined ? "base" : (opts.env ?? undefined);
   const input = {
     ctx: { cwd: opts.projectRoot, cli: CLI_SPEC },
     args: {
       options: {
         path: opts.projectRoot,
         project: undefined,
-        env: "base",
+        env,
         branch: undefined,
         profile,
         target: undefined,
@@ -1072,8 +1124,7 @@ async function runRestart(opts: {
         argv: [
           "--path",
           opts.projectRoot,
-          "--env",
-          "base",
+          ...(env === undefined ? [] : ["--env", env]),
           ...(opts.json ? ["--json"] : []),
           ...(profile ? ["--profile", profile] : []),
           ...(opts.services ?? []),

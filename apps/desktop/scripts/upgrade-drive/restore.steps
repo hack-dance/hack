@@ -1,0 +1,5 @@
+# Part 2 (the harness ran `hack upgrade apply --only ignore-rules`): restore
+# the newest snapshot, the one apply kept, to undo it.
+upgrade
+upgrade-restore
+expect-upgrade Restored 120

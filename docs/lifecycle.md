@@ -113,7 +113,7 @@ grant signal authority or make an unrelated live group count as retained work.
 
 Zellij is removed in v5. If a project has lifecycle state saved by a zellij session,
 v5 `up`, `restart` and `down` refuse. Stop the project with the v4 CLI first; see
-[the zellij stop procedure](guides/v5-release-notes.md#breaking-change-zellij-workspaces-removed).
+[the zellij stop procedure](versions/v5/guides/upgrade-from-v4.md#breaking-change-zellij-workspaces-removed).
 
 If the launch missed a pane start time, foreground cleanup re-reads the current
 pane in the recorded window while checking the session's ownership token before

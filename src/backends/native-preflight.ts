@@ -471,8 +471,18 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
   },
   route_binding_required: {
     message:
-      "The service declares a route, which needs native HTTPS to be set up.",
-    fix: "Set up native HTTPS (see the guide). A route without an authored healthcheck gets a default route-port probe.",
+      "The service declares a route, but no native HTTPS frontend is selected, so the service starts and the route is not served.",
+    fix: "Set https.caddyBinary, https.caddySha256 and https.port in the native machine settings (or HACK_NATIVE_CADDY_BINARY, HACK_NATIVE_CADDY_SHA256 and HACK_NATIVE_HTTPS_PORT).",
+  },
+  candidate_project_namespace: {
+    message:
+      "Native runs the project under its own namespace, so it never adopts or changes the Compose project of the same name.",
+    fix: "Nothing to do.",
+  },
+  hack_network_mapped: {
+    message:
+      "Hack's shared hack-dev network becomes a bridge this project owns on native, so containers of other projects are not reachable by name; routes are served separately.",
+    fix: "Nothing to do, unless a service calls another project's containers by name: use that project's route instead.",
   },
   route_command_healthcheck_replaced: {
     message:
@@ -1764,6 +1774,12 @@ export type NativePreflightOptions = {
   readonly runtime: NativeRuntimeSelection | "incomplete" | null;
   /** The gcloud ADC consent (`HACK_NATIVE_GCLOUD_ADC=file` or `gcloud` setting). */
   readonly gcloud?: NativeGcloudSelection;
+  /**
+   * Whether the native HTTPS frontend is selected (machine `https` setting or
+   * the HACK_NATIVE_CADDY_* variables). Routes are then served, so the
+   * runtime's per-route `route_binding_required` note is not repeated.
+   */
+  readonly httpsSelected?: boolean;
   readonly invoke?: typeof invokeNativeRuntime;
 };
 
@@ -1877,6 +1893,16 @@ async function reviewWithSetup(opts: {
   return reviewed.review.status === "unavailable" ? skipped : reviewed;
 }
 
+/** Runtime findings that still apply to this machine's selections. */
+function selectedRuntimeFindings(
+  findings: readonly NativePreflightFinding[],
+  httpsSelected: boolean
+): readonly NativePreflightFinding[] {
+  return httpsSelected
+    ? findings.filter((found) => found.code !== "route_binding_required")
+    : findings;
+}
+
 /** Runs installation, CLI and runtime gates over the same selected project. */
 export async function collectNativePreflight(
   opts: NativePreflightOptions
@@ -1959,7 +1985,10 @@ export async function collectNativePreflight(
     projectCodes.add(found.code);
     return true;
   });
-  for (const found of runtime.findings) {
+  for (const found of selectedRuntimeFindings(
+    runtime.findings,
+    opts.httpsSelected === true
+  )) {
     const key = `${found.severity}\0${found.code}\0${found.service ?? ""}\0${found.field ?? ""}\0${found.message}`;
     if (
       reported.has(`${found.code}\0${found.service ?? ""}`) ||

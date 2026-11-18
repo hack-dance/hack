@@ -73,10 +73,9 @@ permission to start. Run setup above and the full preflight below.
 
 Native `hack up` selects Compose profiles as Compose does: `--profile`, else
 `COMPOSE_PROFILES` in the managed env (for example `.hack/hack.env.default.yaml`),
-else in the shell (a `COMPOSE_PROFILES` stored as a secret selects nothing). Give
-preflight the same selection with `--profile` (for example
-`--profile jobs` when the managed env sets `COMPOSE_PROFILES=jobs`) so it reviews
-the services `up` starts. A run that already exists keeps the profiles it started
+else in the shell (a `COMPOSE_PROFILES` stored as a secret selects nothing).
+Preflight selects them the same way, so without `--profile` it reviews the services
+a fresh `up` starts. A run that already exists keeps the profiles it started
 with; when the env now selects others, `up` says so, and changing them means
 `hack down --remove-data` (this deletes the data volumes) and `hack up`.
 Preflight reads the Compose project and lists blockers with fixes. It starts no VM or service. Continue only

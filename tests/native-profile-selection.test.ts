@@ -151,7 +151,7 @@ test("a project's managed env selects native profiles, overriding the shell (HAC
   const { join } = await import("node:path");
   const { findProjectContextAtRoot } = await import("../src/lib/project.ts");
   const { resolveNativeProfileSelectionForProject } = await import(
-    "../src/commands/project.ts"
+    "../src/backends/native-profile-selection.ts"
   );
   const root = await mkdtemp(join(tmpdir(), "native-profiles-"));
   const original = process.env.COMPOSE_PROFILES;
@@ -307,7 +307,7 @@ test("a COMPOSE_PROFILES stored as a secret in the managed env is never used as 
   const { join } = await import("node:path");
   const { findProjectContextAtRoot } = await import("../src/lib/project.ts");
   const { resolveNativeProfileSelectionForProject } = await import(
-    "../src/commands/project.ts"
+    "../src/backends/native-profile-selection.ts"
   );
   const root = await mkdtemp(join(tmpdir(), "native-profiles-secret-"));
   const original = process.env.COMPOSE_PROFILES;

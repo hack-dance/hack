@@ -11578,32 +11578,18 @@ async function handleOpen({
       ? applyBranchToHost({ host: rawHost, branch, baseHosts })
       : rawHost;
   const grafanaHost = await resolveOpenGrafanaHost(targetRaw);
-  // On the native backend a project host is served by native's own HTTPS
-  // frontend, which may listen on another port (for example 18443).
-  // The target first: Grafana and full URLs never consult the native runtime.
-  const nativeHost =
-    openTargetIsProjectHost(targetRaw) &&
-    resolveNativeRuntimeSelection() !== null;
-  const httpsPort = nativeHost
-    ? ((
-        await resolveNativeHostSettings({
-          env: process.env,
-          projectName: await resolveComposeProjectName({ project, cfg }),
-          projectRoot: project.projectRoot,
-        })
-      ).https?.httpsPort ?? null)
-    : undefined;
+  const nativeOpen = await resolveNativeOpenPort({ targetRaw, project, cfg });
   const url = resolveOpenUrl({
     targetRaw,
     resolvedHost,
     grafanaHost,
-    httpsPort,
+    httpsPort: nativeOpen.httpsPort,
   });
 
   return await emitOpenOrigin({
     url,
     json,
-    origin: nativeHost ? "native" : "compose",
+    origin: nativeOpen.native ? "native" : "compose",
   });
 }
 
@@ -11765,6 +11751,33 @@ export function resolveOpenUrl(opts: {
     host: opts.resolvedHost,
     httpsPort: opts.httpsPort,
   });
+}
+
+/**
+ * On the native backend a project host is served by native's own HTTPS
+ * frontend, which may listen on another port (for example 18443). The target
+ * is checked first: Grafana and full URLs never consult the native runtime.
+ */
+async function resolveNativeOpenPort(opts: {
+  readonly targetRaw: string;
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+}): Promise<{ readonly native: boolean; readonly httpsPort?: number | null }> {
+  if (
+    !openTargetIsProjectHost(opts.targetRaw) ||
+    resolveNativeRuntimeSelection() === null
+  ) {
+    return { native: false };
+  }
+  const host = await resolveNativeHostSettings({
+    env: process.env,
+    projectName: await resolveComposeProjectName({
+      project: opts.project,
+      cfg: opts.cfg,
+    }),
+    projectRoot: opts.project.projectRoot,
+  });
+  return { native: true, httpsPort: host.https?.httpsPort ?? null };
 }
 
 /** Whether `hack open <target>` names a project host, not Grafana or a URL. */

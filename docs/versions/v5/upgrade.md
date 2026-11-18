@@ -3,9 +3,9 @@
 Start here: [1. Install](install.md) · [2. First project](getting-started.md) ·
 **3. Upgrade** · [4. Try native](native/start.md).
 
-This is today's manual path. **To be replaced by the upgrade assistant**
-(HACK-2189 and HACK-2191). Next.17 source already checks and repairs selected
-files; env migration and the runtime trial remain manual. Keep stable v4
+This is a backup-first, manual path. The upgrade assistant (`hack upgrade check`,
+`review`, `apply`, `snapshot`, `rollback`; since next.17) checks the machine and
+repairs selected files. Env migration and the runtime trial remain manual. Keep stable v4
 installed and try one Compose project at a time. Native is a separate trial.
 The published v5 candidate bundle requires an Apple Silicon Mac.
 
@@ -49,7 +49,7 @@ offered as Run. Host changes and decisions still need review.
    installed and use retained v4 `command hack down` for each affected project.
    Confirm the lifecycle processes stopped, then take a **fresh backup** with the
    step 1 procedure. Keep the earlier copy too; use the stopped-state backup for
-   rollback so it does not restore live zellij state. Next.17 requires tmux; remove
+   rollback so it does not restore live zellij state. v5 requires tmux (since next.17); remove
    `sessions.mux=zellij` and `HACK_SESSIONS_MUX=zellij`, or select `tmux`.
    Changing the setting alone does not clear saved state. See the
    [stop procedure](guides/upgrade-from-v4.md#breaking-change-zellij-workspaces-removed).
@@ -82,8 +82,8 @@ offered as Run. Host changes and decisions still need review.
    `hack doctor --migrate-env-config` only after reading the
    [migration and consent details](guides/upgrade-from-v4.md#4-what-changes-for-a-project).
    On next.16 or earlier, cleanup can remove a project key a legacy store names:
-   never run that repair without the private readable key copy. The merged fix
-   intended for next.17 cannot recover an already deleted key.
+   never run that repair there without the private readable key copy. The fix in
+   next.17 cannot recover an already deleted key.
 6. **Run the project and check it**, using `hack up --detach`, `hack open`,
    `hack logs --no-follow --tail 50` and `hack down`. Check sign-in, saved data,
    hooks and a restart. Keep the backup until rollback and data recovery have
@@ -92,8 +92,8 @@ offered as Run. Host changes and decisions still need review.
 v5 keeps Compose as the default for the ordinary CLI. Retired features include the hosted
 account/team flows, dashboard and Hack Tickets; [Breaking changes from v4](guides/breaking-changes.md) lists every breaking
 change in one table, with the reason for each. The
-[release summary](../guides/v5-release-notes.md) has the detail. Newer source changes are marked as intended for
-next.17; an installed next.16 bundle keeps its original behavior.
+[release summary](../guides/v5-release-notes.md) has the detail. An older installed prerelease keeps its original behavior;
+the detail pages say which prerelease each change needs.
 
 ## Roll back
 
@@ -107,7 +107,7 @@ In a stable terminal, reinstall its login daemon with `command hack daemon insta
 if you removed it. Then use stable `command hack up --detach` and check the app
 and data again. A native trial's data never moves into Compose volumes by itself.
 
-### In the desktop app
+### In the desktop app (unsupported preview)
 
 The desktop app's **Upgrade** pane (sidebar, Machine) shows `hack upgrade
 check` (the verdict, blockers and plan), saves a snapshot, explains review

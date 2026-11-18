@@ -4,12 +4,12 @@ The native backend is a second way for Hack to run your project. It is a beta fo
 Apple Silicon Macs. Docker Compose is still the default, and nothing changes for a
 project unless you choose native for it.
 
-Native setup and live log following are available in next.16 **under verification**.
-Real-VM acceptance remains pending; start with disposable projects and synthetic data.
+Native setup and live log following are **under verification**. Real-VM
+acceptance remains pending; start with disposable projects and synthetic data.
 See [Prepare the runtime](setup.md) and [Follow service logs](log-follow.md).
 
-Next.17 source adds interactive exec, guarded Compose env-file reads and
-retirement fixes. These do not change an installed next.16 bundle; see
+Interactive exec, guarded Compose env-file reads and retirement fixes arrived in
+next.17. An older installed bundle does not have them; see
 [what changed and what to do](https://github.com/hack-dance/hack/blob/5002cf87bb50686b17ceae8a4c835f524ee1b3a5/docs/guides/v5-release-notes.md#next17-what-changed-and-what-to-do).
 
 ## What it is
@@ -106,7 +106,7 @@ What you give up today:
 - Following logs live as a verified native capability. `hack logs --follow` is
   available for testing; real-VM acceptance for authored and adopted projects
   is still pending.
-- Interactive shells on next.16. Next.17 supports foreground terminal
+- Interactive shells before next.17. Since next.17, native supports foreground terminal
   `hack exec SERVICE -- /bin/sh`; redirects and `HACK_NO_INTERACTIVE=1` keep
   finite exec. Use the matching runtime and follow its retained-session
   recovery instructions after an uncertain outcome.

@@ -468,6 +468,9 @@ impl MainWindow {
                     state: service_label(s),
                     cpu: usage.map(|u| u.0.clone()),
                     memory: usage.map(|u| u.1.clone()),
+                    memory_note: None,
+                    usage_note: crate::components::UNKNOWN_USAGE,
+                    emulated: false,
                     route: s.route.clone().ok_or_else(|| "internal".to_owned()),
                 }
             })

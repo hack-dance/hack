@@ -180,6 +180,9 @@ pub struct DetailView {
     pub backend: String,
     pub url: Option<String>,
     pub always_on: bool,
+    /// The always-on line under the header (read-only), when this instance
+    /// is the one its marker names.
+    pub always_on_note: Option<(crate::machine::Tone, String)>,
     pub actions: Vec<Action>,
     pub busy: bool,
     pub services: Vec<ServiceView>,
@@ -268,6 +271,11 @@ fn reported_shells(s: &Snapshot, row: &ProjectRow) -> Option<Vec<String>> {
             .collect()
     };
     if row.is_native() {
+        // Not read yet in this snapshot: whatever it holds is an earlier
+        // read's, so the shells stay as last reported (and marked so).
+        if row.native_pending {
+            return None;
+        }
         // As `state::native_state` reads it: only an observation that
         // establishes service state replaces the list. `runtime_busy` and
         // the other non-observations return no items without meaning the
@@ -396,6 +404,36 @@ impl AppModel {
         }
     }
 
+    /// What the project reads say about hackd, for the hackd card: from the
+    /// unavailable-daemon error when the last read failed that way, else from
+    /// a good snapshot; nothing otherwise. Never an older read's versions
+    /// after a newer read failed.
+    #[must_use]
+    pub fn hackd_evidence(&self) -> crate::machine::HackdEvidence<'_> {
+        match &self.last_error {
+            Some(SourceError::DaemonUnavailable {
+                cli,
+                daemon,
+                shared_with,
+                ..
+            }) => crate::machine::HackdEvidence {
+                hackd_version: daemon.as_deref(),
+                cli_version: Some(cli),
+                shared_with: shared_with.as_deref(),
+            },
+            Some(_) => crate::machine::HackdEvidence::default(),
+            None => self
+                .snapshot
+                .as_ref()
+                .map(|s| crate::machine::HackdEvidence {
+                    hackd_version: s.daemon.as_ref().map(|d| d.version.as_str()),
+                    cli_version: Some(&s.cli_version),
+                    shared_with: None,
+                })
+                .unwrap_or_default(),
+        }
+    }
+
     #[must_use]
     pub fn engine_observed(&self) -> bool {
         self.last_error.is_none()
@@ -460,7 +498,8 @@ impl AppModel {
     /// Apply one event. Returns `true` when the app should refresh now.
     pub fn apply(&mut self, event: Event) -> bool {
         match event {
-            Event::Refreshed(Ok(s)) => {
+            Event::Refreshed(Ok(mut s)) => {
+                self.keep_pending_native(&mut s);
                 self.loaded_once = true;
                 self.clear_recovered_failures(&s);
                 self.last_error = None;
@@ -547,6 +586,71 @@ impl AppModel {
         }
     }
 
+    /// A listing ([`crate::source::Source::listing`]) has not read native
+    /// projects yet: until each `hack ps` returns ([`Self::finish_native`]),
+    /// a pending row shows the observation the previous snapshot had for the
+    /// same project and checkout. It stays pending, so it is not evidence.
+    fn keep_pending_native(&self, s: &mut Snapshot) {
+        let Some(previous) = &self.snapshot else {
+            return;
+        };
+        for row in s.projects.projects.iter_mut().filter(|r| r.native_pending) {
+            row.native = previous
+                .projects
+                .projects
+                .iter()
+                .find(|p| p.name == row.name && p.repo_root == row.repo_root && p.is_native())
+                .and_then(|p| p.native.clone());
+        }
+    }
+
+    /// Apply one native project's `hack ps` to the snapshot it was read
+    /// for: only while that read (`token`) is the one shown and no action
+    /// started or finished since. `ps` is `None` when the read failed, which
+    /// shows as not read. Returns whether it was applied.
+    pub fn finish_native(
+        &mut self,
+        token: RefreshToken,
+        name: &str,
+        repo_root: &str,
+        ps: Option<crate::models::NativePs>,
+    ) -> bool {
+        if token.action_epoch != self.action_epoch || token.sequence != self.applied_sequence {
+            return false;
+        }
+        let Some(mut s) = self.snapshot.take() else {
+            return false;
+        };
+        let applied = match s.projects.projects.iter_mut().find(|r| {
+            r.native_pending && r.name == name && r.repo_root.as_deref() == Some(repo_root)
+        }) {
+            Some(row) => {
+                row.native = ps;
+                row.native_pending = false;
+                true
+            }
+            None => false,
+        };
+        if applied && self.last_error.is_none() {
+            self.clear_recovered_failures(&s);
+            self.remember_shells(&s);
+        }
+        self.snapshot = Some(s);
+        applied
+    }
+
+    /// The native projects the shown snapshot still has to read, as
+    /// `(name, repo_root)`.
+    #[must_use]
+    pub fn pending_native(&self) -> Vec<(String, String)> {
+        self.snapshot
+            .iter()
+            .flat_map(|s| &s.projects.projects)
+            .filter(|r| r.native_pending)
+            .filter_map(|r| Some((r.name.clone(), r.repo_root.clone()?)))
+            .collect()
+    }
+
     /// A startup failure is cleared only on evidence that it is over: every
     /// failed service is observed running again. (A successful Stop from
     /// this app clears it too, in `ActionFinished`.) "Nothing runs" is not
@@ -559,6 +663,10 @@ impl AppModel {
             let Some(row) = instance_row(s, key) else {
                 continue;
             };
+            // A kept observation is from before this read: not evidence.
+            if row.native_pending {
+                continue;
+            }
             let svcs = state::services(&row);
             let recovered = ctx
                 .last_failed
@@ -749,6 +857,26 @@ impl AppModel {
             },
             url: row.dev_host.as_ref().map(|h| format!("https://{h}")),
             always_on: row.autostart.as_ref().is_some_and(|a| a.enabled),
+            // The marker lives on the project's own row (a branch instance's
+            // derived row has none); it names the instance it is for.
+            always_on_note: self
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.projects.projects.iter().find(|p| p.name == key.project))
+                .and_then(|p| p.autostart.as_ref())
+                .filter(|a| a.branch == key.branch)
+                // The state line already says it (`state::derive`) when this
+                // instance's row carries the marker (the base instance); a
+                // branch instance's derived row does not, so keep it there.
+                .filter(|a| a.state != "needs_attention" || row.autostart.is_none())
+                .and_then(|a| {
+                    crate::machine::always_on_note(
+                        a,
+                        self.snapshot
+                            .as_ref()
+                            .and_then(|s| s.projects.autostart_global.as_ref()),
+                    )
+                }),
             actions: if row.is_native()
                 || self.last_error.is_some()
                 || (row.branch.is_some() && row.repo_root.is_none())
@@ -1099,6 +1227,287 @@ mod tests {
         m.apply(Event::Refreshed(Ok(snap)));
         m.apply(Event::Select("storefront".into()));
         assert_eq!(shells(&m), (vec!["api".to_owned()], false));
+    }
+
+    /// `storefront` as a native project. `ps`: `Some((status, api
+    /// running))` an observation, `None` none. `pending`: a listing that
+    /// has not read it yet.
+    fn native_storefront(ps: Option<(&str, bool)>, pending: bool) -> Snapshot {
+        let mut snap = fixtures::snapshot(Fixture::Running).unwrap();
+        let row = snap
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        row.backend = Some("native".into());
+        row.repo_root = Some("/work/storefront".into());
+        row.native = ps.map(|(status, running)| crate::models::NativePs {
+            status: status.into(),
+            items: vec![crate::models::NativePsItem {
+                service: "api".into(),
+                state: if running { "running" } else { "exited" }.into(),
+                exit_code: (!running).then_some(1),
+                ..Default::default()
+            }],
+        });
+        row.native_pending = pending;
+        snap
+    }
+
+    fn observed(running: bool) -> Option<crate::models::NativePs> {
+        native_storefront(Some(("observed", running)), false)
+            .projects
+            .projects
+            .into_iter()
+            .find(|p| p.name == "storefront")
+            .and_then(|p| p.native)
+    }
+
+    #[test]
+    fn a_listing_keeps_the_previous_native_state_until_its_ps_returns() {
+        let mut m = AppModel::new();
+        let t = m.begin_refresh();
+        assert!(m.finish_refresh(t, Ok(native_storefront(Some(("observed", true)), false))));
+        m.apply(Event::Select("storefront".into()));
+        assert!(matches!(
+            m.detail().unwrap().state,
+            ProjectState::Running { .. }
+        ));
+        assert_eq!(shells(&m), (vec!["api".to_owned()], false));
+
+        // The next poll lists at once; native ps is still running.
+        let listing = m.begin_refresh();
+        assert!(m.finish_refresh(listing, Ok(native_storefront(None, true))));
+        assert!(
+            matches!(m.detail().unwrap().state, ProjectState::Running { .. }),
+            "the previous observation is shown meanwhile"
+        );
+        assert_eq!(
+            shells(&m),
+            (vec!["api".to_owned()], true),
+            "marked as earlier"
+        );
+        assert_eq!(
+            m.pending_native(),
+            vec![("storefront".to_owned(), "/work/storefront".to_owned())]
+        );
+
+        // Its ps returns: the new state replaces the kept one.
+        let stopped = native_storefront(Some(("not_started", false)), false);
+        let ps = stopped
+            .projects
+            .projects
+            .iter()
+            .find(|p| p.name == "storefront")
+            .unwrap()
+            .native
+            .clone();
+        assert!(m.finish_native(listing, "storefront", "/work/storefront", ps));
+        assert_eq!(m.detail().unwrap().state, ProjectState::Stopped);
+        assert_eq!(shells(&m), (Vec::<String>::new(), false));
+        assert!(m.pending_native().is_empty());
+        // Applied once only.
+        assert!(!m.finish_native(listing, "storefront", "/work/storefront", observed(true)));
+    }
+
+    #[test]
+    fn a_first_listing_says_native_status_is_being_read() {
+        let mut m = AppModel::new();
+        let t = m.begin_refresh();
+        assert!(m.finish_refresh(t, Ok(native_storefront(None, true))));
+        m.apply(Event::Select("storefront".into()));
+        assert_eq!(
+            m.detail().unwrap().state,
+            ProjectState::Unknown {
+                reason: "Reading native status…".into()
+            }
+        );
+        // A read that failed shows as not read, not as still reading.
+        assert!(m.finish_native(t, "storefront", "/work/storefront", None));
+        assert_eq!(
+            m.detail().unwrap().state,
+            ProjectState::Unknown {
+                reason: "Native status was not read".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_native_result_for_a_superseded_read_or_across_an_action_is_dropped() {
+        let mut m = AppModel::new();
+        let first = m.begin_refresh();
+        assert!(m.finish_refresh(first, Ok(native_storefront(None, true))));
+        let second = m.begin_refresh();
+        assert!(m.finish_refresh(second, Ok(native_storefront(None, true))));
+        assert!(!m.finish_native(first, "storefront", "/work/storefront", observed(true)));
+        assert!(!m.pending_native().is_empty(), "the newer read still waits");
+        let third = m.begin_refresh();
+        assert!(m.finish_refresh(third, Ok(native_storefront(None, true))));
+        m.apply(Event::ActionStarted {
+            key: InstanceKey::project("storefront"),
+            action: Action::Start,
+        });
+        assert!(!m.finish_native(third, "storefront", "/work/storefront", observed(true)));
+        // Another checkout of the same name is not this row.
+        let fourth = m.begin_refresh();
+        assert!(m.finish_refresh(fourth, Ok(native_storefront(None, true))));
+        assert!(!m.finish_native(fourth, "storefront", "/elsewhere", observed(true)));
+    }
+
+    #[test]
+    fn a_kept_native_observation_never_clears_a_failed_start() {
+        let mut m = AppModel::new();
+        let t = m.begin_refresh();
+        assert!(m.finish_refresh(t, Ok(native_storefront(Some(("observed", true)), false))));
+        let key = InstanceKey::project("storefront");
+        m.apply(Event::ActionStarted {
+            key: key.clone(),
+            action: Action::Start,
+        });
+        m.apply(Event::ActionFinished {
+            key: key.clone(),
+            action: Action::Start,
+            result: Err(SourceError::Cli {
+                code: "E_STARTUP_INCOMPLETE".into(),
+                message: "m".into(),
+                failed: vec!["api".into()],
+            }),
+        });
+        let failed = |m: &AppModel| {
+            m.local
+                .get(&key)
+                .map(|c| c.last_failed.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(failed(&m), vec!["api".to_owned()]);
+        // The listing keeps the pre-start observation (api running): that is
+        // not evidence the failure is over.
+        let listing = m.begin_refresh();
+        assert!(m.finish_refresh(listing, Ok(native_storefront(None, true))));
+        assert_eq!(failed(&m), vec!["api".to_owned()]);
+        // This read's own ps: api down, still failed; a later one running.
+        assert!(m.finish_native(listing, "storefront", "/work/storefront", observed(false)));
+        assert_eq!(failed(&m), vec!["api".to_owned()]);
+        let later = m.begin_refresh();
+        assert!(m.finish_refresh(later, Ok(native_storefront(None, true))));
+        assert!(m.finish_native(later, "storefront", "/work/storefront", observed(true)));
+        assert!(failed(&m).is_empty());
+    }
+
+    #[test]
+    fn the_always_on_line_belongs_to_the_instance_its_marker_names() {
+        let mut snap = fixtures::snapshot(Fixture::Hackd).unwrap();
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(Ok(snap.clone())));
+        let note = |m: &mut AppModel, key: InstanceKey| {
+            m.apply(Event::SelectInstance(key));
+            m.detail().unwrap().always_on_note.map(|(_, t)| t)
+        };
+        assert_eq!(
+            note(&mut m, InstanceKey::project("notes")).as_deref(),
+            Some("Always on · paused until you start it")
+        );
+        assert!(
+            note(&mut m, InstanceKey::project("storefront"))
+                .unwrap()
+                .contains("skipped (engine_timeout)")
+        );
+        // A marker for a branch instance is not the base instance's.
+        let mut branch_marker = snap.clone();
+        branch_marker
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap()
+            .autostart
+            .as_mut()
+            .unwrap()
+            .branch = Some("preview".into());
+        m.apply(Event::Refreshed(Ok(branch_marker)));
+        assert_eq!(note(&mut m, InstanceKey::project("storefront")), None);
+        // Needs attention: the state line already says it, once.
+        snap.projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "notes")
+            .unwrap()
+            .autostart
+            .as_mut()
+            .unwrap()
+            .state = "needs_attention".into();
+        m.apply(Event::Refreshed(Ok(snap)));
+        assert_eq!(note(&mut m, InstanceKey::project("notes")), None);
+    }
+
+    #[test]
+    fn a_branch_marker_shows_on_that_branch_instance_only() {
+        let mut snap = fixtures::snapshot(Fixture::Running).unwrap();
+        snap.projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap()
+            .autostart = Some(crate::models::Autostart {
+            enabled: true,
+            state: "paused".into(),
+            paused_reason: Some("manual_stop".into()),
+            branch: Some("feature-search".into()),
+            ..crate::models::Autostart::default()
+        });
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(Ok(snap)));
+        m.apply(Event::SelectInstance(InstanceKey::branch(
+            "storefront",
+            "feature-search",
+        )));
+        assert_eq!(
+            m.detail().unwrap().branch.as_deref(),
+            Some("feature-search")
+        );
+        assert_eq!(
+            m.detail()
+                .unwrap()
+                .always_on_note
+                .map(|(_, t)| t)
+                .as_deref(),
+            Some("Always on · paused until you start it")
+        );
+        m.apply(Event::SelectInstance(InstanceKey::project("storefront")));
+        assert_eq!(m.detail().unwrap().always_on_note, None);
+        // Needs attention on a branch marker: the branch's state line cannot
+        // say it, so the always-on line does.
+        let mut attention = fixtures::snapshot(Fixture::Running).unwrap();
+        attention
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap()
+            .autostart = Some(crate::models::Autostart {
+            enabled: true,
+            state: "needs_attention".into(),
+            branch: Some("feature-search".into()),
+            failures: crate::models::AutostartFailures {
+                count: 3,
+                ..crate::models::AutostartFailures::default()
+            },
+            ..crate::models::Autostart::default()
+        });
+        m.apply(Event::Refreshed(Ok(attention)));
+        m.apply(Event::SelectInstance(InstanceKey::branch(
+            "storefront",
+            "feature-search",
+        )));
+        assert_eq!(
+            m.detail()
+                .unwrap()
+                .always_on_note
+                .map(|(_, t)| t)
+                .as_deref(),
+            Some("Always-on stopped trying after 3 failures")
+        );
     }
 
     #[test]

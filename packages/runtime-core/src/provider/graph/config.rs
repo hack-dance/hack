@@ -590,6 +590,17 @@ fn declared_configuration(
             if mount.kind == "bind" {
                 continue;
             }
+            // The review already reported this mount as `unresolved_mount_source`.
+            // Still refuse it, but say so, so it does not read as a second,
+            // volume-related problem (an anonymous volume is a declared one).
+            if mount.kind == "unresolved" {
+                refuse(
+                    "volumes",
+                    "A mount source is interpolated or home-relative and was not resolved (unresolved_mount_source).",
+                    "Fix the unresolved_mount_source finding for this service: use a recognized credential adapter, or a path relative to the project.",
+                );
+                continue;
+            }
             if mount.kind != "volume" || !plan.volumes.contains_key(&mount.source) {
                 refuse(
                     "volumes",
@@ -1242,6 +1253,53 @@ mod compose_field_tests {
             service[key] = value.clone();
         }
         json!({"services":{"web":service},"networks":{"private":{"internal":true}}})
+    }
+
+    #[test]
+    fn an_unresolved_mount_is_refused_as_that_and_an_anonymous_volume_is_admitted() {
+        let fixture = super::super::tests::Fixture::new();
+        let candidate_root = super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&candidate_root.0).unwrap();
+        let options = || PlanOptions {
+            branch: None,
+            project: &fixture.0,
+            compose_file: Path::new("compose.yaml"),
+            profiles: &[],
+        };
+        // An anonymous volume beside a home-relative credential mount.
+        state::write(
+            &fixture.0.join("compose.yaml"),
+            &document(
+                json!({"volumes":["~/.config/tool/credentials.json:/config/c.json:ro","/cache"]}),
+            ),
+        )
+        .unwrap();
+        let plan = project::plan(&candidate, options()).unwrap().plan;
+        let wire =
+            serde_json::to_value(declared_configuration(&plan, true, true).unwrap_err()).unwrap();
+        let refusals = wire["configuration_refusals"].as_array().unwrap();
+        assert_eq!(refusals.len(), 1, "{wire}");
+        assert_eq!(refusals[0]["field"], "volumes");
+        assert!(
+            refusals[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unresolved_mount_source")
+        );
+        assert!(!wire.to_string().contains("credentials.json"));
+        // Without the credential mount, the anonymous volume alone is admitted.
+        state::write(
+            &fixture.0.join("compose.yaml"),
+            &document(json!({"volumes":["/cache"]})),
+        )
+        .unwrap();
+        let plan = project::plan(&candidate, options()).unwrap().plan;
+        assert!(
+            plan.volumes
+                .keys()
+                .any(|name| name.starts_with("hack-anonymous-"))
+        );
+        declared_configuration(&plan, true, true).unwrap();
     }
 
     #[test]

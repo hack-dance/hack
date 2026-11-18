@@ -17,12 +17,12 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AnyElement, App, ClipboardItem, Context, Entity, IntoElement, KeyBinding, ParentElement,
-    Render, SharedString, Styled, Window, div, prelude::*, px,
+    Render, SharedString, Styled, Task, Window, div, prelude::*, px,
 };
 use hack_desktop_core::doctor::{DoctorPane, Finish, TargetKey, should_auto_refresh};
 use hack_desktop_core::machine_gate::{Holder, MachineGate};
 use hack_desktop_core::source::{
-    ActionOutcome, DaemonRecovery, DoctorTarget, Snapshot, Source, SourceError,
+    ActionOutcome, DaemonRecovery, DoctorTarget, NATIVE_PS_PARALLEL, Snapshot, Source, SourceError,
 };
 
 use crate::doctor_view::Pane;
@@ -59,7 +59,7 @@ const SEARCH_CONTEXT: Option<&str> = None;
 const SEARCH_CONTEXT: Option<&str> = Some("!Terminal");
 
 /// Why the always-on switch is disabled.
-const ALWAYS_ON_REASON: &str = "Always on needs the CLI's autostart commands (HACK-2213)";
+const ALWAYS_ON_REASON: &str = "Read-only here: change always-on with hack autostart add or remove";
 
 /// The window's key bindings.
 pub fn bind_keys(cx: &mut App) {
@@ -151,6 +151,15 @@ pub struct HackApp {
     /// hackd here share it.
     pub(crate) machine: MachineGate,
     recovery_error: Option<String>,
+    /// `hack daemon status --json` for the hackd pane, read when the pane
+    /// opens, on Check again and after Start / Restart hackd.
+    pub(crate) hackd_status: Option<hack_desktop_core::models::DaemonStatus>,
+    /// A read finished (its result may be `None`: not readable).
+    pub(crate) hackd_read: bool,
+    pub(crate) hackd_loading: bool,
+    /// [`Self::hackd_evidence_key`] when hackd was last read: a project read
+    /// that changes it makes the stored read stale.
+    pub(crate) hackd_evidence_seen: String,
     /// Setup checks (DESIGN.md section 2; `setup_view`).
     pub(crate) setup: hack_desktop_core::setup::Pane,
     /// The launch check has not reported yet: when it finds something to
@@ -200,6 +209,10 @@ impl HackApp {
             panels: Default::default(),
             machine: MachineGate::default(),
             recovery_error: None,
+            hackd_status: None,
+            hackd_read: false,
+            hackd_loading: false,
+            hackd_evidence_seen: String::new(),
             action_started: std::collections::HashMap::new(),
             setup: Default::default(),
             setup_on_launch: live,
@@ -422,6 +435,19 @@ impl HackApp {
         if !self.model.finish_refresh(token, snap) {
             return false;
         }
+        // hackd changed under the stored card (stopped, started, another
+        // version): read it again while the pane shows it, else forget it so
+        // the sidebar dot follows the project reads.
+        let evidence = self.hackd_evidence_key();
+        if self.hackd_read && evidence != self.hackd_evidence_seen {
+            // Never leave the old card (and its action) up against the new
+            // evidence: drop it, and read again while the pane shows it.
+            self.hackd_read = false;
+            self.hackd_status = None;
+            if self.pane == Pane::Hackd {
+                self.load_hackd(cx);
+            }
+        }
         let after = self.model.selected_key();
         let selection_changed = before != after || previous_root != self.selected_root();
         if selection_changed {
@@ -526,10 +552,22 @@ impl HackApp {
                     .background_executor()
                     .spawn({
                         let source = source.clone();
-                        async move { source.snapshot() }
+                        async move { source.listing() }
                     })
                     .await;
-                let _ = this.update(cx, |this, cx| this.apply_refresh(token, snap, cx));
+                let workers = this
+                    .update(cx, |this, cx| {
+                        if this.apply_refresh(token, snap, cx) {
+                            this.read_pending_native(token, cx)
+                        } else {
+                            Vec::new()
+                        }
+                    })
+                    .unwrap_or_default();
+                // The next poll waits for this one's native reads.
+                for worker in workers {
+                    worker.await;
+                }
                 let delay = this
                     .update(cx, |this, _| this.model.poll_interval())
                     .unwrap_or(Duration::from_secs(10));
@@ -608,14 +646,150 @@ impl HackApp {
         cx.spawn(async move |this, cx| {
             let snap = cx
                 .background_executor()
-                .spawn(async move { source.snapshot() })
+                .spawn(async move { source.listing() })
                 .await;
-            let _ = this.update(cx, |this, cx| this.apply_refresh(token, snap, cx));
+            let _ = this.update(cx, |this, cx| {
+                if this.apply_refresh(token, snap, cx) {
+                    for worker in this.read_pending_native(token, cx) {
+                        worker.detach();
+                    }
+                }
+            });
         })
         .detach();
     }
 
-    fn recover_daemon(&mut self, action: DaemonRecovery, cx: &mut Context<Self>) {
+    /// Read each native project the shown listing left pending, at most
+    /// [`NATIVE_PS_PARALLEL`] at a time, applying each `hack ps` as it
+    /// returns ([`AppModel::finish_native`] drops it once a newer read is
+    /// shown or an action starts). The tasks end when the queue is empty.
+    fn read_pending_native(
+        &mut self,
+        token: RefreshToken,
+        cx: &mut Context<Self>,
+    ) -> Vec<Task<()>> {
+        let queue = std::rc::Rc::new(std::cell::RefCell::new(std::collections::VecDeque::from(
+            self.model.pending_native(),
+        )));
+        let workers = queue.borrow().len().min(NATIVE_PS_PARALLEL);
+        (0..workers)
+            .map(|_| {
+                let queue = queue.clone();
+                let source = self.source.clone();
+                cx.spawn(async move |this, cx| {
+                    loop {
+                        let Some((name, root)) = queue.borrow_mut().pop_front() else {
+                            return;
+                        };
+                        let ps = cx
+                            .background_executor()
+                            .spawn({
+                                let source = source.clone();
+                                let root = root.clone();
+                                async move { source.native_ps(std::path::Path::new(&root)) }
+                            })
+                            .await;
+                        let applied = this
+                            .update(cx, |this, cx| {
+                                let applied = this.model.finish_native(token, &name, &root, ps);
+                                if applied {
+                                    this.native_filled(cx);
+                                }
+                                applied
+                            })
+                            .unwrap_or(false);
+                        // A newer read or an action superseded this one: the
+                        // rest of its queue is stale too.
+                        if !applied {
+                            return;
+                        }
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// A native project's state arrived: a shown stopped project's Logs
+    /// read follows once it runs, as after a full refresh.
+    fn native_filled(&mut self, cx: &mut Context<Self>) {
+        if self.tab == 1 {
+            let running = self.model.detail().is_some_and(|d| d.state.is_active());
+            if self.logs.model.should_follow_now(running) {
+                self.open_logs(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The last Start / Restart hackd failure, if any.
+    pub(crate) fn recovery_error(&self) -> Option<&str> {
+        self.recovery_error.as_deref()
+    }
+
+    /// Open the hackd pane and read hackd's status.
+    pub(crate) fn open_hackd(&mut self, cx: &mut Context<Self>) {
+        self.pane = Pane::Hackd;
+        self.user_navigated();
+        self.load_hackd(cx);
+        cx.notify();
+    }
+
+    /// Fixtures and screenshots: the hackd pane with its status read.
+    pub fn show_hackd_now(&mut self) {
+        self.pane = Pane::Hackd;
+        self.hackd_status = self.source.daemon_status();
+        self.hackd_read = true;
+        self.hackd_evidence_seen = self.hackd_evidence_key();
+    }
+
+    /// Read `hack daemon status --json` off the UI thread with the CLI
+    /// selected now. A read started under another CLI is dropped.
+    pub(crate) fn load_hackd(&mut self, cx: &mut Context<Self>) {
+        if !self.live {
+            self.show_hackd_now();
+            cx.notify();
+            return;
+        }
+        if self.hackd_loading {
+            return;
+        }
+        self.hackd_loading = true;
+        let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
+        let epoch = self.model.source_epoch();
+        // What the project reads said when this read started: an answer
+        // that lands after they changed may describe the hackd before.
+        let started = self.hackd_evidence_key();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_executor()
+                .spawn(async move { source.daemon_status() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.model.source_epoch() != epoch {
+                    return;
+                }
+                this.hackd_loading = false;
+                if this.hackd_evidence_key() != started {
+                    if this.pane == Pane::Hackd {
+                        this.load_hackd(cx);
+                    } else {
+                        this.hackd_read = false;
+                        this.hackd_status = None;
+                    }
+                    cx.notify();
+                    return;
+                }
+                this.hackd_status = status;
+                this.hackd_read = true;
+                this.hackd_evidence_seen = started;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn recover_daemon(&mut self, action: DaemonRecovery, cx: &mut Context<Self>) {
         if !self.live {
             return;
         }
@@ -642,6 +816,10 @@ impl HackApp {
                 }
                 this.machine.finish(ticket);
                 this.recovery_error = result.err();
+                // The card shows what hackd says now, not the button's exit.
+                if this.pane == Pane::Hackd {
+                    this.load_hackd(cx);
+                }
                 // A command exit is not evidence that a compatible daemon
                 // is ready. Only the next ordered snapshot can restore rows.
                 this.refresh_now_async(cx);
@@ -806,6 +984,13 @@ impl HackApp {
             // previous installation: it must not block this one.
             self.machine.reset();
             self.recovery_error = None;
+            // hackd's status was the previous CLI's.
+            self.hackd_status = None;
+            self.hackd_read = false;
+            self.hackd_loading = false;
+            if self.pane == Pane::Hackd {
+                self.load_hackd(cx);
+            }
             self.logs.close();
             self.env.begin();
             self.doctor.source_changed();
@@ -973,6 +1158,24 @@ impl HackApp {
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.open_doctor(None, cx))),
             )
+            .child({
+                let tone = self
+                    .hackd_card()
+                    .map(|c| c.tone)
+                    .or_else(|| self.hackd_tone_from_snapshot());
+                machine_row(
+                    "hackd",
+                    Glyph::Power,
+                    "hackd",
+                    dot(
+                        tone.map_or(Status::Unknown, crate::machine_view::status_of),
+                        ui,
+                    ),
+                    ui,
+                )
+                .when(self.pane == Pane::Hackd, |d| d.bg(p.surface_1))
+                .on_click(cx.listener(|this, _, _, cx| this.open_hackd(cx)))
+            })
             .child(
                 machine_row(
                     "doctor",
@@ -1053,6 +1256,12 @@ impl HackApp {
         let recovery = self.model.daemon_recovery();
         let mut recovery_shown = false;
         for b in &list.banners {
+            // The hackd pane's card says the same and offers the same action.
+            if self.pane == Pane::Hackd
+                && matches!(b, Banner::DaemonOff | Banner::DaemonMismatch { .. })
+            {
+                continue;
+            }
             let (tone, msg, offers_recovery) = match b {
                 Banner::DaemonOff => (
                     BannerTone::Warn,
@@ -1245,6 +1454,21 @@ impl HackApp {
                     .child(actions),
             )
             .when(!compact, |col| col.child(url_row))
+            .children(
+                d.always_on_note
+                    .clone()
+                    .filter(|_| !compact)
+                    .map(|(tone, note)| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(space::S3)
+                            .type_step(text::BODY)
+                            .text_color(p.text_secondary)
+                            .child(dot(crate::machine_view::status_of(tone), ui))
+                            .child(note)
+                    }),
+            )
             .children((!compact).then_some(()).and(reason).map(|r| {
                 let c = if status == Status::Failed {
                     p.states.failed.fg
@@ -1503,6 +1727,7 @@ impl Render for HackApp {
         let main: AnyElement = match &list.phase {
             // Setup applies whatever the project list shows, a missing CLI
             // included.
+            _ if self.pane == Pane::Hackd => crate::machine_view::render(self, &ui, cx),
             _ if self.pane == Pane::Setup => {
                 crate::setup_view::render(&self.setup, self.machine.busy(), &ui, cx)
             }
@@ -1715,6 +1940,145 @@ mod tests {
         assert_eq!(
             doctor_mark(&never, &m.list()),
             DoctorMark::Dot(Status::Unknown)
+        );
+    }
+}
+
+/// The live refresh path in a window: list first, then each native `ps`.
+#[cfg(all(test, feature = "screenshots"))]
+mod native_fill_tests {
+    use super::*;
+    use gpui_kit::{HeadlessAppContext, WindowOptions};
+    use hack_desktop_core::fixtures::{self, Fixture};
+    use hack_desktop_core::models::{LogEntry, NativePs};
+    use hack_desktop_core::source::{FixtureSource, LogFeed};
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    /// Fixture data, with `storefront` native: `listing` leaves it pending,
+    /// `native_ps` reports it stopped. Records every read, in order.
+    struct Listing {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl Listing {
+        fn snapshot_with(&self, pending: bool) -> Result<Snapshot, SourceError> {
+            let mut s = fixtures::snapshot(Fixture::Running)?;
+            for row in &mut s.projects.projects {
+                if row.name == "storefront" {
+                    row.backend = Some("native".into());
+                    row.repo_root = Some("/work/storefront".into());
+                    row.native_pending = pending;
+                }
+            }
+            Ok(s)
+        }
+        fn log(&self, call: &str) {
+            self.calls.lock().unwrap().push(call.to_owned());
+        }
+    }
+
+    impl Source for Listing {
+        fn snapshot(&self) -> Result<Snapshot, SourceError> {
+            self.log("snapshot");
+            self.snapshot_with(false)
+        }
+        fn listing(&self) -> Result<Snapshot, SourceError> {
+            self.log("listing");
+            self.snapshot_with(true)
+        }
+        fn native_ps(&self, repo_root: &Path) -> Option<NativePs> {
+            self.log(&format!("ps {}", repo_root.display()));
+            Some(NativePs {
+                status: "not_started".into(),
+                items: vec![],
+            })
+        }
+        fn act(
+            &self,
+            repo_root: &Path,
+            native: bool,
+            branch: Option<&str>,
+            action: Action,
+        ) -> Result<ActionOutcome, SourceError> {
+            FixtureSource(Fixture::Running).act(repo_root, native, branch, action)
+        }
+        fn log_tail(
+            &self,
+            repo_root: &Path,
+            native: bool,
+            branch: Option<&str>,
+            lines: u32,
+        ) -> Result<Vec<LogEntry>, String> {
+            FixtureSource(Fixture::Running).log_tail(repo_root, native, branch, lines)
+        }
+        fn doctor_runs(
+            &self,
+            projects: &[DoctorTarget],
+        ) -> Vec<hack_desktop_core::doctor::DoctorRun> {
+            FixtureSource(Fixture::Running).doctor_runs(projects)
+        }
+        fn open_logs(
+            &self,
+            repo_root: &Path,
+            native: bool,
+            branch: Option<&str>,
+            args: &[String],
+        ) -> Result<Box<dyn LogFeed>, String> {
+            FixtureSource(Fixture::Running).open_logs(repo_root, native, branch, args)
+        }
+    }
+
+    #[test]
+    fn a_refresh_lists_first_and_then_reads_each_native_project() {
+        let source = Arc::new(Listing {
+            calls: Mutex::new(Vec::new()),
+        });
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_kit::NoopTextSystem::new()),
+            Arc::new(hack_desktop_ui::icons::Assets),
+            || Ok(None),
+        );
+        cx.update(gpui_kit::init);
+        let options = WindowOptions {
+            focus: false,
+            show: false,
+            ..WindowOptions::default()
+        };
+        let (_, app) = cx
+            .update(|cx| {
+                gpui_kit::open_window(options, cx, |window, cx| {
+                    cx.new(|cx| HackApp::new(source.clone(), false, window, cx))
+                })
+            })
+            .unwrap();
+        source.calls.lock().unwrap().clear();
+        cx.update(|cx| app.update(cx, |a, cx| a.refresh_now_async(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            *source.calls.lock().unwrap(),
+            vec!["listing".to_owned(), "ps /work/storefront".to_owned()],
+            "the window lists without native ps, then reads each native project once"
+        );
+        let state = cx.update(|cx| {
+            let a = app.read(cx);
+            assert!(a.model.pending_native().is_empty());
+            a.model
+                .snapshot()
+                .and_then(|s| {
+                    s.projects
+                        .projects
+                        .iter()
+                        .find(|p| p.name == "storefront")
+                        .cloned()
+                })
+                .and_then(|p| p.native)
+                .map(|n| n.status)
+        });
+        assert_eq!(
+            state.as_deref(),
+            Some("not_started"),
+            "applied when it returned"
         );
     }
 }

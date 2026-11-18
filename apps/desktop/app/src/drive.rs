@@ -40,6 +40,9 @@
 //!                                 wait for the active tab's notice (a
 //!                                 refused paste) to contain text
 //! tab <services|logs|env>        show that detail tab
+//! hackd                           open the hackd pane (reads hackd's status)
+//! expect-hackd <text> [<seconds>] wait for the hackd card's title, or a line
+//!                                 of its always-on summary, to contain text
 //! expect-env <NAME> [<seconds>]   wait for NAME in the Env listing
 //! env-set <NAME> <value>          edit an existing row, as the pencil and
 //!                                 Save do (rest of the line is the value)
@@ -132,6 +135,11 @@ pub enum Step {
     },
     Wait(Duration),
     Tab(usize),
+    Hackd,
+    ExpectHackd {
+        text: String,
+        within: Duration,
+    },
     ExpectEnv {
         name: String,
         within: Duration,
@@ -250,7 +258,8 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
                         .unwrap_or(10),
                 ),
             },
-            ("expect" | "expect-notice" | "expect-cli", _) if !rest.is_empty() => {
+            ("hackd", []) => Step::Hackd,
+            ("expect" | "expect-notice" | "expect-cli" | "expect-hackd", _) if !rest.is_empty() => {
                 let (text, within) = match rest.rsplit_once(char::is_whitespace) {
                     Some((t, secs)) if secs.parse::<u64>().is_ok() => (
                         t.trim(),
@@ -262,6 +271,7 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
                 match word {
                     "expect" => Step::Expect { text, within },
                     "expect-cli" => Step::ExpectCli { text, within },
+                    "expect-hackd" => Step::ExpectHackd { text, within },
                     _ => Step::ExpectNotice { text, within },
                 }
             }
@@ -620,6 +630,28 @@ async fn run_step(handle: &Win, step: &Step, cx: &mut AsyncApp) -> Result<String
                 .map_err(|e| e.to_string())?;
             Ok(String::new())
         }
+        Step::Hackd => {
+            handle
+                .update(cx, |app, _, cx| app.open_hackd(cx))
+                .map_err(|e| e.to_string())?;
+            Ok(String::new())
+        }
+        Step::ExpectHackd { text, within } => {
+            poll(handle, cx, *within, |app, _, _| {
+                app.hackd_lines()
+                    .iter()
+                    .any(|l| l.contains(text.as_str()))
+                    .then_some(())
+            })
+            .await
+            .ok_or_else(|| {
+                let now = handle
+                    .update(cx, |app, _, _| app.hackd_lines())
+                    .unwrap_or_default();
+                format!("hackd pane did not show {text:?} within {within:?} (shows: {now:?})")
+            })?;
+            Ok(String::new())
+        }
         Step::ExpectEnv { name, within } => {
             env_row(handle, cx, name, *within).await?;
             Ok(String::new())
@@ -793,6 +825,9 @@ pub fn supervise(steps_file: &Path, child_args: &[String]) -> i32 {
                     root: PathBuf::from(root),
                 });
             }
+            // A step's own line says whether it failed; its echoed text (an
+            // expected "1 failed", say) must not.
+            _ if rest.starts_with("step ") => failed |= step_failed(rest),
             _ if rest.contains(" failed ") => failed = true,
             _ => {}
         }
@@ -875,6 +910,14 @@ pub fn supervise(steps_file: &Path, child_args: &[String]) -> i32 {
     };
     println!("{TAG} result {}{known}", if ok { "pass" } else { "fail" });
     i32::from(!ok)
+}
+
+/// `step <n> failed …` (as opposed to `step <n> ok …`).
+fn step_failed(line: &str) -> bool {
+    let mut words = line.split_whitespace();
+    words.next() == Some("step")
+        && words.next().is_some_and(|n| n.parse::<usize>().is_ok())
+        && words.next() == Some("failed")
 }
 
 /// Every live process in one of `leaders`' sessions, and the leaders
@@ -986,6 +1029,17 @@ impl ContainerCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_step_fails_by_its_status_word_not_its_echoed_text() {
+        assert!(!step_failed(
+            r#"step 4 ok ExpectHackd { text: "At login: started 1 of 3 · 1 failed · 1 pending", within: 10s }"#
+        ));
+        assert!(step_failed(
+            r#"step 2 failed ExpectHackd { text: "hackd running", within: 10s }: not shown"#
+        ));
+        assert!(!step_failed("step x failed"), "not a step number");
+    }
 
     #[test]
     fn env_steps_never_print_their_values() {

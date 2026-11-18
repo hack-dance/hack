@@ -1,3 +1,4 @@
+import type { NativeGcloudSelection } from "../backends/native-gcloud-environment.ts";
 import {
   collectNativePreflight,
   type NativePreflightFinding,
@@ -142,6 +143,7 @@ export async function collectProjectNativePreflight(opts: {
   let sharedSource = false;
   let hasHostDependencies = false;
   let hasDefaultDependencyFile = false;
+  let gcloud: NativeGcloudSelection | undefined;
   // An unreadable Compose file is reported as `compose_file_unreadable`; the
   // settings lookup needs its project name, so it is skipped then.
   let settingsReadable = false;
@@ -158,6 +160,7 @@ export async function collectProjectNativePreflight(opts: {
       });
       settingsReadable = true;
       sharedSource = host.sharedSource;
+      gcloud = host.gcloud;
       hasDefaultDependencyFile = host.dependencyFile !== undefined;
       hasHostDependencies =
         selectNativeEnvFile({
@@ -224,6 +227,7 @@ export async function collectProjectNativePreflight(opts: {
     buildsEnabled: nativeBuildsEnabled(),
     // Unreadable settings are their own blocker; do not also ask for the grant.
     sharedSource: sharedSource || !settingsReadable,
+    ...(gcloud ? { gcloud } : {}),
     hasHostDependencies,
     hasDefaultDependencyFile,
     effectiveEnvName: effectiveEnv,

@@ -30,6 +30,9 @@ pub struct ProjectsPayload {
     pub runtime_error: Option<String>,
     #[serde(deserialize_with = "null_default")]
     pub projects: Vec<ProjectRow>,
+    /// Machine-wide always-on state (docs/always-on-projects.md, "JSON
+    /// contract"). `None` when the payload does not carry it.
+    pub autostart_global: Option<AutostartGlobal>,
 }
 
 impl ProjectsPayload {
@@ -84,6 +87,13 @@ pub struct ProjectRow {
     /// Native observation from `hack ps --json` (filled by the source).
     #[serde(skip)]
     pub native: Option<NativePs>,
+    /// This read has not asked `hack ps` for this native project yet
+    /// ([`crate::source::Source::listing`]); the app reads it next, on its
+    /// own. Meanwhile [`Self::native`] is the previous read's observation,
+    /// kept for display, or `None`. A pending row is never evidence: it does
+    /// not clear a failed start or report shells.
+    #[serde(skip)]
+    pub native_pending: bool,
     /// Running branch instances (`hack up --branch <name>`), Compose only.
     /// Native branch instances are not reported here (design request R19).
     #[serde(deserialize_with = "null_default")]
@@ -392,7 +402,8 @@ impl Container {
     }
 }
 
-/// Always-on state as designed for HACK-2213 (not yet emitted by the CLI).
+/// Always-on state of one project (docs/always-on-projects.md, "JSON
+/// contract"). The app only reads it: no `hack autostart` command runs.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Autostart {
@@ -402,6 +413,53 @@ pub struct Autostart {
     pub state: String,
     pub paused_reason: Option<String>,
     pub failures: AutostartFailures,
+    /// The keep-up retry bound (`3` today).
+    pub max_failures: Option<u32>,
+    /// `null` for the base instance, else the branch-instance slug.
+    pub branch: Option<String>,
+    /// The individual marker is paused (separate from a global pause).
+    pub paused: bool,
+    /// The last automatic start attempt, `None` before any.
+    pub last_result: Option<AutostartResult>,
+}
+
+/// One recorded automatic start attempt.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AutostartResult {
+    /// `started | already_running | skipped | failed` (an unknown future
+    /// status is shown as a generic failure).
+    #[serde(deserialize_with = "null_default")]
+    pub status: String,
+    /// A machine-readable code, `None` on success. Never command output.
+    pub reason: Option<String>,
+    pub at: Option<String>,
+}
+
+/// `autostart_global`: the machine-wide policy and the login run.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AutostartGlobal {
+    pub paused: bool,
+    pub login_run: AutostartLoginRun,
+    /// A login-service file is installed for this invocation. It does not
+    /// prove the service manager runs it.
+    pub service_ready: bool,
+}
+
+/// Progress of the start pass at login. The arrays hold project ids.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AutostartLoginRun {
+    pub in_progress: bool,
+    pub started_at: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub pending: Vec<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub started: Vec<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub failed: Vec<String>,
+    pub waiting_for_engine: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -432,26 +490,40 @@ pub struct DaemonStatus {
     /// `running | starting | incompatible | stale | stopped`.
     #[serde(deserialize_with = "null_default")]
     pub status: String,
+    #[serde(deserialize_with = "null_default")]
     pub running: bool,
+    #[serde(deserialize_with = "null_default")]
     pub api_ok: bool,
     pub api_reachable: Option<bool>,
     pub api_compatible: Option<bool>,
+    #[serde(deserialize_with = "null_default")]
     pub stale: bool,
     pub stale_reason: Option<String>,
     pub issue: Option<String>,
     pub next_step: Option<String>,
     pub pid: Option<u32>,
     pub service: Option<DaemonService>,
+    /// The version hackd's API reported in this same read, `None` when it
+    /// did not answer.
+    pub version: Option<String>,
+    /// The version of the CLI that answered.
+    pub cli_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DaemonService {
-    /// `launchd | systemd`.
+    /// `launchd | systemd`. launchd reports `enabled: null` (not a launchd
+    /// notion): every flag here reads `null` as false rather than failing
+    /// the whole report.
     pub manager: Option<String>,
+    #[serde(deserialize_with = "null_default")]
     pub available: bool,
+    #[serde(deserialize_with = "null_default")]
     pub installed: bool,
+    #[serde(deserialize_with = "null_default")]
     pub enabled: bool,
+    #[serde(deserialize_with = "null_default")]
     pub active: bool,
     pub summary: Option<String>,
     pub next_step: Option<String>,

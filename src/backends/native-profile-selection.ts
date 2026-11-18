@@ -12,6 +12,13 @@ export type NativeProfileSelection = {
    * selected name the Compose file does not declare is counted, never shown.
    */
   readonly declaredProfiles?: readonly string[];
+  /**
+   * COMPOSE_PROFILES names the Compose file does not declare, dropped
+   * before use. They select nothing in Compose, and COMPOSE_PROFILES may
+   * hold a value copied from decrypted managed env, so such a name never
+   * reaches a runtime argument, saved state or output; it is only counted.
+   */
+  readonly ignoredUndeclared?: number;
 };
 
 function parseProfiles(raw: string | undefined): string[] {
@@ -51,21 +58,30 @@ export function selectNativeProfiles(opts: {
       declaredProfiles: opts.declaredProfiles,
     };
   }
-  if (Object.hasOwn(opts.managedEnv, "COMPOSE_PROFILES")) {
-    const profiles = parseProfiles(opts.managedEnv.COMPOSE_PROFILES);
+  // Environment selectors are reduced to declared names before any use.
+  const fromEnv = (
+    raw: string[],
+    source: "managed-env" | "shell"
+  ): NativeProfileSelection => {
+    const expanded = expand(raw);
+    const declared = new Set(opts.declaredProfiles);
+    const profiles = expanded.filter((profile) => declared.has(profile));
     return {
-      profiles: expand(profiles),
-      source: "managed-env",
+      profiles,
+      source,
       declaredProfiles: opts.declaredProfiles,
+      ignoredUndeclared: expanded.length - profiles.length,
     };
+  };
+  if (Object.hasOwn(opts.managedEnv, "COMPOSE_PROFILES")) {
+    return fromEnv(
+      parseProfiles(opts.managedEnv.COMPOSE_PROFILES),
+      "managed-env"
+    );
   }
   const shell = parseProfiles(opts.shellEnv.COMPOSE_PROFILES);
   return shell.length > 0
-    ? {
-        profiles: expand(shell),
-        source: "shell",
-        declaredProfiles: opts.declaredProfiles,
-      }
+    ? fromEnv(shell, "shell")
     : { profiles: [], source: "none", declaredProfiles: opts.declaredProfiles };
 }
 

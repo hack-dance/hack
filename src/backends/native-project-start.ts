@@ -1997,6 +1997,8 @@ function emitNativeLeftOutNotice(opts: {
   readonly plan: unknown;
   readonly compose: string;
   readonly profiles: readonly string[];
+  /** Undeclared COMPOSE_PROFILES names already dropped; counted with the rest. */
+  readonly ignored: number;
   readonly source: NativeProfileNoticeSource;
   readonly warn: (line: string) => void;
 }): void {
@@ -2015,7 +2017,7 @@ function emitNativeLeftOutNotice(opts: {
       kind: "left-out",
       services: nativeInactiveServices(opts.plan),
       profiles: names.shown,
-      hiddenProfiles: names.hidden,
+      hiddenProfiles: names.hidden + opts.ignored,
       source: opts.source,
     },
     opts.warn
@@ -2058,6 +2060,8 @@ async function chooseNativeStartupProfiles(opts: {
 }): Promise<{
   readonly profiles: readonly string[];
   readonly source: NativeProfileNoticeSource;
+  /** Undeclared COMPOSE_PROFILES names dropped before use; counted only. */
+  readonly ignored?: number;
 }> {
   const kept = opts.restore !== undefined || Boolean(opts.retained);
   if (opts.requested !== undefined) {
@@ -2069,6 +2073,7 @@ async function chooseNativeStartupProfiles(opts: {
       ? {
           profiles: normalizeNativeProfiles(fromEnv.profiles),
           source: fromEnv.source,
+          ignored: fromEnv.ignoredUndeclared ?? 0,
         }
       : { profiles: opts.selected, source: "none" };
   }
@@ -2564,6 +2569,7 @@ async function startNativeProjectAttempt(
           plan: review.report.plan,
           compose: input.normalizedComposeJson,
           profiles,
+          ignored: profileChoice.ignored ?? 0,
           source: profileChoice.source,
           warn: deps.warn,
         });

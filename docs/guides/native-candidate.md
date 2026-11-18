@@ -489,9 +489,11 @@ With it:
   `up -d` on a running graph print a notice naming both and how to change them
   (`hack down --remove-data`, which deletes the data volumes, then `hack up`). An
   explicit `--profile` that differs still refuses. `hack up` (foreground or detached)
-  prints one line naming the services the selection leaves out. Notices print only
-  profile names the Compose file declares; any other selected name (for example a
-  value copied into `COMPOSE_PROFILES` in the managed env) is counted, never shown.
+  prints one line naming the services the selection leaves out. A
+  `COMPOSE_PROFILES` name the Compose file does not declare selects nothing, as in
+  Compose, and is dropped before use: it never reaches a runtime argument, the saved
+  run or any output, and is only counted in the notice (`COMPOSE_PROFILES` can hold a
+  value copied from decrypted managed env). Notices print only declared names.
 - As with Compose `up`, only services in the selected profiles are built, pulled and
   pinned. A service in a profile you did not select is neither built nor acquired from
   its registry, and restore and restart need no image for it; selecting its profile in

@@ -39,17 +39,18 @@ Your project stays the same. The `.hack/` folder, the commands (`hack up`,
   and Compose features. See [what works and known limits](limits.md).
 - **Not a migration.** Trying native does not convert your project or move your
   data. Your stable setup is left alone.
-- **Not faster or lighter.** We make no speed, memory or battery claim for
-  native. Do not choose it to save memory.
+- **Not proven faster or lighter.** We make no speed, memory or battery claim
+  for native. Choose it to run without a Docker app, not for performance.
 - **Not a sandbox.** It is a way to run a Compose file without a Docker app. It
-  does not limit what a project, a person or a coding agent can touch.
+  refuses some risky container settings (see below), but it is not a security
+  boundary: do not rely on it to contain a project or a coding agent.
 - **Not a wall between projects.** Projects on native share the VM's resources.
 
 ## Control and traffic
 
 For the Compose-file native frontend, the compiler prepares the workload plan and
-the provider manages containers; published TCP traffic takes a separate loopback
-publisher and application-bridge path into the VM pool.
+the VM's container runtime runs the containers; published TCP traffic takes a
+separate loopback path into the VM.
 
 ```mermaid
 ---

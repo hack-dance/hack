@@ -3,11 +3,12 @@
 A project can have more than one running copy. Each copy is an **instance**. A
 second copy for another branch is a **branch instance**: it has its own
 containers, its own addresses and its own logs, and it runs beside the main one.
-`hack up` in a git worktree starts one automatically.
+On the Compose backend, `hack up` in a linked git worktree starts one, named
+after its branch. On native, pass `--branch`.
 
 Start from a configured repository. Read
 [Worktrees and watchers](../../guides/development-runtime-safety.md) before choosing
-shared or isolated files.
+shared or per-worktree files.
 
 ```sh
 git worktree add ../project-review -b review-work

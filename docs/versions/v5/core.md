@@ -6,12 +6,13 @@ repository, so teammates and agents use the same definition.
 
 ## Project, instance and branch instance
 
-- A **project** is a repository with a `.hack/` folder. It has one name, and Hack
-  uses that name for addresses, env, logs and helpers.
+- A **project** is a repository with a `.hack/` folder. It has a name, which Hack
+  uses for its instances, logs and helpers. By default its address starts with
+  that name too.
 - An **instance** is one running copy of a project: its containers, its
   addresses, its logs.
 - A **branch instance** is a second instance of the same project, named after a
-  branch. `hack up` in a git worktree starts one automatically.
+  branch. `hack up` in a linked git worktree starts one, named after its branch.
 
 A **service** is one part of a project, such as a web app, API or database. Each
 instance runs its own copy of every service.
@@ -23,7 +24,8 @@ guessing a port or hostname.
 
 ## Backends
 
-The **Compose backend** is the default. It runs services with Docker Compose behind
+A **backend** is what actually runs the containers. The **Compose backend** is the
+default. It runs services with Docker Compose behind
 shared local routing. General project examples use Compose unless they explicitly
 select native.
 

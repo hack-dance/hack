@@ -3,8 +3,8 @@
 A coding agent with a shell can use Hack as it is. Complete [Install](install.md),
 make the intended `hack` executable available on the agent's PATH, and give it this
 version's [documentation index](/v5/llms.txt) or [full corpus](/v5/llms-full.txt).
-Plugins and MCP are optional additions. They do not install Hack or prepare its
-runtime.
+Plugins and MCP are optional additions. They do not install Hack or prepare a
+backend.
 
 v5 retired automatic instruction injection. Hack no longer writes `AGENTS.md` or
 `CLAUDE.md` sections, Cursor rules, session hooks or global skill copies, and the

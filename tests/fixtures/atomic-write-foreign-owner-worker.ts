@@ -31,7 +31,7 @@ mock.module("node:fs/promises", () => ({
   ...fs,
   stat: async (...args: Parameters<typeof fs.stat>) => {
     const info = await realStat(...args);
-    if (args[0] !== target) {
+    if (args[0] !== target || info === undefined) {
       return info;
     }
     const foreign =

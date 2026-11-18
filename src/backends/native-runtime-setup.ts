@@ -1,4 +1,3 @@
-import { constants as osConstants } from "node:os";
 import { basename, join } from "node:path";
 import {
   type CandidateLauncher,
@@ -10,6 +9,7 @@ import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { canPrompt, confirmSafe } from "../lib/interactivity.ts";
+import { subprocessSignalExitStatus } from "../lib/subprocess-signal.ts";
 import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
@@ -279,7 +279,7 @@ export async function runNativeSetupChild(opts: {
     const result =
       canceledExit ??
       (child.signalCode
-        ? 128 + (osConstants.signals[child.signalCode] ?? 1)
+        ? subprocessSignalExitStatus(child.signalCode, 1)
         : exit);
     if (result === 0 && !opts.json) {
       process.stdout.write("Native runtime is set up.\n");

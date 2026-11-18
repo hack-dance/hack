@@ -114,6 +114,7 @@ mod config;
 mod dependency_cache;
 mod image_environment;
 mod image_process;
+mod image_user;
 mod image_volumes;
 #[cfg(feature = "native-config-plan")]
 pub mod native;
@@ -2704,6 +2705,38 @@ fn mount_rosetta_runtime(config: &mut Value) -> Result<(), CandidateError> {
     Ok(())
 }
 
+/// Private delivery stages files for a numeric owner. A named Compose or image user is
+/// resolved from the pinned image's own account files and written into the create config
+/// (`UID` for a bare name, `UID:GID` for `name:group`), so the Engine runs the same identity. An unknown name is left for the
+/// numeric check, which refuses it as before.
+fn resolve_named_user(
+    engine: &Engine<'_>,
+    image: &Value,
+    configs: &mut BTreeMap<String, Value>,
+    key: &str,
+) -> Result<(), CandidateError> {
+    let config = configs.get_mut(key).expect("compiled service config");
+    let selected = [config.get("User"), image["Config"].get("User")]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .find(|user| !user.is_empty())
+        .map(str::to_owned);
+    if let Some(user) = selected.filter(|user| image_user::named(user)) {
+        if let Some(numeric) = image_user::resolve(engine, image, &user)? {
+            // A bare name keeps Docker's group lookup: only the UID is written, and the
+            // Engine resolves the primary and supplementary groups from the image.
+            let numeric = if user.contains(':') {
+                numeric
+            } else {
+                numeric.split(':').next().unwrap_or_default().to_owned()
+            };
+            config["User"] = Value::String(numeric);
+        }
+    }
+    Ok(())
+}
+
 fn verify_images(
     engine: &Engine<'_>,
     resources: &BTreeMap<String, Resource>,
@@ -2746,6 +2779,9 @@ fn verify_images(
             &configs[&resource.key],
             resources,
         )?;
+        if private_services.contains(&resource.key) || file_owners.contains(&resource.key) {
+            resolve_named_user(engine, &image, configs, &resource.key)?;
+        }
         if private_services.contains(&resource.key) {
             refusals.check(
                 &resource.key,

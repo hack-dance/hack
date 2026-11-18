@@ -404,3 +404,37 @@ An alternate `HACK_HOME` does not isolate global Docker projects, networks or
 volumes. Before attempting a non-mutating qualification on an existing host,
 read the [blocked isolated-home result](../qualification/linux-isolated-home-2026-11-16.md)
 and its limited collision gate. That record is not a pass of this runbook.
+
+## First-run check without sudo
+
+`scripts/linux-first-run-check.ts` runs a built `hack` the way a new Linux user
+would on the Compose path, in a fresh private `HOME`, and never runs sudo:
+
+```sh
+bun run build
+bun scripts/linux-first-run-check.ts --hack "$PWD/dist/hack" --scratch /abs/new/scratch-dir
+```
+
+It covers doctor, `global install` (including the `proxy.bind_address` retry
+when another program holds :443), init, `up`/`ps`/`logs`/`open`/`exec`/`run`/
+`restart`/`down` with `--json` shape checks, routed HTTPS against Hack's CA
+(`curl --resolve` to loopback, so no DNS change is needed), env and a secret
+(compared, never printed), `host exec`, a branch instance, foreground `up` with
+Ctrl-C in a pty, the daemon, the update check and `native setup`. It prints a
+Markdown table (step, command, exit, seconds, result, note), writes it to
+`<scratch>/report.md`, and exits 0 only when no step failed.
+
+The fixture's one-shot service sleeps 150 seconds by default
+(`--one-shot-seconds`); it runs on the default Compose startup budget, so a
+one-shot dependency that keeps running past it is part of what the check proves.
+Like the isolated-home preflight, it refuses when containers or volumes of
+`hack-dev-proxy` or `hack-logging`, or the `hack-dev` network, already exist,
+because `HOME` does not isolate them; `--reuse-global-stack` overrides that only
+for an operator who owns them. It removes only its own `lq-<id>` project
+resources. It stops the global stack only when none of its containers existed
+before, and removes a global project's labeled volumes only when that project
+had none before. It drops PATH entries that hold a `hack`, so the CLI under test never
+re-invokes an installed one, and refuses a scratch directory below a directory
+other users can write (hackd would refuse that HOME). Linux DNS and system trust
+stay root steps: the table records the codes Hack reports for them. This is not
+a pass of the runbook above.

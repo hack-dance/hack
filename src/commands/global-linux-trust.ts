@@ -75,6 +75,25 @@ export async function configureLinuxTrustFromRuntime(opts: {
   return await opts.configureHostTrust({ certPath: opts.certPath });
 }
 
+/**
+ * One plain sentence per pending system-trust command (HACK-2329). The
+ * commands are always the CA install, then the bundle refresh
+ * (`linuxSystemTrustCommands`); any other count gets no summary rather than a
+ * wrong one.
+ */
+export function describeLinuxSystemTrustSteps(opts: {
+  readonly family: string;
+  readonly count: number;
+}): string[] {
+  if (opts.count !== 2) {
+    return [];
+  }
+  return [
+    `Copy Hack's local CA certificate into the ${opts.family} system trust anchors.`,
+    `Rebuild the ${opts.family} system trust bundle so programs that use it trust https://*.hack.`,
+  ];
+}
+
 function renderSudo(argv: readonly string[]): string {
   return renderLinuxManualTrustCommand(argv);
 }
@@ -247,7 +266,12 @@ function reportSystem(system: LinuxSystemTrustOutcome): void {
     case "pending":
       logger.warn({
         message: [
-          `System trust not changed (code=${system.code}). Run:`,
+          `System trust not changed (code=${system.code}). It needs root (sudo) for these steps:`,
+          ...describeLinuxSystemTrustSteps({
+            family: system.family,
+            count: system.commands.length,
+          }).map((step, index) => `  ${index + 1}. ${step}`),
+          "Review, then run these exact commands (hack global trust --plan --json lists the same steps):",
           ...system.commands.map((command) => `  ${renderSudo(command)}`),
         ].join("\n"),
       });

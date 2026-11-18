@@ -9,6 +9,7 @@ import {
   type NativeProcessRefusal,
   readNativeProcessRefusals,
 } from "../lib/native-process-wrappers.ts";
+import type { SubprocessSignal } from "../lib/subprocess-signal.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import { nativeBetaCandidatePointer } from "./native-beta.ts";
 import {
@@ -300,7 +301,7 @@ export function isNativeRuntimeStopError(
 }
 
 /** Classify a child stop independently of when the frontend's signal handler is scheduled. */
-function throwIfNativeRuntimeStopped(signal: NodeJS.Signals | null): void {
+function throwIfNativeRuntimeStopped(signal: SubprocessSignal | null): void {
   if (signal === "SIGINT" || signal === "SIGTERM") {
     throw new NativeRuntimeRequestError({
       message:

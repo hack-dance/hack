@@ -35,7 +35,7 @@ const BOUNDED_EXIT_MS = 12_000;
 
 type RunResult = {
   readonly exitCode: number;
-  readonly signalCode: string | null;
+  readonly signalCode: NodeJS.Signals | number | null;
   readonly stdout: string;
   readonly stderr: string;
   readonly elapsedMs: number;

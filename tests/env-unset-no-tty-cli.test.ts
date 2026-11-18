@@ -31,7 +31,7 @@ const VALUE_CANARY = "unset-canary-value-7f3a9c";
 
 type RunResult = {
   readonly exitCode: number;
-  readonly signal: string | null;
+  readonly signal: NodeJS.Signals | number | null;
   readonly stdout: string;
   readonly stderr: string;
   readonly wallMs: number;

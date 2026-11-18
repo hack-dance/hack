@@ -7,6 +7,11 @@ export const CANDIDATE_DAEMON_GUIDANCE =
 export function buildDoctorDaemonCheck(opts: {
   readonly report: DaemonStatusReport;
   readonly candidate: boolean;
+  /**
+   * Why hackd would refuse to start (for example a home directory writable
+   * by others), from `diagnoseDaemonDirectory`; null when it would start.
+   */
+  readonly startRefusal?: string | null;
 }): {
   readonly name: "daemon";
   readonly status: "ok" | "warn";
@@ -18,6 +23,13 @@ export function buildDoctorDaemonCheck(opts: {
       name: "daemon",
       status: "ok",
       message: `hackd running (pid ${report.pid ?? "unknown"})`,
+    };
+  }
+  if (opts.startRefusal) {
+    return {
+      name: "daemon",
+      status: "warn",
+      message: `hackd cannot start: ${opts.startRefusal}`,
     };
   }
   if (opts.candidate) {

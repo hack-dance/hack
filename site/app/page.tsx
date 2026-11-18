@@ -1,4 +1,21 @@
 import Link from "next/link";
+import {
+  description,
+  installCommand,
+  prereleaseTag,
+  tagline,
+} from "@/lib/home";
+import versions from "../../scripts/docs/versions.json";
+
+/** The same release the v5 install page is pinned to. */
+const install = installCommand(prereleaseTag(versions.v5.label));
+
+/**
+ * Words and the spaces between them, so that a narrow screen wraps the command
+ * between words. Only the download address, which has no spaces, may break
+ * inside itself. The text a reader copies is unchanged.
+ */
+const installParts = install.split(/(\s+)/).filter((part) => part !== "");
 
 export default function Home() {
   return (
@@ -7,44 +24,55 @@ export default function Home() {
         Skip to the index
       </a>
 
-      <header className="home-opening">
-        <h1>
-          <Link aria-label="hack.foo — documentation" href="/docs">
-            hack.foo
-          </Link>
-        </h1>
-      </header>
-
-      <div className="home-index" id="home-index" tabIndex={-1}>
+      <header className="home-header">
+        <Link className="home-name" href="/">
+          hack.foo
+        </Link>
         <nav aria-label="Homepage">
           <Link href="/docs">Documentation</Link>
           <a href="https://github.com/hack-dance/hack">Source on GitHub</a>
         </nav>
+      </header>
 
-        <section aria-labelledby="home-about">
-          <h2 id="home-about">One command runs the whole project</h2>
-          <p>
-            Services, environment, secrets, local HTTPS and logs belong to the
-            same project. Hack runs them from a small <code>.hack/</code> folder
-            committed with the repository, so anyone who clones it, teammate or
-            agent, is one <code>hack up</code> from a running environment.
-          </p>
-          <p>
-            Every project gets its own trusted local URL. Projects and branches
-            run side by side without colliding. Nothing is hosted; your machine
-            is the platform.
-          </p>
-          <p>
-            <Link href="/docs/v5/install">Install and get started</Link>
-          </p>
-        </section>
+      <section aria-labelledby="home-about">
+        <h1 id="home-about">{tagline}.</h1>
+        <p>{description}</p>
+        <pre className="home-install">
+          <code>
+            {installParts.map((part, index) =>
+              part.includes("/") || part.trim() === "" ? (
+                part
+              ) : (
+                // biome-ignore lint/suspicious/noArrayIndexKey: fixed list, never reordered
+                <span className="home-word" key={index}>
+                  {part}
+                </span>
+              )
+            )}
+          </code>
+        </pre>
+        <p className="home-note">
+          The v5 prerelease, for Apple Silicon macOS. It installs beside stable
+          v4 and leaves it alone.{" "}
+          <Link href="/docs/v5/install">Install and get started</Link>
+        </p>
+      </section>
 
+      <div className="home-index" id="home-index" tabIndex={-1}>
         <section aria-labelledby="home-docs">
           <h2 id="home-docs">Index</h2>
           <ul className="home-docs">
             <li>
               <Link href="/docs/v5/core">Core concepts</Link>
               <span>Projects, services, instances and local URLs.</span>
+            </li>
+            <li>
+              <Link href="/docs/v5/guides/parallel-work">
+                Work on another branch
+              </Link>
+              <span>
+                An instance per branch; a git worktree gets one automatically.
+              </span>
             </li>
             <li>
               <Link href="/docs/v5/env">Environment &amp; secrets</Link>

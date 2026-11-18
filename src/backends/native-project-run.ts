@@ -1507,6 +1507,16 @@ export function describeNativeForeignHomeMapping(opts: {
   );
 }
 
+/**
+ * The coded foreign-home refusal for this scope, or undefined when no mapping
+ * from another native home is there. Read-only; never releases anything.
+ */
+export async function nativeForeignHomeRefusal(
+  scope: NativeProjectRunScope
+): Promise<Error | undefined> {
+  return await foreignHomeRefusal(scope);
+}
+
 /** The stable code of a run-mapping refusal caused by another native home. */
 export const NATIVE_FOREIGN_HOME_CODE = "E_NATIVE_RUN_MAPPING_FOREIGN_HOME";
 

@@ -6,6 +6,8 @@ import {
   isNativeForeignHomeRefusal,
   loadNativeProjectRun,
   type NativeProjectRun,
+  type NativeProjectRunScope,
+  nativeForeignHomeRefusal,
   normalizeNativeProfiles,
 } from "../backends/native-project-run.ts";
 import type { NativeRuntimeSelection } from "../backends/native-runtime-client.ts";
@@ -185,6 +187,33 @@ function selectionMatches(
       JSON.stringify(normalizeNativeProfiles(saved.profiles)) ===
         JSON.stringify(normalizeNativeProfiles(requested.profiles)))
   );
+}
+
+/**
+ * Explains a detached start whose child was not confirmed. A run mapping from
+ * another native home can appear after the launcher's probe (another version
+ * starting the same instance); the child's own refusal cannot cross IPC, so
+ * re-inspect the mapping and return its coded refusal instead of the generic
+ * `E_STARTUP_INCOMPLETE` (HACK-2339). Any other error is returned unchanged.
+ */
+export async function explainUnconfirmedNativeDetachedStart(opts: {
+  readonly error: unknown;
+  readonly scope: NativeProjectRunScope | null;
+  readonly inspect?: (
+    scope: NativeProjectRunScope
+  ) => Promise<Error | undefined>;
+}): Promise<unknown> {
+  if (
+    opts.scope === null ||
+    !(opts.error instanceof HackCliError) ||
+    opts.error.code !== "E_STARTUP_INCOMPLETE"
+  ) {
+    return opts.error;
+  }
+  const foreign = await (opts.inspect ?? nativeForeignHomeRefusal)(
+    opts.scope
+  ).catch(() => undefined);
+  return foreign ?? opts.error;
 }
 
 /** Read-only admission adapter; resolving the CLI's project and branch stays injected. */

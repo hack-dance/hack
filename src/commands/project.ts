@@ -460,7 +460,10 @@ import {
 import { withActivity } from "./lifecycle-activity.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
-import { answerNativeAlreadyRunning } from "./native-up-already-running.ts";
+import {
+  answerNativeAlreadyRunning,
+  explainUnconfirmedNativeDetachedStart,
+} from "./native-up-already-running.ts";
 import {
   assertAutostartEnvironment,
   assertLoginAutostartCurrent,
@@ -6997,6 +7000,10 @@ async function handleUpUnlocked({
         childArgs.push(`--${name}=${value}`);
       }
     }
+    // The instance the child will start, for explaining an unconfirmed start.
+    let launchScope: Parameters<
+      typeof explainUnconfirmedNativeDetachedStart
+    >[0]["scope"] = null;
     const alreadyRunning = await answerNativeAlreadyRunning({
       native,
       json: args.options.json === true,
@@ -7030,6 +7037,12 @@ async function handleUpUnlocked({
           branch: identity.branch,
           name: isNativeDetachedOwnerProcess() ? null : identity.name,
         });
+        launchScope = {
+          projectRoot: project.projectRoot,
+          projectDir: project.projectDir,
+          nativeHome: native.home,
+          branch: identity.branch,
+        };
         return identity.branch;
       },
       onBranchResolved: (branch) => {
@@ -7041,11 +7054,18 @@ async function handleUpUnlocked({
     if (alreadyRunning !== null) {
       return alreadyRunning;
     }
-    return await startNativeDetachedUp({
-      cwd: ctx.cwd,
-      args: childArgs,
-      json: args.options.json === true,
-    });
+    try {
+      return await startNativeDetachedUp({
+        cwd: ctx.cwd,
+        args: childArgs,
+        json: args.options.json === true,
+      });
+    } catch (error) {
+      throw await explainUnconfirmedNativeDetachedStart({
+        error,
+        scope: launchScope,
+      });
+    }
   }
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,

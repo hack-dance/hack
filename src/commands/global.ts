@@ -109,6 +109,10 @@ import {
 import { inspectMacCaEligibility } from "../lib/mac-ca-trust.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import {
+  removeUnstartedProxyContainers,
+  writeManagedProxyCompose,
+} from "../lib/managed-proxy-compose.ts";
+import {
   ensureBundledMutagenInstalled,
   getMutagenPath,
 } from "../lib/mutagen.ts";
@@ -1063,7 +1067,16 @@ async function globalInstall(): Promise<number> {
   const paths = getGlobalPaths();
   await materializeGlobalInstallFiles({ paths, useStaticIps });
   logger.success({ message: "Global files ready in ~/.hack/" });
-  await globalUp();
+  const upExit = await globalUp();
+  if (upExit !== 0) {
+    // Host DNS and trust steps would point at a proxy that is not running;
+    // stop before them and before the success next steps (HACK-2328).
+    logger.error({
+      message:
+        "Global install did not finish: the global proxy stack did not start. Fix the problem above, then rerun: hack global install",
+    });
+    return upExit;
+  }
   const hostBootstrapOk = await completeGlobalInstallHostBootstrap({
     useStaticIps,
   });
@@ -1207,14 +1220,14 @@ async function writeGlobalInstallAssets(opts: {
   readonly useStaticIps: boolean;
 }): Promise<void> {
   const defaultDomain = await resolveDefaultDomain();
-  await writeWithPromptIfDifferent(
-    opts.paths.caddyCompose,
-    renderGlobalCaddyCompose({
+  await writeGlobalProxyCompose({
+    path: opts.paths.caddyCompose,
+    content: renderGlobalCaddyCompose({
       useStaticCoreDnsIp: opts.useStaticIps,
       useStaticCaddyIp: opts.useStaticIps,
       bindAddress: await resolveProxyBindAddress(),
-    })
-  );
+    }),
+  });
   await writeWithPromptIfDifferent(
     opts.paths.coreDnsConfig,
     renderGlobalCoreDnsConfig({
@@ -1794,6 +1807,22 @@ export async function maybeOfferMacHackdLaunchdInstall(): Promise<void> {
   }
 }
 
+/**
+ * The proxy Compose file is rendered from settings, so it is replaced without
+ * a prompt (HACK-2328); see {@link writeManagedProxyCompose}.
+ */
+async function writeGlobalProxyCompose(opts: {
+  readonly path: string;
+  readonly content: string;
+}): Promise<void> {
+  const result = await writeManagedProxyCompose(opts);
+  if (result.kind === "replaced-hand-edit") {
+    logger.warn({
+      message: `Replaced the hand-edited ${opts.path} with Hack's rendering; your copy is at ${result.backupPath}`,
+    });
+  }
+}
+
 async function writeWithPromptIfDifferent(
   absolutePath: string,
   content: string
@@ -1939,6 +1968,9 @@ export async function globalUp(): Promise<number> {
     { cwd: dirname(paths.caddyCompose) }
   );
   if (caddyExit !== 0) {
+    // A failed start can leave the proxy created but never started, with no
+    // network endpoint; remove it so the next attempt recreates it (HACK-2328).
+    await removeUnstartedProxyContainers();
     const conflict = await diagnoseProxyPortConflict({
       bindAddress: readProxyBindFromCompose(
         (await readTextFile(paths.caddyCompose)) ?? ""

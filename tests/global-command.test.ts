@@ -1082,3 +1082,154 @@ test(
   },
   { timeout: 20_000 }
 );
+
+function globalCaddyComposePath(): string {
+  return join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+}
+
+/** Runs `hack global install` with no terminal, capturing stdout and stderr. */
+async function runNonInteractiveInstall(): Promise<{
+  readonly code: number;
+  readonly output: string;
+}> {
+  const saved = process.env.HACK_NO_INTERACTIVE;
+  process.env.HACK_NO_INTERACTIVE = "1";
+  process.env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
+  const chunks: string[] = [];
+  const capture = (chunk: string | Uint8Array) => {
+    chunks.push(String(chunk));
+    return true;
+  };
+  const stdout = spyOn(process.stdout, "write").mockImplementation(capture);
+  const stderr = spyOn(process.stderr, "write").mockImplementation(capture);
+  // The proxy file is Hack-managed: no run may ask before replacing it.
+  const confirm = spyOn(interactivity, "confirmSafe").mockImplementation(
+    async (opts) => {
+      if (String(opts.message).includes(GLOBAL_CADDY_COMPOSE_FILENAME)) {
+        throw new Error("The proxy Compose file must not prompt");
+      }
+      return false;
+    }
+  );
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    const code = await runCli(["global", "install"]);
+    return { code, output: chunks.join("") };
+  } finally {
+    confirm.mockRestore();
+    stderr.mockRestore();
+    stdout.mockRestore();
+    restoreEnv("HACK_NO_INTERACTIVE", saved);
+  }
+}
+
+test(
+  "global install without a TTY fails, keeps the bind hint and removes a never-started proxy when :443 is taken (HACK-2328)",
+  async () => {
+    await writeInstallStubs();
+    const caddyCompose = globalCaddyComposePath();
+    runExitResponder = (cmd) =>
+      cmd.includes(caddyCompose) && cmd.includes("up") ? 1 : null;
+    execMockResponder = (cmd) => {
+      if (cmd[0] === "ss") {
+        return {
+          exitCode: 0,
+          stdout:
+            'LISTEN 0 4096 10.8.0.2:443 0.0.0.0:* users:(("vpn-client",pid=4242,fd=7))\n',
+          stderr: "",
+        };
+      }
+      if (
+        cmd[0] === "docker" &&
+        cmd[1] === "ps" &&
+        cmd.includes("status=created")
+      ) {
+        return { exitCode: 0, stdout: "0123456789ab\n", stderr: "" };
+      }
+      return null;
+    };
+
+    const { code, output } = await runNonInteractiveInstall();
+
+    expect(code).not.toBe(0);
+    expect(output).toContain("proxy.bind_address");
+    expect(output).toContain("Global install did not finish");
+    expect(output).not.toContain("Next:");
+    expect(output).not.toContain("Linux DNS");
+    expect(
+      execCalls.some(
+        (cmd) =>
+          cmd[0] === "docker" &&
+          cmd[1] === "ps" &&
+          cmd.includes("label=com.docker.compose.project=hack-dev-proxy")
+      )
+    ).toBe(true);
+    expect(execCalls).toContainEqual(["docker", "rm", "0123456789ab"]);
+    expect(linuxDnsPrivileged).toEqual([]);
+  },
+  { timeout: 20_000 }
+);
+
+test(
+  "global install without a TTY applies a new proxy.bind_address to the existing proxy file (HACK-2328)",
+  async () => {
+    await writeInstallStubs();
+    // First install: default bind, all interfaces.
+    expect((await runNonInteractiveInstall()).code).toBe(0);
+    const caddyCompose = globalCaddyComposePath();
+    expect(await Bun.file(caddyCompose).text()).toContain('      - "443:443"');
+
+    const configPath = resolveGlobalConfigPath();
+    await mkdir(dirname(configPath), { recursive: true });
+    await writeFile(
+      configPath,
+      `${JSON.stringify({ proxy: { bind_address: "127.0.0.1" } })}\n`
+    );
+    const { code, output } = await runNonInteractiveInstall();
+
+    expect(code).toBe(0);
+    expect(output).toContain("Next:");
+    const compose = await Bun.file(caddyCompose).text();
+    expect(compose).toContain('      - "127.0.0.1:80:80"');
+    expect(compose).toContain('      - "127.0.0.1:443:443"');
+    // A file Hack rendered is replaced without a backup.
+    const { readdir } = await import("node:fs/promises");
+    expect(
+      (await readdir(dirname(caddyCompose))).filter((name) =>
+        name.includes(".bak-")
+      )
+    ).toEqual([]);
+  },
+  { timeout: 20_000 }
+);
+
+test(
+  "global install keeps a backup of a hand-edited proxy file it replaces (HACK-2328)",
+  async () => {
+    await writeInstallStubs();
+    const caddyCompose = globalCaddyComposePath();
+    await mkdir(dirname(caddyCompose), { recursive: true });
+    const handEdited = "services:\n  caddy:\n    image: my/caddy\n";
+    await writeFile(caddyCompose, handEdited);
+
+    const { code, output } = await runNonInteractiveInstall();
+
+    expect(code).toBe(0);
+    expect(output).toContain("hand-edited");
+    const { readdir } = await import("node:fs/promises");
+    const backups = (await readdir(dirname(caddyCompose))).filter((name) =>
+      name.startsWith(`${GLOBAL_CADDY_COMPOSE_FILENAME}.bak-`)
+    );
+    expect(backups).toHaveLength(1);
+    expect(
+      await Bun.file(join(dirname(caddyCompose), backups[0]!)).text()
+    ).toBe(handEdited);
+    expect(await Bun.file(caddyCompose).text()).toContain("caddy-docker-proxy");
+  },
+  { timeout: 20_000 }
+);

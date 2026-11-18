@@ -203,6 +203,7 @@ import {
   type SupersededRootInventory,
 } from "../lib/mac-ca-trust.ts";
 import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
+import { writeManagedProxyCompose } from "../lib/managed-proxy-compose.ts";
 import {
   ensureBundledMutagenInstalled,
   getManagedMutagenAgentBundlePath,
@@ -4259,14 +4260,21 @@ async function runDoctorFix(opts: {
   await ensureLoggingNetwork();
 
   const useStaticIps = ingressAfterFix.hasSubnet;
-  await writeWithPromptIfDifferent(
-    paths.caddyCompose,
-    renderGlobalCaddyCompose({
+  // Rendered from settings, so replaced without a prompt (HACK-2328).
+  const proxyCompose = await writeManagedProxyCompose({
+    path: paths.caddyCompose,
+    content: renderGlobalCaddyCompose({
       useStaticCoreDnsIp: useStaticIps,
       useStaticCaddyIp: useStaticIps,
       bindAddress: await resolveProxyBindAddress(),
-    })
-  );
+    }),
+  });
+  if (proxyCompose.kind === "replaced-hand-edit") {
+    note(
+      `Replaced the hand-edited ${paths.caddyCompose} with Hack's rendering; your copy is at ${proxyCompose.backupPath}`,
+      "doctor"
+    );
+  }
   await writeWithPromptIfDifferent(
     paths.coreDnsConfig,
     renderGlobalCoreDnsConfig({ useStaticCaddyIp: useStaticIps })

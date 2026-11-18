@@ -28,14 +28,17 @@ Common settings:
   An address other than every interface stops LAN and tunnel clients from
   reaching the proxy through this host, and on macOS a host DNS fallback to
   `127.0.0.1` needs the proxy on loopback. Apply a change with
-  `hack global install` in a terminal and answer yes to rewrite the proxy
-  compose file; Compose then recreates the proxy with the new ports. Install
-  and `hack doctor --fix` render that file from this setting, so they never
-  revert it.
+  `hack global install`, with or without a terminal: it rewrites the proxy
+  compose file (`~/.hack/caddy/docker-compose.yml`) without asking, and Compose
+  recreates the proxy with the new ports. `hack doctor --fix` does the same.
+  That file is Hack's output; if it was edited by hand, the edited copy is kept
+  as `docker-compose.yml.bak-<UTC time>` beside it before the rewrite.
 
-When `hack global up` cannot start the proxy, it lists the listeners holding
-ports 80 and 443 (address, process and pid when the OS reports them) and names
-this setting.
+When `hack global up` or `hack global install` cannot start the proxy, it lists
+the listeners holding ports 80 and 443 (address, process and pid when the OS
+reports them), names this setting and exits non-zero. Install then stops before
+DNS and trust setup and prints no next steps. A proxy container that was created
+but never started is removed, so the next attempt creates it fresh.
 
 Project-level settings live in `.hack/hack.config.json` and override global ones
 where both apply. Settings for the unsupported gateway, cluster and cloud-provider

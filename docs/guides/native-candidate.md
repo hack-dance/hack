@@ -327,6 +327,9 @@ preflight. Raw runtime stderr and startup output are not configuration findings.
   `invalid_mount`, and `review_incompatible` when the review does not admit the
   project and gives no finding this version can show. A code this version has
   no sentence for is still listed, by its code and field.
+- The runtime notes `route_binding_required` for every routed service. Preflight
+  lists it only when no native HTTPS frontend is selected (machine `https` setting
+  or the `HACK_NATIVE_CADDY_*` variables), because the route is then not served.
 
 The preflight is a report, not an admission decision: `hack up` still runs its
 own checks, and a clean report starts nothing. Foreground and detached `up`

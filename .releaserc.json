@@ -27,7 +27,7 @@
           "plugins/hack",
           "plugins/hack-mcp"
         ],
-        "message": "chore(release): ${nextRelease.version}\n\n${nextRelease.notes}"
+        "message": "chore(release): ${nextRelease.version}"
       }
     ]
   ]

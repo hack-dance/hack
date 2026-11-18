@@ -1482,6 +1482,124 @@ test(
 );
 
 test(
+  "HACK-2324: the route note follows the HTTPS selection, and namespace and network notes explain themselves",
+  async () => {
+    const f = await fixture({
+      services: {
+        web: {
+          image: IMAGE,
+          labels: {
+            caddy: "web.example.test",
+            "caddy.reverse_proxy": "{{upstreams 3000}}",
+          },
+        },
+      },
+    });
+    await f.review(
+      [
+        {
+          severity: "warning",
+          code: "route_binding_required",
+          field: "services.web.labels",
+          message: "runtime text",
+        },
+        {
+          severity: "warning",
+          code: "candidate_project_namespace",
+          field: "compose.name",
+          message: "runtime text",
+        },
+        {
+          severity: "warning",
+          code: "hack_network_mapped",
+          field: "networks.hack-dev",
+          message: "runtime text",
+        },
+      ],
+      {
+        services: {
+          web: {
+            active: true,
+            routing: { port: 3000 },
+            healthcheck: {
+              disabled: false,
+              native_http: {
+                policy: "route",
+                port: 3000,
+                path: "/",
+                interval_ms: 30_000,
+                timeout_ms: 1000,
+                retries: 3,
+                start_period_ms: 240_000,
+              },
+            },
+          },
+        },
+      }
+    );
+    const warnings = (report: NativePreflightReport) =>
+      new Map(report.warnings.map((found) => [found.code, found]));
+    const without = warnings(
+      (await preflight(f, { ...f.native, ...GRANT })).report
+    );
+    expect(without.get("route_binding_required")?.message).toContain(
+      "no native HTTPS frontend is selected"
+    );
+    for (const code of ["candidate_project_namespace", "hack_network_mapped"]) {
+      expect(without.get(code)?.fix).not.toContain(
+        "See the native backend guide"
+      );
+    }
+    const selected = warnings(
+      (
+        await preflight(f, {
+          ...f.native,
+          ...GRANT,
+          HACK_NATIVE_CADDY_BINARY: join(f.root, "caddy"),
+          HACK_NATIVE_CADDY_SHA256: "a".repeat(64),
+          HACK_NATIVE_HTTPS_PORT: "18443",
+        })
+      ).report
+    );
+    expect(selected.has("route_binding_required")).toBe(false);
+    expect(selected.has("candidate_project_namespace")).toBe(true);
+    // The same selection from the machine settings file.
+    const home = join(f.root, "user-home");
+    const directory = join(
+      home,
+      ".config",
+      "hack",
+      "native",
+      "preflight-fixture"
+    );
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await chmod(join(home, ".config"), 0o700);
+    await chmod(join(home, ".config", "hack"), 0o700);
+    await chmod(join(home, ".config", "hack", "native"), 0o700);
+    await writeFile(
+      join(directory, "settings.json"),
+      JSON.stringify({
+        version: 1,
+        projectRoots: [f.project],
+        sharedSource: true,
+        https: {
+          caddyBinary: join(f.root, "caddy"),
+          caddySha256: "a".repeat(64),
+          port: 18_443,
+        },
+      }),
+      { mode: 0o600 }
+    );
+    const fromSettings = (await preflight(f, f.native)).report;
+    // The settings file was read: its sharedSource consent applies too.
+    expect(fromSettings.consent_needed).toEqual([]);
+    expect(codes(fromSettings, "cli")).toEqual([]);
+    expect(warnings(fromSettings).has("route_binding_required")).toBe(false);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
   "route admission, project-wide hosts and per-environment dependency files are checked as native up checks them",
   async () => {
     // A route missing its reviewed probe still refuses; authored labels alone are insufficient.

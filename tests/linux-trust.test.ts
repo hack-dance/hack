@@ -1467,3 +1467,19 @@ describe("Linux trust pre-sudo runtime path", () => {
     }
   });
 });
+
+test("pending system trust gets one plain sentence per root command (HACK-2329)", async () => {
+  const { describeLinuxSystemTrustSteps } = await import(
+    "../src/commands/global-linux-trust.ts"
+  );
+  expect(describeLinuxSystemTrustSteps({ family: "debian", count: 2 })).toEqual(
+    [
+      "Copy Hack's local CA certificate into the debian system trust anchors.",
+      "Rebuild the debian system trust bundle so programs that use it trust https://*.hack.",
+    ]
+  );
+  // An unexpected command list gets no summary rather than a wrong one.
+  expect(describeLinuxSystemTrustSteps({ family: "debian", count: 3 })).toEqual(
+    []
+  );
+});

@@ -1069,6 +1069,7 @@ export class Channel {
       }
       const code = await child.exited;
       if (child.signalCode) {
+        // @ts-expect-error bun-types 1.4 types signalCode as Signals | number; next.17 code kept as shipped.
         return 128 + (osConstants.signals[child.signalCode] ?? 0);
       }
       return code;

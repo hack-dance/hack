@@ -1,3 +1,4 @@
+import { nativePlatformRefusal } from "../backends/native-beta.ts";
 import { resolveNativeSetupSelection } from "../backends/native-runtime-client.ts";
 import {
   inspectNativeSetup,
@@ -54,6 +55,18 @@ const setupSpec = defineCommand({
 } as const);
 
 const setup = withHandler(setupSpec, async ({ ctx, args }) => {
+  const platformRefusal = nativePlatformRefusal({
+    platform: process.platform,
+    arch: process.arch,
+    env: process.env,
+  });
+  if (platformRefusal !== null) {
+    throw new HackCliError({
+      code: "E_UNSUPPORTED_PLATFORM",
+      message: platformRefusal,
+      detail: { platform: process.platform, arch: process.arch },
+    });
+  }
   const { archive, engineArchive, networkToolsDirectory } = args.options;
   const hasOffline = [archive, engineArchive, networkToolsDirectory].some(
     (value) => value !== undefined

@@ -1,63 +1,177 @@
 //! Fresh per-command values travel only over an upgraded exec's stdin.
+//!
+//! Stream I/O goes through [`super::exec_io`] (poll plus nonblocking send and recv), never
+//! `SO_RCVTIMEO`/`SO_SNDTIMEO`: macOS can reject those options once the peer has closed
+//! with output still queued, which a short command under host load does (HACK-2357).
+//! Every failure names its step and reason, and says whether the command can have run:
+//! the environment launcher starts the command only after the complete values document
+//! and EOF, so any failure before the last value byte is sent leaves it unrun.
 use crate::CandidateError;
 use std::{
     collections::BTreeMap,
-    io::{Read, Write},
+    io,
     net::Shutdown,
     os::unix::net::UnixStream,
     time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
-fn uncertain() -> CandidateError {
-    CandidateError::new(
-        "graph_service_exec_uncertain",
-        "Private exec completion is uncertain; command effects may have occurred. No request was replayed.",
-    )
+
+/// The private exec step that failed. Steps before [`Stage::Release`] cannot have run
+/// the command. Create, connect and start occur only in the macOS engine path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "environment-launcher")),
+    allow(dead_code)
+)]
+pub(super) enum Stage {
+    /// Creating the exec instance; nothing is started.
+    Create,
+    /// Connecting to the engine socket for the attached start.
+    Connect,
+    /// The attached start request and its upgrade response.
+    Start,
+    /// Reading the launcher's hello.
+    Hello,
+    /// Sending the values document, before its last byte.
+    Deliver,
+    /// Ending the values document (EOF). The launcher may already hold the whole
+    /// document, so the command may run.
+    Release,
+    /// Reading the command's output.
+    Output,
+    /// Inspecting the finished exec for its exit code.
+    Inspect,
 }
-fn remaining(deadline: Instant) -> Result<Duration, CandidateError> {
+impl Stage {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Connect => "connect",
+            Self::Start => "start",
+            Self::Hello => "hello",
+            Self::Deliver => "deliver",
+            Self::Release => "release",
+            Self::Output => "output",
+            Self::Inspect => "inspect",
+        }
+    }
+    fn may_have_run(self) -> bool {
+        matches!(self, Self::Release | Self::Output | Self::Inspect)
+    }
+}
+
+/// Why the step failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Reason {
+    /// The exec's deadline passed.
+    Deadline,
+    /// The peer closed or reset the stream early.
+    Closed,
+    /// Another transport error.
+    Io,
+    /// The peer sent something outside the protocol, or a response was malformed.
+    Protocol,
+}
+impl Reason {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Deadline => "deadline",
+            Self::Closed => "closed",
+            Self::Io => "io",
+            Self::Protocol => "protocol",
+        }
+    }
+}
+
+pub(super) fn failed(stage: Stage, reason: Reason) -> CandidateError {
+    let error = if stage.may_have_run() {
+        CandidateError::new(
+            "graph_service_exec_uncertain",
+            "Private exec completion is uncertain; command effects may have occurred. No request was replayed.",
+        )
+    } else {
+        CandidateError::new(
+            "graph_service_exec_not_run",
+            "Private exec stopped before the command ran, so it had no effects. No request was replayed; it is safe to retry.",
+        )
+    };
+    error.with_exec_stage(stage.name(), reason.name(), stage.may_have_run())
+}
+fn remaining(deadline: Instant, stage: Stage) -> Result<Duration, CandidateError> {
     deadline
         .checked_duration_since(Instant::now())
         .filter(|v| !v.is_zero())
-        .ok_or_else(uncertain)
+        .ok_or_else(|| failed(stage, Reason::Deadline))
+}
+fn io_failure(stage: Stage, error: &io::Error) -> CandidateError {
+    let reason = match error.kind() {
+        io::ErrorKind::TimedOut => Reason::Deadline,
+        io::ErrorKind::BrokenPipe
+        | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::NotConnected
+        | io::ErrorKind::UnexpectedEof => Reason::Closed,
+        _ => Reason::Io,
+    };
+    failed(stage, reason)
+}
+/// One bounded read; `Ok(0)` is EOF. Interrupted and not-yet-ready reads are retried
+/// until the deadline.
+fn read_some(
+    stream: &UnixStream,
+    bytes: &mut [u8],
+    deadline: Instant,
+    stage: Stage,
+) -> Result<usize, CandidateError> {
+    loop {
+        match super::exec_io::read(stream, bytes, deadline) {
+            Ok(count) => return Ok(count),
+            Err(error) if super::exec_io::retry(&error) => continue,
+            Err(error) => return Err(io_failure(stage, &error)),
+        }
+    }
 }
 fn read_exact_until(
-    stream: &mut UnixStream,
+    stream: &UnixStream,
     mut bytes: &mut [u8],
     deadline: Instant,
+    stage: Stage,
 ) -> Result<(), CandidateError> {
     while !bytes.is_empty() {
-        stream
-            .set_read_timeout(Some(remaining(deadline)?))
-            .map_err(|_| uncertain())?;
-        let count = stream.read(bytes).map_err(|_| uncertain())?;
+        let count = read_some(stream, bytes, deadline, stage)?;
         if count == 0 {
-            return Err(uncertain());
+            return Err(failed(stage, Reason::Closed));
         }
         bytes = &mut bytes[count..];
     }
-    remaining(deadline)?;
+    remaining(deadline, stage)?;
     Ok(())
 }
 fn frame(
-    stream: &mut UnixStream,
+    stream: &UnixStream,
     deadline: Instant,
     limit: usize,
 ) -> Result<(u8, Vec<u8>), CandidateError> {
-    stream
-        .set_read_timeout(Some(remaining(deadline)?))
-        .map_err(|_| uncertain())?;
+    let stage = Stage::Hello;
+    remaining(deadline, stage)?;
     let mut header = [0u8; 8];
-    read_exact_until(stream, &mut header, deadline)?;
-    let n = u32::from_be_bytes(header[4..8].try_into().map_err(|_| uncertain())?) as usize;
+    read_exact_until(stream, &mut header, deadline, stage)?;
+    let n = u32::from_be_bytes(
+        header[4..8]
+            .try_into()
+            .map_err(|_| failed(stage, Reason::Protocol))?,
+    ) as usize;
     if ![1, 2].contains(&header[0]) || header[1..4] != [0, 0, 0] || n > limit {
-        return Err(uncertain());
+        return Err(failed(stage, Reason::Protocol));
     }
     let mut bytes = vec![0; n];
-    stream
-        .set_read_timeout(Some(remaining(deadline)?))
-        .map_err(|_| uncertain())?;
-    read_exact_until(stream, &mut bytes, deadline)?;
+    read_exact_until(stream, &mut bytes, deadline, stage)?;
     Ok((header[0], bytes))
+}
+/// Whole seconds of `remaining`, rounded up, so a sub-second remainder still gives the
+/// launcher a future expiry. The host deadline still bounds the exec itself.
+fn expiry_seconds(remaining: Duration) -> u64 {
+    remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0)
 }
 fn deliver(
     stream: &mut UnixStream,
@@ -68,11 +182,11 @@ fn deliver(
     while !hello.ends_with(b"\n") {
         let (kind, bytes) = frame(stream, deadline, 64 - hello.len())?;
         if kind != 1 || bytes.is_empty() {
-            return Err(uncertain());
+            return Err(failed(Stage::Hello, Reason::Protocol));
         }
         hello.extend(bytes);
         if hello.len() >= 64 {
-            return Err(uncertain());
+            return Err(failed(Stage::Hello, Reason::Protocol));
         }
     }
     let now = std::str::from_utf8(&hello)
@@ -80,12 +194,12 @@ fn deliver(
         .and_then(|v| v.strip_prefix("HKEE1 "))
         .and_then(|v| v.strip_suffix('\n'))
         .and_then(|v| v.parse::<u64>().ok())
-        .ok_or_else(uncertain)?;
+        .ok_or_else(|| failed(Stage::Hello, Reason::Protocol))?;
     let expires = now
-        .checked_add(remaining(deadline)?.as_secs())
-        .ok_or_else(uncertain)?;
+        .checked_add(expiry_seconds(remaining(deadline, Stage::Deliver)?))
+        .ok_or_else(|| failed(Stage::Hello, Reason::Protocol))?;
     if expires <= now {
-        return Err(uncertain());
+        return Err(failed(Stage::Deliver, Reason::Deadline));
     }
     #[derive(serde::Serialize)]
     struct Envelope<'a> {
@@ -104,27 +218,42 @@ fn deliver(
                 values,
             },
         )
-        .map_err(|_| uncertain())?;
+        .map_err(|_| failed(Stage::Deliver, Reason::Protocol))?;
         cursor.position() as usize
     };
     bytes.truncate(used);
-    stream
-        .set_write_timeout(Some(remaining(deadline)?))
-        .map_err(|_| uncertain())?;
+    // Until the last byte is accepted the launcher holds an incomplete document, which
+    // never parses, so the command cannot run.
     let mut pending = bytes.as_slice();
     while !pending.is_empty() {
-        stream
-            .set_write_timeout(Some(remaining(deadline)?))
-            .map_err(|_| uncertain())?;
-        let count = stream.write(pending).map_err(|_| uncertain())?;
-        if count == 0 {
-            return Err(uncertain());
+        match super::exec_io::write(stream, pending, deadline) {
+            Ok(0) => return Err(failed(Stage::Deliver, Reason::Closed)),
+            Ok(count) => pending = &pending[count..],
+            Err(error) if super::exec_io::retry(&error) => continue,
+            Err(error) => return Err(io_failure(Stage::Deliver, &error)),
         }
-        pending = &pending[count..];
     }
-    remaining(deadline)?;
-    stream.shutdown(Shutdown::Write).map_err(|_| uncertain())?;
+    remaining(deadline, Stage::Release)?;
+    stream
+        .shutdown(Shutdown::Write)
+        .map_err(|error| io_failure(Stage::Release, &error))?;
     Ok(())
+}
+/// Read the attached output to EOF, keeping bytes the peer queued before it closed.
+/// Bounds total transport work as well as retained output; overflow is uncertain.
+fn read_output(stream: &UnixStream, deadline: Instant) -> Result<Vec<u8>, CandidateError> {
+    let mut raw = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let n = read_some(stream, &mut buffer, deadline, Stage::Output)?;
+        if n == 0 {
+            return Ok(raw);
+        }
+        if raw.len() + n > 4 * 1024 * 1024 {
+            return Err(failed(Stage::Output, Reason::Protocol));
+        }
+        raw.extend_from_slice(&buffer[..n]);
+    }
 }
 #[cfg(all(target_os = "macos", feature = "environment-launcher"))]
 impl super::Engine<'_> {
@@ -139,7 +268,7 @@ impl super::Engine<'_> {
         use reqwest::Method;
         use serde_json::json;
         if self.cleanup_only {
-            return Err(uncertain());
+            return Err(failed(Stage::Create, Reason::Protocol));
         }
         self.guest.verify()?;
         self.guest.before_effect()?;
@@ -148,53 +277,60 @@ impl super::Engine<'_> {
         if let Some(dir) = workdir {
             body["WorkingDir"] = json!(dir);
         }
-        let created = super::Transport::new(&socket, remaining(deadline)?)?.request(
-            Method::POST,
-            &format!("/v1.53/containers/{container}/exec"),
-            Some(&body),
-        )?;
+        let created = super::Transport::new(&socket, remaining(deadline, Stage::Create)?)?
+            .request(
+                Method::POST,
+                &format!("/v1.53/containers/{container}/exec"),
+                Some(&body),
+            )?;
         let id = created["Id"]
             .as_str()
             .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
-            .ok_or_else(uncertain)?;
+            .ok_or_else(|| failed(Stage::Create, Reason::Protocol))?;
         self.guest.verify()?;
         self.guest.before_effect()?;
         let mut stream =
-            crate::provider::agent::connect_until(&socket, deadline).map_err(|_| uncertain())?;
-        super::relay_exec::start(&mut stream, id, deadline).map_err(|_| uncertain())?;
+            crate::provider::agent::connect_until(&socket, deadline).map_err(|_| {
+                failed(
+                    Stage::Connect,
+                    if Instant::now() >= deadline {
+                        Reason::Deadline
+                    } else {
+                        Reason::Io
+                    },
+                )
+            })?;
+        super::relay_exec::start(&mut stream, id, deadline).map_err(|_| {
+            failed(
+                Stage::Start,
+                if Instant::now() >= deadline {
+                    Reason::Deadline
+                } else {
+                    Reason::Protocol
+                },
+            )
+        })?;
         deliver(&mut stream, deadline, values)?;
-        // Bound total transport work as well as retained output. Overflow is uncertain.
-        let mut raw = Vec::new();
-        let mut buffer = [0u8; 8192];
-        loop {
-            stream
-                .set_read_timeout(Some(remaining(deadline)?))
-                .map_err(|_| uncertain())?;
-            let n = stream.read(&mut buffer).map_err(|_| uncertain())?;
-            if n == 0 {
-                break;
-            }
-            if raw.len() + n > 4 * 1024 * 1024 {
-                return Err(uncertain());
-            }
-            raw.extend_from_slice(&buffer[..n]);
-        }
-        let (stdout, stderr, truncated) =
-            super::service_exec::decode(&raw).map_err(|_| uncertain())?;
-        self.guest.verify().map_err(|_| uncertain())?;
-        let inspected = super::Transport::new(&socket, remaining(deadline)?)?
+        let raw = read_output(&stream, deadline)?;
+        let (stdout, stderr, truncated) = super::service_exec::decode(&raw)
+            .map_err(|_| failed(Stage::Output, Reason::Protocol))?;
+        self.guest
+            .verify()
+            .map_err(|_| failed(Stage::Inspect, Reason::Io))?;
+        let inspected = super::Transport::new(&socket, remaining(deadline, Stage::Inspect)?)?
             .request(Method::GET, &format!("/v1.53/exec/{id}/json"), None)
-            .map_err(|_| uncertain())?;
+            .map_err(|_| failed(Stage::Inspect, Reason::Io))?;
         if inspected["ID"] != id
             || inspected["ContainerID"] != container
             || inspected["Running"] != false
         {
-            return Err(uncertain());
+            return Err(failed(Stage::Inspect, Reason::Protocol));
         }
         let exit_code = inspected["ExitCode"]
             .as_i64()
             .filter(|v| (0..=255).contains(v))
-            .ok_or_else(uncertain)? as i32;
+            .ok_or_else(|| failed(Stage::Inspect, Reason::Protocol))?
+            as i32;
         Ok(super::service_exec::ExecOutput {
             exit_code,
             stdout,
@@ -207,6 +343,7 @@ impl super::Engine<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
     fn send(stream: &mut UnixStream, body: &[u8]) {
         let mut header = [0u8; 8];
         header[0] = 1;
@@ -216,7 +353,7 @@ mod tests {
     }
     #[test]
     fn partial_frame_cannot_extend_deadline() {
-        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        let (host, mut guest) = UnixStream::pair().unwrap();
         let worker = std::thread::spawn(move || {
             for byte in [1, 0, 0, 0, 0, 0, 0, 8] {
                 if guest.write_all(&[byte]).is_err() {
@@ -226,7 +363,7 @@ mod tests {
             }
         });
         let started = Instant::now();
-        assert!(frame(&mut host, started + Duration::from_millis(50), 64).is_err());
+        assert!(frame(&host, started + Duration::from_millis(50), 64).is_err());
         assert!(started.elapsed() < Duration::from_millis(140));
         drop(host);
         worker.join().unwrap();
@@ -298,5 +435,133 @@ mod tests {
             .is_err()
         );
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    fn stage_of(error: &CandidateError) -> serde_json::Value {
+        serde_json::to_value(error).unwrap()["exec_stage"].clone()
+    }
+    #[test]
+    fn failures_name_their_stage_and_whether_the_command_can_have_run() {
+        // The launcher never sends a hello: the deadline passes in the hello stage.
+        let (mut host, _guest) = UnixStream::pair().unwrap();
+        let error = deliver(
+            &mut host,
+            Instant::now() + Duration::from_millis(30),
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "graph_service_exec_not_run");
+        assert_eq!(
+            stage_of(&error),
+            serde_json::json!({"version":1,"stage":"hello","reason":"deadline","command_may_have_run":false})
+        );
+        // The launcher closes after its hello: delivery cannot finish, so nothing ran.
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        send(&mut guest, b"HKEE1 100\n");
+        drop(guest);
+        let error = deliver(
+            &mut host,
+            Instant::now() + Duration::from_secs(2),
+            &BTreeMap::from([("TOKEN".into(), "synthetic-private-value".into())]),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "graph_service_exec_not_run");
+        assert_eq!(stage_of(&error)["stage"], "deliver");
+        assert_eq!(stage_of(&error)["reason"], "closed");
+        // Output and inspection failures may follow a command that ran.
+        for stage in [Stage::Release, Stage::Output, Stage::Inspect] {
+            let error = failed(stage, Reason::Io);
+            assert_eq!(error.code, "graph_service_exec_uncertain");
+            assert_eq!(stage_of(&error)["command_may_have_run"], true);
+        }
+        // A malformed frame is a protocol failure, never a value.
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        guest.write_all(&[9, 0, 0, 0, 0, 0, 0, 1, b'x']).unwrap();
+        let error = frame(&host, Instant::now() + Duration::from_secs(1), 64).unwrap_err();
+        assert_eq!(stage_of(&error)["reason"], "protocol");
+        assert!(!serde_json::to_string(&error).unwrap().contains("synthetic"));
+    }
+    #[test]
+    fn output_queued_before_the_peer_closes_is_read_to_eof() {
+        // HACK-2357: a short command finishes and the engine closes the stream while its
+        // output is still queued for a slow host. Every queued byte is still delivered.
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        let output: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let writer = {
+            let output = output.clone();
+            std::thread::spawn(move || {
+                guest.write_all(&output).unwrap();
+            })
+        };
+        // The host is late: the peer has written and closed before the first read.
+        std::thread::sleep(Duration::from_millis(50));
+        let raw = read_output(&host, Instant::now() + Duration::from_secs(5)).unwrap();
+        writer.join().unwrap();
+        assert_eq!(raw, output);
+    }
+    #[test]
+    fn a_sub_second_remainder_still_gives_the_launcher_a_future_expiry() {
+        assert_eq!(expiry_seconds(Duration::from_millis(1)), 1);
+        assert_eq!(expiry_seconds(Duration::from_millis(1500)), 2);
+        assert_eq!(expiry_seconds(Duration::from_secs(3)), 3);
+    }
+    /// One full fake conversation: hello, values to EOF, output, close.
+    fn conversation(delay: Duration) -> Result<Vec<u8>, CandidateError> {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        let launcher = std::thread::spawn(move || {
+            send(&mut guest, b"HKEE1 7\n");
+            let mut values = Vec::new();
+            guest.read_to_end(&mut values).unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&values).unwrap();
+            assert_eq!(parsed["values"]["TOKEN"], "synthetic-private-value");
+            let mut out = vec![1u8, 0, 0, 0, 0, 0, 0, 3];
+            out.extend_from_slice(b"ok\n");
+            guest.write_all(&out).unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        deliver(
+            &mut host,
+            deadline,
+            &BTreeMap::from([("TOKEN".into(), "synthetic-private-value".into())]),
+        )?;
+        std::thread::sleep(delay);
+        let raw = read_output(&host, deadline)?;
+        launcher.join().unwrap();
+        Ok(raw)
+    }
+    #[test]
+    fn many_private_execs_on_a_cpu_starved_host_all_complete() {
+        // Saturate every core while many exec conversations run, each with the host
+        // reading its output only after the peer has closed.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spinners: Vec<_> = (0..std::thread::available_parallelism().map_or(4, |n| n.get() * 2))
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                })
+            })
+            .collect();
+        let workers: Vec<_> = (0..8)
+            .map(|worker| {
+                std::thread::spawn(move || {
+                    for round in 0..25u64 {
+                        let delay = Duration::from_millis((worker * 7 + round) % 5);
+                        assert_eq!(
+                            conversation(delay).unwrap(),
+                            [1u8, 0, 0, 0, 0, 0, 0, 3, b'o', b'k', b'\n']
+                        );
+                    }
+                })
+            })
+            .collect();
+        let results: Vec<_> = workers.into_iter().map(|w| w.join()).collect();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for spinner in spinners {
+            spinner.join().unwrap();
+        }
+        assert!(results.iter().all(Result::is_ok));
     }
 }

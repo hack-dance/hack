@@ -31,6 +31,8 @@ pub enum Pane {
     Setup,
     /// hackd and always-on (`machine_view`).
     Hackd,
+    /// The upgrade review flow (`upgrade_view`).
+    Upgrade,
 }
 
 pub fn render(pane: &DoctorPane, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {

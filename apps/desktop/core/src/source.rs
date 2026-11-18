@@ -364,6 +364,54 @@ pub trait Source: Send + Sync {
         None
     }
 
+    /// `hack upgrade check --json`: read-only.
+    ///
+    /// # Errors
+    /// The CLI could not run or printed no report this app reads.
+    fn upgrade_check(&self) -> Result<crate::upgrade::CheckReport, String> {
+        Err("Upgrade checks are unavailable for this source".into())
+    }
+
+    /// `hack upgrade review --json`: read-only.
+    ///
+    /// # Errors
+    /// As [`Self::upgrade_check`].
+    fn upgrade_review(&self) -> Result<crate::upgrade::Review, String> {
+        Err("Upgrade review is unavailable for this source".into())
+    }
+
+    /// `hack upgrade snapshot --json`: keeps a private copy of the files an
+    /// upgrade changes, under the CLI's home. A machine action.
+    ///
+    /// # Errors
+    /// As [`Self::upgrade_check`].
+    fn upgrade_snapshot(&self) -> Result<crate::upgrade::Snapshot, String> {
+        Err("Upgrade snapshots are unavailable for this source".into())
+    }
+
+    /// The CLI's snapshots (`hack upgrade rollback --json`, no manifest):
+    /// read-only.
+    ///
+    /// # Errors
+    /// As [`Self::upgrade_check`].
+    fn upgrade_snapshots(&self) -> Result<crate::upgrade::SnapshotList, String> {
+        Err("Upgrade snapshots are unavailable for this source".into())
+    }
+
+    /// Put back one listed snapshot's files (`hack upgrade rollback
+    /// --rollback-manifest <m> --json`), never with `--overwrite`. A machine
+    /// action; only a manifest [`crate::upgrade::SnapshotEntry::manifest`]
+    /// accepts is passed.
+    ///
+    /// # Errors
+    /// As [`Self::upgrade_check`], or a manifest the CLI does not keep.
+    fn upgrade_restore(
+        &self,
+        _entry: &crate::upgrade::SnapshotEntry,
+    ) -> Result<crate::upgrade::Rollback, String> {
+        Err("Upgrade restore is unavailable for this source".into())
+    }
+
     /// Explicit user recovery only; never called by a poll.
     /// # Errors
     /// Failed or unavailable daemon command.
@@ -616,6 +664,18 @@ fn read_doctor(
 /// # Errors
 /// No CLI selected, or a context that cannot be checked.
 pub(crate) fn checked_daemon_runner(runner: &CliRunner) -> Result<CliRunner, String> {
+    let (checked, program) = checked_cli_runner(runner)?;
+    Ok(checked.with_env("HACK_MCP_COMMAND", &program))
+}
+
+/// `runner`'s CLI pinned to the executable it resolves to now, in the
+/// checked execution context (a clean environment with only its allowlist
+/// and a `PATH` of directories no other user can change), with that
+/// executable's path.
+///
+/// # Errors
+/// No CLI selected, or a context that cannot be checked.
+pub(crate) fn checked_cli_runner(runner: &CliRunner) -> Result<(CliRunner, String), String> {
     let program = runner
         .program_path()
         .ok_or("No Hack CLI is selected")?
@@ -623,9 +683,7 @@ pub(crate) fn checked_daemon_runner(runner: &CliRunner) -> Result<CliRunner, Str
         .into_string()
         .map_err(|_| "The CLI path is not UTF-8".to_owned())?;
     let context = crate::execution::ExecutionContext::capture(runner)?.with_controlled_path()?;
-    Ok(context
-        .runner(&program)?
-        .with_env("HACK_MCP_COMMAND", &program))
+    Ok((context.runner(&program)?, program))
 }
 
 /// `hack daemon status --json` as JSON, without starting the daemon. Exit
@@ -1620,6 +1678,32 @@ impl LiveSource {
     const READ: Duration = Duration::from_secs(15);
     /// `hack daemon status --json` when the versions differ.
     const DAEMON_STATUS: Duration = Duration::from_secs(10);
+    /// `hack upgrade check` and `review` probe the machine and every
+    /// registered project.
+    const UPGRADE_READ: Duration = Duration::from_secs(180);
+    /// Snapshot, the snapshot listing and restore copy files.
+    const UPGRADE_WRITE: Duration = Duration::from_secs(120);
+
+    /// Run `hack upgrade <sub> --json --no-interactive` with the selected CLI
+    /// in its checked context, without starting hackd. No `--path`: upgrade
+    /// commands are machine-wide and refuse it. Returns stdout whatever the exit code: the CLI reports
+    /// refusals and a not-ready check as an envelope with exit 1.
+    fn run_upgrade(&self, sub: &[&str], timeout: Duration) -> Result<String, String> {
+        let (runner, _) = checked_cli_runner(&self.runner.fixed())?;
+        let mut args = vec!["upgrade"];
+        args.extend_from_slice(sub);
+        args.extend(["--json", "--no-interactive"]);
+        let (out, err, code) = runner
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .run_raw(&args, None, timeout)
+            .map_err(|e| e.to_string())?;
+        if out.trim().is_empty() {
+            let exit = code.map_or_else(|| "was killed".into(), |n| format!("exited {n}"));
+            let detail: String = err.trim().chars().take(300).collect();
+            return Err(format!("hack upgrade {} {exit}. {detail}", sub[0]));
+        }
+        Ok(out)
+    }
     /// After this long a lifecycle command is only *reported* as slow
     /// (`LIFECYCLE_WARN_AFTER`); the app never terminates it. The CLI owns
     /// lifecycle timeouts and retires the detached builds it starts; killing
@@ -1758,6 +1842,37 @@ impl Source for LiveSource {
             .run_raw(&["daemon", "status", "--json"], None, Self::DAEMON_STATUS)
             .ok()?;
         serde_json::from_str(&out).ok()
+    }
+
+    fn upgrade_check(&self) -> Result<crate::upgrade::CheckReport, String> {
+        crate::upgrade::CheckReport::parse(&self.run_upgrade(&["check"], Self::UPGRADE_READ)?)
+    }
+
+    fn upgrade_review(&self) -> Result<crate::upgrade::Review, String> {
+        crate::upgrade::envelope(&self.run_upgrade(&["review"], Self::UPGRADE_READ)?)
+    }
+
+    fn upgrade_snapshot(&self) -> Result<crate::upgrade::Snapshot, String> {
+        crate::upgrade::envelope(&self.run_upgrade(&["snapshot"], Self::UPGRADE_WRITE)?)
+    }
+
+    fn upgrade_snapshots(&self) -> Result<crate::upgrade::SnapshotList, String> {
+        crate::upgrade::envelope(&self.run_upgrade(&["rollback"], Self::UPGRADE_WRITE)?)
+    }
+
+    fn upgrade_restore(
+        &self,
+        entry: &crate::upgrade::SnapshotEntry,
+    ) -> Result<crate::upgrade::Rollback, String> {
+        let manifest = entry
+            .manifest()
+            .and_then(|p| p.to_str())
+            .ok_or("That snapshot's manifest is not one the CLI keeps")?;
+        // Never --overwrite: a file changed since the snapshot stays as it is.
+        crate::upgrade::envelope(&self.run_upgrade(
+            &["rollback", "--rollback-manifest", manifest],
+            Self::UPGRADE_WRITE,
+        )?)
     }
 
     fn recover_daemon(&self, action: DaemonRecovery) -> Result<(), String> {
@@ -2177,6 +2292,32 @@ impl Source for FixtureSource {
 
     fn daemon_status(&self) -> Option<crate::models::DaemonStatus> {
         fixtures::daemon_status(self.0)
+    }
+
+    fn upgrade_check(&self) -> Result<crate::upgrade::CheckReport, String> {
+        fixtures::upgrade_check(self.0)
+    }
+
+    fn upgrade_review(&self) -> Result<crate::upgrade::Review, String> {
+        Ok(fixtures::upgrade_review())
+    }
+
+    fn upgrade_snapshot(&self) -> Result<crate::upgrade::Snapshot, String> {
+        Ok(fixtures::upgrade_snapshot())
+    }
+
+    fn upgrade_snapshots(&self) -> Result<crate::upgrade::SnapshotList, String> {
+        Ok(fixtures::upgrade_snapshots())
+    }
+
+    fn upgrade_restore(
+        &self,
+        entry: &crate::upgrade::SnapshotEntry,
+    ) -> Result<crate::upgrade::Rollback, String> {
+        entry
+            .manifest()
+            .ok_or("That snapshot's manifest is not one the CLI keeps")?;
+        Ok(fixtures::upgrade_restore())
     }
 
     fn doctor_runs(&self, _projects: &[DoctorTarget]) -> Vec<DoctorRun> {
@@ -2656,6 +2797,73 @@ esac
             !status_ran,
             "no daemon command ran outside the checked context"
         );
+    }
+
+    #[test]
+    fn upgrade_commands_run_the_checked_cli_and_restore_never_overwrites() {
+        let dir = std::env::temp_dir().join(format!(
+            "hack-desktop-upgrade-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hack = dir.join("hack");
+        let log = dir.join("calls");
+        let check = include_str!("../tests/fixtures/upgrade/check-v2.json").replace('\'', "");
+        crate::test_support::script(
+            &hack,
+            format!(
+                r#"#!/bin/sh
+echo "$* | stray=${{STRAY_SETTING:-unset}}" >> '{log}'
+case "$2" in
+  check) printf '%s' '{check}'; exit 1 ;;
+  rollback) echo '{{"ok":true,"data":{{"status":"restored","results":[{{"path":"/a","label":"a","status":"restored"}}]}}}}' ;;
+esac
+"#,
+                log = log.display(),
+                check = check.replace('\n', " ")
+            ),
+        );
+        let src = LiveSource::new(
+            fixture_runner(&hack)
+                .with_env("HOME", &dir.to_string_lossy())
+                .with_env("HACK_HOME", &dir.to_string_lossy())
+                .with_env("STRAY_SETTING", "from the app's environment"),
+            None,
+        );
+        let report = src
+            .upgrade_check()
+            .expect("exit 1 still carries the report");
+        assert!(report.ready);
+        let manifest = format!("{}/upgrade/snapshots/s1/manifest.json", dir.display());
+        let listed = crate::upgrade::SnapshotEntry {
+            id: "s1".into(),
+            manifest_path: manifest.clone(),
+            ..crate::upgrade::SnapshotEntry::default()
+        };
+        assert_eq!(src.upgrade_restore(&listed).unwrap().status, "restored");
+        let unlisted = crate::upgrade::SnapshotEntry {
+            id: "s1".into(),
+            manifest_path: "/tmp/elsewhere/manifest.json".into(),
+            ..crate::upgrade::SnapshotEntry::default()
+        };
+        assert!(src.upgrade_restore(&unlisted).is_err(), "never run");
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        let lines: Vec<&str> = calls.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "upgrade check --json --no-interactive | stray=unset".to_owned(),
+                format!(
+                    "upgrade rollback --rollback-manifest {manifest} --json --no-interactive | stray=unset"
+                ),
+            ]
+        );
+        assert!(!calls.contains("--overwrite") && !calls.contains("--path"));
     }
 
     #[test]

@@ -62,6 +62,36 @@ test("restart preserves an explicit base env selection over stored runtime state
   expect(resolved).toBeNull();
 });
 
+test("restart reuses a persisted base selection instead of the configured default (HACK-2280)", async () => {
+  const projectDir = await createProjectDirWithRuntimeState({
+    composeProject: "restart-env",
+    envName: null,
+  });
+
+  const resolved = await resolveStoredRuntimeEnvName({
+    requestedEnvName: undefined,
+    projectDir,
+    composeProject: "restart-env",
+  });
+
+  expect(resolved).toBeNull();
+});
+
+test("restart without runtime state leaves the default overlay to the caller", async () => {
+  const projectDir = await createProjectDirWithRuntimeState({
+    composeProject: "other-instance",
+    envName: "docker",
+  });
+
+  const resolved = await resolveStoredRuntimeEnvName({
+    requestedEnvName: undefined,
+    projectDir,
+    composeProject: "restart-env",
+  });
+
+  expect(resolved).toBeUndefined();
+});
+
 test("restart from the primary checkout targets only the base compose instance", () => {
   expect(
     resolveRestartTarget({

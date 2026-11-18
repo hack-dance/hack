@@ -1,7 +1,11 @@
 import { expect, test } from "bun:test";
 import {
   declaredComposeProfiles,
-  nativeInactiveProfileNotice,
+  nativeInactiveServices,
+  nativeLeftOutNotice,
+  nativeRetainedProfilesNotice,
+  parseNativeProfileNotice,
+  renderNativeProfileNotice,
   selectNativeProfiles,
 } from "../src/backends/native-profile-selection.ts";
 
@@ -81,28 +85,62 @@ test("declared profiles are read from every service, deduplicated and sorted", (
   expect(declaredComposeProfiles("not a document")).toEqual([]);
 });
 
-test("the notice names inactive services, the selection and its source; none when all are active", () => {
-  const plan = {
+test("the left-out notice names inactive services, the selection and its source; none when all are active", () => {
+  const services = nativeInactiveServices({
     services: {
       web: { active: true },
       worker: { active: false },
       search: { active: false },
     },
-  };
+  });
+  expect(services).toEqual(["search", "worker"]);
   expect(
-    nativeInactiveProfileNotice({
-      plan,
-      selection: { profiles: ["ops"], source: "managed-env" },
-    })
+    nativeLeftOutNotice({ services, profiles: ["ops"], source: "managed-env" })
   ).toBe(
     "Not starting 2 services whose Compose profiles are not selected: search, worker. Selected profiles: ops (from COMPOSE_PROFILES in the managed env). Select others with --profile or COMPOSE_PROFILES."
   );
   expect(
-    nativeInactiveProfileNotice({
-      plan: { services: { web: { active: true } } },
-      selection: { profiles: [], source: "none" },
-    })
+    nativeLeftOutNotice({ services: [], profiles: [], source: "none" })
   ).toBeNull();
+});
+
+test("a retained run that keeps other profiles than the env selects says so and how to change them", () => {
+  expect(
+    nativeRetainedProfilesNotice({
+      retained: [],
+      selected: ["jobs", "search"],
+      source: "managed-env",
+    })
+  ).toBe(
+    "COMPOSE_PROFILES in the managed env selects profiles jobs, search, but this instance's retained run uses none; it keeps those. To start it with the new profiles, stop it with hack down --remove-data (this deletes its data volumes) and run hack up again."
+  );
+});
+
+test("profile notices cross IPC as names only; anything else is dropped", () => {
+  const leftOut = {
+    kind: "left-out",
+    services: ["worker"],
+    profiles: [],
+    source: "none",
+  } as const;
+  expect(parseNativeProfileNotice(leftOut)).toEqual(leftOut);
+  expect(renderNativeProfileNotice(leftOut)).toContain("worker");
+  const retained = {
+    kind: "retained",
+    retained: [],
+    selected: ["jobs"],
+    source: "shell",
+  } as const;
+  expect(parseNativeProfileNotice(retained)).toEqual(retained);
+  for (const bad of [
+    { ...leftOut, services: ["has space"] },
+    { ...leftOut, source: "elsewhere" },
+    { ...retained, source: "cli" },
+    { ...leftOut, services: Array.from({ length: 300 }, (_, i) => `s${i}`) },
+    "Not starting everything",
+  ]) {
+    expect(parseNativeProfileNotice(bad)).toBeNull();
+  }
 });
 
 test("a project's managed env selects native profiles, overriding the shell (HACK-2338 item 8)", async () => {

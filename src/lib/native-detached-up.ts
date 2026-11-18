@@ -1,6 +1,11 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
+  type NativeProfileNotice,
+  parseNativeProfileNotice,
+  renderNativeProfileNotice,
+} from "../backends/native-profile-selection.ts";
+import {
   NATIVE_IDLE_POOL_NOTE,
   NATIVE_PROVIDER_PIN_MESSAGE,
 } from "../backends/native-runtime-client.ts";
@@ -30,6 +35,7 @@ type Ready = {
   readonly completed?: readonly string[];
 };
 let publishReady: ((ready: Ready) => void) | undefined;
+let publishProfileNotice: ((notice: NativeProfileNotice) => void) | undefined;
 let publishShellVariables:
   | ((names: readonly string[], ignoredRootDotenv?: boolean) => void)
   | undefined;
@@ -152,6 +158,20 @@ function startupFailureError(failure: StartupFailure): HackCliError {
   });
 }
 
+/**
+ * Hands a profile notice to the launcher when this is a detached owner, whose
+ * stderr is not shown; false otherwise, so the caller prints it itself.
+ */
+export function nativeDetachedUpProfileNotice(
+  notice: NativeProfileNotice
+): boolean {
+  if (!publishProfileNotice) {
+    return false;
+  }
+  publishProfileNotice(notice);
+  return true;
+}
+
 /** Names-only notice: never accepts or forwards an environment map or output text. */
 export function nativeDetachedUpShellVariables(
   names: readonly string[],
@@ -238,6 +258,10 @@ export async function runNativeDetachedOwner(opts: {
           readonly ignoredRootDotenv?: true;
         }
       | { readonly kind: "failure"; readonly data: StartupFailure }
+      | {
+          readonly kind: "profile-notice";
+          readonly notice: NativeProfileNotice;
+        }
   ): Promise<void> =>
     new Promise((resolve) => {
       if (!(process.send && process.connected)) {
@@ -286,6 +310,11 @@ export async function runNativeDetachedOwner(opts: {
       });
     }
   };
+  publishProfileNotice = (notice) => {
+    if (!stopping) {
+      send({ kind: "profile-notice", notice });
+    }
+  };
   // A fresh owner starts with no names from any earlier attempt.
   failedStartupServices = [];
   publishFailure = async (data) => {
@@ -299,6 +328,7 @@ export async function runNativeDetachedOwner(opts: {
     stopping = true;
     publishReady = undefined;
     publishShellVariables = undefined;
+    publishProfileNotice = undefined;
     publishFailure = undefined;
     failedStartupServices = [];
     process.off("disconnect", disconnected);
@@ -413,6 +443,14 @@ export async function startNativeDetachedUp(opts: {
     if (failure) {
       failed = true;
       result.reject(startupFailureError(failure));
+      return;
+    }
+    if (isRecord(value) && value.kind === "profile-notice") {
+      const notice = parseNativeProfileNotice(value.notice);
+      const line = notice ? renderNativeProfileNotice(notice) : null;
+      if (line) {
+        process.stderr.write(`${line}\n`);
+      }
       return;
     }
     if (isRecord(value) && value.kind === "shell-variables") {

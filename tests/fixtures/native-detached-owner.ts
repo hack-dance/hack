@@ -10,6 +10,7 @@ import { ClosedCliError } from "../../src/lib/cli-result.ts";
 import {
   nativeDetachedUpFailedServices,
   nativeDetachedUpFailure,
+  nativeDetachedUpProfileNotice,
   nativeDetachedUpReady,
   nativeDetachedUpShellVariables,
   runNativeDetachedOwner,
@@ -357,9 +358,18 @@ if (role === "channel-holder") {
         // handoff, with the real owner handler still processing that accept.
         process.prependListener("message", cancelAtAccept);
       }
+      if (mode === "profile-notice") {
+        nativeDetachedUpProfileNotice({
+          kind: "left-out",
+          services: ["jobs"],
+          profiles: [],
+          source: "none",
+        });
+      }
       if (
         [
           "ready",
+          "profile-notice",
           "cancel-at-accept",
           "shell-names",
           "shell-names-empty",

@@ -3631,6 +3631,36 @@ test("retained startup admits only the acknowledged original frontend before eff
   expect(events).toContain("save");
 });
 
+test("a retained run keeps its profiles when the managed env now selects others, and says so (HACK-2338 item 8)", async () => {
+  const { opts, saved } = await retainedFinalizationFixture();
+  await acknowledgeRetainedFrontend(opts.scope, saved);
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
+  const asked: unknown[] = [];
+  expect(
+    await startNativeProject({
+      ...opts,
+      profiles: undefined,
+      resolveProfiles: (envName) => {
+        asked.push(envName);
+        return Promise.resolve({
+          profiles: ["jobs"],
+          source: "managed-env" as const,
+        });
+      },
+    })
+  ).toBe(0);
+  // Resolved for the retained run's own env, not the configured default.
+  expect(asked).toEqual([saved.effectiveEnvName]);
+  const retained =
+    (saved.profiles ?? []).length === 0
+      ? "none"
+      : (saved.profiles ?? []).join(", ");
+  expect(notices).toContain(
+    `COMPOSE_PROFILES in the managed env selects profiles jobs, but this instance's retained run uses ${retained}; it keeps those. To start it with the new profiles, stop it with hack down --remove-data (this deletes its data volumes) and run hack up again.`
+  );
+});
+
 /**
  * HACK-1952: a retained startup in the owning home and a release of its mapping from
  * another native home must not interleave. The startup is admitted under the owning
@@ -4896,8 +4926,14 @@ test("a service outside the selected profiles is not pulled, and the start says 
     expect(
       await startNativeProject({
         ...opts,
-        profiles: [...selected],
-        profileSource: selected.length > 0 ? "managed-env" : "none",
+        // No --profile: the managed env's COMPOSE_PROFILES decides.
+        profiles: undefined,
+        resolveProfiles: () =>
+          Promise.resolve(
+            selected.length > 0
+              ? { profiles: [...selected], source: "managed-env" as const }
+              : { profiles: [], source: "none" as const }
+          ),
       })
     ).toBe(0);
     if (selected.length === 0) {

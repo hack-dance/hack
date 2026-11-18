@@ -482,12 +482,14 @@ With it:
   Compose under Hack: `--profile`; else `COMPOSE_PROFILES` in the managed env of the
   selected env (for example `.hack/hack.env.default.yaml`), which overrides the shell;
   else `COMPOSE_PROFILES` in the shell. `*` selects every declared profile. The
-  project's root `.env` is not read on native, so it is not a source. `hack up` and
-  `hack restart` print one line naming the services the selection leaves out and the
-  selected profiles. A restart without `--profile` uses a profile set the managed env
-  or shell selects, and keeps the retained set when neither does. A retained run
-  started with other profiles refuses `up` (it never replaces retained data); use
-  `hack restart`.
+  project's root `.env` is not read on native, so it is not a source. This selects
+  the profiles of a fresh start. A retained run keeps the profiles it started with,
+  because `up` and `restart` never replace its data with another selection; when the
+  environment now selects others (read for the run's own env), `up`, `up -d` and
+  `up -d` on a running graph print a notice naming both and how to change them
+  (`hack down --remove-data`, which deletes the data volumes, then `hack up`). An
+  explicit `--profile` that differs still refuses. `hack up` (foreground or detached)
+  prints one line naming the services the selection leaves out.
 - As with Compose `up`, only services in the selected profiles are built, pulled and
   pinned. A service in a profile you did not select is neither built nor acquired from
   its registry, and restore and restart need no image for it; selecting its profile in

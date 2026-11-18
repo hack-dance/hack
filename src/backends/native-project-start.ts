@@ -11,6 +11,7 @@ import {
 import { isRecord } from "../lib/guards.ts";
 import {
   nativeDetachedUpFailedServices,
+  nativeDetachedUpProfileNotice,
   nativeDetachedUpShellVariables,
   nativeShellForwardingNotice,
 } from "../lib/native-detached-up.ts";
@@ -48,8 +49,11 @@ import {
 } from "./native-prepared-base.ts";
 import { nativePrivateEnvironmentPayload } from "./native-private-environment-payload.ts";
 import {
-  type NativeProfileSource,
-  nativeInactiveProfileNotice,
+  type NativeProfileNotice,
+  type NativeProfileNoticeSource,
+  type NativeProfileSelection,
+  nativeInactiveServices,
+  renderNativeProfileNotice,
 } from "./native-profile-selection.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
@@ -1532,7 +1536,7 @@ function retainedStartupSelection(opts: {
     (opts.gcloudWithheld === true && run.gcloud != null)
   ) {
     throw new ClosedCliError(
-      "Native up cannot change the retained run's environment, profiles, AWS profile or gcloud selection; data was not replaced. Run hack restart to start it with the new selection, or select the retained one (profiles can also come from COMPOSE_PROFILES in the managed env)."
+      "Native up cannot change the retained run's environment, profiles, AWS profile or gcloud selection; data was not replaced. Omit the option to keep the retained selection, or stop the instance with hack down --remove-data (this deletes its data volumes) to start it with another."
     );
   }
   return {
@@ -1883,10 +1887,14 @@ type NativeProjectStartOptions = {
   readonly envName?: string | null;
   readonly profiles?: readonly string[];
   /**
-   * Where `profiles` came from (`--profile`, managed env, shell), for the
-   * notice naming services left out by profile; omitted reads as `--profile`.
+   * With `profiles` omitted, resolves Compose's own profile sources
+   * (`COMPOSE_PROFILES` in the managed env of `envName`, then the shell) for
+   * the effective env: the requested one for a fresh start, the retained
+   * run's for a retained start (HACK-2338 item 8).
    */
-  readonly profileSource?: NativeProfileSource;
+  readonly resolveProfiles?: (
+    envName: string | null | undefined
+  ) => Promise<NativeProfileSelection>;
   readonly sharedSource: boolean;
   readonly restore?: NativeProjectRun;
   readonly onReady?: (services: {
@@ -1978,29 +1986,68 @@ async function staticReviewInput(opts: {
   ).input;
 }
 
-/**
- * Compose leaves unselected-profile services out silently; native names them
- * (HACK-2338 item 8). Profiles kept from a retained run are labeled as such.
- */
-function reportNativeInactiveProfileServices(opts: {
-  readonly plan: unknown;
-  readonly profiles: readonly string[];
-  readonly requestedProfiles: readonly string[];
-  readonly source: NativeProfileSource | undefined;
-  readonly warn: (line: string) => void;
-}): void {
-  const retained =
-    JSON.stringify(opts.profiles) !== JSON.stringify(opts.requestedProfiles);
-  const notice = nativeInactiveProfileNotice({
-    plan: opts.plan,
-    selection: {
-      profiles: opts.profiles,
-      source: retained ? "retained" : (opts.source ?? "cli"),
-    },
-  });
-  if (notice) {
-    opts.warn(notice);
+/** Prints a profile notice, or hands it to the launcher of a detached owner. */
+function emitNativeProfileNotice(
+  notice: NativeProfileNotice,
+  warn: (line: string) => void
+): void {
+  if (nativeDetachedUpProfileNotice(notice)) {
+    return;
   }
+  const line = renderNativeProfileNotice(notice);
+  if (line) {
+    warn(line);
+  }
+}
+
+/**
+ * The profiles this start uses and where they came from (HACK-2338 item 8).
+ * An explicit `--profile` is used as selected. Otherwise a fresh start uses
+ * the profiles Compose would (managed env, then shell), and a retained or
+ * restored run keeps its recorded profiles: up and restart never replace its
+ * data with another selection. When the environment now selects different
+ * ones, a notice says so and how to change them, instead of refusing.
+ */
+async function chooseNativeStartupProfiles(opts: {
+  readonly requested: readonly string[] | undefined;
+  readonly selected: readonly string[];
+  readonly kept: boolean;
+  readonly envName: string | null | undefined;
+  readonly resolve:
+    | ((envName: string | null | undefined) => Promise<NativeProfileSelection>)
+    | undefined;
+  readonly notify: (notice: NativeProfileNotice) => void;
+}): Promise<{
+  readonly profiles: readonly string[];
+  readonly source: NativeProfileNoticeSource;
+}> {
+  if (opts.requested !== undefined) {
+    return { profiles: opts.selected, source: opts.kept ? "retained" : "cli" };
+  }
+  const fromEnv = opts.resolve ? await opts.resolve(opts.envName) : undefined;
+  if (!opts.kept) {
+    return fromEnv && fromEnv.source !== "none"
+      ? {
+          profiles: normalizeNativeProfiles(fromEnv.profiles),
+          source: fromEnv.source,
+        }
+      : { profiles: opts.selected, source: "none" };
+  }
+  if (
+    fromEnv &&
+    (fromEnv.source === "managed-env" || fromEnv.source === "shell")
+  ) {
+    const selected = normalizeNativeProfiles(fromEnv.profiles);
+    if (JSON.stringify(selected) !== JSON.stringify(opts.selected)) {
+      opts.notify({
+        kind: "retained",
+        retained: opts.selected,
+        selected,
+        source: fromEnv.source,
+      });
+    }
+  }
+  return { profiles: opts.selected, source: "retained" };
 }
 
 async function startNativeProjectAttempt(
@@ -2054,7 +2101,15 @@ async function startNativeProjectAttempt(
     });
     requireActiveStartup(opts.signal);
   }
-  const profiles = selection.profiles;
+  const profileChoice = await chooseNativeStartupProfiles({
+    requested: opts.profiles,
+    selected: selection.profiles,
+    kept: opts.restore !== undefined || Boolean(retained),
+    envName: selection.envName,
+    resolve: opts.resolveProfiles,
+    notify: (notice) => emitNativeProfileNotice(notice, deps.warn),
+  });
+  const profiles = profileChoice.profiles;
   progress({ phase: "input" });
   // Keep ps aware of this frontend while input is read. This advisory marker
   // carries no values and is retired even if admission refuses the input.
@@ -2453,13 +2508,15 @@ async function startNativeProjectAttempt(
         });
         reportNativeIgnoredSettingNotices(review.report.plan, deps.warn);
         reportNativeEnvironmentNotices(input, review.report.plan, deps.warn);
-        reportNativeInactiveProfileServices({
-          plan: review.report.plan,
-          profiles,
-          requestedProfiles,
-          source: opts.profileSource,
-          warn: deps.warn,
-        });
+        emitNativeProfileNotice(
+          {
+            kind: "left-out",
+            services: nativeInactiveServices(review.report.plan),
+            profiles,
+            source: profileChoice.source,
+          },
+          deps.warn
+        );
         if (metadata) {
           verifyNativeRuntimeMetadataRoutes({
             plan: review.report.plan,

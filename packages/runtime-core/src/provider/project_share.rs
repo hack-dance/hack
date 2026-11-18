@@ -108,7 +108,11 @@ impl ProjectShareIntent {
             return Err(refused());
         }
         let path = self.project.join(relative);
-        reject_aliased_state(&path)?;
+        // The directory check covers the parents only: the source itself may be a
+        // single file (`./scripts/run.sh:/run.sh:ro`). It is checked just below as a
+        // regular file or directory whose canonical path is itself, so a symlinked
+        // source still refuses.
+        reject_aliased_state(path.parent().unwrap_or(&self.project))?;
         let metadata = fs::symlink_metadata(&path).map_err(|_| refused())?;
         if !(metadata.is_file() || metadata.is_dir())
             || fs::canonicalize(&path).map_err(|_| refused())? != path
@@ -518,6 +522,19 @@ mod tests {
             format!("{}/app", intent.guest_path)
         );
         assert_eq!(intent.bind_path(".").unwrap(), intent.guest_path);
+        // A single file inside the project binds, at any depth.
+        fs::create_dir(fixture.0.join("scripts")).unwrap();
+        fs::write(fixture.0.join("scripts/run.sh"), b"#!/bin/sh\n").unwrap();
+        assert_eq!(
+            intent.bind_path("scripts/run.sh").unwrap(),
+            format!("{}/scripts/run.sh", intent.guest_path)
+        );
+        fs::write(fixture.0.join("top.conf"), b"x").unwrap();
+        assert!(intent.bind_path("top.conf").is_ok());
+        // A symlinked file, or a file standing where a parent directory should be, refuses.
+        symlink("scripts/run.sh", fixture.0.join("linked.sh")).unwrap();
+        assert!(intent.bind_path("linked.sh").is_err());
+        assert!(intent.bind_path("top.conf/child").is_err());
         for path in [
             "",
             "..",

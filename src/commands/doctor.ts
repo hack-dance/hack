@@ -204,6 +204,11 @@ import {
 } from "../lib/mac-ca-trust.ts";
 import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
 import {
+  removeUnstartedProxyContainers,
+  resolveManagedProxyBind,
+  writeManagedProxyCompose,
+} from "../lib/managed-proxy-compose.ts";
+import {
   ensureBundledMutagenInstalled,
   getManagedMutagenAgentBundlePath,
   getManagedMutagenInstallPath,
@@ -283,8 +288,9 @@ import {
   scopeRuntimeHygieneToProject,
 } from "../lib/project-runtime-hygiene.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
-import { resolveProxyBindAddress } from "../lib/proxy-bind.ts";
+import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
 import { inspectProxyLoopback } from "../lib/proxy-loopback.ts";
+import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
 import {
   applySecretsHygieneFixes,
@@ -4259,14 +4265,38 @@ async function runDoctorFix(opts: {
   await ensureLoggingNetwork();
 
   const useStaticIps = ingressAfterFix.hasSubnet;
-  await writeWithPromptIfDifferent(
-    paths.caddyCompose,
-    renderGlobalCaddyCompose({
-      useStaticCoreDnsIp: useStaticIps,
-      useStaticCaddyIp: useStaticIps,
-      bindAddress: await resolveProxyBindAddress(),
-    })
-  );
+  // Rendered from settings, so replaced without a prompt (HACK-2328).
+  const bind = await resolveManagedProxyBind({ path: paths.caddyCompose });
+  if (bind.saveError !== undefined) {
+    note(
+      `Kept the proxy on ${bind.bindAddress} from the existing proxy file, but could not save it as proxy.bind_address: ${bind.saveError}. Fix the global config, then run: hack config set --global proxy.bind_address ${bind.bindAddress}`,
+      "doctor"
+    );
+  }
+  if (bind.migrated !== null) {
+    note(
+      `Kept the proxy on ${bind.migrated} from the existing proxy file and saved it as proxy.bind_address. To publish on every IPv4 interface: hack config set --global proxy.bind_address 0.0.0.0`,
+      "doctor"
+    );
+  }
+  if (bind.keep !== undefined) {
+    note(`Proxy file not updated: ${bind.keep}`, "doctor");
+  } else {
+    const proxyCompose = await writeManagedProxyCompose({
+      path: paths.caddyCompose,
+      content: renderGlobalCaddyCompose({
+        useStaticCoreDnsIp: useStaticIps,
+        useStaticCaddyIp: useStaticIps,
+        bindAddress: bind.bindAddress,
+      }),
+    });
+    if (proxyCompose.kind === "replaced-hand-edit") {
+      note(
+        `Replaced ${paths.caddyCompose}: it differed from Hack's current rendering (edited by hand, or written by an older Hack). The previous copy is at ${proxyCompose.backupPath}`,
+        "doctor"
+      );
+    }
+  }
   await writeWithPromptIfDifferent(
     paths.coreDnsConfig,
     renderGlobalCoreDnsConfig({ useStaticCaddyIp: useStaticIps })
@@ -5452,6 +5482,20 @@ async function maybeStartGlobalCaddyCompose(opts: {
   );
   if (started.exitCode !== 0) {
     note(commandFailureDetail({ result: started }), "runtime repair");
+    // Same cleanup and listener hint as `hack global up` (HACK-2328): a
+    // never-started proxy would otherwise start later with no network.
+    const cleanup = await removeUnstartedProxyContainers();
+    if (cleanup.kind === "failed") {
+      note(cleanup.message, "runtime repair");
+    }
+    note(
+      await diagnoseProxyPortConflict({
+        bindAddress: readProxyBindFromCompose(
+          (await readTextFile(opts.paths.caddyCompose)) ?? ""
+        ),
+      }),
+      "runtime repair"
+    );
     return;
   }
   note("CoreDNS and Caddy are ready.", "runtime repair");

@@ -113,10 +113,15 @@ bun scripts/package-native-storage-tool.ts "$out" "$source_revision"
 chmod 755 "$out/hack-native" "$out/hack-relay-guest"
 python3 scripts/verify-native-relay.py "$out/hack-relay-guest"
 cp packages/runtime-core/provider-pins.json "$out/provider-pins.json"
+# The CLI runs inside projects the user may not trust. Without these flags a
+# compiled Bun program loads the working directory's bunfig.toml (its preloads
+# run as the CLI) and .env (it fills in any variable the caller did not set,
+# such as DOCKER_HOST or a HACK_* setting), and reads tsconfig.json and
+# package.json.
 if [ -n "$version" ]; then
-  bun build index.ts --compile --define 'process.env.OPENTUI_LIBC="glibc"' --define "__HACK_BUILD_VERSION__=\"$version\"" --outfile "$out/hack-cli"
+  bun build index.ts --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig --no-compile-autoload-package-json --define 'process.env.OPENTUI_LIBC="glibc"' --define "__HACK_BUILD_VERSION__=\"$version\"" --outfile "$out/hack-cli"
 else
-  bun build index.ts --compile --define 'process.env.OPENTUI_LIBC="glibc"' --outfile "$out/hack-cli"
+  bun build index.ts --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig --no-compile-autoload-package-json --define 'process.env.OPENTUI_LIBC="glibc"' --outfile "$out/hack-cli"
 fi
 bun scripts/build-lifecycle-supervisor.ts
 cp dist/hack-lifecycle-supervisor "$out/hack-lifecycle-supervisor"
@@ -137,7 +142,9 @@ chmod 600 "$out/hack.project.schema.json" "$out/hack.local.schema.json"
 /usr/bin/codesign --verify --strict "$out/hack-cli"
 /usr/bin/codesign --verify --strict "$out/hack-native"
 bun scripts/check-native-authored-artifact.ts "$out/hack-native"
-bun build scripts/run-mcp-socket-backend.ts --compile --outfile .hack-local/native-candidate-target/release/hack-mcp-backend
+# Same flags: the MCP backend is a compiled Bun program too. Its owner starts it
+# in a private directory, so this is defence in depth.
+bun build scripts/run-mcp-socket-backend.ts --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig --no-compile-autoload-package-json --outfile .hack-local/native-candidate-target/release/hack-mcp-backend
 /usr/bin/codesign --force --sign - --preserve-metadata=entitlements,flags,runtime .hack-local/native-candidate-target/release/hack-mcp-backend
 for artifact in hack-mcp-adapter hack-mcp-owner hack-mcp-backend; do
   /usr/bin/codesign --verify --strict ".hack-local/native-candidate-target/release/$artifact"

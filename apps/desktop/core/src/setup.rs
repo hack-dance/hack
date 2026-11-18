@@ -573,6 +573,28 @@ fn supported_cli(version: &str) -> bool {
             .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// How old a shown Setup pane's checks may get before they run again.
+pub const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// A Setup pane on screen in a visible window checks again once its result
+/// is [`RECHECK_EVERY`] old (or it never finished), so a window left open
+/// does not keep showing a state that has changed. Never while a check or
+/// an action runs.
+pub fn should_recheck_periodically(
+    setup_shown: bool,
+    window_visible: bool,
+    pane: &Pane,
+    now: std::time::Instant,
+) -> bool {
+    setup_shown
+        && window_visible
+        && !pane.loading
+        && !pane.action_busy
+        && pane
+            .checked_at
+            .is_none_or(|t| now.saturating_duration_since(t) >= RECHECK_EVERY)
+}
+
 /// Focus checks are scoped to visible setup or an outstanding explicit fix.
 pub fn should_recheck_on_focus(
     setup_shown: bool,
@@ -644,6 +666,44 @@ mod routing_tests {
 #[cfg(test)]
 mod pane_tests {
     use super::*;
+
+    #[test]
+    fn a_shown_setup_pane_checks_again_after_ten_minutes() {
+        let now = std::time::Instant::now();
+        let mut pane = Pane::default();
+        assert!(
+            should_recheck_periodically(true, true, &pane, now),
+            "never finished"
+        );
+        let generation = pane.begin();
+        assert!(
+            !should_recheck_periodically(true, true, &pane, now),
+            "a check runs"
+        );
+        pane.finish(generation, Report::default());
+        let at = pane.checked_at.expect("finished");
+        let later = at + RECHECK_EVERY;
+        assert!(!should_recheck_periodically(
+            true,
+            true,
+            &pane,
+            at + RECHECK_EVERY - std::time::Duration::from_secs(1)
+        ));
+        assert!(should_recheck_periodically(true, true, &pane, later));
+        assert!(
+            !should_recheck_periodically(false, true, &pane, later),
+            "another pane"
+        );
+        assert!(
+            !should_recheck_periodically(true, false, &pane, later),
+            "hidden window"
+        );
+        pane.action_busy = true;
+        assert!(
+            !should_recheck_periodically(true, true, &pane, later),
+            "an action runs"
+        );
+    }
 
     #[test]
     fn a_cli_switch_drops_the_report_and_anything_in_flight() {

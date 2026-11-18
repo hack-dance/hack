@@ -2,13 +2,23 @@
 
 ## Positioning
 
-Hack runs the whole project on one machine: services, environment, secrets, local
-HTTPS and logs, from a `.hack/` folder committed with the repository. One command
-starts a repo. Projects and branches run side by side at their own URLs. Nothing is
-hosted. The root `README.md` carries this story in full; the site homepage and the
-v5 documentation index repeat it briefly and link out.
+Hack runs your whole project on your own machine, and runs every project, branch
+and git worktree side by side, each at its own HTTPS address. One command
+starts a repo. Nothing is hosted. The root `README.md` carries this story in full;
+the site homepage and the v5 documentation index repeat it briefly and link out.
 
-v5 is the same CLI and project model as v4 with a new runtime layer. Docker Compose
+The native backend is a proof point, not a headline. It is labelled beta and has
+its own section: it runs the same project in a lightweight Linux VM that Hack
+manages, without Docker Desktop. Pages never call it a sandbox or a microVM, and
+make no speed, memory or battery claim for it.
+
+Pages say "backend" for Compose and native, "instance" for a running copy of a
+project, and "prerelease" for a `5.0.0-next.N` build. They do not use "engine",
+"provider", "pool" or "candidate" for these in user-facing text. "Isolated" is
+always qualified: say what a branch instance gets of its own (containers,
+addresses, logs) and what it still shares.
+
+v5 is the same CLI and project model as v4 with a new way to run services. Docker Compose
 stays the default backend; the native backend is beta: opt-in, Apple Silicon macOS, `hack-next` channel only. Pages
 write `hack` for the v5 CLI and tell prerelease users once, on Install, how to map
 that to `hack-next`.

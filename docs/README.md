@@ -1,10 +1,13 @@
 # Hack documentation
 
-Hack is a command-line tool that runs your whole project on your own machine. One
-command starts the project's services, loads its settings and secrets, and gives it
-a local web address with working HTTPS. The project's setup lives in a `.hack/`
-folder committed with the code, so teammates, agents and other worktrees all run it
-the same way. The public site is [hack.foo](https://hack.foo).
+Hack runs your whole project on your own machine, and runs every project, branch
+and git worktree side by side, each at its own HTTPS address. One command
+starts a repo. Nothing is hosted.
+
+That one command starts the project's services, loads its settings and secrets,
+and gives it a local web address with working HTTPS. The project's setup lives in
+a `.hack/` folder committed with the code, so teammates, coding agents and other
+worktrees all run it the same way. The public site is [hack.foo](https://hack.foo).
 
 ## Run your first project
 

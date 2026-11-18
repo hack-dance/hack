@@ -26,10 +26,22 @@ pub struct ServiceUsage {
     pub containers: u32,
     #[serde(rename = "cpuPercent")]
     pub cpu_percent: Option<f64>,
-    #[serde(rename = "memUsedBytes")]
+    #[serde(rename = "memUsedBytes", deserialize_with = "byte_count")]
     pub mem_used_bytes: Option<u64>,
-    #[serde(rename = "memLimitBytes")]
+    #[serde(rename = "memLimitBytes", deserialize_with = "byte_count")]
     pub mem_limit_bytes: Option<u64>,
+}
+
+/// A byte count as the CLI reports it: `docker stats` units parsed to a
+/// number that can be fractional (`212.3MiB` → `222612684.8`). Rounded to
+/// whole bytes; a negative or non-finite value is unknown, never 0.
+fn byte_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    let n: Option<f64> = Option::deserialize(d)?;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // checked range
+    Ok(
+        n.filter(|n| n.is_finite() && *n >= 0.0 && *n <= u64::MAX as f64)
+            .map(|n| n.round() as u64),
+    )
 }
 
 /// `hack usage --json --by-service` → `data`.
@@ -185,6 +197,27 @@ mod tests {
         assert_eq!(bytes(1_395_864_371), "1.3 GiB");
         assert_eq!(bytes(2048), "2 KiB");
         assert_eq!(bytes(12), "12 B");
+    }
+
+    #[test]
+    fn fractional_byte_counts_are_read_not_refused() {
+        let r = UsageReport::from_value(serde_json::json!({
+            "schema": "hack.usage.by-service.v1",
+            "services": [
+                {"composeProject": "shop", "service": "api", "cpuPercent": 0.5, "memUsedBytes": 222_612_684.8, "memLimitBytes": 2_147_483_648.4},
+                {"composeProject": "shop", "service": "db", "memUsedBytes": -1.0},
+                {"composeProject": "shop--preview", "service": "api", "memUsedBytes": 1.5}
+            ]
+        }))
+        .expect("a fractional value is not a bad report");
+        let rows = r.for_instance("shop");
+        assert_eq!(rows["api"].mem_used_bytes, Some(222_612_685));
+        assert_eq!(rows["api"].mem_limit_bytes, Some(2_147_483_648));
+        assert_eq!(rows["db"].mem_used_bytes, None, "unknown, not 0");
+        assert_eq!(
+            r.for_instance("shop--preview")["api"].mem_used_bytes,
+            Some(2)
+        );
     }
 
     #[test]

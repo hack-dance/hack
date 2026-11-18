@@ -45,7 +45,7 @@ import { exec, run } from "../lib/shell.ts";
 import { parseTimeInput } from "../lib/time.ts";
 import { copyToClipboard } from "../ui/clipboard.ts";
 import type { LogStreamBackend, LogStreamEvent } from "../ui/log-stream.ts";
-import { beginTerminalHandoff } from "./terminal-handoff.ts";
+import { runWithTerminalHandoff } from "./terminal-handoff.ts";
 
 /** Matches block characters used in ASCII banners */
 const BLOCK_CHARS_REGEX = /[█░▒▓]/;
@@ -2803,33 +2803,21 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       if (!isActive) {
         return 1;
       }
-      if (!opts.handoff) {
-        return await run(opts.command, {
-          cwd: resolve(project.projectRoot),
-          stdin: "inherit",
-        });
-      }
-
-      let exitCode = 1;
       // suspend() hands the terminal over: it leaves raw mode, turns mouse
       // tracking off and stops reading stdin, so the attached session gets
-      // every key. stop() only halted rendering and kept all three. A
-      // rejected transition is rethrown (see terminal-handoff.ts).
-      if (
-        (await beginTerminalHandoff(() => activeRenderer.suspend())) ===
-        "not_handed_over"
-      ) {
-        return null;
-      }
-      try {
-        exitCode = await run(opts.command, {
-          cwd: resolve(project.projectRoot),
-          stdin: "inherit",
-        });
-      } finally {
-        if (isActive) {
-          // A failed resume leaves the terminal state unknown; it stays fatal.
-          await activeRenderer.resume();
+      // every key. stop() only halted rendering and kept all three. Failure
+      // handling and the resume pairing are in terminal-handoff.ts.
+      return await runWithTerminalHandoff({
+        handoff: opts.handoff,
+        suspend: () => activeRenderer.suspend(),
+        resume: () => activeRenderer.resume(),
+        child: () =>
+          run(opts.command, {
+            cwd: resolve(project.projectRoot),
+            stdin: "inherit",
+          }),
+        isActive: () => isActive,
+        afterResume: () => {
           renderHeader();
           renderMetaPanel({ runtime: currentRuntime });
           updateLogsTitle();
@@ -2837,9 +2825,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
           renderFooter();
           layoutSidebar();
           setActivePane(activePane);
-        }
-      }
-      return exitCode;
+        },
+      });
     };
 
     const interactWithSelectedService = async () => {

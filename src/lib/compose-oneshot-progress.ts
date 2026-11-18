@@ -176,69 +176,105 @@ type ComposeEnvFileEntry = {
 };
 
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
-const LINE_BREAK = /\r?\n/;
 const INLINE_COMMENT = /\s#/;
 
 /**
- * Compose's env-file syntax, one assignment per line: `#` comment lines, an
- * optional `export `, `KEY=VALUE`. A single-quoted value is literal, a
- * double-quoted one keeps everything up to its closing quote (with `\"`,
- * `\\` and `\n` escapes) and is expanded, and an unquoted one ends at an
- * inline ` #` comment and is trimmed. A quote that does not close on its
- * line (a multi-line value) is unknown.
+ * Compose's env-file syntax: `#` comment lines, an optional `export `,
+ * `KEY=VALUE`. A single-quoted value is literal and a double-quoted one
+ * (with `\\"`, `\\\\` and `\\n` escapes) is expanded; either may span lines,
+ * and its lines are part of the value, never assignments of their own. An
+ * unquoted value ends at an inline ` #` comment and is trimmed. A quote that
+ * never closes makes the value unknown and ends the file.
  */
 export function parseComposeEnvFile(text: string): ComposeEnvFileEntry[] {
   const entries: ComposeEnvFileEntry[] = [];
-  for (const rawLine of text.split(LINE_BREAK)) {
+  let position = 0;
+  while (position < text.length) {
+    const lineEnd = endOfLine(text, position);
+    const rawLine = text.slice(position, lineEnd);
     const line = rawLine.trim();
-    if (line.length === 0 || line.startsWith("#")) {
-      continue;
-    }
     const assignment = line.startsWith("export ")
       ? line.slice("export ".length).trimStart()
       : line;
     const eq = assignment.indexOf("=");
     const key = eq > 0 ? assignment.slice(0, eq).trim() : "";
-    if (!ENV_KEY.test(key)) {
+    if (line.startsWith("#") || !ENV_KEY.test(key)) {
+      position = lineEnd + 1;
       continue;
     }
-    entries.push({
-      key,
-      ...parseEnvFileValue(assignment.slice(eq + 1).trimStart()),
-    });
+    const parsed = parseEnvFileValue(text, position + rawLine.indexOf("=") + 1);
+    entries.push({ key, value: parsed.value, expand: parsed.expand });
+    position = parsed.next;
   }
   return entries;
 }
 
-function parseEnvFileValue(raw: string): {
+function endOfLine(text: string, from: number): number {
+  const index = text.indexOf("\n", from);
+  return index < 0 ? text.length : index;
+}
+
+/** The value starting at `start`, and where the next line begins. */
+function parseEnvFileValue(
+  text: string,
+  start: number
+): {
   readonly value: string | null;
   readonly expand: boolean;
+  readonly next: number;
 } {
-  if (raw.startsWith("'")) {
-    const end = raw.indexOf("'", 1);
-    return { value: end < 0 ? null : raw.slice(1, end), expand: false };
+  let index = start;
+  while (text[index] === " " || text[index] === "\t") {
+    index += 1;
   }
-  if (raw.startsWith('"')) {
-    let value = "";
-    for (let index = 1; index < raw.length; index += 1) {
-      const char = raw[index];
-      if (char === "\\" && index + 1 < raw.length) {
-        const next = raw[index + 1];
-        value += next === "n" ? "\n" : next;
-        index += 1;
-      } else if (char === '"') {
-        return { value, expand: true };
-      } else {
-        value += char;
-      }
+  const quote = text[index];
+  if (quote === "'" || quote === '"') {
+    const closed = readQuoted(text, index);
+    if (closed === null) {
+      return { value: null, expand: quote === '"', next: text.length };
     }
-    return { value: null, expand: true };
+    return {
+      value: closed.value,
+      expand: quote === '"',
+      next: endOfLine(text, closed.end) + 1,
+    };
   }
+  const lineEnd = endOfLine(text, index);
+  const raw = text.slice(index, lineEnd);
   const comment = raw.search(INLINE_COMMENT);
   return {
     value: (comment < 0 ? raw : raw.slice(0, comment)).trimEnd(),
     expand: true,
+    next: lineEnd + 1,
   };
+}
+
+/** A quoted value from its opening quote at `open`, or null if it never closes. */
+function readQuoted(
+  text: string,
+  open: number
+): { readonly value: string; readonly end: number } | null {
+  const quote = text[open];
+  if (quote === "'") {
+    const close = text.indexOf("'", open + 1);
+    return close < 0
+      ? null
+      : { value: text.slice(open + 1, close), end: close };
+  }
+  let value = "";
+  for (let index = open + 1; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "\\" && index + 1 < text.length) {
+      const next = text[index + 1];
+      value += next === "n" ? "\n" : next;
+      index += 1;
+    } else if (char === '"') {
+      return { value, end: index };
+    } else {
+      value += char;
+    }
+  }
+  return null;
 }
 
 /** Which services' `depends_on` count: all, or those active under these profiles. */

@@ -490,3 +490,28 @@ test("env files follow Compose's syntax", () => {
   expect(entries.OPEN?.value).toBeNull();
   expect(Object.keys(entries)).not.toContain("not");
 });
+
+test("assignment-looking lines inside a multi-line quoted value are its text", () => {
+  for (const quote of ["'", '"']) {
+    const entries = parseComposeEnvFile(
+      [
+        "COMPOSE_PROFILES=ops",
+        `DESCRIPTION=${quote}example configuration:`,
+        "COMPOSE_PROFILES=dev",
+        `${quote}`,
+        "AFTER=yes",
+      ].join("\n")
+    );
+    const values = Object.fromEntries(
+      entries.map((entry) => [entry.key, entry.value])
+    );
+    expect(values.COMPOSE_PROFILES).toBe("ops");
+    expect(values.DESCRIPTION).toBe(
+      "example configuration:\nCOMPOSE_PROFILES=dev\n"
+    );
+    expect(values.AFTER).toBe("yes");
+    expect(
+      entries.filter((entry) => entry.key === "COMPOSE_PROFILES")
+    ).toHaveLength(1);
+  }
+});

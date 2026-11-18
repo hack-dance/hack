@@ -51,6 +51,7 @@ impl Candidate {
         let checkout = canonical_directory(checkout)?;
         let state_root = checkout.join(".hack-local");
         reject_aliased_state(&state_root)?;
+        register_state_root(&state_root);
         Ok(Self {
             protocol_version: PROTOCOL_VERSION,
             version: CANDIDATE_VERSION,
@@ -227,22 +228,30 @@ fn canonical_directory(path: &Path) -> Result<PathBuf, CandidateError> {
     Ok(canonical)
 }
 
-/// Top-level directories of a candidate state root; only paths beneath one are named.
-const STATE_ROOT_ENTRIES: [&str; 5] = ["run", "artifacts", "node", "providers", "setup"];
+/// Canonical state roots of the candidates this process discovered. Only a path beneath
+/// one of them is named in a diagnostic; project paths never lie inside a native home.
+static STATE_ROOTS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
-/// A state path for diagnostics, relative to its `.hack-local` state root and only when it
-/// lies beneath one of that root's own directories. A project path, a home directory or
-/// anything outside a state root gets no label: nothing a user named is ever carried.
-fn state_component_label(component: &Path) -> Option<String> {
-    let root = component
-        .ancestors()
-        .find(|ancestor| ancestor.file_name() == Some(std::ffi::OsStr::new(".hack-local")))?;
-    let relative = component.strip_prefix(root).ok()?;
-    let first = relative.components().next()?.as_os_str().to_str()?;
-    if !STATE_ROOT_ENTRIES.contains(&first) {
-        return None;
+fn register_state_root(state_root: &Path) {
+    if let Ok(mut roots) = STATE_ROOTS.lock() {
+        if !roots.iter().any(|root| root == state_root) {
+            roots.push(state_root.to_path_buf());
+        }
     }
-    Some(format!(".hack-local/{}", relative.to_str()?))
+}
+
+/// A state path for diagnostics, relative to the candidate state root it lies beneath
+/// (`.hack-local/...`). Anything else, a project path or a home directory included, gets
+/// no label, so nothing a user named is ever carried.
+fn state_component_label(component: &Path) -> Option<String> {
+    let roots = STATE_ROOTS.lock().ok()?;
+    let root = roots.iter().find(|root| component.starts_with(root))?;
+    let relative = component.strip_prefix(root).ok()?.to_str()?;
+    Some(if relative.is_empty() {
+        ".hack-local".to_owned()
+    } else {
+        format!(".hack-local/{relative}")
+    })
 }
 
 fn reject_aliased_state(path: &Path) -> Result<(), CandidateError> {
@@ -327,6 +336,7 @@ mod state_component_tests {
         );
         let state = root.join(".hack-local");
         std::fs::create_dir_all(state.join("run")).unwrap();
+        register_state_root(&state);
         std::fs::write(state.join("run/graphs"), b"not a directory").unwrap();
         // The checked path itself is a file: the shape behind `invalid_state`.
         let error = reject_aliased_state(&state.join("run/graphs")).unwrap_err();
@@ -340,10 +350,12 @@ mod state_component_tests {
         // happens to be named .hack-local, carries no label.
         let project = root.join("project");
         std::fs::create_dir_all(project.join(".hack-local")).unwrap();
+        std::fs::create_dir_all(project.join(".hack-local/run")).unwrap();
         for path in [
             root.join("confidential-plan.txt"),
-            state.join("confidential-plan.txt"),
             project.join(".hack-local/notes"),
+            // The allowed state prefix inside a project is still project data.
+            project.join(".hack-local/run/confidential-acquisition.txt"),
         ] {
             std::fs::write(&path, b"x").unwrap();
             let refused = reject_aliased_state(&path).unwrap_err();

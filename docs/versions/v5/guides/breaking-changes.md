@@ -42,7 +42,7 @@ Three changes are not breaking, but they surprise people:
   lines printed by lifecycle hooks could appear on stdout before the JSON. This
   fix is on the `next` branch and not in a release yet. If a script read hook
   output from stdout, read stderr instead. See
-  [Command and output contracts](../reference/command-contracts.md).
+  [Scripts and JSON output](machine-output.md).
 
 If you scripted against an early v5 prerelease, one more change applies: from
 next.18, `hack version --json`, `hack activity --json`,

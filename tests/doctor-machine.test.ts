@@ -131,10 +131,14 @@ for (const native of [false, true]) {
       ]);
       if (native) {
         // The pool belongs to the native home, so the machine audit reads its
-        // status (read-only) and reports it; the stub fails, so it is skipped.
+        // status (read-only); the failed stub warns that observation is unknown.
         expect(
           checks.find((check) => check.id === "native pool idle")
-        ).toMatchObject({ status: "ok", scope: "machine" });
+        ).toMatchObject({
+          status: "warn",
+          scope: "machine",
+          nativePool: { state: "unknown" },
+        });
       }
       if (!native) {
         expect(

@@ -35,12 +35,7 @@ function isComment(line: string): boolean {
   );
 }
 
-/**
- * The lines of the one command a `--compile` belongs to, so a neighbouring
- * compile's definition cannot stand in for a missing one. A TypeScript argv
- * array runs from its `"build"` element to its closing `]`; a shell,
- * Dockerfile or package.json command is its line plus `\`-continued lines.
- */
+/** The line at `index` joined with its `\\`-continued neighbours, both ways. */
 function continuedLines(lines: readonly string[], index: number): string {
   const continues = (at: number) => (lines[at] ?? "").trimEnd().endsWith("\\");
   let start = index;
@@ -54,6 +49,12 @@ function continuedLines(lines: readonly string[], index: number): string {
   return lines.slice(start, end + 1).join("\n");
 }
 
+/**
+ * The lines of the one command a `--compile` belongs to, so a neighbouring
+ * compile's definition cannot stand in for a missing one. A TypeScript argv
+ * array runs from its `"build"` element to its closing `]`; a shell,
+ * Dockerfile or package.json command is its line plus `\`-continued lines, before and after.
+ */
 function commandAt(opts: {
   readonly lines: readonly string[];
   readonly index: number;

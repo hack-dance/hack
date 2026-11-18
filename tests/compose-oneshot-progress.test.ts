@@ -764,7 +764,10 @@ test("an override entry without a condition keeps the inherited one", async () =
   };
   const graph = mergeOneShotGraphs([base, added]);
   expect([...graph.oneShots]).toEqual(["migrate"]);
-  expect(graph.dependsOn.get("api")?.sort()).toEqual(["cache", "migrate"]);
+  expect([...(graph.dependsOn.get("api") ?? [])].sort()).toEqual([
+    "cache",
+    "migrate",
+  ]);
   // The same through extends.
   const root = await mkdtemp(join(tmpdir(), "hack-oneshot-partial-"));
   try {

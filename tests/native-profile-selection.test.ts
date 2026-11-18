@@ -215,3 +215,12 @@ test("a project's managed env selects native profiles, overriding the shell (HAC
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("an empty --profile names no profile, so COMPOSE_PROFILES still applies, as on Compose", async () => {
+  const { nativeProfileOption } = await import("../src/commands/project.ts");
+  for (const empty of [undefined, "", " ", ",", " , "]) {
+    expect(nativeProfileOption(empty)).toBeUndefined();
+  }
+  expect(nativeProfileOption("jobs")).toBe("jobs");
+  expect(nativeProfileOption("jobs,ops")).toBe("jobs,ops");
+});

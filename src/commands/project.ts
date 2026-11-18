@@ -6441,6 +6441,19 @@ async function nativeRetainedProfilesDrift(opts: {
 }
 
 /** An explicit `--profile` list, with Compose's `*` expanded to every declared profile. */
+/**
+ * The native `--profile` value, or undefined when it names no profile: as in
+ * Hack's Compose path, an empty list (`--profile ""`) falls back to
+ * COMPOSE_PROFILES instead of selecting none (HACK-2338 item 8).
+ */
+export function nativeProfileOption(
+  value: string | undefined
+): string | undefined {
+  return value === undefined || parseCsvList(value).length === 0
+    ? undefined
+    : value;
+}
+
 async function resolveNativeCliProfiles(opts: {
   readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
   readonly cliProfile: string;
@@ -6566,11 +6579,11 @@ async function handleNativeUp({
     // An explicit --profile only; otherwise native start resolves Compose's
     // own sources for the effective env (HACK-2338 item 8).
     profiles:
-      args.options.profile === undefined
+      nativeProfileOption(args.options.profile) === undefined
         ? undefined
         : await resolveNativeCliProfiles({
             project,
-            cliProfile: args.options.profile,
+            cliProfile: args.options.profile ?? "",
           }),
     resolveProfiles: async (envName) =>
       await resolveNativeProfileSelectionForProject({
@@ -6779,7 +6792,10 @@ async function restartNativeImageProject({
   return await restartNativeProject({
     scope: startup.scope,
     envName: startup.envName,
-    profiles: args.options.profile === undefined ? undefined : startup.profiles,
+    profiles:
+      nativeProfileOption(args.options.profile) === undefined
+        ? undefined
+        : startup.profiles,
     recovery: recovery
       ? {
           ...recovery,
@@ -7084,7 +7100,7 @@ async function handleUpUnlocked({
         branch: args.options.branch,
         env: resolveRequestedEnvName({ envOption: args.options.env }),
         profiles:
-          args.options.profile === undefined
+          nativeProfileOption(args.options.profile) === undefined
             ? undefined
             : parseCsvList(args.options.profile),
       },
@@ -7116,7 +7132,7 @@ async function handleUpUnlocked({
         }
       },
       notifyRunning: async (saved, project) => {
-        if (args.options.profile !== undefined) {
+        if (nativeProfileOption(args.options.profile) !== undefined) {
           return;
         }
         const notice = await nativeRetainedProfilesDrift({

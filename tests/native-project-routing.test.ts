@@ -189,11 +189,23 @@ test("a route without an authored healthcheck accepts only its exact reviewed in
     "--route-slot",
     "web=auto",
   ]);
+  // HACK-2324: a command healthcheck the review replaced with this exact
+  // inferred probe is admitted.
+  for (const test of [
+    ["CMD", "true"],
+    ["CMD-SHELL", "true"],
+  ]) {
+    expect(
+      reviewedNativeRoutes({
+        ...opts,
+        specs: { web: { labels, healthcheck: { test } } },
+      }).flags
+    ).toEqual(["--route-slot", "web=auto"]);
+  }
   for (const authoredHealthcheck of [
     null,
     {},
     { disable: true },
-    { test: ["CMD", "true"] },
     healthcheck,
   ]) {
     expect(() =>

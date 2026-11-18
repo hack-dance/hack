@@ -160,11 +160,20 @@ test("down stops a retained run that a start resumes while down waits, without w
     },
   }).catch((caught: unknown) => caught);
   await finish();
-  expect(error).toBeInstanceOf(Error);
-  expect((error as Error).message).not.toContain("still running");
+  // The down retried from the mapping and asked the runtime to stop the
+  // resumed graph: the only failure is the injected stop failure.
+  expect((error as Error).message).toBe("synthetic stop");
+  const thirdInspection = calls.findIndex(
+    (_, index) =>
+      calls.slice(0, index + 1).filter((call) => call.endsWith("inspect"))
+        .length === 3
+  );
+  expect(thirdInspection).toBeGreaterThanOrEqual(0);
+  expect(
+    calls.slice(thirdInspection + 1).some((call) => !call.endsWith("inspect"))
+  ).toBe(true);
   // Well within the 30 s wait: it did not wait for the owner to exit.
   expect(performance.now() - started).toBeLessThan(10_000);
-  expect(inspections).toBeGreaterThanOrEqual(3);
 });
 
 test("the restart coordinator's down never waits for its own start", async () => {

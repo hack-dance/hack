@@ -31,9 +31,9 @@ while we wrote and tested these recipes.
 
 - **Editing an env file does not change running containers.** Run
   `hack restart`, or `hack env apply --service <name>`.
-- **`hack exec` needs the same `--env` as `hack up`.** `hack restart` and
-  `hack down` reuse the overlay the stack started with; `hack exec` refuses a
-  different one, and no `--env` means the default overlay.
+- **`hack exec` refuses a different `--env` from the one `hack up` used.** Leave
+  `--env` out: `hack exec`, `hack run`, `hack restart` and `hack down` reuse the
+  overlay the stack started with.
 - **A hook cannot change this start's env.** Hack resolves managed env before
   `up.before` hooks run. A value a hook stores with `hack env add` reaches
   containers on the next start. See [Sign in to another CLI](cli-sign-in.md).

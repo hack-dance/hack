@@ -96,7 +96,8 @@ The native backend selects a verified executor binary and a private native home,
 plans the project through the config compiler, and runs workloads under a
 foreground owner process that holds the run until it is stopped. Its supported
 commands are whole-project `up` and `restart`, owner-mediated `down`, saved-run
-`ps`, finite `logs`, and noninteractive `exec` and `run`. See
+`ps`, `logs` (live following is under verification), `exec` (interactive on a
+terminal since next.17) and finite `run`. See
 [the native backend guide](guides/native-candidate.md) and
 [native authored commands](reference/native-authored-commands.md). A Compose flag
 in these docs does not imply native support.
@@ -1196,7 +1197,8 @@ qualify the installed binary, real filesystems or an application.
   - `.internal/extra-hosts.json`, `.internal/branch-usage.json`
   - `.internal/lifecycle/state.json` and `.internal/lifecycle/*.log`
   - `.branch/compose.<branch>.override.yml` and `.branch/compose.<branch>.runtime.override.yml`
-  - `hack.project.json` and `native/adaptation.json` (native backend only)
+  - `hack.project.json` (experimental authored project file, a bounded subset) and
+    `native/adaptation.json` (native backend only)
 
 ## Key design choices
 

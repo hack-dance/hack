@@ -238,7 +238,7 @@ Historical remote guides are excluded from the supported documentation.
   a safe default apply it (`hack env unset KEY` removes the key; `hack doctor --fix` applies safe
   remediations and skips destructive ones with a note); prompts that need a real answer fail
   closed with `E_INTERACTIVE_REQUIRED`, naming the flag or argument that makes the invocation
-  scriptable (for example `hack update --yes`, `hack mcp --all`, `hack session attach <name>`,
+  scriptable (for example `hack update --yes`, `hack mcp install --all`, `hack session attach <name>`,
   `hack secrets delete <name> --yes`, `hack ssh --host <host>`). Destructive confirmations without
   such a flag decline or refuse; they never proceed on their own.
   Set `HACK_NO_INTERACTIVE=1` explicitly in scripts anyway so the intent is visible.
@@ -716,9 +716,9 @@ deliberately marks that exact Compose volume disposable. Hack deliberately does 
 ### Runtime host metadata
 
 Containers started by `hack up`, `hack restart`, and `hack run` receive the effective instance and
-public-route metadata. This applies to `.hack/docker-compose.yml` projects and to authored
-`.hack/hack.project.json` projects, on the default Compose backend and on the native backend
-(`HACK_RUNTIME_BACKEND=native`). It keeps server-generated links, OAuth callbacks, webhooks, and
+public-route metadata. This applies to `.hack/docker-compose.yml` projects, on the default
+Compose backend and on the native backend (beta), and to authored `.hack/hack.project.json`
+projects. The authored `.hack/hack.project.json` file is experimental: it covers a bounded subset of project configuration, mainly for the native backend, and is not the normal way to configure a project. It keeps server-generated links, OAuth callbacks, webhooks, and
 other browser-facing URLs isolated when the same project runs in multiple worktrees. Every path
 emits the same keys and document shape from the same shared builder.
 
@@ -785,7 +785,7 @@ port; host variables never do. Native-specific limits:
   hostname change, so the retained graph refuses to start. Start it with its original HTTPS
   frontend selection and port.
 
-For an authored `.hack/hack.project.json` project, the configuration compiler carries the values as
+For an authored `.hack/hack.project.json` project (experimental, a bounded subset), the configuration compiler carries the values as
 public `runtime` bindings (see the [compiler reference](reference/native-config-compiler.md)), so
 they are reviewed with the rest of the plan and are never managed or secret values. The precedence
 matches Compose-file projects: a managed project env value or any authored `environment` directive

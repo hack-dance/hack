@@ -61,6 +61,8 @@ pub struct Finding {
     pub kind: Option<String>,
     /// The command that fixes it, for copying.
     pub command: Option<String>,
+    /// What to do by hand, when the remedy is not (only) a command.
+    pub action: Option<String>,
 }
 
 /// A blocker or an incomplete check, with where it is.
@@ -114,6 +116,9 @@ pub struct PlanStep {
     pub count: u32,
     pub targets: Vec<PlanTarget>,
     pub command: Option<String>,
+    /// What to do by hand, when the remedy is not (only) a command (for
+    /// example restoring a store's key as an alternative to retiring it).
+    pub action: Option<String>,
     pub why: String,
     pub blocker: bool,
     /// `hack upgrade apply` runs it (the app does not).
@@ -397,6 +402,13 @@ mod tests {
         assert_eq!(ignore.how(), "hack upgrade apply runs it");
         assert_eq!(r.plan[0].how(), "Save snapshot below");
         assert_eq!(r.projects.len(), 3);
+        let mut v: serde_json::Value = serde_json::from_str(CHECK).unwrap();
+        v["data"]["plan"][1]["action"] = "Restore the store's key from your backup.".into();
+        let with_action = CheckReport::parse(&v.to_string()).unwrap();
+        assert_eq!(
+            with_action.plan[1].action.as_deref(),
+            Some("Restore the store's key from your backup.")
+        );
     }
 
     #[test]

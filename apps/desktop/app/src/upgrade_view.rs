@@ -334,14 +334,29 @@ pub fn render(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
             ui,
         )
         .into_any_element(),
-        Some(Err(e)) => empty_pane(
-            Glyph::CircleAlert,
-            "Could not check for the upgrade",
-            e.clone(),
-            Some("hack upgrade check"),
-            ui,
-        )
-        .into_any_element(),
+        // The check failed, but snapshots may still be listed: restoring
+        // must not depend on the diagnostics working.
+        Some(Err(e)) => div()
+            .id("upgrade-pane")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .px(space::S8)
+            .py(space::S6)
+            .gap(space::S7)
+            .child(line(
+                Status::Failed,
+                format!("Could not check for the upgrade: {e}"),
+                ui,
+            ))
+            .child(note(
+                "Run hack upgrade check in a terminal to see more.",
+                ui,
+            ))
+            .child(restore(app, ui, cx))
+            .into_any_element(),
         Some(Ok(r)) => div()
             .id("upgrade-pane")
             .flex_1()
@@ -510,6 +525,9 @@ fn plan(r: &CheckReport, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
                 ),
                 ui,
             ));
+        }
+        if let Some(action) = step.action.as_deref().filter(|a| !a.is_empty()) {
+            detail = detail.child(note(action.to_owned(), ui));
         }
         if let Some(cmd) = step.command.as_deref().filter(|_| step.id != "snapshot") {
             detail = detail.child(copy_chip(format!("upgrade-copy-{}", step.id), cmd, ui, cx));
@@ -855,6 +873,30 @@ mod tests {
         cx.update(|cx| {
             let a = app.read(cx);
             assert!(a.upgrade.snapshot.is_none() && a.upgrade.restore.is_none());
+        });
+    }
+
+    #[test]
+    fn a_failed_check_still_lets_a_listed_snapshot_be_restored() {
+        let (mut cx, app) = window(Fixture::Upgrade);
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.open_upgrade(cx);
+                a.upgrade.check = Some(Err("upgrade check timed out".into()));
+                let id = a.newest_listed_for_test().unwrap();
+                a.ask_upgrade_restore(id, cx);
+                a.confirm_upgrade_restore(cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                app.read(cx)
+                    .upgrade
+                    .restore
+                    .as_ref()
+                    .is_some_and(Result::is_ok)
+            );
         });
     }
 

@@ -4,7 +4,7 @@ An explicit `HACK_RUNTIME_BACKEND=native` selection delegates an authored
 `.hack/hack.project.json` project to the separate native foreground owner. The
 current command slice supports whole-project foreground or detached `up` and foreground `restart`,
 owner-mediated `down` and explicit stored-generation `down --recover`, saved-run
-`ps`, live service `logs --follow`, finite `logs --no-follow`, noninteractive service `exec` and one-off
+`ps`, live service `logs --follow`, finite `logs --no-follow`, terminal or finite service `exec` and one-off
 service `run` on macOS with an absolute `HACK_NATIVE_BINARY` and private canonical
 `HACK_NATIVE_HOME`. It requires
 the caller's separately prepared native provider pool and matching runtime binary.
@@ -74,8 +74,8 @@ provider contact. A refusal names no option value, path or project detail.
 | `down` | Whole-project owner-mediated stop of a ready generation through its live foreground owner or private no-host endpoint | `--json`, `--detach`, `--profile` and `--env` overrides, service subsets including an empty selection, single-service, command, workdir, follow, tail and format options |
 | `down --recover` | Explicit retirement of a complete stored generation whose owners are dead, or of a pending startup intent that never reserved runtime state; omit `--profile` | `--json`, `--detach`, explicit empty or named `--profile`, `--env` overrides, service subsets, single-service, command, workdir, follow, tail and format options |
 | `ps` | `ps` and `ps --json` for the exact saved project and explicit `--branch` | `--profile`, `--env`, service subsets or a single service, `--recover`, `--detach`, command, workdir, follow, tail and format options |
-| `logs` | `logs SERVICE --follow` (the default), or `--no-follow`; `--tail` from 0 through 1000 with follow, 1 through 1000 with no-follow (default 200), plain or `--json`; `--since` with follow | Omitted, multiple or malformed service selection, non-integer or out-of-range `--tail`, pretty format, `--until`, query filters, `--profile`, `--env`, `--recover`, `--detach`, command and workdir options; TTY-configured services in follow mode |
-| `exec` | `exec SERVICE -- COMMAND ARG...` with closed stdin, no TTY and an optional absolute `--workdir` | Empty command or empty first argument, NUL bytes, more than 256 arguments, an argument over 16 KiB or 64 KiB in total, relative `--workdir`, interactive or TTY input, `--json`, `--profile`, `--env`, service subsets, follow, tail and format options, `--recover`, `--detach` |
+| `logs` | `logs SERVICE --follow` (the default), or `--no-follow`; `--tail` from 0 through 1000 with follow, 1 through 1000 with no-follow (default 200), plain or `--json`; `--since` and `--timestamps` with follow | Omitted, multiple or malformed service selection, non-integer or out-of-range `--tail`, pretty format, `--until`, query filters, `--profile`, `--env`, `--recover`, `--detach`, command and workdir options; TTY-configured services in follow mode |
+| `exec` | `exec SERVICE -- COMMAND ARG...`; terminal input/output selects a TTY session, otherwise finite exec with closed stdin; optional absolute `--workdir` | Empty command or empty first argument, NUL bytes, more than 256 arguments, an argument over 16 KiB or 64 KiB in total, relative `--workdir`, `--json`, `--profile`, `--env`, service subsets, follow, tail and format options, `--recover`, `--detach` |
 | `run` | `run SERVICE -- COMMAND ARG...` through a ready foreground owner, closed stdin, no TTY, optional absolute `--workdir`; member must have no mounts | The `exec` option refusals above; source, persistent-data or private-env mounts refuse before the one-off effect |
 | `restart` | Whole-project proven stop followed by fresh foreground `up`; `--branch`, `--profile` and `--env` select the fresh generation | Service subsets, `--json`, `--detach`, `--target`, recovery and other unsupported foreground options; missing or unproven stop prevents startup |
 
@@ -192,13 +192,19 @@ retained attempt is inspected.
 
 ## Saved-run `ps`
 
-`ps` and `ps --json` issue one authenticated current status request for the exact
+`ps` and `ps --json` issue one authenticated `observe` request for the exact
 saved project and explicit branch selection. Text output lists service, container,
 current state and current health. JSON uses the ordinary result envelope with
 `data.backend: "native"`, `data.status`, `data.run`, historical `data.phase`, and
 `data.items`; each item includes service, container, state, health and exitCode.
 Only fresh runtime observations supply state and health. Stored readiness and phase
 do not prove that a service is still live.
+
+Observation takes no provider lease, executes no source checks or storage-witness
+helpers, and writes no runtime journal. If the journal changes during the read,
+`ps` reports `runtime_busy` with no phase or service rows; retry for a fresh view.
+The owner's separate `status` action retains full locked verification for `up`
+readiness. An `observed` presentation reply cannot satisfy a `status` request.
 
 A project with no saved attempt reports `not_started`; a retained startup intent
 without a Ready mapping reports `pending` with no confirmed service rows. `pending`
@@ -231,8 +237,10 @@ stop; no host declaration, hook permit, new controller or stored-PID signal is
 created. Success requires authenticated Removed, the original child and detached
 group's settlement, and exact endpoint/start/Ready/source retirement. Compute
 shutdown retains persistent data; this command adds no volume deletion authority.
-A missing, changed or dead endpoint refuses. Partial publication or retirement
-keeps startup evidence blocked. Legacy no-host version 1 records remain ineligible for dead-owner recovery.
+A missing, changed or dead endpoint cannot authorize an owner-mediated stop.
+Plain `down` then tries the same independent recovery proof as `down --recover`.
+Partial publication or retirement keeps startup evidence blocked unless that
+exact proof permits monotonic completion. Legacy no-host version 1 records remain ineligible for dead-owner recovery.
 New version 2 records capture the original native child while its foreground
 owns it: PID, birth, executable identities, UID, host boot session, process group
 and session. Recovery uses two bounded complete process-metadata observations. It refuses
@@ -270,12 +278,12 @@ kill/recover/up or retained SQL behavior.
 Portable private-filesystem and stand-in lifecycle controls cover this boundary;
 installed Source4 SQL retention through public down/up remains a separate runtime gate.
 
-`down --recover` explicitly retires a complete stored native generation whose
+`down --recover` explicitly selects recovery of a stored native generation whose
 foreground publisher and frontend admission owner are both dead on the same host
 boot. New version 4 native publications use the kernel boot-session UUID, which
-remains independent of calendar clock correction. Recovery requires the exact stored Ready,
+remains independent of calendar clock correction. Ready recovery requires the exact stored Ready,
 startup intent and private source envelope, and the original guest incarnation.
-Live owners, older version 2 dead publications, partial startup, pending writes,
+The absent-Ready case below has a separate selection. Live owners, older version 2 dead publications, unsettled startup effects, pending writes,
 changed files and rebooted guests refuse. Env/profile changes, service subsets and
 `--json` are unsupported for this operation. It neither recompiles authored input
 nor acquires managed values or starts a provider.
@@ -289,7 +297,7 @@ pending writes, retained owner records and changed history still select recovery
 or refuse; they do not qualify for the no-op.
 
 When the selection has a retained startup intent but no Ready mapping and no
-recovery intent, `down --recover` takes a different path. It handles only an
+recovery intent, both `down` and `down --recover` first try retirement of an
 incomplete startup that never reserved runtime state. One example is an attempt
 retained by an earlier CLI before this retirement existed. The command first
 takes a fresh startup admission. A live or interrupted foreground CLI still holds
@@ -299,7 +307,52 @@ the exact run. It retires the start intent and the validated source envelope onl
 when the native runtime refuses `native_graph_unreserved`. It removes the source
 first, so an interrupted retirement keeps the start intent blocking. Any receipt,
 any other refusal, or a successful inspection retains every file. This path does
-not compile input, acquire values, serve a run or touch guest resources.
+not compile input, acquire values, serve a run or touch guest resources. If it
+refuses because runtime state was reserved, the command independently attempts
+the settled recovery proof below; that refusal grants no authority.
+If inspection refuses because an interrupted removal no longer has an intact
+network, a read-only recovery selection must validate the exact start-bound
+settled journal before choosing recovery. Busy, canceled, unknown and malformed
+results still cannot choose cleanup from the inspection refusal alone.
+
+When Ready was never saved, recovery requires the exact start and private source
+envelope, repeatedly proves Ready absent, and records a distinct version 3
+frontend intent. A live admission refuses. An interrupted admission must name
+the exact dead owner; if none exists, recovery holds a fresh admission before
+taking recovery and mutation leases and saves its full identity. Every intent
+reader blocks new startup until recovery completes. Before releasing a fresh
+admission, recovery commits `admission_releasing`; a second pass requires its
+absence before completing. A crash retains the exact admission for dead-owner
+recovery. A changed lock or unrecorded absence refuses.
+If recovery refuses after committing its intent but before recording release,
+the exact admission remains held on disk. `up` stays blocked until `down`
+finishes that recovery. Older bundles refuse the new runtime v2 and frontend v3
+intent versions rather than interpreting them as Ready recovery.
+
+The native original may be `ready-observed`, `failed-retained`, `stop-intent`,
+`stopped`, `removal-intent` or `removed`. Containers must be `created`, `started`,
+`stopped` or `removed` with their saved IDs, or never-created `reserved` without
+an ID. Networks admit `created`, `remove-intent`, `removed`, or never-created
+`reserved`. `preparing`, per-container intent/uncertain states and pending files
+refuse. A never-created resource is marked removed only after exact name/label
+absence checks; recovery never creates or starts it. Original bytes, phase,
+boot, incarnation and resource identities remain fixed, and cleanup ranks only
+advance. Runtime recovery intents use version 2; legacy version 1 keeps its
+Ready-only admission. Frontend versions 1 and 2 likewise keep their Ready proof.
+Older readers refuse unknown intent versions.
+
+Pre-Ready host processes and hooks must already have settlement proof and no
+live or uncertain owned groups; recovery only observes them before native
+cleanup and retires their records after Removed/null observations. A live-stop
+record in this absent-Ready path refuses. It never signals a stored PID or
+replays startup. Graph2 and fully enrolled Graph4 retain the existing version
+restrictions; source and topology recovery remain unsupported. Named refusals
+retain evidence and direct the operator to `hack ps`.
+
+A crash after taking admission but before creating any native journal still
+refuses: unreserved retirement cannot take that stale admission, and settled
+recovery has no native receipt to prove. No services were admitted in this case;
+the stale admission and start record remain retained for inspection with `hack ps`.
 
 The closed version 3 publication and version 1 recovery selector remain supported
 with their original calendar boot qualifier; clock drift conservatively refuses
@@ -382,12 +435,15 @@ Follow is the default. `--tail` selects 0 through 1000
 initial lines (default 200); `--since` accepts a timestamp or duration such as
 `10m`. The default tail still limits that time window to the latest 200 lines;
 use `--tail` to select another supported bound, or `--tail 0` for only new lines. `--json` uses the same
-`start`, `log` and `end` event envelope as Compose, with `backend: "native"`.
+`start`, `log` and `end` event envelope as Compose, plus a `notice` event on restart, with `backend: "native"`.
 The optional `project` field is present only when `--project` was supplied;
 saved-run observation does not reload project configuration to derive a name.
 Each log event's `entry` contains `source: "native"`, `service`, `stream`,
-`message`, `raw`, and the Engine timestamp. Plain output uses
-`SERVICE | text` and preserves stdout/stderr. One service is required. Unsupported
+`message` and `raw`. Plain output contains the application text, matching the
+finite snapshot, and sends both service streams to stdout so pipes receive both.
+Hack notices go to stderr. `--timestamps` (follow only) requests Engine timestamps;
+they prefix plain lines and populate JSON `entry.timestamp` without using the
+64 Ki payload limit. Without it, Engine timestamps are disabled. One service is required. Unsupported
 flags are refused by name, and TTY-configured services report
 `native_log_tty_unsupported`.
 
@@ -397,27 +453,65 @@ journal refuses with `native_log_selection_changed`; it does not wait for startu
 Following holds no provider mutation lease and does not use the foreground
 owner's serial control loop. It cannot reserve the lifecycle lock against `up`,
 `down` or `restart`. The selected container ID and start generation stay pinned;
-the follower never switches to a replacement container. Ctrl-C stops only the
+each reader follows only that selection. Ctrl-C stops only the
 reader and exits 130. Actual stream EOF plus a confirmed service stop or removal
-ends the read with 0. If the stopped service's transport remains open for five idle
+ends the read with 0, one stderr line saying the service stopped, and JSON
+`end.reason: "native_log_service_stopped"`. If the stopped service's transport remains open for five idle
 seconds, the follower reports `native_log_stopped_idle` on stderr and in the JSON
 `end.reason`, exits 1 and warns that the final tail may be incomplete;
 unexplained transport loss reports `native_log_stream_uncertain`, while changed
 ownership or generation refuses explicitly. No stream result grants cleanup
 authority.
 
-A container restart also ends the follower. If the new start generation is
-already visible at the final observation, the result is
-`native_log_container_restarted`; if the stop is still visible, it is a clean
-stop. Start another follower for the restarted service. A local output pipe
-closing, such as `hack logs SERVICE | head -1`, stops the reader quietly with 0.
+Native follow failures retain their named JSON `end.reason`. When available,
+`end.phase` identifies admission, periodic or final inspection, or the decoder
+boundary; `end.message` and stderr include only the runtime's bounded, fixed
+diagnostic. Malformed mux headers report the invalid field and expected header
+layout, never raw bytes: a misframed header may actually contain log payload.
+An `engine_protocol` during inspection does not identify a mux-decoder failure.
+Inspection failures still end the follow; no retries or identity checks are relaxed.
+
+After a project restart, the frontend attempts a fresh Ready admission for the same
+project, branch, namespace and service. A fresh owner is allowed; the previous
+selection grants no authority. An advisory restart notice (authored projects) or
+the existing restart intent (adopted projects) allows up to 30 seconds of read-only
+waiting, without a mutation lease. A normal down does not enter this wait.
+Authored restart publishes its notice only after stop admission, before sending the
+stop request. Admission refusals create no notice state. After an admitted attempt,
+the empty notice directory may remain. Notices expire after the remaining stop budget plus 30 seconds (at most 330 seconds); publishing or retiring one never changes the
+lifecycle command result. A recent stale notice can cause a bounded wait, ending with `native_log_restart_unavailable`
+and exit 1. Reattachment requires a different container ID; an adopted restore may
+retain both its run ID and provider owner. The old reader supplies its admitted
+container, and a finite lease-free read selects the replacement. The new reader
+rechecks that exact container before requesting logs. A same-container Engine restart
+observed by the reader ends with `native_log_container_restarted`. If the reader
+already confirmed a stop before that restart, the follow ends as stopped; it never
+reattaches to the same container.
+
+Once the replacement Engine transport admits, one plain stderr marker line (or JSON
+`notice` with reason `native_log_restarted`) precedes the new container's output.
+The replacement requests logs since its pinned `StartedAt` converted to Unix seconds with nanosecond precision,
+capped at its latest 1000 lines, then follows; older lines from
+that new container may be omitted if startup output exceeded the bound. The initial
+`--since` applies only to the first attachment. No old-container lines are replayed.
+
+A closed output pipe stops the reader quietly with 0, including while idle or waiting
+for restart. Linux uses a non-writing poll; macOS uses kqueue's write-side EOF.
+If the native observation helper cannot load (including libc differences on musl),
+closure is detected on the next write. The compiled macOS binary still needs live
+acceptance for the kqueue path.
+Ordinary JSON endings wait for the consumer; only cancellation retains a 100 ms
+best-effort end. Session failures emit a named `end` and a stderr diagnostic, with
+no global error envelope appended to stdout. Native argument or dispatch errors before
+a session starts report on stderr only; Compose keeps its existing error contract.
 
 The runtime emits at most 4 KiB per envelope and waits for the frontend to consume
 output. The frontend retains at most 64 Ki characters per unfinished line per
 descriptor. Longer lines retain that prefix and discard bytes up to the next
 newline, then emit `[truncated]` and continue. A trailing line without a newline
 emits `[partial]`; JSON entries also set `truncated: true` or `partial: true`.
-Neither side accumulates
+A truncated Engine frame can deliver its validated payload prefix before refusing;
+that unfinished application line is marked partial. Neither side accumulates
 the stream's history. A lifetime pipe ends even an idle reader when its frontend
 dies. A slow output consumer may finish draining after the reader exits; the
 pipe-exit timeout bounds stalled child-pipe reads, not consumer writes.
@@ -457,8 +551,8 @@ not qualify a live provider or application log behavior.
 `exec SERVICE -- COMMAND ARG...` sends one command to an already running authored
 service through its authenticated foreground owner. Arguments are literal, including
 empty arguments, spaces and shell characters. `--workdir` selects an absolute guest
-directory; the service's existing environment and user remain in force. Stdin is
-closed and no TTY is allocated. Interactive input, TTY control, env/profile overrides,
+directory; the service's existing environment and user remain in force. Without
+terminal input and output, stdin is closed and no TTY is allocated. Env/profile overrides,
 multiple services and JSON formatting are unsupported. No shell is inserted.
 
 The owner verifies the admitted service, full resource ownership, guest boot, image,
@@ -478,6 +572,74 @@ already-written bytes cannot be retracted. No request is replayed and the foregr
 project is not stopped. Inspect the service before
 deciding whether another command is appropriate. Offline controls do not qualify
 installed native exec or live application behavior.
+
+## Interactive service exec
+
+When stdin and stdout are terminals and Hack is in the foreground, `hack exec SERVICE -- /bin/sh` opens a
+TTY session. `HACK_NO_INTERACTIVE=1` selects the finite path instead. The shell is
+explicit: Hack never inserts one. Authored commands inherit the service's startup
+environment. The authenticated owner checks the same service and generation,
+creates and starts the exec, then hands its connected Engine stream to the native
+terminal child. The owner remains available for `down` and `restart`; no mutation
+lease is held during the session.
+
+The native home holds at most 1024 **uncertain** sessions across all projects.
+A normally closed stream plus a validated Engine exit retires its receipt silently
+and returns the command's exit code. Successful commands do not accumulate receipts.
+If retirement bookkeeping fails, the validated exit code is preserved and the
+remaining receipt is reported for reconciliation.
+Use `hack exec-sessions` for a read-only, lock-free listing of service names, run IDs
+and session IDs; it retries a changing directory snapshot at most three times,
+then names `session_store_changed` instead of claiming corruption. It creates no state and prints no command or environment values.
+Use `hack exec-sessions --reconcile` to clear only proven exits, exact container
+absence or stopped-boot evidence. It prints the current count and IDs remaining,
+including when its bounded reconciliation cannot finish. An intent without an
+exec ID needs exact container absence or stopped-boot proof. `hack down` for the
+affected project is the fallback. A full home names both listing and reconciliation.
+
+The initial terminal size is supplied before the guest command starts.
+If the host reports an unknown (zero) dimension, Hack uses 24 rows or 80 columns
+for that dimension until the terminal supplies a size.
+Terminal output combines the command's stdout and stderr. Ctrl-C, Ctrl-Z and other
+terminal bytes go to the guest PTY; window-size changes are forwarded. Docker's
+Ctrl-P Ctrl-Q sequence disconnects the transport. Disconnecting does not prove
+that the command or its descendants stopped. The native child restores terminal
+attributes on exit or frontend loss; the frontend has a second snapshot for native
+child failure. If restoration fails, Hack names `stty sane` as the repair.
+
+Before create, Hack durably records a value-free session UUID bound to the exact
+owner, run, boot, container and start generation; it records the exec ID before
+start. A known refusal before create dispatch withdraws only its own intent;
+uncertain dispatch retains it. Neither operation is replayed. Normal stream
+closure and a validated exit for the exact exec, container generation, owner and
+boot retire the receipt. EOF alone, a failed inspect, frontend/native process
+loss and uncertain create/start outcomes retain evidence. The diagnostic queries
+only the attempted session UUID; pre-intent refusals do not list old sessions.
+Late errors preserve that UUID, and reports use the current evidence after
+reconciliation. A changed boot alone is never proof. Receipt bookkeeping failures
+do not block container cleanup; cleanup reports any evidence remaining in the
+native home.
+
+Terminal restoration blocks SIGTTOU on the restoring thread so it can finish after
+the shell reclaims the foreground. If the shell immediately starts another raw-mode
+job, a late restoration can still race that job's termios change.
+
+A malformed or truncated descriptor handoff also retains the receipt and refuses
+without replay. The receiver closes only descriptors present in the copied reply.
+On macOS, the kernel may install additional descriptors whose numbers were omitted
+by truncation; the short-lived native child releases them when it exits.
+
+![Interactive session states](../diagrams/interactive-session.svg)
+
+The [diagram source](../diagrams/interactive-session.mmd) and
+[model coverage](../../tests/models/tla/interactive-session/COVERAGE.md) name the
+guards and finite proof limits. Retirement is also allowed from any earlier
+intent-bearing state once the same exact cleanup proof holds.
+
+The PTY fixtures qualify local input/output, cancellation, private delivery and
+restoration boundaries. Real Engine job control, detach keys, macOS descriptor
+handoff, down/restart during a session and VM loss require the real-VM acceptance
+run described in the [candidate guide](../guides/native-candidate.md#interactive-exec-acceptance).
 
 ## Finite one-off service run
 

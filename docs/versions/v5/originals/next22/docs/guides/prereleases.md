@@ -119,7 +119,29 @@ Preparation and publication are separate operations. Preparation validates the
 version and source, builds the complete native package, and retains reviewable
 artifacts without creating a Git tag or release.
 
-After the channel workflow is merged into `next`, dispatch the existing `Release`
+First freeze merges to `next` at the intended release head and obtain full CI:
+
+```sh
+gh workflow run ci.yml --ref next -f full=true
+```
+
+Wait for that exact SHA's full run to succeed. Ordinary `next` pushes can select a
+subset and defer Intel compiler checks; even a green full unit selection is not a
+release certificate. Every prerelease needs an explicit full dispatch. Its
+`test` fan-in must execute `selection_mode=full` and `ci_evidence=release-full`,
+and every shard and compiler host must succeed. Both plan and publish recheck
+that evidence, the latest attempt and the selected run's required-check identities.
+Cancelled runs never qualify. If only scoped evidence exists, the plan refuses
+before building and prints this full-dispatch command. If a newer scoped push
+run at the same SHA is running, failed or cancelled, wait for it to succeed or
+rerun it with `gh run rerun RUN_ID` (the refusal names the run). An older full run
+cannot supersede it. A new full dispatch can supersede it once the dispatch
+succeeds; only successful scoped runs can be ignored in favor of older full evidence.
+Manual full runs have a
+separate concurrency group, so a new `next` push cannot cancel one; moving the
+head still invalidates its release eligibility.
+
+After full CI succeeds, dispatch the existing `Release`
 workflow on that branch with an explicit version and its full commit SHA:
 
 ```sh
@@ -146,6 +168,20 @@ mise exec -- scripts/build-native-candidate.sh /absolute/new/candidate-bundle \
 
 This builds software and provenance only; it does not reserve the version number,
 create a tag, or publish a release.
+
+Before anything is published, the build job also checks that an existing channel
+can take the candidate. It installs the previous published prerelease into a fresh
+root with that release's own standalone manager, then upgrades it to the candidate
+with the documented `hack-next --manager upgrade` command, which runs the retained
+older manager. If that fails, the job fails. Release assets can be replaced after
+publication, so the gate runs the previous release only when its manager digest is
+a reviewed predecessor in `scripts/installer/channel.ts` and both its manager and
+archive digests are pinned for that release in `scripts/check-prerelease-upgrade.ts`.
+Add them for each release when it publishes. The managers run without the workflow token, and the job fails if the
+packaged candidate changed while the gate ran. It also reports whether the documented
+`upgrade-manager` step would work. A release can pass on that step only with
+`HACK_PRERELEASE_ACCEPT_MANAGER_STEP=1` and release notes that tell existing users to
+run it.
 
 Publication requires an explicit publish request for the exact protected `next`
 commit, successful checks for that commit, and approval through a configured
@@ -199,10 +235,28 @@ later bundle that adds a file therefore needs the same `upgrade-manager` step
 first. Upgrading with that newer installer against such a channel also refuses
 until you run it, and leaves the channel unchanged.
 
-A truncated, interrupted or oversized official download is a refused installation.
-The installer removes only the staging directory that attempt created. It leaves
-the current selection, retained bundles and homes unchanged. Retry the same version
-after the network problem is resolved.
+Bundles from `5.0.0-next.18` onward add the lifecycle supervisor executable
+(`hack-lifecycle-supervisor`). A channel installed by `5.0.0-next.17` or earlier
+keeps that release's compiled manager, which refuses the new member: `upgrade`
+fails with "Foreign, duplicate or traversing archive entry." and leaves the channel
+unchanged. The `5.0.0-next.18` standalone manager cannot take such a channel over
+either, because no compiled predecessor was listed before it. Upgrade a channel
+a compiled manager installed (`next.6` to `next.17`) to `5.0.0-next.19` or later
+instead: run that release's standalone manager with `upgrade-manager` against the
+existing root, then `upgrade`. The takeover refuses a channel layout it cannot
+validate, such as one from the `next.1` to `next.5` Python installer; use a fresh
+`--root` for those. Managers
+from `5.0.0-next.19` onward name an unknown file and give that step when they
+refuse. A fresh `--root` does not need it.
+
+Compiled-manager downloads share one total deadline and an inactivity limit. Connection
+interruptions and HTTP 502/503/504 receive up to three fresh attempts with bounded
+backoff. Checksums, signatures, URL/size refusals and uncertain cancellation never
+retry. There is no persistent byte-range resume: a rerun starts from byte zero.
+A refused installation preserves the selection, retained bundles and homes.
+The installer removes its stage; a later install under the exclusive manager lock
+also reclaims abandoned stages with the expected private ownership and name.
+Unsafe entries refuse before reclamation.
 
 An upgrade retains the previous bundle and home. Selection changes require the
 owning candidate CLI to confirm quiescence. A running runtime, timeout, malformed
@@ -216,8 +270,47 @@ or application data. Returning to stable selects the existing stable executable
 and its original Docker state. Preserve candidate data for a later retry rather
 than trying to make a v4 executable read v5 receipts.
 
+### Uninstall without deleting candidate data
+
+`hack-next --manager uninstall` previews removal without changing files or stopping
+applications. `hack-next --manager uninstall --apply` requires every retained
+version to confirm quiescence. It moves the complete channel, including its homes,
+to a private sibling and prints a rollback manifest. Stable Hack, its home and your
+shell PATH are unchanged. No candidate data is deleted.
+
+To undo it, run the retained `manager` executable with the original `--root` and
+`uninstall --rollback-manifest /path/to/manifest`. Rollback checks the retained
+channel identity and refuses to replace an occupied original path. Keep the
+manifest and retained directory together until you choose to dispose of them.
+
+For stable CLI installations, `bun run uninstall:local` from a checkout removes
+only `$HOME/.hack/bin/hack`; it can be repeated and retains user data. See
+[upgrading from v4](upgrading-from-v4.md) for the stable updater's integrity and
+backup boundaries.
+
 Before accepting a candidate for a project, verify normal start, status, logs,
 exec, run, restart and retaining shutdown, then exercise its browser sign-in,
 data-backed pages and assets. Record the bundle version and source commit with
 the result. Unit tests, hosted CI and a responding health endpoint do not replace
 that application check.
+
+### Lifecycle supervisor packaging
+
+New release archives include `hack-lifecycle-supervisor` beside the CLI. The
+standard and slim installers install it with executable mode 0755; Homebrew keeps
+it beside `libexec/hack`. Source installs prepare it with
+`bun run build:lifecycle-supervisor` (Rust 1.97.1, locked dependencies).
+The slim runtime image includes the same sibling executable.
+
+Stable archives build it for macOS arm64/x86_64 and Linux arm64/x86_64. Existing
+prerelease bundles remain macOS arm64 only: their supervisor is ad-hoc signed and
+covered by the bundle checksums. Retained managers accept older bundles without
+this helper. Packaging does not change the lifecycle runner default.
+
+Self-upgrades stage the helper before publishing the CLI, retain its previous
+bytes and SHA-256 in the backup, and restore it if publication fails.
+Before publishing anything, a self-upgrade asks the staged CLI which helper
+handshake it requires and refuses the release, leaving the installation
+unchanged, if the staged helper is missing or answers differently. Releases
+whose CLI predates the helper are still accepted. Keep the
+helper with its matching CLI when moving an installation.

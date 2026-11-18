@@ -10,10 +10,19 @@
 
 ## Environment & sessions
 
+- [Project state](./reference/project-state.md) — shared backend-aware CLI and daemon project/service observations
+- [Version identity](./reference/version.md) — `hack version --json` describes the running CLI without starting services
+- [Read-only update check](./reference/update-check.md) — `hack update --check --json --observe`: newer release, install kind and upgrade command, for any install
+- [Machine-readable output](./reference/machine-readable-output.md) — envelope rule, schema identifiers and the complete JSON command inventory
 - [Environment model](./env.md)
 - [Lifecycle & startup](./lifecycle.md)
+- [Admin plans](./reference/global-admin-plan.md) — `hack global install|trust --plan --json`: the ordered root and user steps and exact root argv, without running anything
+- [Activity log](./reference/activity-log.md) — the `up`/`down`/`restart` history `hack activity` reads: records, origins, concurrency, rotation and what is never recorded
+- [Observe-only global status](./reference/global-status-observe.md) — `hack global status --json --observe`: routing, DNS and proxy state without starting anything, and its probe list
+- [Local CA trust check](./reference/local-ca-trust.md) — `hack doctor`'s read-only `local ca trust` check: which stores trust the Caddy Local CA, or unknown
 - [Shared host helper lifecycle](./reference/shared-host-lifecycle.md) — identity-verified adoption, exact process claims and release rules for helpers shared across branches
 - [Sessions](./sessions.md)
+- [Background commands](./guides/background-commands.md) — `hack exec|run --detach`, cursor reads, inspect and cancel; storage, retention and partial redaction
 - [Agent-first setup](./guides/agent-first-setup.md)
 
 ## Native runtime (experimental)

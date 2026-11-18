@@ -1223,11 +1223,12 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         selectedService,
       });
       const switchTarget = activePane === "services" ? "logs" : "services";
+      // [q] quit stays near the front: a narrow footer drops trailing hints.
       const actions = t`${dim("[")}${fg("#9ad7ff")("tab")}${dim("]")} focus ${fg(
         "#9ad7ff"
       )(
         switchTarget
-      )}  ${dim("[")}${fg("#9ad7ff")("ctrl+f")}${dim("]")} find  ${dim("[")}${fg(
+      )}  ${dim("[")}${fg("#9ad7ff")("q")}${dim("]")} quit  ${dim("[")}${fg("#9ad7ff")("ctrl+f")}${dim("]")} find  ${dim("[")}${fg(
         "#9ad7ff"
       )("o")}${dim("]")} open  ${dim("[")}${fg("#9ad7ff")("i")}${dim(
         "]"
@@ -1235,7 +1236,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         "#9ad7ff"
       )("d")}${dim("]")} down  ${dim("[")}${fg("#9ad7ff")("r")}${dim(
         "]"
-      )} restart  ${dim("[")}${fg("#9ad7ff")("q")}${dim("]")} quit`;
+      )} restart`;
       const scopeLabel = serviceScope === "all" ? "all" : "sel";
       const scopeHint = t`${dim("scope:")} ${fg("#9ad7ff")(scopeLabel)}`;
       const toggleHint = t`${dim("[")}${fg("#9ad7ff")("s")}${dim("]")} scope  ${dim("[")}${fg(

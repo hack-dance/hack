@@ -7,3 +7,7 @@ env-set FIXTURE_MODE fake-plain-two
 env-add FIXTURE_NEW fake-new-value
 env-add --secret FIXTURE_SECRET fake-secret-value
 expect-env FIXTURE_SECRET 60
+# The hackd pane, read live through the checked CLI (the stand-in answers
+# daemon status; the fake hackd answers /v1/status).
+hackd
+expect-hackd hackd running 30

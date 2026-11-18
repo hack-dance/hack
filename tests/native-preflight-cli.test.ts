@@ -881,6 +881,81 @@ test(
 );
 
 test(
+  "HACK-2324: before native setup the static runtime review still runs, and a review that cannot run lists what was not checked",
+  async () => {
+    const f = await fixture({
+      services: { web: { image: IMAGE, privileged: true } },
+    });
+    const env = { ...f.native, ...GRANT };
+    await f.reply("runtime-setup.out", nativeSetupInspection("not_set_up"));
+    await f.review([
+      {
+        severity: "error",
+        code: "privileged_service",
+        field: "services.web.privileged",
+        message: "runtime text",
+      },
+    ]);
+    const before = await preflight(f, env);
+    expect(before.code).toBe(1);
+    expect(before.report).toMatchObject({
+      ready: false,
+      runtime_setup: { state: "not_set_up" },
+      runtime_review: { status: "completed" },
+    });
+    // The setup blocker and the project's own runtime finding are both listed.
+    expect(codes(before.report, "cli")).toEqual(["native_runtime_setup"]);
+    expect(codes(before.report, "runtime")).toEqual(["privileged_service:web"]);
+    expect(await f.calls()).toEqual([
+      "runtime setup",
+      "project plan",
+      "project plan",
+    ]);
+
+    // A review that cannot run before setup is skipped and says what it missed.
+    const missing = await fixture({ services: { web: { image: IMAGE } } });
+    await missing.reply(
+      "runtime-setup.out",
+      nativeSetupInspection("partial_resumable")
+    );
+    const missingEnv = { ...missing.native, ...GRANT };
+    const skipped = await preflight(missing, missingEnv);
+    expect(skipped.report.runtime_review).toEqual({
+      status: "skipped",
+      code: "native_setup_incomplete",
+    });
+    expect(codes(skipped.report, "cli")).toEqual(["native_runtime_setup"]);
+    const human = await cli(
+      missing,
+      ["doctor", "--native-preflight"],
+      missingEnv
+    );
+    expect(human.stdout).toContain(
+      "Runtime review: skipped, because native setup is not complete."
+    );
+    expect(human.stdout).toContain(
+      "Not checked: the runtime's review of each service (mount sources, healthchecks and route probes, restart policies"
+    );
+    expect(human.stdout).not.toContain("no native runtime is selected");
+
+    // An invalid or unsafe home is never reviewed.
+    const unsafe = await fixture({ services: { web: { image: IMAGE } } });
+    await unsafe.reply(
+      "runtime-setup.out",
+      nativeSetupInspection("unsafe_home")
+    );
+    await unsafe.review([]);
+    const refused = await preflight(unsafe, { ...unsafe.native, ...GRANT });
+    expect(refused.report.runtime_review).toEqual({
+      status: "skipped",
+      code: "native_setup_incomplete",
+    });
+    expect(await unsafe.calls()).toEqual(["runtime setup"]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
   "ambiguous env-file aliases are a preflight blocker in JSON and text",
   async () => {
     const f = await fixture({ services: { web: { image: IMAGE } } });
@@ -1228,10 +1303,11 @@ test(
         fix: "Replace the disabled healthcheck",
       },
       {
+        // An older runtime that still returns the command check refuses.
         authored: { test: ["CMD", "true"] },
         reviewed: { healthcheck: { test: ["CMD", "true"] } },
-        message: "command-only healthcheck",
-        fix: "Replace the command healthcheck",
+        message: "does not replace it with the route probe",
+        fix: "Update the native runtime",
       },
       {
         authored: { "x-hack-http": probe },
@@ -1272,6 +1348,73 @@ test(
       expect(found?.service).toBe("web");
       expect(found?.message).toContain(entry.message);
       expect(found?.fix).toContain(entry.fix);
+    }
+  },
+  SPAWN_TIMEOUT_MS * 2
+);
+
+test(
+  "HACK-2324: a routed command healthcheck replaced by the inferred route probe is admitted with a warning",
+  async () => {
+    for (const test of [
+      ["CMD", "curl", "-f", "http://localhost:3000/health"],
+      ["CMD-SHELL", "curl -f http://localhost:3000/health"],
+    ]) {
+      const project = await fixture({
+        services: {
+          web: {
+            image: IMAGE,
+            labels: {
+              caddy: "web.example.test",
+              "caddy.reverse_proxy": "{{upstreams 3000}}",
+              "caddy.tls": "internal",
+            },
+            healthcheck: { test, interval: "10s", start_period: "30s" },
+          },
+        },
+      });
+      await project.review(
+        [
+          {
+            severity: "warning",
+            code: "route_command_healthcheck_replaced",
+            field: "services.web.healthcheck",
+            message: "runtime text",
+          },
+        ],
+        {
+          services: {
+            web: {
+              active: true,
+              routing: { port: 3000 },
+              healthcheck: {
+                disabled: false,
+                native_http: {
+                  port: 3000,
+                  path: "/",
+                  interval_ms: 30_000,
+                  timeout_ms: 1000,
+                  retries: 3,
+                  start_period_ms: 240_000,
+                  policy: "route",
+                },
+              },
+            },
+          },
+        }
+      );
+      const result = await preflight(project, {
+        ...project.native,
+        ...GRANT,
+      });
+      expect(
+        result.report.blockers.filter((f) => f.code === "route_probe_required")
+      ).toEqual([]);
+      const warning = result.report.warnings.find(
+        (f) => f.code === "route_command_healthcheck_replaced"
+      );
+      expect(warning?.service).toBe("web");
+      expect(warning?.message).toContain("is not run on native");
     }
   },
   SPAWN_TIMEOUT_MS * 2

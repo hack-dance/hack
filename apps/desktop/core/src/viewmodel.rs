@@ -180,6 +180,9 @@ pub struct DetailView {
     pub backend: String,
     pub url: Option<String>,
     pub always_on: bool,
+    /// The always-on line under the header (read-only), when this instance
+    /// is the one its marker names.
+    pub always_on_note: Option<(crate::machine::Tone, String)>,
     pub actions: Vec<Action>,
     pub busy: bool,
     pub services: Vec<ServiceView>,
@@ -398,6 +401,36 @@ impl AppModel {
             },
             Some(SourceError::DaemonUnavailable { .. }) => Some(DaemonRecovery::Restart),
             _ => None,
+        }
+    }
+
+    /// What the project reads say about hackd, for the hackd card: from the
+    /// unavailable-daemon error when the last read failed that way, else from
+    /// a good snapshot; nothing otherwise. Never an older read's versions
+    /// after a newer read failed.
+    #[must_use]
+    pub fn hackd_evidence(&self) -> crate::machine::HackdEvidence<'_> {
+        match &self.last_error {
+            Some(SourceError::DaemonUnavailable {
+                cli,
+                daemon,
+                shared_with,
+                ..
+            }) => crate::machine::HackdEvidence {
+                hackd_version: daemon.as_deref(),
+                cli_version: Some(cli),
+                shared_with: shared_with.as_deref(),
+            },
+            Some(_) => crate::machine::HackdEvidence::default(),
+            None => self
+                .snapshot
+                .as_ref()
+                .map(|s| crate::machine::HackdEvidence {
+                    hackd_version: s.daemon.as_ref().map(|d| d.version.as_str()),
+                    cli_version: Some(&s.cli_version),
+                    shared_with: None,
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -824,6 +857,26 @@ impl AppModel {
             },
             url: row.dev_host.as_ref().map(|h| format!("https://{h}")),
             always_on: row.autostart.as_ref().is_some_and(|a| a.enabled),
+            // The marker lives on the project's own row (a branch instance's
+            // derived row has none); it names the instance it is for.
+            always_on_note: self
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.projects.projects.iter().find(|p| p.name == key.project))
+                .and_then(|p| p.autostart.as_ref())
+                .filter(|a| a.branch == key.branch)
+                // The state line already says it (`state::derive`) when this
+                // instance's row carries the marker (the base instance); a
+                // branch instance's derived row does not, so keep it there.
+                .filter(|a| a.state != "needs_attention" || row.autostart.is_none())
+                .and_then(|a| {
+                    crate::machine::always_on_note(
+                        a,
+                        self.snapshot
+                            .as_ref()
+                            .and_then(|s| s.projects.autostart_global.as_ref()),
+                    )
+                }),
             actions: if row.is_native()
                 || self.last_error.is_some()
                 || (row.branch.is_some() && row.repo_root.is_none())
@@ -1340,6 +1393,121 @@ mod tests {
         assert!(m.finish_refresh(later, Ok(native_storefront(None, true))));
         assert!(m.finish_native(later, "storefront", "/work/storefront", observed(true)));
         assert!(failed(&m).is_empty());
+    }
+
+    #[test]
+    fn the_always_on_line_belongs_to_the_instance_its_marker_names() {
+        let mut snap = fixtures::snapshot(Fixture::Hackd).unwrap();
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(Ok(snap.clone())));
+        let note = |m: &mut AppModel, key: InstanceKey| {
+            m.apply(Event::SelectInstance(key));
+            m.detail().unwrap().always_on_note.map(|(_, t)| t)
+        };
+        assert_eq!(
+            note(&mut m, InstanceKey::project("notes")).as_deref(),
+            Some("Always on · paused until you start it")
+        );
+        assert!(
+            note(&mut m, InstanceKey::project("storefront"))
+                .unwrap()
+                .contains("skipped (engine_timeout)")
+        );
+        // A marker for a branch instance is not the base instance's.
+        let mut branch_marker = snap.clone();
+        branch_marker
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap()
+            .autostart
+            .as_mut()
+            .unwrap()
+            .branch = Some("preview".into());
+        m.apply(Event::Refreshed(Ok(branch_marker)));
+        assert_eq!(note(&mut m, InstanceKey::project("storefront")), None);
+        // Needs attention: the state line already says it, once.
+        snap.projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "notes")
+            .unwrap()
+            .autostart
+            .as_mut()
+            .unwrap()
+            .state = "needs_attention".into();
+        m.apply(Event::Refreshed(Ok(snap)));
+        assert_eq!(note(&mut m, InstanceKey::project("notes")), None);
+    }
+
+    #[test]
+    fn a_branch_marker_shows_on_that_branch_instance_only() {
+        let mut snap = fixtures::snapshot(Fixture::Running).unwrap();
+        snap.projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap()
+            .autostart = Some(crate::models::Autostart {
+            enabled: true,
+            state: "paused".into(),
+            paused_reason: Some("manual_stop".into()),
+            branch: Some("feature-search".into()),
+            ..crate::models::Autostart::default()
+        });
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(Ok(snap)));
+        m.apply(Event::SelectInstance(InstanceKey::branch(
+            "storefront",
+            "feature-search",
+        )));
+        assert_eq!(
+            m.detail().unwrap().branch.as_deref(),
+            Some("feature-search")
+        );
+        assert_eq!(
+            m.detail()
+                .unwrap()
+                .always_on_note
+                .map(|(_, t)| t)
+                .as_deref(),
+            Some("Always on · paused until you start it")
+        );
+        m.apply(Event::SelectInstance(InstanceKey::project("storefront")));
+        assert_eq!(m.detail().unwrap().always_on_note, None);
+        // Needs attention on a branch marker: the branch's state line cannot
+        // say it, so the always-on line does.
+        let mut attention = fixtures::snapshot(Fixture::Running).unwrap();
+        attention
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap()
+            .autostart = Some(crate::models::Autostart {
+            enabled: true,
+            state: "needs_attention".into(),
+            branch: Some("feature-search".into()),
+            failures: crate::models::AutostartFailures {
+                count: 3,
+                ..crate::models::AutostartFailures::default()
+            },
+            ..crate::models::Autostart::default()
+        });
+        m.apply(Event::Refreshed(Ok(attention)));
+        m.apply(Event::SelectInstance(InstanceKey::branch(
+            "storefront",
+            "feature-search",
+        )));
+        assert_eq!(
+            m.detail()
+                .unwrap()
+                .always_on_note
+                .map(|(_, t)| t)
+                .as_deref(),
+            Some("Always-on stopped trying after 3 failures")
+        );
     }
 
     #[test]

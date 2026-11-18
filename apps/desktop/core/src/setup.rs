@@ -592,8 +592,10 @@ pub use crate::setup_login::{installation_refusal, qualify_login};
 /// says neither.
 fn daemon_running(d: &serde_json::Value) -> Option<bool> {
     let flag = |key: &str| d.get(key).and_then(serde_json::Value::as_bool);
-    let api_answers = d.get("status").and_then(serde_json::Value::as_str) == Some("running")
-        && (flag("api_ok") == Some(true) || flag("api_reachable") == Some(true));
+    let api_answers = matches!(
+        d.get("status").and_then(serde_json::Value::as_str),
+        Some("running" | "incompatible")
+    ) && (flag("api_ok") == Some(true) || flag("api_reachable") == Some(true));
     match flag("running") {
         Some(true) => Some(true),
         _ if api_answers => Some(true),

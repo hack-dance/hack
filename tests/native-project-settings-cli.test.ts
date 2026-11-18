@@ -405,7 +405,20 @@ test(
     const f = await fixture({
       services: {
         web: { image: IMAGE, labels: { caddy: "web.example.test" } },
-        api: { image: IMAGE, labels: { caddy: "api.example.test" } },
+        // Disabled: native route readiness cannot use it, so it is counted.
+        api: {
+          image: IMAGE,
+          labels: { caddy: "api.example.test" },
+          healthcheck: { disable: true },
+        },
+        // No healthcheck and a command healthcheck both get the inferred
+        // route probe (HACK-2324), so neither is counted.
+        docs: { image: IMAGE, labels: { caddy: "docs.example.test" } },
+        admin: {
+          image: IMAGE,
+          labels: { caddy: "admin.example.test" },
+          healthcheck: { test: ["CMD", "true"] },
+        },
       },
     });
     await writeFile(

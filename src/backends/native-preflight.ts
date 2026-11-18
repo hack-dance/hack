@@ -45,6 +45,7 @@ import {
   type NativeServicePreparationProblem,
   nativeServicePreparationProblems,
 } from "./native-project-start.ts";
+import { nativeManagedRestartNotices } from "./native-restart-policy-notices.ts";
 import {
   invokeNativeRuntime,
   isNativeRuntimeStopError,
@@ -133,7 +134,8 @@ export type NativePreflightReport = {
      * The closed runtime code when the review stopped or failed. For a
      * skipped review: `native_selection_incomplete` when native is selected
      * without a candidate, `native_adaptation_invalid` when the adaptation was
-     * refused, and absent when native is not selected.
+     * refused, `native_setup_incomplete` when setup is not ready and the
+     * review could not run before it, and absent when native is not selected.
      */
     readonly code?: string;
   };
@@ -470,6 +472,11 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
     message:
       "The service declares a route, which needs native HTTPS to be set up.",
     fix: "Set up native HTTPS (see the guide). A route without an authored healthcheck gets a default route-port probe.",
+  },
+  route_command_healthcheck_replaced: {
+    message:
+      "The routed service's command healthcheck is not run on native: route readiness is an HTTP probe. Native sends GET / to the route port; a complete HTTP 200-499 response counts as ready, 5xx and timeouts do not.",
+    fix: "Nothing to do if GET / answers. To probe a real health path, replace the healthcheck with healthcheck.x-hack-http, for example {port: <route port>, path: /health, interval_ms: 30000, timeout_ms: 1000, retries: 3, start_period_ms: 240000} (all six fields are required).",
   },
   inferred_route_probe: {
     message:
@@ -1720,6 +1727,32 @@ async function collectSetupFinding(
   return runtimeSetup;
 }
 
+/** HACK-2324: a restart policy native does not apply to privately delivered services. */
+function managedRestartFindings(
+  document: NonNullable<AdaptedProject["document"]>,
+  plan: unknown
+): NativePreflightFinding[] {
+  return nativeManagedRestartNotices({
+    compose: JSON.parse(document.normalizedComposeJson),
+    plan,
+    delivered: new Set(document.managedServices),
+  }).map(({ service, line }) =>
+    finding(
+      {
+        severity: "warning",
+        gate: "cli",
+        code: "restart_policy_not_applied",
+        service,
+        field: `services.${service}.restart`,
+      },
+      {
+        message: line,
+        fix: "Nothing to do to start. If the service stops, run hack restart (native restarts the whole project; service names are not accepted). Automatic restart with a fresh delivery is planned.",
+      }
+    )
+  );
+}
+
 function deliveryFindings(
   document: NonNullable<AdaptedProject["document"]>,
   plan: unknown
@@ -1730,6 +1763,40 @@ function deliveryFindings(
   } catch (error: unknown) {
     return [environmentInputFinding(error, true)];
   }
+}
+
+/**
+ * Setup states in which the selected binary answered and only the native home is
+ * incomplete. The runtime's Compose review is static (it reads the project and
+ * starts nothing), so it runs before setup and its findings are listed beside
+ * the setup blocker.
+ */
+const PRE_SETUP_REVIEW_STATES: ReadonlySet<NativeSetupState> = new Set([
+  "not_set_up",
+  "partial_resumable",
+]);
+
+/**
+ * The runtime review, or `skipped` with `native_setup_incomplete` when setup is
+ * not ready and the review could not run (or must not run, for a home that is
+ * invalid or unsafe). The report then names the checks that did not run.
+ */
+async function reviewWithSetup(opts: {
+  readonly setup: NativeSetupState;
+  readonly review: () => Promise<RuntimeReview>;
+}): Promise<RuntimeReview> {
+  const skipped: RuntimeReview = {
+    review: { status: "skipped", code: "native_setup_incomplete" },
+    findings: [],
+  };
+  if (opts.setup === "ready") {
+    return await opts.review();
+  }
+  if (!PRE_SETUP_REVIEW_STATES.has(opts.setup)) {
+    return skipped;
+  }
+  const reviewed = await opts.review();
+  return reviewed.review.status === "unavailable" ? skipped : reviewed;
 }
 
 /** Runs installation, CLI and runtime gates over the same selected project. */
@@ -1770,20 +1837,24 @@ export async function collectNativePreflight(
         review: { status: "skipped", code: "native_adaptation_invalid" },
         findings: [],
       };
-    } else if (
-      hasSelectedRuntime(opts.runtime) &&
-      runtimeSetup.state === "ready"
-    ) {
-      runtime = await collectNativeRuntimeFindings({
-        runtime: opts.runtime,
-        projectRoot: opts.projectRoot,
-        composeFile: opts.composeFile,
-        profiles: opts.profiles,
-        adapted: adapted.document,
-        invoke: opts.invoke,
+    } else if (hasSelectedRuntime(opts.runtime)) {
+      const selected = opts.runtime;
+      const document = adapted.document;
+      runtime = await reviewWithSetup({
+        setup: runtimeSetup.state,
+        review: () =>
+          collectNativeRuntimeFindings({
+            runtime: selected,
+            projectRoot: opts.projectRoot,
+            composeFile: opts.composeFile,
+            profiles: opts.profiles,
+            adapted: document,
+            invoke: opts.invoke,
+          }),
       });
       if (runtime.plan) {
         cli.push(...deliveryFindings(adapted.document, runtime.plan));
+        cli.push(...managedRestartFindings(adapted.document, runtime.plan));
         cli.push(
           ...routeFindings({
             plan: runtime.plan,
@@ -1852,6 +1923,10 @@ function findingLines(found: NativePreflightFinding): string[] {
   ];
 }
 
+/** What the runtime review adds, so a skipped review says what was not checked. */
+const SETUP_SKIPPED_CHECKS =
+  "Not checked: the runtime's review of each service (mount sources, healthchecks and route probes, restart policies, platforms, privileges, devices and capabilities), private environment delivery, and route admission.";
+
 function reviewLine(review: NativePreflightReport["runtime_review"]): string {
   if (review.status === "completed") {
     return "Runtime review: completed.";
@@ -1864,6 +1939,9 @@ function reviewLine(review: NativePreflightReport["runtime_review"]): string {
       return "Runtime review: unavailable; update the selected native runtime to include start-admission checks. Only the CLI's own checks ran.";
     }
     return "Runtime review: unavailable; the selected native runtime did not return a review. Only the CLI's own checks ran.";
+  }
+  if (review.code === "native_setup_incomplete") {
+    return `Runtime review: skipped, because native setup is not complete. Only the CLI's own checks ran. ${SETUP_SKIPPED_CHECKS} Finish setup and run the preflight again.`;
   }
   if (review.code === "native_adaptation_invalid") {
     return "Runtime review: skipped, because the native adaptation is not valid. Fix it and run the preflight again.";

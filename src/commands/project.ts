@@ -8,6 +8,7 @@ import {
 } from "../lib/env-migration.ts";
 import { resolveLifecycleRunner } from "../lib/lifecycle-runner.ts";
 import { preflightLifecycleSupervisor } from "../lib/lifecycle-supervisor.ts";
+import { childStdoutTarget } from "../lib/machine-stdout.ts";
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
@@ -2098,7 +2099,12 @@ export async function runLifecycleCommands(opts: {
       command: cmd.command,
       cwd,
       env: await mergeLifecycleCommandEnv(opts.env),
-      output: opts.routeStdoutToStderr ? "stderr" : "stdout",
+      // Under Hack's own `--json`, stdout holds only the envelope
+      // (HACK-2311), whatever this call site passed.
+      output:
+        childStdoutTarget(opts.routeStdoutToStderr) === "stderr"
+          ? "stderr"
+          : "stdout",
       projectDir: opts.projectDir,
       composeProject: opts.composeProject,
       service: serviceName,
@@ -6055,6 +6061,9 @@ async function runRemoteLifecycleCommand(opts: {
   return await runShell([invocation.bin, ...dispatchArgs], {
     cwd: opts.project.projectRoot,
     hackReexec: true,
+    // Under Hack's own --json the dispatch output precedes the envelope
+    // (emitRemoteLifecycleJson), so it goes to stderr (HACK-2311).
+    stdout: childStdoutTarget(undefined),
   });
 }
 

@@ -634,7 +634,10 @@ hack env list
 hack env list --env qa
 hack env list --env qa --service api
 hack env list --json
+hack env list --json --plaintext-values
 hack env list --show-values
+hack env overlay list
+hack env overlay add qa
 hack env explain GITHUB_TOKEN --env runner --service installer --target compose
 ```
 
@@ -656,6 +659,22 @@ JSON also reports `key_state`, whether the project env key can be read, without 
 | `missing` | No key file and no `HACK_ENV_SECRET_KEY`. An empty or whitespace-only key file counts as absent, as it does for the runtime, so the next location is used. Names are still listed. Copy the original key from a checkout that has it; a new key cannot decrypt existing values. |
 | `unreadable` | A key file exists but is refused (a symlink, not a regular file, unreadable, not UTF-8 or larger than 1 MiB). Names are still listed. Run `hack doctor`. |
 | `not_checked` | The project uses the legacy `hack.env.json` contract, which does not use this key. |
+
+`key_source` says which source answered, never the key:
+
+| `key_source` | Meaning |
+| --- | --- |
+| `{"kind":"file","origin":…,"path":…,"relative_path":…}` | A key file. `origin` is `checkout` (this checkout's `.hack.secret.key`), `shared` (the git common dir, shared by linked worktrees), `primary_checkout` (inherited from the primary worktree) or `override` (`--key-file`). `relative_path` is relative to the checkout, or null when the file is outside it. `path` is null only for a `--key-file` path that names nothing. |
+| `{"kind":"env","origin":…,"name":…}` | An environment variable, by NAME: `HACK_ENV_SECRET_KEY` (`origin: default`) or the variable given with `--key-env` (`origin: override`). |
+| `{"kind":"none"}` | No key was found (`key_state: missing`). |
+| `null` | A key file was refused and its location cannot be told (`key_state: unreadable`). |
+| `{"kind":"secret_store","backend":…}` | Legacy `hack.env.json` contract; secrets live in the configured secret store. |
+
+`--key-file <path>` or `--key-env <NAME>` on `env list`, `env get`, `env set` and `env add` uses that key for one run instead of the discovery order above. Pass a path or a variable NAME, never the key itself; a refused `--key-env` argument is not echoed. While an override is given, Hack does not fall back to other key locations and never creates or adopts a key file, so `env set --secret` encrypts with the chosen key. Encryption with an override follows the usual key rules: a git-tracked key file is refused, so is a key file inside a git checkout that git does not ignore (Hack does not edit ignore rules for an override), and so is a key that differs from the one this checkout would otherwise find, so a project never ends up with secrets under two keys. A `--key-file` path that names nothing is reported as `path: null` rather than echoed.
+
+JSON also lists `overlays`: every committed `.hack/hack.env.<name>.yaml`, every overlay that exists only as its machine-local `.hack/hack.env.<name>.local.yaml`, and the configured default overlay even before it has a file. In a linked worktree that inherits local inputs, it also lists overlays that exist only as the primary checkout's `.hack/hack.env.<name>.local.yaml`, which `--env <name>` reads there. Each entry has `name`, `path`, `exists`, `local_path`, `local_exists`, `inherited_local_path` (null when nothing is inherited), `inherited_local_exists` and `default`; layers may be regular files or in-project symlinks. `hack env overlay list --json` returns the same list in a `hack.env-overlays.v1` envelope. `hack env overlay add <name>` creates an empty committed overlay file, refuses a name that exists, makes sure `.hack/.gitignore` ignores its machine-local layer, and with `--json` reports whether git ignores each path. `base`, `default`, `none` and `local` are reserved names.
+
+`--plaintext-values` (with `--json` only) adds `value` to rows stored as plaintext, from the same read as the names. Rows stored as secrets never get a `value`, no key is needed, and the output is safe to pipe. Use it instead of one `env get` per plaintext name.
 
 `--show-values` reveals resolved values only when both stdin and stdout are terminals and interaction is enabled. The older `--show-secrets` spelling is an alias. Redirecting or piping the output refuses the reveal, including with `--json`; ordinary `--json` is metadata only. Use `env get KEY` for an explicit single-value read in a script.
 

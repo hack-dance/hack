@@ -121,7 +121,7 @@ export async function removeUnstartedProxyContainers(): Promise<UnstartedProxyCl
     return {
       kind: "failed",
       ids: [],
-      message: `Could not list never-started proxy containers; check with: docker ps --all --filter label=com.docker.compose.project=${GLOBAL_CADDY_PROJECT_NAME} --filter status=created, and remove any with docker rm <id> before retrying`,
+      message: `Could not list never-started proxy containers; check with: docker ps --all --filter label=com.docker.compose.project=${GLOBAL_CADDY_PROJECT_NAME} --filter label=com.docker.compose.service=caddy --filter status=created, and remove any with docker rm <id> before retrying`,
     };
   }
   const ids = listed.stdout

@@ -54,9 +54,10 @@ curl -fsSL \
 This installs the stable v4 line. This README describes v5, which is in prerelease
 and installs beside v4; see [versions](#versions-and-backends). In v4, new projects
 get `https://myapp.hack` instead of `https://myapp.hack.local`, and a few things
-below arrive with v5: the `hack-mcp` plugin, the doctor's checks for slow settings,
-and plugin-based agent setup. v4's `hack setup` commands write `AGENTS.md` and
-`CLAUDE.md` sections and Cursor rules instead.
+below arrive with v5: the separate `hack-mcp` plugin, the eight-skill `hack` plugin
+and the doctor's checks for slow settings. v4's plugin has two skills and bundles
+the MCP server, and v4's `hack setup` commands write `AGENTS.md` and `CLAUDE.md`
+sections and Cursor rules.
 
 ## Why it exists
 
@@ -207,8 +208,8 @@ open, test and read logs from without touching anyone else's.
 - Many commands accept `--json`. Newer outputs share one envelope with stable
   error codes; older ones keep their published shapes. `--no-interactive` avoids
   prompts. See [machine-readable output](docs/reference/machine-readable-output.md).
-- v5 does not write `AGENTS.md` or `CLAUDE.md` sections, Cursor rules or skill
-  copies. Everything below is optional.
+- v5 does not write `AGENTS.md` or `CLAUDE.md` sections, Cursor rules or global
+  skill copies on its own. Everything below is optional.
 - The `hack` plugin gives Codex, Claude Code and Cursor eight Hack skills through
   the client's own plugin manager. The separate `hack-mcp` plugin is for clients
   without shell access.

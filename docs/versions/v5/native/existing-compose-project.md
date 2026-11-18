@@ -128,8 +128,9 @@ keeps port 443 and its own hostnames.
 **Which CA signs native routes.** Native's Caddy creates its own local CA under
 the native home, at `native-https/data/caddy/pki/authorities/local/root.crt`, the
 first time it serves HTTPS. It is not the Compose proxy's CA, so trust installed
-by `hack global trust` does not cover native routes. Trust the native root once,
-from your own terminal:
+by `hack global trust` does not cover native routes. The file exists only after the
+first `up` with HTTPS selected (step 5), so run that first, then trust the native
+root once, from your own terminal:
 
 ```sh
 sudo security add-trusted-cert -d -r trustRoot \

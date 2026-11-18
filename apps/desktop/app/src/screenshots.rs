@@ -61,6 +61,9 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             if fixtures::opens_hackd(f) {
                                 app.show_hackd_now();
                             }
+                            if fixtures::opens_upgrade(f) {
+                                app.show_upgrade_now();
+                            }
                             if f.name().starts_with("env-") {
                                 app.show_env_fixture(f.name(), window, cx);
                             }

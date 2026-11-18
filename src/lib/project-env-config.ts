@@ -1774,9 +1774,11 @@ export type ProjectEnvOverlayEntry = {
 /**
  * Every overlay a project has: each committed `hack.env.<name>.yaml`, each
  * overlay that exists only as its machine-local layer, and the configured
- * default overlay even when it has no file yet. Base layers (`default`,
- * the bare local file) are not overlays. Names that the `--env` grammar
- * cannot select are left out. Sorted by name; names only, never values.
+ * default overlay even when it has no file yet. Layers may be regular files
+ * or in-project symlinks (`exists` reports the entry; a read checks where it
+ * leads). Base layers (`default`, the bare local file) are not overlays.
+ * Names that the `--env` grammar cannot select are left out. Sorted by name;
+ * names only, never values.
  */
 export async function listProjectEnvOverlays(opts: {
   readonly projectDir: string;
@@ -1785,8 +1787,9 @@ export async function listProjectEnvOverlays(opts: {
   let entries: string[];
   try {
     entries = (await readdir(opts.projectDir, { withFileTypes: true }))
-      // Regular files only, as listProjectEnvOverlayNames does.
-      .filter((entry) => entry.isFile())
+      // Regular files and in-project symlinks, which layer reads support
+      // (and refuse when they lead elsewhere); never directories.
+      .filter((entry) => entry.isFile() || entry.isSymbolicLink())
       .map((entry) => entry.name);
   } catch (error) {
     if (isRecord(error) && error.code === "ENOENT") {
@@ -1798,24 +1801,35 @@ export async function listProjectEnvOverlays(opts: {
   const committed = await listProjectEnvOverlayNames({
     projectDir: opts.projectDir,
   }).catch(() => [] as readonly string[]);
-  const localOnly = entries
+  const layerNames = entries
     .filter(
       (name) =>
         name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
-        name.endsWith(`${localSuffix}${PROJECT_ENV_CONFIG_FILENAME_SUFFIX}`)
+        name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
     )
     .map((name) =>
       name.slice(
         PROJECT_ENV_CONFIG_FILENAME_PREFIX.length,
-        -(localSuffix.length + PROJECT_ENV_CONFIG_FILENAME_SUFFIX.length)
+        -PROJECT_ENV_CONFIG_FILENAME_SUFFIX.length
       )
+    );
+  // `<name>.local` is a machine-local layer; bare `local` is the local base.
+  const discovered = layerNames
+    .map((name) =>
+      name.endsWith(localSuffix) ? name.slice(0, -localSuffix.length) : name
+    )
+    .filter(
+      (name) =>
+        name.length > 0 &&
+        name !== "default" &&
+        name !== PROJECT_ENV_LOCAL_SEGMENT
     );
   const defaultEnv = await readProjectDefaultEnvConfig({
     projectDir: opts.projectDir,
   });
   const names = new Set<string>([
     ...committed,
-    ...localOnly,
+    ...discovered,
     ...(defaultEnv === null ? [] : [defaultEnv]),
   ]);
   const overlays: ProjectEnvOverlayEntry[] = [];
@@ -1836,9 +1850,9 @@ export async function listProjectEnvOverlays(opts: {
     overlays.push({
       name,
       path,
-      exists: await pathExists(path),
+      exists: (await lstat(path).catch(() => null)) !== null,
       localPath,
-      localExists: await pathExists(localPath),
+      localExists: (await lstat(localPath).catch(() => null)) !== null,
       isDefault: name === defaultEnv,
     });
   }

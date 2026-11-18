@@ -6,6 +6,7 @@ import {
   realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -797,6 +798,71 @@ describe("R27: overlay creation", () => {
       expect(again.exitCode).not.toBe(0);
       expect(again.stdout).toContain("E_PATH_CONFLICT");
       expect(await readFile(path, "utf8")).toBe(text);
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
+    "env overlay add migrates a legacy project before creating the overlay",
+    async () => {
+      const project = await createProject();
+      await rm(resolve(project.projectDir, "hack.env.default.yaml"));
+      await writeFile(
+        resolve(project.projectDir, "hack.env.json"),
+        `${JSON.stringify({
+          version: 1,
+          vars: [{ key: "STORED_PLAIN", source: "plain_env", required: false }],
+        })}\n`
+      );
+      await writeFile(
+        resolve(project.projectDir, ".env"),
+        `STORED_PLAIN=${PLAIN_VALUE}\n`
+      );
+      const created = await runHack({
+        project,
+        args: ["env", "overlay", "add", "qa"],
+      });
+      expect(created.exitCode).toBe(0);
+      // The legacy value is still reachable through the new overlay.
+      const get = await runHack({
+        project,
+        args: ["env", "get", "STORED_PLAIN", "--env", "qa"],
+      });
+      expect(get.exitCode).toBe(0);
+      expect(get.stdout).toBe(PLAIN_VALUE);
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
+    "overlays include in-project symlinked layers",
+    async () => {
+      const project = await createProject();
+      const target = resolve(project.projectDir, "layers");
+      await mkdir(target);
+      await writeFile(
+        resolve(target, "qa.yaml"),
+        "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
+      );
+      await symlink(
+        "layers/qa.yaml",
+        resolve(project.projectDir, "hack.env.qa.yaml")
+      );
+      await symlink(
+        "layers/qa.yaml",
+        resolve(project.projectDir, "hack.env.review.local.yaml")
+      );
+      const listed = await listJson({ project });
+      expect(
+        listed.json.overlays.map((entry) => [
+          entry.name,
+          entry.exists,
+          entry.local_exists,
+        ])
+      ).toEqual([
+        ["qa", true, false],
+        ["review", false, true],
+      ]);
     },
     CLI_TEST_TIMEOUT_MS
   );

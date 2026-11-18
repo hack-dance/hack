@@ -3222,6 +3222,13 @@ const handleEnvOverlayAdd: CommandHandlerFor<typeof overlayAddSpec> = async ({
     pathOpt: args.options.path,
     projectOpt: args.options.project,
   });
+  // The first YAML layer would hide a legacy hack.env.json project from
+  // implicit migration, so migrate first, as the other env writes do.
+  await maybeMigrateLegacyProjectEnv({
+    project,
+    projectName: await resolveProjectName(project),
+    reason: "mutation",
+  });
   const created = await createProjectEnvOverlay({
     projectRoot: project.projectRoot,
     projectDir: project.projectDir,

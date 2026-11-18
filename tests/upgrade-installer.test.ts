@@ -15,6 +15,7 @@ import { join } from "node:path";
 import packageJson from "../package.json";
 import { writeReleaseArchive } from "../scripts/build-release.ts";
 import { download } from "../scripts/installer/download.ts";
+import { CLI_COMPILE_DEFINE_ARGS } from "../scripts/lib/cli-compile-define.ts";
 import {
   LIFECYCLE_SUPERVISOR_HANDSHAKE_ARGUMENT,
   LIFECYCLE_SUPERVISOR_VERSION,
@@ -596,6 +597,7 @@ for (const phase of ["assets-published", "compiler-published"]) {
         "build",
         join(import.meta.dir, "fixtures/update-recovery-cli.ts"),
         "--compile",
+        ...CLI_COMPILE_DEFINE_ARGS,
         "--no-compile-autoload-dotenv",
         "--no-compile-autoload-bunfig",
         "--no-compile-autoload-tsconfig",

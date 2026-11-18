@@ -850,22 +850,6 @@ async function runRemoteMonitor(opts: {
     t,
   } = await import("@opentui/core");
 
-  class WrappedTextRenderable extends TextRenderable {
-    protected override onResize(width: number, height: number): void {
-      super.onResize(width, height);
-      if (this.wrapMode !== "none" && width > 0) {
-        this.textBufferView.setWrapWidth(width);
-      }
-    }
-
-    public syncWrapWidth(): void {
-      const width = Math.floor(this.width);
-      if (this.wrapMode !== "none" && width > 0) {
-        this.textBufferView.setWrapWidth(width);
-      }
-    }
-  }
-
   let statusTimer: ReturnType<typeof setInterval> | null = null;
   let auditTimer: ReturnType<typeof setInterval> | null = null;
   let isActive = true;
@@ -879,8 +863,8 @@ async function runRemoteMonitor(opts: {
   const activeRenderer = await createCliRenderer({
     targetFps: 30,
     exitOnCtrlC: false,
-    useConsole: false,
-    useAlternateScreen: true,
+    consoleMode: "disabled",
+    screenMode: "alternate-screen",
     useMouse: false,
   });
   activeRenderer.setBackgroundColor("#0f111a");
@@ -970,7 +954,7 @@ async function runRemoteMonitor(opts: {
     },
   });
 
-  const logsText = new WrappedTextRenderable(activeRenderer, {
+  const logsText = new TextRenderable(activeRenderer, {
     id: "hack-remote-logs-text",
     width: "100%",
     content: "Waiting for gateway activity...",
@@ -1075,7 +1059,6 @@ async function runRemoteMonitor(opts: {
     const rendered = auditLines.map((entry) => entry.formatted).join("\n");
     logsText.content =
       rendered.length > 0 ? rendered : "Waiting for gateway activity...";
-    logsText.syncWrapWidth();
   };
 
   renderHeader();

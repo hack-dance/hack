@@ -1978,6 +1978,31 @@ async function staticReviewInput(opts: {
   ).input;
 }
 
+/**
+ * Compose leaves unselected-profile services out silently; native names them
+ * (HACK-2338 item 8). Profiles kept from a retained run are labeled as such.
+ */
+function reportNativeInactiveProfileServices(opts: {
+  readonly plan: unknown;
+  readonly profiles: readonly string[];
+  readonly requestedProfiles: readonly string[];
+  readonly source: NativeProfileSource | undefined;
+  readonly warn: (line: string) => void;
+}): void {
+  const retained =
+    JSON.stringify(opts.profiles) !== JSON.stringify(opts.requestedProfiles);
+  const notice = nativeInactiveProfileNotice({
+    plan: opts.plan,
+    selection: {
+      profiles: opts.profiles,
+      source: retained ? "retained" : (opts.source ?? "cli"),
+    },
+  });
+  if (notice) {
+    opts.warn(notice);
+  }
+}
+
 async function startNativeProjectAttempt(
   opts: NativeProjectStartOptions,
   observeStartup: () => Promise<void>
@@ -2428,21 +2453,13 @@ async function startNativeProjectAttempt(
         });
         reportNativeIgnoredSettingNotices(review.report.plan, deps.warn);
         reportNativeEnvironmentNotices(input, review.report.plan, deps.warn);
-        // Compose leaves unselected-profile services out silently; native
-        // names them (HACK-2338 item 8).
-        const inactive = nativeInactiveProfileNotice({
+        reportNativeInactiveProfileServices({
           plan: review.report.plan,
-          selection: {
-            profiles,
-            source:
-              JSON.stringify(profiles) === JSON.stringify(requestedProfiles)
-                ? (opts.profileSource ?? "cli")
-                : "retained",
-          },
+          profiles,
+          requestedProfiles,
+          source: opts.profileSource,
+          warn: deps.warn,
         });
-        if (inactive) {
-          deps.warn(inactive);
-        }
         if (metadata) {
           verifyNativeRuntimeMetadataRoutes({
             plan: review.report.plan,

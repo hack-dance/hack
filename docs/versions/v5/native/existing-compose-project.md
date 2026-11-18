@@ -138,10 +138,29 @@ sudo security add-trusted-cert -d -r trustRoot \
 ```
 
 `hack doctor --json` with native selected reports whether that exact root is
-trusted. For browser access the hostnames must also resolve to loopback; to keep
-native names apart from v4, use a separate suffix with
-`hack global dns preview --domain <suffix>` and then
-`hack global dns activate --domain <suffix>`.
+trusted.
+
+**Hostnames beside v4.** The project's existing route names (for example under
+`hack.local`) keep resolving to the Compose proxy, and DNS activation does not
+rename or copy routes. To open the native routes in a browser while v4 keeps its
+names, give each routed service a name under a separate suffix in the native
+adaptation, then activate that suffix:
+
+```json
+{"version": 1, "additionalHostnames": {"web": ["web.my-app.v5.example"]}}
+```
+
+Put it in `.hack/native/adaptation.json` (committed, shared by every checkout), or
+in any absolute file selected with `HACK_NATIVE_ADAPTATION`. The names are appended
+to the service's Caddy labels on native only; the Compose file is unchanged. Then:
+
+```sh
+"$CANDIDATE" global dns preview --domain v5.example
+"$CANDIDATE" global dns activate --domain v5.example
+```
+
+Activation asks for confirmation and an administrator prompt. Check one route with
+`"$CANDIDATE" doctor --browser-url https://web.my-app.v5.example:18443`.
 
 ## 5. Start, check and stop
 

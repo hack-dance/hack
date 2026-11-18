@@ -12,18 +12,16 @@ import {
   ENV_OVERRIDE_COVERAGE_CHECK,
   envOverrideCoverageCheck,
   inspectEnvOverrideCoverage,
+  runningComposeServices,
 } from "../src/lib/doctor-env-override-coverage.ts";
 import { runFixtureGit } from "./helpers/fixture-git.ts";
 
 const FILE = ".hack/.internal/compose.env.override.yml";
 const GRAPH = ["api", "web", "worker"];
+const ALL = new Set(GRAPH);
 
 /** Global env plus one service scope, with effective scopes as `hack up` passes them. */
 function render(targetServices: readonly string[]): string {
-  const globalEnv = { LOG_LEVEL: "synthetic-global" };
-  const serviceEnv = {
-    api: { LOG_LEVEL: "synthetic-global", API_TOKEN: "synthetic-scoped" },
-  };
   const effectiveScopes: ComposeEnvEffectiveScopes = {
     api: {
       LOG_LEVEL: { scope: "global" },
@@ -32,8 +30,10 @@ function render(targetServices: readonly string[]): string {
   };
   const out = renderComposeEnvReferenceOverride({
     targetServices,
-    globalEnv,
-    serviceEnv,
+    globalEnv: { LOG_LEVEL: "synthetic-global" },
+    serviceEnv: {
+      api: { LOG_LEVEL: "synthetic-global", API_TOKEN: "synthetic-scoped" },
+    },
     effectiveScopes,
   });
   if (!out) {
@@ -42,16 +42,13 @@ function render(targetServices: readonly string[]): string {
   return out.text;
 }
 
-test("a whole-graph override covers every running service", () => {
+test("a whole-graph override covers every running service with managed env", () => {
   const coverage = inspectEnvOverrideCoverage({
     text: render(GRAPH),
     expected: GRAPH,
+    managed: ALL,
   });
-  expect(coverage).toEqual({
-    kind: "covered",
-    services: GRAPH,
-    missing: [],
-  });
+  expect(coverage).toEqual({ kind: "covered", services: GRAPH, missing: [] });
   expect(
     envOverrideCoverageCheck({ coverage, file: FILE, running: true }).status
   ).toBe("ok");
@@ -61,6 +58,7 @@ test("an override an older targeted restart wrote misses the other running servi
   const coverage = inspectEnvOverrideCoverage({
     text: render(["api"]),
     expected: ["api", "web", "worker", "web"],
+    managed: ALL,
   });
   expect(coverage).toEqual({
     kind: "stale",
@@ -82,27 +80,27 @@ test("an override an older targeted restart wrote misses the other running servi
   expect(check.message).not.toContain("HACK_ENV_");
 });
 
-test("without global env a missing service may have no managed env, so nothing is judged", () => {
-  const out = renderComposeEnvReferenceOverride({
-    targetServices: GRAPH,
-    globalEnv: {},
-    serviceEnv: { api: { API_TOKEN: "synthetic-scoped" } },
-    effectiveScopes: { api: { API_TOKEN: { scope: "service" } } },
-  });
+test("a service without effective managed env needs no entry", () => {
+  // web removed every inherited global key; worker has no env at all.
   const coverage = inspectEnvOverrideCoverage({
-    text: out?.text ?? null,
+    text: render(["api"]),
     expected: GRAPH,
+    managed: new Set(["api"]),
   });
-  expect(coverage).toEqual({ kind: "no_global_env", services: ["api"] });
-  expect(
-    envOverrideCoverageCheck({ coverage, file: FILE, running: true }).status
-  ).toBe("ok");
+  expect(coverage).toEqual({ kind: "covered", services: ["api"], missing: [] });
 });
 
-test("an absent, empty or foreign file is not judged", () => {
-  for (const text of [null, "", "not: [yaml\n", "name: x\n"]) {
+test("an absent, empty or foreign file, or unknown env metadata, is not judged", () => {
+  const cases: [string | null, ReadonlySet<string> | null][] = [
+    [null, ALL],
+    ["", ALL],
+    ["not: [yaml\n", ALL],
+    ["name: x\n", ALL],
+    [render(["api"]), null],
+  ];
+  for (const [text, managed] of cases) {
     const check = envOverrideCoverageCheck({
-      coverage: inspectEnvOverrideCoverage({ text, expected: GRAPH }),
+      coverage: inspectEnvOverrideCoverage({ text, expected: GRAPH, managed }),
       file: FILE,
       running: true,
     });
@@ -115,6 +113,7 @@ test("doctor JSON places the check under env and secrets", () => {
     coverage: inspectEnvOverrideCoverage({
       text: render(["api"]),
       expected: GRAPH,
+      managed: ALL,
     }),
     file: FILE,
     running: true,
@@ -128,15 +127,31 @@ test("doctor JSON places the check under env and secrets", () => {
   });
 });
 
-test("without Docker the check compares the Compose file's services", async () => {
+async function fixture(env: string) {
   const root = await mkdtemp(join(tmpdir(), "doctor-env-override-"));
+  await mkdir(join(root, ".hack/.internal"), { recursive: true });
+  await runFixtureGit({ cwd: root, args: ["init", "--quiet"] });
+  await Bun.write(
+    join(root, ".hack/docker-compose.yml"),
+    "services:\n  api:\n    image: x:1\n  web:\n    image: x:1\n"
+  );
+  await Bun.write(join(root, ".hack/hack.env.default.yaml"), env);
+  return root;
+}
+
+test("without Docker the Compose file's services with managed env are expected", async () => {
+  const root = await fixture(
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      '    LOG_LEVEL: "synthetic-global"',
+      "",
+    ].join("\n")
+  );
   try {
-    await mkdir(join(root, ".hack/.internal"), { recursive: true });
-    await runFixtureGit({ cwd: root, args: ["init", "--quiet"] });
-    await Bun.write(
-      join(root, ".hack/docker-compose.yml"),
-      "services:\n  api:\n    image: x:1\n  web:\n    image: x:1\n"
-    );
     await Bun.write(join(root, FILE), render(["api"]));
     const stale = await checkEnvOverrideCoverage({
       startDir: root,
@@ -150,9 +165,53 @@ test("without Docker the check compares the Compose file's services", async () =
       startDir: root,
       dockerOk: false,
     });
-    expect(covered).toMatchObject({ status: "ok" });
+    expect(covered.status).toBe("ok");
     expect(covered.message).toContain("running containers not inspected");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("a service scope that removes every global key with null needs no entry", async () => {
+  const root = await fixture(
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      '    LOG_LEVEL: "synthetic-global"',
+      "  web:",
+      "    LOG_LEVEL: null",
+      "",
+    ].join("\n")
+  );
+  try {
+    await Bun.write(join(root, FILE), render(["api"]));
+    const check = await checkEnvOverrideCoverage({
+      startDir: root,
+      dockerOk: false,
+    });
+    expect(check.status).toBe("ok");
+    // Judged and covered, not skipped for unreadable metadata.
+    expect(check.message).toContain(
+      "covers every Compose service with managed env"
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("host lifecycle processes and stopped containers are not expected", () => {
+  expect(
+    runningComposeServices({
+      graph: ["api", "web"],
+      containers: [
+        { service: "api", state: "running" },
+        { service: "web", state: "exited" },
+        // A host lifecycle process shows up under its process name.
+        { service: "dev-server", state: "running" },
+      ],
+    })
+  ).toEqual(["api"]);
 });

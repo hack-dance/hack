@@ -28,10 +28,10 @@ In short:
 title: Trying v5 beside v4
 ---
 flowchart LR
-  Backup["Back up, keep v4"] --> Install["Install hack-next"]
+  Backup["Back up, keep v4"] --> Stop["Stop and uninstall v4 daemon"]
+  Stop --> Install["Install hack-next"]
   Install --> Check["hack upgrade check"]
-  Check --> Stop["Stop the v4 daemon"]
-  Stop --> Try["Try one project on v5"]
+  Check --> Try["Try one project on v5"]
   Try --> Keep{"App works?"}
   Keep -->|yes| Next["Next project"]
   Keep -->|no| Back["Restore the backup"]
@@ -43,10 +43,9 @@ flowchart LR
 
 | Change | What to do |
 | --- | --- |
-| **An old `hackd` keeps running after you upgrade the CLI in place.** `hack daemon status` reports it as incompatible. | Run `hack daemon restart`. For a prerelease trial beside v4, stop the v4 daemon first instead: see [Upgrade from v4](upgrade.md). |
+| **An old `hackd` keeps running after you upgrade the CLI in place.** `hack daemon status` reports it as incompatible. | Run `hack daemon restart`. For a prerelease trial beside v4, stop and uninstall the v4 daemon first instead: see [Upgrade from v4](upgrade.md). |
 | **`hack session` needs tmux.** Zellij is removed. | Install tmux. Stop any project that has saved zellij state with the v4 CLI first. |
-| **Hack options go before your command.** In `hack exec`, `hack run`, `hack host exec` and `hack env exec`, everything from the command's first word on belongs to that command, including `--json` and `--help`. v4 read Hack flags anywhere. | Move Hack options in front of the command in your scripts. |
-| **An option a command does not declare is refused** with `E_USAGE`. | Remove options that the command never used. |
+| **Hack options go before your command.** In `hack exec`, `hack run`, `hack host exec` and `hack env exec`, everything from the command's first word on belongs to that command, including `--json` and `--help`. v4 read Hack flags anywhere, so a tool's own flag after the command could be refused. v5 passes everything after the command to it. | Move Hack options in front of the command in your scripts. |
 | **Secrets are refused as command arguments.** | Type the value at the hidden prompt, or pipe it with `--value-stdin`. |
 | **Env migration keeps your old files.** v4's `hack doctor --migrate-env-config` deleted them. | Run `hack env migrate --json` to preview, then `hack env migrate --apply`. Start the project and check it. Then run `hack env migrate --cleanup --apply`. Undo with `hack env migrate --rollback-manifest <path>`. |
 | **Managed values that contain `$` are delivered as stored.** v4 let Compose expand `$VAR` inside a managed value. | Check values that relied on that, or that escaped `$` as `$$`. The next `hack up` recreates those services. |
@@ -84,8 +83,8 @@ processes to stop and waits for them. A second Ctrl-C forces the stop.
 | `hack activity` | Read the history of `up`, `down` and `restart` for a project. |
 | `hack exec --detach`, `hack run --detach`, `hack commands` | Run a long command in the background, then read its output, inspect it or cancel it. |
 | `hack env migrate` | Preview, apply, resume, roll back and clean up the env file migration. |
-| `hack env hydrate` | Import many values at once into your machine-local env file. |
-| `hack env overlay list`, `hack env overlay add <name>`\* | List and create env overlays. |
+| `hack env hydrate` | Import many values at once into your machine-local env file, from standard input or a file, never from arguments. |
+| `hack env overlay list`, `hack env overlay add <name>` | List and create env overlays.\* |
 | `hack autostart` | Start chosen Compose projects at login. |
 | `hack usage --json --by-service` | CPU and memory for each service of one project. |
 

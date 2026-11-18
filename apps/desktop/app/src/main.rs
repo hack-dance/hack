@@ -29,6 +29,7 @@ mod screenshots;
 mod setup_view;
 #[cfg(hack_terminal)]
 mod terminal;
+mod upgrade_view;
 mod view;
 
 use std::sync::Arc;

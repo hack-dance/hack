@@ -91,7 +91,7 @@ pub(super) fn verify_sockets(
     directory: &std::path::Path,
     intent: BridgeIntent,
 ) -> Result<(), CandidateError> {
-    if sockets_ready(directory, intent)? {
+    if socket_states(directory, intent)?.ready() {
         Ok(())
     } else {
         Err(socket_identity())
@@ -113,13 +113,25 @@ fn private_socket(metadata: &std::fs::Metadata, uid: u32) -> Result<bool, Candid
     Ok(metadata.mode() & 0o077 == 0)
 }
 
+/// How many of the pool's sockets are still pending in each way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SocketStates {
+    missing: u8,
+    not_private: u8,
+}
+impl SocketStates {
+    fn ready(self) -> bool {
+        self.missing == 0 && self.not_private == 0
+    }
+}
+
 /// Missing nodes and not-yet-private owned sockets may converge during boot.
 /// A different type, owner, link count or unreadable identity is never pending.
-fn sockets_ready(
+fn socket_states(
     directory: &std::path::Path,
     intent: BridgeIntent,
-) -> Result<bool, CandidateError> {
-    let mut ready = true;
+) -> Result<SocketStates, CandidateError> {
+    let mut states = SocketStates::default();
     for path in intent.guest_paths() {
         let path = directory.join(
             std::path::Path::new(&path)
@@ -129,25 +141,48 @@ fn sockets_ready(
         let metadata = match std::fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                ready = false;
+                states.missing += 1;
                 continue;
             }
             Err(_) => return Err(socket_identity()),
         };
         // SAFETY: geteuid has no preconditions and cannot fail.
-        ready &= private_socket(&metadata, unsafe { libc::geteuid() })?;
+        if !private_socket(&metadata, unsafe { libc::geteuid() })? {
+            states.not_private += 1;
+        }
     }
-    Ok(ready)
+    Ok(states)
 }
 
-const BOOT_SOCKET_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Fresh-boot wait for the whole socket set: a fixed base plus one second per slot.
+/// Each slot is bound by its own SmolVM expose thread after guest-ready, so a larger
+/// pool needs longer on a slow first boot (HACK-2341: 10 slots missed a flat 10 s).
+const BOOT_SOCKET_BASE: std::time::Duration = std::time::Duration::from_secs(10);
+const BOOT_SOCKET_PER_SLOT: std::time::Duration = std::time::Duration::from_secs(1);
 const BOOT_SOCKET_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
-fn startup_socket_timeout() -> CandidateError {
-    CandidateError::new(
+fn boot_socket_budget(intent: BridgeIntent) -> std::time::Duration {
+    BOOT_SOCKET_BASE + BOOT_SOCKET_PER_SLOT * u32::from(intent.slots)
+}
+
+fn startup_socket_timeout(
+    intent: BridgeIntent,
+    last: Option<SocketStates>,
+    budget: std::time::Duration,
+) -> CandidateError {
+    let failure = CandidateError::new(
         "bridge_socket_timeout",
         "Native bridge sockets did not become private and owned before the startup deadline. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",
-    )
+    );
+    match last {
+        Some(states) => failure.with_bridge_sockets(
+            intent.slots,
+            states.missing,
+            states.not_private,
+            u16::try_from(budget.as_secs()).unwrap_or(u16::MAX),
+        ),
+        None => failure,
+    }
 }
 
 /// Only fresh boot waits: SmolVM's guest-ready signal does not join its expose
@@ -161,7 +196,13 @@ pub(super) fn wait_for_sockets(
     verify_provider: impl FnMut() -> Result<(), CandidateError>,
     clock: &impl super::process::Clock,
 ) -> Result<(), CandidateError> {
-    wait_for_sockets_with(directory, intent, verify_provider, clock, BOOT_SOCKET_WAIT)
+    wait_for_sockets_with(
+        directory,
+        intent,
+        verify_provider,
+        clock,
+        boot_socket_budget(intent),
+    )
 }
 
 fn wait_for_sockets_with(
@@ -172,23 +213,25 @@ fn wait_for_sockets_with(
     budget: std::time::Duration,
 ) -> Result<(), CandidateError> {
     let deadline = clock.now().saturating_add(budget);
+    let mut last = None;
     loop {
         if clock.now() >= deadline {
-            return Err(startup_socket_timeout());
+            return Err(startup_socket_timeout(intent, last, budget));
         }
         verify_provider().map_err(startup_provider_failure)?;
-        let ready = sockets_ready(directory, intent).map_err(|_| {
+        let states = socket_states(directory, intent).map_err(|_| {
             CandidateError::new(
                 "bridge_socket_identity",
                 "Bridge socket identity is unsafe; startup was refused. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",
             )
         })?;
         verify_provider().map_err(startup_provider_failure)?;
+        last = Some(states);
         let remaining = deadline.saturating_sub(clock.now());
         if remaining.is_zero() {
-            return Err(startup_socket_timeout());
+            return Err(startup_socket_timeout(intent, last, budget));
         }
-        if ready {
+        if states.ready() {
             return Ok(());
         }
         clock.sleep(remaining.min(BOOT_SOCKET_POLL));

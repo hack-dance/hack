@@ -1559,6 +1559,51 @@ bunTest(
 );
 
 bunTest(
+  "HACK-2341: bridge_socket_timeout adds the socket counts after the fixed recovery sentence",
+  () => {
+    const fixed =
+      "Native bridge sockets did not become private and owned before the startup deadline. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.";
+    const sockets = {
+      version: 1,
+      expected: 10,
+      missing: 3,
+      not_private: 1,
+      budget_seconds: 20,
+    };
+    expect(
+      nativeFailureDetail({
+        code: "bridge_socket_timeout",
+        message: fixed,
+        message_fixed: true,
+        bridge_sockets: sockets,
+      }).message
+    ).toBe(
+      `${fixed} At the 20-second deadline, bridge sockets missing: 3 of 10; not yet private: 1.`
+    );
+    for (const bad of [
+      { ...sockets, version: 2 },
+      { ...sockets, missing: 10 },
+      { ...sockets, expected: 0, missing: 0, not_private: 0 },
+      { ...sockets, missing: -1 },
+      { ...sockets, budget_seconds: 1.5 },
+      { ...sockets, path: "/run/hack-local/bridge-00.sock" },
+    ]) {
+      expect(
+        nativeFailureDetail({
+          code: "bridge_socket_timeout",
+          bridge_sockets: bad,
+        }).message
+      ).toBeUndefined();
+    }
+    // Only bridge_socket_timeout renders the counts.
+    expect(
+      nativeFailureDetail({ code: "invalid_state", bridge_sockets: sockets })
+        .message
+    ).toBeUndefined();
+  }
+);
+
+bunTest(
   "network diagnostics retain admitted underscore hosts and zero-attempt deadlines",
   () => {
     expect(

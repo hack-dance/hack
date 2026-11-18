@@ -255,3 +255,65 @@ fn readiness_observed_after_the_deadline_never_counts_as_success() {
     .unwrap_err();
     assert_eq!(failure.code, "bridge_socket_timeout");
 }
+
+#[test]
+fn the_boot_budget_grows_with_the_slot_count() {
+    assert_eq!(
+        boot_socket_budget(BridgeIntent::new(1).unwrap()),
+        Duration::from_secs(11)
+    );
+    // HACK-2341: a 10-slot pool missed the former flat 10 s on a fresh home.
+    assert_eq!(
+        boot_socket_budget(BridgeIntent::new(10).unwrap()),
+        Duration::from_secs(20)
+    );
+    assert_eq!(
+        boot_socket_budget(BridgeIntent::new(32).unwrap()),
+        Duration::from_secs(42)
+    );
+}
+
+#[test]
+fn a_timeout_reports_how_many_sockets_were_missing_or_not_private() {
+    let fixture = Fixture::new();
+    fixture.bind(0, 0o700);
+    fixture.bind(1, 0o777);
+    let clock = Scheduled::new(|_: Duration| {});
+    let failure = wait_for_sockets_with(
+        &fixture.root,
+        BridgeIntent::new(3).unwrap(),
+        || Ok(()),
+        &clock,
+        Duration::from_secs(13),
+    )
+    .unwrap_err();
+    assert_eq!(failure.code, "bridge_socket_timeout");
+    assert!(failure.message_fixed);
+    let wire = serde_json::to_value(&failure).unwrap();
+    assert_eq!(
+        wire["bridge_sockets"],
+        serde_json::json!({"version":1,"expected":3,"missing":1,"not_private":1,"budget_seconds":13})
+    );
+    // Counts only: no socket path reaches the diagnostic.
+    assert!(!wire.to_string().contains("bridge-0"));
+    // A deadline that passed before any observation carries no counts.
+    let late = Scheduled::new(|_: Duration| {});
+    late.elapsed.set(Duration::from_secs(1));
+    let none = wait_for_sockets_with(
+        &fixture.root,
+        BridgeIntent::new(3).unwrap(),
+        || {
+            late.elapsed.set(Duration::from_secs(5));
+            Ok(())
+        },
+        &late,
+        Duration::ZERO,
+    )
+    .unwrap_err();
+    assert!(
+        serde_json::to_value(&none)
+            .unwrap()
+            .get("bridge_sockets")
+            .is_none()
+    );
+}

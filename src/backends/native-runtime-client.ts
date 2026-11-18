@@ -187,6 +187,40 @@ function stateComponentFailureMessage(
   return `The native state path ${component.path} exists but is not a directory. Inspect it in the native home; do not delete it to retry.`;
 }
 
+const COUNT = (value: unknown, max: number): value is number =>
+  typeof value === "number" &&
+  Number.isInteger(value) &&
+  value >= 0 &&
+  value <= max;
+
+/**
+ * Render the closed `bridge_socket_timeout` counts (HACK-2341): how many of the pool's
+ * bridge sockets were missing or not yet private when the fresh-boot deadline passed,
+ * after the runtime's fixed recovery sentence. Counts only; never paths.
+ */
+function bridgeSocketsFailureMessage(
+  value: Record<string, unknown>
+): string | undefined {
+  const sockets = value.bridge_sockets;
+  if (
+    value.code !== "bridge_socket_timeout" ||
+    !isRecord(sockets) ||
+    Object.keys(sockets).length !== 5 ||
+    sockets.version !== 1 ||
+    !COUNT(sockets.expected, 32) ||
+    sockets.expected === 0 ||
+    !COUNT(sockets.missing, 32) ||
+    !COUNT(sockets.not_private, 32) ||
+    sockets.missing + sockets.not_private > sockets.expected ||
+    !COUNT(sockets.budget_seconds, 3600)
+  ) {
+    return;
+  }
+  const counts = `At the ${sockets.budget_seconds}-second deadline, bridge sockets missing: ${sockets.missing} of ${sockets.expected}; not yet private: ${sockets.not_private}.`;
+  const fixed = fixedNativeMessage(value);
+  return fixed ? `${fixed} ${counts}` : counts;
+}
+
 /** Render only the closed inferred-route diagnostic; never runtime error text. */
 function routeProbeFailureMessage(
   value: Record<string, unknown>,
@@ -225,6 +259,7 @@ export function nativeFailureDetail(value: Record<string, unknown>): {
   const message =
     networkRequestFailureMessage(value) ??
     stateComponentFailureMessage(value) ??
+    bridgeSocketsFailureMessage(value) ??
     routeProbeFailureMessage(value, service) ??
     fixedNativeMessage(value);
   return {

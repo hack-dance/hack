@@ -770,12 +770,14 @@ local user can take its name while the pool is stopped. It removes only the prov
 socket files the stop proved closed, through the real data directory.
 
 On a fresh pool boot or a boot after stopping the pool, native waits up to 10 seconds
-for every declared bridge socket to appear with the required private ownership and mode.
+plus 1 second per bridge slot (20 seconds for 10 slots, at most 42) for every declared
+bridge socket to appear with the required private ownership and mode.
 The provider's guest-ready signal can arrive before its bridge threads bind. Native
 rechecks the same provider identity around each observation; it never accepts an unsafe
 socket, changes its permissions or removes it to make startup pass. Existing running-pool
 audits do not wait. A socket timeout or identity refusal takes the verified failed-boot
-stop path and names the recovery command. Use the same selected executor and identical
+stop path and names the recovery command. A timeout also says how many sockets were
+still missing and how many were not yet private at the deadline (counts only). Use the same selected executor and identical
 `--candidate-root` argument as the failed start, followed by `runtime recover --json`.
 If you explicitly selected an installed executor with `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME`, use those same non-empty values:

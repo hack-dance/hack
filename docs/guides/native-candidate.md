@@ -478,11 +478,32 @@ With it:
   Its review then differs only in the project source inventory (file sizes and
   modification times), which such a run never reads, and restore keeps the retained
   ownership plan, images and data.
-- As with Compose `up`, only build services in the selected profiles are built and
-  pinned. A build service in a profile you did not select is not built, and restore
-  and restart need no image for it; selecting its profile in a later fresh `up` builds
-  it then. Native builds are `linux/arm64` only; `platform: linux/amd64` is still
-  refused.
+- Native selects Compose profiles from the same sources, in the same order, as
+  Compose under Hack: `--profile`; else `COMPOSE_PROFILES` in the managed env of the
+  selected env (for example `.hack/hack.env.default.yaml`), which overrides the shell;
+  else `COMPOSE_PROFILES` in the shell. `*` selects every declared profile. The
+  project's root `.env` is not read on native, so it is not a source. This selects
+  the profiles of a fresh start. A retained run keeps the profiles it started with,
+  because `up` and `restart` never replace its data with another selection; when the
+  environment now selects others (read for the run's own env), `up`, `up -d` and
+  `up -d` on a running graph print a notice naming both and how to change them
+  (`hack down --remove-data`, which deletes the data volumes, then `hack up`). An
+  explicit `--profile` that differs still refuses. `hack up` (foreground or detached)
+  prints one line naming the services the selection leaves out. A
+  `COMPOSE_PROFILES` name the Compose file does not declare selects nothing, as in
+  Compose, and is dropped before use: it never reaches a runtime argument, the saved
+  run or any output, and is only counted in the notice (`COMPOSE_PROFILES` can hold a
+  value copied from decrypted managed env). Notices never print a profile name that
+  came from `COMPOSE_PROFILES` or a retained run, only how many there are; a name you
+  pass with `--profile` is printed. A `COMPOSE_PROFILES` stored as a secret in the
+  managed env is never used as a selector (profile names reach runtime arguments and
+  the saved run): it selects nothing, and `up` says so. Store it as a plain value, or
+  pass `--profile`.
+- As with Compose `up`, only services in the selected profiles are built, pulled and
+  pinned. A service in a profile you did not select is neither built nor acquired from
+  its registry, and restore and restart need no image for it; selecting its profile in
+  a later fresh `up` builds or pulls it then. Native builds are `linux/arm64` only;
+  `platform: linux/amd64` is still refused.
 
 Native review reads Compose `ports` without reading environment values. Each
 entry may be short (`[host_ip:][published:]target[/protocol]`, with an IPv6 host
@@ -3386,7 +3407,6 @@ the machine settings path with your home shown as `~`. With `--json`, the check'
 | `shared_source_not_granted` | Native `up` and `restart` refuse until the project share is granted. |
 | `internal_dns_tls_not_applied` | `internal.dns` and `internal.tls` in `hack.config.json` are not applied on native, so containers cannot reach routes by their HTTPS names. Set both to `false` to silence it. |
 | `routes_without_probes` | `routesWithoutProbes` routed services have a disabled or timing-only healthcheck after the adaptation for the default env; native `up` refuses them. A routed service with no healthcheck or a command healthcheck gets the inferred route probe and is not counted. |
-| `compose_profiles_ignored` | `COMPOSE_PROFILES` is set in the environment, but native selects profiles only from `--profile`. Managed `COMPOSE_PROFILES` values are not inspected. |
 | `aws_region_without_profile` | `HACK_NATIVE_AWS_REGION` is set without `HACK_NATIVE_AWS_PROFILE` and is ignored. |
 | `unread_project_settings_files` | `.hack/native/` holds files other than `adaptation*.json`; Hack does not read them. |
 

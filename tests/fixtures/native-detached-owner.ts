@@ -11,6 +11,7 @@ import {
   nativeDetachedUpBranchDropped,
   nativeDetachedUpFailedServices,
   nativeDetachedUpFailure,
+  nativeDetachedUpProfileNotice,
   nativeDetachedUpReady,
   nativeDetachedUpShellVariables,
   runNativeDetachedOwner,
@@ -24,6 +25,18 @@ import {
 async function publish(path: string, contents: string): Promise<void> {
   await writeFile(`${path}.tmp`, contents);
   await rename(`${path}.tmp`, path);
+}
+
+/** HACK-2338: a detached owner hands its profile notice to the launcher. */
+function publishFixtureProfileNotice(fixtureMode: string): void {
+  if (fixtureMode === "profile-notice") {
+    nativeDetachedUpProfileNotice({
+      kind: "left-out",
+      services: ["jobs"],
+      profiles: [],
+      source: "none",
+    });
+  }
 }
 
 /** HACK-2338: a detached owner hands its dropped-branch-site notice to the launcher. */
@@ -371,10 +384,12 @@ if (role === "channel-holder") {
         // handoff, with the real owner handler still processing that accept.
         process.prependListener("message", cancelAtAccept);
       }
+      publishFixtureProfileNotice(mode);
       publishFixtureBranchDropped(mode);
       if (
         [
           "ready",
+          "profile-notice",
           "branch-dropped",
           "restart-action",
           "cancel-at-accept",

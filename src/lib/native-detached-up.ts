@@ -1,6 +1,11 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
+  type NativeProfileNotice,
+  parseNativeProfileNotice,
+  renderNativeProfileNotice,
+} from "../backends/native-profile-selection.ts";
+import {
   NATIVE_IDLE_POOL_NOTE,
   NATIVE_PROVIDER_PIN_MESSAGE,
 } from "../backends/native-runtime-client.ts";
@@ -31,6 +36,7 @@ type Ready = {
   readonly completed?: readonly string[];
 };
 let publishReady: ((ready: Ready) => void) | undefined;
+let publishProfileNotice: ((notice: NativeProfileNotice) => void) | undefined;
 let publishBranchDropped: ((details: BranchDroppedSites) => void) | undefined;
 let publishShellVariables:
   | ((names: readonly string[], ignoredRootDotenv?: boolean) => void)
@@ -152,6 +158,36 @@ function startupFailureError(failure: StartupFailure): HackCliError {
     code: "E_STARTUP_INCOMPLETE",
     message: `Native detached startup failed (${failure.code}); inspect hack ps before retrying; retained owners and recovery evidence are preserved.${detail}${failed} ${NATIVE_IDLE_POOL_NOTE}`,
   });
+}
+
+/**
+ * Hands a profile notice to the launcher when this is a detached owner, whose
+ * stderr is not shown; false otherwise, so the caller prints it itself.
+ */
+export function nativeDetachedUpProfileNotice(
+  notice: NativeProfileNotice
+): boolean {
+  if (!publishProfileNotice) {
+    return false;
+  }
+  publishProfileNotice(notice);
+  return true;
+}
+
+/**
+ * Prints an owner's validated profile notice; true when `value` was one
+ * (shown or dropped), so the launcher handles nothing else for it.
+ */
+function writeProfileNotice(value: unknown): boolean {
+  if (!(isRecord(value) && value.kind === "profile-notice")) {
+    return false;
+  }
+  const notice = parseNativeProfileNotice(value.notice);
+  const line = notice ? renderNativeProfileNotice(notice) : null;
+  if (line) {
+    process.stderr.write(`${line}\n`);
+  }
+  return true;
 }
 
 /**
@@ -293,6 +329,10 @@ export async function runNativeDetachedOwner(opts: {
         }
       | { readonly kind: "failure"; readonly data: StartupFailure }
       | {
+          readonly kind: "profile-notice";
+          readonly notice: NativeProfileNotice;
+        }
+      | {
           readonly kind: "branch-dropped";
           readonly details: BranchDroppedSites;
         }
@@ -344,6 +384,11 @@ export async function runNativeDetachedOwner(opts: {
       });
     }
   };
+  publishProfileNotice = (notice) => {
+    if (!stopping) {
+      send({ kind: "profile-notice", notice });
+    }
+  };
   publishBranchDropped = (details) => {
     if (!stopping) {
       send({ kind: "branch-dropped", details });
@@ -362,6 +407,7 @@ export async function runNativeDetachedOwner(opts: {
     stopping = true;
     publishReady = undefined;
     publishShellVariables = undefined;
+    publishProfileNotice = undefined;
     publishBranchDropped = undefined;
     publishFailure = undefined;
     failedStartupServices = [];
@@ -516,6 +562,9 @@ export async function startNativeDetachedUp(opts: {
     if (failure) {
       failed = true;
       result.reject(startupFailureError(failure));
+      return;
+    }
+    if (writeProfileNotice(value)) {
       return;
     }
     if (writeBranchDropped(value)) {

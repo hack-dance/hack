@@ -1,3 +1,4 @@
+import { declaredComposeProfiles } from "../backends/native-profile-selection.ts";
 import {
   type NativeProjectPsResult,
   nativeProjectPs,
@@ -224,6 +225,15 @@ export async function answerNativeAlreadyRunning(opts: {
   readonly resolveProject: () => Promise<ProjectContext>;
   readonly resolveBranch: (project: ProjectContext) => Promise<string | null>;
   readonly onBranchResolved?: (branch: string | null) => void;
+  /**
+   * Called before reporting an already-running graph, with its saved run:
+   * for example to say that the environment now selects other profiles
+   * than the ones the run keeps (HACK-2338 item 8). Notices go to stderr.
+   */
+  readonly notifyRunning?: (
+    saved: NativeProjectRun,
+    project: ProjectContext
+  ) => Promise<void>;
 }): Promise<number | null> {
   const startedAtMs = Date.now();
   let observed: {
@@ -231,6 +241,8 @@ export async function answerNativeAlreadyRunning(opts: {
     projectName: string;
     branch: string | null;
     matches: boolean;
+    saved: NativeProjectRun;
+    project: ProjectContext;
   };
   try {
     const project = await opts.resolveProject();
@@ -259,7 +271,16 @@ export async function answerNativeAlreadyRunning(opts: {
     observed = {
       state,
       branch,
-      matches: selectionMatches(saved, opts.selection),
+      saved,
+      project,
+      // Compose's `*` selects every declared profile; the saved run records
+      // the expanded names.
+      matches: selectionMatches(saved, {
+        ...opts.selection,
+        profiles: opts.selection.profiles?.includes("*")
+          ? declaredComposeProfiles(compose)
+          : opts.selection.profiles,
+      }),
       projectName: await resolveComposeProjectName({
         project,
         cfg: await readProjectConfig(project),
@@ -291,6 +312,7 @@ export async function answerNativeAlreadyRunning(opts: {
     throw nativePartiallyRunningRefusal(observed.state.down, restartCommand);
   }
   if (observed.state.kind === "running") {
+    await opts.notifyRunning?.(observed.saved, observed.project);
     reportNativeAlreadyRunning({
       json: opts.json,
       project: observed.projectName,

@@ -1855,8 +1855,8 @@ hack doctor [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--fix` | Attempt safe auto-remediations (network + CoreDNS + CA) |
 | `--machine` | Observe machine checks only, without discovering a project or repairing state |
-| `--only <id>` | With --fix --yes, run exactly one allowlisted safe repair |
-| `--yes` | Consent to the one safe repair selected with --fix --only |
+| `--only <id>` | With --fix, select exactly one allowlisted repair: 'hack gitignore' (needs --yes) or 'polling watchers' (shows the diff; --yes applies it) |
+| `--yes` | Consent to the one repair selected with --fix --only |
 | `--migrate-env-config` | Migrate legacy hack.env.json/.env state to the new env config files |
 | `--accept-tracked-env-changes` | With --migrate-env-config and no prompt, allow deleting or editing git-tracked files (hack.env.json, the Compose file) |
 | `--domain-migration preview|apply|rollback` | Preview, apply, or roll back only this project's hack.local migration |

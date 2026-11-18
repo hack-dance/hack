@@ -23,6 +23,14 @@ export type DoctorMetadata = {
 
 const DOC_URL =
   "https://github.com/hack-dance/hack/blob/next/docs/versions/v5/troubleshooting.md";
+/** HACK-2323 checks link the runtime safety guide's existing-project section. */
+const DEV_GUIDE_URL =
+  "https://github.com/hack-dance/hack/blob/next/docs/guides/development-runtime-safety.md#check-an-existing-project";
+const DEV_REPORT_ONLY = new Set([
+  "emulated services",
+  "shared volume architectures",
+  "dev image tags",
+]);
 const PROJECT_AREAS: Readonly<Record<string, DoctorArea>> = {
   "browser local network": "routing_dns",
   "native https route": "native",
@@ -51,6 +59,10 @@ const PROJECT_AREAS: Readonly<Record<string, DoctorArea>> = {
   "native settings": "native",
   "native process wrappers": "native",
   "native source size": "native",
+  "emulated services": "engine",
+  "polling watchers": "engine",
+  "shared volume architectures": "engine",
+  "dev image tags": "project_files",
 };
 const MACHINE_AREAS: Readonly<Record<string, DoctorArea>> = {
   bun: "engine",
@@ -141,6 +153,25 @@ export function doctorMetadata(opts: {
         ],
         doc_url: DOC_URL,
       },
+    };
+  }
+  if (opts.id === "polling watchers") {
+    // Shows the diff only; applying needs the same command plus --yes.
+    return {
+      area,
+      scope,
+      fix: {
+        kind: "safe",
+        args: ["doctor", "--fix", "--only", "polling watchers", "--json"],
+        doc_url: DEV_GUIDE_URL,
+      },
+    };
+  }
+  if (DEV_REPORT_ONLY.has(opts.id)) {
+    return {
+      area,
+      scope,
+      fix: { kind: "manual", args: [], doc_url: DEV_GUIDE_URL },
     };
   }
   return {

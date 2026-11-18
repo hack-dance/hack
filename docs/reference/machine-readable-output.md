@@ -149,3 +149,16 @@ success behavior stays covered by command-specific suites.
 | `hack update --json --check --observe` | Envelope; `data.schema: hack.update-check.v1` |
 | `hack doctor --json --machine` | Envelope; `data.schema: hack.doctor.machine.v1` |
 <!-- json-inventory:end -->
+
+## Additive fields
+
+Additive fields keep a command's row and shape above; consumers ignore keys they do not know.
+
+- Compose `hack ps --json`: each `items[]` entry is a Compose `ps` object. An entry whose image
+  architecture differs from the engine's adds `emulated: true`; the key is absent when the
+  architectures match or Docker could not report them (HACK-2323).
+- `hack doctor --json`: the `emulated services`, `polling watchers`, `shared volume
+  architectures` and `dev image tags` checks add a `devPerformance` object with a `kind`, the
+  services, project-relative files and lines, and architectures. `hack doctor --fix --only
+  'polling watchers' --json` adds `data.fix` with `id`, `applied`, `changed`, `confirmed`,
+  `removed` and `diff`.

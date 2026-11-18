@@ -240,6 +240,7 @@ import {
   waitForComposeStartupState,
 } from "../lib/compose-startup-state.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
+import { annotateEmulatedPsItems } from "../lib/container-architecture.ts";
 import { resolveDefaultDomain } from "../lib/default-domain.ts";
 import {
   resolveDependencyCacheBootstrapServices,
@@ -9468,7 +9469,7 @@ async function handlePs({
       project: baseProjectName,
       branch,
       composeProject: composeProjectName ?? baseProjectName,
-      items: entries,
+      items: await annotateEmulatedPsItems({ items: entries }),
     };
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
     return 0;

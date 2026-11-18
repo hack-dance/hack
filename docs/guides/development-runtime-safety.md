@@ -138,13 +138,70 @@ Use `--yes` only after reviewing the same project-scoped evidence. Hack does not
 from arbitrary volume names or mount paths because those signals cannot distinguish generated build
 output from durable application data.
 
+## Check an existing project
+
+Projects created by older `hack init` versions can still carry the defaults described above. On
+the Compose backend, `hack doctor` (and `hack doctor --json`) reports them for the selected
+project:
+
+- **`emulated services`** (warning): a service's running container uses an image whose
+  architecture differs from the engine's, or the Compose file pins a `platform` that differs from
+  the host even when nothing is running. Doctor inspects the image each container was created
+  from; the Compose file alone cannot prove which variant runs. Each entry names the service, and
+  the file and line of the pin when there is one.
+- **`polling watchers`** (warning): a service sets `CHOKIDAR_USEPOLLING` or `WATCHPACK_POLLING` to a
+  truthy value, with file and line. A numeric `WATCHPACK_POLLING` interval and an opt-in default
+  such as `${CHOKIDAR_USEPOLLING:-false}` are deliberate and are not reported.
+- **`shared volume architectures`** (warning): containers of one instance on different
+  architectures mount the same named volume. Requires Docker.
+- **`dev image tags`** (a note, not a warning): a service that bind-mounts project source uses a
+  `:latest` or untagged image while the repository declares Node or Bun versions (`package.json`
+  `engines` or `packageManager`, `.nvmrc`, `.node-version`, `.bun-version`, `.tool-versions`,
+  `mise.toml`).
+
+`hack ps --json` adds `emulated: true` to each Compose item whose image architecture differs from
+the engine's, so other tools can show the same fact.
+
+### Three traps when fixing an emulated project
+
+1. **Removing `platform:` is not enough.** With `image: <name>:latest`, Docker keeps using the tag
+   it already has locally, which can still be the other architecture. Pull the native variant
+   explicitly (`docker pull --platform linux/arm64 <image>` on an Apple silicon Mac), or build
+   from a base image pinned by a multi-architecture digest, then recreate the services. Rerun
+   `hack doctor` and check that no container is still reported as emulated.
+2. **A cached mutable tag can be stale.** The same local `:latest` can also be older than the Node
+   or Bun versions the repository declares. Prefer a version tag that matches them, or a digest.
+3. **Do not mix architectures on one dependency volume.** When services of one instance share a
+   named volume such as `node_modules`, a one-shot install that ran under emulation leaves native
+   modules for the other architecture, and the native services crash on them. Move every service
+   of the instance to one architecture, then reinstall dependencies into that volume (for
+   example, remove the volume after `hack down` and let the install step run again).
+
+### Repairs
+
+Platform pins and images are project configuration: Doctor reports them and never edits them.
+Plain `hack doctor --fix` does not change them or the watcher settings.
+
+The polling lines old `hack init` generated have one opt-in repair. It removes only map entries
+exactly of the form `CHOKIDAR_USEPOLLING: "true"` and `WATCHPACK_POLLING: "true"`, and an
+`environment:` block left empty by that removal:
+
+```sh
+hack doctor --fix --only 'polling watchers'        # print the diff, write nothing
+hack doctor --fix --only 'polling watchers' --yes  # apply it, then verify
+```
+
+Other forms (list entries, comments on the line, other values) are left for you to edit. The
+repair refuses when the change would alter anything else in the parsed Compose document or when
+the file changes while it runs. Recreate the services afterwards (`hack restart`).
+
 ## Doctor boundary
 
-This change does not add threshold-based doctor warnings for CPU, stopped-instance counts, volume
-size, or `linux/amd64` on arm64. Those signals can be legitimate and require image/platform or
-workload context that static configuration cannot prove. The generated-polling regression tests,
-branch-ownership resolution, and confirmation-gated cleanup are deterministic; policy guesses are
-left out of doctor until Hack can make them equally actionable.
+Doctor does not add threshold-based warnings for CPU, stopped-instance counts or volume size;
+those signals depend on workload context that static configuration cannot prove. The
+existing-project checks above report deterministic facts (an image architecture, a pin, a
+variable) and leave the decision and the edit to the project, apart from the opt-in polling
+repair.
 
 ## References
 

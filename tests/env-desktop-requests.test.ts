@@ -578,6 +578,56 @@ describe("R26: key source and one-run override", () => {
   );
 
   test(
+    "an override key file inside a checkout must be ignored by git",
+    async () => {
+      const project = await createProject();
+      const init = Bun.spawnSync(["git", "init", "-q", project.projectRoot], {
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      expect(init.exitCode).toBe(0);
+      const keyFile = resolve(project.projectRoot, "chosen.key");
+      await writeFile(keyFile, `${OVERRIDE_KEY}\n`, { mode: 0o600 });
+      // Untracked but not ignored: a later `git add .` would publish it.
+      const refused = await setValue({
+        project,
+        key: "API_TOKEN",
+        value: SECRET_VALUE,
+        secret: true,
+        extraArgs: ["--key-file", keyFile],
+      });
+      expect(refused.exitCode).not.toBe(0);
+      expect(`${refused.stdout}${refused.stderr}`).toContain(
+        "does not ignore it"
+      );
+      expect(
+        await readFile(
+          resolve(project.projectDir, "hack.env.default.yaml"),
+          "utf8"
+        )
+      ).not.toContain("API_TOKEN");
+      // The override never edits ignore rules itself.
+      expect(
+        await stat(resolve(project.projectRoot, ".gitignore")).catch(() => null)
+      ).toBeNull();
+
+      await writeFile(
+        resolve(project.projectRoot, ".gitignore"),
+        "chosen.key\n"
+      );
+      const accepted = await setValue({
+        project,
+        key: "API_TOKEN",
+        value: SECRET_VALUE,
+        secret: true,
+        extraArgs: ["--key-file", keyFile],
+      });
+      expect(accepted.exitCode).toBe(0);
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
     "an override cannot split the project across two keys",
     async () => {
       const project = await createProject();

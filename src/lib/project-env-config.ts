@@ -5513,6 +5513,7 @@ async function assertProjectEnvKeyOverrideEncryptable(opts: {
 }): Promise<void> {
   if (opts.override.kind === "file") {
     await assertProjectEnvKeyUntracked({ keyPath: opts.override.path });
+    await assertProjectEnvKeyOverrideIgnored({ keyPath: opts.override.path });
   }
   const discovered = await discoverProjectEnvKey({
     projectRoot: opts.projectRoot,
@@ -5523,6 +5524,34 @@ async function assertProjectEnvKeyOverrideEncryptable(opts: {
     discovered.keyText !== opts.keyText
   ) {
     throw opts.refuse();
+  }
+}
+
+export const PROJECT_ENV_KEY_OVERRIDE_UNIGNORED_MESSAGE =
+  "Refusing to encrypt with the key file given by --key-file: it is inside a git checkout that does not ignore it (or git cannot say), so a later commit could publish the key. Move it outside the checkout or add it to .gitignore; key contents are never included in this message.";
+
+/**
+ * A key file chosen with `--key-file` inside a git checkout must be ignored
+ * by git before anything is encrypted with it, the same custody rule the
+ * discovered key follows. Unlike discovery, an override never edits ignore
+ * rules: it refuses instead, and refuses when git cannot report the status.
+ * A key file outside every git checkout is accepted.
+ */
+async function assertProjectEnvKeyOverrideIgnored(opts: {
+  readonly keyPath: string;
+}): Promise<void> {
+  const directory = dirname(opts.keyPath);
+  if (!(await isInsideGitCheckoutMarker({ startDir: directory }))) {
+    return;
+  }
+  const ignored = await isGitIgnoredProjectEnvPath({
+    projectRoot: directory,
+    path: opts.keyPath,
+  });
+  if (ignored !== true) {
+    throw new ProjectEnvKeyRefusalError(
+      PROJECT_ENV_KEY_OVERRIDE_UNIGNORED_MESSAGE
+    );
   }
 }
 

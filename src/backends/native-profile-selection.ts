@@ -19,6 +19,12 @@ export type NativeProfileSelection = {
    * reaches a runtime argument, saved state or output; it is only counted.
    */
   readonly ignoredUndeclared?: number;
+  /**
+   * COMPOSE_PROFILES in the managed env is stored as a secret. A secret is
+   * never used as a profile selector: profile names reach runtime arguments,
+   * saved run state and output, so this one selects nothing.
+   */
+  readonly secretIgnored?: true;
 };
 
 function parseProfiles(raw: string | undefined): string[] {
@@ -46,6 +52,8 @@ export function selectNativeProfiles(opts: {
   readonly managedEnv: Readonly<Record<string, string | undefined>>;
   readonly shellEnv: Readonly<Record<string, string | undefined>>;
   readonly declaredProfiles: readonly string[];
+  /** The managed COMPOSE_PROFILES entry is a secret (encrypted) value. */
+  readonly managedSecret?: boolean;
 }): NativeProfileSelection {
   const expand = (profiles: readonly string[]): string[] =>
     profiles.includes("*")
@@ -74,6 +82,16 @@ export function selectNativeProfiles(opts: {
     };
   };
   if (Object.hasOwn(opts.managedEnv, "COMPOSE_PROFILES")) {
+    // The managed value overrides the shell, as in Compose; a secret one
+    // selects nothing rather than letting the shell's value through.
+    if (opts.managedSecret) {
+      return {
+        profiles: [],
+        source: "none",
+        declaredProfiles: opts.declaredProfiles,
+        secretIgnored: true,
+      };
+    }
     return fromEnv(
       parseProfiles(opts.managedEnv.COMPOSE_PROFILES),
       "managed-env"
@@ -216,11 +234,19 @@ export type NativeProfileNotice =
       readonly selected: readonly string[];
       readonly hiddenSelected?: number;
       readonly source: "managed-env" | "shell";
-    };
+    }
+  | { readonly kind: "secret-selector" };
+
+/** Why a secret COMPOSE_PROFILES selected no profiles. Holds no value. */
+export const NATIVE_SECRET_PROFILE_SELECTOR_NOTICE =
+  "COMPOSE_PROFILES in the managed env is stored as a secret; native does not use a secret value as a profile selector, so it selected no profiles. Store COMPOSE_PROFILES as a plain value, or pass --profile.";
 
 export function renderNativeProfileNotice(
   notice: NativeProfileNotice
 ): string | null {
+  if (notice.kind === "secret-selector") {
+    return NATIVE_SECRET_PROFILE_SELECTOR_NOTICE;
+  }
   return notice.kind === "left-out"
     ? nativeLeftOutNotice(notice)
     : nativeRetainedProfilesNotice(notice);
@@ -250,6 +276,9 @@ export function parseNativeProfileNotice(
 ): NativeProfileNotice | null {
   if (!isRecord(value)) {
     return null;
+  }
+  if (value.kind === "secret-selector") {
+    return { kind: "secret-selector" };
   }
   if (
     value.kind === "left-out" &&

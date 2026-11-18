@@ -58,6 +58,7 @@ import { createNativeDependencyOwnerResolver } from "../backends/native-dependen
 import { assertNativeLogFlags } from "../backends/native-log-follow.ts";
 import {
   declaredComposeProfiles,
+  NATIVE_SECRET_PROFILE_SELECTOR_NOTICE,
   type NativeProfileSelection,
   nativeNoticeProfileNames,
   nativeRetainedProfilesNotice,
@@ -6429,6 +6430,9 @@ async function nativeRetainedProfilesDrift(opts: {
     envName: opts.saved.effectiveEnvName,
     cliProfile: undefined,
   });
+  if (fromEnv.secretIgnored) {
+    return NATIVE_SECRET_PROFILE_SELECTOR_NOTICE;
+  }
   const retained = [...(opts.saved.profiles ?? [])].sort();
   const selected = [...fromEnv.profiles].sort();
   if (
@@ -6514,6 +6518,8 @@ export async function resolveNativeProfileSelectionForProject(opts: {
       : {},
     shellEnv: process.env,
     declaredProfiles: declaredComposeProfiles(compose),
+    managedSecret:
+      resolved?.effectiveMetadata.global?.COMPOSE_PROFILES?.secret === true,
   });
 }
 

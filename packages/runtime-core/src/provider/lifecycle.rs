@@ -919,12 +919,12 @@ pub fn check_project_share(
 
 pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     reject_aliased_state(&root(candidate))?;
-    let users = pool_users::observe(&candidate.state_root);
     if !root(candidate)
         .join("owner.json")
         .try_exists()
         .map_err(io)?
     {
+        let users = pool_users::observe_with(&candidate.state_root, |_| Some(false));
         return Ok(RuntimeStatus {
             network: None,
             project_share: None,
@@ -949,6 +949,19 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         });
     }
     let owner = Owner::load(candidate)?;
+    // Status is read-only. Only the strict, same-owner retirement proof can
+    // exclude a native journal retained in place after all resources are removed.
+    let users = pool_users::observe_with(&candidate.state_root, |run| {
+        #[cfg(feature = "native-config-plan")]
+        {
+            super::graph::native::retired(candidate, run, &owner.token).ok()
+        }
+        #[cfg(not(feature = "native-config-plan"))]
+        {
+            let _ = run;
+            Some(false)
+        }
+    });
     let alive = if let Some(process) = &owner.process {
         let alive = identity::alive(process.pid)?;
         if alive {

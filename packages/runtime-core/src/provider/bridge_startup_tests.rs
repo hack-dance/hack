@@ -254,6 +254,7 @@ fn readiness_observed_after_the_deadline_never_counts_as_success() {
     )
     .unwrap_err();
     assert_eq!(failure.code, "bridge_socket_timeout");
+    assert!(failure.refusals.and_then(|r| r.bridge_sockets).is_none());
 }
 
 #[test]

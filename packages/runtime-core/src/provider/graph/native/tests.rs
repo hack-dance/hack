@@ -40,6 +40,42 @@ fn basic() -> Value {
 }
 
 #[test]
+fn retirement_requires_removed_same_owner_and_no_pending_work() {
+    let root = std::env::temp_dir().join(format!(
+        "native-pool-retirement-{}-{}",
+        std::process::id(),
+        crate::next_test_scratch()
+    ));
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let scratch = Scratch(root);
+    state::private_directory(&scratch.0).unwrap();
+    let candidate = Candidate::discover(&scratch.0).unwrap();
+    state::private_directory(&candidate.state_root).unwrap();
+    state::private_directory(&candidate.state_root.join("run")).unwrap();
+    let prepared = prepare(basic(), json!({"web":{}}), &ManagedValues::new());
+    let config = configuration(&prepared, OWNER).unwrap();
+    let mut receipt =
+        Receipt::preparing(&config, OWNER, "12345678-abcd-abcd-abcd-123456789abc").unwrap();
+    let run = receipt.review.scope().run.to_owned();
+    let directory = journal::reserve(&candidate, &receipt).unwrap();
+    assert!(!retired(&candidate, &run, OWNER).unwrap());
+    for resource in receipt.resources.values_mut() {
+        resource.phase = "removed".into();
+    }
+    receipt.phase = Phase::Removed;
+    journal::save(&directory, &receipt).unwrap();
+    assert!(retired(&candidate, &run, OWNER).unwrap());
+    assert!(retired(&candidate, &run, &"d".repeat(32)).is_err());
+    std::fs::write(directory.join("storage-call.pending"), b"pending").unwrap();
+    assert!(retired(&candidate, &run, OWNER).is_err());
+}
+
+#[test]
 fn recovery_settled_selection_keeps_never_created_members_but_refuses_pending_effects() {
     let prepared = prepare(basic(), json!({"web":{}}), &ManagedValues::new());
     let config = configuration(&prepared, OWNER).unwrap();

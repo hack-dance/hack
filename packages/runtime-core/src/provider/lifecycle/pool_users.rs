@@ -60,27 +60,36 @@ fn count(parent: &Path, accept: impl Fn(&str, &Path) -> Option<bool>) -> Option<
     }
     state::check_private_directory(parent).ok()?;
     let mut total = 0;
-    for entry in fs::read_dir(parent).ok()?.take(MAX_ENTRIES + 1) {
+    for (index, entry) in fs::read_dir(parent).ok()?.take(MAX_ENTRIES + 1).enumerate() {
+        if index == MAX_ENTRIES {
+            return None;
+        }
         let entry = entry.ok()?;
         let name = entry.file_name().into_string().ok()?;
         if accept(&name, &entry.path())? {
             total += 1;
         }
-        if total > MAX_ENTRIES {
-            return None;
-        }
     }
     Some(total)
 }
 
-pub(super) fn observe(state_root: &Path) -> PoolUsers {
+pub(super) fn observe_with(
+    state_root: &Path,
+    native_retired: impl Fn(&str) -> Option<bool>,
+) -> PoolUsers {
     let mut graph_runs = Some(0);
     for directory in GRAPH_DIRECTORIES {
         let runs = count(&state_root.join(directory), |name, path| {
             // Only private run directories; anything else is not proof.
             let private = fs::symlink_metadata(path).ok()?.is_dir()
                 && state::check_private_directory(path).is_ok();
-            (is_graph_run(name) && private).then_some(true)
+            if !is_graph_run(name) || !private {
+                return None;
+            }
+            if directory == "run/native-graphs" {
+                return native_retired(name).map(|retired| !retired);
+            }
+            Some(true)
         });
         graph_runs = graph_runs.zip(runs).map(|(a, b)| a + b);
     }
@@ -124,6 +133,28 @@ pub(super) fn pool_idle(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn observe(root: &Path) -> PoolUsers {
+        observe_with(root, |_| Some(false))
+    }
+
+    #[test]
+    fn only_proven_retired_native_graphs_are_excluded() {
+        let home = Home::new();
+        home.dir(&format!("run/native-graphs/{}", "a".repeat(32)));
+        assert_eq!(observe_with(&home.0, |_| Some(true)), IDLE);
+        assert_eq!(observe_with(&home.0, |_| None).graph_runs, None);
+        assert_eq!(observe(&home.0).graph_runs, Some(1));
+    }
+
+    #[test]
+    fn retired_entries_still_consume_the_inventory_read_bound() {
+        let home = Home::new();
+        for index in 0..=MAX_ENTRIES {
+            home.dir(&format!("run/native-graphs/{index:032x}"));
+        }
+        assert_eq!(observe_with(&home.0, |_| Some(true)).graph_runs, None);
+    }
 
     struct Home(PathBuf);
     impl Home {

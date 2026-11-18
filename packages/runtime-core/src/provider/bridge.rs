@@ -175,13 +175,13 @@ fn startup_socket_timeout(
         "Native bridge sockets did not become private and owned before the startup deadline. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",
     );
     match last {
-        Some(states) => failure.with_bridge_sockets(
+        Some(states) if !states.ready() => failure.with_bridge_sockets(
             intent.slots,
             states.missing,
             states.not_private,
             u16::try_from(budget.as_secs()).unwrap_or(u16::MAX),
         ),
-        None => failure,
+        _ => failure,
     }
 }
 

@@ -382,7 +382,6 @@ async function buildRegisteredProjectView(opts: {
       baseName: opts.name,
       runtimeProjects: opts.allRuntime,
     }),
-    baseServiceHosts: serviceHosts,
     projectDirOk,
   });
   const sessions = collectProjectSessions({
@@ -443,7 +442,6 @@ async function buildRegisteredProjectView(opts: {
 async function describeBranchInstances(opts: {
   readonly registration: RegisteredProject;
   readonly branchRuntime: readonly BranchRuntime[];
-  readonly baseServiceHosts: Readonly<Record<string, readonly string[]>> | null;
   /** Without its project dir a checkout has no settings `hack open` could use. */
   readonly projectDirOk: boolean;
 }): Promise<{
@@ -464,6 +462,20 @@ async function describeBranchInstances(opts: {
         checkout,
       }).catch(() => null);
       settingsByRoot.set(key, pending);
+    }
+    return pending;
+  };
+  const siteHostsByDir = new Map<
+    string,
+    Promise<Readonly<Record<string, readonly string[]>> | null>
+  >();
+  const siteHostsFor = (projectDir: string) => {
+    let pending = siteHostsByDir.get(projectDir);
+    if (!pending) {
+      pending = readComposeSiteLabelHosts({
+        composeFile: resolve(projectDir, PROJECT_COMPOSE_FILENAME),
+      }).catch(() => null);
+      siteHostsByDir.set(projectDir, pending);
     }
     return pending;
   };
@@ -501,16 +513,11 @@ async function describeBranchInstances(opts: {
     if (useRuntimeHosts) {
       serviceHosts = runtimeHosts;
     } else if (settings) {
-      // A worktree's own Compose file, which can differ from the primary's.
-      const baseServiceHosts =
-        input.checkout?.kind === "worktree"
-          ? await readComposeServiceHosts({
-              composeFile: resolve(
-                input.checkout.projectDir,
-                PROJECT_COMPOSE_FILENAME
-              ),
-            })
-          : opts.baseServiceHosts;
+      // The owning checkout's own Compose file (a worktree's can differ from
+      // the primary's), with every root site label, numbered ones included.
+      const baseServiceHosts = await siteHostsFor(
+        input.checkout?.projectDir ?? opts.registration.projectDir
+      );
       serviceHosts = configBranchServiceHosts({
         baseServiceHosts,
         settings,
@@ -542,8 +549,10 @@ async function describeBranchInstances(opts: {
     }))
   );
 
+  // Each checkout's store is scanned on its own: a missing registered
+  // checkout does not hide a worktree's instances (an absent store is empty).
   const nativeBranchRuntime: NativeBranchRuntime[] = [];
-  if (opts.projectDirOk) {
+  {
     const seen = new Set<string>();
     for (const checkout of listRegistrationCheckouts(opts.registration)) {
       for (const record of await listNativeBranchRecords({
@@ -1190,6 +1199,77 @@ async function readComposeServices(opts: {
     readiness: composeServiceReadiness(parsed),
     activation: composeServiceActivation(parsed),
   };
+}
+
+const COMPOSE_SITE_LABEL = /^caddy(?:_\d+)?$/;
+
+/**
+ * Every root Caddy site label (`caddy`, `caddy_<n>`) per service in a Compose
+ * file, as comma-split entries. Unlike {@link readComposeServiceHosts}, which
+ * keeps the published `service_hosts` shape, numbered site labels count.
+ */
+async function readComposeSiteLabelHosts(opts: {
+  readonly composeFile: string;
+}): Promise<Readonly<Record<string, readonly string[]>> | null> {
+  const text = await readTextFile(opts.composeFile);
+  if (!text) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(text);
+  } catch {
+    return null;
+  }
+  const services = isRecord(parsed) ? parsed.services : null;
+  if (!isRecord(services)) {
+    return null;
+  }
+  const out: Record<string, readonly string[]> = {};
+  for (const [serviceName, service] of Object.entries(services)) {
+    const labels = isRecord(service) ? service.labels : null;
+    const entries: string[] = [];
+    for (const [key, value] of composeLabelEntries(labels)) {
+      if (COMPOSE_SITE_LABEL.test(key)) {
+        entries.push(
+          ...value
+            .split(",")
+            .map((entry) => entry.trim())
+            .filter(Boolean)
+        );
+      }
+    }
+    if (entries.length > 0) {
+      out[serviceName] = entries;
+    }
+  }
+  return out;
+}
+
+/** Key/value pairs of Compose labels in map or `KEY=value` list form. */
+function composeLabelEntries(labels: unknown): [string, string][] {
+  if (isRecord(labels)) {
+    return Object.entries(labels).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string"
+    );
+  }
+  if (!Array.isArray(labels)) {
+    return [];
+  }
+  const out: [string, string][] = [];
+  for (const entry of labels) {
+    if (typeof entry !== "string") {
+      continue;
+    }
+    const separator = entry.indexOf("=");
+    if (separator > 0) {
+      out.push([
+        entry.slice(0, separator).trim(),
+        entry.slice(separator + 1).trim(),
+      ]);
+    }
+  }
+  return out;
 }
 
 async function readComposeServiceHosts(opts: {

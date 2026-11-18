@@ -463,6 +463,49 @@ test("native: branch instances come from saved run mappings, no subprocess", asy
   });
 });
 
+test("native: numbered site labels count, and a missing primary hides no worktree", async () => {
+  const worktreeRoot = join(requireRoot(), "alpha-wt");
+  const worktreeDir = await writeCheckout({
+    checkoutRoot: worktreeRoot,
+    config: { name: "alpha", dev_host: "alpha.hack" },
+  });
+  await writeFile(
+    join(worktreeDir, PROJECT_COMPOSE_FILENAME),
+    [
+      "services:",
+      "  web:",
+      "    labels:",
+      '      - "caddy_0=alpha.hack"',
+      '      - "caddy_1=admin.alpha.hack"',
+      '      - "caddy_0.reverse_proxy={{upstreams 3000}}"',
+      "",
+    ].join("\n")
+  );
+  const registration = await createProject({
+    worktrees: [{ path: worktreeRoot, branch: "wt/feature" }],
+  });
+  await writeNativeRun({
+    projectDir: worktreeDir,
+    dir: "native-runs",
+    branch: "wt-feature",
+  });
+  // The registered checkout's .hack is gone; the worktree keeps its own.
+  await rm(registration.projectDir, { recursive: true, force: true });
+  const payload = await serializedProject({ registration, runtime: [] });
+  expect(payload.open_url).toBeNull();
+  expect(branchEntries(payload, "native_branch_runtime")).toMatchObject([
+    {
+      branch: "wt-feature",
+      checkout: { root: worktreeRoot, kind: "worktree" },
+      hosts: {
+        web: ["wt-feature.alpha.hack", "admin.wt-feature.alpha.hack"],
+      },
+      hosts_source: "config",
+      url: "https://wt-feature.alpha.hack",
+    },
+  ]);
+});
+
 test("native authored project: instances by their given name, no guessed URL", async () => {
   const registration = await createProject({});
   // An authored project: the native input marker makes legacy inputs unusable.

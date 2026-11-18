@@ -722,13 +722,32 @@ pub(super) fn amd64_emulation_not_enabled() -> CandidateError {
     )
 }
 
+/// Whether the recorded provider still runs, checked only where a translation request
+/// meets a pool recorded as running without it; elsewhere the answer does not matter.
+fn emulation_pool_alive(candidate: &Candidate, owner: &Owner, requested: bool) -> bool {
+    !(requested && !owner.amd64_emulation && owner.phase == "running")
+        || verify_live(candidate, owner).is_ok()
+}
+
 /// A running pool cannot gain translation without a restart, and running workloads are never
-/// stopped implicitly to add it.
-fn check_amd64_emulation_request(owner: &Owner, requested: bool) -> Result<(), CandidateError> {
+/// stopped implicitly to add it. `alive` is whether the recorded provider process still runs:
+/// a pool recorded as running whose process has exited only needs its stop recorded, so it is
+/// named as that instead of as a running pool.
+fn check_amd64_emulation_request(
+    owner: &Owner,
+    requested: bool,
+    alive: bool,
+) -> Result<(), CandidateError> {
     if requested && !owner.amd64_emulation && owner.phase == "running" {
+        if !alive {
+            return Err(CandidateError::new(
+                "pool_process_exited",
+                "The native VM pool is recorded as running, but its process has exited, so its stop was never recorded. Run `runtime recover --json` on this native home (it proves the process exited, then records the stop), then start again; nothing was stopped or started.",
+            ));
+        }
         return Err(CandidateError::new(
             "amd64_emulation_restart_required",
-            "The running native VM pool was started without x86_64 translation. Stop every native project that uses it (`hack down`), then start again; nothing was stopped or started.",
+            "The running native VM pool was started without x86_64 translation. Stop every native project that uses it (`hack down` in each), stop the pool (`runtime down --json` on this native home), then start again; nothing was stopped or started.",
         ));
     }
     Ok(())
@@ -1250,7 +1269,10 @@ fn start_pool(
             .map_err(io)?
         {
             let owner = Owner::load(candidate)?;
-            request.check(&owner)?;
+            request.check(
+                &owner,
+                emulation_pool_alive(candidate, &owner, request.amd64_emulation),
+            )?;
             (
                 owner.application_bridge,
                 owner.network.clone(),
@@ -1404,7 +1426,8 @@ fn start_pool(
             "Capacity profile changed before the operation lock was acquired.",
         ));
     }
-    check_amd64_emulation_request(&owner, start.amd64_emulation)?;
+    let alive = emulation_pool_alive(candidate, &owner, start.amd64_emulation);
+    check_amd64_emulation_request(&owner, start.amd64_emulation, alive)?;
     if fresh_owner {
         super::graph::initialize_owner_registry(candidate, &owner)?;
     } else {
@@ -3149,8 +3172,15 @@ mod tests {
             }))
             .unwrap()
         };
-        let refused = check_amd64_emulation_request(&owner("running", false), true).unwrap_err();
+        let refused =
+            check_amd64_emulation_request(&owner("running", false), true, true).unwrap_err();
         assert_eq!(refused.code, "amd64_emulation_restart_required");
+        assert!(refused.message.contains("runtime down --json"));
+        // A recorded running pool whose process has exited is named as that, with its recovery.
+        let exited =
+            check_amd64_emulation_request(&owner("running", false), true, false).unwrap_err();
+        assert_eq!(exited.code, "pool_process_exited");
+        assert!(exited.message.contains("runtime recover --json"));
         for (phase, emulation, requested) in [
             ("running", false, false),
             ("running", true, true),
@@ -3158,7 +3188,7 @@ mod tests {
             ("stopped", false, true),
             ("initializing", false, true),
         ] {
-            check_amd64_emulation_request(&owner(phase, emulation), requested).unwrap();
+            check_amd64_emulation_request(&owner(phase, emulation), requested, true).unwrap();
         }
         // A pool without translation keeps its original receipt shape.
         let saved = serde_json::to_value(owner("stopped", false)).unwrap();

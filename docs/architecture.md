@@ -125,7 +125,7 @@ in these docs does not imply native support.
 
 `hack up` and `hack down` run more than Compose. Hooks and managed host processes
 declared in `.hack/hack.config.json` run around the services, inside a dedicated
-tmux or zellij session that Hack owns and can tear down. The exact ordering is in
+tmux session that Hack owns and can tear down. The exact ordering is in
 [Lifecycle](lifecycle.md).
 
 The [lifecycle outcome and phase diagrams](lifecycle.md#runtime-behavior) distinguish
@@ -348,7 +348,8 @@ group and other write from its own logs and pid file. The gateway token store
 is written owner-only (`0600`). A store that others could write, such as one
 written before this under umask `0002`, is not used: the gateway accepts no
 token from it until you remove it and issue tokens again
-(`rm ~/.hack/daemon/gateway/tokens.json && hack x gateway token-create`). Closing the terminal, or an agent
+(`rm ~/.hack/daemon/gateway/tokens.json && hack x gateway token-create`; the
+gateway is an unsupported retained surface). Closing the terminal, or an agent
 harness killing the process group that ran the command, does not stop it. It does
 not survive logout or reboot. For that, install it as a login service with
 `hack daemon install`:

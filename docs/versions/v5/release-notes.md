@@ -4,8 +4,9 @@
 > `5.0.0-next.N` prereleases through `hack-next`, a separate channel that
 > installs beside stable. Stable is still v4. See [Install v5](install.md).
 >
-> Items marked **\*** arrived in `5.0.0-next.21`. An installed next.20 or
-> earlier does not have them.
+> Everything on this page is in `5.0.0-next.22`. The migration wait, overlay
+> reuse, the slow-project checks, `hack env overlay` and the `--json` stdout rule
+> arrived in next.21; an installed next.20 or earlier does not have them.
 
 Hack 5 keeps the v4 project model. Your `.hack/` folder, your encrypted env
 values, branch instances and lifecycle processes carry over. Docker Compose is
@@ -16,8 +17,8 @@ In short:
 
 - **When you upgrade:** deal with the old daemon, install tmux, and check your
   scripts for the changes in section 1.
-- **Every day:** `hack env list` hides values; starts wait for migrations\*;
-  `exec` and `run` keep the overlay\*.
+- **Every day:** `hack env list` hides values; starts wait for migrations;
+  `exec` and `run` keep the overlay.
 - **New:** an upgrade assistant, single repairs in `hack doctor`, a history of
   starts and stops, and background commands.
 - **Opt-in:** the agent plugin and the native backend (beta).
@@ -62,12 +63,12 @@ says how to go back.
 Read one value with `hack env get <KEY>`. See
 [Share environment and secrets](guides/share-environment.md).
 
-**A first start no longer times out during migrations.\*** `hack up -d` keeps
+**A first start no longer times out during migrations.** `hack up -d` keeps
 waiting while a one-shot service such as a migration runs, up to 30 minutes.
 Image builds and pulls have their own 30-minute limit. In v4, one 90-second
 limit covered all of it. See [First project on Compose](getting-started.md).
 
-**`hack exec` and `hack run` keep the running overlay.\*** After
+**`hack exec` and `hack run` keep the running overlay.** After
 `hack up --env qa`, plain `hack exec api -- env` uses `qa`. You no longer repeat
 `--env`. See [Choose where a command runs](guides/run-commands.md).
 
@@ -79,12 +80,12 @@ processes to stop and waits for them. A second Ctrl-C forces the stop.
 | Command | What it is for |
 | --- | --- |
 | `hack upgrade check`, `review`, `apply`, `snapshot`, `rollback` | Check a v4 machine before the upgrade, apply selected file repairs with a snapshot, and restore those files. It does not install a release or back up application data. |
-| `hack doctor --fix --only '<check>'` | Run one named repair and verify it: `hack gitignore`, or `polling watchers`\*. Doctor also reports settings that make a project slow\*: emulated images, polling file watchers, mixed CPU types on one volume, and `:latest` images that may be old. |
+| `hack doctor --fix --only '<check>'` | Run one named repair and verify it: `hack gitignore`, or `polling watchers`. Doctor also reports settings that make a project slow: emulated images, polling file watchers, mixed CPU types on one volume, and `:latest` images that may be old. |
 | `hack activity` | Read the history of `up`, `down` and `restart` for a project. |
 | `hack exec --detach`, `hack run --detach`, `hack commands` | Run a long command in the background, then read its output, inspect it or cancel it. |
 | `hack env migrate` | Preview, apply, resume, roll back and clean up the env file migration. |
 | `hack env hydrate` | Import many values at once into your machine-local env file, from standard input or a file, never from arguments. |
-| `hack env overlay list`, `hack env overlay add <name>` | List and create env overlays.\* |
+| `hack env overlay list`, `hack env overlay add <name>` | List and create env overlays. |
 | `hack autostart` | Start chosen Compose projects at login. |
 | `hack usage --json --by-service` | CPU and memory for each service of one project. |
 
@@ -94,13 +95,13 @@ has every flag.
 
 ## 4. For scripts and agents
 
-- **With `--json`, stdout is one JSON value.\*** Output from lifecycle hooks and
+- **With `--json`, stdout is one JSON value.** Output from lifecycle hooks and
   from Compose goes to stderr.
 - **`hack up`, `down` and `restart` take `--json --progress`** for a line-by-line
   progress stream on Compose.
 - **`hack logs --json` adds `--services` and `--max-line-bytes`.**
-- **`hack ps --json` adds `emulated`\*** for a container that runs under CPU
-  emulation, **and `waiting`\*** for services held behind a one-shot.
+- **`hack ps --json` adds `emulated`** for a container that runs under CPU
+  emulation, **and `waiting`** for services held behind a one-shot.
 - **New read-only reports** for apps and monitors: `hack version --json`,
   `hack projects --json --observe`, `hack global status --json --observe` and
   `hack update --check --json --observe`.

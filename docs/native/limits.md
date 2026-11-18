@@ -4,8 +4,8 @@ The native backend supports part of what Compose supports. When a project needs
 something outside that part, Hack refuses and tells you. It does not guess, and it
 does not fall back to Docker without telling you.
 
-The changes labelled next.17 below describe candidate source `5002cf87bb`.
-An installed next.16 bundle keeps its older behavior.
+Rows labelled next.17 need next.17 or later. An installed next.16 bundle keeps
+its older behavior.
 
 ## Platform
 
@@ -25,7 +25,7 @@ An installed next.16 bundle keeps its older behavior.
 | Stop the project | `hack down`, and `hack down --recover` after a crash |
 | See what is running | `hack ps` |
 | Read recent logs | `hack logs <service> --no-follow`, a bounded snapshot |
-| Run a command in a running service | Next.17: foreground terminal `hack exec SERVICE -- /bin/sh` is interactive; redirected input/output and `HACK_NO_INTERACTIVE=1` use finite exec |
+| Run a command in a running service | Since next.17: foreground terminal `hack exec SERVICE -- /bin/sh` is interactive; redirected input/output and `HACK_NO_INTERACTIVE=1` use finite exec |
 | Run a one-off command | `hack run`, for services without source, data or private env mounts |
 | Preview without starting | `hack config validate`, `hack config plan`, `hack config import --dry-run`, `hack config adopt --dry-run` |
 
@@ -52,7 +52,7 @@ The exact rules for each command are in
 - Proving a complete tail without transport EOF. A stopped service whose stream
   stays open for five idle seconds ends with `native_log_stopped_idle` and exit 1,
   not a clean EOF. The final tail may be incomplete.
-- Interactive exec on an older next.16 bundle. Next.17 supports sized terminals,
+- Interactive exec on an older next.16 bundle. Since next.17, native supports sized terminals,
   resize and control bytes; old managed-env launchers require a matching restart
   or finite exec. Inspect uncertain outcomes with `hack exec-sessions`; see
   [exec recovery](../guides/native-candidate.md#normal-native-exec).
@@ -70,9 +70,9 @@ refuses with `E_NATIVE_PROJECT_UNSUPPORTED`, names the feature, and starts nothi
 
 | Compose feature | Why it stays on Compose |
 | --- | --- |
-| Foreign external networks | Exact `hack-dev` and `hack-logging` identities map to project-owned bridges in next.17; they do not join Docker's shared networks or provide cross-project DNS |
+| Foreign external networks | Exact `hack-dev` and `hack-logging` identities map to project-owned bridges (since next.17); they do not join Docker's shared networks or provide cross-project DNS |
 | External volumes | Native only uses volumes it creates and owns |
-| Unsupported routing labels | Generated Hack/Compose metadata is inert in next.17; authored labels never grant resource ownership |
+| Unsupported routing labels | Generated Hack/Compose metadata is inert (since next.17); authored labels never grant resource ownership |
 | Builds beyond a basic `context`, `dockerfile` and `target` | Build arguments, secrets, SSH and cache options are not supported |
 | Platforms other than Linux arm64 | The virtual machine runs Linux arm64. `linux/amd64` works only for services you opt in to emulation. |
 

@@ -70,7 +70,7 @@ while we wrote and tested these recipes.
 
 ## Lifecycle
 
-- **Lifecycle processes need tmux.** Hack runs them in a tmux (or zellij)
+- **Lifecycle processes need tmux.** Hack runs them in a tmux
   session. Install tmux first.
 - **A failing `up.after` hook leaves containers running.** `hack up` reports
   the failure; run `hack down` if you want them stopped.

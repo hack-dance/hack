@@ -54,8 +54,8 @@ match your app. Check the local URL in the service's routing labels. Commit shar
 configuration, but never the project key `.hack.secret.key` or local env layers.
 [Project setup](guides/init-project.md) explains discovery and custom domains.
 
-For noninteractive setup, `hack init --auto` uses discovery defaults. In builds
-containing merged #791, intended for next.17, it warns **“No runnable service was
+For noninteractive setup, `hack init --auto` uses discovery defaults. Since next.17, it
+warns **“No runnable service was
 found”** when discovery wrote a placeholder `app` service (a Bun image running
 `bun run dev`). Set that service's image and command to how your app really starts
 before `up`. The notice does not appear for a discovered service or when you

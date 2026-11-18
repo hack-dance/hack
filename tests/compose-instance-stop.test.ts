@@ -217,3 +217,40 @@ test("the incomplete-down message names services and, for another checkout, its 
     "docker compose down left a container of this instance still running (extra); run `hack ps --json` to inspect, then `hack down` again; and running containers of the same Compose project started from another checkout (worker); run `hack down` from /w/.hack."
   );
 });
+
+test("one-off run containers are never stopped and never make a down incomplete", async () => {
+  const { projectDir } = await checkout();
+  const listing = parseComposePsInstanceContainers(
+    JSON.stringify({
+      ID: "run1",
+      State: "running",
+      Service: "web",
+      Labels: `com.docker.compose.oneoff=True,com.docker.compose.project.working_dir=${projectDir}`,
+    })
+  );
+  expect(listing).toEqual({
+    ok: true,
+    containers: [
+      {
+        oneOff: true,
+        id: "run1",
+        state: "running",
+        service: "web",
+        workingDir: projectDir,
+      },
+    ],
+  });
+  if (!listing.ok) {
+    return;
+  }
+  // A background `hack run` keeps running through `hack down`.
+  expect(
+    selectOwnedInstanceContainers({
+      containers: listing.containers,
+      projectDir,
+    })
+  ).toEqual([]);
+  expect(classifyDownObservation({ listing, projectDir })).toEqual({
+    complete: true,
+  });
+});

@@ -57,6 +57,11 @@ export type InstanceContainer = {
   readonly state: string;
   /** `com.docker.compose.project.working_dir`, or null when unknown. */
   readonly workingDir: string | null;
+  /**
+   * A one-off container (`docker compose run`, `hack run`, also detached):
+   * Compose's `down` leaves it running by design, and so does Hack's.
+   */
+  readonly oneOff?: boolean;
 };
 
 /** The instance's containers, or why they could not be listed. */
@@ -65,6 +70,7 @@ export type InstanceContainerListing =
   | { readonly ok: false; readonly reason: string };
 
 const WORKING_DIR_LABEL = "com.docker.compose.project.working_dir";
+const ONE_OFF_LABEL = "com.docker.compose.oneoff";
 const LABEL_START = /^[A-Za-z0-9_.\-/]+=/;
 
 /**
@@ -164,7 +170,9 @@ export function parseComposePsInstanceContainers(
     const labels =
       typeof value.Labels === "string" ? parseComposeLabels(value.Labels) : {};
     const workingDir = labels[WORKING_DIR_LABEL];
+    const oneOff = (labels[ONE_OFF_LABEL] ?? "").toLowerCase() === "true";
     containers.push({
+      ...(oneOff ? { oneOff: true } : {}),
       id: value.ID,
       state: value.State.toLowerCase(),
       service: typeof value.Service === "string" ? value.Service : "",
@@ -215,6 +223,7 @@ export function selectOwnedInstanceContainers(opts: {
 }): InstanceContainer[] {
   return opts.containers.filter(
     (container) =>
+      container.oneOff !== true &&
       containerOwnership({ container, projectDir: opts.projectDir }) === "owned"
   );
 }
@@ -260,8 +269,11 @@ export function classifyDownObservation(opts: {
       unknownReason: opts.listing.reason,
     };
   }
+  // One-off run containers outlive a down on purpose (a background
+  // `hack run` keeps running through it), so they never make it incomplete.
   const mayRun = opts.listing.containers.filter(
-    (container) => !NOT_RUNNING_STATES.has(container.state)
+    (container) =>
+      container.oneOff !== true && !NOT_RUNNING_STATES.has(container.state)
   );
   if (mayRun.length === 0) {
     return { complete: true };

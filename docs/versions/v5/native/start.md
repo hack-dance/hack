@@ -71,14 +71,22 @@ permission to start. Run setup above and the full preflight below.
 "$CANDIDATE" doctor --native-preflight --path /absolute/project
 ```
 
-Add the project's `--profile` selection if needed. Preflight reads the Compose
-project and lists blockers with fixes. It starts no VM or service. Continue only
+Native `hack up` selects Compose profiles as Compose does: `--profile`, else
+`COMPOSE_PROFILES` in the managed env (for example `.hack/hack.env.default.yaml`),
+else in the shell (a `COMPOSE_PROFILES` stored as a secret selects nothing).
+Preflight selects them the same way, so without `--profile` it reviews the services
+a fresh `up` starts. A run that already exists keeps the profiles it started
+with; when the env now selects others, `up` says so, and changing them means
+`hack down --remove-data` (this deletes the data volumes) and `hack up`.
+Preflight reads the Compose project and lists blockers with fixes. It starts no VM or service. Continue only
 when there are no blockers **and** the report says `Runtime review: completed`.
 The runtime setup item must also say ready. In JSON, this means `ready: true`
 and `runtime_review.status: "completed"`.
 An exit of 0 alone is not enough: runtime review can be skipped or unavailable.
 
-If blocked, fix the named field and rerun. Do not remove a check or delete state
+If blocked, fix the named field and rerun. For a project that already runs on
+Compose, [Run an existing Compose project on native](existing-compose-project.md)
+collects the usual fixes. Do not remove a check or delete state
 to force a start. Keep the project on Compose if it needs unsupported behavior.
 See [Troubleshooting](../troubleshooting.md) and [the preflight reference](preflight.md).
 
@@ -118,6 +126,15 @@ Stop with the **same version and native home**:
 If stop reports retained or unknown cleanup, follow its inspection instructions
 before switching. Keep the home and receipts; use the
 [cleanup reference](full-reference.md#manual-candidate-upgrade-and-rollback).
+
+After installing a newer version, its native home is new, but the project still
+records its last run in the old one. If you did not stop the project with the old
+version first, `hack up`, `hack ps` and `hack down` from the new version refuse with
+`E_NATIVE_RUN_MAPPING_FOREIGN_HOME`. When the old home proves a clean stop, the
+message names the exact command that releases the old mapping
+(`hack doctor --native-run-mapping release --expect-selection <sha> [--branch <name>]`);
+run it, then `hack up` again. The project's data stays in the old home. If the old
+run is still live or its stop cannot be proven, stop it with the old version first.
 
 ## Back to Compose
 

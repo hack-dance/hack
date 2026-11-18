@@ -13,7 +13,8 @@ COPY apps ./apps
 COPY packages ./packages
 COPY src ./src
 RUN bun install --frozen-lockfile
-RUN bun build index.ts --compile --outfile /out/hack
+# No autoload: the working directory of this CLI is a mounted project.
+RUN bun build index.ts --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig --no-compile-autoload-package-json --define 'process.env.OPENTUI_LIBC="glibc"' --outfile /out/hack
 
 FROM oven/bun:1.4.4
 

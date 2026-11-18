@@ -114,6 +114,7 @@ mod config;
 mod dependency_cache;
 mod image_environment;
 mod image_process;
+mod image_user;
 mod image_volumes;
 #[cfg(feature = "native-config-plan")]
 pub mod native;
@@ -2665,6 +2666,77 @@ fn admitted_platform(
         }
 }
 
+/// Where the guest mounts the host's Rosetta 2 runtime (virtiofs tag `rosetta`; see
+/// `guest-translation.sh`). SmolVM's binfmt interpreter, `rosetta-wrapper`, is pinned by
+/// the fix-binary flag, but it launches the translator from this path at exec time, so the
+/// path must exist inside every container whose image runs under translation.
+const ROSETTA_RUNTIME: &str = "/mnt/rosetta";
+
+/// Bind the guest's Rosetta runtime read-only into an emulated container. Without it every
+/// x86_64 process stops at its first exec (`rosetta-wrapper: unexpected initial stop`,
+/// status 127). A service that already mounts something there is refused, not merged.
+fn mount_rosetta_runtime(config: &mut Value) -> Result<(), CandidateError> {
+    let mounts = config["HostConfig"]["Mounts"]
+        .as_array_mut()
+        .ok_or_else(|| error("graph_image", "Emulated service mounts are malformed."))?;
+    let runtime = json!({
+        "Type": "bind",
+        "Source": ROSETTA_RUNTIME,
+        "Target": ROSETTA_RUNTIME,
+        "ReadOnly": true,
+        "BindOptions": {"Propagation": "rprivate"}
+    });
+    // A config verified again (a one-off copies the startup template) already carries the
+    // runtime's own mount; an authored bind never has this guest source.
+    if mounts.contains(&runtime) {
+        return Ok(());
+    }
+    let claimed = |target: &str| target == ROSETTA_RUNTIME || target.starts_with("/mnt/rosetta/");
+    if mounts
+        .iter()
+        .any(|mount| mount["Target"].as_str().is_some_and(claimed))
+    {
+        return Err(error(
+            "graph_rosetta_mount",
+            "An emulated linux/amd64 service cannot mount anything at /mnt/rosetta: native binds the Rosetta 2 runtime there.",
+        ));
+    }
+    mounts.push(runtime);
+    Ok(())
+}
+
+/// Private delivery stages files for a numeric owner. A named Compose or image user is
+/// resolved from the pinned image's own account files and written into the create config
+/// (`UID` for a bare name, `UID:GID` for `name:group`), so the Engine runs the same identity. An unknown name is left for the
+/// numeric check, which refuses it as before.
+fn resolve_named_user(
+    engine: &Engine<'_>,
+    image: &Value,
+    configs: &mut BTreeMap<String, Value>,
+    key: &str,
+) -> Result<(), CandidateError> {
+    let config = configs.get_mut(key).expect("compiled service config");
+    let selected = [config.get("User"), image["Config"].get("User")]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .find(|user| !user.is_empty())
+        .map(str::to_owned);
+    if let Some(user) = selected.filter(|user| image_user::named(user)) {
+        if let Some(numeric) = image_user::resolve(engine, image, &user)? {
+            // A bare name keeps Docker's group lookup: only the UID is written, and the
+            // Engine resolves the primary and supplementary groups from the image.
+            let numeric = if user.contains(':') {
+                numeric
+            } else {
+                numeric.split(':').next().unwrap_or_default().to_owned()
+            };
+            config["User"] = Value::String(numeric);
+        }
+    }
+    Ok(())
+}
+
 fn verify_images(
     engine: &Engine<'_>,
     resources: &BTreeMap<String, Resource>,
@@ -2692,6 +2764,14 @@ fn verify_images(
             )
             .with_service(&resource.key));
         }
+        if image["Architecture"].as_str() == Some("amd64") {
+            mount_rosetta_runtime(
+                configs
+                    .get_mut(&resource.key)
+                    .expect("compiled service config"),
+            )
+            .map_err(|refusal| refusal.with_service(&resource.key))?;
+        }
         // Image VOLUME targets are admitted only when covered by exactly one owned
         // named mount; the engine never allocates anonymous storage for a graph.
         image_volumes::admit(
@@ -2699,6 +2779,9 @@ fn verify_images(
             &configs[&resource.key],
             resources,
         )?;
+        if private_services.contains(&resource.key) || file_owners.contains(&resource.key) {
+            resolve_named_user(engine, &image, configs, &resource.key)?;
+        }
         if private_services.contains(&resource.key) {
             refusals.check(
                 &resource.key,
@@ -2728,4 +2811,46 @@ fn verify_images(
     // Every wrapped service is checked before the first refusal is reported.
     refusals.finish()?;
     Ok(expected)
+}
+
+#[cfg(test)]
+mod rosetta_mount_tests {
+    use super::*;
+
+    #[test]
+    fn emulated_containers_get_the_rosetta_runtime_and_conflicts_refuse() {
+        let mut config = json!({"HostConfig":{"Mounts":[
+            {"Type":"volume","Source":"data","Target":"/data"}
+        ]}});
+        mount_rosetta_runtime(&mut config).unwrap();
+        let mounts = config["HostConfig"]["Mounts"].as_array().unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(
+            mounts[1],
+            json!({"Type":"bind","Source":"/mnt/rosetta","Target":"/mnt/rosetta","ReadOnly":true,"BindOptions":{"Propagation":"rprivate"}})
+        );
+        for target in ["/mnt/rosetta", "/mnt/rosetta/cache"] {
+            let mut taken =
+                json!({"HostConfig":{"Mounts":[{"Type":"volume","Source":"x","Target":target}]}});
+            assert_eq!(
+                mount_rosetta_runtime(&mut taken).unwrap_err().code,
+                "graph_rosetta_mount"
+            );
+        }
+        // Verifying an already-mounted config again (a one-off template) is a no-op.
+        mount_rosetta_runtime(&mut config).unwrap();
+        assert_eq!(config["HostConfig"]["Mounts"].as_array().unwrap().len(), 2);
+        // A writable or differently sourced mount at the same target still refuses.
+        let mut writable = json!({"HostConfig":{"Mounts":[
+            {"Type":"bind","Source":"/mnt/rosetta","Target":"/mnt/rosetta","ReadOnly":false,"BindOptions":{"Propagation":"rprivate"}}
+        ]}});
+        assert_eq!(
+            mount_rosetta_runtime(&mut writable).unwrap_err().code,
+            "graph_rosetta_mount"
+        );
+        // A neighbouring path is not a conflict.
+        let mut near = json!({"HostConfig":{"Mounts":[{"Type":"volume","Source":"x","Target":"/mnt/rosetta-data"}]}});
+        mount_rosetta_runtime(&mut near).unwrap();
+        assert!(mount_rosetta_runtime(&mut json!({"HostConfig":{}})).is_err());
+    }
 }

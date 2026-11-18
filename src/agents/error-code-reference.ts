@@ -21,6 +21,12 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "The selected native home needs runtime setup before project startup.",
     readFirst: "`hack doctor --native-preflight --json`",
   },
+  E_UNSUPPORTED_PLATFORM: {
+    meaning:
+      "The command needs a platform this host is not, such as the native runtime outside Apple Silicon macOS.",
+    readFirst:
+      "The error's first line names the supported platform; use the Compose backend instead.",
+  },
   E_DOCKER_UNAVAILABLE: {
     meaning: "The container runtime CLI or engine cannot be reached.",
     readFirst: "`hack doctor --json`",
@@ -42,6 +48,12 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
     meaning:
       "No Hack project resolved from the working directory, `--project` or `--path`.",
     readFirst: "`hack projects --json`",
+  },
+  E_NATIVE_RUN_MAPPING_FOREIGN_HOME: {
+    meaning:
+      "The instance's last native run belongs to another native home, usually the one an earlier Hack version used; this home neither starts nor stops it until that mapping is released or the owning version stops the run.",
+    readFirst:
+      "The error message (and `detail.releaseCommand` in `--json`) names the way out; `hack doctor --native-run-mapping inspect --json` shows the owner.",
   },
   E_NATIVE_PROJECT_CONFLICT: {
     meaning:
@@ -83,6 +95,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
   E_STARTUP_INCOMPLETE: {
     meaning:
       "After start or restart, a service is neither running nor a successful one-shot.",
+    readFirst: "`hack ps --json`",
+  },
+  E_DOWN_INCOMPLETE: {
+    meaning:
+      "After down, a container of the instance may still run. `error.detail.running` names this checkout's services, `error.detail.foreign` another checkout's containers and their working dir (stop them from there), and `error.detail.unknown` means the containers could not be listed.",
     readFirst: "`hack ps --json`",
   },
   E_DEPENDENCY_BOOTSTRAP_FAILED: {

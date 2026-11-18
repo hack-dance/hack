@@ -37,6 +37,7 @@ import { dependencyCacheProtocolScenario } from "./scenarios/dependency-cache-pr
 import { doctorScenario } from "./scenarios/doctor.ts";
 import { domainMigrationScenario } from "./scenarios/domain-migration.ts";
 import { domainMigrationFilesScenario } from "./scenarios/domain-migration-files.ts";
+import { downProfilesScenario } from "./scenarios/down-profiles.ts";
 import { envSecretsScenario } from "./scenarios/env-secrets.ts";
 import { execStaleEnvScenario } from "./scenarios/exec-stale-env.ts";
 import { initScenario } from "./scenarios/init.ts";
@@ -128,6 +129,7 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   patternP07CapabilityOverlaysScenario,
   domainMigrationScenario,
   upDownScenario,
+  downProfilesScenario,
   execStaleEnvScenario,
   portableMultiserviceScenario,
   portableBootstrapNegativesScenario,

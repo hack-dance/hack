@@ -1009,8 +1009,26 @@ export async function writeFakeDocker(opts: {
       "#!/bin/sh",
       'if [ -n "${E2E_DOCKER_LOG:-}" ]; then printf "%s\\n" "$*" >> "$E2E_DOCKER_LOG"; fi',
       'if [ "$1" = "compose" ]; then',
+      // After `down`, ps lists nothing for that Compose project, as on a
+      // real engine (HACK-2340: down checks what is left). `up` clears it.
+      "  project=default",
+      '  prev=""',
+      '  for arg in "$@"; do',
+      '    if [ "$prev" = "-p" ]; then project="$arg"; fi',
+      '    prev="$arg"',
+      "  done",
+      '  marker="$(dirname "$0")/.compose-down-$project"',
+      '  case " $* " in',
+      '    *" down "*)',
+      '      : > "$marker"',
+      "      ;;",
+      '    *" up "*)',
+      '      rm -f "$marker"',
+      "      ;;",
+      "  esac",
       '  case " $* " in',
       '    *" ps "*)',
+      '      if [ -f "$marker" ]; then exit 0; fi',
       // A failed up started nothing, unless it failed after starting some
       // services (E2E_DOCKER_FAIL_UP_PARTIAL).
       '      if [ "${E2E_DOCKER_FAIL_UP:-}" = "1" ]; then exit 0; fi',

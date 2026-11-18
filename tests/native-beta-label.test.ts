@@ -1,10 +1,11 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   NATIVE_BETA_DOCS_URL,
   nativeBetaNotice,
+  nativePlatformRefusal,
 } from "../src/backends/native-beta.ts";
 import { resolveNativeRuntimeSelection } from "../src/backends/native-runtime-client.ts";
 import { noteNativeBackendBeta } from "../src/commands/native-beta-notice.ts";
@@ -196,3 +197,59 @@ test("without native selection nothing mentions the native backend", async () =>
   });
   expect(result.stdout + result.stderr).not.toContain(LABEL);
 }, 90_000);
+
+describe("nativePlatformRefusal (HACK-2329)", () => {
+  test("is null on Apple Silicon macOS and with an explicit HACK_NATIVE_BINARY", () => {
+    expect(
+      nativePlatformRefusal({ platform: "darwin", arch: "arm64", env: {} })
+    ).toBeNull();
+    expect(
+      nativePlatformRefusal({
+        platform: "linux",
+        arch: "x64",
+        env: { HACK_NATIVE_BINARY: "/opt/hack-native" },
+      })
+    ).toBeNull();
+  });
+
+  test("names the supported platform and this host first", () => {
+    expect(
+      nativePlatformRefusal({ platform: "linux", arch: "x64", env: {} })
+    ).toBe(
+      "The native runtime supports Apple Silicon macOS only; this host is linux x64. Use the Compose backend; it is the default here."
+    );
+    expect(
+      nativePlatformRefusal({
+        platform: "darwin",
+        arch: "x64",
+        env: { HACK_RUNTIME_BACKEND: "native" },
+      })
+    ).toBe(
+      "The native runtime supports Apple Silicon macOS only; this host is macOS x64. Unset HACK_RUNTIME_BACKEND (or set it to compose) to use the Compose backend."
+    );
+  });
+});
+
+test.skipIf(process.platform === "darwin" && process.arch === "arm64")(
+  "native setup --json refuses with E_UNSUPPORTED_PLATFORM before anything else",
+  async () => {
+    const { code: exit, stdout } = await hack({
+      args: ["native", "setup", "--json"],
+      cwd: outside,
+      env: {},
+    });
+    expect(exit).not.toBe(0);
+    const payload = JSON.parse(stdout) as {
+      ok: boolean;
+      error: { code: string; message: string };
+    };
+    expect(payload.ok).toBe(false);
+    expect(payload.error.code).toBe("E_UNSUPPORTED_PLATFORM");
+    expect(
+      payload.error.message.startsWith(
+        "The native runtime supports Apple Silicon macOS only"
+      )
+    ).toBe(true);
+  },
+  60_000
+);

@@ -534,6 +534,8 @@ export const BOTH_POOL_FILES: Readonly<Record<string, string>> = {
     "daemon directory trust walks host paths (macOS /var -> /private/var)",
   "tests/local-network-hint.test.ts":
     "portable open --json subprocess contract must gate light PRs; macOS hint behavior still needs macOS",
+  "tests/env-desktop-requests.test.ts":
+    "portable env list/overlay refusal contracts must gate light PRs; the file matches PLATFORM_SENSITIVE_SOURCE only because it sets HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK",
 };
 
 /** Parse a layout name, refused closed. */

@@ -198,7 +198,10 @@ function closeProgressStreamOnError(error: unknown): boolean {
  * arguments themselves were wrong. Once a command handler owns the request
  * (`handlerPath` is set), a {@link CliUsageError} it throws is a refusal of a
  * well-formed request: it prints the message and a one-line pointer to the
- * command's help, never the full help.
+ * command's help, never the full help. The message is written to stderr
+ * directly: the default clack logger would otherwise put it on stdout, so
+ * hosts without gum (hosted macOS CI) would show only the generic help hint
+ * on stderr.
  */
 export async function handleRunCliError(opts: {
   readonly error: unknown;
@@ -229,7 +232,8 @@ export async function handleRunCliError(opts: {
       });
       return 1;
     }
-    logger.error({ message: error.message });
+    // Do not use the UI logger here: clack writes errors to stdout.
+    process.stderr.write(`ERROR: ${error.message}\n`);
     if (opts.handlerPath === undefined) {
       await printHelpForPath(CLI_SPEC, []);
     } else {

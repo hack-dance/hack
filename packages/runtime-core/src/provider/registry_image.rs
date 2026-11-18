@@ -33,6 +33,7 @@ use super::image_reference::{ImageReference, NamedReference, normalize};
 use super::network_retry::{ATTEMPTS, backoff, transient};
 use super::registry_credentials::{self, Credential};
 use crate::CandidateError;
+use crate::error::NetworkFailureReason;
 use reqwest::{
     StatusCode, Url,
     blocking::{Client, Response},
@@ -47,7 +48,7 @@ use std::{
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
     os::unix::fs::OpenOptionsExt,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -844,6 +845,7 @@ impl<'a> Fetch<'a> {
         &self,
         request: reqwest::blocking::RequestBuilder,
         url: &Url,
+        timeout: Duration,
         retry: bool,
     ) -> Result<Response, CandidateError> {
         for attempt in 1..=ATTEMPTS {
@@ -863,14 +865,7 @@ impl<'a> Fetch<'a> {
             let request = request
                 .try_clone()
                 .ok_or_else(|| error("Cannot replay registry request."))?;
-            match request
-                .timeout(remaining.min(if retry {
-                    self.request_timeout
-                } else {
-                    REQUEST_TIMEOUT
-                }))
-                .send()
-            {
+            match request.timeout(remaining.min(timeout)).send() {
                 Ok(response) => return Ok(response),
                 Err(failure) => {
                     let classified = transport_error(&failure, "Registry request failed.");
@@ -921,14 +916,12 @@ impl<'a> Fetch<'a> {
                 header.set_sensitive(true);
                 request = request.header(AUTHORIZATION, header);
             }
-            let response = if retry {
-                self.send_headers(request, &url, true)?
-            } else {
-                request
-                    .timeout(self.remaining()?.min(timeout))
-                    .send()
-                    .map_err(|e| transport_error(&e, "Registry request failed or timed out."))?
-            };
+            // Every request here is an idempotent GET of a manifest or a
+            // content-addressed blob, so a transient transport failure is retried
+            // with the same bounded attempts and reports its host. A layer keeps its
+            // size-scaled timeout; manifests and configs use the request timeout.
+            let attempt_timeout = if retry { self.request_timeout } else { timeout };
+            let response = self.send_headers(request, &url, attempt_timeout, true)?;
             if !response.status().is_redirection() {
                 return Ok(response);
             }
@@ -961,6 +954,18 @@ impl<'a> Fetch<'a> {
         timeout: Duration,
         retry: bool,
     ) -> Result<Response, CandidateError> {
+        let response = self.answered(url, timeout, retry)?;
+        refusal(response)
+    }
+
+    /// The response for `url` after the authentication challenges [`Self::get`]
+    /// answers, whatever its final status; [`refusal`] maps a non-success status.
+    fn answered(
+        &mut self,
+        url: Url,
+        timeout: Duration,
+        retry: bool,
+    ) -> Result<Response, CandidateError> {
         loop {
             let response = self.send(url.clone(), timeout, retry)?;
             let status = response.status();
@@ -982,20 +987,7 @@ impl<'a> Fetch<'a> {
                 self.authorize(&challenge)?;
                 continue;
             }
-            return match status {
-                s if s.is_success() => Ok(response),
-                StatusCode::NOT_FOUND => Err(CandidateError::new(
-                    "registry_image_not_found",
-                    "The registry image or requested tag was not found.",
-                )),
-                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(error(
-                    "The registry refused access with the Docker credentials configured for it.",
-                )),
-                StatusCode::TOO_MANY_REQUESTS => Err(error(
-                    "The registry rate-limited this request; retry later or configure credentials.",
-                )),
-                _ => Err(error("The registry request was refused.")),
-            };
+            return Ok(response);
         }
     }
 
@@ -1099,10 +1091,16 @@ impl<'a> Fetch<'a> {
                 request
             }
         };
+        let replayable = !matches!(credential, Some(Credential::IdentityToken(_)));
         let response = self.send_headers(
             request,
             realm,
-            !matches!(credential, Some(Credential::IdentityToken(_))),
+            if replayable {
+                self.request_timeout
+            } else {
+                REQUEST_TIMEOUT
+            },
+            replayable,
         )?;
         if matches!(
             response.status(),
@@ -1182,20 +1180,275 @@ impl<'a> Fetch<'a> {
         Ok(bytes)
     }
 
-    /// A layer blob as a reader that enforces its descriptor's exact size and digest.
-    fn blob(&mut self, d: &Descriptor) -> Result<Verified<Response>, CandidateError> {
-        let timeout = REQUEST_TIMEOUT + Duration::from_secs(d.size / MIN_BLOB_BYTES_PER_SECOND);
-        let response = self.get(self.url("blobs", &d.digest)?, timeout, false)?;
-        if response.content_length().is_some_and(|n| n != d.size) {
-            return Err(error("Registry object digest or size mismatch."));
+    /// One layer blob downloaded into a private temporary file in `directory` and
+    /// checked against its descriptor's exact size and digest before the caller adds it
+    /// to the archive.
+    ///
+    /// A layer body can fail after its response headers, while it streams: a timeout,
+    /// a connection that ends early, or bytes that do not match. Each such attempt is
+    /// retried up to [`ATTEMPTS`] times, because the blob is content-addressed and the
+    /// request an idempotent GET. Every attempt's time limit is the layer's size-scaled
+    /// timeout, cut to what remains of the acquisition deadline, which is never
+    /// extended; an attempt that would start after it, or a backoff that would outlast
+    /// it, stops with [`NetworkFailureReason::Deadline`]. A failure names the host that
+    /// served the body (after redirects), the attempts made and the last reason. Each
+    /// attempt's temporary file is removed when the attempt fails; the returned file is
+    /// removed when it is dropped.
+    fn layer(&mut self, d: &Descriptor, directory: &Path) -> Result<LayerFile, CandidateError> {
+        let url = self.url("blobs", &d.digest)?;
+        let timeout =
+            self.request_timeout + Duration::from_secs(d.size / MIN_BLOB_BYTES_PER_SECOND);
+        let mut host = url.host_str().unwrap_or("unknown").to_owned();
+        for attempt in 1..=ATTEMPTS {
+            if self.remaining().is_err() {
+                return Err(layer_failure(
+                    &host,
+                    attempt - 1,
+                    NetworkFailureReason::Deadline,
+                    None,
+                ));
+            }
+            let failed = match self.layer_attempt(&url, d, timeout, (&mut host, attempt), directory)
+            {
+                Ok(file) => return Ok(file),
+                Err(LayerAttempt::Refused(failure)) => return Err(failure),
+                Err(LayerAttempt::Failed(reason, status)) => (reason, status),
+            };
+            let (reason, status) = failed;
+            if attempt == ATTEMPTS {
+                return Err(layer_failure(&host, attempt, reason, status));
+            }
+            let delay = backoff(attempt);
+            if self.remaining().unwrap_or_default() <= delay {
+                // The deadline, not this attempt's failure, is what prevents another
+                // attempt: an attempt it cut short, or a backoff that would outlast it.
+                return Err(layer_failure(
+                    &host,
+                    attempt,
+                    NetworkFailureReason::Deadline,
+                    None,
+                ));
+            }
+            std::thread::sleep(delay);
         }
-        Ok(Verified {
-            inner: response,
-            digest: Sha256::new(),
-            total: 0,
-            size: d.size,
-            expected: d.digest.clone(),
-        })
+        unreachable!("bounded attempts return")
+    }
+
+    /// One download attempt for [`Self::layer`]. Failures before response headers keep
+    /// the bounded replay in [`Self::send_headers`] and end the layer, as before.
+    fn layer_attempt(
+        &mut self,
+        url: &Url,
+        d: &Descriptor,
+        timeout: Duration,
+        (host, attempt): (&mut String, usize),
+        directory: &Path,
+    ) -> Result<LayerFile, LayerAttempt> {
+        let mut response = self
+            .answered(url.clone(), timeout, false)
+            .map_err(LayerAttempt::Refused)?;
+        if let Some(served) = response.url().host_str() {
+            served.clone_into(host);
+        }
+        let status = response.status();
+        if !status.is_success() {
+            if retryable_status(status) {
+                return Err(LayerAttempt::Failed(
+                    NetworkFailureReason::HttpStatus,
+                    Some(status.as_u16()),
+                ));
+            }
+            // Access and absence keep their own guidance; any other status is named
+            // with the host, attempts and code like a retried one.
+            return Err(LayerAttempt::Refused(
+                if matches!(
+                    status,
+                    StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+                ) {
+                    match refusal(response) {
+                        Err(failure) => failure,
+                        Ok(_) => unreachable!("a non-success status refuses"),
+                    }
+                } else {
+                    layer_failure(
+                        host,
+                        attempt,
+                        NetworkFailureReason::HttpStatus,
+                        Some(status.as_u16()),
+                    )
+                },
+            ));
+        }
+        if response.content_length().is_some_and(|n| n != d.size) {
+            return Err(LayerAttempt::Failed(
+                NetworkFailureReason::SizeMismatch,
+                None,
+            ));
+        }
+        let mut file = LayerFile::create(directory).map_err(LayerAttempt::Refused)?;
+        let mut digest = Sha256::new();
+        let mut total = 0_u64;
+        let mut buffer = vec![0_u8; 64 * 1024];
+        loop {
+            let n = match response.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(failure) if failure.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(failure) => return Err(LayerAttempt::Failed(read_failure(&failure), None)),
+            };
+            total += n as u64;
+            if total > d.size {
+                return Err(LayerAttempt::Failed(
+                    NetworkFailureReason::SizeMismatch,
+                    None,
+                ));
+            }
+            digest.update(&buffer[..n]);
+            file.file.write_all(&buffer[..n]).map_err(|_| {
+                LayerAttempt::Refused(error(
+                    "Cannot write a registry layer to its temporary file.",
+                ))
+            })?;
+        }
+        if total < d.size {
+            return Err(LayerAttempt::Failed(NetworkFailureReason::ShortRead, None));
+        }
+        if format!("sha256:{:x}", digest.finalize()) != d.digest {
+            return Err(LayerAttempt::Failed(
+                NetworkFailureReason::DigestMismatch,
+                None,
+            ));
+        }
+        file.rewind().map_err(LayerAttempt::Refused)?;
+        Ok(file)
+    }
+}
+
+/// How one layer download attempt ended without a verified file.
+enum LayerAttempt {
+    /// A refusal that another attempt cannot change (access, a missing blob, a
+    /// pre-header transport failure already replayed, or a local file error).
+    Refused(CandidateError),
+    /// A failure another attempt may not repeat, with the HTTP status when it is one.
+    Failed(NetworkFailureReason, Option<u16>),
+}
+
+/// A status another attempt may not repeat: a request timeout, rate limiting or a
+/// server-side failure.
+fn retryable_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
+}
+
+/// A body read error: the attempt's time limit, or a connection that ended early.
+fn read_failure(failure: &std::io::Error) -> NetworkFailureReason {
+    let timed_out = failure.kind() == std::io::ErrorKind::TimedOut
+        || failure
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<reqwest::Error>())
+            .is_some_and(reqwest::Error::is_timeout);
+    if timed_out {
+        NetworkFailureReason::Timeout
+    } else {
+        NetworkFailureReason::ShortRead
+    }
+}
+
+/// The closed sentence for a failed layer download, naming its host and attempts.
+fn layer_failure(
+    host: &str,
+    attempts: usize,
+    reason: NetworkFailureReason,
+    status: Option<u16>,
+) -> CandidateError {
+    let why = match (reason, status) {
+        (NetworkFailureReason::Timeout, _) => "the transfer timed out".to_owned(),
+        (NetworkFailureReason::ShortRead, _) => {
+            "the connection ended before the whole layer arrived".to_owned()
+        }
+        (NetworkFailureReason::DigestMismatch, _) => {
+            "the layer did not match its digest".to_owned()
+        }
+        (NetworkFailureReason::SizeMismatch, _) => "the layer did not match its size".to_owned(),
+        (NetworkFailureReason::HttpStatus, Some(code)) => {
+            format!("the registry answered HTTP {code}")
+        }
+        (NetworkFailureReason::HttpStatus, None) => {
+            "the registry answered an error status".to_owned()
+        }
+        (NetworkFailureReason::Deadline, _) => {
+            "the 360-second image deadline was reached".to_owned()
+        }
+    };
+    error(format!(
+        "A registry layer transfer failed: {why}. Host {host} after {attempts} attempt(s)."
+    ))
+    .with_network_failure(host, attempts, reason, status)
+}
+
+/// One layer's private temporary file next to the archive being assembled. Created
+/// exclusively (never through a link); dropping it removes exactly this path.
+struct LayerFile {
+    path: PathBuf,
+    file: File,
+}
+
+impl LayerFile {
+    fn create(directory: &Path) -> Result<Self, CandidateError> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = directory.join(format!(
+            ".hack-layer-{}-{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|_| error("Cannot exclusively create a temporary registry layer file."))?;
+        Ok(Self { path, file })
+    }
+
+    fn rewind(&mut self) -> Result<(), CandidateError> {
+        use std::io::Seek as _;
+        self.file
+            .flush()
+            .and_then(|()| self.file.rewind())
+            .map_err(|_| error("Cannot read back a temporary registry layer file."))
+    }
+}
+
+impl Drop for LayerFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// A successful response, or the refusal its status means.
+fn refusal(response: Response) -> Result<Response, CandidateError> {
+    match response.status() {
+        s if s.is_success() => Ok(response),
+        StatusCode::NOT_FOUND => Err(CandidateError::new(
+            "registry_image_not_found",
+            "The registry image or requested tag was not found.",
+        )),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(error(
+            "The registry refused access with the Docker credentials configured for it.",
+        )),
+        StatusCode::TOO_MANY_REQUESTS => Err(error(
+            "The registry rate-limited this request; retry later or configure credentials.",
+        )),
+        _ => Err(error("The registry request was refused.")),
     }
 }
 
@@ -1726,12 +1979,19 @@ pub fn acquire_with(
                 )
                 .map_err(|_| assemble())?;
             for (layer, name) in manifest.layers.iter().zip(&names) {
-                let mut blob = fetch.blob(layer)?;
+                // Each layer is downloaded and verified in full before it joins the
+                // archive; its temporary file is removed when `downloaded` drops.
+                let mut downloaded = fetch.layer(layer, output_directory(output))?;
+                let mut verified = Verified {
+                    inner: &mut downloaded.file,
+                    digest: Sha256::new(),
+                    total: 0,
+                    size: layer.size,
+                    expected: layer.digest.clone(),
+                };
                 builder
-                    .append_data(&mut header(layer.size), name, &mut blob)
-                    .map_err(|_| {
-                        error("A registry layer transfer failed or did not match its digest and size.")
-                    })?;
+                    .append_data(&mut header(layer.size), name, &mut verified)
+                    .map_err(|_| assemble())?;
             }
             builder
                 .append_data(
@@ -1769,16 +2029,21 @@ pub fn acquire_with(
 
 /// Write a new exclusive temporary file, sync and verify it, then link it into place
 /// without replacing a competing output.
+/// The directory that holds `output` and every temporary file of its acquisition.
+fn output_directory(output: &Path) -> &Path {
+    output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
+
 fn publish<T>(
     output: &Path,
     write: impl FnOnce(&mut File) -> Result<T, CandidateError>,
     verify: impl FnOnce(&Path, &T) -> Result<(), CandidateError>,
 ) -> Result<T, CandidateError> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let parent = output
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
+    let parent = output_directory(output);
     let temporary = parent.join(format!(
         ".hack-image-{}-{}.tmp",
         std::process::id(),

@@ -92,14 +92,15 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.11",
-    "@commitlint/cli": "19.8.1",
-    "@commitlint/config-conventional": "19.8.1",
+    "@commitlint/cli": "21.2.4",
+    "@commitlint/config-conventional": "21.2.4",
     "@semantic-release/changelog": "6.0.3",
     "@semantic-release/commit-analyzer": "13.0.1",
     "@semantic-release/exec": "7.1.0",
     "@semantic-release/git": "10.0.1",
     "@semantic-release/release-notes-generator": "14.1.1",
-    "@types/bun": "latest",
+    "@types/bun": "1.4.4",
+    "@types/node": "26.6.6",
     "@types/qrcode": "^1.5.6",
     "commitizen": "4.3.2",
     "conventional-changelog-conventionalcommits": "8.0.0",
@@ -110,6 +111,10 @@
     "semantic-release": "25.0.2",
     "turbo": "^2.5.8",
     "ultracite": "7.0.12"
+  },
+  "overrides": {
+    "@types/node": "26.6.6",
+    "undici-types": "8.9.0"
   },
   "config": {
     "commitizen": {
@@ -124,7 +129,7 @@
     "@charmland/lipgloss": "2.0.0-beta.3-0e280f3",
     "@clack/prompts": "1.0.0-alpha.9",
     "@modelcontextprotocol/sdk": "1.32.0",
-    "@opentui/core": "^0.1.74",
+    "@opentui/core": "0.8.4",
     "elysia": "^1.4.30",
     "jsonc-parser": "3.3.1",
     "qrcode": "^1.5.4",

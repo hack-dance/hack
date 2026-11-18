@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { CLI_COMPILE_DEFINE_ARGS } from "../scripts/lib/cli-compile-define.ts";
 
 import {
   checkServicePathDirectories,
@@ -162,6 +163,7 @@ async function compileHack(f: Fixture): Promise<void> {
       "build",
       join(REPO_ROOT, "index.ts"),
       "--compile",
+      ...CLI_COMPILE_DEFINE_ARGS,
       "--no-compile-autoload-dotenv",
       "--no-compile-autoload-bunfig",
       "--no-compile-autoload-tsconfig",

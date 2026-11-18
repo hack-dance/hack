@@ -1,10 +1,14 @@
+import { declaredComposeProfiles } from "../backends/native-profile-selection.ts";
 import {
   type NativeProjectPsResult,
   nativeProjectPs,
 } from "../backends/native-project-observe.ts";
 import {
+  isNativeForeignHomeRefusal,
   loadNativeProjectRun,
   type NativeProjectRun,
+  type NativeProjectRunScope,
+  nativeForeignHomeRefusal,
   normalizeNativeProfiles,
 } from "../backends/native-project-run.ts";
 import type { NativeRuntimeSelection } from "../backends/native-runtime-client.ts";
@@ -186,6 +190,33 @@ function selectionMatches(
   );
 }
 
+/**
+ * Explains a detached start whose child was not confirmed. A run mapping from
+ * another native home can appear after the launcher's probe (another version
+ * starting the same instance); the child's own refusal cannot cross IPC, so
+ * re-inspect the mapping and return its coded refusal instead of the generic
+ * `E_STARTUP_INCOMPLETE` (HACK-2339). Any other error is returned unchanged.
+ */
+export async function explainUnconfirmedNativeDetachedStart(opts: {
+  readonly error: unknown;
+  readonly scope: NativeProjectRunScope | null;
+  readonly inspect?: (
+    scope: NativeProjectRunScope
+  ) => Promise<Error | undefined>;
+}): Promise<unknown> {
+  if (
+    opts.scope === null ||
+    !(opts.error instanceof HackCliError) ||
+    opts.error.code !== "E_STARTUP_INCOMPLETE"
+  ) {
+    return opts.error;
+  }
+  const foreign = await (opts.inspect ?? nativeForeignHomeRefusal)(
+    opts.scope
+  ).catch(() => undefined);
+  return foreign ?? opts.error;
+}
+
 /** Read-only admission adapter; resolving the CLI's project and branch stays injected. */
 export async function answerNativeAlreadyRunning(opts: {
   readonly native: NativeRuntimeSelection;
@@ -194,6 +225,15 @@ export async function answerNativeAlreadyRunning(opts: {
   readonly resolveProject: () => Promise<ProjectContext>;
   readonly resolveBranch: (project: ProjectContext) => Promise<string | null>;
   readonly onBranchResolved?: (branch: string | null) => void;
+  /**
+   * Called before reporting an already-running graph, with its saved run:
+   * for example to say that the environment now selects other profiles
+   * than the ones the run keeps (HACK-2338 item 8). Notices go to stderr.
+   */
+  readonly notifyRunning?: (
+    saved: NativeProjectRun,
+    project: ProjectContext
+  ) => Promise<void>;
 }): Promise<number | null> {
   const startedAtMs = Date.now();
   let observed: {
@@ -201,6 +241,8 @@ export async function answerNativeAlreadyRunning(opts: {
     projectName: string;
     branch: string | null;
     matches: boolean;
+    saved: NativeProjectRun;
+    project: ProjectContext;
   };
   try {
     const project = await opts.resolveProject();
@@ -229,7 +271,16 @@ export async function answerNativeAlreadyRunning(opts: {
     observed = {
       state,
       branch,
-      matches: selectionMatches(saved, opts.selection),
+      saved,
+      project,
+      // Compose's `*` selects every declared profile; the saved run records
+      // the expanded names.
+      matches: selectionMatches(saved, {
+        ...opts.selection,
+        profiles: opts.selection.profiles?.includes("*")
+          ? declaredComposeProfiles(compose)
+          : opts.selection.profiles,
+      }),
       projectName: await resolveComposeProjectName({
         project,
         cfg: await readProjectConfig(project),
@@ -238,7 +289,12 @@ export async function answerNativeAlreadyRunning(opts: {
           : null,
       }),
     };
-  } catch {
+  } catch (error) {
+    // A run mapping that another native home owns is a refusal, not "not
+    // running": starting would fail in the child with no way out (HACK-2339).
+    if (isNativeForeignHomeRefusal(error)) {
+      throw error;
+    }
     return null;
   }
   const selection = {
@@ -256,6 +312,7 @@ export async function answerNativeAlreadyRunning(opts: {
     throw nativePartiallyRunningRefusal(observed.state.down, restartCommand);
   }
   if (observed.state.kind === "running") {
+    await opts.notifyRunning?.(observed.saved, observed.project);
     reportNativeAlreadyRunning({
       json: opts.json,
       project: observed.projectName,

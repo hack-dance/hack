@@ -23,22 +23,33 @@ import { restoreEnv } from "./helpers/env.ts";
 
 const STACK_FRAME = /^\s+at /m;
 let output = "";
+let stderrOutput = "";
 let restoreWrites: () => void = () => undefined;
 const savedDebug = process.env.HACK_DEBUG;
 
+function chunkText(chunk: string | Uint8Array): string {
+  return typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+}
+
 beforeEach(() => {
   output = "";
+  stderrOutput = "";
   Reflect.deleteProperty(process.env, "HACK_DEBUG");
   setLoggerBackendOverride({ backend: "console" });
   const stdout = process.stdout.write.bind(process.stdout);
   const stderr = process.stderr.write.bind(process.stderr);
-  const capture = (chunk: string | Uint8Array): boolean => {
-    output +=
-      typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+  const captureStdout = (chunk: string | Uint8Array): boolean => {
+    output += chunkText(chunk);
     return true;
   };
-  process.stdout.write = capture as typeof process.stdout.write;
-  process.stderr.write = capture as typeof process.stderr.write;
+  const captureStderr = (chunk: string | Uint8Array): boolean => {
+    const text = chunkText(chunk);
+    output += text;
+    stderrOutput += text;
+    return true;
+  };
+  process.stdout.write = captureStdout as typeof process.stdout.write;
+  process.stderr.write = captureStderr as typeof process.stderr.write;
   restoreWrites = () => {
     process.stdout.write = stdout;
     process.stderr.write = stderr;
@@ -182,6 +193,25 @@ test("a handler's usage refusal prints its message and one hint line, not the he
   ).toBe(1);
   expect(output).toBe(
     `ERROR: ${error.message}\nSee \`hack run --help\` for usage.\n`
+  );
+  expect(stderrOutput).toBe(output);
+});
+
+test("a handler's usage refusal stays on stderr when the logger backend is clack", async () => {
+  // Hosted CI has no gum, so the default backend is clack, which writes to
+  // stdout. Usage refusals must still put their specific message on stderr
+  // (HACK-2332).
+  setLoggerBackendOverride({ backend: "clack" });
+  const error = new CliUsageError("--plaintext-values requires --json");
+  expect(
+    await handleRunCliError({
+      error,
+      jsonRequested: false,
+      handlerPath: ["env", "list"],
+    })
+  ).toBe(1);
+  expect(stderrOutput).toBe(
+    `ERROR: ${error.message}\nSee \`hack env list --help\` for usage.\n`
   );
 });
 

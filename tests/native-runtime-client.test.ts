@@ -1522,6 +1522,43 @@ bunTest(
 );
 
 bunTest(
+  "HACK-2324: invalid_state names the state path relative to the native home, and nothing else",
+  () => {
+    expect(
+      nativeFailureDetail({
+        code: "invalid_state",
+        message: "Candidate state component is not a directory: <tmp>/state",
+        state_component: { version: 1, path: ".hack-local/run/graphs" },
+      }).message
+    ).toBe(
+      "The native state path .hack-local/run/graphs exists but is not a directory. Inspect it in the native home; do not delete it to retry."
+    );
+    for (const component of [
+      { version: 1, path: "/absolute/private/path" },
+      { version: 1, path: ".hack-local/../escape" },
+      { version: 1, path: "with space" },
+      { version: 1, path: ".hack-local//double" },
+      { version: 2, path: ".hack-local/run" },
+      { version: 1, path: ".hack-local/run", extra: "secret" },
+    ]) {
+      expect(
+        nativeFailureDetail({
+          code: "invalid_state",
+          state_component: component,
+        }).message
+      ).toBeUndefined();
+    }
+    // Only invalid_state renders it.
+    expect(
+      nativeFailureDetail({
+        code: "registry_image",
+        state_component: { version: 1, path: ".hack-local/run" },
+      }).message
+    ).toBeUndefined();
+  }
+);
+
+bunTest(
   "network diagnostics retain admitted underscore hosts and zero-attempt deadlines",
   () => {
     expect(
@@ -1536,5 +1573,64 @@ bunTest(
     ).toBe(
       "Network request to registry_fixture.test failed after 0 attempt(s)."
     );
+  }
+);
+
+bunTest(
+  "HACK-2330: a failed registry layer download names its host, attempts and closed reason",
+  () => {
+    const layer = (request: Record<string, unknown>) =>
+      nativeFailureDetail({
+        code: "registry_image",
+        message: "synthetic-private-transport-error",
+        network_request: request,
+      }).message;
+    const base = { version: 2, host: "registry.example.test", attempts: 3 };
+    expect(layer({ ...base, reason: "short_read" })).toBe(
+      "Registry layer download from registry.example.test failed after 3 attempt(s): the connection ended before the whole layer arrived."
+    );
+    expect(layer({ ...base, reason: "timeout" })).toBe(
+      "Registry layer download from registry.example.test failed after 3 attempt(s): the transfer timed out."
+    );
+    expect(layer({ ...base, reason: "digest_mismatch" })).toContain(
+      "did not match its digest."
+    );
+    expect(layer({ ...base, reason: "size_mismatch" })).toContain(
+      "did not match its size."
+    );
+    expect(layer({ ...base, attempts: 2, reason: "deadline" })).toBe(
+      "Registry layer download from registry.example.test failed after 2 attempt(s): the 360-second image deadline was reached."
+    );
+    expect(layer({ ...base, reason: "http_status", status: 502 })).toBe(
+      "Registry layer download from registry.example.test failed after 3 attempt(s): the registry answered HTTP 502."
+    );
+    // Anything outside the closed shape renders nothing, never the runtime text.
+    for (const request of [
+      { ...base, reason: "connection reset by peer" },
+      { ...base, reason: "toString" },
+      { ...base, reason: "http_status" },
+      { ...base, reason: "http_status", status: 700 },
+      { ...base, reason: "http_status", status: "502" },
+      { ...base, reason: "timeout", status: 502 },
+      { ...base, reason: "timeout", extra: "secret" },
+      { ...base, version: 1, reason: "timeout" },
+      { ...base, version: 3, reason: "timeout" },
+      { ...base, attempts: 4, reason: "timeout" },
+      {
+        ...base,
+        host: "https://user:secret@example.test/v2?x",
+        reason: "timeout",
+      },
+      { version: 2, host: "registry.example.test", attempts: 3 },
+    ]) {
+      expect(layer(request)).toBeUndefined();
+    }
+    // Version 2 belongs to registry layer downloads only.
+    expect(
+      nativeFailureDetail({
+        code: "setup_download",
+        network_request: { ...base, reason: "timeout" },
+      }).message
+    ).toBeUndefined();
   }
 );

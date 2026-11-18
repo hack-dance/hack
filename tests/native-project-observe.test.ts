@@ -13,6 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type NativeLogLine,
+  nativeProjectAllLogs,
+  nativeProjectLogServices,
   nativeProjectLogs,
   nativeProjectPs,
 } from "../src/backends/native-project-observe.ts";
@@ -409,6 +411,109 @@ test("bounded logs verify current container before and after using exact CLI con
     "--json",
   ]);
 });
+/** Three services: api and web have containers, a not-yet-created worker has none. */
+function multiSnapshot(webId = id) {
+  const apiId = "1".repeat(64);
+  return {
+    receipt: {
+      ...run,
+      plan_id: run.planId,
+      phase: "ready-observed",
+      resources: {
+        "container:web": {
+          kind: "container",
+          key: "web",
+          id: webId,
+          phase: "started",
+        },
+        "container:api": {
+          kind: "container",
+          key: "api",
+          id: apiId,
+          phase: "started",
+        },
+        "container:worker": {
+          kind: "container",
+          key: "worker",
+          id: null,
+          phase: "planned",
+        },
+      },
+    },
+    journal_incomplete: false,
+    observations: {
+      "container:web": { state: "running", health: "healthy" },
+      "container:api": { state: "running" },
+      "container:worker": { state: "created" },
+    },
+  };
+}
+
+test("logs without a service read every service with a container, in name order", async () => {
+  const opts = await fixture();
+  const calls: string[][] = [];
+  const invoke = async (request: { args: readonly string[] }) => {
+    calls.push([...request.args]);
+    if (request.args[1] !== "logs") {
+      return multiSnapshot();
+    }
+    const service = request.args[5];
+    return {
+      container: service === "api" ? "1".repeat(64) : id,
+      stdout: `${service} output\n`,
+      stderr: "",
+      truncated: service === "web",
+    };
+  };
+  const result = await nativeProjectAllLogs({ ...opts, invoke, tail: 30 });
+  expect(result.services.map((entry) => entry.service)).toEqual(["api", "web"]);
+  expect(result.services.map((entry) => entry.stdout)).toEqual([
+    "api output\n",
+    "web output\n",
+  ]);
+  expect(result.services.map((entry) => entry.truncated)).toEqual([
+    false,
+    true,
+  ]);
+  expect(result.skipped).toEqual(["worker"]);
+  expect(calls.map((call) => [call[1], call[5]])).toEqual([
+    ["inspect", undefined],
+    ["logs", "api"],
+    ["logs", "web"],
+    ["inspect", undefined],
+  ]);
+  expect(calls[1]?.slice(6)).toEqual(["--tail", "30", "--json"]);
+});
+
+test("logs without a service refuse when a container changed while reading", async () => {
+  const opts = await fixture();
+  let inspects = 0;
+  const invoke = async (request: { args: readonly string[] }) => {
+    if (request.args[1] !== "logs") {
+      inspects++;
+      return multiSnapshot(inspects > 1 ? "f".repeat(64) : id);
+    }
+    return {
+      container: request.args[5] === "api" ? "1".repeat(64) : id,
+      stdout: "must not return\n",
+      stderr: "",
+      truncated: false,
+    };
+  };
+  await expect(
+    nativeProjectAllLogs({ ...opts, invoke, tail: 30 })
+  ).rejects.toThrow("Native graph observation refused");
+});
+
+test("follow without a service selects every service with a container", async () => {
+  const opts = await fixture();
+  const services = await nativeProjectLogServices({
+    ...opts,
+    invoke: async () => multiSnapshot(),
+  });
+  expect(services).toEqual(["api", "web"]);
+});
+
 test("follow, invalid tails and changed container refuse without returning logs", async () => {
   const opts = await fixture();
   let calls = 0;

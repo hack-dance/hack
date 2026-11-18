@@ -8,7 +8,7 @@ import {
   rmdir,
   unlink,
 } from "node:fs/promises";
-import { constants as osConstants, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import {
@@ -18,6 +18,7 @@ import {
 } from "../lib/live-inputs.ts";
 import { findProjectContext } from "../lib/project.ts";
 import type { SecretsHygieneScope } from "../lib/secrets-hygiene.ts";
+import { subprocessSignalExitStatus } from "../lib/subprocess-signal.ts";
 
 const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PREFIX = "hack-mux-env-";
@@ -374,7 +375,7 @@ async function runInForeground(
     }
     const code = await child.exited;
     if (child.signalCode) {
-      return 128 + (osConstants.signals[child.signalCode] ?? 0);
+      return subprocessSignalExitStatus(child.signalCode, 0);
     }
     return code;
   } finally {

@@ -17,6 +17,7 @@ import {
 } from "../src/backends/native-https-owner.ts";
 import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
 import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-policy.ts";
+import { selectNativeProfiles } from "../src/backends/native-profile-selection.ts";
 import { nativeProjectDown } from "../src/backends/native-project-down.ts";
 import { discardUnpublishedNativeStart } from "../src/backends/native-project-failed-start.ts";
 import {
@@ -3183,7 +3184,7 @@ test("a refusal before admission reports that nothing was created, with the runt
   );
   expect(failure).toBeInstanceOf(ClosedCliError);
   expect((failure as Error).message).toBe(
-    "Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed. Startup diagnostic: Native graph startup was interrupted or failed (graph_image). Service web: Pinned image architecture or implicit volumes are incompatible."
+    "Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed. Startup diagnostic: Native graph startup was interrupted or failed (graph_image). Service web: Pinned image architecture or implicit volumes are incompatible. The native VM pool may still be running; when no other native project uses it, stop it with runtime down --json on this native home."
   );
   expect((failure as Error).cause).toBeUndefined();
   expect(nativeRuntimeFailure(failure)).toEqual({
@@ -3629,6 +3630,91 @@ test("retained startup admits only the acknowledged original frontend before eff
     events.indexOf("runtime up")
   );
   expect(events).toContain("save");
+});
+
+test("an undeclared COMPOSE_PROFILES value never reaches the runtime review (HACK-2338 item 8)", async () => {
+  const token = "synthetic-secret-token-value";
+  const { opts } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: {
+        web: { image: `sha256:${"e".repeat(64)}` },
+        jobs: { image: `sha256:${"e".repeat(64)}`, profiles: ["jobs"] },
+      },
+    }),
+    serviceNames: ["web", "jobs"],
+  });
+  const reviewed: unknown[] = [];
+  opts.dependencies.review = async (request) => {
+    reviewed.push(request.profiles);
+    return await request.run({
+      planId: "a".repeat(64),
+      namespace: "b".repeat(64),
+      projectArgs: ["--project", request.projectRoot],
+      report: {
+        plan: {
+          enrollment_compatible: true,
+          services: { web: { active: true }, jobs: { active: true } },
+        },
+      },
+    });
+  };
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
+  expect(
+    await startNativeProject({
+      ...opts,
+      profiles: undefined,
+      resolveProfiles: () =>
+        Promise.resolve(
+          selectNativeProfiles({
+            cliProfiles: undefined,
+            managedEnv: { COMPOSE_PROFILES: `jobs,${token}` },
+            shellEnv: {},
+            declaredProfiles: ["jobs"],
+          })
+        ),
+    })
+  ).toBe(0);
+  expect(reviewed).toEqual([["jobs"]]);
+  expect(JSON.stringify(reviewed)).not.toContain(token);
+  expect(notices.join("\n")).not.toContain(token);
+});
+
+test("a retained run keeps its profiles when the managed env now selects others, and says so (HACK-2338 item 8)", async () => {
+  const { opts, saved } = await retainedFinalizationFixture();
+  await acknowledgeRetainedFrontend(opts.scope, saved);
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
+  const asked: unknown[] = [];
+  expect(
+    await startNativeProject({
+      ...opts,
+      profiles: undefined,
+      resolveProfiles: (envName) => {
+        asked.push(envName);
+        return Promise.resolve({
+          profiles: ["jobs"],
+          source: "managed-env" as const,
+          declaredProfiles: ["jobs"],
+        });
+      },
+    })
+  ).toBe(0);
+  // Resolved for the retained run's own env, not the configured default.
+  expect(asked).toEqual([saved.effectiveEnvName]);
+  // Names from the env or the retained run are counted, never printed.
+  const retained = (saved.profiles ?? []).length;
+  const retainedText =
+    retained === 0
+      ? "none"
+      : `${retained} profile${retained === 1 ? "" : "s"} (names not shown)`;
+  expect(notices).toContain(
+    `COMPOSE_PROFILES in the managed env selects profiles 1 profile (names not shown), but this instance's retained run uses ${retainedText}; it keeps those. To start it with the new profiles, stop it with hack down --remove-data (this deletes its data volumes) and run hack up again.`
+  );
+  expect(notices.join("\n")).not.toContain("jobs");
 });
 
 /**
@@ -4852,6 +4938,74 @@ test("Docker Hub shorthand is admitted once per distinct reference before the ru
   expect(events.indexOf("before")).toBeLessThan(events.indexOf("runtime up"));
 });
 
+test("a service outside the selected profiles is not pulled, and the start says it was left out (HACK-2338)", async () => {
+  const id = `sha256:${"e".repeat(64)}`;
+  for (const selected of [[], ["jobs"]] as const) {
+    const { opts } = await fixture(false);
+    const prepare = opts.dependencies.prepare!;
+    opts.dependencies.prepare = async (request) => ({
+      ...(await prepare(request)),
+      normalizedComposeJson: JSON.stringify({
+        services: {
+          web: { image: "alpine:3.21" },
+          jobs: { image: "redis", profiles: ["jobs"] },
+        },
+      }),
+      serviceNames: ["web", "jobs"],
+    });
+    opts.dependencies.review = async (request) =>
+      request.run({
+        planId: "a".repeat(64),
+        namespace: "b".repeat(64),
+        projectArgs: ["--project", request.projectRoot],
+        report: {
+          plan: {
+            enrollment_compatible: true,
+            services: {
+              web: { active: true },
+              jobs: { active: selected.length > 0 },
+            },
+          },
+        },
+      });
+    const ensured: string[] = [];
+    const invoke = opts.dependencies.invoke!;
+    opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "ensure-image") {
+        ensured.push(String(request.args[3]));
+        return { image_id: id };
+      }
+      return await invoke(request);
+    };
+    const notices: string[] = [];
+    opts.dependencies.warn = (line) => notices.push(line);
+    expect(
+      await startNativeProject({
+        ...opts,
+        // No --profile: the managed env's COMPOSE_PROFILES decides.
+        profiles: undefined,
+        resolveProfiles: () =>
+          Promise.resolve(
+            selected.length > 0
+              ? { profiles: [...selected], source: "managed-env" as const }
+              : { profiles: [], source: "none" as const }
+          ),
+      })
+    ).toBe(0);
+    if (selected.length === 0) {
+      expect(ensured).toEqual(["alpine:3.21"]);
+      expect(notices).toContain(
+        "Not starting 1 service whose Compose profiles are not selected: jobs. Selected profiles: none (from no --profile or COMPOSE_PROFILES). Select others with --profile or COMPOSE_PROFILES."
+      );
+    } else {
+      expect(ensured).toEqual(["alpine:3.21", "redis"]);
+      expect(notices.some((line) => line.startsWith("Not starting"))).toBe(
+        false
+      );
+    }
+  }
+});
+
 test("a runtime failure during image admission keeps its own diagnostic and starts nothing", async () => {
   const { opts, events } = await fixture(false);
   withImages(opts, { web: "alpine:3.21" });
@@ -5607,7 +5761,7 @@ test("HACK-1939: a startup that failed before reserving any runtime state does n
   );
   expect(error).toBeInstanceOf(ClosedCliError);
   expect((error as Error).message).toBe(
-    "Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed. Startup diagnostic: Native graph startup was interrupted or failed (invalid_extra_hosts)."
+    "Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed. Startup diagnostic: Native graph startup was interrupted or failed (invalid_extra_hosts). The native VM pool may still be running; when no other native project uses it, stop it with runtime down --json on this native home."
   );
   expect(events).toContain("graph inspect");
   expect(events).not.toContain("save");
@@ -5739,7 +5893,7 @@ test("HACK-1939: a wrapped service whose Compose user cannot be wrapped refuses 
   opts.dependencies.prepare = async (request) => {
     const input = await prepare(request);
     const compose = JSON.parse(input.normalizedComposeJson);
-    compose.services.web.user = "postgres";
+    compose.services.web.user = "not a user";
     return { ...input, normalizedComposeJson: JSON.stringify(compose) };
   };
   const error = await startNativeProject(opts).catch(
@@ -5783,7 +5937,7 @@ test("HACK-1939: runtime process refusals are named in the nothing-reserved repo
     (caught: unknown) => caught
   );
   expect((error as Error).message).toBe(
-    "Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed. Startup diagnostic: Native graph startup was interrupted or failed (environment_entrypoint). Native cannot wrap these services' processes: service web entrypoint or command (the process must name an executable); service worker user (use a numeric UID or UID:GID)."
+    "Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed. Startup diagnostic: Native graph startup was interrupted or failed (environment_entrypoint). Native cannot wrap these services' processes: service web entrypoint or command (the process must name an executable); service worker user (use a numeric UID or UID:GID). The native VM pool may still be running; when no other native project uses it, stop it with runtime down --json on this native home."
   );
 });
 
@@ -5796,7 +5950,7 @@ async function optionalProfileFixture() {
     const compose = JSON.parse(input.normalizedComposeJson);
     compose.services.optional = {
       image: `sha256:${"e".repeat(64)}`,
-      user: "postgres",
+      user: "not a user",
       profiles: ["extra"],
     };
     return {

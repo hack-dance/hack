@@ -45,7 +45,6 @@ export type NativeSettingsWarning =
   | "shared_source_not_granted"
   | "internal_dns_tls_not_applied"
   | "routes_without_probes"
-  | "compose_profiles_ignored"
   | "aws_region_without_profile"
   | "unread_project_settings_files";
 
@@ -82,8 +81,6 @@ const WARNING_TEXT: Readonly<Record<NativeSettingsWarning, string>> = {
     "hack.config.json internal DNS and container CA trust are not applied on native, so containers cannot reach routes by their HTTPS names",
   routes_without_probes:
     "routed service(s) have a disabled or timing-only healthcheck, which native route readiness cannot use (add httpProbes to the adaptation)",
-  compose_profiles_ignored:
-    "COMPOSE_PROFILES is ignored on native (pass --profile)",
   aws_region_without_profile:
     "HACK_NATIVE_AWS_REGION is ignored without HACK_NATIVE_AWS_PROFILE",
   unread_project_settings_files:
@@ -360,9 +357,6 @@ export async function checkNativeSettings(opts: {
     }
     if (routesWithoutProbes > 0) {
       warnings.push("routes_without_probes");
-    }
-    if ((env.COMPOSE_PROFILES ?? "") !== "") {
-      warnings.push("compose_profiles_ignored");
     }
     if (
       (env.HACK_NATIVE_AWS_REGION ?? "") !== "" &&

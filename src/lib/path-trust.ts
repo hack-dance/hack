@@ -64,6 +64,14 @@ export function walkReplaceableChain(opts: {
   readonly hackHome: string | null;
   readonly stopAtLink?: boolean;
   readonly allowMissing?: boolean;
+  /**
+   * Inspect only: a directory inside `hackHome` that would be repaired is
+   * accepted as it is, without the chmod (HACK-2329). For read-only
+   * observers such as `hack daemon status` and `hack doctor`. It accepts what
+   * a repair would try to fix: on a filesystem that ignores chmod the repair
+   * still fails later, which this mode cannot see.
+   */
+  readonly observeOnly?: boolean;
   readonly checked?: Set<string>;
   /**
    * Autostart engine lookup only: also accept a macOS administrator directory
@@ -123,6 +131,7 @@ type ChainWalk = {
     readonly hackHome: string | null;
     readonly stopAtLink?: boolean;
     readonly allowMissing?: boolean;
+    readonly observeOnly?: boolean;
     readonly acceptDarwinAdminDirectories?: boolean;
   };
   readonly checked: Set<string>;
@@ -140,6 +149,7 @@ function checkChainEntry(state: ChainWalk, entry: string): string | null {
     path: entry,
     uid: state.opts.uid,
     hackHome: state.opts.hackHome,
+    observeOnly: state.opts.observeOnly,
     acceptDarwinAdminDirectories: state.opts.acceptDarwinAdminDirectories,
   });
 }
@@ -209,10 +219,32 @@ function readSymlinkTarget(path: string): string | null {
   }
 }
 
+/**
+ * Removes group/other write from an own directory inside the Hack home; true
+ * when it is then safe. In observe-only mode nothing changes and the repair
+ * is assumed to succeed (see `observeOnly`).
+ */
+function repairHackHomeDirectory(opts: {
+  readonly path: string;
+  readonly mode: number;
+  readonly observeOnly: boolean;
+}): boolean {
+  if (opts.observeOnly) {
+    return true;
+  }
+  try {
+    chmodSync(opts.path, opts.mode & 0o7755);
+    return (lstatSync(opts.path).mode & 0o022) === 0;
+  } catch {
+    return false;
+  }
+}
+
 function checkServicePathEntry(opts: {
   readonly path: string;
   readonly uid: number;
   readonly hackHome: string | null;
+  readonly observeOnly?: boolean;
   readonly acceptDarwinAdminDirectories?: boolean;
 }): string | null {
   let info: Stats;
@@ -257,15 +289,17 @@ function checkServicePathEntry(opts: {
   const insideHackHome =
     opts.hackHome !== null &&
     (opts.path === opts.hackHome || opts.path.startsWith(`${opts.hackHome}/`));
-  if (insideHackHome && info.isDirectory() && info.uid === opts.uid) {
-    try {
-      chmodSync(opts.path, info.mode & 0o7755);
-      if ((lstatSync(opts.path).mode & 0o022) === 0) {
-        return null;
-      }
-    } catch {
-      // Reported below.
-    }
+  if (
+    insideHackHome &&
+    info.isDirectory() &&
+    info.uid === opts.uid &&
+    repairHackHomeDirectory({
+      path: opts.path,
+      mode: info.mode,
+      observeOnly: opts.observeOnly === true,
+    })
+  ) {
+    return null;
   }
   return `${opts.path} is writable by other users (mode ${(info.mode & 0o777).toString(8)}); run: chmod go-w ${opts.path}`;
 }

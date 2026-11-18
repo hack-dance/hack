@@ -9,6 +9,7 @@ import {
   type NativeProcessRefusal,
   readNativeProcessRefusals,
 } from "../lib/native-process-wrappers.ts";
+import type { SubprocessSignal } from "../lib/subprocess-signal.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import { nativeBetaCandidatePointer } from "./native-beta.ts";
 import {
@@ -86,6 +87,44 @@ function fixedNativeMessage(
 
 const NETWORK_HOST = /^[a-zA-Z0-9_.:[\]-]{1,253}$/;
 
+/**
+ * Why a registry layer download's last attempt failed (`network_request` version 2).
+ * A closed vocabulary; `http_status` also carries the status code.
+ */
+const LAYER_FAILURE_REASONS: Readonly<Record<string, string>> = {
+  timeout: "the transfer timed out",
+  short_read: "the connection ended before the whole layer arrived",
+  digest_mismatch: "the layer did not match its digest",
+  size_mismatch: "the layer did not match its size",
+  http_status: "the registry answered HTTP",
+  deadline: "the 360-second image deadline was reached",
+};
+
+/** The version-2 reason sentence, or undefined unless every field is closed. */
+function layerFailureReason(
+  request: Record<string, unknown>
+): string | undefined {
+  const reason =
+    typeof request.reason === "string" &&
+    Object.hasOwn(LAYER_FAILURE_REASONS, request.reason)
+      ? request.reason
+      : undefined;
+  if (!reason) {
+    return;
+  }
+  const keys = Object.keys(request).length;
+  if (reason !== "http_status") {
+    return keys === 4 ? LAYER_FAILURE_REASONS[reason] : undefined;
+  }
+  return keys === 5 &&
+    typeof request.status === "number" &&
+    Number.isInteger(request.status) &&
+    request.status >= 100 &&
+    request.status <= 599
+    ? `${LAYER_FAILURE_REASONS[reason]} ${request.status}`
+    : undefined;
+}
+
 /** Render only a parsed authority and bounded count, never a runtime message or URL. */
 function networkRequestFailureMessage(
   value: Record<string, unknown>
@@ -97,8 +136,6 @@ function networkRequestFailureMessage(
         typeof value.code === "string" ? value.code : ""
       ) && isRecord(request)
     ) ||
-    Object.keys(request).length !== 3 ||
-    request.version !== 1 ||
     typeof request.host !== "string" ||
     !NETWORK_HOST.test(request.host) ||
     typeof request.attempts !== "number" ||
@@ -108,7 +145,46 @@ function networkRequestFailureMessage(
   ) {
     return;
   }
-  return `Network request to ${request.host} failed after ${request.attempts} attempt(s).`;
+  if (request.version === 1 && Object.keys(request).length === 3) {
+    return `Network request to ${request.host} failed after ${request.attempts} attempt(s).`;
+  }
+  const reason =
+    request.version === 2 && value.code === "registry_image"
+      ? layerFailureReason(request)
+      : undefined;
+  return reason
+    ? `Registry layer download from ${request.host} failed after ${request.attempts} attempt(s): ${reason}.`
+    : undefined;
+}
+
+/** The native VM pool outlives a failed start; say how to stop it. */
+export const NATIVE_IDLE_POOL_NOTE =
+  "The native VM pool may still be running; when no other native project uses it, stop it with runtime down --json on this native home.";
+
+/** A state path relative to the native state root, or one final name; never absolute. */
+const STATE_COMPONENT =
+  /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+){0,15}$/;
+
+/**
+ * Render the closed `invalid_state` location: which state path exists but is not a
+ * directory, relative to the native home's `.hack-local` root. Never runtime text.
+ */
+function stateComponentFailureMessage(
+  value: Record<string, unknown>
+): string | undefined {
+  const component = value.state_component;
+  if (
+    value.code !== "invalid_state" ||
+    !isRecord(component) ||
+    Object.keys(component).length !== 2 ||
+    component.version !== 1 ||
+    typeof component.path !== "string" ||
+    component.path.length > 240 ||
+    !STATE_COMPONENT.test(component.path)
+  ) {
+    return;
+  }
+  return `The native state path ${component.path} exists but is not a directory. Inspect it in the native home; do not delete it to retry.`;
 }
 
 /** Render only the closed inferred-route diagnostic; never runtime error text. */
@@ -148,6 +224,7 @@ export function nativeFailureDetail(value: Record<string, unknown>): {
       : undefined;
   const message =
     networkRequestFailureMessage(value) ??
+    stateComponentFailureMessage(value) ??
     routeProbeFailureMessage(value, service) ??
     fixedNativeMessage(value);
   return {
@@ -269,7 +346,7 @@ export function isNativeRuntimeStopError(
 }
 
 /** Classify a child stop independently of when the frontend's signal handler is scheduled. */
-function throwIfNativeRuntimeStopped(signal: NodeJS.Signals | null): void {
+function throwIfNativeRuntimeStopped(signal: SubprocessSignal | null): void {
   if (signal === "SIGINT" || signal === "SIGTERM") {
     throw new NativeRuntimeRequestError({
       message:

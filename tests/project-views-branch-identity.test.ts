@@ -172,7 +172,8 @@ function branchRuntime(opts: {
             project,
             service: "api",
             workingDir: opts.workingDir,
-            caddy: `api.${opts.slug}.alpha.hack`,
+            // Whitespace-separated sites, as Caddy accepts.
+            caddy: `api.${opts.slug}.alpha.hack internal.${opts.slug}.alpha.hack`,
           }),
         ],
       },
@@ -239,7 +240,7 @@ test("compose: recorded name, owning checkout, label hosts and alias URL", async
       kind: "primary",
     },
     hosts: {
-      api: ["api.feature-x.alpha.hack"],
+      api: ["api.feature-x.alpha.hack", "internal.feature-x.alpha.hack"],
       web: ["feature-x.alpha.hack", "feature-x.alpha.hack.gy"],
     },
     hosts_source: "runtime_labels",
@@ -476,7 +477,7 @@ test("native: numbered site labels count, and a missing primary hides no worktre
       "  web:",
       "    labels:",
       '      - "caddy_0=alpha.hack"',
-      '      - "caddy_1=admin.alpha.hack"',
+      '      - "caddy_1=admin.alpha.hack api.alpha.hack,  docs.alpha.hack"',
       '      - "caddy_0.reverse_proxy={{upstreams 3000}}"',
       "",
     ].join("\n")
@@ -498,7 +499,12 @@ test("native: numbered site labels count, and a missing primary hides no worktre
       branch: "wt-feature",
       checkout: { root: worktreeRoot, kind: "worktree" },
       hosts: {
-        web: ["admin.wt-feature.alpha.hack", "wt-feature.alpha.hack"],
+        web: [
+          "admin.wt-feature.alpha.hack",
+          "api.wt-feature.alpha.hack",
+          "docs.wt-feature.alpha.hack",
+          "wt-feature.alpha.hack",
+        ],
       },
       hosts_source: "config",
       url: "https://wt-feature.alpha.hack",

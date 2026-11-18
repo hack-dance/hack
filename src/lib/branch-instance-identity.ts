@@ -224,6 +224,18 @@ export function resolvePrimaryOpenUrl(opts: {
 }
 
 const CADDY_SITE_LABEL = /^caddy(?:_\d+)?$/;
+const CADDY_SITE_SEPARATORS = /[\s,]+/;
+
+/**
+ * Concrete hosts of one site label value. Caddy and native branch routing
+ * (`branchServiceLabels`) accept whitespace as well as commas between sites.
+ */
+function siteLabelHosts(value: string): readonly string[] {
+  return value
+    .split(CADDY_SITE_SEPARATORS)
+    .filter(Boolean)
+    .flatMap((site) => extractCaddyLabelHosts({ value: site }));
+}
 
 /**
  * Hosts per service from the running containers' Caddy site labels
@@ -241,7 +253,7 @@ export function runtimeServiceHosts(
         if (!CADDY_SITE_LABEL.test(key)) {
           continue;
         }
-        for (const host of extractCaddyLabelHosts({ value })) {
+        for (const host of siteLabelHosts(value)) {
           hosts.add(host.toLowerCase());
         }
       }
@@ -266,7 +278,7 @@ export function configBranchServiceHosts(opts: {
   const out: Record<string, readonly string[]> = {};
   for (const [service, hosts] of Object.entries(opts.baseServiceHosts ?? {})) {
     const next = applyBranchToHosts({
-      hosts: hosts.flatMap((value) => extractCaddyLabelHosts({ value })),
+      hosts: hosts.flatMap((value) => siteLabelHosts(value)),
       branch: opts.branch,
       baseHosts,
     });

@@ -1200,6 +1200,7 @@ async function readComposeServices(opts: {
 }
 
 const COMPOSE_SITE_LABEL = /^caddy(?:_\d+)?$/;
+const COMPOSE_SITE_SEPARATORS = /[\s,]+/;
 
 /**
  * Every root Caddy site label (`caddy`, `caddy_<n>`) per service in a Compose
@@ -1229,12 +1230,8 @@ async function readComposeSiteLabelHosts(opts: {
     const entries: string[] = [];
     for (const [key, value] of composeLabelEntries(labels)) {
       if (COMPOSE_SITE_LABEL.test(key)) {
-        entries.push(
-          ...value
-            .split(",")
-            .map((entry) => entry.trim())
-            .filter(Boolean)
-        );
+        // Whitespace separates sites too, as native branch routing accepts.
+        entries.push(...value.split(COMPOSE_SITE_SEPARATORS).filter(Boolean));
       }
     }
     if (entries.length > 0) {

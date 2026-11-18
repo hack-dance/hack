@@ -1347,3 +1347,31 @@ test("never-started proxy cleanup reports listing and removal failures (HACK-232
   expect(ps).toContain("label=com.docker.compose.service=caddy");
   expect(ps).toContain("status=created");
 });
+
+test(
+  "global install never widens a proxy file restricted to one address while proxy.bind_address is unset (HACK-2328)",
+  async () => {
+    await writeInstallStubs();
+    const caddyCompose = globalCaddyComposePath();
+    await mkdir(dirname(caddyCompose), { recursive: true });
+    // An older or hand-edited file that publishes on loopback only.
+    const { renderGlobalCaddyCompose } = await import("../src/templates.ts");
+    await writeFile(
+      caddyCompose,
+      `${renderGlobalCaddyCompose({ bindAddress: "127.0.0.1" })}# local edit\n`
+    );
+
+    const { code, output } = await runNonInteractiveInstall();
+
+    expect(code).toBe(0);
+    expect(output).toContain("Kept the proxy on 127.0.0.1");
+    const compose = await Bun.file(caddyCompose).text();
+    expect(compose).toContain('      - "127.0.0.1:443:443"');
+    expect(compose).not.toContain('      - "443:443"');
+    const config = JSON.parse(
+      await Bun.file(resolveGlobalConfigPath()).text()
+    ) as { proxy?: { bind_address?: string } };
+    expect(config.proxy?.bind_address).toBe("127.0.0.1");
+  },
+  { timeout: 20_000 }
+);

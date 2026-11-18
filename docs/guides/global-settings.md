@@ -33,7 +33,10 @@ Common settings:
   recreates the proxy with the new ports. `hack doctor --fix` does the same.
   That file is Hack's output; when it differs from Hack's current rendering
   (edited by hand, or written by an older Hack), the previous copy is kept as
-  `docker-compose.yml.bak-<UTC time>` beside it before the rewrite.
+  `docker-compose.yml.bak-<UTC time>` (or `-N` on a name clash) beside it
+  before the rewrite. A file that publishes on one specific address while this
+  setting is unset is never widened: that address is saved as
+  `proxy.bind_address` first. Set `0.0.0.0` to publish on every interface.
 
 When `hack global up` or `hack global install` cannot start the proxy, it lists
 the listeners holding ports 80 and 443 (address, process and pid when the OS

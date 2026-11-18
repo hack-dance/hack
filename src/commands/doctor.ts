@@ -205,6 +205,7 @@ import {
 import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
 import {
   removeUnstartedProxyContainers,
+  resolveManagedProxyBind,
   writeManagedProxyCompose,
 } from "../lib/managed-proxy-compose.ts";
 import {
@@ -287,10 +288,7 @@ import {
   scopeRuntimeHygieneToProject,
 } from "../lib/project-runtime-hygiene.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
-import {
-  readProxyBindFromCompose,
-  resolveProxyBindAddress,
-} from "../lib/proxy-bind.ts";
+import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
 import { inspectProxyLoopback } from "../lib/proxy-loopback.ts";
 import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
@@ -4268,12 +4266,19 @@ async function runDoctorFix(opts: {
 
   const useStaticIps = ingressAfterFix.hasSubnet;
   // Rendered from settings, so replaced without a prompt (HACK-2328).
+  const bind = await resolveManagedProxyBind({ path: paths.caddyCompose });
+  if (bind.migrated !== null) {
+    note(
+      `Kept the proxy on ${bind.migrated} from the existing proxy file and saved it as proxy.bind_address. To publish on every interface: hack config set --global proxy.bind_address 0.0.0.0`,
+      "doctor"
+    );
+  }
   const proxyCompose = await writeManagedProxyCompose({
     path: paths.caddyCompose,
     content: renderGlobalCaddyCompose({
       useStaticCoreDnsIp: useStaticIps,
       useStaticCaddyIp: useStaticIps,
-      bindAddress: await resolveProxyBindAddress(),
+      bindAddress: bind.bindAddress,
     }),
   });
   if (proxyCompose.kind === "replaced-hand-edit") {

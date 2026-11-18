@@ -16,8 +16,14 @@ import { copyFile } from "node:fs/promises";
 
 import { GLOBAL_CADDY_PROJECT_NAME } from "../constants.ts";
 import { renderGlobalCaddyCompose } from "../templates.ts";
+import { updateGlobalConfig } from "./config.ts";
 import { readTextFile, writeTextFileIfChanged } from "./fs.ts";
-import { readProxyBindFromCompose } from "./proxy-bind.ts";
+import {
+  PROXY_BIND_CONFIG_KEY,
+  parseProxyBindAddress,
+  readProxyBindFromCompose,
+  resolveProxyBindAddress,
+} from "./proxy-bind.ts";
 import { exec } from "./shell.ts";
 
 const CONTAINER_ID = /^[0-9a-f]{12,64}$/;
@@ -39,6 +45,49 @@ export function isHackRenderedProxyCompose(text: string): boolean {
     }
   }
   return false;
+}
+
+const WILDCARD_BINDS: ReadonlySet<string> = new Set(["0.0.0.0", "::"]);
+
+/**
+ * The address to render the proxy ports with (HACK-2328, Codex security
+ * review). Because the file is now rewritten without a prompt, a file that
+ * publishes on one specific address while `proxy.bind_address` is unset (a
+ * hand edit, or an older setup) must not be widened to every interface: that
+ * would expose routes such as the unauthenticated Loki endpoint to LAN and
+ * tunnel peers. Such an address is written into `proxy.bind_address`, so the
+ * file, login autostart's check and `hack config get` agree on it. To publish
+ * on every interface, set `proxy.bind_address` to 0.0.0.0.
+ */
+export async function resolveManagedProxyBind(opts: {
+  readonly path: string;
+}): Promise<{
+  readonly bindAddress: string | null;
+  /** The address moved from the file into config, or null. */
+  readonly migrated: string | null;
+}> {
+  const configured = await resolveProxyBindAddress();
+  if (configured !== null) {
+    return { bindAddress: configured, migrated: null };
+  }
+  const existing = await readTextFile(opts.path);
+  const fileBind =
+    existing === null ? null : readProxyBindFromCompose(existing);
+  if (fileBind === null) {
+    return { bindAddress: null, migrated: null };
+  }
+  let address: string;
+  try {
+    address = parseProxyBindAddress(fileBind);
+  } catch {
+    // Not an address Hack renders; the file is replaced and backed up.
+    return { bindAddress: null, migrated: null };
+  }
+  if (WILDCARD_BINDS.has(address)) {
+    return { bindAddress: null, migrated: null };
+  }
+  await updateGlobalConfig({ path: PROXY_BIND_CONFIG_KEY, value: address });
+  return { bindAddress: address, migrated: address };
 }
 
 export type ManagedProxyComposeWrite =

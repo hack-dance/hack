@@ -110,6 +110,7 @@ import { inspectMacCaEligibility } from "../lib/mac-ca-trust.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import {
   removeUnstartedProxyContainers,
+  resolveManagedProxyBind,
   writeManagedProxyCompose,
 } from "../lib/managed-proxy-compose.ts";
 import {
@@ -143,10 +144,7 @@ import { createNativeHackLocalRouteDependencies } from "../lib/native-hack-local
 import { isLinux, isMac } from "../lib/os.ts";
 import { resolveTrustedSudo } from "../lib/privileged-sudo.ts";
 import { withProcessDeadline } from "../lib/process-deadline.ts";
-import {
-  readProxyBindFromCompose,
-  resolveProxyBindAddress,
-} from "../lib/proxy-bind.ts";
+import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
 import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
 import { stopRemoteCaddyRoutesStack } from "../lib/remote-caddy-routes.ts";
 import {
@@ -1228,12 +1226,18 @@ async function writeGlobalInstallAssets(opts: {
   readonly useStaticIps: boolean;
 }): Promise<void> {
   const defaultDomain = await resolveDefaultDomain();
+  const bind = await resolveManagedProxyBind({ path: opts.paths.caddyCompose });
+  if (bind.migrated !== null) {
+    logger.info({
+      message: `Kept the proxy on ${bind.migrated} from the existing proxy file and saved it as proxy.bind_address. To publish on every interface: hack config set --global proxy.bind_address 0.0.0.0`,
+    });
+  }
   await writeGlobalProxyCompose({
     path: opts.paths.caddyCompose,
     content: renderGlobalCaddyCompose({
       useStaticCoreDnsIp: opts.useStaticIps,
       useStaticCaddyIp: opts.useStaticIps,
-      bindAddress: await resolveProxyBindAddress(),
+      bindAddress: bind.bindAddress,
     }),
   });
   await writeWithPromptIfDifferent(

@@ -93,7 +93,7 @@ pub struct CliRunner {
 }
 
 /// What a switchable runner runs, shared by its clones.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 enum Pin {
     /// Nothing chosen since launch: the program found then, if any.
     #[default]
@@ -114,6 +114,22 @@ impl CliRunner {
             slot.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
         })
+    }
+
+    /// The pin now, for a later [`Self::settle_pin`].
+    fn pin_now(&self) -> Option<Pin> {
+        self.pin().map(|p| p.clone())
+    }
+
+    /// Record a rediscovery's outcome only if the pin is still what it was
+    /// when the rediscovery began: a selection made meanwhile wins, and is
+    /// never overwritten (or refused) by a check of the previous program.
+    fn settle_pin(&self, seen: Option<&Pin>, next: Pin) {
+        if let (Some(seen), Some(mut pin)) = (seen, self.pin())
+            && *pin == *seen
+        {
+            *pin = next;
+        }
     }
 }
 
@@ -326,7 +342,8 @@ impl CliRunner {
         let Some(name) = &self.path_name else {
             // Created with an explicit program: that is the one to check,
             // the selected one included, even after it was refused.
-            let candidate = match self.pin().as_deref() {
+            let seen = self.pin_now();
+            let candidate = match &seen {
                 Some(Pin::Program(p)) => Some(p.clone()),
                 Some(Pin::Refused { candidate }) => candidate.clone(),
                 Some(Pin::Launch) | None => None,
@@ -337,25 +354,28 @@ impl CliRunner {
                     .and_then(|p| trusted_cli(&p).map(|()| p));
             };
             let checked = trusted_cli(&candidate).map(|()| candidate.clone());
-            if let Some(mut pin) = self.pin() {
-                *pin = match &checked {
+            self.settle_pin(
+                seen.as_ref(),
+                match &checked {
                     Ok(p) => Pin::Program(p.clone()),
                     Err(_) => Pin::Refused {
                         candidate: Some(candidate),
                     },
-                };
-            }
+                },
+            );
             return checked;
         };
+        let seen = self.pin_now();
         let found = resolve_on_path(name, self.effective_env("PATH").as_deref())
             .ok_or(RunError::NotFound)
             .and_then(|p| trusted_cli(&p).map(|()| p));
-        if let Some(mut pin) = self.pin() {
-            *pin = match &found {
+        self.settle_pin(
+            seen.as_ref(),
+            match &found {
                 Ok(p) => Pin::Program(p.clone()),
                 Err(_) => Pin::Refused { candidate: None },
-            };
-        }
+            },
+        );
         found
     }
 
@@ -1849,6 +1869,35 @@ mod tests {
             .expect("runs once trusted again");
         assert!(marker.exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A rediscovery that finishes after the user selected another CLI
+    /// leaves that selection alone, whether its own check passed or failed.
+    #[test]
+    fn a_selection_made_during_a_rediscovery_is_kept() {
+        let a = PathBuf::from("/example/a/hack");
+        let b = PathBuf::from("/example/b/hack");
+        for next in [
+            Pin::Program(a.clone()),
+            Pin::Refused {
+                candidate: Some(a.clone()),
+            },
+        ] {
+            let runner = CliRunner::selectable(&a);
+            let clone = runner.clone();
+            // The check of A began here ...
+            let seen = runner.pin_now();
+            // ... the user picks B meanwhile ...
+            clone.select(&b);
+            // ... and the check of A completes.
+            runner.settle_pin(seen.as_ref(), next);
+            assert_eq!(runner.current_program(), Some(b.clone()), "B stays");
+        }
+        // Unchanged meanwhile: the outcome is recorded.
+        let runner = CliRunner::selectable(&a);
+        let seen = runner.pin_now();
+        runner.settle_pin(seen.as_ref(), Pin::Refused { candidate: Some(a) });
+        assert_eq!(runner.current_program(), None);
     }
 
     #[test]

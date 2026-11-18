@@ -238,20 +238,19 @@ export async function collectProjectNativePreflight(opts: {
     hasHostDependencies,
     hasDefaultDependencyFile,
     effectiveEnvName: effectiveEnv,
-    // Without --profile, the profiles a fresh `hack up` would select from
-    // COMPOSE_PROFILES (managed env, then shell), so the review and the
-    // source check judge the services up starts (HACK-2338 items 7 and 8).
-    profiles:
-      opts.profiles.length > 0
-        ? opts.profiles
-        : (
-            await resolveNativeProfileSelectionForProject({
-              project,
-              envName: effectiveEnv,
-              cliProfile: undefined,
-              shellEnv: env,
-            })
-          ).profiles,
+    // The profiles a fresh `hack up` selects: an explicit --profile, with
+    // Compose's `*` expanded, else COMPOSE_PROFILES (managed env, then shell),
+    // so the review and the source check judge the services up starts
+    // (HACK-2338 items 7 and 8).
+    profiles: (
+      await resolveNativeProfileSelectionForProject({
+        project,
+        envName: effectiveEnv,
+        cliProfile:
+          opts.profiles.length > 0 ? opts.profiles.join(",") : undefined,
+        shellEnv: env,
+      })
+    ).profiles,
     runtime: opts.runtimeReview === false ? null : selectedRuntime(env),
   });
   return report;

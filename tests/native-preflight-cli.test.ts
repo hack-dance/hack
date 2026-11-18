@@ -712,6 +712,31 @@ test("HACK-2338: preflight selects profiles from managed COMPOSE_PROFILES as up 
   );
 });
 
+test("HACK-2338: an explicit --profile '*' selects every declared profile in preflight, as on up", async () => {
+  const f = await fixture({
+    services: {
+      web: { image: IMAGE },
+      jobs: { image: IMAGE, profiles: ["jobs"], volumes: ["./:/app"] },
+    },
+  });
+  await f.review([], {
+    services: { web: { active: true }, jobs: { active: true } },
+  });
+  await scriptSourceShare(f);
+  await f.reply(
+    "project-source-size.out",
+    nativeSourceSizeReceipt({ totalBytes: 200 * 1024 * 1024 })
+  );
+  const report = await preflight(f, { ...f.native, ...GRANT }, [
+    "--profile",
+    "*",
+  ]);
+  expect(report.report.ready).toBe(false);
+  expect(report.report.blockers.map((found) => found.code)).toContain(
+    "native_source_over_limit"
+  );
+});
+
 test("HACK-2338 item 7: an image-only project's source is not measured, as on up", async () => {
   const f = await fixture({ services: { web: { image: IMAGE } } });
   await f.review([], { services: { web: { active: true } } });

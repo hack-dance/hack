@@ -391,6 +391,19 @@ async function preflight(run: FirstRun): Promise<boolean> {
     });
     return false;
   }
+  const missing = REQUIRED_TOOLS.filter(
+    (tool) => Bun.which(tool, { PATH: run.env.PATH ?? "" }) === null
+  );
+  if (missing.length > 0) {
+    run.record({
+      step: "0 preflight",
+      command: "which <tools>",
+      exit: null,
+      result: "fail",
+      note: `precondition: ${missing.join(", ")} not on PATH${run.droppedPath.length > 0 ? ` after dropping ${run.droppedPath.join(", ")} (they hold a hack)` : ""}; install them or move the other hack out of those directories`,
+    });
+    return false;
+  }
   const info = await run.sh([
     "docker",
     "info",
@@ -415,19 +428,6 @@ async function preflight(run: FirstRun): Promise<boolean> {
       exit: null,
       result: "fail",
       note: `precondition: ${unsafe.join(", ")} writable by other users; hackd would refuse a HOME below it. Use a scratch directory under private directories`,
-    });
-    return false;
-  }
-  const missing = REQUIRED_TOOLS.filter(
-    (tool) => Bun.which(tool, { PATH: run.env.PATH ?? "" }) === null
-  );
-  if (missing.length > 0) {
-    run.record({
-      step: "0 preflight",
-      command: "which <tools>",
-      exit: null,
-      result: "fail",
-      note: `precondition: ${missing.join(", ")} not on PATH${run.droppedPath.length > 0 ? ` after dropping ${run.droppedPath.join(", ")} (they hold a hack)` : ""}; install them or move the other hack out of those directories`,
     });
     return false;
   }

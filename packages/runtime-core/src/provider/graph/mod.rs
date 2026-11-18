@@ -2665,6 +2665,39 @@ fn admitted_platform(
         }
 }
 
+/// Where the guest mounts the host's Rosetta 2 runtime (virtiofs tag `rosetta`; see
+/// `guest-translation.sh`). SmolVM's binfmt interpreter, `rosetta-wrapper`, is pinned by
+/// the fix-binary flag, but it launches the translator from this path at exec time, so the
+/// path must exist inside every container whose image runs under translation.
+const ROSETTA_RUNTIME: &str = "/mnt/rosetta";
+
+/// Bind the guest's Rosetta runtime read-only into an emulated container. Without it every
+/// x86_64 process stops at its first exec (`rosetta-wrapper: unexpected initial stop`,
+/// status 127). A service that already mounts something there is refused, not merged.
+fn mount_rosetta_runtime(config: &mut Value) -> Result<(), CandidateError> {
+    let mounts = config["HostConfig"]["Mounts"]
+        .as_array_mut()
+        .ok_or_else(|| error("graph_image", "Emulated service mounts are malformed."))?;
+    let claimed = |target: &str| target == ROSETTA_RUNTIME || target.starts_with("/mnt/rosetta/");
+    if mounts
+        .iter()
+        .any(|mount| mount["Target"].as_str().is_some_and(claimed))
+    {
+        return Err(error(
+            "graph_rosetta_mount",
+            "An emulated linux/amd64 service cannot mount anything at /mnt/rosetta: native binds the Rosetta 2 runtime there.",
+        ));
+    }
+    mounts.push(json!({
+        "Type": "bind",
+        "Source": ROSETTA_RUNTIME,
+        "Target": ROSETTA_RUNTIME,
+        "ReadOnly": true,
+        "BindOptions": {"Propagation": "rprivate"}
+    }));
+    Ok(())
+}
+
 fn verify_images(
     engine: &Engine<'_>,
     resources: &BTreeMap<String, Resource>,
@@ -2691,6 +2724,14 @@ fn verify_images(
                 "Pinned image identity, OS or architecture is incompatible.",
             )
             .with_service(&resource.key));
+        }
+        if image["Architecture"].as_str() == Some("amd64") {
+            mount_rosetta_runtime(
+                configs
+                    .get_mut(&resource.key)
+                    .expect("compiled service config"),
+            )
+            .map_err(|refusal| refusal.with_service(&resource.key))?;
         }
         // Image VOLUME targets are admitted only when covered by exactly one owned
         // named mount; the engine never allocates anonymous storage for a graph.
@@ -2728,4 +2769,35 @@ fn verify_images(
     // Every wrapped service is checked before the first refusal is reported.
     refusals.finish()?;
     Ok(expected)
+}
+
+#[cfg(test)]
+mod rosetta_mount_tests {
+    use super::*;
+
+    #[test]
+    fn emulated_containers_get_the_rosetta_runtime_and_conflicts_refuse() {
+        let mut config = json!({"HostConfig":{"Mounts":[
+            {"Type":"volume","Source":"data","Target":"/data"}
+        ]}});
+        mount_rosetta_runtime(&mut config).unwrap();
+        let mounts = config["HostConfig"]["Mounts"].as_array().unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(
+            mounts[1],
+            json!({"Type":"bind","Source":"/mnt/rosetta","Target":"/mnt/rosetta","ReadOnly":true,"BindOptions":{"Propagation":"rprivate"}})
+        );
+        for target in ["/mnt/rosetta", "/mnt/rosetta/cache"] {
+            let mut taken =
+                json!({"HostConfig":{"Mounts":[{"Type":"volume","Source":"x","Target":target}]}});
+            assert_eq!(
+                mount_rosetta_runtime(&mut taken).unwrap_err().code,
+                "graph_rosetta_mount"
+            );
+        }
+        // A neighbouring path is not a conflict.
+        let mut near = json!({"HostConfig":{"Mounts":[{"Type":"volume","Source":"x","Target":"/mnt/rosetta-data"}]}});
+        mount_rosetta_runtime(&mut near).unwrap();
+        assert!(mount_rosetta_runtime(&mut json!({"HostConfig":{}})).is_err());
+    }
 }

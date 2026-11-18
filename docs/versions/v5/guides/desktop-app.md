@@ -36,7 +36,7 @@ refuses, the app cannot do.
 | --- | --- | --- |
 | Project list | Every registered project and its branch instances, grouped by state. Search with Cmd-K (Ctrl-K on Linux). | `hackd` (`/v1/projects`); `hack ps --json` for native projects |
 | Project header | Start, Stop, Restart and Open, with progress and errors. | `hack up`, `down`, `restart`, `open` |
-| Services tab | Each service, its state and its routes. | `hackd`; `hack ps --json` for native projects |
+| Services tab | Each service, its state and its routes. For a running Compose project, also CPU and memory per service, and an **emulated** mark on a service whose image runs under CPU emulation. | `hackd`; `hack ps --json`; `hack usage --json --by-service` |
 | Logs tab | Live logs with pause, search and a filter for one service. | `hack logs --json` |
 | Env tab | Variable names and values per overlay and scope. See below. | `hack env list`, `get`, `add` |
 | Terminal panel | Log and shell tabs inside the window. On Linux, only in a build with the `terminal` feature. | `hack logs --pretty`, shells |

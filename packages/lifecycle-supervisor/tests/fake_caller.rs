@@ -713,13 +713,36 @@ fn teardown_reaps_a_fixture_whose_main_thread_exited() {
     eventually(|| (live_tasks(leader) == 0).then_some(()));
 }
 
+/// A parent directory private to one stale-sweep test. Its dead-owner roots
+/// sit below it, out of reach of the shared parent's one-time sweep and of the
+/// other stale-sweep test, so concurrent tests cannot reap each other's roots.
+struct PrivateParent(PathBuf);
+impl PrivateParent {
+    fn new() -> Self {
+        let path = fixture_parent().join(format!(
+            "fake-caller-sweep-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+        Self(path)
+    }
+}
+impl Drop for PrivateParent {
+    fn drop(&mut self) {
+        reap_stale_fixture_roots(&self.0);
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn stale_sweep_reaps_other_builds_and_keeps_an_occupied_root() {
     use std::os::unix::process::ExitStatusExt;
     let mut gone = Command::new("/usr/bin/true").spawn().unwrap();
     let dead = gone.id();
     gone.wait().unwrap();
-    let parent = fixture_parent();
+    let private = PrivateParent::new();
+    let parent = private.0.as_path();
     let root = parent.join(format!("{ROOT_PREFIX}{dead}-1-0"));
     fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
     // Another worktree's build of this test binary: same name pattern,
@@ -735,14 +758,14 @@ fn stale_sweep_reaps_other_builds_and_keeps_an_occupied_root() {
         .current_dir(&root)
         .spawn()
         .unwrap();
-    reap_stale_fixture_roots(&parent);
+    reap_stale_fixture_roots(parent);
     let status = wait(&mut foreign_build, TIMEOUT);
     assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
     assert!(bystander.try_wait().unwrap().is_none());
     assert!(root.exists());
     bystander.kill().unwrap();
     bystander.wait().unwrap();
-    reap_stale_fixture_roots(&parent);
+    reap_stale_fixture_roots(parent);
     assert!(!root.exists());
     let _ = fs::remove_dir_all(&other);
 }
@@ -754,7 +777,8 @@ fn stale_roots_of_a_dead_test_process_are_reaped_and_removed() {
     let mut gone = Command::new("/usr/bin/true").spawn().unwrap();
     let dead = gone.id();
     gone.wait().unwrap();
-    let parent = fixture_parent();
+    let private = PrivateParent::new();
+    let parent = private.0.as_path();
     let root = parent.join(format!("{ROOT_PREFIX}{dead}-0-0"));
     fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
     let mut stray = stray_fixture_process(&root);
@@ -772,7 +796,7 @@ fn stale_roots_of_a_dead_test_process_are_reaped_and_removed() {
         unsafe { libc::kill(supervisor.id() as i32, libc::SIGSTOP) },
         0
     );
-    reap_stale_fixture_roots(&parent);
+    reap_stale_fixture_roots(parent);
     for child in [&mut stray, &mut supervisor] {
         let status = wait(child, TIMEOUT);
         assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");

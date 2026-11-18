@@ -220,8 +220,11 @@ const BRACED = /^([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)(.*))?$/s;
 
 /**
  * Compose interpolation of one value: `$$`, `$VAR`, `${VAR}`,
- * `${VAR:-default}` and `${VAR-default}`. Any other form (`:?`, `:+`,
- * nesting) returns null: unknown here.
+ * `${VAR:-default}` and `${VAR-default}`, using only variables set in `env`.
+ * Compose also reads variables from its `.env` and `COMPOSE_ENV_FILES`,
+ * which this does not see, so a reference to a variable `env` does not set
+ * is unknown (null), even with a default, as is any other form (`:?`, `:+`,
+ * nesting).
  */
 export function interpolateComposeValue(
   value: string,
@@ -229,28 +232,43 @@ export function interpolateComposeValue(
 ): string | null {
   let unknown = false;
   const out = value.replace(INTERPOLATION, (match, braced, bare) => {
-    if (match === "$$") {
-      return "$";
-    }
-    if (typeof bare === "string") {
-      return env[bare] ?? "";
-    }
-    const parts = BRACED.exec(braced as string);
-    if (!parts || (parts[3] ?? "").includes("$")) {
+    const resolved = resolveReference({ match, braced, bare, env });
+    if (resolved === null) {
       unknown = true;
       return "";
     }
-    const [, name, operator, fallback] = parts;
-    const current = env[name as string];
-    if (operator === ":-") {
-      return current ? current : (fallback ?? "");
-    }
-    if (operator === "-") {
-      return current ?? fallback ?? "";
-    }
-    return current ?? "";
+    return resolved;
   });
   return unknown ? null : out;
+}
+
+/** One `$...` reference, or null when Hack cannot know its value. */
+function resolveReference(input: {
+  readonly match: string;
+  readonly braced: unknown;
+  readonly bare: unknown;
+  readonly env: Readonly<Record<string, string | undefined>>;
+}): string | null {
+  if (input.match === "$$") {
+    return "$";
+  }
+  if (typeof input.bare === "string") {
+    // Possibly set by an interpolation env file Hack does not read.
+    return input.env[input.bare] ?? null;
+  }
+  const parts = BRACED.exec(String(input.braced));
+  if (!parts || (parts[3] ?? "").includes("$")) {
+    return null;
+  }
+  const [, name, operator, fallback] = parts;
+  const current = input.env[name as string];
+  if (current === undefined) {
+    return null;
+  }
+  if (operator === ":-") {
+    return current ? current : (fallback ?? "");
+  }
+  return current;
 }
 
 /**

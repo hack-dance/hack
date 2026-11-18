@@ -347,7 +347,9 @@ test("profile values are interpolated as Compose does", () => {
   const env = { APP_PROFILE: "prod", EMPTY: "" };
   expect(interpolateComposeValue("${APP_PROFILE}", env)).toBe("prod");
   expect(interpolateComposeValue("$APP_PROFILE", env)).toBe("prod");
-  expect(interpolateComposeValue("${MISSING:-dev}", env)).toBe("dev");
+  // Unset here, but Compose's .env or COMPOSE_ENV_FILES may set it: unknown.
+  expect(interpolateComposeValue("${MISSING:-dev}", env)).toBeNull();
+  expect(interpolateComposeValue("$MISSING", env)).toBeNull();
   expect(interpolateComposeValue("${EMPTY:-dev}", env)).toBe("dev");
   expect(interpolateComposeValue("${EMPTY-dev}", env)).toBe("");
   expect(interpolateComposeValue("$$literal", env)).toBe("$literal");
@@ -375,8 +377,11 @@ test("an interpolated profile decides whether its service counts", () => {
   ) => [
     ...composeOneShotGraph(doc, { activeProfiles, interpolationEnv }).oneShots,
   ];
-  // The default applies: api is in profile dev.
-  expect(graph(document, ["dev"], {})).toEqual(["migrate"]);
+  // The variable is set to dev: api is in profile dev.
+  expect(graph(document, ["dev"], { APP_PROFILE: "dev" })).toEqual(["migrate"]);
+  // Not set where Hack can see it (it may come from an interpolation env
+  // file, e.g. APP_PROFILE=prod under --profile prod): api stays active.
+  expect(graph(document, ["prod"], {})).toEqual(["migrate"]);
   // The variable selects another profile: api is off under dev.
   expect(graph(document, ["dev"], { APP_PROFILE: "prod" })).toEqual([]);
   // A form Hack cannot evaluate keeps the service: never cut a real wait short.

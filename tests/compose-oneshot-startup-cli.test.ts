@@ -405,3 +405,24 @@ test("a service-scoped up ignores a running one-shot outside its scope", async (
   };
   expect(envelope.error.message).toContain("startup budget of 1000 ms");
 }, 60_000);
+
+test("a profile variable set only in Compose's .env keeps the one-shot wait", async () => {
+  // api's profile comes from APP_PROFILE, which only Compose's own .env sets
+  // (Hack does not read it); under --profile prod Compose starts api and
+  // waits for migrate, so Hack must keep waiting too.
+  await writeFile(
+    join(project, ".hack", "docker-compose.yml"),
+    ONE_SHOT_COMPOSE.replace(
+      "  api:\n    image: alpine:3.22\n",
+      '  api:\n    image: alpine:3.22\n    profiles: ["${APP_PROFILE:-dev}"]\n'
+    )
+  );
+  await writeFile(join(project, ".hack", ".env"), "APP_PROFILE=prod\n");
+  const result = await cli(["up", "--detach", "--json", "--profile", "prod"], {
+    HACK_COMPOSE_STARTUP_TIMEOUT_MS: "1000",
+    STUB_UP_SECONDS: "4",
+  });
+  expect({ exitCode: result.exitCode, stdout: result.stdout }).toMatchObject({
+    exitCode: 0,
+  });
+}, 60_000);

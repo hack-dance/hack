@@ -326,7 +326,7 @@ export function mergeOneShotGraphs(
 ): ComposeOneShotGraph {
   // Service -> dependency -> effective condition, in first-seen order.
   const effective = new Map<string, Map<string, string>>();
-  // Service -> its `profiles`, as the last document that sets them says.
+  // Service -> its `profiles`, the union over the documents that set them.
   const serviceProfiles = new Map<string, readonly string[]>();
   for (const document of documents) {
     if (!(isRecord(document) && isRecord(document.services))) {
@@ -335,12 +335,19 @@ export function mergeOneShotGraphs(
     for (const [name, service] of Object.entries(document.services)) {
       const conditions = effective.get(name) ?? new Map<string, string>();
       for (const [dependency, condition] of dependencyConditions(service)) {
-        conditions.set(dependency, condition);
+        conditions.set(
+          dependency,
+          effectiveCondition(condition, options.interpolationEnv)
+        );
       }
       effective.set(name, conditions);
       const profiles = declaredProfiles(service, options.interpolationEnv);
       if (profiles !== null) {
-        serviceProfiles.set(name, profiles);
+        // Compose merges `profiles` across files: the union, in order.
+        serviceProfiles.set(
+          name,
+          unionProfiles(serviceProfiles.get(name), profiles)
+        );
       }
     }
   }
@@ -350,6 +357,20 @@ export function mergeOneShotGraphs(
     activeProfiles: options.activeProfiles,
     presentServices: options.presentServices,
   });
+}
+
+/** `earlier` then each of `later` not already in it. */
+function unionProfiles(
+  earlier: readonly string[] | undefined,
+  later: readonly string[]
+): readonly string[] {
+  const merged = [...(earlier ?? [])];
+  for (const profile of later) {
+    if (!merged.includes(profile)) {
+      merged.push(profile);
+    }
+  }
+  return merged;
 }
 
 /** The graph edges of the effective per-service conditions. */
@@ -391,6 +412,22 @@ function graphFromConditions(input: {
 }
 
 const COMPLETED = "service_completed_successfully";
+
+/**
+ * A `depends_on` condition after Compose interpolation. One Hack cannot
+ * evaluate counts as a completion dependency: a longer, ceiling-bounded
+ * wait is the safe side of not knowing, never a migration cut short.
+ */
+function effectiveCondition(
+  condition: string,
+  env: Readonly<Record<string, string | undefined>> | undefined
+): string {
+  if (!condition.includes("$")) {
+    return condition;
+  }
+  const resolved = env ? interpolateComposeValue(condition, env) : null;
+  return resolved ?? COMPLETED;
+}
 
 /**
  * A service's `profiles`, interpolated, or null when it does not set them.

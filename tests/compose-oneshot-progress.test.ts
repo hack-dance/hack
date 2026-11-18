@@ -687,3 +687,54 @@ test("completion dependencies in included files count", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("profiles from override files add to the base file's, as Compose merges them", () => {
+  const base = {
+    services: {
+      migrate: { image: "app" },
+      api: {
+        image: "app",
+        profiles: ["backend"],
+        depends_on: {
+          migrate: { condition: "service_completed_successfully" },
+        },
+      },
+    },
+  };
+  const override = { services: { api: { profiles: ["debug"] } } };
+  // api is in both backend and debug, so either profile activates it.
+  for (const activeProfiles of [["backend"], ["debug"]]) {
+    expect([
+      ...mergeOneShotGraphs([base, override], { activeProfiles }).oneShots,
+    ]).toEqual(["migrate"]);
+  }
+  expect([
+    ...mergeOneShotGraphs([base, override], { activeProfiles: ["other"] })
+      .oneShots,
+  ]).toEqual([]);
+});
+
+test("dependency conditions are interpolated before they are classified", () => {
+  const document = {
+    services: {
+      migrate: { image: "app" },
+      api: {
+        image: "app",
+        depends_on: {
+          migrate: { condition: "${MIGRATE_CONDITION}" },
+        },
+      },
+    },
+  };
+  const oneShots = (interpolationEnv?: Record<string, string>) => [
+    ...composeOneShotGraph(document, { interpolationEnv }).oneShots,
+  ];
+  expect(
+    oneShots({ MIGRATE_CONDITION: "service_completed_successfully" })
+  ).toEqual(["migrate"]);
+  expect(oneShots({ MIGRATE_CONDITION: "service_started" })).toEqual([]);
+  // A condition Hack cannot resolve counts as a completion dependency: a
+  // longer, ceiling-bounded wait, never a migration cut short.
+  expect(oneShots({})).toEqual(["migrate"]);
+  expect(oneShots()).toEqual(["migrate"]);
+});

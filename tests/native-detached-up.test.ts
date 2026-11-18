@@ -49,6 +49,7 @@ for (const mode of [
   "shell-names-empty",
   "shell-names-root-dotenv",
   "unsafe-failure",
+  "unsafe-prestart-refusal",
   "fail",
   "provider-pin",
   "wrapped-provider-pin",
@@ -106,6 +107,7 @@ for (const mode of [
           "shell-names-empty",
           "shell-names-root-dotenv",
           "unsafe-failure",
+          "unsafe-prestart-refusal",
         ].includes(mode)
       ) {
         expect(code).toBe(0);
@@ -168,6 +170,7 @@ for (const mode of [
             "shell-names-root-dotenv",
             "shell-names-empty",
             "unsafe-failure",
+            "unsafe-prestart-refusal",
           ].includes(mode)
             ? "0"
             : "1"
@@ -386,3 +389,62 @@ test("detached owner exit has a short grace even when its descendant holds the I
     await rm(root, { recursive: true, force: true });
   }
 }, 12_000);
+
+test("HACK-2339: a refusal before VM work reaches the launcher as the foreground prints it, with the failed hook's lines on stderr", async () => {
+  for (const mode of [
+    "prestart-refusal",
+    "prestart-after-runtime",
+    "prestart-plain-error",
+  ]) {
+    const root = await mkdtemp(join(tmpdir(), "native-detached-prestart-"));
+    const launcher = Bun.spawn(
+      [process.execPath, fixture, "launcher", root, mode],
+      {
+        env: fixtureEnv(root),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    try {
+      const [code, stdout, stderr] = await Promise.all([
+        launcher.exited,
+        new Response(launcher.stdout).text(),
+        new Response(launcher.stderr).text(),
+      ]);
+      expect(code).toBe(1);
+      const error = JSON.parse(stdout).error;
+      if (mode === "prestart-refusal") {
+        expect(error).toEqual({
+          code: "E_LIFECYCLE_FAILED",
+          message:
+            "Lifecycle (native up before) failed (exit 3); values omitted.",
+        });
+        // Escape sequences dropped, each line bounded; never on stdout.
+        expect(stderr).toBe(
+          [
+            "Lifecycle (native up before): seed-check: ./seed.sh",
+            "[31mred hook line[0m",
+            "x".repeat(500),
+            "Lifecycle (native up before) failed (exit 3): seed-check: ./seed.sh",
+            "",
+          ].join("\n")
+        );
+        expect(stdout).not.toContain("red hook line");
+      } else {
+        // After VM work starts, or for an error that is not a closed refusal,
+        // nothing crosses: the start stays unconfirmed, as before.
+        expect(error.code).toBe("E_STARTUP_INCOMPLETE");
+        expect(error.message).toContain("was not confirmed");
+        expect(stderr).toBe("");
+        expect(stdout + stderr).not.toContain("synthetic-private-value");
+      }
+    } finally {
+      if (launcher.exitCode === null) {
+        launcher.kill("SIGTERM");
+        await launcher.exited;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+}, 30_000);

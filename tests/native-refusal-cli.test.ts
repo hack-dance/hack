@@ -1190,3 +1190,171 @@ test(
   },
   SPAWN_TIMEOUT_MS
 );
+
+/**
+ * HACK-2339: a refusal before any VM work reaches a detached `up` as the
+ * foreground prints it. Without --json both print one coded line; with it the
+ * envelope carries the same code and message. No case reaches `runtime up`.
+ */
+async function expectSameRefusalDetachedAndForeground(opts: {
+  readonly f: Fixture;
+  readonly line: string;
+  readonly code: string;
+  readonly message: string;
+  /** Lines both forms print to stderr before the refusal (a failed hook's). */
+  readonly stderr?: readonly string[];
+}): Promise<void> {
+  for (const args of [["up"], ["up", "--detach"]]) {
+    const result = await cli({ fixture: opts.f, args, env: SHARED });
+    expect(result.code).toBe(1);
+    expect(result.output).toContain(opts.line);
+    expect(result.output).not.toContain("E_STARTUP_INCOMPLETE");
+    expect(result.output).not.toMatch(STACK_FRAME);
+    for (const line of opts.stderr ?? []) {
+      expect(result.stderr).toContain(line);
+    }
+  }
+  for (const args of [
+    ["up", "--json"],
+    ["up", "--detach", "--json"],
+  ]) {
+    const result = await cli({ fixture: opts.f, args, env: SHARED });
+    expect(result.code).toBe(1);
+    // stdout is exactly the envelope.
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: false,
+      error: { code: opts.code, message: opts.message },
+    });
+    for (const line of opts.stderr ?? []) {
+      expect(result.stderr).toContain(line);
+      expect(result.stdout).not.toContain(line);
+    }
+  }
+  expect(await opts.f.calls()).not.toContain("runtime up");
+}
+
+test(
+  "HACK-2339: a failing up.before hook reports its code, name and output the same detached and in the foreground",
+  async () => {
+    const f = await fixture();
+    await writeFile(
+      join(f.projectDir, "hack.config.json"),
+      JSON.stringify({
+        name: "refusal-fixture",
+        dev_host: "refusal-fixture.hack.local",
+        lifecycle: {
+          up: {
+            before: [
+              {
+                name: "seed-check",
+                command:
+                  "printf 'hook stdout line\\n'; printf 'hook stderr line\\n' >&2; exit 3",
+              },
+            ],
+          },
+        },
+      })
+    );
+    await scriptUpThroughReview(f);
+    const message =
+      "Lifecycle (native up before) failed (exit 3); values omitted.";
+    await expectSameRefusalDetachedAndForeground({
+      f,
+      line: `E_LIFECYCLE_FAILED: ${message}`,
+      code: "E_LIFECYCLE_FAILED",
+      message,
+      stderr: [
+        "hook stdout line",
+        "hook stderr line",
+        "Lifecycle (native up before) failed (exit 3): seed-check",
+      ],
+    });
+    // Compose reports the same hook failure with the same code and exit
+    // status, the hook's output on stderr (HACK-2311).
+    const bin = join(f.root, "bin");
+    await mkdir(bin);
+    await writeFile(join(bin, "docker"), "#!/bin/sh\nexit 0\n", {
+      mode: 0o755,
+    });
+    const compose = await cli({
+      fixture: f,
+      args: ["up", "--detach", "--json"],
+      env: {
+        HACK_RUNTIME_BACKEND: "compose",
+        PATH: `${bin}:/usr/bin:/bin`,
+      },
+    });
+    // Compose exits with the hook's own status; native, like every native
+    // refusal, exits 1. Code, message form and output placement match.
+    expect(compose.code).toBe(3);
+    expect(JSON.parse(compose.stdout)).toMatchObject({
+      ok: false,
+      error: {
+        code: "E_LIFECYCLE_FAILED",
+        message: "Lifecycle (up before) failed (exit 3)",
+      },
+    });
+    expect(compose.stderr).toContain("hook stdout line");
+    expect(compose.stderr).toContain("hook stderr line");
+  },
+  SPAWN_TIMEOUT_MS * 2
+);
+
+test(
+  "HACK-2339: a source-size refusal reaches a detached up with its code and paths",
+  async () => {
+    // A bind mount captures source, so `up` measures it before hooks or VM work.
+    const f = await fixture(
+      JSON.stringify({
+        services: {
+          web: {
+            image: `sha256:${"e".repeat(64)}`,
+            volumes: ["./src:/app/src"],
+          },
+        },
+      })
+    );
+    await scriptUpThroughReview(f);
+    await f.reply(
+      "project source-size",
+      nativeSourceSizeReceipt({ totalBytes: 600 * 1024 * 1024 })
+    );
+    const foreground = await cli({ fixture: f, args: ["up"], env: SHARED });
+    const line = foreground.output
+      .split("\n")
+      .find((text) => text.includes("E_NATIVE_PROJECT_UNSUPPORTED"));
+    expect(line).toBeDefined();
+    expect(foreground.output).toContain("assets/video/intro.bin");
+    const detached = await cli({
+      fixture: f,
+      args: ["up", "--detach", "--json"],
+      env: SHARED,
+    });
+    expect(detached.code).toBe(1);
+    const envelope = JSON.parse(detached.stdout);
+    expect(envelope.error.code).toBe("E_NATIVE_PROJECT_UNSUPPORTED");
+    expect(line).toContain(envelope.error.message.split("\n")[0]);
+    expect(envelope.error.message).toContain("assets/video/intro.bin");
+    expect(await f.calls()).not.toContain("runtime up");
+  },
+  SPAWN_TIMEOUT_MS * 2
+);
+
+test(
+  "HACK-2339: a closed pre-VM refusal without a code reaches a detached up as the foreground prints it",
+  async () => {
+    const f = await fixture();
+    await scriptUpThroughReview(f);
+    // `up` refuses before hooks or VM work without its bundled relay artifact.
+    await unlink(join(f.binary, "..", "hack-relay-guest"));
+    const message =
+      "Native foreground up requires the bundled hack-relay-guest artifact.";
+    await expectSameRefusalDetachedAndForeground({
+      f,
+      line: message,
+      code: "E_UNEXPECTED",
+      message,
+    });
+  },
+  SPAWN_TIMEOUT_MS * 2
+);

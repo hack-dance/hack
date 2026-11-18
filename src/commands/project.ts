@@ -358,6 +358,8 @@ import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
 import {
   isNativeDetachedOwnerProcess,
   nativeDetachedOwnerArgs,
+  nativeDetachedUpHookFailed,
+  nativeDetachedUpPrestart,
   nativeDetachedUpReady,
   startNativeDetachedUp,
 } from "../lib/native-detached-up.ts";
@@ -2298,6 +2300,8 @@ function runLifecycleChild(opts: {
   readonly signal?: AbortSignal;
   /** The hook's log sink, shared with its end record. */
   readonly sink: LifecycleLogSink;
+  /** Each output line, for a bounded tail of a failed hook's output. */
+  readonly onLine?: (line: string) => void;
 }): Promise<number> {
   const { sink } = opts;
   return runLifecycleCommandChild({
@@ -2311,6 +2315,7 @@ function runLifecycleChild(opts: {
         output: source === "stdout" ? opts.output : "stderr",
         service: opts.service,
         sink,
+        onLine: opts.onLine,
       }),
   });
 }
@@ -2391,8 +2396,10 @@ export async function runLifecycleCommands(opts: {
       stream: "meta",
       message: `[start] ${opts.title}: ${label}`,
     });
+    const tail = failedHookTail();
     const exitCode = await runLifecycleChild({
       sink,
+      onLine: tail.onLine,
       command: cmd.command,
       cwd,
       env: await mergeLifecycleCommandEnv(opts.env),
@@ -2416,13 +2423,43 @@ export async function runLifecycleCommands(opts: {
     });
 
     if (exitCode !== 0) {
-      logger.error({
-        message: `${opts.title} failed (exit ${exitCode}): ${label}`,
+      const failure = `${opts.title} failed (exit ${exitCode}): ${label}`;
+      logger.error({ message: failure });
+      nativeDetachedUpHookFailed({
+        step: `${opts.title}: ${label}`,
+        output: tail.lines,
+        failure,
       });
       return exitCode;
     }
   }
   return 0;
+}
+
+/** Output lines of a failed hook a detached native owner keeps for its launcher. */
+const LIFECYCLE_FAILURE_TAIL_LINES = 40;
+
+/**
+ * A detached native owner has no terminal: it keeps the last lines of each
+ * hook's output so a failure before VM work can show them (HACK-2339). Any
+ * other process keeps nothing.
+ */
+function failedHookTail(): {
+  readonly lines: readonly string[];
+  readonly onLine: ((line: string) => void) | undefined;
+} {
+  const lines: string[] = [];
+  return {
+    lines,
+    onLine: isNativeDetachedOwnerProcess()
+      ? (line) => {
+          lines.push(line);
+          if (lines.length > LIFECYCLE_FAILURE_TAIL_LINES) {
+            lines.shift();
+          }
+        }
+      : undefined,
+  };
 }
 
 type LifecycleUpResult = {
@@ -6573,6 +6610,9 @@ async function handleNativeUp({
     target: args.options.target,
     services: args.positionals.services,
   });
+  // A detached `up` owner reports a closed refusal from here until VM work
+  // starts exactly as this command prints it in the foreground (HACK-2339).
+  nativeDetachedUpPrestart(!restart);
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -6705,7 +6745,13 @@ async function handleNativeUp({
         ...services,
       });
     },
-    onProgress: reportNativeStartupProgress,
+    onProgress: (event) => {
+      if (event.phase === "runtime") {
+        // VM work starts: later failures keep the runtime's own reports.
+        nativeDetachedUpPrestart(false);
+      }
+      reportNativeStartupProgress(event);
+    },
     before: async (input) => {
       const lifecycle = await runLifecycleUpBeforeAndProcesses({
         title: "Lifecycle (native up before)",
@@ -6720,9 +6766,11 @@ async function handleNativeUp({
       const cleanup = adoptNativeLifecycleCleanup(lifecycle);
       if (lifecycle.code !== 0) {
         await cleanup();
+        // Compose reports the same failure as `Lifecycle (up before) failed
+        // (exit N)`; the hook's name and output were printed as it ran.
         throw new HackCliError({
           code: "E_LIFECYCLE_FAILED",
-          message: "Native up lifecycle preparation failed; values omitted.",
+          message: `Lifecycle (native up before) failed (exit ${lifecycle.code}); values omitted.`,
         });
       }
       // Native declares these before review; a hook cannot change them now.

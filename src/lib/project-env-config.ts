@@ -10156,6 +10156,37 @@ async function legacyBaseDotenvIsGenerated(opts: {
   readonly projectDir: string;
   readonly serviceNames: readonly string[];
 }): Promise<boolean> {
+  const state = await classifyMaterializedDotenv(opts);
+  if (state === "unknown") {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason:
+        ".hack/.env's state file can't be read, so Hack can't tell whether .env is generated output or holds values of your own. If it's your own file, delete .hack/.env.state.json so it's read as a legacy file. If it's generated output you don't need, delete both files, then run `hack env materialize`. Don't delete only the state file of generated output, because its values would then migrate as your own.",
+    });
+  }
+  if (state === "differs") {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_PATH_CONFLICT",
+      reason: `.hack/.env has a state file, but its text isn't what \`hack env materialize\` would write, so it may hold values of your own. If it's generated output, move any value of your own with \`hack env set --local\`, then run \`hack env materialize\`, which replaces the file. If it's your own file, delete .hack/.env.state.json so it's read as a legacy file. Don't do that for generated output, because its values would then migrate as your own.`,
+    });
+  }
+  return state === "current";
+}
+
+/**
+ * What `.hack/.env` is, judged by its state file and the current env layers:
+ * - `absent`: no `.env`, no state file, or no env layers to compare with;
+ * - `current`: exactly what `hack env materialize` writes now for the selection
+ *   the state file records, so it holds nothing of the user's own;
+ * - `differs`: a state file exists but the text differs (out of date, or edited);
+ * - `unknown`: the state file exists but cannot be read.
+ * Reads values to compare them; returns only the class, never a value.
+ */
+export async function classifyMaterializedDotenv(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+}): Promise<"absent" | "current" | "differs" | "unknown"> {
   const statePath = resolveProjectEnvStatePath({ projectDir: opts.projectDir });
   const read = await readOptionalTextFile(
     resolve(opts.projectDir, PROJECT_ENV_FILENAME)
@@ -10164,7 +10195,7 @@ async function legacyBaseDotenvIsGenerated(opts: {
     read.kind !== "text" ||
     (await readOptionalTextFile(statePath)).kind === "absent"
   ) {
-    return false;
+    return "absent";
   }
   const stateRead = await readProjectEnvStateFile({ statePath });
   const resolved = await resolveProjectEnvConfig({
@@ -10174,14 +10205,10 @@ async function legacyBaseDotenvIsGenerated(opts: {
     serviceNames: opts.serviceNames,
   });
   if (!resolved) {
-    return false;
+    return "absent";
   }
   if (!stateRead.ok) {
-    throw new LegacyDotenvMigrationRefusalError({
-      code: "E_PATH_CONFLICT",
-      reason:
-        ".hack/.env's state file can't be read, so Hack can't tell whether .env is generated output or holds values of your own. If it's your own file, delete .hack/.env.state.json so it's read as a legacy file. If it's generated output you don't need, delete both files, then run `hack env materialize`. Don't delete only the state file of generated output, because its values would then migrate as your own.",
-    });
+    return "unknown";
   }
   const generated = serializeDotEnv(
     selectProjectEnvValues({
@@ -10189,13 +10216,7 @@ async function legacyBaseDotenvIsGenerated(opts: {
       scopeName: stateRead.state.selectedService,
     })
   );
-  if (generated !== read.text) {
-    throw new LegacyDotenvMigrationRefusalError({
-      code: "E_PATH_CONFLICT",
-      reason: `.hack/.env has a state file, but its text isn't what \`hack env materialize\` would write, so it may hold values of your own. If it's generated output, move any value of your own with \`hack env set --local\`, then run \`hack env materialize\`, which replaces the file. If it's your own file, delete .hack/.env.state.json so it's read as a legacy file. Don't do that for generated output, because its values would then migrate as your own.`,
-    });
-  }
-  return true;
+  return generated === read.text ? "current" : "differs";
 }
 
 /**

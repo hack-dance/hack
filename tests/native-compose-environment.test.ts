@@ -27,7 +27,10 @@ import {
   selectActiveNativeProjectInput,
 } from "../src/backends/native-project-input.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../src/lib/native-environment-notices.ts";
-import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
+import {
+  materializeProjectEnv,
+  setProjectEnvValue,
+} from "../src/lib/project-env-config.ts";
 
 const FILE = "synthetic-file-value-canary";
 const DOTENV = "synthetic-dotenv-value-canary";
@@ -1132,6 +1135,32 @@ test("inactive service files are not read, but selected profiles require them", 
   await f.source("missing.env", `TOKEN=${FILE}\n`);
   await chmod(join(f.projectDir, "missing.env"), 0o666);
   expect((await prepareNativeProjectInput(f)).shellEnvironment).toEqual({});
+});
+
+test("HACK-2324: a materialized dotenv refusal says whether removing it can lose values, with the exact command", async () => {
+  const f = await fixture({ env_file: ".env" });
+  await managed(f.projectDir, { global: { FLAG: "on" } });
+  await materializeProjectEnv({
+    projectRoot: f.projectRoot,
+    projectDir: f.projectDir,
+    envName: null,
+    serviceName: null,
+    serviceNames: ["app"],
+  });
+  const current = String(
+    await prepareNativeProjectInput(f).catch((caught: unknown) => caught)
+  );
+  expect(current).toContain("matches the current env layers exactly");
+  expect(current).toContain("rm .hack/.env .hack/.env.state.json");
+  expect(current).not.toContain("on\n");
+  // Hand-edited after materialize: it may hold the user's own values.
+  await f.source(".env", `FLAG=on\nMINE=${DOTENV}\n`);
+  const differs = String(
+    await prepareNativeProjectInput(f).catch((caught: unknown) => caught)
+  );
+  expect(differs).toContain("may hold values of your own");
+  expect(differs).toContain("hack env set --local");
+  expect(differs).not.toContain(DOTENV);
 });
 
 test("materialized dotenv identity aliases are refused before source reading", async () => {

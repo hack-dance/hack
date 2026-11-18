@@ -1614,8 +1614,18 @@ files, and require owner-read access with no group/other write access. Ordinary
 
 The automatic interpolation file is `.env` beside the Compose file (normally
 `.hack/.env`). A sibling `.env.state.json` causes a refusal: the file may be
-obsolete output of `hack env materialize`. Use current Hack env layers, then
-remove obsolete materialized output deliberately. A root `.env` outside the
+obsolete output of `hack env materialize`. The refusal says which case it is:
+- **It matches the current env layers exactly** (what `hack env materialize` would
+  write now, for the selection its state file records): it holds nothing of your
+  own, and native delivers those values itself. Run
+  `rm .hack/.env .hack/.env.state.json`, then remove the `env_file` entry that names
+  it (or mark it `required: false`).
+- **It differs from what the layers produce** (out of date, or edited by hand): it
+  may hold values of your own. Move them with `hack env set --local` first.
+- **Its state file cannot be compared:** remove both files only if they hold
+  nothing of your own.
+
+The refusal never prints values. A root `.env` outside the
 Compose directory is not read; start and preflight report once that it is
 ignored. Dotenv alone does not inject values. The adjacent `.env` is now read on
 every native start and preflight, even with managed env. Symlinks, other-owner or
@@ -2914,6 +2924,20 @@ the main checkout's map that a linked worktree inherits. It then names the
 `aliases` a binding needs and how to remove the alias instead
 (`hack internal extra-hosts unset <alias>` hides an inherited entry in this
 worktree). Listener values are never printed.
+
+Native preflight reports the same gap as `extra_hosts_without_dependencies` per
+service and `internal_hosts_without_dependencies` for the project. It counts the
+aliases without naming them, except the fixed `host.docker.internal`, says what such
+names are usually for, and gives the version 2 entry to add:
+- `host.docker.internal` usually reaches a process on this machine, such as a
+  database proxy, a dev server or a tunnel;
+- names ending in `.hack` are usually Hack routes that Compose internal DNS sends
+  to the host proxy;
+- other names are usually tunnels or remote names that a host process serves.
+
+There is no setup-free form: native's VM has no route to the host except
+through a binding, and one alias reaches one host listener. A project that uses
+`host.docker.internal` for two host ports needs a separate alias for each.
 An entry whose target is not `host-gateway` (for example a fixed address), a name
 that is not an exact lowercase DNS name, or a service that already maps the name
 to a different target also refuses. Service-declared names are matched in the

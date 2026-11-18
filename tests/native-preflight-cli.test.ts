@@ -881,6 +881,47 @@ test(
 );
 
 test(
+  "HACK-2324: host aliases without a binding are counted, explained, and given the entry to add",
+  async () => {
+    const f = await fixture({
+      services: {
+        web: {
+          image: IMAGE,
+          extra_hosts: ["host.docker.internal:host-gateway"],
+        },
+      },
+    });
+    await writeFile(
+      join(f.projectDir, "hack.config.json"),
+      JSON.stringify({
+        name: "preflight-fixture",
+        internal: { extra_hosts: { "api.other.hack": "host-gateway" } },
+      })
+    );
+    const { report } = await preflight(f, GRANT);
+    const service = report.blockers.find(
+      (found) => found.code === "extra_hosts_without_dependencies"
+    );
+    expect(service?.service).toBe("web");
+    expect(service?.message).toContain("host.docker.internal");
+    expect(service?.fix).toContain("a process on this machine");
+    expect(service?.fix).toContain('"aliases": ["host.docker.internal"]');
+    expect(service?.fix).toContain("One alias reaches one host listener;");
+    const project = report.blockers.find(
+      (found) => found.code === "internal_hosts_without_dependencies"
+    );
+    expect(project?.fix).toContain(
+      "1 name(s) ending in .hack are usually Hack routes"
+    );
+    expect(project?.fix).toContain('"aliases": ["<alias>"]');
+    // Authored alias names never reach the report.
+    expect(JSON.stringify(report)).not.toContain("api.other.hack");
+    expect(project?.fix).toContain("hack internal extra-hosts unset");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
   "ambiguous env-file aliases are a preflight blocker in JSON and text",
   async () => {
     const f = await fixture({ services: { web: { image: IMAGE } } });

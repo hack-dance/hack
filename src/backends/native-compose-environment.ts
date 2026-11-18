@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { HACK_KEY_MATERIAL_VARIABLES } from "../lib/child-environment.ts";
 import { isRecord } from "../lib/guards.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../lib/native-environment-notices.ts";
+import { classifyMaterializedDotenv } from "../lib/project-env-config.ts";
 import { nativeAwsCredentialMount } from "./native-aws-environment.ts";
 import {
   type ComposeEnvEntry,
@@ -348,6 +349,36 @@ async function readAutomaticDotenv(opts: {
   return dotenv;
 }
 
+/**
+ * Why an env_file naming `hack env materialize` output refuses, and the exact
+ * steps. Native delivers the selected env layers itself, so the file is never
+ * read as an input; the reason says whether removing it can lose anything.
+ */
+async function materializedDotenvReason(opts: {
+  readonly opts: Options;
+  readonly automatic: string;
+}): Promise<string> {
+  const dotenv = relative(opts.opts.projectRoot, opts.automatic);
+  const remove = `rm ${dotenv} ${dotenv}.state.json`;
+  let state: Awaited<ReturnType<typeof classifyMaterializedDotenv>>;
+  try {
+    state = await classifyMaterializedDotenv({
+      projectRoot: opts.opts.projectRoot,
+      projectDir: dirname(opts.automatic),
+      serviceNames: Object.keys(opts.opts.services),
+    });
+  } catch {
+    state = "unknown";
+  }
+  if (state === "current") {
+    return `Hack materialized output that matches the current env layers exactly, so it holds nothing of your own; native delivers those values itself. Run \`${remove}\`, then remove this env_file entry (or mark it required: false)`;
+  }
+  if (state === "differs") {
+    return `Hack materialized output that no longer matches the current env layers, so it may hold values of your own. Move any with \`hack env set --local\`, then run \`${remove}\` and remove this env_file entry (or mark it required: false)`;
+  }
+  return `possible Hack materialized output whose state file cannot be compared with the current env layers. If it holds nothing of your own, run \`${remove}\` and remove this env_file entry (or mark it required: false)`;
+}
+
 async function environmentSources(
   opts: Options,
   notices: Notice[]
@@ -416,7 +447,7 @@ async function environmentSources(
     ) {
       throw refused(
         spec.path,
-        "possible Hack materialized output: use current Hack env layers and deliberately remove obsolete .env and .env.state.json before retrying",
+        await materializedDotenvReason({ opts, automatic }),
         service
       );
     }

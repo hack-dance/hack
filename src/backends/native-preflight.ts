@@ -26,6 +26,7 @@ import {
 import {
   applyNativeInternalHostAliases,
   type NativeHostAliasSource,
+  nativeServiceHostAliases,
 } from "./native-project-internal-hosts.ts";
 import {
   nativeBridgeSocketCount,
@@ -778,7 +779,10 @@ function cliServiceFindings(opts: {
     if (problem === "missing_image" && declaresBuild) {
       continue;
     }
-    const text = PREPARATION_FINDINGS[problem];
+    const text =
+      problem === "extra_hosts_without_dependencies"
+        ? serviceHostAliasText(name, service)
+        : PREPARATION_FINDINGS[problem];
     found.push(
       finding(
         {
@@ -881,6 +885,74 @@ function environmentInputFinding(
           : "Check the named source and environment declaration; use owned regular files that are not writable by others.",
     }
   );
+}
+
+/** The one alias name preflight prints: a fixed Docker name, never authored data. */
+const DOCKER_HOST_ALIAS = "host.docker.internal";
+/** Route names that Compose internal DNS sends to the host proxy. */
+const HACK_ROUTE_ALIAS = /\.hack(?:\.local)?$/;
+
+/**
+ * The fix for host aliases without a binding: what such aliases are usually
+ * for, and the dependency entry that admits them. Authored names stay out of
+ * the report (only the fixed host.docker.internal is named); ports and
+ * targets are never printed.
+ */
+function hostAliasGuidance(aliases: readonly string[]): string {
+  const docker = aliases.includes(DOCKER_HOST_ALIAS);
+  const routes = aliases.filter((alias) => HACK_ROUTE_ALIAS.test(alias)).length;
+  const others = aliases.length - routes - (docker ? 1 : 0);
+  const purposes = [
+    docker
+      ? `${DOCKER_HOST_ALIAS} usually reaches a process on this machine (a database proxy, a dev server or a tunnel)`
+      : null,
+    routes
+      ? `${routes} name(s) ending in .hack are usually Hack routes sent to the host proxy (Compose internal DNS compatibility)`
+      : null,
+    others
+      ? `${others} other name(s) are usually tunnels or remote names that a process on this machine serves`
+      : null,
+  ].filter((part) => part !== null);
+  const names = JSON.stringify(
+    docker && aliases.length === 1 ? [DOCKER_HOST_ALIAS] : ["<alias>"]
+  );
+  return `${purposes.length ? `${purposes.join("; ")}. ` : ""}Native has no general route from its VM to this machine, so each alias needs a binding to the one host listener it uses: add {"version": 2, "dependencies": [{"binding": "<name>", "aliases": ${names}, "guest_port": <port the container connects to>, "host_port": <listening port on this machine>, "host_executable": "/absolute/path/to/the/listener"}]} to a file selected by HACK_NATIVE_DEPENDENCIES or the dependencies setting (an entry without "services" covers every service that declares the alias; use host_pid instead of host_executable for a listener that does not change). One alias reaches one host listener; hack up names each unbound alias.`;
+}
+
+/** The project-wide aliases that target host-gateway. */
+function projectHostAliases(
+  hosts: Readonly<Record<string, string>> | null
+): string[] {
+  return Object.entries(hosts ?? {})
+    .filter(([, target]) => target === "host-gateway")
+    .map(([alias]) => alias);
+}
+
+/** The per-service extra_hosts finding, counting that service's aliases. */
+function serviceHostAliasText(
+  name: string,
+  service: unknown
+): Explanation & { readonly field?: string } {
+  const aliases = isRecord(service)
+    ? (nativeServiceHostAliases({
+        services: { [name]: service },
+        profiles: Array.isArray(service.profiles)
+          ? service.profiles.filter(
+              (profile): profile is string => typeof profile === "string"
+            )
+          : [],
+      })[name] ?? [])
+    : [];
+  const named = aliases.includes(DOCKER_HOST_ALIAS)
+    ? `, including ${DOCKER_HOST_ALIAS}`
+    : "";
+  return {
+    field: "extra_hosts",
+    message: aliases.length
+      ? `The service declares ${aliases.length} host-gateway alias(es) in extra_hosts${named}, but no host dependency binding is selected.`
+      : PREPARATION_FINDINGS.extra_hosts_without_dependencies.message,
+    fix: `${hostAliasGuidance(aliases)} To drop one instead, remove it from the service's extra_hosts.`,
+  };
 }
 
 /**
@@ -1020,7 +1092,7 @@ async function adaptForPreflight(opts: {
           {
             message:
               "The project declares project-wide extra hosts that native cannot apply: no host dependency binding is selected, or an entry is not an exact host-gateway alias.",
-            fix: "Select a dependency file with HACK_NATIVE_DEPENDENCIES or the dependencies setting, or remove the entries from internal.extra_hosts.",
+            fix: `${hostAliasGuidance(projectHostAliases(opts.internalHosts))} To drop one instead, remove it from internal.extra_hosts or run hack internal extra-hosts unset <alias>.`,
           }
         )
       );

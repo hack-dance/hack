@@ -13,7 +13,7 @@ checkout's key; a separate host needs its own approved runtime delivery mechanis
 
 New to the words? An **overlay** is a named environment such as `qa`. A
 **scope** says who receives a value. See
-[Overlay and scope](run-commands.md).
+[Overlay and scope](run-commands.md#overlay-and-scope).
 
 ## Everyday commands
 
@@ -59,14 +59,17 @@ hack env get PORT --env qa --service api
 ```
 
 - Without `--service`, the value goes to the `global` scope.
-- `--secret` stores the value encrypted. Leave the value out and Hack asks for it
-  with a hidden prompt, or pipe it with `--value-stdin`. Do not type a secret as
+- `--secret` stores the value encrypted. Leave the value out and, in a terminal,
+  Hack asks for it with a hidden prompt. Or pipe it with `--value-stdin`. Do not type a secret as
   an argument; it would stay in your shell history.
-- `hack env list` shows names, scopes and source files. It hides every value.
+- `hack env list` shows names, scopes and source files. It hides every value,
+  unless you pass `--show-values` in a terminal.
 - `hack env get <key>` prints one value. Treat its output as plaintext.
 
-A running service keeps its old values. Run `hack env apply --service api` to
-recreate one service with the new values, or `hack restart`.
+A running service keeps its old values. `hack env apply --service api`
+recreates `api` with the overlay the project runs with. To use values you just
+set in `qa`, name it: `hack env apply --service api --env qa`. That records `qa`
+as the project's overlay, so run `hack restart --env qa` to move every service.
 
 ### Read plaintext values in one call
 
@@ -86,7 +89,7 @@ key itself:
 | Field | Values |
 | --- | --- |
 | `key_state` | `ok`, `missing`, `unreadable`, or `not_checked` (legacy projects that do not use this key). |
-| `key_source` | Where the key came from: a key file (this checkout, shared by worktrees, the primary checkout, or `--key-file`), an environment variable by name, or none. |
+| `key_source` | Where the key came from: a key file (this checkout, shared by worktrees, the primary checkout, or `--key-file`), an environment variable by name, or none. It is `null` when a key file was refused. |
 
 If `key_state` is `missing`, copy the original key from a checkout that has it.
 A new key cannot decrypt existing values.

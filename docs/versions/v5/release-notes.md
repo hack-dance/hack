@@ -52,7 +52,7 @@ flowchart LR
 | **Managed values that contain `$` are delivered as stored.** v4 let Compose expand `$VAR` inside a managed value. | Check values that relied on that, or that escaped `$` as `$$`. The next `hack up` recreates those services. |
 | **In a project that still uses `.hack/hack.env.json`, lifecycle hooks receive only `global` values.** | Move the values a hook needs into the `global` scope. |
 | **The text columns of `hack env list` changed.** | Parse `hack env list --json`, not the text. |
-| **Hack no longer writes agent files.** `hack setup sync`, `hack setup cursor`, `hack setup claude`, `hack setup agents` and `hack agent prime` refuse. | Install the optional plugin if you want agent guidance. |
+| **Hack no longer writes agent files.** `hack setup sync`, `hack setup cursor`, `hack setup claude` and `hack setup agents` refuse. `hack agent prime` only prints a retirement notice. | Install the optional plugin if you want agent guidance. |
 
 Follow [Upgrade from v4](upgrade.md). It is a backup-first procedure, and it
 says how to go back.

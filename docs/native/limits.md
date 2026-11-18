@@ -38,7 +38,7 @@ The exact rules for each command are in
   verification, with `--tail`, `--since`, `--timestamps` and `--json`; real-VM acceptance for both
   authored and adopted projects remains pending. The following limits apply to
   this candidate command.
-- Querying log history with Loki. Native live logs select one service; services configured with a TTY are currently refused by name.
+- Querying log history with Loki. Native live logs follow one service, or every service when you name none (since next.22); services configured with a TTY are currently refused by name.
 - Unbounded restart following. Project restart re-admission waits at most 30 seconds
   and retains at most 1000 initial lines from the new container. Failure reports
   `native_log_restart_unavailable`. Same-container Engine restarts observed by

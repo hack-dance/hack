@@ -171,8 +171,9 @@ on, and report the service in `data.interrupted` and `data.warnings`.
 
 These limits apply to detached Compose starts. Foreground `hack up` has no start
 limit. The native backend has one plain start limit,
-`HACK_COMPOSE_STARTUP_TIMEOUT_MS`. It has no one-shot ceiling and does not read
-the project settings.
+`HACK_COMPOSE_STARTUP_TIMEOUT_MS`, of at most 300000 ms (5 minutes). Native
+image builds use `HACK_COMPOSE_IMAGE_TIMEOUT_MS`. Native has no one-shot ceiling
+and does not read the project settings.
 
 A failed startup prints a reason. Read it before retrying; use
 [troubleshooting](troubleshooting.md) and `hack doctor` for setup problems.

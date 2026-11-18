@@ -50,8 +50,9 @@ impl Candidate {
     pub fn discover(checkout: &Path) -> Result<Self, CandidateError> {
         let checkout = canonical_directory(checkout)?;
         let state_root = checkout.join(".hack-local");
-        reject_aliased_state(&state_root)?;
+        // Registered first, so a malformed root is still named in its own refusal.
         register_state_root(&state_root);
+        reject_aliased_state(&state_root)?;
         Ok(Self {
             protocol_version: PROTOCOL_VERSION,
             version: CANDIDATE_VERSION,
@@ -364,5 +365,19 @@ mod state_component_tests {
             assert!(wire.get("state_component").is_none(), "{wire}");
         }
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn discovery_names_a_state_root_that_is_a_file() {
+        let home = private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-state-root-file",
+        );
+        std::fs::write(home.join(".hack-local"), b"not a directory").unwrap();
+        let error = Candidate::discover(&home).unwrap_err();
+        assert_eq!(error.code, "invalid_state");
+        let wire = serde_json::to_value(&error).unwrap();
+        assert_eq!(wire["state_component"]["path"], ".hack-local");
+        std::fs::remove_dir_all(&home).unwrap();
     }
 }

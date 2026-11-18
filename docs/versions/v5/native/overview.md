@@ -18,12 +18,12 @@ Hack needs something to run your services in. Today that is Docker Compose, whic
 needs a Docker app running on your machine.
 
 With the native backend, Hack runs admitted project workloads as containers in a
-provider-managed Linux virtual machine. You do not need Docker Desktop or OrbStack
-on the Mac. The pool runs its pinned Docker Engine inside the VM; it does not use
-your host's Docker app. Preparing that provider pool is still a separate step.
+lightweight Linux VM that Hack manages. You do not need Docker Desktop or OrbStack
+on the Mac. The VM runs its own pinned Docker Engine; it does not use your host's
+Docker app. Preparing that VM runtime is still a separate step.
 
 It is not a different container format. Your images and your Compose file are the
-same. Projects using the same native pool share that pool's VM resources.
+same. Projects on native share the VM's resources.
 
 Your project stays the same. The `.hack/` folder, the commands (`hack up`,
 `hack down`, `hack logs`) and your env and secrets are the same on both backends.
@@ -39,9 +39,11 @@ Your project stays the same. The `.hack/` folder, the commands (`hack up`,
   and Compose features. See [what works and known limits](limits.md).
 - **Not a migration.** Trying native does not convert your project or move your
   data. Your stable setup is left alone.
-- **Not proven faster or lighter.** We have published no measurement that compares
-  native with Compose, so we make no speed, memory or battery claims.
-- **Not a wall between projects.** Projects in the same pool share VM resources.
+- **Not faster or lighter.** We make no speed, memory or battery claim for
+  native. Do not choose it to save memory.
+- **Not a sandbox.** It is a way to run a Compose file without a Docker app. It
+  does not limit what a project, a person or a coding agent can touch.
+- **Not a wall between projects.** Projects on native share the VM's resources.
 
 ## Control and traffic
 

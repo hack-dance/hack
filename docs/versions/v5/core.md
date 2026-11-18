@@ -4,12 +4,17 @@ Hack keeps the parts needed to run a project together: services, environment,
 secrets, local URLs, startup helpers and logs. The setup lives in `.hack/` in the
 repository, so teammates and agents use the same definition.
 
-## Project, service and instance
+## Project, instance and branch instance
 
-A **project** is a repository with Hack configuration. A **service** is one part of
-that project, such as a web app, API or database. An **instance** is a running copy
-of the project. Branch instances let you run different versions side by side, each
-at its own URL.
+- A **project** is a repository with a `.hack/` folder. It has one name, and Hack
+  uses that name for addresses, env, logs and helpers.
+- An **instance** is one running copy of a project: its containers, its
+  addresses, its logs.
+- A **branch instance** is a second instance of the same project, named after a
+  branch. `hack up` in a git worktree starts one automatically.
+
+A **service** is one part of a project, such as a web app, API or database. Each
+instance runs its own copy of every service.
 
 New projects get `https://<project>.hack.local` with per-service subdomains such as
 `api.<project>.hack.local`. Existing `.hack` names, `.hack.gy` OAuth aliases and
@@ -59,7 +64,7 @@ project instead of in a spare terminal tab.
 
 In a linked git worktree, `hack up` defaults to a branch instance named after the
 branch. The secret key is inherited from the primary checkout. A detached worktree
-needs an explicit `--branch <name>`. See [Work on another branch](guides/parallel-work.md)
+needs an explicit `--branch <name>`. See [Run a branch or worktree beside main](guides/parallel-work.md)
 and [Worktrees and watchers](../guides/development-runtime-safety.md).
 
 ## Use Hack from an agent or script

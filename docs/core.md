@@ -4,32 +4,42 @@ Hack keeps the parts needed to run a project together: services, environment,
 secrets, local URLs, startup helpers and logs. The setup lives in `.hack/` in the
 repository, so teammates and agents can use the same definition.
 
-Developers and agents use the local CLI to control a local runtime; Hack does not
-require a hosted control service.
+Three words come up on every page:
+
+- A **project** is a repository with a `.hack/` folder. It has one name, and Hack
+  uses that name for addresses, env, logs and helpers.
+- An **instance** is one running copy of a project: its containers, its
+  addresses, its logs.
+- A **branch instance** is a second instance of the same project, named after a
+  branch. `hack up` in a git worktree starts one automatically.
+
+Developers and agents use the local CLI to run projects on their own machine.
+Nothing is hosted.
 
 ```mermaid
 ---
-title: Local runtime context
+title: Who runs what
 ---
 C4Context
   Person(developer, "Developer")
   System_Ext(agent, "Agent harness", "Optional CLI client")
   System(hack, "Hack CLI", "Local project commands")
-  System_Ext(engine, "Local engine", "Compose by default")
+  System_Ext(backend, "Backend", "Compose by default")
   Rel(developer, hack, "Runs commands")
   Rel(agent, hack, "Runs commands")
-  Rel(hack, engine, "Controls services")
+  Rel(hack, backend, "Runs services")
   UpdateLayoutConfig($c4ShapeInRow="2", $c4BoundaryInRow="1")
 ```
 
 ## Project, service and instance
 
-A **project** is a repository with Hack configuration. A **service** is one part of
-that project, such as a web app, API or database. An **instance** is a running copy
-of the project. Branch instances let you run different versions side by side.
+A **service** is one part of a project, such as a web app, API or database. Each
+instance runs its own copy of every service. Branch instances let you run
+different versions of one project side by side.
 
-The supported runtime uses Docker Compose for services and shared local routing
-for HTTPS. New projects use `.hack.local` names. Existing `.hack` names and custom
+A **backend** is what actually runs the containers. Compose is the default; it
+runs services with Docker Compose behind shared local routing for HTTPS. Native is
+an opt-in beta on Apple Silicon macOS. New projects use `.hack.local` names. Existing `.hack` names and custom
 domains keep working. Use `hack open` to find the URL for your instance rather than
 guessing a port or hostname.
 

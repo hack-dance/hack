@@ -67,7 +67,9 @@ export function walkReplaceableChain(opts: {
   /**
    * Inspect only: a directory inside `hackHome` that would be repaired is
    * accepted as it is, without the chmod (HACK-2329). For read-only
-   * observers such as `hack daemon status` and `hack doctor`.
+   * observers such as `hack daemon status` and `hack doctor`. It accepts what
+   * a repair would try to fix: on a filesystem that ignores chmod the repair
+   * still fails later, which this mode cannot see.
    */
   readonly observeOnly?: boolean;
   readonly checked?: Set<string>;

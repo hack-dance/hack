@@ -140,11 +140,36 @@ pub struct RouteProbeDiagnostic {
 }
 
 /// Network authority and bounded attempt count only; never a URL, token or response.
+/// Version 1 carries `host` and `attempts`; version 2 adds a closed `reason` (and the
+/// HTTP `status` for [`NetworkFailureReason::HttpStatus`]).
 #[derive(Debug, Serialize)]
 pub struct NetworkRequestDiagnostic {
     pub version: u8,
     pub host: String,
     pub attempts: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<NetworkFailureReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+}
+
+/// Why the last attempt of a registry layer download failed. A closed vocabulary: it
+/// never carries transport text, a URL or response bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkFailureReason {
+    /// The attempt's time limit passed while the body was still arriving.
+    Timeout,
+    /// The connection ended before the descriptor's size had arrived.
+    ShortRead,
+    /// Every byte arrived but they did not hash to the descriptor's digest.
+    DigestMismatch,
+    /// The registry announced or sent a size other than the descriptor's.
+    SizeMismatch,
+    /// The registry answered with a status other than success.
+    HttpStatus,
+    /// The acquisition's own deadline left no time for another attempt.
+    Deadline,
 }
 
 /// One state path that is not what the runtime requires, relative to the candidate
@@ -257,7 +282,31 @@ pub struct CandidateError {
 
 impl CandidateError {
     /// Carry only a parsed network host, excluding userinfo, query and path.
-    pub fn with_network_request(mut self, host: &str, attempts: usize) -> Self {
+    pub fn with_network_request(self, host: &str, attempts: usize) -> Self {
+        self.network_request(host, attempts, None)
+    }
+
+    /// [`Self::with_network_request`] plus why the last attempt failed (version 2).
+    /// `status` is kept only for [`NetworkFailureReason::HttpStatus`] and a valid code.
+    pub fn with_network_failure(
+        self,
+        host: &str,
+        attempts: usize,
+        reason: NetworkFailureReason,
+        status: Option<u16>,
+    ) -> Self {
+        let status = status.filter(|code| {
+            reason == NetworkFailureReason::HttpStatus && (100..=599).contains(code)
+        });
+        self.network_request(host, attempts, Some((reason, status)))
+    }
+
+    fn network_request(
+        mut self,
+        host: &str,
+        attempts: usize,
+        failure: Option<(NetworkFailureReason, Option<u16>)>,
+    ) -> Self {
         if !host.is_empty()
             && host.len() <= 253
             && attempts <= 3
@@ -267,9 +316,11 @@ impl CandidateError {
         {
             self.refusals.get_or_insert_default().network_request =
                 Some(NetworkRequestDiagnostic {
-                    version: 1,
+                    version: if failure.is_some() { 2 } else { 1 },
                     host: host.to_owned(),
                     attempts,
+                    reason: failure.map(|(reason, _)| reason),
+                    status: failure.and_then(|(_, status)| status),
                 });
         }
         self

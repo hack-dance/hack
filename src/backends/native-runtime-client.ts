@@ -87,6 +87,44 @@ function fixedNativeMessage(
 
 const NETWORK_HOST = /^[a-zA-Z0-9_.:[\]-]{1,253}$/;
 
+/**
+ * Why a registry layer download's last attempt failed (`network_request` version 2).
+ * A closed vocabulary; `http_status` also carries the status code.
+ */
+const LAYER_FAILURE_REASONS: Readonly<Record<string, string>> = {
+  timeout: "the transfer timed out",
+  short_read: "the connection ended before the whole layer arrived",
+  digest_mismatch: "the layer did not match its digest",
+  size_mismatch: "the layer did not match its size",
+  http_status: "the registry answered HTTP",
+  deadline: "the 360-second image deadline was reached",
+};
+
+/** The version-2 reason sentence, or undefined unless every field is closed. */
+function layerFailureReason(
+  request: Record<string, unknown>
+): string | undefined {
+  const reason =
+    typeof request.reason === "string" &&
+    Object.hasOwn(LAYER_FAILURE_REASONS, request.reason)
+      ? request.reason
+      : undefined;
+  if (!reason) {
+    return;
+  }
+  const keys = Object.keys(request).length;
+  if (reason !== "http_status") {
+    return keys === 4 ? LAYER_FAILURE_REASONS[reason] : undefined;
+  }
+  return keys === 5 &&
+    typeof request.status === "number" &&
+    Number.isInteger(request.status) &&
+    request.status >= 100 &&
+    request.status <= 599
+    ? `${LAYER_FAILURE_REASONS[reason]} ${request.status}`
+    : undefined;
+}
+
 /** Render only a parsed authority and bounded count, never a runtime message or URL. */
 function networkRequestFailureMessage(
   value: Record<string, unknown>
@@ -98,8 +136,6 @@ function networkRequestFailureMessage(
         typeof value.code === "string" ? value.code : ""
       ) && isRecord(request)
     ) ||
-    Object.keys(request).length !== 3 ||
-    request.version !== 1 ||
     typeof request.host !== "string" ||
     !NETWORK_HOST.test(request.host) ||
     typeof request.attempts !== "number" ||
@@ -109,7 +145,16 @@ function networkRequestFailureMessage(
   ) {
     return;
   }
-  return `Network request to ${request.host} failed after ${request.attempts} attempt(s).`;
+  if (request.version === 1 && Object.keys(request).length === 3) {
+    return `Network request to ${request.host} failed after ${request.attempts} attempt(s).`;
+  }
+  const reason =
+    request.version === 2 && value.code === "registry_image"
+      ? layerFailureReason(request)
+      : undefined;
+  return reason
+    ? `Registry layer download from ${request.host} failed after ${request.attempts} attempt(s): ${reason}.`
+    : undefined;
 }
 
 /** The native VM pool outlives a failed start; say how to stop it. */

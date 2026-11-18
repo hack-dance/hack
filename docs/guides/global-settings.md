@@ -31,14 +31,18 @@ Common settings:
   `hack global install`, with or without a terminal: it rewrites the proxy
   compose file (`~/.hack/caddy/docker-compose.yml`) without asking, and Compose
   recreates the proxy with the new ports. `hack doctor --fix` does the same.
-  That file is Hack's output; if it was edited by hand, the edited copy is kept
-  as `docker-compose.yml.bak-<UTC time>` beside it before the rewrite.
+  That file is Hack's output; when it differs from Hack's current rendering
+  (edited by hand, or written by an older Hack), the previous copy is kept as
+  `docker-compose.yml.bak-<UTC time>` beside it before the rewrite.
 
 When `hack global up` or `hack global install` cannot start the proxy, it lists
 the listeners holding ports 80 and 443 (address, process and pid when the OS
 reports them), names this setting and exits non-zero. Install then stops before
 DNS and trust setup and prints no next steps. A proxy container that was created
-but never started is removed, so the next attempt creates it fresh.
+but never started is removed, so the next attempt creates it fresh; if Docker
+refuses that, the command prints the `docker rm` to run. `hack doctor --fix`
+does the same when it cannot start the proxy. If only the logging stack fails,
+install still sets up DNS and trust, then exits non-zero without next steps.
 
 Project-level settings live in `.hack/hack.config.json` and override global ones
 where both apply. Settings for the unsupported gateway, cluster and cloud-provider

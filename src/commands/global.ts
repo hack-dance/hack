@@ -1067,19 +1067,27 @@ async function globalInstall(): Promise<number> {
   const paths = getGlobalPaths();
   await materializeGlobalInstallFiles({ paths, useStaticIps });
   logger.success({ message: "Global files ready in ~/.hack/" });
-  const upExit = await globalUp();
-  if (upExit !== 0) {
+  const up = await runGlobalUp();
+  if (up.failedStage === "routing") {
     // Host DNS and trust steps would point at a proxy that is not running;
     // stop before them and before the success next steps (HACK-2328).
     logger.error({
       message:
-        "Global install did not finish: the global proxy stack did not start. Fix the problem above, then rerun: hack global install",
+        "Global install did not finish: the global proxy (Caddy and CoreDNS) did not start. Fix the problem above, then rerun: hack global install",
     });
-    return upExit;
+    return up.exit;
   }
   const hostBootstrapOk = await completeGlobalInstallHostBootstrap({
     useStaticIps,
   });
+  if (up.failedStage === "logging") {
+    // Routing works, so DNS and trust were set up; the logs URL would not.
+    logger.error({
+      message:
+        "Global install did not finish: the proxy is up, but the logging stack (Grafana, Loki, Alloy) did not start. Fix the problem above, then rerun: hack global install",
+    });
+    return up.exit;
+  }
   note(
     [
       "Next:",
@@ -1818,7 +1826,7 @@ async function writeGlobalProxyCompose(opts: {
   const result = await writeManagedProxyCompose(opts);
   if (result.kind === "replaced-hand-edit") {
     logger.warn({
-      message: `Replaced the hand-edited ${opts.path} with Hack's rendering; your copy is at ${result.backupPath}`,
+      message: `Replaced ${opts.path}: it differed from Hack's current rendering (edited by hand, or written by an older Hack). The previous copy is at ${result.backupPath}`,
     });
   }
 }
@@ -1879,12 +1887,23 @@ async function ensureHackdForGlobalUp(): Promise<void> {
   }
 }
 
+/** Which part of `hack global up` failed, for install's decision (HACK-2328). */
+type GlobalUpResult = {
+  readonly exit: number;
+  /** `routing`: proxy/CoreDNS (or a prerequisite); `logging`: only the logging stack. */
+  readonly failedStage: "routing" | "logging" | null;
+};
+
 export async function globalUp(): Promise<number> {
+  return (await runGlobalUp()).exit;
+}
+
+async function runGlobalUp(): Promise<GlobalUpResult> {
   const slimExit = failIfSlimMode({
     feature: "hack global up",
   });
   if (slimExit !== null) {
-    return slimExit;
+    return { exit: slimExit, failedStage: "routing" };
   }
 
   const paths = getGlobalPaths();
@@ -1903,20 +1922,20 @@ export async function globalUp(): Promise<number> {
     logger.error({
       message: `Missing ${paths.caddyCompose}. Run: hack global install`,
     });
-    return 1;
+    return { exit: 1, failedStage: "routing" };
   }
   if (!(await pathExists(paths.loggingCompose))) {
     logger.error({
       message: `Missing ${paths.loggingCompose}. Run: hack global install`,
     });
-    return 1;
+    return { exit: 1, failedStage: "routing" };
   }
 
   const proxyRepairExit = await repairProxyNetworkBeforeUp({
     composeFile: paths.caddyCompose,
   });
   if (proxyRepairExit !== 0) {
-    return proxyRepairExit;
+    return { exit: proxyRepairExit, failedStage: "routing" };
   }
 
   const reservedIps = await resolveReservedIngressIps({
@@ -1951,7 +1970,7 @@ export async function globalUp(): Promise<number> {
         logger.error({
           message: renderIngressConflictMessage({ conflicts: blockers }),
         });
-        return 1;
+        return { exit: 1, failedStage: "routing" };
       }
 
       logger.success({
@@ -1970,14 +1989,17 @@ export async function globalUp(): Promise<number> {
   if (caddyExit !== 0) {
     // A failed start can leave the proxy created but never started, with no
     // network endpoint; remove it so the next attempt recreates it (HACK-2328).
-    await removeUnstartedProxyContainers();
+    const cleanup = await removeUnstartedProxyContainers();
+    if (cleanup.kind === "failed") {
+      logger.warn({ message: cleanup.message });
+    }
     const conflict = await diagnoseProxyPortConflict({
       bindAddress: readProxyBindFromCompose(
         (await readTextFile(paths.caddyCompose)) ?? ""
       ),
     });
     logger.error({ message: conflict });
-    return caddyExit;
+    return { exit: caddyExit, failedStage: "routing" };
   }
   const remainingProxyIssues = await inspectProxyNetwork({
     composeFile: paths.caddyCompose,
@@ -1992,7 +2014,7 @@ export async function globalUp(): Promise<number> {
         "Fix: hack global down && hack global up, then hack doctor",
       ].join("\n"),
     });
-    return 1;
+    return { exit: 1, failedStage: "routing" };
   }
   await reconcileGlobalRoutingBridge({ enabled: !login });
 
@@ -2006,12 +2028,12 @@ export async function globalUp(): Promise<number> {
       cwd: dirname(paths.loggingCompose),
     });
     if (logExit !== 0) {
-      return logExit;
+      return { exit: logExit, failedStage: "logging" };
     }
   }
 
   logger.success({ message: "Global infra is up" });
-  return 0;
+  return { exit: 0, failedStage: null };
 }
 
 type IngressIpConflict = {

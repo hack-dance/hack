@@ -73,19 +73,35 @@ export async function writeManagedProxyCompose(opts: {
   return { kind: "replaced-hand-edit", backupPath };
 }
 
+/** Outcome of {@link removeUnstartedProxyContainers}. */
+export type UnstartedProxyCleanup =
+  | { readonly kind: "none" }
+  | { readonly kind: "removed"; readonly ids: readonly string[] }
+  | {
+      readonly kind: "failed";
+      /** Ids that could not be removed; empty when listing itself failed. */
+      readonly ids: readonly string[];
+      /** What the user can run instead. */
+      readonly message: string;
+    };
+
+const DOCKER_CLEANUP_TIMEOUT_MS = 15_000;
+
 /**
- * Removes global proxy containers that Docker created but never started.
+ * Removes global proxy (`caddy` service) containers that Docker created but
+ * never started.
  *
  * When `docker compose up` fails while publishing ports (for example :443 is
  * in use), the proxy container stays in `created` state with no network
  * endpoint. A later `up` with an unchanged file starts that container as is,
- * and it runs attached to no network. Only containers of this Compose project
- * in `created` state are removed: they never ran, so they hold no state.
- * Returns the removed container ids.
+ * and it runs attached to no network. Only this Compose project's `caddy`
+ * containers in `created` state are removed: they never ran, so they hold no
+ * state, and named volumes are untouched. A concurrent `hack global up` may
+ * hold its own container in `created` for a moment between create and start;
+ * removing it then makes that start fail recoverably, which is accepted.
+ * Each Docker call is bounded, and a failure is returned, not hidden.
  */
-export async function removeUnstartedProxyContainers(): Promise<
-  readonly string[]
-> {
+export async function removeUnstartedProxyContainers(): Promise<UnstartedProxyCleanup> {
   const listed = await exec(
     [
       "docker",
@@ -95,22 +111,36 @@ export async function removeUnstartedProxyContainers(): Promise<
       "--filter",
       `label=com.docker.compose.project=${GLOBAL_CADDY_PROJECT_NAME}`,
       "--filter",
+      "label=com.docker.compose.service=caddy",
+      "--filter",
       "status=created",
     ],
-    { stdin: "ignore" }
+    { stdin: "ignore", timeoutMs: DOCKER_CLEANUP_TIMEOUT_MS }
   );
   if (listed.exitCode !== 0) {
-    return [];
+    return {
+      kind: "failed",
+      ids: [],
+      message: `Could not list never-started proxy containers; check with: docker ps --all --filter label=com.docker.compose.project=${GLOBAL_CADDY_PROJECT_NAME} --filter status=created, and remove any with docker rm <id> before retrying`,
+    };
   }
   const ids = listed.stdout
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => CONTAINER_ID.test(line));
   if (ids.length === 0) {
-    return [];
+    return { kind: "none" };
   }
   const removed = await exec(["docker", "rm", ...ids], {
     stdin: "ignore",
+    timeoutMs: DOCKER_CLEANUP_TIMEOUT_MS,
   });
-  return removed.exitCode === 0 ? ids : [];
+  if (removed.exitCode !== 0) {
+    return {
+      kind: "failed",
+      ids,
+      message: `Could not remove the never-started proxy container (${ids.join(", ")}); it would start with no network next time. Remove it with: docker rm ${ids.join(" ")}`,
+    };
+  }
+  return { kind: "removed", ids };
 }

@@ -203,7 +203,10 @@ import {
   type SupersededRootInventory,
 } from "../lib/mac-ca-trust.ts";
 import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
-import { writeManagedProxyCompose } from "../lib/managed-proxy-compose.ts";
+import {
+  removeUnstartedProxyContainers,
+  writeManagedProxyCompose,
+} from "../lib/managed-proxy-compose.ts";
 import {
   ensureBundledMutagenInstalled,
   getManagedMutagenAgentBundlePath,
@@ -284,8 +287,12 @@ import {
   scopeRuntimeHygieneToProject,
 } from "../lib/project-runtime-hygiene.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
-import { resolveProxyBindAddress } from "../lib/proxy-bind.ts";
+import {
+  readProxyBindFromCompose,
+  resolveProxyBindAddress,
+} from "../lib/proxy-bind.ts";
 import { inspectProxyLoopback } from "../lib/proxy-loopback.ts";
+import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
 import {
   applySecretsHygieneFixes,
@@ -4271,7 +4278,7 @@ async function runDoctorFix(opts: {
   });
   if (proxyCompose.kind === "replaced-hand-edit") {
     note(
-      `Replaced the hand-edited ${paths.caddyCompose} with Hack's rendering; your copy is at ${proxyCompose.backupPath}`,
+      `Replaced ${paths.caddyCompose}: it differed from Hack's current rendering (edited by hand, or written by an older Hack). The previous copy is at ${proxyCompose.backupPath}`,
       "doctor"
     );
   }
@@ -5460,6 +5467,20 @@ async function maybeStartGlobalCaddyCompose(opts: {
   );
   if (started.exitCode !== 0) {
     note(commandFailureDetail({ result: started }), "runtime repair");
+    // Same cleanup and listener hint as `hack global up` (HACK-2328): a
+    // never-started proxy would otherwise start later with no network.
+    const cleanup = await removeUnstartedProxyContainers();
+    if (cleanup.kind === "failed") {
+      note(cleanup.message, "runtime repair");
+    }
+    note(
+      await diagnoseProxyPortConflict({
+        bindAddress: readProxyBindFromCompose(
+          (await readTextFile(opts.paths.caddyCompose)) ?? ""
+        ),
+      }),
+      "runtime repair"
+    );
     return;
   }
   note("CoreDNS and Caddy are ready.", "runtime repair");

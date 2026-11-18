@@ -7,6 +7,7 @@ import {
   spyOn,
   test,
 } from "bun:test";
+import { readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1157,6 +1158,8 @@ test(
     const { code, output } = await runNonInteractiveInstall();
 
     expect(code).not.toBe(0);
+    expect(output).toContain("already in use by");
+    expect(output).toContain("10.8.0.2:443 vpn-client (pid 4242)");
     expect(output).toContain("proxy.bind_address");
     expect(output).toContain("Global install did not finish");
     expect(output).not.toContain("Next:");
@@ -1220,7 +1223,7 @@ test(
     const { code, output } = await runNonInteractiveInstall();
 
     expect(code).toBe(0);
-    expect(output).toContain("hand-edited");
+    expect(output).toContain("differed from Hack's current rendering");
     const { readdir } = await import("node:fs/promises");
     const backups = (await readdir(dirname(caddyCompose))).filter((name) =>
       name.startsWith(`${GLOBAL_CADDY_COMPOSE_FILENAME}.bak-`)
@@ -1233,3 +1236,114 @@ test(
   },
   { timeout: 20_000 }
 );
+
+const VPN_LISTENER = {
+  exitCode: 0,
+  stdout:
+    'LISTEN 0 4096 10.8.0.2:443 0.0.0.0:* users:(("vpn-client",pid=4242,fd=7))\n',
+  stderr: "",
+};
+
+test(
+  "global install fails while :443 is taken, then succeeds once proxy.bind_address is set (HACK-2328)",
+  async () => {
+    await writeInstallStubs();
+    const caddyCompose = globalCaddyComposePath();
+    // Compose fails to publish on every interface, as Docker does when
+    // another address already holds :443; the loopback bind starts.
+    runExitResponder = (cmd) => {
+      if (!(cmd.includes(caddyCompose) && cmd.includes("up"))) {
+        return null;
+      }
+      const text = readFileSync(caddyCompose, "utf8");
+      return text.includes('"127.0.0.1:443:443"') ? 0 : 1;
+    };
+    execMockResponder = (cmd) => (cmd[0] === "ss" ? VPN_LISTENER : null);
+
+    const failed = await runNonInteractiveInstall();
+    expect(failed.code).not.toBe(0);
+    expect(failed.output).toContain(
+      "hack config set --global proxy.bind_address"
+    );
+    expect(failed.output).not.toContain("Next:");
+
+    const configPath = resolveGlobalConfigPath();
+    await mkdir(dirname(configPath), { recursive: true });
+    await writeFile(
+      configPath,
+      `${JSON.stringify({ proxy: { bind_address: "127.0.0.1" } })}\n`
+    );
+    const fixed = await runNonInteractiveInstall();
+
+    expect(fixed.code).toBe(0);
+    expect(fixed.output).toContain("Next:");
+    const compose = await Bun.file(caddyCompose).text();
+    expect(compose).toContain('      - "127.0.0.1:80:80"');
+    expect(compose).toContain('      - "127.0.0.1:443:443"');
+  },
+  { timeout: 20_000 }
+);
+
+test(
+  "global install sets up host DNS but exits non-zero when only the logging stack fails (HACK-2328)",
+  async () => {
+    await writeInstallStubs();
+    const loggingCompose = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_LOGGING_DIR_NAME,
+      GLOBAL_LOGGING_COMPOSE_FILENAME
+    );
+    runExitResponder = (cmd) =>
+      cmd.includes(loggingCompose) && cmd.includes("up") ? 1 : null;
+
+    const { code, output } = await runNonInteractiveInstall();
+
+    expect(code).not.toBe(0);
+    expect(output).toContain(
+      "the logging stack (Grafana, Loki, Alloy) did not start"
+    );
+    expect(output).not.toContain(
+      "the global proxy (Caddy and CoreDNS) did not start"
+    );
+    expect(output).not.toContain("Next:");
+    if (process.platform === "linux") {
+      expect(output).toContain("Linux DNS result");
+    }
+  },
+  { timeout: 20_000 }
+);
+
+test("never-started proxy cleanup reports listing and removal failures (HACK-2328)", async () => {
+  const { removeUnstartedProxyContainers } = await import(
+    "../src/lib/managed-proxy-compose.ts"
+  );
+  const fail = { exitCode: 1, stdout: "", stderr: "boom" };
+  execMockResponder = (cmd) =>
+    cmd[1] === "ps" ? { exitCode: 0, stdout: "", stderr: "" } : null;
+  expect(await removeUnstartedProxyContainers()).toEqual({ kind: "none" });
+
+  execMockResponder = (cmd) => (cmd[1] === "ps" ? fail : null);
+  const listing = await removeUnstartedProxyContainers();
+  expect(listing.kind).toBe("failed");
+  expect(listing.kind === "failed" && listing.message).toContain(
+    "docker ps --all"
+  );
+
+  execMockResponder = (cmd) =>
+    cmd[1] === "ps"
+      ? { exitCode: 0, stdout: "0123456789ab\nnot-an-id\n", stderr: "" }
+      : cmd[1] === "rm"
+        ? fail
+        : null;
+  const removal = await removeUnstartedProxyContainers();
+  expect(removal).toMatchObject({ kind: "failed", ids: ["0123456789ab"] });
+  expect(removal.kind === "failed" && removal.message).toContain(
+    "docker rm 0123456789ab"
+  );
+  // Only this project's caddy containers that never started are listed.
+  const ps = execCalls.find((cmd) => cmd[1] === "ps") ?? [];
+  expect(ps).toContain("label=com.docker.compose.project=hack-dev-proxy");
+  expect(ps).toContain("label=com.docker.compose.service=caddy");
+  expect(ps).toContain("status=created");
+});

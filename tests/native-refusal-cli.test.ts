@@ -19,6 +19,7 @@ import {
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
 import { NATIVE_PROVIDER_PIN_MESSAGE } from "../src/backends/native-runtime-client.ts";
+import { NATIVE_HOOK_OUTPUT_TERMINAL_ONLY } from "../src/lib/native-detached-up.ts";
 import { installNext13Frontend } from "./helpers/native-next13-state.ts";
 import { nativeSetupShellReply } from "./helpers/native-setup-inspection.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
@@ -1201,8 +1202,12 @@ async function expectSameRefusalDetachedAndForeground(opts: {
   readonly line: string;
   readonly code: string;
   readonly message: string;
-  /** Lines both forms print to stderr before the refusal (a failed hook's). */
-  readonly stderr?: readonly string[];
+  /**
+   * A failed hook's lines. Foreground `up` prints them as the hook runs; a
+   * detached launcher whose stderr is not a terminal (as here) prints one
+   * fixed line instead and never these (HACK-2339 security review).
+   */
+  readonly hookLines?: readonly string[];
 }): Promise<void> {
   for (const args of [["up"], ["up", "--detach"]]) {
     const result = await cli({ fixture: opts.f, args, env: SHARED });
@@ -1210,9 +1215,10 @@ async function expectSameRefusalDetachedAndForeground(opts: {
     expect(result.output).toContain(opts.line);
     expect(result.output).not.toContain("E_STARTUP_INCOMPLETE");
     expect(result.output).not.toMatch(STACK_FRAME);
-    for (const line of opts.stderr ?? []) {
-      expect(result.stderr).toContain(line);
-    }
+    expectHookLines(result, opts.hookLines, {
+      detached: args.includes("--detach"),
+      json: false,
+    });
   }
   for (const args of [
     ["up", "--json"],
@@ -1225,12 +1231,36 @@ async function expectSameRefusalDetachedAndForeground(opts: {
       ok: false,
       error: { code: opts.code, message: opts.message },
     });
-    for (const line of opts.stderr ?? []) {
-      expect(result.stderr).toContain(line);
-      expect(result.stdout).not.toContain(line);
-    }
+    // On native, `up --json` is always detached.
+    expectHookLines(result, opts.hookLines, { detached: true, json: true });
   }
   expect(await opts.f.calls()).not.toContain("runtime up");
+}
+
+function expectHookLines(
+  result: Awaited<ReturnType<typeof cli>>,
+  lines: readonly string[] | undefined,
+  mode: { readonly detached: boolean; readonly json: boolean }
+): void {
+  if (!lines) {
+    expect(result.output).not.toContain(NATIVE_HOOK_OUTPUT_TERMINAL_ONLY);
+    return;
+  }
+  for (const line of lines) {
+    // Foreground `up` prints the hook as it runs (its stdout to stdout); a
+    // detached launcher with a non-terminal stderr prints none of it.
+    if (mode.detached) {
+      expect(result.output).not.toContain(line);
+    } else {
+      expect(result.output).toContain(line);
+    }
+  }
+  if (mode.detached) {
+    expect(result.stderr).toContain(NATIVE_HOOK_OUTPUT_TERMINAL_ONLY);
+  }
+  if (mode.json) {
+    expect(result.stdout).not.toContain(NATIVE_HOOK_OUTPUT_TERMINAL_ONLY);
+  }
 }
 
 test(
@@ -1263,7 +1293,7 @@ test(
       line: `E_LIFECYCLE_FAILED: ${message}`,
       code: "E_LIFECYCLE_FAILED",
       message,
-      stderr: [
+      hookLines: [
         "hook stdout line",
         "hook stderr line",
         "Lifecycle (native up before) failed (exit 3): seed-check",

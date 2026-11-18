@@ -221,12 +221,32 @@ function isPrestartRefusal(value: unknown): value is PrestartRefusal {
   );
 }
 
+/** Written instead of a failed hook's lines when stderr is not a terminal. */
+export const NATIVE_HOOK_OUTPUT_TERMINAL_ONLY =
+  "The failed lifecycle hook's output is shown only on a terminal; run hack up without -d in a terminal to see it.";
+
 /**
- * Write the failed hook's lines to stderr, as the foreground printed them
- * while the hook ran (never into stdout), and return the refusal's error.
+ * What the launcher writes to stderr for a failed hook. Its lines only on a
+ * terminal, as the foreground printed them: hook output may carry values,
+ * and a non-terminal stderr is often captured (for example as an agent tool's
+ * result). Otherwise one fixed line says how to see them. Never stdout.
  */
+export function nativePrestartHookLines(opts: {
+  readonly lines: readonly string[] | undefined;
+  readonly terminal: boolean;
+}): readonly string[] {
+  if (!opts.lines?.length) {
+    return [];
+  }
+  return opts.terminal ? opts.lines : [NATIVE_HOOK_OUTPUT_TERMINAL_ONLY];
+}
+
+/** Write the failed hook's stderr lines and return the refusal's error. */
 function reportPrestartRefusal(refusal: PrestartRefusal): Error {
-  for (const line of refusal.hook ?? []) {
+  for (const line of nativePrestartHookLines({
+    lines: refusal.hook,
+    terminal: process.stderr.isTTY === true,
+  })) {
     process.stderr.write(`${line}\n`);
   }
   return prestartRefusalError(refusal);

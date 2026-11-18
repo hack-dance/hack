@@ -3,7 +3,11 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NATIVE_PROVIDER_PIN_MESSAGE } from "../src/backends/native-runtime-client.ts";
-import { nativeDetachedOwnerArgs } from "../src/lib/native-detached-up.ts";
+import {
+  NATIVE_HOOK_OUTPUT_TERMINAL_ONLY,
+  nativeDetachedOwnerArgs,
+  nativePrestartHookLines,
+} from "../src/lib/native-detached-up.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../src/lib/native-environment-notices.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -420,17 +424,9 @@ test("HACK-2339: a refusal before VM work reaches the launcher as the foreground
           message:
             "Lifecycle (native up before) failed (exit 3); values omitted.",
         });
-        // Escape sequences dropped, each line bounded; never on stdout.
-        expect(stderr).toBe(
-          [
-            "Lifecycle (native up before): seed-check: ./seed.sh",
-            "[31mred hook line[0m",
-            "x".repeat(500),
-            "Lifecycle (native up before) failed (exit 3): seed-check: ./seed.sh",
-            "",
-          ].join("\n")
-        );
-        expect(stdout).not.toContain("red hook line");
+        // stderr is not a terminal here: one fixed line, never the hook's.
+        expect(stderr).toBe(`${NATIVE_HOOK_OUTPUT_TERMINAL_ONLY}\n`);
+        expect(stdout + stderr).not.toContain("red hook line");
       } else {
         // After VM work starts, or for an error that is not a closed refusal,
         // nothing crosses: the start stays unconfirmed, as before.
@@ -453,12 +449,15 @@ test("HACK-2339: a refusal before VM work reaches the launcher as the foreground
 const PRESTART_LONG_MESSAGE = `Selected source is too large. ${"assets/deeply/nested/".repeat(2100)}`;
 
 /** Run one HACK-2339 fixture mode through a real launcher and owner. */
-async function prestartRun(mode: string) {
+async function prestartRun(mode: string, terminal = false) {
   const root = await mkdtemp(join(tmpdir(), "native-detached-prestart-"));
   const launcher = Bun.spawn(
     [process.execPath, fixture, "launcher", root, mode],
     {
-      env: fixtureEnv(root),
+      env: {
+        ...fixtureEnv(root),
+        ...(terminal ? { FIXTURE_STDERR_TERMINAL: "1" } : {}),
+      },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -489,8 +488,8 @@ test("HACK-2339: a refusal longer than one line, such as a long source-size list
   });
 }, 30_000);
 
-test("HACK-2339: a real failed hook's output reaches the launcher bounded per line", async () => {
-  const result = await prestartRun("prestart-hook-long-line");
+test("HACK-2339: a real failed hook's output reaches a terminal launcher bounded per line", async () => {
+  const result = await prestartRun("prestart-hook-long-line", true);
   expect(result.code).toBe(1);
   expect(JSON.parse(result.stdout).error.code).toBe("E_LIFECYCLE_FAILED");
   expect(result.stderr.split("\n")).toEqual([
@@ -502,11 +501,37 @@ test("HACK-2339: a real failed hook's output reaches the launcher bounded per li
   ]);
 }, 30_000);
 
-test("HACK-2339: a persistent up.before command that cannot start shows its step and failure", async () => {
-  const result = await prestartRun("prestart-persistent-hook");
+test("HACK-2339: a persistent up.before command that cannot start shows its step and failure on a terminal", async () => {
+  const result = await prestartRun("prestart-persistent-hook", true);
   expect(result.code).toBe(1);
   expect(JSON.parse(result.stdout).error.code).toBe("E_LIFECYCLE_FAILED");
   expect(result.stderr).toBe(
     "Lifecycle (native up before): session: run-session\nLifecycle session could not start.\n"
   );
 }, 30_000);
+
+test("HACK-2339: a failed hook's lines reach only a terminal stderr; otherwise one fixed line says how to see them", async () => {
+  const terminal = await prestartRun("prestart-refusal", true);
+  // Escape sequences dropped, each line bounded; never on stdout.
+  expect(terminal.stderr).toBe(
+    [
+      "Lifecycle (native up before): seed-check: ./seed.sh",
+      "[31mred hook line[0m",
+      "x".repeat(500),
+      "Lifecycle (native up before) failed (exit 3): seed-check: ./seed.sh",
+      "",
+    ].join("\n")
+  );
+  expect(terminal.stdout).not.toContain("red hook line");
+  // A captured stderr (an agent tool, a pipe) never receives hook output.
+  const captured = await prestartRun("prestart-hook-long-line");
+  expect(captured.stderr).toBe(`${NATIVE_HOOK_OUTPUT_TERMINAL_ONLY}\n`);
+  expect(captured.stdout + captured.stderr).not.toContain("last line");
+  expect(JSON.parse(captured.stdout).error.code).toBe("E_LIFECYCLE_FAILED");
+  expect(
+    nativePrestartHookLines({ lines: undefined, terminal: false })
+  ).toEqual([]);
+  expect(nativePrestartHookLines({ lines: ["a"], terminal: true })).toEqual([
+    "a",
+  ]);
+}, 60_000);

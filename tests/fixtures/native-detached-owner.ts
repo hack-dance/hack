@@ -290,6 +290,13 @@ if (role === "channel-holder") {
   server.stop(true);
   await publish(join(root, "holder-stopped"), "stopped");
 } else if (role === "launcher") {
+  // HACK-2339: a failed hook's lines are written only to a terminal stderr.
+  if (process.env.FIXTURE_STDERR_TERMINAL === "1") {
+    Object.defineProperty(process.stderr, "isTTY", {
+      value: true,
+      configurable: true,
+    });
+  }
   const restore =
     mode === "held-channel"
       ? deferChannelClosure()

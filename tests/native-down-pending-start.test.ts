@@ -129,6 +129,44 @@ test("down does not call a retained run stopped while a new start of it is alive
   ).toMatchObject({ status: "stopped", run: run.run });
 });
 
+test("down stops a retained run that a start resumes while down waits, without waiting for its owner to exit", async () => {
+  // Codex review: a resumed run's owner (and startup marker) lives as long
+  // as its services, so down must notice the graph is live again.
+  const f = await fixture();
+  await saveNativeProjectRun({ ...f.scope, run });
+  const finalization = await beginNativeProjectFinalization({
+    scope: f.scope,
+    run,
+  });
+  await finalization.complete();
+  const finish = await beginNativeProjectStartupObservation(f.scope);
+  const live = structuredClone(stoppedGraph);
+  live.receipt.phase = "ready-observed";
+  live.observations["container:web"].state = "running";
+  const calls: string[] = [];
+  let inspections = 0;
+  const started = performance.now();
+  const error = await nativeProjectDown({
+    ...f,
+    startupWaitMs: 30_000,
+    invoke: (request) => {
+      calls.push(request.args.slice(0, 2).join(" "));
+      if (request.args[1] === "inspect") {
+        inspections += 1;
+        return Promise.resolve(inspections <= 2 ? stoppedGraph : live);
+      }
+      // Reaching any other request proves down moved on to stop the run.
+      return Promise.reject(new Error("synthetic stop"));
+    },
+  }).catch((caught: unknown) => caught);
+  await finish();
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).message).not.toContain("still running");
+  // Well within the 30 s wait: it did not wait for the owner to exit.
+  expect(performance.now() - started).toBeLessThan(10_000);
+  expect(inspections).toBeGreaterThanOrEqual(3);
+});
+
 test("the restart coordinator's down never waits for its own start", async () => {
   const f = await fixture();
   const finish = await beginNativeProjectStartupObservation(f.scope);

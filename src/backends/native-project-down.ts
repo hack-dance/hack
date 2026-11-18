@@ -505,6 +505,12 @@ async function awaitPendingStartup(opts: {
   readonly scope: NativeProjectRunScope;
   readonly waitMs?: number;
   readonly untilPublished: boolean;
+  /**
+   * A start that resumes a retained run keeps its owner (and its startup
+   * marker) for the services' lifetime: when this reports the graph live
+   * again, stop waiting and stop it (see {@link RetainedRunResumed}).
+   */
+  readonly resumed?: () => Promise<boolean>;
 }): Promise<boolean> {
   const deadline = performance.now() + (opts.waitMs ?? 120_000);
   let waited = false;
@@ -512,6 +518,9 @@ async function awaitPendingStartup(opts: {
     waited = true;
     if (opts.untilPublished && (await loadNativeProjectRun(opts.scope))) {
       return true;
+    }
+    if (await opts.resumed?.()) {
+      throw new RetainedRunResumed();
     }
     if (performance.now() >= deadline) {
       throw new HackCliError({
@@ -524,6 +533,13 @@ async function awaitPendingStartup(opts: {
   }
   return waited;
 }
+
+/**
+ * Raised inside a down when a start resumed the retained run it waited on:
+ * that run has a new owner and finalization, so {@link nativeProjectDown}
+ * begins once more from the mapping and stops the resumed graph.
+ */
+class RetainedRunResumed extends Error {}
 
 /** Whether an inspected graph is stopped with its data retained. */
 function stoppedRetained(snapshot: unknown): boolean {
@@ -557,7 +573,7 @@ async function downRun(opts: {
   return await loadNativeProjectRun(opts.scope);
 }
 
-export async function nativeProjectDown(opts: {
+async function nativeProjectDownOnce(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly before?: (run: NativeProjectRun) => Promise<void>;
@@ -746,6 +762,7 @@ export async function nativeProjectDown(opts: {
       scope: opts.scope,
       waitMs: opts.startupWaitMs,
       untilPublished: false,
+      resumed: async () => !stoppedRetained(await inspect()),
     }))
   ) {
     initial = await inspect();
@@ -823,6 +840,25 @@ export async function nativeProjectDown(opts: {
  * files appeared since: `hack down` stays the way to apply them. A run started with its
  * overlay refuses before cleanup when the overlay is gone, naming it.
  */
+
+/**
+ * Stop an instance's native run. See {@link nativeProjectDownOnce}. A down
+ * that waited on a start resuming the retained run begins once more, with no
+ * further startup wait, so it stops the resumed graph under its new owner.
+ */
+export async function nativeProjectDown(
+  opts: Parameters<typeof nativeProjectDownOnce>[0]
+): ReturnType<typeof nativeProjectDownOnce> {
+  try {
+    return await nativeProjectDownOnce(opts);
+  } catch (error) {
+    if (!(error instanceof RetainedRunResumed)) {
+      throw error;
+    }
+    return await nativeProjectDownOnce({ ...opts, startupWaitMs: 0 });
+  }
+}
+
 export async function nativeDownEnvironment(opts: {
   readonly scope: NativeProjectRunScope;
   readonly run: NativeProjectRun;

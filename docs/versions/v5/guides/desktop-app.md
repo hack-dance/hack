@@ -21,7 +21,7 @@ title: The app runs the CLI for you
 ---
 flowchart LR
   App["Desktop app"] -->|"runs commands"| Cli["hack CLI you chose"]
-  App -->|"reads project list"| Daemon["hackd"]
+  App -->|"reads projects and status"| Daemon["hackd"]
   Cli --> Daemon
   Cli --> Runtime["Compose or native"]
   Cli --> Files[".hack/ env files"]
@@ -34,12 +34,12 @@ refuses, the app cannot do.
 
 | Where | What you see | CLI behind it |
 | --- | --- | --- |
-| Project list | Every registered project and its branch instances, grouped by state. Search with Cmd-K (Ctrl-K on Linux). | `hackd`, `hack ps --json` |
+| Project list | Every registered project and its branch instances, grouped by state. Search with Cmd-K (Ctrl-K on Linux). | `hackd` (`/v1/projects`); `hack ps --json` for native projects |
 | Project header | Start, Stop, Restart and Open, with progress and errors. | `hack up`, `down`, `restart`, `open` |
-| Services tab | Each service, its state and its routes. | `hack ps --json` |
+| Services tab | Each service, its state and its routes. | `hackd`; `hack ps --json` for native projects |
 | Logs tab | Live logs with pause, search and a filter for one service. | `hack logs --json` |
 | Env tab | Variable names and values per overlay and scope. See below. | `hack env list`, `get`, `add` |
-| Terminal panel | Log and shell tabs inside the window. | `hack logs --pretty`, shells |
+| Terminal panel | Log and shell tabs inside the window. On Linux, only in a build with the `terminal` feature. | `hack logs --pretty`, shells |
 | Setup | One card per setup step: the CLI, the runtime, `hackd`, routing and DNS, certificate trust, the login service. | read-only checks |
 | Doctor | Machine checks once, and project checks for each registered checkout. | `hack doctor --json` |
 | hackd | Whether `hackd` runs and matches the CLI, and a summary of always-on projects. | `hack daemon status --json` |
@@ -67,21 +67,22 @@ projects, check which CLI the status bar names.
 
 Your choice is saved in the app's settings file
 (`~/Library/Application Support/dance.hack.desktop/settings.json` on macOS,
-`$XDG_CONFIG_HOME/hack-desktop/settings.json` elsewhere). No environment
+`$XDG_CONFIG_HOME/hack-desktop/settings.json` elsewhere, by default under
+`~/.config`). No environment
 variable selects the CLI.
 
 ## The Env tab
 
 The Env tab shows one overlay at a time. Tabs across the top choose the
 overlay (`base`, then each overlay the project has). Pills on the right choose
-the scope. [Overlay and scope](run-commands.md) explains the two words.
+the scope. [Overlay and scope](run-commands.md#overlay-and-scope) explains the two words.
 
 - **Plaintext values** load with the list.
 - **A secret shows dots** until you press its eye, for that one name. It hides
   again after 60 seconds, and when you change overlay, scope, tab or project, or
-  the window loses focus.
-- **Copy** puts one value on the clipboard and clears it after 60 seconds if it
-  is still there. On macOS the copied item is marked concealed, so clipboard
+  the window is hidden or loses focus.
+- **Copy** puts one value on the clipboard and clears it after 60 seconds, or
+  when the app quits sooner, if it is still there. On macOS the copied item is marked concealed, so clipboard
   managers that follow that convention do not record it. Linux has no such
   convention.
 - **Edit** and **+ Variable** open an editor that shows the exact command Save
@@ -92,9 +93,9 @@ the scope. [Overlay and scope](run-commands.md) explains the two words.
   revealed, copied or edited.
 
 Some things still need the CLI: creating an overlay
-(`hack env overlay add <name>`) and choosing another key for one run
-(`--key-file`, `--key-env`). The app shows these as inactive buttons that name
-the command. See [Share environment and secrets](share-environment.md).
+(`hack env overlay add <name>`) and, when the key is missing, choosing another
+key for one run (`--key-file`, `--key-env`). The app shows these as inactive
+buttons that name the command. See [Share environment and secrets](share-environment.md).
 
 ## The upgrade review pane
 
@@ -118,8 +119,9 @@ The app does not apply the upgrade. Run `hack upgrade apply` in a terminal. See
 - It never runs `hack upgrade apply`, and it never installs a new version.
 - It never runs a Doctor fix. It shows the finding and the command.
 - It never changes always-on projects. Use `hack autostart`.
-- Its setup checks only read. The only setup actions the app runs itself are
-  `hack daemon start` and `hack daemon install`, when you press the button.
+- Its setup checks only read. The only `hackd` actions it runs itself are
+  `hack daemon start`, `hack daemon install`, and `hack daemon restart` for a
+  `hackd` older than the CLI, each when you press its button.
 - It never asks for an administrator password. A step that needs one, such as
   `hack global install` or `hack global trust`, opens in your own terminal.
 - It never puts a secret value in a command argument, a log or an error

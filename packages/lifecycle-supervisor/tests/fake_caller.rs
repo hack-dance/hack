@@ -205,7 +205,11 @@ impl Drop for Fixture {
         // recorded (a panic or killed supervisor before `remember`). Every
         // fixture process runs in this root, so reap by working directory.
         let survivors = reap_fixture_processes(&self.root);
-        let _ = fs::remove_dir_all(&self.root);
+        // Keep the root while anything still works in it, so a survivor's
+        // recovery state is not lost.
+        if survivors.is_empty() && occupants(&self.root).is_empty() {
+            let _ = fs::remove_dir_all(&self.root);
+        }
         if !survivors.is_empty() && !thread::panicking() {
             panic!(
                 "{} fixture process(es) survived teardown: {survivors:?}",
@@ -215,20 +219,28 @@ impl Drop for Fixture {
     }
 }
 
-/// SIGKILLs every live process whose working directory is `root` and whose
-/// executable is this test binary or the supervisor, until a census finds
-/// none or the deadline passes. Each identity is rechecked right before its
-/// signal so a reused PID is never hit. Returns the PIDs still present.
-fn reap_fixture_processes(root: &Path) -> Vec<i32> {
+/// Live processes (other than this one) whose working directory is `root`,
+/// whatever their executable.
+fn occupants(root: &Path) -> Vec<Identity> {
     let Ok(root) = root.canonicalize() else {
         return Vec::new();
     };
+    census()
+        .into_iter()
+        .filter(|p| p.pid != std::process::id() as i32)
+        .filter(|p| cwd_of(p.pid).as_deref() == Some(root.as_path()))
+        .collect()
+}
+
+/// SIGKILLs every live process whose working directory is `root` and whose
+/// executable is a fixture test binary or the supervisor, until a census finds
+/// none or the deadline passes. Each identity is rechecked right before its
+/// signal so a reused PID is never hit. Returns the PIDs still present.
+fn reap_fixture_processes(root: &Path) -> Vec<i32> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let matched: Vec<_> = census()
+        let matched: Vec<_> = occupants(root)
             .into_iter()
-            .filter(|p| p.pid != std::process::id() as i32)
-            .filter(|p| cwd_of(p.pid).as_deref() == Some(root.as_path()))
             .filter(|p| exe_of(p.pid).is_some_and(|exe| is_fixture_executable(&exe)))
             .collect();
         if matched.is_empty() {
@@ -271,37 +283,50 @@ fn reap_stale_fixture_roots(parent: &Path) {
             continue;
         }
         let root = entry.path();
-        if reap_fixture_processes(&root).is_empty() {
+        // Remove the root only once nothing at all works in it: a process
+        // this sweep does not recognize keeps the root and its state.
+        if reap_fixture_processes(&root).is_empty() && occupants(&root).is_empty() {
             let _ = fs::remove_dir_all(&root);
         }
     }
 }
 
-/// This test binary (any build of it in the same directory) or the supervisor.
+/// A build of this test binary (`fake_caller-<hex>`, from any worktree or
+/// profile) or the supervisor. Callers also require the process to work in a
+/// fixture root, which only this suite creates.
 fn is_fixture_executable(exe: &Path) -> bool {
-    let canonical = |p: &Path| p.canonicalize().ok();
-    if canonical(Path::new(env!("CARGO_BIN_EXE_hack-lifecycle-supervisor"))).as_deref() == Some(exe)
-    {
-        return true;
-    }
-    let Some(current) = std::env::current_exe().ok().and_then(|p| canonical(&p)) else {
-        return false;
-    };
-    exe.parent() == current.parent()
-        && exe
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("fake_caller-"))
+    exe.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| {
+            name == "hack-lifecycle-supervisor"
+                || name.strip_prefix("fake_caller-").is_some_and(|hash| {
+                    !hash.is_empty() && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                })
+        })
+}
+
+/// `/proc/<pid>/<link>`, or the same link of any live task when the main
+/// thread has exited (its own links are then unreadable).
+#[cfg(target_os = "linux")]
+fn task_link(pid: i32, link: &str) -> Option<PathBuf> {
+    fs::read_link(format!("/proc/{pid}/{link}"))
+        .ok()
+        .or_else(|| {
+            fs::read_dir(format!("/proc/{pid}/task"))
+                .ok()?
+                .flatten()
+                .find_map(|task| fs::read_link(task.path().join(link)).ok())
+        })
 }
 
 #[cfg(target_os = "linux")]
 fn cwd_of(pid: i32) -> Option<PathBuf> {
-    fs::read_link(format!("/proc/{pid}/cwd")).ok()
+    task_link(pid, "cwd")
 }
 
 #[cfg(target_os = "linux")]
 fn exe_of(pid: i32) -> Option<PathBuf> {
-    let link = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let link = task_link(pid, "exe")?;
     // A binary rebuilt since the process started reads as "<path> (deleted)".
     let text = link.to_str()?;
     Some(PathBuf::from(
@@ -448,6 +473,9 @@ fn command(root: &Path, action: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_hack-lifecycle-supervisor"));
     command
         .arg(action)
+        // Supervisors and the guards they start inherit this, so teardown and
+        // the stale-root sweep find them by working directory too (HACK-2322).
+        .current_dir(root)
         .env_clear()
         .env("HOME", root)
         .env("PATH", "/usr/bin:/bin")
@@ -592,13 +620,17 @@ fn refused(fixture: &Fixture, action: &str, request: Value) {
 
 /// A fixture process started outside the supervisor, so no receipt records it.
 fn stray_fixture_process(cwd: &Path) -> Child {
+    stray_process(&std::env::current_exe().unwrap(), cwd, "hold")
+}
+
+fn stray_process(exe: &Path, cwd: &Path, mode: &str) -> Child {
     use std::os::unix::process::CommandExt;
-    let mut command = Command::new(std::env::current_exe().unwrap());
+    let mut command = Command::new(exe);
     command
         .args(["--exact", "fixture_process", "--nocapture"])
         .current_dir(cwd)
         .env_clear()
-        .env("SUPERVISOR_FIXTURE", "hold")
+        .env("SUPERVISOR_FIXTURE", mode)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -631,6 +663,90 @@ fn teardown_reaps_fixture_processes_no_receipt_recorded() {
     assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
 }
 
+/// Threads of `pid` that are neither zombie nor dead.
+#[cfg(target_os = "linux")]
+fn live_tasks(pid: u32) -> usize {
+    fs::read_dir(format!("/proc/{pid}/task"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|task| {
+            fs::read_to_string(task.path().join("stat"))
+                .ok()
+                .and_then(|stat| {
+                    let state = stat.rsplit_once(") ")?.1.chars().next()?;
+                    Some(state != 'Z' && state != 'X')
+                })
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn teardown_reaps_a_fixture_whose_main_thread_exited() {
+    use std::os::unix::process::ExitStatusExt;
+    let f = Fixture::new();
+    let mut stray = stray_process(
+        &std::env::current_exe().unwrap(),
+        &f.root,
+        "pthread-main-exit",
+    );
+    // The mode forks a child that ends its main thread and keeps a worker;
+    // that leader's own /proc links are then unreadable.
+    let parent = stray.id();
+    let root = f.root.canonicalize().unwrap();
+    let leader = eventually(|| {
+        census()
+            .into_iter()
+            .map(|p| p.pid as u32)
+            .filter(|pid| *pid != parent && parent_pid(*pid as i32) == Some(parent as i32))
+            .find(|pid| {
+                fs::read_link(format!("/proc/{pid}/cwd")).is_err()
+                    && cwd_of(*pid as i32).as_deref() == Some(root.as_path())
+                    && live_tasks(*pid) > 0
+            })
+    });
+    drop(f);
+    let status = wait(&mut stray, TIMEOUT);
+    assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+    eventually(|| (live_tasks(leader) == 0).then_some(()));
+}
+
+#[test]
+fn stale_sweep_reaps_other_builds_and_keeps_an_occupied_root() {
+    use std::os::unix::process::ExitStatusExt;
+    let mut gone = Command::new("/usr/bin/true").spawn().unwrap();
+    let dead = gone.id();
+    gone.wait().unwrap();
+    let parent = fixture_parent();
+    let root = parent.join(format!("{ROOT_PREFIX}{dead}-1-0"));
+    fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+    // Another worktree's build of this test binary: same name pattern,
+    // different directory.
+    let other = parent.join(format!("fake-caller-other-build-{}", std::process::id()));
+    fs::DirBuilder::new().mode(0o700).create(&other).unwrap();
+    let copy = other.join("fake_caller-0123456789abcdef");
+    fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+    let mut foreign_build = stray_process(&copy, &root, "hold");
+    // A process the sweep does not recognize keeps the root.
+    let mut bystander = Command::new("/bin/sleep")
+        .arg("30")
+        .current_dir(&root)
+        .spawn()
+        .unwrap();
+    reap_stale_fixture_roots(&parent);
+    let status = wait(&mut foreign_build, TIMEOUT);
+    assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+    assert!(bystander.try_wait().unwrap().is_none());
+    assert!(root.exists());
+    bystander.kill().unwrap();
+    bystander.wait().unwrap();
+    reap_stale_fixture_roots(&parent);
+    assert!(!root.exists());
+    let _ = fs::remove_dir_all(&other);
+}
+
 #[test]
 fn stale_roots_of_a_dead_test_process_are_reaped_and_removed() {
     use std::os::unix::process::ExitStatusExt;
@@ -642,9 +758,25 @@ fn stale_roots_of_a_dead_test_process_are_reaped_and_removed() {
     let root = parent.join(format!("{ROOT_PREFIX}{dead}-0-0"));
     fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
     let mut stray = stray_fixture_process(&root);
+    // A supervisor left stopped mid-request, as a run killed while a test holds
+    // a guard SIGSTOPed would leave it.
+    let mut supervisor = command(&root, "run").spawn().unwrap();
+    let canonical_root = root.canonicalize().unwrap();
+    eventually(|| {
+        cwd_of(supervisor.id() as i32)
+            .filter(|dir| *dir == canonical_root)
+            .map(|_| ())
+    });
+    // SAFETY: stops only the supervisor this test just spawned.
+    assert_eq!(
+        unsafe { libc::kill(supervisor.id() as i32, libc::SIGSTOP) },
+        0
+    );
     reap_stale_fixture_roots(&parent);
-    let status = wait(&mut stray, TIMEOUT);
-    assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+    for child in [&mut stray, &mut supervisor] {
+        let status = wait(child, TIMEOUT);
+        assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+    }
     assert!(!root.exists());
 }
 

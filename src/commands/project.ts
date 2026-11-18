@@ -371,7 +371,7 @@ import {
   parseOpenHostPreference,
   resolvePreferredOpenHost,
 } from "../lib/open-host.ts";
-import { openUrl } from "../lib/os.ts";
+import { openUrl, urlOpenerAvailable } from "../lib/os.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -11964,6 +11964,7 @@ export async function emitOpenOrigin(opts: {
   readonly origin: "compose" | "native";
   readonly checkLoopback?: typeof openProxyLoopbackWarning;
   readonly checkResolution?: typeof openUnresolvedHostWarning;
+  readonly openerAvailable?: () => boolean;
 }): Promise<number> {
   const warning =
     opts.origin === "compose"
@@ -11999,6 +12000,16 @@ export async function emitOpenOrigin(opts: {
   }
   if (unresolved) {
     logger.warn({ message: unresolved.hint });
+  }
+  if (!(opts.openerAvailable ?? urlOpenerAvailable)()) {
+    // No desktop here (a server, container or cloud sandbox): the URL is the
+    // answer. Print it on stdout so a script or agent can use it.
+    logger.info({
+      message:
+        "No program to open URLs on this machine (xdg-open is not installed), so open this URL yourself:",
+    });
+    process.stdout.write(`${opts.url}\n`);
+    return 0;
   }
   logger.step({ message: `Opening ${opts.url}` });
   noteBrowserTargetsForLocalNetworkHint([opts.url]);

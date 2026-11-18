@@ -824,3 +824,32 @@ test("an unknown lookup is never a miss: only a missing Hack resolver on macOS i
   expect(notice?.hint).not.toContain("has no address");
   expect(notice?.hint).not.toContain("will not open");
 });
+
+test("on Linux an unresolved name also gives the no-DNS curl form and the no-sudo trust step", async () => {
+  const miss = await openUnresolvedHostWarning({
+    url: "https://hello.hack",
+    resolve: () => Promise.resolve("no-answer" as const),
+    platform: "linux",
+  });
+  expect(miss?.dns).toBe("unresolved");
+  expect(miss?.hint).toContain("systemd-resolved");
+  expect(miss?.hint).toContain(
+    "curl --resolve hello.hack:443:127.0.0.1 https://hello.hack/"
+  );
+  expect(miss?.hint).toContain("hack global trust");
+  const http = await openUnresolvedHostWarning({
+    url: "http://hello.hack:8080",
+    resolve: () => Promise.resolve("no-answer" as const),
+    platform: "linux",
+  });
+  expect(http?.hint).toContain(
+    "curl --resolve hello.hack:8080:127.0.0.1 http://hello.hack:8080/"
+  );
+  expect(http?.hint).not.toContain("hack global trust once");
+  const mac = await openUnresolvedHostWarning({
+    url: "https://hello.hack",
+    resolve: () => Promise.resolve("no-answer" as const),
+    platform: "darwin",
+  });
+  expect(mac?.hint).not.toContain("curl --resolve");
+});

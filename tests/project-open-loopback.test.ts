@@ -115,3 +115,22 @@ test("a native origin with a hostname never runs the DNS check", async () => {
     write.mockRestore();
   }
 });
+
+test("with no URL opener (a server or sandbox) open prints the URL and succeeds", async () => {
+  const write = spyOn(process.stdout, "write").mockImplementation(() => true);
+  try {
+    expect(
+      await emitOpenOrigin({
+        url: "https://hello.hack",
+        json: false,
+        origin: "compose",
+        checkLoopback: async () => null,
+        checkResolution: async () => null,
+        openerAvailable: () => false,
+      })
+    ).toBe(0);
+    expect(write).toHaveBeenCalledWith("https://hello.hack\n");
+  } finally {
+    write.mockRestore();
+  }
+});

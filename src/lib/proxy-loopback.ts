@@ -380,6 +380,22 @@ const DNS_FIX =
   "hack doctor shows the DNS checks, and hack global install sets up Hack's domains (it asks for sudo once). A machine set up by an earlier Hack version may only resolve the older suffix: either run hack global install, or give the project a host under a suffix that already resolves here with hack config set dev_host <name>.<suffix>.";
 
 /**
+ * The Linux fix for a name with no address. Hack's names need
+ * systemd-resolved there, which containers and cloud sandboxes usually do
+ * not run, so the hint also gives a way that needs no DNS: send the request
+ * to Hack's proxy on this machine with curl's --resolve (HACK-2356).
+ */
+function linuxDnsFix(url: URL): string {
+  const port = url.port || (url.protocol === "https:" ? "443" : "80");
+  const host = url.hostname;
+  return `hack doctor's "linux dns route" check says whether this host can use Hack's names: on Linux they need systemd-resolved, which most containers and cloud sandboxes do not run. Where it runs, hack global install sets them up (it asks for sudo once). Without it, reach the app through Hack's proxy on this machine with: curl --resolve ${host}:${port}:127.0.0.1 ${url.protocol}//${host}${url.port ? `:${url.port}` : ""}/${
+    url.protocol === "https:"
+      ? " (for https, run hack global trust once and load the host trust env file it prints; that part needs no sudo)"
+      : ""
+  }`;
+}
+
+/**
  * A notice for a URL whose host has no address, or whose Hack-managed suffix
  * has no DNS installed on this Mac; null when there is nothing to say. IP
  * literals, localhost names and non-HTTP schemes are not checked. A lookup
@@ -408,9 +424,12 @@ export async function openUnresolvedHostWarning(opts: {
     return null;
   }
   if (resolution === "no-answer") {
+    const platform = opts.platform ?? process.platform;
     return {
       dns: "unresolved",
-      hint: `${hostname} has no address on this machine, so the URL will not open. ${DNS_FIX}`,
+      hint: `${hostname} has no address on this machine, so the URL will not open. ${
+        platform === "linux" ? linuxDnsFix(url) : DNS_FIX
+      }`,
     };
   }
   // Unknown stays unknown. The one thing still worth saying: on macOS a name

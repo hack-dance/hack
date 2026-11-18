@@ -113,10 +113,13 @@ bun scripts/package-native-storage-tool.ts "$out" "$source_revision"
 chmod 755 "$out/hack-native" "$out/hack-relay-guest"
 python3 scripts/verify-native-relay.py "$out/hack-relay-guest"
 cp packages/runtime-core/provider-pins.json "$out/provider-pins.json"
+# The CLI runs inside projects the user may not trust. Without these flags a
+# compiled Bun program loads the working directory's bunfig.toml (preloads run
+# as the CLI), .env (BUN_OPTIONS), tsconfig.json and package.json.
 if [ -n "$version" ]; then
-  bun build index.ts --compile --define "__HACK_BUILD_VERSION__=\"$version\"" --outfile "$out/hack-cli"
+  bun build index.ts --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig --no-compile-autoload-package-json --define "__HACK_BUILD_VERSION__=\"$version\"" --outfile "$out/hack-cli"
 else
-  bun build index.ts --compile --outfile "$out/hack-cli"
+  bun build index.ts --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig --no-compile-autoload-package-json --outfile "$out/hack-cli"
 fi
 bun scripts/build-lifecycle-supervisor.ts
 cp dist/hack-lifecycle-supervisor "$out/hack-lifecycle-supervisor"

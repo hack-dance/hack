@@ -95,6 +95,10 @@ import {
   preflightNativeRestart,
 } from "../backends/native-project-restart-preflight.ts";
 import {
+  type NativeProjectRunScope,
+  nativeForeignHomeRefusal,
+} from "../backends/native-project-run.ts";
+import {
   nativeAdaptationCandidates,
   resolveNativeAdaptationSelection,
   resolveNativeHostSettings,
@@ -6969,6 +6973,7 @@ async function launchNativeDetachedUp(opts: {
   readonly cwd: string;
   readonly args: readonly string[];
   readonly json: boolean;
+  readonly action?: "up" | "restart";
   readonly scope: Parameters<
     typeof explainUnconfirmedNativeDetachedStart
   >[0]["scope"];
@@ -6978,6 +6983,7 @@ async function launchNativeDetachedUp(opts: {
       cwd: opts.cwd,
       args: opts.args,
       json: opts.json,
+      action: opts.action,
     });
   } catch (error) {
     throw await explainUnconfirmedNativeDetachedStart({
@@ -6985,6 +6991,33 @@ async function launchNativeDetachedUp(opts: {
       scope: opts.scope,
     });
   }
+}
+
+/** The instance a detached `restart --json` will restart. */
+async function resolveNativeRestartLaunchScope(opts: {
+  readonly ctx: CliContext;
+  readonly args: RestartArgs;
+  readonly native: NonNullable<
+    ReturnType<typeof resolveNativeRuntimeSelection>
+  >;
+}): Promise<NativeProjectRunScope> {
+  const project = await resolveProjectForArgs({
+    ctx: opts.ctx,
+    pathOpt: opts.args.options.path,
+    projectOpt: opts.args.options.project,
+    touchRegistration: false,
+  });
+  const identity = await resolveEffectiveBranchIdentityForCommand({
+    project,
+    branchOption: opts.args.options.branch,
+    noticeToStderr: true,
+  });
+  return {
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    nativeHome: opts.native.home,
+    branch: identity.branch,
+  };
 }
 
 async function handleUpUnlocked({
@@ -9237,7 +9270,16 @@ async function handleRestart({
       target: args.options.target,
       services: args.positionals.services,
     });
-    return await startNativeDetachedUp({
+    // The child's own refusal cannot cross IPC: a run mapping another native
+    // home owns is refused here, with its code and release command, as plain
+    // restart and `up --detach` do (HACK-2339), and an unconfirmed start is
+    // explained by that mapping afterwards.
+    const scope = await resolveNativeRestartLaunchScope({ ctx, args, native });
+    const foreign = await nativeForeignHomeRefusal(scope);
+    if (foreign) {
+      throw foreign;
+    }
+    return await launchNativeDetachedUp({
       cwd: ctx.cwd,
       args: nativeDetachedOwnerArgs({
         action: "restart",
@@ -9245,6 +9287,7 @@ async function handleRestart({
       }),
       json: true,
       action: "restart",
+      scope,
     });
   }
   if (native) {

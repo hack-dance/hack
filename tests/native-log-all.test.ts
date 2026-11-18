@@ -157,3 +157,33 @@ test("after Ctrl-C a stuck consumer cannot hold follow-all open", async () => {
   expect(code).toBe(130);
   expect(Date.now() - started).toBeLessThan(500);
 });
+
+test("a stdout failure other than a closed reader leaves stderr for the follower's diagnostic", async () => {
+  const failing = new Writable({
+    write(_chunk, _encoding, done) {
+      done(Object.assign(new Error("i/o error"), { code: "EIO" }));
+    },
+  });
+  const err = sink();
+  const code = await followAllNativeServices({
+    services: ["api"],
+    json: false,
+    stdout: failing,
+    stderr: err.stream,
+    follow: async ({ stdout, stderr }) => {
+      stdout.on("error", () => undefined);
+      await write(stdout, "api line\n").catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(stderr.destroyed).toBe(false);
+      await write(
+        stderr,
+        "Native logs failed (native_log_stream_uncertain).\n"
+      );
+      return 1;
+    },
+  });
+  expect(code).toBe(1);
+  expect(err.text()).toBe(
+    "api | Native logs failed (native_log_stream_uncertain).\n"
+  );
+});

@@ -85,6 +85,10 @@ export async function followAllNativeServices(opts: {
   const stderr = opts.stderr ?? process.stderr;
   const width = Math.max(0, ...opts.services.map((s) => s.length));
   const writers: Writable[] = [];
+  const writersOf = new Map<Writable, Writable[]>([
+    [stdout, []],
+    [stderr, []],
+  ]);
   const outputs = opts.services.map((service) => {
     if (opts.json) {
       return { service, stdout, stderr };
@@ -93,6 +97,8 @@ export async function followAllNativeServices(opts: {
     const out = prefixedLineWriter({ target: stdout, prefix });
     const err = prefixedLineWriter({ target: stderr, prefix });
     writers.push(out, err);
+    writersOf.get(stdout)?.push(out);
+    writersOf.get(stderr)?.push(err);
     return { service, stdout: out, stderr: err };
   });
   const closeAll = () => {
@@ -100,14 +106,38 @@ export async function followAllNativeServices(opts: {
       writer.destroy();
     }
   };
-  const dispose = await watchLogConsumer(stdout, closeAll);
-  // The shared targets emit their own errors (EPIPE when the reader of
-  // `hack logs | head` goes away); consume them here so a closed consumer
-  // ends every follower quietly instead of becoming an unhandled error.
+  // A stream that failed for another reason also emits `close`; that is
+  // not the reader going away, so it must not tear down stderr's writers.
+  const failed = new Set<Writable>();
+  const dispose = await watchLogConsumer(stdout, () => {
+    if (!failed.has(stdout)) {
+      closeAll();
+    }
+  });
+  // The shared targets emit their own errors; consume them here. A closed
+  // consumer (EPIPE when the reader of `hack logs | head` goes away) ends
+  // every follower quietly. Any other failure (EIO, ENOSPC) fails only the
+  // writers on that target, so each follower can still print its fixed
+  // diagnostic on the other stream.
   const targets = [...new Set([stdout, stderr])];
+  const targetError = new Map<Writable, (error: Error) => void>(
+    targets.map((target) => [
+      target,
+      (error: Error) => {
+        if (consumerClosed(error)) {
+          closeAll();
+          return;
+        }
+        failed.add(target);
+        for (const writer of writersOf.get(target) ?? []) {
+          writer.destroy(error);
+        }
+      },
+    ])
+  );
   if (!opts.json) {
-    for (const target of targets) {
-      target.on("error", closeAll);
+    for (const [target, listener] of targetError) {
+      target.on("error", listener);
     }
   }
   try {
@@ -134,12 +164,21 @@ export async function followAllNativeServices(opts: {
     );
   } finally {
     if (!opts.json) {
-      for (const target of targets) {
-        target.off("error", closeAll);
+      for (const [target, listener] of targetError) {
+        target.off("error", listener);
       }
     }
     dispose();
   }
+}
+
+/** The reader went away: a broken pipe or a stream already torn down. */
+function consumerClosed(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error.code === "EPIPE" || error.code === "ERR_STREAM_DESTROYED")
+  );
 }
 
 /** Longest wait for a prefixed writer to flush its last partial line. */

@@ -496,7 +496,12 @@ async function globalSetup(run: FirstRun): Promise<boolean> {
     ["global", "install"],
     (r) => ({
       ok: "info",
-      note: r.exit === 0 ? "proxy started" : firstError(r),
+      note:
+        r.exit === 0
+          ? "proxy started"
+          : plain(r.stdout + r.stderr).includes("proxy.bind_address")
+            ? "proxy could not publish 80/443; the error names proxy.bind_address"
+            : firstError(r),
     })
   );
   let ok = install.exit === 0;

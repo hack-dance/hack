@@ -117,11 +117,11 @@ seed job. Another service waits for it with
 `depends_on: <name>: condition: service_completed_successfully`. While a one-shot
 runs, the start is making progress, so the 90 seconds do not count down. The
 30-minute ceiling limits the whole start phase. A one-shot that keeps restarting
-is not progress.
+is not progress. A ceiling lower than the start limit is raised to it.
 
 ```mermaid
 ---
-title: Detached start with a migration
+title: Detached start with migration
 ---
 sequenceDiagram
   participant You
@@ -138,9 +138,11 @@ sequenceDiagram
   Hack-->>You: Project started
 ```
 
-Set the limits for one command on the host, or for the project in
-`.hack/hack.config.json`. A host variable wins over the project setting. Values
-are milliseconds.
+Set a limit for one command with a host variable. You can also set the two
+start limits for the project in `.hack/hack.config.json`. The image limit has
+only the host variable. A host variable wins over the project setting. Values
+are milliseconds: up to 1 hour for the start limit, and up to 4 hours for the
+ceiling and the image limit.
 
 ```sh
 # Migrations that can run longer than 30 minutes
@@ -158,7 +160,8 @@ If the start stops at the ceiling while a one-shot still runs, the
 nothing starts the services that wait on it. Do this:
 
 1. Run `hack ps`. Waiting services show `created (waiting for <service>)`.
-2. Wait until the one-shot shows `exited`.
+2. Wait until the one-shot shows `exited`. If its exit code is not 0, read
+   `hack logs <service>` before you go on.
 3. Run `hack up -d` again.
 
 Do not run `hack restart` or `hack down` while a one-shot runs. Both stop it
@@ -167,8 +170,9 @@ first and the default answer is no. With `--json` or `--no-interactive` they go
 on, and report the service in `data.interrupted` and `data.warnings`.
 
 These limits apply to detached Compose starts. Foreground `hack up` has no start
-limit. The native backend keeps a plain start budget,
-`HACK_COMPOSE_STARTUP_TIMEOUT_MS`, with no one-shot ceiling.
+limit. The native backend has one plain start limit,
+`HACK_COMPOSE_STARTUP_TIMEOUT_MS`. It has no one-shot ceiling and does not read
+the project settings.
 
 A failed startup prints a reason. Read it before retrying; use
 [troubleshooting](troubleshooting.md) and `hack doctor` for setup problems.

@@ -45,6 +45,10 @@ pub(crate) struct UpgradePane {
     pub restore: Option<Result<Rollback, String>>,
     /// A snapshot or restore is running (it holds the machine gate).
     pub working: Option<&'static str>,
+    /// Bumped when a snapshot or restore finishes: a check started before
+    /// describes the files before it, so its result is dropped and the
+    /// check runs again.
+    pub generation: u64,
 }
 
 impl HackApp {
@@ -77,6 +81,7 @@ impl HackApp {
         self.upgrade.checking = true;
         let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
         let epoch = self.model.source_epoch();
+        let generation = self.upgrade.generation;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let (check, snapshots) = cx
@@ -88,6 +93,11 @@ impl HackApp {
                     return;
                 }
                 this.upgrade.checking = false;
+                if this.upgrade.generation != generation {
+                    // A snapshot or restore finished meanwhile: read again.
+                    this.load_upgrade(cx);
+                    return;
+                }
                 this.upgrade.check = Some(check);
                 this.upgrade.snapshots = Some(snapshots);
                 cx.notify();
@@ -151,6 +161,7 @@ impl HackApp {
                 }
                 this.machine.finish(ticket);
                 this.upgrade.working = None;
+                this.upgrade.generation += 1;
                 this.upgrade.snapshot = Some(snapshot);
                 this.upgrade.snapshots = Some(snapshots);
                 cx.notify();
@@ -206,6 +217,7 @@ impl HackApp {
                 }
                 this.machine.finish(ticket);
                 this.upgrade.working = None;
+                this.upgrade.generation += 1;
                 this.upgrade.restore = Some(result);
                 // What the check said is about the files before the restore.
                 this.upgrade.check = None;

@@ -39,9 +39,17 @@ while [ "$n" -lt "$PASSES" ]; do
   printf '{"name":"demo"}\n' > "$P/.hack/hack.config.json"
   printf '# old rules\n' > "$P/.hack/.gitignore"
   cp "$P/.hack/.gitignore" "$T/seed"
-  git -C "$P" init -q
-  git -C "$P" -c user.email=fixture@example.invalid -c user.name=fixture add -A
-  git -C "$P" -c user.email=fixture@example.invalid -c user.name=fixture commit -qm fixture
+  # Git in a clean environment: the temp HOME, no system or global config,
+  # no hooks, no signing, nothing inherited (GIT_DIR and friends).
+  tgit() {
+    env -i PATH=/usr/bin:/bin HOME="$T/userhome" GIT_CONFIG_NOSYSTEM=1 \
+      GIT_CONFIG_GLOBAL=/dev/null git -C "$P" -c core.hooksPath=/dev/null \
+      -c commit.gpgsign=false -c user.email=fixture@example.invalid \
+      -c user.name=fixture "$@"
+  }
+  tgit init -q
+  tgit add -A
+  tgit commit -qm fixture
   cat > "$T/bin/hack" <<STANDIN
 #!/bin/sh
 case "\$1" in

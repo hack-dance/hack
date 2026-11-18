@@ -23,8 +23,17 @@ const COMPOSE_OUT = "compose-stdout-marker";
  */
 const STUB = `#!/bin/sh
 if [ "$1" != "compose" ]; then exit 0; fi
+# After down, ps lists nothing (HACK-2340: down checks what is left).
+marker="$(dirname "$0")/.compose-down"
 case " $* " in
+  *" down "*)
+    : > "$marker"
+    printf '%s\\n' '${COMPOSE_OUT}'; exit 0 ;;
+  *" up "*)
+    rm -f "$marker"
+    printf '%s\\n' '${COMPOSE_OUT}'; exit 0 ;;
   *" ps "*)
+    if [ -f "$marker" ]; then exit 0; fi
     case " $* " in
       *" --format "*)
         printf '%s\\n' '{"ID":"c1","Service":"api","Name":"shop-api-1","State":"running","Status":"Up","ExitCode":0}' ;;

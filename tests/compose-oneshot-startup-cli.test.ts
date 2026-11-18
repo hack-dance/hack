@@ -25,15 +25,21 @@ const CLI = resolve(import.meta.dir, "..", "index.ts");
 const STUB = `#!/bin/sh
 state="$STUB_STATE"
 if [ "$1" != "compose" ]; then exit 0; fi
+# After down, ps lists nothing (HACK-2340: down checks what is left).
 case " $* " in
+  *" down "*)
+    : > "$state/down-ran"
+    exit 0 ;;
   *" up "*" --no-start"*) exit 0 ;;
   *" up "*" -d "*|*" up -d"*)
+    rm -f "$state/down-ran"
     : > "$state/up-started"
     printf '%s\\n' 'compose-up-stdout-marker'
     sleep "\${STUB_UP_SECONDS:-1}"
     : > "$state/up-done"
     exit 0 ;;
   *" ps "*)
+    if [ -f "$state/down-ran" ]; then exit 0; fi
     if [ -n "\${STUB_PS_HANG:-}" ] && [ ! -f "$state/up-done" ]; then
       printf '%s\\n' "$$" > "$state/ps.pid"
       exec sleep 60

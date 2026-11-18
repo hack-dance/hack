@@ -40,6 +40,9 @@
 //!                                 wait for the active tab's notice (a
 //!                                 refused paste) to contain text
 //! tab <services|logs|env>        show that detail tab
+//! expect-usage <text> [<seconds>] wait for a line of the Services tab's
+//!                                 usage: "<service> <cpu> <memory>",
+//!                                 "emulated <service>" or the header total
 //! upgrade                         open the Upgrade pane (runs the check and
 //!                                 lists the snapshots)
 //! expect-upgrade <text> [<seconds>]
@@ -143,6 +146,10 @@ pub enum Step {
     },
     Wait(Duration),
     Tab(usize),
+    ExpectUsage {
+        text: String,
+        within: Duration,
+    },
     Upgrade,
     ExpectUpgrade {
         text: String,
@@ -277,9 +284,11 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
             ("upgrade", []) => Step::Upgrade,
             ("upgrade-snapshot", []) => Step::UpgradeSnapshot,
             ("upgrade-restore", []) => Step::UpgradeRestore,
-            ("expect" | "expect-notice" | "expect-cli" | "expect-hackd" | "expect-upgrade", _)
-                if !rest.is_empty() =>
-            {
+            (
+                "expect" | "expect-notice" | "expect-cli" | "expect-hackd" | "expect-upgrade"
+                | "expect-usage",
+                _,
+            ) if !rest.is_empty() => {
                 let (text, within) = match rest.rsplit_once(char::is_whitespace) {
                     Some((t, secs)) if secs.parse::<u64>().is_ok() => (
                         t.trim(),
@@ -293,6 +302,7 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
                     "expect-cli" => Step::ExpectCli { text, within },
                     "expect-hackd" => Step::ExpectHackd { text, within },
                     "expect-upgrade" => Step::ExpectUpgrade { text, within },
+                    "expect-usage" => Step::ExpectUsage { text, within },
                     _ => Step::ExpectNotice { text, within },
                 }
             }
@@ -649,6 +659,22 @@ async fn run_step(handle: &Win, step: &Step, cx: &mut AsyncApp) -> Result<String
             handle
                 .update(cx, |app, _, cx| app.set_tab(*i, cx))
                 .map_err(|e| e.to_string())?;
+            Ok(String::new())
+        }
+        Step::ExpectUsage { text, within } => {
+            poll(handle, cx, *within, |app, _, _| {
+                app.usage_lines()
+                    .iter()
+                    .any(|l| l.contains(text.as_str()))
+                    .then_some(())
+            })
+            .await
+            .ok_or_else(|| {
+                let now = handle
+                    .update(cx, |app, _, _| app.usage_lines())
+                    .unwrap_or_default();
+                format!("Services tab did not show {text:?} within {within:?} (shows: {now:?})")
+            })?;
             Ok(String::new())
         }
         Step::Upgrade => {

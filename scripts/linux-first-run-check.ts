@@ -21,8 +21,8 @@
  * operator owns them; existing volumes of those projects count too, since they
  * hold the operator's state (Caddy's CA). It removes only what it created: its
  * `lq-<id>` project containers, networks and volumes; it stops the global
- * stack when none of its containers existed before, and removes its labeled
- * volumes when none of those existed either. PATH entries holding a
+ * stack when none of its containers existed before, and removes a global
+ * project's labeled volumes when that project had none before. PATH entries holding a
  * `hack` are dropped, so re-invocations run the CLI under test.
  *
  * Root steps (Linux DNS, system trust) are never run; the check records the
@@ -256,8 +256,8 @@ class FirstRun {
   readonly droppedPath: readonly string[];
   /** No global container existed before: `global down` at the end. */
   startedGlobalStack = false;
-  /** No global volume existed before: remove those volumes at the end. */
-  ownsGlobalVolumes = false;
+  /** Global projects with no volume before the run: their volumes are removed. */
+  ownedVolumeProjects: string[] = [];
 
   readonly opts: CheckOptions;
 
@@ -267,7 +267,6 @@ class FirstRun {
     this.home = join(opts.scratch, "home");
     this.project = `lq-${id}`;
     this.repo = join(opts.scratch, this.project);
-    const budgetMs = Math.max(90_000, (opts.oneShotSeconds + 120) * 1000);
     const path = pathWithoutHack(process.env.PATH ?? "/usr/bin:/bin");
     this.droppedPath = path.dropped;
     this.env = {
@@ -279,7 +278,6 @@ class FirstRun {
       HACK_NO_INTERACTIVE: "1",
       HACK_SYSTEMD_DISABLE: "1",
       HACK_DAEMON_AUTOSTART_DISABLE: "1",
-      HACK_COMPOSE_STARTUP_TIMEOUT_MS: String(budgetMs),
     };
   }
 
@@ -435,7 +433,7 @@ async function preflight(run: FirstRun): Promise<boolean> {
   }
   const shared: string[] = [];
   let containersExisted = false;
-  let volumesExisted = false;
+  const fresh: string[] = [];
   for (const project of GLOBAL_PROJECTS) {
     const label = `label=com.docker.compose.project=${project}`;
     const ids = await run.sh(["docker", "ps", "-aq", "--filter", label]);
@@ -454,7 +452,8 @@ async function preflight(run: FirstRun): Promise<boolean> {
     ]);
     if (volumes.stdout.trim() !== "") {
       shared.push(`${project} volumes`);
-      volumesExisted = true;
+    } else {
+      fresh.push(project);
     }
   }
   if ((await run.sh(["docker", "network", "inspect", "hack-dev"])).exit === 0) {
@@ -474,7 +473,7 @@ async function preflight(run: FirstRun): Promise<boolean> {
   // remove the global volumes only if none existed before (a reused volume,
   // such as Caddy's CA, stays).
   run.startedGlobalStack = !containersExisted;
-  run.ownsGlobalVolumes = !volumesExisted;
+  run.ownedVolumeProjects = fresh;
   run.record({
     step: "0 preflight",
     command: "docker info",
@@ -692,7 +691,7 @@ async function projectFlow(run: FirstRun, ca: string): Promise<void> {
           : "migrate not reported completed";
       }),
     {
-      display: `hack up -d --json (one-shot ${run.opts.oneShotSeconds}s, HACK_COMPOSE_STARTUP_TIMEOUT_MS=${run.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS})`,
+      display: `hack up -d --json (one-shot ${run.opts.oneShotSeconds}s, default startup budget)`,
     }
   );
   await run.step("3 ps --json", ["ps", "--json"], (r) => oneJson(r));
@@ -1030,11 +1029,17 @@ async function cleanup(run: FirstRun): Promise<void> {
   if (run.startedGlobalStack) {
     await run.hack(["global", "down"], { timeoutMs: 120_000 });
   }
-  const removesGlobalVolumes = run.startedGlobalStack && run.ownsGlobalVolumes;
+  const removesGlobalVolumes =
+    run.startedGlobalStack && run.ownedVolumeProjects.length > 0;
   if (removesGlobalVolumes) {
-    // `global down` keeps named volumes; the check created them, so it
-    // removes them (only these projects' labeled volumes).
-    removed.push(...(await removeLabeled(run, GLOBAL_PROJECTS, ["volume"])));
+    // `global down` keeps named volumes; the check created these projects'
+    // volumes, so it removes them. removeLabeled first force-removes any
+    // container still labeled with those projects: they are the check's own
+    // (no global container existed before), and a failed `global down` would
+    // otherwise keep the volumes in use.
+    removed.push(
+      ...(await removeLabeled(run, run.ownedVolumeProjects, ["volume"]))
+    );
   }
   const left = await readdir(join(run.home, ".hack")).catch(() => []);
   const stack = run.startedGlobalStack ? "stopped" : "left as found";

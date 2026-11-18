@@ -27,7 +27,9 @@ const LAYER_ROOT: &str = "/var/lib/docker/overlay2/";
 /// instead when the file cannot be used. A single layer is read in place.
 ///
 /// Lines are trimmed and empty ones skipped, and only the first entry with a name counts,
-/// as in the engine's resolver. IDs are compared and printed as numbers, so `01000` is
+/// as in the engine's resolver. The engine also trims Unicode spaces, which the report
+/// cannot judge, so a trimmed line that still starts or ends with a byte other than printable
+/// ASCII, before the entry that decides, is reported as `?` instead. IDs are compared and printed as numbers, so `01000` is
 /// UID 1000. An entry before the user's own whose UID is not plain digits could equal it
 /// after the engine's own parsing, so it is reported as `?`, which leaves the name
 /// unresolved; so does a first entry with the UID that the report cannot carry.
@@ -57,18 +59,20 @@ report() {
   if ! test -f "$f"; then echo "$name absent"; return; fi
   if test "$(stat -c %s "$f")" -gt "$budget"; then echo "$name large"; return; fi
   if test "$name" = passwd; then
-    lines=$(awk -F: -v n="$key" '
+    lines=$(LC_ALL=C awk -F: -v n="$key" '
       function ok() { return length($1) <= 64 && $3 ~ /^[0-9]+$/ && length($3) <= 10 && $4 ~ /^[0-9]+$/ && length($4) <= 10 }
-      { sub(/^[ \t\r]+/, ""); sub(/[ \t\r]+$/, "") }
+      { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); odd = $0 ~ /^[^!-~]/ || $0 ~ /[^!-~]$/ }
       $0 == "" { next }
-      NR == FNR { if ($1 == n && !seen) { seen = 1; if (ok()) { u = $3 + 0; own = $1 ":x:" u ":" ($4 + 0) } } next }
-      own == "" || done { next }
-      $3 !~ /^[0-9]+$/ || length($3) > 10 { print "?"; done = 1; next }
+      NR == FNR { if (seen) next; seen = odd || $1 == n; if (odd) bad = 1; else if (seen && ok()) { u = $3 + 0; own = $1 ":x:" u ":" ($4 + 0) } next }
+      bad || own == "" || done { next }
+      odd || $3 !~ /^[0-9]+$/ || length($3) > 10 { print "?"; done = 1; next }
       $3 + 0 == u { if (ok()) print $1 ":x:" ($3 + 0) ":" ($4 + 0); else print "?"; done = 1 }
-      END { if (own != "") print own }' "$f" "$f")
+      END { if (bad) print "?"; else if (own != "") print own }' "$f" "$f")
   else
-    lines=$(awk -F: -v n="$key" '
-      { sub(/^[ \t\r]+/, ""); sub(/[ \t\r]+$/, "") }
+    lines=$(LC_ALL=C awk -F: -v n="$key" '
+      { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); odd = $0 ~ /^[^!-~]/ || $0 ~ /[^!-~]$/ }
+      $0 == "" { next }
+      odd { print "?"; exit }
       $1 == n { if (length($1) <= 64 && $3 ~ /^[0-9]+$/ && length($3) <= 10) print $1 ":x:" ($3 + 0); exit }' "$f")
   fi
   printf '%s %s\n' "$name" "$(printf '%s\n' "$lines" | base64 -w0)"
@@ -338,6 +342,10 @@ mod tests {
         let non_numeric = "odd:x:abc:0::/:/bin/sh\napp:x:1000:200::/:/bin/sh\n";
         assert!(!first_with_uid_is(non_numeric, "app"));
         assert!(!first_with_uid_is("app:x:1000x:200::/:/bin/sh\n", "app"));
+        // The report's `?` for an ambiguous file leaves every form unresolved.
+        assert_eq!(resolve_text("app", "?\n", None), None);
+        assert_eq!(resolve_text("app:200", "?\n", None), None);
+        assert_eq!(resolve_text("1000:staff", "", Some("?\n")), None);
         // With an explicit group the identity is UID:GID, so a shared UID is not ambiguous.
         assert_eq!(resolve_text("app:200", shared, None).unwrap(), "1000:200");
         assert_eq!(

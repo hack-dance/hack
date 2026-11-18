@@ -916,6 +916,26 @@ test(
     expect(project?.fix).toContain('"aliases": ["<alias>"]');
     // Authored alias names never reach the report.
     expect(JSON.stringify(report)).not.toContain("api.other.hack");
+    // One alias declared twice in two spellings still gives a report, with
+    // the fixed text and no authored name.
+    const twice = await fixture({
+      services: {
+        web: {
+          image: IMAGE,
+          extra_hosts: [
+            "private.example:host-gateway",
+            "PRIVATE.EXAMPLE.:host-gateway",
+          ],
+        },
+      },
+    });
+    const duplicate = await preflight(twice, GRANT);
+    expect(codes(duplicate.report, "cli")).toContain(
+      "extra_hosts_without_dependencies:web"
+    );
+    expect(JSON.stringify(duplicate.report).toLowerCase()).not.toContain(
+      "private.example"
+    );
     expect(project?.fix).toContain("hack internal extra-hosts unset");
   },
   SPAWN_TIMEOUT_MS

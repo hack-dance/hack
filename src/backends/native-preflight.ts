@@ -933,16 +933,22 @@ function serviceHostAliasText(
   name: string,
   service: unknown
 ): Explanation & { readonly field?: string } {
-  const aliases = isRecord(service)
-    ? (nativeServiceHostAliases({
-        services: { [name]: service },
-        profiles: Array.isArray(service.profiles)
-          ? service.profiles.filter(
-              (profile): profile is string => typeof profile === "string"
-            )
-          : [],
-      })[name] ?? [])
-    : [];
+  let aliases: string[] = [];
+  try {
+    aliases = isRecord(service)
+      ? (nativeServiceHostAliases({
+          services: { [name]: service },
+          profiles: Array.isArray(service.profiles)
+            ? service.profiles.filter(
+                (profile): profile is string => typeof profile === "string"
+              )
+            : [],
+        })[name] ?? [])
+      : [];
+  } catch {
+    // A declaration native refuses (such as one alias declared twice) has
+    // authored names in its error; keep the fixed text and let up name it.
+  }
   const named = aliases.includes(DOCKER_HOST_ALIAS)
     ? `, including ${DOCKER_HOST_ALIAS}`
     : "";

@@ -132,7 +132,10 @@ class Interrupted extends Error {}
 /** Set by a signal and by cleanup: no measured process may start after it. */
 let stopping = false;
 /** Every `run` child still alive, so cleanup can wait for it. */
-const inflight = new Set<{ readonly exited: Promise<number> }>();
+const inflight = new Set<{
+  kill(signal?: NodeJS.Signals): void;
+  readonly exited: Promise<number>;
+}>();
 
 function quantile(sorted: readonly number[], q: number): number {
   const index = Math.min(
@@ -221,15 +224,22 @@ async function run(opts: {
     new Response(child.stderr).text(),
     child.exited,
   ]).finally(() => inflight.delete(child));
+  // A command that was in flight when the signal came must not let the main
+  // flow carry on to its next step.
+  if (stopping && opts.duringCleanup !== true) {
+    throw new Interrupted("interrupted");
+  }
   const wallMs = performance.now() - started;
   const usage = child.resourceUsage();
-  const cpuMicros = usage
-    ? Number(usage.cpuTime.user) + Number(usage.cpuTime.system)
-    : 0;
-  // Bun reports maxRSS in bytes (checked on Linux; not yet on macOS).
-  const maxRssKb = usage ? Number(usage.maxRSS) / 1024 : 0;
   return {
-    sample: { wallMs, cpuMs: cpuMicros / 1000, maxRssKb },
+    sample: {
+      wallMs,
+      cpuMs: usage
+        ? (Number(usage.cpuTime.user) + Number(usage.cpuTime.system)) / 1000
+        : null,
+      // Bun reports maxRSS in bytes (checked on Linux; not yet on macOS).
+      maxRssKb: usage ? Number(usage.maxRSS) / 1024 : null,
+    },
     exitCode,
     stdout,
     stderr,
@@ -691,28 +701,51 @@ const longLived = new Set<{
 }>();
 let cleaning: Promise<void> | null = null;
 
+/** Waits until every listed process has exited, or `ms` has passed. */
+async function settle(
+  processes: Iterable<{ readonly exited: Promise<number> }>,
+  ms: number
+): Promise<void> {
+  await Promise.race([
+    Promise.all([...processes].map((child) => child.exited)),
+    Bun.sleep(ms),
+  ]);
+}
+
 async function removeOwnedResources(): Promise<void> {
+  // Nothing new starts after this: `run` and `startLongLived` both refuse.
   stopping = true;
   for (const child of longLived) {
     child.kill("SIGTERM");
   }
-  // A signal reaches the commands in flight too; let them finish dying so
-  // none of them creates a container after the `down` below.
-  await Promise.all(
-    [...longLived, ...inflight].map((child) =>
-      Promise.race([child.exited, Bun.sleep(15_000)])
-    )
-  );
+  // A terminal's signal reaches the commands in flight too. One sent to this
+  // script alone does not, so after a short grace they are told to stop, and
+  // killed if they still run, before the `down` below: none of them may
+  // create a container after it.
+  await settle(inflight, 5000);
+  for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+    for (const child of inflight) {
+      child.kill(signal);
+    }
+    await settle([...inflight, ...longLived], 15_000);
+  }
+  for (const child of longLived) {
+    child.kill("SIGKILL");
+  }
   if (dockerHost !== null) {
     for (const name of [projectName, rawName]) {
-      // By project name, not by file: it also removes a network left by a
-      // start that failed before it created a container.
+      // By project name and the fixture's own file, so Compose does not
+      // search the parent directories for one. It also removes a network
+      // left by a start that failed before it created a container (an
+      // empty file would not: the network is defined by the services). If
+      // the file was never written, fall back to the project label alone.
       await run({
         argv: [
           "docker",
           "compose",
           "-p",
           name,
+          ...(existsSync(composeFile) ? ["-f", composeFile] : []),
           "down",
           "--remove-orphans",
           "-t",
@@ -754,6 +787,25 @@ try {
     symlinkSync(userPlugins, join(dockerConfig, "cli-plugins"));
   }
   writeProject({ root, name: projectName, image });
+
+  /** hackd or `mcp serve`: refused once stopping, so cleanup sees every one. */
+  const startLongLived = (
+    argv: string[],
+    options: { readonly cwd: string; readonly stdin: "ignore" | "pipe" }
+  ) => {
+    if (stopping) {
+      throw new Interrupted("interrupted");
+    }
+    const child = Bun.spawn(argv, {
+      cwd: options.cwd,
+      env,
+      stdin: options.stdin,
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    longLived.add(child);
+    return child;
+  };
 
   if (flags["skip-docker"]) {
     notes.push("Docker sections skipped (--skip-docker).");
@@ -1114,14 +1166,10 @@ try {
 
   // 4. hackd: /v1/projects latency by registry size, then idle cost.
   if (!flags["skip-daemon"]) {
-    const daemon = Bun.spawn([hack, "daemon", "start", "--foreground"], {
+    const daemon = startLongLived([hack, "daemon", "start", "--foreground"], {
       cwd: root,
-      env,
       stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
     });
-    longLived.add(daemon);
     const socket = join(home, ".hack", "daemon", "hackd.sock");
     const fetchProjects = async (query: string) => {
       const started = performance.now();
@@ -1224,15 +1272,15 @@ try {
       )}`
     );
 
-    const mcp = Bun.spawn([hack, "mcp", "serve"], {
+    const mcp = startLongLived([hack, "mcp", "serve"], {
       cwd: project,
-      env,
       stdin: "pipe",
-      stdout: "ignore",
-      stderr: "ignore",
     });
-    longLived.add(mcp);
-    mcp.stdin.write(
+    const mcpInput = mcp.stdin;
+    if (typeof mcpInput !== "object" || mcpInput === null) {
+      throw new Error("mcp serve started without a stdin pipe.");
+    }
+    mcpInput.write(
       `${JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
@@ -1244,7 +1292,7 @@ try {
         },
       })}\n`
     );
-    mcp.stdin.flush();
+    mcpInput.flush();
     await Bun.sleep(3000);
     const idle = await sampleIdle({
       targets: [
@@ -1286,13 +1334,16 @@ try {
   }
   // After Hack's own `down` and before the script's cleanup: what the
   // measured commands themselves left behind.
-  const leftovers = dockerReady
-    ? [projectName, rawName].reduce(
-        (sum, name) =>
-          sum + allContainers(env, name) + ownedNetworks(env, name),
-        0
-      )
-    : 0;
+  const counts = dockerReady
+    ? [projectName, rawName].flatMap((name) => [
+        allContainers(env, name),
+        ownedNetworks(env, name),
+      ])
+    : [];
+  // A count Docker could not give is unknown, never zero.
+  const leftovers = counts.some((count) => count < 0)
+    ? null
+    : counts.reduce((sum, count) => sum + count, 0);
   report.cleanup = { containers_and_networks_left: leftovers };
   if (leftovers !== 0) {
     failed = true;
@@ -1309,7 +1360,7 @@ try {
     `- load average at start ${metadata.load_average_start.join(" ")}, at end ${loadavg()
       .map((value) => value.toFixed(2))
       .join(" ")}`,
-    `- cleanup: ${leftovers} fixture containers and networks left by the measured commands`,
+    `- cleanup: ${leftovers ?? "unknown (a Docker query failed)"} fixture containers and networks left by the measured commands`,
     ...notes.map((note) => `- note: ${note}`),
   ].join("\n");
   process.stdout.write(`${header}\n\n${sections.join("\n\n")}\n`);

@@ -67,6 +67,10 @@ test("release commit message does not embed the generated notes", async () => {
   );
   expect(Array.isArray(git)).toBe(true);
   const options = (git as readonly [string, Record<string, unknown>])[1];
-  expect(options.message).toBe("chore(release): ${nextRelease.version}");
+  const message = String(options.message);
+  // Any wording is fine as long as the notes are not part of the argument.
+  expect(message).toStartWith("chore(release): ${nextRelease.version}");
+  expect(message).not.toContain("nextRelease.notes");
+  expect(Buffer.byteLength(message)).toBeLessThan(1024);
   expect(options.assets).toContain("CHANGELOG.md");
 });

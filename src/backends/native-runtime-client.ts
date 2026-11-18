@@ -111,6 +111,36 @@ function networkRequestFailureMessage(
   return `Network request to ${request.host} failed after ${request.attempts} attempt(s).`;
 }
 
+/** The native VM pool outlives a failed start; say how to stop it. */
+export const NATIVE_IDLE_POOL_NOTE =
+  "The native VM pool stays running; when no other native project uses it, stop it with runtime down --json on this native home.";
+
+/** A state path relative to the native state root, or one final name; never absolute. */
+const STATE_COMPONENT =
+  /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+){0,15}$/;
+
+/**
+ * Render the closed `invalid_state` location: which state path exists but is not a
+ * directory, relative to the native home's `.hack-local` root. Never runtime text.
+ */
+function stateComponentFailureMessage(
+  value: Record<string, unknown>
+): string | undefined {
+  const component = value.state_component;
+  if (
+    value.code !== "invalid_state" ||
+    !isRecord(component) ||
+    Object.keys(component).length !== 2 ||
+    component.version !== 1 ||
+    typeof component.path !== "string" ||
+    component.path.length > 240 ||
+    !STATE_COMPONENT.test(component.path)
+  ) {
+    return;
+  }
+  return `The native state path ${component.path} exists but is not a directory. Inspect it in the native home; do not delete it to retry.`;
+}
+
 /** Render only the closed inferred-route diagnostic; never runtime error text. */
 function routeProbeFailureMessage(
   value: Record<string, unknown>,
@@ -148,6 +178,7 @@ export function nativeFailureDetail(value: Record<string, unknown>): {
       : undefined;
   const message =
     networkRequestFailureMessage(value) ??
+    stateComponentFailureMessage(value) ??
     routeProbeFailureMessage(value, service) ??
     fixedNativeMessage(value);
   return {

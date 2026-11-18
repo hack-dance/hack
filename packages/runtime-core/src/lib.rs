@@ -227,6 +227,27 @@ fn canonical_directory(path: &Path) -> Result<PathBuf, CandidateError> {
     Ok(canonical)
 }
 
+/// A state path for diagnostics: relative to its `.hack-local` state root, or only
+/// its final name outside one. Never an absolute path or a home directory.
+fn state_component_label(component: &Path) -> String {
+    for ancestor in component.ancestors() {
+        if ancestor.file_name() == Some(std::ffi::OsStr::new(".hack-local")) {
+            if let Ok(relative) = component.strip_prefix(ancestor) {
+                let relative = relative.to_string_lossy();
+                return if relative.is_empty() {
+                    ".hack-local".to_owned()
+                } else {
+                    format!(".hack-local/{relative}")
+                };
+            }
+        }
+    }
+    component
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 fn reject_aliased_state(path: &Path) -> Result<(), CandidateError> {
     for component in path.ancestors() {
         match component.symlink_metadata() {
@@ -246,7 +267,8 @@ fn reject_aliased_state(path: &Path) -> Result<(), CandidateError> {
                         "Candidate state component is not a directory: {}",
                         component.display()
                     ),
-                ));
+                )
+                .with_state_component(&state_component_label(component)));
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -293,5 +315,39 @@ mod installed_home_tests {
                 "unsafe_candidate_home"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod state_component_tests {
+    use super::*;
+
+    #[test]
+    fn a_non_directory_state_component_carries_its_path_relative_to_the_state_root() {
+        let root = private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-state-component",
+        );
+        let state = root.join(".hack-local");
+        std::fs::create_dir_all(state.join("run")).unwrap();
+        std::fs::write(state.join("run/graphs"), b"not a directory").unwrap();
+        // The checked path itself is a file: the shape behind `invalid_state`.
+        let error = reject_aliased_state(&state.join("run/graphs")).unwrap_err();
+        assert_eq!(error.code, "invalid_state");
+        let wire = serde_json::to_value(&error).unwrap();
+        assert_eq!(
+            wire["state_component"],
+            serde_json::json!({"version": 1, "path": ".hack-local/run/graphs"})
+        );
+        // Outside a state root only the final name is carried, never the absolute path.
+        std::fs::write(root.join("plain-file"), b"x").unwrap();
+        let outside = reject_aliased_state(&root.join("plain-file")).unwrap_err();
+        let wire = serde_json::to_value(&outside).unwrap();
+        assert_eq!(wire["state_component"]["path"], "plain-file");
+        assert!(
+            !wire["state_component"]
+                .to_string()
+                .contains(root.to_str().unwrap())
+        );
     }
 }

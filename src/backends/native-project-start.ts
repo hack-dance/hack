@@ -173,6 +173,7 @@ import {
 } from "./native-restart-policy-notices.ts";
 import {
   invokeNativeRuntime,
+  NATIVE_IDLE_POOL_NOTE,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
   retainNativeRuntimeFailure,
@@ -1247,7 +1248,7 @@ function finalInspectionFailure(opts: {
   return {
     error: retainNativeRuntimeFailure({
       error: new ClosedCliError(
-        `Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed.${startupDiagnostic(opts.serveFailure)}${refusedProcesses(opts.processRefusals)}`
+        `Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed.${startupDiagnostic(opts.serveFailure)}${refusedProcesses(opts.processRefusals)} ${NATIVE_IDLE_POOL_NOTE}`
       ),
       original: opts.serveFailure,
     }),

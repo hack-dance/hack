@@ -3183,7 +3183,7 @@ test("a refusal before admission reports that nothing was created, with the runt
   );
   expect(failure).toBeInstanceOf(ClosedCliError);
   expect((failure as Error).message).toBe(
-    "Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed. Startup diagnostic: Native graph startup was interrupted or failed (graph_image). Service web: Pinned image architecture or implicit volumes are incompatible."
+    "Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed. Startup diagnostic: Native graph startup was interrupted or failed (graph_image). Service web: Pinned image architecture or implicit volumes are incompatible. The native VM pool stays running; when no other native project uses it, stop it with runtime down --json on this native home."
   );
   expect((failure as Error).cause).toBeUndefined();
   expect(nativeRuntimeFailure(failure)).toEqual({
@@ -5607,7 +5607,7 @@ test("HACK-1939: a startup that failed before reserving any runtime state does n
   );
   expect(error).toBeInstanceOf(ClosedCliError);
   expect((error as Error).message).toBe(
-    "Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed. Startup diagnostic: Native graph startup was interrupted or failed (invalid_extra_hosts)."
+    "Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed. Startup diagnostic: Native graph startup was interrupted or failed (invalid_extra_hosts). The native VM pool stays running; when no other native project uses it, stop it with runtime down --json on this native home."
   );
   expect(events).toContain("graph inspect");
   expect(events).not.toContain("save");
@@ -5783,7 +5783,7 @@ test("HACK-1939: runtime process refusals are named in the nothing-reserved repo
     (caught: unknown) => caught
   );
   expect((error as Error).message).toBe(
-    "Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed. Startup diagnostic: Native graph startup was interrupted or failed (environment_entrypoint). Native cannot wrap these services' processes: service web entrypoint or command (the process must name an executable); service worker user (use a numeric UID or UID:GID)."
+    "Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed. Startup diagnostic: Native graph startup was interrupted or failed (environment_entrypoint). Native cannot wrap these services' processes: service web entrypoint or command (the process must name an executable); service worker user (use a numeric UID or UID:GID). The native VM pool stays running; when no other native project uses it, stop it with runtime down --json on this native home."
   );
 });
 

@@ -16,9 +16,16 @@ import { getString, isRecord } from "./guards.ts";
 
 export const BRANCH_USAGE_VERSION = 1 as const;
 const BRANCH_USAGE_FILENAME = "branch-usage.json" as const;
+const BRANCH_NAME_MAX_LENGTH = 1024;
 
 export type BranchUsageEntry = {
   readonly last_used_at: string;
+  /**
+   * The branch name the instance was started with: the `--branch` argument,
+   * or a linked worktree's git branch (HACK-2281, R20). The slug key alone
+   * cannot be turned back into it. Absent in records from older Hack.
+   */
+  readonly name?: string;
 };
 
 type BranchUsageFile = {
@@ -54,18 +61,29 @@ export async function readBranchUsage(opts: {
   return parseBranchUsage(parsed);
 }
 
-/** Records that a branch instance was just used by a runtime command. */
+/**
+ * Records that a branch instance was just used by a runtime command, and the
+ * name it was started with when `name` is given; without `name`, an earlier
+ * recorded name is kept.
+ *
+ * Best effort: a read-modify-write without a lock, so two commands writing
+ * the same checkout's file at once can drop the other's entry (its name then
+ * reads as unknown until that instance's next `up`).
+ */
 export async function recordBranchUsage(opts: {
   readonly projectDir: string;
   readonly branch: string;
+  readonly name?: string | null;
   readonly nowIso?: string;
 }): Promise<RecordBranchUsageResult> {
   const path = resolveBranchUsagePath(opts);
   try {
     const current = await readBranchUsage(opts);
     const next = new Map(current);
+    const name = opts.name || current.get(opts.branch)?.name;
     next.set(opts.branch, {
       last_used_at: opts.nowIso ?? new Date().toISOString(),
+      ...(name ? { name } : {}),
     });
     await writeBranchUsage({ projectDir: opts.projectDir, usage: next });
     return { path };
@@ -135,8 +153,12 @@ function parseBranchUsage(value: unknown): Map<string, BranchUsageEntry> {
       continue;
     }
     const lastUsedAt = getString(entry, "last_used_at");
+    const name = getString(entry, "name");
     if (lastUsedAt) {
-      out.set(slug, { last_used_at: lastUsedAt });
+      out.set(slug, {
+        last_used_at: lastUsedAt,
+        ...(name && name.length <= BRANCH_NAME_MAX_LENGTH ? { name } : {}),
+      });
     }
   }
   return out;

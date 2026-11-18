@@ -263,6 +263,8 @@ export interface ProjectConfig {
   readonly worktree?: ProjectWorktreeConfig;
   readonly sessions?: ProjectSessionsConfig;
   readonly lifecycle?: ProjectLifecycleConfig;
+  /** Detached Compose start budgets; the host variables win over them. */
+  readonly compose?: ProjectComposeConfig;
   readonly ownership: ProjectOwnershipConfig;
   readonly configPath?: string;
   readonly parseError?: string;
@@ -274,6 +276,44 @@ export interface ProjectConfig {
   readonly sharedHelpersError?: string;
   /** Invalid runner selection must refuse lifecycle effects, not fall back. */
   readonly lifecycleRunnerError?: string;
+}
+
+/**
+ * `compose` in `.hack/hack.config.json` (HACK-2310). A value that is not an
+ * integer is kept as NaN so the budget resolver refuses it with its range
+ * message instead of ignoring it.
+ */
+export interface ProjectComposeConfig {
+  /** `compose.startupTimeoutMs`, as `HACK_COMPOSE_STARTUP_TIMEOUT_MS`. */
+  readonly startupTimeoutMs?: number;
+  /** `compose.startupCeilingMs`, as `HACK_COMPOSE_STARTUP_CEILING_MS`. */
+  readonly startupCeilingMs?: number;
+}
+
+function parseComposeConfig(
+  value: Record<string, unknown> | undefined
+): ProjectComposeConfig | undefined {
+  if (!value) {
+    return;
+  }
+  const read = (key: string): number | undefined => {
+    const raw = value[key];
+    if (raw === undefined) {
+      return;
+    }
+    return typeof raw === "number" && Number.isSafeInteger(raw)
+      ? raw
+      : Number.NaN;
+  };
+  const startupTimeoutMs = read("startupTimeoutMs");
+  const startupCeilingMs = read("startupCeilingMs");
+  if (startupTimeoutMs === undefined && startupCeilingMs === undefined) {
+    return;
+  }
+  return {
+    ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
+    ...(startupCeilingMs === undefined ? {} : { startupCeilingMs }),
+  };
 }
 
 export interface ProjectOpenConfig {
@@ -611,6 +651,7 @@ export function parseProjectConfigRecord(
   const internal = parseInternalConfig(getRecord(value, "internal"));
   const worktree = parseWorktreeConfig(getRecord(value, "worktree"));
   const sessions = parseSessionsConfig(getRecord(value, "sessions"));
+  const compose = parseComposeConfig(getRecord(value, "compose"));
   const lifecycleRecord = getRecord(value, "lifecycle");
   const lifecycleRunnerError =
     lifecycleRecord?.runner !== undefined &&
@@ -669,6 +710,7 @@ export function parseProjectConfigRecord(
     ...(worktree ? { worktree } : {}),
     ...(sessions ? { sessions } : {}),
     ...(lifecycle ? { lifecycle } : {}),
+    ...(compose ? { compose } : {}),
     ownership: parsedOwnership.ownership,
     ...(parseErrors.length > 0 ? { parseError: parseErrors.join(" ") } : {}),
     ...(sharedHelpers.errors.length > 0

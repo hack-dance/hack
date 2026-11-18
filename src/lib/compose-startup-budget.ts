@@ -1,7 +1,18 @@
 import { CliUsageError } from "../cli/command.ts";
 
-/** Default budget for starting containers and waiting on Compose dependencies. */
+/**
+ * Default budget for starting containers and waiting on Compose dependencies.
+ * While a one-shot dependency (the target of `service_completed_successfully`)
+ * is running, the start phase is making progress, and this budget counts only
+ * the time since that progress was last seen (HACK-2310); see
+ * {@link DEFAULT_COMPOSE_STARTUP_CEILING_MS} for the absolute bound.
+ */
 export const DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS = 90_000;
+/**
+ * Default absolute bound on the start phase, however long one-shot
+ * dependencies keep it making progress (HACK-2310): 30 minutes.
+ */
+export const DEFAULT_COMPOSE_STARTUP_CEILING_MS = 1_800_000;
 /** Default budget for image build/pull and container creation before start. */
 export const DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS = 1_800_000;
 /**
@@ -12,10 +23,15 @@ export const DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS = 1_800_000;
  */
 export const DEFAULT_NATIVE_STORAGE_TIMEOUT_MS = 90_000;
 export const COMPOSE_STARTUP_TIMEOUT_ENV = "HACK_COMPOSE_STARTUP_TIMEOUT_MS";
+export const COMPOSE_STARTUP_CEILING_ENV = "HACK_COMPOSE_STARTUP_CEILING_MS";
+/** Project settings in `.hack/hack.config.json`, below the host variables. */
+export const COMPOSE_STARTUP_TIMEOUT_CONFIG = "compose.startupTimeoutMs";
+export const COMPOSE_STARTUP_CEILING_CONFIG = "compose.startupCeilingMs";
 export const COMPOSE_IMAGE_TIMEOUT_ENV = "HACK_COMPOSE_IMAGE_TIMEOUT_MS";
 export const NATIVE_STORAGE_TIMEOUT_ENV = "HACK_NATIVE_STORAGE_TIMEOUT_MS";
 const MIN_TIMEOUT_MS = 1000;
 const MAX_STARTUP_TIMEOUT_MS = 3_600_000;
+const MAX_STARTUP_CEILING_MS = 14_400_000;
 const MAX_IMAGE_TIMEOUT_MS = 14_400_000;
 const MAX_NATIVE_STORAGE_TIMEOUT_MS = 600_000;
 const INTEGER_TEXT = /^[0-9]+$/;
@@ -42,18 +58,46 @@ export function resolveComposeStartupTimeoutMs(
   opts: {
     readonly startupTimeoutMs?: number;
     readonly env?: Readonly<Record<string, string | undefined>>;
+    /** `compose.startupTimeoutMs`; the host variable wins over it. */
+    readonly projectValue?: number;
   } = {}
 ): number {
   return resolveBudget({
     explicit: opts.startupTimeoutMs,
     configured: (opts.env ?? process.env)[COMPOSE_STARTUP_TIMEOUT_ENV],
+    project: opts.projectValue,
     fallback: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
     max: MAX_STARTUP_TIMEOUT_MS,
     invalid: () =>
       new CliUsageError(
-        `Compose startup timeout must be an integer from ${MIN_TIMEOUT_MS} to ${MAX_STARTUP_TIMEOUT_MS} milliseconds (${COMPOSE_STARTUP_TIMEOUT_ENV})`
+        `Compose startup timeout must be an integer from ${MIN_TIMEOUT_MS} to ${MAX_STARTUP_TIMEOUT_MS} milliseconds (${COMPOSE_STARTUP_TIMEOUT_ENV} or ${COMPOSE_STARTUP_TIMEOUT_CONFIG})`
       ),
   });
+}
+
+/**
+ * Absolute bound on the start phase (HACK-2310). Never below the start
+ * budget: a ceiling lower than the budget is raised to it.
+ */
+export function resolveComposeStartupCeilingMs(opts: {
+  readonly startupTimeoutMs: number;
+  readonly startupCeilingMs?: number;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  /** `compose.startupCeilingMs`; the host variable wins over it. */
+  readonly projectValue?: number;
+}): number {
+  const ceiling = resolveBudget({
+    explicit: opts.startupCeilingMs,
+    configured: (opts.env ?? process.env)[COMPOSE_STARTUP_CEILING_ENV],
+    project: opts.projectValue,
+    fallback: DEFAULT_COMPOSE_STARTUP_CEILING_MS,
+    max: MAX_STARTUP_CEILING_MS,
+    invalid: () =>
+      new CliUsageError(
+        `Compose startup ceiling must be an integer from ${MIN_TIMEOUT_MS} to ${MAX_STARTUP_CEILING_MS} milliseconds (${COMPOSE_STARTUP_CEILING_ENV} or ${COMPOSE_STARTUP_CEILING_CONFIG})`
+      ),
+  });
+  return Math.max(ceiling, opts.startupTimeoutMs);
 }
 
 /** Budget for the `images` phase: image build/pull and container creation. */
@@ -299,11 +343,16 @@ export async function runNativeComposeWorkloadPhases<T>(opts: {
 function resolveBudget(opts: {
   readonly explicit: number | undefined;
   readonly configured: string | undefined;
+  /** The project setting, used only when no host variable is set. */
+  readonly project?: number;
   readonly fallback: number;
   readonly max: number;
   readonly invalid: () => CliUsageError;
 }): number {
   let timeout = opts.explicit;
+  if (timeout === undefined && opts.configured === undefined) {
+    timeout = opts.project;
+  }
   if (timeout === undefined) {
     if (opts.configured === undefined) {
       return opts.fallback;
@@ -326,6 +375,8 @@ function resolveBudget(opts: {
 export interface ComposeStartupBudgets {
   readonly startupTimeoutMs: number;
   readonly imageTimeoutMs: number;
+  /** Absolute start-phase bound; absent means the start budget alone. */
+  readonly startupCeilingMs?: number;
 }
 
 const PHASE_LABEL: Readonly<Record<ComposeStartupPhase, string>> = {
@@ -337,7 +388,12 @@ const PHASE_LABEL: Readonly<Record<ComposeStartupPhase, string>> = {
 export function describeComposeStartupBudgets(
   budgets: ComposeStartupBudgets
 ): string {
-  return `${PHASE_LABEL.images} (budget ${budgets.imageTimeoutMs} ms, ${COMPOSE_IMAGE_TIMEOUT_ENV}), then ${PHASE_LABEL.start} (budget ${budgets.startupTimeoutMs} ms, ${COMPOSE_STARTUP_TIMEOUT_ENV})`;
+  const ceiling =
+    budgets.startupCeilingMs !== undefined &&
+    budgets.startupCeilingMs > budgets.startupTimeoutMs
+      ? ` without progress, at most ${budgets.startupCeilingMs} ms while one-shot dependencies run, ${COMPOSE_STARTUP_CEILING_ENV}`
+      : "";
+  return `${PHASE_LABEL.images} (budget ${budgets.imageTimeoutMs} ms, ${COMPOSE_IMAGE_TIMEOUT_ENV}), then ${PHASE_LABEL.start} (budget ${budgets.startupTimeoutMs} ms, ${COMPOSE_STARTUP_TIMEOUT_ENV}${ceiling})`;
 }
 
 export interface ComposeStartupFailure {
@@ -346,6 +402,8 @@ export interface ComposeStartupFailure {
   readonly phase: ComposeStartupPhase;
   readonly budgetMs: number;
   readonly budgetEnv: string;
+  /** One-shot dependencies still running when the wait was cut short. */
+  readonly inProgress: readonly string[];
 }
 
 /**
@@ -358,7 +416,15 @@ export function composeStartupFailure(opts: {
   readonly action: string;
   readonly phase: ComposeStartupPhase;
   readonly budgets: ComposeStartupBudgets;
+  /**
+   * One-shot dependencies the start phase last saw running (HACK-2310). When
+   * the start was cut short while they ran, the message names them and says
+   * the start is still in progress.
+   */
+  readonly inProgress?: readonly string[];
 }): ComposeStartupFailure {
+  const inProgress =
+    opts.phase === "start" && opts.code === 124 ? (opts.inProgress ?? []) : [];
   const images = opts.phase === "images";
   const budgetMs = images
     ? opts.budgets.imageTimeoutMs
@@ -374,16 +440,30 @@ export function composeStartupFailure(opts: {
       phase: opts.phase,
       budgetMs,
       budgetEnv,
+      inProgress: [],
+    };
+  }
+  if (inProgress.length > 0) {
+    const names = inProgress.join(", ");
+    const ceilingMs = opts.budgets.startupCeilingMs ?? budgetMs;
+    return {
+      code: "E_STARTUP_TIMEOUT",
+      message: `${opts.action} stopped waiting after its start ceiling of ${ceilingMs} ms while the one-shot service ${names} was still running: the start is still in progress. Services that depend on it stay Created, and nothing starts them when it finishes; once hack ps shows ${names} exited, run hack up -d again to start them. Running hack restart or hack down now would interrupt ${names}. Raise the ceiling with ${COMPOSE_STARTUP_CEILING_ENV}=<ms> on the host invocation or ${COMPOSE_STARTUP_CEILING_CONFIG} in .hack/hack.config.json.`,
+      phase: opts.phase,
+      budgetMs: ceilingMs,
+      budgetEnv: COMPOSE_STARTUP_CEILING_ENV,
+      inProgress,
     };
   }
   const message = images
     ? `${opts.action} exceeded its Compose image build/pull budget of ${budgetMs} ms (phase: ${phaseLabel}). Raise it with ${budgetEnv}=<ms> on the host invocation (max ${MAX_IMAGE_TIMEOUT_MS}); it is separate from ${COMPOSE_STARTUP_TIMEOUT_ENV}. The Compose process group was terminated before this attempt started containers; containers may have been created or recreated but not started. Inspect hack ps before retrying.`
-    : `${opts.action} exceeded its detached Compose startup budget of ${budgetMs} ms (phase: ${phaseLabel}). Raise it with ${budgetEnv}=<ms> on the host invocation (max ${MAX_STARTUP_TIMEOUT_MS}). The Compose process group was terminated; inspect hack ps and hack logs before retrying. Containers may still be running. Image build/pull is not counted against this budget, and it does not cover lifecycle hooks or application readiness.`;
+    : `${opts.action} exceeded its detached Compose startup budget of ${budgetMs} ms (phase: ${phaseLabel}). Raise it with ${budgetEnv}=<ms> on the host invocation (max ${MAX_STARTUP_TIMEOUT_MS}) or ${COMPOSE_STARTUP_TIMEOUT_CONFIG} in .hack/hack.config.json. The Compose process group was terminated; inspect hack ps and hack logs before retrying. Containers may still be running. Image build/pull is not counted against this budget, and it does not cover lifecycle hooks or application readiness.`;
   return {
     code: "E_STARTUP_TIMEOUT",
     message,
     phase: opts.phase,
     budgetMs,
     budgetEnv,
+    inProgress: [],
   };
 }

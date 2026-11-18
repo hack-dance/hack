@@ -2678,6 +2678,18 @@ fn mount_rosetta_runtime(config: &mut Value) -> Result<(), CandidateError> {
     let mounts = config["HostConfig"]["Mounts"]
         .as_array_mut()
         .ok_or_else(|| error("graph_image", "Emulated service mounts are malformed."))?;
+    let runtime = json!({
+        "Type": "bind",
+        "Source": ROSETTA_RUNTIME,
+        "Target": ROSETTA_RUNTIME,
+        "ReadOnly": true,
+        "BindOptions": {"Propagation": "rprivate"}
+    });
+    // A config verified again (a one-off copies the startup template) already carries the
+    // runtime's own mount; an authored bind never has this guest source.
+    if mounts.iter().any(|mount| *mount == runtime) {
+        return Ok(());
+    }
     let claimed = |target: &str| target == ROSETTA_RUNTIME || target.starts_with("/mnt/rosetta/");
     if mounts
         .iter()
@@ -2688,13 +2700,7 @@ fn mount_rosetta_runtime(config: &mut Value) -> Result<(), CandidateError> {
             "An emulated linux/amd64 service cannot mount anything at /mnt/rosetta: native binds the Rosetta 2 runtime there.",
         ));
     }
-    mounts.push(json!({
-        "Type": "bind",
-        "Source": ROSETTA_RUNTIME,
-        "Target": ROSETTA_RUNTIME,
-        "ReadOnly": true,
-        "BindOptions": {"Propagation": "rprivate"}
-    }));
+    mounts.push(runtime);
     Ok(())
 }
 
@@ -2795,6 +2801,17 @@ mod rosetta_mount_tests {
                 "graph_rosetta_mount"
             );
         }
+        // Verifying an already-mounted config again (a one-off template) is a no-op.
+        mount_rosetta_runtime(&mut config).unwrap();
+        assert_eq!(config["HostConfig"]["Mounts"].as_array().unwrap().len(), 2);
+        // A writable or differently sourced mount at the same target still refuses.
+        let mut writable = json!({"HostConfig":{"Mounts":[
+            {"Type":"bind","Source":"/mnt/rosetta","Target":"/mnt/rosetta","ReadOnly":false,"BindOptions":{"Propagation":"rprivate"}}
+        ]}});
+        assert_eq!(
+            mount_rosetta_runtime(&mut writable).unwrap_err().code,
+            "graph_rosetta_mount"
+        );
         // A neighbouring path is not a conflict.
         let mut near = json!({"HostConfig":{"Mounts":[{"Type":"volume","Source":"x","Target":"/mnt/rosetta-data"}]}});
         mount_rosetta_runtime(&mut near).unwrap();

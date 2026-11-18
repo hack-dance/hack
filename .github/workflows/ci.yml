@@ -343,7 +343,9 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.build_smoke == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # About 3x the p95 (298s) of the last 10 completed runs (HACK-2309); the
+    # old 5-minute limit cancelled full release runs at their normal length.
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:

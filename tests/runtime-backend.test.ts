@@ -3,6 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { resetStdoutReservationForTests } from "../src/lib/machine-stdout.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: string[][] = [];
@@ -408,6 +409,9 @@ test("detached up routes stdout to stderr when requested (--json purity)", async
 });
 
 test("detached up inherits stdout by default", async () => {
+  // An earlier file in the same process may have run the CLI with --json,
+  // which reserves stdout process-wide; this case needs the default.
+  resetStdoutReservationForTests();
   const composeRuntimeBackend = await loadComposeRuntimeBackend();
   await composeRuntimeBackend.up({
     composeFiles: ["/tmp/compose.yml"],

@@ -22,7 +22,7 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { YAML } from "bun";
 import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
 import { COMPOSE_ENV_OVERRIDE_FILENAME } from "./compose-env-at-rest.ts";
@@ -30,9 +30,7 @@ import { isRecord } from "./guards.ts";
 import { withProcessDeadline } from "./process-deadline.ts";
 import { findProjectContext } from "./project.ts";
 import { resolveProjectEnvMetadata } from "./project-env-config.ts";
-import { scopeRuntimeHygieneToProject } from "./project-runtime-hygiene.ts";
 import { readProjectRuntimeState } from "./project-runtime-state.ts";
-import { readProjectsRegistry } from "./projects-registry.ts";
 import { readRuntimeProjects } from "./runtime-projects.ts";
 
 export const ENV_OVERRIDE_COVERAGE_CHECK = "env override coverage";
@@ -211,20 +209,15 @@ async function observeServiceStates(opts: {
     return await withProcessDeadline(
       Date.now() + OBSERVATION_DEADLINE_MS,
       async () => {
-        const [registry, runtime] = await Promise.all([
-          readProjectsRegistry(),
-          readRuntimeProjects({ includeGlobal: false }),
-        ]);
+        const runtime = await readRuntimeProjects({ includeGlobal: false });
         if (!runtime.ok) {
           return null;
         }
-        const scoped = scopeRuntimeHygieneToProject({
+        return checkoutRuntimes({
+          runtime: runtime.runtime,
           projectRoot: opts.projectRoot,
           projectDir: opts.projectDir,
-          projects: registry.projects,
-          runtime: runtime.runtime,
-        });
-        return scoped.runtime.flatMap((project) =>
+        }).flatMap((project) =>
           [...project.services.values()].flatMap((service) =>
             service.containers.map((container) => ({
               instance: project.project,
@@ -238,6 +231,25 @@ async function observeServiceStates(opts: {
   } catch {
     return null;
   }
+}
+
+/**
+ * Instances started from this checkout, by their Compose working directory.
+ * A linked worktree's instances share the project name prefix but have their
+ * own override and env layers, so they never count here.
+ */
+export function checkoutRuntimes<
+  T extends { readonly workingDir: string | null },
+>(opts: {
+  readonly runtime: readonly T[];
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): T[] {
+  const own = new Set([resolve(opts.projectDir), resolve(opts.projectRoot)]);
+  return opts.runtime.filter(
+    (project) =>
+      project.workingDir !== null && own.has(resolve(project.workingDir))
+  );
 }
 
 /** Instances with at least one running service of the Compose graph. */

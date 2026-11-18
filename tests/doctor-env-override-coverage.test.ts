@@ -9,6 +9,7 @@ import {
 } from "../src/lib/compose-managed-env.ts";
 import {
   checkEnvOverrideCoverage,
+  checkoutRuntimes,
   ENV_OVERRIDE_COVERAGE_CHECK,
   envOverrideCoverageCheck,
   inspectEnvOverrideCoverage,
@@ -339,4 +340,22 @@ test("an instance started with an overlay is judged by that overlay", async () =
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("a linked worktree's instances do not count for the primary checkout", () => {
+  const runtime = [
+    { project: "demo", workingDir: "/work/demo/.hack" },
+    // A linked worktree: same name prefix, its own checkout and override.
+    { project: "demo--feature", workingDir: "/work/demo-feature/.hack" },
+    // An instance of this checkout's other branch: same working directory.
+    { project: "demo--review", workingDir: "/work/demo/.hack/" },
+    { project: "unlabelled", workingDir: null },
+  ];
+  expect(
+    checkoutRuntimes({
+      runtime,
+      projectRoot: "/work/demo",
+      projectDir: "/work/demo/.hack",
+    }).map((project) => project.project)
+  ).toEqual(["demo", "demo--review"]);
 });

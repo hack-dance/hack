@@ -1707,6 +1707,114 @@ mod tests {
     }
 
     #[test]
+    fn clean_environment_reaches_the_child_on_every_platform() {
+        // The Apple spawn boundary builds the child environment itself, so a
+        // clean runner must say so explicitly; env_clear alone is not visible.
+        assert!(
+            std::env::var_os("HOME").is_some(),
+            "precondition: parent HOME"
+        );
+        let f = FakeHack::new(r#"printf '%s|%s' "${HOME-unset}" "${HACK_HOME-unset}""#);
+        let (inherited, _, code) = f.runner().run_raw(&["x"], None, T).unwrap();
+        assert_eq!(code, Some(0));
+        assert!(
+            !inherited.starts_with("unset|"),
+            "positive control: {inherited}"
+        );
+        // Only HACK_HOME is authored here, so HOME must not reach the child.
+        let (clean, _, code) = CliRunner::new(f.dir.join("hack"))
+            .with_env("HACK_HOME", &f.dir.to_string_lossy())
+            .with_clean_env()
+            .run_raw(&["x"], None, T)
+            .unwrap();
+        assert_eq!(code, Some(0));
+        assert_eq!(clean, format!("unset|{}", f.dir.to_string_lossy()));
+    }
+
+    #[test]
+    fn path_discovery_is_pinned_and_untrusted_locations_never_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "hack-desktop-pin-{}-{}",
+            std::process::id(),
+            rand_suffix()
+        ));
+        let (early, late) = (root.join("early"), root.join("late"));
+        for dir in [&early, &late] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let marker = root.join("ran");
+        let fake = |dir: &std::path::Path| {
+            crate::test_support::script(
+                &dir.join("hack"),
+                format!("#!/bin/sh\n: > '{}'\necho '{{}}'\n", marker.display()),
+            );
+        };
+        fake(&late);
+        let path = format!("{}:{}", early.display(), late.display());
+        // `on_path` as it is when the process PATH has no `hack`, so the
+        // test never resolves (or runs) a CLI installed on this machine;
+        // discovery then searches only the runner's own PATH.
+        let mut runner = CliRunner::new("hack");
+        runner.missing = true;
+        runner.path_name = Some("hack".into());
+        runner.pinned = Some(std::sync::Arc::default());
+        let runner = runner.with_env("PATH", &path);
+        let clone = runner.clone();
+        assert!(matches!(runner.resolve_program(), Err(RunError::NotFound)));
+        assert_eq!(runner.rediscover().unwrap(), late.join("hack"));
+        assert_eq!(clone.resolve_program().unwrap(), late.join("hack"));
+        // A CLI added later to an earlier PATH directory is not picked up by
+        // ordinary reads (clones share the pin) ...
+        fake(&early);
+        assert_eq!(clone.resolve_program().unwrap(), late.join("hack"));
+        // Doctor swaps PATH for its private tool wrappers on a fixed runner,
+        // which keeps the pinned CLI instead of searching the new PATH.
+        assert_eq!(
+            runner
+                .fixed()
+                .with_env("PATH", early.to_str().unwrap())
+                .resolve_program()
+                .unwrap(),
+            late.join("hack")
+        );
+        // ... only by an explicit rediscovery, which validates it first.
+        assert_eq!(runner.rediscover().unwrap(), early.join("hack"));
+        std::fs::set_permissions(&early, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let _ = std::fs::remove_file(&marker);
+        assert!(matches!(runner.rediscover(), Err(RunError::Spawn(_))));
+        assert!(
+            runner.run_raw(&["x"], None, T).is_err(),
+            "no pin remains after a refused discovery"
+        );
+        assert!(!marker.exists(), "an untrusted CLI never runs");
+        // A trusted CLI script whose interpreter another user can replace,
+        // or that uses env with the ordinary PATH, is refused too.
+        std::fs::set_permissions(&early, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let shared = root.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::copy("/bin/sh", shared.join("interp")).unwrap();
+        for shebang in [
+            shared.join("interp").display().to_string(),
+            "/usr/bin/env sh".into(),
+        ] {
+            std::fs::remove_file(early.join("hack")).unwrap();
+            crate::test_support::script(
+                &early.join("hack"),
+                format!("#!{shebang}\n: > '{}'\n", marker.display()),
+            );
+            assert!(
+                matches!(runner.rediscover(), Err(RunError::Spawn(_))),
+                "{shebang}"
+            );
+            assert!(!marker.exists());
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn interpreter_startup_variables_never_reach_doctor_children() {
         // A run-time check with variables SIP-protected macOS shells keep;
         // loader (DYLD_*) variables are checked on the Command below.

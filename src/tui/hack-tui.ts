@@ -2796,16 +2796,34 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
     const runInteractiveCommand = async (opts: {
       readonly command: readonly string[];
+      /** False for a command that returns at once (`tmux switch-client`). */
+      readonly handoff: boolean;
     }): Promise<number> => {
       if (!isActive) {
         return 1;
+      }
+      if (!opts.handoff) {
+        return await run(opts.command, {
+          cwd: resolve(project.projectRoot),
+          stdin: "inherit",
+        });
       }
 
       let exitCode = 1;
       // suspend() hands the terminal over: it leaves raw mode, turns mouse
       // tracking off and stops reading stdin, so the attached session gets
       // every key. stop() only halted rendering and kept all three.
-      await Promise.resolve(activeRenderer.suspend());
+      try {
+        await activeRenderer.suspend();
+      } catch {
+        // Terminal setup or another transition still pending: keep the
+        // dashboard and run nothing rather than share the terminal.
+        setToast({
+          message: t`${fg("#e0af68")("Could not hand over the terminal")} ${dim("(try again)")}`,
+          durationMs: 2400,
+        });
+        return 1;
+      }
       try {
         exitCode = await run(opts.command, {
           cwd: resolve(project.projectRoot),
@@ -2813,7 +2831,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         });
       } finally {
         if (isActive) {
-          await Promise.resolve(activeRenderer.resume());
+          // A failed resume leaves the terminal state unknown; it stays fatal.
+          await activeRenderer.resume();
           renderHeader();
           renderMetaPanel({ runtime: currentRuntime });
           updateLogsTitle();
@@ -2868,6 +2887,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
         const exitCode = await runInteractiveCommand({
           command,
+          handoff: !process.env.TMUX,
         });
 
         if (exitCode !== 0) {

@@ -172,6 +172,22 @@ export function nativeDetachedUpProfileNotice(
   return true;
 }
 
+/**
+ * Prints an owner's validated profile notice; true when `value` was one
+ * (shown or dropped), so the launcher handles nothing else for it.
+ */
+function writeProfileNotice(value: unknown): boolean {
+  if (!(isRecord(value) && value.kind === "profile-notice")) {
+    return false;
+  }
+  const notice = parseNativeProfileNotice(value.notice);
+  const line = notice ? renderNativeProfileNotice(notice) : null;
+  if (line) {
+    process.stderr.write(`${line}\n`);
+  }
+  return true;
+}
+
 /** Names-only notice: never accepts or forwards an environment map or output text. */
 export function nativeDetachedUpShellVariables(
   names: readonly string[],
@@ -445,12 +461,7 @@ export async function startNativeDetachedUp(opts: {
       result.reject(startupFailureError(failure));
       return;
     }
-    if (isRecord(value) && value.kind === "profile-notice") {
-      const notice = parseNativeProfileNotice(value.notice);
-      const line = notice ? renderNativeProfileNotice(notice) : null;
-      if (line) {
-        process.stderr.write(`${line}\n`);
-      }
+    if (writeProfileNotice(value)) {
       return;
     }
     if (isRecord(value) && value.kind === "shell-variables") {

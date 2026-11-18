@@ -2011,7 +2011,9 @@ function emitNativeProfileNotice(
 async function chooseNativeStartupProfiles(opts: {
   readonly requested: readonly string[] | undefined;
   readonly selected: readonly string[];
-  readonly kept: boolean;
+  /** A restore (restart) or a retained run keeps its recorded profiles. */
+  readonly restore: NativeProjectRun | undefined;
+  readonly retained: NativeProjectRun | null | undefined;
   readonly envName: string | null | undefined;
   readonly resolve:
     | ((envName: string | null | undefined) => Promise<NativeProfileSelection>)
@@ -2021,11 +2023,12 @@ async function chooseNativeStartupProfiles(opts: {
   readonly profiles: readonly string[];
   readonly source: NativeProfileNoticeSource;
 }> {
+  const kept = opts.restore !== undefined || Boolean(opts.retained);
   if (opts.requested !== undefined) {
-    return { profiles: opts.selected, source: opts.kept ? "retained" : "cli" };
+    return { profiles: opts.selected, source: kept ? "retained" : "cli" };
   }
   const fromEnv = opts.resolve ? await opts.resolve(opts.envName) : undefined;
-  if (!opts.kept) {
+  if (!kept) {
     return fromEnv && fromEnv.source !== "none"
       ? {
           profiles: normalizeNativeProfiles(fromEnv.profiles),
@@ -2104,7 +2107,8 @@ async function startNativeProjectAttempt(
   const profileChoice = await chooseNativeStartupProfiles({
     requested: opts.profiles,
     selected: selection.profiles,
-    kept: opts.restore !== undefined || Boolean(retained),
+    restore: opts.restore,
+    retained,
     envName: selection.envName,
     resolve: opts.resolveProfiles,
     notify: (notice) => emitNativeProfileNotice(notice, deps.warn),

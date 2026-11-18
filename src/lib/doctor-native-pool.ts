@@ -1,13 +1,14 @@
 /**
- * Doctor machine check: a native VM pool left running with no graph.
+ * Doctor machine check: a native VM pool left running with nothing using it.
  *
  * The pool belongs to the native home, not to a project, so this is a machine
- * check: it runs once, in a project doctor run too, marked machine scope. It
- * warns only when `runtime status --json` proves the pool is running and
- * records no graph, running or retained (`graph_runs: 0`). A missing or
- * unreadable inventory, an older runtime without the field, or a stopped
- * pool is never a warning. Doctor never stops the pool, and `--fix` does
- * not either: the message gives the exact stop command.
+ * check: it runs once, in a project doctor run too, marked machine scope. The
+ * runtime decides idleness: it warns only when `runtime status --json`
+ * reports `pool_idle: true` (running, a live provider process, and no graph,
+ * Compose or native-authored, running or retained, no environment allocation
+ * and no exec session). `false`, `null`, an older runtime without the field
+ * or a stopped pool is never a warning. Doctor never stops the pool, and
+ * `--fix` does not either: the message gives the exact stop command.
  */
 
 import { isRecord } from "./guards.ts";
@@ -46,14 +47,17 @@ export function readNativePoolReport(status: unknown): NativePoolReport {
     : null;
   const guestMemoryMib = count(status.guest_memory_mib);
   const graphRuns = count(status.graph_runs);
-  const running = status.phase === "running" && status.process_alive !== false;
+  const stopped = status.phase !== "running" || status.process_alive === false;
+  const running = status.phase === "running" && status.process_alive === true;
   let state: NativePoolReport["state"];
-  if (!running) {
+  if (stopped) {
     state = "stopped";
-  } else if (graphRuns === null) {
-    state = "unknown";
+  } else if (running && status.pool_idle === true) {
+    state = "idle";
+  } else if (running && status.pool_idle === false) {
+    state = "in_use";
   } else {
-    state = graphRuns === 0 ? "idle" : "in_use";
+    state = "unknown";
   }
   return {
     state,
@@ -108,7 +112,7 @@ export function nativePoolIdleCheck(opts: {
       return {
         name,
         status: "warn",
-        message: `The native VM pool is running with no project graph, running or retained${memory ? `, and holds ${memory}` : ""}. Stop it with: ${nativePoolStopCommand(opts.runtime)}`,
+        message: `The native VM pool is running and nothing uses it: no project graph, running or retained, and no exec session${memory ? `. It holds ${memory}` : ""}. Stop it with: ${nativePoolStopCommand(opts.runtime)}`,
         nativePool: report,
       };
     }
@@ -116,7 +120,10 @@ export function nativePoolIdleCheck(opts: {
       return {
         name,
         status: "ok",
-        message: `The native VM pool serves ${report.graphRuns} project graph${report.graphRuns === 1 ? "" : "s"}.`,
+        message:
+          report.graphRuns === null || report.graphRuns === 0
+            ? "The native VM pool is in use."
+            : `The native VM pool records ${report.graphRuns} project graph${report.graphRuns === 1 ? "" : "s"}, running or retained.`,
         nativePool: report,
       };
     case "stopped":
@@ -133,7 +140,7 @@ export function nativePoolIdleCheck(opts: {
         message:
           opts.status === null
             ? "Skipped (native runtime status unavailable)"
-            : "The native VM pool is running; its graphs could not be counted, so idleness is not judged.",
+            : "The native VM pool is running; the runtime could not establish whether anything uses it, so idleness is not judged.",
         nativePool: report,
       };
   }

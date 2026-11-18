@@ -260,7 +260,6 @@ import {
 } from "../lib/native-process-wrappers.ts";
 import { isLinux, isMac } from "../lib/os.ts";
 import { readPrivateEnvFile } from "../lib/private-env-file.ts";
-import { withProcessDeadline } from "../lib/process-deadline.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -1722,8 +1721,8 @@ async function appendNativeMachineChecks(opts: {
 }
 
 /**
- * `native pool idle` (machine scope): reads `runtime status --json` under a
- * process deadline; any failure is "status unavailable", never a warning.
+ * `native pool idle` (machine scope): reads `runtime status --json`, bounded
+ * by its timeout; any failure is "status unavailable", never a warning.
  * Never stops the pool.
  */
 async function checkNativePoolIdle(opts: {
@@ -1731,14 +1730,13 @@ async function checkNativePoolIdle(opts: {
 }): Promise<CheckResult> {
   let status: unknown = null;
   try {
-    status = await withProcessDeadline(Date.now() + 12_000, () =>
-      invokeNativeRuntime({
-        runtime: opts.runtime,
-        cwd: process.cwd(),
-        args: ["runtime", "status", "--json"],
-        timeoutMs: 10_000,
-      })
-    );
+    // invokeNativeRuntime bounds the child itself (SIGKILL at its timeout).
+    status = await invokeNativeRuntime({
+      runtime: opts.runtime,
+      cwd: process.cwd(),
+      args: ["runtime", "status", "--json"],
+      timeoutMs: 10_000,
+    });
   } catch {
     status = null;
   }

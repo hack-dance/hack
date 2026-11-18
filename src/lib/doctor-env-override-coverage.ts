@@ -26,10 +26,13 @@ import { join, relative } from "node:path";
 import { YAML } from "bun";
 import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
 import { COMPOSE_ENV_OVERRIDE_FILENAME } from "./compose-env-at-rest.ts";
-import { observeDevRuntime } from "./doctor-dev-performance.ts";
 import { isRecord } from "./guards.ts";
+import { withProcessDeadline } from "./process-deadline.ts";
 import { findProjectContext } from "./project.ts";
 import { resolveProjectEnvMetadata } from "./project-env-config.ts";
+import { scopeRuntimeHygieneToProject } from "./project-runtime-hygiene.ts";
+import { readProjectsRegistry } from "./projects-registry.ts";
+import { readRuntimeProjects } from "./runtime-projects.ts";
 
 export const ENV_OVERRIDE_COVERAGE_CHECK = "env override coverage";
 
@@ -181,6 +184,53 @@ async function managedServices(opts: {
   }
 }
 
+/** Bound for the Docker reads below; past it the check uses the Compose file. */
+const OBSERVATION_DEADLINE_MS = 15_000;
+
+/**
+ * Service and state of this checkout's containers, or null when Docker could
+ * not be read. No image inspection: the check needs only which services run.
+ * The process deadline also ends the Docker children, so a slow engine cannot
+ * keep the doctor alive past the check.
+ */
+async function observeServiceStates(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<
+  readonly { readonly service: string; readonly state: string }[] | null
+> {
+  try {
+    return await withProcessDeadline(
+      Date.now() + OBSERVATION_DEADLINE_MS,
+      async () => {
+        const [registry, runtime] = await Promise.all([
+          readProjectsRegistry(),
+          readRuntimeProjects({ includeGlobal: false }),
+        ]);
+        if (!runtime.ok) {
+          return null;
+        }
+        const scoped = scopeRuntimeHygieneToProject({
+          projectRoot: opts.projectRoot,
+          projectDir: opts.projectDir,
+          projects: registry.projects,
+          runtime: runtime.runtime,
+        });
+        return scoped.runtime.flatMap((project) =>
+          [...project.services.values()].flatMap((service) =>
+            service.containers.map((container) => ({
+              service: service.service,
+              state: container.state,
+            }))
+          )
+        );
+      }
+    );
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Running services that belong to the Compose graph. Host lifecycle processes
  * appear in the runtime view with their process name but are not Compose
@@ -232,7 +282,7 @@ export async function checkEnvOverrideCoverage(opts: {
     await readFile(ctx.composeFile, "utf8").catch(() => "")
   );
   const containers = opts.dockerOk
-    ? await observeDevRuntime({
+    ? await observeServiceStates({
         projectRoot: ctx.projectRoot,
         projectDir: ctx.projectDir,
       })

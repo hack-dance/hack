@@ -211,6 +211,11 @@ test("host lifecycle processes and stopped containers are not expected", () => {
         { service: "web", state: "exited" },
         // A host lifecycle process shows up under its process name.
         { service: "dev-server", state: "running" },
+        // A service removed from the Compose file whose container still runs:
+        // `hack up` renders the current graph, so it cannot get an entry.
+        { service: "old-api", state: "running" },
+        // A service from a Compose `include:` file is not in the top-level graph.
+        { service: "included-cache", state: "running" },
       ],
     })
   ).toEqual(["api"]);

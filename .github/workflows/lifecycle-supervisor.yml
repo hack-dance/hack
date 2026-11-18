@@ -80,6 +80,37 @@ jobs:
         run: cargo test --locked --manifest-path packages/lifecycle-supervisor/Cargo.toml -- --test-threads=4
       - name: Test deterministic guard crash windows (qualification build only)
         run: cargo test --locked --manifest-path packages/lifecycle-supervisor/Cargo.toml --features test-hooks guard_killed_after_ -- --test-threads=1
+      # HACK-2322: fixture processes run in their own sessions, so a test that
+      # dies without tearing down (a timeout, a crash) leaves them behind.
+      # Fail when any survives either suite, and kill them so the runner stays
+      # clean.
+      - name: No fixture or test supervisor process survives the suites
+        if: always()
+        run: |
+          find_survivors() {
+            pgrep -f 'fake_caller-[0-9a-f]+ --exact fixture_process' || true
+            pgrep -f '/debug/hack-lifecycle-supervisor' || true
+            # Linux: a process whose main thread exited has an empty command
+            # line and unreadable /proc/<pid>/exe; read each live task's exe.
+            if [ -d /proc/self/task ]; then
+              for task in /proc/[0-9]*/task/[0-9]*; do
+                exe="$(readlink "$task/exe" 2>/dev/null)" || continue
+                case "${exe##*/}" in
+                  fake_caller-* | hack-lifecycle-supervisor*)
+                    pid="${task#/proc/}"
+                    echo "${pid%%/*}"
+                    ;;
+                esac
+              done
+            fi
+          }
+          survivors="$(find_survivors | sort -un | tr '\n' ' ' | sed 's/ *$//')"
+          if [ -n "$survivors" ]; then
+            ps -o pid,ppid,stat,command -p "$(echo $survivors | tr ' ' ',')" || true
+            kill -KILL $survivors || true
+            echo "::error::$(echo $survivors | wc -w | tr -d ' ') fixture or test supervisor process(es) survived the supervisor suites"
+            exit 1
+          fi
       - name: Build standalone release executable
         run: cargo build --locked --release --manifest-path packages/lifecycle-supervisor/Cargo.toml
       - uses: oven-sh/setup-bun@v1

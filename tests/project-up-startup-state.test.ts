@@ -676,6 +676,36 @@ test("a targeted restart drops the entry of a service removed from the graph (HA
   ).toEqual(["api", "migrate"]);
 });
 
+test("a render with no managed env empties a stale value-free override (HACK-2325)", async () => {
+  const projectRoot = await createProject();
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 }),
+    JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
+  );
+  expect(await runDetachedUp({ projectRoot })).toBe(0);
+  expect(
+    Object.keys((await readOverrideShape(projectRoot)).keysByService)
+  ).toContain("api");
+
+  // No service has managed env any more; only the host scope remains.
+  await writeFile(
+    resolve(projectRoot, ".hack/hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  host:",
+      '    HOST_ONLY: "host-only"',
+      "",
+    ].join("\n")
+  );
+  expect(await runRestart({ projectRoot, services: ["api"] })).toBe(0);
+
+  // Kept (container labels name its path) but declares no service.
+  expect((await readOverrideShape(projectRoot)).keysByService).toEqual({});
+});
+
 test("failed targeted restart does not record its service's env as applied", async () => {
   const projectRoot = await createProject();
   const projectDir = resolve(projectRoot, ".hack");

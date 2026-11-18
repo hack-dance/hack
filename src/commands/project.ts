@@ -210,6 +210,7 @@ import {
   listComposeProjectContainers,
 } from "../lib/compose-down-confirmation.ts";
 import {
+  inspectComposeEnvOverrideAtRest,
   removePlaintextComposeEnvOverride,
   writeComposeEnvOverride,
 } from "../lib/compose-env-at-rest.ts";
@@ -1502,6 +1503,40 @@ async function scrubPlaintextComposeEnvOverride(opts: {
   }
 }
 
+/**
+ * For a render with no managed env for any service: removes an override that
+ * still holds literal values (see {@link scrubPlaintextComposeEnvOverride}),
+ * then replaces a value-free one that remains with an empty override
+ * (HACK-2325). Its entries belong to an earlier graph or selection, and a
+ * Compose command that loads it from a container's `config_files` label would
+ * otherwise merge an environment-only entry for a service that no longer
+ * exists. The file is emptied rather than removed because those labels name
+ * its path. A literal file that a saved adoption pins is left as the scrub
+ * left it.
+ */
+async function clearComposeEnvOverride(opts: {
+  readonly projectDir: string;
+}): Promise<void> {
+  await scrubPlaintextComposeEnvOverride(opts);
+  const atRest = await inspectComposeEnvOverrideAtRest(opts).catch(() => null);
+  if (atRest?.kind !== "references") {
+    return;
+  }
+  try {
+    await writeComposeEnvOverride({
+      projectDir: opts.projectDir,
+      text: EMPTY_COMPOSE_ENV_OVERRIDE,
+    });
+  } catch {
+    logger.warn({
+      message:
+        "Could not empty .hack/.internal/compose.env.override.yml after the last managed env entry was removed; it holds no values. Run 'hack doctor'.",
+    });
+  }
+}
+
+const EMPTY_COMPOSE_ENV_OVERRIDE = "services: {}\n";
+
 async function maybePromptLegacyProjectEnvMigration(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly projectName: string;
@@ -1655,7 +1690,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
   // Fail closed before any write or spawn when Compose could not start.
   assertComposeSpawnEnvFits({ env: composeEnv });
   if (override === null) {
-    await scrubPlaintextComposeEnvOverride({
+    await clearComposeEnvOverride({
       projectDir: opts.project.projectDir,
     });
     return {
@@ -1776,7 +1811,7 @@ async function resolveComposeEnvOverrides(opts: {
   );
 
   if (resolved.contract.vars.length === 0) {
-    await scrubPlaintextComposeEnvOverride({
+    await clearComposeEnvOverride({
       projectDir: opts.project.projectDir,
     });
     return {
@@ -1822,7 +1857,7 @@ async function resolveComposeEnvOverrides(opts: {
 
   assertComposeSpawnEnvFits({ env: resolved.envForCompose });
   if (Object.keys(overrideServices).length === 0) {
-    await scrubPlaintextComposeEnvOverride({
+    await clearComposeEnvOverride({
       projectDir: opts.project.projectDir,
     });
     return {

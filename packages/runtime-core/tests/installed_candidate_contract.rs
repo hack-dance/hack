@@ -386,10 +386,9 @@ fn plan_delivery_context_is_names_only_action_scoped_and_outside_identity() {
     let reviewed: Value = serde_json::from_slice(&reviewed.stdout).unwrap();
     assert_eq!(reviewed["plan_id"], plain["plan_id"]);
     assert_eq!(reviewed["plan"], plain["plan"]);
-    let refusals = reviewed["start_refusals"].as_array().unwrap();
-    assert_eq!(refusals.len(), 1);
-    assert_eq!(refusals[0]["code"], "graph_restart_policy");
-    assert_eq!(refusals[0]["service"], "app");
+    // HACK-2324: managed delivery now starts without the engine restart policy,
+    // so the action-scoped context produces no start refusal for `app`.
+    assert_eq!(reviewed["start_refusals"], serde_json::json!([]));
     flags.extend(["--start-managed-service", "not-a-service"]);
     let unknown = invoke(binary, &candidate, &project, &flags);
     assert!(!unknown.status.success());

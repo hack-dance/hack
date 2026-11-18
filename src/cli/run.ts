@@ -8,6 +8,7 @@ import {
 } from "../lib/cli-result.ts";
 import { setNoInteractiveFlag } from "../lib/interactivity.ts";
 import { closeLifecycleProgress } from "../lib/lifecycle-progress.ts";
+import { reserveStdoutForMachineOutput } from "../lib/machine-stdout.ts";
 import { nativeDetachedUpFailure } from "../lib/native-detached-up.ts";
 import { logger } from "../ui/logger.ts";
 import {
@@ -37,6 +38,11 @@ export async function runCli(argv: readonly string[]): Promise<number> {
   // Only Hack's own argv selects the JSON error envelope: a child command's
   // `--json` (as in `hack run web tool --json`) belongs to the child.
   const jsonRequested = hackOwnedArgv(CLI_SPEC, argv).includes("--json");
+  if (jsonRequested) {
+    // Stdout then carries only Hack's envelope or ndjson; whatever Hack runs
+    // for the command writes to stderr (HACK-2311).
+    reserveStdoutForMachineOutput();
+  }
   // Set once argument parsing succeeded and the handler owns the request.
   let handlerPath: readonly string[] | undefined;
   try {

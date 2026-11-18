@@ -11,7 +11,7 @@ function refused(): Error {
   return new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
-      "Native routes require reviewed Caddy labels and matching native route readiness; explicit healthchecks are never replaced.",
+      "Native routes require reviewed Caddy labels and matching native route readiness; values omitted.",
   });
 }
 
@@ -22,8 +22,8 @@ const ROUTE_PROBE_REFUSALS = {
   },
   command: {
     message:
-      "The routed service has a command-only healthcheck; native route readiness requires an HTTP probe.",
-    fix: "Replace the command healthcheck with an x-hack-http-only healthcheck on the route port, or remove the healthcheck declaration to use the inferred probe.",
+      "The routed service has a command-only healthcheck and the selected native runtime does not replace it with the route probe.",
+    fix: "Update the native runtime, replace the command healthcheck with an x-hack-http-only healthcheck on the route port, or remove the healthcheck declaration to use the inferred probe.",
   },
   cache: {
     message:
@@ -182,6 +182,14 @@ export function nativeBridgeCapacity(
   }
   return count;
 }
+/** An authored healthcheck with a command test and no native HTTP probe. */
+function isCommandOnlyHealthcheck(authored: unknown): boolean {
+  return (
+    isRecord(authored) &&
+    !Object.hasOwn(authored, "x-hack-http") &&
+    Object.hasOwn(authored, "test")
+  );
+}
 function requireRouteProbe(
   service: Readonly<Record<string, unknown>>,
   spec: Readonly<Record<string, unknown>> | undefined
@@ -201,13 +209,9 @@ function requireRouteProbe(
   ) {
     throw new RouteProbeRefusal("disabled");
   }
-  if (
-    isRecord(authored) &&
-    !Object.hasOwn(authored, "x-hack-http") &&
-    Object.hasOwn(authored, "test")
-  ) {
-    throw new RouteProbeRefusal("command");
-  }
+  // A command healthcheck on a routed service is replaced by the inferred
+  // route probe in the review (HACK-2324), which reports it as a warning.
+  const commandOnly = isCommandOnlyHealthcheck(authored);
   const probe =
     spec && isRecord(spec.healthcheck)
       ? spec.healthcheck["x-hack-http"]
@@ -217,9 +221,13 @@ function requireRouteProbe(
     : undefined;
   const inferred =
     spec !== undefined &&
-    !Object.hasOwn(spec, "healthcheck") &&
+    (!Object.hasOwn(spec, "healthcheck") || commandOnly) &&
     isRecord(service.routing) &&
     isInferredNativeRouteProbe(reviewedProbe, service.routing.port);
+  if (commandOnly && !inferred) {
+    // An older runtime still refuses command healthchecks on routes.
+    throw new RouteProbeRefusal("command");
+  }
   if (
     !(
       isRecord(service.routing) &&

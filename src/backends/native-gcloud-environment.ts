@@ -49,6 +49,50 @@ function missingCli(): Error {
   });
 }
 
+/** Source prefixes that place a bind on the host rather than in the project. */
+// biome-ignore lint/suspicious/noTemplateCurlyInString: the literal Compose spelling ${HOME}.
+const HOST_ANCHORS = ["~/", "$HOME/", "${HOME}/", "/"] as const;
+
+/**
+ * A mount whose source names the gcloud ADC file in any spelling (`~`,
+ * `$HOME`, `${HOME}` or an absolute home path), valid or not. The adapter
+ * decides whether its form is accepted; a candidate is never read here.
+ */
+export function nativeGcloudCredentialCandidate(value: unknown): boolean {
+  let source: unknown;
+  if (typeof value === "string") {
+    source = value.split(":")[0];
+  } else if (isRecord(value)) {
+    source = value.source;
+  }
+  // Only home-anchored or absolute sources are host credential candidates; a
+  // project-relative bind that happens to end in the same path is project source.
+  return (
+    typeof source === "string" &&
+    HOST_ANCHORS.some((anchor) => source.startsWith(anchor)) &&
+    source.endsWith(`/${ADC_RELATIVE}`)
+  );
+}
+
+/** Whether any service of the input has a gcloud ADC mount candidate. */
+export function hasNativeGcloudCredentialMount(
+  input: Pick<NativeProjectInput, "normalizedComposeJson">
+): boolean {
+  const compose: unknown = JSON.parse(input.normalizedComposeJson);
+  return (
+    isRecord(compose) &&
+    isRecord(compose.services) &&
+    Object.values(compose.services).some(
+      (service) =>
+        isRecord(service) &&
+        Array.isArray(service.volumes) &&
+        service.volumes.some((volume) =>
+          nativeGcloudCredentialCandidate(volume)
+        )
+    )
+  );
+}
+
 /** Parse the explicit selector value; only `file` is accepted. */
 export function parseNativeGcloudSelection(
   value: string | undefined

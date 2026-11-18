@@ -1168,7 +1168,14 @@ Its `pool_idle` field is `true` only when the
 pool runs with a live provider and records no graph, environment allocation or exec
 session, and `null` when that cannot be established. `hack doctor` warns, as the
 `native pool idle` machine check, only for `pool_idle: true`, and gives the stop command;
-it never stops the pool itself, and `--fix` does not either. An `invalid_state` failure
+it never stops the pool itself, and `--fix` does not either.
+
+Historical native environment-lease records are conservatively counted as pool users,
+even after their native-authored graph is fully removed. Such a home can report
+`graph_runs: 0` and `pool_idle: false`, so doctor may omit the idle warning. The check
+does not classify or delete those allocation records.
+
+An `invalid_state` failure
 names the state path that exists but is not a directory, relative to the native home
 (for example `.hack-local/run/graphs`), when that path lies in one of the home's own
 state directories. Inspect that path; do not delete it to retry.

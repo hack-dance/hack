@@ -315,6 +315,25 @@ describe("mixed architectures on a shared volume", () => {
     expect(check.message).toContain("Native modules");
   });
 
+  test("replicas of one service on different architectures are both kept", () => {
+    const check = sharedVolumeArchCheck([
+      container({ service: "web", volumes: ["v"], arch: "amd64" }),
+      container({ service: "web", volumes: ["v"], arch: "arm64" }),
+    ]);
+    expect(check.status).toBe("warn");
+    expect(check.devPerformance).toMatchObject({
+      volumes: [
+        {
+          volume: "v",
+          services: [
+            { service: "web", arch: "amd64" },
+            { service: "web", arch: "arm64" },
+          ],
+        },
+      ],
+    });
+  });
+
   test("one architecture, or unknown architectures, is ok", () => {
     expect(
       sharedVolumeArchCheck([

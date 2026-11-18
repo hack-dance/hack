@@ -474,30 +474,39 @@ export function pollingWatchersCheck(
 export function findSharedVolumeArchitectures(
   containers: readonly DevRuntimeContainer[]
 ): SharedVolumeArchFinding[] {
-  const byVolume = new Map<string, Map<string, ContainerArchitecture>>();
+  // Every (service, architecture) pair: replicas of one service can differ.
+  const byVolume = new Map<
+    string,
+    Map<string, SharedVolumeArchFinding["services"][number]>
+  >();
   for (const container of containers) {
     if (!container.arch) {
       continue;
     }
     for (const volume of container.volumes) {
       const key = `${container.instance}\u0000${volume}`;
-      const services = byVolume.get(key) ?? new Map();
-      services.set(container.service, container.arch);
-      byVolume.set(key, services);
+      const pairs = byVolume.get(key) ?? new Map();
+      pairs.set(`${container.service}\u0000${container.arch}`, {
+        service: container.service,
+        arch: container.arch,
+      });
+      byVolume.set(key, pairs);
     }
   }
   const findings: SharedVolumeArchFinding[] = [];
-  for (const [key, services] of byVolume) {
-    if (new Set(services.values()).size < 2) {
+  for (const [key, pairs] of byVolume) {
+    const services = [...pairs.values()];
+    if (new Set(services.map((pair) => pair.arch)).size < 2) {
       continue;
     }
     const [instance = "", volume = ""] = key.split("\u0000");
     findings.push({
       instance,
       volume,
-      services: [...services.entries()]
-        .map(([service, arch]) => ({ service, arch }))
-        .sort((a, b) => a.service.localeCompare(b.service)),
+      services: services.sort(
+        (a, b) =>
+          a.service.localeCompare(b.service) || a.arch.localeCompare(b.arch)
+      ),
     });
   }
   return findings.sort((a, b) =>

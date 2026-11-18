@@ -10,7 +10,7 @@ The supported v3 prerequisite matrix is local-first.
 | `docker_daemon` | Docker | Docker engine is reachable | Start the backend or run `hack global install` |
 | `global_bootstrap` | Global | `~/.hack` global stack exists | Run `hack global install` |
 | `global_services` | Global | DNS/TLS/logging services are reachable | Run `hack global up` |
-| `mux_backend` | Sessions | tmux is installed (the only multiplexer in v5) | Install tmux, or set `sessions.mux` to `none` if you use no sessions |
+| `mux_backend` | Sessions | tmux is installed (the only multiplexer in v5) | Install tmux. (`sessions.mux=none` turns sessions off, but lifecycle processes and persistent hooks still need tmux.) |
 | `tmux_binary` | Sessions | tmux exists for tmux-specific flows | Install tmux |
 
 ## Command groups

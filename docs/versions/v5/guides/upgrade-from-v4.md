@@ -626,7 +626,7 @@ HACK_RUNTIME_BACKEND=compose "$V5" doctor --path /absolute/project
 An existing project key can retain group or other access from an older version.
 next.16 Doctor already reports `env-key-weak-permissions` and suggests
 `chmod 600` for the key. Review that finding and keep the backup private too.
-Merged [#764](https://github.com/hack-dance/hack/pull/764) (since next.17),
+Merged [#764](https://github.com/hack-dance/hack/pull/764) (since next.17)
 adds Doctor's `secrets hygiene` report: loose modes, tracked or unignored files,
 staging leftovers and terminal payloads older than ten minutes. It names files,
 never values. After reviewing the report, `doctor --fix` tightens eligible files'
@@ -642,7 +642,7 @@ In the next.16 trials, most real env entries were stored as plain values.
 Avoid bulk listing when only names or provenance are needed. Plain values
 migrated from v4 are not encrypted merely by upgrading.
 
-Merged [#767](https://github.com/hack-dance/hack/pull/767) (since next.17),
+Merged [#767](https://github.com/hack-dance/hack/pull/767) (since next.17)
 changes env listings to hide values by default and adds protection in place. This is
 a breaking output change: scripts should use `has_value` to test availability;
 an explicit `env get KEY` is a deliberate plaintext read. Follow that PR's
@@ -653,7 +653,7 @@ output contract or assume the protection command exists in next.16.
 
 A machine upgraded from v4 may still have an encrypted store such as
 `~/.hack/secrets.enc.json` whose key file was lost. Merged
-[#779](https://github.com/hack-dance/hack/pull/779) (since next.17),
+[#779](https://github.com/hack-dance/hack/pull/779) (since next.17)
 changes Doctor's `secret integrity` finding for that store:
 
 - an **error** in a project whose legacy env contract reads the store, and a
@@ -1025,12 +1025,12 @@ next.16 bundle.
 | Symptom | What to check or do |
 | --- | --- |
 | `up` stops with `E_LIFECYCLE_FAILED` and a pre-up hook's message | In one trial, the hook needed its project's cloud credentials refreshed. Check that hook's own dependency and credentials privately, then retry. A failing `up.before` hook blocks startup; do not suppress it to continue. |
-| `up -d` or `restart` exits 1 with `E_STARTUP_INCOMPLETE` although services are up | next.16 can misclassify a one-shot service that finishes in under a second. Check the reported service states and actual exit codes first. In the observed case, rerunning `up -d` succeeded. Merged [#758](https://github.com/hack-dance/hack/pull/758) (since next.17), addresses short one-shot observation; it does not change next.16, and not every incomplete start is this bug. |
+| `up -d` or `restart` exits 1 with `E_STARTUP_INCOMPLETE` although services are up | next.16 can misclassify a one-shot service that finishes in under a second. Check the reported service states and actual exit codes first. In the observed case, rerunning `up -d` succeeded. Merged [#758](https://github.com/hack-dance/hack/pull/758) (since next.17) addresses short one-shot observation; it does not change next.16, and not every incomplete start is this bug. |
 | HTTP on port 80 works but routed HTTPS on 443 times out | On one Mac, another program listened on 443 on all addresses, including loopback; affected project hostnames resolved to `127.0.0.1`. Check listener ownership and hostname resolution. Hostnames resolving to the proxy container's address were not affected in that trial. next.16 Doctor did not detect this case. Merged [#773](https://github.com/hack-dance/hack/pull/773) adds a `proxy ports` warning for failed published loopback paths; inspect competing listeners, VPN serve/runtime HTTPS settings and DNS/bind configuration. There is no automatic repair. |
 | next.16 candidate Doctor suggests `hack daemon start` | That command names the stable CLI. Keep the stable daemon and its launchd service stopped during the shared-home candidate run. Merged [#776](https://github.com/hack-dance/hack/pull/776) treats the daemon as optional for newer candidate Compose trials. |
 | `env list --json` reveals plain values | This is next.16 behavior. Review the breaking listing changes in [#767](https://github.com/hack-dance/hack/pull/767) before updating scripts for the next prerelease. |
 | next.16 or earlier explicit Doctor migration cleanup can remove `.hack.secret.key` | Keep a private readable key backup before any migration, including `doctor --migrate-env-config`. The merged [#769](https://github.com/hack-dance/hack/pull/769) live-input protection is intended for next.17; an older bundle retains the bug, and upgrading does not recover an already removed key. |
-| An old project key has group or other access | next.16 Doctor reports `env-key-weak-permissions` with a `chmod 600` remedy. Merged [#764](https://github.com/hack-dance/hack/pull/764) (since next.17), adds `secrets hygiene`; review its findings, then use `doctor --fix` to tighten eligible files and remove only stale Hack artifacts that are not live inputs. |
+| An old project key has group or other access | next.16 Doctor reports `env-key-weak-permissions` with a `chmod 600` remedy. Merged [#764](https://github.com/hack-dance/hack/pull/764) (since next.17) adds `secrets hygiene`; review its findings, then use `doctor --fix` to tighten eligible files and remove only stale Hack artifacts that are not live inputs. |
 
 Sources for startup failures: [next.16 lifecycle and startup handling](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/commands/project.ts).
 The three-project result, credential refresh, daemon-service behavior and HTTPS

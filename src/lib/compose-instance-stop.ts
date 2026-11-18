@@ -1,7 +1,6 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { isRecord } from "./guards.ts";
-import { exec } from "./shell.ts";
 
 /**
  * Rules for stopping a whole Compose instance (HACK-2340).
@@ -65,93 +64,113 @@ export type InstanceContainerListing =
   | { readonly ok: true; readonly containers: readonly InstanceContainer[] }
   | { readonly ok: false; readonly reason: string };
 
-const DOCKER_PS_FORMAT =
-  '{"id":{{json .ID}},"state":{{json .State}},"service":{{json (.Label "com.docker.compose.service")}},"workingDir":{{json (.Label "com.docker.compose.project.working_dir")}}}';
-
-type ExecRunner = (
-  cmd: readonly string[],
-  opts: { readonly stdin: "ignore"; readonly timeoutMs: number }
-) => Promise<{
-  readonly exitCode: number;
-  readonly stdout: string;
-  readonly stderr: string;
-}>;
+const WORKING_DIR_LABEL = "com.docker.compose.project.working_dir";
+const LABEL_START = /^[A-Za-z0-9_.\-/]+=/;
 
 /**
- * Every container labelled `com.docker.compose.project=<composeProject>`, in
- * any state, with its service and working dir, from one bounded `docker ps`.
- * A failed, timed-out or unreadable listing is unknown, never empty.
+ * Compose's `ps --format json` prints `Labels` as one comma-joined
+ * `key=value` string. A value may itself contain a comma, so a piece that
+ * does not start a new `key=` continues the previous value.
  */
-export async function listInstanceContainersByProject(opts: {
-  readonly composeProject: string;
-  readonly timeoutMs: number;
-  /** Test seam; defaults to the shell runner. */
-  readonly run?: ExecRunner;
-}): Promise<InstanceContainerListing> {
-  const run = opts.run ?? exec;
-  let result: Awaited<ReturnType<ExecRunner>>;
-  try {
-    result = await run(
-      [
-        "docker",
-        "ps",
-        "--all",
-        "--no-trunc",
-        "--filter",
-        `label=com.docker.compose.project=${opts.composeProject}`,
-        "--format",
-        DOCKER_PS_FORMAT,
-      ],
-      { stdin: "ignore", timeoutMs: opts.timeoutMs }
-    );
-  } catch (error: unknown) {
-    return {
-      ok: false,
-      reason: error instanceof Error ? error.message : "docker ps failed",
-    };
+export function parseComposeLabels(labels: string): Record<string, string> {
+  const entries: string[] = [];
+  for (const piece of labels.split(",")) {
+    if (entries.length > 0 && !LABEL_START.test(piece)) {
+      entries[entries.length - 1] += `,${piece}`;
+    } else {
+      entries.push(piece);
+    }
   }
-  if (result.exitCode !== 0) {
-    return {
-      ok: false,
-      reason:
-        result.exitCode === 124
-          ? `docker ps timed out after ${opts.timeoutMs}ms`
-          : `docker ps failed (exit ${result.exitCode})`,
-    };
+  const out: Record<string, string> = {};
+  for (const entry of entries) {
+    const separator = entry.indexOf("=");
+    if (separator > 0) {
+      out[entry.slice(0, separator)] = entry.slice(separator + 1);
+    }
   }
-  return parseInstanceContainers(result.stdout);
+  return out;
 }
 
-/** Parses the `docker ps` lines; any malformed line makes the listing unknown. */
-export function parseInstanceContainers(
+/**
+ * The containers in `docker compose ps --all --format json` output: one JSON
+ * object per line, or one JSON array (older Compose). Compose lists every
+ * container carrying the project label, profiled and orphaned ones included,
+ * whatever the model enables. Any line that is not a container object makes
+ * the listing unknown.
+ */
+/** The JSON values of `compose ps --format json`: lines, or one array. */
+function decodeComposePsValues(
   stdout: string
-): InstanceContainerListing {
-  const containers: InstanceContainer[] = [];
-  for (const line of stdout.split("\n")) {
-    const text = line.trim();
-    if (text.length === 0) {
+):
+  | { readonly ok: true; readonly values: readonly unknown[] }
+  | { readonly ok: false; readonly reason: string } {
+  const text = stdout.trim();
+  if (text.length === 0) {
+    return { ok: true, values: [] };
+  }
+  if (text.startsWith("[")) {
+    try {
+      const parsed: unknown = JSON.parse(text);
+      return Array.isArray(parsed)
+        ? { ok: true, values: parsed }
+        : {
+            ok: false,
+            reason: "docker compose ps printed an unexpected value",
+          };
+    } catch {
+      return {
+        ok: false,
+        reason: "docker compose ps printed unreadable output",
+      };
+    }
+  }
+  const values: unknown[] = [];
+  for (const line of text.split("\n")) {
+    if (line.trim().length === 0) {
       continue;
     }
-    let value: unknown;
     try {
-      value = JSON.parse(text);
+      values.push(JSON.parse(line));
     } catch {
-      return { ok: false, reason: "docker ps printed an unreadable line" };
+      return {
+        ok: false,
+        reason: "docker compose ps printed an unreadable line",
+      };
     }
+  }
+  return { ok: true, values };
+}
+
+export function parseComposePsInstanceContainers(
+  stdout: string
+): InstanceContainerListing {
+  const decoded = decodeComposePsValues(stdout);
+  if (!decoded.ok) {
+    return decoded;
+  }
+  const values = decoded.values;
+  const containers: InstanceContainer[] = [];
+  for (const value of values) {
     if (
       !isRecord(value) ||
-      typeof value.id !== "string" ||
-      typeof value.state !== "string"
+      typeof value.ID !== "string" ||
+      typeof value.State !== "string"
     ) {
-      return { ok: false, reason: "docker ps printed an unexpected entry" };
+      return {
+        ok: false,
+        reason: "docker compose ps printed an unexpected entry",
+      };
     }
+    const labels =
+      typeof value.Labels === "string" ? parseComposeLabels(value.Labels) : {};
+    const workingDir = labels[WORKING_DIR_LABEL];
     containers.push({
-      id: value.id,
-      state: value.state.toLowerCase(),
-      service: typeof value.service === "string" ? value.service : "",
+      id: value.ID,
+      state: value.State.toLowerCase(),
+      service: typeof value.Service === "string" ? value.Service : "",
       workingDir:
-        typeof value.workingDir === "string" && value.workingDir.length > 0
-          ? value.workingDir
+        typeof workingDir === "string" && workingDir.length > 0
+          ? workingDir
           : null,
     });
   }

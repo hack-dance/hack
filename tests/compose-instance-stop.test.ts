@@ -6,8 +6,8 @@ import {
   classifyDownObservation,
   downIncompleteMessage,
   type InstanceContainer,
-  listInstanceContainersByProject,
-  parseInstanceContainers,
+  parseComposeLabels,
+  parseComposePsInstanceContainers,
   resolveInstanceStopProfiles,
   selectOwnedInstanceContainers,
 } from "../src/lib/compose-instance-stop.ts";
@@ -147,35 +147,24 @@ test("an unknown listing is incomplete, never 'none left'", async () => {
   }
 });
 
-test("listing: docker ps failure, timeout and malformed output are unknown", async () => {
-  const fail = await listInstanceContainersByProject({
-    composeProject: "demo",
-    timeoutMs: 1000,
-    run: () => Promise.resolve({ exitCode: 1, stdout: "", stderr: "boom" }),
-  });
-  expect(fail).toEqual({ ok: false, reason: "docker ps failed (exit 1)" });
-  const timeout = await listInstanceContainersByProject({
-    composeProject: "demo",
-    timeoutMs: 1000,
-    run: () => Promise.resolve({ exitCode: 124, stdout: "", stderr: "" }),
-  });
-  expect(timeout).toEqual({
-    ok: false,
-    reason: "docker ps timed out after 1000ms",
-  });
-  const thrown = await listInstanceContainersByProject({
-    composeProject: "demo",
-    timeoutMs: 1000,
-    run: () => Promise.reject(new Error("spawn failed")),
-  });
-  expect(thrown).toEqual({ ok: false, reason: "spawn failed" });
-  expect(parseInstanceContainers("not json\n")).toEqual({
-    ok: false,
-    reason: "docker ps printed an unreadable line",
+test("compose ps listing: lines or array, labels with commas, malformed output unknown", () => {
+  const line = (fields: Record<string, unknown>) => JSON.stringify(fields);
+  expect(parseComposePsInstanceContainers("")).toEqual({
+    ok: true,
+    containers: [],
   });
   expect(
-    parseInstanceContainers(
-      '{"id":"abc","state":"Running","service":"worker","workingDir":"/p/.hack"}\n{"id":"def","state":"exited","service":"","workingDir":""}\n'
+    parseComposePsInstanceContainers(
+      [
+        line({
+          ID: "abc",
+          State: "Running",
+          Service: "worker",
+          Labels:
+            "com.docker.compose.project=demo,com.docker.compose.project.working_dir=/p/a,b/.hack,com.docker.compose.service=worker",
+        }),
+        line({ ID: "def", State: "exited", Service: "web", Labels: "" }),
+      ].join("\n")
     )
   ).toEqual({
     ok: true,
@@ -184,10 +173,34 @@ test("listing: docker ps failure, timeout and malformed output are unknown", asy
         id: "abc",
         state: "running",
         service: "worker",
-        workingDir: "/p/.hack",
+        workingDir: "/p/a,b/.hack",
       },
-      { id: "def", state: "exited", service: "", workingDir: null },
+      { id: "def", state: "exited", service: "web", workingDir: null },
     ],
+  });
+  // Older Compose prints one JSON array.
+  expect(
+    parseComposePsInstanceContainers(
+      JSON.stringify([{ ID: "x", State: "running", Service: "web" }])
+    )
+  ).toEqual({
+    ok: true,
+    containers: [
+      { id: "x", state: "running", service: "web", workingDir: null },
+    ],
+  });
+  expect(parseComposePsInstanceContainers("not json")).toEqual({
+    ok: false,
+    reason: "docker compose ps printed an unreadable line",
+  });
+  expect(parseComposePsInstanceContainers('{"Name":"x"}')).toEqual({
+    ok: false,
+    reason: "docker compose ps printed an unexpected entry",
+  });
+  expect(parseComposeLabels("a=1,b=x,y,c=")).toEqual({
+    a: "1",
+    b: "x,y",
+    c: "",
   });
 });
 

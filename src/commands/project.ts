@@ -220,7 +220,7 @@ import {
   type DownObservation,
   downIncompleteMessage,
   type InstanceContainerListing,
-  listInstanceContainersByProject,
+  parseComposePsInstanceContainers,
   resolveInstanceStopProfiles,
   selectOwnedInstanceContainers,
   unionProfiles,
@@ -9782,10 +9782,9 @@ async function resolveInstanceStopSelection(opts: {
 
 /**
  * Every container labelled with the instance's Compose project, any state,
- * with service and working dir. Compose resolves the project name (for a
- * primary checkout without `name:` it is the directory's, not the config
- * name); `docker ps` then lists by that label. Any failed or unreadable read
- * is unknown, never empty.
+ * with service and working dir, from `docker compose ps --all` (Compose
+ * resolves the project name and lists profiled and orphaned containers
+ * too). A failed or unreadable read is unknown, never empty.
  */
 async function listInstanceContainers(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
@@ -9793,38 +9792,24 @@ async function listInstanceContainers(opts: {
   readonly profiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
 }): Promise<InstanceContainerListing> {
-  let composeProject = opts.composeProjectName;
-  if (composeProject === null) {
-    const res = await composeRuntimeBackend.psJson({
-      composeFiles: [opts.project.composeFile],
-      composeProject: null,
-      profiles: opts.profiles,
-      cwd: dirname(opts.project.composeFile),
-      all: true,
-      env: opts.env,
-    });
-    if (res.exitCode !== 0) {
-      return {
-        ok: false,
-        reason: `docker compose ps failed (exit ${res.exitCode})`,
-      };
-    }
-    const entries = parseJsonLines(res.stdout);
-    if (entries.length === 0) {
-      return { ok: true, containers: [] };
-    }
-    composeProject = getString(entries[0] ?? {}, "Project") ?? null;
-    if (!composeProject) {
-      return {
-        ok: false,
-        reason: "docker compose ps did not name the Compose project",
-      };
-    }
-  }
-  return await listInstanceContainersByProject({
-    composeProject,
-    timeoutMs: INSTANCE_STOP_DOCKER_TIMEOUT_MS,
+  const res = await composeRuntimeBackend.psJson({
+    composeFiles: [opts.project.composeFile],
+    composeProject: opts.composeProjectName,
+    profiles: opts.profiles,
+    cwd: dirname(opts.project.composeFile),
+    all: true,
+    env: opts.env,
   });
+  if (res.exitCode !== 0) {
+    return {
+      ok: false,
+      reason:
+        res.exitCode === 124
+          ? "docker compose ps timed out"
+          : `docker compose ps failed (exit ${res.exitCode})`,
+    };
+  }
+  return parseComposePsInstanceContainers(res.stdout);
 }
 
 /**

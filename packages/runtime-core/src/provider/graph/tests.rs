@@ -603,7 +603,7 @@ fn compose_restart_policies_lower_to_engine_policies_with_receipt_authority() {
     }
 }
 #[test]
-fn compose_restart_policy_refuses_managed_delivery_and_host_dependencies() {
+fn compose_restart_policy_drops_for_managed_delivery_and_refuses_host_dependencies() {
     let fixture = Fixture::new();
     let home = Fixture::new();
     let candidate = Candidate::discover(&home.0).unwrap();
@@ -627,7 +627,9 @@ fn compose_restart_policy_refuses_managed_delivery_and_host_dependencies() {
         &managed,
     )
     .unwrap();
-    let error = config::prepare_delivery(
+    // HACK-2324: managed delivery starts without the engine policy instead of
+    // refusing; values are delivered once and never kept for a restart.
+    let prepared = config::prepare_delivery(
         scoped.executable,
         &BTreeMap::from([("worker".into(), Condition::Started)]),
         &token(),
@@ -638,10 +640,16 @@ fn compose_restart_policy_refuses_managed_delivery_and_host_dependencies() {
             ..Default::default()
         },
     )
-    .err()
     .unwrap();
-    assert_eq!(error.code, "graph_restart_policy");
-    assert!(!error.message.contains("synthetic-restart-canary"));
+    assert_eq!(
+        prepared.configs["worker"]["HostConfig"]["RestartPolicy"],
+        json!({"Name":"no"})
+    );
+    assert!(
+        prepared.resources["container:worker"]
+            .restart_policy
+            .is_none()
+    );
     let document = json!({"services":{"worker":{
         "image":image, "read_only":true, "init":true, "entrypoint":["/bin/worker"],
         "restart":"always", "networks":["private"],
@@ -3623,7 +3631,7 @@ fn file_local_admission_returns_the_same_port_reasons_to_review_and_start() {
 }
 
 #[test]
-fn private_delivery_review_refuses_restart_without_changing_plan_identity() {
+fn private_delivery_review_drops_restart_without_changing_plan_identity() {
     let fixture = Fixture::new();
     let candidate_root = Fixture::new();
     let candidate = Candidate::discover(&candidate_root.0).unwrap();
@@ -3644,6 +3652,8 @@ fn private_delivery_review_refuses_restart_without_changing_plan_identity() {
         )]),
     )
     .unwrap();
+    // HACK-2324: the start review and the start agree that managed delivery
+    // drops the engine policy instead of refusing.
     let start = config::prepare_delivery(
         scoped.executable,
         &review.start_readiness,
@@ -3655,17 +3665,9 @@ fn private_delivery_review_refuses_restart_without_changing_plan_identity() {
             ..Default::default()
         },
     )
-    .err()
     .unwrap();
-    assert_eq!(start.code, "graph_restart_policy");
-    assert!(
-        review
-            .start_refusals
-            .iter()
-            .any(|error| error.code == start.code
-                && error.message == start.message
-                && error.service == start.service)
-    );
+    assert!(start.resources["container:app"].restart_policy.is_none());
+    assert!(review.start_refusals.is_empty());
     assert_eq!(serde_json::to_value(&review.plan).unwrap(), identity);
     assert_eq!(review.plan_id, project::identity(&review.plan).unwrap());
     assert!(

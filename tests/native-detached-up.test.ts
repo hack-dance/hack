@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NATIVE_PROVIDER_PIN_MESSAGE } from "../src/backends/native-runtime-client.ts";
+import { nativeDetachedOwnerArgs } from "../src/lib/native-detached-up.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../src/lib/native-environment-notices.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -42,6 +43,8 @@ async function stop(root: string): Promise<void> {
 for (const mode of [
   "ready",
   "profile-notice",
+  "branch-dropped",
+  "restart-action",
   "shell-names",
   "shell-names-empty",
   "shell-names-root-dotenv",
@@ -83,18 +86,22 @@ for (const mode of [
       expect(stderr).toBe(
         mode === "profile-notice"
           ? "Not starting 1 service whose Compose profiles are not selected: jobs. Selected profiles: none (from no --profile or COMPOSE_PROFILES). Select others with --profile or COMPOSE_PROFILES.\n"
-          : mode === "shell-names"
-            ? "Forwarding shell variables: A_TOKEN, Z_TOKEN.\n"
-            : mode === "shell-names-empty"
-              ? "Forwarding shell variables: (none).\n"
-              : mode === "shell-names-root-dotenv"
-                ? `Forwarding shell variables: (none).\n${NATIVE_ROOT_DOTENV_IGNORED_NOTICE}\n`
-                : ""
+          : mode === "branch-dropped"
+            ? "Branch feature-a: service web label caddy drops 2 sites outside this project's route namespaces; they stay with the base instance.\n"
+            : mode === "shell-names"
+              ? "Forwarding shell variables: A_TOKEN, Z_TOKEN.\n"
+              : mode === "shell-names-empty"
+                ? "Forwarding shell variables: (none).\n"
+                : mode === "shell-names-root-dotenv"
+                  ? `Forwarding shell variables: (none).\n${NATIVE_ROOT_DOTENV_IGNORED_NOTICE}\n`
+                  : ""
       );
       if (
         [
           "ready",
           "profile-notice",
+          "branch-dropped",
+          "restart-action",
           "shell-names",
           "shell-names-empty",
           "shell-names-root-dotenv",
@@ -102,10 +109,12 @@ for (const mode of [
         ].includes(mode)
       ) {
         expect(code).toBe(0);
+        // HACK native CLI gaps item 2: a detached restart reports the same
+        // envelope as Compose's `restart --json`, with its own action.
         expect(JSON.parse(stdout)).toEqual({
           ok: true,
           data: {
-            action: "up",
+            action: mode === "restart-action" ? "restart" : "up",
             project: "fixture",
             branch: null,
             composeProject: "fixture",
@@ -153,6 +162,8 @@ for (const mode of [
           [
             "ready",
             "profile-notice",
+            "branch-dropped",
+            "restart-action",
             "shell-names",
             "shell-names-root-dotenv",
             "shell-names-empty",
@@ -229,6 +240,29 @@ for (const phase of ["static-preflight", "after-start"] as const) {
     }
   });
 }
+
+test("the detached owner gets only the command and its selection options", () => {
+  expect(
+    nativeDetachedOwnerArgs({
+      action: "restart",
+      options: {
+        path: "/work/app",
+        branch: "feature-x",
+        env: "qa",
+        profile: "web,jobs",
+      },
+    })
+  ).toEqual([
+    "restart",
+    "--path=/work/app",
+    "--branch=feature-x",
+    "--env=qa",
+    "--profile=web,jobs",
+  ]);
+  expect(nativeDetachedOwnerArgs({ action: "up", options: {} })).toEqual([
+    "up",
+  ]);
+});
 
 test("detached failure names the services that failed during startup and how to see their output, never the output", async () => {
   const root = await mkdtemp(

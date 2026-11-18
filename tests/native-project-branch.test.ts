@@ -211,6 +211,40 @@ test("base selection is byte-identical and does not require branch configuration
   expect(nativeProjectBranchArgs()).toEqual([]);
 });
 
+test("a branch instance takes its dev host from the same sources as Compose (HACK-2338 item 5)", async () => {
+  // Legacy scaffolds keep DEV_HOST in .hack/.env; Compose branch hosts use it.
+  const legacy = await fixture({ hosts: "app.hack.local" });
+  await writeFile(
+    legacy.configFile,
+    JSON.stringify({ oauth: { enabled: true } })
+  );
+  await writeFile(
+    join(legacy.scope.projectDir, ".env"),
+    "DEV_HOST=app.hack.local\n"
+  );
+  const fromEnv = JSON.parse(
+    (await prepareNativeProjectBranch(legacy)).normalizedComposeJson
+  );
+  expect(fromEnv.services.web.labels.caddy).toBe("feature-a.app.hack.local");
+
+  // DNS is case-insensitive; an uppercase dev_host branches like Compose.
+  const upper = await fixture({
+    hosts: "app.hack.local",
+    devHost: "App.Hack.Local",
+  });
+  const fromUpper = JSON.parse(
+    (await prepareNativeProjectBranch(upper)).normalizedComposeJson
+  );
+  expect(fromUpper.services.web.labels.caddy).toBe("feature-a.app.hack.local");
+});
+
+test("a branch instance says which sites it drops", async () => {
+  const f = await fixture({ hosts: "app.hack.local, foreign.example" });
+  const notices: string[] = [];
+  await prepareNativeProjectBranch({ ...f, onDropped: (n) => notices.push(n) });
+  expect(notices.length).toBeGreaterThan(0);
+});
+
 test("invalid branch selectors and missing or malformed config refuse", async () => {
   const f = await fixture();
   for (const branch of [

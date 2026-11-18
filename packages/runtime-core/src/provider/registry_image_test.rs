@@ -35,6 +35,10 @@ struct Reply {
     status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+    /// Send only this many body bytes (after the full `Content-Length`), then close.
+    cut: Option<usize>,
+    /// Hold the connection this long after the bytes sent, on its own thread.
+    stall: Option<Duration>,
 }
 
 impl Reply {
@@ -43,7 +47,17 @@ impl Reply {
             status,
             headers: Vec::new(),
             body: body.into(),
+            cut: None,
+            stall: None,
         }
+    }
+    fn cut(mut self, bytes: usize) -> Self {
+        self.cut = Some(bytes);
+        self
+    }
+    fn stall(mut self, duration: Duration) -> Self {
+        self.stall = Some(duration);
+        self
     }
     fn header(mut self, name: &str, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
@@ -225,8 +239,16 @@ impl Registry {
                     head.push_str(&format!("{name}: {value}\r\n"));
                 }
                 head.push_str("\r\n");
+                let sent = reply.cut.unwrap_or(reply.body.len()).min(reply.body.len());
                 let _ = stream.write_all(head.as_bytes());
-                let _ = stream.write_all(&reply.body);
+                let _ = stream.write_all(&reply.body[..sent]);
+                if let Some(stall) = reply.stall {
+                    // Keep the connection open without blocking later connections.
+                    std::thread::spawn(move || {
+                        std::thread::sleep(stall);
+                        drop(stream);
+                    });
+                }
             }
         });
         Self {
@@ -2150,4 +2172,352 @@ fn retry_expired_registry_deadline_still_names_host_and_attempt_count() {
         assert_eq!(json["network_request"]["attempts"], 0);
     }
     assert!(fixture.requests().is_empty());
+}
+
+/// Temporary layer files left in `directory` (there must never be any).
+fn layer_temporaries(directory: &Path) -> Vec<String> {
+    fs::read_dir(directory)
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with(".hack-layer-"))
+        .collect()
+}
+
+/// The fixture image, with every `/storage/` (layer body) request for `layer` answered
+/// by `body` from its request number (from 0) and the layer's true bytes.
+fn layer_registry(
+    content: &Content,
+    layer: usize,
+    body: impl Fn(usize, &[u8]) -> Reply + Send + 'static,
+) -> (Registry, Arc<std::sync::atomic::AtomicUsize>) {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = calls.clone();
+    let content = content.clone();
+    let path = format!("/storage/{}", content.layer_digests[layer]);
+    let registry = Registry::serve(Box::new(move |request, port| {
+        if request.path == path {
+            let n = counted.fetch_add(1, AtomicOrdering::SeqCst);
+            let bytes = &content.blobs[&content.layer_digests[layer]];
+            return body(n, bytes);
+        }
+        respond(&content, Auth::None, false, port, request)
+    }));
+    (registry, calls)
+}
+
+fn pinned_reference(registry: &Registry, content: &Content) -> String {
+    format!(
+        "{}/{REPOSITORY}@{}",
+        registry.domain(),
+        content.index_digest
+    )
+}
+
+#[test]
+fn a_layer_body_that_drops_mid_transfer_once_is_downloaded_again_and_published() {
+    let content = content();
+    let (registry, calls) = layer_registry(&content, 0, |n, bytes| {
+        let reply = Reply::new(200, bytes.to_vec());
+        if n == 0 {
+            reply.cut(bytes.len() / 2)
+        } else {
+            reply
+        }
+    });
+    let docker = empty_docker();
+    let policy = registry.policy(&docker);
+    let output = Output::new();
+    let acquired = acquire(
+        &pinned_reference(&registry, &content),
+        &output.archive(),
+        &policy,
+        policy.archive_limit,
+    )
+    .unwrap();
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+    assert_eq!(
+        image_load::validate_file(
+            &output.archive(),
+            &acquired.archive_sha256,
+            &acquired.image_id,
+            &policy
+        )
+        .unwrap(),
+        acquired.archive_bytes
+    );
+    // Only the archive remains: no temporary layer or archive file.
+    assert_eq!(output.entries(), 1);
+}
+
+#[test]
+fn a_layer_body_that_always_drops_fails_after_bounded_attempts_naming_host_and_reason() {
+    let content = content();
+    let (registry, calls) = layer_registry(&content, 1, |_, bytes| {
+        Reply::new(200, bytes.to_vec()).cut(bytes.len() - 7)
+    });
+    let docker = empty_docker();
+    let policy = registry.policy(&docker);
+    let output = Output::new();
+    let failure = acquire(
+        &pinned_reference(&registry, &content),
+        &output.archive(),
+        &policy,
+        policy.archive_limit,
+    )
+    .unwrap_err();
+    assert_eq!(failure.code, "registry_image");
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), ATTEMPTS);
+    assert!(
+        failure
+            .message
+            .contains("connection ended before the whole layer arrived")
+            && failure
+                .message
+                .contains("Host 127.0.0.1 after 3 attempt(s)"),
+        "{}",
+        failure.message
+    );
+    let json = serde_json::to_value(&failure).unwrap();
+    assert_eq!(
+        json["network_request"],
+        serde_json::json!({"version": 2, "host": "127.0.0.1", "attempts": 3, "reason": "short_read"})
+    );
+    // Nothing is published and no temporary file is left.
+    assert_eq!(output.entries(), 0);
+}
+
+#[test]
+fn a_layer_that_never_matches_its_digest_stops_after_bounded_attempts() {
+    let content = content();
+    let registry = Registry::start(content.clone(), Auth::None, true);
+    let docker = empty_docker();
+    let policy = registry.policy(&docker);
+    let output = Output::new();
+    let failure = acquire(
+        &pinned_reference(&registry, &content),
+        &output.archive(),
+        &policy,
+        policy.archive_limit,
+    )
+    .unwrap_err();
+    let json = serde_json::to_value(&failure).unwrap();
+    assert_eq!(json["network_request"]["reason"], "digest_mismatch");
+    assert_eq!(json["network_request"]["attempts"], 3);
+    // The first layer is tried exactly `ATTEMPTS` times and the second never.
+    let requests = registry.requests();
+    let storage = |digest: &str| {
+        requests
+            .iter()
+            .filter(|r| r.path == format!("/storage/{digest}"))
+            .count()
+    };
+    assert_eq!(storage(&content.layer_digests[0]), ATTEMPTS);
+    assert_eq!(storage(&content.layer_digests[1]), 0);
+    assert_eq!(output.entries(), 0);
+}
+
+#[test]
+fn a_size_that_disagrees_with_the_descriptor_is_named_as_a_size_mismatch() {
+    let content = content();
+    let (registry, _) = layer_registry(&content, 0, |_, bytes| {
+        let mut longer = bytes.to_vec();
+        longer.push(0);
+        Reply::new(200, longer)
+    });
+    let docker = empty_docker();
+    let policy = registry.policy(&docker);
+    let output = Output::new();
+    let failure = acquire(
+        &pinned_reference(&registry, &content),
+        &output.archive(),
+        &policy,
+        policy.archive_limit,
+    )
+    .unwrap_err();
+    let json = serde_json::to_value(&failure).unwrap();
+    assert_eq!(json["network_request"]["reason"], "size_mismatch");
+    assert_eq!(output.entries(), 0);
+}
+
+#[test]
+fn a_transient_status_is_retried_and_a_persistent_one_is_named_with_its_code() {
+    let content = content();
+    let (registry, calls) = layer_registry(&content, 0, |n, bytes| {
+        if n == 0 {
+            Reply::new(503, "busy")
+        } else {
+            Reply::new(200, bytes.to_vec())
+        }
+    });
+    let docker = empty_docker();
+    let policy = registry.policy(&docker);
+    let output = Output::new();
+    acquire(
+        &pinned_reference(&registry, &content),
+        &output.archive(),
+        &policy,
+        policy.archive_limit,
+    )
+    .unwrap();
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+
+    let (registry, calls) = layer_registry(&content, 0, |_, _| Reply::new(502, "bad gateway"));
+    let policy = registry.policy(&docker);
+    let output = Output::new();
+    let failure = acquire(
+        &pinned_reference(&registry, &content),
+        &output.archive(),
+        &policy,
+        policy.archive_limit,
+    )
+    .unwrap_err();
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), ATTEMPTS);
+    assert!(
+        failure
+            .message
+            .contains("answered HTTP 502. Host 127.0.0.1 after 3 attempt(s)"),
+        "{}",
+        failure.message
+    );
+    let json = serde_json::to_value(&failure).unwrap();
+    assert_eq!(
+        json["network_request"],
+        serde_json::json!({"version": 2, "host": "127.0.0.1", "attempts": 3, "reason": "http_status", "status": 502})
+    );
+    assert_eq!(output.entries(), 0);
+
+    // A status another attempt cannot change is not replayed.
+    let (registry, calls) = layer_registry(&content, 0, |_, _| Reply::new(410, "gone"));
+    let policy = registry.policy(&docker);
+    let failure = acquire(
+        &pinned_reference(&registry, &content),
+        &output.archive(),
+        &policy,
+        policy.archive_limit,
+    )
+    .unwrap_err();
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    assert_eq!(
+        failure.message,
+        "A registry layer transfer failed: the registry answered HTTP 410. Host 127.0.0.1 after 1 attempt(s)."
+    );
+    let json = serde_json::to_value(&failure).unwrap();
+    assert_eq!(json["network_request"]["status"], 410);
+    assert_eq!(json["network_request"]["attempts"], 1);
+    assert_eq!(output.entries(), 0);
+}
+
+/// A `Fetch` for `fixture` and a layer descriptor for `bytes`.
+fn layer_fetch<'a>(
+    fixture: &Registry,
+    policy: &'a ImagePolicy,
+    bytes: &[u8],
+) -> (Fetch<'a>, Descriptor) {
+    let named = named(&format!("{}/{REPOSITORY}:latest", fixture.domain())).unwrap();
+    let registry = super::registry(&named, policy).unwrap();
+    let fetch = Fetch::new(&registry, REPOSITORY, policy).unwrap();
+    let descriptor = Descriptor {
+        digest: digest(bytes),
+        size: bytes.len() as u64,
+        media_type: String::new(),
+        platform: None,
+        urls: Vec::new(),
+    };
+    (fetch, descriptor)
+}
+
+#[test]
+fn a_stalled_layer_body_times_out_within_its_attempt_limit() {
+    let bytes: Vec<u8> = (0..20_000_u32).map(|n| (n % 7) as u8).collect();
+    let body = bytes.clone();
+    let fixture = Registry::serve(Box::new(move |_, _| {
+        Reply::new(200, body.clone())
+            .cut(100)
+            .stall(Duration::from_secs(2))
+    }));
+    let docker = empty_docker();
+    let policy = fixture.policy(&docker);
+    let (mut fetch, descriptor) = layer_fetch(&fixture, &policy, &bytes);
+    fetch.request_timeout = Duration::from_millis(200);
+    fetch.deadline = Instant::now() + Duration::from_secs(10);
+    let directory = Output::new();
+    let start = Instant::now();
+    let failure = fetch.layer(&descriptor, &directory.0).err().unwrap();
+    let json = serde_json::to_value(&failure).unwrap();
+    assert_eq!(json["network_request"]["reason"], "timeout");
+    assert_eq!(json["network_request"]["attempts"], 3);
+    // Three 200 ms attempts and their backoff, far below the 10 s deadline.
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(layer_temporaries(&directory.0).is_empty());
+}
+
+#[test]
+fn the_deadline_reached_mid_retry_ends_the_layer_without_extending_it() {
+    let bytes: Vec<u8> = (0..20_000_u32).map(|n| (n % 11) as u8).collect();
+    let body = bytes.clone();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = calls.clone();
+    let fixture = Registry::serve(Box::new(move |_, _| {
+        let reply = Reply::new(200, body.clone()).cut(100);
+        if counted.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+            // The first attempt ends at once; the second outlives the deadline.
+            reply
+        } else {
+            reply.stall(Duration::from_secs(5))
+        }
+    }));
+    let docker = empty_docker();
+    let policy = fixture.policy(&docker);
+    let (mut fetch, descriptor) = layer_fetch(&fixture, &policy, &bytes);
+    let deadline = Instant::now() + Duration::from_millis(1200);
+    fetch.deadline = deadline;
+    let directory = Output::new();
+    let failure = fetch.layer(&descriptor, &directory.0).err().unwrap();
+    let json = serde_json::to_value(&failure).unwrap();
+    assert_eq!(
+        json["network_request"],
+        serde_json::json!({"version": 2, "host": "127.0.0.1", "attempts": 2, "reason": "deadline"})
+    );
+    assert!(
+        failure.message.contains("360-second image deadline"),
+        "{}",
+        failure.message
+    );
+    // The second attempt's limit was what remained of the deadline, and no backoff
+    // runs past it: the layer ends with the deadline, not a 500 ms backoff later.
+    let overrun = Instant::now().saturating_duration_since(deadline);
+    assert!(overrun < Duration::from_millis(450), "{overrun:?}");
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+    assert!(layer_temporaries(&directory.0).is_empty());
+
+    // An expired deadline makes no request at all.
+    let before = calls.load(AtomicOrdering::SeqCst);
+    fetch.deadline = Instant::now();
+    let failure = fetch.layer(&descriptor, &directory.0).err().unwrap();
+    let json = serde_json::to_value(&failure).unwrap();
+    assert_eq!(json["network_request"]["attempts"], 0);
+    assert_eq!(json["network_request"]["reason"], "deadline");
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), before);
+}
+
+#[test]
+fn a_verified_layer_file_is_removed_when_it_is_dropped() {
+    let bytes = b"layer bytes".to_vec();
+    let body = bytes.clone();
+    let fixture = Registry::serve(Box::new(move |_, _| Reply::new(200, body.clone())));
+    let docker = empty_docker();
+    let policy = fixture.policy(&docker);
+    let (mut fetch, descriptor) = layer_fetch(&fixture, &policy, &bytes);
+    let directory = Output::new();
+    let mut downloaded = fetch.layer(&descriptor, &directory.0).unwrap();
+    let mut read = Vec::new();
+    downloaded.file.read_to_end(&mut read).unwrap();
+    assert_eq!(read, bytes);
+    assert_eq!(layer_temporaries(&directory.0).len(), 1);
+    drop(downloaded);
+    assert!(layer_temporaries(&directory.0).is_empty());
 }

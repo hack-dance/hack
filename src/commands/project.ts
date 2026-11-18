@@ -1,3 +1,4 @@
+import type { Writable } from "node:stream";
 import { assertAutostartHostCommandsAllowed } from "../lib/autostart-refusal.ts";
 import { resolveAutostartTrustedTlsBinds } from "../lib/autostart-trust-mounts.ts";
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
@@ -55,6 +56,10 @@ import {
 import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
 import { createNativeDependencyOwnerResolver } from "../backends/native-dependency-owners.ts";
+import {
+  followAllNativeServices,
+  nativeLogPrefix,
+} from "../backends/native-log-all.ts";
 import { assertNativeLogFlags } from "../backends/native-log-follow.ts";
 import {
   declaredComposeProfiles,
@@ -76,6 +81,8 @@ import {
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
 import {
   followNativeProjectLogs,
+  nativeProjectAllLogs,
+  nativeProjectLogServices,
   nativeProjectLogs,
   nativeProjectPs,
   requireComposeOperationAvailable,
@@ -95,6 +102,10 @@ import {
   nativeRestartSelection,
   preflightNativeRestart,
 } from "../backends/native-project-restart-preflight.ts";
+import {
+  type NativeProjectRunScope,
+  nativeForeignHomeRefusal,
+} from "../backends/native-project-run.ts";
 import {
   nativeAdaptationCandidates,
   resolveNativeAdaptationSelection,
@@ -336,6 +347,7 @@ import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
 import {
   isNativeDetachedOwnerProcess,
+  nativeDetachedOwnerArgs,
   nativeDetachedUpReady,
   startNativeDetachedUp,
 } from "../lib/native-detached-up.ts";
@@ -429,7 +441,10 @@ import {
   buildRunningEnvMismatchMessage,
   selectEnvForRunningInstance,
 } from "../lib/running-env-selection.ts";
-import { buildRuntimeHostMetadataOverride } from "../lib/runtime-host-metadata.ts";
+import {
+  buildRuntimeHostMetadataOverride,
+  runtimeHostUrl,
+} from "../lib/runtime-host-metadata.ts";
 import {
   type RuntimeProject,
   readRuntimeProjects,
@@ -6914,7 +6929,12 @@ async function restartNativeImageProject({
         ...startup,
         ...nativeRestartSelection({ run }),
         restore: run,
-        onReady,
+        // The restart's own bookkeeping first, then the startup's ready
+        // report: a detached owner (`restart --json`) tells its launcher here.
+        onReady: async (services) => {
+          await onReady();
+          await startup.onReady?.(services);
+        },
         signal,
         onStopSignals,
         onProgress: (event) => {
@@ -7063,6 +7083,7 @@ async function launchNativeDetachedUp(opts: {
   readonly cwd: string;
   readonly args: readonly string[];
   readonly json: boolean;
+  readonly action?: "up" | "restart";
   readonly scope: Parameters<
     typeof explainUnconfirmedNativeDetachedStart
   >[0]["scope"];
@@ -7072,6 +7093,7 @@ async function launchNativeDetachedUp(opts: {
       cwd: opts.cwd,
       args: opts.args,
       json: opts.json,
+      action: opts.action,
     });
   } catch (error) {
     throw await explainUnconfirmedNativeDetachedStart({
@@ -7079,6 +7101,33 @@ async function launchNativeDetachedUp(opts: {
       scope: opts.scope,
     });
   }
+}
+
+/** The instance a detached `restart --json` will restart. */
+async function resolveNativeRestartLaunchScope(opts: {
+  readonly ctx: CliContext;
+  readonly args: RestartArgs;
+  readonly native: NonNullable<
+    ReturnType<typeof resolveNativeRuntimeSelection>
+  >;
+}): Promise<NativeProjectRunScope> {
+  const project = await resolveProjectForArgs({
+    ctx: opts.ctx,
+    pathOpt: opts.args.options.path,
+    projectOpt: opts.args.options.project,
+    touchRegistration: false,
+  });
+  const identity = await resolveEffectiveBranchIdentityForCommand({
+    project,
+    branchOption: opts.args.options.branch,
+    noticeToStderr: true,
+  });
+  return {
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    nativeHome: opts.native.home,
+    branch: identity.branch,
+  };
 }
 
 async function handleUpUnlocked({
@@ -7124,18 +7173,10 @@ async function handleUpUnlocked({
       target: args.options.target,
       services: args.positionals.services,
     });
-    const childArgs = ["up"];
-    for (const [name, value] of Object.entries({
-      path: args.options.path,
-      project: args.options.project,
-      branch: args.options.branch,
-      env: args.options.env,
-      profile: args.options.profile,
-    })) {
-      if (value !== undefined) {
-        childArgs.push(`--${name}=${value}`);
-      }
-    }
+    const childArgs = nativeDetachedOwnerArgs({
+      action: "up",
+      options: args.options,
+    });
     // The instance the child will start, for explaining an unconfirmed start.
     let launchScope: Parameters<
       typeof explainUnconfirmedNativeDetachedStart
@@ -9341,6 +9382,36 @@ async function handleRestart({
     return authored;
   }
   const native = resolveNativeRuntimeSelection();
+  if (native && args.options.json === true && !recover) {
+    // `--json` wants one result envelope once the services are back, as on
+    // Compose. The native restart owns the services for as long as they run,
+    // so run it in a detached owner and report its readiness (HACK native
+    // CLI gaps, item 2); without --json the restart stays in the foreground.
+    refuseUnsupportedNativeUpOptions({
+      restart: true,
+      target: args.options.target,
+      services: args.positionals.services,
+    });
+    // The child's own refusal cannot cross IPC: a run mapping another native
+    // home owns is refused here, with its code and release command, as plain
+    // restart and `up --detach` do (HACK-2339), and an unconfirmed start is
+    // explained by that mapping afterwards.
+    const scope = await resolveNativeRestartLaunchScope({ ctx, args, native });
+    const foreign = await nativeForeignHomeRefusal(scope);
+    if (foreign) {
+      throw foreign;
+    }
+    return await launchNativeDetachedUp({
+      cwd: ctx.cwd,
+      args: nativeDetachedOwnerArgs({
+        action: "restart",
+        options: args.options,
+      }),
+      json: true,
+      action: "restart",
+      scope,
+    });
+  }
   if (native) {
     return await handleNativeUp({
       ctx,
@@ -11207,31 +11278,49 @@ async function handleNativeLogs({
   const tail = args.options.tail ?? 200;
   assertNativeLogFlags(args.options);
   const follow = !args.options.noFollow;
+  const scope = {
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    nativeHome: native.home,
+    branch,
+  };
   if (follow) {
-    return await followNativeProjectLogs({
-      runtime: native,
-      scope: {
-        projectRoot: project.projectRoot,
-        projectDir: project.projectDir,
-        nativeHome: native.home,
-        branch,
-      },
-      service,
-      tail,
-      since: args.options.since,
-      timestamps: args.options.timestamps,
+    const followService = (input: {
+      readonly service: string;
+      readonly stdout?: Writable;
+      readonly stderr?: Writable;
+    }) =>
+      followNativeProjectLogs({
+        runtime: native,
+        scope,
+        service: input.service,
+        tail,
+        since: args.options.since,
+        timestamps: args.options.timestamps,
+        json,
+        project: args.options.project,
+        stdout: input.stdout,
+        stderr: input.stderr,
+      });
+    if (service) {
+      return await followService({ service });
+    }
+    // No service: follow every service, as Compose does.
+    return await followAllNativeServices({
+      services: await nativeProjectLogServices({ runtime: native, scope }),
       json,
-      project: args.options.project,
+      follow: followService,
+    });
+  }
+  if (!service) {
+    return writeNativeAllLogs({
+      result: await nativeProjectAllLogs({ runtime: native, scope, tail }),
+      json,
     });
   }
   const result = await nativeProjectLogs({
     runtime: native,
-    scope: {
-      projectRoot: project.projectRoot,
-      projectDir: project.projectDir,
-      nativeHome: native.home,
-      branch,
-    },
+    scope,
     service,
     tail,
     follow,
@@ -11248,6 +11337,49 @@ async function handleNativeLogs({
         line.text
       );
     }
+  }
+  return 0;
+}
+
+/**
+ * Prints every service's native log snapshot. Text output prefixes each line
+ * with its service, Compose-style, keeping each line on its own stream; JSON
+ * is one object with a `services` array.
+ */
+function writeNativeAllLogs(opts: {
+  readonly result: Awaited<ReturnType<typeof nativeProjectAllLogs>>;
+  readonly json: boolean;
+}): number {
+  const { result } = opts;
+  if (opts.json) {
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return 0;
+  }
+  const truncated = result.services
+    .filter((entry) => entry.truncated)
+    .map((entry) => entry.service);
+  process.stderr.write(
+    `Native logs: all services${truncated.length ? ` (truncated; older lines omitted for ${truncated.join(", ")})` : ""}\n`
+  );
+  const width = Math.max(0, ...result.services.map((e) => e.service.length));
+  for (const entry of result.services) {
+    const prefix = nativeLogPrefix({ service: entry.service, width });
+    for (const line of entry.lines) {
+      const text = line.text.endsWith("\n") ? line.text : `${line.text}\n`;
+      const prefixed = text
+        .slice(0, -1)
+        .split("\n")
+        .map((part) => `${prefix}${part}\n`)
+        .join("");
+      (line.stream === "stdout" ? process.stdout : process.stderr).write(
+        prefixed
+      );
+    }
+  }
+  if (result.skipped.length > 0) {
+    process.stderr.write(
+      `No container to read for: ${result.skipped.join(", ")}.\n`
+    );
   }
   return 0;
 }
@@ -11611,9 +11743,19 @@ async function handleOpen({
       ? applyBranchToHost({ host: rawHost, branch, baseHosts })
       : rawHost;
   const grafanaHost = await resolveOpenGrafanaHost(targetRaw);
-  const url = resolveOpenUrl({ targetRaw, resolvedHost, grafanaHost });
+  const nativeOpen = await resolveNativeOpenPort({ targetRaw, project, cfg });
+  const url = resolveOpenUrl({
+    targetRaw,
+    resolvedHost,
+    grafanaHost,
+    httpsPort: nativeOpen.httpsPort,
+  });
 
-  return await emitOpenOrigin({ url, json, origin: "compose" });
+  return await emitOpenOrigin({
+    url,
+    json,
+    origin: nativeOpen.native ? "native" : "compose",
+  });
 }
 
 export async function emitOpenOrigin(opts: {
@@ -11758,6 +11900,11 @@ export function resolveOpenUrl(opts: {
   readonly grafanaHost?: string;
   readonly targetRaw: string;
   readonly resolvedHost: string;
+  /**
+   * The native HTTPS frontend's port when the project runs on the native
+   * backend; 443 and null stay implicit, any other port is written out.
+   */
+  readonly httpsPort?: number | null;
 }): string {
   if (opts.targetRaw === "logs") {
     return `https://${opts.grafanaHost ?? DEFAULT_GRAFANA_HOST}`;
@@ -11765,5 +11912,40 @@ export function resolveOpenUrl(opts: {
   if (hasUrlScheme(opts.targetRaw)) {
     return opts.targetRaw;
   }
-  return `https://${opts.resolvedHost}`;
+  return runtimeHostUrl({
+    host: opts.resolvedHost,
+    httpsPort: opts.httpsPort,
+  });
+}
+
+/**
+ * On the native backend a project host is served by native's own HTTPS
+ * frontend, which may listen on another port (for example 18443). The target
+ * is checked first: Grafana and full URLs never consult the native runtime.
+ */
+async function resolveNativeOpenPort(opts: {
+  readonly targetRaw: string;
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+}): Promise<{ readonly native: boolean; readonly httpsPort?: number | null }> {
+  if (
+    !openTargetIsProjectHost(opts.targetRaw) ||
+    resolveNativeRuntimeSelection() === null
+  ) {
+    return { native: false };
+  }
+  const host = await resolveNativeHostSettings({
+    env: process.env,
+    projectName: await resolveComposeProjectName({
+      project: opts.project,
+      cfg: opts.cfg,
+    }),
+    projectRoot: opts.project.projectRoot,
+  });
+  return { native: true, httpsPort: host.https?.httpsPort ?? null };
+}
+
+/** Whether `hack open <target>` names a project host, not Grafana or a URL. */
+function openTargetIsProjectHost(targetRaw: string): boolean {
+  return targetRaw !== "logs" && !hasUrlScheme(targetRaw);
 }

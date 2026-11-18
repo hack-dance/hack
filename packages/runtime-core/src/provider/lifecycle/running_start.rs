@@ -59,8 +59,9 @@ pub(super) struct StartRequest<'a> {
 impl StartRequest<'_> {
     /// The request fits the existing pool `owner` records; nothing is resized or replaced.
     /// `project_share::check_request` also re-validates the requested share's live directory.
-    pub(super) fn check(&self, owner: &Owner) -> Result<(), CandidateError> {
-        check_amd64_emulation_request(owner, self.amd64_emulation)?;
+    /// `alive` is whether the recorded provider still runs (see `emulation_pool_alive`).
+    pub(super) fn check(&self, owner: &Owner, alive: bool) -> Result<(), CandidateError> {
+        check_amd64_emulation_request(owner, self.amd64_emulation, alive)?;
         super::super::project_share::check_request(&owner.project_shares(), self.project_share)?;
         self.bridges.check(owner.application_bridge)?;
         super::super::network_intent::check_request(&owner.network, self.network)?;
@@ -134,7 +135,8 @@ pub(super) fn resume(
     if owner != running.owner {
         return Err(changed());
     }
-    request.check(&owner)?;
+    // `select` verified this provider; `verify_running` below checks it again.
+    request.check(&owner, true)?;
     verify_running(candidate, &owner)?;
     super::super::graph::verify_owner_registry(candidate, &owner)?;
     super::super::dependency_socket::verify(candidate, &owner)?;

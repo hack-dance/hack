@@ -958,28 +958,34 @@ async function closingFlow(run: FirstRun): Promise<void> {
   );
 }
 
-async function cleanup(run: FirstRun): Promise<void> {
-  // Always stop hackd before its state under HOME is removed.
-  await run.hack(["daemon", "stop"], { timeoutMs: 60_000 });
-  await run.hack(["down", "--branch", "b1"], { timeoutMs: 120_000 });
-  await run.hack(["down"], { timeoutMs: 120_000 });
+/** Lists Docker objects of `kind` carrying one Compose project label. */
+async function labeled(
+  run: FirstRun,
+  kind: "container" | "volume" | "network",
+  project: string
+): Promise<string[]> {
+  const label = `label=com.docker.compose.project=${project}`;
+  const argv =
+    kind === "container"
+      ? ["docker", "ps", "-aq", "--filter", label]
+      : ["docker", kind, "ls", "-q", "--filter", label];
+  return (await run.sh(argv)).stdout.split("\n").filter(Boolean);
+}
+
+/** Removes labeled volumes (and networks) of `projects`; returns their names. */
+async function removeLabeled(
+  run: FirstRun,
+  projects: readonly string[],
+  kinds: readonly ("volume" | "network")[]
+): Promise<string[]> {
   const removed: string[] = [];
-  for (const project of [run.project, `${run.project}--b1`]) {
-    const label = `label=com.docker.compose.project=${project}`;
-    const containers = (
-      await run.sh(["docker", "ps", "-aq", "--filter", label])
-    ).stdout
-      .split("\n")
-      .filter(Boolean);
+  for (const project of projects) {
+    const containers = await labeled(run, "container", project);
     if (containers.length > 0) {
       await run.sh(["docker", "rm", "-f", ...containers]);
     }
-    for (const kind of ["volume", "network"] as const) {
-      const names = (
-        await run.sh(["docker", kind, "ls", "-q", "--filter", label])
-      ).stdout
-        .split("\n")
-        .filter(Boolean);
+    for (const kind of kinds) {
+      const names = await labeled(run, kind, project);
       if (
         names.length > 0 &&
         (await run.sh(["docker", kind, "rm", ...names])).exit === 0
@@ -988,34 +994,36 @@ async function cleanup(run: FirstRun): Promise<void> {
       }
     }
   }
+  return removed;
+}
+
+async function cleanup(run: FirstRun): Promise<void> {
+  // Always stop hackd before its state under HOME is removed.
+  await run.hack(["daemon", "stop"], { timeoutMs: 60_000 });
+  await run.hack(["down", "--branch", "b1"], { timeoutMs: 120_000 });
+  await run.hack(["down"], { timeoutMs: 120_000 });
+  const removed = await removeLabeled(
+    run,
+    [run.project, `${run.project}--b1`],
+    ["volume", "network"]
+  );
   if (run.startedGlobalStack) {
     await run.hack(["global", "down"], { timeoutMs: 120_000 });
   }
-  if (run.startedGlobalStack && run.ownsGlobalVolumes) {
+  const removesGlobalVolumes = run.startedGlobalStack && run.ownsGlobalVolumes;
+  if (removesGlobalVolumes) {
     // `global down` keeps named volumes; the check created them, so it
     // removes them (only these projects' labeled volumes).
-    for (const project of GLOBAL_PROJECTS) {
-      const label = `label=com.docker.compose.project=${project}`;
-      const names = (
-        await run.sh(["docker", "volume", "ls", "-q", "--filter", label])
-      ).stdout
-        .split("\n")
-        .filter(Boolean);
-      if (
-        names.length > 0 &&
-        (await run.sh(["docker", "volume", "rm", ...names])).exit === 0
-      ) {
-        removed.push(...names);
-      }
-    }
+    removed.push(...(await removeLabeled(run, GLOBAL_PROJECTS, ["volume"])));
   }
   const left = await readdir(join(run.home, ".hack")).catch(() => []);
+  const stack = run.startedGlobalStack ? "stopped" : "left as found";
   run.record({
     step: "9 cleanup",
     command: "hack down; docker rm/volume rm (own labels); hack global down",
     exit: null,
     result: "info",
-    note: `removed ${removed.length} volumes/networks it created; global stack ${run.startedGlobalStack ? "stopped" : "left as found"}${run.startedGlobalStack && run.ownsGlobalVolumes ? " and its volumes removed" : ""}; ~/.hack holds ${left.length} entries${run.opts.keep ? " (kept)" : ""}`,
+    note: `removed ${removed.length} volumes/networks it created; global stack ${stack}${removesGlobalVolumes ? " and its volumes removed" : ""}; ~/.hack holds ${left.length} entries${run.opts.keep ? " (kept)" : ""}`,
   });
   if (!run.opts.keep) {
     await rm(run.home, { recursive: true, force: true });

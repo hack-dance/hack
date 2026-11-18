@@ -724,9 +724,24 @@ pub(super) fn amd64_emulation_not_enabled() -> CandidateError {
 
 /// Whether the recorded provider still runs, checked only where a translation request
 /// meets a pool recorded as running without it; elsewhere the answer does not matter.
-fn emulation_pool_alive(candidate: &Candidate, owner: &Owner, requested: bool) -> bool {
-    !(requested && !owner.amd64_emulation && owner.phase == "running")
-        || verify_live(candidate, owner).is_ok()
+/// `false` needs positive evidence that the recorded process is gone. A missing identity,
+/// an uncertain observation or a live process that fails verification is returned as
+/// that error, never as an exit.
+fn emulation_pool_alive(
+    candidate: &Candidate,
+    owner: &Owner,
+    requested: bool,
+) -> Result<bool, CandidateError> {
+    if !(requested && !owner.amd64_emulation && owner.phase == "running") {
+        return Ok(true);
+    }
+    if let Some(process) = &owner.process {
+        if !identity::alive(process.pid)? {
+            return Ok(false);
+        }
+    }
+    verify_live(candidate, owner)?;
+    Ok(true)
 }
 
 /// A running pool cannot gain translation without a restart, and running workloads are never
@@ -1271,7 +1286,7 @@ fn start_pool(
             let owner = Owner::load(candidate)?;
             request.check(
                 &owner,
-                emulation_pool_alive(candidate, &owner, request.amd64_emulation),
+                emulation_pool_alive(candidate, &owner, request.amd64_emulation)?,
             )?;
             (
                 owner.application_bridge,
@@ -1426,7 +1441,7 @@ fn start_pool(
             "Capacity profile changed before the operation lock was acquired.",
         ));
     }
-    let alive = emulation_pool_alive(candidate, &owner, start.amd64_emulation);
+    let alive = emulation_pool_alive(candidate, &owner, start.amd64_emulation)?;
     check_amd64_emulation_request(&owner, start.amd64_emulation, alive)?;
     if fresh_owner {
         super::graph::initialize_owner_registry(candidate, &owner)?;
@@ -3158,6 +3173,43 @@ mod tests {
             &refused,
             Err(e) if e.code == "provider_busy" && e.message.contains("no operation was admitted")
         ));
+    }
+
+    #[test]
+    fn only_a_provably_exited_provider_is_reported_as_an_exited_pool() {
+        let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let owner = |process: Value| -> Owner {
+            serde_json::from_value(json!({
+                "version":1,"checkout":"/fixture","token":"fixture","machine":"fixture",
+                "short_home":"/fixture","created":true,"phase":"running","process":process,
+                "storage":null,"overlay":null,"guest_boot_id":null,
+                "daemon_pid":null,"daemon_start":null,"rootfs_digest":null,
+                "amd64_emulation":false
+            }))
+            .unwrap()
+        };
+        // A process that has exited: positive evidence of absence.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        child.wait().unwrap();
+        let exited = owner(json!({"pid":pid,"start_micros":0,"uid":0,"executable":"/fixture"}));
+        assert!(!emulation_pool_alive(&candidate, &exited, true).unwrap());
+        // No recorded identity is not evidence of exit: the verification error surfaces.
+        let unknown = emulation_pool_alive(&candidate, &owner(Value::Null), true).unwrap_err();
+        assert_eq!(unknown.code, "process_identity_unavailable");
+        // A live process that fails verification keeps its own error.
+        let live = owner(json!({
+            "pid": i32::try_from(std::process::id()).unwrap(),
+            "start_micros":0,"uid":0,"executable":"/fixture"
+        }));
+        assert_ne!(
+            emulation_pool_alive(&candidate, &live, true)
+                .unwrap_err()
+                .code,
+            "pool_process_exited"
+        );
+        // Without a translation request nothing is observed.
+        assert!(emulation_pool_alive(&candidate, &owner(Value::Null), false).unwrap());
     }
 
     #[test]

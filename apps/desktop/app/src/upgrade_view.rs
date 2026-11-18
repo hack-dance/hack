@@ -636,6 +636,21 @@ fn review(app: &HackApp, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
                         format!("{} · {}", c.scope, f.summary),
                         ui,
                     ));
+                    // The checkout's own remedy (for example rotating an
+                    // exposed key), not only the generic reason below.
+                    let mut remedy = div().flex().flex_col().gap(space::S2).pl(space::S7);
+                    if let Some(action) = f.action.as_deref().filter(|a| !a.is_empty()) {
+                        remedy = remedy.child(note(action.to_owned(), ui));
+                    }
+                    if let Some(cmd) = f.command.as_deref().filter(|c| !c.is_empty()) {
+                        remedy = remedy.child(copy_chip(
+                            format!("upgrade-review-copy-{}-{}", c.scope, f.id),
+                            cmd,
+                            ui,
+                            cx,
+                        ));
+                    }
+                    col = col.child(remedy);
                 }
             }
             for reason in &r.reasons {
@@ -898,6 +913,23 @@ mod tests {
                     .is_some_and(Result::is_ok)
             );
         });
+    }
+
+    #[test]
+    fn review_keeps_each_checkouts_own_remedy() {
+        let (mut cx, app) = window(Fixture::Upgrade);
+        let finding = cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.open_upgrade(cx);
+                a.review_upgrade(cx);
+                a.upgrade.review.clone().unwrap().unwrap().checkouts[0].findings[0].clone()
+            })
+        });
+        assert_eq!(finding.command.as_deref(), Some("hack env migrate"));
+        assert_eq!(
+            finding.action.as_deref(),
+            Some("Check the converted layers before committing them.")
+        );
     }
 
     #[test]

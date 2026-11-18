@@ -689,7 +689,7 @@ pub fn upgrade_review() -> crate::upgrade::Review {
     serde_json::from_value(serde_json::json!({
         "status": "review",
         "checkouts": [{"scope": "alpha", "project": "alpha", "root": "/work/alpha", "findings": [
-            {"id": "env-format", "status": "warn", "summary": "Legacy .env layers; hack env migrate converts them.", "kind": "manual", "command": "hack env migrate"}
+            {"id": "env-format", "status": "warn", "summary": "Legacy .env layers; hack env migrate converts them.", "kind": "manual", "command": "hack env migrate", "action": "Check the converted layers before committing them."}
         ]}],
         "reasons": [{"id": "env-format", "reason": "Converting env layers rewrites files the team commits; review the change first."}]
     }))

@@ -118,10 +118,12 @@ cp packages/runtime-core/provider-pins.json "$out/provider-pins.json"
 # run as the CLI) and .env (it fills in any variable the caller did not set,
 # such as DOCKER_HOST or a HACK_* setting), and reads tsconfig.json and
 # package.json.
+# The bytecode cache spares each start a parse of the whole bundle (about
+# 250 ms); ESM output keeps top-level await working.
 if [ -n "$version" ]; then
-  bun build index.ts --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig --no-compile-autoload-package-json --define 'process.env.OPENTUI_LIBC="glibc"' --define "__HACK_BUILD_VERSION__=\"$version\"" --outfile "$out/hack-cli"
+  bun build index.ts --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig --no-compile-autoload-package-json --bytecode --format=esm --define 'process.env.OPENTUI_LIBC="glibc"' --define "__HACK_BUILD_VERSION__=\"$version\"" --outfile "$out/hack-cli"
 else
-  bun build index.ts --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig --no-compile-autoload-package-json --define 'process.env.OPENTUI_LIBC="glibc"' --outfile "$out/hack-cli"
+  bun build index.ts --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --no-compile-autoload-tsconfig --no-compile-autoload-package-json --bytecode --format=esm --define 'process.env.OPENTUI_LIBC="glibc"' --outfile "$out/hack-cli"
 fi
 bun scripts/build-lifecycle-supervisor.ts
 cp dist/hack-lifecycle-supervisor "$out/hack-lifecycle-supervisor"

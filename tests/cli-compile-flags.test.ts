@@ -33,6 +33,12 @@ const LINE_COMPILE_SITES = [
 
 const COMPILE_LINE = /\bbun build \S+ --compile\b/;
 
+/**
+ * The bytecode cache (see docs/performance.md). The runtime images are built
+ * without it and are not listed here.
+ */
+const BYTECODE_FLAGS = ["--bytecode", "--format=esm"] as const;
+
 const repository = resolve(import.meta.dir, "..");
 let root = "";
 
@@ -145,3 +151,30 @@ test("the flags stop a project's bunfig preload and .env from loading", async ()
   expect(await outputOf([])).toBe("preload ran\nprobe:from-dotenv\n");
   expect(await outputOf(NO_AUTOLOAD_FLAGS)).toBe("probe:unset\n");
 }, 240_000);
+
+test("the dev, release and candidate builds keep the bytecode cache", async () => {
+  for (const flag of BYTECODE_FLAGS) {
+    expect(cliPackage.scripts.build.split(" ")).toContain(flag);
+  }
+  const release = await readFile(
+    join(repository, "scripts/build-release.ts"),
+    "utf8"
+  );
+  for (const flag of BYTECODE_FLAGS) {
+    expect(release).toContain(`      "${flag}",\n`);
+  }
+  const candidate = (
+    await readFile(
+      join(repository, "scripts/build-native-candidate.sh"),
+      "utf8"
+    )
+  )
+    .split("\n")
+    .filter((line) => line.includes("bun build index.ts --compile"));
+  expect(candidate.length).toBeGreaterThan(0);
+  for (const line of candidate) {
+    expect(line.split(" ")).toEqual(
+      expect.arrayContaining([...BYTECODE_FLAGS])
+    );
+  }
+});

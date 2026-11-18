@@ -14,12 +14,14 @@ const REPO = resolve(import.meta.dir, "..");
 const CLI_ENTRIES = ["index.ts", "update-recovery-cli.ts", "v4-upgrade-cli.ts"];
 
 /**
- * Files that only describe a compile in text (this test, and the spawn-env
- * audit's reason strings); they run no `bun build`.
+ * Files that only describe a CLI compile in text (this test, the spawn-env
+ * audit's reason strings, the compile-flags text checks); they compile no CLI.
  */
 const DESCRIPTIONS_ONLY = new Set([
   "tests/cli-compile-define.test.ts",
   "tests/cli-spawn-env-isolation.test.ts",
+  // Matches compile lines as text; its own compile builds a probe, not the CLI.
+  "tests/cli-compile-flags.test.ts",
 ]);
 
 /** How far a TypeScript argv may extend before or after its `--compile`. */

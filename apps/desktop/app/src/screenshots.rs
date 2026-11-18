@@ -64,6 +64,9 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             if fixtures::opens_upgrade(f) {
                                 app.show_upgrade_now();
                             }
+                            if fixtures::loads_usage(f) {
+                                app.show_usage_now();
+                            }
                             if f.name().starts_with("env-") {
                                 app.show_env_fixture(f.name(), window, cx);
                             }

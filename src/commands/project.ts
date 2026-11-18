@@ -995,7 +995,13 @@ export async function resolveEffectiveBranchIdentityForCommand(opts: {
 }): Promise<{ readonly branch: string | null; readonly name: string | null }> {
   const explicit = resolveBranchSlug(opts.branchOption);
   if (explicit) {
-    return { branch: explicit, name: (opts.branchOption ?? "").trim() };
+    // Login autostart replays the saved slug as --branch; it is not a name
+    // the user gave, so the recorded name is kept.
+    const name =
+      process.env.HACK_AUTOSTART_LOGIN === "1"
+        ? null
+        : (opts.branchOption ?? "").trim();
+    return { branch: explicit, name };
   }
   // A saved null instance means base, even when its checkout is a worktree.
   if (process.env.HACK_AUTOSTART_LOGIN === "1") {

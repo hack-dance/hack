@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolveEffectiveBranchIdentityForCommand } from "../src/commands/project.ts";
 import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
@@ -18,6 +19,7 @@ import type {
   RuntimeProject,
   RuntimeService,
 } from "../src/lib/runtime-projects.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -580,3 +582,36 @@ test(
   },
   { timeout: 60_000 }
 );
+
+test("an explicit --branch is its name, except when login autostart replays the slug", async () => {
+  const registration = await createProject({});
+  const project = {
+    projectRoot: registration.repoRoot,
+    projectDirName: ".hack",
+    projectDir: registration.projectDir,
+    composeFile: join(registration.projectDir, PROJECT_COMPOSE_FILENAME),
+    envFile: join(registration.projectDir, ".env"),
+    configFile: join(registration.projectDir, PROJECT_CONFIG_FILENAME),
+  } as Parameters<
+    typeof resolveEffectiveBranchIdentityForCommand
+  >[0]["project"];
+  const previous = process.env.HACK_AUTOSTART_LOGIN;
+  try {
+    Reflect.deleteProperty(process.env, "HACK_AUTOSTART_LOGIN");
+    expect(
+      await resolveEffectiveBranchIdentityForCommand({
+        project,
+        branchOption: " Feature/X ",
+      })
+    ).toEqual({ branch: "feature-x", name: "Feature/X" });
+    process.env.HACK_AUTOSTART_LOGIN = "1";
+    expect(
+      await resolveEffectiveBranchIdentityForCommand({
+        project,
+        branchOption: "feature-x",
+      })
+    ).toEqual({ branch: "feature-x", name: null });
+  } finally {
+    restoreEnv("HACK_AUTOSTART_LOGIN", previous);
+  }
+});

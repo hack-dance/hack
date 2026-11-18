@@ -3,6 +3,7 @@ import {
   nativeProjectPs,
 } from "../backends/native-project-observe.ts";
 import {
+  isNativeForeignHomeRefusal,
   loadNativeProjectRun,
   type NativeProjectRun,
   normalizeNativeProfiles,
@@ -238,7 +239,12 @@ export async function answerNativeAlreadyRunning(opts: {
           : null,
       }),
     };
-  } catch {
+  } catch (error) {
+    // A run mapping that another native home owns is a refusal, not "not
+    // running": starting would fail in the child with no way out (HACK-2339).
+    if (isNativeForeignHomeRefusal(error)) {
+      throw error;
+    }
     return null;
   }
   const selection = {

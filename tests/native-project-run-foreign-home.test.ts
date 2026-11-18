@@ -26,7 +26,10 @@ import {
   saveNativeProjectRun as save,
 } from "../src/backends/native-project-run.ts";
 import type { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
-import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
+import {
+  expectClosedRefusal,
+  expectCodedRefusal,
+} from "./helpers/closed-refusal.ts";
 
 /**
  * HACK-1952: each launcher version has its own native home, and the project's run
@@ -115,8 +118,21 @@ test("a cleanly stopped run from another home is named, inspectable and releasab
   });
   const selection = inspection.selectionSha256 ?? "";
   expect(selection).toMatch(/^[a-f0-9]{64}$/);
-  await expectClosedRefusal(
+  // HACK-2339: the way out is data as well as text, for --json callers.
+  const coded = await expectCodedRefusal(
     load(f.b),
+    "E_NATIVE_RUN_MAPPING_FOREIGN_HOME",
+    "release the mapping"
+  );
+  expect(coded.detail).toMatchObject({
+    owner: "stopped",
+    ownerHome: f.homeA,
+    selectionSha256: selection,
+    releaseCommand: `hack doctor --native-run-mapping release --expect-selection ${selection}`,
+  });
+  await expectCodedRefusal(
+    load(f.b),
+    "E_NATIVE_RUN_MAPPING_FOREIGN_HOME",
     `Native project run mapping belongs to run ${run.run} in another native home (${f.homeA}), which stopped it cleanly; its retained data stays in that home. To start this instance from this native home, release the mapping with hack doctor --native-run-mapping release --expect-selection ${selection}, or run hack down with the Hack version that owns that home.`
   );
 
@@ -151,7 +167,11 @@ test("a cleanly stopped run from another home is named, inspectable and releasab
   // This home can now publish its own fresh owner for the same instance.
   await save({ ...f.b, run: { ...run, run: "f".repeat(32) } });
   expect((await load(f.b))?.run).toBe("f".repeat(32));
-  await expectClosedRefusal(load(f.a), "another native home");
+  await expectCodedRefusal(
+    load(f.a),
+    "E_NATIVE_RUN_MAPPING_FOREIGN_HOME",
+    "another native home"
+  );
 });
 
 test("a live owner in another home is refused by name and never released", async () => {
@@ -166,7 +186,11 @@ test("a live owner in another home is refused by name and never released", async
     selectionSha256: null,
   });
   const live = `Native project run mapping is owned by live run ${run.run} in another native home (${f.homeA}), frontend pid ${process.pid}. Stop it first: press Ctrl-C in that hack up, or run hack down with the Hack version that owns that home; then retry here.`;
-  await expectClosedRefusal(load(f.b), live);
+  await expectCodedRefusal(
+    load(f.b),
+    "E_NATIVE_RUN_MAPPING_FOREIGN_HOME",
+    live
+  );
   await expectClosedRefusal(
     release({ scope: f.b, expectSelection: "e".repeat(64) }),
     live
@@ -189,8 +213,9 @@ test("an interrupted or unrecorded owner is named but cannot be released", async
     owner: "unproven",
     selectionSha256: null,
   });
-  await expectClosedRefusal(
+  await expectCodedRefusal(
     load(g.b),
+    "E_NATIVE_RUN_MAPPING_FOREIGN_HOME",
     `Native project run mapping belongs to run ${run.run} in another native home (${g.homeA}), and its clean stop cannot be proven from this home. Before using this home, run hack down with the Hack version that owns that home.`
   );
   await expectClosedRefusal(

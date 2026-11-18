@@ -913,9 +913,11 @@ the result; its existing native graph and ownership checks still apply.
 
 Each launcher version has its own native home, but the run mapping lives in the
 project. After an upgrade, a mapping the previous version left behind names that
-version's home. Project commands from the new home (`ps`, `up`, `down`,
-`doctor --native-cleanup inspect`) refuse it with a line that names the owning home
-and what to do:
+version's home. Project commands from the new home (`ps`, `up` in the foreground
+or with `--detach`, `down`, `doctor --native-cleanup inspect`) refuse it with a line
+that names the owning home and what to do. The refusal has its own code,
+`E_NATIVE_RUN_MAPPING_FOREIGN_HOME`; with `--json` its `error.detail` carries
+`owner`, `ownerHome`, `selectionSha256` and, for a clean stop, `releaseCommand`:
 
 - **Stopped cleanly.** The owning home's frontend records show that the run's latest
   `hack up` acknowledged confirmed graph cleanup, HTTPS retirement and down hooks.

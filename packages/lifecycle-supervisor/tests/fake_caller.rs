@@ -219,17 +219,90 @@ impl Drop for Fixture {
     }
 }
 
+/// A process seen working in a fixture root, keyed by PID and kernel birth.
+/// Unlike [`Identity`] it carries no session: a process that never called
+/// `setsid` can share session 1 (launchd on macOS runners), which `identity`
+/// rejects so session-wide kills can never reach it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Occupant {
+    pid: i32,
+    birth: u64,
+}
+
 /// Live processes (other than this one) whose working directory is `root`,
-/// whatever their executable.
-fn occupants(root: &Path) -> Vec<Identity> {
+/// whatever their executable or session.
+fn occupants(root: &Path) -> Vec<Occupant> {
     let Ok(root) = root.canonicalize() else {
         return Vec::new();
     };
-    census()
+    all_pids()
         .into_iter()
-        .filter(|p| p.pid != std::process::id() as i32)
-        .filter(|p| cwd_of(p.pid).as_deref() == Some(root.as_path()))
+        .filter(|pid| *pid != std::process::id() as i32)
+        .filter(|pid| cwd_of(*pid).as_deref() == Some(root.as_path()))
+        .filter_map(|pid| {
+            Some(Occupant {
+                pid,
+                birth: birth_of(pid)?,
+            })
+        })
         .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn all_pids() -> Vec<i32> {
+    fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse().ok())
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn all_pids() -> Vec<i32> {
+    let mut pids = vec![0i32; 65536];
+    // SAFETY: initialized vector provides the supplied writable byte count.
+    let count =
+        unsafe { libc::proc_listpids(1, 0, pids.as_mut_ptr().cast(), (pids.len() * 4) as i32) };
+    if count <= 0 {
+        return Vec::new();
+    }
+    pids.into_iter()
+        .take(count as usize / 4)
+        .filter(|p| *p > 1)
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn birth_of(pid: i32) -> Option<u64> {
+    let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    text.rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+#[cfg(target_os = "macos")]
+fn birth_of(pid: i32) -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    // SAFETY: kernel writes at most the supplied live buffer size.
+    let size = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+        )
+    };
+    if size as usize != std::mem::size_of::<libc::proc_bsdinfo>() {
+        return None;
+    }
+    // SAFETY: fully written above.
+    let info = unsafe { info.assume_init() };
+    Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
 }
 
 /// SIGKILLs every live process whose working directory is `root` and whose
@@ -249,10 +322,15 @@ fn reap_fixture_processes(root: &Path) -> Vec<i32> {
         if Instant::now() >= deadline {
             return matched.into_iter().map(|p| p.pid).collect();
         }
+        let canonical = root.canonicalize().ok();
         for member in matched {
-            if identity(member.pid).as_ref() == Some(&member) {
-                // SAFETY: a live process of this test binary or the supervisor
-                // working in this fixture's private root, rechecked by birth.
+            // Recheck birth and root right before the signal: a reused PID
+            // has a different birth, a moved process a different cwd.
+            if birth_of(member.pid) == Some(member.birth)
+                && cwd_of(member.pid).as_deref() == canonical.as_deref()
+            {
+                // SAFETY: a live fixture or supervisor process working in this
+                // fixture's private root, rechecked by birth and cwd.
                 unsafe {
                     libc::kill(member.pid, libc::SIGKILL);
                 }
@@ -763,10 +841,10 @@ fn stale_sweep_reaps_other_builds_and_keeps_an_occupied_root() {
     while !occupants(&root).iter().any(|p| p.pid == bystander_pid) {
         assert!(
             Instant::now() < deadline,
-            "bystander not visible as an occupant: cwd={:?} exe={:?} identity={}",
+            "bystander not visible as an occupant: cwd={:?} exe={:?} birth={:?}",
             cwd_of(bystander_pid),
             exe_of(bystander_pid),
-            identity(bystander_pid).is_some(),
+            birth_of(bystander_pid),
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -812,10 +890,10 @@ fn stale_roots_of_a_dead_test_process_are_reaped_and_removed() {
     let seen = occupants(&root).iter().any(|p| p.pid == supervisor_pid);
     assert!(
         seen && exe_of(supervisor_pid).is_some_and(|exe| is_fixture_executable(&exe)),
-        "stopped supervisor not visible to the sweep: occupant={seen} cwd={:?} exe={:?} identity={}",
+        "stopped supervisor not visible to the sweep: occupant={seen} cwd={:?} exe={:?} birth={:?}",
         cwd_of(supervisor_pid),
         exe_of(supervisor_pid),
-        identity(supervisor_pid).is_some(),
+        birth_of(supervisor_pid),
     );
     reap_stale_fixture_roots(parent);
     for child in [&mut stray, &mut supervisor] {

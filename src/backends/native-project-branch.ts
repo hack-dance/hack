@@ -9,6 +9,7 @@ import { isRecord } from "../lib/guards.ts";
 import {
   findProjectContext,
   readProjectConfig,
+  readProjectDevHost,
   resolveProjectOauthAliasHost,
   resolveProjectRouteBaseHosts,
 } from "../lib/project.ts";
@@ -126,7 +127,12 @@ export async function prepareNativeProjectBranch(opts: {
     throw refused();
   }
   const cfg = await readProjectConfig(project);
-  const devHost = cfg.devHost;
+  // The same source as Compose's branch hosts (HACK-2338 item 5): dev_host in
+  // hack.config.json, else the legacy DEV_HOST in .hack/.env. DNS names are
+  // case-insensitive; the rewrite and the route check use the lowercase form.
+  const devHost = cfg.parseError
+    ? undefined
+    : (await readProjectDevHost(project))?.toLowerCase();
   if (
     cfg.parseError ||
     !devHost ||

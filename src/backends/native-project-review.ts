@@ -374,6 +374,8 @@ export async function prepareNativeReviewBranch(opts: {
   readonly retainedMode?: "stopped" | "active";
   readonly invoke?: typeof invokeNativeRuntime;
   readonly select?: typeof selectNativeProjectReviewIdentity;
+  /** Told about route sites a branch instance drops, as Compose reports them. */
+  readonly onDropped?: (notice: string) => void;
 }): Promise<{
   input: NativeProjectInput;
   identity?: NativeProjectReviewIdentity;
@@ -404,6 +406,7 @@ export async function prepareNativeReviewBranch(opts: {
     input: opts.input,
     composeFile: opts.composeFile,
     scope: identity ? { ...opts.scope, branch: identity.branch } : opts.scope,
+    onDropped: opts.onDropped,
   });
   return { input, ...(identity ? { identity } : {}) };
 }

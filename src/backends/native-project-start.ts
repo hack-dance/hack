@@ -2079,6 +2079,7 @@ async function startNativeProjectAttempt(
       input,
       retained: restore,
       phase: "before-runtime",
+      onDropped: deps.warn,
     })
   ).input;
   // Pure build admission before hooks, VM or provider start; refuses when disabled.
@@ -2333,6 +2334,7 @@ async function startNativeProjectAttempt(
       invoke: deps.invoke,
       select: deps.selectReview,
       phase: "after-runtime",
+      onDropped: deps.warn,
     });
     input = reviewedBranch.input;
     const reviewIdentity = reviewedBranch.identity;

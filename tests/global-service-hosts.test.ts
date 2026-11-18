@@ -31,6 +31,40 @@ test("preferred global URLs do not change legacy project fallback", () => {
   ).toBe("https://api.custom.example");
 });
 
+test("a native project host carries native's HTTPS port unless it is 443 (HACK-2338 item 3)", () => {
+  expect(
+    resolveOpenUrl({
+      targetRaw: "",
+      resolvedHost: "app.example.hack",
+      httpsPort: 18_443,
+    })
+  ).toBe("https://app.example.hack:18443");
+  for (const httpsPort of [443, null, undefined]) {
+    expect(
+      resolveOpenUrl({
+        targetRaw: "api",
+        resolvedHost: "api.example.hack",
+        httpsPort,
+      })
+    ).toBe("https://api.example.hack");
+  }
+  // Grafana and full URLs are not native project hosts.
+  expect(
+    resolveOpenUrl({
+      targetRaw: "logs",
+      resolvedHost: "ignored.example",
+      httpsPort: 18_443,
+    })
+  ).toBe("https://logs.hack.local");
+  expect(
+    resolveOpenUrl({
+      targetRaw: "https://custom.example/path",
+      resolvedHost: "ignored.example",
+      httpsPort: 18_443,
+    })
+  ).toBe("https://custom.example/path");
+});
+
 test("installed route selection preserves old, dual and explicit unknown states", async () => {
   const { selectGlobalGrafanaHost, resolveInstalledGrafanaHost } = await import(
     "../src/lib/global-service-host.ts"

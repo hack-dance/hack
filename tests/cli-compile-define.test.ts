@@ -35,7 +35,7 @@ function isComment(line: string): boolean {
   );
 }
 
-/** The line at `index` joined with its `\\`-continued neighbours, both ways. */
+/** The line at `index` joined with its `\`-continued neighbours, both ways. */
 function continuedLines(lines: readonly string[], index: number): string {
   const continues = (at: number) => (lines[at] ?? "").trimEnd().endsWith("\\");
   let start = index;

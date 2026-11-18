@@ -661,6 +661,51 @@ mod tests {
         assert_eq!(cx.update(|cx| app.read(cx).pane), Pane::Setup);
     }
 
+    /// The minute tick checks a shown Setup pane again once its result is
+    /// ten minutes old, and leaves a fresh one alone.
+    #[test]
+    fn a_setup_pane_left_open_is_checked_again_after_ten_minutes() {
+        let (mut cx, app) = app();
+        cx.update(|cx| app.update(cx, |a, cx| a.open_setup(cx)));
+        let first = cx
+            .update(|cx| app.read(cx).setup.checked_at)
+            .expect("checked");
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.window_visible = true;
+                a.minute_tick(cx);
+            });
+        });
+        assert_eq!(
+            cx.update(|cx| app.read(cx).setup.checked_at),
+            Some(first),
+            "fresh: not checked again"
+        );
+        let old = first
+            .checked_sub(hack_desktop_core::setup::RECHECK_EVERY)
+            .expect("clock");
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.setup.checked_at = Some(old);
+                a.minute_tick(cx);
+            });
+        });
+        cx.run_until_parked();
+        let after = cx
+            .update(|cx| app.read(cx).setup.checked_at)
+            .expect("checked");
+        assert!(after > old, "checked again");
+        // Not when another pane is shown.
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.finish_setup(cx);
+                a.setup.checked_at = Some(old);
+                a.minute_tick(cx);
+            });
+        });
+        assert_eq!(cx.update(|cx| app.read(cx).setup.checked_at), Some(old));
+    }
+
     #[test]
     fn setup_is_checked_again_when_the_window_regains_focus() {
         let mut cx = HeadlessAppContext::with_platform(

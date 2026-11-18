@@ -145,6 +145,7 @@ export async function collectProjectNativePreflight(opts: {
   let hasDefaultDependencyFile = false;
   let gcloud: NativeGcloudSelection | undefined;
   let httpsSelected = false;
+  let httpsPort: number | null = null;
   // An unreadable Compose file is reported as `compose_file_unreadable`; the
   // settings lookup needs its project name, so it is skipped then.
   let settingsReadable = false;
@@ -163,6 +164,7 @@ export async function collectProjectNativePreflight(opts: {
       sharedSource = host.sharedSource;
       gcloud = host.gcloud;
       httpsSelected = host.https !== undefined;
+      httpsPort = host.https?.httpsPort ?? null;
       hasDefaultDependencyFile = host.dependencyFile !== undefined;
       hasHostDependencies =
         selectNativeEnvFile({
@@ -231,6 +233,7 @@ export async function collectProjectNativePreflight(opts: {
     sharedSource: sharedSource || !settingsReadable,
     ...(gcloud ? { gcloud } : {}),
     httpsSelected,
+    httpsPort,
     hasHostDependencies,
     hasDefaultDependencyFile,
     effectiveEnvName: effectiveEnv,

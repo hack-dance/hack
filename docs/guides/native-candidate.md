@@ -334,6 +334,17 @@ preflight. Raw runtime stderr and startup output are not configuration findings.
   on `up`. Source over the limit is the blocker `native_source_over_limit` with
   `up`'s own refusal text; a measurement that fails is `native_source_unmeasured`,
   because `up` refuses then too. An image-only project is not measured.
+- With the native HTTPS frontend selected, the preflight asks this machine's resolver
+  (hosts file and local DNS included) for each active routed hostname. A hostname
+  that resolves to a non-loopback address is the warning
+  `route_host_resolves_elsewhere`: it names the service and the answering address
+  (Hack's Compose proxy is `172.30.0.2`), says native listens on `127.0.0.1:<port>`,
+  and shows how to reach it (`curl --resolve HOST:<port>:127.0.0.1`). A hostname
+  that resolves only to loopback while another listener, such as Hack's Compose
+  proxy, answers on port 443 and native's port is not 443 is the warning
+  `route_default_port_elsewhere`: a URL without a port reaches that other listener;
+  `hack open` adds native's port. Hostnames are never printed, and an unknown
+  lookup reports nothing.
 - The runtime notes `route_binding_required` for every routed service. Preflight
   lists it only when no native HTTPS frontend is selected (machine `https` setting
   or the `HACK_NATIVE_CADDY_*` variables), because the route is then not served.

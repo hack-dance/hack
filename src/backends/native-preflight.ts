@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { DEFAULT_CADDY_IP } from "../constants.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
@@ -10,6 +11,10 @@ import {
   RESERVED_OWNERSHIP_LABEL_PREFIXES,
 } from "../lib/native-compose-backend-features.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../lib/native-environment-notices.ts";
+import {
+  probeProxyLoopback,
+  resolveProxyLoopbackAddresses,
+} from "../lib/proxy-loopback.ts";
 import { NativeEnvFileRefusal } from "./native-env-file-source.ts";
 import { nativeEnvironmentUnsetsReviewed } from "./native-environment-unsets.ts";
 import {
@@ -1782,6 +1787,18 @@ export type NativePreflightOptions = {
    * runtime's per-route `route_binding_required` note is not repeated.
    */
   readonly httpsSelected?: boolean;
+  /** The native HTTPS frontend's port, when it is selected and known. */
+  readonly httpsPort?: number | null;
+  /**
+   * The system resolver (hosts file and local overrides included); `[]` means
+   * unknown. Tests inject it; the default asks the system resolver.
+   */
+  readonly resolveHost?: (hostname: string) => Promise<readonly string[]>;
+  /**
+   * Whether something accepts TCP on 127.0.0.1:443 (for example Hack's
+   * Compose proxy). Tests inject it; the default makes one bounded connect.
+   */
+  readonly defaultHttpsTaken?: () => Promise<boolean>;
   readonly invoke?: typeof invokeNativeRuntime;
 };
 
@@ -1914,6 +1931,139 @@ function selectedRuntimeFindings(
  * and a refusal there is a blocker here, so `ready: true` is never followed
  * by `up` refusing on size. A measurement `up` could not make refuses too.
  */
+/** Routed hostnames checked per preflight, so lookups stay bounded. */
+const HOST_RESOLUTION_LIMIT = 32;
+
+function loopbackAddress(address: string): boolean {
+  return (
+    address === "::1" ||
+    address.startsWith("127.") ||
+    address.toLowerCase().startsWith("::ffff:127.")
+  );
+}
+
+/** Each active routed service's hostnames, in service order. */
+function routedHostnames(
+  plan: Readonly<Record<string, unknown>>
+): { service: string; hostname: string }[] {
+  const routed: { service: string; hostname: string }[] = [];
+  if (!isRecord(plan.services)) {
+    return routed;
+  }
+  for (const name of Object.keys(plan.services).sort(byCodePoint)) {
+    const reviewed = plan.services[name];
+    if (
+      !(
+        SERVICE.test(name) &&
+        isRecord(reviewed) &&
+        reviewed.active !== false &&
+        isRecord(reviewed.routing) &&
+        Array.isArray(reviewed.routing.hostnames)
+      )
+    ) {
+      continue;
+    }
+    for (const hostname of reviewed.routing.hostnames) {
+      if (typeof hostname === "string" && hostname.length > 0) {
+        routed.push({ service: name, hostname });
+      }
+    }
+  }
+  return routed;
+}
+
+/**
+ * Per service: the non-loopback addresses its hostnames resolve to, and
+ * whether a hostname resolved only to loopback. Unknown lookups add nothing.
+ */
+function classifyRouteAnswers(
+  answers: readonly {
+    readonly service: string;
+    readonly addresses: readonly string[];
+  }[]
+): {
+  readonly elsewhere: Map<string, Set<string>>;
+  readonly loopbackOnly: Set<string>;
+} {
+  const elsewhere = new Map<string, Set<string>>();
+  const loopbackOnly = new Set<string>();
+  for (const answer of answers) {
+    const foreign = answer.addresses.filter(
+      (address) => !loopbackAddress(address)
+    );
+    if (foreign.length > 0) {
+      const set = elsewhere.get(answer.service) ?? new Set<string>();
+      for (const address of foreign) {
+        set.add(address);
+      }
+      elsewhere.set(answer.service, set);
+    } else if (answer.addresses.length > 0) {
+      loopbackOnly.add(answer.service);
+    }
+  }
+  return { elsewhere, loopbackOnly };
+}
+
+/**
+ * Native's HTTPS frontend listens on loopback (HACK-2338 item 6). A routed
+ * hostname that resolves on this machine to another address (an existing
+ * Compose proxy, a hosts entry, local DNS) reaches that address instead, so
+ * the route looks broken even though native serves it. One warning per
+ * service names the answering address and how to reach native. Hostnames are
+ * label values and are never printed; an unknown lookup reports nothing.
+ */
+export async function hostResolutionFindings(opts: {
+  readonly plan: Readonly<Record<string, unknown>>;
+  readonly httpsPort: number;
+  readonly resolveHost: (hostname: string) => Promise<readonly string[]>;
+  readonly defaultHttpsTaken: () => Promise<boolean>;
+}): Promise<NativePreflightFinding[]> {
+  const routed = routedHostnames(opts.plan);
+  const answers = await Promise.all(
+    routed.slice(0, HOST_RESOLUTION_LIMIT).map(async (route) => ({
+      ...route,
+      addresses: await opts.resolveHost(route.hostname).catch(() => []),
+    }))
+  );
+  const { elsewhere, loopbackOnly } = classifyRouteAnswers(answers);
+  const port = opts.httpsPort;
+  // Loopback names reach native only with its port when another listener
+  // (such as Hack's Compose proxy on macOS) serves 443 on this machine.
+  const portless =
+    port !== 443 &&
+    [...loopbackOnly].some((service) => !elsewhere.has(service)) &&
+    (await opts.defaultHttpsTaken().catch(() => false))
+      ? [...loopbackOnly].filter((service) => !elsewhere.has(service))
+      : [];
+  const portlessFindings: NativePreflightFinding[] = portless.map(
+    (service) => ({
+      severity: "warning",
+      gate: "cli",
+      code: "route_default_port_elsewhere",
+      service,
+      message: `A hostname this service routes resolves to this machine, where another listener (such as Hack's Compose proxy) answers on port 443; native's HTTPS listener is 127.0.0.1:${port}. A URL without a port reaches that other listener, not native.`,
+      fix: `Open the route with port ${port} (hack open adds it), or stop the other listener on port 443 (for the Compose proxy, hack global down).`,
+    })
+  );
+  return [
+    ...portlessFindings,
+    ...[...elsewhere].map(([service, addresses]) => {
+      const list = [...addresses].sort();
+      const compose = list.includes(DEFAULT_CADDY_IP)
+        ? ", the address of Hack's Compose proxy"
+        : "";
+      return {
+        severity: "warning",
+        gate: "cli",
+        code: "route_host_resolves_elsewhere",
+        service,
+        message: `A hostname this service routes resolves on this machine to ${list.join(", ")}${compose}, not to native's HTTPS listener on 127.0.0.1:${port}. Clients on this machine reach that address instead of native.`,
+        fix: `Make the hostname resolve to 127.0.0.1 here (for the Compose proxy, stop it with hack global down; otherwise remove the hosts file or local DNS entry) and open it with port ${port}; or reach native directly with curl --resolve HOST:${port}:127.0.0.1 https://HOST:${port}/.`,
+      } satisfies NativePreflightFinding;
+    }),
+  ];
+}
+
 /** A runtime request error's text is closed; anything else stays generic. */
 function sourceMeasurementDetail(error: unknown): string {
   if (error instanceof HackCliError) {
@@ -2011,6 +2161,27 @@ async function reviewSelectedRuntime(input: {
     findings.push(
       ...routeFindings({ plan: runtime.plan, services: document.services })
     );
+    if (opts.httpsSelected === true && opts.httpsPort) {
+      findings.push(
+        ...(await hostResolutionFindings({
+          plan: runtime.plan,
+          httpsPort: opts.httpsPort,
+          resolveHost:
+            opts.resolveHost ??
+            ((hostname) => resolveProxyLoopbackAddresses({ hostname })),
+          defaultHttpsTaken:
+            opts.defaultHttpsTaken ??
+            (async () =>
+              (await probeProxyLoopback({
+                address: "127.0.0.1",
+                port: 443,
+                caPem: "",
+                protocol: "http",
+                timeoutMs: 300,
+              })) === "ok"),
+        }))
+      );
+    }
   }
   return { runtime, findings };
 }

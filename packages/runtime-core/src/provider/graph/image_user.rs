@@ -19,10 +19,12 @@ const MAX_LAYERS: usize = 256;
 const LAYER_ROOT: &str = "/var/lib/docker/overlay2/";
 
 /// Mounts the layers (given by their short `l/` links, top first) read-only, then prints
-/// one line per requested file: `<name> absent|symlink|large|<base64>`. A single layer is
-/// read in place: it has no whiteouts to apply.
-const READ_ACCOUNT_FILES: &str = r#"set -eu
-budget=$1; files=$2; shift 2
+/// only the account lines a name needs, so the report stays far below the guest response
+/// limit: `passwd <b64>` holds the first entry with the user's UID followed by the user's
+/// own entry, and `group <b64>` the group's entry. Each is `absent`, `symlink` or `large`
+/// instead when the file cannot be used. A single layer is read in place.
+const READ_ACCOUNT_LINES: &str = r#"set -eu
+budget=$1; user=$2; group=$3; shift 3
 root=/var/lib/docker/overlay2
 cd "$root"
 lower=""
@@ -41,14 +43,23 @@ case "$lower" in *:*)
   ;;
 *) mnt="$root/$1/diff";;
 esac
-for name in $files; do
-  f="$mnt/etc/$name"
-  if test -L "$mnt/etc" || test -L "$f"; then echo "$name symlink"
-  elif test -f "$f"; then
-    if test "$(stat -c %s "$f")" -gt "$budget"; then echo "$name large"
-    else printf '%s %s\n' "$name" "$(base64 -w0 < "$f")"; fi
-  else echo "$name absent"; fi
-done
+report() {
+  name=$1; key=$2; f="$mnt/etc/$name"
+  if test -L "$mnt/etc" || test -L "$f"; then echo "$name symlink"; return; fi
+  if ! test -f "$f"; then echo "$name absent"; return; fi
+  if test "$(stat -c %s "$f")" -gt "$budget"; then echo "$name large"; return; fi
+  if test "$name" = passwd; then
+    lines=$(awk -F: -v n="$key" 'NR == FNR { if ($1 == n && u == "") u = $3; next }
+      u != "" && $3 == u && !first { print; first = 1 }
+      $1 == n && own == "" { own = $0 }
+      END { if (own != "") print own }' "$f" "$f")
+  else
+    lines=$(awk -F: -v n="$key" '$1 == n { print; exit }' "$f")
+  fi
+  printf '%s %s\n' "$name" "$(printf '%s\n' "$lines" | base64 -w0)"
+}
+if test -n "$user"; then report passwd "$user"; fi
+if test -n "$group"; then report group "$group"; fi
 "#;
 
 fn numeric(value: &str) -> bool {
@@ -163,26 +174,41 @@ pub(super) fn resolve(
         return Ok(None);
     };
     let (uid, gid) = user.split_once(':').unwrap_or((user, ""));
-    let mut wanted = Vec::new();
-    if !numeric(uid) {
-        wanted.push("passwd");
-    }
-    if !gid.is_empty() && !numeric(gid) {
-        wanted.push("group");
-    }
+    let user_name = if numeric(uid) { "" } else { uid };
+    let group_name = if gid.is_empty() || numeric(gid) {
+        ""
+    } else {
+        gid
+    };
     let budget = ACCOUNT_FILE_BYTES.to_string();
-    let files = wanted.join(" ");
-    let mut arguments: Vec<&str> = vec![&budget, &files];
+    let mut arguments: Vec<&str> = vec![&budget, user_name, group_name];
     arguments.extend(ids.iter().map(String::as_str));
-    let Ok(output) = engine.guest().execute(READ_ACCOUNT_FILES, &arguments, None) else {
+    let Ok(output) = engine.guest().execute(READ_ACCOUNT_LINES, &arguments, None) else {
         return Ok(None);
     };
     let Ok(files) = parse_files(&output) else {
         return Ok(None);
     };
     let passwd = files.get("passwd").cloned().flatten().unwrap_or_default();
+    if !user_name.is_empty() && !first_with_uid_is(&passwd, user_name) {
+        return Ok(None);
+    }
     let group = files.get("group").cloned().flatten();
     Ok(resolve_text(user, &passwd, group.as_deref()))
+}
+
+/// Docker resolves a numeric UID to the first account with that UID. Writing a bare name
+/// as its UID is only faithful when that first account is the name itself; otherwise the
+/// process would get another account's groups, so the name is left unresolved.
+fn first_with_uid_is(passwd: &str, name: &str) -> bool {
+    let Some((uid, _)) = passwd_entry(passwd, name) else {
+        return false;
+    };
+    passwd
+        .lines()
+        .find(|line| line.split(':').nth(2) == Some(uid.as_str()))
+        .and_then(|line| line.split(':').next())
+        == Some(name)
 }
 
 #[cfg(test)]
@@ -248,6 +274,12 @@ mod tests {
         assert!(parse_files("passwd symlink\n").is_err());
         assert!(parse_files("group large\n").is_err());
         assert!(parse_files("passwd !!notbase64\n").is_err());
+        // A shared UID whose first account is another name is not resolved.
+        let shared = "first:x:1000:100::/:/bin/sh\napp:x:1000:200::/:/bin/sh\n";
+        assert!(!first_with_uid_is(shared, "app"));
+        assert!(first_with_uid_is(shared, "first"));
+        assert!(first_with_uid_is(PASSWD, "temporal"));
+        assert!(!first_with_uid_is(PASSWD, "missing"));
         // A group-only lookup needs no passwd file.
         assert_eq!(
             resolve_text("1000:shared", "", Some(GROUP)).unwrap(),

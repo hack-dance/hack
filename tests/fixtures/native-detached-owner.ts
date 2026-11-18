@@ -10,6 +10,7 @@ import { ClosedCliError } from "../../src/lib/cli-result.ts";
 import {
   nativeDetachedUpFailedServices,
   nativeDetachedUpFailure,
+  nativeDetachedUpProfileNotice,
   nativeDetachedUpReady,
   nativeDetachedUpShellVariables,
   runNativeDetachedOwner,
@@ -23,6 +24,18 @@ import {
 async function publish(path: string, contents: string): Promise<void> {
   await writeFile(`${path}.tmp`, contents);
   await rename(`${path}.tmp`, path);
+}
+
+/** HACK-2338: a detached owner hands its profile notice to the launcher. */
+function publishFixtureProfileNotice(fixtureMode: string): void {
+  if (fixtureMode === "profile-notice") {
+    nativeDetachedUpProfileNotice({
+      kind: "left-out",
+      services: ["jobs"],
+      profiles: [],
+      source: "none",
+    });
+  }
 }
 
 const [role, root, mode] = Bun.argv.slice(2);
@@ -357,9 +370,11 @@ if (role === "channel-holder") {
         // handoff, with the real owner handler still processing that accept.
         process.prependListener("message", cancelAtAccept);
       }
+      publishFixtureProfileNotice(mode);
       if (
         [
           "ready",
+          "profile-notice",
           "cancel-at-accept",
           "shell-names",
           "shell-names-empty",

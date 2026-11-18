@@ -41,6 +41,7 @@ async function stop(root: string): Promise<void> {
 
 for (const mode of [
   "ready",
+  "profile-notice",
   "shell-names",
   "shell-names-empty",
   "shell-names-root-dotenv",
@@ -80,17 +81,20 @@ for (const mode of [
       const stdout = await new Response(launcher.stdout).text();
       const stderr = await new Response(launcher.stderr).text();
       expect(stderr).toBe(
-        mode === "shell-names"
-          ? "Forwarding shell variables: A_TOKEN, Z_TOKEN.\n"
-          : mode === "shell-names-empty"
-            ? "Forwarding shell variables: (none).\n"
-            : mode === "shell-names-root-dotenv"
-              ? `Forwarding shell variables: (none).\n${NATIVE_ROOT_DOTENV_IGNORED_NOTICE}\n`
-              : ""
+        mode === "profile-notice"
+          ? "Not starting 1 service whose Compose profiles are not selected: jobs. Selected profiles: none (from no --profile or COMPOSE_PROFILES). Select others with --profile or COMPOSE_PROFILES.\n"
+          : mode === "shell-names"
+            ? "Forwarding shell variables: A_TOKEN, Z_TOKEN.\n"
+            : mode === "shell-names-empty"
+              ? "Forwarding shell variables: (none).\n"
+              : mode === "shell-names-root-dotenv"
+                ? `Forwarding shell variables: (none).\n${NATIVE_ROOT_DOTENV_IGNORED_NOTICE}\n`
+                : ""
       );
       if (
         [
           "ready",
+          "profile-notice",
           "shell-names",
           "shell-names-empty",
           "shell-names-root-dotenv",
@@ -148,6 +152,7 @@ for (const mode of [
         expect(await readFile(join(root, "stop-signals"), "utf8")).toBe(
           [
             "ready",
+            "profile-notice",
             "shell-names",
             "shell-names-root-dotenv",
             "shell-names-empty",

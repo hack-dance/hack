@@ -3631,6 +3631,36 @@ test("retained startup admits only the acknowledged original frontend before eff
   expect(events).toContain("save");
 });
 
+test("a retained run keeps its profiles when the managed env now selects others, and says so (HACK-2338 item 8)", async () => {
+  const { opts, saved } = await retainedFinalizationFixture();
+  await acknowledgeRetainedFrontend(opts.scope, saved);
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
+  const asked: unknown[] = [];
+  expect(
+    await startNativeProject({
+      ...opts,
+      profiles: undefined,
+      resolveProfiles: (envName) => {
+        asked.push(envName);
+        return Promise.resolve({
+          profiles: ["jobs"],
+          source: "managed-env" as const,
+        });
+      },
+    })
+  ).toBe(0);
+  // Resolved for the retained run's own env, not the configured default.
+  expect(asked).toEqual([saved.effectiveEnvName]);
+  const retained =
+    (saved.profiles ?? []).length === 0
+      ? "none"
+      : (saved.profiles ?? []).join(", ");
+  expect(notices).toContain(
+    `COMPOSE_PROFILES in the managed env selects profiles jobs, but this instance's retained run uses ${retained}; it keeps those. To start it with the new profiles, stop it with hack down --remove-data (this deletes its data volumes) and run hack up again.`
+  );
+});
+
 /**
  * HACK-1952: a retained startup in the owning home and a release of its mapping from
  * another native home must not interleave. The startup is admitted under the owning
@@ -4850,6 +4880,74 @@ test("Docker Hub shorthand is admitted once per distinct reference before the ru
     "ensure redis",
   ]);
   expect(events.indexOf("before")).toBeLessThan(events.indexOf("runtime up"));
+});
+
+test("a service outside the selected profiles is not pulled, and the start says it was left out (HACK-2338)", async () => {
+  const id = `sha256:${"e".repeat(64)}`;
+  for (const selected of [[], ["jobs"]] as const) {
+    const { opts } = await fixture(false);
+    const prepare = opts.dependencies.prepare!;
+    opts.dependencies.prepare = async (request) => ({
+      ...(await prepare(request)),
+      normalizedComposeJson: JSON.stringify({
+        services: {
+          web: { image: "alpine:3.21" },
+          jobs: { image: "redis", profiles: ["jobs"] },
+        },
+      }),
+      serviceNames: ["web", "jobs"],
+    });
+    opts.dependencies.review = async (request) =>
+      request.run({
+        planId: "a".repeat(64),
+        namespace: "b".repeat(64),
+        projectArgs: ["--project", request.projectRoot],
+        report: {
+          plan: {
+            enrollment_compatible: true,
+            services: {
+              web: { active: true },
+              jobs: { active: selected.length > 0 },
+            },
+          },
+        },
+      });
+    const ensured: string[] = [];
+    const invoke = opts.dependencies.invoke!;
+    opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "ensure-image") {
+        ensured.push(String(request.args[3]));
+        return { image_id: id };
+      }
+      return await invoke(request);
+    };
+    const notices: string[] = [];
+    opts.dependencies.warn = (line) => notices.push(line);
+    expect(
+      await startNativeProject({
+        ...opts,
+        // No --profile: the managed env's COMPOSE_PROFILES decides.
+        profiles: undefined,
+        resolveProfiles: () =>
+          Promise.resolve(
+            selected.length > 0
+              ? { profiles: [...selected], source: "managed-env" as const }
+              : { profiles: [], source: "none" as const }
+          ),
+      })
+    ).toBe(0);
+    if (selected.length === 0) {
+      expect(ensured).toEqual(["alpine:3.21"]);
+      expect(notices).toContain(
+        "Not starting 1 service whose Compose profiles are not selected: jobs. Selected profiles: none (from no --profile or COMPOSE_PROFILES). Select others with --profile or COMPOSE_PROFILES."
+      );
+    } else {
+      expect(ensured).toEqual(["alpine:3.21", "redis"]);
+      expect(notices.some((line) => line.startsWith("Not starting"))).toBe(
+        false
+      );
+    }
+  }
 });
 
 test("a runtime failure during image admission keeps its own diagnostic and starts nothing", async () => {

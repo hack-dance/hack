@@ -56,6 +56,12 @@ import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
 import { createNativeDependencyOwnerResolver } from "../backends/native-dependency-owners.ts";
 import { assertNativeLogFlags } from "../backends/native-log-follow.ts";
+import {
+  declaredComposeProfiles,
+  type NativeProfileSelection,
+  nativeRetainedProfilesNotice,
+  selectNativeProfiles,
+} from "../backends/native-profile-selection.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import {
   nativeDownEnvironment,
@@ -320,7 +326,10 @@ import {
   runLokiSnapshotWithFallback,
 } from "../lib/logs.ts";
 import { MissingProjectContextError } from "../lib/missing-project-error.ts";
-import { refuseNativeComposeBackendFeatures } from "../lib/native-compose-backend-features.ts";
+import {
+  readNativeComposeDocument,
+  refuseNativeComposeBackendFeatures,
+} from "../lib/native-compose-backend-features.ts";
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
 import {
@@ -6392,6 +6401,94 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
   }
 }
 
+/**
+ * Native's Compose profile selection for this project, from the same sources
+ * and in the same order as Compose under Hack: `--profile`, else
+ * `COMPOSE_PROFILES` in the managed env of the selected env, else in the shell
+ * (see {@link selectNativeProfiles}). A managed env that cannot be resolved
+ * here contributes nothing; native input preparation refuses it next.
+ */
+/**
+ * The notice for a running or retained native run whose recorded profiles
+ * differ from what the environment now selects, read for the run's own env;
+ * null when they agree or nothing selects profiles (HACK-2338 item 8).
+ */
+async function nativeRetainedProfilesDrift(opts: {
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly saved: {
+    readonly profiles?: readonly string[];
+    readonly effectiveEnvName?: string | null;
+  };
+}): Promise<string | null> {
+  const fromEnv = await resolveNativeProfileSelectionForProject({
+    project: opts.project,
+    envName: opts.saved.effectiveEnvName,
+    cliProfile: undefined,
+  });
+  const retained = [...(opts.saved.profiles ?? [])].sort();
+  const selected = [...fromEnv.profiles].sort();
+  if (
+    (fromEnv.source !== "managed-env" && fromEnv.source !== "shell") ||
+    JSON.stringify(retained) === JSON.stringify(selected)
+  ) {
+    return null;
+  }
+  return nativeRetainedProfilesNotice({
+    retained,
+    selected,
+    source: fromEnv.source,
+  });
+}
+
+/** An explicit `--profile` list, with Compose's `*` expanded to every declared profile. */
+async function resolveNativeCliProfiles(opts: {
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly cliProfile: string;
+}): Promise<readonly string[]> {
+  const compose = await readNativeComposeDocument(
+    opts.project.composeFile
+  ).catch(() => null);
+  return selectNativeProfiles({
+    cliProfiles: parseCsvList(opts.cliProfile),
+    managedEnv: {},
+    shellEnv: {},
+    declaredProfiles: declaredComposeProfiles(compose),
+  }).profiles;
+}
+
+export async function resolveNativeProfileSelectionForProject(opts: {
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly envName: string | null | undefined;
+  readonly cliProfile: string | undefined;
+}): Promise<NativeProfileSelection> {
+  const compose = await readNativeComposeDocument(
+    opts.project.composeFile
+  ).catch(() => null);
+  const serviceNames =
+    isRecord(compose) && isRecord(compose.services)
+      ? Object.keys(compose.services)
+      : [];
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    envName: opts.envName,
+    serviceNames,
+  }).catch(() => null);
+  return selectNativeProfiles({
+    cliProfiles:
+      opts.cliProfile === undefined ? undefined : parseCsvList(opts.cliProfile),
+    managedEnv: resolved
+      ? selectProjectEnvValuesForExecutionTarget({
+          resolved,
+          scopeName: "global",
+          target: "compose",
+        })
+      : {},
+    shellEnv: process.env,
+    declaredProfiles: declaredComposeProfiles(compose),
+  });
+}
+
 async function handleNativeUp({
   ctx,
   args,
@@ -6499,7 +6596,21 @@ async function handleNativeUp({
     },
     composeFile: project.composeFile,
     envName: requestedEnvName,
-    profiles: parseCsvList(args.options.profile),
+    // An explicit --profile only; otherwise native start resolves Compose's
+    // own sources for the effective env (HACK-2338 item 8).
+    profiles:
+      args.options.profile === undefined
+        ? undefined
+        : await resolveNativeCliProfiles({
+            project,
+            cliProfile: args.options.profile,
+          }),
+    resolveProfiles: async (envName) =>
+      await resolveNativeProfileSelectionForProject({
+        project,
+        envName,
+        cliProfile: undefined,
+      }),
     sharedSource: host.sharedSource,
     dependencyFile: host.dependencyFile,
     dependencyFileByEnv: host.dependencyFileByEnv,
@@ -7035,6 +7146,18 @@ async function handleUpUnlocked({
       onBranchResolved: (branch) => {
         if (args.options.branch === undefined && branch !== null) {
           childArgs.push(`--branch=${branch}`);
+        }
+      },
+      notifyRunning: async (saved, project) => {
+        if (args.options.profile !== undefined) {
+          return;
+        }
+        const notice = await nativeRetainedProfilesDrift({
+          project,
+          saved,
+        });
+        if (notice) {
+          process.stderr.write(`${notice}\n`);
         }
       },
     });

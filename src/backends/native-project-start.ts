@@ -11,6 +11,7 @@ import {
 import { isRecord } from "../lib/guards.ts";
 import {
   nativeDetachedUpFailedServices,
+  nativeDetachedUpProfileNotice,
   nativeDetachedUpShellVariables,
   nativeShellForwardingNotice,
 } from "../lib/native-detached-up.ts";
@@ -47,6 +48,13 @@ import {
   preparedBaseArguments,
 } from "./native-prepared-base.ts";
 import { nativePrivateEnvironmentPayload } from "./native-private-environment-payload.ts";
+import {
+  type NativeProfileNotice,
+  type NativeProfileNoticeSource,
+  type NativeProfileSelection,
+  nativeInactiveServices,
+  renderNativeProfileNotice,
+} from "./native-profile-selection.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   admitNativeProjectBuilds,
@@ -55,6 +63,7 @@ import {
   type NativeBuildRequest,
   nativeBuildsEnabled,
   nativeRebuildRequested,
+  nativeServiceActive,
   refuseEmulatedBuilds,
   refuseManagedSecretBuildArguments,
 } from "./native-project-builds.ts";
@@ -724,6 +733,8 @@ async function pinNativeProjectImages(opts: {
   readonly projectRoot: string;
   readonly specs: Record<string, Record<string, unknown>>;
   readonly retainedImages: ReadonlyMap<string, string>;
+  /** The selected Compose profiles: a service outside them is never pulled. */
+  readonly profiles: readonly string[];
   /** Opted-in services' platform policies; every other service resolves Linux arm64. */
   readonly amd64Emulation?: Readonly<Record<string, NativeEmulationPolicy>>;
   readonly signal: AbortSignal;
@@ -736,6 +747,12 @@ async function pinNativeProjectImages(opts: {
     const retainedImage = opts.retainedImages.get(name);
     if (retainedImage) {
       spec.image = retainedImage;
+      continue;
+    }
+    // As Compose does, a service outside the selected profiles is not
+    // acquired; the graph requires a pinned image only for active services
+    // (HACK-2338 item 4).
+    if (!nativeServiceActive(spec, opts.profiles)) {
       continue;
     }
     // A build service left unbuilt here is outside the selected profiles.
@@ -1519,7 +1536,7 @@ function retainedStartupSelection(opts: {
     (opts.gcloudWithheld === true && run.gcloud != null)
   ) {
     throw new ClosedCliError(
-      "Native up cannot change the retained run's environment, profiles, AWS profile or gcloud selection; data was not replaced."
+      "Native up cannot change the retained run's environment, profiles, AWS profile or gcloud selection; data was not replaced. Omit the option to keep the retained selection, or stop the instance with hack down --remove-data (this deletes its data volumes) to start it with another."
     );
   }
   return {
@@ -1869,6 +1886,15 @@ type NativeProjectStartOptions = {
   readonly composeFile: string;
   readonly envName?: string | null;
   readonly profiles?: readonly string[];
+  /**
+   * With `profiles` omitted, resolves Compose's own profile sources
+   * (`COMPOSE_PROFILES` in the managed env of `envName`, then the shell) for
+   * the effective env: the requested one for a fresh start, the retained
+   * run's for a retained start (HACK-2338 item 8).
+   */
+  readonly resolveProfiles?: (
+    envName: string | null | undefined
+  ) => Promise<NativeProfileSelection>;
   readonly sharedSource: boolean;
   readonly restore?: NativeProjectRun;
   readonly onReady?: (services: {
@@ -1960,6 +1986,73 @@ async function staticReviewInput(opts: {
   ).input;
 }
 
+/** Prints a profile notice, or hands it to the launcher of a detached owner. */
+function emitNativeProfileNotice(
+  notice: NativeProfileNotice,
+  warn: (line: string) => void
+): void {
+  if (nativeDetachedUpProfileNotice(notice)) {
+    return;
+  }
+  const line = renderNativeProfileNotice(notice);
+  if (line) {
+    warn(line);
+  }
+}
+
+/**
+ * The profiles this start uses and where they came from (HACK-2338 item 8).
+ * An explicit `--profile` is used as selected. Otherwise a fresh start uses
+ * the profiles Compose would (managed env, then shell), and a retained or
+ * restored run keeps its recorded profiles: up and restart never replace its
+ * data with another selection. When the environment now selects different
+ * ones, a notice says so and how to change them, instead of refusing.
+ */
+async function chooseNativeStartupProfiles(opts: {
+  readonly requested: readonly string[] | undefined;
+  readonly selected: readonly string[];
+  /** A restore (restart) or a retained run keeps its recorded profiles. */
+  readonly restore: NativeProjectRun | undefined;
+  readonly retained: NativeProjectRun | null | undefined;
+  readonly envName: string | null | undefined;
+  readonly resolve:
+    | ((envName: string | null | undefined) => Promise<NativeProfileSelection>)
+    | undefined;
+  readonly notify: (notice: NativeProfileNotice) => void;
+}): Promise<{
+  readonly profiles: readonly string[];
+  readonly source: NativeProfileNoticeSource;
+}> {
+  const kept = opts.restore !== undefined || Boolean(opts.retained);
+  if (opts.requested !== undefined) {
+    return { profiles: opts.selected, source: kept ? "retained" : "cli" };
+  }
+  const fromEnv = opts.resolve ? await opts.resolve(opts.envName) : undefined;
+  if (!kept) {
+    return fromEnv && fromEnv.source !== "none"
+      ? {
+          profiles: normalizeNativeProfiles(fromEnv.profiles),
+          source: fromEnv.source,
+        }
+      : { profiles: opts.selected, source: "none" };
+  }
+  if (
+    fromEnv &&
+    (fromEnv.source === "managed-env" || fromEnv.source === "shell")
+  ) {
+    const selected = normalizeNativeProfiles(fromEnv.profiles);
+    if (JSON.stringify(selected) !== JSON.stringify(opts.selected)) {
+      opts.notify({
+        kind: "retained",
+        retained: opts.selected,
+        selected,
+        source: fromEnv.source,
+      });
+    }
+  }
+  return { profiles: opts.selected, source: "retained" };
+}
+
 async function startNativeProjectAttempt(
   opts: NativeProjectStartOptions,
   observeStartup: () => Promise<void>
@@ -2011,7 +2104,16 @@ async function startNativeProjectAttempt(
     });
     requireActiveStartup(opts.signal);
   }
-  const profiles = selection.profiles;
+  const profileChoice = await chooseNativeStartupProfiles({
+    requested: opts.profiles,
+    selected: selection.profiles,
+    restore: opts.restore,
+    retained,
+    envName: selection.envName,
+    resolve: opts.resolveProfiles,
+    notify: (notice) => emitNativeProfileNotice(notice, deps.warn),
+  });
+  const profiles = profileChoice.profiles;
   progress({ phase: "input" });
   // Keep ps aware of this frontend while input is read. This advisory marker
   // carries no values and is retired even if admission refuses the input.
@@ -2382,6 +2484,7 @@ async function startNativeProjectAttempt(
       projectRoot: opts.scope.projectRoot,
       specs,
       retainedImages,
+      profiles,
       amd64Emulation: input.amd64Emulation,
       signal: controller.signal,
       invoke: deps.invoke,
@@ -2409,6 +2512,15 @@ async function startNativeProjectAttempt(
         });
         reportNativeIgnoredSettingNotices(review.report.plan, deps.warn);
         reportNativeEnvironmentNotices(input, review.report.plan, deps.warn);
+        emitNativeProfileNotice(
+          {
+            kind: "left-out",
+            services: nativeInactiveServices(review.report.plan),
+            profiles,
+            source: profileChoice.source,
+          },
+          deps.warn
+        );
         if (metadata) {
           verifyNativeRuntimeMetadataRoutes({
             plan: review.report.plan,

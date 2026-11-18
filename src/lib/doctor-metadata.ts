@@ -53,6 +53,7 @@ const PROJECT_AREAS: Readonly<Record<string, DoctorArea>> = {
   "secret integrity": "env_secrets",
   "secrets hygiene": "env_secrets",
   "compose env at rest": "env_secrets",
+  "env override coverage": "env_secrets",
   "compose backend features": "native",
   "native data services": "native",
   "amd64 emulation": "native",

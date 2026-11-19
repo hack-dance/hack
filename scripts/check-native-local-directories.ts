@@ -17,9 +17,11 @@
  * or INFO line per point, with the evidence under it:
  *
  *   1. each declared directory is its own mount inside the service, on the
- *      guest disk, not the share (mount source and filesystem type);
- *   2. an install inside the service lands there, the host checkout's
- *      directory stays empty, and how long the install took;
+ *      guest disk, not the share (mount source and filesystem type). It also
+ *      requires `/app` itself to be on the host share: without it points 1-3
+ *      prove nothing, so 1 fails and 2-3 are reported as not proven (INFO);
+ *   2. an install inside the service (`bun install --frozen-lockfile`) lands
+ *      there, the host checkout's directory stays empty, and how long it took;
  *   3. what appears in the host checkout at each declared path (owner, mode)
  *      and whether `git status` is clean afterwards;
  *   4. `down --remove-data` deletes the volumes (a marker written in one is
@@ -46,7 +48,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 const { values } = parseArgs({
@@ -125,17 +127,51 @@ async function run(
     stderr: "pipe",
     timeout: timeoutSeconds * 1000,
   });
+  // The timeout kills the child, but a grandchild that inherited the pipes
+  // could keep them open: reading stops a few seconds after the deadline.
+  const deadline = timeoutSeconds * 1000 + 5000;
+  // A cleared timer: a pending sleep would keep this process alive.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<null>((done) => {
+    timer = setTimeout(() => done(null), deadline);
+  });
   const [stdout, stderr, code] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
+    readBounded(child.stdout, deadline),
+    readBounded(child.stderr, deadline),
+    Promise.race([child.exited, expired]),
+  ]).finally(() => clearTimeout(timer));
   return {
     code,
     stdout,
     stderr,
     seconds: (performance.now() - started) / 1000,
   };
+}
+
+async function readBounded(
+  stream: ReadableStream<Uint8Array>,
+  ms: number
+): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  const timer = setTimeout(() => {
+    reader.cancel().catch(() => undefined);
+  }, ms);
+  let text = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+  } catch {
+    // Cancelled at the deadline: keep what was read.
+  } finally {
+    clearTimeout(timer);
+  }
+  return text + decoder.decode();
 }
 
 function cli(args: readonly string[], timeoutSeconds = 300): Promise<Exec> {
@@ -215,6 +251,9 @@ function mounts(text: string): Map<string, { fstype: string; source: string }> {
   return byPoint;
 }
 
+/** Set by point 1: whether /app is on the host share at all. */
+let shared = false;
+
 /** Filesystems that carry a host share into the guest. */
 const SHARE_TYPES = new Set(["virtiofs", "9p", "nfs", "nfs4", "fuse"]);
 
@@ -231,13 +270,28 @@ async function upDetached(label: string): Promise<Exec> {
   return exec;
 }
 
-async function removeData(): Promise<Exec> {
+/** `down --remove-data`; when that is refused, `down` first, then again. */
+async function removeData(): Promise<{
+  readonly ok: boolean;
+  readonly evidence: string[];
+}> {
   const direct = await cli(["down", "--remove-data", "--yes"], 600);
   if (direct.code === 0) {
-    return direct;
+    return {
+      ok: true,
+      evidence: evidenceOf("down --remove-data --yes", direct),
+    };
   }
-  await cli(["down"], 600);
-  return await cli(["down", "--remove-data", "--yes"], 600);
+  const stop = await cli(["down"], 600);
+  const retry = await cli(["down", "--remove-data", "--yes"], 600);
+  return {
+    ok: retry.code === 0,
+    evidence: [
+      ...evidenceOf("down --remove-data --yes (first try)", direct),
+      ...evidenceOf("down", stop),
+      ...evidenceOf("down --remove-data --yes (after down)", retry),
+    ],
+  };
 }
 
 /** Volumes in the native model this checkout builds: declared plus anonymous. */
@@ -282,6 +336,26 @@ async function modelVolumeCount(): Promise<{
 async function setup(): Promise<boolean> {
   cpSync(fixture, project, { recursive: true });
   rmSync(join(project, "web/node_modules"), { recursive: true, force: true });
+  // A unique identity: no collision with a benchmark run or a kept copy.
+  const suffix = basename(work)
+    .replace(/[^a-z0-9]/gi, "")
+    .toLowerCase();
+  const config = JSON.parse(readFileSync(configPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  writeFileSync(
+    configPath,
+    `${JSON.stringify({ ...config, name: `local-dirs-${suffix}`, dev_host: `local-dirs-${suffix}.hack` }, null, 2)}\n`
+  );
+  const composePath = join(project, ".hack/docker-compose.yml");
+  writeFileSync(
+    composePath,
+    readFileSync(composePath, "utf8").replaceAll(
+      "hack-runtime-bench",
+      `local-dirs-${suffix}`
+    )
+  );
   writeEntries(ENTRIES);
   git(["init", "-q"]);
   git(["add", "-A"]);
@@ -309,7 +383,17 @@ async function point1(): Promise<void> {
   const evidence1 = [
     `/app: ${appMount?.fstype ?? "?"} from ${appMount?.source ?? "?"}`,
   ];
-  let ok1 = table.code === 0 && appMount !== undefined;
+  // Without the share the later points prove nothing: /app would be a
+  // guest-disk copy and the host checkout untouched either way.
+  shared =
+    appMount !== undefined &&
+    (SHARE_TYPES.has(appMount.fstype) || appMount.fstype.startsWith("fuse"));
+  if (!shared) {
+    evidence1.push(
+      "not in shared-source mode: /app is not on a host share, so points 1-3 are not proven"
+    );
+  }
+  let ok1 = table.code === 0 && shared;
   for (const entry of ENTRIES) {
     const target = TARGETS[entry] ?? "";
     const mount = byPoint.get(target);
@@ -335,7 +419,7 @@ async function point1(): Promise<void> {
 async function point2(): Promise<void> {
   const install = await inService(
     "web",
-    "cd /app && bun install --no-progress",
+    "cd /app && bun install --frozen-lockfile --no-progress",
     installTimeout
   );
   const inside = await inService(
@@ -345,15 +429,16 @@ async function point2(): Promise<void> {
   const insideCount = Number(inside.stdout.trim()) || 0;
   const hostDir = join(project, "web/node_modules");
   const hostCount = existsSync(hostDir) ? readdirSync(hostDir).length : 0;
+  const landed = install.code === 0 && insideCount > 0 && hostCount === 0;
   report({
     point: 2,
-    status:
-      install.code === 0 && insideCount > 0 && hostCount === 0
-        ? "PASS"
-        : "FAIL",
+    status: landed && shared ? "PASS" : landed ? "INFO" : "FAIL",
     title: "an install inside the service lands in the volume",
     evidence: [
-      `bun install: exit ${install.code} in ${install.seconds.toFixed(1)}s (wall time of hack exec)`,
+      ...(shared
+        ? []
+        : ["not proven: not in shared-source mode (see point 1)"]),
+      `bun install --frozen-lockfile: exit ${install.code} in ${install.seconds.toFixed(1)}s (wall time of hack exec)`,
       `files in /app/node_modules inside the service: ${insideCount}`,
       `entries in the host checkout's web/node_modules: ${hostCount}`,
       ...lines(install.stderr, 3).map((line) => `  stderr: ${line}`),
@@ -381,9 +466,13 @@ function point3(): void {
   evidence3.push(
     `git status --porcelain: ${status === "" ? "(clean)" : status}`
   );
+  if (!shared) {
+    evidence3.unshift("not proven: not in shared-source mode (see point 1)");
+  }
+  const clean = ownedByUser && status === "";
   report({
     point: 3,
-    status: ownedByUser && status === "" ? "PASS" : "FAIL",
+    status: clean && shared ? "PASS" : clean ? "INFO" : "FAIL",
     title: "the host checkout gets no foreign-owned mountpoint and stays clean",
     evidence: evidence3,
   });
@@ -403,13 +492,19 @@ async function point4(): Promise<void> {
           "test -e /app/node_modules/.hack-local-dirs-marker && echo kept || echo gone"
         )
       : null;
-  const volumes = await modelVolumeCount();
-  const total = volumes.declared.length + volumes.anonymous;
+  let volumes: { declared: string[]; anonymous: number } | null = null;
+  let countError = "";
+  try {
+    volumes = await modelVolumeCount();
+  } catch (error) {
+    countError = error instanceof Error ? error.message : String(error);
+  }
+  const total = volumes ? volumes.declared.length + volumes.anonymous : 99;
   report({
     point: 4,
     status:
       marker.stdout.includes("written") &&
-      removed.code === 0 &&
+      removed.ok &&
       after?.stdout.includes("gone") === true &&
       total <= 16
         ? "PASS"
@@ -418,9 +513,11 @@ async function point4(): Promise<void> {
       "down --remove-data deletes the volumes; the run fits the 16-volume limit",
     evidence: [
       `marker in /app/node_modules: ${marker.stdout.trim() || "not written"}`,
-      ...evidenceOf("down --remove-data --yes", removed),
+      ...removed.evidence,
       `marker after the next up: ${after?.stdout.trim() ?? "not checked (up failed)"}`,
-      `volumes in the native model: ${total} of 16 (${volumes.declared.join(", ")}${volumes.anonymous ? `, ${volumes.anonymous} anonymous` : ""})`,
+      volumes
+        ? `volumes in the native model: ${total} of 16 (${volumes.declared.join(", ")}${volumes.anonymous ? `, ${volumes.anonymous} anonymous` : ""}); counted from this checkout's src/, not the --hack build`
+        : `volume count not available: ${countError}`,
     ],
   });
 }
@@ -462,7 +559,10 @@ async function point6(): Promise<void> {
   report({
     point: 6,
     status:
-      parsed && notice && !noticed.stdout.includes("localDirectories")
+      noticed.code === 0 &&
+      parsed &&
+      notice &&
+      !noticed.stdout.includes("localDirectories")
         ? "PASS"
         : "FAIL",
     title:
@@ -488,17 +588,47 @@ async function main(): Promise<void> {
   await point6();
 }
 
-try {
-  await main();
-} finally {
+async function cleanup(): Promise<void> {
   if (values.keep) {
     process.stdout.write(
       `kept: ${project} (stop it with hack down --remove-data --yes)\n`
     );
-  } else {
-    await removeData();
-    rmSync(work, { recursive: true, force: true });
+    return;
   }
+  if (existsSync(project)) {
+    try {
+      const removed = await removeData();
+      if (!removed.ok) {
+        process.stdout.write(
+          `cleanup: down --remove-data did not succeed; the run may remain for ${project}\n`
+        );
+      }
+    } catch (error) {
+      process.stdout.write(
+        `cleanup: down --remove-data failed: ${error instanceof Error ? error.message : String(error)}\n`
+      );
+    }
+  }
+  try {
+    rmSync(work, { recursive: true, force: true });
+  } catch (error) {
+    process.stdout.write(
+      `cleanup: could not remove ${work} (${error instanceof Error ? error.message : String(error)}); remove it by hand\n`
+    );
+  }
+}
+
+try {
+  await main();
+} catch (error) {
+  report({
+    point: 0,
+    status: "FAIL",
+    title: "the check stopped with an error",
+    evidence: [error instanceof Error ? error.message : String(error)],
+  });
+} finally {
+  await cleanup();
   const failed = results.filter((result) => result.status === "FAIL").length;
   process.stdout.write(
     `summary: ${results.filter((r) => r.status === "PASS").length} pass, ${failed} fail, ${results.filter((r) => r.status === "INFO").length} info\n`

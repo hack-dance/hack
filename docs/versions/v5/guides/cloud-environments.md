@@ -47,6 +47,12 @@ Coder. They have no page yet.
   shows.
 - **Provider preview URLs and forwarded ports** send their own host name. Hack's
   proxy has no route for it yet, so they do not show the app.
+- **Keep the proxy on loopback:** every recipe runs
+  `hack config set --global proxy.bind_address 127.0.0.1` before
+  `hack global install`. Without it, Hack's proxy listens on every interface,
+  and anyone who can reach the machine's ports 80 and 443 can open the app and
+  Hack's log viewer, which has no sign-in. Leave it unset only if you want that
+  exposure and protect it yourself.
 - **Persistence:** running containers do not survive a sandbox stop or a
   snapshot restore. Run `hack up` from the environment's start hook.
 

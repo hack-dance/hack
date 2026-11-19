@@ -36,6 +36,7 @@ of at least 2 vCPU and 4 GiB.
 (dockerd >/var/log/dockerd.log 2>&1 &)
 for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
 export HACK_RUNTIME_BACKEND=compose
+hack config set --global proxy.bind_address 127.0.0.1
 hack global install --no-interactive
 hack up --detach --no-interactive --json
 ```

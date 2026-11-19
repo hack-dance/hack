@@ -18,7 +18,7 @@ not.
 ```json
 {
   "build": { "dockerfile": "Dockerfile", "context": ".." },
-  "install": "sudo service docker start && HACK_RUNTIME_BACKEND=compose hack global install --no-interactive",
+  "install": "sudo service docker start && hack config set --global proxy.bind_address 127.0.0.1 && HACK_RUNTIME_BACKEND=compose hack global install --no-interactive",
   "start": "sudo service docker start && HACK_RUNTIME_BACKEND=compose hack up --detach --no-interactive --json"
 }
 ```

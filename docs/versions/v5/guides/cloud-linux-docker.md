@@ -37,10 +37,14 @@ is published.
 
 **2. Set up Hack's proxy once for this Docker engine.** It creates Hack's shared
 networks and starts its proxy and logging containers. It needs no sudo and asks
-nothing with `--no-interactive`:
+nothing with `--no-interactive`. The first line keeps the proxy on this
+machine's loopback address: without it, the proxy listens on every interface,
+and on a machine whose firewall lets in ports 80 and 443, anyone who can reach
+it can open your app and Hack's log viewer, which has no sign-in:
 
 ```sh
 export HACK_RUNTIME_BACKEND=compose
+hack config set --global proxy.bind_address 127.0.0.1
 hack global install --no-interactive
 ```
 

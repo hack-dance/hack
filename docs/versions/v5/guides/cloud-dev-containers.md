@@ -34,7 +34,7 @@
     "HACK_NO_INTERACTIVE": "1"
   },
   "onCreateCommand": "sh .devcontainer/install-hack.sh",
-  "postStartCommand": "hack global install --no-interactive && hack up --detach --no-interactive --json"
+  "postStartCommand": "hack config set --global proxy.bind_address 127.0.0.1 && hack global install --no-interactive && hack up --detach --no-interactive --json"
 }
 ```
 

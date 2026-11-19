@@ -25,6 +25,7 @@ environment variables.
 # Docker can become ready a few seconds after the sandbox; wait for it.
 for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
 export HACK_RUNTIME_BACKEND=compose
+hack config set --global proxy.bind_address 127.0.0.1
 hack global install --no-interactive
 hack up --detach --no-interactive --json
 ```

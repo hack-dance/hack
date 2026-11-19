@@ -156,7 +156,8 @@ mod tests {
     fn wait_until_published_fails_fast_when_the_child_exits() {
         let root = root();
         let marker = root.0.join("published");
-        let mut child = Command::new("/bin/true")
+        // macOS has no /bin/true; /usr/bin/true exists on both hosts this suite runs.
+        let mut child = Command::new("/usr/bin/true")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()

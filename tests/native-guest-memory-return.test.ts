@@ -26,24 +26,38 @@ async function run(opts: {
   readonly quietTicks: number;
   readonly identity?: readonly [string, string];
 }): Promise<{ exitCode: number; stdout: string }> {
-  const script = (await Bun.file(SCRIPT).text())
-    .replace(
-      "/sys/module/page_reporting/parameters/page_reporting_order",
-      opts.paths.order
-    )
-    .replace("/proc/sys/vm/compact_memory", opts.paths.compact)
-    .replace("stat_file=/proc/stat", `stat_file=${opts.paths.stat}`)
-    .replace("/run/hack-local/memory-return.status", opts.paths.status)
-    .replace("/run/hack-local/memory-return.started", opts.paths.marker)
-    .replace("/storage/.hack-local-owner", opts.paths.owner)
-    .replace("/proc/sys/kernel/random/boot_id", opts.paths.boot)
-    .replace("window_seconds=15", "window_seconds=0")
-    .replace("max_windows=60", "max_windows=3")
-    .replace("quiet_windows=6", "quiet_windows=2")
-    .replace(
-      "quiet_ticks=$((window_seconds * 15))",
-      `quiet_ticks=${opts.quietTicks}`
-    );
+  // Every stand-in must replace exactly one place in the script. A target that is no
+  // longer there would leave the script pointing at the real system file.
+  const swaps: readonly (readonly [string, string])[] = [
+    [
+      "order_file=/sys/module/page_reporting/parameters/page_reporting_order",
+      `order_file=${opts.paths.order}`,
+    ],
+    [
+      "compact_file=/proc/sys/vm/compact_memory",
+      `compact_file=${opts.paths.compact}`,
+    ],
+    ["stat_file=/proc/stat", `stat_file=${opts.paths.stat}`],
+    [
+      "status_file=/run/hack-local/memory-return.status",
+      `status_file=${opts.paths.status}`,
+    ],
+    [
+      "marker_file=/run/hack-local/memory-return.started",
+      `marker_file=${opts.paths.marker}`,
+    ],
+    ["/storage/.hack-local-owner", opts.paths.owner],
+    ["/proc/sys/kernel/random/boot_id", opts.paths.boot],
+    ["window_seconds=15", "window_seconds=0"],
+    ["max_windows=60", "max_windows=3"],
+    ["quiet_windows=6", "quiet_windows=2"],
+    ["quiet_ticks=$((window_seconds * 15))", `quiet_ticks=${opts.quietTicks}`],
+  ];
+  let script = await Bun.file(SCRIPT).text();
+  for (const [from, to] of swaps) {
+    expect(script.split(from).length, from).toBe(2);
+    script = script.replace(from, to);
+  }
   const result = spawnSyncBounded(
     [
       "sh",

@@ -2685,6 +2685,7 @@ export class Qualification {
     );
     let status: Record<string, unknown> = {};
     let statusError: string | null = null;
+    let parsedObject = false;
     try {
       const parsed: unknown = JSON.parse(result.stdout);
       if (
@@ -2693,13 +2694,16 @@ export class Qualification {
         !Array.isArray(parsed)
       ) {
         status = parsed as Record<string, unknown>;
+        parsedObject = true;
       }
     } catch {
-      // Recorded below.
+      // An unreadable status is recorded just below.
     }
     if (result.code !== 0) {
       statusError = executorErrorCode(result.stderr) ?? `exit ${result.code}`;
       status = {};
+    } else if (!parsedObject) {
+      statusError = "invalid_status_json";
     }
     const kernel = kernelProviderMemory(status);
     const rows = this.processes(this.main);

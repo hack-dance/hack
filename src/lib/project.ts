@@ -710,8 +710,9 @@ export function parseProjectConfigRecord(
     ...(parsedOpen.parseError ? [parsedOpen.parseError] : []),
     ...sharedHelpers.errors,
     ...(lifecycleRunnerError ? [lifecycleRunnerError] : []),
-    // localDirectoriesError is not a parse warning: up, restart and run
-    // refuse with it themselves, and doctor gives it its own note.
+    // Kept in parseError so doctor, autostart and project views see an
+    // invalid config; up, restart and run refuse before they print it.
+    ...(localDirectoriesError ? [localDirectoriesError] : []),
   ];
 
   return {

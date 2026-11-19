@@ -75,8 +75,8 @@ test("an invalid setting is a config error, never silently dropped", () => {
   );
   expect(config.localDirectories).toBeUndefined();
   expect(config.localDirectoriesError).toContain("localDirectories");
-  // Reported once, by the refusal, not again as a parse warning.
-  expect(config.parseError).toBeUndefined();
+  // Still a parse error, so doctor, autostart and views see it.
+  expect(config.parseError).toContain("localDirectories");
 });
 
 test("the editor schema accepts and rejects the same entries as the parser", () => {

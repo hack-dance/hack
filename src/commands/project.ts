@@ -7459,6 +7459,11 @@ async function runUpCommand({
   await ensureHackGitInfoExclude({ projectDir: project.projectDir });
 
   const cfg = await readProjectConfig(project);
+  // Refused before the parse warning, which carries the same message.
+  const localDirectoriesRefusal = refuseInvalidLocalDirectories({ cfg, json });
+  if (localDirectoriesRefusal !== null) {
+    return localDirectoriesRefusal;
+  }
   if (cfg.parseError) {
     const configPath = cfg.configPath ?? project.configFile;
     logger.warn({
@@ -7468,10 +7473,6 @@ async function runUpCommand({
   const sharedHelperRefusal = refuseInvalidSharedHelpers({ cfg, json });
   if (sharedHelperRefusal !== null) {
     return sharedHelperRefusal;
-  }
-  const localDirectoriesRefusal = refuseInvalidLocalDirectories({ cfg, json });
-  if (localDirectoriesRefusal !== null) {
-    return localDirectoriesRefusal;
   }
   if (
     resolveLifecycleRunner({ runner: cfg.lifecycle?.runner }) === "supervisor"
@@ -8931,13 +8932,18 @@ function reviewRunConfig(opts: {
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly project: { readonly configFile: string };
 }): number | null {
+  // Refused before the parse warning, which carries the same message.
+  const refusal = refuseInvalidLocalDirectories({ cfg: opts.cfg, json: false });
+  if (refusal !== null) {
+    return refusal;
+  }
   if (opts.cfg.parseError) {
     const configPath = opts.cfg.configPath ?? opts.project.configFile;
     logger.warn({
       message: `Failed to parse ${configPath}: ${opts.cfg.parseError}`,
     });
   }
-  return refuseInvalidLocalDirectories({ cfg: opts.cfg, json: false });
+  return null;
 }
 
 /** Restart's response to a concurrent down: clean up this start and stop. */
@@ -9704,6 +9710,11 @@ async function runRestartCommand({
     return remoteRestartCode;
   }
   const cfg = await readProjectConfig(project);
+  // Refused before the parse warning, which carries the same message.
+  const localDirectoriesRefusal = refuseInvalidLocalDirectories({ cfg, json });
+  if (localDirectoriesRefusal !== null) {
+    return localDirectoriesRefusal;
+  }
   if (cfg.parseError) {
     const configPath = cfg.configPath ?? project.configFile;
     logger.warn({
@@ -9713,10 +9724,6 @@ async function runRestartCommand({
   const sharedHelperRefusal = refuseInvalidSharedHelpers({ cfg, json });
   if (sharedHelperRefusal !== null) {
     return sharedHelperRefusal;
-  }
-  const localDirectoriesRefusal = refuseInvalidLocalDirectories({ cfg, json });
-  if (localDirectoriesRefusal !== null) {
-    return localDirectoriesRefusal;
   }
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });

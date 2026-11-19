@@ -1798,6 +1798,10 @@ for (const operation of [runDetachedUp, runRestart]) {
     // No up, and for restart no down of the running project either.
     expect(runtimeCalls).toHaveLength(0);
     expect(downCalls).toBe(0);
+    // Reported once, as the refusal, not also as a parse warning.
+    expect(warnMessages.some((line) => line.includes("localDirectories"))).toBe(
+      false
+    );
   });
 }
 

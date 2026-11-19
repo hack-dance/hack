@@ -337,9 +337,10 @@ fn verify_record(
 /// other value means something outside this runtime changed the machine. Bookkeeping the
 /// provider writes at every start (`engine_build`, `agent_rootfs_digest`,
 /// `agent_rootfs_path`) grants nothing and is not audited, and `disk_durability` has its
-/// own full-only rule; every other added field is listed here, including workload stop
-/// settings that a pool without a workload never uses.
-const INERT_RECORD_FIELDS: [&str; 35] = [
+/// own full-only rule. Workload stop settings that a pool without a workload never uses are
+/// listed too. Not listed: `docker_socket`, which every pool asks for and stores as `true`,
+/// and `restart`, `runtime_managed` and the `cuda_*` fields, which have no rule yet.
+const INERT_RECORD_FIELDS: [&str; 39] = [
     "pause_reason",
     "paused_checkpoint",
     "disks",
@@ -379,6 +380,12 @@ const INERT_RECORD_FIELDS: [&str; 35] = [
     "oci_platform",
     "switch",
     "auto_ports",
+    // Present since 1.34.1 and never asked for by a pool: a copy-on-write fork base, disks
+    // layered on another machine's disks, a fork's environment, and deletion on exit.
+    "forkable",
+    "golden",
+    "fork_env",
+    "ephemeral",
 ];
 
 /// Running-configuration resource fields SmolVM added after 1.14.3 (1.34.1's and 1.35.4's
@@ -423,12 +430,13 @@ pub(super) fn verify_running_resources(resources: &Value) -> Result<(), Candidat
     Ok(())
 }
 
-/// Absent, null, false, or an empty list or map. `block_private` and `auto_ports` are the
-/// exceptions: an empty list turns on `--block-private` with no re-opened range, and an empty
-/// map turns on `--auto-ports` with no port excluded, so for them only absent or null is
-/// inert.
+/// Absent, null, false, or an empty list or map. `block_private`, `auto_ports` and
+/// `credential_policy` are the exceptions: an empty list turns on `--block-private` with no
+/// re-opened range, an empty map turns on `--auto-ports` with no port excluded, and an empty
+/// credential policy still steers the machine's default network backend, so for them only
+/// absent or null is inert.
 fn inert(field: &str, value: Option<&Value>) -> bool {
-    if field == "block_private" || field == "auto_ports" {
+    if matches!(field, "block_private" | "auto_ports" | "credential_policy") {
         return matches!(value, None | Some(Value::Null));
     }
     match value {
@@ -707,7 +715,7 @@ mod tests {
         for inert_value in [json!(false), json!([]), json!({}), Value::Null] {
             let mut record = plain.clone();
             for field in INERT_RECORD_FIELDS {
-                if field != "block_private" && field != "auto_ports" {
+                if !matches!(field, "block_private" | "auto_ports" | "credential_policy") {
                     record[field] = inert_value.clone();
                 }
             }
@@ -724,6 +732,13 @@ mod tests {
         let mut unset = plain.clone();
         unset["auto_ports"] = Value::Null;
         verify_isolated_record(&unset, "owned", "token", None).unwrap();
+        // An empty credential policy still changes the default network backend.
+        let mut credentialed = plain.clone();
+        credentialed["credential_policy"] = json!({});
+        assert!(verify_isolated_record(&credentialed, "owned", "token", None).is_err());
+        let mut uncredentialed = plain.clone();
+        uncredentialed["credential_policy"] = Value::Null;
+        verify_isolated_record(&uncredentialed, "owned", "token", None).unwrap();
         for field in INERT_RECORD_FIELDS {
             for value in [
                 json!(true),

@@ -182,6 +182,8 @@ describe("provider pin qualification", () => {
     expect(inertField("block_private", null)).toBe(true);
     expect(inertField("auto_ports", {})).toBe(false);
     expect(inertField("auto_ports", null)).toBe(true);
+    expect(inertField("credential_policy", {})).toBe(false);
+    expect(inertField("credential_policy", null)).toBe(true);
     expect(
       activeFields({ disks: [], egress_rules: [{}], nested_virt: true }, [
         "disks",

@@ -139,6 +139,10 @@ export const INERT_RECORD_FIELDS = [
   "oci_platform",
   "switch",
   "auto_ports",
+  "forkable",
+  "golden",
+  "fork_env",
+  "ephemeral",
 ] as const;
 
 /** Running-configuration resource fields that must stay inert (`INERT_RUNNING_RESOURCES`). */
@@ -156,11 +160,15 @@ export const INERT_RUNNING_RESOURCES = [
 ] as const;
 
 /**
- * The runtime's inert rule: absent, null, false, or empty; `block_private` and `auto_ports`
- * only absent or null.
+ * The runtime's inert rule: absent, null, false, or empty; `block_private`, `auto_ports` and
+ * `credential_policy` only absent or null.
  */
 export function inertField(field: string, value: unknown): boolean {
-  if (field === "block_private" || field === "auto_ports") {
+  if (
+    field === "block_private" ||
+    field === "auto_ports" ||
+    field === "credential_policy"
+  ) {
     return value === undefined || value === null;
   }
   if (value === undefined || value === null || value === false) {

@@ -31,9 +31,12 @@ You do not need sudo, a browser or a desktop.
 supports Apple Silicon macOS only. Until there is one, build `hack` from a
 `next` commit on a Linux machine (see
 [Qualify a fresh Linux host](https://github.com/hack-dance/hack/blob/next/docs/guides/linux-host-qualification.md), which also
-needs Rust 1.97.1 and a C compiler), then copy the binary to
-`~/.local/bin/hack`. This step becomes one install command once a Linux release
-is published.
+needs Rust 1.97.1 and a C compiler), then copy `dist/hack` to
+`~/.local/bin/hack`. If the project sets `lifecycle.runner` to `"supervisor"` in
+`.hack/hack.config.json`, also copy the matching `dist/hack-lifecycle-supervisor`
+from the same build into the same directory: `hack up` looks for it beside the
+`hack` executable and refuses to start such a project without it. This step
+becomes one install command once a Linux release is published.
 
 **2. Set up Hack's proxy once for this Docker engine.** It creates Hack's shared
 networks and starts its proxy and logging containers. It needs no sudo and asks

@@ -77,6 +77,7 @@ fn fresh_boot_waits_before_audit_and_never_adopts_failed_socket_readiness() {
                 super::super::bridge::verify_sockets(
                     &directory,
                     super::super::bridge::BridgeIntent::new(1)?,
+                    &mut Vec::new(),
                 )?;
                 events.borrow_mut().push("audit");
                 Ok(())

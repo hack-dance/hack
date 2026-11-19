@@ -666,7 +666,8 @@ of another type, user or link count there is left unchanged instead of refusing 
 provider-pin upgrade must re-derive that list. Each repair is recorded against the running
 provider process (`socket-repairs.json` beside the owner record), and `runtime up` and
 `runtime status` report it as `repaired_sockets: {count, names}`. The field is absent when
-nothing was repaired for the current provider. Recording is best-effort and never changes a
+nothing was repaired for the current provider. A repair is recorded as soon as it is made, also
+when a later check of the same audit refuses. Recording is best-effort and never changes a
 start, an audit or a stop.
 
 A different type, user or link count, or an unreadable identity, still refuses immediately

@@ -77,7 +77,9 @@ fn guest_ready_before_all_bridge_binds_waits_for_complete_private_identity() {
     // The one-shot audit reproduces the old ordering failure: the provider
     // control channel is ready while its expose threads have not yet run.
     assert_eq!(
-        verify_sockets(&fixture.root, intent).unwrap_err().code,
+        verify_sockets(&fixture.root, intent, &mut Vec::new())
+            .unwrap_err()
+            .code,
         "bridge_socket_identity"
     );
     // The second socket is bound world-accessible, as the provider does once its file
@@ -93,7 +95,7 @@ fn guest_ready_before_all_bridge_binds_waits_for_complete_private_identity() {
         fs::symlink_metadata(fixture.path(1)).unwrap().mode() & 0o777,
         0o700
     );
-    verify_sockets(&fixture.root, intent).unwrap();
+    verify_sockets(&fixture.root, intent, &mut Vec::new()).unwrap();
 }
 
 #[test]
@@ -270,7 +272,12 @@ fn world_accessible_owned_sockets_in_a_private_directory_are_repaired_to_private
     let before: Vec<_> = (0..4)
         .map(|slot| fs::symlink_metadata(fixture.path(slot)).unwrap().ino())
         .collect();
-    verify_sockets(&fixture.root, BridgeIntent::new(4).unwrap()).unwrap();
+    verify_sockets(
+        &fixture.root,
+        BridgeIntent::new(4).unwrap(),
+        &mut Vec::new(),
+    )
+    .unwrap();
     for slot in 0..4 {
         let after = fs::symlink_metadata(fixture.path(slot)).unwrap();
         assert_eq!(after.mode() & 0o777, 0o700, "slot {slot}");
@@ -298,7 +305,7 @@ fn lease_free_observation_refuses_a_world_accessible_socket_and_changes_nothing(
         0o777
     );
     // A leased audit repairs it, after which observation passes.
-    verify_sockets(&fixture.root, intent).unwrap();
+    verify_sockets(&fixture.root, intent, &mut Vec::new()).unwrap();
     observe_sockets(&fixture.root, intent).unwrap();
 }
 
@@ -319,7 +326,7 @@ fn a_socket_directory_that_is_not_private_and_owned_refuses_without_repair() {
             }
         };
         assert_eq!(
-            verify_sockets(&directory, BridgeIntent::new(1).unwrap())
+            verify_sockets(&directory, BridgeIntent::new(1).unwrap(), &mut Vec::new())
                 .unwrap_err()
                 .code,
             "bridge_socket_directory",
@@ -338,21 +345,21 @@ fn a_socket_directory_that_is_not_private_and_owned_refuses_without_repair() {
 fn provider_sockets_are_repaired_when_present_and_refused_when_not_sockets() {
     let fixture = Fixture::new();
     // Absent: left for the code that connects to them.
-    secure_provider_sockets(&fixture.root).unwrap();
-    assert!(secure_provider_sockets(&fixture.root).unwrap().is_empty());
+    let repairs = |root: &std::path::Path| {
+        let mut repaired = Vec::new();
+        secure_provider_sockets(root, &mut repaired).map(|()| repaired)
+    };
+    assert!(repairs(&fixture.root).unwrap().is_empty());
     let agent = fixture.root.join("agent.sock");
     let _listener = UnixListener::bind(&agent).unwrap();
     fs::set_permissions(&agent, fs::Permissions::from_mode(0o777)).unwrap();
-    assert_eq!(
-        secure_provider_sockets(&fixture.root).unwrap(),
-        ["agent.sock"]
-    );
+    assert_eq!(repairs(&fixture.root).unwrap(), ["agent.sock"]);
     assert_eq!(fs::symlink_metadata(&agent).unwrap().mode() & 0o777, 0o700);
     // A second audit finds it private and reports nothing.
-    assert!(secure_provider_sockets(&fixture.root).unwrap().is_empty());
+    assert!(repairs(&fixture.root).unwrap().is_empty());
     fs::write(fixture.root.join("docker.sock"), b"not a socket").unwrap();
     assert_eq!(
-        secure_provider_sockets(&fixture.root).unwrap_err().code,
+        repairs(&fixture.root).unwrap_err().code,
         "bridge_socket_identity"
     );
 }
@@ -367,7 +374,8 @@ fn every_other_provider_socket_is_repaired_and_reported_and_a_non_socket_is_left
         listeners.push(UnixListener::bind(&path).unwrap());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
     }
-    let mut repaired = secure_provider_sockets(&fixture.root).unwrap();
+    let mut repaired = Vec::new();
+    secure_provider_sockets(&fixture.root, &mut repaired).unwrap();
     repaired.sort();
     let mut expected = OTHER_PROVIDER_SOCKETS.map(str::to_owned).to_vec();
     expected.sort();
@@ -386,7 +394,9 @@ fn every_other_provider_socket_is_repaired_and_reported_and_a_non_socket_is_left
     fs::remove_file(&file).unwrap();
     fs::write(&file, b"not a socket").unwrap();
     fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(secure_provider_sockets(&fixture.root).unwrap().is_empty());
+    let mut repaired = Vec::new();
+    secure_provider_sockets(&fixture.root, &mut repaired).unwrap();
+    assert!(repaired.is_empty());
     assert_eq!(fs::symlink_metadata(&file).unwrap().mode() & 0o777, 0o644);
 }
 
@@ -397,11 +407,35 @@ fn verification_and_the_boot_wait_report_the_bridge_sockets_they_repaired() {
     fixture.bind(0, 0o700);
     fixture.bind(1, 0o777);
     fixture.bind(2, 0o770);
+    let mut repaired = Vec::new();
+    verify_sockets(&fixture.root, intent, &mut repaired).unwrap();
+    assert_eq!(repaired, ["bridge-01.sock", "bridge-02.sock"]);
+    let mut again = Vec::new();
+    verify_sockets(&fixture.root, intent, &mut again).unwrap();
+    assert!(again.is_empty());
+    // A repair is kept when a later socket of the same observation refuses.
+    let fixture = Fixture::new();
+    fixture.bind(0, 0o777);
+    fs::write(fixture.path(1), b"not a socket").unwrap();
+    let mut repaired = Vec::new();
     assert_eq!(
-        verify_sockets(&fixture.root, intent).unwrap(),
-        ["bridge-01.sock", "bridge-02.sock"]
+        verify_sockets(&fixture.root, BridgeIntent::new(2).unwrap(), &mut repaired)
+            .unwrap_err()
+            .code,
+        "bridge_socket_identity"
     );
-    assert!(verify_sockets(&fixture.root, intent).unwrap().is_empty());
+    assert_eq!(repaired, ["bridge-00.sock"]);
+    let fixture = Fixture::new();
+    fs::write(fixture.root.join("agent.sock"), b"not a socket").unwrap();
+    let forward = fixture.root.join("port-forward.sock");
+    let _forward = UnixListener::bind(&forward).unwrap();
+    fs::set_permissions(&forward, fs::Permissions::from_mode(0o777)).unwrap();
+    let mut repaired = Vec::new();
+    assert!(secure_provider_sockets(&fixture.root, &mut repaired).is_err());
+    assert!(
+        repaired.is_empty(),
+        "agent.sock is checked first and refuses before any repair"
+    );
     let fixture = Fixture::new();
     fixture.bind(0, 0o777);
     let clock = Scheduled::new(|_: Duration| panic!("all sockets are present"));

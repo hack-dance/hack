@@ -371,7 +371,7 @@ impl<'a> ObservedGuest<'a> {
         };
         observed.verify()?;
         // No mutation lease is held here: observe without repairing.
-        audit_with(candidate, &observed.owner, Repair::Observe)?;
+        audit_with(candidate, &observed.owner, Repair::Observe, &mut Vec::new())?;
         observed.verify()?;
         Ok(observed)
     }
@@ -827,15 +827,12 @@ fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError
 fn audit_boot_after(
     candidate: &Candidate,
     owner: &Owner,
-    mut earlier: Vec<String>,
+    mut repaired: Vec<String>,
 ) -> Result<(), CandidateError> {
-    let result = audit_with(candidate, owner, Repair::Allowed);
-    if let Ok(repaired) = &result {
-        earlier.extend(repaired.iter().cloned());
-    }
-    // The wait's repairs are recorded even when the audit then refuses: those modes stay changed.
-    socket_repairs::record(&root(candidate), owner.process.as_ref(), &earlier);
-    result.map(drop)
+    let result = audit_with(candidate, owner, Repair::Allowed, &mut repaired);
+    // Recorded even when the audit then refuses: a mode already changed stays changed.
+    socket_repairs::record(&root(candidate), owner.process.as_ref(), &repaired);
+    result
 }
 
 /// Whether an audit may repair the provider's world-accessible sockets (HACK-2375). Only a
@@ -847,23 +844,24 @@ enum Repair {
     Observe,
 }
 
-/// Returns the provider sockets this audit repaired (none under `Repair::Observe`).
+/// Adds each provider socket this audit repairs to `repaired` as it is repaired, also when a
+/// later check refuses (none under `Repair::Observe`).
 fn audit_with(
     candidate: &Candidate,
     owner: &Owner,
     repair: Repair,
-) -> Result<Vec<String>, CandidateError> {
+    repaired: &mut Vec<String>,
+) -> Result<(), CandidateError> {
     super::config_audit::verify(candidate, owner)?;
     super::dependency_socket::verify(candidate, owner)?;
-    let mut repaired = Vec::new();
     if repair == Repair::Allowed {
         // The provider's own sockets share the bridge sockets' umask exposure.
-        repaired = super::bridge::secure_provider_sockets(&owner.real_data_dir(candidate)?)?;
+        super::bridge::secure_provider_sockets(&owner.real_data_dir(candidate)?, repaired)?;
     }
     if let Some(bridge) = owner.application_bridge {
         let directory = owner.real_data_dir(candidate)?;
         if repair == Repair::Allowed {
-            repaired.extend(super::bridge::verify_sockets(&directory, bridge)?);
+            super::bridge::verify_sockets(&directory, bridge, repaired)?;
         } else {
             super::bridge::observe_sockets(&directory, bridge)?;
         }
@@ -917,7 +915,7 @@ fn audit_with(
         &binary(candidate),
         &[directory.join("storage.raw"), directory.join("overlay.raw")],
     )?;
-    Ok(repaired)
+    Ok(())
 }
 
 /// Read-only source compatibility check before application lifecycle hooks.

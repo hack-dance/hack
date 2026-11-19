@@ -103,14 +103,17 @@ pub(super) fn observe_sockets(
 /// Verify the pool's bridge sockets, repairing a world-accessible one. Callers hold the
 /// provider's mutation lease (boot, warm start, a leased operation).
 ///
-/// Returns the file names of the sockets this call repaired.
+/// Adds the file names of the sockets it repaired to `repaired`, also when it then refuses.
 pub(super) fn verify_sockets(
     directory: &std::path::Path,
     intent: BridgeIntent,
-) -> Result<Vec<String>, CandidateError> {
-    let states = socket_states(directory, intent)?;
-    if states.ready() {
-        Ok(states.repaired_names(intent))
+    repaired: &mut Vec<String>,
+) -> Result<(), CandidateError> {
+    let mut slots = 0;
+    let states = socket_states_into(directory, intent, true, &mut slots);
+    repaired.extend(names_of(intent, slots));
+    if states?.ready() {
+        Ok(())
     } else {
         Err(socket_identity())
     }
@@ -276,11 +279,6 @@ impl SocketStates {
     fn ready(self) -> bool {
         self.missing == 0 && self.not_private == 0
     }
-
-    /// File names of the slots set in `repaired`, in slot order.
-    fn repaired_names(self, intent: BridgeIntent) -> Vec<String> {
-        names_of(intent, self.repaired)
-    }
 }
 
 fn names_of(intent: BridgeIntent, slots: u32) -> Vec<String> {
@@ -314,6 +312,20 @@ fn socket_states_with(
     intent: BridgeIntent,
     repair: bool,
 ) -> Result<SocketStates, CandidateError> {
+    let mut slots = 0;
+    let mut states = socket_states_into(directory, intent, repair, &mut slots)?;
+    states.repaired = slots;
+    Ok(states)
+}
+
+/// [`socket_states_with`], setting each repaired slot's bit in `repaired` as soon as it is
+/// repaired, so a later refusal in the same observation does not lose it.
+fn socket_states_into(
+    directory: &std::path::Path,
+    intent: BridgeIntent,
+    repair: bool,
+    repaired: &mut u32,
+) -> Result<SocketStates, CandidateError> {
     let directory = private_directory(directory)?;
     let mut states = SocketStates::default();
     for (slot, path) in intent.guest_paths().into_iter().enumerate() {
@@ -334,7 +346,7 @@ fn socket_states_with(
         };
         match mode {
             Mode::Private => {}
-            Mode::Repaired => states.repaired |= 1 << slot,
+            Mode::Repaired => *repaired |= 1 << slot,
             Mode::Open => states.not_private += 1,
         }
     }
@@ -369,12 +381,13 @@ pub(super) const OTHER_PROVIDER_SOCKETS: [&str; 6] = [
     "ports.sock",
 ];
 
-/// Repair the provider's own sockets in `directory`. Returns the names this call repaired.
+/// Repair the provider's own sockets in `directory`, adding each name repaired to `repaired`
+/// as it is repaired, so a later refusal does not lose it.
 pub(super) fn secure_provider_sockets(
     directory: &std::path::Path,
-) -> Result<Vec<String>, CandidateError> {
+    repaired: &mut Vec<String>,
+) -> Result<(), CandidateError> {
     let directory = private_directory(directory)?;
-    let mut repaired = Vec::new();
     for name in PROVIDER_SOCKETS {
         let entry_name = std::ffi::CString::new(name).expect("fixed socket name");
         if let Some(stat) = entry(&directory, &entry_name)? {
@@ -402,7 +415,7 @@ pub(super) fn secure_provider_sockets(
             Mode::Open => return Err(socket_identity()),
         }
     }
-    Ok(repaired)
+    Ok(())
 }
 
 /// Fresh-boot wait for the whole socket set: a fixed base plus one second per slot.
@@ -547,20 +560,20 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         let intent = BridgeIntent::new(1).unwrap();
-        verify_sockets(&root, intent).unwrap();
+        verify_sockets(&root, intent, &mut Vec::new()).unwrap();
         // An owned socket's group and other bits are repaired, not refused (HACK-2375).
         fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
-        verify_sockets(&root, intent).unwrap();
+        verify_sockets(&root, intent, &mut Vec::new()).unwrap();
         assert_eq!(
             fs::symlink_metadata(&path).unwrap().permissions().mode() & 0o777,
             0o700
         );
         fs::remove_file(&path).unwrap();
         fs::write(&path, b"foreign").unwrap();
-        assert!(verify_sockets(&root, intent).is_err());
+        assert!(verify_sockets(&root, intent, &mut Vec::new()).is_err());
         fs::remove_file(&path).unwrap();
         symlink(root.join("other"), &path).unwrap();
-        assert!(verify_sockets(&root, intent).is_err());
+        assert!(verify_sockets(&root, intent, &mut Vec::new()).is_err());
         drop(listener);
         fs::remove_dir_all(root).unwrap();
     }

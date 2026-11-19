@@ -659,6 +659,15 @@ this same user that replaces the entry in the instant between that last read and
 change is outside this check, as it is for the disk templates: such a process could
 equally rewrite the pool's disks. The guest agent and exposed engine sockets
 (`agent.sock`, `docker.sock`) get the same check and repair in those leased audits when present.
+So does every other socket the pinned SmolVM 1.35.4 binds in that directory, taken from its
+source (`bridge::OTHER_PROVIDER_SOCKETS`): `agent.ready`, `agent.logs`, `port-forward.sock`,
+`auto-ports.sock`, `control.sock` and `ports.sock`. Native never connects to these, so an entry
+of another type, user or link count there is left unchanged instead of refusing the boot. A
+provider-pin upgrade must re-derive that list. Each repair is recorded against the running
+provider process (`socket-repairs.json` beside the owner record), and `runtime up` and
+`runtime status` report it as `repaired_sockets: {count, names}`. The field is absent when
+nothing was repaired for the current provider. Recording is best-effort and never changes a
+start, an audit or a stop.
 
 A different type, user or link count, or an unreadable identity, still refuses immediately
 and is never repaired. Only a complete private socket set observed before the deadline

@@ -474,3 +474,27 @@ test("a branch named like an Object property is an ordinary instance key", async
     "toString",
   ]);
 });
+
+test("a damaged tracking record is ignored, not a reason to refuse", async () => {
+  const fixture = await project({ localDirectories: ["node_modules"] });
+  const context = (await findProjectContextAtRoot({
+    projectRoot: fixture.root,
+  }))!;
+  const internal = join(fixture.projectDir, ".internal");
+  await mkdir(internal, { recursive: true });
+  for (const text of [
+    '{"version":1,"instances":null}',
+    '{"version":1,"instances":[]}',
+    "not json",
+  ]) {
+    await writeFile(join(internal, "native-local-directories.json"), text);
+    await expect(
+      trackNativeLocalDirectories({
+        project: context,
+        branch: null,
+        mode: "running",
+        warn: () => {},
+      })
+    ).resolves.toBeUndefined();
+  }
+});

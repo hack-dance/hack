@@ -3,6 +3,7 @@ import { YAML } from "bun";
 import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
 import { HackCliError } from "./cli-result.ts";
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "./fs.ts";
+import { isRecord } from "./guards.ts";
 import {
   planProjectLocalDirectories,
   withLocalDirectoriesOverride,
@@ -110,7 +111,7 @@ async function readRecord(projectDir: string): Promise<LocalDirectoriesRecord> {
       typeof value === "object" &&
       value !== null &&
       (value as { version?: unknown }).version === 1 &&
-      typeof (value as { instances?: unknown }).instances === "object"
+      isRecord((value as { instances?: unknown }).instances)
     ) {
       return value as LocalDirectoriesRecord;
     }

@@ -376,7 +376,9 @@ fn provider_config(pool: &Pool, token: &str) {
     let _ = fs::remove_file(&database);
     let record = serde_json::json!({
         "name": pool.owner.machine, "labels": {"hack-local.owner": token},
+        // Every pool is created with `--docker-socket`, so its record carries it (HACK-2361).
         "ssh_agent": false, "network": false, "ports": [], "published_sockets": [],
+        "docker_socket": true,
         "staged_mounts": [], "remote_volumes": [], "init": [], "env": [], "entrypoint": [],
         "cmd": [],
         "mounts": [[artifact::engine_root(&pool.candidate), "/opt/hack-engine", true]],

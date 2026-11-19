@@ -41,6 +41,11 @@ pub(crate) fn wait_until_published(
     let started = Instant::now();
     while !marker.exists() {
         if let Some(status) = child.try_wait().unwrap() {
+            // Fixture::dead() writes the marker and exits. That can happen
+            // between exists() and try_wait; only fail if the marker is still gone.
+            if marker.exists() {
+                return;
+            }
             panic!(
                 "publisher exited ({status}) before fixture publication after {:?}\n{}",
                 started.elapsed(),
@@ -128,6 +133,23 @@ mod tests {
         wait_until_published(&marker, &mut child.0, Duration::from_secs(5), String::new);
         assert!(marker.exists());
         assert!(child.0.try_wait().unwrap().is_none());
+    }
+
+    #[test]
+    fn wait_until_published_accepts_a_child_that_writes_then_exits() {
+        let root = root();
+        for index in 0..20 {
+            let marker = root.0.join(format!("published-{index}"));
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", &format!("printf published > '{}'", marker.display())])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            wait_until_published(&marker, &mut child, Duration::from_secs(5), String::new);
+            assert!(marker.exists());
+            assert!(child.wait().unwrap().success());
+        }
     }
 
     #[test]

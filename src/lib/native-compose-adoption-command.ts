@@ -4,6 +4,7 @@ import { parseProjectSelectorOption } from "../cli/project-selector.ts";
 import { assertAutostartAdoptionAllowed } from "./autostart-refusal.ts";
 import { HackCliError } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
+import { warnLocalDirectoriesNotApplied } from "./local-directories-project.ts";
 import type { LegacyComposeVerifiedBinding } from "./native-compose-adoption-binding.ts";
 import { legacyComposeOrderedRefusal } from "./native-compose-adoption-diagnostics.ts";
 import { runLegacyComposeRetainedOperation } from "./native-compose-adoption-execution.ts";
@@ -325,6 +326,13 @@ export async function tryLegacyComposeAdoptedCommand(
   const projectRoot = await selectLegacyComposeAdoptedRoot(options);
   if (!projectRoot) {
     return null;
+  }
+  if (options.operation === "up" || options.operation === "restart") {
+    await warnLocalDirectoriesNotApplied({
+      projectRoot,
+      kind: "adopted",
+      warn: (line) => process.stderr.write(`${line}\n`),
+    });
   }
   assertAutostartAdoptionAllowed();
   requireNativeComposeBackend({ backend: process.env.HACK_RUNTIME_BACKEND });

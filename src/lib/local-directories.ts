@@ -592,6 +592,43 @@ export function localDirectoriesNotices(
  * overrides, so its mounts are the last word for their targets). Refuses an
  * invalid setting. No entries, or no covered service: the list unchanged.
  */
+/**
+ * The plan for a project and the notices `up` prints, shared by the Compose
+ * override and the native model: entries that exist as files are skipped,
+ * the rest are planned against the parsed Compose document.
+ */
+export async function planProjectLocalDirectories(opts: {
+  readonly projectRoot: string;
+  readonly composeFile: string;
+  readonly compose: unknown;
+  readonly entries: readonly string[];
+}): Promise<{
+  readonly plan: LocalDirectoriesPlan;
+  readonly notices: string[];
+}> {
+  const notices: string[] = [];
+  const notFiles: string[] = [];
+  for (const entry of opts.entries) {
+    if (await isNonDirectory(resolve(opts.projectRoot, entry))) {
+      notices.push(
+        `localDirectories: ${entry} is a file in the checkout, not a directory; skipped.`
+      );
+    } else {
+      notFiles.push(entry);
+    }
+  }
+  const plan = planLocalDirectories({
+    compose: opts.compose,
+    composeDir: dirname(opts.composeFile),
+    projectRoot: opts.projectRoot,
+    entries: notFiles,
+  });
+  const composeLabel =
+    relative(opts.projectRoot, opts.composeFile) || opts.composeFile;
+  notices.push(...localDirectoriesNotices(plan, composeLabel));
+  return { plan, notices };
+}
+
 export async function withLocalDirectoriesOverride(opts: {
   readonly project: {
     readonly projectRoot: string;
@@ -623,26 +660,13 @@ export async function withLocalDirectoriesOverride(opts: {
     // Compose reports a malformed file itself, with its own message.
     return [...opts.composeFiles];
   }
-  const notFiles: string[] = [];
-  for (const entry of entries) {
-    if (await isNonDirectory(resolve(opts.project.projectRoot, entry))) {
-      opts.notify?.(
-        `localDirectories: ${entry} is a file in the checkout, not a directory; skipped.`
-      );
-    } else {
-      notFiles.push(entry);
-    }
-  }
-  const plan = planLocalDirectories({
-    compose,
-    composeDir: dirname(opts.project.composeFile),
+  const { plan, notices } = await planProjectLocalDirectories({
     projectRoot: opts.project.projectRoot,
-    entries: notFiles,
+    composeFile: opts.project.composeFile,
+    compose,
+    entries,
   });
-  const composeLabel =
-    relative(opts.project.projectRoot, opts.project.composeFile) ||
-    opts.project.composeFile;
-  for (const line of localDirectoriesNotices(plan, composeLabel)) {
+  for (const line of notices) {
     opts.notify?.(line);
   }
   const override = localDirectoriesOverride(plan);

@@ -343,7 +343,10 @@ import {
   appendHackHostTrustEnvironment,
   findHackHostTrustBundlePath,
 } from "../lib/local-ca.ts";
-import { withProjectLocalDirectories } from "../lib/local-directories-project.ts";
+import {
+  reportNativeLocalDirectories,
+  withProjectLocalDirectories,
+} from "../lib/local-directories-project.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
   buildLogSelector,
@@ -6608,6 +6611,15 @@ async function handleNativeUp({
     projectOpt: args.options.project,
     touchRegistration: false,
   });
+  // HACK-2358: refuse an invalid setting before anything starts or stops,
+  // and say what is kept local. A detached owner's output is not shown; its
+  // launcher printed these already.
+  if (!isNativeDetachedOwnerProcess()) {
+    await reportNativeLocalDirectories({
+      project,
+      warn: (message) => logger.warn({ message }),
+    });
+  }
   // Before branch, config, env, lifecycle, storage or runtime work. `down`
   // stays available for any graph a project already has.
   // The selected adaptation applies first: a network it isolates is not
@@ -7327,6 +7339,15 @@ async function handleUpUnlocked({
     if (alreadyRunning !== null) {
       return alreadyRunning;
     }
+    await reportNativeLocalDirectories({
+      project: await resolveProjectForArgs({
+        ctx,
+        pathOpt: args.options.path,
+        projectOpt: args.options.project,
+        touchRegistration: false,
+      }),
+      warn: (message) => logger.warn({ message }),
+    });
     return await launchNativeDetachedUp({
       cwd: ctx.cwd,
       args: childArgs,
@@ -9637,6 +9658,16 @@ async function handleRestart({
     if (foreign) {
       throw foreign;
     }
+    // The detached owner's output is not shown: refuse or report here.
+    await reportNativeLocalDirectories({
+      project: await resolveProjectForArgs({
+        ctx,
+        pathOpt: args.options.path,
+        projectOpt: args.options.project,
+        touchRegistration: false,
+      }),
+      warn: (message) => logger.warn({ message }),
+    });
     return await launchNativeDetachedUp({
       cwd: ctx.cwd,
       args: nativeDetachedOwnerArgs({

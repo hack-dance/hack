@@ -1,5 +1,6 @@
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { applyNativeLocalDirectories } from "./native-local-directories.ts";
 import { addNativeHostAliases } from "./native-project-host-aliases.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
 import { applyNativeAmd64Emulation } from "./native-project-platform.ts";
@@ -211,15 +212,39 @@ export function adaptNativeProject(opts: {
     : { ...opts.input, normalizedComposeJson };
 }
 
+/**
+ * The native model for start, preflight and restart: the project's
+ * `localDirectories` first (on every path, with or without an adaptation
+ * file), then the selected adaptation.
+ */
 export async function prepareNativeProjectAdaptation(opts: {
   readonly input: NativeProjectInput;
   readonly path?: string;
 }): Promise<NativeProjectInput> {
+  const input = await withNativeLocalDirectories(opts.input);
   if (opts.path === undefined) {
-    return opts.input;
+    return input;
   }
   return adaptNativeProject({
-    input: opts.input,
+    input,
     selection: await readNativeSelection(opts.path),
   });
+}
+
+async function withNativeLocalDirectories(
+  input: NativeProjectInput
+): Promise<NativeProjectInput> {
+  if (input.localDirectories === undefined) {
+    return input;
+  }
+  const compose: unknown = JSON.parse(input.normalizedComposeJson);
+  if (!(isRecord(compose) && isRecord(compose.services))) {
+    return input;
+  }
+  // Notices are printed by `up` before any detached owner starts.
+  await applyNativeLocalDirectories({
+    compose,
+    selection: input.localDirectories,
+  });
+  return { ...input, normalizedComposeJson: JSON.stringify(compose) };
 }

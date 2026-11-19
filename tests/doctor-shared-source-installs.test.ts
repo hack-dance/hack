@@ -180,3 +180,20 @@ test("the advice names the Compose backend and says native does not apply it", a
     "The native backend does not apply localDirectories yet."
   );
 });
+
+test("doctor flags only what up would move: a volume at the path, even with a trailing slash, is not flagged", async () => {
+  const compose = `services:
+  web:
+    image: node:22
+    volumes:
+      - ..:/app
+      - nm:/app/node_modules/
+volumes:
+  nm: {}
+`;
+  const fixture = await project({ compose, dirs: ["node_modules"] });
+  expect((await check(fixture, compose)).devPerformance).toEqual({
+    kind: "shared_source_installs",
+    services: [],
+  });
+});

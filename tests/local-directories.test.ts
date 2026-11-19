@@ -295,6 +295,23 @@ test("a path hidden by a more specific mount shows something else and is left al
   ]);
   expect(result.kept).toEqual([]);
   expect(result.unmatched).toEqual([]);
+  expect(result.hidden).toEqual([
+    {
+      service: "web",
+      entry: "packages/ui/node_modules",
+      target: "/app/packages/ui/node_modules",
+      by: "/app/packages",
+    },
+    {
+      service: "api",
+      entry: "packages/ui/node_modules",
+      target: "/app/packages/ui/node_modules",
+      by: "/app/packages",
+    },
+  ]);
+  expect(localDirectoriesNotices(result)).toContain(
+    "localDirectories: service web mounts something else at /app/packages, so packages/ui/node_modules is not visible at /app/packages/ui/node_modules; nothing mounted there."
+  );
 });
 
 test("existing mount targets match with or without a trailing slash", () => {

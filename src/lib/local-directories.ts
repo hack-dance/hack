@@ -207,7 +207,23 @@ export type LocalDirectoriesPlan = {
     readonly entry: string;
     readonly target: string;
   }[];
+  /**
+   * A source bind would show the entry at `target`, but a more specific
+   * mount at `by` shows something else there; nothing is mounted.
+   */
+  readonly hidden: readonly {
+    readonly service: string;
+    readonly entry: string;
+    readonly target: string;
+    readonly by: string;
+  }[];
 };
+
+/** What one candidate path gets; see `planLocalDirectories`. */
+export type LocalDirectoryDecision =
+  | { readonly kind: "replace"; readonly readOnly: boolean }
+  | { readonly kind: "kept" }
+  | { readonly kind: "hidden"; readonly by: string };
 
 /**
  * Maps entries onto a parsed Compose document. Pure: the caller reads the
@@ -228,6 +244,12 @@ export function planLocalDirectories(opts: {
 }): LocalDirectoriesPlan {
   const services: Record<string, LocalDirectoryMount[]> = {};
   const kept: { service: string; entry: string; target: string }[] = [];
+  const hidden: {
+    service: string;
+    entry: string;
+    target: string;
+    by: string;
+  }[] = [];
   const matched = new Set<string>();
   const declared =
     isRecord(opts.compose) && isRecord(opts.compose.services)
@@ -245,6 +267,9 @@ export function planLocalDirectories(opts: {
     for (const item of result.kept) {
       kept.push({ service: name, ...item });
     }
+    for (const item of result.hidden) {
+      hidden.push({ service: name, ...item });
+    }
     if (result.list.length > 0) {
       services[name] = result.list;
     }
@@ -253,6 +278,7 @@ export function planLocalDirectories(opts: {
     services,
     unmatched: opts.entries.filter((entry) => !matched.has(entry)),
     kept,
+    hidden,
   };
 }
 
@@ -263,20 +289,23 @@ function planService(opts: {
 }): {
   readonly list: LocalDirectoryMount[];
   readonly kept: { entry: string; target: string }[];
+  readonly hidden: { entry: string; target: string; by: string }[];
   readonly matched: string[];
 } {
   const list: LocalDirectoryMount[] = [];
   const kept: { entry: string; target: string }[] = [];
+  const hidden: { entry: string; target: string; by: string }[] = [];
   const matched: string[] = [];
   for (const entry of opts.entries) {
     const hostPath = resolve(opts.projectRoot, entry);
     for (const path of entryTargets(opts.mounts, hostPath)) {
-      const decision = decideTarget(opts.mounts, path, hostPath);
-      if (decision === "hidden") {
-        continue;
-      }
+      // A bind covers the entry even where a deeper mount hides it, so it
+      // is never reported as "not under a source bind".
       matched.push(entry);
-      if (decision === "kept") {
+      const decision = localDirectoryDecision(opts.mounts, path, hostPath);
+      if (decision.kind === "hidden") {
+        hidden.push({ entry, target: path, by: decision.by });
+      } else if (decision.kind === "kept") {
         kept.push({ entry, target: path });
       } else if (!list.some((mount) => mount.target === path)) {
         list.push({
@@ -288,7 +317,7 @@ function planService(opts: {
       }
     }
   }
-  return { list, kept, matched };
+  return { list, kept, hidden, matched };
 }
 
 /** Each distinct container path where one of a service's binds would show `hostPath`. */
@@ -333,23 +362,29 @@ export function effectiveMount(
   return best;
 }
 
-function decideTarget(
+/**
+ * The decision for one candidate container path of checkout directory
+ * `hostPath`, shared by the planner and `hack doctor` so the hint never
+ * names a directory `up` would leave alone.
+ */
+export function localDirectoryDecision(
   mounts: readonly ServiceMount[],
   path: string,
   hostPath: string
-): { readonly readOnly: boolean } | "kept" | "hidden" {
+): LocalDirectoryDecision {
   const mount = effectiveMount(mounts, path);
   if (mount === undefined) {
-    return "hidden";
+    return { kind: "hidden", by: path };
   }
   const showsEntry =
     mount.type === "bind" && containerPathFor(mount, hostPath) === path;
   if (showsEntry) {
-    return { readOnly: mount.readOnly };
+    return { kind: "replace", readOnly: mount.readOnly };
   }
-  return normalizeTarget(mount.target) === normalizeTarget(path)
-    ? "kept"
-    : "hidden";
+  const target = normalizeTarget(mount.target);
+  return target === normalizeTarget(path)
+    ? { kind: "kept" }
+    : { kind: "hidden", by: target };
 }
 
 /** The Compose override for a plan: service mounts plus labeled volumes. */
@@ -397,6 +432,10 @@ export function localDirectoriesNotices(
     ...plan.kept.map(
       (item) =>
         `localDirectories: service ${item.service} already mounts ${item.target}; that mount is kept for ${item.entry}.`
+    ),
+    ...plan.hidden.map(
+      (item) =>
+        `localDirectories: service ${item.service} mounts something else at ${item.by}, so ${item.entry} is not visible at ${item.target}; nothing mounted there.`
     ),
   ];
 }

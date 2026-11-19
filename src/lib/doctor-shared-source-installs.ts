@@ -1,6 +1,10 @@
 import { stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, posix, relative } from "node:path";
-import { containerPathFor, serviceMounts } from "./local-directories.ts";
+import {
+  containerPathFor,
+  localDirectoryDecision,
+  serviceMounts,
+} from "./local-directories.ts";
 
 /**
  * HACK-2358 doctor hint: a service whose source bind mount shows a
@@ -80,15 +84,11 @@ export async function findSharedSourceInstalls(opts: {
         const directory = relative(opts.projectRoot, host);
         const target =
           containerPathFor(bind, host) ?? posix.join(bind.target, name);
-        // A bind of this very directory is still the shared source.
-        const mounted = mounts.some(
-          (mount) =>
-            mount !== bind &&
-            mount.target === target &&
-            !(mount.type === "bind" && mount.source === host)
-        );
+        // Flag only what `up` would actually move: the same decision.
+        const replaced =
+          localDirectoryDecision(mounts, target, host).kind === "replace";
         if (
-          mounted ||
+          !replaced ||
           covered(opts.localDirectories, directory) ||
           !(await isDirectory(host)) ||
           findings.some(

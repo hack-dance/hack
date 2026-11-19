@@ -81,11 +81,26 @@ export type ServiceMount = {
   readonly readOnly: boolean;
 };
 
+/** `${...}` expressions, which may hold `:` (`${DEPS:-deps}`). */
+const INTERPOLATION = /\$\{[^}]*\}/g;
+/** Stands in for an expression while splitting; never a valid path character. */
+const MASK = "\u0000";
+
 /**
- * A short-syntax spec with a variable only in its source and no `:` inside
- * that variable: the target and mode still split cleanly.
+ * Splits short syntax on `:` outside `${...}`. A part that still holds a
+ * variable (masked or a bare `$NAME`) is returned as null: its value is
+ * unknown here.
  */
-const SOURCE_ONLY_VARIABLE = /^[^:]*\$[^:]*:\/[^:$]*(:[A-Za-z,]+)?$/;
+function splitShortSyntax(value: string): (string | null)[] {
+  const expressions: string[] = [];
+  const masked = value.replace(INTERPOLATION, (match) => {
+    expressions.push(match);
+    return MASK;
+  });
+  return masked
+    .split(":")
+    .map((part) => (part.includes(MASK) || part.includes("$") ? null : part));
+}
 
 const UNKNOWN_TARGET: ServiceMount = {
   type: "unknown-target",
@@ -99,33 +114,50 @@ export function hasUnknownTarget(mounts: readonly ServiceMount[]): boolean {
   return mounts.some((mount) => mount.type === "unknown-target");
 }
 
+function readShortMount(value: string, composeDir: string): ServiceMount {
+  // `${...}` may hold `:` (`${DEPS:-deps}:/app/node_modules`), so the
+  // split skips it. A target that is (or holds) a variable is unknown, and
+  // its service gets no local directories (see `hasUnknownTarget`); a
+  // variable only in the source keeps the literal target, which then wins
+  // as an existing mount.
+  const parts = splitShortSyntax(value);
+  if (parts.length === 1) {
+    const only = parts[0];
+    return only === null || only === undefined
+      ? UNKNOWN_TARGET
+      : {
+          type: "volume",
+          source: undefined,
+          target: normalizeTarget(only),
+          readOnly: false,
+        };
+  }
+  const [source, target, mode] = parts;
+  if (target === null || target === undefined || mode === null) {
+    return UNKNOWN_TARGET;
+  }
+  if (source === null || source === undefined) {
+    return {
+      type: "other",
+      source: undefined,
+      target: normalizeTarget(target),
+      readOnly: (mode ?? "").split(",").includes("ro"),
+    };
+  }
+  return {
+    type: shortSyntaxType(source),
+    source:
+      shortSyntaxType(source) === "bind"
+        ? resolveBindSource(source, composeDir)
+        : source,
+    target: normalizeTarget(target),
+    readOnly: (mode ?? "").split(",").includes("ro"),
+  };
+}
+
 function readMount(value: unknown, composeDir: string): ServiceMount | null {
   if (typeof value === "string") {
-    // `..:${APP_DIR:-/app}` has a `:` inside the variable; splitting it
-    // would invent a target. Its path is unknown here, so its service gets
-    // no local directories (see `hasUnknownTarget`).
-    if (value.includes("$") && !SOURCE_ONLY_VARIABLE.test(value)) {
-      return UNKNOWN_TARGET;
-    }
-    const parts = value.split(":");
-    if (parts.length === 1) {
-      return {
-        type: "volume",
-        source: undefined,
-        target: normalizeTarget(parts[0] ?? ""),
-        readOnly: false,
-      };
-    }
-    const [source = "", target = "", mode = ""] = parts;
-    return {
-      type: shortSyntaxType(source),
-      source:
-        shortSyntaxType(source) === "bind"
-          ? resolveBindSource(source, composeDir)
-          : source,
-      target: normalizeTarget(target),
-      readOnly: mode.split(",").includes("ro"),
-    };
+    return readShortMount(value, composeDir);
   }
   if (!(isRecord(value) && typeof value.target === "string")) {
     return null;
@@ -181,12 +213,40 @@ export function serviceMounts(
   spec: unknown,
   composeDir: string
 ): ServiceMount[] {
-  if (!(isRecord(spec) && Array.isArray(spec.volumes))) {
+  if (!isRecord(spec)) {
     return [];
   }
-  return spec.volumes
-    .map((value) => readMount(value, composeDir))
-    .filter((mount): mount is ServiceMount => mount !== null);
+  const volumes = Array.isArray(spec.volumes)
+    ? spec.volumes
+        .map((value) => readMount(value, composeDir))
+        .filter((mount): mount is ServiceMount => mount !== null)
+    : [];
+  return [...volumes, ...tmpfsMounts(spec.tmpfs)];
+}
+
+/**
+ * Service-level `tmpfs:` (a path or a list of `path[:options]`): each hides
+ * what is below it, like any other mount.
+ */
+function tmpfsMounts(value: unknown): ServiceMount[] {
+  const entries = Array.isArray(value) ? value : [value];
+  return entries.flatMap((entry): ServiceMount[] => {
+    if (typeof entry !== "string" || entry.length === 0) {
+      return [];
+    }
+    if (entry.includes("$")) {
+      return [UNKNOWN_TARGET];
+    }
+    const [path = ""] = entry.split(":");
+    return [
+      {
+        type: "other",
+        source: undefined,
+        target: normalizeTarget(path),
+        readOnly: false,
+      },
+    ];
+  });
 }
 
 function resolveBindSource(

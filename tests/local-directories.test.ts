@@ -471,3 +471,40 @@ test("a service with a mount whose target is a variable gets nothing, with a not
     "localDirectories: service web has a mount whose path comes from a variable; nothing kept local for it."
   );
 });
+
+test("a variable source with a default keeps its literal target, which wins", () => {
+  const result = plan(
+    {
+      services: {
+        web: { volumes: ["..:/app", "${DEPS:-deps}:/app/node_modules:ro"] },
+      },
+    },
+    ["node_modules"]
+  );
+  expect(result.services.web).toBeUndefined();
+  expect(result.skipped).toEqual([]);
+  expect(result.kept).toEqual([
+    { service: "web", entry: "node_modules", target: "/app/node_modules" },
+  ]);
+});
+
+test("service-level tmpfs mounts hide what is below them", () => {
+  const result = plan(
+    {
+      services: {
+        list: { volumes: ["..:/app"], tmpfs: ["/app/cache:size=64m"] },
+        single: { volumes: ["..:/app"], tmpfs: "/app/cache" },
+        exact: { volumes: ["..:/app"], tmpfs: ["/app/cache/build"] },
+      },
+    },
+    ["cache/build"]
+  );
+  expect(result.services).toEqual({});
+  expect(result.hidden.map((item) => [item.service, item.by])).toEqual([
+    ["list", "/app/cache"],
+    ["single", "/app/cache"],
+  ]);
+  expect(result.kept).toEqual([
+    { service: "exact", entry: "cache/build", target: "/app/cache/build" },
+  ]);
+});

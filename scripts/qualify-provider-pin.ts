@@ -750,14 +750,29 @@ export function parseOptions(argv: string[]): Options {
   };
 }
 
+/** The fixture's routed hostname when the run selects native HTTPS. */
+export const HTTPS_ROUTE_HOST = "web.provider-qual.hack.local";
+
+/**
+ * The fixture project. With `routeHost`, `web` gets the documented Caddy route labels on
+ * its probe port, so a run with `--caddy` actually serves a route over native HTTPS.
+ */
 export function compose(
   webImage: string,
   dbImage: string,
-  alias: string
+  alias: string,
+  routeHost: string | null = null
 ): string {
+  const labels = routeHost
+    ? `
+    labels:
+      caddy: ${routeHost}
+      caddy.reverse_proxy: "{{upstreams 8080}}"
+      caddy.tls: internal`
+    : "";
   return `services:
   web:
-    image: ${webImage}
+    image: ${webImage}${labels}
     command: ["sh", "-c", "mkdir -p /srv && echo ready > /srv/index.txt && exec httpd -f -p 8080 -h /srv"]
     extra_hosts:
       - "${alias}:host-gateway"
@@ -772,6 +787,35 @@ export function compose(
 volumes:
   db-data: {}
 `;
+}
+
+/** Native Caddy's local root CA under a native home (`native-https/data`). */
+export function nativeCaRoot(home: string): string {
+  return join(home, "native-https/data/caddy/pki/authorities/local/root.crt");
+}
+
+/**
+ * `curl` for one routed hostname on the native HTTPS port: resolved to loopback without
+ * DNS, trusting only `ca`, so a pass proves the route, SNI and the home's own CA.
+ */
+export function httpsRouteRequest(
+  ca: string,
+  host: string,
+  port: number
+): string[] {
+  return [
+    "/usr/bin/curl",
+    "--silent",
+    "--show-error",
+    "--fail",
+    "--max-time",
+    "15",
+    "--cacert",
+    ca,
+    "--resolve",
+    `${host}:${port}:127.0.0.1`,
+    `https://${host}:${port}/index.txt`,
+  ];
 }
 
 /** The host dependency listener: 64 KiB of fixed bytes out, the SHA-256 of what came in. */
@@ -1439,7 +1483,12 @@ export class Qualification {
     );
     writeFileSync(
       join(this.project, ".hack/docker-compose.yml"),
-      compose(this.options.webImage, this.options.dbImage, alias)
+      compose(
+        this.options.webImage,
+        this.options.dbImage,
+        alias,
+        this.options.caddy ? HTTPS_ROUTE_HOST : null
+      )
     );
     writeFileSync(
       join(this.project, "README.md"),
@@ -2202,6 +2251,9 @@ export class Qualification {
           passed: this.passed,
           failed: this.failed,
           recorded: this.recorded,
+          // With --caddy every step runs with the HTTPS frontend, so timings from runs
+          // with and without it are not comparable.
+          https: this.options.caddy !== null,
           measurements: this.measurements,
         },
         null,
@@ -2375,6 +2427,9 @@ export class Qualification {
         "wget -qO- http://127.0.0.1:8080/index.txt"
       ).trim() === "ready"
     );
+    if (this.options.caddy && this.options.httpsPort) {
+      this.httpsRoute();
+    }
     this.check(
       "web reaches db by service name",
       this.inContainer(
@@ -2392,6 +2447,22 @@ export class Qualification {
     this.check(
       "disk identity is unchanged at the end",
       JSON.stringify(this.diskIdentity()) === JSON.stringify(identity)
+    );
+  }
+
+  /** Fetch the fixture's route over native HTTPS, trusting only this home's Caddy root. */
+  httpsRoute(): void {
+    const ca = nativeCaRoot(this.main);
+    this.check("the native HTTPS frontend created its CA", existsSync(ca), ca);
+    const fetched = this.exec(
+      "https-route",
+      httpsRouteRequest(ca, HTTPS_ROUTE_HOST, this.options.httpsPort as number),
+      { allowFailure: true }
+    );
+    this.check(
+      "web answers its route over native HTTPS with the home's CA",
+      fetched.code === 0 && fetched.stdout.trim() === "ready",
+      `exit ${fetched.code}: ${(fetched.stderr || fetched.stdout).trim().slice(-300)}`
     );
   }
 

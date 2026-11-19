@@ -601,7 +601,29 @@ function managedRouteProject(
 export async function readProjectConfig(
   ctx: ProjectContext
 ): Promise<ProjectConfig> {
-  await assertLegacyProjectDirectory({ projectDir: ctx.projectDir });
+  return await readProjectConfigInDirectory(ctx.projectDir);
+}
+
+/**
+ * `readProjectConfig` for a project directory alone: `hack.config.json`,
+ * else the legacy TOML file, else defaults.
+ */
+export async function readProjectConfigInDirectory(
+  projectDir: string
+): Promise<ProjectConfig> {
+  await assertLegacyProjectDirectory({ projectDir });
+  return await readProjectConfigFiles(projectDir);
+}
+
+/**
+ * The config files alone (`hack.config.json`, else `hack.toml`), with no
+ * project-family check: for messages about native-marked projects that may
+ * still carry a legacy config file. Not for deciding what a start does.
+ */
+export async function readProjectConfigFiles(
+  projectDir: string
+): Promise<ProjectConfig> {
+  const ctx = { projectDir };
   const jsonPath = resolve(ctx.projectDir, PROJECT_CONFIG_FILENAME);
   const jsonText = await readTextFile(jsonPath);
   if (jsonText !== null) {

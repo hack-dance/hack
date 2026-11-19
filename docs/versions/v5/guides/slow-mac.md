@@ -136,8 +136,10 @@ file:
 The next `hack up` mounts a named volume at each listed directory for every
 service that bind-mounts it. Run the install once more after that start,
 because the volume starts empty (or with what the image has at that path).
-Your checkout's copies stay where they are. This works on the Compose
-backend; the native backend does not apply `localDirectories` yet. See
+Your checkout's copies stay where they are. On the native backend the
+volumes are on the VM disk, so installs there avoid the host share entirely
+(adopted, authored and imported native projects do not apply the setting).
+See
 [Dependency directories](../recipes/dependency-directories.md#keep-a-directory-local-without-editing-compose).
 
 ## If doctor finds nothing

@@ -1404,9 +1404,10 @@ have run, and the error stays `graph_service_exec_uncertain`. The per-command va
 lifetime bounds only their delivery; the exec's own wait bounds the command. Output that is
 still arriving when that wait ends is read to the end, allowing 5 seconds between bytes and
 at most 20 seconds past the wait, so a command that finished on a slow or busy host is reported
-with its exit code rather than as uncertain. Output that stays silent for 5 seconds or keeps
-going past that limit, a host that stalls beyond it, or an exec whose exit cannot be read
-within 5 seconds of its output ending is still uncertain. Exec inherits the container's static environment. When the selected service has a
+with its exit code rather than as uncertain. Output already queued when a stalled host resumes,
+even after that limit, is still read. Output that stays silent for 5 seconds without ending,
+keeps going past that limit, or an exec whose exit cannot be read within 5 seconds of its
+output ending is still uncertain. Exec inherits the container's static environment. When the selected service has a
 committed private environment attachment on the current boot, it reuses that
 service's exact read-only launcher mounts and original expiry. No values are copied
 into engine metadata, and exec never renews credentials. With the current launcher,
@@ -4377,7 +4378,9 @@ the current owned project/branch mapping, preserves binary stdout/stderr and the
 command exit code, and never falls back to Compose. With piped input/output or
 `HACK_NO_INTERACTIVE=1`, it uses finite exec with a 30-second observation budget;
 a timeout may leave the command running and is not
-retried. `--env` and `--profile` changes are refused. A command name such as `bun`
+retried. When fresh values are delivered through private stdin, output that is still arriving
+or already queued when that budget ends is read to the end, so a command that finished on a
+busy host returns its exit code (see below). `--env` and `--profile` changes are refused. A command name such as `bun`
 uses the selected container's PATH; no host PATH or implicit shell is used. For
 adopted Compose services, `hack exec` resolves the saved startup overlay and AWS profile again, and delivers
 fresh selected-service managed, allowed caller-shell and env-file values through

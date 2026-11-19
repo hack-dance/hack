@@ -300,7 +300,14 @@ fn read_output_within(
     let mut buffer = [0u8; 8192];
     loop {
         let window = output_window(deadline, last_progress, idle_grace, ceiling);
-        let n = read_some(stream, &mut buffer, window, Stage::Output)?;
+        let n = match read_some(stream, &mut buffer, window, Stage::Output) {
+            Ok(n) => n,
+            // The window passed while this host was not running. Whatever the peer had
+            // already queued, including EOF, still counts (from #982); only a stream with
+            // nothing queued is uncertain. Draining never waits, and the 4 MiB bound holds.
+            Err(timeout) if Instant::now() >= window => return drain_queued(stream, raw, timeout),
+            Err(error) => return Err(error),
+        };
         if n == 0 {
             return Ok(raw);
         }
@@ -309,6 +316,28 @@ fn read_output_within(
         }
         raw.extend_from_slice(&buffer[..n]);
         last_progress = Instant::now();
+    }
+}
+/// Read what the peer already queued after the output window passed: the output if it
+/// reaches EOF, otherwise the window's own failure.
+fn drain_queued(
+    stream: &UnixStream,
+    mut raw: Vec<u8>,
+    timeout: CandidateError,
+) -> Result<Vec<u8>, CandidateError> {
+    let mut buffer = [0u8; 8192];
+    loop {
+        match super::exec_io::read_queued(stream, &mut buffer) {
+            Ok(0) => return Ok(raw),
+            Ok(n) => {
+                if raw.len() + n > 4 * 1024 * 1024 {
+                    return Err(failed(Stage::Output, Reason::Protocol));
+                }
+                raw.extend_from_slice(&buffer[..n]);
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(timeout),
+        }
     }
 }
 #[cfg(all(target_os = "macos", feature = "environment-launcher"))]
@@ -649,6 +678,22 @@ mod tests {
             output_window(at(30_000), at(60_000), grace, ceiling),
             at(50_000)
         );
+    }
+    #[test]
+    fn output_queued_past_the_ceiling_is_still_read_to_eof() {
+        // From #982: even a host that resumes after the whole drain window has passed
+        // returns a finished command's queued output rather than calling it uncertain.
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        // Below macOS's default 8 KiB AF_UNIX send buffer, so the write completes unread.
+        let output: Vec<u8> = (0..6_000u32).map(|i| (i % 251) as u8).collect();
+        let writer = {
+            let output = output.clone();
+            std::thread::spawn(move || guest.write_all(&output).unwrap())
+        };
+        writer.join().unwrap();
+        let long_ago = Instant::now() - Duration::from_secs(120);
+        let raw = read_output(&host, long_ago).unwrap();
+        assert_eq!(raw, output);
     }
     #[test]
     fn a_silent_open_stream_past_the_deadline_is_uncertain_output() {

@@ -816,6 +816,8 @@ fn enable_amd64_emulation(
 fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
     super::config_audit::verify(candidate, owner)?;
     super::dependency_socket::verify(candidate, owner)?;
+    // The agent and engine sockets share the bridge sockets' umask exposure (HACK-2375).
+    super::bridge::secure_provider_sockets(&owner.real_data_dir(candidate)?)?;
     if let Some(bridge) = owner.application_bridge {
         super::bridge::verify_sockets(&owner.real_data_dir(candidate)?, bridge)?;
     }

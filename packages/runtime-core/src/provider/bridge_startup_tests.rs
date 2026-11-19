@@ -19,8 +19,11 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        let root = crate::unique_test_root(&std::env::temp_dir(), "bridge-wait");
+        // The provider's socket directory is owned and private; the wait requires it.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         Self {
-            root: crate::unique_test_root(&std::env::temp_dir(), "bridge-wait"),
+            root,
             listeners: RefCell::new(Vec::new()),
         }
     }
@@ -77,14 +80,19 @@ fn guest_ready_before_all_bridge_binds_waits_for_complete_private_identity() {
         verify_sockets(&fixture.root, intent).unwrap_err().code,
         "bridge_socket_identity"
     );
+    // The second socket is bound world-accessible, as the provider does once its file
+    // sharing has cleared the process umask (HACK-2375): it is repaired, not waited for.
     let clock = Scheduled::new(|elapsed: Duration| match elapsed.as_millis() {
         50 => fixture.bind(0, 0o700),
         100 => fixture.bind(1, 0o777),
-        150 => fixture.mode(1, 0o700),
         _ => panic!("unexpected wait"),
     });
     wait_for_sockets_with(&fixture.root, intent, || Ok(()), &clock, BUDGET).unwrap();
-    assert_eq!(clock.now(), Duration::from_millis(150));
+    assert_eq!(clock.now(), Duration::from_millis(100));
+    assert_eq!(
+        fs::symlink_metadata(fixture.path(1)).unwrap().mode() & 0o777,
+        0o700
+    );
     verify_sockets(&fixture.root, intent).unwrap();
 }
 
@@ -110,12 +118,9 @@ fn private_sockets_ready_first_need_no_wait_but_still_verify_the_provider_twice(
 }
 
 #[test]
-fn missing_or_never_private_sockets_expire_without_changing_them_and_name_recovery() {
-    for present in [false, true] {
+fn missing_sockets_expire_and_name_recovery() {
+    {
         let fixture = Fixture::new();
-        if present {
-            fixture.bind(0, 0o777);
-        }
         let clock = Scheduled::new(|_: Duration| {});
         let failure = wait_for_sockets_with(
             &fixture.root,
@@ -134,14 +139,7 @@ fn missing_or_never_private_sockets_expire_without_changing_them_and_name_recove
                 .contains("identical --candidate-root argument")
         );
         assert_eq!(clock.now(), BUDGET);
-        if present {
-            assert_eq!(
-                fs::symlink_metadata(fixture.path(0)).unwrap().mode() & 0o777,
-                0o777
-            );
-        } else {
-            assert!(!fixture.path(0).exists());
-        }
+        assert!(!fixture.path(0).exists());
     }
 }
 
@@ -181,15 +179,92 @@ fn unsafe_type_alias_and_link_count_refuse_even_when_an_earlier_slot_is_missing(
 }
 
 #[test]
-fn another_owner_is_not_pending_or_private() {
+fn another_owner_is_not_pending_private_or_repaired() {
     let fixture = Fixture::new();
-    fixture.bind(0, 0o700);
-    let metadata = fs::symlink_metadata(fixture.path(0)).unwrap();
-    assert!(private_socket(&metadata, metadata.uid()).unwrap());
+    fixture.bind(0, 0o777);
+    let directory = private_directory(&fixture.root).unwrap();
+    let name = std::ffi::CString::new("bridge-00.sock").unwrap();
+    let mut stat = entry(&directory, &name).unwrap().unwrap();
+    stat.st_uid = stat.st_uid.wrapping_add(1);
     assert_eq!(
-        private_socket(&metadata, metadata.uid().wrapping_add(1))
-            .unwrap_err()
-            .code,
+        private_socket(&directory, &name, stat).unwrap_err().code,
+        "bridge_socket_identity"
+    );
+    // Refused before any repair: the socket keeps its mode.
+    assert_eq!(
+        fs::symlink_metadata(fixture.path(0)).unwrap().mode() & 0o777,
+        0o777
+    );
+}
+
+#[test]
+fn world_accessible_owned_sockets_in_a_private_directory_are_repaired_to_private() {
+    // HACK-2375: a mix of private and 0777 sockets, as the provider leaves them after its
+    // file sharing clears the process umask partway through its bind loop.
+    let fixture = Fixture::new();
+    for slot in 0..4 {
+        fixture.bind(slot, if slot == 1 { 0o700 } else { 0o777 });
+    }
+    let before: Vec<_> = (0..4)
+        .map(|slot| fs::symlink_metadata(fixture.path(slot)).unwrap().ino())
+        .collect();
+    verify_sockets(&fixture.root, BridgeIntent::new(4).unwrap()).unwrap();
+    for slot in 0..4 {
+        let after = fs::symlink_metadata(fixture.path(slot)).unwrap();
+        assert_eq!(after.mode() & 0o777, 0o700, "slot {slot}");
+        assert_eq!(
+            after.ino(),
+            before[slot as usize],
+            "slot {slot} kept its inode"
+        );
+    }
+}
+
+#[test]
+fn a_socket_directory_that_is_not_private_and_owned_refuses_without_repair() {
+    for kind in ["group-readable", "symlink"] {
+        let fixture = Fixture::new();
+        fixture.bind(0, 0o777);
+        let directory = match kind {
+            "group-readable" => {
+                fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o750)).unwrap();
+                fixture.root.clone()
+            }
+            _ => {
+                let link = fixture.root.join("link");
+                symlink(&fixture.root, &link).unwrap();
+                link
+            }
+        };
+        assert_eq!(
+            verify_sockets(&directory, BridgeIntent::new(1).unwrap())
+                .unwrap_err()
+                .code,
+            "bridge_socket_directory",
+            "{kind}"
+        );
+        assert_eq!(
+            fs::symlink_metadata(fixture.path(0)).unwrap().mode() & 0o777,
+            0o777,
+            "{kind}: nothing repaired"
+        );
+        fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+#[test]
+fn provider_sockets_are_repaired_when_present_and_refused_when_not_sockets() {
+    let fixture = Fixture::new();
+    // Absent: left for the code that connects to them.
+    secure_provider_sockets(&fixture.root).unwrap();
+    let agent = fixture.root.join("agent.sock");
+    let _listener = UnixListener::bind(&agent).unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o777)).unwrap();
+    secure_provider_sockets(&fixture.root).unwrap();
+    assert_eq!(fs::symlink_metadata(&agent).unwrap().mode() & 0o777, 0o700);
+    fs::write(fixture.root.join("docker.sock"), b"not a socket").unwrap();
+    assert_eq!(
+        secure_provider_sockets(&fixture.root).unwrap_err().code,
         "bridge_socket_identity"
     );
 }
@@ -278,6 +353,7 @@ fn the_boot_budget_grows_with_the_slot_count() {
 fn a_timeout_reports_how_many_sockets_were_missing_or_not_private() {
     let fixture = Fixture::new();
     fixture.bind(0, 0o700);
+    // A world-accessible socket is repaired, so only the missing one is pending.
     fixture.bind(1, 0o777);
     let clock = Scheduled::new(|_: Duration| {});
     let failure = wait_for_sockets_with(
@@ -293,7 +369,7 @@ fn a_timeout_reports_how_many_sockets_were_missing_or_not_private() {
     let wire = serde_json::to_value(&failure).unwrap();
     assert_eq!(
         wire["bridge_sockets"],
-        serde_json::json!({"version":1,"expected":3,"missing":1,"not_private":1,"budget_seconds":13})
+        serde_json::json!({"version":1,"expected":3,"missing":1,"not_private":0,"budget_seconds":13})
     );
     // Counts only: no socket path reaches the diagnostic.
     assert!(!wire.to_string().contains("bridge-0"));

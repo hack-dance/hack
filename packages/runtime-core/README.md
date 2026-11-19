@@ -637,12 +637,27 @@ before signalling ready, without joining them. The pinned
 [launcher removes old expose paths first](https://github.com/smol-machines/smolvm/blob/v1.35.4/src/agent/launcher.rs#L2070);
 freshness depends on that ordering, because private socket metadata alone does not identify
 its binder. A provider-pin upgrade must re-check that contract. Fresh boot waits up to 10 seconds
-for all declared bridge sockets, before disk adoption and the full boot audit. Each poll
-checks the retained provider identity before and after the socket observation. Missing
-nodes and same-user, single-link sockets awaiting private mode can converge; a different
-type, user, link count or unreadable identity refuses immediately. Only a complete private
-socket set observed before the deadline succeeds. The wait never chmods, removes or connects
-to sockets. Running-pool audits remain immediate. The existing failed-boot path stops only
+plus 1 second per bridge slot for all declared bridge sockets, before disk adoption and the full
+boot audit. Each poll checks the retained provider identity before and after the socket
+observation.
+
+The socket directory must be a directory owned by this user with no group or other access.
+It is opened without following a symlink and checked through that descriptor; otherwise the
+boot refuses with `bridge_socket_directory`. Missing nodes can converge.
+
+The pinned provider binds every exposed socket with the VM process's umask at that moment. Its
+file-sharing device clears the umask for the whole process early in each boot (`umask(0)` in
+libkrun's macOS passthrough `init`, in both 1.34.1 and 1.35.4), so on a busy host the sockets
+bound after that are world-accessible for the life of the VM (HACK-2375). A same-user,
+single-link socket with group or other bits therefore has those bits removed. The mode is
+set through the verified directory, which only this user can change, and the socket is read
+back as the same inode, still private. The guest agent and exposed engine sockets
+(`agent.sock`, `docker.sock`) get the same check and repair in every boot audit when present.
+
+A different type, user or link count, or an unreadable identity, still refuses immediately
+and is never repaired. Only a complete private socket set observed before the deadline
+succeeds. The wait never removes or connects to sockets. Running-pool audits remain
+immediate. The existing failed-boot path stops only
 the verified provider, records its absence and retains `failed-boot-stopped`, without
 claiming a clean guest shutdown. Socket failures and provider-verification failures during
 the wait name `runtime recover --json`, using the same executor and identical

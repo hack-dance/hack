@@ -21,6 +21,7 @@ import {
   runNativeComposeWorkloadPhases,
 } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
+import { warnLocalDirectoriesNotApplied } from "./local-directories-project.ts";
 import { tryNativeAuthoredCommand } from "./native-authored-command.ts";
 import { nativeComposeRuntimeMetadataSelection } from "./native-authored-runtime-metadata.ts";
 import { tryLegacyComposeAdoptedCommand } from "./native-compose-adoption-command.ts";
@@ -2493,6 +2494,13 @@ async function dispatchNativeComposeCommand(
   const selected = await selectNativeComposeProject(options);
   if (!selected) {
     return null;
+  }
+  if (options.operation === "up" || options.operation === "restart") {
+    await warnLocalDirectoriesNotApplied({
+      projectRoot: selected.projectRoot,
+      kind: "authored or imported",
+      warn: (line) => process.stderr.write(`${line}\n`),
+    });
   }
   refuseEmptyAuthoredRunSelection(input);
   const native = await tryNativeAuthoredCommand({ options, selected });

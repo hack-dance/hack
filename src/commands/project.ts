@@ -344,7 +344,11 @@ import {
   appendHackHostTrustEnvironment,
   findHackHostTrustBundlePath,
 } from "../lib/local-ca.ts";
-import { withProjectLocalDirectories } from "../lib/local-directories-project.ts";
+import {
+  reportNativeLocalDirectories,
+  trackNativeLocalDirectories,
+  withProjectLocalDirectories,
+} from "../lib/local-directories-project.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
   buildLogSelector,
@@ -6609,6 +6613,18 @@ async function handleNativeUp({
     projectOpt: args.options.project,
     touchRegistration: false,
   });
+  // HACK-2358: refuse an invalid setting before anything starts or stops,
+  // and say what is kept local. A detached owner's output is not shown; its
+  // launcher printed these already.
+  if (!isNativeDetachedOwnerProcess()) {
+    await reportNativeLocalDirectories({
+      project,
+      warn: (message) => logger.warn({ message }),
+    });
+  }
+  // Native writes machine-local state under `.hack/.internal` too (env
+  // fingerprints, run records): keep it out of `git status` as Compose does.
+  await ensureHackGitInfoExclude({ projectDir: project.projectDir });
   // Before branch, config, env, lifecycle, storage or runtime work. `down`
   // stays available for any graph a project already has.
   // The selected adaptation applies first: a network it isolates is not
@@ -6642,6 +6658,14 @@ async function handleNativeUp({
     branchOption: args.options.branch,
   });
   const branch = branchIdentity.branch;
+  if (!isNativeDetachedOwnerProcess()) {
+    await trackNativeLocalDirectories({
+      project,
+      branch,
+      mode: restart ? "restart" : "start",
+      warn: (message) => logger.warn({ message }),
+    });
+  }
   // Foreground native up and restart record the name like Compose up does;
   // the detached owner child keeps the name its launcher recorded.
   await recordBranchUsageIfNeeded({
@@ -7270,6 +7294,7 @@ async function handleUpUnlocked({
     let launchScope: Parameters<
       typeof explainUnconfirmedNativeDetachedStart
     >[0]["scope"] = null;
+    let launchBranch: string | null = null;
     const alreadyRunning = await answerNativeAlreadyRunning({
       native,
       json: args.options.json === true,
@@ -7312,11 +7337,18 @@ async function handleUpUnlocked({
         return identity.branch;
       },
       onBranchResolved: (branch) => {
+        launchBranch = branch;
         if (args.options.branch === undefined && branch !== null) {
           childArgs.push(`--branch=${branch}`);
         }
       },
       notifyRunning: async (saved, project) => {
+        await trackNativeLocalDirectories({
+          project,
+          branch: launchBranch ?? args.options.branch ?? null,
+          mode: "running",
+          warn: nativeLocalDirectoriesWarn(args.options.json === true),
+        });
         if (nativeProfileOption(args.options.profile) !== undefined) {
           return;
         }
@@ -7332,6 +7364,16 @@ async function handleUpUnlocked({
     if (alreadyRunning !== null) {
       return alreadyRunning;
     }
+    await reportNativeLocalDirectoriesBeforeLaunch({
+      ctx,
+      path: args.options.path,
+      project: args.options.project,
+      json: args.options.json === true,
+      track: {
+        branch: launchBranch ?? args.options.branch ?? null,
+        mode: "start",
+      },
+    });
     return await launchNativeDetachedUp({
       cwd: ctx.cwd,
       args: childArgs,
@@ -8958,6 +9000,59 @@ function refuseInvalidSharedHelpers(opts: {
 }
 
 /**
+ * Before a detached owner starts (its output is not shown): refuse an invalid
+ * `localDirectories` and print its notices. Only an ordinary Compose project
+ * reads the setting; for an authored or imported project the lookup fails
+ * here and the child dispatches it, as `answerNativeAlreadyRunning` does.
+ */
+export async function reportNativeLocalDirectoriesBeforeLaunch(opts: {
+  readonly ctx: CliContext;
+  readonly path: string | undefined;
+  readonly project: string | undefined;
+  readonly json: boolean;
+  /** Records the plan this launch starts, and says when a restart changes it. */
+  readonly track?: {
+    readonly branch: string | null;
+    readonly mode: "start" | "restart";
+  };
+}): Promise<void> {
+  let project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  try {
+    project = await resolveProjectForArgs({
+      ctx: opts.ctx,
+      pathOpt: opts.path,
+      projectOpt: opts.project,
+      touchRegistration: false,
+    });
+  } catch {
+    return;
+  }
+  const warn = nativeLocalDirectoriesWarn(opts.json);
+  await reportNativeLocalDirectories({ project, warn });
+  await ensureHackGitInfoExclude({ projectDir: project.projectDir });
+  if (opts.track) {
+    await trackNativeLocalDirectories({
+      project,
+      branch: opts.track.branch,
+      mode: opts.track.mode,
+      warn,
+    });
+  }
+}
+
+/**
+ * Where native `localDirectories` notices go: stderr under `--json`, so the
+ * result envelope stays the only thing on stdout; the logger otherwise.
+ */
+export function nativeLocalDirectoriesWarn(
+  json: boolean
+): (message: string) => void {
+  return json
+    ? (message) => process.stderr.write(`${message}\n`)
+    : (message) => logger.warn({ message });
+}
+
+/**
  * HACK-2358: an invalid `localDirectories` refuses before anything starts or
  * stops (a restart would otherwise stop the project and then refuse).
  */
@@ -9642,6 +9737,14 @@ async function handleRestart({
     if (foreign) {
       throw foreign;
     }
+    // The detached owner's output is not shown: refuse or report here.
+    await reportNativeLocalDirectoriesBeforeLaunch({
+      ctx,
+      path: args.options.path,
+      project: args.options.project,
+      json: true,
+      track: { branch: scope?.branch ?? null, mode: "restart" },
+    });
     return await launchNativeDetachedUp({
       cwd: ctx.cwd,
       args: nativeDetachedOwnerArgs({

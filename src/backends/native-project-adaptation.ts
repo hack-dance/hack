@@ -1,5 +1,6 @@
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { applyNativeLocalDirectories } from "./native-local-directories.ts";
 import { addNativeHostAliases } from "./native-project-host-aliases.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
 import { applyNativeAmd64Emulation } from "./native-project-platform.ts";
@@ -211,15 +212,97 @@ export function adaptNativeProject(opts: {
     : { ...opts.input, normalizedComposeJson };
 }
 
+/**
+ * The native model for start, preflight and restart: the project's
+ * `localDirectories` first (on every path, with or without an adaptation
+ * file), then the selected adaptation.
+ */
 export async function prepareNativeProjectAdaptation(opts: {
   readonly input: NativeProjectInput;
   readonly path?: string;
 }): Promise<NativeProjectInput> {
-  if (opts.path === undefined) {
-    return opts.input;
+  const selection =
+    opts.path === undefined ? undefined : await readNativeSelection(opts.path);
+  const input = await withNativeLocalDirectories(opts.input, selection);
+  if (selection === undefined) {
+    return input;
   }
-  return adaptNativeProject({
-    input: opts.input,
-    selection: await readNativeSelection(opts.path),
+  return adaptNativeProject({ input, selection });
+}
+
+/**
+ * The workspace `node_modules` paths an adaptation's `workspaceCache` mounts,
+ * by service: only services that mount the cache volume at
+ * `${root}/node_modules` get them (see `applyNativeWorkspaceCache`). The
+ * cache keeps those paths on the VM disk and refuses a mount it finds there,
+ * so `localDirectories` leaves them to it in exactly those services.
+ */
+function workspaceCacheTargets(
+  selection: unknown,
+  compose: Record<string, unknown>
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const cache = isRecord(selection) ? selection.workspaceCache : undefined;
+  if (
+    !(
+      isRecord(cache) &&
+      typeof cache.volume === "string" &&
+      typeof cache.root === "string" &&
+      Array.isArray(cache.workspaces) &&
+      isRecord(compose.services)
+    )
+  ) {
+    return new Map();
+  }
+  const root = cache.root;
+  const parent = `${root}/node_modules`;
+  const targets = new Set(
+    cache.workspaces
+      .filter((path): path is string => typeof path === "string")
+      .map((path) => `${root}/${path}/node_modules`)
+  );
+  const byService = new Map<string, ReadonlySet<string>>();
+  for (const [name, spec] of Object.entries(compose.services)) {
+    const volumes =
+      isRecord(spec) && Array.isArray(spec.volumes) ? spec.volumes : [];
+    if (
+      volumes.some((value) =>
+        mountsCacheAt(value, cache.volume as string, parent)
+      )
+    ) {
+      byService.set(name, targets);
+    }
+  }
+  return byService;
+}
+
+function mountsCacheAt(
+  value: unknown,
+  volume: string,
+  target: string
+): boolean {
+  if (typeof value === "string") {
+    const [source, mountTarget] = value.split(":");
+    return source === volume && mountTarget === target;
+  }
+  return isRecord(value) && value.source === volume && value.target === target;
+}
+
+async function withNativeLocalDirectories(
+  input: NativeProjectInput,
+  selection: unknown
+): Promise<NativeProjectInput> {
+  if (input.localDirectories === undefined) {
+    return input;
+  }
+  const compose: unknown = JSON.parse(input.normalizedComposeJson);
+  if (!(isRecord(compose) && isRecord(compose.services))) {
+    return input;
+  }
+  // Notices are printed by `up` before any detached owner starts.
+  await applyNativeLocalDirectories({
+    compose,
+    selection: input.localDirectories,
+    leaveTargets: workspaceCacheTargets(selection, compose),
   });
+  return { ...input, normalizedComposeJson: JSON.stringify(compose) };
 }

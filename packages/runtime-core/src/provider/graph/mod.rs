@@ -2667,14 +2667,16 @@ fn admitted_platform(
 }
 
 /// Where the guest mounts the host's Rosetta 2 runtime (virtiofs tag `rosetta`; see
-/// `guest-translation.sh`). SmolVM's binfmt interpreter, `rosetta-wrapper`, is pinned by
-/// the fix-binary flag, but it launches the translator from this path at exec time, so the
-/// path must exist inside every container whose image runs under translation.
+/// `guest-translation.sh`). SmolVM 1.35.4 registers `/mnt/rosetta/rosetta` itself with
+/// binfmt_misc flags `OCF`, so `F` keeps the translator open across container mount
+/// namespaces. The read-only bind below is kept so the path also exists inside every
+/// container whose image runs under translation, as it did for 1.34.1's `rosetta-wrapper`,
+/// which started the translator from this path at exec time.
 const ROSETTA_RUNTIME: &str = "/mnt/rosetta";
 
-/// Bind the guest's Rosetta runtime read-only into an emulated container. Without it every
-/// x86_64 process stops at its first exec (`rosetta-wrapper: unexpected initial stop`,
-/// status 127). A service that already mounts something there is refused, not merged.
+/// Bind the guest's Rosetta runtime read-only into an emulated container. Under 1.34.1's
+/// `rosetta-wrapper`, every x86_64 process stopped at its first exec without it (status
+/// 127). A service that already mounts something there is refused, not merged.
 fn mount_rosetta_runtime(config: &mut Value) -> Result<(), CandidateError> {
     let mounts = config["HostConfig"]["Mounts"]
         .as_array_mut()

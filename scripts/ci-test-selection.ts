@@ -153,7 +153,47 @@ export type SelectionInputs = {
   /** Pure fixture seam: relative file names and contents, no host filesystem reads. */
   readonly sources?: Readonly<Record<string, string>>;
   readonly tests?: readonly string[];
+  /** Reuse a graph from {@link buildSelectionGraph} instead of discovering and parsing again. */
+  readonly graph?: SelectionGraph;
 };
+
+/**
+ * Discovered test files plus a lazy import graph for one checkout.
+ * Filesystem graphs are cached per `repoRoot` for the process lifetime.
+ */
+export type SelectionGraph = {
+  readonly files: readonly string[];
+};
+
+type GraphState = {
+  readonly files: readonly string[];
+  readonly read: (file: string) => string | undefined;
+  readonly module: (file: string) => Module;
+  readonly preloads: readonly string[] | null;
+};
+
+const graphState = new WeakMap<SelectionGraph, GraphState>();
+const filesystemGraphs = new Map<string, SelectionGraph>();
+
+function isTestSupportFile(file: string): boolean {
+  return (
+    file.startsWith("tests/") ||
+    file.startsWith("scripts/") ||
+    file.startsWith("packages/db/tests/")
+  );
+}
+
+/** Source-reader tests are always-run; their import graph is not needed to classify them. */
+function isSourceReaderSource(file: string, source: string): boolean {
+  return isTestSupportFile(file) && OPAQUE_TEST_SOURCE.test(source);
+}
+
+function isFilesystemGraph(opts: {
+  readonly sources?: Readonly<Record<string, string>>;
+  readonly tests?: readonly string[];
+}): boolean {
+  return opts.sources === undefined && opts.tests === undefined;
+}
 
 /** Bun loads these modules before every file, without explicit test imports. */
 function suitePreloads(opts: {
@@ -255,8 +295,22 @@ function externalDependencies(
  * Graph scope is intentionally small: config, fixtures, scripts, assets and native
  * inputs force all tests. Deleted modules do too, rather than losing their old edges.
  * Unknown resolution or computed imports make every dependent test always-run.
+ *
+ * Filesystem graphs are cached per checkout so a process can classify many
+ * changed paths without rediscovering tests or re-parsing TypeScript. Fixture
+ * `sources`/`tests` seams always build a fresh graph.
  */
-export function selectTests(opts: SelectionInputs): TestSelection {
+export function buildSelectionGraph(opts: {
+  readonly repoRoot: string;
+  readonly sources?: Readonly<Record<string, string>>;
+  readonly tests?: readonly string[];
+}): SelectionGraph {
+  if (isFilesystemGraph(opts)) {
+    const cached = filesystemGraphs.get(opts.repoRoot);
+    if (cached) {
+      return cached;
+    }
+  }
   const files = [
     ...(opts.tests ?? discoverTestFiles({ repoRoot: opts.repoRoot })),
   ].sort();
@@ -277,30 +331,6 @@ export function selectTests(opts: SelectionInputs): TestSelection {
       return undefined;
     }
   };
-  const full = (reason: string): TestSelection => ({
-    mode: "full",
-    reason,
-    files,
-  });
-  if (opts.full) {
-    return full("full CI requested");
-  }
-  if (!opts.changed?.length) {
-    return full("changed paths unavailable or empty");
-  }
-  for (const path of opts.changed) {
-    if (DOC_PATH.test(path)) {
-      continue;
-    }
-    if (
-      !MODULE_PATH.test(path) ||
-      NON_GRAPH_PATH.test(path) ||
-      CONFIG_MODULE.test(path) ||
-      read(path) === undefined
-    ) {
-      return full(`non-graph or deleted input: ${path}`);
-    }
-  }
   const modules = new Map<string, Module>();
   const external = externalDependencies(read);
   const root = resolve(opts.repoRoot);
@@ -379,7 +409,13 @@ export function selectTests(opts: SelectionInputs): TestSelection {
     if (source === undefined) {
       return { dependencies: [], opaque: true, sourceCheck: false };
     }
-    const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+    // Parent pointers are unused; skipping them avoids extra AST allocation.
+    const ast = ts.createSourceFile(
+      file,
+      source,
+      ts.ScriptTarget.Latest,
+      false
+    );
     const dependencies = new Set<string>();
     let opaque = false;
     let aliasedReader = false;
@@ -428,16 +464,66 @@ export function selectTests(opts: SelectionInputs): TestSelection {
       opaque,
       sourceCheck:
         unbounded ||
-        ((file.startsWith("tests/") ||
-          file.startsWith("scripts/") ||
-          file.startsWith("packages/db/tests/")) &&
+        (isTestSupportFile(file) &&
           (OPAQUE_TEST_SOURCE.test(source) || aliasedReader)),
     };
     modules.set(file, result);
     return result;
   }
+  const graph: SelectionGraph = { files };
+  graphState.set(graph, {
+    files,
+    read,
+    module,
+    preloads: suitePreloads({ root, read }),
+  });
+  if (isFilesystemGraph(opts)) {
+    filesystemGraphs.set(opts.repoRoot, graph);
+  }
+  return graph;
+}
+
+function graphInternals(graph: SelectionGraph): GraphState {
+  const state = graphState.get(graph);
+  if (!state) {
+    throw new Error("selection graph was not created by buildSelectionGraph");
+  }
+  return state;
+}
+
+/**
+ * Graph scope is intentionally small: config, fixtures, scripts, assets and native
+ * inputs force all tests. Deleted modules do too, rather than losing their old edges.
+ * Unknown resolution or computed imports make every dependent test always-run.
+ */
+export function selectTests(opts: SelectionInputs): TestSelection {
+  const graph = opts.graph ?? buildSelectionGraph(opts);
+  const { files, read, module, preloads } = graphInternals(graph);
+  const full = (reason: string): TestSelection => ({
+    mode: "full",
+    reason,
+    files: [...files],
+  });
+  if (opts.full) {
+    return full("full CI requested");
+  }
+  if (!opts.changed?.length) {
+    return full("changed paths unavailable or empty");
+  }
+  for (const path of opts.changed) {
+    if (DOC_PATH.test(path)) {
+      continue;
+    }
+    if (
+      !MODULE_PATH.test(path) ||
+      NON_GRAPH_PATH.test(path) ||
+      CONFIG_MODULE.test(path) ||
+      read(path) === undefined
+    ) {
+      return full(`non-graph or deleted input: ${path}`);
+    }
+  }
   const changed = new Set(opts.changed);
-  const preloads = suitePreloads({ root, read });
   if (!preloads) {
     return full("suite preload configuration unavailable");
   }
@@ -460,6 +546,10 @@ export function selectTests(opts: SelectionInputs): TestSelection {
   }
   const selected = files.filter((test) => {
     if (Object.hasOwn(ALWAYS_RUN_TESTS, test) || CONTRACT_PATH.test(test)) {
+      return true;
+    }
+    const source = read(test);
+    if (source !== undefined && isSourceReaderSource(test, source)) {
       return true;
     }
     const seen = new Set<string>();

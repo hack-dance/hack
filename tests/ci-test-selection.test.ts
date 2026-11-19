@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { relative, resolve } from "node:path";
 import { COMPILER_HOSTS } from "../scripts/ci-change-scope.ts";
 import {
@@ -7,7 +7,11 @@ import {
   touchesCandidate,
   touchesCompilerHost,
 } from "../scripts/ci-pr-plan.ts";
-import { selectTests } from "../scripts/ci-test-selection.ts";
+import {
+  buildSelectionGraph,
+  type SelectionGraph,
+  selectTests,
+} from "../scripts/ci-test-selection.ts";
 import { requiresWorkflowFull } from "../scripts/ci-workflow-guard.ts";
 import {
   buildVerifiedPlan,
@@ -17,6 +21,19 @@ import {
 import { isRecord } from "../src/lib/guards.ts";
 
 const repoRoot = resolve(import.meta.dir, "..");
+let repoGraph!: SelectionGraph;
+// Prime once per file. Hosted macOS cold reads of the remaining graph can
+// exceed bun's 5s default, so the hook has a wider budget than each case.
+beforeAll(() => {
+  repoGraph = buildSelectionGraph({ repoRoot });
+  // Documentation paths walk the largest remaining set (source-reader tests
+  // skip TypeScript parsing), so later real-graph cases reuse that work.
+  selectTests({
+    repoRoot,
+    changed: ["docs/reference/ci-test-selection.md"],
+    graph: repoGraph,
+  });
+}, 20_000);
 const sources = {
   "src/leaf.ts": "export const value = 1;",
   "src/barrel.ts": 'export * from "./leaf.ts";',
@@ -227,6 +244,21 @@ describe("conservative dependency selection", () => {
       }).mode
     ).toBe("full");
   });
+  test("a source-reader preload still walks imported production modules", () => {
+    expect(
+      selectTests({
+        repoRoot: "/fixture",
+        tests,
+        sources: {
+          ...sources,
+          "bunfig.toml": '[test]\npreload="./tests/preload.ts"',
+          "tests/preload.ts":
+            'import {readFileSync} from "node:fs"; import "../src/leaf.ts";',
+        },
+        changed: ["src/leaf.ts"],
+      }).mode
+    ).toBe("full");
+  });
   test.each([
     "[test",
     "[test]\npreload=42",
@@ -277,6 +309,9 @@ describe("conservative dependency selection", () => {
     expect(result.mode).toBe("selected");
     expect(result.files).not.toContain("tests/b.test.ts");
   });
+  test("filesystem selection graphs are reused for the same checkout", () => {
+    expect(buildSelectionGraph({ repoRoot })).toBe(repoGraph);
+  });
   test.each([
     "docs/reference/ci-test-selection.md",
     "src/commands/env.ts",
@@ -284,11 +319,10 @@ describe("conservative dependency selection", () => {
     const result = selectTests({
       repoRoot,
       changed: [path],
+      graph: repoGraph,
     });
     expect(result.mode).toBe("selected");
-    expect(result.files.length).toBeLessThan(
-      discoverTestFiles({ repoRoot }).length
-    );
+    expect(result.files.length).toBeLessThan(repoGraph.files.length);
     expect(result.files).toContain("tests/cli-reference-docs.test.ts");
   });
   test.each([
@@ -362,7 +396,11 @@ describe("PR matrix policy", () => {
     "src/lib/local-network-hint.ts",
   ])("light CLI change gates the portable open output contract on Linux: %s", async (path) => {
     expect(await Bun.file(resolve(repoRoot, path)).exists()).toBe(true);
-    const selection = selectTests({ repoRoot, changed: [path] });
+    const selection = selectTests({
+      repoRoot,
+      changed: [path],
+      graph: repoGraph,
+    });
     expect(selection.mode).toBe("selected");
     const file = "tests/local-network-hint.test.ts";
     expect(selection.files).toContain(file);

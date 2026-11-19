@@ -31,6 +31,15 @@ import {
   type NativeGcloudSelection,
 } from "./native-gcloud-environment.ts";
 import {
+  NATIVE_START_FRONTEND_SLACK_MS,
+  NATIVE_START_STATUS_INTERVAL_MS,
+  NATIVE_START_STATUS_STALE_MS,
+  nativeGraphTimeoutDetail,
+  nativeReadinessGoals,
+  nativeStartBudgetSeconds,
+  watchNativeStartupStatus,
+} from "./native-graph-start-budget.ts";
+import {
   admitNativeHttpProbe,
   isInferredNativeRouteProbe,
 } from "./native-http-probe-admission.ts";
@@ -430,6 +439,8 @@ type Dependencies = {
   downHooks: typeof createNativeForegroundDownHooks;
   /** Poll interval of the ready graph's service exit monitor. */
   exitMonitorIntervalMs: number;
+  /** How often a waiting start reads its graph status (HACK-2351). */
+  startupStatusIntervalMs: number;
 };
 const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
@@ -463,6 +474,7 @@ const DEFAULTS: Dependencies = {
   admitDownHooks: admitNativeDownHookGeneration,
   downHooks: createNativeForegroundDownHooks,
   exitMonitorIntervalMs: 2000,
+  startupStatusIntervalMs: NATIVE_START_STATUS_INTERVAL_MS,
 };
 /**
  * Reports forwarded source names and unset-reference notices for active services.
@@ -1181,6 +1193,52 @@ export function nativeEnvironmentDelivery(opts: {
  * report. Applied after diagnostics that parse the original closed message; the
  * error keeps its class so recovery handling is unchanged.
  */
+/**
+ * A `graph_timeout` failure, replaced by one whose fixed runtime detail names
+ * the services that had not reached their readiness goal. Any other failure,
+ * or a snapshot that names none, is returned unchanged.
+ */
+function withGraphTimeoutDetail(opts: {
+  readonly failure: unknown;
+  readonly nativeCode: string | undefined;
+  /** The latest startup-phase status snapshot, if one was read. */
+  readonly status:
+    | { readonly snapshot: unknown; readonly takenAt: number }
+    | undefined;
+  /** When serve settled after the deadline, on the same monotonic clock. */
+  readonly deadlineAt: number;
+  readonly goals: Readonly<Record<string, string>>;
+  readonly waitedMs: number;
+  readonly budgetSeconds: number;
+}): unknown {
+  if (opts.nativeCode !== "graph_timeout" || !(opts.failure instanceof Error)) {
+    return opts.failure;
+  }
+  // Without a recent startup view, keep the runtime's generic message rather
+  // than describe services from stale or missing evidence.
+  const ageMs = opts.status
+    ? Math.max(0, opts.deadlineAt - opts.status.takenAt)
+    : Number.POSITIVE_INFINITY;
+  if (!opts.status || ageMs > NATIVE_START_STATUS_STALE_MS) {
+    return opts.failure;
+  }
+  const detail = nativeGraphTimeoutDetail({
+    snapshot: opts.status.snapshot,
+    goals: opts.goals,
+    waitedMs: opts.waitedMs,
+    budgetSeconds: opts.budgetSeconds,
+    snapshotAgeMs: ageMs,
+  });
+  if (!detail) {
+    return opts.failure;
+  }
+  return new NativeRuntimeRequestError({
+    message: `Native graph startup was interrupted or failed (graph_timeout); inspect owned state before retrying. Runtime: ${detail}`,
+    nativeCode: "graph_timeout",
+    nativeMessage: detail,
+  });
+}
+
 function withStartupLogReport(error: unknown, report: string): unknown {
   if (report !== "" && error instanceof Error) {
     error.message = `${error.message}\n${report}`;
@@ -1965,6 +2023,11 @@ type NativeProjectStartOptions = {
   readonly onStopSignals?: () => void;
   /** Foreground progress and the ready line; see {@link NativeStartupProgress}. */
   readonly onProgress?: (event: NativeStartupProgress) => void;
+  /**
+   * The graph start budget in seconds (see `native-graph-start-budget.ts`);
+   * 300 when omitted.
+   */
+  readonly startTimeoutSeconds?: number;
   readonly dependencies?: Partial<Dependencies>;
 };
 
@@ -2713,7 +2776,20 @@ async function startNativeProjectAttempt(
             routed: routes.services,
           });
           progress({ phase: "services", services });
+          const budgetSeconds = nativeStartBudgetSeconds(
+            opts.startTimeoutSeconds
+          );
+          const servicesRequestedAt = performance.now();
           let stopWatching: (() => Promise<void>) | undefined;
+          // The runtime removes a failed start's containers before it returns:
+          // keep the graph's status as it stands while the start waits.
+          const startupStatus = watchNativeStartupStatus({
+            runtime: opts.runtime,
+            projectRoot: opts.scope.projectRoot,
+            run,
+            intervalMs: deps.startupStatusIntervalMs,
+            invoke: deps.invoke,
+          });
           try {
             servicesRequested = true;
             code = await deps.serve({
@@ -2737,10 +2813,11 @@ async function startNativeProjectAttempt(
                 "--auto-dependency-slots",
                 ...delivery.flags,
                 "--timeout-seconds",
-                "300",
+                String(budgetSeconds),
               ],
               privateInput: delivery.payload,
-              startupTimeoutMs: 300_000,
+              startupTimeoutMs:
+                budgetSeconds * 1000 + NATIVE_START_FRONTEND_SLACK_MS,
               signal: controller.signal,
               // Down hooks run on the first stop request of a ready graph.
               ...stop?.serve,
@@ -2760,6 +2837,8 @@ async function startNativeProjectAttempt(
                 });
               },
               onReady: async () => {
+                // Ready: the startup view is no longer needed.
+                void startupStatus.stop();
                 const readyMapping = authoritative(
                   await invokeInspect(),
                   run,
@@ -2889,6 +2968,7 @@ async function startNativeProjectAttempt(
           } catch (error) {
             serveFailure = error;
           } finally {
+            await startupStatus.stop();
             delivery.payload?.fill(0);
             await stopWatching?.();
           }
@@ -2896,6 +2976,18 @@ async function startNativeProjectAttempt(
             let final: unknown;
             try {
               final = await invokeInspect();
+              // The runtime's deadline names no service: say which were not
+              // ready, from the last startup status read before it (HACK-2351).
+              serveFailure = withGraphTimeoutDetail({
+                failure: serveFailure,
+                nativeCode: nativeExitCode,
+                status: startupStatus.latest(),
+                // Serve has settled: the runtime's deadline passed at most now.
+                deadlineAt: performance.now(),
+                goals: nativeReadinessGoals(readinessArgs),
+                waitedMs: performance.now() - servicesRequestedAt,
+                budgetSeconds,
+              });
             } catch (inspectionFailure) {
               const settled = finalInspectionFailure({
                 serveFailure,

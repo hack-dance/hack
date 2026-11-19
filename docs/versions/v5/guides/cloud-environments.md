@@ -1,18 +1,76 @@
-# Use a cloud agent or another host
+# Run a project on another machine or in a cloud agent sandbox
 
-Choose the execution environment first:
+The `.hack/` folder you commit with your code is everything Hack needs to run the
+project, so the same folder and the same `hack up` work on your laptop, on
+another machine, or inside a cloud agent's sandbox. Hack does not provide the
+machine or the sandbox, and it adds no isolation: it runs inside whatever you
+give it, with that environment's rules for Docker, secrets, network and
+persistence.
 
-- **Your local machine:** Hack uses that machine's services, configuration and routing.
-- **A cloud coding-agent environment:** install and run Hack inside the provider's VM/container, subject to its runtime, persistence, secret and network rules.
-- **An existing remote development host:** Hack runs locally on that host; SSH or an agent is transport, not a built-in Hack fleet controller.
-- **An application hosting service:** deploying an app to ECS or an agent runtime is a separate workflow. Hack does not translate project configuration into a deployment there.
+On Linux, Hack's Compose runtime needs a Docker Engine the user can reach, and
+Docker Compose v2. v5 has no Linux release yet (the prerelease installer
+supports Apple Silicon macOS only), so every page below starts from a `hack`
+binary you supply.
 
-Use [Managed environments](../../guides/codex-managed-environments.md) for the
-version-specific installation contract. Verify OS/CPU architecture, matching
-release asset, project toolchain, Docker daemon and Compose (for that runtime),
-bind mounts, network access, task-time credentials and startup after snapshot
-restore. Installing a CLI does not supply a Docker daemon or laptop certificate
-trust. A macOS native bundle does not install on an Ubuntu cloud VM.
+## Pick your environment
+
+Each page says at the top whether it was run, when, and with which build.
+
+| Environment | Status | Page |
+| --- | --- | --- |
+| Any Linux machine with Docker | Verified 2026-11-19 (`next` at `6447491b33`) | [Any Linux machine with Docker](cloud-linux-docker.md) |
+| Dev containers (local) | Verified 2026-11-19 (`next` at `6447491b33`) | [Codespaces and dev containers](cloud-dev-containers.md) |
+| GitHub Codespaces | Not run yet | [Codespaces and dev containers](cloud-dev-containers.md) |
+| Claude Code on the web | Not run yet | [Claude Code on the web](cloud-claude-code.md) |
+| Cursor cloud agents | Not run yet | [Cursor cloud agents](cloud-cursor.md) |
+| boat.dev | Not run yet | [boat.dev](cloud-boat.md) |
+| Daytona | Not run yet | [Daytona](cloud-daytona.md) |
+| OpenAI Codex cloud | Not run yet; Docker not documented | [Codex cloud](cloud-codex.md) |
+
+Not covered: Google Jules (read-only since 2026-11-11, closing 2026-12-31) and
+Cube Computer (closing 2026-12-20). Other sandboxes that document a Docker
+daemon include E2B, Modal (VM runtime), Vercel Sandbox, Cloudflare Sandbox and
+Coder. They have no page yet.
+
+## What is the same everywhere
+
+- **Secrets:** give the project key as the environment variable
+  `HACK_ENV_SECRET_KEY` through the environment's secret settings. Several
+  providers offer "secrets" that only reach the network proxy and give programs
+  a placeholder. Those cannot decrypt anything, so use the plain
+  environment-variable kind. Never commit the key or bake it into an image or
+  snapshot.
+- **The key reaches whatever the checkout runs:** commands that run in the
+  started environment (session hooks, `postStartCommand`, start scripts and the
+  `hack` binary itself) get `HACK_ENV_SECRET_KEY` and network access. Setup
+  steps that run before the key is set, such as a Dockerfile build or a setup
+  script, can still install code that reads it later. Someone who can change
+  these files on a branch can therefore send the key out. Start an environment
+  with the key only from a branch you trust, review changes to `.devcontainer/`,
+  `.claude/`, `.cursor/`, `.hack-bin/` and `.hack/` first, and use a
+  development key, not a production one.
+- **Addresses:** most sandboxes have no DNS for Hack's names. The app still
+  runs, and Hack's proxy answers on the machine's ports 80 and 443. Check it from
+  inside with `curl --resolve`, as
+  [Reaching the app without local DNS](#reaching-the-app-without-local-dns)
+  shows.
+- **Provider preview URLs and forwarded ports** send their own host name. Hack's
+  proxy has no route for it yet, so they do not show the app.
+- **Keep the proxy on loopback:** every recipe runs
+  `hack config set --global proxy.bind_address 127.0.0.1` before
+  `hack global install`. Without it, Hack's proxy listens on every interface,
+  and anyone who can reach the machine's ports 80 and 443 can open the app,
+  query Hack's log store (Loki, whose API has no authentication) and reach the
+  Grafana log viewer's sign-in page, which keeps its default admin password
+  unless you change it. Leave it unset only if you want that
+  exposure and protect it yourself.
+- **Persistence:** running containers do not survive a sandbox stop or a
+  snapshot restore. Run `hack up` from the environment's start hook.
+
+For env-only use without containers (resolving values, running host commands),
+see [Managed environments](https://github.com/hack-dance/hack/blob/next/docs/guides/codex-managed-environments.md).
+Deploying an app to a hosting service is a different workflow: Hack does not
+translate project configuration into a deployment.
 
 ## Reaching the app without local DNS
 
@@ -41,26 +99,6 @@ the system trust store steps it lists do. Where no program can open a URL
 (no `xdg-open`, as on most servers and sandboxes), `hack open` prints only the
 URL on stdout, its notes on stderr, and exits 0. `hack doctor` reports a missing Bun as a warning for the
 compiled CLI, which does not need it.
-
-## Named platform compatibility
-
-These are documentation-based assessments, not successful Hack application tests:
-
-| Platform | Supported prerequisite evidence | Remaining verification |
-| --- | --- | --- |
-| [Cursor cloud agents](https://cursor.com/docs/cloud-agent) | Provider-managed Ubuntu; inspect current environment/Docker documentation | Nested Docker, mounts, startup and task-time secrets for your app |
-| [boat.dev](https://boat.dev) | Provider documents Linux VMs, SSH and Docker | Architecture, matching asset, persistence and app readiness |
-| [Google Jules](https://jules.google/docs/environment/) | Managed task VM; use its current tool/setup contract | Secret lifetime, daemon availability and app health |
-| [Google Cloud Workstations](https://cloud.google.com/workstations/docs/overview) | Managed workstation environment | Actual image, Docker access and persistent paths |
-| code.computer | Exact product documentation could not be retrieved during review | Identity and runtime contract unverified; no setup recipe claimed |
-| [Amazon ECS](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/Welcome.html) | App container hosting; Fargate is not a privileged Docker host | No verified Hack deployment adapter or full host-runtime integration |
-| Personal fleet | Ordinary CLI installation per compatible existing host | Per-host runtime, access, state and routing qualification |
-
-Use provider-approved secret injection at task time. Do not bake project keys into
-images or snapshots. Provider setup scripts, build snapshots and service startup
-may have different lifetimes. Test the actual application after every fresh task
-or resumed host. Remote/gateway/node/dispatch commands are outside the supported
-setup described here.
 
 ## When `hack up` cannot start the project here
 

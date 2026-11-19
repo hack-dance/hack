@@ -45,10 +45,10 @@ pub(super) struct Template<'a> {
     pub content_sha256: &'a str,
 }
 
-/// Expanded templates of SmolVM 1.34.1 (`ARCHIVE_SHA256` 8ebda502…).
+/// Expanded templates of SmolVM 1.35.4 (`ARCHIVE_SHA256` 4ad2b02b…).
 ///
-/// Derivation: the archive's `storage-template.ext4.zst` (SHA-256 bcfb59e3…) and
-/// `overlay-template.ext4.zst` (3f43cd1f…) were decoded with an independent zstd decoder
+/// Derivation: the archive's `storage-template.ext4.zst` (SHA-256 2444c7d3…) and
+/// `overlay-template.ext4.zst` (25d60ee2…) were decoded with an independent zstd decoder
 /// (the `zstd` CLI) and hashed with a separate reimplementation of the [`content_digest`]
 /// definition, which reproduces the previous pin's values from the 1.14.3 archive.
 /// SmolVM's own expansion of the same inputs must produce the same values; that is checked
@@ -59,12 +59,12 @@ pub(super) const PINNED: [Template<'static>; 2] = [
     Template {
         name: "storage-template.ext4",
         logical_len: 21_474_836_480,
-        content_sha256: "1b4273319a8a777e5a504dcb1deb6be72d45d3ecff7aa312301ce1fa69805a19",
+        content_sha256: "f394177fd39264f5fefdea08087bc9942b45baf6a984eec0add3d58a537d9589",
     },
     Template {
         name: "overlay-template.ext4",
         logical_len: 10_737_418_240,
-        content_sha256: "762e4886f7fde2bae3c4aa1c65c2be810d5c674b9207d5ee36067a0e48dab909",
+        content_sha256: "428ed6c52249421b5353719c01253ed5665a2a439458ad933ce85fcdcd743dd6",
     },
 ];
 
@@ -574,7 +574,7 @@ mod tests {
         // The archive `PINNED` was derived from. A stale pin would refuse every create; fail
         // here instead, where the fix is named.
         assert_eq!(
-            "8ebda502e332c739fdfc13b059be982cca66da9253c5229b4586af02c92781d9",
+            "4ad2b02be848219a9d88632ca9e6dc881d6e97343626aab9c11ac4a184929d9e",
             super::super::artifact::ARCHIVE_SHA256,
             "SmolVM archive pin changed: re-derive disk_template::PINNED"
         );

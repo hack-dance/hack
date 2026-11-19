@@ -1139,8 +1139,8 @@ profile unless you pass `--profile development`; the research profile can report
 hashes are listed in `provider-pins.json` and under
 [network tool packages](#network-tool-packages).
 
-The current SmolVM pin is 1.34.1 (`smolvm-1.34.1-darwin-arm64.tar.gz`, SHA-256
-`8ebda502e332c739fdfc13b059be982cca66da9253c5229b4586af02c92781d9`, the value
+The current SmolVM pin is 1.35.4 (`smolvm-1.35.4-darwin-arm64.tar.gz`, SHA-256
+`4ad2b02be848219a9d88632ca9e6dc881d6e97343626aab9c11ac4a184929d9e`, the value
 upstream publishes in the release's `checksums.sha256`). `provider-pins.json` is the
 source of truth; the executor refuses any other archive.
 

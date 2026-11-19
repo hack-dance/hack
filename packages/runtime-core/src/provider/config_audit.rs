@@ -330,15 +330,16 @@ fn verify_record(
     Ok(())
 }
 
-/// Machine-record fields SmolVM added after 1.14.3 (in 1.34.1's `VmRecord`) that grant a
-/// capability, change egress, or mark a machine as paused, restored, branched or credentialed.
+/// Machine-record fields SmolVM added after 1.14.3 (in 1.34.1's and 1.35.4's `VmRecord`) that
+/// grant a capability, change egress or published ports, record guest ownership on host
+/// files, or mark a machine as paused, restored, branched or credentialed.
 /// A pool never requests any of them, so each must be absent or at its inert default; any
 /// other value means something outside this runtime changed the machine. Bookkeeping the
 /// provider writes at every start (`engine_build`, `agent_rootfs_digest`,
 /// `agent_rootfs_path`) grants nothing and is not audited, and `disk_durability` has its
 /// own full-only rule; every other added field is listed here, including workload stop
 /// settings that a pool without a workload never uses.
-const INERT_RECORD_FIELDS: [&str; 29] = [
+const INERT_RECORD_FIELDS: [&str; 35] = [
     "pause_reason",
     "paused_checkpoint",
     "disks",
@@ -368,11 +369,22 @@ const INERT_RECORD_FIELDS: [&str; 29] = [
     "image_origin_digest",
     "checkpoint_head",
     "host_uid_owner",
+    // Added in 1.35.x. `recorded_ownership` makes live mounts keep guest file ownership in
+    // an extended attribute on host files; `allocated_ports`, `listen_addresses` and
+    // `auto_ports` publish guest ports on the host; `switch` joins an inter-VM network;
+    // `oci_platform` selects a machine image platform. A pool asks for none of them.
+    "recorded_ownership",
+    "allocated_ports",
+    "listen_addresses",
+    "oci_platform",
+    "switch",
+    "auto_ports",
 ];
 
-/// Running-configuration resource fields SmolVM added after 1.14.3 (1.34.1's `VmResources`).
+/// Running-configuration resource fields SmolVM added after 1.14.3 (1.34.1's and 1.35.4's
+/// `VmResources`).
 /// As with [`INERT_RECORD_FIELDS`], a pool requests none of them.
-const INERT_RUNNING_RESOURCES: [&str; 9] = [
+const INERT_RUNNING_RESOURCES: [&str; 10] = [
     "nested_virt",
     "disks",
     "cache_disk",
@@ -382,6 +394,7 @@ const INERT_RUNNING_RESOURCES: [&str; 9] = [
     "dns_options",
     "shm_size",
     "guest_subnet",
+    "switch",
 ];
 
 /// Refuse a running configuration (`agent.config.json` `resources`) that boots with any
@@ -674,7 +687,7 @@ mod tests {
     }
     #[test]
     fn capabilities_added_since_the_previous_pin_must_stay_inert() {
-        // The fields SmolVM 1.34.1 writes for a plain create, plus start bookkeeping.
+        // The fields SmolVM 1.34.1 and 1.35.4 write for a plain create, plus start bookkeeping.
         let mut plain = fixture();
         for (field, value) in [
             ("disk_durability", json!("full")),

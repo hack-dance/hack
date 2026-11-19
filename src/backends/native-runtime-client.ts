@@ -187,6 +187,102 @@ function stateComponentFailureMessage(
   return `The native state path ${component.path} exists but is not a directory. Inspect it in the native home; do not delete it to retry.`;
 }
 
+const COUNT = (value: unknown, max: number): value is number =>
+  typeof value === "number" &&
+  Number.isInteger(value) &&
+  value >= 0 &&
+  value <= max;
+
+/**
+ * Render the closed `bridge_socket_timeout` counts (HACK-2341): how many of the pool's
+ * bridge sockets were missing or not yet private when the fresh-boot deadline passed,
+ * after the runtime's fixed recovery sentence. Counts only; never paths.
+ */
+function bridgeSocketsFailureMessage(
+  value: Record<string, unknown>
+): string | undefined {
+  const sockets = value.bridge_sockets;
+  if (
+    value.code !== "bridge_socket_timeout" ||
+    !isRecord(sockets) ||
+    Object.keys(sockets).length !== 5 ||
+    sockets.version !== 1 ||
+    !COUNT(sockets.expected, 32) ||
+    sockets.expected === 0 ||
+    !COUNT(sockets.missing, 32) ||
+    !COUNT(sockets.not_private, 32) ||
+    sockets.missing + sockets.not_private > sockets.expected ||
+    !COUNT(sockets.budget_seconds, 3600)
+  ) {
+    return;
+  }
+  const counts = `At the ${sockets.budget_seconds}-second deadline, bridge sockets missing: ${sockets.missing} of ${sockets.expected}; not yet private: ${sockets.not_private}.`;
+  const fixed = fixedNativeMessage(value);
+  return fixed ? `${fixed} ${counts}` : counts;
+}
+
+const EXEC_STAGES = new Set([
+  "create",
+  "connect",
+  "start",
+  "hello",
+  "deliver",
+  "release",
+  "output",
+  "inspect",
+]);
+const EXEC_REASONS: Readonly<Record<string, string>> = {
+  deadline: "the deadline passed",
+  closed: "the stream closed early",
+  io: "a transport error",
+  protocol: "an unexpected response",
+};
+/** Stages at which the environment launcher may already hold every value byte. */
+const EXEC_MAY_HAVE_RUN = new Set(["release", "output", "inspect"]);
+
+/**
+ * Render the closed private exec step (HACK-2357) after the runtime's fixed sentence:
+ * which step failed and why. Every field is a closed name; never argv, values or output.
+ */
+/** The closed `exec_stage` shape, consistent with the error code, or undefined. */
+function closedExecStage(
+  value: Record<string, unknown>
+): { stage: string; reason: string } | undefined {
+  const exec = value.exec_stage;
+  const uncertain = value.code === "graph_service_exec_uncertain";
+  if (!(uncertain || value.code === "graph_service_exec_not_run")) {
+    return;
+  }
+  if (!isRecord(exec) || Object.keys(exec).length !== 4 || exec.version !== 1) {
+    return;
+  }
+  const { stage, reason } = exec;
+  if (
+    typeof stage !== "string" ||
+    !EXEC_STAGES.has(stage) ||
+    typeof reason !== "string" ||
+    !Object.hasOwn(EXEC_REASONS, reason)
+  ) {
+    return;
+  }
+  const mayHaveRun = EXEC_MAY_HAVE_RUN.has(stage);
+  return exec.command_may_have_run === mayHaveRun && mayHaveRun === uncertain
+    ? { stage, reason }
+    : undefined;
+}
+
+function execStageFailureMessage(
+  value: Record<string, unknown>
+): string | undefined {
+  const exec = closedExecStage(value);
+  if (!exec) {
+    return;
+  }
+  const step = `The ${exec.stage} step failed: ${EXEC_REASONS[exec.reason]}.`;
+  const fixed = fixedNativeMessage(value);
+  return fixed ? `${fixed} ${step}` : step;
+}
+
 /** Render only the closed inferred-route diagnostic; never runtime error text. */
 function routeProbeFailureMessage(
   value: Record<string, unknown>,
@@ -225,6 +321,8 @@ export function nativeFailureDetail(value: Record<string, unknown>): {
   const message =
     networkRequestFailureMessage(value) ??
     stateComponentFailureMessage(value) ??
+    bridgeSocketsFailureMessage(value) ??
+    execStageFailureMessage(value) ??
     routeProbeFailureMessage(value, service) ??
     fixedNativeMessage(value);
   return {

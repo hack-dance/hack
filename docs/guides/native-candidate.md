@@ -770,12 +770,14 @@ local user can take its name while the pool is stopped. It removes only the prov
 socket files the stop proved closed, through the real data directory.
 
 On a fresh pool boot or a boot after stopping the pool, native waits up to 10 seconds
-for every declared bridge socket to appear with the required private ownership and mode.
+plus 1 second per bridge slot (20 seconds for 10 slots, at most 42) for every declared
+bridge socket to appear with the required private ownership and mode.
 The provider's guest-ready signal can arrive before its bridge threads bind. Native
 rechecks the same provider identity around each observation; it never accepts an unsafe
 socket, changes its permissions or removes it to make startup pass. Existing running-pool
 audits do not wait. A socket timeout or identity refusal takes the verified failed-boot
-stop path and names the recovery command. Use the same selected executor and identical
+stop path and names the recovery command. A timeout also says how many sockets were
+still missing and how many were not yet private at the deadline (counts only). Use the same selected executor and identical
 `--candidate-root` argument as the failed start, followed by `runtime recover --json`.
 If you explicitly selected an installed executor with `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME`, use those same non-empty values:
@@ -1158,7 +1160,24 @@ its retained data, then prepare a fresh home for the new build.
 
 A failed `up` can leave the native VM pool running, and the failure message says how to
 stop it: once no other native project uses the pool, run `runtime down --json` on the
-native home (`runtime status --json` shows whether it runs). An `invalid_state` failure
+native home. `runtime status --json` shows whether it runs. Its `graph_runs` field counts
+the graphs the home records, Compose and native-authored, running or retained after `down`;
+fully removed native-authored journals are excluded only after strict same-owner
+retirement validation. The count is `null` when the inventory cannot be read.
+Its `pool_idle` field is `true` only when the
+pool runs with a live provider and records no graph, environment allocation or exec
+session, and `null` when that cannot be established. The `native pool idle` machine
+check warns about an idle pool only for `pool_idle: true`, and gives the stop command.
+Unavailable runtime status or unknown pool state produces an observation warning,
+with `nativePool.state: "unknown"`, instead of an all-clear or a stop suggestion;
+it never stops the pool itself, and `--fix` does not either.
+
+Historical native environment-lease records are conservatively counted as pool users,
+even after their native-authored graph is fully removed. Such a home can report
+`graph_runs: 0` and `pool_idle: false`, so doctor may omit the idle warning. The check
+does not classify or delete those allocation records.
+
+An `invalid_state` failure
 names the state path that exists but is not a directory, relative to the native home
 (for example `.hack-local/run/graphs`), when that path lies in one of the home's own
 state directories. Inspect that path; do not delete it to retry.
@@ -1376,7 +1395,12 @@ code. Retained exec output is limited to 1 MiB per stream.
 Exec is noninteractive: stdin is closed, no TTY is allocated, and arguments are passed
 literally without an implicit shell. The default wait is 30 seconds, configurable up
 to 120 with `--timeout-seconds`. Timeout or transport failure means completion is
-uncertain: the command may still run, and Hack does not replay it. Exec inherits the container's static environment. When the selected service has a
+uncertain: the command may still run, and Hack does not replay it. An exec that delivers
+fresh per-command values names the step that failed (`create`, `connect`, `start`, `hello`,
+`deliver`, `release`, `output` or `inspect`) and why (`deadline`, `closed`, `io` or
+`protocol`). A failure before the last value byte is sent cannot have run the command: it
+reports `graph_service_exec_not_run` and is safe to retry. From `release` on, the command may
+have run, and the error stays `graph_service_exec_uncertain`. Exec inherits the container's static environment. When the selected service has a
 committed private environment attachment on the current boot, it reuses that
 service's exact read-only launcher mounts and original expiry. No values are copied
 into engine metadata, and exec never renews credentials. With the current launcher,

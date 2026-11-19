@@ -100,6 +100,7 @@ const MACHINE_AREAS: Readonly<Record<string, DoctorArea>> = {
   "native ca repair": "certificates",
   "native hack.local route": "routing_dns",
   "native hack.local repair": "routing_dns",
+  "native pool idle": "native",
 };
 
 /** Closed IDs and prefixes only; never parse executable instructions from diagnostic text. */

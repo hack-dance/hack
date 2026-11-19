@@ -310,6 +310,16 @@ networks:
         ALL
       )
     ).toEqual([]);
+    // `extends` may inherit network_mode or other networks: not assumed.
+    expect(
+      sharedExternalNetworks(
+        implicit.replace(
+          "image: web",
+          "image: web\n    extends:\n      file: base.yml\n      service: web"
+        ),
+        ALL
+      )
+    ).toEqual([]);
   });
 
   test("an unreadable or networkless file checks nothing", () => {

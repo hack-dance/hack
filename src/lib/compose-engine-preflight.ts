@@ -212,14 +212,19 @@ export function sharedExternalNetworks(
 
 /**
  * The network keys a service joins: its `networks` entries, or Compose's
- * implicit `default` when it names none. `network_mode` joins none.
+ * implicit `default` when it names none (unless it `extends` another
+ * service, whose networking this file cannot settle). `network_mode` joins
+ * none.
  */
 function serviceNetworks(definition: unknown): readonly string[] {
   if (!isRecord(definition) || definition.network_mode !== undefined) {
     return [];
   }
   if (definition.networks === undefined) {
-    return ["default"];
+    // A service that `extends` another can inherit `network_mode` or its
+    // networks from a file this check does not read, so its implicit
+    // default network cannot be known here; it is left to Compose.
+    return definition.extends === undefined ? ["default"] : [];
   }
   return listOrMapKeys(definition.networks);
 }

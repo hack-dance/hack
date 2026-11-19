@@ -486,6 +486,9 @@ function firstError(ran: Ran): string {
 
 const GLOBAL_PROJECTS = ["hack-dev-proxy", "hack-logging"] as const;
 
+/** How long started global containers get to fail before they are judged. */
+const GLOBAL_SETTLE_MS = 5000;
+
 /** The services `hack global install` starts, by Compose project. */
 const GLOBAL_SERVICES: Readonly<Record<string, readonly string[]>> = {
   "hack-dev-proxy": ["caddy", "coredns"],
@@ -805,6 +808,9 @@ async function globalSetup(run: FirstRun): Promise<boolean> {
   // stayed up while CoreDNS, Loki and Grafana had exited because they could
   // not read configs written under the prerelease manager's umask
   // (HACK-2381). Every container of both global projects must be running.
+  // A container that cannot read its config takes a second or two to exit,
+  // so look only after they have had time to fail.
+  await Bun.sleep(GLOBAL_SETTLE_MS);
   const states = await run.sh([
     "docker",
     "ps",

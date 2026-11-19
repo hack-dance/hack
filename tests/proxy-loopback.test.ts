@@ -11,11 +11,16 @@ import {
 } from "node:tls";
 import { LEGACY_SCHEMAS_HOST } from "../src/constants.ts";
 import {
+  type ProxyBindScope,
+  readProxyBindScope,
+} from "../src/lib/managed-proxy-compose.ts";
+import {
   hostResolution,
   inspectProxyLoopback,
   openProxyLoopbackWarning,
   openUnresolvedHostWarning,
   probeProxyLoopback,
+  proxyConnectAddress,
   resolveProxyLoopbackAddresses,
 } from "../src/lib/proxy-loopback.ts";
 import { CURRENT_CA_PEM } from "./helpers/ca-certificates.ts";
@@ -823,4 +828,75 @@ test("an unknown lookup is never a miss: only a missing Hack resolver on macOS i
   expect(notice?.hint).toContain("may not open");
   expect(notice?.hint).not.toContain("has no address");
   expect(notice?.hint).not.toContain("will not open");
+});
+
+test("on Linux an unresolved name gives the no-DNS curl form for the proxy's own port, at the address its Compose file publishes, with the full URL", async () => {
+  const miss = (url: string, scope: ProxyBindScope | null) =>
+    openUnresolvedHostWarning({
+      url,
+      resolve: () => Promise.resolve("no-answer" as const),
+      platform: "linux",
+      proxyBind: () => Promise.resolve(scope),
+    });
+  const all = { kind: "all" } as const;
+  const at = (address: string) => ({ kind: "address", address }) as const;
+  const https = await miss("https://hello.hack/api/health?verbose=1", all);
+  expect(https?.dns).toBe("unresolved");
+  expect(https?.hint).toContain("systemd-resolved");
+  expect(https?.hint).toContain(
+    "curl --resolve 'hello.hack:443:127.0.0.1' 'https://hello.hack/api/health?verbose=1'"
+  );
+  expect(https?.hint).toContain("hack global trust");
+  for (const [scope, target] of [
+    [at("0.0.0.0"), "127.0.0.1"],
+    [at("::"), "[::1]"],
+    [at("192.168.1.10"), "192.168.1.10"],
+    [at("::1"), "[::1]"],
+  ] as const) {
+    expect((await miss("https://hello.hack", scope))?.hint).toContain(
+      `'hello.hack:443:${target}'`
+    );
+  }
+  // A missing or unreadable proxy file: no invented address.
+  for (const scope of [null, { kind: "unknown" } as const]) {
+    const hint = (await miss("https://hello.hack", scope))?.hint ?? "";
+    expect(hint).toContain("'hello.hack:443:<address>'");
+    expect(hint).not.toContain("127.0.0.1");
+  }
+  const http = await miss("http://hello.hack/it's", all);
+  expect(http?.hint).toContain(
+    "curl --resolve 'hello.hack:80:127.0.0.1' 'http://hello.hack/it'\\''s'"
+  );
+  expect(http?.hint).not.toContain("hack global trust once");
+  // Port 8080 is not the proxy's: no proxy command, only the DNS reason.
+  const custom = await miss("http://hello.hack:8080/", all);
+  expect(custom?.hint).toContain("systemd-resolved");
+  expect(custom?.hint).not.toContain("curl --resolve");
+  const mac = await openUnresolvedHostWarning({
+    url: "https://hello.hack",
+    resolve: () => Promise.resolve("no-answer" as const),
+    platform: "darwin",
+  });
+  expect(mac?.hint).not.toContain("curl --resolve");
+});
+
+test("the hint's address comes from the rendered proxy file, not the setting", () => {
+  // The file Docker was given publishes on [::]; a newer setting is not applied yet.
+  const rendered = `services:
+  caddy:
+    ports:
+      - "[::]:80:80"
+      - "[::]:443:443"
+`;
+  expect(proxyConnectAddress(readProxyBindScope(rendered))).toBe("[::1]");
+  expect(
+    proxyConnectAddress(
+      readProxyBindScope(`services:
+  caddy:
+    ports:
+      - "80:80"
+      - "443:443"
+`)
+    )
+  ).toBe("127.0.0.1");
 });

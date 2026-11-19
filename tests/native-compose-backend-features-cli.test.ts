@@ -750,13 +750,15 @@ test(
 );
 
 test(
-  "native up --detach reports a closed failure when the background owner cannot start",
+  "native up --detach reports the background owner's refusal before VM work as one closed line",
   async () => {
     const f = await fixture({ services: { web: { image: IMAGE } } });
     const result = await cli(f, ["up", "--detach"], {});
+    // HACK-2339: the owner refuses before VM work (no project share), and
+    // that refusal, not "not confirmed", is the detached result.
     expectOneClosedLine(
       result,
-      "E_STARTUP_INCOMPLETE: Native detached startup was not confirmed. Inspect hack ps before retrying; retained owners and recovery evidence are preserved."
+      "E_PERMISSION: Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 or sharedSource in the native machine settings to share this exact project, including ignored files. Grant that share and run the command again."
     );
     expect(await f.calls()).toEqual([]);
   },

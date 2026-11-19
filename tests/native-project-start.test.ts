@@ -70,6 +70,7 @@ import {
   type ComposeEnvFingerprintRecord,
   evaluateComposeServiceEnvFreshness,
 } from "../src/lib/compose-env-fingerprint.ts";
+import { isRecord } from "../src/lib/guards.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -3133,6 +3134,59 @@ test("failed cleanup reports sanitized TLS failure and retained state without re
   );
   expect((caught as Error).cause).toBeUndefined();
   expect(events).not.toContain("remove");
+});
+
+test("HACK-2351: the configured graph start budget reaches the runtime, and its timeout names the services that were not ready", async () => {
+  const { opts } = await fixture();
+  let timeoutArgument: string | undefined;
+  let startupTimeoutMs: number | undefined;
+  let served: string | undefined;
+  opts.dependencies.serve = async (request) => {
+    served = request.run;
+    const index = request.args.indexOf("--timeout-seconds");
+    timeoutArgument = request.args[index + 1];
+    startupTimeoutMs = request.startupTimeoutMs;
+    request.onExitDiagnostic?.({ exitCode: 1, nativeCode: "graph_timeout" });
+    throw new NativeRuntimeRequestError({
+      message:
+        "Native graph startup was interrupted or failed (graph_timeout); inspect owned state before retrying.",
+      nativeCode: "graph_timeout",
+      nativeMessage:
+        "Graph readiness deadline exceeded; owned state is retained.",
+    });
+  };
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    const value = await invoke(request);
+    if (request.args[1] === "inspect" && served && isRecord(value)) {
+      // The graph the runtime retained at its deadline: web never started.
+      return {
+        ...value,
+        receipt: {
+          ...(value.receipt as object),
+          run: served,
+          phase: "stopped-data-retained",
+        },
+        observations: { "container:web": { state: "created" } },
+      };
+    }
+    return value;
+  };
+  let caught: unknown;
+  try {
+    await startNativeProject({ ...opts, startTimeoutSeconds: 900 });
+  } catch (error) {
+    caught = error;
+  }
+  expect(timeoutArgument).toBe("900");
+  // The frontend outlasts the runtime's own deadline, so the runtime reports it.
+  expect(startupTimeoutMs).toBe(915_000);
+  expect(caught).toBeInstanceOf(Error);
+  const message = (caught as Error).message;
+  expect(message).toContain("graph_timeout");
+  expect(message).toContain("of the 900 s graph start budget");
+  expect(message).toContain("web (wanted started; created)");
+  expect(message).toContain("native.startTimeoutSeconds");
 });
 
 test("final inspection failure reports uncertainty without echoing arbitrary failure values", async () => {

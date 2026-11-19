@@ -1324,17 +1324,17 @@ test("the Linux gate leg is decided from reviewed pins, never from a missing ass
   ).toEqual({ leg: "fresh" });
   // Today, with the reviewed history itself: next.23 is pinned, so the next
   // release upgrades it, and next.22 is no longer a "first release" case.
+  const reviewed = publishedPins("5.0.0-next.23", platform);
+  if (reviewed === undefined) {
+    throw new Error("5.0.0-next.23 has no reviewed linux-x86_64 pin");
+  }
   expect(
     linuxGateDecision({
       previous: "5.0.0-next.23",
       platform,
       previousHasManagerAsset: true,
     })
-  ).toEqual({
-    leg: "upgrade",
-    previous: "5.0.0-next.23",
-    pins: PUBLISHED_LINUX_RELEASES["5.0.0-next.23"]?.[platform],
-  });
+  ).toEqual({ leg: "upgrade", previous: "5.0.0-next.23", pins: reviewed });
   expect(() =>
     linuxGateDecision({
       previous: "5.0.0-next.22",

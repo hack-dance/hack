@@ -65,8 +65,9 @@ any launcher is active.
 
 ## Linux: the Compose-only candidate
 
-Releases after `5.0.0-next.22` also carry a bundle for Linux on x86_64 and arm64
-with glibc. It runs the Compose backend only. The native backend is Apple Silicon
+Starting with the first release that ships Linux assets (`SHA256SUMS-linux` is in
+its asset list; `5.0.0-next.22` and earlier have none), a release also carries a
+bundle for Linux on x86_64 and arm64 with glibc. It runs the Compose backend only. The native backend is Apple Silicon
 macOS only. musl-based systems such as Alpine and other architectures are not
 supported; the installer refuses there and names the supported platforms.
 

@@ -81,6 +81,20 @@ case "$(uname -s)/$(uname -m)" in
   Linux/aarch64|Linux/arm64) ${linuxCase("linux-arm64")} ;;
   *) fail "${UNSUPPORTED_HOST} This host is $(uname -s) $(uname -m)." ;;
 esac
+# Every list below is written out: no step relies on word splitting, so the
+# script also runs under zsh without sh emulation.
+if [ "$platform" = darwin-arm64 ]; then
+  for tool in curl shasum codesign mktemp chmod rm date; do
+    command -v "$tool" >/dev/null 2>&1 || fail "Required system tool unavailable: $tool"
+  done
+  sha256_check() { shasum -a 256 -c -; }
+elif command -v sha256sum >/dev/null 2>&1; then
+  sha256_check() { sha256sum -c -; }
+elif command -v shasum >/dev/null 2>&1; then
+  sha256_check() { shasum -a 256 -c -; }
+else
+  fail 'Required system tool unavailable: sha256sum (or shasum)'
+fi
 root=\${HOME:?HOME must be set}/.hack-next
 root_set=0
 archive=
@@ -93,7 +107,7 @@ while [ "$#" -gt 0 ]; do
     --archive) [ -z "$archive" ] || fail 'Duplicate --archive.'; [ -n "$2" ] || fail 'Empty --archive.'; archive=$2 ;;
     --sha256) [ -z "$checksum" ] || fail 'Duplicate --sha256.'; [ -n "$2" ] || fail 'Empty --sha256.'; checksum=$2 ;;
     --manager) [ -z "$manager" ] || fail 'Duplicate --manager.'; [ -n "$2" ] || fail 'Empty --manager.'; manager=$2 ;;
-    *) fail 'Usage: sh installer.sh [--root /canonical/path] [--archive /canonical/archive --sha256 digest] [--manager /downloaded/manager]' ;;
+    *) fail 'Usage: sh installer.sh [--root /canonical/path] [--archive /canonical/archive --sha256 digest] (Linux also: [--manager /downloaded/manager])' ;;
   esac
   shift 2
 done
@@ -103,31 +117,23 @@ if [ -n "$archive" ] || [ -n "$checksum" ]; then
   case "$checksum" in *[!0-9a-f]*|'') fail 'Expected lowercase SHA-256.' ;; esac
   [ "\${#checksum}" -eq 64 ] || fail 'Expected lowercase SHA-256.'
 fi
-# A manager file you already downloaded replaces only the transfer: it is
-# checked against the same embedded digest before it runs.
+# Linux only: a manager file you already downloaded replaces the transfer. It
+# is checked against the same embedded digest before it runs.
 if [ -n "$manager" ]; then
+  [ "$platform" != darwin-arm64 ] || fail '--manager is for Linux installs only.'
   case "$manager" in /*) ;; *) fail 'Manager path must be absolute.' ;; esac
   [ -f "$manager" ] || fail 'Supplied manager is not a regular file.'
-  tools='cat'
-else
-  tools='curl'
 fi
-if [ "$platform" = darwin-arm64 ]; then
-  tools="$tools shasum codesign mktemp chmod rm date"
-  sha256_check='shasum -a 256 -c -'
-else
-  tools="$tools mktemp chmod rm date"
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256_check='sha256sum -c -'
-  elif command -v shasum >/dev/null 2>&1; then
-    sha256_check='shasum -a 256 -c -'
+if [ "$platform" != darwin-arm64 ]; then
+  for tool in mktemp chmod rm date; do
+    command -v "$tool" >/dev/null 2>&1 || fail "Required system tool unavailable: $tool"
+  done
+  if [ -n "$manager" ]; then
+    command -v cat >/dev/null 2>&1 || fail 'Required system tool unavailable: cat'
   else
-    fail 'Required system tool unavailable: sha256sum (or shasum)'
+    command -v curl >/dev/null 2>&1 || fail 'Required system tool unavailable: curl'
   fi
 fi
-for tool in $tools; do
-  command -v "$tool" >/dev/null 2>&1 || fail "Required system tool unavailable: $tool"
-done
 # Refuse before creating scratch or downloading. The manager validates the full root again.
 case "$root" in /*) ;; *) fail 'Installation root must be absolute.' ;; esac
 scratch=$(mktemp -d "\${TMPDIR:-/tmp}/hack-next-bootstrap.XXXXXXXX") || fail 'Cannot create private scratch.'
@@ -166,7 +172,7 @@ done
 if [ -n "$manager" ]; then
   cat "$manager" > "$scratch/manager" || fail 'Cannot read the supplied manager; installation unchanged.'
 fi
-printf '%s  %s\\n' "$manager_sha256" "$scratch/manager" | $sha256_check >/dev/null || fail 'Manager checksum mismatch; installation unchanged.'
+printf '%s  %s\\n' "$manager_sha256" "$scratch/manager" | sha256_check >/dev/null || fail 'Manager checksum mismatch; installation unchanged.'
 if [ "$platform" = darwin-arm64 ]; then
   # Ad-hoc signature verification checks structural integrity, not Developer ID origin.
   # Origin trust is the official HTTPS bootstrap and its embedded manager digest.

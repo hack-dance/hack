@@ -7,8 +7,9 @@ Already using v4? Read [3. Upgrade from v4](upgrade.md) before running v5 in a p
 
 v5 is in prerelease. Stable is still v4. A stable install does **not** install v5.
 The v5 prerelease supports Apple Silicon macOS (native and Compose backends).
-From the first release after `5.0.0-next.22` it also supports Linux on x86_64 and
-arm64 with glibc, on the Compose backend only. Intel Macs stay on stable v4; see
+Starting with the first release that ships Linux assets (`5.0.0-next.22` and
+earlier have none), it also supports Linux on x86_64 and arm64 with glibc, on the
+Compose backend only. Intel Macs stay on stable v4; see
 [platform support](../guides/prereleases.md).
 The [Linux host setup](../guides/linux-setup.md) and
 [Linux certificate trust](../guides/linux-certificate-trust.md) guides cover Linux

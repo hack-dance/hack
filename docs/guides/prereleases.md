@@ -23,9 +23,9 @@ timeline
 These are adoption phases, not release dates or a promised schedule; each native
 trial still needs the platform, provider and project prerequisites below.
 
-The first supported package is for Apple Silicon macOS. From the first release
-after `5.0.0-next.22`, each release also carries a Compose-only package for Linux
-on x86_64 and arm64; it has no native backend. Provider installation,
+The first supported package is for Apple Silicon macOS. Starting with the first
+release that ships Linux assets (none has yet), a release also carries a
+Compose-only package for Linux on x86_64 and arm64; it has no native backend. Provider installation,
 native project adaptations and host routing remain explicit prerequisites in the
 [native candidate guide](native-candidate.md). A packaged candidate is not a claim
 of full Compose parity, lower resource use, or compatibility with every project.
@@ -44,7 +44,9 @@ candidate can run.
 
 ### Compose-only Linux platforms
 
-Releases after `5.0.0-next.22` also carry these. Each archive records its own
+Starting with the first release that ships Linux assets (`SHA256SUMS-linux` is in
+its asset list; `5.0.0-next.22` and earlier have none), a release also carries
+these. Each archive records its own
 platform in the `prerelease.json` inside it.
 
 - `linux-x86_64`: the Compose candidate archive for Linux on x86_64 with glibc.

@@ -116,7 +116,7 @@ export function newerReleaseMemberMessage(
   name: string,
   platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
 ): string {
-  return `This release contains ${name}, which this installation manager does not know, so it was not installed and nothing changed. Replace the manager with the target release's standalone manager first: download ${managerAssetName(platform)} and INSTALLER-SHA256SUMS from that release, verify them, and run it with --root <channel root> upgrade-manager (see the candidate install guide). Then retry, or install into a fresh --root.`;
+  return `This release contains ${name}, which this installation manager does not know, so it was not installed and nothing changed. Replace the manager with the target release's standalone manager first: download ${managerAssetName(platform)} and ${composeOnly(platform) ? "SHA256SUMS-linux" : "INSTALLER-SHA256SUMS"} from that release, verify them, and run it with --root <channel root> upgrade-manager (see the candidate install guide). Then retry, or install into a fresh --root.`;
 }
 export const MCP =
   /^mcp\/([0-9a-f]{64})\/(manifest\.json|hack-mcp-adapter|hack-mcp-owner|hack-mcp-backend)$(?![\s\S])/;

@@ -695,8 +695,12 @@ test("the macOS branch of the one installer is the same whether or not Linux dig
       `Darwin/arm64) platform=darwin-arm64; manager_sha256='${mac}' ;;`
     );
     expect(text).toContain(
-      'tools="$tools shasum codesign mktemp chmod rm date"'
+      "for tool in curl shasum codesign mktemp chmod rm date; do"
     );
+    expect(text).toContain("sha256_check() { shasum -a 256 -c -; }");
+    expect(text).toContain("'--manager is for Linux installs only.'");
+    // No unquoted variable is used as a word list or a command.
+    expect(text).not.toMatch(/for tool in \$|\| \$/);
     expect(text).toContain('codesign --verify --strict "$scratch/manager"');
     expect(text).toContain(
       `url="https://github.com/hack-dance/hack/releases/download/v${VERSION}/hack-next-manager-$platform"`
@@ -1546,3 +1550,39 @@ test("the guides list the Linux platforms apart from the native platform and say
     expect(text).toContain("without `sudo`");
   }
 });
+
+fixtureTest(
+  "the installer runs under zsh without sh emulation, and macOS refuses --manager",
+  () => {
+    // Native zsh does not split unquoted variables; the script must not need it.
+    if (existsSync("/bin/zsh")) {
+      const f = bootstrapFixture({ system: "Linux", machine: "x86_64" });
+      const result = spawnSyncBounded(["/bin/zsh", f.bootstrap], {
+        env: f.env,
+        timeout: 10_000,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.stderr.toString()).toBe("");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain(LINUX_INSTALLED_NOTE);
+    }
+    if (Bun.which("shasum")) {
+      const mac = bootstrapFixture({
+        system: "Darwin",
+        machine: "arm64",
+        tools: ["shasum", "mktemp", "chmod", "rm", "cp", "cat", "date"],
+      });
+      writeFileSync(join(mac.bin, "codesign"), "#!/bin/sh\nexit 0\n", {
+        mode: 0o755,
+      });
+      const refused = mac.run(["--manager", mac.manager]);
+      expect(refused.exitCode).not.toBe(0);
+      expect(refused.stderr.toString()).toContain(
+        "--manager is for Linux installs only."
+      );
+      expect(existsSync(mac.env.CURL_ARGS)).toBe(false);
+      expect(existsSync(mac.env.INVOCATION)).toBe(false);
+    }
+  }
+);

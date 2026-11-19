@@ -1397,6 +1397,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   await chmod(run.home, 0o700);
   await mkdir(join(opts.scratch, "tmp"), { mode: 0o700 });
   await mkdir(run.repo, { mode: 0o700 });
+  let cleaned = false;
   const installed =
     opts.installer === undefined
       ? true
@@ -1428,12 +1429,15 @@ export async function main(argv: readonly string[]): Promise<number> {
       run.steps.some((s) => s.step === "0 preflight" && s.result !== "fail")
     ) {
       await cleanup(run);
+      cleaned = true;
     }
     // Last: the uninstall moves the channel, and with it the CLI under test.
     if (opts.installer !== undefined && installed && version?.exit === 0) {
       await managerFlow(run);
     }
-    if (!opts.keep) {
+    // As before installer mode existed, a run that failed preflight keeps
+    // its scratch; installer mode has installed into it by then, so it clears.
+    if (!opts.keep && (cleaned || opts.installer !== undefined)) {
       await rm(run.home, { recursive: true, force: true });
       await rm(run.repo, { recursive: true, force: true });
     }

@@ -564,9 +564,11 @@ not start, restart or recover a project and does not acquire managed values.
 One 30-second observation budget includes identity proofs and the Engine's existing
 single exec create, attached start and completion inspection. Known completion
 preserves the command's exit code and binary stdout/stderr, with up to 1 MiB per
-stream and an explicit truncation notice. Cancellation or timeout settles the local
-request but cannot prove guest command termination. Unknown guest completion
-admits no command output and warns that effects may have occurred. Once a validated
+stream and an explicit truncation notice. The wait bounds how long Hack waits for
+more bytes; if the command has already closed the stream, queued output is still
+returned. Cancellation or timeout otherwise settles the local request but cannot
+prove guest command termination. Unknown guest completion admits no command output
+and warns that effects may have occurred. Once a validated
 completion is being written, cancellation returns 130 and prevents remaining writes;
 already-written bytes cannot be retracted. No request is replayed and the foreground
 project is not stopped. Inspect the service before

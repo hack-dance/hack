@@ -1394,8 +1394,10 @@ code. Retained exec output is limited to 1 MiB per stream.
 
 Exec is noninteractive: stdin is closed, no TTY is allocated, and arguments are passed
 literally without an implicit shell. The default wait is 30 seconds, configurable up
-to 120 with `--timeout-seconds`. Timeout or transport failure means completion is
-uncertain: the command may still run, and Hack does not replay it. An exec that delivers
+to 120 with `--timeout-seconds`. That wait is how long Hack waits for more bytes; it
+does not drop output the command already queued. If the stream has already closed,
+queued bytes are still returned. Timeout or transport failure otherwise means
+completion is uncertain: the command may still run, and Hack does not replay it. An exec that delivers
 fresh per-command values names the step that failed (`create`, `connect`, `start`, `hello`,
 `deliver`, `release`, `output` or `inspect`) and why (`deadline`, `closed`, `io` or
 `protocol`). A failure before the last value byte is sent cannot have run the command: it
@@ -4370,7 +4372,8 @@ With the same explicit native binary/home selection used for `up`, run
 the current owned project/branch mapping, preserves binary stdout/stderr and the
 command exit code, and never falls back to Compose. With piped input/output or
 `HACK_NO_INTERACTIVE=1`, it uses finite exec with a 30-second observation budget;
-a timeout may leave the command running and is not
+output already sitting in the stream is still returned. A timeout may leave a
+command that has not closed the stream running and is not
 retried. `--env` and `--profile` changes are refused. A command name such as `bun`
 uses the selected container's PATH; no host PATH or implicit shell is used. For
 adopted Compose services, `hack exec` resolves the saved startup overlay and AWS profile again, and delivers

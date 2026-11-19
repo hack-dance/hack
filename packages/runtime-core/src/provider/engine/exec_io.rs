@@ -1,6 +1,7 @@
 //! Deadline-bounded exec handshake I/O, restoring descriptor flags after writes.
 //! macOS can reject SO_RCVTIMEO after peer closure even with bytes still queued.
 //! Poll plus nonblocking I/O preserves those bytes and never reads ahead.
+//! A passed wait deadline still drains bytes already queued; it does not wait for more.
 use std::{
     io,
     os::{fd::AsRawFd, unix::net::UnixStream},
@@ -37,7 +38,13 @@ fn wait(stream: &UnixStream, deadline: Instant, events: i16) -> io::Result<()> {
 }
 
 pub(super) fn read(stream: &UnixStream, bytes: &mut [u8], deadline: Instant) -> io::Result<usize> {
-    wait(stream, deadline, libc::POLLIN)?;
+    // HACK-2357: the caller's timeout bounds waiting, not throwing away output the
+    // peer already queued. A starved host can miss the wait and still recv.
+    let expired = match wait(stream, deadline, libc::POLLIN) {
+        Ok(()) => false,
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => true,
+        Err(error) => return Err(error),
+    };
     // SAFETY: writable slice and live socket; MSG_DONTWAIT is per-call only.
     let result = unsafe {
         libc::recv(
@@ -47,7 +54,13 @@ pub(super) fn read(stream: &UnixStream, bytes: &mut [u8], deadline: Instant) -> 
             libc::MSG_DONTWAIT,
         )
     };
-    count(result)
+    match count(result) {
+        Ok(n) => Ok(n),
+        Err(error) if expired && error.kind() == io::ErrorKind::WouldBlock => {
+            Err(io::ErrorKind::TimedOut.into())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) fn write(stream: &UnixStream, bytes: &[u8], deadline: Instant) -> io::Result<usize> {
@@ -213,5 +226,24 @@ mod tests {
             io::ErrorKind::TimedOut
         );
         assert!(Instant::now() < deadline + Duration::from_secs(1));
+    }
+
+    #[test]
+    fn queued_bytes_are_still_read_after_the_wait_deadline() {
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(b"queued-after-deadline").unwrap();
+        drop(peer);
+        let deadline = Instant::now() - Duration::from_millis(1);
+        let mut raw = Vec::new();
+        let mut byte = [0];
+        loop {
+            match read(&stream, &mut byte, deadline) {
+                Ok(0) => break,
+                Ok(1) => raw.push(byte[0]),
+                Err(error) if retry(&error) => continue,
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(raw, b"queued-after-deadline");
     }
 }

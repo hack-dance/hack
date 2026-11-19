@@ -367,12 +367,26 @@ impl super::Engine<'_> {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    fn send(stream: &mut UnixStream, body: &[u8]) {
+    fn try_send(stream: &mut UnixStream, body: &[u8]) -> io::Result<()> {
         let mut header = [0u8; 8];
         header[0] = 1;
         header[4..].copy_from_slice(&(body.len() as u32).to_be_bytes());
-        stream.write_all(&header).unwrap();
-        stream.write_all(body).unwrap();
+        stream.write_all(&header)?;
+        stream.write_all(body)?;
+        Ok(())
+    }
+    fn send(stream: &mut UnixStream, body: &[u8]) {
+        try_send(stream, body).unwrap();
+    }
+    fn closed_peer(error: &io::Error) -> bool {
+        matches!(
+            error.kind(),
+            io::ErrorKind::BrokenPipe
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::NotConnected
+                | io::ErrorKind::UnexpectedEof
+        )
     }
     #[test]
     fn partial_frame_cannot_extend_deadline() {
@@ -523,6 +537,26 @@ mod tests {
         assert_eq!(raw, output);
     }
     #[test]
+    fn output_queued_after_the_exec_deadline_is_still_read_to_eof() {
+        // The observation budget bounds waiting. A late host still drains bytes the
+        // peer queued before it closed, even when that budget has already expired.
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        let output: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+        guest.write_all(&output).unwrap();
+        drop(guest);
+        let raw = read_output(&host, Instant::now() - Duration::from_millis(1)).unwrap();
+        assert_eq!(raw, output);
+    }
+    #[test]
+    fn silent_output_peer_still_deadlines() {
+        let (host, _guest) = UnixStream::pair().unwrap();
+        let error = read_output(&host, Instant::now() + Duration::from_millis(30)).unwrap_err();
+        assert_eq!(error.code, "graph_service_exec_uncertain");
+        assert_eq!(stage_of(&error)["stage"], "output");
+        assert_eq!(stage_of(&error)["reason"], "deadline");
+        assert_eq!(stage_of(&error)["command_may_have_run"], true);
+    }
+    #[test]
     fn a_sub_second_remainder_still_gives_the_launcher_a_future_expiry() {
         assert_eq!(expiry_seconds(Duration::from_millis(1)), 1);
         assert_eq!(expiry_seconds(Duration::from_millis(1500)), 2);
@@ -532,14 +566,24 @@ mod tests {
     fn conversation(delay: Duration) -> Result<Vec<u8>, CandidateError> {
         let (mut host, mut guest) = UnixStream::pair().unwrap();
         let launcher = std::thread::spawn(move || {
-            send(&mut guest, b"HKEE1 7\n");
+            // The host may drop this stream at the output deadline. Further I/O is a
+            // closed peer, not a protocol failure.
+            if try_send(&mut guest, b"HKEE1 7\n").is_err() {
+                return;
+            }
             let mut values = Vec::new();
-            guest.read_to_end(&mut values).unwrap();
-            let parsed: serde_json::Value = serde_json::from_slice(&values).unwrap();
+            if guest.read_to_end(&mut values).is_err() {
+                return;
+            }
+            let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&values) else {
+                return;
+            };
             assert_eq!(parsed["values"]["TOKEN"], "synthetic-private-value");
             let mut out = vec![1u8, 0, 0, 0, 0, 0, 0, 3];
             out.extend_from_slice(b"ok\n");
-            guest.write_all(&out).unwrap();
+            if let Err(error) = guest.write_all(&out) {
+                assert!(closed_peer(&error), "{error}");
+            }
         });
         let deadline = Instant::now() + Duration::from_secs(20);
         deliver(
@@ -555,7 +599,10 @@ mod tests {
     #[test]
     fn many_private_execs_on_a_cpu_starved_host_all_complete() {
         // Saturate every core while many exec conversations run, each with the host
-        // reading its output only after the peer has closed.
+        // reading its output only after the peer has closed. Yield so the fake
+        // launcher can still write: non-yielding 2x-core spin can starve that
+        // thread for the whole 20s conversation bound on a hosted macOS runner
+        // that is also running other nextest processes (HACK-2357).
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let spinners: Vec<_> = (0..std::thread::available_parallelism().map_or(4, |n| n.get() * 2))
             .map(|_| {
@@ -563,6 +610,7 @@ mod tests {
                 std::thread::spawn(move || {
                     while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                         std::hint::spin_loop();
+                        std::thread::yield_now();
                     }
                 })
             })

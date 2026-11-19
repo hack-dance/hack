@@ -167,6 +167,7 @@ test("the released compiled managers are reviewed predecessors", () => {
     "ba47091559a80b2abbb246b8e86c5530b8ddb068973f5136e120d36e2003fae6", // next.19
     "2e9183b4ce7b4c4c5659f9ae33677699e1cdc9f5553e1b668bbbe6ea6846ac7b", // next.20
     "af7d25e2db3e5d0edf8d0e308a49db928f1bc7f138beb54b9d3b0ccae83ee423", // next.21
+    "df75f28ef2fdd892e9d17f5528171117488b426a2fe9140ac3dd9add924ae45a", // next.22
   ]);
 });
 
@@ -257,6 +258,12 @@ test("the gate runs a previous release only from its own reviewed pins", () => {
         "af7d25e2db3e5d0edf8d0e308a49db928f1bc7f138beb54b9d3b0ccae83ee423",
       archive:
         "7e7f887a09d435ee20a4dfd0afe7b33eb5a171660937efd443fac73ecc09ff0e",
+    },
+    "5.0.0-next.22": {
+      manager:
+        "df75f28ef2fdd892e9d17f5528171117488b426a2fe9140ac3dd9add924ae45a",
+      archive:
+        "a0d36c68d0e670a2d9b8dfad895136a17fa6706fc7b84072a962afa6d1994f51",
     },
   });
   for (const { manager } of Object.values(PUBLISHED_RELEASES)) {

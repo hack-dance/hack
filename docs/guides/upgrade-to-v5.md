@@ -66,7 +66,7 @@ executable to v5. Review env migration before the Compose trial.
 
 ## Secrets after upgrading
 
-The next.17 env changes hide all values in ordinary `env list` output and add
+Since next.17, env changes hide all values in ordinary `env list` output and add
 `env protect` to encrypt selected plaintext YAML entries in place. Check that
 the installed release contains those changes before using the new command.
 For scripts, use `env list --json` and `has_value` for metadata, or an explicit
@@ -84,8 +84,7 @@ Keep these manual checks too:
 
 - Check ownership and permissions of `.hack/hack.env.local.yaml` and
   `.hack/hack.env.<name>.local.yaml`. New local layers are created mode 0600,
-  but next.16 keeps existing modes. The merged #764 change, intended for
-  next.17, tightens a local layer on a write and lets Doctor fix loose files
+  but next.16 keeps existing modes. Since next.17 (#764), Hack tightens a local layer on a write and lets Doctor fix loose files
   without waiting for that write. Keep local layers owner-only.
 - Check Git's tracked-file list for `.hack/.env.<name>` and
   `hack.env*.local.yaml`. next.16's managed ignore block omitted legacy overlay
@@ -102,12 +101,12 @@ Keep these manual checks too:
 **On next.16 or an earlier prerelease, keep a private readable copy of
 `.hack.secret.key` before `doctor --migrate-env-config`.** HACK-2172 lets
 explicit cleanup delete that key when a legacy store's `keyPath` names it.
-The live-input protection fix is merged for next.17: current project/shared
+Since next.17, live inputs are protected: current project/shared
 keys, config and YAML inputs are not cleanup targets, including filesystem
 aliases, and cleanup refuses a request that names one. It cannot recover a key already removed by an older
 build. Back up original keys and env state before migration on any version.
 
-Merged #764 (HACK-2165), intended for next.17, adds the
+Since next.17, #764 (HACK-2165) adds the
 [Doctor secrets-hygiene report and fixes](#after-upgrading-check-secrets-at-rest)
 below. next.16 already reports `env-key-weak-permissions` with a `chmod 600`
 remedy, but does not include the broader hygiene report.
@@ -118,7 +117,7 @@ not evidence that the real-machine upgrade or rollback has passed.
 
 ## Preview, resume and undo env migration
 
-HACK-2191 follows next.17. In a build containing it, use `hack env migrate --json` to review names and
+Since next.18 (HACK-2191), use `hack env migrate --json` to review names and
 file paths before applying. `hack env migrate --apply` snapshots originals outside
 the working tree and records resumable steps; repeat the same command after an
 interruption. Add `--accept-tracked-env-changes` only when consenting to the
@@ -174,7 +173,7 @@ cleanup. Keep these repairs separate from `--migrate-env-config` and its backup 
 
 ### An old global secret store whose key is gone
 
-Merged #779, intended for next.17, makes an old store with a missing or wrong
+Since next.17, #779 makes an old store with a missing or wrong
 key a Doctor error only where the project's runtime reads it. Other projects
 receive a warning. Choose one: restore the original key from a private backup,
 or retire the store if the key is gone for good. A new key cannot open the old

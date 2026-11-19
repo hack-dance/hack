@@ -1400,7 +1400,12 @@ fresh per-command values names the step that failed (`create`, `connect`, `start
 `deliver`, `release`, `output` or `inspect`) and why (`deadline`, `closed`, `io` or
 `protocol`). A failure before the last value byte is sent cannot have run the command: it
 reports `graph_service_exec_not_run` and is safe to retry. From `release` on, the command may
-have run, and the error stays `graph_service_exec_uncertain`. Exec inherits the container's static environment. When the selected service has a
+have run, and the error stays `graph_service_exec_uncertain`. The per-command values'
+lifetime bounds only their delivery; the exec's own wait bounds the command. Output that is
+still arriving when that wait ends is read to the end, allowing 5 seconds between bytes and
+at most 20 seconds past the wait, so a command that finished on a slow or busy host is reported
+with its exit code rather than as uncertain. Only output that stays silent, or keeps going
+past that limit, is uncertain. Exec inherits the container's static environment. When the selected service has a
 committed private environment attachment on the current boot, it reuses that
 service's exact read-only launcher mounts and original expiry. No values are copied
 into engine metadata, and exec never renews credentials. With the current launcher,

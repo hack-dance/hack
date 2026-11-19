@@ -257,13 +257,41 @@ fn deliver_with(
         .map_err(|error| io_failure(Stage::Release, &error))?;
     Ok(())
 }
+/// After the exec's deadline, output keeps being read while bytes still arrive: a gap this
+/// long with no byte and no EOF ends it.
+pub(super) const OUTPUT_IDLE_GRACE: Duration = Duration::from_secs(5);
+/// Past the exec's deadline, output is never read for longer than this.
+pub(super) const OUTPUT_DRAIN_CEILING: Duration = Duration::from_secs(20);
+/// The finished exec's inspection gets at least this long, however late the output ended.
+#[cfg(all(target_os = "macos", feature = "environment-launcher"))]
+const INSPECT_GRACE: Duration = Duration::from_secs(5);
+
 /// Read the attached output to EOF, keeping bytes the peer queued before it closed.
-/// Bounds total transport work as well as retained output; overflow is uncertain.
+///
+/// The exec's deadline bounds how long a silent command is waited for, not how long a slow
+/// host may take to read output that is already arriving (HACK-2357): a command that
+/// finished while a starved host fell behind still ends in EOF, and reporting it as
+/// uncertain would tell the user a completed command may not have run. So once the deadline
+/// has passed, reading continues while bytes keep arriving, with `idle_grace` allowed
+/// between them and an absolute `ceiling` past the deadline. Only a stream that stays silent
+/// for `idle_grace`, or keeps going past `ceiling`, is uncertain. Total retained output stays
+/// bounded at 4 MiB.
 fn read_output(stream: &UnixStream, deadline: Instant) -> Result<Vec<u8>, CandidateError> {
+    read_output_within(stream, deadline, OUTPUT_IDLE_GRACE, OUTPUT_DRAIN_CEILING)
+}
+fn read_output_within(
+    stream: &UnixStream,
+    deadline: Instant,
+    idle_grace: Duration,
+    ceiling: Duration,
+) -> Result<Vec<u8>, CandidateError> {
+    let hard_stop = deadline + ceiling;
+    let mut last_progress = Instant::now();
     let mut raw = Vec::new();
     let mut buffer = [0u8; 8192];
     loop {
-        let n = read_some(stream, &mut buffer, deadline, Stage::Output)?;
+        let window = deadline.max((last_progress + idle_grace).min(hard_stop));
+        let n = read_some(stream, &mut buffer, window, Stage::Output)?;
         if n == 0 {
             return Ok(raw);
         }
@@ -271,6 +299,7 @@ fn read_output(stream: &UnixStream, deadline: Instant) -> Result<Vec<u8>, Candid
             return Err(failed(Stage::Output, Reason::Protocol));
         }
         raw.extend_from_slice(&buffer[..n]);
+        last_progress = Instant::now();
     }
 }
 #[cfg(all(target_os = "macos", feature = "environment-launcher"))]
@@ -281,9 +310,13 @@ impl super::Engine<'_> {
         argv: &[String],
         workdir: Option<&str>,
         deadline: Instant,
+        values_deadline: Instant,
         values: &BTreeMap<String, String>,
     ) -> Result<super::service_exec::ExecOutput, CandidateError> {
         use reqwest::Method;
+        // The values' lifetime bounds every step until they are delivered; afterwards only
+        // the exec's own deadline applies, extended for output already arriving.
+        let deadline_for_values = values_deadline.min(deadline);
         use serde_json::json;
         if self.cleanup_only {
             return Err(failed(Stage::Create, Reason::Protocol));
@@ -301,54 +334,69 @@ impl super::Engine<'_> {
             if error.code == "engine_not_found" {
                 error
             } else {
-                failed(stage, past_or(deadline, Reason::Io))
+                failed(stage, past_or(deadline_for_values, Reason::Io))
             }
         };
-        let created = super::Transport::new(&socket, remaining(deadline, Stage::Create)?)
-            .map_err(|error| tagged(Stage::Create, error))?
-            .request(
-                Method::POST,
-                &format!("/v1.53/containers/{container}/exec"),
-                Some(&body),
-            )
-            .map_err(|error| tagged(Stage::Create, error))?;
+        let created =
+            super::Transport::new(&socket, remaining(deadline_for_values, Stage::Create)?)
+                .map_err(|error| tagged(Stage::Create, error))?
+                .request(
+                    Method::POST,
+                    &format!("/v1.53/containers/{container}/exec"),
+                    Some(&body),
+                )
+                .map_err(|error| tagged(Stage::Create, error))?;
         let id = created["Id"]
             .as_str()
             .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
             .ok_or_else(|| failed(Stage::Create, Reason::Protocol))?;
         self.guest.verify()?;
         self.guest.before_effect()?;
-        let mut stream = crate::provider::agent::connect_until(&socket, deadline)
-            .map_err(|_| failed(Stage::Connect, past_or(deadline, Reason::Io)))?;
-        super::relay_exec::start_classified(&mut stream, id, deadline).map_err(|failure| {
-            use super::relay_exec::StartFailure;
-            failed(
-                Stage::Start,
-                match failure {
-                    StartFailure::Deadline => Reason::Deadline,
-                    StartFailure::Closed => Reason::Closed,
-                    StartFailure::Io => past_or(deadline, Reason::Io),
-                    StartFailure::Protocol => Reason::Protocol,
-                },
-            )
-        })?;
-        deliver(&mut stream, deadline, values)?;
+        let mut stream = crate::provider::agent::connect_until(&socket, deadline_for_values)
+            .map_err(|_| failed(Stage::Connect, past_or(deadline_for_values, Reason::Io)))?;
+        super::relay_exec::start_classified(&mut stream, id, deadline_for_values).map_err(
+            |failure| {
+                use super::relay_exec::StartFailure;
+                failed(
+                    Stage::Start,
+                    match failure {
+                        StartFailure::Deadline => Reason::Deadline,
+                        StartFailure::Closed => Reason::Closed,
+                        StartFailure::Io => past_or(deadline_for_values, Reason::Io),
+                        StartFailure::Protocol => Reason::Protocol,
+                    },
+                )
+            },
+        )?;
+        deliver(&mut stream, deadline_for_values, values)?;
         let raw = read_output(&stream, deadline)?;
         let (stdout, stderr, truncated) = super::service_exec::decode(&raw)
             .map_err(|_| failed(Stage::Output, Reason::Protocol))?;
         self.guest
             .verify()
             .map_err(|_| failed(Stage::Inspect, Reason::Io))?;
-        let inspected = super::Transport::new(&socket, remaining(deadline, Stage::Inspect)?)
-            .map_err(|_| failed(Stage::Inspect, past_or(deadline, Reason::Io)))?
-            .request(Method::GET, &format!("/v1.53/exec/{id}/json"), None)
-            .map_err(|_| failed(Stage::Inspect, past_or(deadline, Reason::Io)))?;
-        if inspected["ID"] != id
-            || inspected["ContainerID"] != container
-            || inspected["Running"] != false
-        {
-            return Err(failed(Stage::Inspect, Reason::Protocol));
-        }
+        // EOF means the command's output is complete; the engine may record its exit a
+        // moment later, so inspection gets its own short grace and retries while the exec
+        // still reads as running.
+        let inspect_deadline = deadline.max(Instant::now() + INSPECT_GRACE);
+        let inspected = loop {
+            let inspected =
+                super::Transport::new(&socket, remaining(inspect_deadline, Stage::Inspect)?)
+                    .map_err(|_| failed(Stage::Inspect, past_or(inspect_deadline, Reason::Io)))?
+                    .request(Method::GET, &format!("/v1.53/exec/{id}/json"), None)
+                    .map_err(|_| failed(Stage::Inspect, past_or(inspect_deadline, Reason::Io)))?;
+            if inspected["ID"] != id || inspected["ContainerID"] != container {
+                return Err(failed(Stage::Inspect, Reason::Protocol));
+            }
+            match inspected["Running"].as_bool() {
+                Some(false) => break inspected,
+                Some(true) if Instant::now() + Duration::from_millis(50) < inspect_deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Some(true) => return Err(failed(Stage::Inspect, Reason::Deadline)),
+                None => return Err(failed(Stage::Inspect, Reason::Protocol)),
+            }
+        };
         let exit_code = inspected["ExitCode"]
             .as_i64()
             .filter(|v| (0..=255).contains(v))
@@ -528,34 +576,122 @@ mod tests {
         assert_eq!(expiry_seconds(Duration::from_millis(1500)), 2);
         assert_eq!(expiry_seconds(Duration::from_secs(3)), 3);
     }
-    /// One full fake conversation: hello, values to EOF, output, close.
-    fn conversation(delay: Duration) -> Result<Vec<u8>, CandidateError> {
+    /// One full fake conversation: hello, values to EOF, then a command that writes its
+    /// output and exits. The host reads the output only after the command has finished and
+    /// after the exec's deadline has passed, as a starved host does.
+    fn finished_conversation() -> Result<Vec<u8>, CandidateError> {
         let (mut host, mut guest) = UnixStream::pair().unwrap();
         let launcher = std::thread::spawn(move || {
             send(&mut guest, b"HKEE1 7\n");
             let mut values = Vec::new();
-            guest.read_to_end(&mut values).unwrap();
-            let parsed: serde_json::Value = serde_json::from_slice(&values).unwrap();
+            // A delivery the host abandoned never runs the command.
+            if guest.read_to_end(&mut values).is_err() {
+                return false;
+            }
+            let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&values) else {
+                return false;
+            };
             assert_eq!(parsed["values"]["TOKEN"], "synthetic-private-value");
             let mut out = vec![1u8, 0, 0, 0, 0, 0, 0, 3];
             out.extend_from_slice(b"ok\n");
             guest.write_all(&out).unwrap();
+            true
         });
-        let deadline = Instant::now() + Duration::from_secs(20);
         deliver(
             &mut host,
-            deadline,
+            Instant::now() + Duration::from_secs(60),
             &BTreeMap::from([("TOKEN".into(), "synthetic-private-value".into())]),
         )?;
-        std::thread::sleep(delay);
-        let raw = read_output(&host, deadline)?;
-        launcher.join().unwrap();
-        Ok(raw)
+        assert!(launcher.join().unwrap(), "the command ran and finished");
+        // The exec's deadline has already passed when the starved host gets to the output.
+        read_output(&host, Instant::now())
     }
     #[test]
-    fn many_private_execs_on_a_cpu_starved_host_all_complete() {
-        // Saturate every core while many exec conversations run, each with the host
-        // reading its output only after the peer has closed.
+    fn a_finished_command_read_after_the_deadline_is_complete_not_uncertain() {
+        assert_eq!(
+            finished_conversation().unwrap(),
+            [1u8, 0, 0, 0, 0, 0, 0, 3, b'o', b'k', b'\n']
+        );
+    }
+    #[test]
+    fn after_the_deadline_only_silence_or_the_ceiling_ends_the_output() {
+        // A silent stream that stays open ends one idle grace after reading starts.
+        let (host, _guest) = UnixStream::pair().unwrap();
+        let started = Instant::now();
+        let error = read_output_within(
+            &host,
+            started,
+            Duration::from_millis(100),
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert_eq!(stage_of(&error)["stage"], "output");
+        assert_eq!(stage_of(&error)["reason"], "deadline");
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // Bytes still arriving past the deadline are read to EOF.
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        let writer = std::thread::spawn(move || {
+            for _ in 0..6 {
+                std::thread::sleep(Duration::from_millis(40));
+                guest.write_all(b"x").unwrap();
+            }
+        });
+        let raw = read_output_within(
+            &host,
+            Instant::now(),
+            Duration::from_millis(400),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        writer.join().unwrap();
+        assert_eq!(raw, b"xxxxxx");
+        // A stream that never stops is cut at the ceiling.
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    if guest.write_all(b"y").is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            })
+        };
+        let started = Instant::now();
+        let error = read_output_within(
+            &host,
+            started,
+            Duration::from_millis(200),
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(host);
+        writer.join().unwrap();
+        assert_eq!(stage_of(&error)["reason"], "deadline");
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(started.elapsed() < Duration::from_secs(3));
+        // Before the deadline nothing changes: reading waits for the deadline itself.
+        let (host, _guest) = UnixStream::pair().unwrap();
+        let started = Instant::now();
+        read_output_within(
+            &host,
+            started + Duration::from_millis(300),
+            Duration::from_millis(10),
+            Duration::from_millis(10),
+        )
+        .unwrap_err();
+        assert!(started.elapsed() >= Duration::from_millis(300));
+    }
+    #[test]
+    fn on_a_cpu_starved_host_a_finished_command_is_never_uncertain() {
+        // Saturate every core while many exec conversations run. Each command finishes
+        // before the host reads its output, after the exec's deadline. A delivery that a
+        // starved host could not finish in time is `not_run` and is allowed; a finished
+        // command reported as uncertain is not.
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let spinners: Vec<_> = (0..std::thread::available_parallelism().map_or(4, |n| n.get() * 2))
             .map(|_| {
@@ -568,24 +704,31 @@ mod tests {
             })
             .collect();
         let workers: Vec<_> = (0..8)
-            .map(|worker| {
+            .map(|_| {
                 std::thread::spawn(move || {
-                    for round in 0..25u64 {
-                        let delay = Duration::from_millis((worker * 7 + round) % 5);
-                        assert_eq!(
-                            conversation(delay).unwrap(),
-                            [1u8, 0, 0, 0, 0, 0, 0, 3, b'o', b'k', b'\n']
-                        );
+                    let mut uncertain = 0;
+                    for _ in 0..25 {
+                        match finished_conversation() {
+                            Ok(raw) => {
+                                assert_eq!(raw, [1u8, 0, 0, 0, 0, 0, 0, 3, b'o', b'k', b'\n']);
+                            }
+                            Err(error) if error.code == "graph_service_exec_not_run" => {}
+                            Err(_) => uncertain += 1,
+                        }
                     }
+                    uncertain
                 })
             })
             .collect();
-        let results: Vec<_> = workers.into_iter().map(|w| w.join()).collect();
+        let uncertain: Vec<_> = workers.into_iter().map(|w| w.join()).collect();
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         for spinner in spinners {
             spinner.join().unwrap();
         }
-        assert!(results.iter().all(Result::is_ok));
+        assert!(
+            uncertain.iter().all(|count| matches!(count, Ok(0))),
+            "a finished command was reported uncertain: {uncertain:?}"
+        );
     }
 
     #[test]

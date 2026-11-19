@@ -263,14 +263,15 @@ fn service_exec_inner(
                 "--exec-environment-stdin-v1".into(),
             ];
             argv.extend_from_slice(options.argv);
-            let deadline = managed
-                .deadline()
-                .min(std::time::Instant::now() + options.timeout);
+            // The values' lifetime bounds their delivery; the exec's own timeout bounds the
+            // command and its output (HACK-2357).
+            let deadline = std::time::Instant::now() + options.timeout;
             engine.service_exec_private(
                 options.expected_container,
                 &argv,
                 options.workdir,
                 deadline,
+                managed.deadline(),
                 values,
             )?
         }

@@ -27,6 +27,7 @@ import {
   INERT_RUNNING_RESOURCES,
   inertField,
   isExecutor,
+  kernelProviderMemory,
   main,
   type Options,
   parseCpuTime,
@@ -323,6 +324,22 @@ describe("provider pin qualification", () => {
     ).toBe(412 * 1024 * 1024);
     expect(parseFootprint("Footprint: 1.5 GB")).toBe(1.5 * 1024 ** 3);
     expect(parseFootprint("no footprint")).toBeNull();
+    // HACK-2360: footprint_mib comes from the kernel figure runtime status reports.
+    expect(
+      kernelProviderMemory({
+        provider_memory: {
+          resident_bytes: 9_090_000_000,
+          physical_footprint_bytes: 900 * 1024 * 1024,
+        },
+      })
+    ).toEqual({ footprint: 900 * 1024 * 1024, resident: 9_090_000_000 });
+    expect(kernelProviderMemory({ provider_memory: null })).toBeNull();
+    expect(kernelProviderMemory({})).toBeNull();
+    expect(
+      kernelProviderMemory({
+        provider_memory: { resident_bytes: 1, physical_footprint_bytes: "1" },
+      })
+    ).toBeNull();
     expect(parseTopMemory("PID    MEM\n123    845M+\n", 123)).toBe(
       845 * 1024 ** 2
     );

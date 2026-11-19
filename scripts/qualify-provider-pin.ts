@@ -254,7 +254,32 @@ export function sourceTemplatePins(
   return { archive, templates };
 }
 
-/** `footprint` reports physical footprint as `Footprint: <n> <unit>`; returns bytes. */
+/**
+ * The provider's memory as the kernel accounts it (`proc_pid_rusage` `ri_phys_footprint`
+ * and `ri_resident_size`), from `runtime status --json` `provider_memory`. This is the
+ * figure native admission charges. `null` when the pool is not running or the field is
+ * missing.
+ */
+export function kernelProviderMemory(
+  status: Record<string, unknown>
+): { footprint: number; resident: number } | null {
+  const memory = status.provider_memory;
+  if (typeof memory !== "object" || memory === null) {
+    return null;
+  }
+  const { physical_footprint_bytes: footprint, resident_bytes: resident } =
+    memory as Record<string, unknown>;
+  return Number.isSafeInteger(footprint) && Number.isSafeInteger(resident)
+    ? { footprint: footprint as number, resident: resident as number }
+    : null;
+}
+
+/**
+ * `footprint` reports physical footprint as `Footprint: <n> <unit>`; returns bytes. Its
+ * header line undercounts a VM process against the kernel's `phys_footprint` (about 237
+ * MiB against 800 to 1,000 MiB on one pool), so it is reported only beside
+ * [`kernelProviderMemory`], never instead of it.
+ */
 export function parseFootprint(text: string): number | null {
   const match = /Footprint:\s*([0-9]+(?:\.[0-9]+)?)\s*(B|KB|MB|GB)\b/.exec(
     text
@@ -2580,8 +2605,18 @@ export class Qualification {
     this.runtime(this.aux, "aux-down-rosetta", ["runtime", "down", "--json"]);
   }
 
-  /** Footprint and CPU of this home's provider processes. */
+  /**
+   * Footprint and CPU of this home's provider processes. `footprint_mib` is the kernel's
+   * `phys_footprint` of the pool's provider process (`runtime status`); `footprint_tool_mib`
+   * sums what `footprint` or `top` report per provider process, for comparison.
+   */
   sample(label: string): Record<string, unknown> {
+    const status = this.runtime(this.main, `status-${label}`, [
+      "runtime",
+      "status",
+      "--json",
+    ]);
+    const kernel = kernelProviderMemory(status);
     const rows = this.processes(this.main);
     let footprint = 0;
     let measured = true;
@@ -2622,7 +2657,9 @@ export class Qualification {
         rss_kib: row.rssKib,
         command: row.command.split(" ").slice(0, 2).join(" "),
       })),
-      footprint_mib: measured ? round(footprint / 1024 / 1024) : null,
+      footprint_mib: kernel ? round(kernel.footprint / 1024 / 1024) : null,
+      resident_mib: kernel ? round(kernel.resident / 1024 / 1024) : null,
+      footprint_tool_mib: measured ? round(footprint / 1024 / 1024) : null,
       rss_mib: round(rows.reduce((sum, row) => sum + row.rssKib, 0) / 1024),
       cpu_seconds: rows.reduce((sum, row) => sum + row.cpuSeconds, 0),
     };
@@ -2758,6 +2795,8 @@ export class Qualification {
       );
       this.measure(`idle_${minute}m`, {
         footprint_mib: before.footprint_mib,
+        resident_mib: before.resident_mib,
+        footprint_tool_mib: before.footprint_tool_mib,
         rss_mib: before.rss_mib,
         cpu_percent_over_30s: cpu,
         processes: before.processes,

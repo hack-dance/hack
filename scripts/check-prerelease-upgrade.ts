@@ -105,13 +105,17 @@ export const PUBLISHED_RELEASES: Readonly<
     manager: "df75f28ef2fdd892e9d17f5528171117488b426a2fe9140ac3dd9add924ae45a",
     archive: "a0d36c68d0e670a2d9b8dfad895136a17fa6706fc7b84072a962afa6d1994f51",
   },
+  "5.0.0-next.23": {
+    manager: "c9cc02744bf801986f8962699fe633566790cb3a6e7bfff2beb0536107a56b66",
+    archive: "c17cb20bfe955fb188273701f8e39016cd7e4394ebc6cb7a1714959ff2a842a4",
+  },
 };
 
 /**
  * The same pins for the Linux assets (`SHA256SUMS-linux`), per release and
  * platform. Kept beside `PUBLISHED_RELEASES`, whose entries stay the macOS
- * pair. Empty until the first release with Linux assets publishes; add both
- * platforms then, and each manager to `REVIEWED_PREDECESSORS`.
+ * pair. 5.0.0-next.23 is the first release with Linux assets. Add both
+ * platforms for each release, and each manager to `REVIEWED_PREDECESSORS`.
  */
 export const PUBLISHED_LINUX_RELEASES: Readonly<
   Record<
@@ -125,7 +129,22 @@ export const PUBLISHED_LINUX_RELEASES: Readonly<
       >
     >
   >
-> = {};
+> = {
+  "5.0.0-next.23": {
+    "linux-x86_64": {
+      manager:
+        "e946ba95a49018b0eff8ff81161d1ccf1a086627773e62a30db53e4e94c9195b",
+      archive:
+        "21a3709c8b78adaa1f399b3c91d3213862fc51cfaefbf0a0e6d06ff76fd7bb6f",
+    },
+    "linux-arm64": {
+      manager:
+        "be1599a85cd4251df4a9779f2e7fa16480094ebb48ec97ca4e9dad6dd73d0094",
+      archive:
+        "6874a73a1cea9410527b4831ffec7a46c4bccb28312620adfd335e0fb01d40de",
+    },
+  },
+};
 
 /** The reviewed manager and archive digests of `version` for `platform`. */
 export function publishedPins(

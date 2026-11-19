@@ -21,6 +21,14 @@ declined or the run could not prompt (it then prints the steps). It exits 1 when
 a root step you confirmed failed, naming that step. The log line
 `Linux DNS result:` says `configured`, `skipped` or `failed`.
 
+It exits non-zero, and names the container, when a container of the proxy or
+logging stack is not running a moment after it started (for example CoreDNS,
+Loki or Grafana, which do not run as root and stop with `permission denied` when
+they cannot read their config under `~/.hack`). Each install sets the few configs
+those containers read to 0644, and the Grafana dashboards directory to 0755,
+whatever your umask; nothing secret is among them. See
+[troubleshooting](../versions/v5/troubleshooting.md).
+
 ## DNS
 
 Hack detects how the host resolves names and acts on the result:

@@ -1493,3 +1493,201 @@ test(
   },
   { timeout: 20_000 }
 );
+
+/** `docker compose ps --all --format json` for one stack, one line per service. */
+function composePsLines(
+  services: Readonly<Record<string, { state: string; exitCode?: number }>>,
+  project: string
+): string {
+  return Object.entries(services)
+    .map(([service, { state, exitCode }]) =>
+      JSON.stringify({
+        Name: `${project}-${service}-1`,
+        Service: service,
+        State: state,
+        ExitCode: exitCode ?? 0,
+      })
+    )
+    .join("\n");
+}
+
+for (const [stage, exited, wanted, unwanted] of [
+  [
+    "routing",
+    "coredns",
+    "Global install did not finish: the global proxy (Caddy and CoreDNS) did not start.",
+    "the proxy is up, but the logging stack",
+  ],
+  [
+    "logging",
+    "grafana",
+    "Global install did not finish: the proxy is up, but the logging stack (Grafana, Loki, Alloy) did not start.",
+    "the global proxy (Caddy and CoreDNS) did not start",
+  ],
+] as const) {
+  test(
+    `global install fails and names the container when a ${stage} container has exited after a successful start (HACK-2381)`,
+    async () => {
+      await writeInstallStubs();
+      const caddyCompose = globalCaddyComposePath();
+      execMockResponder = (cmd) => {
+        if (
+          cmd[0] === "docker" &&
+          cmd[1] === "compose" &&
+          cmd.includes("ps") &&
+          cmd.includes("--all")
+        ) {
+          const routing = cmd.includes(caddyCompose);
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: routing
+              ? composePsLines(
+                  {
+                    caddy: { state: "running" },
+                    coredns:
+                      exited === "coredns"
+                        ? { state: "exited", exitCode: 1 }
+                        : { state: "running" },
+                  },
+                  "hack-dev-proxy"
+                )
+              : composePsLines(
+                  {
+                    loki: { state: "running" },
+                    alloy: { state: "running" },
+                    grafana: { state: "exited", exitCode: 1 },
+                  },
+                  "hack-logging"
+                ),
+          };
+        }
+        return null;
+      };
+
+      const { code, output } = await runNonInteractiveInstall();
+
+      expect(code).not.toBe(0);
+      const container =
+        exited === "coredns"
+          ? "hack-dev-proxy-coredns-1"
+          : "hack-logging-grafana-1";
+      expect(output).toContain(`${container} (exited, exit code 1)`);
+      expect(output).toContain(`docker logs --tail 50 ${container}`);
+      expect(output).toContain(wanted);
+      expect(output).not.toContain(unwanted);
+      // Compose said the start worked; that is no longer taken as "up".
+      expect(output).not.toContain("Global infra is up");
+      expect(output).not.toContain("Next:");
+    },
+    { timeout: 20_000 }
+  );
+}
+
+test(
+  "global install succeeds when every container is still running after the start (HACK-2381)",
+  async () => {
+    await writeInstallStubs();
+    const caddyCompose = globalCaddyComposePath();
+    let looks = 0;
+    execMockResponder = (cmd) => {
+      if (
+        cmd[0] === "docker" &&
+        cmd[1] === "compose" &&
+        cmd.includes("ps") &&
+        cmd.includes("--all")
+      ) {
+        looks++;
+        return {
+          exitCode: 0,
+          stderr: "",
+          stdout: cmd.includes(caddyCompose)
+            ? composePsLines(
+                { caddy: { state: "running" }, coredns: { state: "running" } },
+                "hack-dev-proxy"
+              )
+            : composePsLines(
+                {
+                  loki: { state: "running" },
+                  alloy: { state: "running" },
+                  grafana: { state: "running" },
+                },
+                "hack-logging"
+              ),
+        };
+      }
+      return null;
+    };
+
+    const { code, output } = await runNonInteractiveInstall();
+
+    expect(code).toBe(0);
+    expect(output).toContain("Global infra is up");
+    // Both stacks were watched for the whole settle window, not looked at once.
+    expect(looks).toBeGreaterThanOrEqual(6);
+  },
+  { timeout: 30_000 }
+);
+
+test(
+  "global install writes container-read configs world-readable under a strict umask, repairs tight ones, and keeps the rest private (HACK-2381)",
+  async () => {
+    await writeInstallStubs();
+    const { stat } = await import("node:fs/promises");
+    const mode = async (path: string) => (await stat(path)).mode & 0o777;
+    const caddyDir = dirname(globalCaddyComposePath());
+    const loggingDir = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_LOGGING_DIR_NAME
+    );
+    const readable = {
+      [join(caddyDir, "Corefile")]: 0o644,
+      [join(loggingDir, "loki.yaml")]: 0o644,
+      [join(
+        loggingDir,
+        "grafana/provisioning/datasources/hack-datasources.yaml"
+      )]: 0o644,
+      [join(
+        loggingDir,
+        "grafana/provisioning/dashboards/hack-dashboards.yaml"
+      )]: 0o644,
+      [join(loggingDir, "grafana/dashboards")]: 0o755,
+      [join(loggingDir, "grafana/dashboards/hack-logs.json")]: 0o644,
+    };
+    const previous = process.umask(0o077);
+    try {
+      expect((await runNonInteractiveInstall()).code).toBe(0);
+      for (const [path, wanted] of Object.entries(readable)) {
+        expect([path, await mode(path)]).toEqual([path, wanted]);
+      }
+      // Everything else keeps what the strict umask gave it: the stack
+      // directories, the Compose files, the Alloy config and the schemas.
+      for (const [path, wanted] of [
+        [caddyDir, 0o700],
+        [loggingDir, 0o700],
+        [globalCaddyComposePath(), 0o600],
+        [join(loggingDir, GLOBAL_LOGGING_COMPOSE_FILENAME), 0o600],
+        [join(loggingDir, "alloy.alloy"), 0o600],
+        [join(loggingDir, "grafana"), 0o700],
+        [join(loggingDir, "grafana/provisioning"), 0o700],
+        [join(loggingDir, "grafana/provisioning/datasources"), 0o700],
+      ] as const) {
+        expect([path, await mode(path)]).toEqual([path, wanted]);
+      }
+
+      // Repair: files an earlier run left owner-only are reset by a rerun
+      // even though their content did not change.
+      for (const [path, wanted] of Object.entries(readable)) {
+        await chmod(path, wanted === 0o755 ? 0o700 : 0o600);
+      }
+      expect((await runNonInteractiveInstall()).code).toBe(0);
+      for (const [path, wanted] of Object.entries(readable)) {
+        expect([path, await mode(path)]).toEqual([path, wanted]);
+      }
+    } finally {
+      process.umask(previous);
+    }
+  },
+  { timeout: 30_000 }
+);

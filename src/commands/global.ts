@@ -88,7 +88,16 @@ import {
   writeTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import {
+  containerReadableGlobalPaths,
+  ensureContainerReadable,
+} from "../lib/global-container-config.ts";
 import { describeProxyNetworkIssue } from "../lib/global-proxy-network.ts";
+import {
+  describeContainersNotRunning,
+  parseComposePs,
+  watchStartedContainers,
+} from "../lib/global-stack-state.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import {
@@ -1206,6 +1215,15 @@ async function materializeGlobalInstallFiles(opts: {
     paths: opts.paths,
     useStaticIps: opts.useStaticIps,
   });
+  // After the writes, and on every install whether or not a file changed:
+  // the configs that non-root containers read must not depend on the umask
+  // this run, or an earlier one, happened to have (HACK-2381).
+  await ensureContainerReadable(
+    containerReadableGlobalPaths({
+      ...opts.paths,
+      grafanaDashboardsDir: dirname(opts.paths.grafanaDashboard),
+    })
+  );
 }
 
 async function ensureGlobalInstallDirectories(opts: {
@@ -1921,6 +1939,47 @@ async function reportProxyStartFailure(opts: {
   });
 }
 
+/**
+ * After a successful `docker compose up -d`: watches the stack's containers
+ * briefly and reports any that are not running, by name (HACK-2381). `up -d`
+ * exits 0 for a container that starts and then fails at once, so without
+ * this a stack with exited containers was reported as up. Returns whether a
+ * container was found not running. No answer from Docker is not a finding.
+ */
+async function globalContainersNotRunning(opts: {
+  readonly composeFile: string;
+  readonly stack: string;
+}): Promise<boolean> {
+  const stopped = await watchStartedContainers({
+    read: async () => {
+      const ps = await exec(
+        [
+          "docker",
+          "compose",
+          "-f",
+          opts.composeFile,
+          "ps",
+          "--all",
+          "--format",
+          "json",
+        ],
+        { stdin: "ignore" }
+      );
+      return ps.exitCode === 0 ? parseComposePs(ps.stdout) : [];
+    },
+  });
+  if (stopped.length === 0) {
+    return false;
+  }
+  logger.error({
+    message: [
+      describeContainersNotRunning({ stack: opts.stack, containers: stopped }),
+      'If a log says "permission denied" for a file under ~/.hack, run: hack global install (it resets the modes of the configs containers read).',
+    ].join("\n"),
+  });
+  return true;
+}
+
 /** Which part of `hack global up` failed, for install's decision (HACK-2328). */
 type GlobalUpResult = {
   readonly exit: number;
@@ -2039,6 +2098,13 @@ async function runGlobalUp(): Promise<GlobalUpResult> {
     });
     return { exit: 1, failedStage: "routing" };
   }
+  const stoppedRouting = await globalContainersNotRunning({
+    composeFile: paths.caddyCompose,
+    stack: "The global proxy (Caddy and CoreDNS)",
+  });
+  if (stoppedRouting) {
+    return { exit: 1, failedStage: "routing" };
+  }
   await reconcileGlobalRoutingBridge({ enabled: !login });
 
   const loggingArguments = globalLoggingUpArguments({
@@ -2052,6 +2118,13 @@ async function runGlobalUp(): Promise<GlobalUpResult> {
     });
     if (logExit !== 0) {
       return { exit: logExit, failedStage: "logging" };
+    }
+    const stoppedLogging = await globalContainersNotRunning({
+      composeFile: paths.loggingCompose,
+      stack: "The logging stack (Grafana, Loki, Alloy)",
+    });
+    if (stoppedLogging) {
+      return { exit: 1, failedStage: "logging" };
     }
   }
 

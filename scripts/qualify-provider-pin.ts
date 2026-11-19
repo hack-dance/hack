@@ -2251,6 +2251,9 @@ export class Qualification {
           passed: this.passed,
           failed: this.failed,
           recorded: this.recorded,
+          // With --caddy every step runs with the HTTPS frontend, so timings from runs
+          // with and without it are not comparable.
+          https: this.options.caddy !== null,
           measurements: this.measurements,
         },
         null,

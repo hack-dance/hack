@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import {
   countJsonValues,
   groupWritableAncestors,
+  installedLauncher,
   parseCheckArgs,
   pathWithoutHack,
   renderStepTable,
@@ -122,5 +123,67 @@ test("reports scratch ancestors other users can write, ignoring sticky ones", as
     expect(found).toEqual([shared]);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("installer mode installs under the check's HOME and validates its local inputs", () => {
+  const digest = "a".repeat(64);
+  // The installer's default root, in the HOME the check creates under scratch.
+  const launcher = ["/tmp/s", "home", ".hack-next", "bin", "hack-next"].join(
+    "/"
+  );
+  expect(installedLauncher("/tmp/s")).toBe(launcher);
+  expect(
+    parseCheckArgs(["--installer", "/x/install.sh", "--scratch", "/tmp/s"])
+  ).toEqual({
+    hack: launcher,
+    scratch: "/tmp/s",
+    oneShotSeconds: 150,
+    reuseGlobalStack: false,
+    keep: false,
+    installer: { path: "/x/install.sh" },
+  });
+  expect(
+    parseCheckArgs([
+      "--scratch",
+      "/tmp/s",
+      "--installer",
+      "/x/install.sh",
+      "--archive",
+      "/x/bundle.tar.gz",
+      "--sha256",
+      digest,
+      "--manager",
+      "/x/manager",
+      "--reuse-global-stack",
+    ]).installer
+  ).toEqual({
+    path: "/x/install.sh",
+    archive: "/x/bundle.tar.gz",
+    sha256: digest,
+    manager: "/x/manager",
+  });
+  for (const [args, message] of [
+    [["--installer", "/x/i.sh", "--hack", "/x/hack"], "not both"],
+    [["--installer", "i.sh"], "--installer with an absolute path"],
+    [
+      ["--hack", "/x/hack", "--archive", "/x/a", "--sha256", digest],
+      "need --installer",
+    ],
+    [["--installer", "/x/i.sh", "--archive", "/x/a"], "go together"],
+    [["--installer", "/x/i.sh", "--sha256", digest], "go together"],
+    [
+      ["--installer", "/x/i.sh", "--archive", "a", "--sha256", digest],
+      "absolute paths",
+    ],
+    [
+      ["--installer", "/x/i.sh", "--archive", "/x/a", "--sha256", "ABC"],
+      "lowercase SHA-256",
+    ],
+    [["--installer", "/x/i.sh", "--manager", "manager"], "absolute paths"],
+  ] as const) {
+    expect(() => parseCheckArgs([...args, "--scratch", "/tmp/s"])).toThrow(
+      message
+    );
   }
 });

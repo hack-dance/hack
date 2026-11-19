@@ -21,8 +21,21 @@
  * candidate assets changed while it ran.
  *
  * Inputs: HACK_PRERELEASE_VERSION, HACK_PRERELEASE_OUTPUT (the packaged candidate
- * assets) and a GitHub token for `gh` (GH_TOKEN). Runs on Apple Silicon macOS
- * only; it starts no runtime and changes nothing outside its own temp directory.
+ * assets) and a GitHub token for `gh` (GH_TOKEN). It starts no runtime and
+ * changes nothing outside its own temp directory.
+ *
+ * It gates the host's platform. On Apple Silicon macOS that is the native
+ * bundle. On Linux x86_64 or arm64 it is the Compose bundle, with that
+ * platform's manager and archive (HACK_PRERELEASE_OUTPUT is then the Linux
+ * build job's package directory). Which Linux leg runs is decided from reviewed
+ * history, `PUBLISHED_LINUX_RELEASES`, never from what a release's asset list
+ * happens to hold (see `linuxGateDecision`). While that history is empty and
+ * the previous release has no Linux assets, there is no Linux install to
+ * upgrade: the gate says so and instead installs the candidate into a fresh
+ * channel, deselects, selects, rolls back and uninstalls it. Once a Linux
+ * release is in reviewed history, the previous release must be pinned and its
+ * assets present, and the gate upgrades that install with its retained
+ * manager, as on macOS.
  */
 import {
   chmodSync,
@@ -36,10 +49,18 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REVIEWED_PREDECESSORS } from "./installer/channel.ts";
+import { LINUX_SUMS } from "./installer/download.ts";
 import {
+  type BundlePlatform,
+  bundleArchiveName,
   candidateVersion,
   compareCandidateVersions,
+  composeOnly,
   digest,
+  hostBundlePlatform,
+  type LINUX_BUNDLE_PLATFORMS,
+  managerAssetName,
+  UNSUPPORTED_HOST,
 } from "./installer/integrity.ts";
 
 const REPOSITORY = "hack-dance/hack";
@@ -85,6 +106,36 @@ export const PUBLISHED_RELEASES: Readonly<
     archive: "a0d36c68d0e670a2d9b8dfad895136a17fa6706fc7b84072a962afa6d1994f51",
   },
 };
+
+/**
+ * The same pins for the Linux assets (`SHA256SUMS-linux`), per release and
+ * platform. Kept beside `PUBLISHED_RELEASES`, whose entries stay the macOS
+ * pair. Empty until the first release with Linux assets publishes; add both
+ * platforms then, and each manager to `REVIEWED_PREDECESSORS`.
+ */
+export const PUBLISHED_LINUX_RELEASES: Readonly<
+  Record<
+    string,
+    Readonly<
+      Partial<
+        Record<
+          (typeof LINUX_BUNDLE_PLATFORMS)[number],
+          { readonly manager: string; readonly archive: string }
+        >
+      >
+    >
+  >
+> = {};
+
+/** The reviewed manager and archive digests of `version` for `platform`. */
+export function publishedPins(
+  version: string,
+  platform: BundlePlatform
+): { readonly manager: string; readonly archive: string } | undefined {
+  return platform === "darwin-arm64"
+    ? PUBLISHED_RELEASES[version]
+    : PUBLISHED_LINUX_RELEASES[version]?.[platform];
+}
 
 /** A fixed environment for the managers: no token, output path or caller state. */
 function managerEnvironment(work: string): Record<string, string> {
@@ -169,6 +220,258 @@ function required(step: Step, what: string): string {
   return step.output;
 }
 
+type LinuxPins = typeof PUBLISHED_LINUX_RELEASES;
+
+/**
+ * Which Linux leg the gate runs, decided from reviewed history.
+ *
+ * - `fresh`: no Linux release is in reviewed history (`history` is empty) and
+ *   the previous release has no Linux manager asset. Nothing can be upgraded.
+ * - `upgrade`: the previous release is pinned for this platform and has its
+ *   Linux manager asset.
+ *
+ * Everything else refuses. In particular a missing asset is never read as
+ * "Linux has not shipped yet": once any Linux release is pinned, a previous
+ * release without a pin, or a pinned one whose asset is gone, fails the gate.
+ * A previous release that has Linux assets but no pin fails too, whatever the
+ * history holds, so the pin chore cannot be skipped after the first release.
+ */
+export function linuxGateDecision(opts: {
+  readonly previous: string | null;
+  readonly platform: (typeof LINUX_BUNDLE_PLATFORMS)[number];
+  /** Whether the previous release lists this platform's manager asset. */
+  readonly previousHasManagerAsset: boolean;
+  readonly history?: LinuxPins;
+}):
+  | { readonly leg: "fresh" }
+  | {
+      readonly leg: "upgrade";
+      readonly previous: string;
+      readonly pins: { readonly manager: string; readonly archive: string };
+    } {
+  const history = opts.history ?? PUBLISHED_LINUX_RELEASES;
+  const where =
+    "PUBLISHED_LINUX_RELEASES in scripts/check-prerelease-upgrade.ts";
+  const pins =
+    opts.previous === null
+      ? undefined
+      : history[opts.previous]?.[opts.platform];
+  if (opts.previous !== null && pins !== undefined) {
+    if (!opts.previousHasManagerAsset) {
+      throw new Error(
+        `${opts.previous} is a reviewed ${opts.platform} release (${where}) but its ${managerAssetName(opts.platform)} asset is missing. A published Linux install cannot be upgraded without it; restore the release's assets or resolve this in review. The gate does not fall back to a fresh install.`
+      );
+    }
+    return { leg: "upgrade", previous: opts.previous, pins };
+  }
+  if (opts.previousHasManagerAsset) {
+    throw new Error(
+      `${String(opts.previous)} has ${opts.platform} assets but is not pinned (${where}); add its published manager and archive digests in review before this gate runs it.`
+    );
+  }
+  const reviewed = Object.keys(history).sort((a, b) =>
+    compareCandidateVersions(a, b)
+  );
+  if (reviewed.length > 0) {
+    throw new Error(
+      `Linux releases are in reviewed history (${where}, latest ${reviewed.at(-1)}), but the previous prerelease ${String(opts.previous)} has no reviewed ${opts.platform} pin and no ${opts.platform} assets. That is not a first Linux release; pin the previous release or resolve the missing assets in review.`
+    );
+  }
+  return { leg: "fresh" };
+}
+
+/**
+ * The Linux gate when no published Linux install precedes the candidate:
+ * install the candidate into a fresh channel with its own manager and take it
+ * through every selection change a user can make, ending with an uninstall
+ * that leaves no channel root. `manager` and `archive` are the gate's copies.
+ */
+export function freshChannelLeg(opts: {
+  readonly work: string;
+  readonly manager: string;
+  readonly archive: string;
+  readonly checksum: string;
+  readonly version: string;
+}): void {
+  const env = managerEnvironment(opts.work);
+  for (const directory of [env.HOME, env.TMPDIR]) {
+    mkdirSync(directory as string, { mode: 0o700, recursive: true });
+  }
+  const root = join(opts.work, "channel");
+  const launcher = join(root, "bin/hack-next");
+  const selected = (output: string): unknown =>
+    (JSON.parse(output.split("\n").at(-1) ?? "") as { selected?: unknown })
+      .selected;
+  chmodSync(opts.manager, 0o700);
+  required(
+    step(
+      [
+        opts.manager,
+        "--root",
+        root,
+        "install",
+        "--version",
+        opts.version,
+        "--archive",
+        opts.archive,
+        "--sha256",
+        opts.checksum,
+      ],
+      600_000,
+      env
+    ),
+    `Installing ${opts.version} into a fresh channel`
+  );
+  const manager = (args: readonly string[], want: string | null) => {
+    const what = `hack-next --manager ${args.join(" ")}`;
+    const output = required(
+      step([launcher, "--manager", ...args], 600_000, env),
+      what
+    );
+    if (selected(output) !== want) {
+      throw new Error(
+        `${what} left ${String(selected(output))} selected, not ${String(want)}.`
+      );
+    }
+  };
+  manager(["status"], opts.version);
+  const reported = required(
+    step([launcher, "--version"], 120_000, env),
+    "hack-next --version"
+  );
+  if (reported !== `hack v${opts.version}`) {
+    throw new Error(`The installed candidate reports "${reported}".`);
+  }
+  manager(["stable"], null);
+  manager(["select", "--version", opts.version], opts.version);
+  manager(["stable"], null);
+  manager(["rollback"], opts.version);
+  const removed = JSON.parse(
+    required(
+      step([launcher, "--manager", "uninstall", "--apply"], 600_000, env),
+      "hack-next --manager uninstall --apply"
+    )
+  ) as { applied?: unknown; to?: unknown };
+  if (
+    removed.applied !== true ||
+    typeof removed.to !== "string" ||
+    readdirSync(opts.work).includes("channel") ||
+    !readdirSync(opts.work).includes(removed.to.split("/").at(-1) ?? "")
+  ) {
+    throw new Error(
+      "Uninstall did not move the whole channel to its retained sibling."
+    );
+  }
+}
+
+/**
+ * The upgrade itself, on any platform: install the previous release into a
+ * fresh channel with its own manager, then upgrade it to the candidate with
+ * the documented command, which runs the retained previous manager. Returns
+ * the gate's exit code. `unchanged` must throw if the candidate assets that
+ * will be uploaded changed. Every file here is already verified by the caller.
+ */
+export function upgradeLeg(opts: {
+  readonly work: string;
+  readonly previous: string;
+  readonly previousManager: string;
+  readonly previousArchive: string;
+  readonly previousSum: string;
+  readonly candidate: string;
+  readonly candidateManager: string;
+  readonly candidateArchive: string;
+  readonly candidateSum: string;
+  readonly unchanged: () => void;
+  readonly acceptManagerStep: boolean;
+}): number {
+  const {
+    work,
+    previous,
+    previousManager,
+    previousArchive,
+    previousSum,
+    candidate,
+    candidateManager,
+    candidateArchive,
+    candidateSum,
+    unchanged,
+  } = opts;
+  const env = managerEnvironment(work);
+  mkdirSync(env.HOME as string, { mode: 0o700 });
+  mkdirSync(env.TMPDIR as string, { mode: 0o700 });
+  const root = join(work, "channel");
+  required(
+    step(
+      [
+        previousManager,
+        "--root",
+        root,
+        "install",
+        "--version",
+        previous,
+        "--archive",
+        previousArchive,
+        "--sha256",
+        previousSum,
+      ],
+      600_000,
+      env
+    ),
+    `Installing ${previous} with its own manager`
+  );
+  const upgrade = () =>
+    step(
+      [
+        join(root, "bin/hack-next"),
+        "--manager",
+        "upgrade",
+        "--version",
+        candidate,
+        "--archive",
+        candidateArchive,
+        "--sha256",
+        candidateSum,
+      ],
+      600_000,
+      env
+    );
+  const direct = upgrade();
+  unchanged();
+  if (direct.ok) {
+    console.log(
+      `The ${previous} manager upgrades its channel to ${candidate} with the documented command.`
+    );
+    return 0;
+  }
+  console.error(
+    `The ${previous} manager cannot upgrade its channel to ${candidate}: ${direct.output}`
+  );
+  chmodSync(candidateManager, 0o700);
+  const takeover = step(
+    [candidateManager, "--root", root, "upgrade-manager"],
+    600_000,
+    env
+  );
+  const retried = takeover.ok ? upgrade() : null;
+  unchanged();
+  if (!(takeover.ok && retried?.ok)) {
+    console.error(
+      `The documented upgrade-manager step does not work either: ${takeover.ok ? retried?.output : takeover.output}`
+    );
+    return 1;
+  }
+  if (opts.acceptManagerStep) {
+    console.log(
+      `Accepted: ${previous} users must run the ${candidate} standalone manager's upgrade-manager first; the release notes must say so.`
+    );
+    return 0;
+  }
+  console.error(
+    `The documented upgrade-manager step works. Publish only with HACK_PRERELEASE_ACCEPT_MANAGER_STEP=1 and release notes that tell ${previous} users to run it.`
+  );
+  return 1;
+}
+
 async function main(): Promise<number> {
   const candidate = process.env.HACK_PRERELEASE_VERSION ?? "";
   const output = process.env.HACK_PRERELEASE_OUTPUT ?? "";
@@ -176,6 +479,17 @@ async function main(): Promise<number> {
   if (!output) {
     throw new Error("HACK_PRERELEASE_OUTPUT is required.");
   }
+  const platform = hostBundlePlatform();
+  if (platform === null) {
+    throw new Error(UNSUPPORTED_HOST);
+  }
+  const linux = composeOnly(platform);
+  // The names below are the host platform's; on macOS they are the constants
+  // this gate has always used.
+  const MANAGER_ASSET = managerAssetName(platform);
+  const archiveName = (version: string) => bundleArchiveName(version, platform);
+  const SUMS = linux ? LINUX_SUMS : "SHA256SUMS";
+  const INSTALLER_SUMS = linux ? LINUX_SUMS : "INSTALLER-SHA256SUMS";
   const tags = required(
     step(
       [
@@ -191,7 +505,7 @@ async function main(): Promise<number> {
     "Listing published releases"
   ).split("\n");
   const previous = previousPrerelease(tags, candidate);
-  if (previous === null) {
+  if (previous === null && !linux) {
     console.log(
       `No published prerelease precedes ${candidate}; nothing to upgrade.`
     );
@@ -201,6 +515,59 @@ async function main(): Promise<number> {
   // a link to /private/var.
   const work = realpathSync(mkdtempSync(join(tmpdir(), "hack-upgrade-gate-")));
   try {
+    // Linux: reviewed history decides the leg. The asset list is read only to
+    // refuse inconsistencies with it, never to conclude that Linux is new.
+    const decision =
+      platform === "darwin-arm64"
+        ? null
+        : linuxGateDecision({
+            previous,
+            platform,
+            previousHasManagerAsset:
+              previous !== null &&
+              required(
+                step(
+                  [
+                    "gh",
+                    "api",
+                    `repos/${REPOSITORY}/releases/tags/v${previous}`,
+                    "--jq",
+                    ".assets[].name",
+                  ],
+                  120_000
+                ),
+                `Listing the assets of ${previous}`
+              )
+                .split("\n")
+                .includes(MANAGER_ASSET),
+          });
+    if (decision?.leg === "fresh") {
+      const before = snapshot(output);
+      const copies = join(work, "candidate");
+      mkdirSync(copies, { mode: 0o700 });
+      for (const name of [MANAGER_ASSET, archiveName(candidate)]) {
+        copyFileSync(join(output, name), join(copies, name));
+      }
+      freshChannelLeg({
+        work,
+        manager: join(copies, MANAGER_ASSET),
+        archive: join(copies, archiveName(candidate)),
+        checksum: digest(join(copies, archiveName(candidate))),
+        version: candidate,
+      });
+      if (JSON.stringify(snapshot(output)) !== JSON.stringify(before)) {
+        throw new Error(
+          "The candidate assets changed while the upgrade gate ran; do not publish them."
+        );
+      }
+      console.log(
+        `No ${platform} release is in reviewed history (PUBLISHED_LINUX_RELEASES is empty) and ${previous === null ? "no published prerelease precedes this one" : `the previous prerelease ${previous} has no ${platform} assets`}, so no published ${platform} install precedes ${candidate}: there is nothing to upgrade. Instead ${candidate} was installed into a fresh channel, deselected, selected, rolled back and uninstalled with its own manager.`
+      );
+      return 0;
+    }
+    if (previous === null) {
+      throw new Error("No previous prerelease.");
+    }
     const assets = join(work, "previous");
     required(
       step(
@@ -216,11 +583,11 @@ async function main(): Promise<number> {
           "--pattern",
           MANAGER_ASSET,
           "--pattern",
-          "INSTALLER-SHA256SUMS",
+          INSTALLER_SUMS,
           "--pattern",
           archiveName(previous),
           "--pattern",
-          "SHA256SUMS",
+          SUMS,
         ],
         600_000
       ),
@@ -231,18 +598,20 @@ async function main(): Promise<number> {
     const sums = (name: string) => Bun.file(join(assets, name)).text();
     // The release's own checksum files are only a consistency check: they
     // live beside the assets. Execution needs this release's reviewed pins.
-    const pins = PUBLISHED_RELEASES[previous];
+    const pins =
+      decision?.leg === "upgrade"
+        ? decision.pins
+        : publishedPins(previous, platform);
     if (pins === undefined) {
       throw new Error(
-        `${previous} is not pinned (PUBLISHED_RELEASES in scripts/check-prerelease-upgrade.ts); add its published manager and archive digests in review before this gate runs it.`
+        `${previous} is not pinned (${linux ? `PUBLISHED_LINUX_RELEASES, ${platform},` : "PUBLISHED_RELEASES"} in scripts/check-prerelease-upgrade.ts); add its published manager and archive digests in review before this gate runs it.`
       );
     }
     const managerDigest = digest(previousManager);
     if (
       managerDigest !== pins.manager ||
       !REVIEWED_PREDECESSORS.includes(managerDigest) ||
-      listedDigest(await sums("INSTALLER-SHA256SUMS"), MANAGER_ASSET) !==
-        pins.manager
+      listedDigest(await sums(INSTALLER_SUMS), MANAGER_ASSET) !== pins.manager
     ) {
       throw new Error(
         `${previous}'s manager does not match its pin or is not a reviewed predecessor (REVIEWED_PREDECESSORS in scripts/installer/channel.ts).`
@@ -251,8 +620,7 @@ async function main(): Promise<number> {
     const previousSum = pins.archive;
     if (
       digest(previousArchive) !== previousSum ||
-      listedDigest(await sums("SHA256SUMS"), archiveName(previous)) !==
-        previousSum
+      listedDigest(await sums(SUMS), archiveName(previous)) !== previousSum
     ) {
       throw new Error(`${previous}'s archive does not match its pin.`);
     }
@@ -267,16 +635,17 @@ async function main(): Promise<number> {
     }
     const candidateManager = join(copies, MANAGER_ASSET);
     const candidateArchive = join(copies, archiveName(candidate));
-    const candidateSum = listedDigest(
-      await Bun.file(join(output, "SHA256SUMS")).text(),
-      archiveName(candidate)
-    );
+    // The Linux build job gates its own package directory, which has no
+    // checksum file yet: the macOS job writes SHA256SUMS-linux afterwards.
+    const candidateSum = linux
+      ? digest(join(output, archiveName(candidate)))
+      : listedDigest(
+          await Bun.file(join(output, SUMS)).text(),
+          archiveName(candidate)
+        );
     if (digest(candidateArchive) !== candidateSum) {
       throw new Error("The candidate archive does not match its checksums.");
     }
-    const env = managerEnvironment(work);
-    mkdirSync(env.HOME as string, { mode: 0o700 });
-    mkdirSync(env.TMPDIR as string, { mode: 0o700 });
     const unchanged = () => {
       if (JSON.stringify(snapshot(output)) !== JSON.stringify(before)) {
         throw new Error(
@@ -284,77 +653,20 @@ async function main(): Promise<number> {
         );
       }
     };
-    const root = join(work, "channel");
-    required(
-      step(
-        [
-          previousManager,
-          "--root",
-          root,
-          "install",
-          "--version",
-          previous,
-          "--archive",
-          previousArchive,
-          "--sha256",
-          previousSum,
-        ],
-        600_000,
-        env
-      ),
-      `Installing ${previous} with its own manager`
-    );
-    const upgrade = () =>
-      step(
-        [
-          join(root, "bin/hack-next"),
-          "--manager",
-          "upgrade",
-          "--version",
-          candidate,
-          "--archive",
-          candidateArchive,
-          "--sha256",
-          candidateSum,
-        ],
-        600_000,
-        env
-      );
-    const direct = upgrade();
-    unchanged();
-    if (direct.ok) {
-      console.log(
-        `The ${previous} manager upgrades its channel to ${candidate} with the documented command.`
-      );
-      return 0;
-    }
-    console.error(
-      `The ${previous} manager cannot upgrade its channel to ${candidate}: ${direct.output}`
-    );
-    chmodSync(candidateManager, 0o700);
-    const takeover = step(
-      [candidateManager, "--root", root, "upgrade-manager"],
-      600_000,
-      env
-    );
-    const retried = takeover.ok ? upgrade() : null;
-    unchanged();
-    if (!(takeover.ok && retried?.ok)) {
-      console.error(
-        `The documented upgrade-manager step does not work either: ${takeover.ok ? retried?.output : takeover.output}`
-      );
-      return 1;
-    }
-    if (process.env.HACK_PRERELEASE_ACCEPT_MANAGER_STEP === "1") {
-      console.log(
-        `Accepted: ${previous} users must run the ${candidate} standalone manager's upgrade-manager first; the release notes must say so.`
-      );
-      return 0;
-    }
-    console.error(
-      `The documented upgrade-manager step works. Publish only with HACK_PRERELEASE_ACCEPT_MANAGER_STEP=1 and release notes that tell ${previous} users to run it.`
-    );
-    return 1;
+    return upgradeLeg({
+      work,
+      previous,
+      previousManager,
+      previousArchive,
+      previousSum,
+      candidate,
+      candidateManager,
+      candidateArchive,
+      candidateSum,
+      unchanged,
+      acceptManagerStep:
+        process.env.HACK_PRERELEASE_ACCEPT_MANAGER_STEP === "1",
+    });
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

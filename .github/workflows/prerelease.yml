@@ -61,8 +61,81 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bun scripts/prerelease-plan.ts verify
 
-  build:
+  # HACK-2364: the Compose-only Linux bundle and its manager, built natively on
+  # each architecture (there is no cross build), installed and exercised before
+  # the macOS job packages the release set. It has no write permission and
+  # publishes nothing.
+  build-linux:
+    name: build-linux (${{ matrix.platform }})
     needs: plan
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+    env:
+      HACK_PRERELEASE_LINUX_PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Select isolated build directories
+        run: |
+          printf 'HACK_PRERELEASE_BUNDLE=%s/compose-candidate\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'HACK_PRERELEASE_OUTPUT=%s/prerelease-linux\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'HACK_PRERELEASE_REHEARSAL=%s/rehearsal\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.source_revision }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.4.4"
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - run: bun install --frozen-lockfile
+      - name: Build the Compose-only bundle for this architecture
+        run: scripts/build-compose-candidate.sh "$HACK_PRERELEASE_BUNDLE" "--version=$HACK_PRERELEASE_VERSION"
+      - name: Check the candidate starts its own hackd with the release version
+        run: bun scripts/check-candidate-daemon-identity.ts "$HACK_PRERELEASE_BUNDLE" "$HACK_PRERELEASE_VERSION"
+      - name: Package the verified archive and build this architecture's manager
+        run: bun scripts/prerelease-plan.ts package-linux
+      # The published installer is rendered once, by the macOS job, from all
+      # three manager digests. This one embeds only this job's manager digest;
+      # it is the same script otherwise and is never uploaded.
+      - name: Render a rehearsal installer for this architecture
+        run: bun scripts/prerelease-plan.ts rehearsal-installer
+      # The first release with Linux assets has no previous Linux install: the
+      # gate then installs, deselects, selects, rolls back and uninstalls the
+      # candidate. Later releases upgrade the previous published Linux install.
+      - name: Gate the Linux channel (upgrade, or fresh install for the first Linux release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/check-prerelease-upgrade.ts
+      # Installs through the installer into a clean HOME with no sudo, then
+      # runs the Linux first-run steps through the installed hack-next.
+      - name: Install through the installer and run the Linux first-run check
+        run: |
+          archive="$HACK_PRERELEASE_OUTPUT/hack-$HACK_PRERELEASE_VERSION-$HACK_PRERELEASE_LINUX_PLATFORM-compose.tar.gz"
+          bun scripts/linux-first-run-check.ts \
+            --installer "$HACK_PRERELEASE_REHEARSAL/hack-next-install.sh" \
+            --archive "$archive" \
+            --sha256 "$(sha256sum "$archive" | cut -d ' ' -f 1)" \
+            --manager "$HACK_PRERELEASE_OUTPUT/hack-next-manager-$HACK_PRERELEASE_LINUX_PLATFORM" \
+            --scratch "$RUNNER_TEMP/first-run"
+      - name: Retain this architecture's archive and manager
+        uses: actions/upload-artifact@v4
+        with:
+          name: v5-prerelease-linux-${{ matrix.platform }}-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/prerelease-linux/*
+          if-no-files-found: error
+          retention-days: 14
+
+  build:
+    needs: [plan, build-linux]
     runs-on: macos-15
     timeout-minutes: 60
     permissions:
@@ -72,6 +145,7 @@ jobs:
         run: |
           printf 'HACK_PRERELEASE_BUNDLE=%s/native-candidate\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           printf 'HACK_PRERELEASE_OUTPUT=%s/prerelease-assets\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'HACK_PRERELEASE_LINUX_ASSETS=%s/prerelease-linux\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.plan.outputs.source_revision }}
@@ -97,6 +171,15 @@ jobs:
       # and hackd must report this release version.
       - name: Check the candidate starts its own hackd with the release version
         run: bun scripts/check-candidate-daemon-identity.ts "$HACK_PRERELEASE_BUNDLE" "$HACK_PRERELEASE_VERSION"
+      # One step still renders every checksum file and the installer: the Linux
+      # jobs' archives and managers are verified here and listed in
+      # SHA256SUMS-linux. SHA256SUMS keeps exactly the macOS archive line.
+      - name: Fetch the Linux archives and managers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v5-prerelease-linux-*-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/prerelease-linux
+          merge-multiple: true
       - name: Package verified payload and outer checksum
         run: bun scripts/prerelease-plan.ts package
       # HACK-2262: an existing prerelease channel must be able to take this

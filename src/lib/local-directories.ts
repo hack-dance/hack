@@ -77,8 +77,20 @@ export type ServiceMount = {
   readonly readOnly: boolean;
 };
 
+/**
+ * A short-syntax spec with a variable only in its source and no `:` inside
+ * that variable: the target and mode still split cleanly.
+ */
+const SOURCE_ONLY_VARIABLE = /^[^:]*\$[^:]*:\/[^:$]*(:[A-Za-z,]+)?$/;
+
 function readMount(value: unknown, composeDir: string): ServiceMount | null {
   if (typeof value === "string") {
+    // `..:${APP_DIR:-/app}` has a `:` inside the variable; splitting it
+    // would invent a target. Such a mount is unknown here, so it is
+    // ignored (and `up` says no source bind shows the entry).
+    if (value.includes("$") && !SOURCE_ONLY_VARIABLE.test(value)) {
+      return null;
+    }
     const parts = value.split(":");
     if (parts.length === 1) {
       return {
@@ -99,11 +111,22 @@ function readMount(value: unknown, composeDir: string): ServiceMount | null {
       readOnly: mode.split(",").includes("ro"),
     };
   }
-  if (!(isRecord(value) && typeof value.target === "string")) {
+  if (
+    !(isRecord(value) && typeof value.target === "string") ||
+    value.target.includes("$")
+  ) {
     return null;
   }
   const type = mountType(value.type);
   const source = typeof value.source === "string" ? value.source : undefined;
+  if (type === "bind" && source?.includes("$")) {
+    return {
+      type: "other",
+      source: undefined,
+      target: normalizeTarget(value.target),
+      readOnly: value.read_only === true,
+    };
+  }
   return {
     type,
     source:

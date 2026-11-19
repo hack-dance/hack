@@ -421,3 +421,26 @@ test("a directory that cannot be created is a notice, not a crash", async () => 
     "localDirectories: could not create package.json/cache in the checkout (ENOTDIR); the engine creates it instead.",
   ]);
 });
+
+test("a mount whose target uses a variable is never split or written into the override", () => {
+  const result = plan(
+    {
+      services: {
+        short: { volumes: ["..:${APP_DIR:-/app}"] },
+        long: {
+          volumes: [{ type: "bind", source: "..", target: "${APP_DIR}" }],
+        },
+        // A variable source with a plain target still marks the target taken.
+        taken: { volumes: ["..:/app", "${DEPS}:/app/node_modules"] },
+      },
+    },
+    ["node_modules"]
+  );
+  expect(result.services.short).toBeUndefined();
+  expect(result.services.long).toBeUndefined();
+  expect(result.services.taken).toBeUndefined();
+  expect(result.kept).toEqual([
+    { service: "taken", entry: "node_modules", target: "/app/node_modules" },
+  ]);
+  expect(JSON.stringify(localDirectoriesOverride(result))).not.toContain("$");
+});

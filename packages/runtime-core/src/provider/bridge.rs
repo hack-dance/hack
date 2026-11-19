@@ -87,6 +87,21 @@ impl Request {
     }
 }
 
+/// The lease-free form of [`verify_sockets`]: the same checks, and a world-accessible socket is
+/// refused instead of repaired, so read-only observation changes nothing.
+pub(super) fn observe_sockets(
+    directory: &std::path::Path,
+    intent: BridgeIntent,
+) -> Result<(), CandidateError> {
+    if socket_states_with(directory, intent, false)?.ready() {
+        Ok(())
+    } else {
+        Err(socket_identity())
+    }
+}
+
+/// Verify the pool's bridge sockets, repairing a world-accessible one. Callers hold the
+/// provider's mutation lease (boot, warm start, a leased operation).
 pub(super) fn verify_sockets(
     directory: &std::path::Path,
     intent: BridgeIntent,
@@ -105,12 +120,134 @@ fn socket_identity() -> CandidateError {
     )
 }
 
-fn private_socket(metadata: &std::fs::Metadata, uid: u32) -> Result<bool, CandidateError> {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    if !metadata.file_type().is_socket() || metadata.uid() != uid || metadata.nlink() != 1 {
+fn socket_directory() -> CandidateError {
+    CandidateError::new(
+        "bridge_socket_directory",
+        "The provider socket directory must be an owned directory with no group or other access.",
+    )
+}
+
+/// The provider's per-VM socket directory, opened without following a final symlink and
+/// checked through that descriptor: a directory, ours, with no group or other access.
+/// Only this user can then add, replace or rename an entry in it, which is what makes a
+/// socket's own mode bits safe to repair below.
+fn private_directory(directory: &std::path::Path) -> Result<std::fs::File, CandidateError> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(directory)
+        .map_err(|_| socket_directory())?;
+    let metadata = file.metadata().map_err(|_| socket_directory())?;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    if !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(socket_directory());
+    }
+    Ok(file)
+}
+
+/// One entry of the verified directory, never following a symlink. `None` when absent.
+fn entry(
+    directory: &std::fs::File,
+    name: &std::ffi::CStr,
+) -> Result<Option<libc::stat>, CandidateError> {
+    use std::os::fd::AsRawFd;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
+    // SAFETY: a live directory descriptor, a NUL-terminated name and a correctly sized buffer.
+    let result = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        // SAFETY: fstatat succeeded, so the buffer is initialized.
+        return Ok(Some(unsafe { stat.assume_init() }));
+    }
+    match std::io::Error::last_os_error().kind() {
+        std::io::ErrorKind::NotFound => Ok(None),
+        _ => Err(socket_identity()),
+    }
+}
+
+/// Whether one socket of the verified directory is ours and private, repairing its mode when
+/// only its group or other bits are wrong (HACK-2375).
+///
+/// The pinned provider binds every exposed socket with the VM process's umask at that
+/// moment. Hack starts it with umask 077, but the provider's file-sharing device clears the
+/// umask for the whole process early in each boot, so on a busy host the sockets bound after
+/// that are 0777 for the life of the VM; no wait makes them private. Identity still refuses:
+/// a non-socket, another owner or an extra link is refused, never repaired. Within an owned
+/// 0700 directory only this user can create or replace the entry. The entry is read again
+/// immediately before the change and must still be the same socket inode; the mode change
+/// itself does not follow a symlink; and the entry is read back as that inode, still a
+/// private socket of ours. What remains is the gap between that last read and the system
+/// call, reachable only by a process running as this same user, which could equally rewrite
+/// the pool's disks, as for the disk templates (`disk_template`). `Ok(false)` only when the
+/// mode cannot be set.
+/// The identity checks of [`private_socket`] without any change: whether this owned socket
+/// is already private.
+#[allow(clippy::useless_conversion)]
+fn observe_socket(stat: libc::stat) -> Result<bool, CandidateError> {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    if stat.st_mode & libc::S_IFMT != libc::S_IFSOCK || stat.st_uid != uid || stat.st_nlink != 1 {
         return Err(socket_identity());
     }
-    Ok(metadata.mode() & 0o077 == 0)
+    Ok(u32::from(stat.st_mode) & 0o077 == 0)
+}
+
+// `st_mode` is u16 on macOS and u32 on Linux, so the conversions are needed on the target.
+#[allow(clippy::useless_conversion)]
+fn private_socket(
+    directory: &std::fs::File,
+    name: &std::ffi::CStr,
+    stat: libc::stat,
+) -> Result<bool, CandidateError> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    let identity = |stat: &libc::stat| {
+        stat.st_mode & libc::S_IFMT == libc::S_IFSOCK && stat.st_uid == uid && stat.st_nlink == 1
+    };
+    if !identity(&stat) {
+        return Err(socket_identity());
+    }
+    let mode = u32::from(stat.st_mode) & 0o7777;
+    if mode & 0o077 == 0 {
+        return Ok(true);
+    }
+    let same = |other: &libc::stat| {
+        identity(other) && other.st_dev == stat.st_dev && other.st_ino == stat.st_ino
+    };
+    // The entry must still be the socket just inspected: a replacement since is refused
+    // before anything is changed.
+    if !entry(directory, name)?.is_some_and(|current| same(&current)) {
+        return Err(socket_identity());
+    }
+    // Never follows a symlink (Darwin natively; glibc refuses a symlink and supports the
+    // rest), so a replacement cannot redirect the change.
+    // SAFETY: a live directory descriptor and a NUL-terminated name.
+    let changed = unsafe {
+        libc::fchmodat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            (mode & 0o700) as libc::mode_t,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } == 0;
+    if !changed {
+        return Ok(false);
+    }
+    match entry(directory, name)? {
+        Some(after) if same(&after) && u32::from(after.st_mode) & 0o077 == 0 => Ok(true),
+        _ => Err(socket_identity()),
+    }
 }
 
 /// How many of the pool's sockets are still pending in each way.
@@ -125,33 +262,61 @@ impl SocketStates {
     }
 }
 
-/// Missing nodes and not-yet-private owned sockets may converge during boot.
-/// A different type, owner, link count or unreadable identity is never pending.
+/// Missing nodes may converge during boot; an owned socket with group or other bits is
+/// repaired (see [`private_socket`]). A different type, owner, link count, unreadable
+/// identity or a socket directory that is not private and owned is never pending.
 fn socket_states(
     directory: &std::path::Path,
     intent: BridgeIntent,
 ) -> Result<SocketStates, CandidateError> {
+    socket_states_with(directory, intent, true)
+}
+
+fn socket_states_with(
+    directory: &std::path::Path,
+    intent: BridgeIntent,
+    repair: bool,
+) -> Result<SocketStates, CandidateError> {
+    let directory = private_directory(directory)?;
     let mut states = SocketStates::default();
     for path in intent.guest_paths() {
-        let path = directory.join(
-            std::path::Path::new(&path)
-                .file_name()
-                .expect("fixed socket name"),
-        );
-        let metadata = match std::fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                states.missing += 1;
-                continue;
-            }
-            Err(_) => return Err(socket_identity()),
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .expect("fixed socket name");
+        let name = std::ffi::CString::new(name.as_encoded_bytes()).expect("fixed socket name");
+        let Some(stat) = entry(&directory, &name)? else {
+            states.missing += 1;
+            continue;
         };
-        // SAFETY: geteuid has no preconditions and cannot fail.
-        if !private_socket(&metadata, unsafe { libc::geteuid() })? {
+        let private = if repair {
+            private_socket(&directory, &name, stat)?
+        } else {
+            observe_socket(stat)?
+        };
+        if !private {
             states.not_private += 1;
         }
     }
     Ok(states)
+}
+
+/// The provider's own sockets in the same directory: the guest agent and the exposed engine
+/// socket. Bound by the same provider process, they have the same umask exposure; nothing
+/// waited for them before. Each one present gets the same identity check and mode repair;
+/// an absent one is left for the code that connects to it.
+pub(super) const PROVIDER_SOCKETS: [&str; 2] = ["agent.sock", "docker.sock"];
+
+pub(super) fn secure_provider_sockets(directory: &std::path::Path) -> Result<(), CandidateError> {
+    let directory = private_directory(directory)?;
+    for name in PROVIDER_SOCKETS {
+        let name = std::ffi::CString::new(name).expect("fixed socket name");
+        if let Some(stat) = entry(&directory, &name)? {
+            if !private_socket(&directory, &name, stat)? {
+                return Err(socket_identity());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Fresh-boot wait for the whole socket set: a fixed base plus one second per slot.
@@ -187,7 +352,8 @@ fn startup_socket_timeout(
 
 /// Only fresh boot waits: SmolVM's guest-ready signal does not join its expose
 /// threads. Caller holds the pool lease and rechecks its retained provider on
-/// both sides of each complete socket observation. No socket is changed here.
+/// both sides of each complete socket observation. The only change made is a
+/// verified socket's group and other mode bits (see [`private_socket`]).
 /// Socket freshness also relies on the pinned launcher's removal of old expose
 /// paths before guest-ready; see the upgrade contract at `artifact::VERSION`.
 pub(super) fn wait_for_sockets(
@@ -288,13 +454,19 @@ mod tests {
             },
         };
         let root = crate::unique_test_root(&std::env::temp_dir(), "hack-bridge-sockets");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let path = root.join("bridge-00.sock");
         let listener = UnixListener::bind(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         let intent = BridgeIntent::new(1).unwrap();
         verify_sockets(&root, intent).unwrap();
+        // An owned socket's group and other bits are repaired, not refused (HACK-2375).
         fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(verify_sockets(&root, intent).is_err());
+        verify_sockets(&root, intent).unwrap();
+        assert_eq!(
+            fs::symlink_metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         fs::remove_file(&path).unwrap();
         fs::write(&path, b"foreign").unwrap();
         assert!(verify_sockets(&root, intent).is_err());

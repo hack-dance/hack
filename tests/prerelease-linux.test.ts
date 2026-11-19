@@ -529,11 +529,17 @@ const ZSH_SKIP: string | null = (() => {
   if (ZSH === null) {
     return "no zsh on PATH";
   }
-  const f = bootstrapFixture({ system: "Linux", machine: "x86_64" });
+  // A host that lacks a fixture tool must skip this one test by name, not
+  // fail the whole file while it loads.
   try {
-    return shellMissesFixtureTools(ZSH, f.env, f.bin);
-  } finally {
-    rmSync(f.root, { recursive: true, force: true });
+    const f = bootstrapFixture({ system: "Linux", machine: "x86_64" });
+    try {
+      return shellMissesFixtureTools(ZSH, f.env, f.bin);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  } catch (error) {
+    return `fixture unavailable: ${error instanceof Error ? error.message : String(error)}`;
   }
 })();
 
@@ -1927,16 +1933,30 @@ test.skipIf(ZSH === null)(
     const zsh = ZSH as string;
     const f = bootstrapFixture({ system: "Linux", machine: "x86_64" });
     // What a system zshenv does on some machines, done here through the
-    // fixture HOME's own .zshenv: put system directories first.
+    // fixture HOME's own .zshenv: put another directory first. That directory
+    // holds decoys, so the result does not depend on where this host keeps
+    // its real tools, and nothing real is run.
+    const decoys = join(f.root, "decoys");
+    mkdirSync(decoys, { mode: 0o700 });
+    const called = join(f.root, "decoy-curl-called");
     writeFileSync(
-      join(f.home, ".zshenv"),
-      'export PATH="/usr/bin:/bin:$PATH"\n'
+      join(decoys, "uname"),
+      '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo x86_64;; esac\n',
+      { mode: 0o755 }
     );
+    writeFileSync(
+      join(decoys, "curl"),
+      `#!/bin/sh\n: > '${called}'\nexit 7\n`,
+      { mode: 0o755 }
+    );
+    writeFileSync(join(f.home, ".zshenv"), `export PATH='${decoys}':"$PATH"\n`);
     const reason = shellMissesFixtureTools(zsh, f.env, f.bin);
-    expect(reason).toContain("its startup files change PATH");
-    expect(reason).toContain("not the fixture's");
-    // And even run that way, the installer cannot reach the network: a real
-    // curl gets the discard-port proxy and the install stops unchanged.
+    expect(reason).toBe(
+      `its startup files change PATH: uname and curl resolve to ${join(decoys, "uname")}, ${join(decoys, "curl")}, not the fixture's`
+    );
+    // Run that way, the installer uses the other curl, which is exactly why
+    // the zsh run is skipped on such a host. Here it is a decoy that fails,
+    // so the install stops unchanged.
     const result = spawnSyncBounded([zsh, f.bootstrap], {
       env: f.env,
       timeout: 20_000,
@@ -1944,11 +1964,52 @@ test.skipIf(ZSH === null)(
       stderr: "pipe",
     });
     expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("Manager download failed");
+    expect(existsSync(called)).toBe(true);
     expect(existsSync(f.env.CURL_ARGS)).toBe(false);
     expect(existsSync(f.env.INVOCATION)).toBe(false);
     expect(existsSync(join(f.home, ".hack-next"))).toBe(false);
   },
   60_000
+);
+
+// The fixture's last line of defence, checked against the host's real curl
+// with the installer's own protocol flags: it can only reach the discard port
+// on this machine, so it fails without any outside connection.
+const REAL_CURL = Bun.which("curl");
+test.skipIf(REAL_CURL === null)(
+  `a real curl with the fixture environment cannot leave this machine${REAL_CURL === null ? " [skipped: no curl on PATH]" : ""}`,
+  () => {
+    const root = scratch();
+    const result = spawnSyncBounded(
+      [
+        REAL_CURL as string,
+        "--proto",
+        "=https",
+        "--tlsv1.2",
+        "--silent",
+        "--show-error",
+        "--fail",
+        "--connect-timeout",
+        "5",
+        "--max-time",
+        "10",
+        "--output",
+        join(root, "out"),
+        `https://github.com/hack-dance/hack/releases/download/v${VERSION}/hack-next-manager-linux-x86_64`,
+      ],
+      {
+        env: { PATH: "/usr/bin:/bin", HOME: root, ...NO_NETWORK },
+        timeout: 20_000,
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("127.0.0.1");
+    expect(existsSync(join(root, "out"))).toBe(false);
+  },
+  30_000
 );
 
 // Independent of zsh: runs under /bin/sh wherever shasum exists.

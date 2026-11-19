@@ -8,7 +8,10 @@
 #    pieces stays charged to the VM. Order 2 is 16 KiB, the host's page size.
 # 2. After the start-up work (image loads, installs, builds) the free memory is fragmented.
 #    One compaction, once the guest has gone quiet, merges it into blocks that can be
-#    reported. It waits for two quiet windows in a row and gives up after 15 minutes.
+#    reported. It waits for six quiet windows in a row (90 s) and gives up after 15 minutes.
+#    The wait is longer than the provider agent's own page-cache trim, which needs one quiet
+#    minute: compacting before that trim leaves the cache's memory to be freed afterwards,
+#    fragmented again.
 #
 # What it did is one line in the status file, for `cat` from the guest.
 set -u
@@ -24,6 +27,7 @@ status_file=/run/hack-local/memory-return.status
 marker_file=/run/hack-local/memory-return.started
 window_seconds=15
 max_windows=60
+quiet_windows=6
 # Busy time allowed in one window, in clock ticks: 15% of one CPU at 100 ticks a second.
 quiet_ticks=$((window_seconds * 15))
 
@@ -76,7 +80,7 @@ while test "$windows" -lt "$max_windows"; do
     quiet=0
   fi
   previous=$current
-  if test "$quiet" -ge 2; then
+  if test "$quiet" -ge "$quiet_windows"; then
     if (printf '1\n' > "$compact_file") 2>/dev/null; then
       record done "$windows"
     else

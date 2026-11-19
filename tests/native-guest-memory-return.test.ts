@@ -39,6 +39,7 @@ async function run(opts: {
     .replace("/proc/sys/kernel/random/boot_id", opts.paths.boot)
     .replace("window_seconds=15", "window_seconds=0")
     .replace("max_windows=60", "max_windows=3")
+    .replace("quiet_windows=6", "quiet_windows=2")
     .replace(
       "quiet_ticks=$((window_seconds * 15))",
       `quiet_ticks=${opts.quietTicks}`

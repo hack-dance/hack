@@ -71,9 +71,9 @@ same with `--secrets-file`, a JSON file such as
 `devcontainer up` runs the checkout's `onCreateCommand`, `postStartCommand`,
 install script and committed binary with that key, so pass `--secrets-file`
 only for a checkout you have reviewed (a contributor's branch can change those
-files to send the key out). Codespaces does not give repository secrets to
-codespaces opened by users without write access or on forks of a public
-repository.
+files to send the key out). Codespaces does not give repository secrets to a
+codespace created from a pull request branch in a fork (see GitHub's
+[security in Codespaces](https://docs.github.com/en/codespaces/reference/security-in-github-codespaces#working-with-other-peoples-contributions-and-repositories)).
 
 ## Start it
 

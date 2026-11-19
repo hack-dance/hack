@@ -428,7 +428,8 @@ export function proxyConnectAddress(
  * systemd-resolved there, which containers and cloud sandboxes usually do
  * not run. For a URL on the proxy's own port (80 for http, 443 for https)
  * the hint also gives a way in that needs no DNS: curl's --resolve to the
- * address the proxy publishes on, with the full URL (HACK-2356). Other ports
+ * address the proxy publishes on, with the full URL, bypassing any inherited
+ * HTTPS proxy (sandboxes often set one) (HACK-2356). Other ports
  * are not the proxy's, so they get the DNS reason only.
  */
 export function linuxDnsFix(opts: {
@@ -442,13 +443,13 @@ export function linuxDnsFix(opts: {
   }
   const address = proxyConnectAddress(opts.proxyBind);
   if (address === null) {
-    return `${LINUX_DNS_REASON} Without it, send the request to the address Hack's proxy publishes port ${proxyPort} on, for example with curl --resolve ${shellQuote(`${url.hostname}:${proxyPort}:<address>`)} ${shellQuote(url.href)}.`;
+    return `${LINUX_DNS_REASON} Without it, send the request to the address Hack's proxy publishes port ${proxyPort} on, for example with curl --noproxy ${shellQuote(url.hostname)} --resolve ${shellQuote(`${url.hostname}:${proxyPort}:<address>`)} ${shellQuote(url.href)}.`;
   }
   const trust =
     url.protocol === "https:"
       ? " (for https, run hack global trust once and load the host trust env file it prints; that part needs no sudo)"
       : "";
-  return `${LINUX_DNS_REASON} Without it, reach the app through Hack's proxy on this machine with: curl --resolve ${shellQuote(`${url.hostname}:${proxyPort}:${address}`)} ${shellQuote(url.href)}${trust}`;
+  return `${LINUX_DNS_REASON} Without it, reach the app through Hack's proxy on this machine with: curl --noproxy ${shellQuote(url.hostname)} --resolve ${shellQuote(`${url.hostname}:${proxyPort}:${address}`)} ${shellQuote(url.href)}${trust}`;
 }
 
 /** How the rendered proxy Compose file publishes ports, or null when absent. */

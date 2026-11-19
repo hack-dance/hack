@@ -49,8 +49,9 @@ Check a release's notes before replacing the tag above.
 assets (`SHA256SUMS-linux` is in its asset list). The `5.0.0-next.22` installer
 stops on Linux. The installer needs `curl` and `sha256sum`, installs under
 `~/.hack-next` without `sudo`, and ends with "Installed the Compose backend. The
-native backend is Apple Silicon macOS only." See
-[the Linux candidate](../guides/candidate-install.md#linux-the-compose-only-candidate).
+native backend is Apple Silicon macOS only." The
+[candidate install guide on `next`](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#linux-the-compose-only-candidate)
+has the details.
 
 | Channel | What it installs | Project state |
 | --- | --- | --- |

@@ -365,7 +365,8 @@ impl<'a> ObservedGuest<'a> {
             owner: Owner::load(candidate)?,
         };
         observed.verify()?;
-        audit_boot(candidate, &observed.owner)?;
+        // No mutation lease is held here: observe without repairing.
+        audit_with(candidate, &observed.owner, Repair::Observe)?;
         observed.verify()?;
         Ok(observed)
     }
@@ -814,12 +815,32 @@ fn enable_amd64_emulation(
 }
 
 fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
+    audit_with(candidate, owner, Repair::Allowed)
+}
+
+/// Whether an audit may repair the provider's world-accessible sockets (HACK-2375). Only a
+/// caller holding the provider's mutation lease (boot, warm start, a leased operation)
+/// repairs; lease-free observation stays read-only and refuses such a bridge socket as before.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Repair {
+    Allowed,
+    Observe,
+}
+
+fn audit_with(candidate: &Candidate, owner: &Owner, repair: Repair) -> Result<(), CandidateError> {
     super::config_audit::verify(candidate, owner)?;
     super::dependency_socket::verify(candidate, owner)?;
-    // The agent and engine sockets share the bridge sockets' umask exposure (HACK-2375).
-    super::bridge::secure_provider_sockets(&owner.real_data_dir(candidate)?)?;
+    if repair == Repair::Allowed {
+        // The agent and engine sockets share the bridge sockets' umask exposure.
+        super::bridge::secure_provider_sockets(&owner.real_data_dir(candidate)?)?;
+    }
     if let Some(bridge) = owner.application_bridge {
-        super::bridge::verify_sockets(&owner.real_data_dir(candidate)?, bridge)?;
+        let directory = owner.real_data_dir(candidate)?;
+        if repair == Repair::Allowed {
+            super::bridge::verify_sockets(&directory, bridge)?;
+        } else {
+            super::bridge::observe_sockets(&directory, bridge)?;
+        }
     }
     // The pinned SmolVM consumes and removes boot-config.json. Its retained running config plus
     // independently observed disk descriptors form the host audit boundary.

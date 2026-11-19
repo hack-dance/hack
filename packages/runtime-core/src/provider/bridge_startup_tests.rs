@@ -280,6 +280,26 @@ fn world_accessible_owned_sockets_in_a_private_directory_are_repaired_to_private
 }
 
 #[test]
+fn lease_free_observation_refuses_a_world_accessible_socket_and_changes_nothing() {
+    // Review of #991: observation holds no mutation lease, so it never repairs.
+    let fixture = Fixture::new();
+    fixture.bind(0, 0o700);
+    fixture.bind(1, 0o777);
+    let intent = BridgeIntent::new(2).unwrap();
+    assert_eq!(
+        observe_sockets(&fixture.root, intent).unwrap_err().code,
+        "bridge_socket_identity"
+    );
+    assert_eq!(
+        fs::symlink_metadata(fixture.path(1)).unwrap().mode() & 0o777,
+        0o777
+    );
+    // A leased audit repairs it, after which observation passes.
+    verify_sockets(&fixture.root, intent).unwrap();
+    observe_sockets(&fixture.root, intent).unwrap();
+}
+
+#[test]
 fn a_socket_directory_that_is_not_private_and_owned_refuses_without_repair() {
     for kind in ["group-readable", "symlink"] {
         let fixture = Fixture::new();

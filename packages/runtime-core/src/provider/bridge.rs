@@ -87,6 +87,21 @@ impl Request {
     }
 }
 
+/// The lease-free form of [`verify_sockets`]: the same checks, and a world-accessible socket is
+/// refused instead of repaired, so read-only observation changes nothing.
+pub(super) fn observe_sockets(
+    directory: &std::path::Path,
+    intent: BridgeIntent,
+) -> Result<(), CandidateError> {
+    if socket_states_with(directory, intent, false)?.ready() {
+        Ok(())
+    } else {
+        Err(socket_identity())
+    }
+}
+
+/// Verify the pool's bridge sockets, repairing a world-accessible one. Callers hold the
+/// provider's mutation lease (boot, warm start, a leased operation).
 pub(super) fn verify_sockets(
     directory: &std::path::Path,
     intent: BridgeIntent,
@@ -175,6 +190,18 @@ fn entry(
 /// call, reachable only by a process running as this same user, which could equally rewrite
 /// the pool's disks, as for the disk templates (`disk_template`). `Ok(false)` only when the
 /// mode cannot be set.
+/// The identity checks of [`private_socket`] without any change: whether this owned socket
+/// is already private.
+#[allow(clippy::useless_conversion)]
+fn observe_socket(stat: libc::stat) -> Result<bool, CandidateError> {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    if stat.st_mode & libc::S_IFMT != libc::S_IFSOCK || stat.st_uid != uid || stat.st_nlink != 1 {
+        return Err(socket_identity());
+    }
+    Ok(u32::from(stat.st_mode) & 0o077 == 0)
+}
+
 // `st_mode` is u16 on macOS and u32 on Linux, so the conversions are needed on the target.
 #[allow(clippy::useless_conversion)]
 fn private_socket(
@@ -242,6 +269,14 @@ fn socket_states(
     directory: &std::path::Path,
     intent: BridgeIntent,
 ) -> Result<SocketStates, CandidateError> {
+    socket_states_with(directory, intent, true)
+}
+
+fn socket_states_with(
+    directory: &std::path::Path,
+    intent: BridgeIntent,
+    repair: bool,
+) -> Result<SocketStates, CandidateError> {
     let directory = private_directory(directory)?;
     let mut states = SocketStates::default();
     for path in intent.guest_paths() {
@@ -253,7 +288,12 @@ fn socket_states(
             states.missing += 1;
             continue;
         };
-        if !private_socket(&directory, &name, stat)? {
+        let private = if repair {
+            private_socket(&directory, &name, stat)?
+        } else {
+            observe_socket(stat)?
+        };
+        if !private {
             states.not_private += 1;
         }
     }

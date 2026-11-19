@@ -652,11 +652,13 @@ bound after that are world-accessible for the life of the VM (HACK-2375). A same
 single-link socket with group or other bits therefore has those bits removed. The mode is
 set through the verified directory, which only this user can change. The entry is read again
 just before the change and must still be the same socket inode; the change never follows a
-symlink; and the socket is read back as that inode, still private. A process running as
+symlink; and the socket is read back as that inode, still private. Only audits that hold the provider's mutation lease
+repair: fresh boot, a warm start and leased operations. Lease-free observation (status,
+log follow) changes nothing and refuses a world-accessible bridge socket as before. A process running as
 this same user that replaces the entry in the instant between that last read and the
 change is outside this check, as it is for the disk templates: such a process could
 equally rewrite the pool's disks. The guest agent and exposed engine sockets
-(`agent.sock`, `docker.sock`) get the same check and repair in every boot audit when present.
+(`agent.sock`, `docker.sock`) get the same check and repair in those leased audits when present.
 
 A different type, user or link count, or an unreadable identity, still refuses immediately
 and is never repaired. Only a complete private socket set observed before the deadline

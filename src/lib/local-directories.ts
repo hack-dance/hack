@@ -162,7 +162,9 @@ function readMount(value: unknown, composeDir: string): ServiceMount | null {
   if (!(isRecord(value) && typeof value.target === "string")) {
     return null;
   }
-  if (value.target.includes("$")) {
+  // An unresolved access mode could make a replacement writable where the
+  // original mount was read-only, so it is as unknown as a variable target.
+  if (value.target.includes("$") || readOnlyFlag(value.read_only) === null) {
     return UNKNOWN_TARGET;
   }
   const type = mountType(value.type);
@@ -172,7 +174,7 @@ function readMount(value: unknown, composeDir: string): ServiceMount | null {
       type: "other",
       source: undefined,
       target: normalizeTarget(value.target),
-      readOnly: value.read_only === true,
+      readOnly: readOnlyFlag(value.read_only) === true,
     };
   }
   return {
@@ -182,7 +184,7 @@ function readMount(value: unknown, composeDir: string): ServiceMount | null {
         ? resolveBindSource(source, composeDir)
         : source,
     target: normalizeTarget(value.target),
-    readOnly: value.read_only === true,
+    readOnly: readOnlyFlag(value.read_only) === true,
   };
 }
 
@@ -200,6 +202,17 @@ function shortSyntaxType(source: string): ServiceMount["type"] {
     source.startsWith("~")
     ? "bind"
     : "volume";
+}
+
+/** `read_only` as Compose reads it; null when it holds a variable or is not a flag. */
+function readOnlyFlag(value: unknown): boolean | null {
+  if (value === undefined || value === false || value === "false") {
+    return false;
+  }
+  if (value === true || value === "true") {
+    return true;
+  }
+  return null;
 }
 
 function mountType(value: unknown): ServiceMount["type"] {

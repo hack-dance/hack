@@ -508,3 +508,32 @@ test("service-level tmpfs mounts hide what is below them", () => {
     { service: "exact", entry: "cache/build", target: "/app/cache/build" },
   ]);
 });
+
+test("a long-syntax access mode is read as Compose reads it; an unresolved one skips the service", () => {
+  const result = plan(
+    {
+      services: {
+        literal: {
+          volumes: [
+            { type: "bind", source: "..", target: "/app", read_only: "true" },
+          ],
+        },
+        variable: {
+          volumes: [
+            {
+              type: "bind",
+              source: "..",
+              target: "/app",
+              read_only: "${SOURCE_READ_ONLY:-true}",
+            },
+          ],
+        },
+      },
+    },
+    ["node_modules"]
+  );
+  expect(result.services.literal?.[0]?.readOnly).toBe(true);
+  expect(result.services.variable).toBeUndefined();
+  // No source bind is readable in that service, so it is not reported as skipped.
+  expect(result.skipped).toEqual([]);
+});

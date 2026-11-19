@@ -932,9 +932,11 @@ function linuxManagerDigests(output: string): LinuxManagerDigests {
  * A Linux archive and its manager must be this release's for `platform`. The
  * archive is verified in full with the installer's own extraction: the exact
  * member list, every member against the archive's `SHA256SUMS`, and metadata
- * naming the planned version, source revision and platform. The manager must
- * be an ELF executable for that architecture. The host that packages and the
- * host that publishes both run this; neither relies on the build job's check.
+ * naming the planned version, source revision and platform. The manager gets
+ * a structural check (`requireLinuxManagerElf`). The host that packages and
+ * the host that publishes both run this; neither relies on the build job's
+ * check. This establishes consistency, not provenance: the files' origin is
+ * the workflow's own artifact from the Linux jobs.
  */
 async function requireLinuxAssets({
   plan,
@@ -963,22 +965,93 @@ async function requireLinuxAssets({
   } finally {
     await rm(probe, { recursive: true, force: true });
   }
-  // ELF64 little-endian, e_machine at offset 18: x86-64 is 62, AArch64 is 183.
+  await requireLinuxManagerElf({
+    path: join(directory, managerAssetName(platform)),
+    platform,
+  });
+}
+
+const ELF_HEADER_BYTES = 64;
+const ELF_PROGRAM_HEADER_BYTES = 56;
+/** Far above any real executable's count; bounds the table this check reads. */
+const ELF_MAX_PROGRAM_HEADERS = 256;
+
+/**
+ * Structural validation of a Linux manager: a complete ELF64 little-endian
+ * header of an executable (`ET_EXEC` or `ET_DYN`) for the platform's machine,
+ * with a program-header table that lies inside the file and at least one
+ * loadable segment whose bytes are in the file. It stops a truncated file, a
+ * stub or the other architecture's manager from being given a digest in the
+ * installer and published. It is not authentication: it does not show the file
+ * is the manager the Linux job built.
+ */
+export async function requireLinuxManagerElf({
+  path,
+  platform,
+}: {
+  readonly path: string;
+  readonly platform: BundlePlatform;
+}) {
+  const refuse = (): never => {
+    throw new Error(
+      `Linux manager for ${platform} is not a structurally valid ELF executable for that architecture`
+    );
+  };
+  const file = Bun.file(path);
+  const size = file.size;
+  if (size < ELF_HEADER_BYTES + ELF_PROGRAM_HEADER_BYTES) {
+    refuse();
+  }
   const header = Buffer.from(
-    await Bun.file(join(directory, managerAssetName(platform)))
-      .slice(0, 20)
+    await file.slice(0, ELF_HEADER_BYTES).arrayBuffer()
+  );
+  // e_ident: magic, ELFCLASS64, ELFDATA2LSB, EV_CURRENT.
+  const ident = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+  const type = header.readUInt16LE(16);
+  const programOffset = header.readBigUInt64LE(32);
+  const programCount = header.readUInt16LE(56);
+  if (
+    header.length !== ELF_HEADER_BYTES ||
+    !header.subarray(0, ident.length).equals(ident) ||
+    // ET_EXEC is 2, ET_DYN (position-independent executable) is 3.
+    !(type === 2 || type === 3) ||
+    // EM_X86_64 is 62, EM_AARCH64 is 183.
+    header.readUInt16LE(18) !== (platform === "linux-arm64" ? 183 : 62) ||
+    header.readUInt32LE(20) !== 1 ||
+    header.readUInt16LE(52) !== ELF_HEADER_BYTES ||
+    header.readUInt16LE(54) !== ELF_PROGRAM_HEADER_BYTES ||
+    programCount < 1 ||
+    programCount > ELF_MAX_PROGRAM_HEADERS ||
+    programOffset < BigInt(ELF_HEADER_BYTES) ||
+    programOffset + BigInt(programCount * ELF_PROGRAM_HEADER_BYTES) >
+      BigInt(size)
+  ) {
+    refuse();
+  }
+  const start = Number(programOffset);
+  const table = Buffer.from(
+    await file
+      .slice(start, start + programCount * ELF_PROGRAM_HEADER_BYTES)
       .arrayBuffer()
   );
-  if (
-    header.length < 20 ||
-    !header
-      .subarray(0, 6)
-      .equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1])) ||
-    header.readUInt16LE(18) !== (platform === "linux-arm64" ? 183 : 62)
-  ) {
-    throw new Error(
-      `Linux manager for ${platform} is not an ELF executable for that architecture`
+  let loadable = false;
+  for (let index = 0; index < programCount; index++) {
+    const entry = table.subarray(
+      index * ELF_PROGRAM_HEADER_BYTES,
+      (index + 1) * ELF_PROGRAM_HEADER_BYTES
     );
+    // PT_LOAD is 1; p_offset is at 8 and p_filesz at 32.
+    if (
+      entry.length === ELF_PROGRAM_HEADER_BYTES &&
+      entry.readUInt32LE(0) === 1 &&
+      entry.readBigUInt64LE(32) > 0n &&
+      entry.readBigUInt64LE(8) + entry.readBigUInt64LE(32) <= BigInt(size)
+    ) {
+      loadable = true;
+    }
+  }
+  if (!loadable) {
+    refuse();
   }
 }
 

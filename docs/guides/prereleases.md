@@ -250,8 +250,11 @@ Linux assets publishes.
 The packaging job and the publish job each verify the Linux files themselves: the
 installer's own extraction checks every member of each archive against the
 archive's inner `SHA256SUMS`, the metadata must name the planned version, source
-revision and platform, and each manager must be an ELF executable for its
-architecture.
+revision and platform, and each manager must pass a structural check: a complete
+ELF64 executable header for its architecture, a program-header table inside the
+file and at least one loadable segment. These checks establish that the set is
+consistent and installable. They are not authentication: they do not show that a
+file is the one the Linux job built.
 
 Publication requires an explicit publish request for the exact protected `next`
 commit, successful checks for that commit, and approval through a configured

@@ -63,6 +63,7 @@ import {
   prereleaseNotes,
   releaseAssets,
   renderChecksums,
+  requireLinuxManagerElf,
   verifyReleaseAssets,
   writeRehearsalInstaller,
 } from "../scripts/prerelease-plan.ts";
@@ -104,22 +105,42 @@ const plan = createPrereleasePlan({
   eventName: "workflow_dispatch",
   channel: "prerelease",
 });
-/** The first bytes of an ELF64 executable for `machine` (62 x86-64, 183 AArch64). */
-function elfHeader(machine: number) {
-  const bytes = Buffer.alloc(64);
+/**
+ * A minimal structurally valid ELF64 executable for `machine` (62 x86-64, 183
+ * AArch64): the 64-byte header, one PT_LOAD program header covering the whole
+ * file, then `payload`. `change` edits the bytes before they are returned.
+ */
+function elfExecutable(
+  machine: number,
+  payload = "manager fixture\n",
+  change: (bytes: Buffer) => void = () => undefined
+) {
+  const body = Buffer.from(payload);
+  const bytes = Buffer.alloc(64 + 56 + body.length);
   bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+  bytes.writeUInt16LE(3, 16); // e_type ET_DYN
   bytes.writeUInt16LE(machine, 18);
+  bytes.writeUInt32LE(1, 20); // e_version
+  bytes.writeBigUInt64LE(64n, 32); // e_phoff
+  bytes.writeUInt16LE(64, 52); // e_ehsize
+  bytes.writeUInt16LE(56, 54); // e_phentsize
+  bytes.writeUInt16LE(1, 56); // e_phnum
+  bytes.writeUInt32LE(1, 64); // p_type PT_LOAD
+  bytes.writeBigUInt64LE(0n, 64 + 8); // p_offset
+  bytes.writeBigUInt64LE(BigInt(bytes.length), 64 + 32); // p_filesz
+  body.copy(bytes, 64 + 56);
+  change(bytes);
   return bytes;
 }
-/** A stand-in manager: an ELF header for the architecture its file name says. */
+/** A stand-in manager: a valid ELF for the architecture its file name says. */
 const fixtureManager = async (output: string) => {
   const name = output.split("/").at(-1) ?? "";
   writeFileSync(
     output,
-    Buffer.concat([
-      elfHeader(name.endsWith("linux-arm64") ? 183 : 62),
-      Buffer.from(`manager fixture for ${name}\n`),
-    ]),
+    elfExecutable(
+      name.endsWith("linux-arm64") ? 183 : 62,
+      `manager fixture for ${name}\n`
+    ),
     { mode: 0o500 }
   );
   await Promise.resolve();
@@ -886,18 +907,76 @@ fixtureTest(
       "Prerelease identity mismatch."
     );
     writeFileSync(arm, saved);
-    // A manager for the other architecture, or one that is not ELF, refuses.
+    // A manager that is not a structurally valid ELF executable for the
+    // architecture refuses: the other architecture's, a script, a header
+    // truncated at any point, a non-executable type, a program-header table
+    // outside the file, and no loadable segment.
     const armManager = join(linux, "hack-next-manager-linux-arm64");
     const savedManager = readFileSync(armManager);
-    for (const wrong of [
-      readFileSync(join(linux, "hack-next-manager-linux-x86_64")),
-      Buffer.from("#!/bin/sh\nexit 0\n"),
-    ]) {
+    const valid = elfExecutable(183);
+    const invalid: Record<string, Buffer> = {
+      "other architecture": readFileSync(
+        join(linux, "hack-next-manager-linux-x86_64")
+      ),
+      script: Buffer.from("#!/bin/sh\nexit 0\n"),
+      "20-byte stub": valid.subarray(0, 20),
+      "header only": valid.subarray(0, 64),
+      "truncated program header": valid.subarray(0, 64 + 55),
+      "e_type ET_NONE": elfExecutable(183, undefined, (b) => {
+        b.writeUInt16LE(0, 16);
+      }),
+      "e_type ET_REL": elfExecutable(183, undefined, (b) => {
+        b.writeUInt16LE(1, 16);
+      }),
+      "e_type ET_CORE": elfExecutable(183, undefined, (b) => {
+        b.writeUInt16LE(4, 16);
+      }),
+      "32-bit class": elfExecutable(183, undefined, (b) => {
+        b.writeUInt8(1, 4);
+      }),
+      "no program headers": elfExecutable(183, undefined, (b) => {
+        b.writeUInt16LE(0, 56);
+      }),
+      "program headers past the end": elfExecutable(183, undefined, (b) => {
+        b.writeBigUInt64LE(BigInt(b.length), 32);
+      }),
+      "too many program headers": elfExecutable(183, undefined, (b) => {
+        b.writeUInt16LE(0xff_ff, 56);
+      }),
+      "wrong program header size": elfExecutable(183, undefined, (b) => {
+        b.writeUInt16LE(32, 54);
+      }),
+      "no loadable segment": elfExecutable(183, undefined, (b) => {
+        b.writeUInt32LE(4, 64);
+      }),
+      "segment past the end": elfExecutable(183, undefined, (b) => {
+        b.writeBigUInt64LE(BigInt(b.length) + 1n, 64 + 32);
+      }),
+    };
+    for (const [what, bytes] of Object.entries(invalid)) {
       chmodSync(armManager, 0o700);
-      writeFileSync(armManager, wrong);
-      await expect(attempt(`manager-${wrong.length}`)).rejects.toThrow(
-        "Linux manager for linux-arm64 is not an ELF executable for that architecture"
+      writeFileSync(armManager, bytes);
+      const refusal = await attempt(
+        `manager-${what.replaceAll(" ", "-")}`
+      ).then(
+        () => "accepted",
+        (error: unknown) => String(error)
       );
+      expect([what, refusal]).toEqual([
+        what,
+        "Error: Linux manager for linux-arm64 is not a structurally valid ELF executable for that architecture",
+      ]);
+    }
+    // Controls: the valid fixture, as ET_DYN and as ET_EXEC, is accepted.
+    for (const type of [3, 2]) {
+      const path = join(root, `valid-${type}`);
+      writeFileSync(
+        path,
+        elfExecutable(183, undefined, (b) => {
+          b.writeUInt16LE(type, 16);
+        })
+      );
+      await requireLinuxManagerElf({ path, platform: "linux-arm64" });
     }
     writeFileSync(armManager, savedManager);
     // A member changed after the archive's own checksums were written refuses
@@ -1524,6 +1603,15 @@ test.skipIf(linuxHost === null || linuxHost === "darwin-arm64")(
     });
     const manager = join(output, managerAssetName(platform));
     const archive = join(output, bundleArchiveName(VERSION, platform));
+    // The structural check accepts a real compiled manager for this host and
+    // refuses it as the other architecture's.
+    await requireLinuxManagerElf({ path: manager, platform });
+    await expect(
+      requireLinuxManagerElf({
+        path: manager,
+        platform: platform === "linux-arm64" ? "linux-x86_64" : "linux-arm64",
+      })
+    ).rejects.toThrow("not a structurally valid ELF executable");
     const rehearsal = join(root, "rehearsal");
     await writeRehearsalInstaller({ plan, output, directory: rehearsal });
     const env = {
@@ -1785,5 +1873,88 @@ fixtureTest(
       expect(existsSync(mac.env.CURL_ARGS)).toBe(false);
       expect(existsSync(mac.env.INVOCATION)).toBe(false);
     }
+  }
+);
+
+fixtureTest(
+  "a takeover that works still fails the gate unless the manager step is accepted",
+  () => {
+    // Stand-in managers isolate the gate's own control flow: the previous
+    // manager's channel refuses the documented upgrade until the candidate's
+    // standalone manager has run upgrade-manager on it.
+    const leg = (accept: boolean, takeoverWorks: boolean) => {
+      const work = scratch();
+      const previousManager = join(work, "previous-manager");
+      writeFileSync(
+        previousManager,
+        `#!/bin/sh
+# --root R install --version V --archive A --sha256 S
+[ "$3" = install ] || exit 64
+mkdir -p "$2/bin"
+cat > "$2/bin/hack-next" <<'LAUNCHER'
+#!/bin/sh
+root=$(CDPATH= cd -P "$(dirname "$0")/.." && pwd -P)
+[ "$1" = --manager ] && [ "$2" = upgrade ] || exit 64
+[ -f "$root/taken-over" ] || { echo "retained manager refuses this bundle" >&2; exit 1; }
+: > "$root/upgraded"
+LAUNCHER
+chmod 755 "$2/bin/hack-next"
+`,
+        { mode: 0o700 }
+      );
+      const candidateManager = join(work, "candidate-manager");
+      writeFileSync(
+        candidateManager,
+        `#!/bin/sh
+[ "$3" = upgrade-manager ] || exit 64
+${takeoverWorks ? ': > "$2/taken-over"' : 'echo "unknown predecessor" >&2; exit 1'}
+`,
+        { mode: 0o600 }
+      );
+      let checks = 0;
+      const exit = upgradeLeg({
+        work,
+        previous: "5.0.0-next.23",
+        previousManager,
+        previousArchive: join(work, "previous.tar.gz"),
+        previousSum: "a".repeat(64),
+        candidate: "5.0.0-next.24",
+        candidateManager,
+        candidateArchive: join(work, "candidate.tar.gz"),
+        candidateSum: "b".repeat(64),
+        unchanged: () => {
+          checks++;
+        },
+        acceptManagerStep: accept,
+      });
+      return {
+        exit,
+        checks,
+        tookOver: existsSync(join(work, "channel/taken-over")),
+        upgraded: existsSync(join(work, "channel/upgraded")),
+      };
+    };
+    // Direct upgrade fails, upgrade-manager succeeds, the retry succeeds:
+    // still a failure, because existing users would need the extra step.
+    expect(leg(false, true)).toEqual({
+      exit: 1,
+      checks: 2,
+      tookOver: true,
+      upgraded: true,
+    });
+    // The same run passes only when the maintainer accepted that step.
+    expect(leg(true, true)).toEqual({
+      exit: 0,
+      checks: 2,
+      tookOver: true,
+      upgraded: true,
+    });
+    // Acceptance does not rescue a takeover that does not work.
+    expect(leg(true, false)).toEqual({
+      exit: 1,
+      checks: 2,
+      tookOver: false,
+      upgraded: false,
+    });
   }
 );

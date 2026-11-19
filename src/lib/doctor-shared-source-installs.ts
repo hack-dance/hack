@@ -121,5 +121,5 @@ export function sharedSourceInstallsMessage(
   const listed = directories
     .map((dir) => `${dir} (${byDirectory.get(dir)?.join(", ")})`)
     .join("; ");
-  return `Note: services see these checkout directories through the shared source, so installs and builds there cross the host share: ${listed}. To keep them on the runtime's own disk (a named volume on Compose, the VM disk on native), add "localDirectories": ${JSON.stringify(directories)} to .hack/hack.config.json. The checkout's copies stay where they are; run the install once more after the next hack up.`;
+  return `Note: services see these checkout directories through the shared source, so installs and builds there cross the host share: ${listed}. On the Compose backend, add "localDirectories": ${JSON.stringify(directories)} to .hack/hack.config.json to keep them in named volumes instead; the checkout's copies stay where they are, so run the install once more after the next hack up. The native backend does not apply localDirectories yet.`;
 }

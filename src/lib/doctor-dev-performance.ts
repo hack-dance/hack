@@ -765,11 +765,13 @@ export function hasDevPerformanceDetail(check: DevPerformanceCheck): boolean {
     return true;
   }
   const report = check.devPerformance;
-  return (
-    (report?.kind === "dev_image_tags" ||
-      report?.kind === "shared_source_installs") &&
-    report.services.length > 0
-  );
+  if (
+    report?.kind === "shared_source_installs" &&
+    check.message.startsWith("Note:")
+  ) {
+    return true;
+  }
+  return report?.kind === "dev_image_tags" && report.services.length > 0;
 }
 
 /** HACK-2358: an advisory note, like dev image tags; never a failure. */
@@ -778,7 +780,18 @@ export async function sharedSourceInstallsCheck(opts: {
   readonly composeFile: string;
   readonly inputs: ComposeDevInputs;
   readonly localDirectories: readonly string[];
+  /** Set when the project's `localDirectories` is invalid. */
+  readonly localDirectoriesError?: string;
 }): Promise<DevPerformanceCheck> {
+  if (opts.localDirectoriesError) {
+    // Advice would name entries the invalid list may already hold.
+    return {
+      name: SHARED_SOURCE_INSTALLS_CHECK,
+      status: "ok",
+      message: `Note: localDirectories in .hack/hack.config.json is invalid, so it was not compared, and hack up refuses it: ${opts.localDirectoriesError}`,
+      devPerformance: { kind: "shared_source_installs", services: [] },
+    };
+  }
   const services = await findSharedSourceInstalls({
     projectRoot: opts.projectRoot,
     composeFile: opts.composeFile,
@@ -855,6 +868,7 @@ export async function runDevPerformanceChecks(opts: {
   readonly containers: readonly DevRuntimeContainer[] | null;
   /** The project's `localDirectories`; already kept off the share. */
   readonly localDirectories?: readonly string[];
+  readonly localDirectoriesError?: string;
 }): Promise<DevPerformanceCheck[]> {
   const inputs = await readComposeDevInputs(opts);
   const declared = await readDeclaredToolVersions(opts.projectRoot);
@@ -874,6 +888,7 @@ export async function runDevPerformanceChecks(opts: {
       composeFile: opts.composeFile,
       inputs,
       localDirectories: opts.localDirectories ?? [],
+      localDirectoriesError: opts.localDirectoriesError,
     }),
   ];
 }

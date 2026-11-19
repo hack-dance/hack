@@ -7469,6 +7469,10 @@ async function runUpCommand({
   if (sharedHelperRefusal !== null) {
     return sharedHelperRefusal;
   }
+  const localDirectoriesRefusal = refuseInvalidLocalDirectories({ cfg, json });
+  if (localDirectoriesRefusal !== null) {
+    return localDirectoriesRefusal;
+  }
   if (
     resolveLifecycleRunner({ runner: cfg.lifecycle?.runner }) === "supervisor"
   ) {
@@ -8900,6 +8904,42 @@ function refuseInvalidSharedHelpers(opts: {
   return 1;
 }
 
+/**
+ * HACK-2358: an invalid `localDirectories` refuses before anything starts or
+ * stops (a restart would otherwise stop the project and then refuse).
+ */
+function refuseInvalidLocalDirectories(opts: {
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly json: boolean;
+}): number | null {
+  const message = opts.cfg.localDirectoriesError;
+  if (!message) {
+    return null;
+  }
+  if (opts.json) {
+    return emitLifecycleResult({
+      result: errorResult({ code: "E_CONFIG_INVALID", message }),
+      exitCode: 1,
+    });
+  }
+  logger.error({ message });
+  return 1;
+}
+
+/** `hack run`: warn on a config parse error, refuse an invalid `localDirectories`. */
+function reviewRunConfig(opts: {
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly project: { readonly configFile: string };
+}): number | null {
+  if (opts.cfg.parseError) {
+    const configPath = opts.cfg.configPath ?? opts.project.configFile;
+    logger.warn({
+      message: `Failed to parse ${configPath}: ${opts.cfg.parseError}`,
+    });
+  }
+  return refuseInvalidLocalDirectories({ cfg: opts.cfg, json: false });
+}
+
 /** Restart's response to a concurrent down: clean up this start and stop. */
 async function abandonSupersededRestart(opts: {
   readonly error: SharedHelperSupersededError;
@@ -9673,6 +9713,10 @@ async function runRestartCommand({
   const sharedHelperRefusal = refuseInvalidSharedHelpers({ cfg, json });
   if (sharedHelperRefusal !== null) {
     return sharedHelperRefusal;
+  }
+  const localDirectoriesRefusal = refuseInvalidLocalDirectories({ cfg, json });
+  if (localDirectoriesRefusal !== null) {
+    return localDirectoriesRefusal;
   }
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
@@ -10552,11 +10596,9 @@ async function handleRun({
   const cmdArgs = args.positionals.cmd;
 
   const cfg = await readProjectConfig(project);
-  if (cfg.parseError) {
-    const configPath = cfg.configPath ?? project.configFile;
-    logger.warn({
-      message: `Failed to parse ${configPath}: ${cfg.parseError}`,
-    });
+  const configRefusal = reviewRunConfig({ cfg, project });
+  if (configRefusal !== null) {
+    return configRefusal;
   }
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });

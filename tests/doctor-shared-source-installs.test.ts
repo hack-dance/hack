@@ -152,3 +152,31 @@ test("a bind of the directory itself is still the shared source", async () => {
     ],
   });
 });
+
+test("an invalid localDirectories gets its own note instead of advice", async () => {
+  const fixture = await project({ compose: BIND, dirs: ["node_modules"] });
+  const result = await sharedSourceInstallsCheck({
+    projectRoot: fixture.root,
+    composeFile: fixture.composeFile,
+    inputs: composeDevInputsFromText({
+      file: ".hack/docker-compose.yml",
+      text: BIND,
+    }),
+    localDirectories: [],
+    localDirectoriesError: "Project localDirectories must be a list.",
+  });
+  expect(result.status).toBe("ok");
+  expect(result.message).toBe(
+    "Note: localDirectories in .hack/hack.config.json is invalid, so it was not compared, and hack up refuses it: Project localDirectories must be a list."
+  );
+  expect(hasDevPerformanceDetail(result)).toBe(true);
+});
+
+test("the advice names the Compose backend and says native does not apply it", async () => {
+  const fixture = await project({ compose: BIND, dirs: ["node_modules"] });
+  const result = await check(fixture, BIND);
+  expect(result.message).toContain("On the Compose backend");
+  expect(result.message).toContain(
+    "The native backend does not apply localDirectories yet."
+  );
+});

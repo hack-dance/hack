@@ -1791,10 +1791,38 @@ test("run uses the same local-directory override as up", async () => {
   expect(localDirectoriesOverrides(run.opts.composeFiles)).toHaveLength(1);
 });
 
-test("an invalid localDirectories setting refuses up before Compose runs", async () => {
-  const projectRoot = await createLocalDirectoriesProject(["../outside"]);
-  await expect(runDetachedUp({ projectRoot })).rejects.toMatchObject({
-    code: "E_CONFIG_INVALID",
+for (const operation of [runDetachedUp, runRestart]) {
+  test(`${operation.name} refuses an invalid localDirectories before anything starts or stops`, async () => {
+    const projectRoot = await createLocalDirectoriesProject(["../outside"]);
+    expect(await operation({ projectRoot })).toBe(1);
+    // No up, and for restart no down of the running project either.
+    expect(runtimeCalls).toHaveLength(0);
+    expect(downCalls).toBe(0);
   });
-  expect(runtimeCalls).toHaveLength(0);
+}
+
+test("a targeted restart recreates the service with the local-directory override", async () => {
+  const projectRoot = await createLocalDirectoriesProject(["node_modules"]);
+  expect(await runRestart({ projectRoot, services: ["api"] })).toBe(0);
+  const up = runtimeCalls.find((call) => call.kind === "up");
+  if (up?.kind !== "up") {
+    throw new Error("Missing up");
+  }
+  expect(localDirectoriesOverrides(up.opts.composeFiles)).toHaveLength(1);
+});
+
+test("up says which entries it cannot keep local", async () => {
+  const projectRoot = await createLocalDirectoriesProject(["node_modules"]);
+  const composeFile = resolve(projectRoot, ".hack", PROJECT_COMPOSE_FILENAME);
+  const compose = YAML.parse(await readFile(composeFile, "utf8")) as {
+    services: Record<string, Record<string, unknown>>;
+    volumes?: Record<string, unknown>;
+  };
+  compose.services.api!.volumes = ["..:/app", "deps:/app/node_modules"];
+  compose.volumes = { deps: {} };
+  await writeFile(composeFile, YAML.stringify(compose));
+  expect(await runDetachedUp({ projectRoot })).toBe(0);
+  expect(warnMessages).toContain(
+    "localDirectories: service api already mounts /app/node_modules; that mount is kept for node_modules."
+  );
 });

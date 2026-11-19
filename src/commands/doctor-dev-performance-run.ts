@@ -138,8 +138,21 @@ async function collect(opts: {
     composeFile: ctx.composeFile,
     hostArch: hostArch ?? processArchitecture(),
     containers,
-    localDirectories: (await readProjectConfig(ctx)).localDirectories,
+    ...localDirectoriesInputs(await readProjectConfig(ctx)),
   });
+}
+
+function localDirectoriesInputs(config: {
+  readonly localDirectories?: readonly string[];
+  readonly localDirectoriesError?: string;
+}): {
+  readonly localDirectories?: readonly string[];
+  readonly localDirectoriesError?: string;
+} {
+  return {
+    localDirectories: config.localDirectories,
+    localDirectoriesError: config.localDirectoriesError,
+  };
 }
 
 /** Text mode: each finding in full, after the summary (which shortens it). */

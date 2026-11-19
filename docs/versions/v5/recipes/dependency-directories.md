@@ -44,21 +44,32 @@ installer and the app read the same files. Each branch instance gets its own
 volumes. Your Compose file does not change.
 
 - **Existing content.** A new volume starts empty, or with what the image has
-  at that path. Hack does not copy the checkout's directory into it (files
+  at that path. Docker copies the image's content only when it creates the
+  volume, so after you change the dependencies baked into the image, a
+  rebuild alone keeps the old ones: run `hack down --prune-caches` first.
+  Hack does not copy the checkout's directory into the volume (files
   installed on macOS are for another system). Run the install once more after
   the first start. The checkout's copy stays where it is; containers no longer
-  see it.
+  see it. If the directory does not exist yet, Hack creates it empty in the
+  checkout, as you, so the engine does not create it as root.
 - **A mount you already have wins.** If a service already mounts something at
   that path, Hack keeps it and `hack up` says so. A service that bind-mounts
   that same directory gets the volume instead.
-- **Read-only binds** get a read-only volume.
+- **Read-only binds** get a read-only volume: the mode of the bind the volume
+  replaces.
+- **What Hack reads.** Hack reads the source binds in `.hack/docker-compose.yml`
+  itself. Binds whose source uses a variable (`${PWD}`), `extends`, `include`
+  or another `-f` file are not read; `hack up` says when no bind shows an
+  entry. An entry that is a file, not a directory, is skipped with a notice.
 - **Cleanup.** `hack down` keeps the volumes. They are labeled
   `hack.cache.disposable`, so `hack down --prune-caches` removes them. Run it
   before you remove an entry from the list: afterwards no container mounts that
   volume, so you remove it with `docker volume rm <name>` (its label
   `hack.local-directory` names the directory).
-- **Invalid entries** (an absolute path, `..`, `.git` or `.hack`, one entry
-  inside another, more than 32) stop `hack up` with `E_CONFIG_INVALID`.
+- **Invalid entries** (an absolute path, `..`, a trailing `/`, `.git` or
+  `.hack`, one entry inside another, more than 32) stop `hack up`,
+  `hack restart` and `hack run` with `E_CONFIG_INVALID` before anything starts
+  or stops.
 - **Native backend.** Not applied yet; native ignores the setting.
 
 `hack doctor` adds a `shared source installs` note when a service sees such a

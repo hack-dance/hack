@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { lstat, mkdir, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, posix, relative, resolve, sep } from "node:path";
 import { YAML } from "bun";
 import { HackCliError } from "./cli-result.ts";
@@ -32,7 +33,7 @@ export type LocalDirectoriesParse =
   | { readonly error: string };
 
 const ENTRY_RULE =
-  "Project localDirectories must be a list of up to 32 distinct paths relative to the project root (no '..', no leading '/', not inside .git or .hack), none inside another.";
+  "Project localDirectories must be a list of up to 32 distinct paths relative to the project root (no '..', no leading or trailing '/', not inside .git or .hack), none inside another.";
 
 /**
  * Validates `localDirectories`. An invalid value is an error, not ignored:
@@ -56,8 +57,7 @@ export function parseLocalDirectories(value: unknown): LocalDirectoriesParse {
   return nested ? { error: ENTRY_RULE } : { entries };
 }
 
-function normalizeEntry(raw: string): string | null {
-  const entry = raw.endsWith("/") ? raw.slice(0, -1) : raw;
+function normalizeEntry(entry: string): string | null {
   if (entry.length === 0 || entry.length > 256) {
     return null;
   }
@@ -84,19 +84,18 @@ function readMount(value: unknown, composeDir: string): ServiceMount | null {
       return {
         type: "volume",
         source: undefined,
-        target: parts[0] ?? "",
+        target: normalizeTarget(parts[0] ?? ""),
         readOnly: false,
       };
     }
     const [source = "", target = "", mode = ""] = parts;
-    const bind =
-      source.startsWith(".") ||
-      source.startsWith("/") ||
-      source.startsWith("~");
     return {
-      type: bind ? "bind" : "volume",
-      source: bind ? resolveBindSource(source, composeDir) : source,
-      target,
+      type: shortSyntaxType(source),
+      source:
+        shortSyntaxType(source) === "bind"
+          ? resolveBindSource(source, composeDir)
+          : source,
+      target: normalizeTarget(target),
       readOnly: mode.split(",").includes("ro"),
     };
   }
@@ -111,9 +110,25 @@ function readMount(value: unknown, composeDir: string): ServiceMount | null {
       type === "bind" && source
         ? resolveBindSource(source, composeDir)
         : source,
-    target: value.target,
+    target: normalizeTarget(value.target),
     readOnly: value.read_only === true,
   };
+}
+
+/**
+ * Short syntax: a path is a bind, a name is a volume. A source with an
+ * unresolved variable (`${PWD}/..`) is neither as far as this reader can
+ * tell, so it never maps a checkout path.
+ */
+function shortSyntaxType(source: string): ServiceMount["type"] {
+  if (source.includes("$")) {
+    return "other";
+  }
+  return source.startsWith(".") ||
+    source.startsWith("/") ||
+    source.startsWith("~")
+    ? "bind"
+    : "volume";
 }
 
 function mountType(value: unknown): ServiceMount["type"] {
@@ -139,8 +154,11 @@ function resolveBindSource(
   source: string,
   composeDir: string
 ): string | undefined {
-  // `~` depends on the engine's user; such a bind never maps a checkout path.
-  return source.startsWith("~") ? undefined : resolve(composeDir, source);
+  // `~` depends on the engine's user, and a variable is unresolved here;
+  // such a bind never maps a checkout path.
+  return source.startsWith("~") || source.includes("$")
+    ? undefined
+    : resolve(composeDir, source);
 }
 
 /** The container path where `hostPath` appears through `bind`, if it does. */
@@ -367,11 +385,14 @@ export function localDirectoriesOverride(
 }
 
 /** One line per entry this start cannot keep local, or null when there is none. */
-export function localDirectoriesNotices(plan: LocalDirectoriesPlan): string[] {
+export function localDirectoriesNotices(
+  plan: LocalDirectoriesPlan,
+  composeFile = "the Compose file"
+): string[] {
   return [
     ...plan.unmatched.map(
       (entry) =>
-        `localDirectories: ${entry} is not under any service's source mount; nothing to keep local.`
+        `localDirectories: no service's source bind in ${composeFile} shows ${entry}; nothing kept local for it (mounts from variables, extends, include or other -f files are not read).`
     ),
     ...plan.kept.map(
       (item) =>
@@ -417,22 +438,103 @@ export async function withLocalDirectoriesOverride(opts: {
     // Compose reports a malformed file itself, with its own message.
     return [...opts.composeFiles];
   }
+  const notFiles: string[] = [];
+  for (const entry of entries) {
+    if (await isNonDirectory(resolve(opts.project.projectRoot, entry))) {
+      opts.notify?.(
+        `localDirectories: ${entry} is a file in the checkout, not a directory; skipped.`
+      );
+    } else {
+      notFiles.push(entry);
+    }
+  }
   const plan = planLocalDirectories({
     compose,
     composeDir: dirname(opts.project.composeFile),
     projectRoot: opts.project.projectRoot,
-    entries,
+    entries: notFiles,
   });
-  for (const line of localDirectoriesNotices(plan)) {
+  const composeLabel =
+    relative(opts.project.projectRoot, opts.project.composeFile) ||
+    opts.project.composeFile;
+  for (const line of localDirectoriesNotices(plan, composeLabel)) {
     opts.notify?.(line);
   }
   const override = localDirectoriesOverride(plan);
   if (override === null) {
     return [...opts.composeFiles];
   }
+  await createMountedEntries({
+    projectRoot: opts.project.projectRoot,
+    plan,
+  });
   const internalDir = resolve(opts.project.projectDir, ".internal");
   await ensureDir(internalDir);
   const overridePath = resolve(internalDir, OVERRIDE_FILENAME);
   await writeTextFileIfChanged(overridePath, YAML.stringify(override));
   return [...opts.composeFiles, overridePath];
+}
+
+/** True when `path` exists and is (or links to) something other than a directory. */
+async function isNonDirectory(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+  } catch {
+    return false;
+  }
+  try {
+    return !(await stat(path)).isDirectory();
+  } catch {
+    // A dangling link: the engine cannot mount over it either.
+    return true;
+  }
+}
+
+/**
+ * Creates each mounted entry's checkout directory as the invoking user
+ * before Compose runs. On a Linux engine, a missing mountpoint inside a bind
+ * would otherwise be created by the engine as root, and host tools (a host
+ * `next build`, `rm -rf`) would then fail on it.
+ */
+async function createMountedEntries(opts: {
+  readonly projectRoot: string;
+  readonly plan: LocalDirectoriesPlan;
+}): Promise<void> {
+  const entries = new Set(
+    Object.values(opts.plan.services).flatMap((mounts) =>
+      mounts.map((mount) => mount.entry)
+    )
+  );
+  const root = await realpath(opts.projectRoot).catch(() => null);
+  if (root === null) {
+    return;
+  }
+  for (const entry of entries) {
+    const path = resolve(opts.projectRoot, entry);
+    // Through a symlinked parent the directory could land outside the
+    // checkout; leave that one to the engine.
+    if (await insideCheckout({ root, path })) {
+      await mkdir(path, { recursive: true });
+    }
+  }
+}
+
+/** True when the nearest existing ancestor of `path` resolves inside `root`. */
+async function insideCheckout(opts: {
+  readonly root: string;
+  readonly path: string;
+}): Promise<boolean> {
+  let current = opts.path;
+  for (;;) {
+    const real = await realpath(current).catch(() => null);
+    if (real !== null) {
+      const rel = relative(opts.root, real);
+      return !(rel.startsWith("..") || isAbsolute(rel));
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return false;
+    }
+    current = parent;
+  }
 }

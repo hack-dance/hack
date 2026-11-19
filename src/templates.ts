@@ -598,7 +598,7 @@ export function renderProjectConfigSchemaJson(): string {
           minLength: 1,
           maxLength: 256,
           pattern:
-            "^(?!\\.git(/|$))(?!\\.hack(/|$))(?!.*(^|/)\\.\\.?(/|$))[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*/?$",
+            "^(?!\\.git(/|$))(?!\\.hack(/|$))(?!.*(^|/)\\.\\.?(/|$))[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$",
         },
       },
       native: {

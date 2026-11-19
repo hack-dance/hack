@@ -207,6 +207,29 @@ impl SetAside {
         Ok(format!("{SET_ASIDE_PREFIX}{nanos}"))
     }
 
+    /// Remove the pending file of an intent write that never reached its rename (an
+    /// interruption, or a write or sync error). No move happens before the intent is published,
+    /// so that file guards nothing; left in place, it would refuse every later write. Only a
+    /// private regular file of ours with one link is removed; anything else refuses.
+    fn discard_unpublished(candidate: &Candidate) -> Result<(), CandidateError> {
+        use std::os::unix::fs::MetadataExt;
+        let pending = Self::path(candidate).with_extension("pending");
+        let metadata = match fs::symlink_metadata(&pending) {
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(unrecoverable()),
+            Ok(metadata) => metadata,
+        };
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let ours = metadata.file_type().is_file()
+            && metadata.nlink() == 1
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o077 == 0;
+        if !ours {
+            return Err(unrecoverable());
+        }
+        fs::remove_file(&pending).map_err(io)
+    }
+
     fn load(candidate: &Candidate) -> Result<Option<Self>, CandidateError> {
         match fs::symlink_metadata(Self::path(candidate)) {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -287,6 +310,7 @@ fn set_aside(
     let vm_lock = lock_disks_closed(candidate, owner, &locations, STOP_SCAN_WAIT)?;
     sockets_absent(owner)?;
     if SetAside::load(candidate)?.is_none() {
+        SetAside::discard_unpublished(candidate)?;
         state::write(
             &SetAside::path(candidate),
             &SetAside {
@@ -584,6 +608,25 @@ mod tests {
             pool.recover(&mut owner).unwrap();
             assert_eq!(owner.phase, "stopped-before-engine", "case {index}");
             assert_eq!(aside(&data).len(), 1, "case {index}");
+        }
+
+        // An intent write interrupted before its rename leaves only its pending file, and no
+        // disk has moved: recovery discards that file and completes.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let pool = Pool::new("untrusted-pending");
+            let mut owner = pool.owner("booting", true, false);
+            pool.disks(&owner, &["storage.raw", "overlay.raw", "vm.lock"]);
+            let data = owner.real_data_dir(&pool.candidate).unwrap();
+            fs::write(data.join("name"), "fixture\n").unwrap();
+            state::private_directory(&root(&pool.candidate).join("home/.smolvm")).unwrap();
+            let pending = root(&pool.candidate).join("untrusted-first-boot.pending");
+            fs::write(&pending, b"{\"version\":1").unwrap();
+            fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+            pool.recover(&mut owner).unwrap();
+            assert_eq!(owner.phase, "stopped-before-engine");
+            assert!(!pending.exists() && !root(&pool.candidate).join(SET_ASIDE).exists());
+            assert!(!data.join("storage.raw").exists());
         }
 
         // A set-aside interrupted after its first move resumes from its durable intent.

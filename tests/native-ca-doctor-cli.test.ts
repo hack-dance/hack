@@ -69,6 +69,14 @@ test("native Doctor reports unknown owner without consulting Docker-era CA state
       hackLocalRoute: { status: "refused", reason: "relay-not-verified" },
     });
   }
+  checks.push({
+    id: "native pool idle",
+    status: "warn",
+    detail:
+      "Native runtime status unavailable; pool idleness could not be checked.",
+    scope: "machine",
+    nativePool: { state: "unknown", graphRuns: null },
+  });
   expect(envelope).toMatchObject({ ok: true, data: { checks } });
   expect(result.stdout).not.toContain("caddy local ca");
   expect(result.stdout).not.toContain("docker daemon");

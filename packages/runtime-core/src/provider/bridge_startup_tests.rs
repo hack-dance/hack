@@ -198,6 +198,50 @@ fn another_owner_is_not_pending_private_or_repaired() {
 }
 
 #[test]
+fn an_entry_replaced_after_inspection_is_refused_before_any_mode_change() {
+    // Review of #991: a replacement between the inspection and the repair must not be
+    // changed. Each case swaps the inspected 0777 socket for something else at the same name.
+    for replacement in ["file", "socket", "symlink"] {
+        let fixture = Fixture::new();
+        fixture.bind(0, 0o777);
+        let directory = private_directory(&fixture.root).unwrap();
+        let name = std::ffi::CString::new("bridge-00.sock").unwrap();
+        let inspected = entry(&directory, &name).unwrap().unwrap();
+        fixture.listeners.borrow_mut().clear();
+        fs::remove_file(fixture.path(0)).unwrap();
+        let target = fixture.root.join("target");
+        match replacement {
+            "file" => {
+                fs::write(fixture.path(0), b"replacement").unwrap();
+                fs::set_permissions(fixture.path(0), fs::Permissions::from_mode(0o444)).unwrap();
+            }
+            "socket" => fixture.bind(0, 0o777),
+            _ => {
+                fs::write(&target, b"target").unwrap();
+                fs::set_permissions(&target, fs::Permissions::from_mode(0o444)).unwrap();
+                symlink(&target, fixture.path(0)).unwrap();
+            }
+        }
+        let before = fs::symlink_metadata(fixture.path(0)).unwrap().mode();
+        assert_eq!(
+            private_socket(&directory, &name, inspected)
+                .unwrap_err()
+                .code,
+            "bridge_socket_identity",
+            "{replacement}"
+        );
+        assert_eq!(
+            fs::symlink_metadata(fixture.path(0)).unwrap().mode(),
+            before,
+            "{replacement}: nothing changed"
+        );
+        if replacement == "symlink" {
+            assert_eq!(fs::metadata(&target).unwrap().mode() & 0o777, 0o444);
+        }
+    }
+}
+
+#[test]
 fn world_accessible_owned_sockets_in_a_private_directory_are_repaired_to_private() {
     // HACK-2375: a mix of private and 0777 sockets, as the provider leaves them after its
     // file sharing clears the process umask partway through its bind loop.

@@ -167,10 +167,14 @@ fn entry(
 /// moment. Hack starts it with umask 077, but the provider's file-sharing device clears the
 /// umask for the whole process early in each boot, so on a busy host the sockets bound after
 /// that are 0777 for the life of the VM; no wait makes them private. Identity still refuses:
-/// a non-socket, another owner or an extra link is never repaired. Within an owned 0700
-/// directory only this user can have created the entry, so dropping its group and other bits
-/// (keeping the owner's) and reading it back as the same inode, still a private socket of
-/// ours, changes nothing but the mode. `Ok(false)` only when the mode cannot be set.
+/// a non-socket, another owner or an extra link is refused, never repaired. Within an owned
+/// 0700 directory only this user can create or replace the entry. The entry is read again
+/// immediately before the change and must still be the same socket inode; the mode change
+/// itself does not follow a symlink; and the entry is read back as that inode, still a
+/// private socket of ours. What remains is the gap between that last read and the system
+/// call, reachable only by a process running as this same user, which could equally rewrite
+/// the pool's disks, as for the disk templates (`disk_template`). `Ok(false)` only when the
+/// mode cannot be set.
 // `st_mode` is u16 on macOS and u32 on Linux, so the conversions are needed on the target.
 #[allow(clippy::useless_conversion)]
 fn private_socket(
@@ -191,33 +195,30 @@ fn private_socket(
     if mode & 0o077 == 0 {
         return Ok(true);
     }
-    // Darwin honors AT_SYMLINK_NOFOLLOW here; elsewhere (tests) the entry was just read as
-    // a socket in a directory only this user can change.
-    #[cfg(target_os = "macos")]
-    let flags = libc::AT_SYMLINK_NOFOLLOW;
-    #[cfg(not(target_os = "macos"))]
-    let flags = 0;
+    let same = |other: &libc::stat| {
+        identity(other) && other.st_dev == stat.st_dev && other.st_ino == stat.st_ino
+    };
+    // The entry must still be the socket just inspected: a replacement since is refused
+    // before anything is changed.
+    if !entry(directory, name)?.is_some_and(|current| same(&current)) {
+        return Err(socket_identity());
+    }
+    // Never follows a symlink (Darwin natively; glibc refuses a symlink and supports the
+    // rest), so a replacement cannot redirect the change.
     // SAFETY: a live directory descriptor and a NUL-terminated name.
     let changed = unsafe {
         libc::fchmodat(
             directory.as_raw_fd(),
             name.as_ptr(),
             (mode & 0o700) as libc::mode_t,
-            flags,
+            libc::AT_SYMLINK_NOFOLLOW,
         )
     } == 0;
     if !changed {
         return Ok(false);
     }
     match entry(directory, name)? {
-        Some(after)
-            if identity(&after)
-                && after.st_dev == stat.st_dev
-                && after.st_ino == stat.st_ino
-                && u32::from(after.st_mode) & 0o077 == 0 =>
-        {
-            Ok(true)
-        }
+        Some(after) if same(&after) && u32::from(after.st_mode) & 0o077 == 0 => Ok(true),
         _ => Err(socket_identity()),
     }
 }

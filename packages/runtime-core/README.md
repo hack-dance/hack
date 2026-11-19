@@ -650,8 +650,12 @@ file-sharing device clears the umask for the whole process early in each boot (`
 libkrun's macOS passthrough `init`, in both 1.34.1 and 1.35.4), so on a busy host the sockets
 bound after that are world-accessible for the life of the VM (HACK-2375). A same-user,
 single-link socket with group or other bits therefore has those bits removed. The mode is
-set through the verified directory, which only this user can change, and the socket is read
-back as the same inode, still private. The guest agent and exposed engine sockets
+set through the verified directory, which only this user can change. The entry is read again
+just before the change and must still be the same socket inode; the change never follows a
+symlink; and the socket is read back as that inode, still private. A process running as
+this same user that replaces the entry in the instant between that last read and the
+change is outside this check, as it is for the disk templates: such a process could
+equally rewrite the pool's disks. The guest agent and exposed engine sockets
 (`agent.sock`, `docker.sock`) get the same check and repair in every boot audit when present.
 
 A different type, user or link count, or an unreadable identity, still refuses immediately

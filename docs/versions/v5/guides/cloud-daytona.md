@@ -2,6 +2,7 @@
 
 > **Not run yet.** This page follows the provider's documentation as read on
 > 2026-11-18 ([snapshots](https://www.daytona.io/docs/en/snapshots/),
+> [process execution](https://www.daytona.io/docs/en/process-code-execution/),
 > [secrets](https://www.daytona.io/docs/en/secrets/),
 > [preview](https://www.daytona.io/docs/en/preview/)). v5 has no Linux release
 > yet, so the install line needs a `hack` binary you supply; see
@@ -20,19 +21,27 @@ of at least 2 vCPU and 4 GiB.
   builds image-based snapshots only).
 - **Create the sandbox** with `HACK_ENV_SECRET_KEY` in `envVars`. Daytona
   *Secrets* give the process a placeholder and cannot decrypt Hack's values.
-- **After each start**, run through the CLI or `process.executeCommand`:
+- **Clone the project** into the sandbox once (Daytona's Git operations, or
+  `git clone` in a command), for example to `~/project`.
+- **After each start**, run in the project directory. With the SDK, pass the
+  directory and a longer timeout: `process.executeCommand` stops a command after
+  10 seconds by default (TypeScript: `executeCommand(command, cwd, env, timeout)`;
+  Python: `process.exec(command, cwd=..., timeout=...)`):
 
 ```sh
-(dockerd >/var/log/dockerd.log 2>&1 &); sleep 3
+(dockerd >/var/log/dockerd.log 2>&1 &)
+for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
 export HACK_RUNTIME_BACKEND=compose
 hack global install --no-interactive
 hack up --detach --no-interactive --json
 ```
 
+  Give it at least 300 seconds: the first run pulls images.
+
 ## Check it
 
 ```sh
-curl --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
+curl --noproxy hello.hack --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
 ```
 
 ## Expected differences

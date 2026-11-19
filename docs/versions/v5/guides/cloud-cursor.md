@@ -45,7 +45,7 @@ file above. Builds use the file from the default branch.
 Ask the agent to run (with your project's host):
 
 ```sh
-curl --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
+curl --noproxy hello.hack --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
 ```
 
 ## Expected differences

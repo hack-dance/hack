@@ -30,7 +30,7 @@ You do not need sudo, a browser or a desktop.
 **1. Install `hack`.** v5 has no Linux release yet: the prerelease installer
 supports Apple Silicon macOS only. Until there is one, build `hack` from a
 `next` commit on a Linux machine (see
-[Qualify a fresh Linux host](../../guides/linux-host-qualification.md), which also
+[Qualify a fresh Linux host](https://github.com/hack-dance/hack/blob/next/docs/guides/linux-host-qualification.md), which also
 needs Rust 1.97.1 and a C compiler), then copy the binary to
 `~/.local/bin/hack`. This step becomes one install command once a Linux release
 is published.
@@ -46,12 +46,15 @@ hack global install --no-interactive
 
 **3. Start the project:**
 
+If the project has encrypted values, provide `HACK_ENV_SECRET_KEY` through your
+environment's secret settings first, so it is already in the environment. Never
+type the key on the command line, where it lands in shell history. Then:
+
 ```sh
 cd your-project
-HACK_ENV_SECRET_KEY=... hack up --detach --no-interactive --json
+hack up --detach --no-interactive --json
 ```
 
-Pass the key through your environment's secret settings, not on the command line.
 `hack up` prints `{"ok": true, ...}` with the started services. If something
 is missing it prints one error with a code and what to do; see
 [When `hack up` cannot start the project here](cloud-environments.md#when-hack-up-cannot-start-the-project-here).
@@ -60,10 +63,11 @@ is missing it prints one error with a code and what to do; see
 (`hello.hack` here):
 
 ```sh
-curl --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
+curl --noproxy hello.hack --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
 ```
 
-You should see your app's page. In the verified run, the first `global install`
+You should see your app's page. `--noproxy` keeps an inherited HTTPS proxy
+(common in sandboxes) from receiving the request instead of this machine. In the verified run, the first `global install`
 took 11 seconds and `up` took 2 seconds, with images already pulled once.
 
 ## What is different from a laptop
@@ -74,8 +78,12 @@ took 11 seconds and `up` took 2 seconds, with images already pulled once.
   `curl --resolve` as above. `hack open` prints the same hint and the URL.
 - **HTTPS trust.** To drop `-k`, run `hack global trust --no-interactive` once
   and load the file it prints: `. ~/.hack/caddy/pki/caddy-host-trust-env.sh`.
-  That covers curl, Node, Python and git without sudo. The system trust store
-  steps it lists need root.
+  That covers curl, Node, Python and git without sudo; the system trust store
+  steps it lists need root. This works when Docker is the system engine (a
+  root-owned `/var/run/docker.sock` and a `docker` client in a system
+  directory), as in the verified run. With rootless Docker or Docker Desktop
+  for Linux, Hack cannot confirm which certificate authority the running proxy
+  uses and refuses to trust it automatically; keep `-k` for local checks there.
 - **Secrets.** Hack decrypts with `HACK_ENV_SECRET_KEY` at `up` time. It writes
   neither the key nor decrypted values to disk (the generated Compose override
   holds only `${NAME}` references). The containers' environment does hold the

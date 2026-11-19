@@ -22,6 +22,8 @@ environment variables.
   resume and fork:
 
 ```sh
+# Docker can become ready a few seconds after the sandbox; wait for it.
+for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
 export HACK_RUNTIME_BACKEND=compose
 hack global install --no-interactive
 hack up --detach --no-interactive --json
@@ -33,7 +35,7 @@ From your machine, `boat exec <sandbox> --cwd <repo> '<command>'` runs a command
 in the sandbox (the default timeout is 30 seconds):
 
 ```sh
-curl --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
+curl --noproxy hello.hack --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
 ```
 
 A VM with systemd-resolved may also resolve Hack's names after

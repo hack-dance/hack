@@ -27,19 +27,21 @@ already covers Docker Hub, `ghcr.io` and GitHub release downloads.
 **Setup script** (optional; it runs once, before the environment's variables are
 set, and its result is cached): pre-pull large images so new sessions have them.
 
-**Session hook** in the repository's `.claude/settings.json`. It runs inside the
-repository on every session start and resume, so it installs `hack` from a path
-in the repository (until a Linux release exists) and starts the project:
+**Session hook** in the repository's `.claude/settings.json`. It runs on every
+session start and resume, also in local sessions, so the script exits at once
+outside the cloud. It installs `hack` from a path in the repository (until a
+Linux release exists) and starts the project:
 
 ```json
 {
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "startup|resume",
         "hooks": [
           {
             "type": "command",
-            "command": "sh .claude/hack-up.sh",
+            "command": "sh \"$CLAUDE_PROJECT_DIR\"/.claude/hack-up.sh",
             "timeout": 600
           }
         ]
@@ -53,8 +55,11 @@ in the repository (until a Linux release exists) and starts the project:
 
 ```sh
 #!/bin/sh
+# Cloud sessions only; local sessions keep their own Hack setup.
+[ "${CLAUDE_CODE_REMOTE:-}" = "true" ] || exit 0
 set -eu
-command -v hack >/dev/null || install -m 0755 ./.hack-bin/hack /usr/local/bin/hack
+cd "$CLAUDE_PROJECT_DIR"
+command -v hack >/dev/null || { gunzip -c .hack-bin/hack.gz > /usr/local/bin/hack && chmod 0755 /usr/local/bin/hack; }
 pgrep -x dockerd >/dev/null || (dockerd >/var/log/dockerd.log 2>&1 &)
 for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
 export HACK_RUNTIME_BACKEND=compose
@@ -67,7 +72,7 @@ hack up --detach --no-interactive --json
 Ask the session to run (with your project's host):
 
 ```sh
-curl --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
+curl --noproxy hello.hack --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
 ```
 
 ## Expected differences

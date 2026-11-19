@@ -33,16 +33,32 @@
     "HACK_RUNTIME_BACKEND": "compose",
     "HACK_NO_INTERACTIVE": "1"
   },
-  "onCreateCommand": "bash .devcontainer/install-hack.sh",
+  "onCreateCommand": "sh .devcontainer/install-hack.sh",
   "postStartCommand": "hack global install --no-interactive && hack up --detach --no-interactive --json"
 }
 ```
 
 The `docker-in-docker` feature gives the container its own Docker Engine and
 Compose. `postStartCommand` runs on every start, so the project comes back
-after a stop. `.devcontainer/install-hack.sh` installs `hack` into the image;
-until a Linux release exists it has to place a `hack` binary you built (see
-[Any Linux machine with Docker](cloud-linux-docker.md#steps)).
+after a stop.
+
+`.devcontainer/install-hack.sh` installs `hack`. Until a Linux release exists it
+copies a `hack` binary you built (see
+[Any Linux machine with Docker](cloud-linux-docker.md#steps)) and committed as a
+gzip file, because GitHub refuses files over 100 MB and the binary is about
+160 MB (about 70 MB gzipped):
+
+```sh
+#!/bin/sh
+# Installs the hack binary committed at .devcontainer/hack-linux-x86_64.gz.
+set -eu
+here=$(cd "$(dirname "$0")" && pwd)
+tmp=$(mktemp)
+gunzip -c "$here/hack-linux-x86_64.gz" > "$tmp"
+chmod 0755 "$tmp"
+sudo mv "$tmp" /usr/local/bin/hack
+hack --version
+```
 
 The key is not in the file. In Codespaces, add `HACK_ENV_SECRET_KEY` as a
 Codespaces secret for the repository (**Settings → Secrets and variables →
@@ -67,14 +83,12 @@ project.
 In the container's terminal (use your project's host):
 
 ```sh
-curl --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
+curl --noproxy hello.hack --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
 ```
 
-On 2026-11-18 a cold `devcontainer up` (with image pulls) took 82 seconds, and
-after the container was stopped, `devcontainer up` brought the project back in
-5 seconds. On 2026-11-19, with the base images already pulled, it took 24
-seconds. In both runs the key came from `--secrets-file`, the page printed
-`token-present`, and the key did not appear in the CLI's output.
+In the verified run (base images already pulled), `devcontainer up` took 24
+seconds. The key came from `--secrets-file`, the page printed `token-present`,
+and the key did not appear in the CLI's output.
 
 ## What is different from a laptop
 
@@ -85,8 +99,10 @@ seconds. In both runs the key came from `--secrets-file`, the page printed
   forwarding 443 does not show the app.
 - **Secrets.** Codespaces secrets are environment variables in the container.
   Anyone with access to the codespace can read them.
-- **Persistence.** Images and volumes live in the container's Docker data and
-  survive a stop. A rebuild starts over and runs `onCreateCommand` again.
+- **Persistence.** The `docker-in-docker` feature keeps Docker's data
+  (`/var/lib/docker`: images, volumes, stopped containers) in a Docker volume,
+  so it survives a stop and a rebuild. A rebuild replaces the container's own
+  filesystem and runs `onCreateCommand` again.
 
 ## What does not work yet
 

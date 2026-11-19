@@ -51,7 +51,7 @@ Coder. They have no page yet.
   snapshot restore. Run `hack up` from the environment's start hook.
 
 For env-only use without containers (resolving values, running host commands),
-see [Managed environments](../../guides/codex-managed-environments.md).
+see [Managed environments](https://github.com/hack-dance/hack/blob/next/docs/guides/codex-managed-environments.md).
 Deploying an app to a hosting service is a different workflow: Hack does not
 translate project configuration into a deployment.
 
@@ -66,6 +66,10 @@ prints the address with a command that needs no DNS, for example:
 ```sh
 curl --resolve 'hello.hack:443:127.0.0.1' 'https://hello.hack/'
 ```
+
+Where the environment sets an HTTPS proxy (`HTTPS_PROXY`, common in sandboxes),
+add `--noproxy hello.hack` so curl sends the request to this machine and not to
+the proxy.
 
 The command sends the request to the address the proxy publishes on, read from
 Hack's proxy Compose file (`~/.hack/caddy/docker-compose.yml`): loopback by

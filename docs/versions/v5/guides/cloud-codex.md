@@ -9,8 +9,9 @@
 
 Hack's Compose runtime needs a Docker Engine the task can reach. Until a run
 shows one in a current Codex cloud task, treat this environment as unsupported
-for `hack up`. Hack's env commands still work there; see
-[Managed environments](../../guides/codex-managed-environments.md).
+for `hack up`. Env-only use (resolving values and running host commands without
+containers) is the intended workflow there, also not run yet; see
+[Managed environments](https://github.com/hack-dance/hack/blob/next/docs/guides/codex-managed-environments.md).
 
 ## To test it
 

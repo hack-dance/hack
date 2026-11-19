@@ -86,6 +86,32 @@ describe("preflightComposeEngine", () => {
       expect(error?.code).toBe("E_DOCKER_UNAVAILABLE");
       expect(error?.message).toContain("no `docker` command");
     }
+    // The same holds when docker goes away after the first read succeeds.
+    const later = await preflightComposeEngine({
+      deps: {
+        dockerOnPath: () => true,
+        run: (argv) =>
+          argv[1] === "compose"
+            ? Promise.reject(
+                Object.assign(new Error("spawn docker ENOENT"), {
+                  code: "ENOENT",
+                })
+              )
+            : Promise.resolve(ok),
+      },
+    });
+    expect(later?.code).toBe("E_DOCKER_UNAVAILABLE");
+    const network = await preflightSharedNetworks({
+      composeYaml: HELLO,
+      selection: ALL,
+      deps: {
+        run: () =>
+          Promise.reject(
+            Object.assign(new Error("spawn docker EACCES"), { code: "EACCES" })
+          ),
+      },
+    });
+    expect(network?.code).toBe("E_DOCKER_UNAVAILABLE");
     // Any other failure is not diagnosed as a missing CLI.
     await expect(
       preflightComposeEngine({

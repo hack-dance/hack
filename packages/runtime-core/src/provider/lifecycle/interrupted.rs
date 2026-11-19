@@ -34,8 +34,8 @@ use super::super::{
     identity, prepared_start, state,
 };
 use super::{
-    Owner, binary, finish_absent, invoke, lock_absent_disks, phase, recorded_process,
-    sockets_absent, stop_verified_provider, verify_templates,
+    Owner, STOP_SCAN_WAIT, binary, finish_absent, invoke, lock_disks_closed, phase,
+    recorded_process, sockets_absent, stop_verified_provider, verify_templates,
 };
 use crate::{Candidate, CandidateError};
 use std::fs;
@@ -130,6 +130,16 @@ fn recover_start(
         Err(_) => return Err(unrecoverable()),
     };
     let adopted = owner.storage.is_some() || owner.overlay.is_some();
+    if let Some(intent) = SetAside::load(candidate)? {
+        // A set-aside began and did not finish: resume it. It was decided under the same
+        // proofs, which are repeated below before any further move.
+        let templates = prepared_start::stock_templates(candidate, owner, lock)?;
+        let (false, Some(templates)) = (adopted, templates) else {
+            return Err(unrecoverable());
+        };
+        provider_idle(candidate)?;
+        return set_aside(candidate, owner, &templates, &intent.label);
+    }
     if launched == [false; 2] && !adopted {
         // Nothing was launched, so nothing can be running once no provider command remains.
         provider_idle(candidate)?;
@@ -153,15 +163,69 @@ fn recover_start(
         }
         // The record may be stale (a previous boot's) while an orphaned start is still running.
         provider_idle(candidate)?;
-        let untrusted = untrusted_first_start(candidate, owner, lock)?;
-        owner.process = Some(process);
-        owner.save(candidate)?;
-        return finish(candidate, owner, untrusted);
+        let Some(templates) = untrusted_first_start(candidate, owner, lock)? else {
+            owner.process = Some(process);
+            owner.save(candidate)?;
+            return finish_absent(candidate, owner, "recovered-unclean", false);
+        };
+        // The process is not recorded here: with a recorded process the next recovery would
+        // take the stopped path, which adopts these disks without checking their templates.
+        return set_aside(candidate, owner, &templates, &SetAside::new_label()?);
     }
     // The provider launched and exited, removing its PID record.
     provider_idle(candidate)?;
-    let untrusted = untrusted_first_start(candidate, owner, lock)?;
-    finish(candidate, owner, untrusted)
+    match untrusted_first_start(candidate, owner, lock)? {
+        None => finish_absent(candidate, owner, "recovered-unclean", false),
+        Some(templates) => set_aside(candidate, owner, &templates, &SetAside::new_label()?),
+    }
+}
+
+/// The durable intent of a set-aside in progress, beside the owner record. Written once the
+/// proofs hold and before the first move, removed after the last one and before the phase
+/// changes, so a set-aside interrupted at any point resumes instead of leaving a pool with
+/// one disk (which recovery cannot tell from lost data).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetAside {
+    version: u32,
+    label: String,
+}
+
+const SET_ASIDE: &str = "untrusted-first-boot.json";
+const SET_ASIDE_PREFIX: &str = "untrusted-first-boot-";
+
+impl SetAside {
+    fn path(candidate: &Candidate) -> std::path::PathBuf {
+        super::root(candidate).join(SET_ASIDE)
+    }
+
+    fn new_label() -> Result<String, CandidateError> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| unrecoverable())?
+            .as_nanos();
+        Ok(format!("{SET_ASIDE_PREFIX}{nanos}"))
+    }
+
+    fn load(candidate: &Candidate) -> Result<Option<Self>, CandidateError> {
+        match fs::symlink_metadata(Self::path(candidate)) {
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(unrecoverable()),
+            Ok(_) => {}
+        }
+        let intent: Self = state::read(&Self::path(candidate)).map_err(|_| unrecoverable())?;
+        let valid = intent.version == 1
+            && intent
+                .label
+                .strip_prefix(SET_ASIDE_PREFIX)
+                .is_some_and(|n| {
+                    !n.is_empty() && n.len() <= 40 && n.bytes().all(|b| b.is_ascii_digit())
+                });
+        if !valid {
+            return Err(unrecoverable());
+        }
+        Ok(Some(intent))
+    }
 }
 
 /// Verify the templates the interrupted first start cloned from (`Stage::AfterFirstStart`).
@@ -186,47 +250,59 @@ fn untrusted_first_start(
     }
 }
 
-fn finish(
-    candidate: &Candidate,
-    owner: &mut Owner,
-    untrusted: Option<std::path::PathBuf>,
-) -> Result<(), CandidateError> {
-    match untrusted {
-        None => finish_absent(candidate, owner, "recovered-unclean", false),
-        Some(templates) => set_aside(candidate, owner, &templates),
-    }
-}
-
 /// Set aside the unadopted disks of a first start whose templates did not verify, and the
 /// owned templates that failed, then return the pool to `stopped-before-engine` (HACK-2376).
 ///
 /// Runs only after the provider was proven stopped and idle, under the VM lock with the disk
 /// handles proven closed and the owned sockets absent, as an unclean stop does. Those disks were
 /// never adopted, so they never held project data (graph start needs `running`). Nothing is
-/// deleted: each file is renamed into an `untrusted-first-boot-<n>` directory beside it, for
-/// inspection. The verified compressed templates stay, so the next start expands the templates
-/// again and clones new disks, and verifies them before adoption as every first start does.
+/// deleted: each file is renamed into a `label` directory beside it, for inspection. The
+/// verified compressed templates stay, so the next start expands the templates again and
+/// clones new disks, and verifies them before adoption as every first start does. A refusal
+/// before the intent is written changes nothing; after it, recovery resumes (`SetAside`).
 fn set_aside(
     candidate: &Candidate,
     owner: &mut Owner,
     templates: &Path,
+    label: &str,
 ) -> Result<(), CandidateError> {
     let failed = disk_template::owned_unverified(templates)?;
-    let vm_lock = lock_absent_disks(candidate, owner)?;
+    let data = owner.real_data_dir(candidate)?;
+    let disks = ["storage.raw", "overlay.raw"];
+    // Each disk is at its original path or, after an interrupted set-aside, already moved.
+    let mut locations = Vec::new();
+    let mut remaining = Vec::new();
+    for name in disks {
+        match present(&data, [name])? {
+            [true] => {
+                locations.push(data.join(name));
+                remaining.push(name);
+            }
+            _ if present(&data.join(label), [name])? == [true] => {
+                locations.push(data.join(label).join(name));
+            }
+            _ => return Err(unrecoverable()),
+        }
+    }
+    let vm_lock = lock_disks_closed(candidate, owner, &locations, STOP_SCAN_WAIT)?;
     sockets_absent(owner)?;
-    let label = format!(
-        "untrusted-first-boot-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| unrecoverable())?
-            .as_nanos()
-    );
-    move_into(
-        &owner.real_data_dir(candidate)?,
-        &label,
-        &["storage.raw", "overlay.raw"],
-    )?;
-    move_into(templates, &label, &failed)?;
+    if SetAside::load(candidate)?.is_none() {
+        state::write(
+            &SetAside::path(candidate),
+            &SetAside {
+                version: 1,
+                label: label.to_owned(),
+            },
+        )?;
+    }
+    move_into(&data, label, &remaining)?;
+    move_into(templates, label, &failed)?;
+    // Removed before the phase changes: an interruption between the two leaves `booting`
+    // with no disks and nothing adopted, which recovery returns to `stopped-before-engine`.
+    fs::remove_file(SetAside::path(candidate)).map_err(io)?;
+    fs::File::open(super::root(candidate))
+        .and_then(|directory| directory.sync_all())
+        .map_err(io)?;
     #[cfg(target_os = "macos")]
     super::interactive_session::after_boot_stopped(candidate, owner);
     owner.process = None;
@@ -500,11 +576,45 @@ mod tests {
             } else {
                 assert!(moved.is_empty(), "case {index}");
             }
+            assert!(
+                !root(&pool.candidate).join(SET_ASIDE).exists(),
+                "case {index}"
+            );
             // The returned state is the never-launched one: a second recovery changes nothing.
             pool.recover(&mut owner).unwrap();
             assert_eq!(owner.phase, "stopped-before-engine", "case {index}");
             assert_eq!(aside(&data).len(), 1, "case {index}");
         }
+
+        // A set-aside interrupted after its first move resumes from its durable intent.
+        let pool = Pool::new("untrusted-resume");
+        let mut owner = pool.owner("booting", true, false);
+        pool.disks(&owner, &["storage.raw", "overlay.raw", "vm.lock"]);
+        let data = owner.real_data_dir(&pool.candidate).unwrap();
+        fs::write(data.join("name"), "fixture\n").unwrap();
+        let templates = root(&pool.candidate).join("home/.smolvm");
+        state::private_directory(&templates).unwrap();
+        let label = "untrusted-first-boot-1";
+        state::write(
+            &root(&pool.candidate).join(SET_ASIDE),
+            &SetAside {
+                version: 1,
+                label: label.into(),
+            },
+        )
+        .unwrap();
+        state::private_directory(&data.join(label)).unwrap();
+        fs::rename(
+            data.join("storage.raw"),
+            data.join(label).join("storage.raw"),
+        )
+        .unwrap();
+        pool.recover(&mut owner).unwrap();
+        assert_eq!(owner.phase, "stopped-before-engine");
+        assert!(data.join(label).join("storage.raw").exists());
+        assert!(data.join(label).join("overlay.raw").exists());
+        assert!(!data.join("overlay.raw").exists());
+        assert!(!root(&pool.candidate).join(SET_ASIDE).exists());
     }
 
     #[test]
@@ -544,6 +654,15 @@ mod tests {
         let data = owner.real_data_dir(&pool.candidate).unwrap();
         assert!(data.join("storage.raw").exists() && templates.join(pinned[0].name).exists());
         assert!(!root(&pool.candidate).join("owner.json").exists());
+        // With the provider's PID record left behind, that refusal still records no process:
+        // a recorded one would route the next recovery to the stopped path, which adopts the
+        // disks without checking their templates.
+        fs::write(data.join("agent.pid"), "99999\n1\n").unwrap();
+        let error = pool.recover(&mut owner).unwrap_err();
+        assert_eq!(error.code, "disk_template_untrusted");
+        assert!(owner.process.is_none());
+        assert!(!root(&pool.candidate).join("owner.json").exists());
+        assert!(!root(&pool.candidate).join(SET_ASIDE).exists());
     }
 
     #[test]

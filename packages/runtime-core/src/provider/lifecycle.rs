@@ -2763,6 +2763,23 @@ fn lock_absent_disks_within(
     handle_wait: Duration,
 ) -> Result<VmLock, CandidateError> {
     let directory = owner.real_data_dir(candidate)?;
+    lock_disks_closed(
+        candidate,
+        owner,
+        &[directory.join("storage.raw"), directory.join("overlay.raw")],
+        handle_wait,
+    )
+}
+
+/// [`lock_absent_disks_within`] for disks at `disks`, which a resumed set-aside of
+/// unadopted disks (`interrupted`) may have partly moved.
+fn lock_disks_closed(
+    candidate: &Candidate,
+    owner: &Owner,
+    disks: &[std::path::PathBuf],
+    handle_wait: Duration,
+) -> Result<VmLock, CandidateError> {
+    let directory = owner.real_data_dir(candidate)?;
     let vm_lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -2786,7 +2803,7 @@ fn lock_absent_disks_within(
     disk_handles::disks_closed(
         &disk_handles::Lsof::host(),
         &process::MonotonicClock::new(),
-        &[directory.join("storage.raw"), directory.join("overlay.raw")],
+        disks,
         handle_wait,
     )?;
     verify_disks(candidate, owner)?;

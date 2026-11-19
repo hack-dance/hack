@@ -66,7 +66,10 @@ wiring, reference and generation checks, and the reasoned exceptions in
 reads: false positives spend minutes rather than omit evidence. Tests that read
 docs, CLI reference, environment matrices or generated files must remain in this
 set. Add an explicit exception whenever a new observation cannot be recognized
-by the source-reader rules.
+by the source-reader rules. A documentation-only change classifies source-reader
+tests from their source text and does not parse their import graphs. Suite
+preloads still parse, including source-reader preloads, so their imported
+production modules keep the full-set rule.
 
 Tests also always run when an imported source module refers to the CLI entry
 point or built binary, launches a process, uses Bun shell execution or creates

@@ -1141,8 +1141,8 @@ profile unless you pass `--profile development`; the research profile can report
 hashes are listed in `provider-pins.json` and under
 [network tool packages](#network-tool-packages).
 
-The current SmolVM pin is 1.34.1 (`smolvm-1.34.1-darwin-arm64.tar.gz`, SHA-256
-`8ebda502e332c739fdfc13b059be982cca66da9253c5229b4586af02c92781d9`, the value
+The current SmolVM pin is 1.35.4 (`smolvm-1.35.4-darwin-arm64.tar.gz`, SHA-256
+`4ad2b02be848219a9d88632ca9e6dc881d6e97343626aab9c11ac4a184929d9e`, the value
 upstream publishes in the release's `checksums.sha256`). `provider-pins.json` is the
 source of truth; the executor refuses any other archive.
 
@@ -1400,7 +1400,14 @@ fresh per-command values names the step that failed (`create`, `connect`, `start
 `deliver`, `release`, `output` or `inspect`) and why (`deadline`, `closed`, `io` or
 `protocol`). A failure before the last value byte is sent cannot have run the command: it
 reports `graph_service_exec_not_run` and is safe to retry. From `release` on, the command may
-have run, and the error stays `graph_service_exec_uncertain`. Exec inherits the container's static environment. When the selected service has a
+have run, and the error stays `graph_service_exec_uncertain`. The per-command values'
+lifetime bounds only their delivery; the exec's own wait bounds the command. Output that is
+still arriving when that wait ends is read to the end, allowing 5 seconds between bytes and
+at most 20 seconds past the wait, so a command that finished on a slow or busy host is reported
+with its exit code rather than as uncertain. Output already queued when a stalled host resumes,
+even after that limit, is still read. Output that stays silent for 5 seconds without ending,
+keeps going past that limit, or an exec whose exit cannot be read within 5 seconds of its
+output ending is still uncertain. Exec inherits the container's static environment. When the selected service has a
 committed private environment attachment on the current boot, it reuses that
 service's exact read-only launcher mounts and original expiry. No values are copied
 into engine metadata, and exec never renews credentials. With the current launcher,
@@ -3130,20 +3137,34 @@ first success, then every 30 seconds for the rest of that probe generation.
 This allows slow first-page compilation, including a server first answering after
 120 seconds. With a full timeout on each request, the grace plus three failed
 startup samples takes at most about 246 seconds of probe time, leaving about
-54 seconds of the usual 300-second graph budget for earlier startup work.
+54 seconds of the default 300-second graph budget for earlier startup work.
 An inferred probe observed unhealthy names its service and route port. For a
 missing listener or HTTP 5xx during boot, check `hack logs <service>` in the same
 project/branch, fix the route
 port, or declare `healthcheck.x-hack-http` with a longer `start_period_ms` and a
 readiness path that answers 2xx.
 
-The 300-second deadline belongs to the whole graph; it is not renewed when a
-service starts. Slow earlier services or `service_healthy` dependencies consume
-it too. A routed service started after a dependency taking 240 seconds can reach
-the graph deadline before its own probe finishes. That path still returns the
-generic `graph_timeout`, without naming the waiting services. Use `hack logs`
-and inspect the dependencies as well as the route. An explicit probe with a longer
-grace does not extend the whole-graph deadline.
+The graph start deadline (300 seconds by default) belongs to the whole graph; it
+is not renewed when a service starts. Slow earlier services or `service_healthy`
+dependencies consume it too. A routed service started after a dependency taking
+240 seconds can reach the graph deadline before its own probe finishes. An
+explicit probe with a longer grace does not extend the whole-graph deadline.
+For a graph that legitimately needs longer (many services, slow first starts, a
+loaded host), set `native.startTimeoutSeconds` in `.hack/hack.config.json` or
+`HACK_NATIVE_START_TIMEOUT_SECONDS` (whole seconds, 60 to 600, the runtime's
+own bound; the variable wins). The budget is configurable rather than progress-aware because the runtime
+owns the deadline and reports nothing per service before the graph is ready.
+When it runs out, `graph_timeout` names each service that had not reached its
+readiness goal, what it was doing and how long it was waited on. The runtime
+removes a failed start's containers before it reports, so these states come from
+the graph's status as read while the start waited (every 5 seconds, startup views
+only); the message says how old that read was, and without one from the last 30
+seconds it keeps the runtime's generic `graph_timeout` message. For example
+`Not ready after 300 s of the 300 s graph start budget: api (wanted healthy;
+running, starting)`. Use `hack logs` and inspect the dependencies as well as the
+route. A guest that is too small can page heavily and miss this budget; the
+error does not yet report guest memory pressure (`hack doctor` shows the
+memory the pool reserves for its guest).
 A successful TCP connection and complete HTTP/1.0 or HTTP/1.1 response headers are
 required. HTTP 200–499, including `/` returning 404, is ready; 5xx, EOF, non-HTTP
 bytes, a timeout or partial headers are not. Redirects are not followed. At most
@@ -3298,8 +3319,8 @@ still resolve arm64 images. Without Rosetta 2 the start refuses with
 
 Every boot audits translation against the pool's recorded intent: the provider's
 stored machine setting, its running configuration, and the guest's `binfmt_misc`
-`rosetta` registration (the x86_64 ELF match with the fixed `rosetta-wrapper`
-interpreter). A pool without translation must have no such registration. The image
+`rosetta` registration (the x86_64 ELF match with the Rosetta translator at
+`/mnt/rosetta/rosetta` as the fixed interpreter). A pool without translation must have no such registration. The image
 cache keeps amd64 archives separate from arm64 ones. Under `prefer-native`, a cached
 amd64 archive is reused only after the pinned image is confirmed not to publish arm64.
 The runtime admits an amd64 image only for an opted-in service
@@ -4371,7 +4392,9 @@ the current owned project/branch mapping, preserves binary stdout/stderr and the
 command exit code, and never falls back to Compose. With piped input/output or
 `HACK_NO_INTERACTIVE=1`, it uses finite exec with a 30-second observation budget;
 a timeout may leave the command running and is not
-retried. `--env` and `--profile` changes are refused. A command name such as `bun`
+retried. When fresh values are delivered through private stdin, output that is still arriving
+or already queued when that budget ends is read to the end, so a command that finished on a
+busy host returns its exit code (see below). `--env` and `--profile` changes are refused. A command name such as `bun`
 uses the selected container's PATH; no host PATH or implicit shell is used. For
 adopted Compose services, `hack exec` resolves the saved startup overlay and AWS profile again, and delivers
 fresh selected-service managed, allowed caller-shell and env-file values through

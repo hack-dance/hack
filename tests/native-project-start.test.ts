@@ -70,6 +70,7 @@ import {
   type ComposeEnvFingerprintRecord,
   evaluateComposeServiceEnvFreshness,
 } from "../src/lib/compose-env-fingerprint.ts";
+import { isRecord } from "../src/lib/guards.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -3133,6 +3134,158 @@ test("failed cleanup reports sanitized TLS failure and retained state without re
   );
   expect((caught as Error).cause).toBeUndefined();
   expect(events).not.toContain("remove");
+});
+
+test("HACK-2351: the configured graph start budget reaches the runtime, and its timeout names the services that were not ready", async () => {
+  const { opts } = await fixture();
+  let timeoutArgument: string | undefined;
+  let startupTimeoutMs: number | undefined;
+  let served: string | undefined;
+  let statusReads = 0;
+  opts.dependencies.startupStatusIntervalMs = 5;
+  opts.dependencies.serve = async (request) => {
+    served = request.run;
+    const index = request.args.indexOf("--timeout-seconds");
+    timeoutArgument = request.args[index + 1];
+    startupTimeoutMs = request.startupTimeoutMs;
+    // The start waits; its status reads run meanwhile.
+    await Bun.sleep(100);
+    request.onExitDiagnostic?.({ exitCode: 1, nativeCode: "graph_timeout" });
+    throw new NativeRuntimeRequestError({
+      message:
+        "Native graph startup was interrupted or failed (graph_timeout); inspect owned state before retrying.",
+      nativeCode: "graph_timeout",
+      nativeMessage:
+        "Graph readiness deadline exceeded; owned state is retained.",
+    });
+  };
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[0] === "graph" && request.args[1] === "status") {
+      statusReads += 1;
+      // While the start waits web never starts; the later reads see the
+      // runtime's cleanup, which must not replace that view (review finding).
+      return statusReads <= 3
+        ? {
+            receipt: { phase: "preparing" },
+            observations: { "container:web": { state: "created" } },
+          }
+        : {
+            receipt: { phase: "cleanup-intent" },
+            observations: { "container:web": { state: "absent" } },
+          };
+    }
+    const value = await invoke(request);
+    if (request.args[1] === "inspect" && served && isRecord(value)) {
+      // After the runtime's own cleanup the container is gone: this view
+      // must not be the one the error describes (review finding).
+      return {
+        ...value,
+        receipt: {
+          ...(value.receipt as object),
+          run: served,
+          phase: "stopped-data-retained",
+        },
+        observations: { "container:web": { state: "absent" } },
+      };
+    }
+    return value;
+  };
+  let caught: unknown;
+  try {
+    await startNativeProject({ ...opts, startTimeoutSeconds: 600 });
+  } catch (error) {
+    caught = error;
+  }
+  expect(timeoutArgument).toBe("600");
+  // The frontend outlasts the runtime's own deadline, so the runtime reports it.
+  expect(startupTimeoutMs).toBe(615_000);
+  expect(caught).toBeInstanceOf(Error);
+  const message = (caught as Error).message;
+  expect(message).toContain("graph_timeout");
+  expect(message).toContain("of the 600 s graph start budget");
+  // From the status read before the deadline, not the post-cleanup inspection.
+  expect(message).toContain("web (wanted started; created)");
+  expect(message).not.toContain("absent");
+  expect(statusReads).toBeGreaterThan(3);
+  expect(message).toContain("native.startTimeoutSeconds");
+});
+
+test("HACK-2351: without a startup-phase graph status, a graph timeout keeps the runtime's own message", async () => {
+  const { opts } = await fixture();
+  opts.dependencies.startupStatusIntervalMs = 5;
+  let served: string | undefined;
+  opts.dependencies.serve = async (request) => {
+    served = request.run;
+    await Bun.sleep(50);
+    request.onExitDiagnostic?.({ exitCode: 1, nativeCode: "graph_timeout" });
+    throw new NativeRuntimeRequestError({
+      message:
+        "Native graph startup was interrupted or failed (graph_timeout); inspect owned state before retrying.",
+      nativeCode: "graph_timeout",
+      nativeMessage:
+        "Graph readiness deadline exceeded; owned state is retained.",
+    });
+  };
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[0] === "graph" && request.args[1] === "status") {
+      // Only cleanup views: nothing describes the graph at its deadline.
+      return {
+        receipt: { phase: "removed" },
+        observations: { "container:web": { state: "absent" } },
+      };
+    }
+    const value = await invoke(request);
+    return request.args[1] === "inspect" && served && isRecord(value)
+      ? {
+          ...value,
+          receipt: {
+            ...(value.receipt as object),
+            run: served,
+            phase: "stopped-data-retained",
+          },
+        }
+      : value;
+  };
+  let caught: unknown;
+  try {
+    await startNativeProject(opts);
+  } catch (error) {
+    caught = error;
+  }
+  expect((caught as Error).message).toContain("graph_timeout");
+  expect((caught as Error).message).not.toContain("Not ready after");
+});
+
+test("HACK-2351: a ready start stops reading its startup status", async () => {
+  const { opts } = await fixture();
+  opts.dependencies.startupStatusIntervalMs = 5;
+  let statusReads = 0;
+  let readsAtReady = 0;
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[0] === "graph" && request.args[1] === "status") {
+      statusReads += 1;
+      return { receipt: { phase: "preparing" }, observations: {} };
+    }
+    return await invoke(request);
+  };
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) =>
+    await serve({
+      ...request,
+      onReady: async (...args) => {
+        await Bun.sleep(40);
+        await request.onReady(...args);
+        readsAtReady = statusReads;
+        // The ready graph keeps running; no startup reads continue.
+        await Bun.sleep(60);
+      },
+    });
+  await startNativeProject(opts).catch(() => undefined);
+  expect(readsAtReady).toBeGreaterThan(0);
+  expect(statusReads).toBe(readsAtReady);
 });
 
 test("final inspection failure reports uncertainty without echoing arbitrary failure values", async () => {

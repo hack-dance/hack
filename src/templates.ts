@@ -612,6 +612,13 @@ export function renderProjectConfigSchemaJson(): string {
             minimum: 1,
             maximum: 512,
           },
+          startTimeoutSeconds: {
+            description:
+              "Native backend graph start budget: how long up waits, after images are ready, for every service to reach its readiness goal. Default 300; 60 to 600. HACK_NATIVE_START_TIMEOUT_SECONDS wins over it.",
+            type: "integer",
+            minimum: 60,
+            maximum: 600,
+          },
         },
       },
       internal: {

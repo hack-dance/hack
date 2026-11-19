@@ -99,7 +99,7 @@ export const TEMPLATE_LENGTHS = {
 } as const;
 
 /**
- * Machine-record fields (SmolVM 1.34.1 `VmRecord`) that must stay inert. Kept equal to
+ * Machine-record fields (SmolVM 1.35.4 `VmRecord`) that must stay inert. Kept equal to
  * `INERT_RECORD_FIELDS` in `packages/runtime-core/src/provider/config_audit.rs`; a test
  * compares the two lists.
  */
@@ -133,6 +133,16 @@ export const INERT_RECORD_FIELDS = [
   "image_origin_digest",
   "checkpoint_head",
   "host_uid_owner",
+  "recorded_ownership",
+  "allocated_ports",
+  "listen_addresses",
+  "oci_platform",
+  "switch",
+  "auto_ports",
+  "forkable",
+  "golden",
+  "fork_env",
+  "ephemeral",
 ] as const;
 
 /** Running-configuration resource fields that must stay inert (`INERT_RUNNING_RESOURCES`). */
@@ -146,11 +156,19 @@ export const INERT_RUNNING_RESOURCES = [
   "dns_options",
   "shm_size",
   "guest_subnet",
+  "switch",
 ] as const;
 
-/** The runtime's inert rule: absent, null, false, or empty; `block_private` only absent or null. */
+/**
+ * The runtime's inert rule: absent, null, false, or empty; `block_private`, `auto_ports` and
+ * `credential_policy` only absent or null.
+ */
 export function inertField(field: string, value: unknown): boolean {
-  if (field === "block_private") {
+  if (
+    field === "block_private" ||
+    field === "auto_ports" ||
+    field === "credential_policy"
+  ) {
     return value === undefined || value === null;
   }
   if (value === undefined || value === null || value === false) {

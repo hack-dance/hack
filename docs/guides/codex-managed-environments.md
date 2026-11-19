@@ -1,5 +1,10 @@
 # Hack in Codex Cloud and remote development environments
 
+To start a project's containers in a cloud agent sandbox or another Linux
+machine, see the v5 walkthroughs under
+[Cloud environments](../versions/v5/guides/cloud-environments.md). This page
+covers env resolution and host commands without a container runtime.
+
 Use the existing repository, its encrypted env configuration, and its pinned
 dependencies to prepare a development environment on another machine. Start by
 choosing the target and Hack version explicitly. A portable CLI installation gives

@@ -628,10 +628,10 @@ removing the refused file lets SmolVM re-expand it from the verified compressed 
 start, the boot is stopped as a failed boot without adopting its disks and needs manual recovery.
 
 Guest control readiness does not mean exposed bridge sockets have bound. The pinned
-[SmolVM 1.34.1 guest](https://github.com/smol-machines/smolvm/blob/v1.34.1/crates/smolvm-agent/src/main.rs#L642)
-starts [independent expose threads](https://github.com/smol-machines/smolvm/blob/v1.34.1/crates/smolvm-agent/src/publish_socket.rs#L57)
+[SmolVM 1.35.4 guest](https://github.com/smol-machines/smolvm/blob/v1.35.4/crates/smolvm-agent/src/main.rs#L664)
+starts [independent expose threads](https://github.com/smol-machines/smolvm/blob/v1.35.4/crates/smolvm-agent/src/publish_socket.rs#L57)
 before signalling ready, without joining them. The pinned
-[launcher removes old expose paths first](https://github.com/smol-machines/smolvm/blob/v1.34.1/src/agent/launcher.rs#L1955);
+[launcher removes old expose paths first](https://github.com/smol-machines/smolvm/blob/v1.35.4/src/agent/launcher.rs#L2070);
 freshness depends on that ordering, because private socket metadata alone does not identify
 its binder. A provider-pin upgrade must re-check that contract. Fresh boot waits up to 10 seconds
 for all declared bridge sockets, before disk adoption and the full boot audit. Each poll

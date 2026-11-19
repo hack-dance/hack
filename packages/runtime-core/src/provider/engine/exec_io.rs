@@ -50,6 +50,23 @@ pub(super) fn read(stream: &UnixStream, bytes: &mut [u8], deadline: Instant) -> 
     count(result)
 }
 
+/// One nonblocking `recv` with no wait: bytes or EOF the peer already queued, or
+/// `WouldBlock` when nothing is queued. For draining a stream after its deadline, so a
+/// late reader still gets output that had already arrived (idea from #982).
+#[cfg(any(all(target_os = "macos", feature = "environment-launcher"), test))]
+pub(super) fn read_queued(stream: &UnixStream, bytes: &mut [u8]) -> io::Result<usize> {
+    // SAFETY: writable slice and live socket; MSG_DONTWAIT is per-call only.
+    let result = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            bytes.as_mut_ptr().cast(),
+            bytes.len(),
+            libc::MSG_DONTWAIT,
+        )
+    };
+    count(result)
+}
+
 pub(super) fn write(stream: &UnixStream, bytes: &[u8], deadline: Instant) -> io::Result<usize> {
     wait(stream, deadline, libc::POLLOUT)?;
     // Darwin can block a large send despite MSG_DONTWAIT. Handshake callers own
@@ -122,6 +139,29 @@ pub(super) fn retry(error: &io::Error) -> bool {
 mod tests {
     use super::*;
     use std::{io::Write, time::Duration};
+
+    #[test]
+    fn queued_bytes_and_eof_are_read_without_waiting() {
+        // From #982: bytes the peer queued before it closed are available after any deadline.
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(b"queued-after-deadline").unwrap();
+        drop(peer);
+        let mut raw = Vec::new();
+        let mut buffer = [0u8; 4];
+        loop {
+            match read_queued(&stream, &mut buffer).unwrap() {
+                0 => break,
+                n => raw.extend_from_slice(&buffer[..n]),
+            }
+        }
+        assert_eq!(raw, b"queued-after-deadline");
+        // Nothing queued on an open stream: it does not wait.
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        assert_eq!(
+            read_queued(&stream, &mut buffer).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
 
     #[test]
     fn only_a_failure_after_an_accepted_send_is_marked_and_it_is_never_retryable() {

@@ -12,12 +12,12 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const ARCHIVE_SHA256: &str = "8ebda502e332c739fdfc13b059be982cca66da9253c5229b4586af02c92781d9";
+pub const ARCHIVE_SHA256: &str = "4ad2b02be848219a9d88632ca9e6dc881d6e97343626aab9c11ac4a184929d9e";
 // Bridge freshness relies on the pinned launcher's unlink-before-guest-ready
-// ordering for expose paths (src/agent/launcher.rs:1955-1972 at v1.34.1).
+// ordering for expose paths (src/agent/launcher.rs:2070-2086 at v1.35.4).
 // A pin upgrade must re-check that contract as well as the archive digest.
-pub const VERSION: &str = "1.34.1";
-const DIRECTORY: &str = "smolvm-1.34.1-darwin-arm64";
+pub const VERSION: &str = "1.35.4";
+const DIRECTORY: &str = "smolvm-1.35.4-darwin-arm64";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

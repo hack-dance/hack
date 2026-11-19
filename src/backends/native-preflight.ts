@@ -1922,15 +1922,6 @@ function selectedRuntimeFindings(
     : findings;
 }
 
-/** Runs installation, CLI and runtime gates over the same selected project. */
-/**
- * The source content limit `up` and `restart` enforce before any hook,
- * runtime start, image pull or build (HACK-2338 item 7). Same decision and
- * same text: only a graph that captures source (a selected service
- * bind-mounts project source or declares a dependency cache) is measured,
- * and a refusal there is a blocker here, so `ready: true` is never followed
- * by `up` refusing on size. A measurement `up` could not make refuses too.
- */
 /** Routed hostnames checked per preflight, so lookups stay bounded. */
 const HOST_RESOLUTION_LIMIT = 32;
 
@@ -2102,6 +2093,11 @@ function sourceMeasurementDetail(error: unknown): string {
   return "Values omitted.";
 }
 
+/**
+ * Applies the source content limit enforced by `up` and `restart` before effects.
+ * Only selected services that capture source are measured. Both an excessive
+ * size and a failed measurement block preflight with the startup refusal.
+ */
 async function sourceSizeFindings(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
@@ -2213,6 +2209,7 @@ async function reviewSelectedRuntime(input: {
   return { runtime, findings };
 }
 
+/** Runs installation, CLI and runtime gates over the same selected project. */
 export async function collectNativePreflight(
   opts: NativePreflightOptions
 ): Promise<NativePreflightReport> {

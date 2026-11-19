@@ -35,7 +35,7 @@ async function fixture() {
   ]) {
     await Bun.write(
       join(tools, name),
-      `#!${process.execPath}\nconst args=process.argv.slice(2);\nawait Bun.write(${JSON.stringify(calls)}, (await Bun.file(${JSON.stringify(calls)}).text().catch(()=>""))+${JSON.stringify(name)}+" "+args.join(" ")+"\\n");\nconst allowed=${JSON.stringify(name)} === "docker" && (["info","ps","inspect","version"].includes(args[0]) || args[0] === "network" && args[1] === "inspect");\nconst readOnlyService=${JSON.stringify(name)} === "systemctl" && args.join(" ") === "is-active systemd-resolved";\nif(!(allowed || readOnlyService)) await Bun.write(${JSON.stringify(forbidden)},"unexpected-effect");\nprocess.exit(1);\n`
+      `#!${process.execPath}\nconst args=process.argv.slice(2);\nawait Bun.write(${JSON.stringify(calls)}, (await Bun.file(${JSON.stringify(calls)}).text().catch(()=>""))+${JSON.stringify(name)}+" "+args.join(" ")+"\\n");\nconst allowed=${JSON.stringify(name)} === "docker" && (["info","ps","inspect","version"].includes(args[0]) || args[0] === "network" && args[1] === "inspect");\nconst readOnlyService=${JSON.stringify(name)} === "systemctl" && args.join(" ") === "is-active systemd-resolved";\nconst readOnlyStatus=${JSON.stringify(name)} === "native-runtime" && args.slice(2).join(" ") === "runtime status --json";\nif(!(allowed || readOnlyService || readOnlyStatus)) await Bun.write(${JSON.stringify(forbidden)},"unexpected-effect");\nprocess.exit(1);\n`
     );
     await chmod(join(tools, name), 0o700);
   }
@@ -129,6 +129,17 @@ for (const native of [false, true]) {
         "hack.config.json",
         "hack.project.json",
       ]);
+      if (native) {
+        // The pool belongs to the native home, so the machine audit reads its
+        // status (read-only); the failed stub warns that observation is unknown.
+        expect(
+          checks.find((check) => check.id === "native pool idle")
+        ).toMatchObject({
+          status: "warn",
+          scope: "machine",
+          nativePool: { state: "unknown" },
+        });
+      }
       if (!native) {
         expect(
           checks.find((check) => check.id === "docker daemon")?.status

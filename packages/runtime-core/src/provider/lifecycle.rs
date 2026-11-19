@@ -3,6 +3,7 @@ mod disk_handles;
 pub mod host_filesystem;
 mod interrupted;
 mod operating_guard;
+mod pool_users;
 mod prepared_boot;
 #[cfg(test)]
 mod pressure_tests;
@@ -58,7 +59,17 @@ pub struct RuntimeStatus {
     /// Prepared-base selection and activation, for pools that requested one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prepared_base: Option<super::prepared_start::Status>,
+    /// Graph runs this home records, Compose and native-authored, running or
+    /// retained after `down`; `null` when either inventory cannot be read.
+    pub graph_runs: Option<usize>,
+    /// `true` only when the pool runs with a live provider process and records
+    /// no graph, environment allocation or exec session (see
+    /// [`pool_users`]); `false` when it is not running or something uses it;
+    /// `null` when that cannot be established. An active image build is not
+    /// observed here; `runtime down` refuses during one.
+    pub pool_idle: Option<bool>,
 }
+
 fn root(candidate: &Candidate) -> std::path::PathBuf {
     candidate.state_root.join("run/smolvm")
 }
@@ -913,6 +924,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         .try_exists()
         .map_err(io)?
     {
+        let users = pool_users::observe_with(&candidate.state_root, |_| Some(false));
         return Ok(RuntimeStatus {
             network: None,
             project_share: None,
@@ -932,9 +944,24 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             persistent_disks_identified: false,
             guest_boot_id: None,
             prepared_base: None,
+            graph_runs: users.graph_runs,
+            pool_idle: Some(false),
         });
     }
     let owner = Owner::load(candidate)?;
+    // Status is read-only. Only the strict, same-owner retirement proof can
+    // exclude a native journal retained in place after all resources are removed.
+    let users = pool_users::observe_with(&candidate.state_root, |run| {
+        #[cfg(feature = "native-config-plan")]
+        {
+            super::graph::native::retired(candidate, run, &owner.token).ok()
+        }
+        #[cfg(not(feature = "native-config-plan"))]
+        {
+            let _ = run;
+            Some(false)
+        }
+    });
     let alive = if let Some(process) = &owner.process {
         let alive = identity::alive(process.pid)?;
         if alive {
@@ -956,6 +983,12 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     } else {
         None
     };
+    let phase = if alive == Some(false) && owner.phase == "running" {
+        "process-exited".to_owned()
+    } else {
+        owner.phase.clone()
+    };
+    let pool_idle = pool_users::pool_idle(&phase, alive, users);
     Ok(RuntimeStatus {
         network: Some(owner.network.clone()),
         project_share: owner.project_share.clone(),
@@ -973,11 +1006,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         reclamation: owner.reclamation,
         guest_memory_mib: Some(owner.profile.memory_mib()),
         application_bridge: owner.application_bridge,
-        phase: if alive == Some(false) && owner.phase == "running" {
-            "process-exited".into()
-        } else {
-            owner.phase.clone()
-        },
+        phase,
         qualification: owner.profile.qualification(),
         machine: Some(owner.machine.clone()),
         process_alive: alive,
@@ -988,6 +1017,8 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         persistent_disks_identified: owner.storage.is_some(),
         guest_boot_id: owner.guest_boot_id,
         prepared_base: super::prepared_start::status(candidate),
+        graph_runs: users.graph_runs,
+        pool_idle,
     })
 }
 

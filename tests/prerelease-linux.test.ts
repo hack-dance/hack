@@ -17,9 +17,11 @@ import { join } from "node:path";
 import { buildPrereleaseManager } from "../scripts/build-prerelease-manager.ts";
 import {
   freshChannelLeg,
+  linuxGateDecision,
   PUBLISHED_LINUX_RELEASES,
   PUBLISHED_RELEASES,
   publishedPins,
+  upgradeLeg,
 } from "../scripts/check-prerelease-upgrade.ts";
 import {
   BOOTSTRAP_ASSET,
@@ -141,9 +143,10 @@ async function composeBundle(
   changes: {
     readonly metadataPlatform?: string;
     readonly sourceRevision?: string;
+    readonly version?: string;
   } = {}
 ) {
-  const bundle = join(root, `bundle-${platform}`);
+  const bundle = join(root, `bundle-${platform}-${changes.version ?? VERSION}`);
   mkdirSync(bundle, { mode: 0o700 });
   const files: Record<string, [string, number]> = {
     "hack-cli": [FIXTURE_CLI, 0o755],
@@ -153,7 +156,7 @@ async function composeBundle(
       `${JSON.stringify(
         {
           ...prereleaseMetadata({
-            version: VERSION,
+            version: changes.version ?? VERSION,
             sourceRevision: changes.sourceRevision ?? revision,
             platform,
           }),
@@ -817,6 +820,29 @@ fixtureTest(
     ).rejects.toThrow("Linux assets do not match their checksum manifest");
     writeFileSync(manager, original);
     await verifyReleaseAssets({ plan, output, linux: true });
+    // Publication boundary: an archive whose member changed after the Linux
+    // job validated it is refused even when SHA256SUMS-linux was rendered from
+    // the changed bytes, because every member is checked against the
+    // archive's own SHA256SUMS here too.
+    const x86 = join(output, bundleArchiveName(VERSION, "linux-x86_64"));
+    const savedArchive = readFileSync(x86);
+    const savedSums = readFileSync(join(output, LINUX_SUMS));
+    const changed = await composeBundle(
+      join(root, "out-linux-arm64"),
+      "linux-x86_64"
+    );
+    writeFileSync(join(changed, "hack-cli"), "#!/bin/sh\necho changed\n");
+    tar(x86, changed, [...COMPOSE_PAYLOAD, "SHA256SUMS"]);
+    writeFileSync(
+      join(output, LINUX_SUMS),
+      await renderChecksums({ root: output, names: linuxSumsNames(VERSION) })
+    );
+    await expect(
+      verifyReleaseAssets({ plan, output, linux: true })
+    ).rejects.toThrow("Candidate checksum mismatch: hack-cli");
+    writeFileSync(x86, savedArchive);
+    writeFileSync(join(output, LINUX_SUMS), savedSums);
+    await verifyReleaseAssets({ plan, output, linux: true });
     // A Linux line added to SHA256SUMS is refused, not published.
     writeFileSync(
       join(output, "SHA256SUMS"),
@@ -1108,6 +1134,85 @@ test("Linux pins are separate, so the macOS pins stay the reviewed pairs", () =>
       expect(publishedPins(version, platform)).toBeUndefined();
     }
   }
+});
+
+test("the Linux gate leg is decided from reviewed pins, never from a missing asset", () => {
+  const pin = { manager: "a".repeat(64), archive: "b".repeat(64) };
+  const platform = "linux-x86_64";
+  const shipped = {
+    "5.0.0-next.23": { "linux-x86_64": pin, "linux-arm64": pin },
+  };
+  // Today: no Linux release is in reviewed history and next.22 has no Linux
+  // assets, so there is nothing to upgrade.
+  expect(
+    linuxGateDecision({
+      previous: "5.0.0-next.22",
+      platform,
+      previousHasManagerAsset: false,
+    })
+  ).toEqual({ leg: "fresh" });
+  expect(
+    linuxGateDecision({
+      previous: null,
+      platform,
+      previousHasManagerAsset: false,
+      history: {},
+    })
+  ).toEqual({ leg: "fresh" });
+  // A pinned predecessor with its assets: the upgrade leg, with its pins.
+  expect(
+    linuxGateDecision({
+      previous: "5.0.0-next.23",
+      platform,
+      previousHasManagerAsset: true,
+      history: shipped,
+    })
+  ).toEqual({ leg: "upgrade", previous: "5.0.0-next.23", pins: pin });
+  // A reviewed Linux predecessor whose manager asset is gone fails; it is
+  // not a first release.
+  expect(() =>
+    linuxGateDecision({
+      previous: "5.0.0-next.23",
+      platform,
+      previousHasManagerAsset: false,
+      history: shipped,
+    })
+  ).toThrow("asset is missing");
+  // Once Linux is in reviewed history, an unpinned previous release fails,
+  // with or without assets.
+  for (const previousHasManagerAsset of [false, true]) {
+    expect(() =>
+      linuxGateDecision({
+        previous: "5.0.0-next.24",
+        platform,
+        previousHasManagerAsset,
+        history: shipped,
+      })
+    ).toThrow(
+      previousHasManagerAsset
+        ? "is not pinned"
+        : "That is not a first Linux release"
+    );
+  }
+  // A pin for the other architecture only is not a pin for this one.
+  expect(() =>
+    linuxGateDecision({
+      previous: "5.0.0-next.23",
+      platform,
+      previousHasManagerAsset: false,
+      history: { "5.0.0-next.23": { "linux-arm64": pin } },
+    })
+  ).toThrow("That is not a first Linux release");
+  // The pin chore cannot be skipped after the first Linux release: assets
+  // with no pin fail even while the reviewed history is still empty.
+  expect(() =>
+    linuxGateDecision({
+      previous: "5.0.0-next.23",
+      platform,
+      previousHasManagerAsset: true,
+      history: {},
+    })
+  ).toThrow("has linux-x86_64 assets but is not pinned");
 });
 
 fixtureTest(
@@ -1524,6 +1629,62 @@ test.skipIf(linuxHost === null || linuxHost === "darwin-arm64")(
         version: VERSION,
       })
     ).toThrow(`Installing ${VERSION} into a fresh channel failed`);
+
+    // The published-predecessor leg: a channel installed by the previous
+    // release's manager takes the next candidate with the documented command.
+    const NEXT = "5.0.0-next.24";
+    const nextPlan = createPrereleasePlan({
+      version: NEXT,
+      sourceRevision: revision,
+      ref: "refs/heads/next",
+      eventName: "workflow_dispatch",
+      channel: "prerelease",
+    });
+    const nextOutput = join(root, "out-next");
+    await packageLinuxPrerelease({
+      plan: nextPlan,
+      bundle: await composeBundle(root, platform, { version: NEXT }),
+      output: nextOutput,
+      platform,
+      buildManager: fixtureManager,
+    });
+    const nextArchive = join(nextOutput, bundleArchiveName(NEXT, platform));
+    const legInputs = (name: string) => {
+      const legWork = join(root, name);
+      mkdirSync(join(legWork, "files"), { mode: 0o700, recursive: true });
+      for (const [from, to] of [
+        [manager, "previous-manager"],
+        [manager, "candidate-manager"],
+        [archive, "previous.tar.gz"],
+        [nextArchive, "candidate.tar.gz"],
+      ] as const) {
+        copyFileSync(from, join(legWork, "files", to));
+      }
+      chmodSync(join(legWork, "files/previous-manager"), 0o700);
+      return {
+        work: legWork,
+        previous: VERSION,
+        previousManager: join(legWork, "files/previous-manager"),
+        previousArchive: join(legWork, "files/previous.tar.gz"),
+        previousSum: digest(archive),
+        candidate: NEXT,
+        candidateManager: join(legWork, "files/candidate-manager"),
+        candidateArchive: join(legWork, "files/candidate.tar.gz"),
+        unchanged: () => undefined,
+        acceptManagerStep: false,
+      };
+    };
+    const upgraded = legInputs("leg-ok");
+    expect(upgradeLeg({ ...upgraded, candidateSum: digest(nextArchive) })).toBe(
+      0
+    );
+    expect(readdirSync(join(upgraded.work, "channel/versions")).sort()).toEqual(
+      [VERSION, NEXT]
+    );
+    // A candidate the retained manager cannot install fails the gate.
+    expect(
+      upgradeLeg({ ...legInputs("leg-bad"), candidateSum: "0".repeat(64) })
+    ).toBe(1);
 
     // Uninstall moves the whole channel aside; nothing else under HOME changes.
     const removed = JSON.parse(

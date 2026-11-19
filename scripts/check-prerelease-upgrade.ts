@@ -27,11 +27,15 @@
  * It gates the host's platform. On Apple Silicon macOS that is the native
  * bundle. On Linux x86_64 or arm64 it is the Compose bundle, with that
  * platform's manager and archive (HACK_PRERELEASE_OUTPUT is then the Linux
- * build job's package directory). The first release with Linux assets has no
- * previous Linux install to upgrade: the gate says so and instead installs the
- * candidate into a fresh channel, deselects, selects, rolls back and
- * uninstalls it. From the second such release on, it upgrades the previous
- * published Linux install with its retained manager, as on macOS.
+ * build job's package directory). Which Linux leg runs is decided from reviewed
+ * history, `PUBLISHED_LINUX_RELEASES`, never from what a release's asset list
+ * happens to hold (see `linuxGateDecision`). While that history is empty and
+ * the previous release has no Linux assets, there is no Linux install to
+ * upgrade: the gate says so and instead installs the candidate into a fresh
+ * channel, deselects, selects, rolls back and uninstalls it. Once a Linux
+ * release is in reviewed history, the previous release must be pinned and its
+ * assets present, and the gate upgrades that install with its retained
+ * manager, as on macOS.
  */
 import {
   chmodSync,
@@ -216,6 +220,66 @@ function required(step: Step, what: string): string {
   return step.output;
 }
 
+type LinuxPins = typeof PUBLISHED_LINUX_RELEASES;
+
+/**
+ * Which Linux leg the gate runs, decided from reviewed history.
+ *
+ * - `fresh`: no Linux release is in reviewed history (`history` is empty) and
+ *   the previous release has no Linux manager asset. Nothing can be upgraded.
+ * - `upgrade`: the previous release is pinned for this platform and has its
+ *   Linux manager asset.
+ *
+ * Everything else refuses. In particular a missing asset is never read as
+ * "Linux has not shipped yet": once any Linux release is pinned, a previous
+ * release without a pin, or a pinned one whose asset is gone, fails the gate.
+ * A previous release that has Linux assets but no pin fails too, whatever the
+ * history holds, so the pin chore cannot be skipped after the first release.
+ */
+export function linuxGateDecision(opts: {
+  readonly previous: string | null;
+  readonly platform: (typeof LINUX_BUNDLE_PLATFORMS)[number];
+  /** Whether the previous release lists this platform's manager asset. */
+  readonly previousHasManagerAsset: boolean;
+  readonly history?: LinuxPins;
+}):
+  | { readonly leg: "fresh" }
+  | {
+      readonly leg: "upgrade";
+      readonly previous: string;
+      readonly pins: { readonly manager: string; readonly archive: string };
+    } {
+  const history = opts.history ?? PUBLISHED_LINUX_RELEASES;
+  const where =
+    "PUBLISHED_LINUX_RELEASES in scripts/check-prerelease-upgrade.ts";
+  const pins =
+    opts.previous === null
+      ? undefined
+      : history[opts.previous]?.[opts.platform];
+  if (opts.previous !== null && pins !== undefined) {
+    if (!opts.previousHasManagerAsset) {
+      throw new Error(
+        `${opts.previous} is a reviewed ${opts.platform} release (${where}) but its ${managerAssetName(opts.platform)} asset is missing. A published Linux install cannot be upgraded without it; restore the release's assets or resolve this in review. The gate does not fall back to a fresh install.`
+      );
+    }
+    return { leg: "upgrade", previous: opts.previous, pins };
+  }
+  if (opts.previousHasManagerAsset) {
+    throw new Error(
+      `${String(opts.previous)} has ${opts.platform} assets but is not pinned (${where}); add its published manager and archive digests in review before this gate runs it.`
+    );
+  }
+  const reviewed = Object.keys(history).sort((a, b) =>
+    compareCandidateVersions(a, b)
+  );
+  if (reviewed.length > 0) {
+    throw new Error(
+      `Linux releases are in reviewed history (${where}, latest ${reviewed.at(-1)}), but the previous prerelease ${String(opts.previous)} has no reviewed ${opts.platform} pin and no ${opts.platform} assets. That is not a first Linux release; pin the previous release or resolve the missing assets in review.`
+    );
+  }
+  return { leg: "fresh" };
+}
+
 /**
  * The Linux gate when no published Linux install precedes the candidate:
  * install the candidate into a fresh channel with its own manager and take it
@@ -300,6 +364,114 @@ export function freshChannelLeg(opts: {
   }
 }
 
+/**
+ * The upgrade itself, on any platform: install the previous release into a
+ * fresh channel with its own manager, then upgrade it to the candidate with
+ * the documented command, which runs the retained previous manager. Returns
+ * the gate's exit code. `unchanged` must throw if the candidate assets that
+ * will be uploaded changed. Every file here is already verified by the caller.
+ */
+export function upgradeLeg(opts: {
+  readonly work: string;
+  readonly previous: string;
+  readonly previousManager: string;
+  readonly previousArchive: string;
+  readonly previousSum: string;
+  readonly candidate: string;
+  readonly candidateManager: string;
+  readonly candidateArchive: string;
+  readonly candidateSum: string;
+  readonly unchanged: () => void;
+  readonly acceptManagerStep: boolean;
+}): number {
+  const {
+    work,
+    previous,
+    previousManager,
+    previousArchive,
+    previousSum,
+    candidate,
+    candidateManager,
+    candidateArchive,
+    candidateSum,
+    unchanged,
+  } = opts;
+  const env = managerEnvironment(work);
+  mkdirSync(env.HOME as string, { mode: 0o700 });
+  mkdirSync(env.TMPDIR as string, { mode: 0o700 });
+  const root = join(work, "channel");
+  required(
+    step(
+      [
+        previousManager,
+        "--root",
+        root,
+        "install",
+        "--version",
+        previous,
+        "--archive",
+        previousArchive,
+        "--sha256",
+        previousSum,
+      ],
+      600_000,
+      env
+    ),
+    `Installing ${previous} with its own manager`
+  );
+  const upgrade = () =>
+    step(
+      [
+        join(root, "bin/hack-next"),
+        "--manager",
+        "upgrade",
+        "--version",
+        candidate,
+        "--archive",
+        candidateArchive,
+        "--sha256",
+        candidateSum,
+      ],
+      600_000,
+      env
+    );
+  const direct = upgrade();
+  unchanged();
+  if (direct.ok) {
+    console.log(
+      `The ${previous} manager upgrades its channel to ${candidate} with the documented command.`
+    );
+    return 0;
+  }
+  console.error(
+    `The ${previous} manager cannot upgrade its channel to ${candidate}: ${direct.output}`
+  );
+  chmodSync(candidateManager, 0o700);
+  const takeover = step(
+    [candidateManager, "--root", root, "upgrade-manager"],
+    600_000,
+    env
+  );
+  const retried = takeover.ok ? upgrade() : null;
+  unchanged();
+  if (!(takeover.ok && retried?.ok)) {
+    console.error(
+      `The documented upgrade-manager step does not work either: ${takeover.ok ? retried?.output : takeover.output}`
+    );
+    return 1;
+  }
+  if (opts.acceptManagerStep) {
+    console.log(
+      `Accepted: ${previous} users must run the ${candidate} standalone manager's upgrade-manager first; the release notes must say so.`
+    );
+    return 0;
+  }
+  console.error(
+    `The documented upgrade-manager step works. Publish only with HACK_PRERELEASE_ACCEPT_MANAGER_STEP=1 and release notes that tell ${previous} users to run it.`
+  );
+  return 1;
+}
+
 async function main(): Promise<number> {
   const candidate = process.env.HACK_PRERELEASE_VERSION ?? "";
   const output = process.env.HACK_PRERELEASE_OUTPUT ?? "";
@@ -343,28 +515,33 @@ async function main(): Promise<number> {
   // a link to /private/var.
   const work = realpathSync(mkdtempSync(join(tmpdir(), "hack-upgrade-gate-")));
   try {
-    // A release from before Linux bundles existed has no manager for this
-    // platform. That is decided by the release's asset list, never by a
-    // missing pin: a release that has the asset must be pinned.
-    const hasLinuxAssets =
-      linux &&
-      previous !== null &&
-      required(
-        step(
-          [
-            "gh",
-            "api",
-            `repos/${REPOSITORY}/releases/tags/v${previous}`,
-            "--jq",
-            ".assets[].name",
-          ],
-          120_000
-        ),
-        `Listing the assets of ${previous}`
-      )
-        .split("\n")
-        .includes(MANAGER_ASSET);
-    if (linux && !hasLinuxAssets) {
+    // Linux: reviewed history decides the leg. The asset list is read only to
+    // refuse inconsistencies with it, never to conclude that Linux is new.
+    const decision =
+      platform === "darwin-arm64"
+        ? null
+        : linuxGateDecision({
+            previous,
+            platform,
+            previousHasManagerAsset:
+              previous !== null &&
+              required(
+                step(
+                  [
+                    "gh",
+                    "api",
+                    `repos/${REPOSITORY}/releases/tags/v${previous}`,
+                    "--jq",
+                    ".assets[].name",
+                  ],
+                  120_000
+                ),
+                `Listing the assets of ${previous}`
+              )
+                .split("\n")
+                .includes(MANAGER_ASSET),
+          });
+    if (decision?.leg === "fresh") {
       const before = snapshot(output);
       const copies = join(work, "candidate");
       mkdirSync(copies, { mode: 0o700 });
@@ -384,7 +561,7 @@ async function main(): Promise<number> {
         );
       }
       console.log(
-        `${previous === null ? "No published prerelease" : `The previous prerelease ${previous} has no ${platform} assets, so no published ${platform} install`} precedes ${candidate}: there is nothing to upgrade. Instead ${candidate} was installed into a fresh channel, deselected, selected, rolled back and uninstalled with its own manager.`
+        `No ${platform} release is in reviewed history (PUBLISHED_LINUX_RELEASES is empty) and ${previous === null ? "no published prerelease precedes this one" : `the previous prerelease ${previous} has no ${platform} assets`}, so no published ${platform} install precedes ${candidate}: there is nothing to upgrade. Instead ${candidate} was installed into a fresh channel, deselected, selected, rolled back and uninstalled with its own manager.`
       );
       return 0;
     }
@@ -421,7 +598,10 @@ async function main(): Promise<number> {
     const sums = (name: string) => Bun.file(join(assets, name)).text();
     // The release's own checksum files are only a consistency check: they
     // live beside the assets. Execution needs this release's reviewed pins.
-    const pins = publishedPins(previous, platform);
+    const pins =
+      decision?.leg === "upgrade"
+        ? decision.pins
+        : publishedPins(previous, platform);
     if (pins === undefined) {
       throw new Error(
         `${previous} is not pinned (${linux ? `PUBLISHED_LINUX_RELEASES, ${platform},` : "PUBLISHED_RELEASES"} in scripts/check-prerelease-upgrade.ts); add its published manager and archive digests in review before this gate runs it.`
@@ -466,9 +646,6 @@ async function main(): Promise<number> {
     if (digest(candidateArchive) !== candidateSum) {
       throw new Error("The candidate archive does not match its checksums.");
     }
-    const env = managerEnvironment(work);
-    mkdirSync(env.HOME as string, { mode: 0o700 });
-    mkdirSync(env.TMPDIR as string, { mode: 0o700 });
     const unchanged = () => {
       if (JSON.stringify(snapshot(output)) !== JSON.stringify(before)) {
         throw new Error(
@@ -476,77 +653,20 @@ async function main(): Promise<number> {
         );
       }
     };
-    const root = join(work, "channel");
-    required(
-      step(
-        [
-          previousManager,
-          "--root",
-          root,
-          "install",
-          "--version",
-          previous,
-          "--archive",
-          previousArchive,
-          "--sha256",
-          previousSum,
-        ],
-        600_000,
-        env
-      ),
-      `Installing ${previous} with its own manager`
-    );
-    const upgrade = () =>
-      step(
-        [
-          join(root, "bin/hack-next"),
-          "--manager",
-          "upgrade",
-          "--version",
-          candidate,
-          "--archive",
-          candidateArchive,
-          "--sha256",
-          candidateSum,
-        ],
-        600_000,
-        env
-      );
-    const direct = upgrade();
-    unchanged();
-    if (direct.ok) {
-      console.log(
-        `The ${previous} manager upgrades its channel to ${candidate} with the documented command.`
-      );
-      return 0;
-    }
-    console.error(
-      `The ${previous} manager cannot upgrade its channel to ${candidate}: ${direct.output}`
-    );
-    chmodSync(candidateManager, 0o700);
-    const takeover = step(
-      [candidateManager, "--root", root, "upgrade-manager"],
-      600_000,
-      env
-    );
-    const retried = takeover.ok ? upgrade() : null;
-    unchanged();
-    if (!(takeover.ok && retried?.ok)) {
-      console.error(
-        `The documented upgrade-manager step does not work either: ${takeover.ok ? retried?.output : takeover.output}`
-      );
-      return 1;
-    }
-    if (process.env.HACK_PRERELEASE_ACCEPT_MANAGER_STEP === "1") {
-      console.log(
-        `Accepted: ${previous} users must run the ${candidate} standalone manager's upgrade-manager first; the release notes must say so.`
-      );
-      return 0;
-    }
-    console.error(
-      `The documented upgrade-manager step works. Publish only with HACK_PRERELEASE_ACCEPT_MANAGER_STEP=1 and release notes that tell ${previous} users to run it.`
-    );
-    return 1;
+    return upgradeLeg({
+      work,
+      previous,
+      previousManager,
+      previousArchive,
+      previousSum,
+      candidate,
+      candidateManager,
+      candidateArchive,
+      candidateSum,
+      unchanged,
+      acceptManagerStep:
+        process.env.HACK_PRERELEASE_ACCEPT_MANAGER_STEP === "1",
+    });
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

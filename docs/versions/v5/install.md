@@ -58,6 +58,11 @@ has the details.
 | Stable `hack` | Homebrew's executable, or `~/.hack/bin/hack` with the release installer | Uses `~/.hack` |
 | Prerelease `hack-next` | Launcher and versioned bundles under `~/.hack-next` | Native uses private homes per version; Compose shares `~/.hack` with stable |
 
+The installer pins only its manager's SHA-256; the manager then accepts the
+archive digest listed in the release's checksum file, fetched over HTTPS from the
+same GitHub release, so an archive is only as trustworthy as that release's assets
+(the same on macOS and Linux).
+
 The prerelease installer leaves stable alone. It does not edit PATH, start a VM,
 or set up DNS or certificate trust. [Install details](../guides/candidate-install.md)
 cover custom roots, checksums and version changes.

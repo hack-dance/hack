@@ -108,6 +108,12 @@ What differs from the macOS bundle:
   not stop or inspect your Compose projects. They take the channel lock, which
   refuses while a `hack-next` command is running.
 
+Trust model, the same on macOS and Linux: the installer pins only the manager's
+SHA-256, and the manager then accepts the archive digest listed in the release's
+checksum file (`SHA256SUMS-linux` on Linux, `SHA256SUMS` on macOS), which it
+downloads over HTTPS from the same GitHub release as the archive, so an archive is
+only as trustworthy as that release's assets.
+
 `--manager status`, `upgrade`, `select`, `rollback`, `stable` and `uninstall` work
 as described under
 [upgrade, roll back and return to stable](#upgrade-roll-back-and-return-to-stable).

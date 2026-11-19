@@ -234,12 +234,24 @@ packaged candidate changed while the gate ran. It also reports whether the docum
 run it.
 
 The Linux jobs run the same gate for their platform, with pins in
-`PUBLISHED_LINUX_RELEASES` in the same file. The first release with Linux assets
-has no earlier Linux install to upgrade. The gate says so, and instead installs
-the candidate into a fresh channel, deselects it, selects it, rolls back and
-uninstalls it. Later releases upgrade the previous published Linux install with
-its retained manager. A previous release that has Linux assets but no pin fails
-the gate.
+`PUBLISHED_LINUX_RELEASES` in the same file. Those reviewed pins, not a release's
+asset list, decide which leg runs. While no Linux release is pinned and the
+previous release has no Linux assets, there is no Linux install to upgrade. The
+gate says so, and instead installs the candidate into a fresh channel, deselects
+it, selects it, rolls back and uninstalls it. Once a Linux release is pinned, the
+previous release must be pinned for the platform and still have its Linux assets;
+the gate then upgrades that install with its retained manager. It fails, and never
+falls back to the fresh install, when a pinned release's Linux manager asset is
+missing, when the previous release has no pin although Linux releases are pinned,
+or when the previous release has Linux assets but no pin. Add both platforms' pins
+and both Linux manager digests to `REVIEWED_PREDECESSORS` when a release with
+Linux assets publishes.
+
+The packaging job and the publish job each verify the Linux files themselves: the
+installer's own extraction checks every member of each archive against the
+archive's inner `SHA256SUMS`, the metadata must name the planned version, source
+revision and platform, and each manager must be an ELF executable for its
+architecture.
 
 Publication requires an explicit publish request for the exact protected `next`
 commit, successful checks for that commit, and approval through a configured

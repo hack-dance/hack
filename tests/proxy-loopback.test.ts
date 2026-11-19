@@ -844,7 +844,7 @@ test("on Linux an unresolved name gives the no-DNS curl form for the proxy's own
   expect(https?.dns).toBe("unresolved");
   expect(https?.hint).toContain("systemd-resolved");
   expect(https?.hint).toContain(
-    "curl --resolve 'hello.hack:443:127.0.0.1' 'https://hello.hack/api/health?verbose=1'"
+    "curl --noproxy 'hello.hack' --resolve 'hello.hack:443:127.0.0.1' 'https://hello.hack/api/health?verbose=1'"
   );
   expect(https?.hint).toContain("hack global trust");
   for (const [scope, target] of [
@@ -865,19 +865,19 @@ test("on Linux an unresolved name gives the no-DNS curl form for the proxy's own
   }
   const http = await miss("http://hello.hack/it's", all);
   expect(http?.hint).toContain(
-    "curl --resolve 'hello.hack:80:127.0.0.1' 'http://hello.hack/it'\\''s'"
+    "curl --noproxy 'hello.hack' --resolve 'hello.hack:80:127.0.0.1' 'http://hello.hack/it'\\''s'"
   );
   expect(http?.hint).not.toContain("hack global trust once");
   // Port 8080 is not the proxy's: no proxy command, only the DNS reason.
   const custom = await miss("http://hello.hack:8080/", all);
   expect(custom?.hint).toContain("systemd-resolved");
-  expect(custom?.hint).not.toContain("curl --resolve");
+  expect(custom?.hint).not.toContain("--resolve");
   const mac = await openUnresolvedHostWarning({
     url: "https://hello.hack",
     resolve: () => Promise.resolve("no-answer" as const),
     platform: "darwin",
   });
-  expect(mac?.hint).not.toContain("curl --resolve");
+  expect(mac?.hint).not.toContain("--resolve");
 });
 
 test("the hint's address comes from the rendered proxy file, not the setting", () => {

@@ -143,6 +143,20 @@ export const INERT_RECORD_FIELDS = [
   "golden",
   "fork_env",
   "ephemeral",
+  "runtime_managed",
+  "cuda",
+  "cuda_fork_pool_size",
+  "cuda_vram_limit_mib",
+  "cuda_preload_modules",
+  "source_smolmachine",
+  "fork_generation",
+  "fork_lineage_pid_start_time",
+  "fork_overlay_owner",
+  "forkpoint_held",
+  "health_interval_secs",
+  "health_timeout_secs",
+  "health_retries",
+  "health_startup_grace_secs",
 ] as const;
 
 /** Running-configuration resource fields that must stay inert (`INERT_RUNNING_RESOURCES`). */

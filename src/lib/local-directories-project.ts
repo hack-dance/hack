@@ -173,8 +173,13 @@ export async function trackNativeLocalDirectories(opts: {
     Array.isArray(saved) && saved.every((line) => typeof line === "string")
       ? saved
       : undefined;
+  // No record: the run started without the setting (or before native
+  // applied it), so it has none of these volumes; any planned mount is a
+  // change. A project that never declares the setting writes no record.
   const changed =
-    previous === undefined ? false : !sameSignature(previous, signature);
+    previous === undefined
+      ? signature.length > 0
+      : !sameSignature(previous, signature);
   if (opts.mode === "running") {
     if (changed) {
       opts.warn(NATIVE_LOCAL_DIRECTORIES_CHANGED_NOTICE);

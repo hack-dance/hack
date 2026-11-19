@@ -408,11 +408,18 @@ test("a run started with the setting is recorded, and a change says to restart u
     NATIVE_LOCAL_DIRECTORIES_CHANGED_NOTICE,
     NATIVE_LOCAL_DIRECTORIES_APPLIED_NOTICE,
   ]);
-  // After the restart the record matches: quiet again, also for another branch.
+  // After the restart the record matches: quiet again. Another instance
+  // started with the same plan has its own record and is quiet too.
   await trackNativeLocalDirectories({
     project: context,
     branch: null,
     mode: "running",
+    warn,
+  });
+  await trackNativeLocalDirectories({
+    project: context,
+    branch: "feature",
+    mode: "start",
     warn,
   });
   await trackNativeLocalDirectories({
@@ -497,4 +504,46 @@ test("a damaged tracking record is ignored, not a reason to refuse", async () =>
       })
     ).resolves.toBeUndefined();
   }
+});
+
+test("declaring the first directory while the project runs says to restart, and restart applies it", async () => {
+  const fixture = await project({});
+  const context = (await findProjectContextAtRoot({
+    projectRoot: fixture.root,
+  }))!;
+  const lines: string[] = [];
+  const warn = (line: string) => lines.push(line);
+  // Started without the setting: no record.
+  await trackNativeLocalDirectories({
+    project: context,
+    branch: null,
+    mode: "start",
+    warn,
+  });
+  await writeFile(
+    join(fixture.projectDir, "hack.config.json"),
+    `${JSON.stringify({ name: "native-local-dirs", dev_host: "native-local-dirs.hack", localDirectories: ["node_modules"] })}\n`
+  );
+  await trackNativeLocalDirectories({
+    project: context,
+    branch: null,
+    mode: "running",
+    warn,
+  });
+  await trackNativeLocalDirectories({
+    project: context,
+    branch: null,
+    mode: "restart",
+    warn,
+  });
+  await trackNativeLocalDirectories({
+    project: context,
+    branch: null,
+    mode: "running",
+    warn,
+  });
+  expect(lines).toEqual([
+    NATIVE_LOCAL_DIRECTORIES_CHANGED_NOTICE,
+    NATIVE_LOCAL_DIRECTORIES_APPLIED_NOTICE,
+  ]);
 });

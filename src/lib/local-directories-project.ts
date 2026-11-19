@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { YAML } from "bun";
 import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
 import { HackCliError } from "./cli-result.ts";
-import { readTextFile } from "./fs.ts";
+import { ensureDir, readTextFile, writeTextFileIfChanged } from "./fs.ts";
 import {
   planProjectLocalDirectories,
   withLocalDirectoriesOverride,
@@ -43,7 +43,20 @@ export async function reportNativeLocalDirectories(opts: {
   readonly project: ProjectContext;
   readonly warn: (line: string) => void;
 }): Promise<void> {
-  const config = await readProjectConfig(opts.project);
+  const { notices } = await nativeLocalDirectoriesState(opts.project);
+  for (const line of notices) {
+    opts.warn(line);
+  }
+}
+
+/**
+ * The plan's notices and its signature: one value-free line per planned
+ * mount (`service target volume[ ro]`), sorted. Refuses an invalid setting.
+ */
+export async function nativeLocalDirectoriesState(
+  project: ProjectContext
+): Promise<{ readonly notices: string[]; readonly signature: string[] }> {
+  const config = await readProjectConfig(project);
   if (config.localDirectoriesError) {
     throw new HackCliError({
       code: "E_CONFIG_INVALID",
@@ -52,24 +65,126 @@ export async function reportNativeLocalDirectories(opts: {
   }
   const entries = config.localDirectories ?? [];
   if (entries.length === 0) {
-    return;
+    return { notices: [], signature: [] };
   }
-  const text = await readTextFile(opts.project.composeFile);
+  const text = await readTextFile(project.composeFile);
   let compose: unknown = null;
   try {
     compose = text === null ? null : YAML.parse(text);
   } catch {
     // Native start reports an unreadable Compose file itself.
-    return;
+    return { notices: [], signature: [] };
   }
-  const { notices } = await planProjectLocalDirectories({
-    projectRoot: opts.project.projectRoot,
-    composeFile: opts.project.composeFile,
+  const { plan, notices } = await planProjectLocalDirectories({
+    projectRoot: project.projectRoot,
+    composeFile: project.composeFile,
     compose,
     entries,
   });
-  for (const line of notices) {
-    opts.warn(line);
+  const signature = Object.entries(plan.services)
+    .flatMap(([service, mounts]) =>
+      mounts.map(
+        (mount) =>
+          `${service} ${mount.target} ${mount.volume}${mount.readOnly ? " ro" : ""}`
+      )
+    )
+    .sort();
+  return { notices, signature };
+}
+
+/** `.hack/.internal/native-local-directories.json`: what each instance's run started with. */
+const RECORD_FILE = "native-local-directories.json";
+
+type LocalDirectoriesRecord = {
+  readonly version: 1;
+  readonly instances: Record<string, readonly string[]>;
+};
+
+async function readRecord(projectDir: string): Promise<LocalDirectoriesRecord> {
+  const text = await readTextFile(
+    resolve(projectDir, ".internal", RECORD_FILE)
+  );
+  try {
+    const value: unknown = text === null ? null : JSON.parse(text);
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      (value as { version?: unknown }).version === 1 &&
+      typeof (value as { instances?: unknown }).instances === "object"
+    ) {
+      return value as LocalDirectoriesRecord;
+    }
+  } catch {
+    // A damaged record is no record.
+  }
+  return { version: 1, instances: {} };
+}
+
+function instanceKey(branch: string | null | undefined): string {
+  return branch ?? "";
+}
+
+export const NATIVE_LOCAL_DIRECTORIES_CHANGED_NOTICE =
+  "localDirectories: the declared directories changed since this run started; run hack restart to apply them.";
+export const NATIVE_LOCAL_DIRECTORIES_APPLIED_NOTICE =
+  "localDirectories: this restart applies the changed declared directories.";
+
+function sameSignature(
+  left: readonly string[],
+  right: readonly string[]
+): boolean {
+  return (
+    left.length === right.length && left.every((line, i) => line === right[i])
+  );
+}
+
+/**
+ * Native `up`, `restart` and the `up` that finds its run already running
+ * (HACK-2358): compares the current plan with what this instance's run
+ * started with, says so when they differ, and records the plan a start or
+ * restart launches. Best-effort: a record that cannot be read or written
+ * only loses the message, never the start.
+ */
+export async function trackNativeLocalDirectories(opts: {
+  readonly project: ProjectContext;
+  readonly branch: string | null | undefined;
+  readonly mode: "start" | "restart" | "running";
+  readonly warn: (line: string) => void;
+}): Promise<void> {
+  const { signature } = await nativeLocalDirectoriesState(opts.project);
+  const record = await readRecord(opts.project.projectDir).catch(() => ({
+    version: 1 as const,
+    instances: {} as Record<string, readonly string[]>,
+  }));
+  const key = instanceKey(opts.branch);
+  const previous = record.instances[key];
+  const changed =
+    previous === undefined ? false : !sameSignature(previous, signature);
+  if (opts.mode === "running") {
+    if (changed) {
+      opts.warn(NATIVE_LOCAL_DIRECTORIES_CHANGED_NOTICE);
+    }
+    return;
+  }
+  if (opts.mode === "restart" && changed) {
+    opts.warn(NATIVE_LOCAL_DIRECTORIES_APPLIED_NOTICE);
+  }
+  if (previous === undefined && signature.length === 0) {
+    return;
+  }
+  const next: LocalDirectoriesRecord = {
+    version: 1,
+    instances: { ...record.instances, [key]: signature },
+  };
+  try {
+    const dir = resolve(opts.project.projectDir, ".internal");
+    await ensureDir(dir);
+    await writeTextFileIfChanged(
+      resolve(dir, RECORD_FILE),
+      `${JSON.stringify(next, null, 2)}\n`
+    );
+  } catch {
+    // Best-effort: only the next comparison is lost.
   }
 }
 

@@ -28,8 +28,9 @@
  *      gone after the next up), and how many volumes the run uses against
  *      the 16-volume limit (counted from the native model this checkout
  *      builds);
- *   5. adding a directory to a project that already has a run: what `up` and
- *      `restart` do, with the exact lines they print;
+ *   5. adding a directory to a project that already has a run: `up` leaves
+ *      the run as it is and says to restart, and `restart` applies it and
+ *      says so (the new path is a mount of its own afterwards);
  *   6. a detached `up --json` with a notice: stdout is one JSON envelope and
  *      the notice is on stderr.
  *
@@ -528,16 +529,33 @@ async function point5(): Promise<void> {
   const restart = await cli(["restart", "--json"], startTimeout);
   const apiTable = await inService("api", "cat /proc/self/mountinfo");
   const applied = mounts(apiTable.stdout).get("/app/.cache");
-  const said = `${upRunning.stdout}${upRunning.stderr}${restart.stdout}${restart.stderr}`;
+  const upSaid = upRunning.stderr.includes(
+    "localDirectories: the declared directories changed since this run started; run hack restart to apply them."
+  );
+  const restartSaid = restart.stderr.includes(
+    "localDirectories: this restart applies the changed declared directories."
+  );
+  const appliedOnDisk =
+    applied !== undefined &&
+    !SHARE_TYPES.has(applied.fstype) &&
+    !applied.fstype.startsWith("fuse");
   report({
     point: 5,
-    status: "INFO",
-    title: `adding ${ADDED} while the project runs (behavior is recorded, not judged)`,
+    status:
+      upRunning.code === 0 &&
+      restart.code === 0 &&
+      upSaid &&
+      restartSaid &&
+      appliedOnDisk
+        ? "PASS"
+        : "FAIL",
+    title: `adding ${ADDED} while the project runs: up says to restart, restart applies it`,
     evidence: [
       ...evidenceOf("up --detach --json", upRunning),
+      `up says to restart: ${upSaid ? "yes" : "no"}`,
       ...evidenceOf("restart --json", restart),
+      `restart says it applies the change: ${restartSaid ? "yes" : "no"}`,
       `/app/.cache in api after restart: ${applied ? `${applied.fstype} from ${applied.source}` : "no mount of its own"}`,
-      `mentions localDirectories: ${said.includes("localDirectories") ? "yes" : "no"}`,
     ],
   });
 }

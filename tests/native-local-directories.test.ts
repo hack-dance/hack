@@ -16,7 +16,10 @@ import {
   planLocalDirectories,
 } from "../src/lib/local-directories.ts";
 import {
+  NATIVE_LOCAL_DIRECTORIES_APPLIED_NOTICE,
+  NATIVE_LOCAL_DIRECTORIES_CHANGED_NOTICE,
   reportNativeLocalDirectories,
+  trackNativeLocalDirectories,
   warnLocalDirectoriesNotApplied,
 } from "../src/lib/local-directories-project.ts";
 import { findProjectContextAtRoot } from "../src/lib/project.ts";
@@ -348,4 +351,93 @@ test("an authored project with localDirectories only in hack.toml still gets the
     warn: (line) => lines.push(line),
   });
   expect(lines).toHaveLength(1);
+});
+
+test("a run started with the setting is recorded, and a change says to restart until restart applies it", async () => {
+  const fixture = await project({ localDirectories: ["node_modules"] });
+  const context = (await findProjectContextAtRoot({
+    projectRoot: fixture.root,
+  }))!;
+  const lines: string[] = [];
+  const warn = (line: string) => lines.push(line);
+  const record = join(
+    fixture.projectDir,
+    ".internal",
+    "native-local-directories.json"
+  );
+
+  await trackNativeLocalDirectories({
+    project: context,
+    branch: null,
+    mode: "start",
+    warn,
+  });
+  expect(JSON.parse(await Bun.file(record).text())).toEqual({
+    version: 1,
+    instances: { "": [`web /app/node_modules ${NODE_MODULES}`] },
+  });
+  // Unchanged: up on the running project says nothing.
+  await trackNativeLocalDirectories({
+    project: context,
+    branch: null,
+    mode: "running",
+    warn,
+  });
+  expect(lines).toEqual([]);
+
+  // Add a directory while it runs.
+  await writeFile(
+    join(fixture.projectDir, "hack.config.json"),
+    `${JSON.stringify({ name: "native-local-dirs", dev_host: "native-local-dirs.hack", localDirectories: ["node_modules", "dist"] })}\n`
+  );
+  await trackNativeLocalDirectories({
+    project: context,
+    branch: null,
+    mode: "running",
+    warn,
+  });
+  expect(lines).toEqual([NATIVE_LOCAL_DIRECTORIES_CHANGED_NOTICE]);
+  // up on a running project records nothing, so restart still sees the change.
+  await trackNativeLocalDirectories({
+    project: context,
+    branch: null,
+    mode: "restart",
+    warn,
+  });
+  expect(lines).toEqual([
+    NATIVE_LOCAL_DIRECTORIES_CHANGED_NOTICE,
+    NATIVE_LOCAL_DIRECTORIES_APPLIED_NOTICE,
+  ]);
+  // After the restart the record matches: quiet again, also for another branch.
+  await trackNativeLocalDirectories({
+    project: context,
+    branch: null,
+    mode: "running",
+    warn,
+  });
+  await trackNativeLocalDirectories({
+    project: context,
+    branch: "feature",
+    mode: "running",
+    warn,
+  });
+  expect(lines).toHaveLength(2);
+});
+
+test("a project that never used the setting writes no record", async () => {
+  const fixture = await project({});
+  const context = (await findProjectContextAtRoot({
+    projectRoot: fixture.root,
+  }))!;
+  await trackNativeLocalDirectories({
+    project: context,
+    branch: null,
+    mode: "start",
+    warn: () => {},
+  });
+  expect(
+    await Bun.file(
+      join(fixture.projectDir, ".internal", "native-local-directories.json")
+    ).exists()
+  ).toBe(false);
 });

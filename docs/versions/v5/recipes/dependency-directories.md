@@ -76,7 +76,12 @@ volumes. Your Compose file does not change.
   mounted at the same paths, so installs and builds there never cross the
   host share. Like other native volumes they are kept across `hack down`,
   `hack down --remove-data` deletes them, and they count toward native's
-  16-volume limit. `hack up` prints the same notices as on Compose. Adopted,
+  16-volume limit. `hack up` prints the same notices as on Compose. With
+  shared source, each declared path appears in your checkout as an empty
+  directory owned by you (the mountpoint); Hack keeps `.hack/.internal/` out
+  of `git status`. If you change the list while the project runs, `hack up`
+  leaves the run as it is and says to restart; `hack restart` applies the
+  change and says so. Adopted,
   authored and imported native projects do not apply the setting, and
   `hack up` says so. In services that use a `workspaceCache`
   adaptation, the cache keeps its workspace `node_modules` paths and

@@ -346,6 +346,7 @@ import {
 } from "../lib/local-ca.ts";
 import {
   reportNativeLocalDirectories,
+  trackNativeLocalDirectories,
   withProjectLocalDirectories,
 } from "../lib/local-directories-project.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
@@ -6621,6 +6622,9 @@ async function handleNativeUp({
       warn: (message) => logger.warn({ message }),
     });
   }
+  // Native writes machine-local state under `.hack/.internal` too (env
+  // fingerprints, run records): keep it out of `git status` as Compose does.
+  await ensureHackGitInfoExclude({ projectDir: project.projectDir });
   // Before branch, config, env, lifecycle, storage or runtime work. `down`
   // stays available for any graph a project already has.
   // The selected adaptation applies first: a network it isolates is not
@@ -6654,6 +6658,14 @@ async function handleNativeUp({
     branchOption: args.options.branch,
   });
   const branch = branchIdentity.branch;
+  if (!isNativeDetachedOwnerProcess()) {
+    await trackNativeLocalDirectories({
+      project,
+      branch,
+      mode: restart ? "restart" : "start",
+      warn: (message) => logger.warn({ message }),
+    });
+  }
   // Foreground native up and restart record the name like Compose up does;
   // the detached owner child keeps the name its launcher recorded.
   await recordBranchUsageIfNeeded({
@@ -7282,6 +7294,7 @@ async function handleUpUnlocked({
     let launchScope: Parameters<
       typeof explainUnconfirmedNativeDetachedStart
     >[0]["scope"] = null;
+    let launchBranch: string | null = null;
     const alreadyRunning = await answerNativeAlreadyRunning({
       native,
       json: args.options.json === true,
@@ -7324,11 +7337,18 @@ async function handleUpUnlocked({
         return identity.branch;
       },
       onBranchResolved: (branch) => {
+        launchBranch = branch;
         if (args.options.branch === undefined && branch !== null) {
           childArgs.push(`--branch=${branch}`);
         }
       },
       notifyRunning: async (saved, project) => {
+        await trackNativeLocalDirectories({
+          project,
+          branch: launchBranch ?? args.options.branch ?? null,
+          mode: "running",
+          warn: nativeLocalDirectoriesWarn(args.options.json === true),
+        });
         if (nativeProfileOption(args.options.profile) !== undefined) {
           return;
         }
@@ -7349,6 +7369,10 @@ async function handleUpUnlocked({
       path: args.options.path,
       project: args.options.project,
       json: args.options.json === true,
+      track: {
+        branch: launchBranch ?? args.options.branch ?? null,
+        mode: "start",
+      },
     });
     return await launchNativeDetachedUp({
       cwd: ctx.cwd,
@@ -8986,6 +9010,11 @@ export async function reportNativeLocalDirectoriesBeforeLaunch(opts: {
   readonly path: string | undefined;
   readonly project: string | undefined;
   readonly json: boolean;
+  /** Records the plan this launch starts, and says when a restart changes it. */
+  readonly track?: {
+    readonly branch: string | null;
+    readonly mode: "start" | "restart";
+  };
 }): Promise<void> {
   let project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
   try {
@@ -8998,10 +9027,17 @@ export async function reportNativeLocalDirectoriesBeforeLaunch(opts: {
   } catch {
     return;
   }
-  await reportNativeLocalDirectories({
-    project,
-    warn: nativeLocalDirectoriesWarn(opts.json),
-  });
+  const warn = nativeLocalDirectoriesWarn(opts.json);
+  await reportNativeLocalDirectories({ project, warn });
+  await ensureHackGitInfoExclude({ projectDir: project.projectDir });
+  if (opts.track) {
+    await trackNativeLocalDirectories({
+      project,
+      branch: opts.track.branch,
+      mode: opts.track.mode,
+      warn,
+    });
+  }
 }
 
 /**
@@ -9707,6 +9743,7 @@ async function handleRestart({
       path: args.options.path,
       project: args.options.project,
       json: true,
+      track: { branch: scope?.branch ?? null, mode: "restart" },
     });
     return await launchNativeDetachedUp({
       cwd: ctx.cwd,

@@ -444,3 +444,30 @@ test("a mount whose target uses a variable is never split or written into the ov
   ]);
   expect(JSON.stringify(localDirectoriesOverride(result))).not.toContain("$");
 });
+
+test("a service with a mount whose target is a variable gets nothing, with a notice", () => {
+  const result = plan(
+    {
+      services: {
+        // After interpolation this may be exactly /app/node_modules.
+        web: { volumes: ["..:/app", "nm:${NM_DIR:-/app/node_modules}"] },
+        api: {
+          volumes: [
+            "..:/srv",
+            { type: "volume", source: "nm", target: "${NM_DIR}" },
+          ],
+        },
+        plain: { volumes: ["..:/app"] },
+      },
+    },
+    ["node_modules"]
+  );
+  expect(result.services.web).toBeUndefined();
+  expect(result.services.api).toBeUndefined();
+  expect(result.services.plain?.[0]?.target).toBe("/app/node_modules");
+  expect(result.skipped).toEqual(["web", "api"]);
+  expect(result.unmatched).toEqual([]);
+  expect(localDirectoriesNotices(result)).toContain(
+    "localDirectories: service web has a mount whose path comes from a variable; nothing kept local for it."
+  );
+});

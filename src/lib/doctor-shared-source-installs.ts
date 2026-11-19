@@ -2,7 +2,9 @@ import { stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, posix, relative } from "node:path";
 import {
   containerPathFor,
+  hasUnknownTarget,
   localDirectoryDecision,
+  type ServiceMount,
   serviceMounts,
 } from "./local-directories.ts";
 
@@ -71,37 +73,56 @@ export async function findSharedSourceInstalls(opts: {
   const findings: SharedSourceInstallFinding[] = [];
   for (const [service, spec] of opts.services) {
     const mounts = serviceMounts(spec, dirname(opts.composeFile));
+    if (hasUnknownTarget(mounts)) {
+      // up leaves such a service alone; advice would do nothing.
+      continue;
+    }
     for (const bind of mounts) {
-      if (bind.type !== "bind" || bind.source === undefined) {
-        continue;
-      }
-      const inCheckout = relative(opts.projectRoot, bind.source);
-      if (inCheckout.startsWith("..") || isAbsolute(inCheckout)) {
-        continue;
-      }
-      for (const name of await candidatesIn(bind.source)) {
-        const host = join(bind.source, name);
-        const directory = relative(opts.projectRoot, host);
-        const target =
-          containerPathFor(bind, host) ?? posix.join(bind.target, name);
-        // Flag only what `up` would actually move: the same decision.
-        const replaced =
-          localDirectoryDecision(mounts, target, host).kind === "replace";
-        if (
-          !replaced ||
-          covered(opts.localDirectories, directory) ||
-          !(await isDirectory(host)) ||
-          findings.some(
-            (item) => item.service === service && item.target === target
-          )
-        ) {
-          continue;
-        }
-        findings.push({ service, directory, target });
+      if (checkoutBind(bind, opts.projectRoot)) {
+        await addBindFindings({ ...opts, service, mounts, bind, findings });
       }
     }
   }
   return findings;
+}
+
+function checkoutBind(bind: ServiceMount, projectRoot: string): boolean {
+  if (bind.type !== "bind" || bind.source === undefined) {
+    return false;
+  }
+  const inCheckout = relative(projectRoot, bind.source);
+  return !(inCheckout.startsWith("..") || isAbsolute(inCheckout));
+}
+
+async function addBindFindings(opts: {
+  readonly projectRoot: string;
+  readonly localDirectories: readonly string[];
+  readonly service: string;
+  readonly mounts: readonly ServiceMount[];
+  readonly bind: ServiceMount;
+  readonly findings: SharedSourceInstallFinding[];
+}): Promise<void> {
+  const source = opts.bind.source ?? "";
+  for (const name of await candidatesIn(source)) {
+    const host = join(source, name);
+    const directory = relative(opts.projectRoot, host);
+    const target =
+      containerPathFor(opts.bind, host) ?? posix.join(opts.bind.target, name);
+    // Flag only what `up` would actually move: the same decision.
+    const replaced =
+      localDirectoryDecision(opts.mounts, target, host).kind === "replace";
+    const duplicate = opts.findings.some(
+      (item) => item.service === opts.service && item.target === target
+    );
+    if (
+      replaced &&
+      !duplicate &&
+      !covered(opts.localDirectories, directory) &&
+      (await isDirectory(host))
+    ) {
+      opts.findings.push({ service: opts.service, directory, target });
+    }
+  }
 }
 
 /** The note text, or null when nothing crosses the share. */

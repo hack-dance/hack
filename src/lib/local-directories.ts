@@ -70,7 +70,11 @@ function normalizeEntry(entry: string): string | null {
 }
 
 export type ServiceMount = {
-  readonly type: "bind" | "volume" | "other";
+  /**
+   * `unknown-target`: the container path comes from a variable, so it may
+   * be any path; a service with one gets no local directories.
+   */
+  readonly type: "bind" | "volume" | "other" | "unknown-target";
   /** Resolved host path for a bind; the volume name otherwise. */
   readonly source: string | undefined;
   readonly target: string;
@@ -83,13 +87,25 @@ export type ServiceMount = {
  */
 const SOURCE_ONLY_VARIABLE = /^[^:]*\$[^:]*:\/[^:$]*(:[A-Za-z,]+)?$/;
 
+const UNKNOWN_TARGET: ServiceMount = {
+  type: "unknown-target",
+  source: undefined,
+  target: "",
+  readOnly: false,
+};
+
+/** True when one of the service's mounts has a target this reader cannot know. */
+export function hasUnknownTarget(mounts: readonly ServiceMount[]): boolean {
+  return mounts.some((mount) => mount.type === "unknown-target");
+}
+
 function readMount(value: unknown, composeDir: string): ServiceMount | null {
   if (typeof value === "string") {
     // `..:${APP_DIR:-/app}` has a `:` inside the variable; splitting it
     // would invent a target. Such a mount is unknown here, so it is
     // ignored (and `up` says no source bind shows the entry).
     if (value.includes("$") && !SOURCE_ONLY_VARIABLE.test(value)) {
-      return null;
+      return UNKNOWN_TARGET;
     }
     const parts = value.split(":");
     if (parts.length === 1) {
@@ -111,11 +127,11 @@ function readMount(value: unknown, composeDir: string): ServiceMount | null {
       readOnly: mode.split(",").includes("ro"),
     };
   }
-  if (
-    !(isRecord(value) && typeof value.target === "string") ||
-    value.target.includes("$")
-  ) {
+  if (!(isRecord(value) && typeof value.target === "string")) {
     return null;
+  }
+  if (value.target.includes("$")) {
+    return UNKNOWN_TARGET;
   }
   const type = mountType(value.type);
   const source = typeof value.source === "string" ? value.source : undefined;
@@ -240,6 +256,11 @@ export type LocalDirectoriesPlan = {
     readonly target: string;
     readonly by: string;
   }[];
+  /**
+   * Services left alone because a mount's path comes from a variable: after
+   * interpolation it could be the very path a volume would replace.
+   */
+  readonly skipped: readonly string[];
 };
 
 /** What one candidate path gets; see `planLocalDirectories`. */
@@ -274,16 +295,28 @@ export function planLocalDirectories(opts: {
     by: string;
   }[] = [];
   const matched = new Set<string>();
+  const skipped: string[] = [];
   const declared =
     isRecord(opts.compose) && isRecord(opts.compose.services)
       ? opts.compose.services
       : {};
   for (const [name, spec] of Object.entries(declared)) {
+    const mounts = serviceMounts(spec, opts.composeDir);
     const result = planService({
-      mounts: serviceMounts(spec, opts.composeDir),
+      mounts,
       projectRoot: opts.projectRoot,
       entries: opts.entries,
     });
+    if (hasUnknownTarget(mounts)) {
+      if (result.list.length > 0) {
+        skipped.push(name);
+      }
+      // Counted as covered: the notice names the service instead.
+      for (const entry of result.matched) {
+        matched.add(entry);
+      }
+      continue;
+    }
     for (const entry of result.matched) {
       matched.add(entry);
     }
@@ -302,6 +335,7 @@ export function planLocalDirectories(opts: {
     unmatched: opts.entries.filter((entry) => !matched.has(entry)),
     kept,
     hidden,
+    skipped,
   };
 }
 
@@ -455,6 +489,10 @@ export function localDirectoriesNotices(
     ...plan.kept.map(
       (item) =>
         `localDirectories: service ${item.service} already mounts ${item.target}; that mount is kept for ${item.entry}.`
+    ),
+    ...plan.skipped.map(
+      (service) =>
+        `localDirectories: service ${service} has a mount whose path comes from a variable; nothing kept local for it.`
     ),
     ...plan.hidden.map(
       (item) =>

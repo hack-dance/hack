@@ -197,3 +197,20 @@ volumes:
     services: [],
   });
 });
+
+test("doctor skips a service whose mount target comes from a variable, as up does", async () => {
+  const compose = `services:
+  web:
+    image: node:22
+    volumes:
+      - ..:/app
+      - nm:\${NM_DIR:-/app/node_modules}
+volumes:
+  nm: {}
+`;
+  const fixture = await project({ compose, dirs: ["node_modules"] });
+  expect((await check(fixture, compose)).devPerformance).toEqual({
+    kind: "shared_source_installs",
+    services: [],
+  });
+});

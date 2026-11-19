@@ -76,7 +76,7 @@ Phases, each optional through `--phases`:
 | `restart` | `restart --json` until ready, repeated |
 | `watch` | a host edit until a routed endpoint serves it: process restart (`bun --watch`) and directory watch (`fs.watch`), each on its own file, with an in-place and an atomic save |
 | `latency` | 200 requests through the backend's proxy on one connection, and 200 on new connections |
-| `tasks` | `bun install` and a production build inside a service, on the shared mount, and the same install in a named volume. Each runs as a background job timed on the guest clock and polled, because one non-interactive `exec` has a time limit on native |
+| `tasks` | `bun install` and a production build inside a service, on the shared mount, and the same install in a named volume (compare the later runs: the first shared-mount install also downloads the packages). Each runs as a background job timed on the guest clock and polled, because one non-interactive `exec` has a time limit on native |
 | `io` | 512 MiB write with `fsync`, read back, and 5,000 small files, on a bind mount and on a named volume, as the same kind of job |
 | `idle` | memory and CPU over a quiet window (default 300 s after a 60 s settle) |
 | `stop` | `down`, and on native the VM stop when this run booted it |

@@ -80,6 +80,7 @@ import {
   jobPollArgv,
   jobStartArgv,
   parseJobPoll,
+  parsePhysFootprintBytes,
 } from "./lib/runtime-bench-job.ts";
 
 type Env = Record<string, string>;
@@ -179,10 +180,6 @@ type Phase = (typeof PHASES)[number];
 const PROVIDER_VM = /(^|\/)(smolvm-bin|krun)$/;
 const PS_ROW = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/;
 const CPU_TIME = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$/;
-// The kernel ledger's figure (what Activity Monitor shows as Memory), not the
-// sum of the regions `footprint` can walk: for a VM process the walk misses
-// memory the process owns without mapping, and came out at under half.
-const FOOTPRINT = /phys_footprint:\s+(\d+)\s+B/;
 
 const { values } = parseArgs({
   options: {
@@ -590,8 +587,7 @@ function footprintBytes(pid: number): number | null {
     "--pid",
     String(pid),
   ]);
-  const match = FOOTPRINT.exec(result.stdout.toString());
-  return match ? Number(match[1]) : null;
+  return parsePhysFootprintBytes(result.stdout.toString());
 }
 
 function hostSnapshot(withFootprint: boolean): Record<string, unknown> {

@@ -7,6 +7,7 @@ import {
   jobPollArgv,
   jobStartArgv,
   parseJobPoll,
+  parsePhysFootprintBytes,
 } from "../scripts/lib/runtime-bench-job.ts";
 
 const fixture = join(
@@ -91,6 +92,26 @@ test("a poll reply is running, complete, or rejected", () => {
     )
   ).toThrow();
   expect(() => jobStartArgv("../x", ["true"])).toThrow();
+});
+
+test("physical footprint is the kernel's figure, not the header or the peak", () => {
+  const output = [
+    "======================================================================",
+    "vm [4242]: 64-bit    Footprint: 328501240 B (16384 bytes per page)",
+    "======================================================================",
+    "",
+    "Auxiliary data:",
+    "    phys_footprint: 927746040 B",
+    "    phys_footprint_peak: 2216345600 B",
+    "",
+  ].join("\n");
+  expect(parsePhysFootprintBytes(output)).toBe(927_746_040);
+  expect(
+    parsePhysFootprintBytes("vm [1]: 64-bit    Footprint: 1024 B\n")
+  ).toBeNull();
+  expect(
+    parsePhysFootprintBytes("    phys_footprint_peak: 2216345600 B\n")
+  ).toBeNull();
 });
 
 test("an exec that gave up is told apart from a command that failed", () => {

@@ -108,6 +108,17 @@ export function parseJobPoll(id: string, text: string): JobResult | null {
   };
 }
 
+/**
+ * The kernel's figure for a process from macOS `footprint --format bytes`:
+ * the `phys_footprint` line, which Activity Monitor shows as Memory. Not the
+ * `Footprint:` header, which sums only the regions the tool can walk and for
+ * a VM process came out at under half, and not `phys_footprint_peak`.
+ */
+export function parsePhysFootprintBytes(text: string): number | null {
+  const match = /^\s*phys_footprint:\s+(\d+)\s+B\s*$/m.exec(text);
+  return match ? Number(match[1]) : null;
+}
+
 /** True when a non-interactive exec gave up without knowing the outcome. */
 export function execGaveUp(stderr: string): boolean {
   return stderr.includes("graph_service_exec_uncertain");

@@ -112,7 +112,8 @@ opting in. Check the app and saved data yourself; a running VM is not acceptance
 Since next.17, use
 `"$CANDIDATE" exec api -- /bin/sh` from a foreground terminal for a live shell.
 Terminal stdin and stdout are required; redirects or `HACK_NO_INTERACTIVE=1`
-select finite exec. Use the matching runtime, and restart old managed-env
+select finite exec, which waits up to 30 seconds; with fresh per-command values, a command that
+finished on a busy host still returns its output and exit code. Use the matching runtime, and restart old managed-env
 launchers if requested. After an uncertain outcome, inspect
 `"$CANDIDATE" exec-sessions` and follow the
 [recovery instructions](https://github.com/hack-dance/hack/blob/5002cf87bb50686b17ceae8a4c835f524ee1b3a5/docs/guides/native-candidate.md#normal-native-exec).

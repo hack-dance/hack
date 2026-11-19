@@ -18,8 +18,8 @@ Each page says at the top whether it was run, when, and with which build.
 
 | Environment | Status | Page |
 | --- | --- | --- |
-| Any Linux machine with Docker | Verified 2026-11-18 (branch build) | [Any Linux machine with Docker](cloud-linux-docker.md) |
-| Dev containers (local) | Verified 2026-11-18 (branch build) | [Codespaces and dev containers](cloud-dev-containers.md) |
+| Any Linux machine with Docker | Verified 2026-11-19 (`next` at `95ea63e497`) | [Any Linux machine with Docker](cloud-linux-docker.md) |
+| Dev containers (local) | Verified 2026-11-19 (`next` at `95ea63e497`) | [Codespaces and dev containers](cloud-dev-containers.md) |
 | GitHub Codespaces | Not run yet | [Codespaces and dev containers](cloud-dev-containers.md) |
 | Claude Code on the web | Not run yet | [Claude Code on the web](cloud-claude-code.md) |
 | Cursor cloud agents | Not run yet | [Cursor cloud agents](cloud-cursor.md) |
@@ -80,3 +80,21 @@ the system trust store steps it lists do. Where no program can open a URL
 (no `xdg-open`, as on most servers and sandboxes), `hack open` prints only the
 URL on stdout, its notes on stderr, and exits 0. `hack doctor` reports a missing Bun as a warning for the
 compiled CLI, which does not need it.
+
+## When `hack up` cannot start the project here
+
+On the Compose backend, `hack up` checks the machine after the project's
+`up.before` hooks (which may start the engine or create a network) and before it
+pulls an image or starts a container. The checks select the engine the same way
+Compose does, so a project's `DOCKER_HOST`, `DOCKER_CONTEXT` or SSH agent applies.
+When something is missing, it stops with one line that says what and what to do
+(the `--json` envelope carries the same `code` and `message`):
+
+| Code | What it means | What to do |
+| --- | --- | --- |
+| `E_DOCKER_UNAVAILABLE` "This machine has no `docker` command…" | No Docker CLI on PATH. | Install Docker Engine and Docker Compose v2, or turn on the environment's Docker option. An environment that cannot run a container engine cannot start the project with Hack. |
+| `E_PERMISSION` "Permission denied connecting to the Docker engine…" | Docker runs, but this user cannot open its socket. | Add the user to the `docker` group and start a new login session, or select a usable engine with `docker context use`. |
+| `E_DOCKER_UNAVAILABLE` "The Docker engine is not reachable…" | The CLI is there, but no engine answers (not started, or `DOCKER_HOST` points elsewhere). | Start the engine (in a container sandbox, `dockerd` must already run or be started by the environment's setup), then retry. |
+| `E_DOCKER_UNAVAILABLE` "…Hack needs the Docker Compose v2 plugin" | `docker compose version` fails. | Install the Compose plugin (`docker-compose-v2` or `docker-compose-plugin` on Ubuntu and Debian). |
+| `E_GLOBAL_INFRA_DOWN` "This project joins Hack's shared network hack-dev…" | A service that this `up` starts joins Hack's shared network, and `hack global install` has not run on this Docker engine yet. | Run `hack global install` once. Creating the network and starting the proxy need no sudo; its DNS and certificate trust steps can ask for it and can be skipped. |
+| `E_ENV_KEY_MISSING` "Missing project env key at …" | The project has encrypted values and this checkout has no key. | Provide the same key as `HACK_ENV_SECRET_KEY` through the environment's secret settings, or copy `.hack.secret.key` from a checkout that has it. A new key cannot decrypt existing values. |

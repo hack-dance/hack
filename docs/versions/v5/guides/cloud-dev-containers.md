@@ -1,10 +1,11 @@
 # GitHub Codespaces and dev containers
 
-> **Dev container: verified on 2026-11-18** with the Dev Container CLI 0.90.0
-> on Linux x86_64 and a `hack` built from `next` (commit `6b30dfd21` plus #966
-> and #967). `devcontainer up` with the files below started the project with
-> no other command. The install step copied in that built binary, since v5 has
-> no Linux release yet.
+> **Dev container: verified on 2026-11-19** with the Dev Container CLI 0.90.0
+> on Linux x86_64 and `hack` built from `next` at `95ea63e497`.
+> `devcontainer up` with the files below started the project with no other
+> command. The install step copied in that built binary, since v5 has no Linux
+> release yet.
+>
 > **GitHub Codespaces: not run yet.** It reads the same `devcontainer.json`.
 
 ## What you need
@@ -69,11 +70,11 @@ In the container's terminal (use your project's host):
 curl --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
 ```
 
-In the verified run, a cold `devcontainer up` (with image pulls) took 82
-seconds. After the container was stopped, `devcontainer up` brought the project
-back in 5 seconds. A run with the key from `--secrets-file` printed
-`token-present` for the encrypted value, and the key did not appear in the
-CLI's output.
+On 2026-11-18 a cold `devcontainer up` (with image pulls) took 82 seconds, and
+after the container was stopped, `devcontainer up` brought the project back in
+5 seconds. On 2026-11-19, with the base images already pulled, it took 24
+seconds. In both runs the key came from `--secrets-file`, the page printed
+`token-present`, and the key did not appear in the CLI's output.
 
 ## What is different from a laptop
 

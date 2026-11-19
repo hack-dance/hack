@@ -1,10 +1,10 @@
 # Any Linux machine with Docker
 
-> **Verified on 2026-11-18** with a `hack` built from `next` (commit `6b30dfd21`
-> plus #966 and #967), in a fresh Ubuntu 24.04 x86_64 container: a user without
-> sudo, a private Docker Engine 29.1.3 with Compose 2.40.3, and a project with
-> one encrypted value. The commands below ran as written, except step 1, which
-> copied in the built binary. There is no published Linux v5 release yet.
+> **Verified on 2026-11-19** with `hack` built from `next` at `95ea63e497`, in
+> a fresh Ubuntu 24.04 x86_64 container: a user without sudo, a private Docker
+> Engine 29.1.3 with Compose 2.40.3, and a project with one encrypted value.
+> The commands below ran as written, except step 1, which copied in the built
+> binary. There is no published Linux v5 release yet.
 
 This page is for a machine or sandbox you can open a shell on: a cloud VM, a
 CI runner, a container with its own Docker daemon, a remote dev box. The same

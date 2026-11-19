@@ -44,6 +44,7 @@ async function run(opts: {
   readonly paths: Paths;
   readonly rounds?: number;
   readonly identity?: readonly [string, string];
+  readonly shell?: string;
 }): Promise<{ exitCode: number; stdout: string }> {
   // Every stand-in must replace exactly one place in the script. A target that is no
   // longer there would leave the script pointing at the real system file.
@@ -74,7 +75,7 @@ async function run(opts: {
   }
   const result = spawnSyncBounded(
     [
-      "sh",
+      opts.shell ?? "sh",
       "-c",
       script,
       "guest-memory-peak",
@@ -233,21 +234,84 @@ test("a second start in the same boot does nothing", async () => {
   }
 });
 
-test("one sample starts no process but the sleep", async () => {
+test("every POSIX shell on this host gives the same status line", async () => {
+  // The guest runs BusyBox ash. Of the shells a host may have, dash is the closest and
+  // the strictest; bash and the platform's sh are run as well when present.
+  const shells = ["sh", "dash", "bash"].filter(
+    (name) => Bun.which(name) !== null
+  );
+  expect(shells).toContain("sh");
+  for (const shell of shells) {
+    const { root, paths } = await fixture();
+    try {
+      const result = await run({ paths, shell });
+      expect(result.exitCode, shell).toBe(0);
+      expect(await readFile(paths.status, "utf8"), shell).toBe(
+        "memory-peak-v1 peak_kib=3343816 samples=3 total_kib=6087220 some_us=1075081 full_us=40211 oom_kill=0 pgmajfault=2065\n"
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("one sample runs shell builtins only, and one sleep", async () => {
   const script = await Bun.file(SCRIPT).text();
   const loop = script.slice(script.indexOf("while :; do"));
   expect(loop.length).toBeGreaterThan(0);
-  // Command substitution, pipes and subshells each start a process in the guest's shell.
   const code = loop
     .split("\n")
     .filter((line) => !line.trimStart().startsWith("#"))
-    .join("\n")
-    .replaceAll("$((", "");
-  expect(code).not.toContain("$(");
-  expect(code).not.toContain("`");
-  expect(code).not.toContain("|");
-  expect(code).not.toMatch(/^\s*\(/m);
-  const commands = code.match(/\b(awk|sed|grep|cat|cut|tr|mv|date)\b/g) ?? [];
-  expect(commands).toEqual([]);
-  expect(code.match(/\bsleep\b/g)?.length).toBe(1);
+    .join("\n");
+  // Command substitution, pipes and subshells each start a process in the guest's shell.
+  const withoutArithmetic = code.replaceAll("$((", "");
+  expect(withoutArithmetic).not.toContain("$(");
+  expect(withoutArithmetic).not.toContain("`");
+  expect(withoutArithmetic).not.toContain("|");
+  expect(withoutArithmetic).not.toMatch(/^\s*\(/m);
+
+  // Every command word in the loop is on this list: shell syntax, builtins of the
+  // guest's shell, the script's own function, and `sleep`.
+  const allowed = new Set([
+    "while",
+    "do",
+    "done",
+    "if",
+    "then",
+    "fi",
+    "case",
+    "esac",
+    "test",
+    "read",
+    "break",
+    "exit",
+    "printf",
+    "check",
+    "sleep",
+    ":",
+    "{",
+    "}",
+  ]);
+  const commands: string[] = [];
+  let continued = false;
+  for (const raw of code.split("\n")) {
+    const line = raw.trim();
+    const isContinuation = continued;
+    continued = line.endsWith("\\") || line.endsWith("&&");
+    if (line === "" || isContinuation) {
+      continue;
+    }
+    // Case patterns and their terminators, and plain assignments, run nothing.
+    const body = line.replace(/^[A-Za-z_:' |*![\]0-9-]*\)\s*/, "");
+    for (const part of body.split(/;;|;|&&/)) {
+      const word = part.trim().split(/\s+/)[0] ?? "";
+      if (word === "" || /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
+        continue;
+      }
+      commands.push(word);
+    }
+  }
+  expect(commands.length).toBeGreaterThan(20);
+  expect(commands.filter((word) => !allowed.has(word))).toEqual([]);
+  expect(commands.filter((word) => word === "sleep").length).toBe(1);
 });

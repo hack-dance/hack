@@ -1,9 +1,9 @@
 //! The guest's memory peak for a boot, and the pool's short history of them.
 //!
 //! `guest-memory-peak.sh` keeps one status line in the guest for the current boot.
-//! `runtime down` reads it once before the stop and appends it to
-//! `guest-memory-peaks.json` beside the pool's owner record; `runtime status` reports
-//! that file. This is a record only: nothing here changes a guest's size, and no failure
+//! `runtime down` reads it once before the stop and, after the stop has finished, appends
+//! it to `guest-memory-peaks.json` beside the pool's owner record; `runtime status`
+//! reports that file. This is a record only: nothing here changes a guest's size, and no failure
 //! here may change what a start or a stop does. Every reader treats a missing, foreign or
 //! malformed record as "no history".
 use super::state;
@@ -174,29 +174,67 @@ pub(super) fn history(root: &Path) -> Option<Vec<Boot>> {
     (history.version == VERSION && history.boots.len() <= KEEP).then_some(history.boots)
 }
 
-/// Append `boot`, replacing an earlier reading of the same boot, and keep the last
-/// [`KEEP`]. The caller holds the pool's operation lock. An unusable record is replaced.
-pub(super) fn record(root: &Path, boot: Boot) -> Result<(), CandidateError> {
-    let mut boots = history(root).unwrap_or_default();
+/// Whether `metadata` (not followed through a symlink) is a file only this user's
+/// `state::write` could have left: regular, one link, ours, no group or other access.
+fn own_private_file(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.is_file()
+        && metadata.nlink() == 1
+        && metadata.uid() == unsafe { libc::geteuid() }
+        && metadata.mode() & 0o077 == 0
+}
+
+fn not_found(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+}
+
+/// Append `boot`, replacing an earlier reading of the same boot, keep the last [`KEEP`]
+/// and return them. The caller holds the pool's operation lock.
+///
+/// Only this record's own files are replaced. A record that passes the receipt checks but
+/// does not decode as this format starts again; a record or a pending file that is a
+/// symlink, has another link, or is not private to this user is left in place and nothing
+/// is recorded.
+pub(super) fn record(root: &Path, boot: Boot) -> Result<Vec<Boot>, CandidateError> {
+    let target = path(root);
+    let mut boots = match fs::symlink_metadata(&target) {
+        Err(error) if not_found(&error) => Vec::new(),
+        Err(error) => return Err(state::io(error)),
+        Ok(_) => match state::read::<History>(&target) {
+            Ok(history) if history.version == VERSION && history.boots.len() <= KEEP => {
+                history.boots
+            }
+            Ok(_) => Vec::new(),
+            Err(error) if error.code == "invalid_receipt" => Vec::new(),
+            Err(error) => return Err(error),
+        },
+    };
+    // `state::write` refuses to replace a pending file. One left by an interrupted write of
+    // this record is removed; anything else at that name is not ours to remove.
+    let pending = target.with_extension("pending");
+    match fs::symlink_metadata(&pending) {
+        Err(error) if not_found(&error) => (),
+        Err(error) => return Err(state::io(error)),
+        Ok(metadata) if own_private_file(&metadata) => {
+            fs::remove_file(&pending).map_err(state::io)?;
+        }
+        Ok(_) => {
+            return Err(CandidateError::new(
+                "foreign_state",
+                "Unsafe pending guest memory record; left in place.",
+            ));
+        }
+    }
     boots.retain(|recorded| recorded.boot_id != boot.boot_id);
     boots.push(boot);
     let excess = boots.len().saturating_sub(KEEP);
     boots.drain(..excess);
-    let target = path(root);
-    // `state::write` refuses to replace a pending file. One left by an interrupted write of
-    // this record is ours alone, under the lock the caller holds.
-    match fs::remove_file(target.with_extension("pending")) {
-        Ok(()) => (),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-        Err(error) => return Err(state::io(error)),
-    }
-    state::write(
-        &target,
-        &History {
-            version: VERSION,
-            boots,
-        },
-    )
+    let history = History {
+        version: VERSION,
+        boots,
+    };
+    state::write(&target, &history)?;
+    Ok(history.boots)
 }
 
 #[cfg(test)]
@@ -308,8 +346,9 @@ mod tests {
             record(root, boot(&format!("boot-{index}"), 1000 + index)).unwrap();
         }
         // A second reading of the newest boot replaces the first.
-        record(root, boot("boot-6", 2000)).unwrap();
+        let returned = record(root, boot("boot-6", 2000)).unwrap();
         let boots = history(root).unwrap();
+        assert_eq!(returned, boots);
         assert_eq!(
             boots.iter().map(|b| b.boot_id.as_str()).collect::<Vec<_>>(),
             ["boot-2", "boot-3", "boot-4", "boot-5", "boot-6"]
@@ -325,13 +364,62 @@ mod tests {
         let root = directory.path();
         fs::write(path(root), b"{not json").unwrap();
         fs::set_permissions(path(root), fs::Permissions::from_mode(0o600)).unwrap();
-        fs::write(path(root).with_extension("pending"), b"partial").unwrap();
+        // What an interrupted `state::write` leaves: a private file of its own.
+        let pending = path(root).with_extension("pending");
+        fs::write(&pending, b"partial").unwrap();
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(history(root), None);
         record(root, boot("boot-a", 1)).unwrap();
         assert_eq!(history(root).unwrap().len(), 1);
         // A record from a later format is not read as this one.
         fs::write(path(root), br#"{"version":2,"boots":[]}"#).unwrap();
         assert_eq!(history(root), None);
+    }
+
+    #[test]
+    fn a_record_or_pending_file_that_is_not_ours_is_left_in_place_and_nothing_is_recorded() {
+        use std::os::unix::fs::symlink;
+        let elsewhere = private_directory();
+        let outside = elsewhere.path().join("outside");
+        fs::write(&outside, b"outside").unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+
+        // The record is readable by others, is a symlink, or has a second link.
+        let cases: [&dyn Fn(&Path); 3] = [
+            &|target| {
+                fs::write(target, br#"{"version":1,"boots":[]}"#).unwrap();
+                fs::set_permissions(target, fs::Permissions::from_mode(0o644)).unwrap();
+            },
+            &|target| symlink(&outside, target).unwrap(),
+            &|target| fs::hard_link(&outside, target).unwrap(),
+        ];
+        for place in cases {
+            let directory = private_directory();
+            let target = path(directory.path());
+            place(&target);
+            let before = fs::symlink_metadata(&target).unwrap();
+            assert!(record(directory.path(), boot("boot-a", 1)).is_err());
+            let after = fs::symlink_metadata(&target).unwrap();
+            assert_eq!(before.file_type(), after.file_type());
+            assert_eq!(before.permissions().mode(), after.permissions().mode());
+            assert_eq!(history(directory.path()), None);
+            assert!(!target.with_extension("pending").exists());
+        }
+        // The pending name holds a symlink or a file with a second link.
+        let pending_cases: [&dyn Fn(&Path); 2] =
+            [&|pending| symlink(&outside, pending).unwrap(), &|pending| {
+                fs::hard_link(&outside, pending).unwrap()
+            }];
+        for place in pending_cases {
+            let directory = private_directory();
+            let pending = path(directory.path()).with_extension("pending");
+            place(&pending);
+            let error = record(directory.path(), boot("boot-a", 1)).unwrap_err();
+            assert_eq!(error.code, "foreign_state");
+            assert!(fs::symlink_metadata(&pending).is_ok());
+            assert!(!path(directory.path()).exists());
+        }
+        assert_eq!(fs::read(&outside).unwrap(), b"outside");
     }
 
     #[test]

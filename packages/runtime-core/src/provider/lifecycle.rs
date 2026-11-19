@@ -2087,44 +2087,49 @@ fn start_memory_peak(
     );
 }
 
-/// Read this boot's memory peak from a running guest and append it to the pool's record,
-/// just before `down` stops the guest. Best-effort and bounded by
-/// [`guest_memory_peak::READ_BUDGET`]: a guest that does not answer, a reading that does
-/// not decode and a record that cannot be written all leave `down` exactly as it was. The
-/// caller holds the pool's operation lock.
-fn record_memory_peak(
+/// Read this boot's memory peak from a running guest, just before `down` stops it. Best-effort
+/// and bounded by [`guest_memory_peak::READ_BUDGET`]: a guest that does not answer and a
+/// reading that does not decode give `None`, and `down` goes on exactly as it would have.
+/// Nothing is written here; `down` keeps the reading only after the stop has finished.
+fn read_memory_peak(
     state_root: &Path,
-    pool_root: &Path,
     owner: &Owner,
     read: impl FnOnce(&str, &[&str], Instant) -> Result<String, CandidateError>,
-) {
+) -> Option<guest_memory_peak::Boot> {
     if owner.phase != "running" {
-        return;
+        return None;
     }
-    let Some(boot) = owner.guest_boot_id.as_deref() else {
-        return;
-    };
+    let boot = owner.guest_boot_id.as_deref()?;
     let deadline = Instant::now() + guest_memory_peak::READ_BUDGET;
-    let Ok(output) = read(
+    let output = read(
         guest_memory_peak::READ_SCRIPT,
         &[&owner.token, boot],
         deadline,
-    ) else {
+    )
+    .ok()?;
+    Some(guest_memory_peak::Boot {
+        boot_id: boot.to_owned(),
+        guest_memory_mib: owner.profile.memory_mib(),
+        cpus: owner.profile.cpus(),
+        reading: guest_memory_peak::parse(&output)?,
+        graphs: guest_memory_peak::graph_runs(state_root),
+    })
+}
+
+/// Keep a reading taken before the stop, once `down` has succeeded. It runs after the stop
+/// and every owner write the stop needs, so the record cannot take the disk space or the
+/// time of either, and a record that cannot be written leaves `result` as it is.
+fn keep_memory_peak(
+    pool_root: &Path,
+    peak: Option<guest_memory_peak::Boot>,
+    result: &mut Result<RuntimeStatus, CandidateError>,
+) {
+    let (Some(boot), Ok(status)) = (peak, result.as_mut()) else {
         return;
     };
-    let Some(reading) = guest_memory_peak::parse(&output) else {
-        return;
-    };
-    let _ = guest_memory_peak::record(
-        pool_root,
-        guest_memory_peak::Boot {
-            boot_id: boot.to_owned(),
-            guest_memory_mib: owner.profile.memory_mib(),
-            cpus: owner.profile.cpus(),
-            reading,
-            graphs: guest_memory_peak::graph_runs(state_root),
-        },
-    );
+    if let Ok(boots) = guest_memory_peak::record(pool_root, boot) {
+        status.guest_memory_peaks = Some(boots);
+    }
 }
 
 /// Copy (once) and prove the pool's guest rootfs by content. Returns its metadata digest
@@ -2364,20 +2369,15 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
-    record_memory_peak(
-        &candidate.state_root,
-        &root(candidate),
-        &owner,
-        |script, args, deadline| {
-            agent::exec_until(
-                &socket(candidate, &owner, "agent.sock")?,
-                script,
-                args,
-                deadline,
-            )
-        },
-    );
-    match guest_stop(candidate, &mut owner) {
+    let peak = read_memory_peak(&candidate.state_root, &owner, |script, args, deadline| {
+        agent::exec_until(
+            &socket(candidate, &owner, "agent.sock")?,
+            script,
+            args,
+            deadline,
+        )
+    });
+    let mut result = match guest_stop(candidate, &mut owner) {
         Ok(()) => status(candidate),
         Err(error)
             if error.code == "agent_protocol_uncertain" && agent_silent(candidate, &owner)? =>
@@ -2390,7 +2390,9 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             status(candidate)
         }
         Err(error) => Err(error),
-    }
+    };
+    keep_memory_peak(&root(candidate), peak, &mut result);
+    result
 }
 
 /// The code `guest_stop` returns when the engine quiesce failed again on a resumed stop.

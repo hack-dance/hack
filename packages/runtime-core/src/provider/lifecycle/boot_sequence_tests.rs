@@ -270,13 +270,29 @@ fn running_owner(boot: Option<&str>) -> Owner {
     owner
 }
 
+fn uninitialized_status(root: &std::path::Path) -> RuntimeStatus {
+    let candidate = Candidate {
+        protocol_version: 1,
+        version: "test",
+        channel: "test",
+        checkpoint: "test",
+        checkout: root.join("checkout"),
+        executable: root.join("executable"),
+        state_root: root.join("state"),
+        host_os: "macos",
+        host_arch: "aarch64",
+        runtime_execution_supported: true,
+        runtime_lifecycle_qualified: false,
+    };
+    status(&candidate).unwrap()
+}
+
 #[test]
-fn down_records_the_memory_peak_of_a_running_guest_within_its_budget() {
-    let root = peak_scratch("records");
+fn down_reads_the_memory_peak_of_a_running_guest_once_with_a_two_second_deadline() {
+    let root = peak_scratch("reads");
     let calls = RefCell::new(Vec::new());
     let before = Instant::now();
-    record_memory_peak(
-        &root,
+    let boot = read_memory_peak(
         &root,
         &running_owner(Some("boot-1")),
         |script, args, deadline| {
@@ -287,67 +303,119 @@ fn down_records_the_memory_peak_of_a_running_guest_within_its_budget() {
             ));
             Ok(PEAK_LINE.into())
         },
-    );
+    )
+    .unwrap();
     let calls = calls.into_inner();
     assert_eq!(calls.len(), 1);
     assert!(calls[0].0);
     assert_eq!(calls[0].1, ["fixture-token", "boot-1"]);
-    // One read, bounded at two seconds from before the call.
-    assert!(calls[0].2 > before && calls[0].2 <= Instant::now() + Duration::from_secs(2));
-    let boots = guest_memory_peak::history(&root).unwrap();
-    assert_eq!(boots.len(), 1);
-    assert_eq!(boots[0].boot_id, "boot-1");
+    // The deadline handed to the guest call is two seconds from the call, not later.
+    assert!(calls[0].2 >= before + guest_memory_peak::READ_BUDGET);
+    assert!(calls[0].2 <= Instant::now() + guest_memory_peak::READ_BUDGET);
+    assert_eq!(guest_memory_peak::READ_BUDGET, Duration::from_secs(2));
+    assert_eq!(boot.boot_id, "boot-1");
     assert_eq!(
-        boots[0].guest_memory_mib,
+        boot.guest_memory_mib,
         running_owner(None).profile.memory_mib()
     );
-    assert_eq!(boots[0].reading.peak_kib, 3_343_816);
-    assert_eq!(boots[0].reading.full_stall_us, Some(40_211));
+    assert_eq!(boot.cpus, running_owner(None).profile.cpus());
+    assert_eq!(boot.reading.peak_kib, 3_343_816);
+    assert_eq!(boot.reading.full_stall_us, Some(40_211));
+    // Reading writes nothing.
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
     let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
-fn a_memory_peak_that_cannot_be_read_or_recorded_leaves_down_untouched() {
-    let root = peak_scratch("untouched");
-    let record = root.join("guest-memory-peaks.json");
+fn a_memory_peak_that_cannot_be_read_is_no_reading_and_makes_no_guest_call_when_not_running() {
+    let root = peak_scratch("unread");
     // A guest that does not answer, and output that is not the sampler's line.
-    record_memory_peak(&root, &root, &running_owner(Some("boot-1")), |_, _, _| {
-        Err(CandidateError::new("agent_protocol_uncertain", "fixture"))
-    });
+    assert!(
+        read_memory_peak(&root, &running_owner(Some("boot-1")), |_, _, _| {
+            Err(CandidateError::new("agent_protocol_uncertain", "fixture"))
+        })
+        .is_none()
+    );
     for output in ["", "unexpected\n", "memory-peak-v1 peak_kib=1\n"] {
-        record_memory_peak(&root, &root, &running_owner(Some("boot-1")), |_, _, _| {
-            Ok(output.into())
-        });
+        assert!(
+            read_memory_peak(&root, &running_owner(Some("boot-1")), |_, _, _| {
+                Ok(output.into())
+            })
+            .is_none()
+        );
     }
-    assert!(!record.exists());
     // No guest call for a pool that is not running or has no verified boot.
     let mut stopping = running_owner(Some("boot-1"));
     stopping.phase = "stopping".into();
     for owner in [stopping, running_owner(None)] {
-        record_memory_peak(&root, &root, &owner, |_, _, _| {
-            panic!("no guest call outside a running, identified boot")
-        });
+        assert!(
+            read_memory_peak(&root, &owner, |_, _, _| {
+                panic!("no guest call outside a running, identified boot")
+            })
+            .is_none()
+        );
     }
-    // A record that cannot be written is not an error either.
+    let _ = fs::remove_dir_all(&root);
+}
+
+fn peak_boot() -> guest_memory_peak::Boot {
+    guest_memory_peak::Boot {
+        boot_id: "boot-1".into(),
+        guest_memory_mib: 6144,
+        cpus: 4,
+        reading: guest_memory_peak::parse(PEAK_LINE).unwrap(),
+        graphs: Vec::new(),
+    }
+}
+
+#[test]
+fn a_reading_is_kept_only_after_a_successful_stop_and_never_changes_its_result() {
+    let root = peak_scratch("keeps");
+    let record = root.join("guest-memory-peaks.json");
+    // A failed stop keeps its error and records nothing.
+    let mut failed: Result<RuntimeStatus, CandidateError> =
+        Err(CandidateError::new("engine_quiesce_stalled", "fixture"));
+    keep_memory_peak(&root, Some(peak_boot()), &mut failed);
+    assert_eq!(failed.unwrap_err().code, "engine_quiesce_stalled");
+    assert!(!record.exists());
+    // No reading: a successful stop is returned as it was.
+    let mut stopped = Ok(uninitialized_status(&root));
+    keep_memory_peak(&root, None, &mut stopped);
+    assert!(stopped.as_ref().unwrap().guest_memory_peaks.is_none());
+    assert!(!record.exists());
+    // A record that cannot be written (no such directory) leaves the result as it was.
     let missing = root.join("absent");
-    record_memory_peak(
-        &root,
-        &missing,
-        &running_owner(Some("boot-1")),
-        |_, _, _| Ok(PEAK_LINE.into()),
-    );
-    assert!(!missing.exists() && !record.exists());
+    keep_memory_peak(&missing, Some(peak_boot()), &mut stopped);
+    let unchanged = stopped.as_ref().unwrap();
+    assert_eq!(unchanged.phase, "uninitialized");
+    assert!(unchanged.guest_memory_peaks.is_none());
+    assert!(!missing.exists());
+    // A reading after a successful stop is recorded and reported in that same status.
+    keep_memory_peak(&root, Some(peak_boot()), &mut stopped);
+    let kept = stopped.unwrap();
+    assert_eq!(kept.phase, "uninitialized");
+    assert_eq!(kept.guest_memory_peaks, Some(vec![peak_boot()]));
+    assert_eq!(guest_memory_peak::history(&root), Some(vec![peak_boot()]));
     let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
-fn down_reads_the_memory_peak_once_after_the_live_check_and_before_the_stop() {
+fn down_reads_the_memory_peak_before_the_stop_and_keeps_it_only_after() {
     let source = include_str!("../lifecycle.rs");
     let down = source.find("pub fn down(candidate: &Candidate)").unwrap();
     let body = &source[down..down + source[down..].find("\n}\n").unwrap()];
     let live = body.find("verify_live(candidate, &owner)?;").unwrap();
-    let read = body.find("record_memory_peak(").unwrap();
+    let read = body.find("read_memory_peak(").unwrap();
     let stop = body.find("guest_stop(candidate, &mut owner)").unwrap();
-    assert!(live < read && read < stop);
-    assert_eq!(source.matches("record_memory_peak(").count(), 2);
+    let keep = body.find("keep_memory_peak(").unwrap();
+    assert!(live < read && read < stop && stop < keep);
+    // The record is written from one place, after every stop path in `down`.
+    assert!(body[keep..].find("stop_silent_guest").is_none());
+    assert_eq!(source.matches("guest_memory_peak::record(").count(), 1);
+    let keeper = source.find("fn keep_memory_peak(").unwrap();
+    assert!(
+        source[keeper..]
+            .find("guest_memory_peak::record(")
+            .is_some()
+    );
 }

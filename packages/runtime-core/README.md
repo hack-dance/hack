@@ -1655,13 +1655,17 @@ A sample is read with shell builtins, so the loop starts one process every five 
 (`sleep`).
 
 `runtime down` reads that line once from a running guest, after its live check and before
-the stop, and appends it to `guest-memory-peaks.json` beside the pool's owner record: the
-last five boots, each with boot ID, guest size, vCPU count, the reading, and the graph runs
-the home recorded at that time with their plan IDs. The read is bounded at two seconds and
-is best-effort: a guest that does not answer, a line that does not decode and a record
-that cannot be written leave `down` exactly as it was. A VM that ends without `runtime
-down` leaves no reading for that boot. `runtime status` reports the record as
-`guest_memory_peaks` when there is one.
+the stop. Once the stop has succeeded it appends the reading to `guest-memory-peaks.json`
+beside the pool's owner record: the last five boots, each with boot ID, guest size, vCPU
+count, the reading, and the graph runs the home recorded at that time with their plan IDs.
+The read is bounded at two seconds and is best-effort, and the record is written only
+after the stop and its own state writes, so it cannot take the time or the disk space the
+stop needs. A guest that does not answer, a line that does not decode and a record that
+cannot be written leave `down` and its result exactly as they were. A record or pending
+file at that name that is a symlink, has a second link or is not private to the user is
+left in place and nothing is recorded. A VM that ends without `runtime down` leaves no
+reading for that boot. `runtime status` reports the record as `guest_memory_peaks` when
+there is one.
 
 Nothing reads the record to make a decision. It exists so that guest sizes can be chosen
 from measured use later; no start changes size because of it.

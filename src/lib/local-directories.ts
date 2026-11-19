@@ -102,8 +102,8 @@ export function hasUnknownTarget(mounts: readonly ServiceMount[]): boolean {
 function readMount(value: unknown, composeDir: string): ServiceMount | null {
   if (typeof value === "string") {
     // `..:${APP_DIR:-/app}` has a `:` inside the variable; splitting it
-    // would invent a target. Such a mount is unknown here, so it is
-    // ignored (and `up` says no source bind shows the entry).
+    // would invent a target. Its path is unknown here, so its service gets
+    // no local directories (see `hasUnknownTarget`).
     if (value.includes("$") && !SOURCE_ONLY_VARIABLE.test(value)) {
       return UNKNOWN_TARGET;
     }

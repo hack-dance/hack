@@ -14,8 +14,10 @@ of at least 2 vCPU and 4 GiB.
 ## Set up
 
 - **Snapshot** from a Dockerfile: Ubuntu with Docker installed (Daytona's docs
-  use the `get.docker.com` script), the Compose plugin, and `hack` in
-  `/usr/local/bin`.
+  use `curl -fsSL https://get.docker.com | VERSION=28.3.3 sh -`), the Compose
+  plugin, and `hack` in `/usr/local/bin`. Build it with the CLI:
+  `daytona-v0 snapshot create <name> --dockerfile ./Dockerfile` (the dashboard
+  builds image-based snapshots only).
 - **Create the sandbox** with `HACK_ENV_SECRET_KEY` in `envVars`. Daytona
   *Secrets* give the process a placeholder and cannot decrypt Hack's values.
 - **After each start**, run through the CLI or `process.executeCommand`:

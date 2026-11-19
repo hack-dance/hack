@@ -31,8 +31,14 @@ a user in the `docker` group), then add `hack`:
 COPY .hack-bin/hack /usr/local/bin/hack
 ```
 
-**Secret:** add `HACK_ENV_SECRET_KEY` as an *Environment Variable* or *Runtime
-Secret*. A *Build Secret* is not visible to the running agent.
+**Secret:** in the Cursor dashboard, **Cloud Agents → Secrets**, add
+`HACK_ENV_SECRET_KEY` as an *Environment Variable* or *Runtime Secret*. A *Build
+Secret* is not visible to the running agent.
+
+**Environment:** in **Cloud Agents → Environments**, create an environment for
+the repository and set its **environment.json location** to that repository. A
+new environment defaults to **None (skip environment.json)**, which ignores the
+file above. Builds use the file from the default branch.
 
 ## Check it
 

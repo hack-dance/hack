@@ -44,7 +44,8 @@ until a Linux release exists it has to place a `hack` binary you built (see
 [Any Linux machine with Docker](cloud-linux-docker.md#steps)).
 
 The key is not in the file. In Codespaces, add `HACK_ENV_SECRET_KEY` as a
-Codespaces secret for the repository; Codespaces gives it to the container's
+Codespaces secret for the repository (**Settings → Secrets and variables →
+Codespaces → New repository secret**); Codespaces gives it to the container's
 processes, including `postStartCommand`. Locally, the Dev Container CLI does the
 same with `--secrets-file`, a JSON file such as
 `{"HACK_ENV_SECRET_KEY": "..."}` kept outside the repository with mode 0600.

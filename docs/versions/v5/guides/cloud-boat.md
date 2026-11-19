@@ -16,7 +16,10 @@ environment variables.
   `HACK_RUNTIME_BACKEND=compose hack global install --no-interactive` once, so
   the proxy images are in the snapshot.
 - **Environment secret:** `HACK_ENV_SECRET_KEY`.
-- **Repository setup script** (runs on every create, resume and fork):
+- **Repository setup script:** in the dashboard, **Environment**, under GitHub
+  repositories select **Setup** below the repository, then save the environment.
+  It runs inside the repository folder, in a login shell, on every create,
+  resume and fork:
 
 ```sh
 export HACK_RUNTIME_BACKEND=compose
@@ -25,6 +28,9 @@ hack up --detach --no-interactive --json
 ```
 
 ## Check it
+
+From your machine, `boat exec <sandbox> --cwd <repo> '<command>'` runs a command
+in the sandbox (the default timeout is 30 seconds):
 
 ```sh
 curl --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/

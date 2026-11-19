@@ -11,28 +11,25 @@ allowlist includes Docker Hub, `ghcr.io` and GitHub release downloads.
 
 ## Set up the environment
 
-**Environment variables** (in the environment's settings): add
-`HACK_ENV_SECRET_KEY` as an ordinary environment variable. Do not use a
-*network secret*: those never reach the VM, and the process only sees a
-placeholder that cannot decrypt anything. Anyone who uses the environment can
-read its variables.
+Open the environment selector (the first control under the message box on the
+new-session screen at claude.ai/code), choose **New environment**, and fill in:
 
-**Setup script** (pasted in the environment dialog; it runs once, and its result
-is cached):
+**Environment variables:** add `HACK_ENV_SECRET_KEY=...` as an ordinary
+environment variable. The dialog warns that anyone who uses the environment can
+read these values, and it suggests a *network secret* instead. A network secret
+never reaches the VM, though, and gives programs only a placeholder that cannot
+decrypt anything. So for this key the environment variable is the only kind that
+works; use a non-production key.
 
-```sh
-#!/bin/sh
-set -eu
-# Install hack (replace with the Linux release installer once it exists).
-install -m 0755 ./.hack-bin/hack /usr/local/bin/hack
-pgrep -x dockerd >/dev/null || (dockerd >/var/log/dockerd.log 2>&1 &)
-for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
-export HACK_RUNTIME_BACKEND=compose
-hack global install --no-interactive
-```
+**Network access:** the default **Limited** with **Allow package managers**
+already covers Docker Hub, `ghcr.io` and GitHub release downloads.
 
-**Session hook** in the repository's `.claude/settings.json`, which runs on every
-session start and resume:
+**Setup script** (optional; it runs once, before the environment's variables are
+set, and its result is cached): pre-pull large images so new sessions have them.
+
+**Session hook** in the repository's `.claude/settings.json`. It runs inside the
+repository on every session start and resume, so it installs `hack` from a path
+in the repository (until a Linux release exists) and starts the project:
 
 ```json
 {
@@ -42,7 +39,7 @@ session start and resume:
         "hooks": [
           {
             "type": "command",
-            "command": "pgrep -x dockerd >/dev/null || (dockerd >/var/log/dockerd.log 2>&1 &); sleep 3; HACK_RUNTIME_BACKEND=compose hack up --detach --no-interactive --json",
+            "command": "sh .claude/hack-up.sh",
             "timeout": 600
           }
         ]
@@ -50,6 +47,19 @@ session start and resume:
     ]
   }
 }
+```
+
+`.claude/hack-up.sh`:
+
+```sh
+#!/bin/sh
+set -eu
+command -v hack >/dev/null || install -m 0755 ./.hack-bin/hack /usr/local/bin/hack
+pgrep -x dockerd >/dev/null || (dockerd >/var/log/dockerd.log 2>&1 &)
+for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+export HACK_RUNTIME_BACKEND=compose
+hack global install --no-interactive
+hack up --detach --no-interactive --json
 ```
 
 ## Check it
@@ -70,4 +80,5 @@ curl --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
 ## Not known yet
 
 Whether `dockerd` already runs at session start, and whether the VM allows
-binding ports 80 and 443. The first run should record both.
+binding ports 80 and 443. The first run should record both. Hooks do not run in
+sessions with several repositories; start one repository per session.

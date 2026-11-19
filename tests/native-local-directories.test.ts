@@ -441,3 +441,36 @@ test("a project that never used the setting writes no record", async () => {
     ).exists()
   ).toBe(false);
 });
+
+test("a branch named like an Object property is an ordinary instance key", async () => {
+  const fixture = await project({ localDirectories: ["node_modules"] });
+  const context = (await findProjectContextAtRoot({
+    projectRoot: fixture.root,
+  }))!;
+  const lines: string[] = [];
+  for (const branch of ["constructor", "toString", "__proto__"]) {
+    await trackNativeLocalDirectories({
+      project: context,
+      branch,
+      mode: "start",
+      warn: (line) => lines.push(line),
+    });
+    await trackNativeLocalDirectories({
+      project: context,
+      branch,
+      mode: "running",
+      warn: (line) => lines.push(line),
+    });
+  }
+  expect(lines).toEqual([]);
+  const record = JSON.parse(
+    await Bun.file(
+      join(fixture.projectDir, ".internal", "native-local-directories.json")
+    ).text()
+  ) as { instances: Record<string, unknown> };
+  expect(Object.keys(record.instances).sort()).toEqual([
+    "__proto__",
+    "constructor",
+    "toString",
+  ]);
+});

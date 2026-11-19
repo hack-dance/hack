@@ -163,7 +163,15 @@ export async function trackNativeLocalDirectories(opts: {
     instances: {} as Record<string, readonly string[]>,
   }));
   const key = instanceKey(opts.branch);
-  const previous = record.instances[key];
+  // Own entries only: a branch named like an Object property (`constructor`)
+  // must not read the prototype's value.
+  const saved = Object.hasOwn(record.instances, key)
+    ? record.instances[key]
+    : undefined;
+  const previous =
+    Array.isArray(saved) && saved.every((line) => typeof line === "string")
+      ? saved
+      : undefined;
   const changed =
     previous === undefined ? false : !sameSignature(previous, signature);
   if (opts.mode === "running") {

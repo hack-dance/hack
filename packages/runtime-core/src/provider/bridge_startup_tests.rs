@@ -222,7 +222,22 @@ fn an_entry_replaced_after_inspection_is_refused_before_any_mode_change() {
                 symlink(&target, fixture.path(0)).unwrap();
             }
         }
-        let before = fs::symlink_metadata(fixture.path(0)).unwrap().mode();
+        let replaced = fs::symlink_metadata(fixture.path(0)).unwrap();
+        let before = replaced.mode();
+        // A file system may give the replacement socket the inode just freed. It is then the
+        // same device and inode, our socket in our private directory, indistinguishable from
+        // the one inspected, and repairing it is the intended outcome.
+        let current = entry(&directory, &name).unwrap().unwrap();
+        if replacement == "socket"
+            && (current.st_dev, current.st_ino) == (inspected.st_dev, inspected.st_ino)
+        {
+            assert!(private_socket(&directory, &name, inspected).unwrap());
+            assert_eq!(
+                fs::symlink_metadata(fixture.path(0)).unwrap().mode() & 0o777,
+                0o700
+            );
+            continue;
+        }
         assert_eq!(
             private_socket(&directory, &name, inspected)
                 .unwrap_err()

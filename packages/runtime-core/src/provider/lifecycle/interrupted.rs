@@ -180,6 +180,39 @@ fn recover_start(
     }
 }
 
+/// Recovery of a pool whose receipt records a provider process that is proven dead, before
+/// the stopped path identifies and adopts its disks (`lifecycle::recover`). When neither disk
+/// was adopted and the templates its first start cloned from do not verify, or a set-aside is
+/// in progress, the disks are set aside as in [`recover_start`] and this returns `true`.
+/// Otherwise it changes nothing and returns `false`. This covers a fresh boot that refused in
+/// `finish_boot` (`failed-boot-stopped`), whose cleanup keeps the process recorded.
+pub(super) fn set_aside_recorded(
+    candidate: &Candidate,
+    owner: &mut Owner,
+    lock: &state::Lock,
+) -> Result<bool, CandidateError> {
+    if owner.storage.is_some() && owner.overlay.is_some() {
+        return Ok(false);
+    }
+    if let Some(intent) = SetAside::load(candidate)? {
+        let templates = prepared_start::stock_templates(candidate, owner, lock)?;
+        let (false, false, Some(templates)) =
+            (owner.storage.is_some(), owner.overlay.is_some(), templates)
+        else {
+            return Err(unrecoverable());
+        };
+        provider_idle(candidate)?;
+        set_aside(candidate, owner, &templates, &intent.label)?;
+        return Ok(true);
+    }
+    let Some(templates) = untrusted_first_start(candidate, owner, lock)? else {
+        return Ok(false);
+    };
+    provider_idle(candidate)?;
+    set_aside(candidate, owner, &templates, &SetAside::new_label()?)?;
+    Ok(true)
+}
+
 /// The durable intent of a set-aside in progress, beside the owner record. Written once the
 /// proofs hold and before the first move, removed after the last one and before the phase
 /// changes, so a set-aside interrupted at any point resumes instead of leaving a pool with
@@ -706,6 +739,42 @@ mod tests {
         assert!(owner.process.is_none());
         assert!(!root(&pool.candidate).join("owner.json").exists());
         assert!(!root(&pool.candidate).join(SET_ASIDE).exists());
+    }
+
+    #[test]
+    fn a_recorded_failed_first_boot_with_unverified_templates_is_set_aside_not_adopted() {
+        use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+        run_isolated(
+            "provider::lifecycle::interrupted::tests::recorded_failed_boot_child",
+            ISOLATED_HANG_GUARD,
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated release-check fixture launched by a_recorded_failed_first_boot_with_unverified_templates_is_set_aside_not_adopted"]
+    fn recorded_failed_boot_child() {
+        // `finish_boot` refused the templates and its cleanup kept the dead process recorded.
+        let pool = Pool::new("recorded-failed-boot");
+        let mut owner = pool.owner("failed-boot-stopped", true, false);
+        owner.process = Some(identity::ProcessIdentity {
+            pid: 99_999,
+            start_micros: 1,
+            uid: unsafe { libc::geteuid() },
+            executable: binary(&pool.candidate),
+        });
+        owner.save(&pool.candidate).unwrap();
+        pool.disks(&owner, &["storage.raw", "overlay.raw", "vm.lock"]);
+        let data = owner.real_data_dir(&pool.candidate).unwrap();
+        fs::write(data.join("name"), "fixture\n").unwrap();
+        state::private_directory(&root(&pool.candidate).join("home/.smolvm")).unwrap();
+        let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
+        assert!(set_aside_recorded(&pool.candidate, &mut owner, &lock).unwrap());
+        assert_eq!(owner.phase, "stopped-before-engine");
+        assert!(owner.process.is_none() && owner.storage.is_none() && owner.overlay.is_none());
+        assert!(!data.join("storage.raw").exists() && !data.join("overlay.raw").exists());
+        // Adopted disks are left to the stopped path.
+        let mut adopted = pool.owner("failed-boot-stopped", true, true);
+        assert!(!set_aside_recorded(&pool.candidate, &mut adopted, &lock).unwrap());
     }
 
     #[test]

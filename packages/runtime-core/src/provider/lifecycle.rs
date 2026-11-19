@@ -2913,6 +2913,11 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         stop_silent_guest(candidate, &mut owner)?;
         return status(candidate);
     }
+    // A failed first boot whose provider was recorded (`failed-boot-stopped` after a template
+    // refusal) must not reach the stopped path, which adopts its disks unchecked.
+    if interrupted::set_aside_recorded(candidate, &mut owner, &lock)? {
+        return status(candidate);
+    }
     finish_stopped(candidate, &mut owner, "recovered-unclean")?;
     status(candidate)
 }

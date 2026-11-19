@@ -640,7 +640,9 @@ nothing moved (HACK-2376). This also covers a first start cut off by the provide
 (`provider_timeout_uncertain`). A refusal before the first move records nothing, not even the
 provider process, so a retry checks the templates again. Before the first move recovery writes
 `untrusted-first-boot.json` beside the owner record, and an interrupted set-aside resumes from it.
-Repeating recovery on the resulting pool changes nothing.
+The same applies when the failed boot's provider was recorded and is proven dead
+(`failed-boot-stopped` after a template refusal): recovery sets those disks aside instead of
+adopting them on the stopped path. Repeating recovery on the resulting pool changes nothing.
 
 Guest control readiness does not mean exposed bridge sockets have bound. The pinned
 [SmolVM 1.35.4 guest](https://github.com/smol-machines/smolvm/blob/v1.35.4/crates/smolvm-agent/src/main.rs#L664)

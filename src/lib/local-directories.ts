@@ -92,11 +92,7 @@ const MASK = "\u0000";
  * unknown here.
  */
 function splitShortSyntax(value: string): (string | null)[] {
-  const expressions: string[] = [];
-  const masked = value.replace(INTERPOLATION, (match) => {
-    expressions.push(match);
-    return MASK;
-  });
+  const masked = value.replace(INTERPOLATION, MASK);
   return masked
     .split(":")
     .map((part) => (part.includes(MASK) || part.includes("$") ? null : part));

@@ -1324,24 +1324,31 @@ test("the Linux gate leg is decided from reviewed pins, never from a missing ass
   ).toEqual({ leg: "fresh" });
   // Today, with the reviewed history itself: next.23 is pinned, so the next
   // release upgrades it, and next.22 is no longer a "first release" case.
-  const reviewed = publishedPins("5.0.0-next.23", platform);
-  if (reviewed === undefined) {
-    throw new Error("5.0.0-next.23 has no reviewed linux-x86_64 pin");
+  // The exact digests are asserted in the pins test above; this checks the
+  // decision picks each platform's own pair.
+  for (const real of PRERELEASE_LINUX_PLATFORMS) {
+    const reviewed = publishedPins("5.0.0-next.23", real);
+    if (reviewed === undefined) {
+      throw new Error(`5.0.0-next.23 has no reviewed ${real} pin`);
+    }
+    expect(
+      linuxGateDecision({
+        previous: "5.0.0-next.23",
+        platform: real,
+        previousHasManagerAsset: true,
+      })
+    ).toEqual({ leg: "upgrade", previous: "5.0.0-next.23", pins: reviewed });
+    expect(() =>
+      linuxGateDecision({
+        previous: "5.0.0-next.22",
+        platform: real,
+        previousHasManagerAsset: false,
+      })
+    ).toThrow("That is not a first Linux release");
   }
-  expect(
-    linuxGateDecision({
-      previous: "5.0.0-next.23",
-      platform,
-      previousHasManagerAsset: true,
-    })
-  ).toEqual({ leg: "upgrade", previous: "5.0.0-next.23", pins: reviewed });
-  expect(() =>
-    linuxGateDecision({
-      previous: "5.0.0-next.22",
-      platform,
-      previousHasManagerAsset: false,
-    })
-  ).toThrow("That is not a first Linux release");
+  expect(publishedPins("5.0.0-next.23", "linux-x86_64")).not.toEqual(
+    publishedPins("5.0.0-next.23", "linux-arm64")
+  );
   expect(
     linuxGateDecision({
       previous: null,

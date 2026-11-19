@@ -50,8 +50,10 @@ Coder. They have no page yet.
 - **Keep the proxy on loopback:** every recipe runs
   `hack config set --global proxy.bind_address 127.0.0.1` before
   `hack global install`. Without it, Hack's proxy listens on every interface,
-  and anyone who can reach the machine's ports 80 and 443 can open the app and
-  Hack's log viewer, which has no sign-in. Leave it unset only if you want that
+  and anyone who can reach the machine's ports 80 and 443 can open the app,
+  query Hack's log store (Loki, whose API has no authentication) and reach the
+  Grafana log viewer's sign-in page, which keeps its default admin password
+  unless you change it. Leave it unset only if you want that
   exposure and protect it yourself.
 - **Persistence:** running containers do not survive a sandbox stop or a
   snapshot restore. Run `hack up` from the environment's start hook.

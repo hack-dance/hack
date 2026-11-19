@@ -12,9 +12,10 @@ environment variables.
 
 ## Set up
 
-- **Saved snapshot:** install `hack` to `/usr/local/bin/hack` and run
+- **Saved snapshot:** install `hack` to `/usr/local/bin/hack`, then run
+  `hack config set --global proxy.bind_address 127.0.0.1` and
   `HACK_RUNTIME_BACKEND=compose hack global install --no-interactive` once, so
-  the proxy images are in the snapshot.
+  the proxy images, and a proxy bound to loopback, are in the snapshot.
 - **Environment secret:** `HACK_ENV_SECRET_KEY`.
 - **Repository setup script:** in the dashboard, **Environment**, under GitHub
   repositories select **Setup** below the repository, then save the environment.

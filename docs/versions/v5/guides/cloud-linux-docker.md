@@ -40,7 +40,9 @@ networks and starts its proxy and logging containers. It needs no sudo and asks
 nothing with `--no-interactive`. The first line keeps the proxy on this
 machine's loopback address: without it, the proxy listens on every interface,
 and on a machine whose firewall lets in ports 80 and 443, anyone who can reach
-it can open your app and Hack's log viewer, which has no sign-in:
+it can open your app and query Hack's log store (Loki, whose API has no
+authentication), and reach the Grafana log viewer's sign-in page, which keeps
+its default admin password unless you change it:
 
 ```sh
 export HACK_RUNTIME_BACKEND=compose

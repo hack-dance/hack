@@ -253,7 +253,10 @@ calls. The stop batch sends at most four HTTP stops at a time from one shared
 queue and joins every worker, so 14 or more services do not open one engine
 connection each at once. A connect that fails or times out sent no request, so the
 batch retries it with capped backoff inside the batch deadline and a 30-second
-window from that stop's first connect failure. Once one stop exhausts the window,
+window from that stop's first connect failure. A retry starts only with at least
+250 ms left; otherwise the stop reports its last connect failure, so a retry cut short by
+the request timeout cannot turn "never connected" into an uncertain timeout. Once one
+stop exhausts the window,
 the batch treats the engine as unreachable and later connect failures return at
 once. Any other stop failure is never retried. Cleanup
 checks authority before each journal publication. It also

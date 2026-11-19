@@ -276,3 +276,45 @@ test("under --json, native localDirectories notices go to stderr, never stdout",
   expect(out).toEqual([]);
   expect(err).toEqual(["localDirectories: a notice\n"]);
 });
+
+test("a project configured in hack.toml gets its local directories on native too", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-native-local-dirs-toml-"));
+  roots.push(root);
+  const projectDir = join(root, ".hack");
+  await mkdir(projectDir, { recursive: true });
+  const composeFile = join(projectDir, "docker-compose.yml");
+  await writeFile(
+    composeFile,
+    "services:\n  web:\n    image: node:22\n    volumes:\n      - ..:/app\n"
+  );
+  await writeFile(
+    join(projectDir, "hack.toml"),
+    'name = "toml-local-dirs"\ndev_host = "toml-local-dirs.hack"\nlocalDirectories = ["node_modules"]\n'
+  );
+  const input = await prepareNativeProjectInput({
+    projectRoot: root,
+    projectDir,
+    composeFile,
+  });
+  expect(input.localDirectories?.entries).toEqual(["node_modules"]);
+});
+
+test("the pre-launch report leaves an authored project to its own dispatcher", async () => {
+  const { reportNativeLocalDirectoriesBeforeLaunch } = await import(
+    "../src/commands/project.ts"
+  );
+  const root = await mkdtemp(
+    join(tmpdir(), "hack-native-local-dirs-authored-")
+  );
+  roots.push(root);
+  await mkdir(join(root, ".hack"), { recursive: true });
+  await writeFile(join(root, ".hack", "hack.project.json"), "{}\n");
+  await expect(
+    reportNativeLocalDirectoriesBeforeLaunch({
+      ctx: { cwd: root } as never,
+      path: root,
+      project: undefined,
+      json: true,
+    })
+  ).resolves.toBeUndefined();
+});

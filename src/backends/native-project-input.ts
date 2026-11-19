@@ -1,12 +1,9 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
-import { resolve } from "node:path";
-import { PROJECT_CONFIG_FILENAME } from "../constants.ts";
 import { HackCliError } from "../lib/cli-result.ts";
-import { readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
-import { parseProjectConfigRecord } from "../lib/project.ts";
+import { readProjectConfigInDirectory } from "../lib/project.ts";
 import {
   missingProjectEnvKeyHint,
   ProjectEnvKeyMissingError,
@@ -107,32 +104,29 @@ export type NativeProjectInput = {
 };
 
 /**
- * Reads `localDirectories` from `.hack/hack.config.json`. Checkout paths
- * only; no values. An unreadable config declares none here (`up` reports a
- * parse error itself).
+ * Reads `localDirectories` with the same reader `up` uses
+ * (`hack.config.json`, else the legacy TOML file). Checkout paths only; no
+ * values. An unreadable config declares none here (`up` reports it).
  */
 async function readNativeLocalDirectories(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly composeFile: string;
 }): Promise<{ readonly localDirectories?: NativeLocalDirectories }> {
-  const path = resolve(opts.projectDir, PROJECT_CONFIG_FILENAME);
-  const text = await readTextFile(path);
-  if (text === null) {
+  const config = await readProjectConfigInDirectory(opts.projectDir).catch(
+    () => null
+  );
+  if (config === null) {
     return {};
   }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    return {};
-  }
-  const config = parseProjectConfigRecord(raw, path);
+  const where = {
+    projectRoot: opts.projectRoot,
+    composeFile: opts.composeFile,
+  };
   if (config.localDirectoriesError) {
     return {
       localDirectories: {
-        projectRoot: opts.projectRoot,
-        composeFile: opts.composeFile,
+        ...where,
         entries: [],
         error: config.localDirectoriesError,
       },
@@ -141,13 +135,7 @@ async function readNativeLocalDirectories(opts: {
   const entries = config.localDirectories ?? [];
   return entries.length === 0
     ? {}
-    : {
-        localDirectories: {
-          projectRoot: opts.projectRoot,
-          composeFile: opts.composeFile,
-          entries,
-        },
-      };
+    : { localDirectories: { ...where, entries } };
 }
 
 const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;

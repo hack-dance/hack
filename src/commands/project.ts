@@ -7339,14 +7339,11 @@ async function handleUpUnlocked({
     if (alreadyRunning !== null) {
       return alreadyRunning;
     }
-    await reportNativeLocalDirectories({
-      project: await resolveProjectForArgs({
-        ctx,
-        pathOpt: args.options.path,
-        projectOpt: args.options.project,
-        touchRegistration: false,
-      }),
-      warn: nativeLocalDirectoriesWarn(args.options.json === true),
+    await reportNativeLocalDirectoriesBeforeLaunch({
+      ctx,
+      path: args.options.path,
+      project: args.options.project,
+      json: args.options.json === true,
     });
     return await launchNativeDetachedUp({
       cwd: ctx.cwd,
@@ -8974,6 +8971,35 @@ function refuseInvalidSharedHelpers(opts: {
 }
 
 /**
+ * Before a detached owner starts (its output is not shown): refuse an invalid
+ * `localDirectories` and print its notices. Only an ordinary Compose project
+ * reads the setting; for an authored or imported project the lookup fails
+ * here and the child dispatches it, as `answerNativeAlreadyRunning` does.
+ */
+export async function reportNativeLocalDirectoriesBeforeLaunch(opts: {
+  readonly ctx: CliContext;
+  readonly path: string | undefined;
+  readonly project: string | undefined;
+  readonly json: boolean;
+}): Promise<void> {
+  let project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  try {
+    project = await resolveProjectForArgs({
+      ctx: opts.ctx,
+      pathOpt: opts.path,
+      projectOpt: opts.project,
+      touchRegistration: false,
+    });
+  } catch {
+    return;
+  }
+  await reportNativeLocalDirectories({
+    project,
+    warn: nativeLocalDirectoriesWarn(opts.json),
+  });
+}
+
+/**
  * Where native `localDirectories` notices go: stderr under `--json`, so the
  * result envelope stays the only thing on stdout; the logger otherwise.
  */
@@ -9671,14 +9697,11 @@ async function handleRestart({
       throw foreign;
     }
     // The detached owner's output is not shown: refuse or report here.
-    await reportNativeLocalDirectories({
-      project: await resolveProjectForArgs({
-        ctx,
-        pathOpt: args.options.path,
-        projectOpt: args.options.project,
-        touchRegistration: false,
-      }),
-      warn: nativeLocalDirectoriesWarn(true),
+    await reportNativeLocalDirectoriesBeforeLaunch({
+      ctx,
+      path: args.options.path,
+      project: args.options.project,
+      json: true,
     });
     return await launchNativeDetachedUp({
       cwd: ctx.cwd,

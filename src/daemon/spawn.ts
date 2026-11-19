@@ -45,7 +45,9 @@ export function detachedDaemonEnvironment(
  * process group (an agent harness killing its group, `kill -- -PGID`).
  * stdio is ignored so the caller never waits on pipes the daemon holds;
  * hackd writes its own capped log file. The child is unref'd, so the caller
- * exits without waiting for it (HACK-2052).
+ * exits without waiting for it (HACK-2052). `exitCode` lets the caller see
+ * that the process it spawned has already ended, while it still waits for
+ * readiness.
  *
  * This does not escape a systemd scope or cgroup that is torn down at logout
  * (`KillUserProcesses=yes`); `hack daemon install` covers that case.
@@ -56,7 +58,11 @@ export function spawnDetachedDaemon(opts: {
   readonly argv: readonly string[];
   /** Replaces the caller's PATH; see {@link detachedDaemonEnvironment}. */
   readonly path?: string;
-}): { readonly pid: number } {
+}): {
+  readonly pid: number;
+  /** The spawned process's exit code once it has ended, else null. */
+  readonly exitCode: () => number | null;
+} {
   const proc = Bun.spawn([...opts.argv], {
     env: hackReexecEnvironment(
       detachedDaemonEnvironment(process.env, { path: opts.path })
@@ -67,5 +73,9 @@ export function spawnDetachedDaemon(opts: {
     detached: true,
   });
   proc.unref();
-  return { pid: proc.pid };
+  return {
+    pid: proc.pid,
+    // A process ended by a signal has no exit code of its own; 128 marks it.
+    exitCode: () => proc.exitCode ?? (proc.signalCode ? 128 : null),
+  };
 }

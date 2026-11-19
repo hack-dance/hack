@@ -17,6 +17,10 @@
  *
  * Hermetic: temp HOME and Hack home, `HACK_DAEMON_AUTOSTART_DISABLE=1`, no
  * Docker event watcher, no login service. It stops the hackd it started.
+ *
+ * A failure explains itself, because a hosted rerun costs an hour: it prints
+ * how long `daemon start` took, `daemon status --json` as it is then, and the
+ * end of hackd's log.
  */
 import { realpathSync } from "node:fs";
 import {
@@ -178,13 +182,16 @@ async function checkOne(opts: {
   const run: RunCli = (args, what) =>
     runJson({ argv: [launcher, ...args], env, cwd: root, what });
   let startedPid: number | null = null;
+  let startMs: number | null = null;
   try {
     const cliVersion = await readCliVersion({
       run,
       expected: opts.expectedVersion,
     });
 
+    const startedAt = performance.now();
     const start = await run(["daemon", "start", "--json"], "daemon start");
+    startMs = Math.round(performance.now() - startedAt);
     const startData = record(
       start.json.data ?? record(start.json.error, "start error").detail,
       "daemon start data"
@@ -214,7 +221,19 @@ async function checkOne(opts: {
     }
 
     await checkStatusAgrees({ run, cliVersion });
-    return `${opts.marker}: hackd pid ${startedPid} runs the bundle's hack-cli; CLI and hackd report ${cliVersion}`;
+    return `${opts.marker}: hackd pid ${startedPid} runs the bundle's hack-cli; CLI and hackd report ${cliVersion} (daemon start took ${startMs} ms)`;
+  } catch (error) {
+    // Gathered before the cleanup below stops hackd and removes its home.
+    const diagnostics = await failureDiagnostics({
+      launcher,
+      env,
+      root,
+      home,
+      startMs,
+    });
+    throw new Error(
+      `${opts.marker}: ${error instanceof Error ? error.message : String(error)}\n${diagnostics}`
+    );
   } finally {
     await runJson({
       argv: [launcher, "daemon", "stop", "--json"],
@@ -231,6 +250,50 @@ async function checkOne(opts: {
     }
     await rm(root, { recursive: true, force: true });
   }
+}
+
+/** How many lines of hackd's log a failure prints. */
+const LOG_TAIL_LINES = 60;
+
+/**
+ * What a failed check prints so the cause can be read from one run: the time
+ * `daemon start` took, the daemon's status now, and the end of its log. Each
+ * part is best effort; one that cannot be read says so.
+ */
+export async function failureDiagnostics(opts: {
+  readonly launcher: string;
+  readonly env: Record<string, string>;
+  readonly root: string;
+  readonly home: string;
+  readonly startMs: number | null;
+}): Promise<string> {
+  const status = Bun.spawn([opts.launcher, "daemon", "status", "--json"], {
+    cwd: opts.root,
+    env: opts.env,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: TIMEOUT_MS,
+  });
+  const [statusOut, statusErr, statusExit] = await Promise.all([
+    new Response(status.stdout).text(),
+    new Response(status.stderr).text(),
+    status.exited,
+  ]).catch(() => ["", "daemon status could not be run", -1] as const);
+  const logPath = join(opts.home, ".hack", "daemon", "hackd.log");
+  const log = await readFile(logPath, "utf8").then(
+    (text) =>
+      text.trimEnd().split("\n").slice(-LOG_TAIL_LINES).join("\n") || "(empty)",
+    () => "(no hackd.log: hackd did not get as far as opening its log)"
+  );
+  return [
+    "--- diagnostics ---",
+    `daemon start took: ${opts.startMs === null ? "not reached" : `${opts.startMs} ms`}`,
+    `daemon status --json (exit ${statusExit}):`,
+    (statusOut.trim() || statusErr.trim() || "(no output)").trim(),
+    `hackd log, last ${LOG_TAIL_LINES} lines:`,
+    log,
+  ].join("\n");
 }
 
 async function main(): Promise<void> {

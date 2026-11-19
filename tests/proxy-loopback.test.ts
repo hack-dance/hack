@@ -825,27 +825,39 @@ test("an unknown lookup is never a miss: only a missing Hack resolver on macOS i
   expect(notice?.hint).not.toContain("will not open");
 });
 
-test("on Linux an unresolved name also gives the no-DNS curl form and the no-sudo trust step", async () => {
-  const miss = await openUnresolvedHostWarning({
-    url: "https://hello.hack",
-    resolve: () => Promise.resolve("no-answer" as const),
-    platform: "linux",
-  });
-  expect(miss?.dns).toBe("unresolved");
-  expect(miss?.hint).toContain("systemd-resolved");
-  expect(miss?.hint).toContain(
-    "curl --resolve hello.hack:443:127.0.0.1 https://hello.hack/"
+test("on Linux an unresolved name gives the no-DNS curl form for the proxy's own port, at its bind address, with the full URL", async () => {
+  const miss = (url: string, bindAddress: string | null) =>
+    openUnresolvedHostWarning({
+      url,
+      resolve: () => Promise.resolve("no-answer" as const),
+      platform: "linux",
+      bindAddress: () => Promise.resolve(bindAddress),
+    });
+  const https = await miss("https://hello.hack/api/health?verbose=1", null);
+  expect(https?.dns).toBe("unresolved");
+  expect(https?.hint).toContain("systemd-resolved");
+  expect(https?.hint).toContain(
+    "curl --resolve 'hello.hack:443:127.0.0.1' 'https://hello.hack/api/health?verbose=1'"
   );
-  expect(miss?.hint).toContain("hack global trust");
-  const http = await openUnresolvedHostWarning({
-    url: "http://hello.hack:8080",
-    resolve: () => Promise.resolve("no-answer" as const),
-    platform: "linux",
-  });
+  expect(https?.hint).toContain("hack global trust");
+  expect((await miss("https://hello.hack", "0.0.0.0"))?.hint).toContain(
+    "'hello.hack:443:127.0.0.1'"
+  );
+  expect((await miss("https://hello.hack", "192.168.1.10"))?.hint).toContain(
+    "'hello.hack:443:192.168.1.10'"
+  );
+  expect((await miss("https://hello.hack", "::1"))?.hint).toContain(
+    "'hello.hack:443:[::1]'"
+  );
+  const http = await miss("http://hello.hack/it's", null);
   expect(http?.hint).toContain(
-    "curl --resolve hello.hack:8080:127.0.0.1 http://hello.hack:8080/"
+    "curl --resolve 'hello.hack:80:127.0.0.1' 'http://hello.hack/it'\\''s'"
   );
   expect(http?.hint).not.toContain("hack global trust once");
+  // Port 8080 is not the proxy's: no proxy command, only the DNS reason.
+  const custom = await miss("http://hello.hack:8080/", null);
+  expect(custom?.hint).toContain("systemd-resolved");
+  expect(custom?.hint).not.toContain("curl --resolve");
   const mac = await openUnresolvedHostWarning({
     url: "https://hello.hack",
     resolve: () => Promise.resolve("no-answer" as const),

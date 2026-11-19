@@ -20,17 +20,21 @@ Hack's addresses (`https://<project>.hack`) need local DNS. On Linux, Hack sets
 it up only through systemd-resolved, which most containers and cloud sandboxes
 do not run, so the name has no address there. The app still runs, and Hack's
 proxy answers on this machine's ports 80 and 443. `hack open` then warns and
-prints the address with a command that needs no DNS:
+prints the address with a command that needs no DNS, for example:
 
 ```sh
-curl --resolve hello.hack:443:127.0.0.1 https://hello.hack/
+curl --resolve 'hello.hack:443:127.0.0.1' 'https://hello.hack/'
 ```
+
+The command sends the request to the address the proxy publishes on: loopback
+by default, or the address set with `proxy.bind_address`. It is offered only
+for the proxy's own ports (80 and 443).
 
 For `https`, run `hack global trust` once and load the host trust env file it
 prints (`~/.hack/caddy/pki/caddy-host-trust-env.sh`). That part needs no sudo;
 the system trust store steps it lists do. Where no program can open a URL
-(no `xdg-open`, as on most servers and sandboxes), `hack open` prints the URL
-on stdout and exits 0. `hack doctor` reports a missing Bun as a warning for the
+(no `xdg-open`, as on most servers and sandboxes), `hack open` prints only the
+URL on stdout, its notes on stderr, and exits 0. `hack doctor` reports a missing Bun as a warning for the
 compiled CLI, which does not need it.
 
 ## Named platform compatibility

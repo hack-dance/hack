@@ -116,8 +116,19 @@ test("a native origin with a hostname never runs the DNS check", async () => {
   }
 });
 
-test("with no URL opener (a server or sandbox) open prints the URL and succeeds", async () => {
-  const write = spyOn(process.stdout, "write").mockImplementation(() => true);
+test("with no URL opener (a server or sandbox) stdout is exactly the URL and notes go to stderr", async () => {
+  const out: string[] = [];
+  const err: string[] = [];
+  const write = spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    out.push(String(chunk));
+    return true;
+  });
+  const writeErr = spyOn(process.stderr, "write").mockImplementation(
+    (chunk) => {
+      err.push(String(chunk));
+      return true;
+    }
+  );
   try {
     expect(
       await emitOpenOrigin({
@@ -125,12 +136,18 @@ test("with no URL opener (a server or sandbox) open prints the URL and succeeds"
         json: false,
         origin: "compose",
         checkLoopback: async () => null,
-        checkResolution: async () => null,
+        checkResolution: async () => ({
+          dns: "unresolved",
+          hint: "hello.hack has no address on this machine",
+        }),
         openerAvailable: () => false,
       })
     ).toBe(0);
-    expect(write).toHaveBeenCalledWith("https://hello.hack\n");
+    expect(out).toEqual(["https://hello.hack\n"]);
+    expect(err.join("")).toContain("hello.hack has no address on this machine");
+    expect(err.join("")).toContain("No program to open URLs");
   } finally {
     write.mockRestore();
+    writeErr.mockRestore();
   }
 });

@@ -11998,18 +11998,21 @@ export async function emitOpenOrigin(opts: {
     noteBrowserTargetsForLocalNetworkHint([opts.url]);
     return 0;
   }
-  if (unresolved) {
-    logger.warn({ message: unresolved.hint });
-  }
   if (!(opts.openerAvailable ?? urlOpenerAvailable)()) {
     // No desktop here (a server, container or cloud sandbox): the URL is the
-    // answer. Print it on stdout so a script or agent can use it.
-    logger.info({
-      message:
-        "No program to open URLs on this machine (xdg-open is not installed), so open this URL yourself:",
-    });
+    // answer. Stdout carries only the URL, so `url=$(hack open)` works; every
+    // note goes to stderr.
+    if (unresolved) {
+      process.stderr.write(`${unresolved.hint}\n`);
+    }
+    process.stderr.write(
+      "No program to open URLs on this machine (xdg-open is not installed), so open this URL yourself.\n"
+    );
     process.stdout.write(`${opts.url}\n`);
     return 0;
+  }
+  if (unresolved) {
+    logger.warn({ message: unresolved.hint });
   }
   logger.step({ message: `Opening ${opts.url}` });
   noteBrowserTargetsForLocalNetworkHint([opts.url]);

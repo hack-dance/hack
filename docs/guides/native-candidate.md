@@ -3137,20 +3137,34 @@ first success, then every 30 seconds for the rest of that probe generation.
 This allows slow first-page compilation, including a server first answering after
 120 seconds. With a full timeout on each request, the grace plus three failed
 startup samples takes at most about 246 seconds of probe time, leaving about
-54 seconds of the usual 300-second graph budget for earlier startup work.
+54 seconds of the default 300-second graph budget for earlier startup work.
 An inferred probe observed unhealthy names its service and route port. For a
 missing listener or HTTP 5xx during boot, check `hack logs <service>` in the same
 project/branch, fix the route
 port, or declare `healthcheck.x-hack-http` with a longer `start_period_ms` and a
 readiness path that answers 2xx.
 
-The 300-second deadline belongs to the whole graph; it is not renewed when a
-service starts. Slow earlier services or `service_healthy` dependencies consume
-it too. A routed service started after a dependency taking 240 seconds can reach
-the graph deadline before its own probe finishes. That path still returns the
-generic `graph_timeout`, without naming the waiting services. Use `hack logs`
-and inspect the dependencies as well as the route. An explicit probe with a longer
-grace does not extend the whole-graph deadline.
+The graph start deadline (300 seconds by default) belongs to the whole graph; it
+is not renewed when a service starts. Slow earlier services or `service_healthy`
+dependencies consume it too. A routed service started after a dependency taking
+240 seconds can reach the graph deadline before its own probe finishes. An
+explicit probe with a longer grace does not extend the whole-graph deadline.
+For a graph that legitimately needs longer (many services, slow first starts, a
+loaded host), set `native.startTimeoutSeconds` in `.hack/hack.config.json` or
+`HACK_NATIVE_START_TIMEOUT_SECONDS` (whole seconds, 60 to 600, the runtime's
+own bound; the variable wins). The budget is configurable rather than progress-aware because the runtime
+owns the deadline and reports nothing per service before the graph is ready.
+When it runs out, `graph_timeout` names each service that had not reached its
+readiness goal, what it was doing and how long it was waited on. The runtime
+removes a failed start's containers before it reports, so these states come from
+the graph's status as read while the start waited (every 5 seconds, startup views
+only); the message says how old that read was, and without one from the last 30
+seconds it keeps the runtime's generic `graph_timeout` message. For example
+`Not ready after 300 s of the 300 s graph start budget: api (wanted healthy;
+running, starting)`. Use `hack logs` and inspect the dependencies as well as the
+route. A guest that is too small can page heavily and miss this budget; the
+error does not yet report guest memory pressure (`hack doctor` shows the
+memory the pool reserves for its guest).
 A successful TCP connection and complete HTTP/1.0 or HTTP/1.1 response headers are
 required. HTTP 200–499, including `/` returning 404, is ready; 5xx, EOF, non-HTTP
 bytes, a timeout or partial headers are not. Redirects are not followed. At most

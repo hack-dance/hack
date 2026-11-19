@@ -266,6 +266,8 @@ export interface ProjectConfig {
   readonly lifecycle?: ProjectLifecycleConfig;
   /** Detached Compose start budgets; the host variables win over them. */
   readonly compose?: ProjectComposeConfig;
+  /** Native start settings read by the frontend (HACK-2351). */
+  readonly native?: ProjectNativeConfig;
   /**
    * `localDirectories` (HACK-2358): checkout directories, relative to the
    * project root, kept on the runtime's disk instead of the shared source.
@@ -296,6 +298,29 @@ export interface ProjectComposeConfig {
   readonly startupTimeoutMs?: number;
   /** `compose.startupCeilingMs`, as `HACK_COMPOSE_STARTUP_CEILING_MS`. */
   readonly startupCeilingMs?: number;
+}
+
+/**
+ * Frontend-read settings in `native` of `.hack/hack.config.json`. A value
+ * that is not an integer is kept as NaN so its resolver refuses it with its
+ * range message. (`native.sourceLimitMiB` is read by the runtime itself.)
+ */
+export interface ProjectNativeConfig {
+  /** `native.startTimeoutSeconds`, as `HACK_NATIVE_START_TIMEOUT_SECONDS`. */
+  readonly startTimeoutSeconds?: number;
+}
+
+function parseNativeConfig(
+  value: Record<string, unknown> | undefined
+): ProjectNativeConfig | undefined {
+  const raw = value?.startTimeoutSeconds;
+  if (raw === undefined) {
+    return;
+  }
+  return {
+    startTimeoutSeconds:
+      typeof raw === "number" && Number.isSafeInteger(raw) ? raw : Number.NaN,
+  };
 }
 
 function parseComposeConfig(
@@ -660,6 +685,7 @@ export function parseProjectConfigRecord(
   const worktree = parseWorktreeConfig(getRecord(value, "worktree"));
   const sessions = parseSessionsConfig(getRecord(value, "sessions"));
   const compose = parseComposeConfig(getRecord(value, "compose"));
+  const native = parseNativeConfig(getRecord(value, "native"));
   const localDirectories =
     value.localDirectories === undefined
       ? undefined
@@ -730,6 +756,7 @@ export function parseProjectConfigRecord(
     ...(sessions ? { sessions } : {}),
     ...(lifecycle ? { lifecycle } : {}),
     ...(compose ? { compose } : {}),
+    ...(native ? { native } : {}),
     ...(localDirectories && "entries" in localDirectories
       ? { localDirectories: localDirectories.entries }
       : {}),

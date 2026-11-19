@@ -40,6 +40,13 @@ Coder. They have no page yet.
   a placeholder. Those cannot decrypt anything, so use the plain
   environment-variable kind. Never commit the key or bake it into an image or
   snapshot.
+- **The key reaches whatever the checkout runs:** the setup script, hooks,
+  `devcontainer.json` commands, the Dockerfile and any `hack` binary committed
+  to the repository all run with `HACK_ENV_SECRET_KEY` available, and with
+  network access. Someone who can change those files on a branch can send the
+  key out. Start an environment with the key only from a branch you trust,
+  review changes to `.devcontainer/`, `.claude/`, `.cursor/`, `.hack-bin/` and
+  `.hack/` first, and use a development key, not a production one.
 - **Addresses:** most sandboxes have no DNS for Hack's names. The app still
   runs, and Hack's proxy answers on the machine's ports 80 and 443. Check it from
   inside with `curl --resolve`, as

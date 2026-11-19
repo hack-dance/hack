@@ -320,7 +320,7 @@ function commandWords(code: string): string[] {
   for (const line of logical) {
     for (const part of line
       .replace(CASE_PATTERN, "")
-      .split(/;;|;|&&|\|\||\|/)) {
+      .split(/;;|;|&&|\|\||\||&/)) {
       const tokens = part
         .trim()
         .split(/\s+/)
@@ -361,6 +361,8 @@ test("one sample runs shell builtins only, and one sleep", async () => {
   expect(code).not.toContain("`");
   expect(code).not.toContain("|");
   expect(code).not.toMatch(/^\s*\(/m);
+  // A background job is a process too.
+  expect(code.replaceAll("&&", "")).not.toContain("&");
 
   const commands = commandWords(loop);
   expect(commands.length).toBeGreaterThan(40);
@@ -377,6 +379,7 @@ test("the builtins check sees a command behind a prefix, a keyword or a continua
     ["  while cat /proc/uptime; do break; done", "cat"],
     ["  printf x \\\n    > /dev/null; awk 1 /proc/uptime", "awk"],
     ["  a=1 b=2 date", "date"],
+    ["  : & head /proc/meminfo", "head"],
     ["  MemTotal:) total=$value; cut -c1 /proc/uptime ;;", "cut"],
   ];
   for (const [line, command] of planted) {

@@ -334,10 +334,8 @@ fail when that check is removed.
   (recovered by `hack down` and `hack up`, not prevented). The README lists each
   case. A session-ID mutation fence for tmux would close it; it is tracked in
   HACK-1849 and is not in this slice.
-- zellij lifecycle sessions for projects with shared helpers. They are refused
-  before anything starts: zellij writes the ownership token after creating the
-  session, so an interrupted start could leave a session without a token.
-  Support is tracked in HACK-1849.
+- zellij lifecycle sessions. zellij is removed in v5; lifecycle sessions require
+  tmux, which creates the session with its ownership token in one step.
 - The daemon. It has no lifecycle surface today; shared helpers are started and
   released only by the CLI's `up`, `restart` and `down`.
 - Migrating existing `lifecycle.singleton` configurations. `singleton` keeps its

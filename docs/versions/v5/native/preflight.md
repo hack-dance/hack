@@ -18,7 +18,7 @@ environment, can select different adaptation and dependency files. Authored
 native project files take a separate admission path; use `hack config validate`
 for them.
 
-Changes intended for next.17: preflight reads allowed caller-shell variables,
+Since next.17, preflight reads allowed caller-shell variables,
 decrypts managed env and reads `.env` beside Compose (normally `.hack/.env`),
 using the same file checks as native start. A missing decryption key is a
 structured blocker with recovery guidance; the command still produces a report.

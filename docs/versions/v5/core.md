@@ -80,4 +80,4 @@ or account is required. [Agent handoff](agent-handoff.md) and
 
 ## Interactive workspaces
 
-Use `hack session` for a persistent interactive workspace. v5 requires tmux; `sessions.mux=auto` detects tmux only. If upgrading from zellij, install tmux and unset `sessions.mux` or set it to `tmux`. See the [upgrade checklist](guides/upgrade-from-v4.md#breaking-change-zellij-workspaces-removed).
+A [session](../sessions.md) is a named tmux session that Hack starts in a project's repository, with the project's env loaded. Use `hack session start <project>` for a terminal that survives a closed window or a lost SSH connection, and that a person or a coding agent can come back to by name. It is not a sandbox. v5 requires tmux; `sessions.mux=auto` detects tmux only. If upgrading from zellij, install tmux and unset `sessions.mux` or set it to `tmux`. See the [upgrade checklist](guides/upgrade-from-v4.md#breaking-change-zellij-workspaces-removed).

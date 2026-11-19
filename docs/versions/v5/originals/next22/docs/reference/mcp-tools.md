@@ -2,8 +2,10 @@
 
 `hack mcp serve` exposes the tools below to MCP clients that have no shell. Each
 tool runs one `hack` CLI command as a child process, with the session's captured
-working directory and environment, and `HACK_NO_INTERACTIVE=1`. When a shell is
-available, run the CLI command directly instead.
+working directory and environment, and `HACK_NO_INTERACTIVE=1`. Unless that
+environment sets `HACK_ORIGIN`, the child also gets `HACK_ORIGIN=agent`, so
+lifecycle tools appear as `agent` in the [activity log](./activity-log.md).
+When a shell is available, run the CLI command directly instead.
 
 This page is the contract for tool names, annotations, inputs, the argv each tool
 runs, and result shapes. The log tools have their own page:
@@ -41,6 +43,10 @@ Every tool sets `openWorldHint: false`. Mutating tools set `idempotentHint: fals
 | `hack.project.target` | read-only | `hack project target --json` (provisional) |
 | `hack.project.task.list` | read-only | `hack project task list --json` (provisional; runs nothing) |
 | `hack.project.task.inspect` | read-only | `hack project task inspect --json -- <task>` (provisional; runs nothing) |
+| `hack.project.command.start` | destructive | `hack exec\|run --detach --json --request-key=… -- <service> [cmd...]` |
+| `hack.project.command.read` | read-only | `hack commands read --json -- <commandId>` |
+| `hack.project.command.inspect` | read-only | `hack commands show --json -- <commandId>` |
+| `hack.project.command.cancel` | destructive | `hack commands cancel --json -- <commandId>` |
 
 ## Project selection
 
@@ -62,7 +68,12 @@ nothing is selected, maps to the registered project whose repo root or project
 directory contains it. When registrations are nested, the deepest one wins. Two
 different registrations at the same root are refused as `ambiguous_project`. A
 project that has a `.hack/` directory but no registration is refused; run
-`hack projects` or any project command in it to register it.
+a registering command in it, for example `hack status`, `hack projects` or
+`hack init` (`hack down`, `ps`, `run`, `exec`, `logs`, `open` and `commands`
+do not register; `hack up` registers on the Compose backend only). A
+`repoRoot` or `path` outside every registered project is refused as
+`path_not_registered`. With no selection the server's working directory is
+used, so check that it is the project you mean before a destructive call.
 
 ## Inputs and identifiers
 
@@ -152,6 +163,119 @@ starts a container, and the CLI fails when the service is not running.
   `--branch` reach the container command and are never parsed by hack.
 - `data.limits` echoes `{ timeoutMs, outputBytes }`. `outputBytes` is the shared
   8 MiB capture limit.
+- When `timeoutMs` runs out, the server stops the command's process group and
+  the result has `timedOut: true`, `isError`, a nonzero `exitCode` (usually
+  143; 124 when the command exited 0 after being stopped) and a stderr line
+  naming the limit. Exit 143 alone does not tell a timeout from a
+  signal sent by something else. For anything that may run longer than a few
+  minutes, use `hack.project.command.start` instead.
+
+![Foreground command completion, timeout and cancellation](../diagrams/mcp-command-timeout.svg)
+
+## Background commands
+
+`hack.project.command.start`, `read`, `inspect` and `cancel` start `exec` or
+`run` in the background and report on it by id and cursor. They are adapters
+over the CLI described in [Background commands](../guides/background-commands.md),
+so a command started through MCP can be read with `hack commands read` and the
+other way round.
+
+- `start`: required `operation` (`exec` or `run`), `service`, `cmd` (an array;
+  `exec` needs at least one entry) and `requestKey`
+  (`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`). Optional: project selection,
+  `branch`, `workdir`, `timeoutMs` (1,000 to 21,600,000; default 1,800,000),
+  `stallAfterMs` (0 to 21,600,000; default 120,000; 0 turns it off) and
+  `capture` (`full` or `metadata`). Validation, argv handling and refusals are
+  those of `hack.project.exec` and `hack.project.run`. `data` is
+  `{ commandId, cursor, state, expiresAt, reused, capture, liveOutput,
+  stallDetection, limits }`. `expiresAt` is the planned expiry for a command that
+  runs to its timeout (acceptance + `timeoutMs` + retention); one that ends
+  earlier is kept for its retention time after its end. Storage limits can
+  expire a result earlier. Retrying with the same `requestKey` and the same
+  inputs returns the existing command (`reused: true`) while its result is kept;
+  after the result expires the key is refused (`E_RESULT_EXPIRED`) for 7 days,
+  then forgotten. The same key with different inputs is refused
+  (`E_REQUEST_CONFLICT`). Keys are
+  scoped to the project, whichever selector named it.
+  The MCP session is the caller for the admission limit of 4 active commands.
+- `read`: required `commandId`. Optional: project selection, `branch`, `after`
+  (cursor; the first read passes the `cursor` from `start`, later reads each
+  `nextCursor`), `waitMs` and `maxBytes` (16,384 to 262,144; default 32,768).
+  `waitMs` defaults to 25,000 and is capped at 30,000 (a larger value is refused
+  before any child starts), which keeps a call under the shortest known client
+  tool-call limit. The call returns early when the command ends, a stall starts
+  or the next event would pass `maxBytes`, 1,000 events or 4 × `maxBytes` of
+  serialized events (`nextCursor` always advances). New output alone does not
+  end the wait, so pass a smaller `waitMs` to see output sooner. A wait that
+  elapses is not an error: it returns `timedOut: true` with `reason:
+  "wait_elapsed"`. `data` is `{ state, events,
+  nextCursor, gap, timedOut, ended, reason, outcome?, exitCode?, limits }`.
+  Output events carry `text` (UTF-8) or `withheld`. An unknown or expired cursor
+  gives `gap: true` and one `gap` event naming the earliest cursor.
+- `inspect`: required `commandId`; `data` is the `hack commands show` result.
+  Automatic env maps are omitted, but stored caller argv can contain sensitive
+  expanded values and is not redacted, including with metadata-only capture.
+- `cancel`: required `commandId`; `data` says what was confirmed. Stopping a
+  `docker compose exec` or `run` client does not prove the process inside the
+  container stopped (`containerProcess: "not_confirmed"`).
+  `alreadyEnded: true` means the command had ended before the call; `outcome`
+  is then its recorded outcome.
+
+Every call re-checks project and instance scope: `commandId` must match
+`^cmd_[a-z0-9]{26}$`, and an id from another project or instance fails with
+`E_COMMAND_NOT_FOUND`. The id grants nothing. Errors reported by the CLI keep
+their registered code (`E_COMMAND_NOT_FOUND`, `E_RESULT_EXPIRED`,
+`E_CAPTURE_DISABLED`, `E_ADMISSION_LIMIT`, `E_REQUEST_CONFLICT`,
+`E_JOURNAL_VERSION`, …) with `reason: "command_error"`. `start` and `cancel`
+write an `mcp-audit.log` line; `read` and `inspect` do not. The `start` line
+records the operation, service, `argv[0]`, the argument count and a SHA-256 of
+the arguments, never the arguments themselves.
+
+Differences from the foreground tools:
+
+- **Capture limit.** Reaching 8 MiB stops capture and records
+  `command.output_truncated`, but the command keeps running to its normal end.
+  The foreground `hack.project.exec` and `hack.project.run` stop the command at
+  8 MiB.
+- **Storage.** Output is stored in private files under the Hack home, where
+  later processes of the same OS user that can select the project can read it
+  (`capture: "metadata"` stores none). It is not readable after its retention
+  time (at most 24 hours after the command ends); the files are physically
+  removed at the next background-command operation, `hack up` or `hack down`,
+  so Hack does not promise physical deletion within 24 hours.
+- **Redaction is partial.** Values Hack had already resolved to inject into the
+  command are replaced with `*` before output is announced. Values Hack did not
+  inject, or that the command transforms, are not caught. It is defence in
+  depth, not a guarantee.
+
+Client notes, from qualifying the tools with Claude Code and the Codex CLI:
+
+- `start` and `cancel` are annotated destructive. A headless `codex exec` has
+  no one to approve them and refuses each call ("MCP tool call requires
+  approval"); give that run `-c
+  'mcp_servers.<name>.default_tools_approval_mode="approve"'` (or answer the
+  prompt in an interactive session). Claude Code in `-p` mode needs the tools
+  allowed, for example `--allowedTools mcp__hack`.
+- Observed in Claude Code 2.1.322: it loads the tools on demand through its
+  tool search, and their names appear with dots replaced
+  (`mcp__hack__hack_project_command_start`).
+- Tool-call limits. With default settings, no client limit interrupted a
+  foreground exec of 90 s in Codex CLI 0.168.0 or Claude Code 2.1.322, nor
+  one of 200 s (`timeoutMs: 600000`) in Codex; longer calls were not
+  measured, so a larger default limit is not ruled out. Codex stops waiting at
+  `mcp_servers.<name>.tool_timeout_sec` when it is set (`timed out awaiting
+  tools/call after 30s` at 30 s); it then cancels the call, and Hack stops the
+  command's process group (exit 143 in `mcp-audit.log`). For a Compose command
+  that stops the `docker compose` client; what runs in the container is not
+  proven stopped. `hack setup mcp --codex` and `hack mcp install --codex`
+  write `tool_timeout_sec = 660`: the largest `timeoutMs` (600 s) plus a
+  margin for stopping the command, so a call that runs to Hack's limit
+  normally returns Hack's `timedOut: true` result. They add it to an existing
+  entry that has no limit and keep a value already set, even a smaller one.
+
+Codex reinstall adds a missing timeout with a single line and preserves existing
+comments and formatting. For layouts that cannot be updated safely, it keeps the
+entry unchanged and gives manual `tool_timeout_sec = 660` guidance.
 
 ## `hack.project.doctor`
 
@@ -194,8 +318,9 @@ dropped whole.
 
 ### Value-free output
 
-`hack env list --json` prints plaintext values, and CLI errors can quote env
-files. Both env tools therefore withhold the child's output:
+`hack env list --json` defaults to metadata without values. Both env tools also
+enforce an independent value-free boundary and withhold the child's raw output,
+including on errors:
 
 - `stdout` is always `""`.
 - `stderr` is `""` on success. On failure it is a fixed message that tells you

@@ -4,6 +4,9 @@ Many projects need host-side setup around `hack up` (auth, local proxies, tunnel
 
 Lifecycle is configured in `.hack/hack.config.json` under `lifecycle`.
 
+The [Rust supervisor contract](./lifecycle-supervisor.md) describes the experimental
+`lifecycle.runner: "supervisor"` opt-in. Omission keeps the current mux runner.
+
 With the Compose backend, the first Ctrl-C during foreground `hack up` asks
 Compose to stop the project containers. Hack waits for Compose to finish stopping
 them and drains its logs before exiting with code 130. A second Ctrl-C is forwarded
@@ -12,6 +15,115 @@ settles. Detached `hack up -d` is unchanged; use `hack down` to stop that instan
 Repeated interrupts during lifecycle cleanup wait for that cleanup to finish.
 An interrupted foreground start reports cancellation rather than a Compose startup
 failure. `hack up --json` uses detached startup.
+
+For attached Compose, `lifecycle.up.after` runs only after `docker compose up`
+returns successfully. Container readiness does not release that wait, so a
+long-running foreground session does not run `up.after` while attached. Ctrl-C
+returns 130 and skips it. Ctrl-C also does not dispatch `lifecycle.down.before`
+or `down.after`; use explicit `hack down` or `hack restart` for those hooks.
+This ordering is inherited from v4.3.0. The native backend has its own documented
+hook contract.
+
+On tmux foreground cleanup, Hack captures the owned lifecycle process groups before
+stopping their mux session. The recorded pane PID and UTC start time must match
+before any descendants are captured, and captured member identities are checked
+again before signalling. The wrapper forwards TERM to its main command group;
+Hack sends TERM to separately grouped descendants that the wrapper does not signal.
+It waits for the detached commands to disappear before
+retiring the FIFO wrapper and its reader. Each phase allows 5 seconds for graceful
+exit, escalates surviving groups once with SIGKILL, then gives confirmation a
+2-second polling budget. Each `ps` call can itself take up to 2 seconds, including
+a final call begun at the polling deadline: these budgets are not hard wall-clock
+limits. A failed census is retried within the current observation budget. If no
+read succeeds, cleanup stays unconfirmed; a successful live observation still
+requires retirement or escalation. Probe EPERM means the group may still exist: on
+macOS, even a zombie-only group can return it. Hack uses the process census to
+distinguish live members from zombies. TERM or KILL denied with EPERM is benign
+only when the following observation proves retirement; live members still cause
+a refusal. Failed reads retry within the existing phase budget.
+Explicit `hack down` uses the same command-before-wrapper order
+after interrupting its owned lifecycle panes. On Docker Compose it stops every
+service the instance started, profiled ones included, removes any container of
+the instance Compose left behind, and fails with `E_DOWN_INCOMPLETE` (exit 1) if
+one may still run afterwards, if a container of another checkout with the same
+Compose project still runs (`error.detail.foreign`, never stopped from here), or if
+the containers could not be listed (`error.detail.unknown`).
+Commands that finish their TERM handler sooner do not wait out the grace period.
+A second Ctrl-C skips the remaining command grace and requests the single SIGKILL;
+identity/ownership checks and post-KILL confirmation still run. An in-flight
+bounded `ps` or mux call finishes before that request can take effect.
+The foreground guard counts Ctrl-Cs from before Compose starts: two interrupts
+while Compose stops containers also skip the later lifecycle command grace.
+The wrapper/reader phase keeps its five-second reap window even after a forced
+command stop, so the wrapper can remove its private FIFO directory before exiting.
+
+| Lifecycle shutdown case | With prompt process reads (excluding Compose and mux shutdown) |
+| --- | --- |
+| Command finishes a one-second TERM handler; wrapper reaps it | About 1 second, plus polling/scheduling |
+| Command ignores TERM; wrapper reaps after KILL | About 5 seconds, plus KILL confirmation/polling |
+| Command needs KILL; wrapper then also needs KILL | About 10 seconds, plus both KILL confirmations; confirmation polling budgets can add up to 4 seconds |
+| Every process observation consumes its timeout | Up to 48 seconds across both group phases, as detailed below; capture and mux checks are additional |
+
+The conservative 48-second group ceiling includes two initial-observation budgets
+of 5 seconds (up to 7 seconds each with one final 2-second read), two grace budgets
+(up to 7 seconds each), two confirmation budgets (up to 4 seconds each), and three
+signal-identity batches (up to 4 seconds each with one failed-read retry). No census
+success within an initial budget refuses cleanup without signalling. Capture adds
+up to 4 seconds: two 1-second snapshots run alongside up to two 2-second identity
+reads. The normal owned foreground mux-stop path uses a token read and a stop,
+each bounded by `HACK_MUX_COMMAND_TIMEOUT_MS` (15 seconds by default); a failed stop
+can add one bounded presence check. Thus the worst-case process/mux allowance is
+97 seconds before optional identity refresh, rather than 14 seconds. A missing
+launch birth adds up to two owner reads, one parallel pane-query batch and two
+identity reads: at most another 49 seconds with default mux timeouts. These are
+conservative allowances for successful observations near deadlines, not a timer
+that every shutdown waits out. Filesystem I/O, OS scheduling, the instance-lock
+wait and Compose's own service stop grace are separate. Explicit `down` also sends
+an interrupt to each lifecycle window and waits 750 ms before this group path;
+its per-window mux calls and subsequent shutdown work are additional.
+An unreaped zombie has exited and runs no code: a group containing only zombies
+counts as retired. A live member in the same group still requires shutdown;
+failed process observations never count as absence.
+Native launch cancellation still permits the owned cleanup to retry a missing
+start time: its ownership and artifact checks remain active independently of the
+canceled startup deadline. Failed native launches also use a cleanup freshness
+check independent of canceled startup inputs: admission, hook ownership, private
+directory identity, the saved owner record and the mux token are still checked.
+Normal startup and ordinary stop retain their full input freshness checks.
+
+For value-free retirement diagnostics, set `HACK_LIFECYCLE_RETIREMENT_TRACE=1`.
+Stderr records fixed decision labels, PIDs/group IDs, counts and boolean outcomes.
+It excludes paths, names, command/env values, ownership tokens and raw errors.
+Leave it unset for normal operation.
+`hack doctor --fix` also captures groups before mux teardown and waits for
+commands before wrappers when repairing an ownership-proven orphan. An
+unconfirmed retirement keeps that entry and is reported while repair continues
+with other candidates. Repair refreshes pane identities from the owned mux, so
+older records without start-time metadata can also be retired safely.
+Signal delivery and FIFO EOF alone do not confirm group exit. If confirmation
+fails, Hack reports it and retains the ownership record and dependent helpers;
+it does not silently report completed cleanup.
+If both snapshots fail, Hack still attempts the owned mux stop, but retains
+descendant uncertainty. Other process-snapshot callers retain their existing
+timeout policy. For a mux that is already absent, a matching saved group number
+alone does not block cleanup: a matching command leader PID and UTC start time
+keeps the record even after its wrapper exits. Matching wrapper identity plus
+descendant lineage also keeps the record. Older records without that identity do not
+grant signal authority or make an unrelated live group count as retained work.
+
+Zellij does not await process-group retirement; it is scheduled for removal in v5.0.0.
+
+If the launch missed a pane start time, foreground cleanup re-reads the current
+pane in the recorded window while checking the session's ownership token before
+and after the query. It fills only a missing birth for that same current pane;
+it never replaces a stored birth or borrows identity from a reused PID outside
+the window. A failed pane query leaves the original missing birth intact: Hack
+still attempts the token-checked mux stop, then retains unconfirmed descendant
+state. A replaced owner still refuses the stop.
+
+![Foreground lifecycle retirement](diagrams/compose-lifecycle-retirement.svg)
+
+[Diagram source](diagrams/compose-lifecycle-retirement.mmd).
 
 You can also use a shorthand `startup` array for common `hack up` startup flows.
 
@@ -163,6 +275,10 @@ Each entry can be either:
 
 Hooks run on the host as `sh -c <command>`. Failures stop the operation.
 Commands inherit the CLI process environment (including PATH), plus resolved project env vars.
+A hook's stdout goes to the terminal's stdout and its stderr to stderr. With Hack's own
+`--json` (`up`, `restart`, `down`, with or without `--progress`), both go to stderr, so
+stdout holds only the JSON result; see
+[machine-readable output](reference/machine-readable-output.md#output-from-what-hack-runs).
 
 `persistent` behavior:
 - In `lifecycle.up.before`, `persistent: true` starts the command in the lifecycle mux session and immediately continues to the next hook.
@@ -488,11 +604,34 @@ its isolated derived branch instance, and `--branch <name>` targets only that ex
 `E_COMPOSE_FAILED`. If Compose exits successfully but one or more containers remain `created`, exit
 non-zero, or enter another failed runtime state, Hack returns `E_STARTUP_INCOMPLETE`. Successful
 one-shot services (`exited` with code 0) are reported under `services.completed` and do not fail startup.
-Hack recognizes dependency installers, services labeled `hack.service.one-shot=true`, and services
+Hack recognizes dependency installers, services with explicit `restart: "no"`, services labeled
+`hack.service.one-shot=true`, and services
 referenced by another service with Compose `condition: service_completed_successfully`. An unrelated
 service that merely exits zero is still treated as incomplete startup.
+
+![Compose startup observation](diagrams/compose-startup.svg)
+
+[Diagram source](diagrams/compose-startup.mmd).
+
+Detached startup re-reads transitional states within the remaining start budget.
+It corroborates container IDs before accepting running or completed services, so
+an old completed container cannot stand in for a replacement that has not started.
+`created` with exit code 0 is pending, not successful completion. Image preparation
+and lifecycle hooks do not consume the observation budget. Each inspection keeps
+its normal 15-second timeout, and two initial reads are allowed even when Compose
+used the whole start budget. Only retries for pending or changing observations
+use the remaining budget. Inspection failures return the Docker/Compose error
+without retrying it as a missing service.
 Lifecycle failures are one of the primary consumers of the `--json` error envelope,
 since hook and process startup are common failure points around `hack up`.
+
+### Activity log
+
+Every `hack up`, `hack down` and `hack restart`, on either backend, appends one
+names-only record (time, project, branch, action, origin, outcome, failed
+services, duration) to `<hack home>/activity.jsonl`; `hack activity --json`
+reads it newest first. `HACK_ORIGIN` (`cli`, `app`, `autostart`, `agent`) names
+who asked. See the [activity log reference](./reference/activity-log.md).
 
 ## Sessions backend
 
@@ -520,7 +659,21 @@ Notes:
   overlay or value replaces the owned session so host helpers cannot retain stale configuration.
 - For tmux-backed lifecycle sessions, Hack also persists the pane PID and the wrapped command's actual
   process-group metadata to `.hack/.internal/lifecycle/state.json`, with per-hook/process output logged to
-  `.hack/.internal/lifecycle/*.log`. If tmux pane state disappears before teardown, `hack down` still uses that persisted metadata to clean up any live lifecycle process groups instead of leaving orphaned host processes behind.
+  `.hack/.internal/lifecycle/*.log`. Those logs hold hook and process output verbatim and
+  unredacted, so a value a hook prints is stored there: the directory is private (0700) and each
+  log is private (0600), owned by you, and Hack never writes it through a symlink (a persistent
+  process's shell appends with `>>`, so a same-user replacement during its session is followed
+  until Hack's next record). An older log that group
+  or others could read is moved aside to `<log>.before-private-<time>` (made private, with its
+  history) and a new private log is started before the next record, so a reader that already had
+  the old file open sees no new output; an older directory is tightened to 0700. If a
+  hook's log cannot be written (a refused path, an I/O error), Hack writes nothing through it,
+  reports that once and still runs the hook and the ones after it, showing their output; it is just
+  not saved. A persistent process is not started while its log is unsafe, since its shell would
+  follow a link. Private modes do not protect
+  them from your own tools, agents or backups. A persistent process's output reaches its log
+  through a FIFO (mode 0600) in a directory that `mktemp -d` creates privately; if it cannot be
+  created, the process is not started. If tmux pane state disappears before teardown, `hack down` still uses that persisted metadata to clean up any live lifecycle process groups instead of leaving orphaned host processes behind.
 - `hack doctor` reports stale lifecycle state, leaderless process groups, ownership collisions, and
   ownership-proven sessions with no running Compose instance. Recently updated sessions are treated
   as possible in-flight startups for five minutes and stay untouched. `hack doctor --fix` reaps only
@@ -543,3 +696,46 @@ Notes:
   `--no-interactive` convention used across the CLI (documented defaults or `E_INTERACTIVE_REQUIRED`).
   It does not change hook `stdin` behavior — a hook that itself blocks on interactive auth still
   blocks under `--no-interactive`.
+
+## Experimental built-in runner
+
+Set `lifecycle.runner` to `"supervisor"` to use the built-in Rust host-process
+owner; the default remains `"mux"`. The supervisor executable must be available
+beside Hack. The [supervisor contract](./lifecycle-supervisor.md) records delivery
+and platform qualification. This opt-in does not provide a PTY: stdin is null,
+stdout/stderr are pipes, and commands requiring a terminal must use a
+noninteractive mode or an interactive workspace.
+
+Supervisor lifecycle processes do not appear as tmux sessions. Watch their output
+with `hack logs -f <name>`. Stop and restart use the recorded owner even after the
+runner setting changes. Neither runner restarts a persistent command that exits or
+crashes: it stays down, its exit is recorded, and status reports it as not live.
+Run `hack restart` (or `hack up`) to start it again. Automatic restart with backoff
+is not part of this opt-in. Unknown shutdown retains the ownership record and any
+shared helper holders, and fails so `hack down` can be retried. Shared helper
+commands themselves keep their existing ownership contract in this unit.
+
+### Refused ownership state
+
+For projects that have never published supervisor ownership, an empty or
+unparsable legacy `.hack/.internal/lifecycle/state.json` is moved to a private
+`state.json.legacy-<timestamp>-<id>` sibling, with one explanation, and treated as
+empty. This recovers interrupted non-atomic writes from older mux versions.
+After a project has used the supervisor, the durable `supervisor-state` marker
+disables that fallback: losing ownership may hide running native commands. With
+that marker present, a missing `state.json` is also refused rather than read as
+"nothing running", so `hack down`, status and runner changes cannot skip native
+retirement. Removing entries rewrites the file; Hack never deletes it.
+Unsafe files (including symlinks, hard links and foreign ownership) and
+semantically invalid records still refuse under both runners. State mutations
+now serialize on `state.lock` and publish atomically with mode 0600.
+Global project listings continue and mark the affected project's
+lifecycle as `state_unreadable`; this is unknown, not stopped.
+
+To recover, inspect that project's state file and the processes or sessions it
+records. Confirm identity before stopping any leftover work; a PID alone may have
+been reused. Preserve the file for diagnosis. Once the recorded work is confirmed
+stopped, seek an ownership-state repair; do not hand-edit or discard ownership
+records while commands may still run. A
+symlink, foreign owner, or unreadable directory needs its owner to repair the path
+before Hack can safely proceed. `hack doctor --fix` does not bypass these checks.

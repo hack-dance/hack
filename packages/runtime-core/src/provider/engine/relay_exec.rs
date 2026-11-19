@@ -141,7 +141,6 @@ fn start_failure(error: &std::io::Error) -> StartFailure {
     }
 }
 /// [`start_mode`] without a console. Used by the macOS relay launch and the tests.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn start(
     stream: &mut UnixStream,
     id: &str,
@@ -149,11 +148,9 @@ pub(super) fn start(
 ) -> Result<(), CandidateError> {
     start_mode(stream, id, deadline, None)
 }
-/// [`start_mode`] without a console, keeping why the upgrade failed.
-#[cfg_attr(
-    not(all(target_os = "macos", feature = "environment-launcher")),
-    allow(dead_code)
-)]
+/// [`start_mode`] without a console, keeping why the upgrade failed. Only private exec
+/// uses it.
+#[cfg(all(target_os = "macos", feature = "environment-launcher"))]
 pub(super) fn start_classified(
     stream: &mut UnixStream,
     id: &str,

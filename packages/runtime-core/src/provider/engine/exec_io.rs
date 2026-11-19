@@ -94,7 +94,9 @@ impl std::fmt::Display for SentThenFailed {
 }
 impl std::error::Error for SentThenFailed {}
 
-/// Whether `error` came after `write` had already sent bytes.
+/// Whether `error` came after `write` had already sent bytes. Only private exec
+/// delivery, which decides whether the command can have run, needs this.
+#[cfg(any(all(target_os = "macos", feature = "environment-launcher"), test))]
 pub(super) fn sent_before(error: &io::Error) -> bool {
     error
         .get_ref()

@@ -19,10 +19,6 @@ use zeroize::Zeroizing;
 /// The private exec step that failed. Steps before [`Stage::Release`] cannot have run
 /// the command. Create, connect and start occur only in the macOS engine path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(all(target_os = "macos", feature = "environment-launcher")),
-    allow(dead_code)
-)]
 pub(super) enum Stage {
     /// Creating the exec instance; nothing is started.
     Create,
@@ -104,10 +100,7 @@ fn remaining(deadline: Instant, stage: Stage) -> Result<Duration, CandidateError
         .ok_or_else(|| failed(stage, Reason::Deadline))
 }
 /// `Deadline` once the exec's deadline has passed, otherwise `reason`.
-#[cfg_attr(
-    not(all(target_os = "macos", feature = "environment-launcher")),
-    allow(dead_code)
-)]
+#[cfg(all(target_os = "macos", feature = "environment-launcher"))]
 fn past_or(deadline: Instant, reason: Reason) -> Reason {
     if Instant::now() >= deadline {
         Reason::Deadline
@@ -616,5 +609,31 @@ mod tests {
         assert_eq!(error.code, "graph_service_exec_uncertain");
         assert_eq!(stage_of(&error)["stage"], "release");
         assert_eq!(stage_of(&error)["command_may_have_run"], true);
+    }
+    #[test]
+    fn every_stage_names_itself_and_only_release_and_later_may_have_run() {
+        let stages = [
+            (Stage::Create, "create", false),
+            (Stage::Connect, "connect", false),
+            (Stage::Start, "start", false),
+            (Stage::Hello, "hello", false),
+            (Stage::Deliver, "deliver", false),
+            (Stage::Release, "release", true),
+            (Stage::Output, "output", true),
+            (Stage::Inspect, "inspect", true),
+        ];
+        for (stage, name, may_have_run) in stages {
+            let error = failed(stage, Reason::Deadline);
+            assert_eq!(stage_of(&error)["stage"], name);
+            assert_eq!(stage_of(&error)["command_may_have_run"], may_have_run);
+            assert_eq!(
+                error.code,
+                if may_have_run {
+                    "graph_service_exec_uncertain"
+                } else {
+                    "graph_service_exec_not_run"
+                }
+            );
+        }
     }
 }

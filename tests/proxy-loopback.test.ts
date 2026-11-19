@@ -900,3 +900,26 @@ test("the hint's address comes from the rendered proxy file, not the setting", (
     )
   ).toBe("127.0.0.1");
 });
+
+test("the no-DNS hint names the same normalized host in --noproxy, --resolve and the URL", async () => {
+  const hint = async (url: string) =>
+    (
+      await openUnresolvedHostWarning({
+        url,
+        resolve: () => Promise.resolve("no-answer" as const),
+        platform: "linux",
+        proxyBind: () => Promise.resolve({ kind: "all" } as const),
+      })
+    )?.hint ?? "";
+  // URL parsing lowercases, punycodes and keeps a trailing dot; all three
+  // parts of the command must agree so curl bypasses the proxy for it.
+  for (const [input, host] of [
+    ["https://Hello.HACK/", "hello.hack"],
+    ["https://bücher.hack/", "xn--bcher-kva.hack"],
+    ["https://hello.hack./", "hello.hack."],
+  ] as const) {
+    expect(await hint(input)).toContain(
+      `curl --noproxy '${host}' --resolve '${host}:443:127.0.0.1' 'https://${host}/'`
+    );
+  }
+});

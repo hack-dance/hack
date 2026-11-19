@@ -3141,11 +3141,14 @@ test("HACK-2351: the configured graph start budget reaches the runtime, and its 
   let timeoutArgument: string | undefined;
   let startupTimeoutMs: number | undefined;
   let served: string | undefined;
+  opts.dependencies.startupStatusIntervalMs = 5;
   opts.dependencies.serve = async (request) => {
     served = request.run;
     const index = request.args.indexOf("--timeout-seconds");
     timeoutArgument = request.args[index + 1];
     startupTimeoutMs = request.startupTimeoutMs;
+    // The start waits; its status reads run meanwhile.
+    await Bun.sleep(100);
     request.onExitDiagnostic?.({ exitCode: 1, nativeCode: "graph_timeout" });
     throw new NativeRuntimeRequestError({
       message:
@@ -3157,9 +3160,14 @@ test("HACK-2351: the configured graph start budget reaches the runtime, and its 
   };
   const invoke = opts.dependencies.invoke!;
   opts.dependencies.invoke = async (request) => {
+    if (request.args[0] === "graph" && request.args[1] === "status") {
+      // While the start waits: web never started.
+      return { observations: { "container:web": { state: "created" } } };
+    }
     const value = await invoke(request);
     if (request.args[1] === "inspect" && served && isRecord(value)) {
-      // The graph the runtime retained at its deadline: web never started.
+      // After the runtime's own cleanup the container is gone: this view
+      // must not be the one the error describes (review finding).
       return {
         ...value,
         receipt: {
@@ -3167,25 +3175,27 @@ test("HACK-2351: the configured graph start budget reaches the runtime, and its 
           run: served,
           phase: "stopped-data-retained",
         },
-        observations: { "container:web": { state: "created" } },
+        observations: { "container:web": { state: "absent" } },
       };
     }
     return value;
   };
   let caught: unknown;
   try {
-    await startNativeProject({ ...opts, startTimeoutSeconds: 900 });
+    await startNativeProject({ ...opts, startTimeoutSeconds: 600 });
   } catch (error) {
     caught = error;
   }
-  expect(timeoutArgument).toBe("900");
+  expect(timeoutArgument).toBe("600");
   // The frontend outlasts the runtime's own deadline, so the runtime reports it.
-  expect(startupTimeoutMs).toBe(915_000);
+  expect(startupTimeoutMs).toBe(615_000);
   expect(caught).toBeInstanceOf(Error);
   const message = (caught as Error).message;
   expect(message).toContain("graph_timeout");
-  expect(message).toContain("of the 900 s graph start budget");
+  expect(message).toContain("of the 600 s graph start budget");
+  // From the status read before the deadline, not the post-cleanup inspection.
   expect(message).toContain("web (wanted started; created)");
+  expect(message).not.toContain("absent");
   expect(message).toContain("native.startTimeoutSeconds");
 });
 

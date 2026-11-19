@@ -3144,11 +3144,14 @@ dependencies consume it too. A routed service started after a dependency taking
 explicit probe with a longer grace does not extend the whole-graph deadline.
 For a graph that legitimately needs longer (many services, slow first starts, a
 loaded host), set `native.startTimeoutSeconds` in `.hack/hack.config.json` or
-`HACK_NATIVE_START_TIMEOUT_SECONDS` (whole seconds, 60 to 1800; the variable
-wins). The budget is configurable rather than progress-aware because the runtime
+`HACK_NATIVE_START_TIMEOUT_SECONDS` (whole seconds, 60 to 600, the runtime's
+own bound; the variable wins). The budget is configurable rather than progress-aware because the runtime
 owns the deadline and reports nothing per service before the graph is ready.
 When it runs out, `graph_timeout` names each service that had not reached its
-readiness goal, what it was doing and how long it was waited on, for example
+readiness goal, what it was doing and how long it was waited on. The runtime
+removes a failed start's containers before it reports, so these states come from
+the graph's status as read while the start waited (every 5 seconds, so at most
+that old), for example
 `Not ready after 300 s of the 300 s graph start budget: api (wanted healthy;
 running, starting)`. Use `hack logs` and inspect the dependencies as well as the
 route. A guest that is too small can page heavily and miss this budget; the

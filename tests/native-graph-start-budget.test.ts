@@ -14,14 +14,15 @@ test("the budget comes from the host variable, then the project, then 300 s, and
   expect(
     resolveNativeStartTimeoutSeconds({ env: {}, project: undefined })
   ).toBe(DEFAULT_NATIVE_START_TIMEOUT_SECONDS);
-  expect(resolveNativeStartTimeoutSeconds({ env: {}, project: 900 })).toBe(900);
+  expect(resolveNativeStartTimeoutSeconds({ env: {}, project: 450 })).toBe(450);
   expect(
     resolveNativeStartTimeoutSeconds({
-      env: { [NATIVE_START_TIMEOUT_ENV]: "1200" },
-      project: 900,
+      env: { [NATIVE_START_TIMEOUT_ENV]: "600" },
+      project: 450,
     })
-  ).toBe(1200);
-  for (const value of ["59", "1801", "1.5", "ten", "-60", "600s"]) {
+  ).toBe(600);
+  // The runtime refuses a graph budget above 600 s, so the frontend does too.
+  for (const value of ["59", "601", "1800", "1.5", "ten", "-60", "600s"]) {
     expect(() =>
       resolveNativeStartTimeoutSeconds({
         env: { [NATIVE_START_TIMEOUT_ENV]: value },
@@ -29,7 +30,7 @@ test("the budget comes from the host variable, then the project, then 300 s, and
       })
     ).toThrow(NATIVE_START_TIMEOUT_ENV);
   }
-  for (const value of [59, 1801, Number.NaN]) {
+  for (const value of [59, 601, Number.NaN]) {
     expect(() =>
       resolveNativeStartTimeoutSeconds({ env: {}, project: value })
     ).toThrow("native.startTimeoutSeconds in .hack/hack.config.json");
@@ -105,17 +106,21 @@ test("the timeout detail stays within the runtime-failure envelope and admits on
   expect(detail).toMatch(/^[\x20-\x7e]+$/);
   expect(detail).toContain("more service(s)");
   expect(detail).not.toContain("bad name");
-  // A state outside the fixed vocabulary is never echoed.
-  expect(
-    nativeGraphTimeoutDetail({
-      snapshot: {
-        observations: { "container:web": { state: "Weird State!" } },
+  // States, health and goals outside the closed vocabularies are never echoed.
+  const closed = nativeGraphTimeoutDetail({
+    snapshot: {
+      observations: {
+        "container:web": { state: "private_token", health: "customer_name" },
       },
-      goals: { web: "healthy" },
-      waitedMs: 1000,
-      budgetSeconds: 300,
-    })
-  ).toContain("web (wanted healthy; unknown)");
+    },
+    goals: { web: "healthy", api: "private_goal" },
+    waitedMs: 1000,
+    budgetSeconds: 300,
+  });
+  expect(closed).toContain("web (wanted healthy; unknown)");
+  expect(closed).not.toContain("private");
+  expect(closed).not.toContain("customer");
+  expect(closed).not.toContain("api");
 });
 
 /** Where the parsed record came from; only used in messages. */
@@ -134,4 +139,21 @@ test("native.startTimeoutSeconds is read from the project config; a non-integer 
     parseProjectConfigRecord({ native: {} }, CONFIG).native
   ).toBeUndefined();
   expect(parseProjectConfigRecord({}, CONFIG).native).toBeUndefined();
+});
+
+test("a service that exited unsuccessfully has not started, as the runtime judges it", () => {
+  // Review finding: only a running container or a clean exit meets `started`.
+  expect(
+    nativeGraphTimeoutDetail({
+      snapshot: {
+        observations: {
+          "container:worker": { state: "exited", code: 3 },
+          "container:job": { state: "exited", code: 0 },
+        },
+      },
+      goals: { worker: "started", job: "started" },
+      waitedMs: 300_000,
+      budgetSeconds: 300,
+    })
+  ).toContain(": worker (wanted started; exited 3).");
 });

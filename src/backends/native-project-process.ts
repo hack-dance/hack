@@ -309,8 +309,8 @@ function assertProcessSelection(opts: ProcessOptions): void {
     !(RUN.test(opts.run) && Number.isSafeInteger(opts.startupTimeoutMs)) ||
     opts.startupTimeoutMs < 1 ||
     !(Number.isSafeInteger(exitDrainBoundMs) && exitDrainBoundMs >= 1) ||
-    // The graph start budget (at most 1800 s) plus the frontend's slack.
-    opts.startupTimeoutMs > 1_815_000 ||
+    // The graph start budget (at most 600 s) plus the frontend's slack.
+    opts.startupTimeoutMs > 615_000 ||
     (opts.privateInput?.byteLength ?? 0) > MAX_INPUT ||
     canceledAtEntry(opts)
   ) {

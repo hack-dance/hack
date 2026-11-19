@@ -11,16 +11,28 @@
  *
  * Precedence: `HACK_NATIVE_START_TIMEOUT_SECONDS`, then
  * `native.startTimeoutSeconds` in `.hack/hack.config.json`, then 300 s. Values
- * are whole seconds from 60 to 1800; anything else refuses, never falls back.
+ * are whole seconds from 60 to 600 (the runtime's own bound for a graph start);
+ * anything else refuses, never falls back.
+ *
+ * The runtime cleans up a failed start before it returns, so the graph as it
+ * stood at the deadline is read while the start waits: a lease-free
+ * `graph status` every few seconds ({@link watchNativeStartupStatus}).
  */
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import {
+  invokeNativeRuntime,
+  type NativeRuntimeSelection,
+} from "./native-runtime-client.ts";
 
 export const NATIVE_START_TIMEOUT_ENV = "HACK_NATIVE_START_TIMEOUT_SECONDS";
 export const NATIVE_START_TIMEOUT_CONFIG = "native.startTimeoutSeconds";
 export const DEFAULT_NATIVE_START_TIMEOUT_SECONDS = 300;
 export const MIN_NATIVE_START_TIMEOUT_SECONDS = 60;
-export const MAX_NATIVE_START_TIMEOUT_SECONDS = 1800;
+/** The runtime refuses a graph start budget above 600 s (`graph_budget`). */
+export const MAX_NATIVE_START_TIMEOUT_SECONDS = 600;
+/** How often a waiting start reads the graph's lease-free status. */
+export const NATIVE_START_STATUS_INTERVAL_MS = 5000;
 /**
  * The frontend's own wait outlasts the runtime's deadline by this much, so
  * the runtime reports `graph_timeout` (and the graph can be inspected) first.
@@ -91,7 +103,19 @@ export function nativeReadinessGoals(
 }
 
 const SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
-const STATE = /^[a-z_-]{1,32}$/;
+/** The closed vocabularies shown; anything else is "unknown" or left out. */
+const STATES = new Set([
+  "absent",
+  "created",
+  "dead",
+  "exited",
+  "paused",
+  "removing",
+  "restarting",
+  "running",
+]);
+const HEALTH = new Set(["healthy", "none", "starting", "unhealthy"]);
+const GOALS = new Set(["completed", "healthy", "started"]);
 /** The runtime-failure envelope keeps at most 400 printable characters. */
 const DETAIL_LIMIT = 400;
 
@@ -100,14 +124,14 @@ function observed(observation: unknown): string {
   if (!(isRecord(observation) && typeof observation.state === "string")) {
     return "no container";
   }
-  const state = STATE.test(observation.state) ? observation.state : "unknown";
+  const state = STATES.has(observation.state) ? observation.state : "unknown";
   if (state === "exited") {
     return Number.isSafeInteger(observation.code)
       ? `exited ${observation.code}`
       : "exited";
   }
   const health =
-    typeof observation.health === "string" && STATE.test(observation.health)
+    typeof observation.health === "string" && HEALTH.has(observation.health)
       ? observation.health
       : undefined;
   return health ? `${state}, ${health}` : state;
@@ -123,7 +147,11 @@ function reachedGoal(goal: string, observation: unknown): boolean {
   if (goal === "healthy") {
     return observation.state === "running" && observation.health === "healthy";
   }
-  return observation.state === "running" || observation.state === "exited";
+  // As the runtime: running, or exited successfully.
+  return (
+    observation.state === "running" ||
+    (observation.state === "exited" && observation.code === 0)
+  );
 }
 
 /**
@@ -144,7 +172,7 @@ export function nativeGraphTimeoutDetail(opts: {
       ? opts.snapshot.observations
       : {};
   const waiting = Object.entries(opts.goals)
-    .filter(([name]) => SERVICE.test(name))
+    .filter(([name, goal]) => SERVICE.test(name) && GOALS.has(goal))
     .sort(([a], [b]) => a.localeCompare(b))
     .filter(
       ([name, goal]) => !reachedGoal(goal, observations[`container:${name}`])
@@ -174,4 +202,55 @@ export function nativeGraphTimeoutDetail(opts: {
     shown.push(entry);
   }
   return `${head}${shown.join(", ")}${tail}`;
+}
+
+/**
+ * While a start waits for readiness, keep its latest lease-free `graph status`
+ * snapshot: the runtime removes a failed start's containers before it
+ * returns, so this is the only view of the graph as it stood at the deadline.
+ * A failed or slow read keeps the previous snapshot; reads never overlap.
+ */
+export function watchNativeStartupStatus(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: string;
+  readonly intervalMs?: number;
+  readonly invoke?: typeof invokeNativeRuntime;
+}): { readonly latest: () => unknown; readonly stop: () => Promise<void> } {
+  const controller = new AbortController();
+  let latest: unknown;
+  let reading: Promise<void> | undefined;
+  const read = () => {
+    if (reading || controller.signal.aborted) {
+      return;
+    }
+    reading = (opts.invoke ?? invokeNativeRuntime)({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: ["graph", "status", "--run-id", opts.run, "--json"],
+      timeoutMs: 10_000,
+      signal: controller.signal,
+    })
+      .then((value) => {
+        if (!controller.signal.aborted) {
+          latest = value;
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        reading = undefined;
+      });
+  };
+  const timer = setInterval(
+    read,
+    opts.intervalMs ?? NATIVE_START_STATUS_INTERVAL_MS
+  );
+  return {
+    latest: () => latest,
+    stop: async () => {
+      clearInterval(timer);
+      controller.abort();
+      await reading;
+    },
+  };
 }

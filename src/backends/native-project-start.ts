@@ -32,9 +32,11 @@ import {
 } from "./native-gcloud-environment.ts";
 import {
   NATIVE_START_FRONTEND_SLACK_MS,
+  NATIVE_START_STATUS_INTERVAL_MS,
   nativeGraphTimeoutDetail,
   nativeReadinessGoals,
   nativeStartBudgetSeconds,
+  watchNativeStartupStatus,
 } from "./native-graph-start-budget.ts";
 import {
   admitNativeHttpProbe,
@@ -436,6 +438,8 @@ type Dependencies = {
   downHooks: typeof createNativeForegroundDownHooks;
   /** Poll interval of the ready graph's service exit monitor. */
   exitMonitorIntervalMs: number;
+  /** How often a waiting start reads its graph status (HACK-2351). */
+  startupStatusIntervalMs: number;
 };
 const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
@@ -469,6 +473,7 @@ const DEFAULTS: Dependencies = {
   admitDownHooks: admitNativeDownHookGeneration,
   downHooks: createNativeForegroundDownHooks,
   exitMonitorIntervalMs: 2000,
+  startupStatusIntervalMs: NATIVE_START_STATUS_INTERVAL_MS,
 };
 /**
  * Reports forwarded source names and unset-reference notices for active services.
@@ -2756,6 +2761,15 @@ async function startNativeProjectAttempt(
           );
           const servicesRequestedAt = performance.now();
           let stopWatching: (() => Promise<void>) | undefined;
+          // The runtime removes a failed start's containers before it returns:
+          // keep the graph's status as it stands while the start waits.
+          const startupStatus = watchNativeStartupStatus({
+            runtime: opts.runtime,
+            projectRoot: opts.scope.projectRoot,
+            run,
+            intervalMs: deps.startupStatusIntervalMs,
+            invoke: deps.invoke,
+          });
           try {
             servicesRequested = true;
             code = await deps.serve({
@@ -2932,6 +2946,7 @@ async function startNativeProjectAttempt(
           } catch (error) {
             serveFailure = error;
           } finally {
+            await startupStatus.stop();
             delivery.payload?.fill(0);
             await stopWatching?.();
           }
@@ -2940,11 +2955,11 @@ async function startNativeProjectAttempt(
             try {
               final = await invokeInspect();
               // The runtime's deadline names no service: say which were not
-              // ready, from the graph as it stood (HACK-2351).
+              // ready, from the last status read before it (HACK-2351).
               serveFailure = withGraphTimeoutDetail({
                 failure: serveFailure,
                 nativeCode: nativeExitCode,
-                snapshot: final,
+                snapshot: startupStatus.latest(),
                 goals: nativeReadinessGoals(readinessArgs),
                 waitedMs: performance.now() - servicesRequestedAt,
                 budgetSeconds,

@@ -337,6 +337,7 @@ import {
   appendHackHostTrustEnvironment,
   findHackHostTrustBundlePath,
 } from "../lib/local-ca.ts";
+import { withProjectLocalDirectories } from "../lib/local-directories-project.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
   buildLogSelector,
@@ -7662,9 +7663,13 @@ async function runUpCommand({
         composeFile: project.composeFile,
       }));
     reportDependencyCacheFallback(dependencyCache);
-    const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
-      ? [...composeFilesWithInternal, dependencyCache.overridePath]
-      : composeFilesWithInternal;
+    const composeFilesWithRuntimeOverrides = await withProjectLocalDirectories({
+      project,
+      composeFiles: dependencyCache.overridePath
+        ? [...composeFilesWithInternal, dependencyCache.overridePath]
+        : composeFilesWithInternal,
+      notify: (message) => logger.warn({ message }),
+    });
     const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
       project,
       composeFiles: composeFilesWithRuntimeOverrides,
@@ -9061,9 +9066,13 @@ async function runRestartUpPhase(opts: {
       composeFile: opts.project.composeFile,
     });
     reportDependencyCacheFallback(dependencyCache);
-    const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
-      ? [...composeFilesWithInternal, dependencyCache.overridePath]
-      : composeFilesWithInternal;
+    const composeFilesWithRuntimeOverrides = await withProjectLocalDirectories({
+      project: opts.project,
+      composeFiles: dependencyCache.overridePath
+        ? [...composeFilesWithInternal, dependencyCache.overridePath]
+        : composeFilesWithInternal,
+      notify: (message) => logger.warn({ message }),
+    });
     const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
       project: opts.project,
       composeFiles: composeFilesWithRuntimeOverrides,
@@ -9302,11 +9311,14 @@ async function runTargetedServiceRestart(opts: {
     };
   }
   reportDependencyCacheFallback(dependencyCache);
-  const composeFilesWithRuntimeOverrides = [
-    ...composeFiles,
-    ...(internalOverride ? [internalOverride] : []),
-    ...(dependencyCache.overridePath ? [dependencyCache.overridePath] : []),
-  ];
+  const composeFilesWithRuntimeOverrides = await withProjectLocalDirectories({
+    project: opts.project,
+    composeFiles: [
+      ...composeFiles,
+      ...(internalOverride ? [internalOverride] : []),
+      ...(dependencyCache.overridePath ? [dependencyCache.overridePath] : []),
+    ],
+  });
   const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
     project: opts.project,
     composeFiles: composeFilesWithRuntimeOverrides,
@@ -10584,9 +10596,12 @@ async function handleRun({
     composeFile: project.composeFile,
   });
   reportDependencyCacheFallback(dependencyCache);
-  const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
-    ? [...composeFilesWithInternal, dependencyCache.overridePath]
-    : composeFilesWithInternal;
+  const composeFilesWithRuntimeOverrides = await withProjectLocalDirectories({
+    project,
+    composeFiles: dependencyCache.overridePath
+      ? [...composeFilesWithInternal, dependencyCache.overridePath]
+      : composeFilesWithInternal,
+  });
   const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
     project,
     composeFiles: composeFilesWithRuntimeOverrides,

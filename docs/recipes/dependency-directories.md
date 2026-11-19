@@ -22,6 +22,44 @@ Bind-mount only your source (`..:/app`). On macOS, files in a bind mount cross
 from macOS into the Linux VM, which is slower than a named volume, which stays
 inside the VM. See [Development runtime safety](../guides/development-runtime-safety.md).
 
+## Keep a directory local without editing Compose
+
+If your Compose file bind-mounts the whole checkout (`..:/app`) and a service
+installs or builds into it, list those directories in
+`.hack/hack.config.json`. Paths are relative to the project root:
+
+```json
+{ "localDirectories": ["node_modules", "apps/web/node_modules", "apps/web/.next"] }
+```
+
+On each `hack up`, `hack restart` and `hack run`, Hack adds a Compose override
+(`.hack/.internal/compose.local-directories.override.yml`) that mounts a named
+volume at each listed directory, for every service whose source bind mount
+shows it. Services that see the same directory share one volume, so a `deps`
+installer and the app read the same files. Each branch instance gets its own
+volumes. Your Compose file does not change.
+
+- **Existing content.** A new volume starts empty, or with what the image has
+  at that path. Hack does not copy the checkout's directory into it (files
+  installed on macOS are for another system). Run the install once more after
+  the first start. The checkout's copy stays where it is; containers no longer
+  see it.
+- **A mount you already have wins.** If a service already mounts something at
+  that path, Hack keeps it and `hack up` says so. A service that bind-mounts
+  that same directory gets the volume instead.
+- **Read-only binds** get a read-only volume.
+- **Cleanup.** `hack down` keeps the volumes. They are labeled
+  `hack.cache.disposable`, so `hack down --prune-caches` removes them. Run it
+  before you remove an entry from the list: afterwards no container mounts that
+  volume, so you remove it with `docker volume rm <name>` (its label
+  `hack.local-directory` names the directory).
+- **Invalid entries** (an absolute path, `..`, `.git` or `.hack`, one entry
+  inside another, more than 32) stop `hack up` with `E_CONFIG_INVALID`.
+- **Native backend.** Not applied yet; native ignores the setting.
+
+`hack doctor` adds a `shared source installs` note when a service sees such a
+directory through its source bind and nothing keeps it local.
+
 ## Caches you can throw away
 
 Mark a cache volume as disposable, so `hack down --prune-caches` can remove it:

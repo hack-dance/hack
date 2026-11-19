@@ -414,6 +414,7 @@ describe("doctor output", () => {
         ["polling watchers", "warn"],
         ["shared volume architectures", "ok"],
         ["dev image tags", "ok"],
+        ["shared source installs", "ok"],
       ]);
       const polling = data.checks.find((c) => c.id === "polling watchers");
       expect(polling?.fix).toEqual({

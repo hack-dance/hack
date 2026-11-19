@@ -1,6 +1,6 @@
 # My Mac is slow
 
-Start here when a project makes your Mac hot, loud or slow. Four common causes
+Start here when a project makes your Mac hot, loud or slow. Five common causes
 are project settings that `hack doctor` can find. Other causes, such as many
 running projects or a heavy build, need `hack usage`. These checks run on the
 Compose backend. The same checks run on Linux.
@@ -13,6 +13,7 @@ Compose backend. The same checks run on Linux.
 | Everything in one service is several times slower than expected | The image was built for another CPU type, so it runs emulated | `emulated services` |
 | A service crashes on a native module after an install | Two CPU types share one dependency volume | `shared volume architectures` |
 | The container's Node or Bun may be older than the repository asks for | A `:latest` or untagged `node` or `bun` image that Docker cached long ago | `dev image tags` (a note) |
+| Installs and rebuilds are slow, and the checkout fills with `node_modules` or build output | A service installs or builds into the source you bind-mount | `shared source installs` (a note) |
 
 ```mermaid
 ---
@@ -29,7 +30,9 @@ flowchart TD
   Vol -->|yes| FixVol["One CPU type, reinstall"]
   Vol -->|no| Tag{"dev image tags note?"}
   Tag -->|yes| FixTag["Use a version tag"]
-  Tag -->|no| Other["If doctor finds nothing"]
+  Tag -->|no| Src{"shared source installs note?"}
+  Src -->|yes| FixSrc["Set localDirectories"]
+  Src -->|no| Other["If doctor finds nothing"]
 ```
 
 ## 1. See which project uses the CPU
@@ -115,11 +118,32 @@ This is a note, not a warning. A service mounts your source code and uses a
 version. It covers only images whose name contains `node` or `bun`. Docker does
 not refresh a `:latest` image it already has, so it can be old. Use a version tag that matches the repository, or pull the image again.
 
+### `shared source installs`
+
+This is a note, not a warning. A service bind-mounts your checkout and sees a
+directory that installs or builds usually write, such as `node_modules`,
+`.venv`, `.next` or a Rust `target` beside `Cargo.toml`, and nothing else is
+mounted there. Every write then crosses from the Linux VM to macOS, which is
+much slower than the VM's own disk.
+
+List those directories in `.hack/hack.config.json`. You do not edit the Compose
+file:
+
+```json
+{ "localDirectories": ["node_modules", "apps/web/.next"] }
+```
+
+The next `hack up` mounts a named volume at each listed directory for every
+service that bind-mounts it. Run the install once more after that start,
+because the volume starts empty (or with what the image has at that path).
+Your checkout's copies stay where they are. See
+[Dependency directories](../recipes/dependency-directories.md#keep-a-directory-local-without-editing-compose).
+
 ## If doctor finds nothing
 
 - Check that you ran doctor with the same `hack` and in the same project as the
   slow services.
-- These four checks do not run for a project you adopted with
+- These checks do not run for a project you adopted with
   `hack config adopt`, or on the native backend. Native has its own
   `amd64 emulation` check.
 - A script can read the same fact from `hack ps --json`: an emulated container

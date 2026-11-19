@@ -3150,8 +3150,9 @@ owns the deadline and reports nothing per service before the graph is ready.
 When it runs out, `graph_timeout` names each service that had not reached its
 readiness goal, what it was doing and how long it was waited on. The runtime
 removes a failed start's containers before it reports, so these states come from
-the graph's status as read while the start waited (every 5 seconds, so at most
-that old), for example
+the graph's status as read while the start waited (every 5 seconds, startup views
+only); the message says how old that read was, and without one from the last 30
+seconds it keeps the runtime's generic `graph_timeout` message. For example
 `Not ready after 300 s of the 300 s graph start budget: api (wanted healthy;
 running, starting)`. Use `hack logs` and inspect the dependencies as well as the
 route. A guest that is too small can page heavily and miss this budget; the

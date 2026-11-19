@@ -33,6 +33,14 @@ export const MIN_NATIVE_START_TIMEOUT_SECONDS = 60;
 export const MAX_NATIVE_START_TIMEOUT_SECONDS = 600;
 /** How often a waiting start reads the graph's lease-free status. */
 export const NATIVE_START_STATUS_INTERVAL_MS = 5000;
+/** An older status snapshot is not used to describe a timeout. */
+export const NATIVE_START_STATUS_STALE_MS = 30_000;
+/**
+ * Receipt phases of a start still reaching readiness. A snapshot in any
+ * other phase (cleanup, removed, ready, retained) does not describe the graph
+ * at its deadline and is never kept.
+ */
+const STARTUP_PHASES = new Set(["preparing", "restoring"]);
 /**
  * The frontend's own wait outlasts the runtime's deadline by this much, so
  * the runtime reports `graph_timeout` (and the graph can be inspected) first.
@@ -122,7 +130,8 @@ const DETAIL_LIMIT = 400;
 /** One service's observed state, in the fixed vocabulary only. */
 function observed(observation: unknown): string {
   if (!(isRecord(observation) && typeof observation.state === "string")) {
-    return "no container";
+    // A startup-phase snapshot without it: not created yet.
+    return "not created";
   }
   const state = STATES.has(observation.state) ? observation.state : "unknown";
   if (state === "exited") {
@@ -166,6 +175,8 @@ export function nativeGraphTimeoutDetail(opts: {
   readonly goals: Readonly<Record<string, string>>;
   readonly waitedMs: number;
   readonly budgetSeconds: number;
+  /** How old the snapshot was when the deadline passed. */
+  readonly snapshotAgeMs?: number;
 }): string | undefined {
   const observations =
     isRecord(opts.snapshot) && isRecord(opts.snapshot.observations)
@@ -185,7 +196,11 @@ export function nativeGraphTimeoutDetail(opts: {
     return;
   }
   const seconds = Math.round(opts.waitedMs / 1000);
-  const head = `Not ready after ${seconds} s of the ${opts.budgetSeconds} s graph start budget: `;
+  const age =
+    opts.snapshotAgeMs === undefined
+      ? ""
+      : ` (graph status ${Math.round(opts.snapshotAgeMs / 1000)} s before the deadline)`;
+  const head = `Not ready after ${seconds} s of the ${opts.budgetSeconds} s graph start budget${age}: `;
   const tail = `. Raise ${NATIVE_START_TIMEOUT_CONFIG} or ${NATIVE_START_TIMEOUT_ENV} if they were still starting.`;
   const shown: string[] = [];
   for (const [index, entry] of waiting.entries()) {
@@ -204,6 +219,15 @@ export function nativeGraphTimeoutDetail(opts: {
   return `${head}${shown.join(", ")}${tail}`;
 }
 
+function startupPhase(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isRecord(value.receipt) &&
+    typeof value.receipt.phase === "string" &&
+    STARTUP_PHASES.has(value.receipt.phase)
+  );
+}
+
 /**
  * While a start waits for readiness, keep its latest lease-free `graph status`
  * snapshot: the runtime removes a failed start's containers before it
@@ -216,9 +240,15 @@ export function watchNativeStartupStatus(opts: {
   readonly run: string;
   readonly intervalMs?: number;
   readonly invoke?: typeof invokeNativeRuntime;
-}): { readonly latest: () => unknown; readonly stop: () => Promise<void> } {
+}): {
+  /** The latest startup-phase snapshot and when it was taken, if any. */
+  readonly latest: () =>
+    | { readonly snapshot: unknown; readonly takenAt: number }
+    | undefined;
+  readonly stop: () => Promise<void>;
+} {
   const controller = new AbortController();
-  let latest: unknown;
+  let latest: { snapshot: unknown; takenAt: number } | undefined;
   let reading: Promise<void> | undefined;
   const read = () => {
     if (reading || controller.signal.aborted) {
@@ -232,8 +262,10 @@ export function watchNativeStartupStatus(opts: {
       signal: controller.signal,
     })
       .then((value) => {
-        if (!controller.signal.aborted) {
-          latest = value;
+        // Only a start still reaching readiness describes the deadline; a
+        // cleanup or terminal snapshot never replaces it.
+        if (!controller.signal.aborted && startupPhase(value)) {
+          latest = { snapshot: value, takenAt: performance.now() };
         }
       })
       .catch(() => undefined)

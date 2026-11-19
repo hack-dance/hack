@@ -75,7 +75,7 @@ test("the timeout detail names each service that missed its goal, what it was do
       budgetSeconds: 300,
     })
   ).toBe(
-    "Not ready after 300 s of the 300 s graph start budget: api (wanted healthy; running, starting), migrate (wanted completed; exited 3), worker (wanted started; no container). Raise native.startTimeoutSeconds or HACK_NATIVE_START_TIMEOUT_SECONDS if they were still starting."
+    "Not ready after 300 s of the 300 s graph start budget: api (wanted healthy; running, starting), migrate (wanted completed; exited 3), worker (wanted started; not created). Raise native.startTimeoutSeconds or HACK_NATIVE_START_TIMEOUT_SECONDS if they were still starting."
   );
   // Every goal reached: nothing to add to the runtime's own message.
   expect(
@@ -156,4 +156,18 @@ test("a service that exited unsuccessfully has not started, as the runtime judge
       budgetSeconds: 300,
     })
   ).toContain(": worker (wanted started; exited 3).");
+});
+
+test("the detail says how old the graph status it describes was", () => {
+  expect(
+    nativeGraphTimeoutDetail({
+      snapshot: { observations: {} },
+      goals: { web: "started" },
+      waitedMs: 300_000,
+      budgetSeconds: 300,
+      snapshotAgeMs: 4200,
+    })
+  ).toContain(
+    "graph start budget (graph status 4 s before the deadline): web (wanted started; not created)"
+  );
 });

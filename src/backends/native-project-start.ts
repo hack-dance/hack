@@ -33,6 +33,7 @@ import {
 import {
   NATIVE_START_FRONTEND_SLACK_MS,
   NATIVE_START_STATUS_INTERVAL_MS,
+  NATIVE_START_STATUS_STALE_MS,
   nativeGraphTimeoutDetail,
   nativeReadinessGoals,
   nativeStartBudgetSeconds,
@@ -1200,7 +1201,12 @@ export function nativeEnvironmentDelivery(opts: {
 function withGraphTimeoutDetail(opts: {
   readonly failure: unknown;
   readonly nativeCode: string | undefined;
-  readonly snapshot: unknown;
+  /** The latest startup-phase status snapshot, if one was read. */
+  readonly status:
+    | { readonly snapshot: unknown; readonly takenAt: number }
+    | undefined;
+  /** When serve settled after the deadline, on the same monotonic clock. */
+  readonly deadlineAt: number;
   readonly goals: Readonly<Record<string, string>>;
   readonly waitedMs: number;
   readonly budgetSeconds: number;
@@ -1208,7 +1214,21 @@ function withGraphTimeoutDetail(opts: {
   if (opts.nativeCode !== "graph_timeout" || !(opts.failure instanceof Error)) {
     return opts.failure;
   }
-  const detail = nativeGraphTimeoutDetail(opts);
+  // Without a recent startup view, keep the runtime's generic message rather
+  // than describe services from stale or missing evidence.
+  const ageMs = opts.status
+    ? Math.max(0, opts.deadlineAt - opts.status.takenAt)
+    : Number.POSITIVE_INFINITY;
+  if (!opts.status || ageMs > NATIVE_START_STATUS_STALE_MS) {
+    return opts.failure;
+  }
+  const detail = nativeGraphTimeoutDetail({
+    snapshot: opts.status.snapshot,
+    goals: opts.goals,
+    waitedMs: opts.waitedMs,
+    budgetSeconds: opts.budgetSeconds,
+    snapshotAgeMs: ageMs,
+  });
   if (!detail) {
     return opts.failure;
   }
@@ -2817,6 +2837,8 @@ async function startNativeProjectAttempt(
                 });
               },
               onReady: async () => {
+                // Ready: the startup view is no longer needed.
+                void startupStatus.stop();
                 const readyMapping = authoritative(
                   await invokeInspect(),
                   run,
@@ -2955,11 +2977,13 @@ async function startNativeProjectAttempt(
             try {
               final = await invokeInspect();
               // The runtime's deadline names no service: say which were not
-              // ready, from the last status read before it (HACK-2351).
+              // ready, from the last startup status read before it (HACK-2351).
               serveFailure = withGraphTimeoutDetail({
                 failure: serveFailure,
                 nativeCode: nativeExitCode,
-                snapshot: startupStatus.latest(),
+                status: startupStatus.latest(),
+                // Serve has settled: the runtime's deadline passed at most now.
+                deadlineAt: performance.now(),
                 goals: nativeReadinessGoals(readinessArgs),
                 waitedMs: performance.now() - servicesRequestedAt,
                 budgetSeconds,

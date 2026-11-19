@@ -35,6 +35,7 @@ import { extractArchive } from "../scripts/installer/bundle.ts";
 import {
   Channel,
   COMPOSE_ONLY_NATIVE_REFUSAL,
+  REVIEWED_PREDECESSORS,
 } from "../scripts/installer/channel.ts";
 import {
   LINUX_SUMS,
@@ -1296,13 +1297,41 @@ fixtureTest(
 );
 
 test("Linux pins are separate, so the macOS pins stay the reviewed pairs", () => {
-  expect(PUBLISHED_LINUX_RELEASES).toEqual({});
+  // Each digest is that platform's line in the release's SHA256SUMS-linux.
+  expect(PUBLISHED_LINUX_RELEASES).toEqual({
+    "5.0.0-next.23": {
+      "linux-x86_64": {
+        manager:
+          "e946ba95a49018b0eff8ff81161d1ccf1a086627773e62a30db53e4e94c9195b",
+        archive:
+          "21a3709c8b78adaa1f399b3c91d3213862fc51cfaefbf0a0e6d06ff76fd7bb6f",
+      },
+      "linux-arm64": {
+        manager:
+          "be1599a85cd4251df4a9779f2e7fa16480094ebb48ec97ca4e9dad6dd73d0094",
+        archive:
+          "6874a73a1cea9410527b4831ffec7a46c4bccb28312620adfd335e0fb01d40de",
+      },
+    },
+  });
   for (const [version, pins] of Object.entries(PUBLISHED_RELEASES)) {
     expect(Object.keys(pins).sort()).toEqual(["archive", "manager"]);
     expect(publishedPins(version, "darwin-arm64")).toBe(pins);
-    // No published release has Linux assets yet.
+    // 5.0.0-next.23 is the first release with Linux assets.
+    const linux = PUBLISHED_LINUX_RELEASES[version];
     for (const platform of PRERELEASE_LINUX_PLATFORMS) {
-      expect(publishedPins(version, platform)).toBeUndefined();
+      expect(publishedPins(version, platform)).toBe(linux?.[platform]);
+    }
+  }
+  // Every release with Linux assets is also a pinned macOS release, pins both
+  // platforms, and its Linux managers are reviewed predecessors.
+  for (const [version, platforms] of Object.entries(PUBLISHED_LINUX_RELEASES)) {
+    expect(PUBLISHED_RELEASES[version]).toBeDefined();
+    expect(Object.keys(platforms).sort()).toEqual(
+      [...PRERELEASE_LINUX_PLATFORMS].sort()
+    );
+    for (const pins of Object.values(platforms)) {
+      expect(REVIEWED_PREDECESSORS).toContain(pins?.manager);
     }
   }
 });
@@ -1313,15 +1342,43 @@ test("the Linux gate leg is decided from reviewed pins, never from a missing ass
   const shipped = {
     "5.0.0-next.23": { "linux-x86_64": pin, "linux-arm64": pin },
   };
-  // Today: no Linux release is in reviewed history and next.22 has no Linux
-  // assets, so there is nothing to upgrade.
+  // Before the first Linux release: nothing in reviewed history and next.22
+  // has no Linux assets, so there is nothing to upgrade.
   expect(
     linuxGateDecision({
       previous: "5.0.0-next.22",
       platform,
       previousHasManagerAsset: false,
+      history: {},
     })
   ).toEqual({ leg: "fresh" });
+  // Today, with the reviewed history itself: next.23 is pinned, so the next
+  // release upgrades it, and next.22 is no longer a "first release" case.
+  // The exact digests are asserted in the pins test above; this checks the
+  // decision picks each platform's own pair.
+  for (const real of PRERELEASE_LINUX_PLATFORMS) {
+    const reviewed = publishedPins("5.0.0-next.23", real);
+    if (reviewed === undefined) {
+      throw new Error(`5.0.0-next.23 has no reviewed ${real} pin`);
+    }
+    expect(
+      linuxGateDecision({
+        previous: "5.0.0-next.23",
+        platform: real,
+        previousHasManagerAsset: true,
+      })
+    ).toEqual({ leg: "upgrade", previous: "5.0.0-next.23", pins: reviewed });
+    expect(() =>
+      linuxGateDecision({
+        previous: "5.0.0-next.22",
+        platform: real,
+        previousHasManagerAsset: false,
+      })
+    ).toThrow("That is not a first Linux release");
+  }
+  expect(publishedPins("5.0.0-next.23", "linux-x86_64")).not.toEqual(
+    publishedPins("5.0.0-next.23", "linux-arm64")
+  );
   expect(
     linuxGateDecision({
       previous: null,

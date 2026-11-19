@@ -202,6 +202,11 @@ const STOP_CONCURRENCY: usize = 4;
 const CONNECT_RETRY_WINDOW: Duration = Duration::from_secs(30);
 const CONNECT_BACKOFF_START: Duration = Duration::from_millis(25);
 const CONNECT_BACKOFF_MAX: Duration = Duration::from_millis(500);
+/// A connect retry starts only with at least this long left (HACK-2368). A retry with a
+/// few milliseconds left is cut by the request timeout, which cannot say whether the
+/// connection was made, so it would turn a clean "the engine never answered" into an
+/// uncertain timeout.
+const CONNECT_RETRY_MIN_BUDGET: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy)]
 struct Policy {
@@ -209,6 +214,8 @@ struct Policy {
     connect_window: Duration,
     backoff_start: Duration,
     backoff_max: Duration,
+    /// The least time left for a connect retry to start; see [`CONNECT_RETRY_MIN_BUDGET`].
+    retry_min_budget: Duration,
     /// Waits between connect attempts. Tests substitute a scheduler that
     /// oversleeps, as a loaded host does.
     pause: fn(Duration),
@@ -219,6 +226,7 @@ const POLICY: Policy = Policy {
     connect_window: CONNECT_RETRY_WINDOW,
     backoff_start: CONNECT_BACKOFF_START,
     backoff_max: CONNECT_BACKOFF_MAX,
+    retry_min_budget: CONNECT_RETRY_MIN_BUDGET,
     pause: std::thread::sleep,
 };
 
@@ -384,6 +392,15 @@ where
                 )
             }));
         };
+        // Only connect failures so far, and too little time for another attempt to finish:
+        // the stop never reached the engine, so report the last connect failure rather than
+        // start a request whose timeout could not say so. A pause that overslept on a
+        // loaded host lands here.
+        if remaining < policy.retry_min_budget {
+            if let Some(last) = last_connect.take() {
+                return Err(last);
+            }
+        }
         match send(index, remaining) {
             Err((error, stage))
                 if matches!(
@@ -393,7 +410,9 @@ where
             {
                 let now = Instant::now();
                 let until = (*window.get_or_insert(now + policy.connect_window)).min(deadline);
-                if unreachable.load(Ordering::SeqCst) || now + backoff >= until {
+                if unreachable.load(Ordering::SeqCst)
+                    || now + backoff + policy.retry_min_budget > until
+                {
                     unreachable.store(true, Ordering::SeqCst);
                     return Err((error, stage));
                 }
@@ -495,6 +514,7 @@ mod tests {
             connect_window: window,
             backoff_start: Duration::from_millis(1),
             backoff_max: Duration::from_millis(4),
+            retry_min_budget: Duration::ZERO,
             pause: std::thread::sleep,
         }
     }
@@ -624,18 +644,73 @@ mod tests {
         let transport = Transport::new(&path, Duration::from_secs(1)).unwrap();
         let id = "a".repeat(64);
         let started = Instant::now();
+        // Room for the first attempt and at least one retry with the full retry budget, so
+        // only a connect failure can end it; the bound logic itself is checked without a
+        // socket below.
         let failure = batch(
             &transport.client,
             &[(id.clone(), 0)],
-            Instant::now() + Duration::from_millis(400),
+            Instant::now() + Duration::from_millis(1_500),
         )
         .err()
         .unwrap();
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(failure.error.code, "engine_protocol");
         assert_eq!(failure.failures.len(), 1);
         assert_eq!(failure.failures[0].id, id);
         assert_eq!(failure.failures[0].stage, StopFailureStage::Connect);
+    }
+
+    #[test]
+    fn a_connect_retry_never_starts_without_its_budget_and_the_deadline_reports_connect() {
+        // HACK-2368: only connect failures were seen and the deadline ends the retries, so
+        // the stop never reached the engine and the stage is the last connect failure. No
+        // retry starts with less than its budget, so none can end in an ambiguous timeout.
+        for pause in [std::thread::sleep as fn(Duration), |backoff: Duration| {
+            // A loaded host oversleeps every pause.
+            std::thread::sleep(backoff * 3 + Duration::from_millis(20));
+        }] {
+            let budgets = std::sync::Mutex::new(Vec::new());
+            let policy = Policy {
+                concurrency: 1,
+                connect_window: Duration::from_secs(30),
+                backoff_start: Duration::from_millis(25),
+                backoff_max: Duration::from_millis(500),
+                retry_min_budget: Duration::from_millis(250),
+                pause,
+            };
+            let outcome = attempt(
+                0,
+                Instant::now() + Duration::from_millis(700),
+                policy,
+                &AtomicBool::new(false),
+                &|_, remaining| {
+                    budgets.lock().unwrap().push(remaining);
+                    connect_failure(StopFailureStage::Connect)
+                },
+            );
+            assert_eq!(outcome.unwrap_err().1, StopFailureStage::Connect);
+            let budgets = budgets.into_inner().unwrap();
+            assert!(budgets.len() >= 2, "it retried: {budgets:?}");
+            assert!(
+                budgets[1..]
+                    .iter()
+                    .all(|remaining| *remaining >= policy.retry_min_budget),
+                "a retry started without its budget: {budgets:?}"
+            );
+        }
+        // A first attempt always runs, whatever is left, and reports its own stage.
+        let outcome = attempt(
+            0,
+            Instant::now() + Duration::from_millis(10),
+            Policy {
+                retry_min_budget: Duration::from_millis(250),
+                ..quick(Duration::from_secs(30))
+            },
+            &AtomicBool::new(false),
+            &|_, _| connect_failure(StopFailureStage::ConnectTimeout),
+        );
+        assert_eq!(outcome.unwrap_err().1, StopFailureStage::ConnectTimeout);
     }
 
     #[test]

@@ -22,7 +22,8 @@ a root step you confirmed failed, naming that step. The log line
 `Linux DNS result:` says `configured`, `skipped` or `failed`.
 
 It exits non-zero, and names the container, when a container of the proxy or
-logging stack is not running a moment after it started (for example CoreDNS,
+logging stack stops within a few seconds of starting: it watches the proxy for
+2 seconds and the logging stack for 10 (for example CoreDNS,
 Loki or Grafana, which do not run as root and stop with `permission denied` when
 they cannot read their config under `~/.hack`). Each install sets the few configs
 those containers read to 0644, and the Grafana dashboards directory to 0755,

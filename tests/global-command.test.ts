@@ -1635,10 +1635,11 @@ test(
 
     expect(code).toBe(0);
     expect(output).toContain("Global infra is up");
-    // Both stacks were watched for the whole settle window, not looked at once.
-    expect(looks).toBeGreaterThanOrEqual(6);
+    // Both stacks were watched for their whole settle windows, not looked at
+    // once: 2 s for the proxy, 10 s for the logging stack, every 500 ms.
+    expect(looks).toBeGreaterThanOrEqual(5 + 21);
   },
-  { timeout: 30_000 }
+  { timeout: 40_000 }
 );
 
 test(

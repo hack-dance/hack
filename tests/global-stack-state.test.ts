@@ -146,6 +146,17 @@ test("the watch fails as soon as a container is seen stopped, and passes only af
   expect(stopped.map((container) => container.name)).toEqual(["b"]);
   expect(sleeps).toEqual([500, 500]);
 
+  // A longer window (the logging stack's) is watched to its end too.
+  sleeps.length = 0;
+  expect(
+    await watchStartedContainers({
+      read: () => Promise.resolve([running("a")]),
+      settleMs: 10_000,
+      sleep,
+    })
+  ).toEqual([]);
+  expect(sleeps).toHaveLength(20);
+
   // No answer is not a finding, and costs no wait.
   sleeps.length = 0;
   expect(

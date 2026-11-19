@@ -1986,8 +1986,19 @@ async function reportProxyStartFailure(opts: {
 }
 
 /**
+ * How long each stack is watched after its start. Caddy and CoreDNS read
+ * their config at once. Grafana migrates its database before it provisions
+ * datasources and dashboards, so a config it cannot read can stop it several
+ * seconds after the start; the logging stack gets longer. A container that
+ * stops later than this is not caught here: `hack doctor` and the stack's
+ * own symptoms report it.
+ */
+const ROUTING_SETTLE_MS = 2000;
+const LOGGING_SETTLE_MS = 10_000;
+
+/**
  * After a successful `docker compose up -d`: watches the stack's containers
- * briefly and reports any that are not running, by name (HACK-2381). `up -d`
+ * for a short time and reports any that are not running, by name (HACK-2381). `up -d`
  * exits 0 for a container that starts and then fails at once, so without
  * this a stack with exited containers was reported as up. Returns whether a
  * container was found not running. No answer from Docker is not a finding.
@@ -1995,13 +2006,19 @@ async function reportProxyStartFailure(opts: {
 async function globalContainersNotRunning(opts: {
   readonly composeFile: string;
   readonly stack: string;
+  readonly login: boolean;
+  /** How long the stack is watched; a stopped container ends it early. */
+  readonly settleMs: number;
 }): Promise<boolean> {
   const stopped = await watchStartedContainers({
+    settleMs: opts.settleMs,
     read: async () => {
       const ps = await exec(
         [
           "docker",
           "compose",
+          // The same environment rule as the `up` this follows.
+          ...(opts.login ? ["--env-file", "/dev/null"] : []),
           "-f",
           opts.composeFile,
           "ps",
@@ -2160,6 +2177,8 @@ async function runGlobalUp(): Promise<GlobalUpResult> {
   const stoppedRouting = await globalContainersNotRunning({
     composeFile: paths.caddyCompose,
     stack: "The global proxy (Caddy and CoreDNS)",
+    login,
+    settleMs: ROUTING_SETTLE_MS,
   });
   if (stoppedRouting) {
     return { exit: 1, failedStage: "routing" };
@@ -2181,6 +2200,8 @@ async function runGlobalUp(): Promise<GlobalUpResult> {
     const stoppedLogging = await globalContainersNotRunning({
       composeFile: paths.loggingCompose,
       stack: "The logging stack (Grafana, Loki, Alloy)",
+      login,
+      settleMs: LOGGING_SETTLE_MS,
     });
     if (stoppedLogging) {
       return { exit: 1, failedStage: "logging" };

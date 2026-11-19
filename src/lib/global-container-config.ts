@@ -1,4 +1,5 @@
-import { chmod, lstat, readdir, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, readdir } from "node:fs/promises";
 import { basename } from "node:path";
 
 /**
@@ -92,15 +93,18 @@ export type RetainedCustomPath = {
   readonly reader: string;
 };
 
-async function hasTemplateContent(
-  path: string,
-  template: string
-): Promise<boolean> {
-  const info = await lstat(path).catch(() => null);
-  if (!info?.isFile()) {
-    return false;
-  }
-  return (await readFile(path, "utf8").catch(() => null)) === template;
+/**
+ * Opens `path` without following a link at its last component, so the entry
+ * that is checked is the entry whose mode is changed. Returns null for a
+ * link or anything else that cannot be opened.
+ */
+async function openNoFollow(path: string, directory: boolean) {
+  return await open(
+    path,
+    constants.O_RDONLY |
+      constants.O_NOFOLLOW |
+      (directory ? constants.O_DIRECTORY : 0)
+  ).catch(() => null);
 }
 
 /**
@@ -108,7 +112,9 @@ async function hasTemplateContent(
  * its content is Hack's template (see the type's comment). Runs on every
  * `hack global install`, whether or not a file was rewritten, so it also
  * repairs template files an earlier run wrote too tightly. A symlink is left
- * alone: its target is the user's own choice.
+ * alone: its target is the user's own choice. The content check and the mode
+ * change go through one descriptor opened without following links, so a path
+ * swapped for a link in between cannot redirect the change.
  *
  * Returns the paths it changed, and the customised ones it left with a mode
  * the container user cannot read, so the caller can say what to do.
@@ -122,36 +128,74 @@ export async function ensureContainerReadable(
   const changed: string[] = [];
   const retained: RetainedCustomPath[] = [];
   for (const entry of entries) {
-    const info = await lstat(entry.path).catch(() => null);
-    const expectedKind =
-      entry.kind === "file" ? info?.isFile() : info?.isDirectory();
-    if (!(info && expectedKind)) {
+    const before = await lstat(entry.path).catch(() => null);
+    if (!before || before.isSymbolicLink()) {
       continue;
     }
     const wanted = containerReadableMode(entry.kind);
-    const mode = info.mode & 0o777;
-    if ((mode & wanted) === wanted) {
-      continue;
-    }
-    const known =
-      entry.kind === "file"
-        ? await hasTemplateContent(entry.path, entry.template)
-        : JSON.stringify(await readdir(entry.path).catch(() => null)) ===
-            JSON.stringify([basename(entry.onlyFile)]) &&
-          (await hasTemplateContent(entry.onlyFile, entry.template));
-    if (!known) {
+    const keep = (mode: number) =>
       retained.push({
         path: entry.path,
         kind: entry.kind,
         mode,
         reader: entry.reader,
       });
+    const handle = await openNoFollow(entry.path, entry.kind === "directory");
+    if (handle === null) {
+      // The expected kind is not there, or the owner cannot read it: nothing
+      // is known about its content. A directory where a file is expected (or
+      // the reverse) is skipped; an unreadable entry is reported.
+      const expectedKind =
+        entry.kind === "file" ? before.isFile() : before.isDirectory();
+      if (expectedKind && (before.mode & wanted) !== wanted) {
+        keep(before.mode & 0o777);
+      }
       continue;
     }
-    await chmod(entry.path, wanted);
-    changed.push(entry.path);
+    try {
+      const info = await handle.stat();
+      const expectedKind =
+        entry.kind === "file" ? info.isFile() : info.isDirectory();
+      const mode = info.mode & 0o777;
+      if (!expectedKind || (mode & wanted) === wanted) {
+        continue;
+      }
+      const known =
+        entry.kind === "file"
+          ? (await handle.readFile("utf8")) === entry.template
+          : JSON.stringify(await readdir(entry.path).catch(() => null)) ===
+              JSON.stringify([basename(entry.onlyFile)]) &&
+            (await fileHasTemplate(entry.onlyFile, entry.template));
+      if (!known) {
+        keep(mode);
+        continue;
+      }
+      await handle.chmod(wanted);
+      changed.push(entry.path);
+    } finally {
+      await handle.close();
+    }
   }
   return { changed, retained };
+}
+
+/** Whether a regular file (not a link) holds exactly `template`. */
+async function fileHasTemplate(
+  path: string,
+  template: string
+): Promise<boolean> {
+  const handle = await openNoFollow(path, false);
+  if (handle === null) {
+    return false;
+  }
+  try {
+    return (
+      (await handle.stat()).isFile() &&
+      (await handle.readFile("utf8")) === template
+    );
+  } finally {
+    await handle.close();
+  }
 }
 
 /**

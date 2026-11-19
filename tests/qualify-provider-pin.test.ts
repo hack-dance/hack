@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { parse as parseYaml } from "yaml";
 import {
   activeFields,
   BLOB_SHA256,
@@ -24,12 +25,15 @@ import {
   DEPENDENCY_SERVER,
   executorErrorCode,
   foregroundReadyRun,
+  HTTPS_ROUTE_HOST,
+  httpsRouteRequest,
   INERT_RECORD_FIELDS,
   INERT_RUNNING_RESOURCES,
   inertField,
   isExecutor,
   kernelProviderMemory,
   main,
+  nativeCaRoot,
   type Options,
   parseCpuTime,
   parseFootprint,
@@ -139,6 +143,51 @@ describe("provider pin qualification", () => {
     expect(() => parseOptions([...required, "--caddy", "/bin/caddy"])).toThrow(
       "go together"
     );
+  });
+
+  test("HACK-2360: an HTTPS run routes web and fetches it with the home's CA", () => {
+    const plain = compose(
+      `busybox@${"a".repeat(64)}`,
+      `postgres@${"b".repeat(64)}`,
+      "alias.test"
+    );
+    expect(plain).not.toContain("caddy");
+    const routed = compose(
+      `busybox@${"a".repeat(64)}`,
+      `postgres@${"b".repeat(64)}`,
+      "alias.test",
+      HTTPS_ROUTE_HOST
+    );
+    const web = (
+      parseYaml(routed) as { services: Record<string, Record<string, unknown>> }
+    ).services.web;
+    expect(web?.labels).toEqual({
+      caddy: HTTPS_ROUTE_HOST,
+      "caddy.reverse_proxy": "{{upstreams 8080}}",
+      "caddy.tls": "internal",
+    });
+    // The route's upstream is the port the health probe checks.
+    expect(
+      (web?.healthcheck as Record<string, Record<string, unknown>>)[
+        "x-hack-http"
+      ]?.port
+    ).toBe(8080);
+    expect(nativeCaRoot("/q/candidate")).toBe(
+      "/q/candidate/native-https/data/caddy/pki/authorities/local/root.crt"
+    );
+    expect(httpsRouteRequest("/q/ca.crt", HTTPS_ROUTE_HOST, 18_443)).toEqual([
+      "/usr/bin/curl",
+      "--silent",
+      "--show-error",
+      "--fail",
+      "--max-time",
+      "15",
+      "--cacert",
+      "/q/ca.crt",
+      "--resolve",
+      `${HTTPS_ROUTE_HOST}:18443:127.0.0.1`,
+      `https://${HTTPS_ROUTE_HOST}:18443/index.txt`,
+    ]);
   });
 
   test("HACK-2360: HTTPS options give the CLI the binary, its SHA-256 and the port together", () => {

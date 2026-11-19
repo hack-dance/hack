@@ -804,6 +804,14 @@ With `--keep-going`, recorded and thrown step failures both settle owned process
 before advancing; unconfirmed cleanup skips later steps. Restart keeps the previous
 foreground tracked through replacement failure and its bounded exit wait.
 
+`--caddy`, `--caddy-sha256` and `--https-port` together select native HTTPS. They also
+route the fixture's `web` service at `web.provider-qual.hack.local`. The web and
+database step then fetches that route with `curl`, resolved to loopback and trusting
+only the home's own Caddy root. Because the fixture is routed, every step runs with
+the HTTPS frontend, including startup, restart, recovery, the warm runs and the idle
+samples. So qualify the baseline pin and the new pin with the same HTTPS options.
+`qualification.json` records `https: true` or `false` next to the measurements.
+
 ## Provider owner receipt compatibility
 
 The provider owner receipt is `<state root>/run/smolvm/owner.json`, the `Owner`

@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { readProjectConfigInDirectory } from "../lib/project.ts";
 import {
   missingProjectEnvKeyHint,
   ProjectEnvKeyMissingError,
@@ -15,6 +16,7 @@ import {
   normalizeNativeComposeEnvironment,
 } from "./native-compose-environment.ts";
 import { NativeEnvFileRefusal } from "./native-env-file-source.ts";
+import type { NativeLocalDirectories } from "./native-local-directories.ts";
 import {
   MAX_NATIVE_PRIVATE_INPUT_BYTES,
   nativePrivateEnvironmentPayload,
@@ -94,7 +96,47 @@ export type NativeProjectInput = {
    * (`amd64Emulation`); absent when none did. See `native-project-platform.ts`.
    */
   readonly amd64Emulation?: Readonly<Record<string, NativeEmulationPolicy>>;
+  /**
+   * The project's `localDirectories` (HACK-2358), applied to the model by
+   * `prepareNativeProjectAdaptation`. Absent when none is declared.
+   */
+  readonly localDirectories?: NativeLocalDirectories;
 };
+
+/**
+ * Reads `localDirectories` with the same reader `up` uses
+ * (`hack.config.json`, else the legacy TOML file). Checkout paths only; no
+ * values. An unreadable config declares none here (`up` reports it).
+ */
+async function readNativeLocalDirectories(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly composeFile: string;
+}): Promise<{ readonly localDirectories?: NativeLocalDirectories }> {
+  const config = await readProjectConfigInDirectory(opts.projectDir).catch(
+    () => null
+  );
+  if (config === null) {
+    return {};
+  }
+  const where = {
+    projectRoot: opts.projectRoot,
+    composeFile: opts.composeFile,
+  };
+  if (config.localDirectoriesError) {
+    return {
+      localDirectories: {
+        ...where,
+        entries: [],
+        error: config.localDirectoriesError,
+      },
+    };
+  }
+  const entries = config.localDirectories ?? [];
+  return entries.length === 0
+    ? {}
+    : { localDirectories: { ...where, entries } };
+}
 
 const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 
@@ -550,6 +592,7 @@ export async function prepareNativeProjectInput(opts: {
       forwardedShellVariables: shell.forwardedNames,
       environmentNotices: shell.notices,
       ignoredRootDotenv: shell.ignoredRootDotenv,
+      ...(await readNativeLocalDirectories(opts)),
     };
   } catch (error: unknown) {
     // Only this module's closed refusals carry a cause; anything else stays generic.

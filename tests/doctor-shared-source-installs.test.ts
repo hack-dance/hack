@@ -172,12 +172,12 @@ test("an invalid localDirectories gets its own note instead of advice", async ()
   expect(hasDevPerformanceDetail(result)).toBe(true);
 });
 
-test("the advice names the Compose backend and says native does not apply it", async () => {
+test("the advice covers both backends and names the native projects that do not apply it", async () => {
   const fixture = await project({ compose: BIND, dirs: ["node_modules"] });
   const result = await check(fixture, BIND);
-  expect(result.message).toContain("On the Compose backend");
+  expect(result.message).toContain("(on native, on the VM disk)");
   expect(result.message).toContain(
-    "The native backend does not apply localDirectories yet."
+    "Adopted, authored and imported native projects do not apply localDirectories."
   );
 });
 

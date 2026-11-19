@@ -22,6 +22,7 @@ import {
   type NativeEnvFingerprintScope,
   saveNativeEnvFingerprint,
 } from "../src/lib/native-env-fingerprint-state.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { nativeSetupScriptReply } from "./helpers/native-setup-inspection.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
@@ -366,4 +367,32 @@ test("negative control: a native restart refused before down keeps the running r
   await expect(restart(root)).rejects.toThrow("synthetic preflight refusal");
   expect(calls).toEqual(["restart"]);
   expect((await loadNativeEnvFingerprint(scope))?.run).toBe(RUN_OLD);
+});
+
+test("native up keeps .hack/.internal out of git status, as Compose up does", async () => {
+  const { root, scope } = await nativeProject();
+  const git = (args: string[]) =>
+    spawnSyncBounded(["git", ...args], { cwd: root, timeout: 30_000 });
+  expect(git(["init", "-q"]).exitCode).toBe(0);
+  const seen: { entry?: NativeEnvFingerprintEntry | null; status?: string } =
+    {};
+  // While the record exists under .hack/.internal, look at git status.
+  startBehavior = async (opts: StartOptions) => {
+    await opts.onEnvironmentReady?.({
+      run: RUN_NEW,
+      fingerprint: fingerprint("e"),
+    });
+    seen.entry = await loadNativeEnvFingerprint(scope);
+    const status = new TextDecoder().decode(
+      git(["status", "--porcelain", "--untracked-files=all"]).stdout
+    );
+    seen.status = status;
+    return 0;
+  };
+  expect(await up(root)).toBe(0);
+  expect(seen.entry).not.toBeNull();
+  const statusLines = (seen.status ?? "").split("\n");
+  expect(statusLines.some((line) => line.includes(".hack/.internal"))).toBe(
+    false
+  );
 });

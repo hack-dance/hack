@@ -9,6 +9,7 @@ import {
   NATIVE_IDLE_POOL_NOTE,
   NATIVE_PROVIDER_PIN_MESSAGE,
 } from "../backends/native-runtime-client.ts";
+import { CliUsageError } from "../cli/command.ts";
 import {
   noteActivityFailedServices,
   suppressActivityRecording,
@@ -16,9 +17,12 @@ import {
 import type { BranchDroppedSites } from "./branch-hosts.ts";
 import { hackReexecEnvironment } from "./child-environment.ts";
 import {
+  ClosedCliError,
   emitCliResult,
   errorResult,
+  HACK_ERROR_CODES,
   HackCliError,
+  type HackErrorCode,
   okResult,
 } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
@@ -57,6 +61,212 @@ const FAILED_SERVICES_LIMIT = 32;
 let failedStartupServices: readonly string[] = [];
 
 /**
+ * A refusal raised before the detached owner started any VM work: the same
+ * closed CLI error the foreground command would print (HACK-2339), and, for
+ * a failed lifecycle hook, the lines the foreground printed about it.
+ */
+type PrestartRefusal = {
+  readonly error: "hack" | "closed" | "usage";
+  /** Registered `HackErrorCode`; only for `error: "hack"`. */
+  readonly code?: string;
+  readonly message: string;
+  /** JSON detail of a `HackCliError`, bounded; never for other errors. */
+  readonly detail?: unknown;
+  /** The failed lifecycle hook's step line, output tail and failure line. */
+  readonly hook?: readonly string[];
+};
+let publishPrestartRefusal:
+  | ((refusal: PrestartRefusal) => Promise<void>)
+  | undefined;
+/** True while the owner is in `up`'s checks before any VM work. */
+let prestart = false;
+let failedHookLines: readonly string[] = [];
+/** A control character other than tab or newline (escape sequences included). */
+const CONTROL = /[^\P{Cc}\t\n]/u;
+/** A control character other than tab: a hook line never holds a newline. */
+const HOOK_CONTROL = /[^\P{Cc}\t]/u;
+const HOOK_CONTROLS = /[^\P{Cc}\t]/gu;
+/**
+ * Above every bounded closed diagnostic, such as a source-size refusal that
+ * names ten paths of up to 4096 characters each.
+ */
+const REFUSAL_MESSAGE_LIMIT = 64 * 1024;
+const REFUSAL_DETAIL_LIMIT = 16 * 1024;
+const HOOK_LINE_LIMIT = 500;
+const HOOK_LINES_LIMIT = 60;
+const HOOK_OUTPUT_TAIL = 40;
+
+/** One display line: no control characters but tabs, bounded. */
+function hookLine(value: string): string {
+  return value.replace(HOOK_CONTROLS, "").slice(0, HOOK_LINE_LIMIT);
+}
+
+/**
+ * Marks the detached owner's pre-VM phase of `up`: from its first project
+ * check until runtime work starts. A closed refusal raised in it reaches the
+ * launcher as the foreground would print it; outside it nothing changes.
+ */
+export function nativeDetachedUpPrestart(active: boolean): void {
+  if (!publishPrestartRefusal) {
+    return;
+  }
+  prestart = active;
+  if (!active) {
+    failedHookLines = [];
+  }
+}
+
+/** Whether a lifecycle hook's output tail is kept: a detached owner before VM work. */
+export function nativeDetachedUpKeepsHookOutput(): boolean {
+  return publishPrestartRefusal !== undefined && prestart;
+}
+
+/**
+ * Record the lines the foreground printed for a failed lifecycle hook: its
+ * step line, the last lines of its output and its failure line. Kept only in
+ * a detached owner's pre-VM phase, and sent only with that phase's refusal;
+ * the launcher writes them to stderr, never into `--json` (HACK-2311).
+ */
+export function nativeDetachedUpHookFailed(opts: {
+  readonly step: string;
+  readonly output: readonly string[];
+  readonly failure: string;
+}): void {
+  if (!(publishPrestartRefusal && prestart)) {
+    return;
+  }
+  failedHookLines = [
+    opts.step,
+    ...opts.output.slice(-HOOK_OUTPUT_TAIL),
+    opts.failure,
+  ].map(hookLine);
+}
+
+/** The closed CLI error the foreground would print, or undefined for any other error. */
+function prestartRefusal(error: unknown): PrestartRefusal | undefined {
+  const hook = failedHookLines.length > 0 ? failedHookLines : undefined;
+  if (error instanceof HackCliError) {
+    const detail =
+      error.detail === undefined ? undefined : JSON.stringify(error.detail);
+    return {
+      error: "hack",
+      code: error.code,
+      message: error.message,
+      ...(detail !== undefined && detail.length <= REFUSAL_DETAIL_LIMIT
+        ? { detail: JSON.parse(detail) as unknown }
+        : {}),
+      ...(hook ? { hook } : {}),
+    };
+  }
+  if (error instanceof CliUsageError || error instanceof ClosedCliError) {
+    return {
+      error: error instanceof CliUsageError ? "usage" : "closed",
+      message: error.message,
+      ...(hook ? { hook } : {}),
+    };
+  }
+  return;
+}
+
+function isRefusalMessage(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= REFUSAL_MESSAGE_LIMIT &&
+    !CONTROL.test(value)
+  );
+}
+
+/** A registered code for a `HackCliError`; no code or detail for the others. */
+function isRefusalIdentity(value: Record<string, unknown>): boolean {
+  if (value.error === "hack") {
+    return (
+      typeof value.code === "string" &&
+      (HACK_ERROR_CODES as readonly string[]).includes(value.code) &&
+      (value.detail === undefined ||
+        JSON.stringify(value.detail).length <= REFUSAL_DETAIL_LIMIT)
+    );
+  }
+  return (
+    (value.error === "closed" || value.error === "usage") &&
+    value.code === undefined &&
+    value.detail === undefined
+  );
+}
+
+function isHookLines(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (Array.isArray(value) &&
+      value.length > 0 &&
+      value.length <= HOOK_LINES_LIMIT &&
+      value.every(
+        (line) =>
+          typeof line === "string" &&
+          line.length <= HOOK_LINE_LIMIT &&
+          !HOOK_CONTROL.test(line)
+      ))
+  );
+}
+
+function isPrestartRefusal(value: unknown): value is PrestartRefusal {
+  return (
+    isRecord(value) &&
+    Object.keys(value).every((key) =>
+      ["error", "code", "message", "detail", "hook"].includes(key)
+    ) &&
+    isRefusalMessage(value.message) &&
+    isRefusalIdentity(value) &&
+    isHookLines(value.hook)
+  );
+}
+
+/** Written instead of a failed hook's lines when stderr is not a terminal. */
+export const NATIVE_HOOK_OUTPUT_TERMINAL_ONLY =
+  "The failed lifecycle hook's output is shown only on a terminal; run hack up without -d in a terminal to see it.";
+
+/**
+ * What the launcher writes to stderr for a failed hook. Its lines only on a
+ * terminal, as the foreground printed them: hook output may carry values,
+ * and a non-terminal stderr is often captured (for example as an agent tool's
+ * result). Otherwise one fixed line says how to see them. Never stdout.
+ */
+export function nativePrestartHookLines(opts: {
+  readonly lines: readonly string[] | undefined;
+  readonly terminal: boolean;
+}): readonly string[] {
+  if (!opts.lines?.length) {
+    return [];
+  }
+  return opts.terminal ? opts.lines : [NATIVE_HOOK_OUTPUT_TERMINAL_ONLY];
+}
+
+/** Write the failed hook's stderr lines and return the refusal's error. */
+function reportPrestartRefusal(refusal: PrestartRefusal): Error {
+  for (const line of nativePrestartHookLines({
+    lines: refusal.hook,
+    terminal: process.stderr.isTTY === true,
+  })) {
+    process.stderr.write(`${line}\n`);
+  }
+  return prestartRefusalError(refusal);
+}
+
+/** The launcher's error for a validated pre-VM refusal: the foreground's own class. */
+function prestartRefusalError(refusal: PrestartRefusal): Error {
+  if (refusal.error === "hack") {
+    return new HackCliError({
+      code: refusal.code as HackErrorCode,
+      message: refusal.message,
+      ...(refusal.detail === undefined ? {} : { detail: refusal.detail }),
+    });
+  }
+  return refusal.error === "usage"
+    ? new CliUsageError(refusal.message)
+    : new ClosedCliError(refusal.message);
+}
+
+/**
  * Record which services failed during a detached startup. Names only: the
  * owner has no terminal, and service output never crosses IPC.
  */
@@ -86,6 +296,13 @@ export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
         ? { ...failure, failedServices: failedStartupServices }
         : failure
     );
+    return;
+  }
+  // Before any VM work, a closed refusal is exactly what the foreground would
+  // print (HACK-2339); anything else, and anything later, stays unconfirmed.
+  const refusal = prestart ? prestartRefusal(error) : undefined;
+  if (refusal && isPrestartRefusal(refusal)) {
+    await publishPrestartRefusal?.(refusal);
   }
 }
 
@@ -115,6 +332,25 @@ function isStartupFailure(value: unknown): value is StartupFailure {
     (value.startupPhase === undefined ||
       value.startupPhase === "static-preflight")
   );
+}
+
+/** The error for a validated startup failure or pre-VM refusal message, if it is one. */
+function startupRefusal(value: unknown): Error | undefined {
+  const failure = startupFailureMessage(value);
+  if (failure) {
+    return startupFailureError(failure);
+  }
+  const refusal = prestartRefusalMessage(value);
+  return refusal ? reportPrestartRefusal(refusal) : undefined;
+}
+
+function prestartRefusalMessage(value: unknown): PrestartRefusal | undefined {
+  return isRecord(value) &&
+    Object.keys(value).length === 2 &&
+    value.kind === "prestart-refusal" &&
+    isPrestartRefusal(value.data)
+    ? value.data
+    : undefined;
 }
 
 function startupFailureMessage(value: unknown): StartupFailure | undefined {
@@ -336,6 +572,7 @@ export async function runNativeDetachedOwner(opts: {
           readonly kind: "branch-dropped";
           readonly details: BranchDroppedSites;
         }
+      | { readonly kind: "prestart-refusal"; readonly data: PrestartRefusal }
   ): Promise<void> =>
     new Promise((resolve) => {
       if (!(process.send && process.connected)) {
@@ -401,6 +638,13 @@ export async function runNativeDetachedOwner(opts: {
       await send({ kind: "failure", data });
     }
   };
+  prestart = false;
+  failedHookLines = [];
+  publishPrestartRefusal = async (data) => {
+    if (!(ready || stopping)) {
+      await send({ kind: "prestart-refusal", data });
+    }
+  };
   try {
     return await opts.run(opts.args);
   } finally {
@@ -411,6 +655,9 @@ export async function runNativeDetachedOwner(opts: {
     publishBranchDropped = undefined;
     publishFailure = undefined;
     failedStartupServices = [];
+    publishPrestartRefusal = undefined;
+    prestart = false;
+    failedHookLines = [];
     process.off("disconnect", disconnected);
     process.off("message", message);
     if (process.connected) {
@@ -558,10 +805,10 @@ export async function startNativeDetachedUp(opts: {
     if (failed) {
       return;
     }
-    const failure = ready ? undefined : startupFailureMessage(value);
-    if (failure) {
+    const refused = ready ? undefined : startupRefusal(value);
+    if (refused) {
       failed = true;
-      result.reject(startupFailureError(failure));
+      result.reject(refused);
       return;
     }
     if (writeProfileNotice(value)) {

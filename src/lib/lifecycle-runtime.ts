@@ -583,6 +583,8 @@ export async function drainLifecycleOutput(opts: {
   readonly service: string;
   readonly sink: LifecycleLogSink;
   readonly write?: (output: "stdout" | "stderr", text: string) => void;
+  /** Each output line as written, for a caller that keeps a bounded tail. */
+  readonly onLine?: (line: string) => void;
 }): Promise<void> {
   if (!opts.stream || typeof opts.stream === "number") {
     return;
@@ -599,6 +601,7 @@ export async function drainLifecycleOutput(opts: {
     });
   for await (const line of readLinesFromStream(opts.stream)) {
     write(opts.output, `${line}\n`);
+    opts.onLine?.(line);
     await opts.sink.append({
       timestamp: new Date().toISOString(),
       service: opts.service,

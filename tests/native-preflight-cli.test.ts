@@ -616,9 +616,14 @@ test("preflight and start refuse ignored root dotenv in a native build before ef
     const started = await cli(f, args, env);
     expect(started.code).toBe(1);
     if (args.includes("--json")) {
+      // HACK-2339: the detached owner's refusal before VM work reaches
+      // `up --json` as the foreground prints it, not "not confirmed".
       expect(JSON.parse(started.stdout)).toMatchObject({
         ok: false,
-        error: { code: "E_STARTUP_INCOMPLETE" },
+        error: {
+          code: "E_NATIVE_PROJECT_UNSUPPORTED",
+          message: expect.stringContaining("overlap an environment source"),
+        },
       });
     } else {
       expect(started.output).toContain("overlap an environment source");

@@ -267,6 +267,21 @@ export async function failureDiagnostics(opts: {
   readonly home: string;
   readonly startMs: number | null;
 }): Promise<string> {
+  // Never replace the check's own failure with a failure to describe it.
+  try {
+    return await gatherDiagnostics(opts);
+  } catch (error) {
+    return `--- diagnostics unavailable: ${error instanceof Error ? error.message : String(error)} ---`;
+  }
+}
+
+async function gatherDiagnostics(opts: {
+  readonly launcher: string;
+  readonly env: Record<string, string>;
+  readonly root: string;
+  readonly home: string;
+  readonly startMs: number | null;
+}): Promise<string> {
   const status = Bun.spawn([opts.launcher, "daemon", "status", "--json"], {
     cwd: opts.root,
     env: opts.env,

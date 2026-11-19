@@ -13,6 +13,7 @@ import { join, resolve } from "node:path";
 import { detachedStartFailureMessage } from "../src/commands/daemon.ts";
 import {
   DETACHED_START_BUDGET_MS,
+  HANDOFF_GRACE_MS,
   waitForDetachedDaemonStart,
 } from "../src/daemon/start-wait.ts";
 
@@ -50,7 +51,7 @@ test("a daemon ready after the old budget but inside the new one is started", as
   const readyAt = 3000;
   const outcome = await waitForDetachedDaemonStart({
     isReady: () => Promise.resolve(clock.now() >= readyAt),
-    spawnedExited: () => false,
+    spawnedExitCode: () => null,
     daemonAlive: () => Promise.resolve(true),
     ...clock,
   });
@@ -65,7 +66,7 @@ test("a daemon that is ready at once costs no wait", async () => {
   expect(
     await waitForDetachedDaemonStart({
       isReady: () => Promise.resolve(true),
-      spawnedExited: () => false,
+      spawnedExitCode: () => null,
       daemonAlive: () => Promise.resolve(true),
       ...clock,
     })
@@ -77,7 +78,7 @@ test("a spawned process that exits early fails quickly, not at the budget", asyn
   const exitedAt = 300;
   const outcome = await waitForDetachedDaemonStart({
     isReady: () => Promise.resolve(false),
-    spawnedExited: () => clock.now() >= exitedAt,
+    spawnedExitCode: () => (clock.now() >= exitedAt ? 3 : null),
     daemonAlive: () => Promise.resolve(false),
     ...clock,
   });
@@ -87,11 +88,39 @@ test("a spawned process that exits early fails quickly, not at the budget", asyn
   expect(outcome.waitedMs).toBeLessThan(OLD_BUDGET_MS);
 });
 
+test("a launcher that exits 0 gets a grace for its hackd's pid file, then is an exit", async () => {
+  // Handed off: the launcher left with 0 and hackd's pid file came 1.5 s
+  // later, on a slow machine. That is a healthy start, not an exit.
+  const handoff = fakeClock();
+  expect(
+    (
+      await waitForDetachedDaemonStart({
+        isReady: () => Promise.resolve(handoff.now() >= 2600),
+        spawnedExitCode: () => 0,
+        daemonAlive: () => Promise.resolve(handoff.now() >= 1500),
+        ...handoff,
+      })
+    ).kind
+  ).toBe("ready");
+  // Nothing ever appears: reported once the grace has passed, still far
+  // short of the budget.
+  const nothing = fakeClock();
+  const outcome = await waitForDetachedDaemonStart({
+    isReady: () => Promise.resolve(false),
+    spawnedExitCode: () => 0,
+    daemonAlive: () => Promise.resolve(false),
+    ...nothing,
+  });
+  expect(outcome.kind).toBe("exited");
+  expect(outcome.waitedMs).toBeGreaterThanOrEqual(HANDOFF_GRACE_MS);
+  expect(outcome.waitedMs).toBeLessThan(HANDOFF_GRACE_MS + 400);
+});
+
 test("a launcher that leaves while its hackd lives on is not an exit", async () => {
   const clock = fakeClock();
   const outcome = await waitForDetachedDaemonStart({
     isReady: () => Promise.resolve(clock.now() >= 2500),
-    spawnedExited: () => true,
+    spawnedExitCode: () => 0,
     daemonAlive: () => Promise.resolve(true),
     ...clock,
   });
@@ -103,7 +132,7 @@ test("a hackd that is just writing its pid file is not taken for an exit", async
   let looks = 0;
   const outcome = await waitForDetachedDaemonStart({
     isReady: () => Promise.resolve(clock.now() >= 600),
-    spawnedExited: () => true,
+    spawnedExitCode: () => 0,
     // Gone on the first look only: the pid file appeared a moment later.
     daemonAlive: () => Promise.resolve(looks++ > 0),
     ...clock,
@@ -115,7 +144,7 @@ test("a process that never becomes ready fails at the budget with the existing m
   const clock = fakeClock();
   const outcome = await waitForDetachedDaemonStart({
     isReady: () => Promise.resolve(false),
-    spawnedExited: () => false,
+    spawnedExitCode: () => null,
     daemonAlive: () => Promise.resolve(true),
     ...clock,
   });
@@ -170,6 +199,23 @@ afterEach(async () => {
   const current = fixture;
   fixture = null;
   if (current) {
+    // A failed test can leave the wrapper still sleeping before it starts
+    // hackd. End it first, so nothing starts after the stop below and
+    // recreates the fixture directory.
+    const wrapperPid = Number(
+      (
+        await readFile(join(current.root, "wrapper.pid"), "utf8").catch(
+          () => ""
+        )
+      ).trim()
+    );
+    if (Number.isInteger(wrapperPid) && wrapperPid > 0) {
+      try {
+        process.kill(-wrapperPid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
     await run(current, ["daemon", "stop"]).catch(() => undefined);
     await rm(current.root, { recursive: true, force: true });
   }
@@ -188,7 +234,7 @@ async function createFixture(foreground: string): Promise<Fixture> {
     join(bin, "hack"),
     `#!/bin/sh
 case "$*" in
-  "daemon start --foreground") ${foreground} ;;
+  "daemon start --foreground") echo "$$" > ${JSON.stringify(join(root, "wrapper.pid"))}; ${foreground} ;;
 esac
 exec ${cli} "$@"
 `

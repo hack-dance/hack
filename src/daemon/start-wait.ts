@@ -16,6 +16,14 @@ export const DETACHED_START_BUDGET_MS = 20_000;
 
 const POLL_MS = 150;
 
+/**
+ * A launcher that exits 0 may have handed hackd off to another process that
+ * has not written its pid file yet. It gets this long (the whole budget of
+ * the earlier wait) before the start is called exited. A launcher that exits
+ * non-zero has failed and is reported one poll later.
+ */
+export const HANDOFF_GRACE_MS = 2000;
+
 export type DetachedStartOutcome =
   /** hackd reported ready within the budget. */
   | { readonly kind: "ready"; readonly waitedMs: number }
@@ -31,13 +39,16 @@ export type DetachedStartOutcome =
  *
  * `daemonAlive` is whether the pid file names a live process. The launcher
  * that was spawned is normally hackd itself (`exec`), but a wrapper may start
- * hackd as another process and leave; that is not an exit. An exit is
- * confirmed by a second look one poll later, so a hackd that is just writing
- * its pid file is not mistaken for one that never started.
+ * hackd as another process and leave; that is not an exit. So a spawned
+ * process that is gone counts as an exit only after it has stayed gone, with
+ * no live daemon recorded: for one more poll when it failed (non-zero exit),
+ * and for {@link HANDOFF_GRACE_MS} when it exited 0, so a hackd that is just
+ * writing its pid file is not mistaken for one that never started.
  */
 export async function waitForDetachedDaemonStart(opts: {
   readonly isReady: () => Promise<boolean>;
-  readonly spawnedExited: () => boolean;
+  /** The spawned process's exit code once it has ended, else null. */
+  readonly spawnedExitCode: () => number | null;
   readonly daemonAlive: () => Promise<boolean>;
   readonly budgetMs?: number;
   readonly pollMs?: number;
@@ -52,18 +63,19 @@ export async function waitForDetachedDaemonStart(opts: {
   const pollMs = opts.pollMs ?? POLL_MS;
   const started = now();
   const deadline = started + (opts.budgetMs ?? DETACHED_START_BUDGET_MS);
-  let goneOnce = false;
+  let goneSince: number | null = null;
   for (;;) {
     if (await opts.isReady()) {
       return { kind: "ready", waitedMs: now() - started };
     }
-    if (opts.spawnedExited() && !(await opts.daemonAlive())) {
-      if (goneOnce) {
+    const exitCode = opts.spawnedExitCode();
+    if (exitCode !== null && !(await opts.daemonAlive())) {
+      goneSince ??= now();
+      if (now() - goneSince >= (exitCode === 0 ? HANDOFF_GRACE_MS : pollMs)) {
         return { kind: "exited", waitedMs: now() - started };
       }
-      goneOnce = true;
     } else {
-      goneOnce = false;
+      goneSince = null;
     }
     if (now() >= deadline) {
       return { kind: "timeout", waitedMs: now() - started };

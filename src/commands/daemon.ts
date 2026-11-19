@@ -946,7 +946,7 @@ async function startDaemonDetached(opts: {
       const status = await readDaemonStatus({ paths });
       return status.running && status.socketExists;
     },
-    spawnedExited: () => spawned.exitCode() !== null,
+    spawnedExitCode: spawned.exitCode,
     daemonAlive: async () => (await readDaemonStatus({ paths })).running,
   });
   if (outcome.kind !== "ready") {

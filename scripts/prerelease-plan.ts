@@ -29,11 +29,9 @@ import {
 import { extractArchive } from "./installer/bundle.ts";
 import { LINUX_SUMS, linuxSumsNames } from "./installer/download.ts";
 import {
-  archiveEntries,
   BUNDLE_PLATFORMS,
   type BundlePlatform,
   bundleArchiveName,
-  metadata as bundleMetadata,
   COMPOSE_PAYLOAD,
   composeOnly,
   digest,
@@ -931,28 +929,55 @@ function linuxManagerDigests(output: string): LinuxManagerDigests {
 }
 
 /**
- * A Linux archive must be this release's Compose bundle for `platform`: the
- * exact member list, checksums that match every member, and metadata naming
- * the planned version, source revision and platform.
+ * A Linux archive and its manager must be this release's for `platform`. The
+ * archive is verified in full with the installer's own extraction: the exact
+ * member list, every member against the archive's `SHA256SUMS`, and metadata
+ * naming the planned version, source revision and platform. The manager must
+ * be an ELF executable for that architecture. The host that packages and the
+ * host that publishes both run this; neither relies on the build job's check.
  */
-function requireLinuxArchive({
+async function requireLinuxAssets({
   plan,
   platform,
-  bytes,
+  directory,
 }: {
   readonly plan: PrereleasePlan;
   readonly platform: BundlePlatform;
-  readonly bytes: Uint8Array;
+  readonly directory: string;
 }) {
-  const entries = archiveEntries(bytes, platform);
-  const identity = bundleMetadata(
-    entries.get("prerelease.json") ?? new Uint8Array(),
-    plan.version,
-    platform
+  const archive = join(directory, bundleArchiveName(plan.version, platform));
+  const probe = await mkdtemp(join(tmpdir(), "hack-linux-asset-"));
+  try {
+    const { identity } = extractArchive({
+      archive,
+      checksum: digest(archive),
+      destination: join(probe, "bundle"),
+      version: plan.version,
+      platform,
+    });
+    if (identity.source_revision !== plan.source_revision) {
+      throw new Error(
+        `Linux archive for ${platform} was built from another source revision`
+      );
+    }
+  } finally {
+    await rm(probe, { recursive: true, force: true });
+  }
+  // ELF64 little-endian, e_machine at offset 18: x86-64 is 62, AArch64 is 183.
+  const header = Buffer.from(
+    await Bun.file(join(directory, managerAssetName(platform)))
+      .slice(0, 20)
+      .arrayBuffer()
   );
-  if (identity.source_revision !== plan.source_revision) {
+  if (
+    header.length < 20 ||
+    !header
+      .subarray(0, 6)
+      .equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1])) ||
+    header.readUInt16LE(18) !== (platform === "linux-arm64" ? 183 : 62)
+  ) {
     throw new Error(
-      `Linux archive for ${platform} was built from another source revision`
+      `Linux manager for ${platform} is not an ELF executable for that architecture`
     );
   }
 }
@@ -983,13 +1008,7 @@ async function addLinuxAssets({
     }
   }
   for (const platform of PRERELEASE_LINUX_PLATFORMS) {
-    requireLinuxArchive({
-      plan,
-      platform,
-      bytes: await Bun.file(
-        join(linux, bundleArchiveName(plan.version, platform))
-      ).bytes(),
-    });
+    await requireLinuxAssets({ plan, platform, directory: linux });
   }
   for (const name of names) {
     await copyFile(join(linux, name), join(output, name));
@@ -1234,13 +1253,7 @@ export async function verifyReleaseAssets({
       throw new Error("Linux assets do not match their checksum manifest");
     }
     for (const platform of PRERELEASE_LINUX_PLATFORMS) {
-      requireLinuxArchive({
-        plan,
-        platform,
-        bytes: await Bun.file(
-          join(output, bundleArchiveName(plan.version, platform))
-        ).bytes(),
-      });
+      await requireLinuxAssets({ plan, platform, directory: output });
     }
   }
   if (

@@ -102,10 +102,24 @@ const plan = createPrereleasePlan({
   eventName: "workflow_dispatch",
   channel: "prerelease",
 });
+/** The first bytes of an ELF64 executable for `machine` (62 x86-64, 183 AArch64). */
+function elfHeader(machine: number) {
+  const bytes = Buffer.alloc(64);
+  bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+  bytes.writeUInt16LE(machine, 18);
+  return bytes;
+}
+/** A stand-in manager: an ELF header for the architecture its file name says. */
 const fixtureManager = async (output: string) => {
-  writeFileSync(output, `manager fixture for ${output.split("/").at(-1)}\n`, {
-    mode: 0o500,
-  });
+  const name = output.split("/").at(-1) ?? "";
+  writeFileSync(
+    output,
+    Buffer.concat([
+      elfHeader(name.endsWith("linux-arm64") ? 183 : 62),
+      Buffer.from(`manager fixture for ${name}\n`),
+    ]),
+    { mode: 0o500 }
+  );
   await Promise.resolve();
 };
 
@@ -844,6 +858,32 @@ fixtureTest(
     copyFileSync(join(linux, bundleArchiveName(VERSION, "linux-x86_64")), arm);
     await expect(attempt("swapped")).rejects.toThrow(
       "Prerelease identity mismatch."
+    );
+    writeFileSync(arm, saved);
+    // A manager for the other architecture, or one that is not ELF, refuses.
+    const armManager = join(linux, "hack-next-manager-linux-arm64");
+    const savedManager = readFileSync(armManager);
+    for (const wrong of [
+      readFileSync(join(linux, "hack-next-manager-linux-x86_64")),
+      Buffer.from("#!/bin/sh\nexit 0\n"),
+    ]) {
+      chmodSync(armManager, 0o700);
+      writeFileSync(armManager, wrong);
+      await expect(attempt(`manager-${wrong.length}`)).rejects.toThrow(
+        "Linux manager for linux-arm64 is not an ELF executable for that architecture"
+      );
+    }
+    writeFileSync(armManager, savedManager);
+    // A member changed after the archive's own checksums were written refuses
+    // on the packaging host too, not only in the Linux build job.
+    const tampered = await composeBundle(
+      join(root, "out-linux-x86_64"),
+      "linux-arm64"
+    );
+    writeFileSync(join(tampered, "hack-cli"), "#!/bin/sh\necho changed\n");
+    tar(arm, tampered, [...COMPOSE_PAYLOAD, "SHA256SUMS"]);
+    await expect(attempt("member")).rejects.toThrow(
+      "Candidate checksum mismatch: hack-cli"
     );
     // An archive built from another commit is not this release's.
     const other = join(root, "other");

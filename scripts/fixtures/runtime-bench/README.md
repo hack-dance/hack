@@ -8,7 +8,9 @@ a measurement workload, not an example of how to set up a project.
 - `bench.json`: what the benchmark probes (routes, data marker, watched file, tasks,
   I/O paths). Point `--workload` at another descriptor to measure another project.
 - `web/`: the dev server, plus a small React entry point with a few common dependencies so
-  `bun install` and `bun run build` do real work on the shared mount.
+  `bun install` and `bun run build` do real work on the shared mount. The `install on
+  volume` task runs the same install in a named volume (`deps`), which shows what keeping
+  dependencies off the shared mount is worth on each backend.
 - `api/`: one Postgres table and one Redis counter.
 
 Copy the directory somewhere outside the repository before running it: both backends

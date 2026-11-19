@@ -59,6 +59,8 @@ services:
       API_URL: http://api:3001
     volumes:
       - ../web:/app
+      # A named volume for the install-on-volume task: the same install off the shared source.
+      - deps:/deps
     # service_started: native replaces a routed service's command healthcheck with a
     # route probe, so it refuses service_healthy on a routed dependency.
     depends_on:
@@ -74,6 +76,7 @@ services:
 volumes:
   pgdata:
   scratch:
+  deps:
 networks:
   hack-dev:
     external: true

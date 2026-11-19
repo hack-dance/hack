@@ -55,6 +55,16 @@
       "runs": 3
     },
     {
+      "label": "install on volume",
+      "service": "web",
+      "argv": [
+        "sh",
+        "-c",
+        "cp package.json bun.lock /deps/ && cd /deps && rm -rf node_modules && bun install --frozen-lockfile"
+      ],
+      "runs": 3
+    },
+    {
       "label": "build",
       "service": "web",
       "argv": ["bun", "run", "build"],

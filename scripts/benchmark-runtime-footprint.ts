@@ -41,9 +41,11 @@
  *     shared Docker VM with every other project in it; the report says how
  *     many other containers were running;
  *   - host: for each VM process, resident size (`ps`) and physical footprint
- *     (`footprint`). The two differ a lot between VM implementations, because
- *     some map guest memory in a way macOS does not charge to the process's
- *     footprint. Read both, and compare like with like.
+ *     (the `phys_footprint` line of `footprint`, the kernel's own charge to
+ *     the process). The two differ a lot between VM implementations, because
+ *     some map guest memory in a way macOS does not charge to the process,
+ *     and resident size drops when the host compresses memory. Read both, and
+ *     compare like with like.
  * Idle CPU is the growth of cumulative CPU time over the window: host VM
  * processes from `ps`, containers from cgroup `cpu.stat`, the guest from
  * `/proc/stat`. Nothing is executed in the project during the window; host
@@ -177,7 +179,10 @@ type Phase = (typeof PHASES)[number];
 const PROVIDER_VM = /(^|\/)(smolvm-bin|krun)$/;
 const PS_ROW = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/;
 const CPU_TIME = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$/;
-const FOOTPRINT = /Footprint:\s+(\d+)\s+B/;
+// The kernel ledger's figure (what Activity Monitor shows as Memory), not the
+// sum of the regions `footprint` can walk: for a VM process the walk misses
+// memory the process owns without mapping, and came out at under half.
+const FOOTPRINT = /phys_footprint:\s+(\d+)\s+B/;
 
 const { values } = parseArgs({
   options: {

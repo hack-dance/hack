@@ -60,8 +60,14 @@ pub(super) fn recover(
         // `created` is saved before the start's admission, so `creating` may already hold it.
         ("creating" | "booting", true) => recover_start(candidate, owner, lock),
         // What recovery itself leaves when nothing was launched or the unadopted disks were set
-        // aside: nothing ran, so repeating recovery changes nothing.
-        ("stopped-before-engine", _) => Ok(()),
+        // aside: nothing ran, so repeating recovery changes nothing but a completed intent.
+        // A left-over intent there is one whose owner transition committed.
+        ("stopped-before-engine", _) => {
+            if SetAside::load(candidate)?.is_some() {
+                SetAside::remove_completed(candidate)?;
+            }
+            Ok(())
+        }
         _ => Err(unrecoverable()),
     }
 }
@@ -214,9 +220,10 @@ pub(super) fn set_aside_recorded(
 }
 
 /// The durable intent of a set-aside in progress, beside the owner record. Written once the
-/// proofs hold and before the first move, removed after the last one and before the phase
-/// changes, so a set-aside interrupted at any point resumes instead of leaving a pool with
-/// one disk (which recovery cannot tell from lost data).
+/// proofs hold and before the first move, and removed only after the owner records
+/// `stopped-before-engine`, so a set-aside interrupted at any point resumes (or, once the owner
+/// transition committed, is cleared) instead of leaving a pool with one disk, which recovery
+/// cannot tell from lost data.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SetAside {
@@ -261,6 +268,18 @@ impl SetAside {
             return Err(unrecoverable());
         }
         fs::remove_file(&pending).map_err(io)
+    }
+
+    /// Remove the intent of a set-aside whose owner transition has committed.
+    fn remove_completed(candidate: &Candidate) -> Result<(), CandidateError> {
+        match fs::remove_file(Self::path(candidate)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(io(error)),
+        }
+        fs::File::open(super::root(candidate))
+            .and_then(|directory| directory.sync_all())
+            .map_err(io)
     }
 
     fn load(candidate: &Candidate) -> Result<Option<Self>, CandidateError> {
@@ -340,6 +359,11 @@ fn set_aside(
             _ => return Err(unrecoverable()),
         }
     }
+    // Unadopted disks have no recorded identity for `verify_disks` to check, so check here
+    // that each is a regular file of ours with one link before anything moves.
+    for location in &locations {
+        owned_file(location)?;
+    }
     let vm_lock = lock_disks_closed(candidate, owner, &locations, STOP_SCAN_WAIT)?;
     sockets_absent(owner)?;
     if SetAside::load(candidate)?.is_none() {
@@ -354,22 +378,42 @@ fn set_aside(
     }
     move_into(&data, label, &remaining)?;
     move_into(templates, label, &failed)?;
-    // Removed before the phase changes: an interruption between the two leaves `booting`
-    // with no disks and nothing adopted, which recovery returns to `stopped-before-engine`.
-    fs::remove_file(SetAside::path(candidate)).map_err(io)?;
-    fs::File::open(super::root(candidate))
-        .and_then(|directory| directory.sync_all())
-        .map_err(io)?;
+    // A replay may have nothing left to move: make the moves of every attempt durable anyway.
+    for directory in [&data, templates] {
+        sync_moved(directory, label)?;
+    }
     #[cfg(target_os = "macos")]
     super::interactive_session::after_boot_stopped(candidate, owner);
+    // The owner transition commits the set-aside; the intent is removed only after it. An
+    // interruption between the two leaves `stopped-before-engine` with the intent, which
+    // `recover` then removes as complete.
     owner.process = None;
     phase(candidate, owner, "stopped-before-engine")?;
+    SetAside::remove_completed(candidate)?;
     drop(vm_lock);
     Ok(())
 }
 
-/// Rename each of `names` from `directory` into the new private `directory/label`, then make
-/// both directories durable. Same file system, so each rename is atomic.
+/// Refuse unless `path` is a regular file owned by this user with one link.
+fn owned_file(path: &Path) -> Result<(), CandidateError> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(path).map_err(|_| unrecoverable())?;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    if !metadata.file_type().is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != unsafe { libc::geteuid() }
+    {
+        return Err(CandidateError::new(
+            "foreign_state",
+            "An unadopted provider disk is not a regular file of this user with one link; nothing was moved.",
+        ));
+    }
+    Ok(())
+}
+
+/// Rename each of `names` from `directory` into the private `directory/label`. Same file
+/// system, so each rename is atomic; a name already present there refuses rather than
+/// replacing it.
 fn move_into(directory: &Path, label: &str, names: &[&str]) -> Result<(), CandidateError> {
     if names.is_empty() {
         return Ok(());
@@ -377,12 +421,24 @@ fn move_into(directory: &Path, label: &str, names: &[&str]) -> Result<(), Candid
     let aside = directory.join(label);
     state::private_directory(&aside)?;
     for name in names {
+        if present(&aside, [*name])? == [true] {
+            return Err(unrecoverable());
+        }
         fs::rename(directory.join(name), aside.join(name)).map_err(io)?;
     }
-    for path in [&aside, &directory.to_path_buf()] {
-        fs::File::open(path).map_err(io)?.sync_all().map_err(io)?;
-    }
     Ok(())
+}
+
+/// Sync `directory` and, when present, `directory/label`.
+fn sync_moved(directory: &Path, label: &str) -> Result<(), CandidateError> {
+    let aside = directory.join(label);
+    if present(directory, [label])? == [true] {
+        fs::File::open(&aside).map_err(io)?.sync_all().map_err(io)?;
+    }
+    fs::File::open(directory)
+        .map_err(io)?
+        .sync_all()
+        .map_err(io)
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -738,6 +794,35 @@ mod tests {
         assert_eq!(error.code, "disk_template_untrusted");
         assert!(owner.process.is_none());
         assert!(!root(&pool.candidate).join("owner.json").exists());
+        assert!(!root(&pool.candidate).join(SET_ASIDE).exists());
+
+        // A disk path that is not a regular file of ours (here a symlink) refuses first.
+        let pool = Pool::new("foreign-disk");
+        let mut owner = pool.owner("booting", true, false);
+        pool.disks(&owner, &["overlay.raw", "vm.lock", "elsewhere"]);
+        let data = owner.real_data_dir(&pool.candidate).unwrap();
+        std::os::unix::fs::symlink(data.join("elsewhere"), data.join("storage.raw")).unwrap();
+        state::private_directory(&root(&pool.candidate).join("home/.smolvm")).unwrap();
+        let error = pool.recover(&mut owner).unwrap_err();
+        assert_eq!(error.code, "foreign_state");
+        assert!(fs::symlink_metadata(data.join("storage.raw")).is_ok());
+        assert!(data.join("overlay.raw").exists());
+        assert!(!root(&pool.candidate).join(SET_ASIDE).exists());
+
+        // Interrupted after the owner committed `stopped-before-engine` but before the intent
+        // was removed: recovery clears the completed intent and changes nothing else.
+        let pool = Pool::new("committed-intent");
+        let mut owner = pool.owner("stopped-before-engine", true, false);
+        state::write(
+            &root(&pool.candidate).join(SET_ASIDE),
+            &SetAside {
+                version: 1,
+                label: "untrusted-first-boot-1".into(),
+            },
+        )
+        .unwrap();
+        pool.recover(&mut owner).unwrap();
+        assert_eq!(owner.phase, "stopped-before-engine");
         assert!(!root(&pool.candidate).join(SET_ASIDE).exists());
     }
 

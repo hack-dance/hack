@@ -155,9 +155,12 @@ export const INERT_RUNNING_RESOURCES = [
   "switch",
 ] as const;
 
-/** The runtime's inert rule: absent, null, false, or empty; `block_private` only absent or null. */
+/**
+ * The runtime's inert rule: absent, null, false, or empty; `block_private` and `auto_ports`
+ * only absent or null.
+ */
 export function inertField(field: string, value: unknown): boolean {
-  if (field === "block_private") {
+  if (field === "block_private" || field === "auto_ports") {
     return value === undefined || value === null;
   }
   if (value === undefined || value === null || value === false) {

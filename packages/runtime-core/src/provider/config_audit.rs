@@ -423,11 +423,12 @@ pub(super) fn verify_running_resources(resources: &Value) -> Result<(), Candidat
     Ok(())
 }
 
-/// Absent, null, false, or an empty list or map. `block_private` is the exception: an
-/// empty list there turns on `--block-private` with no re-opened range, so only absent or
-/// null is inert.
+/// Absent, null, false, or an empty list or map. `block_private` and `auto_ports` are the
+/// exceptions: an empty list turns on `--block-private` with no re-opened range, and an empty
+/// map turns on `--auto-ports` with no port excluded, so for them only absent or null is
+/// inert.
 fn inert(field: &str, value: Option<&Value>) -> bool {
-    if field == "block_private" {
+    if field == "block_private" || field == "auto_ports" {
         return matches!(value, None | Some(Value::Null));
     }
     match value {
@@ -706,7 +707,7 @@ mod tests {
         for inert_value in [json!(false), json!([]), json!({}), Value::Null] {
             let mut record = plain.clone();
             for field in INERT_RECORD_FIELDS {
-                if field != "block_private" {
+                if field != "block_private" && field != "auto_ports" {
                     record[field] = inert_value.clone();
                 }
             }
@@ -716,6 +717,13 @@ mod tests {
         let mut blocking = plain.clone();
         blocking["block_private"] = json!([]);
         assert!(verify_isolated_record(&blocking, "owned", "token", None).is_err());
+        // An empty auto_ports map publishes every guest listener on the host.
+        let mut publishing = plain.clone();
+        publishing["auto_ports"] = json!({});
+        assert!(verify_isolated_record(&publishing, "owned", "token", None).is_err());
+        let mut unset = plain.clone();
+        unset["auto_ports"] = Value::Null;
+        verify_isolated_record(&unset, "owned", "token", None).unwrap();
         for field in INERT_RECORD_FIELDS {
             for value in [
                 json!(true),
@@ -762,6 +770,7 @@ mod tests {
             ("dns_options", json!(["use-vc"])),
             ("shm_size", json!("2g")),
             ("guest_subnet", json!("10.200.0.0/30")),
+            ("switch", json!({"name": "synthetic"})),
             ("disk_durability", json!("deferred")),
         ] {
             let mut changed = plain.clone();

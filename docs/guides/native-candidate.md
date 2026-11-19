@@ -3274,8 +3274,8 @@ still resolve arm64 images. Without Rosetta 2 the start refuses with
 
 Every boot audits translation against the pool's recorded intent: the provider's
 stored machine setting, its running configuration, and the guest's `binfmt_misc`
-`rosetta` registration (the x86_64 ELF match with the fixed `rosetta-wrapper`
-interpreter). A pool without translation must have no such registration. The image
+`rosetta` registration (the x86_64 ELF match with the Rosetta translator at
+`/mnt/rosetta/rosetta` as the fixed interpreter). A pool without translation must have no such registration. The image
 cache keeps amd64 archives separate from arm64 ones. Under `prefer-native`, a cached
 amd64 archive is reused only after the pinned image is confirmed not to publish arm64.
 The runtime admits an amd64 image only for an opted-in service

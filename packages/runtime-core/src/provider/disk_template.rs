@@ -532,9 +532,10 @@ mod tests {
         let fixture = Fixture::new("interrupted");
         let content = content_with(&[(0, b"ext4")]);
         let pinned = [pinned_for("storage-template.ext4", &content)];
-        // SmolVM expands into `<stem>.partial` and renames only on success; after an
-        // interruption only the compressed input and the scratch file can remain.
-        let partial = fixture.sparse("storage-template.partial", LEN / 2, &[(0, b"ext4")]);
+        // SmolVM 1.35.4 expands into a `.smolvm-template-<random>` scratch file and renames
+        // only on success; after an interruption only the compressed input and the scratch
+        // file can remain.
+        let partial = fixture.sparse(".smolvm-template-a1B2c3", LEN / 2, &[(0, b"ext4")]);
         fixture.sparse("storage-template.ext4.zst", 16, &[(0, b"compressed")]);
         verify_with(&fixture.0, Stage::BeforeUse, &pinned, MAX_ALLOCATED_READ).unwrap();
         let error = verify_with(

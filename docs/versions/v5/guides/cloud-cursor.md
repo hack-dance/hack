@@ -32,7 +32,7 @@ own Docker packages, then `hack`. The binary is committed gzipped as
 ```dockerfile
 FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git sudo gzip docker.io docker-compose-v2 fuse-overlayfs iptables \
+      ca-certificates curl git sudo gzip docker.io docker-compose-v2 fuse-overlayfs iptables tmux \
  && rm -rf /var/lib/apt/lists/*
 RUN update-alternatives --set iptables /usr/sbin/iptables-legacy \
  && update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy

@@ -16,7 +16,8 @@ of at least 2 vCPU and 4 GiB.
 
 - **Snapshot** from a Dockerfile: Ubuntu with Docker installed (Daytona's docs
   use `curl -fsSL https://get.docker.com | VERSION=28.3.3 sh -`), the Compose
-  plugin, and `hack` in `/usr/local/bin` (commit the binary gzipped, since
+  plugin, `tmux` if the project has lifecycle processes, and `hack` in
+  `/usr/local/bin` (commit the binary gzipped, since
   GitHub refuses files over 100 MB, and unpack it in the Dockerfile:
   `COPY .hack-bin/hack.gz /tmp/` then
   `RUN gunzip -c /tmp/hack.gz > /usr/local/bin/hack && chmod 0755 /usr/local/bin/hack`).

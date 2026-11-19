@@ -20,6 +20,9 @@ isolation.
   and says which one is missing.
 - Outbound network access to Docker Hub and the registries your project uses.
 - The `hack` command (step 1).
+- If the project defines lifecycle processes (`lifecycle.processes`) or
+  long-running `up.before` hooks and does not set `lifecycle.runner` to
+  `"supervisor"`, `tmux`: Hack runs those processes in a tmux session.
 - If the project has encrypted values: its key, which goes in
   `HACK_ENV_SECRET_KEY`.
 

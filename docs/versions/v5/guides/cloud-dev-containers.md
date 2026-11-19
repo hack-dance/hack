@@ -48,7 +48,9 @@ copies a `hack` binary you built (see
 gzip file, because GitHub refuses files over 100 MB and the binary is about
 160 MB (about 70 MB gzipped). A project that sets `lifecycle.runner` to
 `"supervisor"` also needs the build's `hack-lifecycle-supervisor` installed beside
-`hack` in `/usr/local/bin`; the script below installs `hack` only:
+`hack` in `/usr/local/bin`, and a project with lifecycle processes needs `tmux`
+(see [Any Linux machine with Docker](cloud-linux-docker.md#what-you-need)); the
+script below installs `hack` only:
 
 ```sh
 #!/bin/sh

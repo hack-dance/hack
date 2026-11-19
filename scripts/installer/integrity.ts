@@ -40,13 +40,83 @@ const COMPILER = [
   "hack.local.schema.json",
 ];
 const SUPERVISOR = ["hack-lifecycle-supervisor"];
+/**
+ * The platforms a candidate bundle is built for. `darwin-arm64` is the native
+ * bundle (it also runs Compose). The Linux bundles are Compose only: they
+ * carry no native executor, guest relay, storage witness, provider pins or MCP
+ * bundle, and their executables are not code signed.
+ */
+export const BUNDLE_PLATFORMS = [
+  "darwin-arm64",
+  "linux-x86_64",
+  "linux-arm64",
+] as const;
+export type BundlePlatform = (typeof BUNDLE_PLATFORMS)[number];
+export const LINUX_BUNDLE_PLATFORMS = ["linux-x86_64", "linux-arm64"] as const;
+/** What every function here assumed before Linux bundles existed. */
+export const DEFAULT_BUNDLE_PLATFORM: BundlePlatform = "darwin-arm64";
+/** True for the Compose-only Linux bundle kind. */
+export function composeOnly(platform: BundlePlatform): boolean {
+  return platform !== "darwin-arm64";
+}
+/** The bundle platform of a host, or null where no candidate bundle exists. */
+export function hostBundlePlatform(
+  platform: string = process.platform,
+  arch: string = process.arch
+): BundlePlatform | null {
+  if (platform === "darwin" && arch === "arm64") {
+    return "darwin-arm64";
+  }
+  if (platform === "linux" && arch === "x64") {
+    return "linux-x86_64";
+  }
+  if (platform === "linux" && arch === "arm64") {
+    return "linux-arm64";
+  }
+  return null;
+}
+/** What the manager and the bootstrap say on a host with no candidate bundle. */
+export const UNSUPPORTED_HOST =
+  "Prereleases support Apple Silicon macOS (native and Compose backends) and glibc Linux x86_64 or arm64 (Compose backend only).";
+/** Release asset name of a platform's bundle archive. */
+export function bundleArchiveName(
+  version: string,
+  platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
+): string {
+  return `hack-${version}-${platform}-${composeOnly(platform) ? "compose" : "native"}.tar.gz`;
+}
+/** Release asset name of a platform's standalone manager. */
+export function managerAssetName(
+  platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
+): string {
+  return `hack-next-manager-${platform}`;
+}
+/**
+ * The exact Compose-only Linux payload, in the order
+ * `scripts/build-compose-candidate.sh` checksums it. Unlike the native bundle
+ * it has no optional group: every member is required and nothing else is
+ * accepted.
+ */
+export const COMPOSE_PAYLOAD = [
+  "hack-cli",
+  "hack-v5",
+  "README.md",
+  "prerelease.json",
+  "hack-lifecycle-supervisor",
+  "hack-config-compiler",
+  "hack.project.schema.json",
+  "hack.local.schema.json",
+] as const;
 const STORAGE = ["hack-storage-root-witness", "native-storage-tool.json"];
 /** A flat, plain file name: what a newer release's added payload looks like. */
 const NEWER_RELEASE_MEMBER = /^[a-z0-9][a-z0-9._-]{0,63}$(?![\s\S])/;
 
 /** The refusal for an archive member a newer release added (HACK-2262). */
-export function newerReleaseMemberMessage(name: string): string {
-  return `This release contains ${name}, which this installation manager does not know, so it was not installed and nothing changed. Replace the manager with the target release's standalone manager first: download hack-next-manager-darwin-arm64 and INSTALLER-SHA256SUMS from that release, verify them, and run it with --root <channel root> upgrade-manager (see the candidate install guide). Then retry, or install into a fresh --root.`;
+export function newerReleaseMemberMessage(
+  name: string,
+  platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
+): string {
+  return `This release contains ${name}, which this installation manager does not know, so it was not installed and nothing changed. Replace the manager with the target release's standalone manager first: download ${managerAssetName(platform)} and INSTALLER-SHA256SUMS from that release, verify them, and run it with --root <channel root> upgrade-manager (see the candidate install guide). Then retry, or install into a fresh --root.`;
 }
 export const MCP =
   /^mcp\/([0-9a-f]{64})\/(manifest\.json|hack-mcp-adapter|hack-mcp-owner|hack-mcp-backend)$(?![\s\S])/;
@@ -357,25 +427,40 @@ export function compareCandidateVersions(a: unknown, b: unknown): -1 | 0 | 1 {
   }
   return 0;
 }
-export function metadata(raw: Uint8Array, version: string) {
+export function metadata(
+  raw: Uint8Array,
+  version: string,
+  platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
+) {
   const value = parseJson(raw);
   exact(value, ["schema", "version", "tag", "source_revision", "platform"]);
   requireThat(
     value.schema === "hack.prerelease/v1" &&
       value.version === version &&
       value.tag === `v${version}` &&
-      value.platform === "darwin-arm64" &&
+      value.platform === platform &&
       typeof value.source_revision === "string" &&
       /^[0-9a-f]{40}$(?![\s\S])/.test(value.source_revision),
     "Prerelease identity mismatch."
   );
   return value;
 }
-export function inventory(names: string[]): string[] {
+export function inventory(
+  names: string[],
+  platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
+): string[] {
   requireThat(
     new Set(names).size === names.length && names.length <= 64,
     "Duplicate or excessive payload inventory."
   );
+  if (composeOnly(platform)) {
+    requireThat(
+      JSON.stringify([...names].sort()) ===
+        JSON.stringify([...COMPOSE_PAYLOAD, "SHA256SUMS"].sort()),
+      "Incomplete or foreign Compose candidate bundle."
+    );
+    return names.filter((name) => name !== "SHA256SUMS");
+  }
   const required = [...CORE, "SHA256SUMS"];
   requireThat(
     required.every((name) => names.includes(name)),
@@ -437,7 +522,10 @@ export function checksums(raw: Uint8Array, expected: string[]) {
 }
 
 /** Accept only bounded ustar regular members. No extraction tool sees untrusted paths. */
-export function archiveEntries(compressed: Uint8Array) {
+export function archiveEntries(
+  compressed: Uint8Array,
+  platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
+) {
   requireThat(compressed.length <= MAX_ARCHIVE, "Oversized archive.");
   const tar = gunzipSync(compressed, {
     maxOutputLength: MAX_ARCHIVE + 65 * 512 + 10_240,
@@ -465,7 +553,7 @@ export function archiveEntries(compressed: Uint8Array) {
           tar.subarray(offset).every((byte) => byte === 0),
         "Invalid tar terminator or trailing payload."
       );
-      inventory([...entries.keys()]);
+      inventory([...entries.keys()], platform);
       return entries;
     }
     requireThat(entries.size < 64, "Too many archive entries.");
@@ -490,10 +578,15 @@ export function archiveEntries(compressed: Uint8Array) {
     );
     const prefix = field(header, 345, 155);
     const name = `${prefix ? `${prefix}/` : ""}${field(header, 0, 100)}`;
-    const known =
-      [...CORE, ...COMPILER, ...STORAGE, ...SUPERVISOR, "SHA256SUMS"].includes(
-        name
-      ) || MCP.test(name);
+    const known = composeOnly(platform)
+      ? [...COMPOSE_PAYLOAD, "SHA256SUMS"].includes(name)
+      : [
+          ...CORE,
+          ...COMPILER,
+          ...STORAGE,
+          ...SUPERVISOR,
+          "SHA256SUMS",
+        ].includes(name) || MCP.test(name);
     requireThat(
       !entries.has(name) && (known || NEWER_RELEASE_MEMBER.test(name)),
       "Foreign, duplicate or traversing archive entry."
@@ -501,7 +594,7 @@ export function archiveEntries(compressed: Uint8Array) {
     // A plain top-level file this manager does not know is most likely a payload
     // a newer release added. Never accept it; say how to get a manager that
     // validates it (HACK-2262).
-    requireThat(known, newerReleaseMemberMessage(name));
+    requireThat(known, newerReleaseMemberMessage(name, platform));
     const size = octal(124, 12);
     total += size;
     requireThat(

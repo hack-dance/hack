@@ -1,20 +1,33 @@
 #!/usr/bin/env bun
 import { chmod } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { requireThat } from "./installer/integrity.ts";
-/** Build only: user machines receive a standalone executable, never a Bun installer. */
+import {
+  composeOnly,
+  hostBundlePlatform,
+  requireThat,
+  UNSUPPORTED_HOST,
+} from "./installer/integrity.ts";
+/**
+ * Build only: user machines receive a standalone executable, never a Bun installer.
+ *
+ * Builds for the host: Apple Silicon macOS gets the signed manager, glibc Linux
+ * x86_64 or arm64 the unsigned one (`hack-next-manager-linux-*`). There is no
+ * cross build, so each manager is built and run on its own platform.
+ */
 export async function buildPrereleaseManager(output: string) {
   const target = resolve(output);
+  const platform = hostBundlePlatform();
   requireThat(
-    process.platform === "darwin" && process.arch === "arm64",
-    "Build and sign the prerelease manager on Apple Silicon macOS."
+    platform,
+    `No prerelease manager for this host. ${UNSUPPORTED_HOST}`
   );
   const result = Bun.spawnSync(
     [
       process.execPath,
       "build",
       "--compile",
-      "--target=bun-darwin-arm64",
+      // Linux compiles with the running Bun's own runtime (its host target).
+      ...(composeOnly(platform) ? [] : ["--target=bun-darwin-arm64"]),
       "--no-compile-autoload-dotenv",
       "--no-compile-autoload-bunfig",
       "--no-compile-autoload-tsconfig",
@@ -39,6 +52,10 @@ export async function buildPrereleaseManager(output: string) {
     `Standalone manager build failed: ${result.stderr.toString()}`
   );
   await chmod(target, 0o500);
+  if (composeOnly(platform)) {
+    // Linux executables are not code signed; release checksums bind the bytes.
+    return;
+  }
   const signature = Bun.spawnSync(
     ["/usr/bin/codesign", "--force", "--sign", "-", target],
     { stdin: "ignore", stdout: "ignore", stderr: "pipe", timeout: 30_000 }

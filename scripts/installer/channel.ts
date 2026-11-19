@@ -24,9 +24,12 @@ import {
 } from "./bundle.ts";
 import { officialArchive } from "./download.ts";
 import {
+  type BundlePlatform,
   candidateVersion,
   canonical,
   compareCandidateVersions,
+  composeOnly,
+  DEFAULT_BUNDLE_PLATFORM,
   digest,
   exact,
   hash,
@@ -53,7 +56,9 @@ const STAGE = /^\.stage-[0-9a-f]{32}$(?![\s\S])/;
  * replaces only these. A channel root holds a byte copy of the manager that
  * installed it, so its digest is the release's. Add each new release's manager
  * when it publishes; the prerelease upgrade gate fails until a successor accepts
- * the previous release's manager (HACK-2262).
+ * the previous release's manager (HACK-2262). Linux managers
+ * (`hack-next-manager-linux-x86_64`, `-arm64`, listed in `SHA256SUMS-linux`)
+ * go in the same list from the first release that ships them.
  */
 export const REVIEWED_PREDECESSORS: readonly string[] = [
   // 5.0.0-next.6 and next.7
@@ -148,10 +153,26 @@ interface Hooks {
   predecessors?: readonly string[];
   checkpoint?: (point: string) => void;
 }
+/**
+ * The private directories a version keeps beside its bundle. A Compose-only
+ * Linux version keeps none: Compose runs use the caller's own Hack home.
+ */
+function versionHomes(platform: BundlePlatform): string[] {
+  return composeOnly(platform) ? [] : ["native-home", "cli-home"];
+}
+/** The refusal for a native selection on a Compose-only Linux channel. */
+export const COMPOSE_ONLY_NATIVE_REFUSAL =
+  "This is a Compose-only Linux candidate; the native backend is Apple Silicon macOS only. Unset HACK_RUNTIME_BACKEND (or set it to compose).";
 /** One owner for receipts, retained bytes and atomic selection. Hooks are fixture-only injection. */
 export class Channel {
   readonly root: string;
   readonly source: string;
+  /**
+   * The bundle kind this channel installs and runs: the host's, as the
+   * compiled manager passes it. The default keeps the macOS contract for
+   * callers that do not choose.
+   */
+  readonly platform: BundlePlatform;
   /**
    * What the validation inside `lock()` verified, per version: the directory
    * and the receipt checksum it was verified against. An entry lets one
@@ -172,16 +193,26 @@ export class Channel {
     previous: null,
   };
   private readonly hooks: Hooks;
-  constructor(root: string, source: string, hooks: Hooks = {}) {
+  constructor(
+    root: string,
+    source: string,
+    hooks: Hooks = {},
+    platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
+  ) {
     this.root = canonical(root);
     this.source = canonical(source);
     this.hooks = hooks;
+    this.platform = platform;
   }
   private path(name: string) {
     return join(this.root, name);
   }
   private signatures(bundle: string) {
-    (this.hooks.signatures ?? verifySignatures)(bundle);
+    if (this.hooks.signatures) {
+      this.hooks.signatures(bundle);
+      return;
+    }
+    verifySignatures(bundle, this.platform);
   }
   private refuseLegacy() {
     if (
@@ -534,7 +565,7 @@ export class Channel {
     requireThat(
       sameJson(
         readdirSync(directory).sort(),
-        ["bundle", "native-home", "cli-home", ".receipt.json"].sort()
+        ["bundle", ...versionHomes(this.platform), ".receipt.json"].sort()
       ),
       "Incomplete or foreign version installation."
     );
@@ -557,15 +588,19 @@ export class Channel {
         SHA256.test(receipt.archive_sha256),
       "Malformed version receipt."
     );
-    const verified = verifyBundle(join(directory, "bundle"), version);
+    const verified = verifyBundle(
+      join(directory, "bundle"),
+      version,
+      this.platform
+    );
     requireThat(
       sameJson(receipt.metadata, verified.identity) &&
         sameJson(receipt.checksums, verified.manifest),
       "Candidate identity or checksum receipt changed."
     );
     const homes = object(receipt.homes);
-    exact(homes, ["native-home", "cli-home"]);
-    for (const name of ["native-home", "cli-home"]) {
+    exact(homes, versionHomes(this.platform));
+    for (const name of versionHomes(this.platform)) {
       const info = owned(join(directory, name), true, 0o700);
       requireThat(
         sameJson(homes[name], { device: info.dev, inode: info.ino }),
@@ -606,6 +641,12 @@ export class Channel {
     this.signatures(join(directory, "bundle"));
     if (this.hooks.quiescence) {
       this.hooks.quiescence(directory, this.environment(version));
+      return;
+    }
+    // A Compose-only version owns no runtime and no home: its projects run in
+    // the caller's Docker engine and Hack home, which a selection change does
+    // not touch. The exclusive manager lock already refuses active launchers.
+    if (composeOnly(this.platform)) {
       return;
     }
     for (const action of ["status", "down", "status"]) {
@@ -810,17 +851,18 @@ export class Channel {
     try {
       const input = archive
         ? { archive: canonical(archive), checksum: checksum as string }
-        : await officialArchive(stage, version);
+        : await officialArchive(stage, version, undefined, this.platform);
       const installation = join(stage, "installation");
       mkdirSync(installation, { mode: 0o700 });
       const verified = extractArchive({
         ...input,
         destination: join(installation, "bundle"),
         version,
+        platform: this.platform,
         signatures: (bundle) => this.signatures(bundle),
       });
       const homes: Record<string, { device: number; inode: number }> = {};
-      for (const name of ["native-home", "cli-home"]) {
+      for (const name of versionHomes(this.platform)) {
         mkdirSync(join(installation, name), { mode: 0o700 });
         const info = owned(join(installation, name), true, 0o700);
         syncDirectory(join(installation, name));
@@ -1068,13 +1110,19 @@ export class Channel {
     this.validate();
   }
   async run(arguments_: string[]) {
-    let backend = process.env.HACK_RUNTIME_BACKEND || "native";
+    const compose = composeOnly(this.platform);
+    let backend =
+      process.env.HACK_RUNTIME_BACKEND || (compose ? "compose" : "native");
     requireThat(
       backend === "native" || backend === "compose",
-      "HACK_RUNTIME_BACKEND must be native or compose (unset selects native)."
+      `HACK_RUNTIME_BACKEND must be native or compose (unset selects ${compose ? "compose" : "native"}).`
     );
-    // Explicit native operations select native setup even from a Compose shell.
-    if (
+    if (compose) {
+      // `native ...` commands still reach the CLI on Compose, which answers
+      // them itself (`native setup` refuses with E_UNSUPPORTED_PLATFORM).
+      requireThat(backend === "compose", COMPOSE_ONLY_NATIVE_REFUSAL);
+    } else if (
+      // Explicit native operations select native setup even from a Compose shell.
       arguments_.filter((argument) => argument !== "--no-interactive")[0] ===
       "native"
     ) {
@@ -1147,7 +1195,8 @@ import { parseJson as parseJsonStatus } from "./integrity.ts";
 export function rollbackUninstall(
   root: string,
   manifestPath: string,
-  source: string
+  source: string,
+  platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
 ) {
   canonical(root);
   canonical(manifestPath);
@@ -1178,7 +1227,7 @@ export function rollbackUninstall(
       manifestPath === `${backup}.json`,
     "Uninstall manifest target is not its retained sibling."
   );
-  const retained = new Channel(backup, source);
+  const retained = new Channel(backup, source, {}, platform);
   const release = retained.lock(false, false, root);
   try {
     const info = owned(backup, true, 0o700);
@@ -1199,7 +1248,7 @@ export function rollbackUninstall(
       "Original channel path is occupied; nothing replaced."
     );
     syncDirectory(dirname(root));
-    new Channel(root, join(root, "manager")).validate();
+    new Channel(root, join(root, "manager"), {}, platform).validate();
     return { restored: root, manifest: manifestPath };
   } finally {
     release();

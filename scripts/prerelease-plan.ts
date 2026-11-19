@@ -1,5 +1,14 @@
 #!/usr/bin/env bun
-import { appendFile, lstat, mkdir, readdir } from "node:fs/promises";
+import {
+  appendFile,
+  copyFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  rm,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   NATIVE_STORAGE_TOOL_FILE,
@@ -13,10 +22,26 @@ import { buildPrereleaseManager } from "./build-prerelease-manager.ts";
 import {
   BOOTSTRAP_ASSET,
   INSTALLER_SUMS,
+  type LinuxManagerDigests,
   MANAGER_ASSET,
   renderBootstrap,
 } from "./installer/bootstrap.ts";
-import { digest, VERSION } from "./installer/integrity.ts";
+import { extractArchive } from "./installer/bundle.ts";
+import { LINUX_SUMS, linuxSumsNames } from "./installer/download.ts";
+import {
+  archiveEntries,
+  BUNDLE_PLATFORMS,
+  type BundlePlatform,
+  bundleArchiveName,
+  metadata as bundleMetadata,
+  COMPOSE_PAYLOAD,
+  composeOnly,
+  digest,
+  hostBundlePlatform,
+  LINUX_BUNDLE_PLATFORMS,
+  managerAssetName,
+  VERSION,
+} from "./installer/integrity.ts";
 
 export const PRERELEASE_ENVIRONMENT = "v5-prerelease";
 /**
@@ -52,8 +77,14 @@ export const PAYLOAD_MODES: Readonly<Record<string, number>> = {
   "hack.project.schema.json": 0o600,
   "hack.local.schema.json": 0o600,
 };
-/** The only packaged and installable candidate platform. */
+/**
+ * The native candidate platform, and the platform the release-level
+ * `prerelease.json` records. Published macOS managers require exactly this
+ * value there, so it does not change when Linux bundles are added.
+ */
 export const PRERELEASE_PLATFORM = "darwin-arm64";
+/** The Compose-only Linux bundle platforms a release also ships. */
+export const PRERELEASE_LINUX_PLATFORMS = LINUX_BUNDLE_PLATFORMS;
 /** GitHub heading anchor of the consolidated support list in the prerelease guide. */
 export const PRERELEASE_SUPPORT_ANCHOR = "supported-platforms-and-capabilities";
 /**
@@ -72,10 +103,13 @@ export function prereleaseMetadata({
   version,
   sourceRevision,
   base = PRERELEASE_BASE,
+  platform = PRERELEASE_PLATFORM,
 }: {
   readonly version: string;
   readonly sourceRevision: string;
   readonly base?: string;
+  /** The bundle the metadata goes into; the release-level file keeps the default. */
+  readonly platform?: BundlePlatform;
 }) {
   if (!BASE.test(base)) {
     throw new Error("Candidate base must be a stable 5.MINOR.PATCH version");
@@ -95,7 +129,7 @@ export function prereleaseMetadata({
     version,
     tag: `v${version}`,
     source_revision: sourceRevision,
-    platform: PRERELEASE_PLATFORM,
+    platform,
   } as const;
 }
 
@@ -143,6 +177,9 @@ export function createPrereleasePlan({
       BOOTSTRAP_ASSET,
       INSTALLER_SUMS,
     ],
+    // Linux assets are listed apart: `assets` stays exactly the set every
+    // published macOS manager and installer was written against.
+    linuxAssets: [...linuxSumsNames(version), LINUX_SUMS],
   };
 }
 
@@ -167,7 +204,7 @@ export function prereleaseNotes({
         ]
       : [];
   return [
-    `Native macOS ARM64 candidate from ${sourceRevision}. Requires explicit opt-in; stable installation is unchanged.`,
+    `Native macOS ARM64 candidate and Compose-only Linux (x86_64, arm64) candidate from ${sourceRevision}. Requires explicit opt-in; stable installation is unchanged.`,
     `Supported platform, unsupported platforms and capability limits: https://github.com/hack-dance/hack/blob/${tag}/docs/guides/prereleases.md#${PRERELEASE_SUPPORT_ANCHOR}`,
     ...envChanges,
   ].join("\n\n");
@@ -766,11 +803,20 @@ export async function packagePrerelease({
   bundle,
   output,
   buildManager = buildPrereleaseManager,
+  linux,
 }: {
   readonly plan: PrereleasePlan;
   readonly bundle: string;
   readonly output: string;
   readonly buildManager?: (output: string) => Promise<void>;
+  /**
+   * Directory holding exactly the two Linux archives and two Linux managers
+   * that `packageLinuxPrerelease` produced on their own hosts. When given,
+   * they are verified, copied beside the macOS assets and listed in
+   * `SHA256SUMS-linux`, and the installer accepts Linux. The macOS assets
+   * other than the installer are the same bytes either way.
+   */
+  readonly linux?: string;
 }) {
   if (!(await lstat(bundle)).isDirectory()) {
     throw new Error("Native bundle root must be a directory, not an alias");
@@ -856,15 +902,225 @@ export async function packagePrerelease({
     await renderChecksums({ root: output, names: [plan.archive] })
   );
   await buildManager(join(output, MANAGER_ASSET));
+  if (linux !== undefined) {
+    await addLinuxAssets({ plan, linux, output });
+  }
   await Bun.write(
     join(output, BOOTSTRAP_ASSET),
-    renderBootstrap(plan.version, digest(join(output, MANAGER_ASSET)))
+    renderBootstrap(
+      plan.version,
+      digest(join(output, MANAGER_ASSET)),
+      linux === undefined ? undefined : linuxManagerDigests(output)
+    )
   );
   await Bun.write(
     join(output, INSTALLER_SUMS),
     await renderChecksums({
       root: output,
       names: [MANAGER_ASSET, BOOTSTRAP_ASSET],
+    })
+  );
+}
+
+/** The digests the installer embeds for the Linux managers in `output`. */
+function linuxManagerDigests(output: string): LinuxManagerDigests {
+  return {
+    "linux-x86_64": digest(join(output, managerAssetName("linux-x86_64"))),
+    "linux-arm64": digest(join(output, managerAssetName("linux-arm64"))),
+  };
+}
+
+/**
+ * A Linux archive must be this release's Compose bundle for `platform`: the
+ * exact member list, checksums that match every member, and metadata naming
+ * the planned version, source revision and platform.
+ */
+function requireLinuxArchive({
+  plan,
+  platform,
+  bytes,
+}: {
+  readonly plan: PrereleasePlan;
+  readonly platform: BundlePlatform;
+  readonly bytes: Uint8Array;
+}) {
+  const entries = archiveEntries(bytes, platform);
+  const identity = bundleMetadata(
+    entries.get("prerelease.json") ?? new Uint8Array(),
+    plan.version,
+    platform
+  );
+  if (identity.source_revision !== plan.source_revision) {
+    throw new Error(
+      `Linux archive for ${platform} was built from another source revision`
+    );
+  }
+}
+
+/** Verify the Linux build jobs' files and place them beside the macOS assets. */
+async function addLinuxAssets({
+  plan,
+  linux,
+  output,
+}: {
+  readonly plan: PrereleasePlan;
+  readonly linux: string;
+  readonly output: string;
+}) {
+  const names = linuxSumsNames(plan.version);
+  if (
+    JSON.stringify((await readdir(linux)).sort()) !==
+    JSON.stringify([...names].sort())
+  ) {
+    throw new Error(
+      "Linux assets must be exactly the two Compose archives and the two Linux managers"
+    );
+  }
+  for (const name of names) {
+    const entry = await lstat(join(linux, name));
+    if (!entry.isFile() || entry.nlink !== 1) {
+      throw new Error(`Linux asset must be a regular file: ${name}`);
+    }
+  }
+  for (const platform of PRERELEASE_LINUX_PLATFORMS) {
+    requireLinuxArchive({
+      plan,
+      platform,
+      bytes: await Bun.file(
+        join(linux, bundleArchiveName(plan.version, platform))
+      ).bytes(),
+    });
+  }
+  for (const name of names) {
+    await copyFile(join(linux, name), join(output, name));
+  }
+  await Bun.write(
+    join(output, LINUX_SUMS),
+    await renderChecksums({ root: output, names })
+  );
+}
+
+/**
+ * The Linux build job's packaging step, run on the platform it packages: check
+ * the bundle `scripts/build-compose-candidate.sh` wrote, archive it and build
+ * that platform's manager. The output directory then holds exactly the archive
+ * and the manager; the macOS job adds them to the release set.
+ */
+export async function packageLinuxPrerelease({
+  plan,
+  bundle,
+  output,
+  platform,
+  buildManager = buildPrereleaseManager,
+}: {
+  readonly plan: PrereleasePlan;
+  readonly bundle: string;
+  readonly output: string;
+  readonly platform: BundlePlatform;
+  readonly buildManager?: (output: string) => Promise<void>;
+}) {
+  if (!composeOnly(platform)) {
+    throw new Error("Linux packaging requires a Linux bundle platform");
+  }
+  if (!(await lstat(bundle)).isDirectory()) {
+    throw new Error("Compose bundle root must be a directory, not an alias");
+  }
+  const expected = [...COMPOSE_PAYLOAD, "SHA256SUMS"].sort();
+  if (
+    JSON.stringify((await readdir(bundle)).sort()) !== JSON.stringify(expected)
+  ) {
+    throw new Error(
+      "Compose prerelease bundle must contain exactly the complete payload and checksums"
+    );
+  }
+  for (const name of expected) {
+    const entry = await lstat(join(bundle, name));
+    if (!entry.isFile() || entry.nlink !== 1) {
+      throw new Error(`Compose bundle payload must be a regular file: ${name}`);
+    }
+    const mode = PAYLOAD_MODES[name];
+    if (mode !== undefined && (entry.mode & 0o7777) !== mode) {
+      throw new Error(`Compose bundle payload has unsafe permissions: ${name}`);
+    }
+  }
+  const metadata = prereleaseMetadata({
+    version: plan.version,
+    sourceRevision: plan.source_revision,
+    base: plan.base,
+    platform,
+  });
+  const actualMetadata: unknown = await Bun.file(
+    join(bundle, "prerelease.json")
+  ).json();
+  if (JSON.stringify(actualMetadata) !== JSON.stringify(metadata)) {
+    throw new Error(
+      "Bundle metadata must match the requested version, revision and platform"
+    );
+  }
+  if (
+    (await Bun.file(join(bundle, "SHA256SUMS")).text()) !==
+    (await renderChecksums({ root: bundle, names: COMPOSE_PAYLOAD }))
+  ) {
+    throw new Error(
+      "Compose bundle checksums do not match its complete payload"
+    );
+  }
+  await mkdir(output, { mode: 0o700 });
+  const archive = join(output, bundleArchiveName(plan.version, platform));
+  await run([
+    "tar",
+    "--format=ustar",
+    "-czf",
+    archive,
+    "-C",
+    bundle,
+    ...COMPOSE_PAYLOAD,
+    "SHA256SUMS",
+  ]);
+  // The installer's own extraction is the acceptance test for the archive.
+  const probe = await mkdtemp(join(tmpdir(), "hack-compose-package-"));
+  try {
+    extractArchive({
+      archive,
+      checksum: digest(archive),
+      destination: join(probe, "bundle"),
+      version: plan.version,
+      platform,
+    });
+  } finally {
+    await rm(probe, { recursive: true, force: true });
+  }
+  await buildManager(join(output, managerAssetName(platform)));
+}
+
+/**
+ * An installer for a Linux build job to install its own package with, before
+ * the release set exists. It is the published script with one difference: only
+ * this host's manager digest is real. The other two are zeros, so it cannot
+ * install on another platform, and it is never a release asset.
+ */
+export async function writeRehearsalInstaller({
+  plan,
+  output,
+  directory,
+  platform = hostBundlePlatform(),
+}: {
+  readonly plan: PrereleasePlan;
+  readonly output: string;
+  readonly directory: string;
+  readonly platform?: BundlePlatform | null;
+}) {
+  if (platform === null || !composeOnly(platform)) {
+    throw new Error("The rehearsal installer is for a Linux build host");
+  }
+  const unknown = "0".repeat(64);
+  const own = digest(join(output, managerAssetName(platform)));
+  await mkdir(directory, { mode: 0o700 });
+  await Bun.write(
+    join(directory, BOOTSTRAP_ASSET),
+    renderBootstrap(plan.version, unknown, {
+      "linux-x86_64": platform === "linux-x86_64" ? own : unknown,
+      "linux-arm64": platform === "linux-arm64" ? own : unknown,
     })
   );
 }
@@ -934,30 +1190,66 @@ export async function renderChecksums({
   return `${lines.join("\n")}\n`;
 }
 
+/** Every asset a release uploads: the macOS set, then the Linux set. */
+export function releaseAssets(plan: PrereleasePlan): string[] {
+  return [...plan.assets, ...plan.linuxAssets];
+}
+
 export async function verifyReleaseAssets({
   plan,
   output,
+  linux = false,
 }: {
   readonly plan: PrereleasePlan;
   readonly output: string;
+  /**
+   * Require the Linux assets too. Publication always does; without it the
+   * directory must hold exactly the macOS set, as a macOS-only package does.
+   */
+  readonly linux?: boolean;
 }) {
+  const assets = linux ? releaseAssets(plan) : plan.assets;
   if (
     JSON.stringify((await readdir(output)).sort()) !==
-    JSON.stringify([...plan.assets].sort())
+    JSON.stringify([...assets].sort())
   ) {
     throw new Error(
       "Expected exactly the candidate and standalone installer release assets"
     );
   }
-  for (const name of plan.assets) {
+  for (const name of assets) {
     const entry = await lstat(join(output, name));
     if (!entry.isFile() || entry.nlink !== 1) {
       throw new Error("Release assets must be regular files");
     }
   }
+  if (linux) {
+    if (
+      (await Bun.file(join(output, LINUX_SUMS)).text()) !==
+      (await renderChecksums({
+        root: output,
+        names: linuxSumsNames(plan.version),
+      }))
+    ) {
+      throw new Error("Linux assets do not match their checksum manifest");
+    }
+    for (const platform of PRERELEASE_LINUX_PLATFORMS) {
+      requireLinuxArchive({
+        plan,
+        platform,
+        bytes: await Bun.file(
+          join(output, bundleArchiveName(plan.version, platform))
+        ).bytes(),
+      });
+    }
+  }
   if (
     (await Bun.file(join(output, BOOTSTRAP_ASSET)).text()) !==
-      renderBootstrap(plan.version, digest(join(output, MANAGER_ASSET))) ||
+      renderBootstrap(
+        plan.version,
+        digest(join(output, MANAGER_ASSET)),
+        linux ? linuxManagerDigests(output) : undefined
+      ) ||
     (await Bun.file(join(output, INSTALLER_SUMS)).text()) !==
       (await renderChecksums({
         root: output,
@@ -1017,6 +1309,21 @@ function env(name: string): string {
   return process.env[name] ?? "";
 }
 
+/** HACK_PRERELEASE_PLATFORM for `metadata`: unset, or one bundle platform. */
+function platformInput(): BundlePlatform | undefined {
+  const value = env("HACK_PRERELEASE_PLATFORM");
+  if (!value) {
+    return;
+  }
+  const platform = BUNDLE_PLATFORMS.find((name) => name === value);
+  if (platform === undefined) {
+    throw new Error(
+      `HACK_PRERELEASE_PLATFORM must be one of ${BUNDLE_PLATFORMS.join(", ")}`
+    );
+  }
+  return platform;
+}
+
 export function githubApi(): Api {
   if (
     env("GITHUB_ACTIONS") !== "true" ||
@@ -1068,7 +1375,7 @@ async function main() {
   const sourceRevision = env("HACK_PRERELEASE_SOURCE_REVISION");
   if (mode === "metadata") {
     process.stdout.write(
-      `${JSON.stringify(prereleaseMetadata({ version, sourceRevision }), null, 2)}\n`
+      `${JSON.stringify(prereleaseMetadata({ version, sourceRevision, platform: platformInput() ?? PRERELEASE_PLATFORM }), null, 2)}\n`
     );
     return;
   }
@@ -1086,10 +1393,34 @@ async function main() {
     );
   }
   if (mode === "package") {
+    // A release always carries the Linux assets; a macOS-only set is for tests.
+    if (!env("HACK_PRERELEASE_LINUX_ASSETS")) {
+      throw new Error(
+        "Packaging requires HACK_PRERELEASE_LINUX_ASSETS, the directory holding the Linux build jobs' archives and managers"
+      );
+    }
     await packagePrerelease({
       plan,
       bundle: resolve(env("HACK_PRERELEASE_BUNDLE")),
       output: resolve(env("HACK_PRERELEASE_OUTPUT")),
+      linux: resolve(env("HACK_PRERELEASE_LINUX_ASSETS")),
+    });
+  } else if (mode === "package-linux") {
+    const platform = hostBundlePlatform();
+    if (platform === null || !composeOnly(platform)) {
+      throw new Error("package-linux runs on Linux x86_64 or arm64");
+    }
+    await packageLinuxPrerelease({
+      plan,
+      bundle: resolve(env("HACK_PRERELEASE_BUNDLE")),
+      output: resolve(env("HACK_PRERELEASE_OUTPUT")),
+      platform,
+    });
+  } else if (mode === "rehearsal-installer") {
+    await writeRehearsalInstaller({
+      plan,
+      output: resolve(env("HACK_PRERELEASE_OUTPUT")),
+      directory: resolve(env("HACK_PRERELEASE_REHEARSAL")),
     });
   } else if (mode === "verify-ci") {
     const { run } = await verifyPrereleaseCi({
@@ -1113,7 +1444,7 @@ async function main() {
     });
     if (mode === "publish") {
       const output = resolve(env("HACK_PRERELEASE_OUTPUT"));
-      await verifyReleaseAssets({ plan, output });
+      await verifyReleaseAssets({ plan, output, linux: true });
       // Exclusive reference creation refuses a tag created since gate verification.
       // Failure retains this tag for inspection; reruns must never replace it.
       await run([
@@ -1132,7 +1463,7 @@ async function main() {
         "release",
         "create",
         plan.tag,
-        ...plan.assets.map((name) => join(output, name)),
+        ...releaseAssets(plan).map((name) => join(output, name)),
         "--repo",
         "hack-dance/hack",
         "--target",
@@ -1148,7 +1479,7 @@ async function main() {
     }
   } else if (mode !== "plan") {
     throw new Error(
-      "Expected plan, metadata, package, verify-ci, verify, publish, or stable"
+      "Expected plan, metadata, package, package-linux, rehearsal-installer, verify-ci, verify, publish, or stable"
     );
   }
   process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);

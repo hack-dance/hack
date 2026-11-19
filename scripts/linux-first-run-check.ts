@@ -13,6 +13,17 @@
  * Usage:
  *   bun scripts/linux-first-run-check.ts --hack /abs/dist/hack --scratch /abs/new/dir \
  *     [--one-shot-seconds 150] [--reuse-global-stack] [--keep]
+ *   bun scripts/linux-first-run-check.ts --installer /abs/hack-next-install.sh --scratch /abs/new/dir \
+ *     [--archive /abs/bundle.tar.gz --sha256 DIGEST] [--manager /abs/hack-next-manager-linux-ARCH] ...
+ *
+ * Installer mode (HACK-2364) installs a v5 prerelease through its rendered
+ * installer into the fresh HOME first, then runs the same steps through
+ * `~/.hack-next/bin/hack-next`. It adds: the installer refusing an unsupported
+ * architecture, the install itself, `--manager status`, `stable`, `rollback`
+ * and `uninstall`, and what the uninstall leaves on disk. `--archive/--sha256`
+ * and `--manager` install local files (the installer still checks the manager
+ * against its embedded digest); without them it downloads the published
+ * release.
  *
  * Ownership: the global proxy and logging stacks have fixed Compose names
  * (`hack-dev-proxy`, `hack-logging`) and the `hack-dev` network, so HOME does
@@ -26,13 +37,14 @@
  * `hack` are dropped, so re-invocations run the CLI under test.
  *
  * Root steps (Linux DNS, system trust) are never run; the check records the
- * codes Hack reports for them. Not covered: published-artifact install,
- * systemd user services, browsers, rootless Docker.
+ * codes Hack reports for them. Not covered: systemd user services, browsers,
+ * rootless Docker; with `--hack`, no install is exercised.
  */
 import { randomBytes } from "node:crypto";
 import { accessSync, constants, statSync } from "node:fs";
 import { chmod, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
+import { LINUX_INSTALLED_NOTE } from "./installer/bootstrap.ts";
 
 export type StepResult = "pass" | "fail" | "info";
 
@@ -45,21 +57,38 @@ export type StepRecord = {
   readonly note: string;
 };
 
+/** Installer mode: the rendered `hack-next-install.sh` and its optional local inputs. */
+export type InstallerInput = {
+  readonly path: string;
+  readonly archive?: string;
+  readonly sha256?: string;
+  readonly manager?: string;
+};
+
 export type CheckOptions = {
+  /** The CLI under test; in installer mode, the `hack-next` the install creates. */
   readonly hack: string;
   readonly scratch: string;
   readonly oneShotSeconds: number;
   readonly reuseGlobalStack: boolean;
   readonly keep: boolean;
+  /** Present only in installer mode. */
+  readonly installer?: InstallerInput;
 };
 
 const USAGE =
-  "Usage: bun scripts/linux-first-run-check.ts --hack /abs/hack --scratch /abs/new/dir [--one-shot-seconds N] [--reuse-global-stack] [--keep]";
+  "Usage: bun scripts/linux-first-run-check.ts (--hack /abs/hack | --installer /abs/hack-next-install.sh [--archive /abs/archive --sha256 DIGEST] [--manager /abs/manager]) --scratch /abs/new/dir [--one-shot-seconds N] [--reuse-global-stack] [--keep]";
+
+/** Where installer mode installs: the installer's default root in the check's HOME. */
+export function installedLauncher(scratch: string): string {
+  return join(scratch, "home", ".hack-next", "bin", "hack-next");
+}
 
 /** Parses argv; throws with the usage text on anything unexpected. */
 export function parseCheckArgs(argv: readonly string[]): CheckOptions {
   let hack: string | null = null;
   let scratch: string | null = null;
+  const installer: Record<string, string | undefined> = {};
   let oneShotSeconds = 150;
   let reuseGlobalStack = false;
   let keep = false;
@@ -73,6 +102,13 @@ export function parseCheckArgs(argv: readonly string[]): CheckOptions {
         break;
       case "--scratch":
         scratch = value ?? null;
+        i++;
+        break;
+      case "--installer":
+      case "--archive":
+      case "--sha256":
+      case "--manager":
+        installer[arg.slice(2)] = value ?? "";
         i++;
         break;
       case "--one-shot-seconds":
@@ -89,6 +125,13 @@ export function parseCheckArgs(argv: readonly string[]): CheckOptions {
         throw new Error(`Unknown argument ${String(arg)}. ${USAGE}`);
     }
   }
+  const installerInput = installerOptions(installer);
+  if (installerInput !== undefined && hack !== null) {
+    throw new Error(`Use --hack or --installer, not both. ${USAGE}`);
+  }
+  if (installerInput !== undefined && scratch && isAbsolute(scratch)) {
+    hack = installedLauncher(scratch);
+  }
   if (!(hack && isAbsolute(hack) && scratch && isAbsolute(scratch))) {
     throw new Error(`--hack and --scratch must be absolute paths. ${USAGE}`);
   }
@@ -101,7 +144,47 @@ export function parseCheckArgs(argv: readonly string[]): CheckOptions {
       `--one-shot-seconds must be 1..1500 (the start ceiling is 30 minutes). ${USAGE}`
     );
   }
-  return { hack, scratch, oneShotSeconds, reuseGlobalStack, keep };
+  return {
+    hack,
+    scratch,
+    oneShotSeconds,
+    reuseGlobalStack,
+    keep,
+    ...(installerInput === undefined ? {} : { installer: installerInput }),
+  };
+}
+
+/** Validates the installer-mode flags; undefined when none was given. */
+function installerOptions(
+  raw: Readonly<Record<string, string | undefined>>
+): InstallerInput | undefined {
+  if (Object.keys(raw).length === 0) {
+    return;
+  }
+  const { installer, archive, sha256, manager } = raw;
+  if (!(installer && isAbsolute(installer))) {
+    throw new Error(
+      `--archive, --sha256 and --manager need --installer with an absolute path. ${USAGE}`
+    );
+  }
+  if ((archive === undefined) !== (sha256 === undefined)) {
+    throw new Error(`--archive and --sha256 go together. ${USAGE}`);
+  }
+  if (
+    (archive !== undefined && !isAbsolute(archive)) ||
+    (manager !== undefined && !isAbsolute(manager)) ||
+    (sha256 !== undefined && !/^[0-9a-f]{64}$/.test(sha256))
+  ) {
+    throw new Error(
+      `--archive and --manager must be absolute paths and --sha256 a lowercase SHA-256. ${USAGE}`
+    );
+  }
+  return {
+    path: installer,
+    ...(archive === undefined ? {} : { archive }),
+    ...(sha256 === undefined ? {} : { sha256 }),
+    ...(manager === undefined ? {} : { manager }),
+  };
 }
 
 /** How many JSON values `text` holds (one per line or one document), or null if any part does not parse. */
@@ -922,12 +1005,15 @@ async function foregroundInterrupt(run: FirstRun): Promise<void> {
   if (exit === null) {
     proc.kill("SIGKILL");
   }
+  // `hack-next up` is a launcher, its manager and the bundle's CLI: all three
+  // run from the channel root, so any process naming it is a leftover.
   const leftover = await run.sh([
     "pgrep",
     "-u",
     String(process.getuid?.() ?? 0),
-    "-xf",
-    `${run.opts.hack} up`,
+    ...(run.opts.installer === undefined
+      ? ["-xf", `${run.opts.hack} up`]
+      : ["-f", `^${escapeRegExp(join(run.home, ".hack-next"))}/.* up$`]),
   ]);
   const running = (
     await run.sh([
@@ -951,6 +1037,224 @@ async function foregroundInterrupt(run: FirstRun): Promise<void> {
         ? "pass"
         : "fail",
     note: `worker reached ${state || "nothing"}; ${leftover.exit === 1 ? "no hack process left" : "hack process left"}; ${running === "" ? "containers stopped" : "containers still running"}`,
+  });
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Records one installer or manager command of installer mode. */
+async function installerStep(
+  run: FirstRun,
+  opts: {
+    readonly step: string;
+    readonly display: string;
+    readonly argv: readonly string[];
+    readonly env?: Record<string, string>;
+    readonly check: (ran: Ran) => {
+      readonly ok: boolean;
+      readonly note: string;
+    };
+  }
+): Promise<Ran> {
+  const ran = await runProcess({
+    argv: opts.argv,
+    env: { ...run.env, ...opts.env },
+    cwd: run.opts.scratch,
+    timeoutMs: 1_800_000,
+  });
+  const verdict = opts.check(ran);
+  run.record({
+    step: opts.step,
+    command: opts.display,
+    exit: ran.exit,
+    seconds: ran.seconds,
+    result: verdict.ok ? "pass" : "fail",
+    note: verdict.note,
+  });
+  return ran;
+}
+
+/** The `selected` field of a manager status line, or undefined if it is not one. */
+function selectedVersion(stdout: string): string | null | undefined {
+  try {
+    const value = JSON.parse(stdout.trim().split("\n").at(-1) ?? "") as {
+      selected?: unknown;
+    };
+    return typeof value.selected === "string" || value.selected === null
+      ? value.selected
+      : undefined;
+  } catch {
+    return;
+  }
+}
+
+/**
+ * Installer mode, before any Hack command: the installer must refuse an
+ * architecture with no bundle without touching HOME, then install under HOME
+ * with no sudo and say that the native backend is macOS only.
+ */
+async function installFlow(
+  run: FirstRun,
+  installer: InstallerInput
+): Promise<boolean> {
+  const root = join(run.home, ".hack-next");
+  const fakeBin = join(run.opts.scratch, "tmp", "fake-uname");
+  await mkdir(fakeBin, { mode: 0o700 });
+  await writeFile(
+    join(fakeBin, "uname"),
+    '#!/bin/sh\ncase "${1-}" in -s) echo Linux ;; -m) echo riscv64 ;; *) echo Linux ;; esac\n',
+    { mode: 0o755 }
+  );
+  await installerStep(run, {
+    step: "1 installer refuses an unsupported architecture",
+    display: "sh hack-next-install.sh (uname -m = riscv64)",
+    argv: ["sh", installer.path],
+    env: { PATH: `${fakeBin}:${run.env.PATH ?? ""}` },
+    check: (r) => {
+      const named = r.stderr.includes("Linux x86_64 or arm64");
+      const untouched = !pathExists(root);
+      return {
+        ok: r.exit !== 0 && named && untouched,
+        note: `${named ? "names the supported platforms" : "does not name the supported platforms"}; ${untouched ? "nothing installed" : "~/.hack-next was created"}`,
+      };
+    },
+  });
+  await rm(fakeBin, { recursive: true, force: true });
+  const local = [
+    ...(installer.archive === undefined
+      ? []
+      : ["--archive", installer.archive, "--sha256", installer.sha256 ?? ""]),
+    ...(installer.manager === undefined
+      ? []
+      : ["--manager", installer.manager]),
+  ];
+  const install = await installerStep(run, {
+    step: "1 install through the installer",
+    display: `sh hack-next-install.sh${installer.archive === undefined ? "" : " --archive <archive> --sha256 <digest>"}${installer.manager === undefined ? "" : " --manager <manager>"}`,
+    argv: ["sh", installer.path, ...local],
+    check: (r) => {
+      const noted = r.stdout.includes(LINUX_INSTALLED_NOTE);
+      return {
+        ok: r.exit === 0 && noted && executableFile(run.opts.hack),
+        note:
+          r.exit === 0
+            ? `installed under ~/.hack-next without sudo; ${noted ? "says the native backend is macOS only" : "does NOT say the native backend is macOS only"}`
+            : firstError(r),
+      };
+    },
+  });
+  if (install.exit !== 0) {
+    return false;
+  }
+  await installerStep(run, {
+    step: "1 hack-next --manager status",
+    display: "hack-next --manager status",
+    argv: [run.opts.hack, "--manager", "status"],
+    check: (r) => {
+      const selected = selectedVersion(r.stdout);
+      return {
+        ok: r.exit === 0 && typeof selected === "string",
+        note:
+          typeof selected === "string"
+            ? `selected ${selected}`
+            : "no selected version reported",
+      };
+    },
+  });
+  return true;
+}
+
+function pathExists(path: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Installer mode, after the Hack steps: deselect, roll back to the candidate,
+ * then uninstall and record what is left under HOME.
+ */
+async function managerFlow(run: FirstRun): Promise<void> {
+  const manager = (args: readonly string[]) => [
+    run.opts.hack,
+    "--manager",
+    ...args,
+  ];
+  const before = selectedVersion((await run.sh(manager(["status"]))).stdout);
+  await installerStep(run, {
+    step: "10 hack-next --manager stable",
+    display: "hack-next --manager stable",
+    argv: manager(["stable"]),
+    check: (r) => ({
+      ok: r.exit === 0 && selectedVersion(r.stdout) === null,
+      note:
+        selectedVersion(r.stdout) === null
+          ? "no candidate selected; bundle kept"
+          : firstError(r),
+    }),
+  });
+  await installerStep(run, {
+    step: "10 hack-next with nothing selected",
+    display: "hack-next --version",
+    argv: [run.opts.hack, "--version"],
+    check: (r) => ({
+      ok: r.exit !== 0 && r.stderr.includes("No candidate selected"),
+      note: r.exit === 0 ? "ran a deselected candidate" : firstError(r),
+    }),
+  });
+  await installerStep(run, {
+    step: "10 hack-next --manager rollback",
+    display: "hack-next --manager rollback",
+    argv: manager(["rollback"]),
+    check: (r) => ({
+      ok: r.exit === 0 && selectedVersion(r.stdout) === before,
+      note:
+        selectedVersion(r.stdout) === before
+          ? `selected ${String(before)} again`
+          : firstError(r),
+    }),
+  });
+  await installerStep(run, {
+    step: "10 hack-next --manager uninstall (preview)",
+    display: "hack-next --manager uninstall",
+    argv: manager(["uninstall"]),
+    check: (r) => ({
+      ok:
+        r.exit === 0 &&
+        r.stdout.includes('"applied":false') &&
+        executableFile(run.opts.hack),
+      note: "preview only; channel unchanged",
+    }),
+  });
+  await installerStep(run, {
+    step: "10 hack-next --manager uninstall --apply",
+    display: "hack-next --manager uninstall --apply",
+    argv: manager(["uninstall", "--apply"]),
+    check: (r) => ({
+      ok: r.exit === 0 && r.stdout.includes('"applied":true'),
+      note: r.exit === 0 ? "channel moved aside" : firstError(r),
+    }),
+  });
+  const left = (await readdir(run.home).catch(() => [])).filter((name) =>
+    name.startsWith(".hack-next")
+  );
+  const retained = left.filter((name) =>
+    /^\.hack-next\.uninstalled-[0-9a-f]{32}(\.json)?$/.test(name)
+  );
+  run.record({
+    step: "10 left on disk after uninstall",
+    command: "ls -a ~ | grep .hack-next",
+    exit: null,
+    result:
+      !left.includes(".hack-next") && retained.length === 2 && left.length === 2
+        ? "pass"
+        : "fail",
+    note: `~/.hack-next ${left.includes(".hack-next") ? "still present" : "gone"}; kept ${retained.length === 2 ? "one retained channel directory and its rollback manifest" : left.join(", ") || "nothing"}`,
   });
 }
 
@@ -1077,10 +1381,6 @@ async function cleanup(run: FirstRun): Promise<void> {
     result: "info",
     note: `removed ${removed.length} volumes/networks it created; global stack ${stack}${removesGlobalVolumes ? " and its volumes removed" : ""}; ~/.hack holds ${left.length} entries${run.opts.keep ? " (kept)" : ""}`,
   });
-  if (!run.opts.keep) {
-    await rm(run.home, { recursive: true, force: true });
-    await rm(run.repo, { recursive: true, force: true });
-  }
 }
 
 export async function main(argv: readonly string[]): Promise<number> {
@@ -1096,10 +1396,14 @@ export async function main(argv: readonly string[]): Promise<number> {
   await chmod(run.home, 0o700);
   await mkdir(join(opts.scratch, "tmp"), { mode: 0o700 });
   await mkdir(run.repo, { mode: 0o700 });
+  const installed =
+    opts.installer === undefined
+      ? true
+      : await installFlow(run, opts.installer).catch(() => false);
   const version = await run.hack(["--version"]).catch(() => null);
   run.record({
     step: "1 version",
-    command: "hack --version",
+    command: `${opts.installer === undefined ? "hack" : "hack-next"} --version`,
     exit: version?.exit ?? null,
     seconds: version?.seconds,
     result: version?.exit === 0 ? "info" : "fail",
@@ -1123,6 +1427,14 @@ export async function main(argv: readonly string[]): Promise<number> {
       run.steps.some((s) => s.step === "0 preflight" && s.result !== "fail")
     ) {
       await cleanup(run);
+    }
+    // Last: the uninstall moves the channel, and with it the CLI under test.
+    if (opts.installer !== undefined && installed && version?.exit === 0) {
+      await managerFlow(run);
+    }
+    if (!opts.keep) {
+      await rm(run.home, { recursive: true, force: true });
+      await rm(run.repo, { recursive: true, force: true });
     }
   }
   const table = renderStepTable(run.steps);

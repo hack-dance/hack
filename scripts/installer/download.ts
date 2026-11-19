@@ -6,8 +6,14 @@ import {
 } from "../../src/lib/release-transfer.ts";
 import { TransferBudget } from "../../src/lib/release-transfer-budget.ts";
 import {
+  type BundlePlatform,
+  bundleArchiveName,
   checksums,
+  composeOnly,
+  DEFAULT_BUNDLE_PLATFORM,
+  LINUX_BUNDLE_PLATFORMS,
   MAX_ARCHIVE,
+  managerAssetName,
   metadata,
   object,
   parseJson,
@@ -56,14 +62,30 @@ export async function download(
     }
   }
 }
+/**
+ * The release asset that lists the Linux archives and managers. It is a
+ * separate file because every published macOS manager parses `SHA256SUMS`
+ * expecting exactly its own archive line and refuses any other.
+ */
+export const LINUX_SUMS = "SHA256SUMS-linux";
+/** The exact entries of `SHA256SUMS-linux`, in file order. */
+export function linuxSumsNames(version: string): string[] {
+  return [
+    ...LINUX_BUNDLE_PLATFORMS.map((platform) =>
+      bundleArchiveName(version, platform)
+    ),
+    ...LINUX_BUNDLE_PLATFORMS.map((platform) => managerAssetName(platform)),
+  ];
+}
 /** The five official downloads share one monotonic total budget, plus bounded cancellation grace. */
 export async function officialArchive(
   stage: string,
   version: string,
-  budget = new TransferBudget()
+  budget = new TransferBudget(),
+  platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
 ) {
   try {
-    return await officialArchiveWithinBudget(stage, version, budget);
+    return await officialArchiveWithinBudget(stage, version, budget, platform);
   } finally {
     budget.close();
   }
@@ -71,7 +93,8 @@ export async function officialArchive(
 async function officialArchiveWithinBudget(
   stage: string,
   version: string,
-  budget: TransferBudget
+  budget: TransferBudget,
+  platform: BundlePlatform
 ) {
   const transfer = (url: string, target: string, limit: number) =>
     download(url, target, limit, budget);
@@ -91,8 +114,9 @@ async function officialArchiveWithinBudget(
       Array.isArray(release.assets),
     "Expected a published, pinned official prerelease."
   );
-  const name = `hack-${version}-darwin-arm64-native.tar.gz`;
-  const wanted = [name, "SHA256SUMS", "prerelease.json"];
+  const name = bundleArchiveName(version, platform);
+  const sums = composeOnly(platform) ? LINUX_SUMS : "SHA256SUMS";
+  const wanted = [name, sums, "prerelease.json"];
   const selected = new Map<string, string>();
   for (const raw of release.assets) {
     const asset = object(raw);
@@ -141,16 +165,16 @@ async function officialArchiveWithinBudget(
       commit.sha === identity.source_revision,
     "Official prerelease tag does not match its source revision."
   );
-  await transfer(
-    get("SHA256SUMS"),
-    join(stage, "release-checksums"),
-    64 * 1024
-  );
-  const checksum = checksums(readFileSync(join(stage, "release-checksums")), [
-    name,
-  ])[name];
+  await transfer(get(sums), join(stage, "release-checksums"), 64 * 1024);
+  const checksum = checksums(
+    readFileSync(join(stage, "release-checksums")),
+    composeOnly(platform) ? linuxSumsNames(version) : [name]
+  )[name];
   requireThat(checksum, "Missing archive checksum.");
   const archive = join(stage, name);
   await transfer(get(name), archive, MAX_ARCHIVE);
-  return { archive, checksum, releaseMetadata: identity };
+  // The release-level prerelease.json keeps its published shape and names the
+  // macOS platform. A Linux archive must match it in everything else: version,
+  // tag and the source revision the tag was just checked against.
+  return { archive, checksum, releaseMetadata: { ...identity, platform } };
 }

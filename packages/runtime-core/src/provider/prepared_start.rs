@@ -257,6 +257,20 @@ pub(super) fn verify(
     )
 }
 
+/// The stock template directory, when this pool's unadopted disks were cloned from stock
+/// templates rather than an activated prepared base (which keeps its own recovery).
+pub(super) fn stock_templates(
+    candidate: &Candidate,
+    owner: &Owner,
+    lock: &state::Lock,
+) -> Result<Option<PathBuf>, CandidateError> {
+    with_target(candidate, owner, lock, |target| {
+        Ok(ActivationRecord::load(target)?
+            .is_none()
+            .then(|| root(candidate).join(TEMPLATE_DIR)))
+    })
+}
+
 /// Hook 3: after the first start's disks are adopted, remove the activated templates. Never
 /// fails the boot: a refusal is recorded for status and retried at the next boot.
 pub(super) fn after_adoption(candidate: &Candidate, owner: &Owner, lock: &state::Lock) {

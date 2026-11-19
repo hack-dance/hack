@@ -794,6 +794,11 @@ home or `.hack-local` directory; from that checkout run `./hack-local runtime re
 Provider-verification failures during the wait carry this guidance too; recovery still
 independently proves ownership before stopping anything. Then retry. This preserves
 retained disks and records an unclean stop; it does not claim the guest shut down cleanly.
+One exception: if the failed start was the pool's first and the disk templates it used do
+not verify (`disk_template_untrusted`, for example after a first start ended in
+`provider_timeout_uncertain`), recovery moves the never-adopted disks and the failed
+templates into an `untrusted-first-boot-<n>` directory instead and returns the pool to
+`stopped-before-engine`. The next start formats new disks. Those disks never held project data, and nothing is deleted.
 `hack down` may say the project was not started because no project mapping was published.
 
 Host cleanup or a reboot can still remove the alias. For a clean stop, observation

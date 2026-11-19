@@ -628,7 +628,16 @@ cloned. SmolVM expands and clones within one start, so a first-start expansion i
 after the guest has booted from it. Size, owner and mode checks are not integrity; the content
 digest is. A mismatch refuses with `disk_template_untrusted` and changes no files. Before a start,
 removing the refused file lets SmolVM re-expand it from the verified compressed template. After a
-start, the boot is stopped as a failed boot without adopting its disks and needs manual recovery.
+start, the boot is stopped as a failed boot without adopting its disks. `runtime recover --json`
+then proves the provider stopped and idle, takes the VM lock with the disk handles closed, and
+renames the unadopted `storage.raw` and `overlay.raw`, plus any owned expanded template that
+failed, into an `untrusted-first-boot-<n>` directory beside each. It deletes nothing and keeps
+the compressed templates, and it returns the pool to `stopped-before-engine`, so the next start
+expands and clones again and verifies before adoption. Those disks were never adopted, so they
+held no project data. Adopted disks, a prepared-base activation, and a template that is
+hard-linked, foreign-owned, group/world-writable or not a regular file still refuse with
+nothing moved (HACK-2376). This also covers a first start cut off by the provider timeout
+(`provider_timeout_uncertain`). Repeating recovery on the resulting pool changes nothing.
 
 Guest control readiness does not mean exposed bridge sockets have bound. The pinned
 [SmolVM 1.35.4 guest](https://github.com/smol-machines/smolvm/blob/v1.35.4/crates/smolvm-agent/src/main.rs#L664)

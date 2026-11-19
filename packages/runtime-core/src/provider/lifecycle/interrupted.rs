@@ -21,16 +21,26 @@
 //! every path first requires that no process executes this candidate's provider binary; the
 //! pool lock keeps a new one from starting meanwhile. Recovery never adopts disks: a start that
 //! never adopted them leaves them unadopted, so the next boot's template, size and format checks
-//! decide. Everything else without a recorded process still refuses for manual inspection.
+//! decide. One exception (HACK-2376): when the templates that start cloned from fail
+//! verification after it (for example, a start cut off while SmolVM expanded them), the
+//! unadopted disks and the owned failed templates are renamed into an
+//! `untrusted-first-boot-<n>` directory and the pool returns to `stopped-before-engine`, so the
+//! next start expands and clones them again from the verified compressed templates. Everything else without a recorded process still refuses for manual inspection.
 //! Nothing unowned is adopted, stopped or removed.
-use super::super::{config_audit, disk_template::Stage, identity, state};
+use super::super::state::io;
+use super::super::{
+    config_audit,
+    disk_template::{self, Stage},
+    identity, prepared_start, state,
+};
 use super::{
-    Owner, binary, finish_absent, invoke, recorded_process, stop_verified_provider,
-    verify_templates,
+    Owner, binary, finish_absent, invoke, lock_absent_disks, phase, recorded_process,
+    sockets_absent, stop_verified_provider, verify_templates,
 };
 use crate::{Candidate, CandidateError};
 use std::fs;
 use std::io::ErrorKind;
+use std::path::Path;
 
 fn unrecoverable() -> CandidateError {
     CandidateError::new(
@@ -49,6 +59,9 @@ pub(super) fn recover(
         ("creating", false) => recover_create(candidate, owner),
         // `created` is saved before the start's admission, so `creating` may already hold it.
         ("creating" | "booting", true) => recover_start(candidate, owner, lock),
+        // What recovery itself leaves when nothing was launched or the unadopted disks were set
+        // aside: nothing ran, so repeating recovery changes nothing.
+        ("stopped-before-engine", _) => Ok(()),
         _ => Err(unrecoverable()),
     }
 }
@@ -140,15 +153,103 @@ fn recover_start(
         }
         // The record may be stale (a previous boot's) while an orphaned start is still running.
         provider_idle(candidate)?;
-        verify_templates(candidate, owner, lock, Stage::AfterFirstStart)?;
+        let untrusted = untrusted_first_start(candidate, owner, lock)?;
         owner.process = Some(process);
         owner.save(candidate)?;
-        return finish_absent(candidate, owner, "recovered-unclean", false);
+        return finish(candidate, owner, untrusted);
     }
     // The provider launched and exited, removing its PID record.
     provider_idle(candidate)?;
-    verify_templates(candidate, owner, lock, Stage::AfterFirstStart)?;
-    finish_absent(candidate, owner, "recovered-unclean", false)
+    let untrusted = untrusted_first_start(candidate, owner, lock)?;
+    finish(candidate, owner, untrusted)
+}
+
+/// Verify the templates the interrupted first start cloned from (`Stage::AfterFirstStart`).
+/// `Ok(None)`: verified. `Ok(Some(dir))`: refused, but the disks were never adopted and came
+/// from the stock templates in `dir`, so recovery may set them aside. Every other refusal,
+/// including any adopted disk or a prepared-base activation, is returned unchanged.
+fn untrusted_first_start(
+    candidate: &Candidate,
+    owner: &Owner,
+    lock: &state::Lock,
+) -> Result<Option<std::path::PathBuf>, CandidateError> {
+    let Err(error) = verify_templates(candidate, owner, lock, Stage::AfterFirstStart) else {
+        return Ok(None);
+    };
+    if error.code != "disk_template_untrusted" || owner.storage.is_some() || owner.overlay.is_some()
+    {
+        return Err(error);
+    }
+    match prepared_start::stock_templates(candidate, owner, lock)? {
+        Some(directory) => Ok(Some(directory)),
+        None => Err(error),
+    }
+}
+
+fn finish(
+    candidate: &Candidate,
+    owner: &mut Owner,
+    untrusted: Option<std::path::PathBuf>,
+) -> Result<(), CandidateError> {
+    match untrusted {
+        None => finish_absent(candidate, owner, "recovered-unclean", false),
+        Some(templates) => set_aside(candidate, owner, &templates),
+    }
+}
+
+/// Set aside the unadopted disks of a first start whose templates did not verify, and the
+/// owned templates that failed, then return the pool to `stopped-before-engine` (HACK-2376).
+///
+/// Runs only after the provider was proven stopped and idle, under the VM lock with the disk
+/// handles proven closed and the owned sockets absent, as an unclean stop does. Those disks were
+/// never adopted, so they never held project data (graph start needs `running`). Nothing is
+/// deleted: each file is renamed into an `untrusted-first-boot-<n>` directory beside it, for
+/// inspection. The verified compressed templates stay, so the next start expands the templates
+/// again and clones new disks, and verifies them before adoption as every first start does.
+fn set_aside(
+    candidate: &Candidate,
+    owner: &mut Owner,
+    templates: &Path,
+) -> Result<(), CandidateError> {
+    let failed = disk_template::owned_unverified(templates)?;
+    let vm_lock = lock_absent_disks(candidate, owner)?;
+    sockets_absent(owner)?;
+    let label = format!(
+        "untrusted-first-boot-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| unrecoverable())?
+            .as_nanos()
+    );
+    move_into(
+        &owner.real_data_dir(candidate)?,
+        &label,
+        &["storage.raw", "overlay.raw"],
+    )?;
+    move_into(templates, &label, &failed)?;
+    #[cfg(target_os = "macos")]
+    super::interactive_session::after_boot_stopped(candidate, owner);
+    owner.process = None;
+    phase(candidate, owner, "stopped-before-engine")?;
+    drop(vm_lock);
+    Ok(())
+}
+
+/// Rename each of `names` from `directory` into the new private `directory/label`, then make
+/// both directories durable. Same file system, so each rename is atomic.
+fn move_into(directory: &Path, label: &str, names: &[&str]) -> Result<(), CandidateError> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    let aside = directory.join(label);
+    state::private_directory(&aside)?;
+    for name in names {
+        fs::rename(directory.join(name), aside.join(name)).map_err(io)?;
+    }
+    for path in [&aside, &directory.to_path_buf()] {
+        fs::File::open(path).map_err(io)?.sync_all().map_err(io)?;
+    }
+    Ok(())
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -316,6 +417,133 @@ mod tests {
             recording.storage.is_none(),
             "E_TEST_RECORDING_REFUSED_EARLY"
         );
+    }
+
+    #[test]
+    fn a_first_start_with_unverified_templates_sets_its_unadopted_disks_aside() {
+        // Same isolation reason as the unclean-stop fixture: the host-wide disk-handle scan.
+        use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
+        run_isolated(
+            "provider::lifecycle::interrupted::tests::untrusted_first_start_child",
+            ISOLATED_HANG_GUARD,
+        );
+    }
+
+    /// Write a sparse file of the pinned template's size whose content differs from the pin.
+    fn wrong_template(directory: &std::path::Path, name: &str, len: u64) {
+        use std::os::unix::fs::{FileExt, PermissionsExt};
+        state::private_directory(directory).unwrap();
+        let file = fs::File::create(directory.join(name)).unwrap();
+        file.write_all_at(b"partial", 0).unwrap();
+        file.set_len(len).unwrap();
+        fs::set_permissions(directory.join(name), fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
+    #[ignore = "isolated release-check fixture launched by a_first_start_with_unverified_templates_sets_its_unadopted_disks_aside"]
+    fn untrusted_first_start_child() {
+        let pinned = crate::provider::disk_template::PINNED;
+        // (a) the expansion never finished, so no template is present;
+        // (b) a wrong overlay template is present beside a missing storage one.
+        for (index, wrong) in [false, true].into_iter().enumerate() {
+            let pool = Pool::new(&format!("untrusted-{index}"));
+            let mut owner = pool.owner("booting", true, false);
+            pool.disks(&owner, &["storage.raw", "overlay.raw", "vm.lock"]);
+            let data = owner.real_data_dir(&pool.candidate).unwrap();
+            fs::write(data.join("name"), "fixture\n").unwrap();
+            let templates = root(&pool.candidate).join("home/.smolvm");
+            state::private_directory(&root(&pool.candidate).join("home")).unwrap();
+            state::private_directory(&templates).unwrap();
+            fs::write(
+                templates.join("overlay-template.ext4.zst"),
+                b"verified input",
+            )
+            .unwrap();
+            if wrong {
+                wrong_template(&templates, pinned[1].name, pinned[1].logical_len);
+            }
+            pool.recover(&mut owner).unwrap();
+            assert_eq!(owner.phase, "stopped-before-engine", "case {index}");
+            assert!(
+                owner.process.is_none() && owner.storage.is_none(),
+                "case {index}"
+            );
+            let saved: serde_json::Value = serde_json::from_slice(
+                &fs::read(root(&pool.candidate).join("owner.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved["phase"], "stopped-before-engine", "case {index}");
+            // Nothing deleted: the disks and the wrong template moved aside, the input stayed.
+            let aside = |directory: &std::path::Path| {
+                let mut found = fs::read_dir(directory)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| {
+                        path.file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .starts_with("untrusted-first-boot-")
+                    })
+                    .collect::<Vec<_>>();
+                found.sort();
+                found
+            };
+            let disks = aside(&data);
+            assert_eq!(disks.len(), 1, "case {index}");
+            assert!(disks[0].join("storage.raw").exists() && disks[0].join("overlay.raw").exists());
+            assert!(!data.join("storage.raw").exists() && !data.join("overlay.raw").exists());
+            assert!(templates.join("overlay-template.ext4.zst").exists());
+            let moved = aside(&templates);
+            if wrong {
+                assert!(moved[0].join(pinned[1].name).exists(), "case {index}");
+                assert!(!templates.join(pinned[1].name).exists(), "case {index}");
+            } else {
+                assert!(moved.is_empty(), "case {index}");
+            }
+            // The returned state is the never-launched one: a second recovery changes nothing.
+            pool.recover(&mut owner).unwrap();
+            assert_eq!(owner.phase, "stopped-before-engine", "case {index}");
+            assert_eq!(aside(&data).len(), 1, "case {index}");
+        }
+    }
+
+    #[test]
+    fn unverified_templates_never_move_adopted_or_foreign_files() {
+        let pinned = crate::provider::disk_template::PINNED;
+        // Adopted disks are pinned by identity: a template mismatch there is not set aside.
+        // (Unreachable through `verify_templates`, which skips adopted pools, so this
+        // checks the guard directly.)
+        let pool = Pool::new("adopted-untrusted");
+        let owner = pool.owner("booting", true, true);
+        let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
+        assert_eq!(
+            untrusted_first_start(&pool.candidate, &owner, &lock).unwrap(),
+            None
+        );
+        drop(lock);
+        // A template that may not be ours (hard-linked) refuses before anything moves.
+        let pool = Pool::new("foreign-template");
+        let mut owner = pool.owner("booting", true, false);
+        pool.disks(&owner, &["storage.raw", "overlay.raw", "vm.lock"]);
+        let templates = root(&pool.candidate).join("home/.smolvm");
+        state::private_directory(&root(&pool.candidate).join("home")).unwrap();
+        wrong_template(&templates, pinned[0].name, pinned[0].logical_len);
+        fs::hard_link(
+            templates.join(pinned[0].name),
+            templates.join("second-link"),
+        )
+        .unwrap();
+        let error = pool.recover(&mut owner).unwrap_err();
+        assert_eq!(error.code, "disk_template_untrusted");
+        assert!(
+            error.message.contains("is hard-linked"),
+            "{}",
+            error.message
+        );
+        assert_eq!(owner.phase, "booting");
+        let data = owner.real_data_dir(&pool.candidate).unwrap();
+        assert!(data.join("storage.raw").exists() && templates.join(pinned[0].name).exists());
+        assert!(!root(&pool.candidate).join("owner.json").exists());
     }
 
     #[test]

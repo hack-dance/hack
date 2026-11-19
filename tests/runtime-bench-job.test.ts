@@ -9,6 +9,7 @@ import {
   parseJobPoll,
   parsePhysFootprintBytes,
 } from "../scripts/lib/runtime-bench-job.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 
 const fixture = join(
   import.meta.dir,
@@ -26,7 +27,7 @@ describe.skipIf(process.platform !== "linux")("in a shell", () => {
       await Bun.sleep(100);
       result = parseJobPoll(
         id,
-        Bun.spawnSync(jobPollArgv(id)).stdout.toString()
+        spawnSyncBounded(jobPollArgv(id), { timeout: 10_000 }).stdout.toString()
       );
     }
     return result;
@@ -36,7 +37,9 @@ describe.skipIf(process.platform !== "linux")("in a shell", () => {
     const id = "aaaaaaaa";
     // No newline ends either stream.
     const command = ["sh", "-c", "printf out; printf err >&2; exit 7"];
-    expect(Bun.spawnSync(jobStartArgv(id, command)).exitCode).toBe(0);
+    expect(
+      spawnSyncBounded(jobStartArgv(id, command), { timeout: 10_000 }).exitCode
+    ).toBe(0);
     expect(await finish(id)).toMatchObject({
       exitCode: 7,
       stdout: "out",
@@ -48,7 +51,9 @@ describe.skipIf(process.platform !== "linux")("in a shell", () => {
     const slow = "bbbbbbbb";
     const fast = "cccccccc";
     const start = (id: string, script: string): number =>
-      Bun.spawnSync(jobStartArgv(id, ["sh", "-c", script])).exitCode;
+      spawnSyncBounded(jobStartArgv(id, ["sh", "-c", script]), {
+        timeout: 10_000,
+      }).exitCode;
     expect(start(slow, "sleep 2; echo slow; exit 3")).toBe(0);
     expect(start(fast, "echo fast")).toBe(0);
     expect(await finish(fast)).toMatchObject({ exitCode: 0, stdout: "fast\n" });

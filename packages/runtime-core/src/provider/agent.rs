@@ -188,7 +188,6 @@ pub fn exec(
 }
 
 /// Fixed noninteractive observation using the caller's original aggregate deadline.
-#[cfg(feature = "native-config-plan")]
 pub(super) fn exec_until(
     path: &Path,
     script: &str,
@@ -200,7 +199,6 @@ pub(super) fn exec_until(
 
 /// Private input follows the same absolute deadline as connect, dispatch and reply.
 /// A timed-out exec is uncertain; no late successful reply restores authority.
-#[cfg(feature = "native-config-plan")]
 pub(super) fn exec_input_until(
     path: &Path,
     script: &str,

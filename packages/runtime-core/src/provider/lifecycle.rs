@@ -1,5 +1,6 @@
 mod admission_pool;
 mod disk_handles;
+mod guest_memory_peak;
 pub mod host_filesystem;
 mod interrupted;
 mod operating_guard;
@@ -68,6 +69,10 @@ pub struct RuntimeStatus {
     /// `null` when that cannot be established. An active image build is not
     /// observed here; `runtime down` refuses during one.
     pub pool_idle: Option<bool>,
+    /// Guest memory peaks of the pool's last boots that ended in `runtime down`, oldest
+    /// first (see `guest_memory_peak`). A record only; absent when there is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guest_memory_peaks: Option<Vec<guest_memory_peak::Boot>>,
 }
 
 fn root(candidate: &Candidate) -> std::path::PathBuf {
@@ -946,6 +951,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             prepared_base: None,
             graph_runs: users.graph_runs,
             pool_idle: Some(false),
+            guest_memory_peaks: None,
         });
     }
     let owner = Owner::load(candidate)?;
@@ -1019,6 +1025,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         prepared_base: super::prepared_start::status(candidate),
         graph_runs: users.graph_runs,
         pool_idle,
+        guest_memory_peaks: guest_memory_peak::history(&root(candidate)),
     })
 }
 
@@ -2038,6 +2045,9 @@ exit 43"#,
     start_memory_return(owner, |script, args, background| {
         guest(candidate, owner, script, args, background)
     });
+    start_memory_peak(owner, |script, args, background| {
+        guest(candidate, owner, script, args, background)
+    });
     phase(candidate, owner, "running")?;
     status(candidate)
 }
@@ -2058,6 +2068,62 @@ fn start_memory_return(
         include_str!("guest-memory-return.sh"),
         &[&owner.token, boot],
         true,
+    );
+}
+
+/// Start the guest job that records this boot's memory peak (`guest-memory-peak.sh`), the
+/// same way as [`start_memory_return`]: background mode, result ignored, fresh boots only.
+fn start_memory_peak(
+    owner: &Owner,
+    run: impl FnOnce(&str, &[&str], bool) -> Result<String, CandidateError>,
+) {
+    let Some(boot) = owner.guest_boot_id.as_deref() else {
+        return;
+    };
+    let _ = run(
+        include_str!("guest-memory-peak.sh"),
+        &[&owner.token, boot],
+        true,
+    );
+}
+
+/// Read this boot's memory peak from a running guest and append it to the pool's record,
+/// just before `down` stops the guest. Best-effort and bounded by
+/// [`guest_memory_peak::READ_BUDGET`]: a guest that does not answer, a reading that does
+/// not decode and a record that cannot be written all leave `down` exactly as it was. The
+/// caller holds the pool's operation lock.
+fn record_memory_peak(
+    state_root: &Path,
+    pool_root: &Path,
+    owner: &Owner,
+    read: impl FnOnce(&str, &[&str], Instant) -> Result<String, CandidateError>,
+) {
+    if owner.phase != "running" {
+        return;
+    }
+    let Some(boot) = owner.guest_boot_id.as_deref() else {
+        return;
+    };
+    let deadline = Instant::now() + guest_memory_peak::READ_BUDGET;
+    let Ok(output) = read(
+        guest_memory_peak::READ_SCRIPT,
+        &[&owner.token, boot],
+        deadline,
+    ) else {
+        return;
+    };
+    let Some(reading) = guest_memory_peak::parse(&output) else {
+        return;
+    };
+    let _ = guest_memory_peak::record(
+        pool_root,
+        guest_memory_peak::Boot {
+            boot_id: boot.to_owned(),
+            guest_memory_mib: owner.profile.memory_mib(),
+            cpus: owner.profile.cpus(),
+            reading,
+            graphs: guest_memory_peak::graph_runs(state_root),
+        },
     );
 }
 
@@ -2298,6 +2364,19 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
+    record_memory_peak(
+        &candidate.state_root,
+        &root(candidate),
+        &owner,
+        |script, args, deadline| {
+            agent::exec_until(
+                &socket(candidate, &owner, "agent.sock")?,
+                script,
+                args,
+                deadline,
+            )
+        },
+    );
     match guest_stop(candidate, &mut owner) {
         Ok(()) => status(candidate),
         Err(error)

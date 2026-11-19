@@ -22,6 +22,7 @@ import {
   compose,
   contentDigest,
   DEPENDENCY_SERVER,
+  executorErrorCode,
   foregroundReadyRun,
   INERT_RECORD_FIELDS,
   INERT_RUNNING_RESOURCES,
@@ -206,6 +207,9 @@ describe("provider pin qualification", () => {
         caddyProblem({ caddy: join(root, "absent"), caddySha256: sha })
       ).toContain("Missing");
       expect(caddyProblem({ caddy: null, caddySha256: null })).toBeNull();
+      expect(caddyProblem({ caddy: root, caddySha256: sha })).toContain(
+        "not a regular file"
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -332,8 +336,36 @@ describe("provider pin qualification", () => {
           physical_footprint_bytes: 900 * 1024 * 1024,
         },
       })
-    ).toEqual({ footprint: 900 * 1024 * 1024, resident: 9_090_000_000 });
+    ).toEqual({
+      footprint: 900 * 1024 * 1024,
+      resident: 9_090_000_000,
+      treeFootprint: null,
+    });
+    expect(
+      kernelProviderMemory({
+        provider_memory: { resident_bytes: 2, physical_footprint_bytes: 10 },
+        provider_resources: {
+          processes: [
+            { physical_footprint_bytes: 10 },
+            { physical_footprint_bytes: 5 },
+          ],
+        },
+      })?.treeFootprint
+    ).toBe(15);
+    expect(
+      kernelProviderMemory({
+        provider_memory: { resident_bytes: 2, physical_footprint_bytes: 10 },
+        provider_resources: { processes: [{ physical_footprint_bytes: "5" }] },
+      })?.treeFootprint
+    ).toBeNull();
     expect(kernelProviderMemory({ provider_memory: null })).toBeNull();
+    expect(
+      executorErrorCode(
+        '{"code":"resource_observation_unavailable","message":"Native resource tree changed."}\n'
+      )
+    ).toBe("resource_observation_unavailable");
+    expect(executorErrorCode("not json")).toBeNull();
+    expect(executorErrorCode('{"code":"Not A Code"}')).toBeNull();
     expect(kernelProviderMemory({})).toBeNull();
     expect(
       kernelProviderMemory({

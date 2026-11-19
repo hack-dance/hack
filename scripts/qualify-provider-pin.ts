@@ -260,18 +260,66 @@ export function sourceTemplatePins(
  * figure native admission charges. `null` when the pool is not running or the field is
  * missing.
  */
-export function kernelProviderMemory(
-  status: Record<string, unknown>
-): { footprint: number; resident: number } | null {
+export function kernelProviderMemory(status: Record<string, unknown>): {
+  footprint: number;
+  resident: number;
+  treeFootprint: number | null;
+} | null {
   const memory = status.provider_memory;
   if (typeof memory !== "object" || memory === null) {
     return null;
   }
   const { physical_footprint_bytes: footprint, resident_bytes: resident } =
     memory as Record<string, unknown>;
-  return Number.isSafeInteger(footprint) && Number.isSafeInteger(resident)
-    ? { footprint: footprint as number, resident: resident as number }
-    : null;
+  if (!(Number.isSafeInteger(footprint) && Number.isSafeInteger(resident))) {
+    return null;
+  }
+  return {
+    footprint: footprint as number,
+    resident: resident as number,
+    treeFootprint: treeFootprint(status.provider_resources),
+  };
+}
+
+/** The closed `code` of the native executor's JSON refusal on stderr, or `null`. */
+export function executorErrorCode(stderr: string): string | null {
+  try {
+    const value: unknown = JSON.parse(
+      stderr.trim().split(/\r?\n/).at(-1) ?? ""
+    );
+    const code =
+      typeof value === "object" && value !== null
+        ? (value as Record<string, unknown>).code
+        : undefined;
+    return typeof code === "string" && /^[a-z][a-z0-9_]{0,79}$/.test(code)
+      ? code
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The kernel footprint summed over the provider's whole process tree, or `null`. */
+function treeFootprint(resources: unknown): number | null {
+  const processes =
+    typeof resources === "object" && resources !== null
+      ? (resources as Record<string, unknown>).processes
+      : undefined;
+  if (!Array.isArray(processes) || processes.length === 0) {
+    return null;
+  }
+  let total = 0;
+  for (const entry of processes) {
+    const bytes =
+      typeof entry === "object" && entry !== null
+        ? (entry as Record<string, unknown>).physical_footprint_bytes
+        : undefined;
+    if (!Number.isSafeInteger(bytes)) {
+      return null;
+    }
+    total += bytes as number;
+  }
+  return total;
 }
 
 /**
@@ -575,9 +623,17 @@ export function caddyProblem(
   if (!existsSync(options.caddy)) {
     return `Missing ${options.caddy}.`;
   }
-  const actual = createHash("sha256")
-    .update(readFileSync(options.caddy))
-    .digest("hex");
+  let actual: string;
+  try {
+    if (!statSync(options.caddy).isFile()) {
+      return `${options.caddy} is not a regular file.`;
+    }
+    actual = createHash("sha256")
+      .update(readFileSync(options.caddy))
+      .digest("hex");
+  } catch {
+    return `Cannot read ${options.caddy}.`;
+  }
   return actual === options.caddySha256
     ? null
     : `--caddy-sha256 does not match ${options.caddy} (its SHA-256 is ${actual}).`;
@@ -2606,16 +2662,45 @@ export class Qualification {
   }
 
   /**
-   * Footprint and CPU of this home's provider processes. `footprint_mib` is the kernel's
-   * `phys_footprint` of the pool's provider process (`runtime status`); `footprint_tool_mib`
-   * sums what `footprint` or `top` report per provider process, for comparison.
+   * Footprint and CPU of this home's provider processes. `footprint_mib` and
+   * `resident_mib` are the kernel's figures for the root provider process (`runtime
+   * status`, the value admission charges); `tree_footprint_mib` sums the kernel footprint
+   * over the provider's whole process tree; `footprint_tool_mib` sums what `footprint` or
+   * `top` report per provider process, for comparison. Sampling is best-effort: a failed
+   * status (for example a provider helper starting between its two tree inventories)
+   * records `null` and its error code instead of failing a long idle measurement.
    */
   sample(label: string): Record<string, unknown> {
-    const status = this.runtime(this.main, `status-${label}`, [
-      "runtime",
-      "status",
-      "--json",
-    ]);
+    const result = this.exec(
+      `status-${label}`,
+      [
+        this.options.native,
+        "--candidate-root",
+        this.main,
+        "runtime",
+        "status",
+        "--json",
+      ],
+      { allowFailure: true }
+    );
+    let status: Record<string, unknown> = {};
+    let statusError: string | null = null;
+    try {
+      const parsed: unknown = JSON.parse(result.stdout);
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        !Array.isArray(parsed)
+      ) {
+        status = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Recorded below.
+    }
+    if (result.code !== 0) {
+      statusError = executorErrorCode(result.stderr) ?? `exit ${result.code}`;
+      status = {};
+    }
     const kernel = kernelProviderMemory(status);
     const rows = this.processes(this.main);
     let footprint = 0;
@@ -2659,6 +2744,11 @@ export class Qualification {
       })),
       footprint_mib: kernel ? round(kernel.footprint / 1024 / 1024) : null,
       resident_mib: kernel ? round(kernel.resident / 1024 / 1024) : null,
+      tree_footprint_mib:
+        kernel?.treeFootprint == null
+          ? null
+          : round(kernel.treeFootprint / 1024 / 1024),
+      status_error: statusError,
       footprint_tool_mib: measured ? round(footprint / 1024 / 1024) : null,
       rss_mib: round(rows.reduce((sum, row) => sum + row.rssKib, 0) / 1024),
       cpu_seconds: rows.reduce((sum, row) => sum + row.cpuSeconds, 0),
@@ -2796,6 +2886,8 @@ export class Qualification {
       this.measure(`idle_${minute}m`, {
         footprint_mib: before.footprint_mib,
         resident_mib: before.resident_mib,
+        tree_footprint_mib: before.tree_footprint_mib,
+        status_error: before.status_error,
         footprint_tool_mib: before.footprint_tool_mib,
         rss_mib: before.rss_mib,
         cpu_percent_over_30s: cpu,

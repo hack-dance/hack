@@ -14,9 +14,11 @@ import {
   nativeDetachedUpHookFailed,
   nativeDetachedUpPrestart,
   nativeDetachedUpProfileNotice,
+  nativeDetachedUpProgress,
   nativeDetachedUpReady,
   nativeDetachedUpShellVariables,
   runNativeDetachedOwner,
+  setNativeDetachedHeartbeatIntervalForTests,
   startNativeDetachedUp,
 } from "../../src/lib/native-detached-up.ts";
 
@@ -50,6 +52,48 @@ function publishFixtureBranchDropped(fixtureMode: string): void {
       label: "caddy",
       count: 2,
     });
+  }
+}
+
+/** HACK-2351 modes: phase reports against short launcher limits. */
+const DEADLINE_MODES = ["slow-images", "slow-runtime", "images-ceiling"];
+
+/** The launcher's limits for a fixture mode. */
+function fixtureLimits(fixtureMode: string) {
+  if (fixtureMode === "images-ceiling") {
+    return { budgetMs: 1000, ceilingMs: 2000 };
+  }
+  if (["timeout", "late-ready", ...DEADLINE_MODES].includes(fixtureMode)) {
+    return {
+      budgetMs: 1000,
+      ceilingMs:
+        fixtureMode === "timeout" || fixtureMode === "late-ready"
+          ? 1000
+          : 10_000,
+    };
+  }
+  return { budgetMs: 10_000, ceilingMs: 10_000 };
+}
+
+/**
+ * HACK-2351: report startup phases as native up does. `slow-images` builds
+ * for longer than the launcher's budget with heartbeats, then continues;
+ * `slow-runtime` stalls before image work; `images-ceiling` builds forever.
+ */
+async function reportFixturePhases(fixtureMode: string): Promise<void> {
+  if (!DEADLINE_MODES.includes(fixtureMode)) {
+    return;
+  }
+  setNativeDetachedHeartbeatIntervalForTests(100);
+  nativeDetachedUpProgress("input");
+  nativeDetachedUpProgress("runtime");
+  if (fixtureMode === "slow-runtime") {
+    return;
+  }
+  nativeDetachedUpProgress("images");
+  if (fixtureMode === "slow-images") {
+    await Bun.sleep(2500);
+    nativeDetachedUpProgress("services");
   }
 }
 
@@ -316,7 +360,9 @@ if (role === "channel-holder") {
         root,
         mode,
       ],
-      timeoutMs: ["timeout", "late-ready"].includes(mode) ? 1000 : 10_000,
+      limits: fixtureLimits(mode),
+      heartbeatStaleMs: 400,
+      unwindMs: 3000,
     });
   } catch (error) {
     process.exitCode = [
@@ -333,6 +379,8 @@ if (role === "channel-holder") {
       "prestart-long",
       "prestart-hook-long-line",
       "prestart-persistent-hook",
+      "slow-runtime",
+      "images-ceiling",
     ].includes(mode)
       ? await handleRunCliError({ error, jsonRequested: true })
       : 1;
@@ -531,6 +579,7 @@ if (role === "channel-holder") {
         // handoff, with the real owner handler still processing that accept.
         process.prependListener("message", cancelAtAccept);
       }
+      await reportFixturePhases(mode);
       publishFixtureProfileNotice(mode);
       publishFixtureBranchDropped(mode);
       sendUnsafePrestartRefusals(mode);
@@ -546,6 +595,7 @@ if (role === "channel-holder") {
           "shell-names-root-dotenv",
           "unsafe-failure",
           "unsafe-prestart-refusal",
+          "slow-images",
         ].includes(mode)
       ) {
         notifyReady();

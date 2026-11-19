@@ -361,6 +361,7 @@ import {
   nativeDetachedUpHookFailed,
   nativeDetachedUpKeepsHookOutput,
   nativeDetachedUpPrestart,
+  nativeDetachedUpProgress,
   nativeDetachedUpReady,
   startNativeDetachedUp,
 } from "../lib/native-detached-up.ts";
@@ -6440,6 +6441,9 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
     case "images":
       logger.step({ message: "Acquiring service images…" });
       return;
+    case "plan":
+      // Only a detached launcher's clocks use it; the terminal shows nothing.
+      return;
     case "services":
       logger.step({
         message: `Starting services: ${event.services.join(", ")}…`,
@@ -6726,6 +6730,8 @@ async function handleNativeUp({
         // VM work starts: later failures keep the runtime's own reports.
         nativeDetachedUpPrestart(false);
       }
+      // A detached launcher's clocks follow these phases (HACK-2351).
+      nativeDetachedUpProgress(event.phase);
       reportNativeStartupProgress(event);
     },
     before: async (input) => {

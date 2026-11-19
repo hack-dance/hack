@@ -535,3 +535,56 @@ test("HACK-2339: a failed hook's lines reach only a terminal stderr; otherwise o
     "a",
   ]);
 }, 60_000);
+
+test("HACK-2351: image work longer than the budget, with heartbeats, still completes", async () => {
+  const started = performance.now();
+  const result = await prestartRun("slow-images");
+  // The launcher's budget is 1 s; image work took 2.5 s.
+  expect(performance.now() - started).toBeGreaterThan(2500);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: true,
+    data: { action: "up", services: { started: ["web"] } },
+  });
+}, 30_000);
+
+for (const mode of ["slow-runtime", "images-ceiling"]) {
+  test(`HACK-2351: ${mode} times out naming its phase, and its owner has stopped when the launcher returns`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "native-detached-deadline-"));
+    const launcher = Bun.spawn(
+      [process.execPath, fixture, "launcher", root, mode],
+      {
+        env: fixtureEnv(root),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    try {
+      const [code, stdout] = await Promise.all([
+        launcher.exited,
+        new Response(launcher.stdout).text(),
+      ]);
+      expect(code).toBe(1);
+      const error = JSON.parse(stdout).error;
+      expect(error.code).toBe("E_STARTUP_TIMEOUT");
+      expect(error.message).toContain(
+        mode === "slow-runtime"
+          ? "it was starting the native runtime when its 1 s budget"
+          : "it was building and loading service images when its 2 s ceiling"
+      );
+      expect(error.message).toContain("Run hack down for this instance next");
+      // The launcher waited for the owner to stop before it returned.
+      expect(await readFile(join(root, "stopped"), "utf8")).toBe(
+        "down.before\nprocess.stop\ndown.after\n"
+      );
+    } finally {
+      await stop(root);
+      if (launcher.exitCode === null) {
+        launcher.kill("SIGTERM");
+        await launcher.exited;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+}

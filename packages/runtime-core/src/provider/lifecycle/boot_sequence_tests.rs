@@ -372,29 +372,35 @@ fn peak_boot() -> guest_memory_peak::Boot {
 fn a_reading_is_kept_only_after_a_successful_stop_and_never_changes_its_result() {
     let root = peak_scratch("keeps");
     let record = root.join("guest-memory-peaks.json");
-    // A failed stop keeps its error and records nothing.
+    let whole = |result: &Result<RuntimeStatus, CandidateError>| match result {
+        Ok(status) => serde_json::to_string(status).unwrap(),
+        Err(error) => format!("{error:?}"),
+    };
+    // A failed stop is returned whole and records nothing.
     let mut failed: Result<RuntimeStatus, CandidateError> =
         Err(CandidateError::new("engine_quiesce_stalled", "fixture"));
+    let before = whole(&failed);
     keep_memory_peak(&root, Some(peak_boot()), &mut failed);
-    assert_eq!(failed.unwrap_err().code, "engine_quiesce_stalled");
+    assert_eq!(whole(&failed), before);
     assert!(!record.exists());
-    // No reading: a successful stop is returned as it was.
+    // No reading: a successful stop is returned whole.
     let mut stopped = Ok(uninitialized_status(&root));
+    let before = whole(&stopped);
     keep_memory_peak(&root, None, &mut stopped);
-    assert!(stopped.as_ref().unwrap().guest_memory_peaks.is_none());
+    assert_eq!(whole(&stopped), before);
     assert!(!record.exists());
-    // A record that cannot be written (no such directory) leaves the result as it was.
+    // A record that cannot be written (no such directory) leaves the result whole.
     let missing = root.join("absent");
     keep_memory_peak(&missing, Some(peak_boot()), &mut stopped);
-    let unchanged = stopped.as_ref().unwrap();
-    assert_eq!(unchanged.phase, "uninitialized");
-    assert!(unchanged.guest_memory_peaks.is_none());
+    assert_eq!(whole(&stopped), before);
     assert!(!missing.exists());
-    // A reading after a successful stop is recorded and reported in that same status.
+    // A reading after a successful stop is recorded, and the only change to the status is
+    // the record it now reports.
     keep_memory_peak(&root, Some(peak_boot()), &mut stopped);
-    let kept = stopped.unwrap();
-    assert_eq!(kept.phase, "uninitialized");
-    assert_eq!(kept.guest_memory_peaks, Some(vec![peak_boot()]));
+    let mut expected: serde_json::Value = serde_json::from_str(&before).unwrap();
+    assert!(expected.get("guest_memory_peaks").is_none());
+    expected["guest_memory_peaks"] = serde_json::to_value(vec![peak_boot()]).unwrap();
+    assert_eq!(serde_json::to_value(stopped.unwrap()).unwrap(), expected);
     assert_eq!(guest_memory_peak::history(&root), Some(vec![peak_boot()]));
     let _ = fs::remove_dir_all(&root);
 }

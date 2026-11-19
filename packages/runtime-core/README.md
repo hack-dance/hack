@@ -1661,9 +1661,10 @@ count, the reading, and the graph runs the home recorded at that time with their
 The read is bounded at two seconds and is best-effort, and the record is written only
 after the stop and its own state writes, so it cannot take the time or the disk space the
 stop needs. A guest that does not answer, a line that does not decode and a record that
-cannot be written leave `down` and its result exactly as they were. A record or pending
-file at that name that is a symlink, has a second link or is not private to the user is
-left in place and nothing is recorded. A VM that ends without `runtime down` leaves no
+cannot be written leave `down` and its result exactly as they were. A record at that
+name that is a symlink, has a second link or is not private to the user is left in place
+and nothing is recorded; the write goes through a temporary file of its own and removes
+nothing that was there before. A VM that ends without `runtime down` leaves no
 reading for that boot. `runtime status` reports the record as `guest_memory_peaks` when
 there is one.
 

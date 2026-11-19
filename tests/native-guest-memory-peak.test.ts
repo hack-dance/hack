@@ -255,63 +255,137 @@ test("every POSIX shell on this host gives the same status line", async () => {
   }
 });
 
+// Shell syntax, builtins of the guest's shell, the script's own function, and `sleep`.
+const ALLOWED_COMMANDS = new Set([
+  "while",
+  "do",
+  "done",
+  "if",
+  "then",
+  "fi",
+  "case",
+  "esac",
+  "test",
+  "read",
+  "break",
+  "exit",
+  "printf",
+  "check",
+  "sleep",
+  ":",
+  "{",
+  "}",
+]);
+// Words that introduce a command without being one.
+const LEADING_KEYWORDS = new Set([
+  "if",
+  "then",
+  "else",
+  "elif",
+  "while",
+  "do",
+  "{",
+  "!",
+]);
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const CASE_PATTERN = /^[A-Za-z_:' |*![\]0-9-]*\)\s*/;
+
+/**
+ * Every command word the shell would run in `code`: the first word of each simple
+ * command, after any `NAME=value` prefixes and any leading keyword. Lines continued
+ * with a backslash or a trailing `&&` are read as one line.
+ */
+function commandWords(code: string): string[] {
+  const logical: string[] = [];
+  let pending = "";
+  // An arithmetic expansion is a value, not a command.
+  for (const raw of code.replaceAll(/\$\(\([^()]*\)\)/g, "0").split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("#")) {
+      continue;
+    }
+    if (line.endsWith("\\")) {
+      pending += `${line.slice(0, -1)} `;
+      continue;
+    }
+    if (line.endsWith("&&")) {
+      pending += `${line} `;
+      continue;
+    }
+    logical.push(pending + line);
+    pending = "";
+  }
+  logical.push(pending);
+  const words: string[] = [];
+  for (const line of logical) {
+    for (const part of line
+      .replace(CASE_PATTERN, "")
+      .split(/;;|;|&&|\|\||\|/)) {
+      const tokens = part
+        .trim()
+        .split(/\s+/)
+        .filter((token) => token !== "");
+      // Keep each keyword, then look past it and past assignment prefixes for the command.
+      while (tokens.length > 0) {
+        const word = tokens[0] ?? "";
+        if (LEADING_KEYWORDS.has(word)) {
+          words.push(word);
+          tokens.shift();
+        } else if (ASSIGNMENT.test(word)) {
+          tokens.shift();
+        } else {
+          words.push(word);
+          break;
+        }
+      }
+    }
+  }
+  return words;
+}
+
+function notAllowed(code: string): string[] {
+  return commandWords(code).filter((word) => !ALLOWED_COMMANDS.has(word));
+}
+
 test("one sample runs shell builtins only, and one sleep", async () => {
   const script = await Bun.file(SCRIPT).text();
   const loop = script.slice(script.indexOf("while :; do"));
   expect(loop.length).toBeGreaterThan(0);
+  // Command substitution, pipes and subshells each start a process in the guest's shell.
   const code = loop
     .split("\n")
     .filter((line) => !line.trimStart().startsWith("#"))
-    .join("\n");
-  // Command substitution, pipes and subshells each start a process in the guest's shell.
-  const withoutArithmetic = code.replaceAll("$((", "");
-  expect(withoutArithmetic).not.toContain("$(");
-  expect(withoutArithmetic).not.toContain("`");
-  expect(withoutArithmetic).not.toContain("|");
-  expect(withoutArithmetic).not.toMatch(/^\s*\(/m);
+    .join("\n")
+    .replaceAll("$((", "");
+  expect(code).not.toContain("$(");
+  expect(code).not.toContain("`");
+  expect(code).not.toContain("|");
+  expect(code).not.toMatch(/^\s*\(/m);
 
-  // Every command word in the loop is on this list: shell syntax, builtins of the
-  // guest's shell, the script's own function, and `sleep`.
-  const allowed = new Set([
-    "while",
-    "do",
-    "done",
-    "if",
-    "then",
-    "fi",
-    "case",
-    "esac",
-    "test",
-    "read",
-    "break",
-    "exit",
-    "printf",
-    "check",
-    "sleep",
-    ":",
-    "{",
-    "}",
-  ]);
-  const commands: string[] = [];
-  let continued = false;
-  for (const raw of code.split("\n")) {
-    const line = raw.trim();
-    const isContinuation = continued;
-    continued = line.endsWith("\\") || line.endsWith("&&");
-    if (line === "" || isContinuation) {
-      continue;
-    }
-    // Case patterns and their terminators, and plain assignments, run nothing.
-    const body = line.replace(/^[A-Za-z_:' |*![\]0-9-]*\)\s*/, "");
-    for (const part of body.split(/;;|;|&&/)) {
-      const word = part.trim().split(/\s+/)[0] ?? "";
-      if (word === "" || /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
-        continue;
-      }
-      commands.push(word);
-    }
-  }
-  expect(commands.length).toBeGreaterThan(20);
-  expect(commands.filter((word) => !allowed.has(word))).toEqual([]);
+  const commands = commandWords(loop);
+  expect(commands.length).toBeGreaterThan(40);
+  expect(notAllowed(loop)).toEqual([]);
   expect(commands.filter((word) => word === "sleep").length).toBe(1);
+});
+
+test("the builtins check sees a command behind a prefix, a keyword or a continuation", () => {
+  const planted: readonly (readonly [string, string])[] = [
+    ["  head -1 /proc/uptime > /dev/null", "head"],
+    ["  sample_probe=1 head /proc/meminfo", "head"],
+    ["  test 1 = 1 &&\n    head /proc/meminfo", "head"],
+    ["  if grep -q x /proc/meminfo; then :; fi", "grep"],
+    ["  while cat /proc/uptime; do break; done", "cat"],
+    ["  printf x \\\n    > /dev/null; awk 1 /proc/uptime", "awk"],
+    ["  a=1 b=2 date", "date"],
+    ["  MemTotal:) total=$value; cut -c1 /proc/uptime ;;", "cut"],
+  ];
+  for (const [line, command] of planted) {
+    expect(notAllowed(`while :; do\n${line}\ndone`), line).toEqual([command]);
+  }
+  // Assignments, keywords and builtins alone are not reported.
+  expect(
+    notAllowed(
+      'while :; do\n  total=\n  if test "$a" -gt 1 &&\n    test "$b" -gt 2; then\n    a=$b\n  fi\ndone'
+    )
+  ).toEqual([]);
 });

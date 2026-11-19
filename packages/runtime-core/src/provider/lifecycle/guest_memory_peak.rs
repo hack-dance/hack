@@ -174,27 +174,52 @@ pub(super) fn history(root: &Path) -> Option<Vec<Boot>> {
     (history.version == VERSION && history.boots.len() <= KEEP).then_some(history.boots)
 }
 
-/// Whether `metadata` (not followed through a symlink) is a file only this user's
-/// `state::write` could have left: regular, one link, ours, no group or other access.
-fn own_private_file(metadata: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    metadata.is_file()
-        && metadata.nlink() == 1
-        && metadata.uid() == unsafe { libc::geteuid() }
-        && metadata.mode() & 0o077 == 0
-}
-
 fn not_found(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::NotFound
+}
+
+/// Write `history` through a temporary file this call creates and nothing else names, then
+/// rename it over the record. Nothing that existed before the call is removed: a temporary
+/// file is removed only by the call that created it, when its write fails.
+fn replace(root: &Path, history: &History) -> Result<(), CandidateError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let bytes = serde_json::to_vec_pretty(history)
+        .map_err(|e| CandidateError::new("invalid_receipt", e.to_string()))?;
+    let temporary = root.join(format!(
+        "{FILE}.{}.{}.new",
+        std::process::id(),
+        SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temporary)
+        .map_err(state::io)?;
+    let written = file
+        .write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| fs::rename(&temporary, path(root)));
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temporary);
+        return Err(state::io(error));
+    }
+    fs::File::open(root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(state::io)
 }
 
 /// Append `boot`, replacing an earlier reading of the same boot, keep the last [`KEEP`]
 /// and return them. The caller holds the pool's operation lock.
 ///
-/// Only this record's own files are replaced. A record that passes the receipt checks but
-/// does not decode as this format starts again; a record or a pending file that is a
-/// symlink, has another link, or is not private to this user is left in place and nothing
-/// is recorded.
+/// A record that passes the receipt checks but does not decode as this format starts
+/// again. A record that is a symlink, has another link, or is not private to this user is
+/// left in place and nothing is recorded. Like every receipt in the pool's private
+/// directory, this assumes its only writers are this program's commands under that lock;
+/// a same-user process that ignores the lock is outside what the check can cover.
 pub(super) fn record(root: &Path, boot: Boot) -> Result<Vec<Boot>, CandidateError> {
     let target = path(root);
     let mut boots = match fs::symlink_metadata(&target) {
@@ -209,22 +234,6 @@ pub(super) fn record(root: &Path, boot: Boot) -> Result<Vec<Boot>, CandidateErro
             Err(error) => return Err(error),
         },
     };
-    // `state::write` refuses to replace a pending file. One left by an interrupted write of
-    // this record is removed; anything else at that name is not ours to remove.
-    let pending = target.with_extension("pending");
-    match fs::symlink_metadata(&pending) {
-        Err(error) if not_found(&error) => (),
-        Err(error) => return Err(state::io(error)),
-        Ok(metadata) if own_private_file(&metadata) => {
-            fs::remove_file(&pending).map_err(state::io)?;
-        }
-        Ok(_) => {
-            return Err(CandidateError::new(
-                "foreign_state",
-                "Unsafe pending guest memory record; left in place.",
-            ));
-        }
-    }
     boots.retain(|recorded| recorded.boot_id != boot.boot_id);
     boots.push(boot);
     let excess = boots.len().saturating_sub(KEEP);
@@ -233,7 +242,7 @@ pub(super) fn record(root: &Path, boot: Boot) -> Result<Vec<Boot>, CandidateErro
         version: VERSION,
         boots,
     };
-    state::write(&target, &history)?;
+    replace(root, &history)?;
     Ok(history.boots)
 }
 
@@ -358,26 +367,69 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
+    fn names(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
     #[test]
-    fn an_unusable_record_or_an_interrupted_write_is_replaced() {
+    fn a_record_of_ours_that_does_not_decode_is_replaced_and_nothing_else_is_touched() {
         let directory = private_directory();
         let root = directory.path();
         fs::write(path(root), b"{not json").unwrap();
         fs::set_permissions(path(root), fs::Permissions::from_mode(0o600)).unwrap();
-        // What an interrupted `state::write` leaves: a private file of its own.
-        let pending = path(root).with_extension("pending");
-        fs::write(&pending, b"partial").unwrap();
-        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+        // Files that only look related, private and ours, are not this call's to remove.
+        for name in [
+            "guest-memory-peaks.pending",
+            "guest-memory-peaks.json.1.0.new",
+        ] {
+            fs::write(root.join(name), b"kept").unwrap();
+            fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o600)).unwrap();
+        }
         assert_eq!(history(root), None);
         record(root, boot("boot-a", 1)).unwrap();
-        assert_eq!(history(root).unwrap().len(), 1);
+        record(root, boot("boot-b", 2)).unwrap();
+        assert_eq!(history(root).unwrap().len(), 2);
+        // No temporary file is left, and the two bystanders are as they were.
+        assert_eq!(
+            names(root),
+            [
+                "guest-memory-peaks.json",
+                "guest-memory-peaks.json.1.0.new",
+                "guest-memory-peaks.pending"
+            ]
+        );
+        assert_eq!(
+            fs::read(root.join("guest-memory-peaks.pending")).unwrap(),
+            b"kept"
+        );
         // A record from a later format is not read as this one.
         fs::write(path(root), br#"{"version":2,"boots":[]}"#).unwrap();
         assert_eq!(history(root), None);
     }
 
     #[test]
-    fn a_record_or_pending_file_that_is_not_ours_is_left_in_place_and_nothing_is_recorded() {
+    fn a_write_that_fails_leaves_no_temporary_file() {
+        let directory = private_directory();
+        let root = directory.path();
+        // A directory at the record's name passes no receipt check and refuses the rename.
+        fs::create_dir(path(root)).unwrap();
+        assert!(record(root, boot("boot-a", 1)).is_err());
+        assert_eq!(names(root), ["guest-memory-peaks.json"]);
+        let history = History {
+            version: VERSION,
+            boots: Vec::new(),
+        };
+        assert!(replace(root, &history).is_err());
+        assert_eq!(names(root), ["guest-memory-peaks.json"]);
+    }
+
+    #[test]
+    fn a_record_that_is_not_ours_is_left_in_place_and_nothing_is_recorded() {
         use std::os::unix::fs::symlink;
         let elsewhere = private_directory();
         let outside = elsewhere.path().join("outside");
@@ -403,21 +455,7 @@ mod tests {
             assert_eq!(before.file_type(), after.file_type());
             assert_eq!(before.permissions().mode(), after.permissions().mode());
             assert_eq!(history(directory.path()), None);
-            assert!(!target.with_extension("pending").exists());
-        }
-        // The pending name holds a symlink or a file with a second link.
-        let pending_cases: [&dyn Fn(&Path); 2] =
-            [&|pending| symlink(&outside, pending).unwrap(), &|pending| {
-                fs::hard_link(&outside, pending).unwrap()
-            }];
-        for place in pending_cases {
-            let directory = private_directory();
-            let pending = path(directory.path()).with_extension("pending");
-            place(&pending);
-            let error = record(directory.path(), boot("boot-a", 1)).unwrap_err();
-            assert_eq!(error.code, "foreign_state");
-            assert!(fs::symlink_metadata(&pending).is_ok());
-            assert!(!path(directory.path()).exists());
+            assert_eq!(names(directory.path()), ["guest-memory-peaks.json"]);
         }
         assert_eq!(fs::read(&outside).unwrap(), b"outside");
     }

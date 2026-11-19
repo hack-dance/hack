@@ -118,13 +118,17 @@ export async function preflightComposeEngine(opts: {
  */
 export async function preflightSharedNetworks(opts: {
   readonly composeYaml: string | null;
+  readonly selection: ComposeServiceSelection;
   readonly deps: Pick<ComposeEnginePreflightDeps, "run">;
   /** Values that must never appear in a quoted engine line. */
   readonly redactValues?: Iterable<string>;
 }): Promise<HackCliError | null> {
   const redactValues = [...(opts.redactValues ?? [])];
   const { deps } = opts;
-  for (const network of sharedExternalNetworks(opts.composeYaml)) {
+  for (const network of sharedExternalNetworks(
+    opts.composeYaml,
+    opts.selection
+  )) {
     const inspect = await deps.run(
       ["docker", "network", "inspect", "--format", "{{.Name}}", network],
       ENGINE_PREFLIGHT_TIMEOUT_MS
@@ -150,17 +154,30 @@ export async function preflightSharedNetworks(opts: {
 function missingSharedNetworkError(network: string): HackCliError {
   return new HackCliError({
     code: "E_GLOBAL_INFRA_DOWN",
-    message: `This project joins Hack's shared network ${network}, which does not exist on this Docker engine yet. Run \`hack global install\` once on this machine to create it and start Hack's proxy (that step needs no sudo), then retry.`,
+    message: `This project joins Hack's shared network ${network}, which does not exist on this Docker engine yet. Run \`hack global install\` once on this machine to create it and start Hack's proxy, then retry. Creating the network and starting the proxy need no sudo; its DNS and certificate trust steps can ask for it and can be skipped.`,
     detail: { network },
   });
 }
 
+/** Which services `up` starts, for the network check. */
+export interface ComposeServiceSelection {
+  /** Services named on the command line; empty for the whole project. */
+  readonly requested: readonly string[];
+  /** Active Compose profiles (CLI and COMPOSE_PROFILES). */
+  readonly profiles: readonly string[];
+}
+
 /**
- * Hack's shared networks that the compose file's top-level `networks`
- * declares as external, by their engine name (`name:` or the key).
+ * Hack's shared networks, declared external at the top level of the compose
+ * file, that the services `up` will start join, by engine name (`name:` or
+ * the key). A whole-project `up` starts every service without `profiles` or
+ * with an active profile; a scoped `up` starts the named services and what
+ * they depend on. Networks only an unselected service joins are left out,
+ * because Compose does not need them either.
  */
 export function sharedExternalNetworks(
-  composeYaml: string | null
+  composeYaml: string | null,
+  selection: ComposeServiceSelection = { requested: [], profiles: [] }
 ): readonly string[] {
   if (composeYaml === null) {
     return [];
@@ -171,18 +188,89 @@ export function sharedExternalNetworks(
   } catch {
     return [];
   }
-  if (!(isRecord(parsed) && isRecord(parsed.networks))) {
+  if (!isRecord(parsed)) {
     return [];
   }
+  const shared = sharedNetworksByKey(parsed.networks);
+  if (shared.size === 0) {
+    return [];
+  }
+  const services = isRecord(parsed.services) ? parsed.services : {};
   const names = new Set<string>();
-  for (const [key, value] of Object.entries(parsed.networks)) {
+  for (const service of selectedServices(services, selection)) {
+    const definition = services[service];
+    if (!isRecord(definition)) {
+      continue;
+    }
+    for (const key of listOrMapKeys(definition.networks)) {
+      const name = shared.get(key);
+      if (name !== undefined) {
+        names.add(name);
+      }
+    }
+  }
+  return [...names];
+}
+
+/** Top-level network keys that are external Hack shared networks, to engine names. */
+function sharedNetworksByKey(networks: unknown): ReadonlyMap<string, string> {
+  const shared = new Map<string, string>();
+  if (!isRecord(networks)) {
+    return shared;
+  }
+  for (const [key, value] of Object.entries(networks)) {
     if (!(isRecord(value) && value.external === true)) {
       continue;
     }
     const name = typeof value.name === "string" ? value.name : key;
     if (HACK_SHARED_NETWORKS.includes(name)) {
-      names.add(name);
+      shared.set(key, name);
     }
   }
-  return [...names];
+  return shared;
+}
+
+function selectedServices(
+  services: Record<string, unknown>,
+  selection: ComposeServiceSelection
+): ReadonlySet<string> {
+  if (selection.requested.length === 0) {
+    const active = new Set(selection.profiles);
+    return new Set(
+      Object.entries(services)
+        .filter(([, definition]) => {
+          const profiles = isRecord(definition)
+            ? definition.profiles
+            : undefined;
+          return (
+            !Array.isArray(profiles) ||
+            profiles.length === 0 ||
+            profiles.some((p) => typeof p === "string" && active.has(p))
+          );
+        })
+        .map(([name]) => name)
+    );
+  }
+  const selected = new Set<string>();
+  const queue = [...selection.requested];
+  while (queue.length > 0) {
+    const name = queue.pop();
+    if (name === undefined || selected.has(name)) {
+      continue;
+    }
+    selected.add(name);
+    const definition = services[name];
+    if (isRecord(definition)) {
+      queue.push(...listOrMapKeys(definition.depends_on));
+    }
+  }
+  return selected;
+}
+
+/** Keys of a Compose list-or-map field (`networks`, `depends_on`). */
+function listOrMapKeys(value: unknown): readonly string[] {
+  if (Array.isArray(value)) {
+    return value.filter((entry): entry is string => typeof entry === "string");
+  }
+  return isRecord(value) ? Object.keys(value) : [];
 }

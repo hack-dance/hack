@@ -4,6 +4,7 @@ import {
   buildLifecycleJsonErrorResult,
   composeEnginePreflightDeps,
 } from "../src/commands/project.ts";
+import { HackCliError } from "../src/lib/cli-result.ts";
 import {
   type ComposeEnginePreflightDeps,
   preflightComposeEngine,
@@ -40,6 +41,8 @@ function fakeDocker(answers: Record<string, ComposePsProcessResult>): {
     },
   };
 }
+
+const ALL = { requested: [], profiles: [] } as const;
 
 const HELLO = `
 services:
@@ -149,7 +152,11 @@ describe("preflightSharedNetworks", () => {
         stderr: "Error response from daemon: network hack-dev not found\n",
       },
     });
-    const error = await preflightSharedNetworks({ composeYaml: HELLO, deps });
+    const error = await preflightSharedNetworks({
+      composeYaml: HELLO,
+      selection: ALL,
+      deps,
+    });
     expect(error?.code).toBe("E_GLOBAL_INFRA_DOWN");
     expect(error?.message).toContain("hack global install");
     expect(error?.detail).toEqual({ network: "hack-dev" });
@@ -158,7 +165,11 @@ describe("preflightSharedNetworks", () => {
   test("an existing network passes", async () => {
     const { deps, calls } = fakeDocker({});
     expect(
-      await preflightSharedNetworks({ composeYaml: HELLO, deps })
+      await preflightSharedNetworks({
+        composeYaml: HELLO,
+        selection: ALL,
+        deps,
+      })
     ).toBeNull();
     expect(calls).toEqual([
       "docker network inspect --format {{.Name}} hack-dev",
@@ -170,15 +181,32 @@ describe("preflightSharedNetworks", () => {
       "docker network inspect": { exitCode: 1, stdout: "", stderr: "odd\n" },
     });
     expect(
-      await preflightSharedNetworks({ composeYaml: HELLO, deps })
+      await preflightSharedNetworks({
+        composeYaml: HELLO,
+        selection: ALL,
+        deps,
+      })
     ).toBeNull();
   });
 });
 
 describe("sharedExternalNetworks", () => {
-  test("lists only Hack's shared networks declared external, by engine name", () => {
-    expect(
-      sharedExternalNetworks(`
+  const FILE = `
+services:
+  web:
+    image: web
+    networks: [ingress, default]
+    depends_on: [api]
+  api:
+    image: api
+    networks:
+      hack-logging: {}
+  db:
+    image: db
+  tools:
+    image: tools
+    profiles: [tools]
+    networks: [theirs, ingress]
 networks:
   ingress:
     external: true
@@ -187,24 +215,62 @@ networks:
     external: true
   theirs:
     external: true
-  hack-dev-local: {}
-`)
+`;
+
+  test("lists Hack's shared networks the started services join, by engine name", () => {
+    expect([...sharedExternalNetworks(FILE, ALL)].sort()).toEqual([
+      "hack-dev",
+      "hack-logging",
+    ]);
+  });
+
+  test("a scoped up checks only the named services and what they depend on", () => {
+    expect(
+      sharedExternalNetworks(FILE, { requested: ["db"], profiles: [] })
+    ).toEqual([]);
+    expect(
+      sharedExternalNetworks(FILE, { requested: ["api"], profiles: [] })
+    ).toEqual(["hack-logging"]);
+    expect(
+      [
+        ...sharedExternalNetworks(FILE, { requested: ["web"], profiles: [] }),
+      ].sort()
     ).toEqual(["hack-dev", "hack-logging"]);
   });
 
+  test("a service behind an inactive profile does not count", () => {
+    const toolsOnly = `
+services:
+  tools:
+    image: tools
+    profiles: [tools]
+    networks: [hack-dev]
+networks:
+  hack-dev:
+    external: true
+`;
+    expect(sharedExternalNetworks(toolsOnly, ALL)).toEqual([]);
+    expect(
+      sharedExternalNetworks(toolsOnly, { requested: [], profiles: ["tools"] })
+    ).toEqual(["hack-dev"]);
+  });
+
   test("an unreadable or networkless file checks nothing", () => {
-    expect(sharedExternalNetworks(null)).toEqual([]);
-    expect(sharedExternalNetworks(": : not yaml [")).toEqual([]);
-    expect(sharedExternalNetworks("services: {}\n")).toEqual([]);
+    expect(sharedExternalNetworks(null, ALL)).toEqual([]);
+    expect(sharedExternalNetworks(": : not yaml [", ALL)).toEqual([]);
+    expect(sharedExternalNetworks("services: {}\n", ALL)).toEqual([]);
   });
 });
 
-describe("lifecycle JSON errors", () => {
-  test("a missing project env key keeps its message under E_ENV_KEY_MISSING", () => {
-    const result = buildLifecycleJsonErrorResult({
-      error: new ProjectEnvKeyMissingError("Missing project env key at /x."),
-    });
-    expect(result).toEqual({
+describe("missing env key", () => {
+  test("is a closed E_ENV_KEY_MISSING error in text and JSON modes", () => {
+    const error = new ProjectEnvKeyMissingError(
+      "Missing project env key at /x."
+    );
+    // Text mode: the CLI's closed-error renderer prints `code: message`.
+    expect(error).toBeInstanceOf(HackCliError);
+    expect(error.code).toBe("E_ENV_KEY_MISSING");
+    expect(buildLifecycleJsonErrorResult({ error })).toEqual({
       ok: false,
       error: {
         code: "E_ENV_KEY_MISSING",
@@ -215,15 +281,17 @@ describe("lifecycle JSON errors", () => {
 });
 
 describe("preflight environment", () => {
-  test("the real deps run with the env Compose gets, so a project's DOCKER_HOST applies", async () => {
+  test("the real deps pass the project's Docker transport settings and nothing else from its env", async () => {
     const deps = composeEnginePreflightDeps({
       DOCKER_HOST: "unix:///run/project-engine.sock",
+      API_TOKEN: "decrypted-project-value",
     });
     const result = await deps.run(
-      ["sh", "-c", 'printf %s "$DOCKER_HOST"'],
+      ["sh", "-c", 'printf "%s|%s" "$DOCKER_HOST" "${API_TOKEN-unset}"'],
       5000
     );
-    expect(result.stdout).toBe("unix:///run/project-engine.sock");
+    // The engine selection applies; other project values stay out.
+    expect(result.stdout).toBe("unix:///run/project-engine.sock|unset");
   });
 
   test("a quoted engine line redacts the project's env values", async () => {

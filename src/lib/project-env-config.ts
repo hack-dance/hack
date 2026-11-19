@@ -5859,8 +5859,16 @@ export function missingProjectEnvKeyHint(): string {
  * Secret env entries exist but no project env key was found. The message names
  * the searched key paths and the next action; it never carries key or env values.
  */
-export class ProjectEnvKeyMissingError extends Error {
-  override readonly name = "ProjectEnvKeyMissingError";
+/**
+ * Encrypted values exist and no key was found. A closed `E_ENV_KEY_MISSING`
+ * error, so text and `--json` callers both get the code and the message that
+ * says where the key goes, not an unexpected-error stack (HACK-2356).
+ */
+export class ProjectEnvKeyMissingError extends HackCliError {
+  constructor(message: string) {
+    super({ code: "E_ENV_KEY_MISSING", message });
+    this.name = "ProjectEnvKeyMissingError";
+  }
 }
 
 /** Native reads preserve this owner's local/shared/primary/environment key priority without mutation. */

@@ -37,7 +37,9 @@ setup described here.
 ## When `hack up` cannot start the project here
 
 On the Compose backend, `hack up` checks the machine before it pulls an image
-or starts a container. When something is missing, it stops with one line that
+or starts a container, using the same environment Compose gets (so a project's
+`DOCKER_HOST` or `DOCKER_CONTEXT` applies). The shared-network check runs after
+the project's `up.before` hooks. When something is missing, it stops with one line that
 says what and what to do (the `--json` envelope carries the same `code` and
 `message`):
 
@@ -47,5 +49,5 @@ says what and what to do (the `--json` envelope carries the same `code` and
 | `E_PERMISSION` "Permission denied connecting to the Docker engine…" | Docker runs, but this user cannot open its socket. | Add the user to the `docker` group and start a new login session, or select a usable engine with `docker context use`. |
 | `E_DOCKER_UNAVAILABLE` "The Docker engine is not reachable…" | The CLI is there, but no engine answers (not started, or `DOCKER_HOST` points elsewhere). | Start the engine (in a container sandbox, `dockerd` must already run or be started by the environment's setup), then retry. |
 | `E_DOCKER_UNAVAILABLE` "…Hack needs the Docker Compose v2 plugin" | `docker compose version` fails. | Install the Compose plugin (`docker-compose-v2` or `docker-compose-plugin` on Ubuntu and Debian). |
-| `E_GLOBAL_INFRA_DOWN` "This project joins Hack's shared network hack-dev…" | `hack global install` has not run on this Docker engine yet. | Run `hack global install` once; that step needs no sudo. |
+| `E_GLOBAL_INFRA_DOWN` "This project joins Hack's shared network hack-dev…" | A service that this `up` starts joins Hack's shared network, and `hack global install` has not run on this Docker engine yet. | Run `hack global install` once. Creating the network and starting the proxy need no sudo; its DNS and certificate trust steps can ask for it and can be skipped. |
 | `E_ENV_KEY_MISSING` "Missing project env key at …" | The project has encrypted values and this checkout has no key. | Provide the same key as `HACK_ENV_SECRET_KEY` through the environment's secret settings, or copy `.hack.secret.key` from a checkout that has it. A new key cannot decrypt existing values. |

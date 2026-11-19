@@ -1505,14 +1505,6 @@ export function buildLifecycleJsonErrorResult(opts: {
   if (opts.error instanceof CliUsageError) {
     return errorResult({ code: "E_USAGE", message: opts.error.message });
   }
-  // A fresh checkout without the key is a setup gap, not a crash: keep the
-  // message (where the key goes) under its own code (HACK-2356).
-  if (opts.error instanceof ProjectEnvKeyMissingError) {
-    return errorResult({
-      code: "E_ENV_KEY_MISSING",
-      message: opts.error.message,
-    });
-  }
   if (opts.error instanceof RegistryCredentialPreflightError) {
     return errorResult({
       code: "E_ENV_KEY_MISSING",
@@ -7458,19 +7450,19 @@ async function runUpCommand({
     envName,
   });
 
-  // Name a missing engine, socket permission, Compose plugin or shared
-  // network before any pull starts (HACK-2356), against the engine Compose
-  // will use: the same environment, so a project's DOCKER_HOST or
-  // DOCKER_CONTEXT applies. The error renders as the JSON envelope or one line.
+  // Name a missing engine, socket permission or Compose plugin before any
+  // hook or pull runs (HACK-2356), against the engine Compose will use: the
+  // same environment, so a project's DOCKER_HOST or DOCKER_CONTEXT applies.
+  // Interactive runs were already offered to start global services (and their
+  // engine) above. The error renders as the JSON envelope or one line.
   const preflightDeps = composeEnginePreflightDeps(envOverrides.env);
-  const redactValues = composeEnvValuesToRedact({ env: envOverrides.env });
-  const engineRefusal =
-    (await preflightComposeEngine({ deps: preflightDeps, redactValues })) ??
-    (await preflightSharedNetworks({
-      composeYaml: await readTextFile(project.composeFile),
-      deps: preflightDeps,
-      redactValues,
-    }));
+  const preflightRedactValues = composeEnvValuesToRedact({
+    env: envOverrides.env,
+  });
+  const engineRefusal = await preflightComposeEngine({
+    deps: preflightDeps,
+    redactValues: preflightRedactValues,
+  });
   if (engineRefusal !== null) {
     throw engineRefusal;
   }
@@ -7633,6 +7625,24 @@ async function runUpCommand({
       ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
       ...envOverrides.composeFiles,
     ];
+    // After `up.before` hooks, which may create a shared network themselves,
+    // and before any pull: name a shared network Compose will need and that
+    // does not exist. A refusal here runs the same cleanup as other failures.
+    const networkRefusal = await preflightSharedNetworks({
+      composeYaml: await readTextFile(project.composeFile),
+      selection: {
+        requested: requestedServices,
+        profiles: resolveEffectiveComposeProfiles({
+          cliProfiles: profiles,
+          composeEnv: envOverrides.env,
+        }),
+      },
+      deps: preflightDeps,
+      redactValues: preflightRedactValues,
+    });
+    if (networkRefusal !== null) {
+      throw networkRefusal;
+    }
     reportComposeStartupBudget({ budgets, detach });
     const bootstrapCode = await bootstrapDependencyCaches({
       timeoutMs: detach ? startupTimeoutMs : undefined,
@@ -7914,16 +7924,39 @@ async function runUpCommand({
 }
 
 /**
- * Real Docker reads for the `up` preflight, in the environment Compose will
- * get (`env` overlays the inherited environment, as for `docker compose up`).
+ * Docker client settings that choose and reach the engine. The preflight
+ * passes only these from the project's env: the rest of that env can hold
+ * decrypted values, which reach only the processes that deliver them.
+ */
+const DOCKER_TRANSPORT_ENV_KEYS: readonly string[] = [
+  "DOCKER_HOST",
+  "DOCKER_CONTEXT",
+  "DOCKER_CONFIG",
+  "DOCKER_TLS",
+  "DOCKER_TLS_VERIFY",
+  "DOCKER_CERT_PATH",
+  "DOCKER_API_VERSION",
+];
+
+/**
+ * Real Docker reads for the `up` preflight. `env` is the environment Compose
+ * will get; only its Docker transport settings are passed on, over the
+ * inherited environment, so the preflight checks the engine Compose will use.
  */
 export function composeEnginePreflightDeps(
-  env: Record<string, string> | undefined
+  env: Readonly<Record<string, string>> | undefined
 ): ComposeEnginePreflightDeps {
+  const transport: Record<string, string> = {};
+  for (const key of DOCKER_TRANSPORT_ENV_KEYS) {
+    const value = env?.[key];
+    if (value !== undefined) {
+      transport[key] = value;
+    }
+  }
   return {
     dockerOnPath: () => findExecutableInPath("docker") !== null,
     run: async (argv, timeoutMs) =>
-      await exec(argv, { stdin: "ignore", timeoutMs, env }),
+      await exec(argv, { stdin: "ignore", timeoutMs, env: transport }),
   };
 }
 

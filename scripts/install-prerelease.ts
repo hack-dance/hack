@@ -5,7 +5,9 @@ import { Channel, rollbackUninstall } from "./installer/channel.ts";
 import {
   candidateVersion,
   compareCandidateVersions,
+  hostBundlePlatform,
   requireThat,
+  UNSUPPORTED_HOST,
 } from "./installer/integrity.ts";
 
 /**
@@ -55,10 +57,8 @@ export async function main(inputArgv: string[]) {
     );
     return 0;
   }
-  requireThat(
-    process.platform === "darwin" && process.arch === "arm64",
-    "Native prereleases support Apple Silicon macOS only."
-  );
+  const platform = hostBundlePlatform();
+  requireThat(platform, UNSUPPORTED_HOST);
   process.umask(0o077);
   // Also applies to uninstall rollback, whose original root no longer exists.
   requireThat(
@@ -95,7 +95,7 @@ export async function main(inputArgv: string[]) {
     if (rest[0] === "--rollback-manifest") {
       console.log(
         JSON.stringify(
-          rollbackUninstall(root, rest[1] as string, process.execPath)
+          rollbackUninstall(root, rest[1] as string, process.execPath, platform)
         )
       );
       return 0;
@@ -129,7 +129,7 @@ export async function main(inputArgv: string[]) {
       "--archive and --sha256 must be supplied together."
     );
   }
-  const channel = new Channel(root, process.execPath);
+  const channel = new Channel(root, process.execPath, {}, platform);
   if (command === "install" || command === "upgrade") {
     channel.initialize();
   }

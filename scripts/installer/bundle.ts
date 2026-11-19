@@ -2,7 +2,10 @@ import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   archiveEntries,
+  type BundlePlatform,
   checksums,
+  composeOnly,
+  DEFAULT_BUNDLE_PLATFORM,
   digest,
   exact,
   hash,
@@ -20,9 +23,13 @@ import {
   writeFile,
 } from "./integrity.ts";
 
-export function bundleInventory(bundle: string) {
+export function bundleInventory(
+  bundle: string,
+  platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
+) {
   const names = readdirSync(bundle);
-  if (names.includes("mcp")) {
+  // A Compose-only bundle has no MCP group: `mcp` stays a foreign name there.
+  if (names.includes("mcp") && !composeOnly(platform)) {
     owned(join(bundle, "mcp"), true, 0o700);
     const identities = readdirSync(join(bundle, "mcp"));
     const identity = identities[0];
@@ -38,11 +45,15 @@ export function bundleInventory(bundle: string) {
       )
     );
   }
-  return inventory(names);
+  return inventory(names, platform);
 }
-export function verifyBundle(bundle: string, version: string) {
+export function verifyBundle(
+  bundle: string,
+  version: string,
+  platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
+) {
   owned(bundle, true, 0o700);
-  const payload = bundleInventory(bundle);
+  const payload = bundleInventory(bundle, platform);
   for (const name of [...payload, "SHA256SUMS"]) {
     owned(join(bundle, name), false, payloadMode(name));
   }
@@ -61,7 +72,8 @@ export function verifyBundle(bundle: string, version: string) {
   }
   const identity = metadata(
     readFileSync(join(bundle, "prerelease.json")),
-    version
+    version,
+    platform
   );
   if (payload.includes("hack-storage-root-witness")) {
     const path = join(bundle, "native-storage-tool.json");
@@ -154,7 +166,15 @@ export function verifyBundle(bundle: string, version: string) {
 /** Structural/ad-hoc signature integrity only, not Developer ID origin authentication.
  * Official HTTPS and pinned release/manager hashes carry the origin trust contract.
  */
-export function verifySignatures(bundle: string) {
+export function verifySignatures(
+  bundle: string,
+  platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
+) {
+  if (composeOnly(platform)) {
+    // Linux executables carry no code signature. Their integrity check is the
+    // archive digest and the per-file checksums every launch re-verifies.
+    return;
+  }
   const payload = bundleInventory(bundle);
   const names = [
     "hack-native",
@@ -186,7 +206,8 @@ export function extractArchive({
   destination,
   version,
   releaseMetadata,
-  signatures = verifySignatures,
+  platform = DEFAULT_BUNDLE_PLATFORM,
+  signatures = (bundle) => verifySignatures(bundle, platform),
   afterArchiveOpen,
 }: {
   archive: string;
@@ -194,14 +215,17 @@ export function extractArchive({
   destination: string;
   version: string;
   releaseMetadata?: Record<string, unknown>;
+  /** The bundle kind to accept; a Linux bundle has no code signatures to check. */
+  platform?: BundlePlatform;
   signatures?: (bundle: string) => void;
   afterArchiveOpen?: (fd: number) => void;
 }) {
   owned(archive);
   const entries = archiveEntries(
-    readPinnedArchive(archive, checksum, afterArchiveOpen)
+    readPinnedArchive(archive, checksum, afterArchiveOpen),
+    platform
   );
-  const payload = inventory([...entries.keys()]);
+  const payload = inventory([...entries.keys()], platform);
   const get = (name: string) => {
     const bytes = entries.get(name);
     requireThat(bytes, "Missing archive entry.");
@@ -212,7 +236,7 @@ export function extractArchive({
       get("SHA256SUMS").length <= 64 * 1024,
     "Oversized archive metadata."
   );
-  const identity = metadata(get("prerelease.json"), version);
+  const identity = metadata(get("prerelease.json"), version, platform);
   requireThat(
     !releaseMetadata || sameJson(identity, releaseMetadata),
     "Archive metadata differs from the pinned release."
@@ -235,7 +259,7 @@ export function extractArchive({
   for (const [name, bytes] of entries) {
     writeFile(join(destination, name), bytes, payloadMode(name));
   }
-  const verified = verifyBundle(destination, version);
+  const verified = verifyBundle(destination, version, platform);
   signatures(destination);
   for (const directory of nested
     ? [

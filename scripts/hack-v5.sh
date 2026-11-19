@@ -8,22 +8,45 @@
 # CLI on the Compose backend with the caller's own Hack home (HACK_HOME, or
 # ~/.hack when unset); native selectors are removed so they cannot leak into
 # Compose children. Any other value refuses rather than guessing.
+#
+# A Linux bundle is Compose only: it ships no hack-native, and its own
+# prerelease.json names a Linux platform. There an unset or empty
+# HACK_RUNTIME_BACKEND selects Compose, native refuses, and `native ...`
+# commands reach the CLI, which answers them itself. Any other bundle without
+# hack-native is incomplete and still refuses.
 set -eu
 bundle=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-backend=${HACK_RUNTIME_BACKEND:-native}
-case "$backend" in
-  native|compose) ;;
-  *) echo "HACK_RUNTIME_BACKEND must be native or compose (unset selects native)." >&2; exit 64 ;;
-esac
-# An explicit native operation must use the same home as native up, even when
-# the surrounding shell selects Compose for ordinary project commands.
-for task_argument in "$@"; do
-  case "$task_argument" in
-    --no-interactive) continue ;;
-    native) backend=native ;;
+compose_only=0
+if [ -f "$bundle/prerelease.json" ]; then
+  while IFS= read -r metadata_line || [ -n "$metadata_line" ]; do
+    case "$metadata_line" in
+      *'"platform": "linux-x86_64"'*|*'"platform": "linux-arm64"'*) compose_only=1 ;;
+    esac
+  done < "$bundle/prerelease.json"
+fi
+if [ "$compose_only" -eq 1 ]; then
+  backend=${HACK_RUNTIME_BACKEND:-compose}
+  case "$backend" in
+    compose) ;;
+    native) echo "This is a Compose-only Linux candidate; the native backend is Apple Silicon macOS only. Unset HACK_RUNTIME_BACKEND (or set it to compose)." >&2; exit 69 ;;
+    *) echo "HACK_RUNTIME_BACKEND must be native or compose (unset selects compose)." >&2; exit 64 ;;
   esac
-  break
-done
+else
+  backend=${HACK_RUNTIME_BACKEND:-native}
+  case "$backend" in
+    native|compose) ;;
+    *) echo "HACK_RUNTIME_BACKEND must be native or compose (unset selects native)." >&2; exit 64 ;;
+  esac
+  # An explicit native operation must use the same home as native up, even when
+  # the surrounding shell selects Compose for ordinary project commands.
+  for task_argument in "$@"; do
+    case "$task_argument" in
+      --no-interactive) continue ;;
+      native) backend=native ;;
+    esac
+    break
+  done
+fi
 if [ "$backend" = native ]; then
   trim_path() {
     path_value=$1
@@ -52,7 +75,12 @@ if [ "$backend" = native ]; then
   esac
   export HACK_NATIVE_HOME="$native_home"
 fi
-if [ ! -x "$bundle/hack-cli" ] || [ ! -x "$bundle/hack-native" ]; then
+if [ "$compose_only" -eq 1 ]; then
+  if [ ! -x "$bundle/hack-cli" ]; then
+    echo "Incomplete candidate bundle: hack-cli is required." >&2
+    exit 69
+  fi
+elif [ ! -x "$bundle/hack-cli" ] || [ ! -x "$bundle/hack-native" ]; then
   echo "Incomplete candidate bundle: hack-cli and hack-native are required." >&2
   exit 69
 fi

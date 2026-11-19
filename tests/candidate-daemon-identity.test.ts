@@ -80,8 +80,34 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
     expect(gate.stdout).toContain("hack-next: hackd pid");
     expect(gate.stdout).toContain("hack-v5: hackd pid");
     expect(gate.stdout).toContain(`CLI and hackd report ${VERSION}`);
+    expect(gate.stdout).toMatch(/daemon start took \d+ ms/);
+
+    // A failure explains itself in one run (HACK-2371): the status and the
+    // end of hackd's log are printed with the reason.
+    const failed = await children.run({
+      cmd: [
+        process.execPath,
+        join(REPO, "scripts", "check-candidate-daemon-identity.ts"),
+        bundle,
+        "5.0.0-next.98",
+      ],
+      cwd: root,
+      env: privateCliEnv({ root }),
+    });
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stderr).toContain(
+      `CLI reports ${VERSION}, the release is 5.0.0-next.98`
+    );
+    for (const part of [
+      "--- diagnostics ---",
+      "daemon start took: not reached",
+      "daemon status --json (exit",
+      "hackd log, last 60 lines:",
+    ]) {
+      expect(failed.stderr).toContain(part);
+    }
   },
-  120_000
+  180_000
 );
 
 /** Compiles this checkout's CLI to `outfile` with a build version. */

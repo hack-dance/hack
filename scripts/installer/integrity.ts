@@ -505,7 +505,9 @@ export function checksums(raw: Uint8Array, expected: string[]) {
   const text = new TextDecoder("ascii", { fatal: true }).decode(raw);
   const result: Record<string, string> = Object.create(null);
   for (const line of text.replace(/\n$/, "").split("\n")) {
-    const match = /^([0-9a-f]{64}) {2}([A-Za-z0-9./-]+)$/.exec(line);
+    // `_` is in the Linux asset names (`linux-x86_64`). The name must still
+    // be one of `expected`, so this admits no entry the caller did not ask for.
+    const match = /^([0-9a-f]{64}) {2}([A-Za-z0-9._/-]+)$/.exec(line);
     requireThat(
       match &&
         expected.includes(match[2] ?? "") &&

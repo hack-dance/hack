@@ -23,7 +23,9 @@ timeline
 These are adoption phases, not release dates or a promised schedule; each native
 trial still needs the platform, provider and project prerequisites below.
 
-The first supported package is for Apple Silicon macOS. Provider installation,
+The first supported package is for Apple Silicon macOS. From the first release
+after `5.0.0-next.22`, each release also carries a Compose-only package for Linux
+on x86_64 and arm64; it has no native backend. Provider installation,
 native project adaptations and host routing remain explicit prerequisites in the
 [native candidate guide](native-candidate.md). A packaged candidate is not a claim
 of full Compose parity, lower resource use, or compatibility with every project.
@@ -36,14 +38,32 @@ candidate can run.
 
 ### Supported platform
 
-- `darwin-arm64`: the native candidate archive for Apple Silicon macOS. This is
-  the only platform recorded in `prerelease.json` and accepted by the installer.
+- `darwin-arm64`: the native candidate archive for Apple Silicon macOS. It also
+  runs the Compose backend. This is the platform the release's `prerelease.json`
+  records.
+
+### Compose-only Linux platforms
+
+Releases after `5.0.0-next.22` also carry these. Each archive records its own
+platform in the `prerelease.json` inside it.
+
+- `linux-x86_64`: the Compose candidate archive for Linux on x86_64 with glibc.
+- `linux-arm64`: the Compose candidate archive for Linux on arm64 with glibc.
+
+A Linux archive holds the CLI, the launcher, the config compiler and its schemas,
+the lifecycle supervisor, the install guide, checksums and provenance. It has no
+native executor, guest relay, storage witness, provider pins or MCP bundle, and
+its executables are not code signed. On Linux `hack-next` runs Compose by default;
+`HACK_RUNTIME_BACKEND=native` refuses, and `hack-next native setup` reports
+`E_UNSUPPORTED_PLATFORM`. See
+[the Linux candidate](candidate-install.md#linux-the-compose-only-candidate).
 
 ### Unsupported platforms and surfaces
 
 - Intel (x86_64) macOS. The installer refuses before it changes a channel.
-- Linux and Windows packages. The bundled Linux guest relay runs inside the
-  candidate VM; it is not a Linux host package.
+- The native backend on Linux, Linux on other architectures, musl-based Linux
+  such as Alpine, and Windows. The Linux guest relay in the macOS bundle runs
+  inside the candidate VM; it is not a Linux host package.
 - Homebrew installation of a candidate. Candidate releases never update the
   stable Homebrew formula.
 - Remote, gateway, node and dispatch workflows, and the retained macOS app.
@@ -102,6 +122,19 @@ byte manifest, config compiler and schemas, shared MCP bundle, launcher, provide
 pins, guide, checksums and `prerelease.json` provenance. The compiled frontend
 reports the candidate version. The provenance records the exact source commit and
 platform; filenames alone do not establish either.
+
+The Linux archives are named `hack-BASE-next.N-linux-x86_64-compose.tar.gz` and
+`hack-BASE-next.N-linux-arm64-compose.tar.gz`, with the managers
+`hack-next-manager-linux-x86_64` and `hack-next-manager-linux-arm64`. Their
+checksums are in a separate release asset, `SHA256SUMS-linux`: the two archives,
+then the two managers. They are not in `SHA256SUMS`, because every published
+macOS manager reads that file expecting exactly its own archive line and refuses
+any other, which would stop `hack-next --manager upgrade` on existing installs.
+`SHA256SUMS`, `INSTALLER-SHA256SUMS` and the release's `prerelease.json` keep the
+shape of a macOS-only release. One installer, `hack-next-install.sh`, serves every
+platform: it carries the digest of each platform's manager and picks by `uname`.
+`scripts/build-compose-candidate.sh` builds a Linux bundle on its own
+architecture, and packaging accepts exactly the files and order it checksums.
 
 Packaging accepts exactly the files and order that `scripts/build-native-candidate.sh`
 checksums for a versioned build, with fixed modes for the storage witness (`0500`),
@@ -169,6 +202,21 @@ mise exec -- scripts/build-native-candidate.sh /absolute/new/candidate-bundle \
 This builds software and provenance only; it does not reserve the version number,
 create a tag, or publish a release.
 
+On Linux x86_64 or arm64, the Compose bundle builds the same way with the pinned
+Bun and Rust and a clean, committed checkout:
+
+```sh
+scripts/build-compose-candidate.sh /absolute/new/compose-bundle \
+  --version=5.0.0-next.1
+```
+
+The workflow's `build-linux` job runs it on `ubuntu-latest` and `ubuntu-24.04-arm`,
+checks that the bundle starts its own `hackd`, packages the archive and that
+architecture's manager, installs them through the installer into a clean home
+without `sudo`, and runs `scripts/linux-first-run-check.ts` through the installed
+`hack-next`. The macOS job then verifies both architectures' files, lists them in
+`SHA256SUMS-linux` and renders the one installer.
+
 Before anything is published, the build job also checks that an existing channel
 can take the candidate. It installs the previous published prerelease into a fresh
 root with that release's own standalone manager, then upgrades it to the candidate
@@ -182,6 +230,14 @@ packaged candidate changed while the gate ran. It also reports whether the docum
 `upgrade-manager` step would work. A release can pass on that step only with
 `HACK_PRERELEASE_ACCEPT_MANAGER_STEP=1` and release notes that tell existing users to
 run it.
+
+The Linux jobs run the same gate for their platform, with pins in
+`PUBLISHED_LINUX_RELEASES` in the same file. The first release with Linux assets
+has no earlier Linux install to upgrade. The gate says so, and instead installs
+the candidate into a fresh channel, deselects it, selects it, rolls back and
+uninstalls it. Later releases upgrade the previous published Linux install with
+its retained manager. A previous release that has Linux assets but no pin fails
+the gate.
 
 Publication requires an explicit publish request for the exact protected `next`
 commit, successful checks for that commit, and approval through a configured
@@ -208,7 +264,8 @@ prerelease tags; stable semantic releases continue to use `main`.
 The branch dispatch and same-commit workflow selection follow GitHub's
 [manual dispatch](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
 and [reusable workflow](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)
-contracts. The publish build runs on the Apple Silicon `macos-15` runner; application
+contracts. The Linux bundles build on `ubuntu-latest` and `ubuntu-24.04-arm`, and
+the release set is packaged on the Apple Silicon `macos-15` runner; application
 VM tests remain on a separately qualified native host.
 
 ## Install, upgrade and return to stable
@@ -302,10 +359,10 @@ it beside `libexec/hack`. Source installs prepare it with
 `bun run build:lifecycle-supervisor` (Rust 1.97.1, locked dependencies).
 The slim runtime image includes the same sibling executable.
 
-Stable archives build it for macOS arm64/x86_64 and Linux arm64/x86_64. Existing
-prerelease bundles remain macOS arm64 only: their supervisor is ad-hoc signed and
-covered by the bundle checksums. Retained managers accept older bundles without
-this helper. Packaging does not change the lifecycle runner default.
+Stable archives build it for macOS arm64/x86_64 and Linux arm64/x86_64. The macOS
+prerelease bundle's supervisor is ad-hoc signed and covered by the bundle
+checksums. The Compose-only Linux prerelease bundles carry it unsigned, covered by
+the bundle checksums. Retained managers accept older bundles without this helper. Packaging does not change the lifecycle runner default.
 
 Self-upgrades stage the helper before publishing the CLI, retain its previous
 bytes and SHA-256 in the backup, and restore it if publication fails.

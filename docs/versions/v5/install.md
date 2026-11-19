@@ -6,11 +6,13 @@ Already using v4? Read [3. Upgrade from v4](upgrade.md) before running v5 in a p
 ## Prerequisites
 
 v5 is in prerelease. Stable is still v4. A stable install does **not** install v5.
-The v5 prerelease bundle supports Apple Silicon macOS. Linux and Intel Macs stay
-on stable v4; see [platform support](../guides/prereleases.md).
+The v5 prerelease supports Apple Silicon macOS (native and Compose backends).
+From the first release after `5.0.0-next.22` it also supports Linux on x86_64 and
+arm64 with glibc, on the Compose backend only. Intel Macs stay on stable v4; see
+[platform support](../guides/prereleases.md).
 The [Linux host setup](../guides/linux-setup.md) and
-[Linux certificate trust](../guides/linux-certificate-trust.md) guides cover host
-configuration, not a Linux v5 candidate bundle.
+[Linux certificate trust](../guides/linux-certificate-trust.md) guides cover Linux
+host configuration.
 
 ```mermaid
 ---
@@ -42,6 +44,13 @@ Expect the version you chose and a selected bundle in the manager's report.
 Newer releases are on [GitHub](https://github.com/hack-dance/hack/releases).
 Check a release's notes before replacing the tag above.
 
+**On Linux**, run the same commands with the tag of a release that has Linux
+assets (`SHA256SUMS-linux` is in its asset list). The `5.0.0-next.22` installer
+stops on Linux. The installer needs `curl` and `sha256sum`, installs under
+`~/.hack-next` without `sudo`, and ends with "Installed the Compose backend. The
+native backend is Apple Silicon macOS only." See
+[the Linux candidate](../guides/candidate-install.md#linux-the-compose-only-candidate).
+
 | Channel | What it installs | Project state |
 | --- | --- | --- |
 | Stable `hack` | Homebrew's executable, or `~/.hack/bin/hack` with the release installer | Uses `~/.hack` |
@@ -67,7 +76,8 @@ than treating it as a complete plan.
 Have a running Docker-compatible engine and Docker Compose. Check with
 `docker info` and `docker compose version`.
 
-`hack-next` selects **native** unless you select Compose. In this terminal:
+On macOS, `hack-next` selects **native** unless you select Compose. On Linux it
+always runs Compose, and the `export` below is optional. In this terminal:
 
 ```sh
 export HACK_RUNTIME_BACKEND=compose
@@ -119,10 +129,10 @@ it beside `libexec/hack`. Source installs prepare it with
 `bun run build:lifecycle-supervisor` (Rust 1.97.1, locked dependencies).
 The slim runtime image includes the same sibling executable.
 
-Stable archives build it for macOS arm64/x86_64 and Linux arm64/x86_64. Existing
-prerelease bundles remain macOS arm64 only: their supervisor is ad-hoc signed and
-covered by the bundle checksums. Retained managers accept older bundles without
-this helper. Packaging does not change the lifecycle runner default.
+Stable archives build it for macOS arm64/x86_64 and Linux arm64/x86_64. The macOS
+prerelease bundle's supervisor is ad-hoc signed and covered by the bundle
+checksums. The Compose-only Linux prerelease bundles carry it unsigned, covered by
+the bundle checksums. Retained managers accept older bundles without this helper. Packaging does not change the lifecycle runner default.
 A prerelease channel installed by `5.0.0-next.17` or earlier refuses a bundle that
 contains it ("Foreign, duplicate or traversing archive entry."), and its `upgrade`
 changes nothing. For a channel a compiled manager installed (`next.6` to `next.17`),

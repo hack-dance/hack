@@ -1241,14 +1241,15 @@ async function managerFlow(run: FirstRun): Promise<void> {
     }),
   });
   const left = (await readdir(run.home).catch(() => [])).filter((name) =>
-    name.startsWith(".hack-next")
+    name.includes("hack-next")
   );
+  // The manager names the retained sibling `.<root name>.uninstalled-<id>`.
   const retained = left.filter((name) =>
-    /^\.hack-next\.uninstalled-[0-9a-f]{32}(\.json)?$/.test(name)
+    /^\.\.hack-next\.uninstalled-[0-9a-f]{32}(\.json)?$/.test(name)
   );
   run.record({
     step: "10 left on disk after uninstall",
-    command: "ls -a ~ | grep .hack-next",
+    command: "ls -a ~ | grep hack-next",
     exit: null,
     result:
       !left.includes(".hack-next") && retained.length === 2 && left.length === 2

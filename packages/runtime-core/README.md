@@ -767,7 +767,11 @@ for a security fix, so each bump stays small enough to review against upstream n
    digests in `disk_template::PINNED` (decode the archive's `*.ext4.zst` with an
    independent decoder and apply the `content_digest` definition), the network-tool
    packages when the guest Alpine release moves, and the audit lists in
-   `config_audit.rs` for any new machine-record capability.
+   `config_audit.rs`. `KNOWN_RECORD_FIELDS` names every field of the pinned
+   `VmRecord`, and a machine record with any other field refuses. So a bump that adds
+   fields must classify each one: inert (`INERT_RECORD_FIELDS`, mirrored in the
+   qualification script), or a rule of its own (`docker_socket` must be `true`,
+   `restart` must keep the `never` policy, `disk_durability` must be `full`).
 3. On an Apple Silicon Mac, run [`scripts/qualify-provider-pin.ts`](../../scripts/qualify-provider-pin.ts)
    once with a bundle built from the current pin (baseline) and once with the bump,
    each in its own empty private root. Supply `--provider-archive`,

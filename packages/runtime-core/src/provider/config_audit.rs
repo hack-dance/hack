@@ -315,10 +315,36 @@ fn verify_record(
             return Err(invalid());
         }
     }
+    let fields = record.as_object().ok_or_else(invalid)?;
+    if fields
+        .keys()
+        .any(|key| !KNOWN_RECORD_FIELDS.contains(&key.as_str()))
+    {
+        return Err(invalid());
+    }
     for field in INERT_RECORD_FIELDS {
         if !inert(field, record.get(field)) {
             return Err(invalid());
         }
+    }
+    // Every pool asks for the engine socket on the host (`--docker-socket` at create), so
+    // the record must say exactly that.
+    if record.get("docker_socket") != Some(&Value::Bool(true)) {
+        return Err(invalid());
+    }
+    // The provider must never restart a pool on its own. The policy stays `never` (absent
+    // means the provider default, `never`); the counters and the user-stopped flag are the
+    // provider's bookkeeping under that policy.
+    match record.get("restart") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(restart)) => {
+            if !matches!(restart.get("policy"), None | Some(Value::Null))
+                && restart.get("policy") != Some(&json!("never"))
+            {
+                return Err(invalid());
+            }
+        }
+        Some(_) => return Err(invalid()),
     }
     // A pool's disks must reach the host disk before a guest flush returns: clean stop,
     // exact disk identity and recovery assume it. Absent means the provider default, full.
@@ -338,9 +364,11 @@ fn verify_record(
 /// provider writes at every start (`engine_build`, `agent_rootfs_digest`,
 /// `agent_rootfs_path`) grants nothing and is not audited, and `disk_durability` has its
 /// own full-only rule. Workload stop settings that a pool without a workload never uses are
-/// listed too. Not listed: `docker_socket`, which every pool asks for and stores as `true`,
-/// and `restart`, `runtime_managed` and the `cuda_*` fields, which have no rule yet.
-const INERT_RECORD_FIELDS: [&str; 39] = [
+/// listed too. Three fields have their own rule in `verify_record` instead: `docker_socket`
+/// must be `true` (every pool asks for it), `restart` must keep the `never` policy, and
+/// `disk_durability` must be `full`. Every field of the pinned record is named in
+/// [`KNOWN_RECORD_FIELDS`]; a field that list does not name refuses.
+const INERT_RECORD_FIELDS: [&str; 53] = [
     "pause_reason",
     "paused_checkpoint",
     "disks",
@@ -386,6 +414,129 @@ const INERT_RECORD_FIELDS: [&str; 39] = [
     "golden",
     "fork_env",
     "ephemeral",
+    // Also present since 1.34.1 (HACK-2361). `runtime_managed` hands the machine to the
+    // provider's runtime-shim reconciliation; `cuda` remotes guest CUDA to a host GPU, with
+    // the `cuda_*` fork-pool settings; `source_smolmachine` mounts a `.smolmachine` sidecar
+    // instead of the pinned image; the `fork_*` fields and `forkpoint_held` mark a fork
+    // lineage; and the `health_*` settings run a workload health check. A pool asks for
+    // none of them.
+    "runtime_managed",
+    "cuda",
+    "cuda_fork_pool_size",
+    "cuda_vram_limit_mib",
+    "cuda_preload_modules",
+    "source_smolmachine",
+    "fork_generation",
+    "fork_lineage_pid_start_time",
+    "fork_overlay_owner",
+    "forkpoint_held",
+    "health_interval_secs",
+    "health_timeout_secs",
+    "health_retries",
+    "health_startup_grace_secs",
+];
+
+/// Every field of the pinned SmolVM's `VmRecord` (1.35.4, `src/config.rs`; no field is
+/// renamed or flattened). A record key outside this list is a field this runtime has not
+/// reviewed, so the record refuses; a pin bump that adds fields must classify each one
+/// here and, if it can grant anything, in [`INERT_RECORD_FIELDS`] or a rule of its own.
+pub(super) const KNOWN_RECORD_FIELDS: [&str; 96] = [
+    "name",
+    "created_at",
+    "state",
+    "pause_reason",
+    "paused_checkpoint",
+    "pid",
+    "pid_start_time",
+    "engine_build",
+    "cpus",
+    "mem",
+    "block_io",
+    "disk_durability",
+    "disks",
+    "cache_disk",
+    "disk_volumes",
+    "block_private",
+    "mounts",
+    "staged_mounts",
+    "recorded_ownership",
+    "staged_mounts_detached_from",
+    "ports",
+    "udp_ports",
+    "allocated_ports",
+    "listen_addresses",
+    "published_sockets",
+    "network",
+    "gpu",
+    "nested_virt",
+    "gpu_vram_mib",
+    "rosetta",
+    "oci_platform",
+    "restart",
+    "last_exit_code",
+    "init",
+    "init_completed",
+    "remote_volumes",
+    "env",
+    "secret_refs",
+    "workdir",
+    "user",
+    "storage_gb",
+    "overlay_gb",
+    "allowed_cidrs",
+    "egress_rules",
+    "network_backend",
+    "dns",
+    "dns_options",
+    "shm_size",
+    "network_name",
+    "guest_subnet",
+    "switch",
+    "image",
+    "entrypoint",
+    "cmd",
+    "labels",
+    "health_cmd",
+    "health_interval_secs",
+    "health_timeout_secs",
+    "health_retries",
+    "health_startup_grace_secs",
+    "ssh_agent",
+    "cuda",
+    "forkable",
+    "detached",
+    "keep_identity",
+    "stop_on_exit",
+    "stop_signal",
+    "stop_timeout_secs",
+    "cuda_fork_pool_size",
+    "cuda_vram_limit_mib",
+    "cuda_preload_modules",
+    "docker_socket",
+    "auto_ports",
+    "dns_filter_hosts",
+    "credential_policy",
+    "external_interceptor_required",
+    "mediated_egress_required",
+    "credential_placeholders",
+    "credentials_supplied_by_api",
+    "ephemeral",
+    "source_smolmachine",
+    "packed_image_on_storage",
+    "source_registry_ref",
+    "image_origin",
+    "image_origin_digest",
+    "golden",
+    "fork_generation",
+    "fork_lineage_pid_start_time",
+    "checkpoint_head",
+    "agent_rootfs_digest",
+    "agent_rootfs_path",
+    "fork_overlay_owner",
+    "host_uid_owner",
+    "forkpoint_held",
+    "fork_env",
+    "runtime_managed",
 ];
 
 /// Running-configuration resource fields SmolVM added after 1.14.3 (1.34.1's and 1.35.4's
@@ -536,7 +687,7 @@ mod tests {
     }
     fn fixture() -> Value {
         json!({"name":"owned","labels":{"hack-local.owner":"token"},"ssh_agent":false,
-            "network":false,"ports":[],
+            "network":false,"ports":[],"docker_socket":true,
             "published_sockets":[],"staged_mounts":[],"remote_volumes":[],"init":[],"env":[],"entrypoint":[],"cmd":[]})
     }
     #[test]
@@ -692,6 +843,68 @@ mod tests {
             let mut record = fixture();
             record.as_object_mut().unwrap().remove(field);
             assert!(verify_isolated_record(&record, "owned", "token", None).is_err());
+        }
+    }
+    #[test]
+    fn the_engine_socket_must_be_requested_and_the_provider_never_restarts_a_pool() {
+        // HACK-2361: every pool asks for `--docker-socket`; the record must say exactly that.
+        let plain = fixture();
+        verify_isolated_record(&plain, "owned", "token", None).unwrap();
+        for value in [
+            None,
+            Some(json!(false)),
+            Some(Value::Null),
+            Some(json!("true")),
+        ] {
+            let mut record = plain.clone();
+            match value {
+                Some(value) => record["docker_socket"] = value,
+                None => {
+                    record.as_object_mut().unwrap().remove("docker_socket");
+                }
+            }
+            assert!(verify_isolated_record(&record, "owned", "token", None).is_err());
+        }
+        // `restart` keeps the `never` policy; its counters are the provider's bookkeeping.
+        for restart in [
+            Value::Null,
+            json!({}),
+            json!({"policy":"never","max_retries":0,"max_backoff_secs":0,"restart_count":3,"user_stopped":true}),
+        ] {
+            let mut record = plain.clone();
+            record["restart"] = restart;
+            verify_isolated_record(&record, "owned", "token", None).unwrap();
+        }
+        for restart in [
+            json!({"policy":"always"}),
+            json!({"policy":"on-failure","max_retries":5}),
+            json!({"policy":"unless-stopped"}),
+            json!("never"),
+        ] {
+            let mut record = plain.clone();
+            record["restart"] = restart;
+            assert!(verify_isolated_record(&record, "owned", "token", None).is_err());
+        }
+    }
+    #[test]
+    fn a_record_field_this_runtime_has_not_reviewed_refuses() {
+        // Every field the pinned provider writes is named, so a plain record passes ...
+        let mut record = fixture();
+        verify_isolated_record(&record, "owned", "token", None).unwrap();
+        // ... and a field the next pin adds refuses until it is classified here.
+        record["teleport"] = json!(false);
+        assert!(verify_isolated_record(&record, "owned", "token", None).is_err());
+        record.as_object_mut().unwrap().remove("teleport");
+        record["engine_build"] = json!("synthetic");
+        verify_isolated_record(&record, "owned", "token", None).unwrap();
+        // The list names each field once.
+        let unique: std::collections::BTreeSet<_> = KNOWN_RECORD_FIELDS.iter().collect();
+        assert_eq!(unique.len(), KNOWN_RECORD_FIELDS.len());
+        for field in INERT_RECORD_FIELDS {
+            assert!(
+                KNOWN_RECORD_FIELDS.contains(&field),
+                "{field} is not a known field"
+            );
         }
     }
     #[test]

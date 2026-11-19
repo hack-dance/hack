@@ -2035,8 +2035,30 @@ exit 43"#,
             false,
         );
     }
+    start_memory_return(owner, |script, args, background| {
+        guest(candidate, owner, script, args, background)
+    });
     phase(candidate, owner, "running")?;
     status(candidate)
+}
+
+/// Start the guest job that returns freed memory to the host (`guest-memory-return.sh`):
+/// it reports smaller free blocks and compacts once when the guest has gone quiet. It runs
+/// in the agent's background mode and its result is ignored, so a fresh boot neither waits
+/// for it nor fails because of it. The warm `running_start` path does not boot and so does
+/// not start it.
+fn start_memory_return(
+    owner: &Owner,
+    run: impl FnOnce(&str, &[&str], bool) -> Result<String, CandidateError>,
+) {
+    let Some(boot) = owner.guest_boot_id.as_deref() else {
+        return;
+    };
+    let _ = run(
+        include_str!("guest-memory-return.sh"),
+        &[&owner.token, boot],
+        true,
+    );
 }
 
 /// Copy (once) and prove the pool's guest rootfs by content. Returns its metadata digest

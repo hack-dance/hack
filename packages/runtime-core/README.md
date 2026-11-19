@@ -1623,6 +1623,24 @@ yet, and pinning an unmeasured value could do worse than upstream's. The provide
 qualification script measures idle footprint at 0, 3 and 10 minutes; pin it
 explicitly once those numbers are recorded.
 
+A fresh boot also starts one best-effort job in the guest
+([`guest-memory-return.sh`](src/provider/guest-memory-return.sh)), in the agent's
+background mode, after the engine answers and before the pool is recorded as running. It
+does two things. It sets the guest kernel's free page reporting to 16 KiB blocks (order
+2) instead of the default 2 MiB, so freed memory in smaller pieces is handed back to the
+host. And it compacts guest memory once, after the guest has been quiet for six
+15-second windows in a row (90 s, each under 15% of one CPU busy), giving up after 15
+minutes. The wait is longer than the provider agent's own page-cache trim, which needs
+one quiet minute, so the compaction comes after it.
+Neither setting returns memory alone on this runtime; together they do. Boot does
+not wait for the job and ignores its result: a guest kernel without either setting, a
+refused write or a guest that never goes quiet is recorded and nothing fails. It runs at
+most once per boot (a marker under `/run/hack-local`), checks the pool's owner token and
+boot ID before it does anything, and writes nothing under `/storage`. The warm start of a
+pool that is already running does not boot and does not start it. To see what it did,
+read `/run/hack-local/memory-return.status` in the guest: one line such as
+`memory-return-v1 order=2 compaction=done windows=9`.
+
 ### Starting a pool that is already running
 
 `runtime up` on a pool that is already running and owned by this home (every warm frontend

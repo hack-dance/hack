@@ -144,3 +144,67 @@ fn failed_boot_stop_preserves_its_code_and_the_recovery_command() {
     );
     assert!(!failure.message.contains("private transport detail"));
 }
+
+fn memory_return_owner(boot: Option<&str>) -> Owner {
+    serde_json::from_value(serde_json::json!({
+        "version":1,"checkout":"/fixture","token":"fixture-token","machine":"fixture",
+        "short_home":"/fixture","created":true,"phase":"initializing","process":null,
+        "storage":null,"overlay":null,"guest_boot_id":boot,
+        "daemon_pid":null,"daemon_start":null,"rootfs_digest":null
+    }))
+    .unwrap()
+}
+
+#[test]
+fn memory_return_starts_in_the_background_with_the_guest_identity_and_never_fails_boot() {
+    let calls = RefCell::new(Vec::new());
+    start_memory_return(
+        &memory_return_owner(Some("boot-1")),
+        |script, args, background| {
+            calls.borrow_mut().push((
+                script.contains("memory-return-v1"),
+                args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(),
+                background,
+            ));
+            // The guest refusing, or the agent being unreachable, is not a boot failure.
+            Err(CandidateError::new("guest_protocol", "fixture"))
+        },
+    );
+    assert_eq!(
+        calls.into_inner(),
+        [(
+            true,
+            vec![String::from("fixture-token"), String::from("boot-1")],
+            true
+        )]
+    );
+    // Without a verified boot identity there is nothing to bind the job to: it is not started.
+    start_memory_return(&memory_return_owner(None), |_, _, _| {
+        panic!("no guest call without a boot identity")
+    });
+}
+
+#[test]
+fn memory_return_is_started_after_the_engine_answers_and_before_the_running_phase() {
+    let source = include_str!("../lifecycle.rs");
+    let position = |needle: &str| {
+        source
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing {needle}"))
+    };
+    let engine = position("engine_ping(&socket(candidate, owner, \"docker.sock\")?)?;");
+    let build_network = position("include_str!(\"guest-build-network.sh\")");
+    let memory = position("start_memory_return(owner, |script, args, background| {");
+    let running = memory
+        + source[memory..]
+            .find("phase(candidate, owner, \"running\")?;")
+            .expect("running phase after the memory step");
+    assert!(engine < build_network && build_network < memory && memory < running);
+    // Nothing else is recorded between the step and the running phase.
+    assert_eq!(
+        source[memory..running]
+            .matches("phase(candidate, owner,")
+            .count(),
+        0
+    );
+}

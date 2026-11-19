@@ -142,8 +142,14 @@ function sameSignature(
  * Native `up`, `restart` and the `up` that finds its run already running
  * (HACK-2358): compares the current plan with what this instance's run
  * started with, says so when they differ, and records the plan a start or
- * restart launches. Best-effort: a record that cannot be read or written
- * only loses the message, never the start.
+ * restart launches. The record is best-effort: one that cannot be read or
+ * written only loses the message, never the start. An invalid
+ * `localDirectories` still refuses here, as on every other path.
+ *
+ * Known limit: the record is written when a start or restart is launched,
+ * not when it is confirmed, so a launch that then fails leaves a record of a
+ * plan that is not running; only the next "changed" or "applies" message is
+ * affected, never what runs.
  */
 export async function trackNativeLocalDirectories(opts: {
   readonly project: ProjectContext;

@@ -1412,6 +1412,15 @@ fn start_pool(
     // Recheck a clean stop's alias under the lease before the release checks probe its
     // sockets or the provider runs with it as HOME.
     restore_released_short_home(candidate)?;
+    // First under the lease, before admission or anything else can rewrite the phase: a
+    // set-aside of a previous failed first boot must not meet this start's new disks.
+    if root(candidate)
+        .join("owner.json")
+        .try_exists()
+        .map_err(io)?
+    {
+        interrupted::before_boot(candidate, &Owner::load(candidate)?)?;
+    }
     // Under the lease: the selection is rechecked. A stopped pool keeps the reserve only if
     // a sample needs it, and then its provider release (VM lock, disk handles, listeners,
     // provider configuration) is proven; otherwise this start uses the fresh budget.
@@ -1634,8 +1643,6 @@ fn start_pool(
     if let Some(guard) = &retained_guard {
         guard.verify(candidate)?;
     }
-    // A set-aside of a previous failed first boot must not meet this boot's new disks.
-    interrupted::before_boot(candidate, &owner)?;
     // The last check before `machine start` releases the VM lock to the provider.
     let permit = boot.release(candidate, &lock)?;
     let previous_boot = owner.begin_boot();

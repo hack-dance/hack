@@ -642,7 +642,7 @@ provider process, so a retry checks the templates again. Before the first move r
 `untrusted-first-boot.json` beside the owner record, and an interrupted set-aside resumes from it.
 The disks must be regular files of this user with one link. Every attempt syncs the directories
 it moved files between, and the intent is removed only after the owner records
-`stopped-before-engine`. The next start also removes a completed intent before it boots, and refuses with
+`stopped-before-engine`. The next start also removes a completed intent first, before admission, and refuses with
 `recovery_required` while one is unfinished.
 The same applies when the failed boot's provider was recorded and is proven dead
 (`failed-boot-stopped` after a template refusal): recovery sets those disks aside instead of

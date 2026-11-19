@@ -219,7 +219,8 @@ pub(super) fn set_aside_recorded(
     Ok(true)
 }
 
-/// Before a boot, under the pool lock: a set-aside intent left by recovery must not survive
+/// At the start of `up`, first under the pool lock and before admission can change the
+/// phase: a set-aside intent left by recovery must not survive
 /// into a boot, whose new disks a later recovery would otherwise try to move into the old
 /// set-aside directory. On `stopped-before-engine` the set-aside completed (the owner
 /// transition commits it), so the intent is removed. In any other phase it may still be in

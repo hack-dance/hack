@@ -17,7 +17,9 @@
  *    and are left to Compose.
  *
  * The checks only read: they start no engine, create no network and change
- * nothing. Any other failure of a check (an unrecognized `docker version`
+ * nothing. Callers run them with the same environment Compose will get, so a
+ * project that selects its engine (`DOCKER_HOST`, `DOCKER_CONTEXT`) through its
+ * env is checked against that engine. Any other failure of a check (an unrecognized `docker version`
  * error, an unreadable compose file) passes, so Compose reports it as before.
  */
 
@@ -65,7 +67,10 @@ export interface ComposeEnginePreflightDeps {
  */
 export async function preflightComposeEngine(opts: {
   readonly deps: ComposeEnginePreflightDeps;
+  /** Values that must never appear in a quoted engine line. */
+  readonly redactValues?: Iterable<string>;
 }): Promise<HackCliError | null> {
+  const redactValues = [...(opts.redactValues ?? [])];
   const { deps } = opts;
   if (!deps.dockerOnPath()) {
     return new HackCliError({
@@ -81,6 +86,7 @@ export async function preflightComposeEngine(opts: {
     return dockerEngineFailureError({
       result: version,
       command: "docker version",
+      redactValues,
     });
   }
   const compose = await deps.run(
@@ -92,6 +98,7 @@ export async function preflightComposeEngine(opts: {
       dockerEngineFailureError({
         result: compose,
         command: "docker compose version",
+        redactValues,
       }) ??
       new HackCliError({
         code: "E_DOCKER_UNAVAILABLE",
@@ -112,7 +119,10 @@ export async function preflightComposeEngine(opts: {
 export async function preflightSharedNetworks(opts: {
   readonly composeYaml: string | null;
   readonly deps: Pick<ComposeEnginePreflightDeps, "run">;
+  /** Values that must never appear in a quoted engine line. */
+  readonly redactValues?: Iterable<string>;
 }): Promise<HackCliError | null> {
+  const redactValues = [...(opts.redactValues ?? [])];
   const { deps } = opts;
   for (const network of sharedExternalNetworks(opts.composeYaml)) {
     const inspect = await deps.run(
@@ -125,6 +135,7 @@ export async function preflightSharedNetworks(opts: {
     const engine = dockerEngineFailureError({
       result: inspect,
       command: "docker network inspect",
+      redactValues,
     });
     if (engine !== null) {
       return engine;

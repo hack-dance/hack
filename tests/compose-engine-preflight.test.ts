@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import { buildLifecycleJsonErrorResult } from "../src/commands/project.ts";
+import {
+  buildLifecycleJsonErrorResult,
+  composeEnginePreflightDeps,
+} from "../src/commands/project.ts";
 import {
   type ComposeEnginePreflightDeps,
   preflightComposeEngine,
@@ -208,5 +211,35 @@ describe("lifecycle JSON errors", () => {
         message: "Missing project env key at /x.",
       },
     });
+  });
+});
+
+describe("preflight environment", () => {
+  test("the real deps run with the env Compose gets, so a project's DOCKER_HOST applies", async () => {
+    const deps = composeEnginePreflightDeps({
+      DOCKER_HOST: "unix:///run/project-engine.sock",
+    });
+    const result = await deps.run(
+      ["sh", "-c", 'printf %s "$DOCKER_HOST"'],
+      5000
+    );
+    expect(result.stdout).toBe("unix:///run/project-engine.sock");
+  });
+
+  test("a quoted engine line redacts the project's env values", async () => {
+    const { deps } = fakeDocker({
+      "docker version": {
+        exitCode: 1,
+        stdout: "",
+        stderr:
+          "Cannot connect to the Docker daemon at unix:///run/project-secret-value.sock. Is the docker daemon running?\n",
+      },
+    });
+    const error = await preflightComposeEngine({
+      deps,
+      redactValues: ["project-secret-value"],
+    });
+    expect(error?.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(error?.message).not.toContain("project-secret-value");
   });
 });

@@ -7388,14 +7388,6 @@ async function runUpCommand({
     }
     return remoteUpCode;
   }
-  // Name a missing engine, socket permission or Compose plugin before any
-  // pull starts (HACK-2356). The error renders as the JSON envelope or one line.
-  const engineRefusal = await preflightComposeEngine({
-    deps: composeEnginePreflightDeps,
-  });
-  if (engineRefusal !== null) {
-    throw engineRefusal;
-  }
   await maybeSyncOauthAliasesInCompose({ project });
   // Keep machine-local generated files (.internal/, .branch/, .env, env
   // state) out of git status without writing into the user's tree: the rules
@@ -7432,13 +7424,6 @@ async function runUpCommand({
   const aliasHost = resolveBranchAliasHost({ devHost, cfg });
   const internalSettings = resolveInternalSettings(cfg);
   await maybePromptToStartGlobal({ internal: internalSettings });
-  const networkRefusal = await preflightSharedNetworks({
-    composeYaml: await readTextFile(project.composeFile),
-    deps: composeEnginePreflightDeps,
-  });
-  if (networkRefusal !== null) {
-    throw networkRefusal;
-  }
 
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const requestedServices = resolveRequestedComposeServices({
@@ -7472,6 +7457,23 @@ async function runUpCommand({
     allServiceNames,
     envName,
   });
+
+  // Name a missing engine, socket permission, Compose plugin or shared
+  // network before any pull starts (HACK-2356), against the engine Compose
+  // will use: the same environment, so a project's DOCKER_HOST or
+  // DOCKER_CONTEXT applies. The error renders as the JSON envelope or one line.
+  const preflightDeps = composeEnginePreflightDeps(envOverrides.env);
+  const redactValues = composeEnvValuesToRedact({ env: envOverrides.env });
+  const engineRefusal =
+    (await preflightComposeEngine({ deps: preflightDeps, redactValues })) ??
+    (await preflightSharedNetworks({
+      composeYaml: await readTextFile(project.composeFile),
+      deps: preflightDeps,
+      redactValues,
+    }));
+  if (engineRefusal !== null) {
+    throw engineRefusal;
+  }
 
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
@@ -7911,12 +7913,19 @@ async function runUpCommand({
   }
 }
 
-/** Real Docker reads for the `up` preflight; tests inject their own. */
-const composeEnginePreflightDeps: ComposeEnginePreflightDeps = {
-  dockerOnPath: () => findExecutableInPath("docker") !== null,
-  run: async (argv, timeoutMs) =>
-    await exec(argv, { stdin: "ignore", timeoutMs }),
-};
+/**
+ * Real Docker reads for the `up` preflight, in the environment Compose will
+ * get (`env` overlays the inherited environment, as for `docker compose up`).
+ */
+export function composeEnginePreflightDeps(
+  env: Record<string, string> | undefined
+): ComposeEnginePreflightDeps {
+  return {
+    dockerOnPath: () => findExecutableInPath("docker") !== null,
+    run: async (argv, timeoutMs) =>
+      await exec(argv, { stdin: "ignore", timeoutMs, env }),
+  };
+}
 
 async function maybePromptToStartGlobal(opts: {
   readonly internal: { readonly dns: boolean; readonly tls: boolean };

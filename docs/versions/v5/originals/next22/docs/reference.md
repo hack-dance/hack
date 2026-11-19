@@ -1,0 +1,45 @@
+# Reference
+
+## CLI & architecture
+
+- [CLI overview](./cli.md) — supported command surface and the running-things decision guide
+- [CLI reference (generated, exhaustive)](./reference/cli.md) — every command and flag, rendered from the spec (regenerate: `bun run docs:cli-reference`)
+- [Architecture](./architecture.md)
+- [Core docs](./core.md)
+- [Docs information architecture](./docs-ia.md)
+
+## Environment & sessions
+
+- [Project state](./reference/project-state.md) — shared backend-aware CLI and daemon project/service observations
+- [Version identity](./reference/version.md) — `hack version --json` describes the running CLI without starting services
+- [Read-only update check](./reference/update-check.md) — `hack update --check --json --observe`: newer release, install kind and upgrade command, for any install
+- [Machine-readable output](./reference/machine-readable-output.md) — envelope rule, schema identifiers and the complete JSON command inventory
+- [Environment model](./env.md)
+- [Lifecycle & startup](./lifecycle.md)
+- [Admin plans](./reference/global-admin-plan.md) — `hack global install|trust --plan --json`: the ordered root and user steps and exact root argv, without running anything
+- [Activity log](./reference/activity-log.md) — the `up`/`down`/`restart` history `hack activity` reads: records, origins, concurrency, rotation and what is never recorded
+- [Observe-only global status](./reference/global-status-observe.md) — `hack global status --json --observe`: routing, DNS and proxy state without starting anything, and its probe list
+- [Local CA trust check](./reference/local-ca-trust.md) — `hack doctor`'s read-only `local ca trust` check: which stores trust the Caddy Local CA, or unknown
+- [Shared host helper lifecycle](./reference/shared-host-lifecycle.md) — identity-verified adoption, exact process claims and release rules for helpers shared across branches
+- [Sessions](./sessions.md)
+- [Background commands](./guides/background-commands.md) — `hack exec|run --detach`, cursor reads, inspect and cancel; storage, retention and partial redaction
+- [Agent-first setup](./guides/agent-first-setup.md)
+
+## Native runtime (experimental)
+
+- [Upgrade to v5](./guides/upgrade-to-v5.md)
+- [Native backend (beta)](./native/README.md) and its [detailed reference](./guides/native-candidate.md)
+- [Native configuration validation](./reference/native-config-compiler.md) — the authored `.hack/hack.project.json` compiler contract
+- [Native configuration with Compose](./reference/native-compose-commands.md) — the Compose command owner for authored projects
+- [Authored configuration with the native runtime](./reference/native-authored-commands.md) — the explicit native backend command slices and their support matrix
+- [Application benchmark protocol](./reference/application-benchmark-protocol.md) — the frozen matched benchmark artifacts, workloads, order, sample counts and budgets
+
+## Agent interfaces and retained surfaces
+
+- [Agent integrations](./integrations.md)
+- [Unsupported retained surfaces](./extensions.md)
+- [Creating an extension](./guides/create-extension.md)
+- [MCP tool contract](./reference/mcp-tools.md) — every MCP tool: annotations, inputs, argv, results, and the value-free env tools
+- [MCP logs contract](./reference/mcp-logs.md) — cutoff versus backend failure for the MCP log tools, and the cursor/handle decision
+- [AX target and result contract](./reference/ax-target-result-contract.md) — provisional target schema, closed refusals and the read-only `hack project target` inspector
+- [AX task catalog contract](./reference/ax-task-catalog.md) — provisional reviewed-recipe catalog, closed refusals and the read-only `hack project task list|inspect` commands

@@ -9,6 +9,7 @@ import {
   NATIVE_IDLE_POOL_NOTE,
   NATIVE_PROVIDER_PIN_MESSAGE,
 } from "../backends/native-runtime-client.ts";
+import { CliUsageError } from "../cli/command.ts";
 import {
   noteActivityFailedServices,
   suppressActivityRecording,
@@ -16,12 +17,23 @@ import {
 import type { BranchDroppedSites } from "./branch-hosts.ts";
 import { hackReexecEnvironment } from "./child-environment.ts";
 import {
+  ClosedCliError,
   emitCliResult,
   errorResult,
+  HACK_ERROR_CODES,
   HackCliError,
+  type HackErrorCode,
   okResult,
 } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
+import {
+  isNativeDetachedStartPhase,
+  NATIVE_DETACHED_HEARTBEAT_MS,
+  NativeDetachedStartDeadline,
+  type NativeDetachedStartLimits,
+  type NativeDetachedStartPhase,
+  resolveNativeDetachedStartLimits,
+} from "./native-detached-start-deadline.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "./native-environment-notices.ts";
 
 export const NATIVE_DETACHED_OWNER_ARGUMENT =
@@ -50,11 +62,254 @@ type StartupFailure = {
   readonly startupPhase?: "static-preflight";
 };
 let publishFailure: ((failure: StartupFailure) => Promise<void>) | undefined;
+let publishProgress:
+  | ((phase: Exclude<NativeDetachedStartPhase, "launching">) => void)
+  | undefined;
+let progressHeartbeat: ReturnType<typeof setInterval> | undefined;
+let heartbeatIntervalMs = NATIVE_DETACHED_HEARTBEAT_MS;
+
+/** Test fixtures may report image-work heartbeats faster than every 30 s. */
+export function setNativeDetachedHeartbeatIntervalForTests(ms: number): void {
+  heartbeatIntervalMs = ms;
+}
+
+function stopProgressHeartbeat(): void {
+  clearInterval(progressHeartbeat);
+  progressHeartbeat = undefined;
+}
+
+/**
+ * Report a startup phase to the launcher (HACK-2351): its name only. While the
+ * owner is in `images` (bounded build and load requests) it repeats that
+ * report as a heartbeat, so the launcher does not count image work against its
+ * budget. A foreground start has no launcher and reports nothing.
+ */
+export function nativeDetachedUpProgress(phase: string): void {
+  if (!(publishProgress && isNativeDetachedStartPhase(phase))) {
+    return;
+  }
+  stopProgressHeartbeat();
+  publishProgress(phase);
+  if (phase === "images") {
+    const report = publishProgress;
+    progressHeartbeat = setInterval(
+      () => report("images"),
+      heartbeatIntervalMs
+    );
+    progressHeartbeat.unref?.();
+  }
+}
 const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const FAILURE_MESSAGE = /^[\x20-\x7e]{1,400}$/;
 const FAILURE_SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
 const FAILED_SERVICES_LIMIT = 32;
 let failedStartupServices: readonly string[] = [];
+
+/**
+ * A refusal raised before the detached owner started any VM work: the same
+ * closed CLI error the foreground command would print (HACK-2339), and, for
+ * a failed lifecycle hook, the lines the foreground printed about it.
+ */
+type PrestartRefusal = {
+  readonly error: "hack" | "closed" | "usage";
+  /** Registered `HackErrorCode`; only for `error: "hack"`. */
+  readonly code?: string;
+  readonly message: string;
+  /** JSON detail of a `HackCliError`, bounded; never for other errors. */
+  readonly detail?: unknown;
+  /** The failed lifecycle hook's step line, output tail and failure line. */
+  readonly hook?: readonly string[];
+};
+let publishPrestartRefusal:
+  | ((refusal: PrestartRefusal) => Promise<void>)
+  | undefined;
+/** True while the owner is in `up`'s checks before any VM work. */
+let prestart = false;
+let failedHookLines: readonly string[] = [];
+/** A control character other than tab or newline (escape sequences included). */
+const CONTROL = /[^\P{Cc}\t\n]/u;
+/** A control character other than tab: a hook line never holds a newline. */
+const HOOK_CONTROL = /[^\P{Cc}\t]/u;
+const HOOK_CONTROLS = /[^\P{Cc}\t]/gu;
+/**
+ * Above every bounded closed diagnostic, such as a source-size refusal that
+ * names ten paths of up to 4096 characters each.
+ */
+const REFUSAL_MESSAGE_LIMIT = 64 * 1024;
+const REFUSAL_DETAIL_LIMIT = 16 * 1024;
+const HOOK_LINE_LIMIT = 500;
+const HOOK_LINES_LIMIT = 60;
+const HOOK_OUTPUT_TAIL = 40;
+
+/** One display line: no control characters but tabs, bounded. */
+function hookLine(value: string): string {
+  return value.replace(HOOK_CONTROLS, "").slice(0, HOOK_LINE_LIMIT);
+}
+
+/**
+ * Marks the detached owner's pre-VM phase of `up`: from its first project
+ * check until runtime work starts. A closed refusal raised in it reaches the
+ * launcher as the foreground would print it; outside it nothing changes.
+ */
+export function nativeDetachedUpPrestart(active: boolean): void {
+  if (!publishPrestartRefusal) {
+    return;
+  }
+  prestart = active;
+  if (!active) {
+    failedHookLines = [];
+  }
+}
+
+/** Whether a lifecycle hook's output tail is kept: a detached owner before VM work. */
+export function nativeDetachedUpKeepsHookOutput(): boolean {
+  return publishPrestartRefusal !== undefined && prestart;
+}
+
+/**
+ * Record the lines the foreground printed for a failed lifecycle hook: its
+ * step line, the last lines of its output and its failure line. Kept only in
+ * a detached owner's pre-VM phase, and sent only with that phase's refusal;
+ * the launcher writes them to stderr, never into `--json` (HACK-2311).
+ */
+export function nativeDetachedUpHookFailed(opts: {
+  readonly step: string;
+  readonly output: readonly string[];
+  readonly failure: string;
+}): void {
+  if (!(publishPrestartRefusal && prestart)) {
+    return;
+  }
+  failedHookLines = [
+    opts.step,
+    ...opts.output.slice(-HOOK_OUTPUT_TAIL),
+    opts.failure,
+  ].map(hookLine);
+}
+
+/** The closed CLI error the foreground would print, or undefined for any other error. */
+function prestartRefusal(error: unknown): PrestartRefusal | undefined {
+  const hook = failedHookLines.length > 0 ? failedHookLines : undefined;
+  if (error instanceof HackCliError) {
+    const detail =
+      error.detail === undefined ? undefined : JSON.stringify(error.detail);
+    return {
+      error: "hack",
+      code: error.code,
+      message: error.message,
+      ...(detail !== undefined && detail.length <= REFUSAL_DETAIL_LIMIT
+        ? { detail: JSON.parse(detail) as unknown }
+        : {}),
+      ...(hook ? { hook } : {}),
+    };
+  }
+  if (error instanceof CliUsageError || error instanceof ClosedCliError) {
+    return {
+      error: error instanceof CliUsageError ? "usage" : "closed",
+      message: error.message,
+      ...(hook ? { hook } : {}),
+    };
+  }
+  return;
+}
+
+function isRefusalMessage(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= REFUSAL_MESSAGE_LIMIT &&
+    !CONTROL.test(value)
+  );
+}
+
+/** A registered code for a `HackCliError`; no code or detail for the others. */
+function isRefusalIdentity(value: Record<string, unknown>): boolean {
+  if (value.error === "hack") {
+    return (
+      typeof value.code === "string" &&
+      (HACK_ERROR_CODES as readonly string[]).includes(value.code) &&
+      (value.detail === undefined ||
+        JSON.stringify(value.detail).length <= REFUSAL_DETAIL_LIMIT)
+    );
+  }
+  return (
+    (value.error === "closed" || value.error === "usage") &&
+    value.code === undefined &&
+    value.detail === undefined
+  );
+}
+
+function isHookLines(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (Array.isArray(value) &&
+      value.length > 0 &&
+      value.length <= HOOK_LINES_LIMIT &&
+      value.every(
+        (line) =>
+          typeof line === "string" &&
+          line.length <= HOOK_LINE_LIMIT &&
+          !HOOK_CONTROL.test(line)
+      ))
+  );
+}
+
+function isPrestartRefusal(value: unknown): value is PrestartRefusal {
+  return (
+    isRecord(value) &&
+    Object.keys(value).every((key) =>
+      ["error", "code", "message", "detail", "hook"].includes(key)
+    ) &&
+    isRefusalMessage(value.message) &&
+    isRefusalIdentity(value) &&
+    isHookLines(value.hook)
+  );
+}
+
+/** Written instead of a failed hook's lines when stderr is not a terminal. */
+export const NATIVE_HOOK_OUTPUT_TERMINAL_ONLY =
+  "The failed lifecycle hook's output is shown only on a terminal; run hack up without -d in a terminal to see it.";
+
+/**
+ * What the launcher writes to stderr for a failed hook. Its lines only on a
+ * terminal, as the foreground printed them: hook output may carry values,
+ * and a non-terminal stderr is often captured (for example as an agent tool's
+ * result). Otherwise one fixed line says how to see them. Never stdout.
+ */
+export function nativePrestartHookLines(opts: {
+  readonly lines: readonly string[] | undefined;
+  readonly terminal: boolean;
+}): readonly string[] {
+  if (!opts.lines?.length) {
+    return [];
+  }
+  return opts.terminal ? opts.lines : [NATIVE_HOOK_OUTPUT_TERMINAL_ONLY];
+}
+
+/** Write the failed hook's stderr lines and return the refusal's error. */
+function reportPrestartRefusal(refusal: PrestartRefusal): Error {
+  for (const line of nativePrestartHookLines({
+    lines: refusal.hook,
+    terminal: process.stderr.isTTY === true,
+  })) {
+    process.stderr.write(`${line}\n`);
+  }
+  return prestartRefusalError(refusal);
+}
+
+/** The launcher's error for a validated pre-VM refusal: the foreground's own class. */
+function prestartRefusalError(refusal: PrestartRefusal): Error {
+  if (refusal.error === "hack") {
+    return new HackCliError({
+      code: refusal.code as HackErrorCode,
+      message: refusal.message,
+      ...(refusal.detail === undefined ? {} : { detail: refusal.detail }),
+    });
+  }
+  return refusal.error === "usage"
+    ? new CliUsageError(refusal.message)
+    : new ClosedCliError(refusal.message);
+}
 
 /**
  * Record which services failed during a detached startup. Names only: the
@@ -86,6 +341,13 @@ export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
         ? { ...failure, failedServices: failedStartupServices }
         : failure
     );
+    return;
+  }
+  // Before any VM work, a closed refusal is exactly what the foreground would
+  // print (HACK-2339); anything else, and anything later, stays unconfirmed.
+  const refusal = prestart ? prestartRefusal(error) : undefined;
+  if (refusal && isPrestartRefusal(refusal)) {
+    await publishPrestartRefusal?.(refusal);
   }
 }
 
@@ -115,6 +377,25 @@ function isStartupFailure(value: unknown): value is StartupFailure {
     (value.startupPhase === undefined ||
       value.startupPhase === "static-preflight")
   );
+}
+
+/** The error for a validated startup failure or pre-VM refusal message, if it is one. */
+function startupRefusal(value: unknown): Error | undefined {
+  const failure = startupFailureMessage(value);
+  if (failure) {
+    return startupFailureError(failure);
+  }
+  const refusal = prestartRefusalMessage(value);
+  return refusal ? reportPrestartRefusal(refusal) : undefined;
+}
+
+function prestartRefusalMessage(value: unknown): PrestartRefusal | undefined {
+  return isRecord(value) &&
+    Object.keys(value).length === 2 &&
+    value.kind === "prestart-refusal" &&
+    isPrestartRefusal(value.data)
+    ? value.data
+    : undefined;
 }
 
 function startupFailureMessage(value: unknown): StartupFailure | undefined {
@@ -336,6 +617,11 @@ export async function runNativeDetachedOwner(opts: {
           readonly kind: "branch-dropped";
           readonly details: BranchDroppedSites;
         }
+      | { readonly kind: "prestart-refusal"; readonly data: PrestartRefusal }
+      | {
+          readonly kind: "progress";
+          readonly phase: Exclude<NativeDetachedStartPhase, "launching">;
+        }
   ): Promise<void> =>
     new Promise((resolve) => {
       if (!(process.send && process.connected)) {
@@ -401,6 +687,20 @@ export async function runNativeDetachedOwner(opts: {
       await send({ kind: "failure", data });
     }
   };
+  prestart = false;
+  failedHookLines = [];
+  publishPrestartRefusal = async (data) => {
+    if (!(ready || stopping)) {
+      await send({ kind: "prestart-refusal", data });
+    }
+  };
+  publishProgress = (phase) => {
+    if (ready || stopping) {
+      stopProgressHeartbeat();
+      return;
+    }
+    send({ kind: "progress", phase });
+  };
   try {
     return await opts.run(opts.args);
   } finally {
@@ -411,6 +711,11 @@ export async function runNativeDetachedOwner(opts: {
     publishBranchDropped = undefined;
     publishFailure = undefined;
     failedStartupServices = [];
+    publishPrestartRefusal = undefined;
+    prestart = false;
+    failedHookLines = [];
+    publishProgress = undefined;
+    stopProgressHeartbeat();
     process.off("disconnect", disconnected);
     process.off("message", message);
     if (process.connected) {
@@ -466,6 +771,66 @@ function nativeDetachedReadyLine(action: "up" | "restart"): string {
 }
 
 /**
+ * Feed the owner's phase reports into the start's clocks and reject through
+ * `expire` once one runs out (HACK-2351). Phase reports never resolve a start.
+ */
+function watchStartDeadline(opts: {
+  readonly child: ReturnType<typeof spawn>;
+  readonly limits: NativeDetachedStartLimits;
+  readonly heartbeatStaleMs: number | undefined;
+  readonly expire: (error: HackCliError) => void;
+}): ReturnType<typeof setInterval> {
+  // One monotonic clock: a wall clock change must not move either limit.
+  const deadline = new NativeDetachedStartDeadline({
+    limits: opts.limits,
+    now: performance.now(),
+    heartbeatStaleMs: opts.heartbeatStaleMs,
+  });
+  opts.child.on("message", (value: unknown) => {
+    if (
+      isRecord(value) &&
+      Object.keys(value).length === 2 &&
+      value.kind === "progress" &&
+      isNativeDetachedStartPhase(value.phase)
+    ) {
+      deadline.observe(value.phase, performance.now());
+    }
+  });
+  return setInterval(
+    () => {
+      const now = performance.now();
+      const expiry = deadline.check(now);
+      if (expiry) {
+        opts.expire(deadline.timeoutError(expiry, now));
+      }
+    },
+    Math.min(1000, Math.max(50, Math.floor(opts.limits.budgetMs / 20)))
+  );
+}
+
+/** The launch's limits: an explicit override, else the configured ones. */
+function launchLimits(
+  override: NativeDetachedStartLimits | undefined
+): NativeDetachedStartLimits {
+  return override ?? resolveNativeDetachedStartLimits(process.env);
+}
+
+/** Wait for `promise`, but never longer than `ms` (default 120 s). */
+async function settleWithin(
+  promise: Promise<void>,
+  ms = 120_000
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    promise,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]);
+  clearTimeout(timer);
+}
+
+/**
  * Launch only parsed, whole-project native `up` or `restart` arguments; no
  * shell or secret argv. The child becomes the detached owner; this launcher
  * returns once the child reports durable readiness. With `json`, it prints
@@ -480,8 +845,14 @@ export async function startNativeDetachedUp(opts: {
   readonly action?: "up" | "restart";
   /** Synthetic process fixtures may replace the CLI invocation. */
   readonly invocation?: readonly string[];
-  readonly timeoutMs?: number;
+  /** Overrides the configured limits; see `native-detached-start-deadline.ts`. */
+  readonly limits?: NativeDetachedStartLimits;
+  /** How long image work may go without a heartbeat (tests shorten it). */
+  readonly heartbeatStaleMs?: number;
+  /** How long a timed-out launch waits for its owner to exit (tests shorten it). */
+  readonly unwindMs?: number;
 }): Promise<number> {
+  const limits = launchLimits(opts.limits);
   const invocation = opts.invocation ?? [
     process.execPath,
     ...(Bun.main.startsWith("/$bunfs/")
@@ -511,6 +882,10 @@ export async function startNativeDetachedUp(opts: {
   let cancellationCode: number | undefined;
   let shellVariablesReported = false;
   let exitGrace: ReturnType<typeof setTimeout> | undefined;
+  const exited = new Promise<void>((resolve) => {
+    child.once("exit", () => resolve());
+  });
+  let timedOut = false;
   const fail = () => {
     if (committed || failed) {
       return;
@@ -558,10 +933,10 @@ export async function startNativeDetachedUp(opts: {
     if (failed) {
       return;
     }
-    const failure = ready ? undefined : startupFailureMessage(value);
-    if (failure) {
+    const refused = ready ? undefined : startupRefusal(value);
+    if (refused) {
       failed = true;
-      result.reject(startupFailureError(failure));
+      result.reject(refused);
       return;
     }
     if (writeProfileNotice(value)) {
@@ -607,7 +982,18 @@ export async function startNativeDetachedUp(opts: {
   });
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", terminate);
-  const timer = setTimeout(fail, opts.timeoutMs ?? 900_000);
+  const timer = watchStartDeadline({
+    child,
+    limits,
+    heartbeatStaleMs: opts.heartbeatStaleMs,
+    expire: (error) => {
+      if (!(committed || failed)) {
+        failed = true;
+        timedOut = true;
+        result.reject(error);
+      }
+    },
+  });
   try {
     const data = await result.promise;
     if (opts.json) {
@@ -645,7 +1031,7 @@ export async function startNativeDetachedUp(opts: {
     }
     return cancellationCode;
   } finally {
-    clearTimeout(timer);
+    clearInterval(timer);
     clearTimeout(exitGrace);
     process.off("SIGINT", interrupt);
     process.off("SIGTERM", terminate);
@@ -665,6 +1051,9 @@ export async function startNativeDetachedUp(opts: {
         });
       }
     }
+    // After a timeout, give the owner a bounded chance to stop what it started
+    // before this command returns; `hack down` waits for a start still unwinding.
+    await settleWithin(timedOut ? exited : Promise.resolve(), opts.unwindMs);
     child.unref();
   }
 }

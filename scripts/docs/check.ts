@@ -407,6 +407,19 @@ if (!prerelease) {
 // Installer artifacts and version variables must all select the release pin.
 const stagedV5 = resolve(repositoryRoot, "site/content/docs/v5");
 const installerTag = `v5.0.0-next.${prerelease}`;
+// A link whose text wraps a line must still be rewritten: a relative Markdown
+// target left at the start of a staged line would 404 on the site.
+const unrewrittenWrappedLink =
+  /^[^[\]\n]*\]\((?![a-z][a-z\d+.-]*:|\/|#)[^)\s]*\.md/m;
+for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: stagedV5 })) {
+  const staged = (await Bun.file(resolve(stagedV5, file)).text()).replace(
+    /^\s*(```|~~~)[\s\S]*?^\s*\1.*$/gm,
+    ""
+  );
+  if (unrewrittenWrappedLink.test(staged)) {
+    throw new Error(`Unrewritten wrapped link in published v5 page ${file}`);
+  }
+}
 for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: stagedV5 })) {
   assertPinnedInstallers({
     text: await Bun.file(resolve(stagedV5, file)).text(),

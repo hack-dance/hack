@@ -15,7 +15,7 @@ exact release tag over HTTPS, review it, then run it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -295,7 +295,7 @@ lifecycle supervisor that `5.0.0-next.18` added. The installed manager cannot fe
 a newer one: `upgrade-manager` installs the executable it is run from. Download the
 standalone manager from the release you are upgrading to, verify it against that
 release's `INSTALLER-SHA256SUMS`, then run that file against your channel root.
-The example names `v5.0.0-next.16`; use the release you are upgrading to in both
+The example names `v5.0.0-next.22`; use the release you are upgrading to in both
 URLs and replace `NEWER` with its number. For a channel that a compiled manager
 installed (`5.0.0-next.6` to `next.17`) that is `5.0.0-next.19` or later: the
 `5.0.0-next.18` manager does not recognize earlier managers. The takeover works only
@@ -305,10 +305,10 @@ on a channel the newer manager can validate. A channel from the `5.0.0-next.1` t
 ```sh
 dir=$(mktemp -d) && cd "$dir" &&
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/hack-next-manager-darwin-arm64 \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/hack-next-manager-darwin-arm64 \
   --output hack-next-manager-darwin-arm64 &&
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/INSTALLER-SHA256SUMS \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/INSTALLER-SHA256SUMS \
   --output INSTALLER-SHA256SUMS &&
 grep '[ *]hack-next-manager-darwin-arm64$' INSTALLER-SHA256SUMS > manager.sha256 &&
 shasum -a 256 --check manager.sha256 &&

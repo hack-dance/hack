@@ -46,8 +46,8 @@ With the native backend selected (`HACK_RUNTIME_BACKEND=native`, which the
   path `/`. Change the path to your app's health endpoint if `/` does not answer
   `2xx`. See [Native HTTP readiness probe](native-candidate.md#native-http-readiness-probe).
 - The next steps it prints are native ones: `HACK_NATIVE_SHARED_SOURCE=1 hack up`
-  in the foreground (native refuses `--detach`), then `hack open` from another
-  terminal. It does not suggest `hack global install`, which native refuses.
+  in the foreground, then `hack open` from another terminal. (`hack up -d` also
+  works on native.) It does not suggest `hack global install`, which native refuses.
 
 Without that selection, the Compose scaffold and its next steps are unchanged.
 

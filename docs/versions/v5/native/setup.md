@@ -70,7 +70,7 @@ run `up` then `down` with that same next.16 launcher, and confirm its runtime is
 setup-only quiescence; do not delete receipts to bypass a refusal. See the
 [upgrade and recovery reference](full-reference.md#manual-candidate-upgrade-and-rollback).
 
-The frontend command above is intended for next.17; installed next.16 retains
+The frontend command above needs next.17 or later; an installed next.16 keeps
 the [older setup procedure](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/docs/native/try-it.md).
 
 After preparation, continue with [Check before starting](start.md#check-before-starting).

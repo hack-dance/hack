@@ -39,8 +39,8 @@ With Hack's own `--json`, stdout carries only Hack's result: one JSON value,
 or, with `--progress`, only NDJSON lines ending in the envelope. Everything
 Hack runs for the command writes to stderr instead, on both backends:
 lifecycle hooks (`before`, `after` and down phases, both their stdout and their
-stderr), host commands, the Compose client's own output, and a remote lifecycle
-dispatch (`--target remote`). This holds for every command in the inventory
+stderr), host commands, the Compose client's own output, and the unsupported
+remote lifecycle dispatch (`--target remote`). This holds for every command in the inventory
 below, including `up`, `restart`, `down` and `run --detach`. Read stderr for
 that output; never parse it from stdout. One exception: `run --detach` captures
 the Compose client's output for its own result, so that output appears on

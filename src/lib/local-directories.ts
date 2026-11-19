@@ -153,7 +153,7 @@ export function containerPathFor(
   }
   const rel = relative(bind.source, hostPath);
   if (rel === "") {
-    return bind.target;
+    return normalizeTarget(bind.target);
   }
   if (rel.startsWith("..") || isAbsolute(rel)) {
     return null;
@@ -193,9 +193,14 @@ export type LocalDirectoriesPlan = {
 
 /**
  * Maps entries onto a parsed Compose document. Pure: the caller reads the
- * file. A service's existing mount at the same target wins unless it is a
- * bind of that same host directory, which the volume replaces (it is the
- * shared-source copy this setting moves off the share).
+ * file. A candidate path is decided by the mount it resolves through (the
+ * most specific one at or above it):
+ * - a bind that shows the entry there: the volume replaces what it shows,
+ *   with that bind's access mode;
+ * - another mount exactly at the path: kept, and reported;
+ * - a more specific mount above the path that shows something else (a
+ *   volume, or a bind of another directory): the entry is not visible there,
+ *   so nothing is mounted for it.
  */
 export function planLocalDirectories(opts: {
   readonly compose: unknown;
@@ -211,26 +216,19 @@ export function planLocalDirectories(opts: {
       ? opts.compose.services
       : {};
   for (const [name, spec] of Object.entries(declared)) {
-    const mounts = serviceMounts(spec, opts.composeDir);
-    const list: LocalDirectoryMount[] = [];
-    for (const entry of opts.entries) {
-      const hostPath = resolve(opts.projectRoot, entry);
-      for (const target of entryTargets(mounts, hostPath)) {
-        matched.add(entry);
-        if (!replaceableTarget(mounts, target.path, hostPath)) {
-          kept.push({ service: name, entry, target: target.path });
-        } else if (!list.some((mount) => mount.target === target.path)) {
-          list.push({
-            entry,
-            volume: localDirectoryVolumeName(entry),
-            target: target.path,
-            readOnly: target.readOnly,
-          });
-        }
-      }
+    const result = planService({
+      mounts: serviceMounts(spec, opts.composeDir),
+      projectRoot: opts.projectRoot,
+      entries: opts.entries,
+    });
+    for (const entry of result.matched) {
+      matched.add(entry);
     }
-    if (list.length > 0) {
-      services[name] = list;
+    for (const item of result.kept) {
+      kept.push({ service: name, ...item });
+    }
+    if (result.list.length > 0) {
+      services[name] = result.list;
     }
   }
   return {
@@ -240,28 +238,100 @@ export function planLocalDirectories(opts: {
   };
 }
 
-/** Each container path where a service's binds show `hostPath`. */
+function planService(opts: {
+  readonly mounts: readonly ServiceMount[];
+  readonly projectRoot: string;
+  readonly entries: readonly string[];
+}): {
+  readonly list: LocalDirectoryMount[];
+  readonly kept: { entry: string; target: string }[];
+  readonly matched: string[];
+} {
+  const list: LocalDirectoryMount[] = [];
+  const kept: { entry: string; target: string }[] = [];
+  const matched: string[] = [];
+  for (const entry of opts.entries) {
+    const hostPath = resolve(opts.projectRoot, entry);
+    for (const path of entryTargets(opts.mounts, hostPath)) {
+      const decision = decideTarget(opts.mounts, path, hostPath);
+      if (decision === "hidden") {
+        continue;
+      }
+      matched.push(entry);
+      if (decision === "kept") {
+        kept.push({ entry, target: path });
+      } else if (!list.some((mount) => mount.target === path)) {
+        list.push({
+          entry,
+          volume: localDirectoryVolumeName(entry),
+          target: path,
+          readOnly: decision.readOnly,
+        });
+      }
+    }
+  }
+  return { list, kept, matched };
+}
+
+/** Each distinct container path where one of a service's binds would show `hostPath`. */
 function entryTargets(
   mounts: readonly ServiceMount[],
   hostPath: string
-): { readonly path: string; readonly readOnly: boolean }[] {
-  return mounts.flatMap((bind) => {
+): string[] {
+  const paths = mounts.flatMap((bind) => {
     const path = containerPathFor(bind, hostPath);
-    return path === null ? [] : [{ path, readOnly: bind.readOnly }];
+    return path === null ? [] : [path];
   });
+  return [...new Set(paths)];
 }
 
-/** Free, or the shared-source bind of this very directory. */
-function replaceableTarget(
+function normalizeTarget(target: string): string {
+  const normalized = posix.normalize(target);
+  return normalized.length > 1 && normalized.endsWith("/")
+    ? normalized.slice(0, -1)
+    : normalized;
+}
+
+/**
+ * The mount a container path resolves through: the one with the longest
+ * target at or above it. Undefined when no mount covers the path.
+ */
+export function effectiveMount(
   mounts: readonly ServiceMount[],
-  target: string,
+  path: string
+): ServiceMount | undefined {
+  const wanted = normalizeTarget(path);
+  let best: ServiceMount | undefined;
+  let bestLength = -1;
+  for (const mount of mounts) {
+    const target = normalizeTarget(mount.target);
+    const prefix = target === "/" ? "/" : `${target}/`;
+    const covers = wanted === target || wanted.startsWith(prefix);
+    if (covers && target.length > bestLength) {
+      best = mount;
+      bestLength = target.length;
+    }
+  }
+  return best;
+}
+
+function decideTarget(
+  mounts: readonly ServiceMount[],
+  path: string,
   hostPath: string
-): boolean {
-  const existing = mounts.find((mount) => mount.target === target);
-  return (
-    existing === undefined ||
-    (existing.type === "bind" && existing.source === hostPath)
-  );
+): { readonly readOnly: boolean } | "kept" | "hidden" {
+  const mount = effectiveMount(mounts, path);
+  if (mount === undefined) {
+    return "hidden";
+  }
+  const showsEntry =
+    mount.type === "bind" && containerPathFor(mount, hostPath) === path;
+  if (showsEntry) {
+    return { readOnly: mount.readOnly };
+  }
+  return normalizeTarget(mount.target) === normalizeTarget(path)
+    ? "kept"
+    : "hidden";
 }
 
 /** The Compose override for a plan: service mounts plus labeled volumes. */

@@ -229,3 +229,57 @@ test("volume names are stable, Compose-safe and distinct per entry", () => {
   expect(localDirectoryVolumeName("apps/web/.next")).toBe(name);
   expect(localDirectoryVolumeName("apps/web/next")).not.toBe(name);
 });
+
+test("the replaced bind's own access mode wins over a covering ancestor's", () => {
+  // Source read-only, dependencies writable (an installer layout).
+  const result = plan(
+    {
+      services: {
+        deps: {
+          volumes: ["..:/app:ro", "../node_modules:/app/node_modules:rw"],
+        },
+        // And the other way round.
+        web: { volumes: ["..:/app", "../node_modules/:/app/node_modules/:ro"] },
+      },
+    },
+    ["node_modules"]
+  );
+  expect(result.services.deps).toEqual([
+    {
+      entry: "node_modules",
+      volume: localDirectoryVolumeName("node_modules"),
+      target: "/app/node_modules",
+      readOnly: false,
+    },
+  ]);
+  expect(result.services.web?.[0]?.readOnly).toBe(true);
+  expect(result.kept).toEqual([]);
+});
+
+test("a path hidden by a more specific mount shows something else and is left alone", () => {
+  const result = plan(
+    {
+      services: {
+        // /app/packages shows vendor/, not the checkout's packages/.
+        web: { volumes: ["..:/app", "../vendor:/app/packages"] },
+        // A named volume over /app/packages hides it as well.
+        api: { volumes: ["..:/app", "pkgs:/app/packages"] },
+        // A bind of the declared parent itself still shows the entry.
+        ui: { volumes: ["..:/app", "../packages:/app/packages"] },
+      },
+    },
+    ["packages/ui/node_modules"]
+  );
+  expect(result.services.web).toBeUndefined();
+  expect(result.services.api).toBeUndefined();
+  expect(result.services.ui).toEqual([
+    {
+      entry: "packages/ui/node_modules",
+      volume: localDirectoryVolumeName("packages/ui/node_modules"),
+      target: "/app/packages/ui/node_modules",
+      readOnly: false,
+    },
+  ]);
+  expect(result.kept).toEqual([]);
+  expect(result.unmatched).toEqual([]);
+});

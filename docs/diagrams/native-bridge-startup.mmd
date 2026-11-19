@@ -2,22 +2,26 @@
 title: Native bridge startup
 ---
 flowchart TD
-    ready[Guest ready] --> check[Verify provider]
+    ready[Guest ready] --> budget["Deadline: 10s + slots"]
+    budget --> before{Before deadline?}
+    before -->|no| timeout[Timeout with socket counts]
+    before -->|yes| check[Verify provider]
     check --> inspect[Inspect all sockets]
     check -->|identity changed| fail[Refuse startup]
     inspect -->|unsafe identity| fail
     inspect -->|ready or pending| recheck[Recheck provider]
     recheck -->|identity changed| fail
-    recheck --> deadline{Before 10 seconds?}
-    deadline -->|no| fail
+    recheck --> deadline{Before socket deadline?}
+    deadline -->|no| timeout
     deadline -->|yes| complete{All sockets private?}
     complete -->|no| wait[Wait up to 50ms]
-    wait --> check
+    wait --> before
     complete -->|yes| audit[Full audit then adoption]
     fail --> stop[Verified provider stop]
+    timeout --> stop
     stop --> retained[Retain failure evidence]
     class ready,check,inspect,recheck live
     class wait wait
     class audit ok
-    class fail fail
+    class fail,timeout fail
     class retained idle

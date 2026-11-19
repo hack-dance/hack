@@ -28,7 +28,7 @@ import {
 } from "../lib/doctor-polling-fix.ts";
 import { selectDoctorFixProject } from "../lib/doctor-safe-fix.ts";
 import { withProcessDeadline } from "../lib/process-deadline.ts";
-import { findProjectContext } from "../lib/project.ts";
+import { findProjectContext, readProjectConfig } from "../lib/project.ts";
 
 export type { DevPerformanceReport } from "../lib/doctor-dev-performance.ts";
 
@@ -138,7 +138,21 @@ async function collect(opts: {
     composeFile: ctx.composeFile,
     hostArch: hostArch ?? processArchitecture(),
     containers,
+    ...localDirectoriesInputs(await readProjectConfig(ctx)),
   });
+}
+
+function localDirectoriesInputs(config: {
+  readonly localDirectories?: readonly string[];
+  readonly localDirectoriesError?: string;
+}): {
+  readonly localDirectories?: readonly string[];
+  readonly localDirectoriesError?: string;
+} {
+  return {
+    localDirectories: config.localDirectories,
+    localDirectoriesError: config.localDirectoriesError,
+  };
 }
 
 /** Text mode: each finding in full, after the summary (which shortens it). */

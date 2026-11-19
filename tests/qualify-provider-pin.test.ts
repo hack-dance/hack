@@ -18,14 +18,17 @@ import { join, resolve } from "node:path";
 import {
   activeFields,
   BLOB_SHA256,
+  caddyProblem,
   compose,
   contentDigest,
   DEPENDENCY_SERVER,
+  executorErrorCode,
   foregroundReadyRun,
   INERT_RECORD_FIELDS,
   INERT_RUNNING_RESOURCES,
   inertField,
   isExecutor,
+  kernelProviderMemory,
   main,
   type Options,
   parseCpuTime,
@@ -43,6 +46,7 @@ import {
   terminalRuntimeErrorCode,
   warmPhases,
 } from "../scripts/qualify-provider-pin.ts";
+import { parseNativeHttpsSelection } from "../src/backends/native-project-start.ts";
 import { formatNativeStartupLogReport } from "../src/backends/native-startup-logs.ts";
 import { selectNativeComposeProject } from "../src/lib/native-compose-selection.ts";
 
@@ -135,6 +139,80 @@ describe("provider pin qualification", () => {
     expect(() => parseOptions([...required, "--caddy", "/bin/caddy"])).toThrow(
       "go together"
     );
+  });
+
+  test("HACK-2360: HTTPS options give the CLI the binary, its SHA-256 and the port together", () => {
+    const sha = "a".repeat(64);
+    const https = [
+      "--caddy",
+      "/opt/caddy",
+      "--caddy-sha256",
+      sha,
+      "--https-port",
+      "18443",
+    ];
+    const options = parseOptions([...required, ...https]);
+    expect(options).toMatchObject({
+      caddy: "/opt/caddy",
+      caddySha256: sha,
+      httpsPort: 18_443,
+    });
+    // The CLI's own parser accepts exactly what the run passes it.
+    expect(parseNativeHttpsSelection(new Qualification(options).env)).toEqual({
+      caddyBinary: "/opt/caddy",
+      caddySha256: sha,
+      httpsPort: 18_443,
+    });
+    // Without HTTPS options nothing HTTPS reaches the CLI.
+    expect(
+      parseNativeHttpsSelection(new Qualification(parseOptions(required)).env)
+    ).toBeUndefined();
+    for (const partial of [
+      ["--caddy", "/opt/caddy", "--https-port", "18443"],
+      ["--caddy-sha256", sha, "--https-port", "18443"],
+      ["--caddy", "/opt/caddy", "--caddy-sha256", sha],
+    ]) {
+      expect(() => parseOptions([...required, ...partial])).toThrow(
+        "go together"
+      );
+    }
+    for (const bad of ["ABC", "A".repeat(64), "a".repeat(63)]) {
+      expect(() =>
+        parseOptions([
+          ...required,
+          ...https.slice(0, 3),
+          bad,
+          ...https.slice(4),
+        ])
+      ).toThrow("--caddy-sha256");
+    }
+    for (const port of ["80", "65536"]) {
+      expect(() =>
+        parseOptions([...required, ...https.slice(0, 5), port])
+      ).toThrow("--https-port");
+    }
+    // A run checks the pin against the binary before any work.
+    const root = mkdtempSync(join(tmpdir(), "hack-qualify-caddy-"));
+    try {
+      const binary = join(root, "caddy");
+      writeFileSync(binary, "synthetic caddy");
+      const actual = createHash("sha256")
+        .update("synthetic caddy")
+        .digest("hex");
+      expect(caddyProblem({ caddy: binary, caddySha256: actual })).toBeNull();
+      expect(caddyProblem({ caddy: binary, caddySha256: sha })).toContain(
+        "does not match"
+      );
+      expect(
+        caddyProblem({ caddy: join(root, "absent"), caddySha256: sha })
+      ).toContain("Missing");
+      expect(caddyProblem({ caddy: null, caddySha256: null })).toBeNull();
+      expect(caddyProblem({ caddy: root, caddySha256: sha })).toContain(
+        "not a regular file"
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("a preview changes nothing and a run refuses off Apple Silicon macOS", async () => {
@@ -254,6 +332,50 @@ describe("provider pin qualification", () => {
     ).toBe(412 * 1024 * 1024);
     expect(parseFootprint("Footprint: 1.5 GB")).toBe(1.5 * 1024 ** 3);
     expect(parseFootprint("no footprint")).toBeNull();
+    // HACK-2360: footprint_mib comes from the kernel figure runtime status reports.
+    expect(
+      kernelProviderMemory({
+        provider_memory: {
+          resident_bytes: 9_090_000_000,
+          physical_footprint_bytes: 900 * 1024 * 1024,
+        },
+      })
+    ).toEqual({
+      footprint: 900 * 1024 * 1024,
+      resident: 9_090_000_000,
+      treeFootprint: null,
+    });
+    expect(
+      kernelProviderMemory({
+        provider_memory: { resident_bytes: 2, physical_footprint_bytes: 10 },
+        provider_resources: {
+          processes: [
+            { physical_footprint_bytes: 10 },
+            { physical_footprint_bytes: 5 },
+          ],
+        },
+      })?.treeFootprint
+    ).toBe(15);
+    expect(
+      kernelProviderMemory({
+        provider_memory: { resident_bytes: 2, physical_footprint_bytes: 10 },
+        provider_resources: { processes: [{ physical_footprint_bytes: "5" }] },
+      })?.treeFootprint
+    ).toBeNull();
+    expect(kernelProviderMemory({ provider_memory: null })).toBeNull();
+    expect(
+      executorErrorCode(
+        '{"code":"resource_observation_unavailable","message":"Native resource tree changed."}\n'
+      )
+    ).toBe("resource_observation_unavailable");
+    expect(executorErrorCode("not json")).toBeNull();
+    expect(executorErrorCode('{"code":"Not A Code"}')).toBeNull();
+    expect(kernelProviderMemory({})).toBeNull();
+    expect(
+      kernelProviderMemory({
+        provider_memory: { resident_bytes: 1, physical_footprint_bytes: "1" },
+      })
+    ).toBeNull();
     expect(parseTopMemory("PID    MEM\n123    845M+\n", 123)).toBe(
       845 * 1024 ** 2
     );

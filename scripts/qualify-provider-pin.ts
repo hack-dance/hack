@@ -272,7 +272,80 @@ export function sourceTemplatePins(
   return { archive, templates };
 }
 
-/** `footprint` reports physical footprint as `Footprint: <n> <unit>`; returns bytes. */
+/**
+ * The provider's memory as the kernel accounts it (`proc_pid_rusage` `ri_phys_footprint`
+ * and `ri_resident_size`), from `runtime status --json` `provider_memory`. This is the
+ * figure native admission charges. `null` when the pool is not running or the field is
+ * missing.
+ */
+export function kernelProviderMemory(status: Record<string, unknown>): {
+  footprint: number;
+  resident: number;
+  treeFootprint: number | null;
+} | null {
+  const memory = status.provider_memory;
+  if (typeof memory !== "object" || memory === null) {
+    return null;
+  }
+  const { physical_footprint_bytes: footprint, resident_bytes: resident } =
+    memory as Record<string, unknown>;
+  if (!(Number.isSafeInteger(footprint) && Number.isSafeInteger(resident))) {
+    return null;
+  }
+  return {
+    footprint: footprint as number,
+    resident: resident as number,
+    treeFootprint: treeFootprint(status.provider_resources),
+  };
+}
+
+/** The closed `code` of the native executor's JSON refusal on stderr, or `null`. */
+export function executorErrorCode(stderr: string): string | null {
+  try {
+    const value: unknown = JSON.parse(
+      stderr.trim().split(/\r?\n/).at(-1) ?? ""
+    );
+    const code =
+      typeof value === "object" && value !== null
+        ? (value as Record<string, unknown>).code
+        : undefined;
+    return typeof code === "string" && /^[a-z][a-z0-9_]{0,79}$/.test(code)
+      ? code
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The kernel footprint summed over the provider's whole process tree, or `null`. */
+function treeFootprint(resources: unknown): number | null {
+  const processes =
+    typeof resources === "object" && resources !== null
+      ? (resources as Record<string, unknown>).processes
+      : undefined;
+  if (!Array.isArray(processes) || processes.length === 0) {
+    return null;
+  }
+  let total = 0;
+  for (const entry of processes) {
+    const bytes =
+      typeof entry === "object" && entry !== null
+        ? (entry as Record<string, unknown>).physical_footprint_bytes
+        : undefined;
+    if (!Number.isSafeInteger(bytes)) {
+      return null;
+    }
+    total += bytes as number;
+  }
+  return total;
+}
+
+/**
+ * `footprint` reports physical footprint as `Footprint: <n> <unit>`; returns bytes. Its
+ * header line undercounts a VM process against the kernel's `phys_footprint` (about 237
+ * MiB against 800 to 1,000 MiB on one pool), so it is reported only beside
+ * [`kernelProviderMemory`], never instead of it.
+ */
 export function parseFootprint(text: string): number | null {
   const match = /Footprint:\s*([0-9]+(?:\.[0-9]+)?)\s*(B|KB|MB|GB)\b/.exec(
     text
@@ -475,6 +548,8 @@ export interface Options {
   keepGoing: boolean;
   profile: "development" | "research";
   caddy: string | null;
+  /** The Caddy binary's SHA-256, which the CLI checks before it serves HTTPS. */
+  caddySha256: string | null;
   httpsPort: number | null;
   run: boolean;
 }
@@ -486,7 +561,7 @@ const USAGE = `Usage: bun scripts/qualify-provider-pin.ts --hack /abs/bundle/hac
   [--amd64-image repo@sha256:...] [--idle-minutes 0,3,10 | --skip-idle] \\
   [--warm-runs 5] [--warm-only] \\
   [--profile development|research] [--keep-going] \\
-  [--caddy /abs/caddy --https-port 8443] [--run]`;
+  [--caddy /abs/caddy --caddy-sha256 <hex> --https-port 8443] [--run]`;
 
 function idleMinutes(text: string): number[] {
   const idle = text.split(",").map(Number);
@@ -522,6 +597,65 @@ function profileOption(value: string): "development" | "research" {
 }
 
 const FLAGS = new Set(["--run", "--skip-idle", "--warm-only", "--keep-going"]);
+
+/**
+ * The optional native HTTPS selection. The CLI accepts it only as the binary, its SHA-256
+ * and the port together, so a partial set is refused here before anything runs.
+ */
+function httpsOptions(
+  caddy: string | null,
+  caddySha256: string | null,
+  portText: string | null
+): Pick<Options, "caddy" | "caddySha256" | "httpsPort"> {
+  const given = [caddy, caddySha256, portText].filter(
+    (value) => value !== null
+  );
+  if (given.length !== 0 && given.length !== 3) {
+    throw new Error("--caddy, --caddy-sha256 and --https-port go together.");
+  }
+  if (caddySha256 !== null && !/^[0-9a-f]{64}$/.test(caddySha256)) {
+    throw new Error("--caddy-sha256 must be 64 lowercase hex characters.");
+  }
+  const httpsPort = portText === null ? null : Number(portText);
+  if (
+    httpsPort !== null &&
+    !(Number.isInteger(httpsPort) && httpsPort >= 1024 && httpsPort <= 65_535)
+  ) {
+    throw new Error("--https-port must be an unprivileged port.");
+  }
+  return { caddy, caddySha256, httpsPort };
+}
+
+/**
+ * Whether the selected Caddy binary is missing or its SHA-256 differs from
+ * `--caddy-sha256`. Checked before a run does any work, so a wrong pin fails in seconds
+ * rather than at the CLI's own check after preparation. `null` when HTTPS is not selected
+ * or the binary matches.
+ */
+export function caddyProblem(
+  options: Pick<Options, "caddy" | "caddySha256">
+): string | null {
+  if (options.caddy === null || options.caddySha256 === null) {
+    return null;
+  }
+  if (!existsSync(options.caddy)) {
+    return `Missing ${options.caddy}.`;
+  }
+  let actual: string;
+  try {
+    if (!statSync(options.caddy).isFile()) {
+      return `${options.caddy} is not a regular file.`;
+    }
+    actual = createHash("sha256")
+      .update(readFileSync(options.caddy))
+      .digest("hex");
+  } catch {
+    return `Cannot read ${options.caddy}.`;
+  }
+  return actual === options.caddySha256
+    ? null
+    : `--caddy-sha256 does not match ${options.caddy} (its SHA-256 is ${actual}).`;
+}
 
 /** Parse and validate arguments; throws with a usage line on any problem. */
 export function parseOptions(argv: string[]): Options {
@@ -584,18 +718,11 @@ export function parseOptions(argv: string[]): Options {
     20
   );
   const profile = profileOption(one("--profile", false) ?? "development");
-  const caddy = absolute("--caddy", false);
-  const portText = one("--https-port", false);
-  const httpsPort = portText === null ? null : Number(portText);
-  if ((caddy === null) !== (httpsPort === null)) {
-    throw new Error("--caddy and --https-port go together.");
-  }
-  if (
-    httpsPort !== null &&
-    !(Number.isInteger(httpsPort) && httpsPort >= 1024 && httpsPort <= 65_535)
-  ) {
-    throw new Error("--https-port must be an unprivileged port.");
-  }
+  const { caddy, caddySha256, httpsPort } = httpsOptions(
+    absolute("--caddy", false),
+    one("--caddy-sha256", false),
+    one("--https-port", false)
+  );
   return {
     hack,
     bundle: dirname(hack),
@@ -617,6 +744,7 @@ export function parseOptions(argv: string[]): Options {
     keepGoing: flags.has("--keep-going"),
     profile,
     caddy,
+    caddySha256,
     httpsPort,
     run: flags.has("--run"),
   };
@@ -794,8 +922,9 @@ export class Qualification {
       HACK_NATIVE_DEPENDENCIES: join(root, "fixtures", "dependencies.json"),
       DOCKER_HOST: `unix://${join(root, "no-docker.sock")}`,
     };
-    if (options.caddy && options.httpsPort) {
+    if (options.caddy && options.caddySha256 && options.httpsPort) {
       this.env.HACK_NATIVE_CADDY_BINARY = options.caddy;
+      this.env.HACK_NATIVE_CADDY_SHA256 = options.caddySha256;
       this.env.HACK_NATIVE_HTTPS_PORT = String(options.httpsPort);
     }
   }
@@ -2550,8 +2679,51 @@ export class Qualification {
     this.runtime(this.aux, "aux-down-rosetta", ["runtime", "down", "--json"]);
   }
 
-  /** Footprint and CPU of this home's provider processes. */
+  /**
+   * Footprint and CPU of this home's provider processes. `footprint_mib` and
+   * `resident_mib` are the kernel's figures for the root provider process (`runtime
+   * status`, the value admission charges); `tree_footprint_mib` sums the kernel footprint
+   * over the provider's whole process tree; `footprint_tool_mib` sums what `footprint` or
+   * `top` report per provider process, for comparison. Sampling is best-effort: a failed
+   * status (for example a provider helper starting between its two tree inventories)
+   * records `null` and its error code instead of failing a long idle measurement.
+   */
   sample(label: string): Record<string, unknown> {
+    const result = this.exec(
+      `status-${label}`,
+      [
+        this.options.native,
+        "--candidate-root",
+        this.main,
+        "runtime",
+        "status",
+        "--json",
+      ],
+      { allowFailure: true }
+    );
+    let status: Record<string, unknown> = {};
+    let statusError: string | null = null;
+    let parsedObject = false;
+    try {
+      const parsed: unknown = JSON.parse(result.stdout);
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        !Array.isArray(parsed)
+      ) {
+        status = parsed as Record<string, unknown>;
+        parsedObject = true;
+      }
+    } catch {
+      // An unreadable status is recorded just below.
+    }
+    if (result.code !== 0) {
+      statusError = executorErrorCode(result.stderr) ?? `exit ${result.code}`;
+      status = {};
+    } else if (!parsedObject) {
+      statusError = "invalid_status_json";
+    }
+    const kernel = kernelProviderMemory(status);
     const rows = this.processes(this.main);
     let footprint = 0;
     let measured = true;
@@ -2592,7 +2764,14 @@ export class Qualification {
         rss_kib: row.rssKib,
         command: row.command.split(" ").slice(0, 2).join(" "),
       })),
-      footprint_mib: measured ? round(footprint / 1024 / 1024) : null,
+      footprint_mib: kernel ? round(kernel.footprint / 1024 / 1024) : null,
+      resident_mib: kernel ? round(kernel.resident / 1024 / 1024) : null,
+      tree_footprint_mib:
+        kernel?.treeFootprint == null
+          ? null
+          : round(kernel.treeFootprint / 1024 / 1024),
+      status_error: statusError,
+      footprint_tool_mib: measured ? round(footprint / 1024 / 1024) : null,
       rss_mib: round(rows.reduce((sum, row) => sum + row.rssKib, 0) / 1024),
       cpu_seconds: rows.reduce((sum, row) => sum + row.cpuSeconds, 0),
     };
@@ -2728,6 +2907,10 @@ export class Qualification {
       );
       this.measure(`idle_${minute}m`, {
         footprint_mib: before.footprint_mib,
+        resident_mib: before.resident_mib,
+        tree_footprint_mib: before.tree_footprint_mib,
+        status_error: before.status_error,
+        footprint_tool_mib: before.footprint_tool_mib,
         rss_mib: before.rss_mib,
         cpu_percent_over_30s: cpu,
         processes: before.processes,
@@ -2910,6 +3093,14 @@ export async function main(argv: string[]): Promise<number> {
       amd64: options.amd64Image,
     },
     approved_hosts: options.approvedHosts,
+    https:
+      options.caddy === null
+        ? null
+        : {
+            caddy: options.caddy,
+            caddy_sha256: options.caddySha256,
+            port: options.httpsPort,
+          },
     idle_minutes: options.idleMinutes,
     sequence: [
       "1 archive",
@@ -2956,6 +3147,11 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (problem) {
     console.error(problem);
+    return 64;
+  }
+  const caddy = caddyProblem(options);
+  if (caddy) {
+    console.error(caddy);
     return 64;
   }
   return await new Qualification(options).run();

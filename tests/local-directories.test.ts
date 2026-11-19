@@ -468,7 +468,7 @@ test("a service with a mount whose target is a variable gets nothing, with a not
   expect(result.skipped).toEqual(["web", "api"]);
   expect(result.unmatched).toEqual([]);
   expect(localDirectoriesNotices(result)).toContain(
-    "localDirectories: service web has a mount whose path comes from a variable; nothing kept local for it."
+    "localDirectories: service web has mounts Hack does not read (a path or mode from a variable, volumes_from or extends); nothing kept local for it."
   );
 });
 
@@ -536,4 +536,28 @@ test("a long-syntax access mode is read as Compose reads it; an unresolved one s
   expect(result.services.variable).toBeUndefined();
   // No source bind is readable in that service, so it is not reported as skipped.
   expect(result.skipped).toEqual([]);
+});
+
+test("a service that inherits mounts through volumes_from or extends is left alone", () => {
+  const result = plan(
+    {
+      services: {
+        deps: { volumes: ["..:/app", "deps:/app/node_modules"] },
+        app: { volumes: ["..:/app"], volumes_from: ["deps:ro"] },
+        single: { volumes: ["..:/app"], volumes_from: "deps" },
+        child: { volumes: ["..:/app"], extends: { service: "base" } },
+        plain: { volumes: ["..:/app"], volumes_from: [] },
+      },
+    },
+    ["node_modules"]
+  );
+  expect(result.services.app).toBeUndefined();
+  expect(result.services.single).toBeUndefined();
+  expect(result.services.child).toBeUndefined();
+  expect(result.services.plain?.[0]?.target).toBe("/app/node_modules");
+  expect(result.skipped).toEqual(["app", "single", "child"]);
+  // deps keeps its own dependency volume.
+  expect(result.kept).toEqual([
+    { service: "deps", entry: "node_modules", target: "/app/node_modules" },
+  ]);
 });

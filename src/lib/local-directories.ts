@@ -230,7 +230,23 @@ export function serviceMounts(
         .map((value) => readMount(value, composeDir))
         .filter((mount): mount is ServiceMount => mount !== null)
     : [];
-  return [...volumes, ...tmpfsMounts(spec.tmpfs)];
+  return [
+    ...volumes,
+    ...tmpfsMounts(spec.tmpfs),
+    ...(inheritsMounts(spec) ? [UNKNOWN_TARGET] : []),
+  ];
+}
+
+/**
+ * `volumes_from` and `extends` bring in mounts this reader does not see, any
+ * of which could sit at a path a volume would replace.
+ */
+function inheritsMounts(spec: Readonly<Record<string, unknown>>): boolean {
+  const volumesFrom = spec.volumes_from;
+  const hasVolumesFrom =
+    typeof volumesFrom === "string" ||
+    (Array.isArray(volumesFrom) && volumesFrom.length > 0);
+  return hasVolumesFrom || spec.extends !== undefined;
 }
 
 /**
@@ -561,7 +577,7 @@ export function localDirectoriesNotices(
     ),
     ...plan.skipped.map(
       (service) =>
-        `localDirectories: service ${service} has a mount whose path comes from a variable; nothing kept local for it.`
+        `localDirectories: service ${service} has mounts Hack does not read (a path or mode from a variable, volumes_from or extends); nothing kept local for it.`
     ),
     ...plan.hidden.map(
       (item) =>

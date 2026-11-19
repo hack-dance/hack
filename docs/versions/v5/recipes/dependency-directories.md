@@ -60,7 +60,9 @@ volumes. Your Compose file does not change.
 - **What Hack reads.** Hack reads the source binds in `.hack/docker-compose.yml`
   itself. Binds whose source uses a variable (`${PWD}`), `extends`, `include`
   or another `-f` file are not read; `hack up` says when no bind shows an
-  entry. An entry that is a file, not a directory, is skipped with a notice.
+  entry. A service with a mount whose path or mode comes from a variable, or
+  that uses `volumes_from` or `extends`, gets no volumes, with a notice. An
+  entry that is a file, not a directory, is skipped with a notice.
 - **Cleanup.** `hack down` keeps the volumes. They are labeled
   `hack.cache.disposable`, so `hack down --prune-caches` removes them. Run it
   before you remove an entry from the list: afterwards no container mounts that

@@ -343,6 +343,7 @@ import {
   appendHackHostTrustEnvironment,
   findHackHostTrustBundlePath,
 } from "../lib/local-ca.ts";
+import { withProjectLocalDirectories } from "../lib/local-directories-project.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
   buildLogSelector,
@@ -7456,6 +7457,11 @@ async function runUpCommand({
   await ensureHackGitInfoExclude({ projectDir: project.projectDir });
 
   const cfg = await readProjectConfig(project);
+  // Refused before the parse warning, which carries the same message.
+  const localDirectoriesRefusal = refuseInvalidLocalDirectories({ cfg, json });
+  if (localDirectoriesRefusal !== null) {
+    return localDirectoriesRefusal;
+  }
   if (cfg.parseError) {
     const configPath = cfg.configPath ?? project.configFile;
     logger.warn({
@@ -7691,9 +7697,13 @@ async function runUpCommand({
         composeFile: project.composeFile,
       }));
     reportDependencyCacheFallback(dependencyCache);
-    const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
-      ? [...composeFilesWithInternal, dependencyCache.overridePath]
-      : composeFilesWithInternal;
+    const composeFilesWithRuntimeOverrides = await withProjectLocalDirectories({
+      project,
+      composeFiles: dependencyCache.overridePath
+        ? [...composeFilesWithInternal, dependencyCache.overridePath]
+        : composeFilesWithInternal,
+      notify: (message) => logger.warn({ message }),
+    });
     const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
       project,
       composeFiles: composeFilesWithRuntimeOverrides,
@@ -8942,6 +8952,47 @@ function refuseInvalidSharedHelpers(opts: {
   return 1;
 }
 
+/**
+ * HACK-2358: an invalid `localDirectories` refuses before anything starts or
+ * stops (a restart would otherwise stop the project and then refuse).
+ */
+function refuseInvalidLocalDirectories(opts: {
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly json: boolean;
+}): number | null {
+  const message = opts.cfg.localDirectoriesError;
+  if (!message) {
+    return null;
+  }
+  if (opts.json) {
+    return emitLifecycleResult({
+      result: errorResult({ code: "E_CONFIG_INVALID", message }),
+      exitCode: 1,
+    });
+  }
+  logger.error({ message });
+  return 1;
+}
+
+/** `hack run`: warn on a config parse error, refuse an invalid `localDirectories`. */
+function reviewRunConfig(opts: {
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly project: { readonly configFile: string };
+}): number | null {
+  // Refused before the parse warning, which carries the same message.
+  const refusal = refuseInvalidLocalDirectories({ cfg: opts.cfg, json: false });
+  if (refusal !== null) {
+    return refusal;
+  }
+  if (opts.cfg.parseError) {
+    const configPath = opts.cfg.configPath ?? opts.project.configFile;
+    logger.warn({
+      message: `Failed to parse ${configPath}: ${opts.cfg.parseError}`,
+    });
+  }
+  return null;
+}
+
 /** Restart's response to a concurrent down: clean up this start and stop. */
 async function abandonSupersededRestart(opts: {
   readonly error: SharedHelperSupersededError;
@@ -9108,9 +9159,13 @@ async function runRestartUpPhase(opts: {
       composeFile: opts.project.composeFile,
     });
     reportDependencyCacheFallback(dependencyCache);
-    const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
-      ? [...composeFilesWithInternal, dependencyCache.overridePath]
-      : composeFilesWithInternal;
+    const composeFilesWithRuntimeOverrides = await withProjectLocalDirectories({
+      project: opts.project,
+      composeFiles: dependencyCache.overridePath
+        ? [...composeFilesWithInternal, dependencyCache.overridePath]
+        : composeFilesWithInternal,
+      notify: (message) => logger.warn({ message }),
+    });
     const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
       project: opts.project,
       composeFiles: composeFilesWithRuntimeOverrides,
@@ -9349,11 +9404,14 @@ async function runTargetedServiceRestart(opts: {
     };
   }
   reportDependencyCacheFallback(dependencyCache);
-  const composeFilesWithRuntimeOverrides = [
-    ...composeFiles,
-    ...(internalOverride ? [internalOverride] : []),
-    ...(dependencyCache.overridePath ? [dependencyCache.overridePath] : []),
-  ];
+  const composeFilesWithRuntimeOverrides = await withProjectLocalDirectories({
+    project: opts.project,
+    composeFiles: [
+      ...composeFiles,
+      ...(internalOverride ? [internalOverride] : []),
+      ...(dependencyCache.overridePath ? [dependencyCache.overridePath] : []),
+    ],
+  });
   const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
     project: opts.project,
     composeFiles: composeFilesWithRuntimeOverrides,
@@ -9699,6 +9757,11 @@ async function runRestartCommand({
     return remoteRestartCode;
   }
   const cfg = await readProjectConfig(project);
+  // Refused before the parse warning, which carries the same message.
+  const localDirectoriesRefusal = refuseInvalidLocalDirectories({ cfg, json });
+  if (localDirectoriesRefusal !== null) {
+    return localDirectoriesRefusal;
+  }
   if (cfg.parseError) {
     const configPath = cfg.configPath ?? project.configFile;
     logger.warn({
@@ -10587,11 +10650,9 @@ async function handleRun({
   const cmdArgs = args.positionals.cmd;
 
   const cfg = await readProjectConfig(project);
-  if (cfg.parseError) {
-    const configPath = cfg.configPath ?? project.configFile;
-    logger.warn({
-      message: `Failed to parse ${configPath}: ${cfg.parseError}`,
-    });
+  const configRefusal = reviewRunConfig({ cfg, project });
+  if (configRefusal !== null) {
+    return configRefusal;
   }
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
@@ -10631,9 +10692,12 @@ async function handleRun({
     composeFile: project.composeFile,
   });
   reportDependencyCacheFallback(dependencyCache);
-  const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
-    ? [...composeFilesWithInternal, dependencyCache.overridePath]
-    : composeFilesWithInternal;
+  const composeFilesWithRuntimeOverrides = await withProjectLocalDirectories({
+    project,
+    composeFiles: dependencyCache.overridePath
+      ? [...composeFilesWithInternal, dependencyCache.overridePath]
+      : composeFilesWithInternal,
+  });
   const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
     project,
     composeFiles: composeFilesWithRuntimeOverrides,

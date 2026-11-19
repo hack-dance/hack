@@ -1,0 +1,12 @@
+{
+  "name": "hack-runtime-bench",
+  "dev_host": "hack-runtime-bench.hack",
+  "logs": {
+    "follow_backend": "compose",
+    "snapshot_backend": "compose",
+    "clear_on_down": false
+  },
+  "internal": { "dns": false, "tls": false },
+  "oauth": { "enabled": false, "tld": "gy" },
+  "open": { "prefer": "auto" }
+}

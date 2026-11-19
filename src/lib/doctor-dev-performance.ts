@@ -27,6 +27,12 @@ import {
   inspectContainerArchitectures,
   platformArchitecture,
 } from "./container-architecture.ts";
+import {
+  findSharedSourceInstalls,
+  SHARED_SOURCE_INSTALLS_CHECK,
+  type SharedSourceInstallFinding,
+  sharedSourceInstallsMessage,
+} from "./doctor-shared-source-installs.ts";
 import { isRecord } from "./guards.ts";
 import { scopeRuntimeHygieneToProject } from "./project-runtime-hygiene.ts";
 import { readProjectsRegistry } from "./projects-registry.ts";
@@ -42,6 +48,7 @@ export const DEV_PERFORMANCE_CHECKS = [
   POLLING_WATCHERS_CHECK,
   SHARED_VOLUME_ARCH_CHECK,
   DEV_IMAGE_TAGS_CHECK,
+  SHARED_SOURCE_INSTALLS_CHECK,
 ] as const;
 
 export const DEV_PERFORMANCE_GUIDE_URL =
@@ -137,6 +144,10 @@ export type DevPerformanceReport =
       readonly kind: "dev_image_tags";
       readonly declared: readonly DeclaredToolVersion[];
       readonly services: readonly MutableImageFinding[];
+    }
+  | {
+      readonly kind: "shared_source_installs";
+      readonly services: readonly SharedSourceInstallFinding[];
     };
 
 export type DevPerformanceCheck = {
@@ -753,10 +764,48 @@ export function hasDevPerformanceDetail(check: DevPerformanceCheck): boolean {
   if (check.status !== "ok") {
     return true;
   }
-  return (
-    check.devPerformance?.kind === "dev_image_tags" &&
-    check.devPerformance.services.length > 0
-  );
+  const report = check.devPerformance;
+  if (
+    report?.kind === "shared_source_installs" &&
+    check.message.startsWith("Note:")
+  ) {
+    return true;
+  }
+  return report?.kind === "dev_image_tags" && report.services.length > 0;
+}
+
+/** HACK-2358: an advisory note, like dev image tags; never a failure. */
+export async function sharedSourceInstallsCheck(opts: {
+  readonly projectRoot: string;
+  readonly composeFile: string;
+  readonly inputs: ComposeDevInputs;
+  readonly localDirectories: readonly string[];
+  /** Set when the project's `localDirectories` is invalid. */
+  readonly localDirectoriesError?: string;
+}): Promise<DevPerformanceCheck> {
+  if (opts.localDirectoriesError) {
+    // Advice would name entries the invalid list may already hold.
+    return {
+      name: SHARED_SOURCE_INSTALLS_CHECK,
+      status: "ok",
+      message: `Note: localDirectories in .hack/hack.config.json is invalid, so it was not compared, and hack up refuses it: ${opts.localDirectoriesError}`,
+      devPerformance: { kind: "shared_source_installs", services: [] },
+    };
+  }
+  const services = await findSharedSourceInstalls({
+    projectRoot: opts.projectRoot,
+    composeFile: opts.composeFile,
+    services: opts.inputs.services,
+    localDirectories: opts.localDirectories,
+  });
+  return {
+    name: SHARED_SOURCE_INSTALLS_CHECK,
+    status: "ok",
+    message:
+      sharedSourceInstallsMessage(services) ??
+      "No dependency or build directory in the shared source is visible to a service.",
+    devPerformance: { kind: "shared_source_installs", services },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -817,6 +866,9 @@ export async function runDevPerformanceChecks(opts: {
   readonly composeFile: string;
   readonly hostArch: ContainerArchitecture;
   readonly containers: readonly DevRuntimeContainer[] | null;
+  /** The project's `localDirectories`; already kept off the share. */
+  readonly localDirectories?: readonly string[];
+  readonly localDirectoriesError?: string;
 }): Promise<DevPerformanceCheck[]> {
   const inputs = await readComposeDevInputs(opts);
   const declared = await readDeclaredToolVersions(opts.projectRoot);
@@ -831,5 +883,12 @@ export async function runDevPerformanceChecks(opts: {
       ? []
       : [sharedVolumeArchCheck(opts.containers)]),
     devImageTagsCheck({ inputs, declared }),
+    await sharedSourceInstallsCheck({
+      projectRoot: opts.projectRoot,
+      composeFile: opts.composeFile,
+      inputs,
+      localDirectories: opts.localDirectories ?? [],
+      localDirectoriesError: opts.localDirectoriesError,
+    }),
   ];
 }

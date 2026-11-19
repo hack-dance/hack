@@ -18,6 +18,7 @@ import {
   type LifecycleRunner,
   parseLifecycleRunner,
 } from "./lifecycle-runner.ts";
+import { parseLocalDirectories } from "./local-directories.ts";
 import {
   type OpenHostPreference,
   parseOpenHostPreference,
@@ -265,6 +266,13 @@ export interface ProjectConfig {
   readonly lifecycle?: ProjectLifecycleConfig;
   /** Detached Compose start budgets; the host variables win over them. */
   readonly compose?: ProjectComposeConfig;
+  /**
+   * `localDirectories` (HACK-2358): checkout directories, relative to the
+   * project root, kept on the runtime's disk instead of the shared source.
+   */
+  readonly localDirectories?: readonly string[];
+  /** Set when `localDirectories` is invalid; starts refuse it. */
+  readonly localDirectoriesError?: string;
   readonly ownership: ProjectOwnershipConfig;
   readonly configPath?: string;
   readonly parseError?: string;
@@ -652,6 +660,14 @@ export function parseProjectConfigRecord(
   const worktree = parseWorktreeConfig(getRecord(value, "worktree"));
   const sessions = parseSessionsConfig(getRecord(value, "sessions"));
   const compose = parseComposeConfig(getRecord(value, "compose"));
+  const localDirectories =
+    value.localDirectories === undefined
+      ? undefined
+      : parseLocalDirectories(value.localDirectories);
+  const localDirectoriesError =
+    localDirectories && "error" in localDirectories
+      ? localDirectories.error
+      : undefined;
   const lifecycleRecord = getRecord(value, "lifecycle");
   const lifecycleRunnerError =
     lifecycleRecord?.runner !== undefined &&
@@ -694,6 +710,9 @@ export function parseProjectConfigRecord(
     ...(parsedOpen.parseError ? [parsedOpen.parseError] : []),
     ...sharedHelpers.errors,
     ...(lifecycleRunnerError ? [lifecycleRunnerError] : []),
+    // Kept in parseError so doctor, autostart and project views see an
+    // invalid config; up, restart and run refuse before they print it.
+    ...(localDirectoriesError ? [localDirectoriesError] : []),
   ];
 
   return {
@@ -711,6 +730,10 @@ export function parseProjectConfigRecord(
     ...(sessions ? { sessions } : {}),
     ...(lifecycle ? { lifecycle } : {}),
     ...(compose ? { compose } : {}),
+    ...(localDirectories && "entries" in localDirectories
+      ? { localDirectories: localDirectories.entries }
+      : {}),
+    ...(localDirectoriesError ? { localDirectoriesError } : {}),
     ownership: parsedOwnership.ownership,
     ...(parseErrors.length > 0 ? { parseError: parseErrors.join(" ") } : {}),
     ...(sharedHelpers.errors.length > 0

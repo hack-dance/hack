@@ -506,6 +506,7 @@ export async function withLocalDirectoriesOverride(opts: {
   await createMountedEntries({
     projectRoot: opts.project.projectRoot,
     plan,
+    notify: opts.notify,
   });
   const internalDir = resolve(opts.project.projectDir, ".internal");
   await ensureDir(internalDir);
@@ -538,6 +539,7 @@ async function isNonDirectory(path: string): Promise<boolean> {
 async function createMountedEntries(opts: {
   readonly projectRoot: string;
   readonly plan: LocalDirectoriesPlan;
+  readonly notify?: (line: string) => void;
 }): Promise<void> {
   const entries = new Set(
     Object.values(opts.plan.services).flatMap((mounts) =>
@@ -552,8 +554,20 @@ async function createMountedEntries(opts: {
     const path = resolve(opts.projectRoot, entry);
     // Through a symlinked parent the directory could land outside the
     // checkout; leave that one to the engine.
-    if (await insideCheckout({ root, path })) {
+    if (!(await insideCheckout({ root, path }))) {
+      continue;
+    }
+    try {
       await mkdir(path, { recursive: true });
+    } catch (error) {
+      // Not fatal: the engine still creates the mountpoint itself.
+      const code =
+        error instanceof Error && "code" in error
+          ? String(error.code)
+          : "error";
+      opts.notify?.(
+        `localDirectories: could not create ${entry} in the checkout (${code}); the engine creates it instead.`
+      );
     }
   }
 }

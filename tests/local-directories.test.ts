@@ -75,7 +75,8 @@ test("an invalid setting is a config error, never silently dropped", () => {
   );
   expect(config.localDirectories).toBeUndefined();
   expect(config.localDirectoriesError).toContain("localDirectories");
-  expect(config.parseError).toContain("localDirectories");
+  // Reported once, by the refusal, not again as a parse warning.
+  expect(config.parseError).toBeUndefined();
 });
 
 test("the editor schema accepts and rejects the same entries as the parser", () => {
@@ -403,4 +404,20 @@ test("an invalid setting is refused by the override as a backstop", async () => 
       composeFiles: [project.composeFile],
     })
   ).rejects.toMatchObject({ code: "E_CONFIG_INVALID" });
+});
+
+test("a directory that cannot be created is a notice, not a crash", async () => {
+  const { root, project } = await checkout();
+  await writeFile(join(root, "package.json"), "{}");
+  const notices: string[] = [];
+  const files = await withLocalDirectoriesOverride({
+    project,
+    config: { localDirectories: ["package.json/cache"] },
+    composeFiles: [project.composeFile],
+    notify: (line) => notices.push(line),
+  });
+  expect(files).toHaveLength(2);
+  expect(notices).toEqual([
+    "localDirectories: could not create package.json/cache in the checkout (ENOTDIR); the engine creates it instead.",
+  ]);
 });

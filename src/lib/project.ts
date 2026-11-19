@@ -710,7 +710,8 @@ export function parseProjectConfigRecord(
     ...(parsedOpen.parseError ? [parsedOpen.parseError] : []),
     ...sharedHelpers.errors,
     ...(lifecycleRunnerError ? [lifecycleRunnerError] : []),
-    ...(localDirectoriesError ? [localDirectoriesError] : []),
+    // localDirectoriesError is not a parse warning: up, restart and run
+    // refuse with it themselves, and doctor gives it its own note.
   ];
 
   return {

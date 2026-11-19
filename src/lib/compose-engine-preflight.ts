@@ -171,9 +171,11 @@ export interface ComposeServiceSelection {
  * Hack's shared networks, declared external at the top level of the compose
  * file, that the services `up` will start join, by engine name (`name:` or
  * the key). A whole-project `up` starts every service without `profiles` or
- * with an active profile; a scoped `up` starts the named services and what
- * they depend on. Networks only an unselected service joins are left out,
- * because Compose does not need them either.
+ * with an active profile; a scoped `up` starts the named services. Either way
+ * Compose also starts their dependencies, except an optional one
+ * (`required: false`) that is not active. A service with no `networks` joins
+ * the implicit `default` network; `network_mode` joins none. Networks only an
+ * unselected service joins are left out, because Compose does not need them.
  */
 export function sharedExternalNetworks(
   composeYaml: string | null,
@@ -198,11 +200,7 @@ export function sharedExternalNetworks(
   const services = isRecord(parsed.services) ? parsed.services : {};
   const names = new Set<string>();
   for (const service of selectedServices(services, selection)) {
-    const definition = services[service];
-    if (!isRecord(definition)) {
-      continue;
-    }
-    for (const key of listOrMapKeys(definition.networks)) {
+    for (const key of serviceNetworks(services[service])) {
       const name = shared.get(key);
       if (name !== undefined) {
         names.add(name);
@@ -210,6 +208,20 @@ export function sharedExternalNetworks(
     }
   }
   return [...names];
+}
+
+/**
+ * The network keys a service joins: its `networks` entries, or Compose's
+ * implicit `default` when it names none. `network_mode` joins none.
+ */
+function serviceNetworks(definition: unknown): readonly string[] {
+  if (!isRecord(definition) || definition.network_mode !== undefined) {
+    return [];
+  }
+  if (definition.networks === undefined) {
+    return ["default"];
+  }
+  return listOrMapKeys(definition.networks);
 }
 
 /** Top-level network keys that are external Hack shared networks, to engine names. */
@@ -230,39 +242,58 @@ function sharedNetworksByKey(networks: unknown): ReadonlyMap<string, string> {
   return shared;
 }
 
+function profileActive(
+  definition: unknown,
+  active: ReadonlySet<string>
+): boolean {
+  const profiles = isRecord(definition) ? definition.profiles : undefined;
+  return (
+    !Array.isArray(profiles) ||
+    profiles.length === 0 ||
+    profiles.some((p) => typeof p === "string" && active.has(p))
+  );
+}
+
+/**
+ * Dependencies Compose starts with a service: every `depends_on` entry,
+ * except an optional one (`required: false`) whose service is not active.
+ */
+function startedDependencies(
+  definition: unknown,
+  services: Record<string, unknown>,
+  active: ReadonlySet<string>
+): readonly string[] {
+  if (!isRecord(definition)) {
+    return [];
+  }
+  const dependsOn = definition.depends_on;
+  return listOrMapKeys(dependsOn).filter((name) => {
+    const entry = isRecord(dependsOn) ? dependsOn[name] : undefined;
+    const optional = isRecord(entry) && entry.required === false;
+    return !optional || profileActive(services[name], active);
+  });
+}
+
 function selectedServices(
   services: Record<string, unknown>,
   selection: ComposeServiceSelection
 ): ReadonlySet<string> {
-  if (selection.requested.length === 0) {
-    const active = new Set(selection.profiles);
-    return new Set(
-      Object.entries(services)
-        .filter(([, definition]) => {
-          const profiles = isRecord(definition)
-            ? definition.profiles
-            : undefined;
-          return (
-            !Array.isArray(profiles) ||
-            profiles.length === 0 ||
-            profiles.some((p) => typeof p === "string" && active.has(p))
-          );
-        })
-        .map(([name]) => name)
-    );
-  }
+  const active = new Set(selection.profiles);
+  const roots =
+    selection.requested.length > 0
+      ? selection.requested
+      : Object.keys(services).filter((name) =>
+          profileActive(services[name], active)
+        );
   const selected = new Set<string>();
-  const queue = [...selection.requested];
+  const queue = [...roots];
   while (queue.length > 0) {
     const name = queue.pop();
     if (name === undefined || selected.has(name)) {
       continue;
     }
     selected.add(name);
-    const definition = services[name];
-    if (isRecord(definition)) {
-      queue.push(...listOrMapKeys(definition.depends_on));
-    }
+    queue.push(...startedDependencies(services[name], services, active));
   }
   return selected;
 }

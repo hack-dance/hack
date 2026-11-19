@@ -36,12 +36,12 @@ setup described here.
 
 ## When `hack up` cannot start the project here
 
-On the Compose backend, `hack up` checks the machine before it pulls an image
-or starts a container, using the same environment Compose gets (so a project's
-`DOCKER_HOST` or `DOCKER_CONTEXT` applies). The shared-network check runs after
-the project's `up.before` hooks. When something is missing, it stops with one line that
-says what and what to do (the `--json` envelope carries the same `code` and
-`message`):
+On the Compose backend, `hack up` checks the machine after the project's
+`up.before` hooks (which may start the engine or create a network) and before it
+pulls an image or starts a container. The checks select the engine the same way
+Compose does, so a project's `DOCKER_HOST`, `DOCKER_CONTEXT` or SSH agent applies.
+When something is missing, it stops with one line that says what and what to do
+(the `--json` envelope carries the same `code` and `message`):
 
 | Code | What it means | What to do |
 | --- | --- | --- |

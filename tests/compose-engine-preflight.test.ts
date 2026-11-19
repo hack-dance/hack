@@ -255,6 +255,63 @@ networks:
     ).toEqual(["hack-dev"]);
   });
 
+  test("an optional dependency behind an inactive profile does not count", () => {
+    const optional = `
+services:
+  web:
+    image: web
+    depends_on:
+      tools:
+        condition: service_started
+        required: false
+  tools:
+    image: tools
+    profiles: [tools]
+    networks: [hack-dev]
+networks:
+  hack-dev:
+    external: true
+`;
+    expect(
+      sharedExternalNetworks(optional, { requested: ["web"], profiles: [] })
+    ).toEqual([]);
+    expect(
+      sharedExternalNetworks(optional, {
+        requested: ["web"],
+        profiles: ["tools"],
+      })
+    ).toEqual(["hack-dev"]);
+    // A required dependency is started whatever its profile.
+    expect(
+      sharedExternalNetworks(
+        optional.replace("required: false", "required: true"),
+        {
+          requested: ["web"],
+          profiles: [],
+        }
+      )
+    ).toEqual(["hack-dev"]);
+  });
+
+  test("a service without networks joins the implicit default; network_mode joins none", () => {
+    const implicit = `
+services:
+  web:
+    image: web
+networks:
+  default:
+    external: true
+    name: hack-dev
+`;
+    expect(sharedExternalNetworks(implicit, ALL)).toEqual(["hack-dev"]);
+    expect(
+      sharedExternalNetworks(
+        implicit.replace("image: web", "image: web\n    network_mode: host"),
+        ALL
+      )
+    ).toEqual([]);
+  });
+
   test("an unreadable or networkless file checks nothing", () => {
     expect(sharedExternalNetworks(null, ALL)).toEqual([]);
     expect(sharedExternalNetworks(": : not yaml [", ALL)).toEqual([]);
@@ -283,15 +340,23 @@ describe("missing env key", () => {
 describe("preflight environment", () => {
   test("the real deps pass the project's Docker transport settings and nothing else from its env", async () => {
     const deps = composeEnginePreflightDeps({
-      DOCKER_HOST: "unix:///run/project-engine.sock",
+      DOCKER_HOST: "ssh://dev@engine.example",
+      SSH_AUTH_SOCK: "/run/project-agent.sock",
+      CONTAINER_HOST: "unix:///run/podman.sock",
       API_TOKEN: "decrypted-project-value",
     });
     const result = await deps.run(
-      ["sh", "-c", 'printf "%s|%s" "$DOCKER_HOST" "${API_TOKEN-unset}"'],
+      [
+        "sh",
+        "-c",
+        'printf "%s|%s|%s|%s" "$DOCKER_HOST" "$SSH_AUTH_SOCK" "$CONTAINER_HOST" "${API_TOKEN-unset}"',
+      ],
       5000
     );
-    // The engine selection applies; other project values stay out.
-    expect(result.stdout).toBe("unix:///run/project-engine.sock|unset");
+    // Engine selection and its transport apply; application values stay out.
+    expect(result.stdout).toBe(
+      "ssh://dev@engine.example|/run/project-agent.sock|unix:///run/podman.sock|unset"
+    );
   });
 
   test("a quoted engine line redacts the project's env values", async () => {

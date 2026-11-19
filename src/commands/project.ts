@@ -296,6 +296,7 @@ import {
   dependencyCacheBootstrapFailure,
 } from "../lib/dependency-cache-bootstrap.ts";
 import { removeDisposableCacheVolumes } from "../lib/disposable-cache-volumes.ts";
+import { dockerHelperRunEnvironment } from "../lib/docker-helper-environment.ts";
 import { parseDurationMs } from "../lib/duration.ts";
 import {
   isSlimExecutionMode,
@@ -7450,23 +7451,6 @@ async function runUpCommand({
     envName,
   });
 
-  // Name a missing engine, socket permission or Compose plugin before any
-  // hook or pull runs (HACK-2356), against the engine Compose will use: the
-  // same environment, so a project's DOCKER_HOST or DOCKER_CONTEXT applies.
-  // Interactive runs were already offered to start global services (and their
-  // engine) above. The error renders as the JSON envelope or one line.
-  const preflightDeps = composeEnginePreflightDeps(envOverrides.env);
-  const preflightRedactValues = composeEnvValuesToRedact({
-    env: envOverrides.env,
-  });
-  const engineRefusal = await preflightComposeEngine({
-    deps: preflightDeps,
-    redactValues: preflightRedactValues,
-  });
-  if (engineRefusal !== null) {
-    throw engineRefusal;
-  }
-
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
     composeFile: project.composeFile,
@@ -7625,23 +7609,36 @@ async function runUpCommand({
       ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
       ...envOverrides.composeFiles,
     ];
-    // After `up.before` hooks, which may create a shared network themselves,
-    // and before any pull: name a shared network Compose will need and that
-    // does not exist. A refusal here runs the same cleanup as other failures.
-    const networkRefusal = await preflightSharedNetworks({
-      composeYaml: await readTextFile(project.composeFile),
-      selection: {
-        requested: requestedServices,
-        profiles: resolveEffectiveComposeProfiles({
-          cliProfiles: profiles,
-          composeEnv: envOverrides.env,
-        }),
-      },
-      deps: preflightDeps,
-      redactValues: preflightRedactValues,
+    // After `up.before` hooks, which may start the engine, open the tunnel
+    // DOCKER_HOST needs or create a shared network, and before any pull: name
+    // a missing engine, socket permission, Compose plugin or shared network
+    // Compose will need (HACK-2356). The reads use Compose's engine selection
+    // from the project env, never its application values. A refusal here
+    // runs the same cleanup as other failures; it renders as the JSON
+    // envelope or one line.
+    const preflightDeps = composeEnginePreflightDeps(envOverrides.env);
+    const preflightRedactValues = composeEnvValuesToRedact({
+      env: envOverrides.env,
     });
-    if (networkRefusal !== null) {
-      throw networkRefusal;
+    const preflightRefusal =
+      (await preflightComposeEngine({
+        deps: preflightDeps,
+        redactValues: preflightRedactValues,
+      })) ??
+      (await preflightSharedNetworks({
+        composeYaml: await readTextFile(project.composeFile),
+        selection: {
+          requested: requestedServices,
+          profiles: resolveEffectiveComposeProfiles({
+            cliProfiles: profiles,
+            composeEnv: envOverrides.env,
+          }),
+        },
+        deps: preflightDeps,
+        redactValues: preflightRedactValues,
+      }));
+    if (preflightRefusal !== null) {
+      throw preflightRefusal;
     }
     reportComposeStartupBudget({ budgets, detach });
     const bootstrapCode = await bootstrapDependencyCaches({
@@ -7924,39 +7921,20 @@ async function runUpCommand({
 }
 
 /**
- * Docker client settings that choose and reach the engine. The preflight
- * passes only these from the project's env: the rest of that env can hold
- * decrypted values, which reach only the processes that deliver them.
- */
-const DOCKER_TRANSPORT_ENV_KEYS: readonly string[] = [
-  "DOCKER_HOST",
-  "DOCKER_CONTEXT",
-  "DOCKER_CONFIG",
-  "DOCKER_TLS",
-  "DOCKER_TLS_VERIFY",
-  "DOCKER_CERT_PATH",
-  "DOCKER_API_VERSION",
-];
-
-/**
  * Real Docker reads for the `up` preflight. `env` is the environment Compose
- * will get; only its Docker transport settings are passed on, over the
- * inherited environment, so the preflight checks the engine Compose will use.
+ * will get; the reads see only its platform and engine-transport settings
+ * (the Docker helper projection: DOCKER_*, Podman's CONTAINER_*, SSH agent,
+ * proxies), so they check the engine Compose will use while decrypted
+ * application values reach only the processes that deliver them.
  */
 export function composeEnginePreflightDeps(
   env: Readonly<Record<string, string>> | undefined
 ): ComposeEnginePreflightDeps {
-  const transport: Record<string, string> = {};
-  for (const key of DOCKER_TRANSPORT_ENV_KEYS) {
-    const value = env?.[key];
-    if (value !== undefined) {
-      transport[key] = value;
-    }
-  }
+  const runEnvironment = dockerHelperRunEnvironment(env);
   return {
     dockerOnPath: () => findExecutableInPath("docker") !== null,
     run: async (argv, timeoutMs) =>
-      await exec(argv, { stdin: "ignore", timeoutMs, env: transport }),
+      await exec(argv, { stdin: "ignore", timeoutMs, ...runEnvironment }),
   };
 }
 

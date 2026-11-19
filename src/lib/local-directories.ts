@@ -587,12 +587,6 @@ export function localDirectoriesNotices(
 }
 
 /**
- * Writes the Compose override for the project's `localDirectories` and
- * returns the compose file list with it appended (after Hack's other
- * overrides, so its mounts are the last word for their targets). Refuses an
- * invalid setting. No entries, or no covered service: the list unchanged.
- */
-/**
  * The plan for a project and the notices `up` prints, shared by the Compose
  * override and the native model: entries that exist as files are skipped,
  * the rest are planned against the parsed Compose document.
@@ -629,6 +623,12 @@ export async function planProjectLocalDirectories(opts: {
   return { plan, notices };
 }
 
+/**
+ * Writes the Compose override for the project's `localDirectories` and
+ * returns the compose file list with it appended (after Hack's other
+ * overrides, so its mounts are the last word for their targets). Refuses an
+ * invalid setting. No entries, or no covered service: the list unchanged.
+ */
 export async function withLocalDirectoriesOverride(opts: {
   readonly project: {
     readonly projectRoot: string;

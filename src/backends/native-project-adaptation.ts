@@ -221,18 +221,45 @@ export async function prepareNativeProjectAdaptation(opts: {
   readonly input: NativeProjectInput;
   readonly path?: string;
 }): Promise<NativeProjectInput> {
-  const input = await withNativeLocalDirectories(opts.input);
-  if (opts.path === undefined) {
+  const selection =
+    opts.path === undefined ? undefined : await readNativeSelection(opts.path);
+  const input = await withNativeLocalDirectories(
+    opts.input,
+    workspaceCacheTargets(selection)
+  );
+  if (selection === undefined) {
     return input;
   }
-  return adaptNativeProject({
-    input,
-    selection: await readNativeSelection(opts.path),
-  });
+  return adaptNativeProject({ input, selection });
+}
+
+/**
+ * The workspace `node_modules` paths an adaptation's `workspaceCache` mounts.
+ * That cache already keeps them on the VM disk, and it refuses a mount it
+ * finds there, so `localDirectories` leaves these paths to it.
+ */
+function workspaceCacheTargets(selection: unknown): ReadonlySet<string> {
+  const cache = isRecord(selection) ? selection.workspaceCache : undefined;
+  if (
+    !(
+      isRecord(cache) &&
+      typeof cache.root === "string" &&
+      Array.isArray(cache.workspaces)
+    )
+  ) {
+    return new Set();
+  }
+  const root = cache.root;
+  return new Set(
+    cache.workspaces
+      .filter((path): path is string => typeof path === "string")
+      .map((path) => `${root}/${path}/node_modules`)
+  );
 }
 
 async function withNativeLocalDirectories(
-  input: NativeProjectInput
+  input: NativeProjectInput,
+  cacheTargets: ReadonlySet<string>
 ): Promise<NativeProjectInput> {
   if (input.localDirectories === undefined) {
     return input;
@@ -245,6 +272,7 @@ async function withNativeLocalDirectories(
   await applyNativeLocalDirectories({
     compose,
     selection: input.localDirectories,
+    leaveTargets: cacheTargets,
   });
   return { ...input, normalizedComposeJson: JSON.stringify(compose) };
 }

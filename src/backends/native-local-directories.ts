@@ -96,6 +96,24 @@ export function applyLocalDirectoriesPlan(opts: {
   }
 }
 
+/** The plan without mounts at `targets`; a service left with none drops out. */
+function withoutTargets(
+  plan: LocalDirectoriesPlan,
+  targets: ReadonlySet<string> | undefined
+): LocalDirectoriesPlan {
+  if (!targets || targets.size === 0) {
+    return plan;
+  }
+  const services: Record<string, LocalDirectoriesPlan["services"][string]> = {};
+  for (const [name, mounts] of Object.entries(plan.services)) {
+    const kept = mounts.filter((mount) => !targets.has(mount.target));
+    if (kept.length > 0) {
+      services[name] = kept;
+    }
+  }
+  return { ...plan, services };
+}
+
 /**
  * Applies the recorded setting to a parsed native Compose model and returns
  * the notices `up` prints. An invalid setting refuses with `E_CONFIG_INVALID`
@@ -104,6 +122,8 @@ export function applyLocalDirectoriesPlan(opts: {
 export async function applyNativeLocalDirectories(opts: {
   readonly compose: Record<string, unknown>;
   readonly selection: NativeLocalDirectories | undefined;
+  /** Container paths another native mechanism owns (a workspace cache). */
+  readonly leaveTargets?: ReadonlySet<string>;
 }): Promise<string[]> {
   const selection = opts.selection;
   if (selection?.error) {
@@ -121,6 +141,9 @@ export async function applyNativeLocalDirectories(opts: {
     compose: opts.compose,
     entries: selection.entries,
   });
-  applyLocalDirectoriesPlan({ compose: opts.compose, plan });
+  applyLocalDirectoriesPlan({
+    compose: opts.compose,
+    plan: withoutTargets(plan, opts.leaveTargets),
+  });
   return notices;
 }

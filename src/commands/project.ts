@@ -7346,7 +7346,7 @@ async function handleUpUnlocked({
         projectOpt: args.options.project,
         touchRegistration: false,
       }),
-      warn: (message) => logger.warn({ message }),
+      warn: nativeLocalDirectoriesWarn(args.options.json === true),
     });
     return await launchNativeDetachedUp({
       cwd: ctx.cwd,
@@ -8974,6 +8974,18 @@ function refuseInvalidSharedHelpers(opts: {
 }
 
 /**
+ * Where native `localDirectories` notices go: stderr under `--json`, so the
+ * result envelope stays the only thing on stdout; the logger otherwise.
+ */
+export function nativeLocalDirectoriesWarn(
+  json: boolean
+): (message: string) => void {
+  return json
+    ? (message) => process.stderr.write(`${message}\n`)
+    : (message) => logger.warn({ message });
+}
+
+/**
  * HACK-2358: an invalid `localDirectories` refuses before anything starts or
  * stops (a restart would otherwise stop the project and then refuse).
  */
@@ -9666,7 +9678,7 @@ async function handleRestart({
         projectOpt: args.options.project,
         touchRegistration: false,
       }),
-      warn: (message) => logger.warn({ message }),
+      warn: nativeLocalDirectoriesWarn(true),
     });
     return await launchNativeDetachedUp({
       cwd: ctx.cwd,

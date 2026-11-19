@@ -74,7 +74,8 @@ volumes. Your Compose file does not change.
   `hack down --remove-data` deletes them, and they count toward native's
   16-volume limit. `hack up` prints the same notices as on Compose. Adopted,
   authored and imported native projects do not apply the setting, and
-  `hack up` says so.
+  `hack up` says so. A `workspaceCache` adaptation keeps its workspace
+  `node_modules` paths; `localDirectories` leaves those to it.
 
 `hack doctor` adds a `shared source installs` note when a service sees such a
 directory through its source bind and nothing keeps it local.

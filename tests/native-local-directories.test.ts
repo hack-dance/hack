@@ -201,3 +201,78 @@ test("native up refuses an invalid setting and prints the plan's notices in the 
     "localDirectories: service web already mounts /app/node_modules; that mount is kept for node_modules.",
   ]);
 });
+
+test("a workspace cache in the adaptation keeps its workspace paths, and native up does not refuse", async () => {
+  const fixture = await project({
+    localDirectories: ["node_modules", "apps/web/node_modules"],
+  });
+  await writeFile(
+    fixture.composeFile,
+    "services:\n  web:\n    image: node:22\n    volumes:\n      - ..:/app\n      - deps:/app/node_modules\nvolumes:\n  deps: {}\n"
+  );
+  const adaptationFile = join(fixture.projectDir, "native-adaptation.json");
+  await writeFile(
+    adaptationFile,
+    JSON.stringify({
+      version: 1,
+      workspaceCache: {
+        volume: "deps",
+        root: "/app",
+        workspaces: ["apps/web"],
+      },
+    })
+  );
+  const input = await prepareNativeProjectInput({
+    projectRoot: fixture.root,
+    projectDir: fixture.projectDir,
+    composeFile: fixture.composeFile,
+  });
+  const adapted = await prepareNativeProjectAdaptation({
+    input,
+    path: adaptationFile,
+  });
+  const model = JSON.parse(adapted.normalizedComposeJson) as {
+    services: { web: { volumes: unknown[] } };
+    volumes: Record<string, unknown>;
+  };
+  // deps is kept at the root, the workspace path belongs to the cache, and
+  // localDirectories adds nothing of its own here.
+  expect(model.services.web.volumes).toEqual([
+    "..:/app",
+    "deps:/app/node_modules",
+    {
+      type: "volume",
+      source: "deps",
+      target: "/app/apps/web/node_modules",
+      read_only: false,
+      volume: { subpath: ".hack-workspace-node-modules/apps/web" },
+    },
+  ]);
+  expect(model.volumes).toEqual({ deps: {} });
+});
+
+test("under --json, native localDirectories notices go to stderr, never stdout", async () => {
+  const { nativeLocalDirectoriesWarn } = await import(
+    "../src/commands/project.ts"
+  );
+  const out: string[] = [];
+  const err: string[] = [];
+  const stdout = process.stdout.write.bind(process.stdout);
+  const stderr = process.stderr.write.bind(process.stderr);
+  process.stdout.write = ((chunk: string) => {
+    out.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string) => {
+    err.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    nativeLocalDirectoriesWarn(true)("localDirectories: a notice");
+  } finally {
+    process.stdout.write = stdout;
+    process.stderr.write = stderr;
+  }
+  expect(out).toEqual([]);
+  expect(err).toEqual(["localDirectories: a notice\n"]);
+});

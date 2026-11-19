@@ -198,6 +198,18 @@ const shellMock = await registerScopedModuleMock({
   },
 });
 
+// These tests drive Compose through the mocked runtime backend; the engine
+// preflight would otherwise run the host's real `docker` (absent on some CI
+// runners). Its own behavior is covered in compose-engine-preflight.test.ts.
+const enginePreflightMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/compose-engine-preflight.ts",
+  overrides: {
+    preflightComposeEngine: () => Promise.resolve(null),
+    preflightSharedNetworks: () => Promise.resolve(null),
+  },
+});
+
 const loggerMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
   specifier: "../src/ui/logger.ts",
@@ -227,6 +239,7 @@ beforeAll(() => {
   runtimeBackendMock.activate();
   runtimeProjectsMock.activate();
   shellMock.activate();
+  enginePreflightMock.activate();
   loggerMock.activate();
 });
 
@@ -285,6 +298,7 @@ afterAll(() => {
   runtimeBackendMock.deactivate();
   runtimeProjectsMock.deactivate();
   shellMock.deactivate();
+  enginePreflightMock.deactivate();
   loggerMock.deactivate();
 });
 

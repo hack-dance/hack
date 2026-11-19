@@ -219,6 +219,25 @@ pub(super) fn set_aside_recorded(
     Ok(true)
 }
 
+/// Before a boot, under the pool lock: a set-aside intent left by recovery must not survive
+/// into a boot, whose new disks a later recovery would otherwise try to move into the old
+/// set-aside directory. On `stopped-before-engine` the set-aside completed (the owner
+/// transition commits it), so the intent is removed. In any other phase it may still be in
+/// progress, so the boot refuses until `runtime recover` finishes it. Without an intent this
+/// changes nothing.
+pub(super) fn before_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
+    if SetAside::load(candidate)?.is_none() {
+        return Ok(());
+    }
+    if owner.phase == "stopped-before-engine" {
+        return SetAside::remove_completed(candidate);
+    }
+    Err(CandidateError::new(
+        "recovery_required",
+        "A set-aside of a failed first boot's disks is not finished; run runtime recover --json before starting. Nothing was started.",
+    ))
+}
+
 /// The durable intent of a set-aside in progress, beside the owner record. Written once the
 /// proofs hold and before the first move, and removed only after the owner records
 /// `stopped-before-engine`, so a set-aside interrupted at any point resumes (or, once the owner
@@ -808,6 +827,33 @@ mod tests {
         assert!(fs::symlink_metadata(data.join("storage.raw")).is_ok());
         assert!(data.join("overlay.raw").exists());
         assert!(!root(&pool.candidate).join(SET_ASIDE).exists());
+
+        // Before a boot, a completed intent is removed and one still in progress refuses.
+        {
+            let pool = Pool::new("before-boot");
+            let intent = || {
+                state::write(
+                    &root(&pool.candidate).join(SET_ASIDE),
+                    &SetAside {
+                        version: 1,
+                        label: "untrusted-first-boot-1".into(),
+                    },
+                )
+                .unwrap()
+            };
+            let stopped = pool.owner("stopped-before-engine", true, false);
+            before_boot(&pool.candidate, &stopped).unwrap();
+            intent();
+            before_boot(&pool.candidate, &stopped).unwrap();
+            assert!(!root(&pool.candidate).join(SET_ASIDE).exists());
+            intent();
+            let failed = pool.owner("failed-boot-stopped", true, false);
+            assert_eq!(
+                before_boot(&pool.candidate, &failed).unwrap_err().code,
+                "recovery_required"
+            );
+            assert!(root(&pool.candidate).join(SET_ASIDE).exists());
+        }
 
         // Interrupted after the owner committed `stopped-before-engine` but before the intent
         // was removed: recovery clears the completed intent and changes nothing else.

@@ -1634,6 +1634,8 @@ fn start_pool(
     if let Some(guard) = &retained_guard {
         guard.verify(candidate)?;
     }
+    // A set-aside of a previous failed first boot must not meet this boot's new disks.
+    interrupted::before_boot(candidate, &owner)?;
     // The last check before `machine start` releases the VM lock to the provider.
     let permit = boot.release(candidate, &lock)?;
     let previous_boot = owner.begin_boot();

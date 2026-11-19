@@ -204,7 +204,9 @@ export async function nativeProjectExec(opts: {
     value = await invoke({
       runtime: opts.runtime,
       cwd: opts.scope.projectRoot,
-      timeoutMs: 35_000,
+      // The runtime's 30 s exec bound may be followed by up to 20 s of reading output that
+      // is still arriving and a 5 s inspection grace (HACK-2357); do not kill it first.
+      timeoutMs: 60_000,
       serviceExecResponse: true,
       privateInput: payload,
       args: [

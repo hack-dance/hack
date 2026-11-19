@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "smolvm": {
-    "version": "1.34.1",
+    "version": "1.35.4",
     "platform": "darwin-arm64",
-    "url": "https://github.com/smol-machines/smolvm/releases/download/v1.34.1/smolvm-1.34.1-darwin-arm64.tar.gz",
-    "archive_sha256": "8ebda502e332c739fdfc13b059be982cca66da9253c5229b4586af02c92781d9",
+    "url": "https://github.com/smol-machines/smolvm/releases/download/v1.35.4/smolvm-1.35.4-darwin-arm64.tar.gz",
+    "archive_sha256": "4ad2b02be848219a9d88632ca9e6dc881d6e97343626aab9c11ac4a184929d9e",
     "max_bytes": 134217728,
     "redirect_hosts": ["release-assets.githubusercontent.com"],
     "agent_protocol_version": 1,
-    "size_bytes": 41187333
+    "size_bytes": 43873883
   },
   "docker": {
     "version": "29.5.2",

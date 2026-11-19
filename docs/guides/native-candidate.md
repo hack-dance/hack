@@ -1141,8 +1141,8 @@ profile unless you pass `--profile development`; the research profile can report
 hashes are listed in `provider-pins.json` and under
 [network tool packages](#network-tool-packages).
 
-The current SmolVM pin is 1.34.1 (`smolvm-1.34.1-darwin-arm64.tar.gz`, SHA-256
-`8ebda502e332c739fdfc13b059be982cca66da9253c5229b4586af02c92781d9`, the value
+The current SmolVM pin is 1.35.4 (`smolvm-1.35.4-darwin-arm64.tar.gz`, SHA-256
+`4ad2b02be848219a9d88632ca9e6dc881d6e97343626aab9c11ac4a184929d9e`, the value
 upstream publishes in the release's `checksums.sha256`). `provider-pins.json` is the
 source of truth; the executor refuses any other archive.
 
@@ -1400,7 +1400,14 @@ fresh per-command values names the step that failed (`create`, `connect`, `start
 `deliver`, `release`, `output` or `inspect`) and why (`deadline`, `closed`, `io` or
 `protocol`). A failure before the last value byte is sent cannot have run the command: it
 reports `graph_service_exec_not_run` and is safe to retry. From `release` on, the command may
-have run, and the error stays `graph_service_exec_uncertain`. Exec inherits the container's static environment. When the selected service has a
+have run, and the error stays `graph_service_exec_uncertain`. The per-command values'
+lifetime bounds only their delivery; the exec's own wait bounds the command. Output that is
+still arriving when that wait ends is read to the end, allowing 5 seconds between bytes and
+at most 20 seconds past the wait, so a command that finished on a slow or busy host is reported
+with its exit code rather than as uncertain. Output already queued when a stalled host resumes,
+even after that limit, is still read. Output that stays silent for 5 seconds without ending,
+keeps going past that limit, or an exec whose exit cannot be read within 5 seconds of its
+output ending is still uncertain. Exec inherits the container's static environment. When the selected service has a
 committed private environment attachment on the current boot, it reuses that
 service's exact read-only launcher mounts and original expiry. No values are copied
 into engine metadata, and exec never renews credentials. With the current launcher,
@@ -3312,8 +3319,8 @@ still resolve arm64 images. Without Rosetta 2 the start refuses with
 
 Every boot audits translation against the pool's recorded intent: the provider's
 stored machine setting, its running configuration, and the guest's `binfmt_misc`
-`rosetta` registration (the x86_64 ELF match with the fixed `rosetta-wrapper`
-interpreter). A pool without translation must have no such registration. The image
+`rosetta` registration (the x86_64 ELF match with the Rosetta translator at
+`/mnt/rosetta/rosetta` as the fixed interpreter). A pool without translation must have no such registration. The image
 cache keeps amd64 archives separate from arm64 ones. Under `prefer-native`, a cached
 amd64 archive is reused only after the pinned image is confirmed not to publish arm64.
 The runtime admits an amd64 image only for an opted-in service
@@ -4385,7 +4392,9 @@ the current owned project/branch mapping, preserves binary stdout/stderr and the
 command exit code, and never falls back to Compose. With piped input/output or
 `HACK_NO_INTERACTIVE=1`, it uses finite exec with a 30-second observation budget;
 a timeout may leave the command running and is not
-retried. `--env` and `--profile` changes are refused. A command name such as `bun`
+retried. When fresh values are delivered through private stdin, output that is still arriving
+or already queued when that budget ends is read to the end, so a command that finished on a
+busy host returns its exit code (see below). `--env` and `--profile` changes are refused. A command name such as `bun`
 uses the selected container's PATH; no host PATH or implicit shell is used. For
 adopted Compose services, `hack exec` resolves the saved startup overlay and AWS profile again, and delivers
 fresh selected-service managed, allowed caller-shell and env-file values through

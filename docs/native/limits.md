@@ -94,6 +94,11 @@ Details and the exact checks:
   and a second Ctrl-C can request the forced command-group stop. Unknown cleanup
   still retains evidence. Use `hack down` from another terminal, then
   `hack down --recover` if it reports the owner is gone; do not delete state.
+- **Removing folders on shared source.** Inside a service, `rm -rf` of a folder with
+  many entries on shared source can stop with "Directory not empty" and leave files
+  behind. This is a fault in the virtual machine's file share and is still present in
+  the pinned SmolVM 1.35.4. Run the command again, remove the folder from the Mac, or
+  keep that folder on a named volume.
 - **Images.** Images need a Linux arm64 variant. Local registries need an explicit
   opt-in. Registries signed by a private certificate authority are not supported.
 - **Data.** Data does not move between backends, or between prerelease versions.

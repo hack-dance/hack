@@ -129,7 +129,12 @@ export async function ensureContainerReadable(
   const retained: RetainedCustomPath[] = [];
   for (const entry of entries) {
     const before = await lstat(entry.path).catch(() => null);
-    if (!before || before.isSymbolicLink()) {
+    // Only a regular file, or a real directory, is ever opened: a link is
+    // the user's own arrangement, and opening a FIFO would block.
+    if (
+      before === null ||
+      !(entry.kind === "file" ? before.isFile() : before.isDirectory())
+    ) {
       continue;
     }
     const wanted = containerReadableMode(entry.kind);
@@ -142,12 +147,8 @@ export async function ensureContainerReadable(
       });
     const handle = await openNoFollow(entry.path, entry.kind === "directory");
     if (handle === null) {
-      // The expected kind is not there, or the owner cannot read it: nothing
-      // is known about its content. A directory where a file is expected (or
-      // the reverse) is skipped; an unreadable entry is reported.
-      const expectedKind =
-        entry.kind === "file" ? before.isFile() : before.isDirectory();
-      if (expectedKind && (before.mode & wanted) !== wanted) {
+      // Its owner cannot open it, so nothing is known about its content.
+      if ((before.mode & wanted) !== wanted) {
         keep(before.mode & 0o777);
       }
       continue;
@@ -240,10 +241,10 @@ export function describeUnreadableContainerPaths(
 ): string {
   return [
     `Not readable by the containers that mount ${unreadable.length === 1 ? "it" : "them"}: ${unreadable.map((entry) => `${entry.path} (mode ${entry.mode.toString(8)})`).join(", ")}.`,
-    "hack global install resets the mode of a config that still has Hack's own content. It never changes the permissions of one whose content you customised, because it may hold something private.",
+    "hack global install resets the mode of a config whose content is exactly what this Hack writes. It never changes the permissions of one that differs (customised, or written with other settings or by another Hack version), because it may hold something private.",
     ...unreadable.map(
       (entry) =>
-        `If you want the container to read it: chmod ${containerReadableMode(entry.kind).toString(8)} ${entry.path}`
+        `If you want the container to read it: chmod ${containerReadableMode(entry.kind).toString(8)} ${entry.path} (or, for Hack's own content again, rerun hack global install and agree to overwrite it)`
     ),
   ].join("\n");
 }

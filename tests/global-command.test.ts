@@ -1743,7 +1743,7 @@ test(
           0o600,
         ]);
         expect(output).toContain(
-          "Kept the permissions of customised global configs."
+          "Kept the permissions of global configs whose content differs from what this Hack writes."
         );
         expect(output).toContain(`${datasource} (mode 600)`);
         expect(output).toContain(`chmod 644 ${datasource}`);

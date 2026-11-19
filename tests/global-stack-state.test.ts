@@ -276,7 +276,7 @@ test("a customised config keeps its mode: Hack never widens content it does not 
   const message = describeUnreadableContainerPaths(result.retained);
   expect(message).toContain(`${datasource} (mode 600)`);
   expect(message).toContain(
-    "never changes the permissions of one whose content you customised"
+    "It never changes the permissions of one that differs (customised, or written with other settings or by another Hack version)"
   );
   expect(message).toContain(`chmod 644 ${datasource}`);
 });
@@ -336,6 +336,27 @@ test("links, wrong kinds, missing paths and already readable files are left alon
   );
 });
 
+test("a FIFO at a listed path is skipped without being opened", async () => {
+  root = await mkdtemp(join(tmpdir(), "hack-gcc-"));
+  await tightTemplates(root);
+  await rm(join(root, "loki.yaml"));
+  const made = Bun.spawnSync(["mkfifo", "-m", "600", join(root, "loki.yaml")], {
+    timeout: 10_000,
+  });
+  if (made.exitCode !== 0) {
+    return;
+  }
+  // Opening it for reading would block for ever; the call must return.
+  const result = await Promise.race([
+    ensureContainerReadable(entries(root)),
+    new Promise<"blocked">((resolve) =>
+      setTimeout(() => resolve("blocked"), 3000)
+    ),
+  ]);
+  expect(result).not.toBe("blocked");
+  expect((await stat(join(root, "loki.yaml"))).mode & 0o777).toBe(0o600);
+});
+
 test("unreadable configs are named by mode alone, for the stopped-container message", async () => {
   root = await mkdtemp(join(tmpdir(), "hack-gcc-"));
   await tightTemplates(root);
@@ -351,6 +372,6 @@ test("unreadable configs are named by mode alone, for the stopped-container mess
     { path: join(root, "dashboards"), kind: "directory", mode: 0o700 },
   ]);
   expect(describeUnreadableContainerPaths(unreadable)).toContain(
-    "hack global install resets the mode of a config that still has Hack's own content."
+    "hack global install resets the mode of a config whose content is exactly what this Hack writes."
   );
 });

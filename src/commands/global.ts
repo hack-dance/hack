@@ -1250,7 +1250,7 @@ async function materializeGlobalInstallFiles(opts: {
   if (retained.length > 0) {
     logger.warn({
       message: [
-        "Kept the permissions of customised global configs.",
+        "Kept the permissions of global configs whose content differs from what this Hack writes.",
         describeUnreadableContainerPaths(retained),
       ].join("\n"),
     });
@@ -2037,14 +2037,18 @@ async function globalContainersNotRunning(opts: {
   // The usual cause on Linux: a config the container's user cannot read.
   // Named by mode alone; nothing is read or changed here.
   const paths = getGlobalPaths();
-  const unreadable = await unreadableContainerPaths([
-    { path: paths.coreDnsConfig, kind: "file" },
-    { path: paths.lokiConfig, kind: "file" },
-    { path: paths.grafanaDatasource, kind: "file" },
-    { path: paths.grafanaDashboardsProvisioning, kind: "file" },
-    { path: dirname(paths.grafanaDashboard), kind: "directory" },
-    { path: paths.grafanaDashboard, kind: "file" },
-  ]);
+  // Only the configs this stack's containers mount.
+  const unreadable = await unreadableContainerPaths(
+    opts.composeFile === paths.caddyCompose
+      ? [{ path: paths.coreDnsConfig, kind: "file" }]
+      : [
+          { path: paths.lokiConfig, kind: "file" },
+          { path: paths.grafanaDatasource, kind: "file" },
+          { path: paths.grafanaDashboardsProvisioning, kind: "file" },
+          { path: dirname(paths.grafanaDashboard), kind: "directory" },
+          { path: paths.grafanaDashboard, kind: "file" },
+        ]
+  );
   logger.error({
     message: [
       describeContainersNotRunning({ stack: opts.stack, containers: stopped }),

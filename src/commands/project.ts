@@ -3964,7 +3964,9 @@ async function resolveCoreDnsServer(): Promise<string | null> {
     GLOBAL_CADDY_DIR_NAME,
     GLOBAL_CADDY_COMPOSE_FILENAME
   );
-  if (!(await pathExists(composePath))) {
+  // No docker CLI means no answer, not a spawn failure: `up` reports the
+  // missing engine itself (HACK-2356), like resolveGlobalCaddyIp.
+  if (!((await pathExists(composePath)) && findExecutableInPath("docker"))) {
     return null;
   }
 
@@ -7562,6 +7564,37 @@ async function runUpCommand({
     });
   let signalCleanup = lifecycleSignalCleanup ?? installOperationSignalCleanup();
   try {
+    // After `up.before` hooks, which may start the engine, open the tunnel
+    // DOCKER_HOST needs or create a shared network, and before any pull: name
+    // a missing engine, socket permission, Compose plugin or shared network
+    // Compose will need (HACK-2356). The reads use Compose's engine selection
+    // from the project env, never its application values. A refusal here
+    // runs the same cleanup as other failures; it renders as the JSON
+    // envelope or one line.
+    const preflightDeps = composeEnginePreflightDeps(envOverrides.env);
+    const preflightRedactValues = composeEnvValuesToRedact({
+      env: envOverrides.env,
+    });
+    const preflightRefusal =
+      (await preflightComposeEngine({
+        deps: preflightDeps,
+        redactValues: preflightRedactValues,
+      })) ??
+      (await preflightSharedNetworks({
+        composeYaml: await readTextFile(project.composeFile),
+        selection: {
+          requested: requestedServices,
+          profiles: resolveEffectiveComposeProfiles({
+            cliProfiles: profiles,
+            composeEnv: envOverrides.env,
+          }),
+        },
+        deps: preflightDeps,
+        redactValues: preflightRedactValues,
+      }));
+    if (preflightRefusal !== null) {
+      throw preflightRefusal;
+    }
     // Hooks may register or remove runtime aliases; render overrides only after
     // successful preparation, while lifecycle cleanup remains installed.
     const internalOverride = await resolveInternalComposeOverride({
@@ -7609,37 +7642,6 @@ async function runUpCommand({
       ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
       ...envOverrides.composeFiles,
     ];
-    // After `up.before` hooks, which may start the engine, open the tunnel
-    // DOCKER_HOST needs or create a shared network, and before any pull: name
-    // a missing engine, socket permission, Compose plugin or shared network
-    // Compose will need (HACK-2356). The reads use Compose's engine selection
-    // from the project env, never its application values. A refusal here
-    // runs the same cleanup as other failures; it renders as the JSON
-    // envelope or one line.
-    const preflightDeps = composeEnginePreflightDeps(envOverrides.env);
-    const preflightRedactValues = composeEnvValuesToRedact({
-      env: envOverrides.env,
-    });
-    const preflightRefusal =
-      (await preflightComposeEngine({
-        deps: preflightDeps,
-        redactValues: preflightRedactValues,
-      })) ??
-      (await preflightSharedNetworks({
-        composeYaml: await readTextFile(project.composeFile),
-        selection: {
-          requested: requestedServices,
-          profiles: resolveEffectiveComposeProfiles({
-            cliProfiles: profiles,
-            composeEnv: envOverrides.env,
-          }),
-        },
-        deps: preflightDeps,
-        redactValues: preflightRedactValues,
-      }));
-    if (preflightRefusal !== null) {
-      throw preflightRefusal;
-    }
     reportComposeStartupBudget({ budgets, detach });
     const bootstrapCode = await bootstrapDependencyCaches({
       timeoutMs: detach ? startupTimeoutMs : undefined,

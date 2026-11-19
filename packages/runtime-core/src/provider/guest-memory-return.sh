@@ -1,24 +1,35 @@
-# Returns freed guest memory to the host sooner. Best-effort from start to finish: a missing
+# Returns freed guest memory to the host sooner. Started once per fresh boot in the agent's
+# background mode, after the engine answers. Best-effort from start to finish: a missing
 # knob, a refused write or a guest that never goes quiet is recorded and the script exits 0.
-# It must never fail a start.
+# It must never fail or delay a start, and it writes nothing under /storage.
 #
 # 1. Free page reporting hands free blocks back to the host only from a minimum block size
 #    up. The guest kernel's default is 2 MiB blocks, so free memory scattered in smaller
 #    pieces stays charged to the VM. Order 2 is 16 KiB, the host's page size.
 # 2. After the start-up work (image loads, installs, builds) the free memory is fragmented.
 #    One compaction, once the guest has gone quiet, merges it into blocks that can be
-#    reported. It waits for two quiet windows in a row and gives up after a bound.
+#    reported. It waits for two quiet windows in a row and gives up after 15 minutes.
 #
 # What it did is one line in the status file, for `cat` from the guest.
 set -u
+# Identity first, as every guest script: another pool's guest or a later boot is left alone.
+test "$(cat /storage/.hack-local-owner 2>/dev/null)" = "${1-}" || exit 0
+test "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" = "${2-}" || exit 0
+
 order_file=/sys/module/page_reporting/parameters/page_reporting_order
 compact_file=/proc/sys/vm/compact_memory
 stat_file=/proc/stat
 status_file=/run/hack-local/memory-return.status
+# At most one compaction per boot: /run/hack-local is a tmpfs made at boot.
+marker_file=/run/hack-local/memory-return.started
 window_seconds=15
-max_windows=240
+max_windows=60
 # Busy time allowed in one window, in clock ticks: 15% of one CPU at 100 ticks a second.
 quiet_ticks=$((window_seconds * 15))
+
+if ! (set -C; : > "$marker_file") 2>/dev/null; then
+  exit 0
+fi
 
 order=unavailable
 if test -w "$order_file"; then

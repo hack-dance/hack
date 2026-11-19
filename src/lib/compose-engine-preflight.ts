@@ -73,15 +73,17 @@ export async function preflightComposeEngine(opts: {
   const redactValues = [...(opts.redactValues ?? [])];
   const { deps } = opts;
   if (!deps.dockerOnPath()) {
-    return new HackCliError({
-      code: "E_DOCKER_UNAVAILABLE",
-      message: NO_DOCKER_MESSAGE,
-    });
+    return noDockerError();
   }
-  const version = await deps.run(
-    ["docker", "version", "--format", "{{.Server.Version}}"],
-    ENGINE_PREFLIGHT_TIMEOUT_MS
-  );
+  const version = await runDocker(deps, [
+    "docker",
+    "version",
+    "--format",
+    "{{.Server.Version}}",
+  ]);
+  if (version === null) {
+    return noDockerError();
+  }
   if (version.exitCode !== 0) {
     return dockerEngineFailureError({
       result: version,
@@ -89,10 +91,15 @@ export async function preflightComposeEngine(opts: {
       redactValues,
     });
   }
-  const compose = await deps.run(
-    ["docker", "compose", "version", "--short"],
-    ENGINE_PREFLIGHT_TIMEOUT_MS
-  );
+  const compose = await runDocker(deps, [
+    "docker",
+    "compose",
+    "version",
+    "--short",
+  ]);
+  if (compose === null) {
+    return noDockerError();
+  }
   if (compose.exitCode !== 0) {
     return (
       dockerEngineFailureError({
@@ -129,10 +136,17 @@ export async function preflightSharedNetworks(opts: {
     opts.composeYaml,
     opts.selection
   )) {
-    const inspect = await deps.run(
-      ["docker", "network", "inspect", "--format", "{{.Name}}", network],
-      ENGINE_PREFLIGHT_TIMEOUT_MS
-    );
+    const inspect = await runDocker(deps, [
+      "docker",
+      "network",
+      "inspect",
+      "--format",
+      "{{.Name}}",
+      network,
+    ]);
+    if (inspect === null) {
+      return noDockerError();
+    }
     if (inspect.exitCode === 0) {
       continue;
     }
@@ -309,4 +323,38 @@ function listOrMapKeys(value: unknown): readonly string[] {
     return value.filter((entry): entry is string => typeof entry === "string");
   }
   return isRecord(value) ? Object.keys(value) : [];
+}
+
+/**
+ * Run one bounded Docker read. Null when PATH named a `docker` that cannot be
+ * started (removed since the lookup, a dangling link, no execute bit): the
+ * same answer as none. Any other failure still throws.
+ */
+async function runDocker(
+  deps: Pick<ComposeEnginePreflightDeps, "run">,
+  argv: readonly string[]
+): Promise<ComposePsProcessResult | null> {
+  try {
+    return await deps.run(argv, ENGINE_PREFLIGHT_TIMEOUT_MS);
+  } catch (error: unknown) {
+    if (isSpawnNotFound(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function noDockerError(): HackCliError {
+  return new HackCliError({
+    code: "E_DOCKER_UNAVAILABLE",
+    message: NO_DOCKER_MESSAGE,
+  });
+}
+
+function isSpawnNotFound(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error.code === "ENOENT" || error.code === "EACCES")
+  );
 }

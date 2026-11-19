@@ -26,9 +26,12 @@ prints the address with a command that needs no DNS, for example:
 curl --resolve 'hello.hack:443:127.0.0.1' 'https://hello.hack/'
 ```
 
-The command sends the request to the address the proxy publishes on: loopback
-by default, or the address set with `proxy.bind_address`. It is offered only
-for the proxy's own ports (80 and 443).
+The command sends the request to the address the proxy publishes on, read from
+Hack's proxy Compose file (`~/.hack/caddy/docker-compose.yml`): loopback by
+default, or the address `proxy.bind_address` had when `hack global install`
+last rendered that file. When the file cannot be read, the hint shows
+`<address>` instead of guessing. It is offered only for the proxy's own ports
+(80 and 443).
 
 For `https`, run `hack global trust` once and load the host trust env file it
 prints (`~/.hack/caddy/pki/caddy-host-trust-env.sh`). That part needs no sudo;

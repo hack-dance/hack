@@ -1,22 +1,27 @@
 import { stat } from "node:fs/promises";
 import { createConnection, isIP } from "node:net";
+import { resolve as resolvePath } from "node:path";
 import { connect } from "node:tls";
 import {
   DEFAULT_NEW_PROJECT_TLD,
   DEFAULT_OAUTH_ALIAS_ROOT,
   DEFAULT_PROJECT_TLD,
+  GLOBAL_CADDY_COMPOSE_FILENAME,
+  GLOBAL_CADDY_DIR_NAME,
   LEGACY_SCHEMAS_HOST,
 } from "../constants.ts";
 import {
   type CaddyCaIdentity,
   inspectCaddyCaIdentity,
 } from "./caddy-ca-identity.ts";
+import { resolveGlobalHackDir } from "./config-paths.ts";
+import { readTextFile } from "./fs.ts";
 import { resolveHackLocalCaCertPath } from "./local-ca.ts";
 import {
-  findProxyPortConflicts,
-  type HostListener,
-  resolveProxyBindAddress,
-} from "./proxy-bind.ts";
+  type ProxyBindScope,
+  readProxyBindScope,
+} from "./managed-proxy-compose.ts";
+import { findProxyPortConflicts, type HostListener } from "./proxy-bind.ts";
 import { listHostTcpListeners } from "./proxy-port-listeners.ts";
 import { exec } from "./shell.ts";
 
@@ -398,18 +403,24 @@ function shellQuote(value: string): string {
 }
 
 /**
- * The address curl should send the request to: the proxy's configured bind
- * address, or loopback when it publishes on every interface.
+ * The address curl should send the request to, from the proxy Compose file
+ * Docker was given (not the setting, which may not be applied yet): loopback
+ * of the published family, or the one published address. Null when the file
+ * is missing or its publication cannot be read, so no address is invented.
  */
-function proxyConnectAddress(bindAddress: string | null): string {
-  if (
-    bindAddress === null ||
-    bindAddress === "0.0.0.0" ||
-    bindAddress === "::"
-  ) {
+export function proxyConnectAddress(
+  scope: ProxyBindScope | null
+): string | null {
+  if (scope === null || scope.kind === "unknown") {
+    return null;
+  }
+  if (scope.kind === "all" || scope.address === "0.0.0.0") {
     return "127.0.0.1";
   }
-  return bindAddress.includes(":") ? `[${bindAddress}]` : bindAddress;
+  if (scope.address === "::") {
+    return "[::1]";
+  }
+  return scope.address.includes(":") ? `[${scope.address}]` : scope.address;
 }
 
 /**
@@ -422,28 +433,34 @@ function proxyConnectAddress(bindAddress: string | null): string {
  */
 export function linuxDnsFix(opts: {
   readonly url: URL;
-  readonly bindAddress: string | null;
+  readonly proxyBind: ProxyBindScope | null;
 }): string {
   const { url } = opts;
   const proxyPort = PROXY_DEFAULT_PORT[url.protocol];
   if (proxyPort === undefined || (url.port !== "" && url.port !== proxyPort)) {
     return LINUX_DNS_REASON;
   }
-  const resolveTo = `${url.hostname}:${proxyPort}:${proxyConnectAddress(opts.bindAddress)}`;
+  const address = proxyConnectAddress(opts.proxyBind);
+  if (address === null) {
+    return `${LINUX_DNS_REASON} Without it, send the request to the address Hack's proxy publishes port ${proxyPort} on, for example with curl --resolve ${shellQuote(`${url.hostname}:${proxyPort}:<address>`)} ${shellQuote(url.href)}.`;
+  }
   const trust =
     url.protocol === "https:"
       ? " (for https, run hack global trust once and load the host trust env file it prints; that part needs no sudo)"
       : "";
-  return `${LINUX_DNS_REASON} Without it, reach the app through Hack's proxy on this machine with: curl --resolve ${shellQuote(resolveTo)} ${shellQuote(url.href)}${trust}`;
+  return `${LINUX_DNS_REASON} Without it, reach the app through Hack's proxy on this machine with: curl --resolve ${shellQuote(`${url.hostname}:${proxyPort}:${address}`)} ${shellQuote(url.href)}${trust}`;
 }
 
-/** The configured proxy bind address, or null when unset or unreadable. */
-async function configuredBindAddress(): Promise<string | null> {
-  try {
-    return await resolveProxyBindAddress();
-  } catch {
-    return null;
-  }
+/** How the rendered proxy Compose file publishes ports, or null when absent. */
+async function renderedProxyBind(): Promise<ProxyBindScope | null> {
+  const text = await readTextFile(
+    resolvePath(
+      resolveGlobalHackDir(),
+      GLOBAL_CADDY_DIR_NAME,
+      GLOBAL_CADDY_COMPOSE_FILENAME
+    )
+  );
+  return text === null ? null : readProxyBindScope(text);
 }
 
 /**
@@ -457,8 +474,8 @@ export async function openUnresolvedHostWarning(opts: {
   readonly resolve?: (hostname: string) => Promise<HostResolution>;
   readonly platform?: NodeJS.Platform;
   readonly resolverFile?: (domain: string) => Promise<ResolverFileState>;
-  /** The proxy's configured bind address; defaults to the global setting. */
-  readonly bindAddress?: () => Promise<string | null>;
+  /** How the proxy publishes its ports; defaults to the rendered Compose file. */
+  readonly proxyBind?: () => Promise<ProxyBindScope | null>;
 }): Promise<OpenDnsNotice | null> {
   const url = new URL(opts.url);
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
@@ -484,7 +501,7 @@ export async function openUnresolvedHostWarning(opts: {
         platform === "linux"
           ? linuxDnsFix({
               url,
-              bindAddress: await (opts.bindAddress ?? configuredBindAddress)(),
+              proxyBind: await (opts.proxyBind ?? renderedProxyBind)(),
             })
           : DNS_FIX
       }`,

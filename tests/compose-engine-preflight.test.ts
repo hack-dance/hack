@@ -72,6 +72,31 @@ describe("preflightComposeEngine", () => {
     expect(calls).toEqual([]);
   });
 
+  test("a docker on PATH that cannot be started is the same refusal as none", async () => {
+    for (const code of ["ENOENT", "EACCES"]) {
+      const error = await preflightComposeEngine({
+        deps: {
+          dockerOnPath: () => true,
+          run: () =>
+            Promise.reject(
+              Object.assign(new Error(`spawn docker ${code}`), { code })
+            ),
+        },
+      });
+      expect(error?.code).toBe("E_DOCKER_UNAVAILABLE");
+      expect(error?.message).toContain("no `docker` command");
+    }
+    // Any other failure is not diagnosed as a missing CLI.
+    await expect(
+      preflightComposeEngine({
+        deps: {
+          dockerOnPath: () => true,
+          run: () => Promise.reject(new Error("unexpected")),
+        },
+      })
+    ).rejects.toThrow("unexpected");
+  });
+
   test("a denied socket is E_PERMISSION before Compose runs", async () => {
     const { deps, calls } = fakeDocker({
       "docker version": {

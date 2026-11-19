@@ -78,10 +78,23 @@ export async function preflightComposeEngine(opts: {
       message: NO_DOCKER_MESSAGE,
     });
   }
-  const version = await deps.run(
-    ["docker", "version", "--format", "{{.Server.Version}}"],
-    ENGINE_PREFLIGHT_TIMEOUT_MS
-  );
+  let version: ComposePsProcessResult;
+  try {
+    version = await deps.run(
+      ["docker", "version", "--format", "{{.Server.Version}}"],
+      ENGINE_PREFLIGHT_TIMEOUT_MS
+    );
+  } catch (error: unknown) {
+    // PATH named a `docker` that cannot be started (removed since the
+    // lookup, a dangling link, no execute bit): the same answer as none.
+    if (isSpawnNotFound(error)) {
+      return new HackCliError({
+        code: "E_DOCKER_UNAVAILABLE",
+        message: NO_DOCKER_MESSAGE,
+      });
+    }
+    throw error;
+  }
   if (version.exitCode !== 0) {
     return dockerEngineFailureError({
       result: version,
@@ -309,4 +322,12 @@ function listOrMapKeys(value: unknown): readonly string[] {
     return value.filter((entry): entry is string => typeof entry === "string");
   }
   return isRecord(value) ? Object.keys(value) : [];
+}
+
+function isSpawnNotFound(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error.code === "ENOENT" || error.code === "EACCES")
+  );
 }

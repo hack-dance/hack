@@ -96,17 +96,20 @@ export function applyLocalDirectoriesPlan(opts: {
   }
 }
 
-/** The plan without mounts at `targets`; a service left with none drops out. */
+/** The plan without each service's `targets`; a service left with none drops out. */
 function withoutTargets(
   plan: LocalDirectoriesPlan,
-  targets: ReadonlySet<string> | undefined
+  targetsByService: ReadonlyMap<string, ReadonlySet<string>> | undefined
 ): LocalDirectoriesPlan {
-  if (!targets || targets.size === 0) {
+  if (!targetsByService || targetsByService.size === 0) {
     return plan;
   }
   const services: Record<string, LocalDirectoriesPlan["services"][string]> = {};
   for (const [name, mounts] of Object.entries(plan.services)) {
-    const kept = mounts.filter((mount) => !targets.has(mount.target));
+    const targets = targetsByService.get(name);
+    const kept = targets
+      ? mounts.filter((mount) => !targets.has(mount.target))
+      : mounts;
     if (kept.length > 0) {
       services[name] = kept;
     }
@@ -122,8 +125,8 @@ function withoutTargets(
 export async function applyNativeLocalDirectories(opts: {
   readonly compose: Record<string, unknown>;
   readonly selection: NativeLocalDirectories | undefined;
-  /** Container paths another native mechanism owns (a workspace cache). */
-  readonly leaveTargets?: ReadonlySet<string>;
+  /** Container paths another native mechanism owns (a workspace cache), by service. */
+  readonly leaveTargets?: ReadonlyMap<string, ReadonlySet<string>>;
 }): Promise<string[]> {
   const selection = opts.selection;
   if (selection?.error) {

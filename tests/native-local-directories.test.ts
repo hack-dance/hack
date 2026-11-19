@@ -208,7 +208,7 @@ test("a workspace cache in the adaptation keeps its workspace paths, and native 
   });
   await writeFile(
     fixture.composeFile,
-    "services:\n  web:\n    image: node:22\n    volumes:\n      - ..:/app\n      - deps:/app/node_modules\nvolumes:\n  deps: {}\n"
+    "services:\n  web:\n    image: node:22\n    volumes:\n      - ..:/app\n      - deps:/app/node_modules\n  worker:\n    image: node:22\n    volumes:\n      - ..:/app\nvolumes:\n  deps: {}\n"
   );
   const adaptationFile = join(fixture.projectDir, "native-adaptation.json");
   await writeFile(
@@ -232,9 +232,16 @@ test("a workspace cache in the adaptation keeps its workspace paths, and native 
     path: adaptationFile,
   });
   const model = JSON.parse(adapted.normalizedComposeJson) as {
-    services: { web: { volumes: unknown[] } };
+    services: { web: { volumes: unknown[] }; worker: { volumes: unknown[] } };
     volumes: Record<string, unknown>;
   };
+  // worker does not use the cache, so both its paths get local volumes.
+  const workspace = localDirectoryVolumeName("apps/web/node_modules");
+  expect(model.services.worker.volumes).toEqual([
+    "..:/app",
+    { type: "volume", source: NODE_MODULES, target: "/app/node_modules" },
+    { type: "volume", source: workspace, target: "/app/apps/web/node_modules" },
+  ]);
   // deps is kept at the root, the workspace path belongs to the cache, and
   // localDirectories adds nothing of its own here.
   expect(model.services.web.volumes).toEqual([
@@ -248,7 +255,11 @@ test("a workspace cache in the adaptation keeps its workspace paths, and native 
       volume: { subpath: ".hack-workspace-node-modules/apps/web" },
     },
   ]);
-  expect(model.volumes).toEqual({ deps: {} });
+  expect(model.volumes).toEqual({
+    deps: {},
+    [NODE_MODULES]: {},
+    [workspace]: {},
+  });
 });
 
 test("under --json, native localDirectories notices go to stderr, never stdout", async () => {

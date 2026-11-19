@@ -223,10 +223,7 @@ export async function prepareNativeProjectAdaptation(opts: {
 }): Promise<NativeProjectInput> {
   const selection =
     opts.path === undefined ? undefined : await readNativeSelection(opts.path);
-  const input = await withNativeLocalDirectories(
-    opts.input,
-    workspaceCacheTargets(selection)
-  );
+  const input = await withNativeLocalDirectories(opts.input, selection);
   if (selection === undefined) {
     return input;
   }
@@ -234,32 +231,65 @@ export async function prepareNativeProjectAdaptation(opts: {
 }
 
 /**
- * The workspace `node_modules` paths an adaptation's `workspaceCache` mounts.
- * That cache already keeps them on the VM disk, and it refuses a mount it
- * finds there, so `localDirectories` leaves these paths to it.
+ * The workspace `node_modules` paths an adaptation's `workspaceCache` mounts,
+ * by service: only services that mount the cache volume at
+ * `${root}/node_modules` get them (see `applyNativeWorkspaceCache`). The
+ * cache keeps those paths on the VM disk and refuses a mount it finds there,
+ * so `localDirectories` leaves them to it in exactly those services.
  */
-function workspaceCacheTargets(selection: unknown): ReadonlySet<string> {
+function workspaceCacheTargets(
+  selection: unknown,
+  compose: Record<string, unknown>
+): ReadonlyMap<string, ReadonlySet<string>> {
   const cache = isRecord(selection) ? selection.workspaceCache : undefined;
   if (
     !(
       isRecord(cache) &&
+      typeof cache.volume === "string" &&
       typeof cache.root === "string" &&
-      Array.isArray(cache.workspaces)
+      Array.isArray(cache.workspaces) &&
+      isRecord(compose.services)
     )
   ) {
-    return new Set();
+    return new Map();
   }
   const root = cache.root;
-  return new Set(
+  const parent = `${root}/node_modules`;
+  const targets = new Set(
     cache.workspaces
       .filter((path): path is string => typeof path === "string")
       .map((path) => `${root}/${path}/node_modules`)
   );
+  const byService = new Map<string, ReadonlySet<string>>();
+  for (const [name, spec] of Object.entries(compose.services)) {
+    const volumes =
+      isRecord(spec) && Array.isArray(spec.volumes) ? spec.volumes : [];
+    if (
+      volumes.some((value) =>
+        mountsCacheAt(value, cache.volume as string, parent)
+      )
+    ) {
+      byService.set(name, targets);
+    }
+  }
+  return byService;
+}
+
+function mountsCacheAt(
+  value: unknown,
+  volume: string,
+  target: string
+): boolean {
+  if (typeof value === "string") {
+    const [source, mountTarget] = value.split(":");
+    return source === volume && mountTarget === target;
+  }
+  return isRecord(value) && value.source === volume && value.target === target;
 }
 
 async function withNativeLocalDirectories(
   input: NativeProjectInput,
-  cacheTargets: ReadonlySet<string>
+  selection: unknown
 ): Promise<NativeProjectInput> {
   if (input.localDirectories === undefined) {
     return input;
@@ -272,7 +302,7 @@ async function withNativeLocalDirectories(
   await applyNativeLocalDirectories({
     compose,
     selection: input.localDirectories,
-    leaveTargets: cacheTargets,
+    leaveTargets: workspaceCacheTargets(selection, compose),
   });
   return { ...input, normalizedComposeJson: JSON.stringify(compose) };
 }

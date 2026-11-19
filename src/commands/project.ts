@@ -1,4 +1,5 @@
 import type { Writable } from "node:stream";
+import { resolveNativeStartTimeoutSeconds } from "../backends/native-graph-start-budget.ts";
 import { assertAutostartHostCommandsAllowed } from "../lib/autostart-refusal.ts";
 import { resolveAutostartTrustedTlsBinds } from "../lib/autostart-trust-mounts.ts";
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
@@ -6746,6 +6747,10 @@ async function handleNativeUp({
         ...services,
       });
     },
+    startTimeoutSeconds: resolveNativeStartTimeoutSeconds({
+      env: process.env,
+      project: cfg.native?.startTimeoutSeconds,
+    }),
     onProgress: (event) => {
       if (event.phase === "runtime") {
         // VM work starts: later failures keep the runtime's own reports.

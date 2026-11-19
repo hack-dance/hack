@@ -5311,6 +5311,34 @@
         "title": "Cloud and remote environments"
       },
       {
+        "slug": "guides/cloud-linux-docker",
+        "title": "Any Linux machine with Docker"
+      },
+      {
+        "slug": "guides/cloud-dev-containers",
+        "title": "Codespaces and dev containers"
+      },
+      {
+        "slug": "guides/cloud-claude-code",
+        "title": "Claude Code on the web"
+      },
+      {
+        "slug": "guides/cloud-cursor",
+        "title": "Cursor cloud agents"
+      },
+      {
+        "slug": "guides/cloud-boat",
+        "title": "boat.dev"
+      },
+      {
+        "slug": "guides/cloud-daytona",
+        "title": "Daytona"
+      },
+      {
+        "slug": "guides/cloud-codex",
+        "title": "OpenAI Codex cloud"
+      },
+      {
         "slug": "guides/desktop-app",
         "title": "Desktop app (preview)",
         "sourceRevision": "0dd44ca6b59024b5546ca7e755a4210dedb9a106",

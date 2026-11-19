@@ -1996,7 +1996,9 @@ test.skipIf(REAL_CURL === null)(
         "10",
         "--output",
         join(root, "out"),
-        `https://github.com/hack-dance/hack/releases/download/v${VERSION}/hack-next-manager-linux-x86_64`,
+        // A reserved name that never resolves: a curl built without proxy
+        // support would ignore the proxy, and even then connects nowhere.
+        `https://github.invalid/hack-dance/hack/releases/download/v${VERSION}/hack-next-manager-linux-x86_64`,
       ],
       {
         env: { PATH: "/usr/bin:/bin", HOME: root, ...NO_NETWORK },
@@ -2005,8 +2007,10 @@ test.skipIf(REAL_CURL === null)(
         stderr: "pipe",
       }
     );
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr.toString()).toContain("127.0.0.1");
+    // 7: the discard port refused the connection. 28: something listens on
+    // it and never answers. Either way the request went to this machine.
+    expect([7, 28]).toContain(result.exitCode);
+    expect(result.stderr.toString()).toMatch(/127\.0\.0\.1|timed out/i);
     expect(existsSync(join(root, "out"))).toBe(false);
   },
   30_000

@@ -68,7 +68,8 @@ The content stays in the CLI, so the skill fetches guidance matching the install
 CLI.
 
 A client that cannot use the plugin can export the same skill into a chosen scope as
-an explicit opt-in (`hack setup claude` or `hack setup codex`). Onboarding itself
+an explicit opt-in with `hack setup codex` (Codex only; `hack setup claude` is
+retired and refuses). Onboarding itself
 never installs it.
 
 ## MCP request lifetime

@@ -7,22 +7,30 @@ terminal).
 
 ## Core commands
 
+- `hack autostart add|remove|list|pause|resume` — choose [always-on projects](always-on-projects.md) for this machine; `hack up -d --always` marks and starts one. `down` pauses its next login start; `up` resumes it.
 - `hack init` — generate `.hack/` (compose + config); `--with claude|codex` also hands off to
   agent-assisted onboarding
 - `hack up` / `hack down` / `hack restart` — start, stop and restart the project
 - `hack up --branch <name>` — a parallel branch instance with its own hostnames
 - `hack dev` — the repository's [side-by-side development build](dev.md)
 - `hack open` — open/print the project URL
-- `hack logs` — tail logs (compose by default; Loki via `--loki`/`--query`)
+- `hack logs` — tail logs (compose by default; Loki via `--loki`/`--query`; `--json` is the [logs JSON stream](reference/logs-json.md))
 - `hack ps` / `hack status` — project status
 - `hack projects` — registry + running instances; `hack projects prune --project <name>` safely scopes stale registry/container cleanup to one project family (omit `--project` only for an intentional machine-wide prune)
+- `hack projects --json --observe` — read-only listing: no registration, `lastSeenAt` update, registry creation or write, daemon contact or engine contact. Works with `--summary`, `--project` and `--all`; rejects `--meta`. Add `--runtime` to query Docker explicitly; socket contact can start an on-demand engine. Ordinary listing retains discovery writes for compatibility.
 - `hack env` — env values and local secrets
 - `hack host exec` / `hack host shell` — host commands/shells with Hack-resolved env injected
 - `hack run <service> [cmd...]` — one-off command in a fresh service container
 - `hack exec <service> -- <cmd...>` — command in an already-running service container
 - `hack session` — persistent project workspaces (tmux-first)
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
-- `hack daemon` — optional local daemon for faster JSON project status; `hack daemon install` starts it at login (launchd on macOS, a systemd user unit on Linux). On Linux without linger it still stops at your last logout and does not start at boot; `loginctl enable-linger` changes that
+- `hack upgrade check` — read-only upgrade check of this machine and every registered project: a one-screen summary, the projects with findings (worktrees folded; `--verbose` for every checkout), and a plan with one step per kind of change, then the next command; `hack upgrade apply [--only <fix>] [--project <name>] [--dry-run]` runs the plan's apply steps (`.hack/.gitignore` refresh, stale agent files) for every checkout after keeping a snapshot and a journal; `hack upgrade snapshot` and `hack upgrade rollback --rollback-manifest <manifest>` keep and restore the files the upgrade changes
+- `hack daemon` — optional local daemon for faster JSON project status; `hack daemon install` starts it at login (launchd on macOS, a systemd user unit on Linux). On Linux without linger it still stops at your last logout and does not start at boot; `loginctl enable-linger` changes that. After an upgrade, `hack daemon start` (and `hack update`) restarts hackd on the new version when its login service runs the same executable, and rewrites a stale unit or plist that Hack wrote (managed header); `start`, `stop`, `restart` and `install` accept `--json`
+
+Candidate `hack-next doctor` and `hack-v5 doctor` report a missing hackd as optional
+for Compose workflows. They do not recommend starting the stable daemon or
+installing its login service. Candidate `doctor --fix` keeps daemon repair disabled;
+stale or incompatible daemon state is still reported without a repair command.
 - `hack agent onboard` — print an onboarding prompt for an existing project
 - Optional agent interfaces — the [`hack` plugin, its skills and the separate MCP server](integrations.md)
 
@@ -30,6 +38,42 @@ Interactive diagnostics use compact status rows: healthy groups stay on one line
 and errors expand with wrapped detail and recovery guidance. `hack doctor --json` remains the stable,
 fully detailed automation surface. Generic macOS resolver setup is shown only when those resolver
 checks need attention.
+
+With the Compose proxy running, the `proxy ports` check tests its published IPv4 and
+IPv6 loopback bindings independently. An IPv4-only, IPv6-only or LAN bind does not
+imply a listener on the other loopback family. The running container's actual bound
+ports take precedence over requested publication intent, so IPv6-disabled hosts and
+IPv4-only forwarders do not gain an implied IPv6 listener. Requested bindings are
+used only when the runtime projection is absent. HTTPS must verify against the running
+proxy's internal CA using its
+schemas hostname; an unrelated TCP listener cannot pass. A warning names the failed
+port and any listener process visible without privilege. Check competing listeners,
+a VPN's serve feature, the container runtime's HTTPS setting, and local DNS overrides.
+This warning has no automatic repair. Hostnames resolving directly to the container
+address use a different path and can still work. For legacy Compose origins, `hack open` checks the selected URL's
+loopback path before opening it or printing JSON, and refuses when every checked
+loopback path fails and no non-loopback DNS alternative exists. A healthy family or a
+direct-container DNS alternative preserves browser fallback; doctor still warns about
+individual failed bindings. An unavailable runtime CA remains a doctor warning rather than
+proof that a listener is foreign.
+
+`hack open` also says when DNS for the selected host looks wrong. The URL is still printed
+or opened, because it is the right URL; text output adds one warning, and `--json` keeps
+`url` and adds `dns` and a `hint`:
+
+- `"dns": "unresolved"`: the system resolver definitely has no address for the host.
+- `"dns": "unconfigured"` (macOS): the lookup did not answer in time and the host is under
+  a suffix Hack installs DNS for, but this Mac has no resolver file for that suffix, so
+  the URL may not open.
+
+Either is the usual sign of a machine set up by an earlier version that only resolves the
+older suffix: run `hack global install`, or give the project a host under a suffix that
+already resolves with `hack config set dev_host <name>.<suffix>`. A lookup that fails or
+times out is never reported as unresolved. The macOS `unconfigured` hint applies only
+to Hack-managed suffixes; an unknown result for another host is left alone.
+
+Saved native origins retain their own routing behavior: opening them does not invoke
+the Compose proxy's system resolver, Docker inspections or CA-pinned TLS probe.
 
 On macOS, a healthy terminal connection does not establish browser connectivity.
 Use `hack doctor --browser-url https://your-service.hack.local --browser-result fails`
@@ -83,7 +127,30 @@ does not refresh the global project registry. A held registration lock therefore
 does not block their resolution or require a retry just to update last-seen metadata.
 Use a checkout/path directly, or an existing registry entry with `--project`;
 `hack init`, project lifecycle registration and `hack projects` discovery maintain
-registrations. Optional `hack projects` discovery coalesces unchanged observations
+registrations. `--json --observe` skips registration and engine queries entirely.
+Compose state is unknown by default. `--runtime` explicitly opts in to Docker
+ps/inspect reads, which can start a socket-activated engine (for example a
+systemd Docker socket or an on-demand macOS engine). Both modes bypass hackd,
+including when a daemon is available. `--all` discovers runtime-only projects
+only with `--runtime`.
+Observe returns a success envelope with `data.schema: "hack.projects.observe.v1"`.
+The `data` payload contains the normal listing fields plus `observe: true` and
+`runtime_requested: false|true`. Without runtime queries, `runtime_error` and
+`runtime_checked_at` are null rather than claiming Docker failed. Each full or
+summary row adds `backend`, `state`, `state_reason`, `started_at` and `services`.
+Each service has `name`, `state`, `ready`, `completed`, `health`, `exit_code` and
+`started_at`. Missing evidence is null or unknown: Docker activity is not a
+readiness/completion guarantee, and an exited container without an observed
+exit code is unknown. Mixed running and non-running replicas make their service
+and project degraded. Registered native rows remain visible with
+`backend: native`, `state: unknown`, and `state_reason: native-observer-required`;
+use the native `ps` observer for their current state. R2 will complete the shared
+backend-aware projection. Always-on fields will be supplied when their owner
+exists; absence of `autostart` is not an off-state claim.
+
+![Observe-only listing](reference/projects-observe.svg) ([source](reference/projects-observe.mmd))
+
+Ordinary listing coalesces unchanged observations
 for one minute and defers refresh when the registry lock is busy. Stale optional
 upserts check before Git and configuration discovery, then again before staging
 an owner, so an observed busy lock avoids work that would be discarded. These
@@ -141,7 +208,8 @@ Historical remote guides are excluded from the supported documentation.
   envelope with stable `E_*` error codes. `--json` on `hack up` implies `--detach`.
 - A `--path` (or working directory) without a `.hack/` project reports `E_PROJECT_NOT_FOUND`
   from `up`, `down`, `restart`, `ps`, `logs`, `run`, `exec`, `open`, `tui`, `branch ...`,
-  `config get`/`set`, `env ...`, `host exec`/`shell` and `project owner`/`target`/`task`, for
+  `config get`/`set`, `env ...`, `host exec`/`shell`, `usage --by-service` and
+  `project owner`/`target`/`task`, for
   example `hack ps -p <dir> --json` and `hack branch list -p <dir>`. Under `--json` it is one
   error envelope; without `--json` it is one closed error message, `E_PROJECT_NOT_FOUND: <message>`,
   and no stack trace. The logger decides how it looks: the console logger (`HACK_LOGGER=console`)
@@ -175,6 +243,9 @@ Historical remote guides are excluded from the supported documentation.
   such a flag decline or refuse; they never proceed on their own.
   Set `HACK_NO_INTERACTIVE=1` explicitly in scripts anyway so the intent is visible.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
+- `HACK_ORIGIN` (`cli`, `app`, `autostart` or `agent`) names who started an `up`, `down` or
+  `restart` in the [activity log](./reference/activity-log.md) that `hack activity` reads; unset or
+  any other value records `cli`.
 
 Automatic agent instruction management is retired in v5. `hack setup sync`, the standalone
 `hack setup cursor|claude|agents` exports and `hack agent prime` refuse with a retirement notice,
@@ -253,6 +324,9 @@ are listed in the [command reference](reference/cli.md).
 
 - One-off command in a fresh service container (deps started as needed): `hack run <service> <cmd...>`.
 - Command inside an already-running service container: `hack exec <service> -- <cmd...>`.
+- Long command you want to start now and read later (or from another process): add `--detach` to
+  `hack exec` or `hack run`, then `hack commands read <id> --follow`. See
+  [Background commands](guides/background-commands.md).
 - Host script that needs hack-stored env: `hack host exec --env <overlay> --scope <service> -- <cmd...>`
   — this is the way to run repo scripts; never read `.env` files directly.
 - Interactive host shell with injected env: `hack host shell --env <overlay> --scope <service>`.
@@ -339,7 +413,39 @@ Detached Compose startup runs in two phases, each with its own budget:
 | Phase | Compose invocation | Default | Variable | Range (ms) |
 | --- | --- | --- | --- | --- |
 | Image build/pull and container creation | `up --no-start` | 30 minutes | `HACK_COMPOSE_IMAGE_TIMEOUT_MS` | 1,000–14,400,000 |
-| Start and dependency wait | `up -d --no-build` | 90 seconds | `HACK_COMPOSE_STARTUP_TIMEOUT_MS` | 1,000–3,600,000 |
+| Start and dependency wait | `up -d --no-build` | 90 seconds without progress | `HACK_COMPOSE_STARTUP_TIMEOUT_MS` | 1,000–3,600,000 |
+| Start, while one-shot dependencies run | `up -d --no-build` | 30 minutes in all | `HACK_COMPOSE_STARTUP_CEILING_MS` | 1,000–14,400,000 |
+
+A one-shot dependency is a service that another service waits on with
+`depends_on: <name>: condition: service_completed_successfully`, such as a
+migration or seed job. While one is running, the start is making progress:
+Compose is waiting for it to exit before it starts the services that depend on
+it. The start budget then counts only time in which no one-shot is running, so a
+first start that runs minutes of migrations on an empty database still succeeds.
+The ceiling bounds the whole start phase however long one-shots keep running, and
+is never lower than the start budget. A one-shot in a restart loop is not
+progress. A graph with no one-shot keeps the plain 90-second budget. Only services
+active under the command's profiles count (`--profile`, else `COMPOSE_PROFILES` from
+the delivered environment): a dependency of a service whose profile is off is not a
+one-shot.
+
+The project can set both in `.hack/hack.config.json`; a host variable set on the
+invocation wins over the project setting:
+
+```json
+{ "compose": { "startupTimeoutMs": 180000, "startupCeilingMs": 3600000 } }
+```
+
+If the start is cut short at the ceiling while a one-shot is still running,
+`E_STARTUP_TIMEOUT` names that service and says the start is still in progress
+(`error.detail.inProgress` lists it; `budgetEnv` is then
+`HACK_COMPOSE_STARTUP_CEILING_MS`). The one-shot keeps running, but its dependents
+stay `Created` and nothing starts them when it finishes; `hack ps` shows them as
+`created (waiting for <service>)` (`waiting` in `ps --json`). Once `hack ps` shows
+the one-shot exited, run `hack up -d` again to start them. `hack restart` or
+`hack down` would stop the one-shot mid-run: in a terminal they ask first; with
+`--json` or `--no-interactive` they go on and report the service in
+`data.interrupted` and `data.warnings`.
 
 A first-time build or a large image pull therefore does not consume the start
 budget. Raise the budget for the phase that was hit, on the host CLI invocation
@@ -350,6 +456,8 @@ rather than in a container's environment:
 HACK_COMPOSE_IMAGE_TIMEOUT_MS=3600000 hack up --detach
 # Slow container start or a dependency that is slow to become healthy
 HACK_COMPOSE_STARTUP_TIMEOUT_MS=300000 hack up --detach
+# One-shot dependencies (migrations) that may run longer than 30 minutes
+HACK_COMPOSE_STARTUP_CEILING_MS=3600000 hack up --detach
 HACK_COMPOSE_STARTUP_TIMEOUT_MS=300000 hack restart
 ```
 

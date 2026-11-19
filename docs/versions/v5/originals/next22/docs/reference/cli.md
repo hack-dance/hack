@@ -4,9 +4,183 @@
 
 hack — Local development without the port-collision tax
 
-Run `hack help <command>` for the same content in the terminal. Global options: `--no-interactive` (or `HACK_NO_INTERACTIVE=1`); commands with `--json` emit a `{ok, data, error}` envelope on stdout.
+Run `hack help <command>` for the same content in the terminal. Global options: `--no-interactive` (or `HACK_NO_INTERACTIVE=1`); new JSON contracts use schema-tagged envelopes; published legacy and streaming formats are listed in [Machine-readable output](./machine-readable-output.md).
 
 ## Project
+
+## `hack autostart`
+
+Manage always-on projects on this machine
+
+### Usage
+
+```bash
+hack autostart <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack autostart add [project]` | Start this registered project at login on this machine |
+| `hack autostart remove [project]` | Remove this project's machine autostart marker |
+| `hack autostart list` | List this machine's always-on projects |
+| `hack autostart pause [project]` | Pause one marked project, or all marked projects |
+| `hack autostart resume [project]` | Resume one marked project, or all marked projects |
+| `hack autostart run` | Intentionally run one non-interactive autostart pass |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack autostart add [project]`
+
+Start this registered project at login on this machine
+
+### Usage
+
+```bash
+hack autostart add [project] [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `project` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack autostart remove [project]`
+
+Remove this project's machine autostart marker
+
+### Usage
+
+```bash
+hack autostart remove [project] [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `project` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack autostart list`
+
+List this machine's always-on projects
+
+### Usage
+
+```bash
+hack autostart list [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack autostart pause [project]`
+
+Pause one marked project, or all marked projects
+
+### Usage
+
+```bash
+hack autostart pause [project] [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `project` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack autostart resume [project]`
+
+Resume one marked project, or all marked projects
+
+### Usage
+
+```bash
+hack autostart resume [project] [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `project` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack autostart run`
+
+Intentionally run one non-interactive autostart pass
+
+### Usage
+
+```bash
+hack autostart run [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--engine-wait-ms <ms>` | Engine readiness wait bound (1-3600000 ms; default 600000) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
 
 ## `hack project`
 
@@ -76,7 +250,7 @@ hack project target [options]
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--service <service>` | Also resolve one Compose service of the target |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--expect-generation <id>` | Refuse unless the project's config generation still equals this id |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
@@ -181,12 +355,14 @@ hack up [services...] [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--detach, -d` | Run in background (docker compose up -d) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
 | `--json` | Output JSON (machine-readable) |
+| `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
+| `--always` | Mark this project for machine-local autostart and start it |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -208,7 +384,7 @@ hack down [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
@@ -216,6 +392,7 @@ hack down [options]
 | `--remove-data` | Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first) |
 | `--yes` | Confirm --prune-caches or --remove-data without prompting |
 | `--json` | Output JSON (machine-readable) |
+| `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
 | `--recover` | Explicitly reconcile an interrupted native stop, or stop the services of a native run whose foreground owner exited, while retaining data |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -244,11 +421,12 @@ hack restart [services...] [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
 | `--json` | Output JSON (machine-readable) |
+| `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
 | `--recover-frontend` | Recover an interrupted native frontend after proving its owner and effects are gone |
 | `--expect-finalization-attempt <32-hex>` | Require this exact interrupted native frontend attempt |
 | `--expect-frontend-pid <pid>` | Previously observed frontend PID (required only for legacy v1 state) |
@@ -327,10 +505,16 @@ Everything from `<cmd>` on is passed to the command unchanged, including flags s
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--workdir <path>` | Working directory inside the container (docker compose run -w) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
+| `--detach` | Start in the background and print a command id at once; read it with `hack commands read <id>` |
+| `--json` | With --detach: print the start result as a JSON envelope |
+| `--request-key <key>` | With --detach: retrying the same key with the same inputs returns the existing command instead of running it again |
+| `--timeout-ms <ms>` | With --detach: stop the command after this long (default 1800000, maximum 21600000) |
+| `--stall-after-ms <ms>` | With --detach: report an advisory stall after this long without output (default 120000, 0 turns it off) |
+| `--capture <full|metadata>` | With --detach: store output (full, the default) or only events and the outcome (metadata) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -361,10 +545,131 @@ Everything from `<cmd>` on is passed to the command unchanged, including flags s
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--workdir <path>` | Working directory inside the container (docker compose run -w) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
+| `--detach` | Start in the background and print a command id at once; read it with `hack commands read <id>` |
+| `--json` | With --detach: print the start result as a JSON envelope |
+| `--request-key <key>` | With --detach: retrying the same key with the same inputs returns the existing command instead of running it again |
+| `--timeout-ms <ms>` | With --detach: stop the command after this long (default 1800000, maximum 21600000) |
+| `--stall-after-ms <ms>` | With --detach: report an advisory stall after this long without output (default 120000, 0 turns it off) |
+| `--capture <full|metadata>` | With --detach: store output (full, the default) or only events and the outcome (metadata) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
+## `hack commands`
+
+Read, inspect or cancel background commands started with `hack exec\|run --detach`
+
+### Usage
+
+```bash
+hack commands <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack commands read <commandId>` | Read a background command's events and output from a cursor |
+| `hack commands show <commandId>` | Show a background command's state, limits and outcome |
+| `hack commands cancel <commandId>` | Cancel a background command |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack commands read <commandId>`
+
+Read a background command's events and output from a cursor
+
+### Usage
+
+```bash
+hack commands read <commandId> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `commandId` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--after <cursor>` | Read events after this cursor (default: from the start) |
+| `--follow, -f` | Keep reading until the command ends |
+| `--wait-ms <ms>` | Wait up to this long for new events (0-30000; default 0, or no limit with --follow) |
+| `--max-bytes <n>` | Output text per read (16384-262144; default 32768) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack commands show <commandId>`
+
+Show a background command's state, limits and outcome
+
+### Usage
+
+```bash
+hack commands show <commandId> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `commandId` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack commands cancel <commandId>`
+
+Cancel a background command
+
+### Usage
+
+```bash
+hack commands cancel <commandId> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `commandId` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -390,6 +695,7 @@ hack logs [service] [options]
 
 | Option | Description |
 | --- | --- |
+| `--timestamps` | Include Engine timestamps in native followed logs |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
@@ -401,7 +707,8 @@ hack logs [service] [options]
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--compose` | Read logs directly from docker compose (bypass Loki) |
 | `--loki` | Force Loki backend (do not fall back to docker compose logs) |
-| `--services <csv>` | Filter Loki logs by service(s), comma-separated (e.g. api,www) |
+| `--services <csv>` | Only these services, comma-separated (e.g. api,www); merged with the service argument |
+| `--max-line-bytes <n>` | With --json, keep at most n UTF-8 bytes of each line and mark it truncated |
 | `--query <logql>` | Raw LogQL selector/query (overrides auto selector built from project + services) |
 | `--since <time>` | Start time for Loki or native followed logs (RFC3339 or duration like 15m) |
 | `--until <time>` | End time for Loki logs (RFC3339 or duration like 15m) |
@@ -435,6 +742,28 @@ hack open [target] [options]
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--prefer <auto|alias|dev>` | Browser host preference (auto uses the OAuth alias when enabled) |
 | `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
+## `hack activity`
+
+Show recent up, down and restart actions (newest first)
+
+### Usage
+
+```bash
+hack activity [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--project <name>` | Only entries for this project name (canonical-name aliases accepted) |
+| `--limit <n>` | Most entries to show, newest first (default 50, at most 10000) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -672,7 +1001,7 @@ Uses the matching bundled Rust compiler. Without --file, discovers a native proj
 | `--profile <names>` | Comma-separated declared native profiles |
 | `--domain <suffix>` | Select the generated native routing domain suffix |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -697,7 +1026,7 @@ Resolves the native project, permitted local env selection and routing preview, 
 | `--profile <names>` | Comma-separated declared native profiles |
 | `--domain <suffix>` | Select the generated native routing domain suffix |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -764,7 +1093,7 @@ Manage persistent project workspaces with tmux-first onboarding
 hack session <subcommand> [options]
 ```
 
-Sessions keep a project workspace alive across terminal restarts, SSH reconnects, and long-running agent work. The guided default is tmux, including `hack setup tmux` for a popup picker. Other mux backends such as zellij still exist through `sessions.mux`, but the interactive session tooling is tmux-first today.
+Sessions keep a project workspace alive across terminal restarts, SSH reconnects, and long-running agent work. The guided default is tmux, including `hack setup tmux` for a popup picker. Interactive workspaces require tmux.
 
 ### Subcommands
 
@@ -831,7 +1160,7 @@ Reuse the default project workspace when it already exists, or create an isolate
 | `--new` | Create an isolated workspace instead of reusing the default project workspace |
 | `--name <value>` | Suffix for an isolated workspace name (for example: agent-1 -> project--agent-1) |
 | `--detach, -d` | Create or reuse the workspace without attaching (for GUI/non-TTY use) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--service <global|service>` | Inject env for the selected scope (global or a service name) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -871,7 +1200,7 @@ Attach to an existing workspace
 hack session attach <workspace> [options]
 ```
 
-Attach to a running workspace by name. Tmux switches clients instead of nesting tmux inside tmux, while zellij attaches to the named session directly.
+Attach to a running workspace by name. Tmux switches clients instead of nesting tmux inside tmux.
 
 ### Arguments
 
@@ -899,7 +1228,7 @@ hack session exec [options] <workspace> <command>
 
 `<command>` is one argument: quote a command that has its own arguments or flags, as in `"npm --version"`. Put Hack options before it; a leading `--` is optional.
 
-Queue a command in the workspace without opening a new interactive attach flow. Tmux sends it to the active pane; zellij opens a new pane for the command. This is useful for long-running agents, background checks, or remote follow-up work.
+Queue a command in the workspace without opening a new interactive attach flow. Tmux sends it to the active pane. This is useful for long-running agents, background checks, or remote follow-up work.
 
 ### Arguments
 
@@ -912,7 +1241,7 @@ Queue a command in the workspace without opening a new interactive attach flow. 
 
 | Option | Description |
 | --- | --- |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--service <global|service>` | Inject env for the selected scope (global or a service name) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -1085,6 +1414,8 @@ hack global install [options]
 
 | Option | Description |
 | --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--plan` | Print the steps (root and user) and exact root argv this command would run, without running anything (needs --json) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1166,6 +1497,7 @@ hack global status [options]
 | Option | Description |
 | --- | --- |
 | `--json` | Output JSON (machine-readable) |
+| `--observe` | Read only: never start Docker, a container or hackd; unknown parts say unknown (needs --json) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1259,6 +1591,8 @@ hack global trust [options]
 
 | Option | Description |
 | --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--plan` | Print the steps (root and user) and exact root argv this command would run, without running anything (needs --json) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1339,6 +1673,8 @@ hack usage [options]
 | Option | Description |
 | --- | --- |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--by-service` | With --json, report one project's usage per service (use --path or --project) |
 | `--details` | Show per-container usage and mount types |
 | `--include-global` | Include global infra projects under ~/.hack (e.g. logging stack) |
 | `--watch` | Refresh usage continuously |
@@ -1375,6 +1711,8 @@ hack projects <subcommand> [options]
 | `--summary` | Return compact project counts with --json; load details with --project |
 | `--timings` | Write numeric listing phase timings to stderr (requires --json) |
 | `--no-daemon` | Read runtime directly instead of the daemon cache |
+| `--observe` | Read projects without registry writes or engine contact; --runtime opts in to Docker queries (requires --json) |
+| `--runtime` | With --observe, query Docker for live state; socket contact can start an on-demand engine |
 | `--meta` | Include git/worktree/session/env metadata (implies --details) |
 | `--include-global` | Include global infra projects under ~/.hack (e.g. logging stack) |
 | `--all` | Include unregistered docker compose projects (best-effort) |
@@ -1406,7 +1744,78 @@ hack projects prune [options]
 | `--version, -v` | Show version |
 
 
+## `hack native`
+
+Set up the opt-in native runtime
+
+### Usage
+
+```bash
+hack native <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack native setup` | Download and prepare the pinned native runtime for this home |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack native setup`
+
+Download and prepare the pinned native runtime for this home
+
+### Usage
+
+```bash
+hack native setup [options]
+```
+
+Verifies and resumes pinned downloads without starting a VM. Requires Apple Silicon macOS. Non-interactive downloads need --accept-downloads. --json passes the runtime result through unchanged.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--accept-downloads` | Consent to the displayed pinned downloads |
+| `--archive <path>` | Offline pinned provider archive (requires the complete offline input set) |
+| `--engine-archive <path>` | Offline pinned engine archive |
+| `--network-tools-directory <path>` | Private directory containing all pinned networking packages |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
 ## Diagnostics
+
+## `hack exec-sessions`
+
+List retained native interactive exec sessions in this native home
+
+### Usage
+
+```bash
+hack exec-sessions [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--reconcile` | Retire only sessions with proven exit, container absence or a stopped boot |
+| `--json` | Print value-free session evidence as JSON |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
 
 ## `hack log-pipe`
 
@@ -1445,6 +1854,9 @@ hack doctor [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--fix` | Attempt safe auto-remediations (network + CoreDNS + CA) |
+| `--machine` | Observe machine checks only, without discovering a project or repairing state |
+| `--only <id>` | With --fix, select exactly one allowlisted repair: 'hack gitignore' (needs --yes) or 'polling watchers' (shows the diff; --yes applies it) |
+| `--yes` | Consent to the one repair selected with --fix --only |
 | `--migrate-env-config` | Migrate legacy hack.env.json/.env state to the new env config files |
 | `--accept-tracked-env-changes` | With --migrate-env-config and no prompt, allow deleting or editing git-tracked files (hack.env.json, the Compose file) |
 | `--domain-migration preview|apply|rollback` | Preview, apply, or roll back only this project's hack.local migration |
@@ -1500,7 +1912,7 @@ hack daemon <subcommand> [options]
 
 | Command | Summary |
 | --- | --- |
-| `hack daemon start` | Start hackd (local daemon) |
+| `hack daemon start` | Start hackd (local daemon); reinstalls and restarts a stale login service |
 | `hack daemon stop` | Stop hackd |
 | `hack daemon restart` | Restart hackd |
 | `hack daemon status` | Show hackd status |
@@ -1520,7 +1932,7 @@ hack daemon <subcommand> [options]
 
 ## `hack daemon start`
 
-Start hackd (local daemon)
+Start hackd (local daemon); reinstalls and restarts a stale login service
 
 ### Usage
 
@@ -1533,6 +1945,7 @@ hack daemon start [options]
 | Option | Description |
 | --- | --- |
 | `--foreground` | Run hackd in the foreground (debug) |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1551,6 +1964,7 @@ hack daemon stop [options]
 
 | Option | Description |
 | --- | --- |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1569,6 +1983,7 @@ hack daemon restart [options]
 
 | Option | Description |
 | --- | --- |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1665,6 +2080,7 @@ hack daemon install [options]
 | `--no-run-at-load` | Do not start hackd automatically on login (macOS launchd) |
 | `--gui-only` | Only run in GUI sessions (macOS launchd; default) |
 | `--no-gui-only` | Run in all session types, including SSH (macOS launchd) |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1703,6 +2119,7 @@ Downloads and installs the latest stable hack release from GitHub.
 Notes:
 - Refuses to self-update when running from a Homebrew install, local dev wrapper, or symlink install.
 - Updates the current hack binary and refreshes assets.
+- `--check --json --observe` only reports: current, latest, availability, install kind and the upgrade command for this install.
 
 ### Options
 
@@ -1711,6 +2128,173 @@ Notes:
 | `--check` | Check for updates (do not install) |
 | `--yes` | Apply update without prompting |
 | `--tag <tag>` | Update to a specific release tag (e.g. v1.4.0) |
+| `--observe` | With --check --json, report updates for any install kind without installing or refusing (one release read) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
+## `hack upgrade`
+
+Guided upgrade: check, apply, snapshot and roll back
+
+### Usage
+
+```bash
+hack upgrade <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack upgrade check` | Check this machine and every registered project for the upgrade (read-only) |
+| `hack upgrade apply` | Run the plan's apply steps for every checkout (snapshot and journal first) |
+| `hack upgrade review` | Walk affected checkouts and explain decisions that cannot be applied safely |
+| `hack upgrade snapshot` | Keep a private copy of the files the upgrade changes |
+| `hack upgrade rollback` | Put back the files kept by an upgrade snapshot |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack upgrade check`
+
+Check this machine and every registered project for the upgrade (read-only)
+
+### Usage
+
+```bash
+hack upgrade check [options]
+```
+
+Reads the installed versions, the daemon's service, the projects registry (dead entries apart
+from unreadable ones), Hack's global services, proxy ports and DNS, the global secret store, and
+for each live project its env format and key, tracked files, ignore rules, agent integrations
+and (Apple Silicon) native preflight. Prints a one-screen summary, the projects with findings
+(worktrees folded under their project) and a plan with one step per kind of change, then the
+next command. Changes nothing and prints no value. Exits 1 when something blocks the upgrade.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--verbose` | Also list every checkout's findings and the dead registry entries (--json always has everything) |
+| `--all` | Same as --verbose |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack upgrade apply`
+
+Run the plan's apply steps for every checkout (snapshot and journal first)
+
+### Usage
+
+```bash
+hack upgrade apply [options]
+```
+
+Checks first, then runs the plan steps marked (apply) for every checkout they cover: refreshing
+outdated .hack/.gitignore files, removing group/other access from verified weak keys without changing owner bits,
+and removing stale standalone agent files the hack plugin replaces
+(each removal covered by the same snapshot). Before changing anything it keeps an upgrade
+snapshot and writes a journal beside it with the snapshot's coverage and gaps and each checkout's
+outcome. Checkouts with a blocker or a check that could not run are skipped. Prints the rollback
+command. --dry-run summarizes what would change; --verbose includes file paths. Exits 1 when anything selected was not done.
+After interruption, --resume <manifest> reuses that run's selection and snapshot; unexpected edits refuse.
+Other-volume checkouts are skipped before writing. Select one project with --snapshot-root on its volume
+to keep recovery bytes in an explicit private directory outside every Git working tree.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--only <fix>` | Run selected plan steps: ignore-rules, agent-integrations or env-key-permissions (comma-separated) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--dry-run` | List what would change and change nothing |
+| `--resume <manifest>` | Resume the apply journal beside this explicit snapshot manifest |
+| `--snapshot-root <directory>` | Keep recovery bytes in this private directory outside Git, on the selected targets' filesystem |
+| `--verbose` | Also list every checkout's findings and the dead registry entries (--json always has everything) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack upgrade review`
+
+Walk affected checkouts and explain decisions that cannot be applied safely
+
+### Usage
+
+```bash
+hack upgrade review [options]
+```
+
+Runs a fresh read-only check, then walks the selected env/key/tracked-file findings with their reasons and checkout-specific diagnostics. Executes no fixes or printed commands.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--only <finding>` | Review env-secrets, env-format, env-key or tracked-files (comma-separated) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack upgrade snapshot`
+
+Keep a private copy of the files the upgrade changes
+
+### Usage
+
+```bash
+hack upgrade snapshot [options]
+```
+
+Copies the global Hack config, the projects registry, the encrypted secret store and its key
+(when used), and each live project's .hack config, env files, env layers, .hack/.gitignore and
+env key files into a private directory under ~/.hack/upgrade/snapshots (0700, files 0600).
+Prints the rollback command. The manifest records paths, sizes, modes and digests, never values.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack upgrade rollback`
+
+Put back the files kept by an upgrade snapshot
+
+### Usage
+
+```bash
+hack upgrade rollback [options]
+```
+
+Restores each file in the manifest with its exact bytes and mode. A file that changed since the
+snapshot (or since the step that recorded it) is left as it is unless --overwrite is passed;
+whatever a restore replaces or removes is kept in the snapshot directory, never deleted.
+Without --rollback-manifest, lists the snapshots and changes nothing.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--rollback-manifest <manifest>` | The snapshot manifest to restore (from hack upgrade snapshot) |
+| `--overwrite` | Also restore files that changed since the snapshot (the current copies are kept in the snapshot) |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -1731,6 +2315,7 @@ hack version [options]
 
 | Option | Description |
 | --- | --- |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -2210,6 +2795,7 @@ hack secrets <subcommand> [options]
 | `hack secrets set [name]` | Store a secret |
 | `hack secrets get [name]` | Print a secret (exit 1 if missing) |
 | `hack secrets delete [name]` | Delete a stored secret |
+| `hack secrets retire-store` | Move an encrypted secret store whose key is gone aside (reversible) |
 
 ### Options
 
@@ -2299,6 +2885,37 @@ the deletion is refused with E_INTERACTIVE_REQUIRED unless --yes is passed.
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
 
+## `hack secrets retire-store`
+
+Move an encrypted secret store whose key is gone aside (reversible)
+
+### Usage
+
+```bash
+hack secrets retire-store [options]
+```
+
+For an encrypted_file (or cloud shim) store that hack doctor reports with a missing or wrong key.
+Moves the store into a new directory <store>.retired-<UTC time>/ beside it: nothing is deleted, read or printed,
+and the key file is left alone. It prints how to put the store back. The store is the one this project
+selects (--path or the current directory), or the global one outside a project. Refused for a store that
+opens with the key in use, that another registered project's key still opens, or that is unreadable for
+another reason. HACK_SECRETS_FILE_KEY set in another shell cannot be inspected, so retiring needs --allow-unchecked:
+pass it once you have confirmed no shell for a project that selects the store sets it (it also covers registered
+projects that could not be checked). Without a TTY (or with
+HACK_NO_INTERACTIVE / --no-interactive) it is refused with E_INTERACTIVE_REQUIRED unless --yes is passed.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--yes` | Confirm moving the store aside without prompting (required without a TTY or with HACK_NO_INTERACTIVE) |
+| `--allow-unchecked` | Accept what cannot be checked: a HACK_SECRETS_FILE_KEY set in another shell for a project that selects the store, and registered projects that could not be checked. Retiring needs it; a key known to open the store still refuses |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
 
 ## Integrations
 
@@ -2316,7 +2933,9 @@ hack env <subcommand> [options]
 
 | Command | Summary |
 | --- | --- |
-| `hack env list` | List resolved env values for the selected overlay |
+| `hack env migrate` | Preview, resume or undo project env migration; cleanup is a separate later step |
+| `hack env list` | List env names, scopes, layers and set state |
+| `hack env protect [keys...]` | List plaintext keys, or encrypt chosen keys in their existing layers |
 | `hack env get <key>` | Print one resolved env value without an added newline |
 | `hack env explain <key>` | Explain a resolved env value without revealing it |
 | `hack env apply` | Recreate one service with its resolved env |
@@ -2327,6 +2946,7 @@ hack env <subcommand> [options]
 | `hack env exec [command...]` | Run a host command with project env injected |
 | `hack env shell` | Open a host shell with project env injected |
 | `hack env unset [key]` | Remove an env value from the canonical config |
+| `hack env overlay` | List or create env overlays |
 | `hack env backend` | Manage env/secret storage backend strategy |
 
 ### Options
@@ -2337,9 +2957,34 @@ hack env <subcommand> [options]
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
 
+## `hack env migrate`
+
+Preview, resume or undo project env migration; cleanup is a separate later step
+
+### Usage
+
+```bash
+hack env migrate [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--json` | Output JSON (machine-readable) |
+| `--apply` | Apply the previewed migration with a snapshot and resumable journal |
+| `--cleanup` | Preview later legacy cleanup; combine with --apply only after migration has completed |
+| `--rollback-manifest <manifest>` | Restore the migration snapshot, refusing changes made afterward |
+| `--accept-tracked-env-changes` | Consent to the displayed edits or removals of Git-tracked legacy env files |
+| `--preserve-changes` | With rollback, restore originals and retain later edits privately in the snapshot |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
 ## `hack env list`
 
-List resolved env values for the selected overlay
+List env names, scopes, layers and set state
 
 ### Usage
 
@@ -2353,10 +2998,45 @@ hack env list [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--json` | Output JSON (machine-readable) |
-| `--show-secrets` | Print secret values (keychain) in plaintext |
+| `--show-values` | Reveal resolved values only in an interactive terminal |
+| `--show-secrets` | Alias for --show-values (interactive terminal only) |
+| `--plaintext-values` | With --json, include values of plaintext entries only; secret values are never included (safe for pipes) |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--key-file <path>` | Use this project env key file for this run instead of key discovery (pass a path, never the key) |
+| `--key-env <NAME>` | Use the key held by the environment variable NAME for this run instead of key discovery (pass the NAME, never the key) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack env protect [keys...]`
+
+List plaintext keys, or encrypt chosen keys in their existing layers
+
+### Usage
+
+```bash
+hack env protect [keys...] [options]
+```
+
+With no keys, list names, scopes and layers only. With keys, encrypt each matching plaintext entry in this checkout without moving it. An unqualified key selects every scope; scope.KEY or --service selects one scope. Omit --env to cover all overlays. Files commit independently, so retry after a partial failure.
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `keys` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
+| `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -2385,8 +3065,10 @@ Read one global or service value without starting a runtime. Empty values succee
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--key-file <path>` | Use this project env key file for this run instead of key discovery (pass a path, never the key) |
+| `--key-env <NAME>` | Use the key held by the environment variable NAME for this run instead of key discovery (pass the NAME, never the key) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -2413,7 +3095,7 @@ hack env explain <key> [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--json` | Output JSON (machine-readable) |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
@@ -2437,7 +3119,7 @@ hack env apply [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--json` | Output JSON (machine-readable) |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
@@ -2469,11 +3151,14 @@ Non-secret values may be passed as arguments. For secrets, pipe the value with -
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--secret` | Store value as an encrypted secure entry |
+| `--allow-secret-argv` | Unsafe compatibility: allow secret values in process arguments and shell history |
 | `--value-stdin` | Read the value from piped stdin (max 64 KiB, one trailing newline stripped) so it never appears in argv or shell history |
 | `--local` | Write to the worktree-local env override file instead of the shared repo env file |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--key-file <path>` | Use this project env key file for this run instead of key discovery (pass a path, never the key) |
+| `--key-env <NAME>` | Use the key held by the environment variable NAME for this run instead of key discovery (pass the NAME, never the key) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -2503,11 +3188,14 @@ Same value rules as `hack env add`: pipe secrets with --value-stdin or use the h
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--secret` | Store value as an encrypted secure entry |
+| `--allow-secret-argv` | Unsafe compatibility: allow secret values in process arguments and shell history |
 | `--value-stdin` | Read the value from piped stdin (max 64 KiB, one trailing newline stripped) so it never appears in argv or shell history |
 | `--local` | Write to the worktree-local env override file instead of the shared repo env file |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--key-file <path>` | Use this project env key file for this run instead of key discovery (pass a path, never the key) |
+| `--key-env <NAME>` | Use the key held by the environment variable NAME for this run instead of key discovery (pass the NAME, never the key) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -2530,7 +3218,7 @@ Reads KEY=value entries from piped stdin or --file (never from arguments) and wr
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--json` | Output JSON (machine-readable) |
 | `--secret` | Store value as an encrypted secure entry |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
@@ -2556,7 +3244,7 @@ hack env materialize [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -2588,7 +3276,7 @@ Inject the selected Hack env overlay directly into a one-off host command withou
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
 | `--shell <command>` | Run a shell command string via /bin/sh -lc after env injection so `$VAR` expansion happens inside the child shell |
@@ -2616,7 +3304,7 @@ Start an interactive host shell with the selected Hack env overlay injected into
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
@@ -2645,9 +3333,36 @@ hack env unset [key] [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--local` | Write to the worktree-local env override file instead of the shared repo env file |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack env overlay`
+
+List or create env overlays
+
+### Usage
+
+```bash
+hack env overlay <subcommand> [options]
+```
+
+An overlay is a named layer, .hack/hack.env.<name>.yaml, selected with --env <name>. Its machine-local layer, .hack/hack.env.<name>.local.yaml, stays ignored by git.
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack env overlay list` | List every env overlay of the project (names and paths only) |
+| `hack env overlay add <name>` | Create an empty env overlay file |
+
+### Options
+
+| Option | Description |
+| --- | --- |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -2752,7 +3467,7 @@ Run a one-off command on the host with the selected Hack env overlay injected. U
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--scope <global|service>` | Resolve values for one env scope while still running the command on the host |
 | `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
 | `--shell <command>` | Run a shell command string via /bin/sh -lc after env injection so `$VAR` expansion happens inside the child shell |
@@ -2780,7 +3495,7 @@ Start an interactive host shell with the selected Hack env overlay injected. Use
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--scope <global|service>` | Resolve values for one env scope while still running the command on the host |
 | `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |

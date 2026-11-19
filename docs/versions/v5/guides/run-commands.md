@@ -114,7 +114,8 @@ it needs.
 
 `hack logs`, `hack ps` and `hack open` do not read an overlay at all.
 
-One exception: for a project with an authored `.hack/hack.project.json` on the
+One exception: for a project with an authored `.hack/hack.project.json` (an
+experimental file that covers a bounded subset of configuration) on the
 Compose backend, `hack run` without `--env` uses the default overlay, not the
 running one. Pass the running overlay with `--env`.
 
@@ -129,8 +130,9 @@ commands such as migrations, which need their own project-specific checks.
 On the native backend, `hack exec <service> -- /bin/sh` opens an interactive
 session when stdin and stdout are terminals. Otherwise, or with
 `HACK_NO_INTERACTIVE=1`, it runs the command once with closed stdin. Name the
-shell yourself; Hack never adds one. Native `exec` and `run` both refuse
-`--env`: they use the overlay the project started with. A one-off `run` has
+shell yourself; Hack never adds one. Native `exec` refuses
+`--env`. Native `run` accepts only the overlay the project started with and
+refuses any other. Both use that overlay. A one-off `run` has
 closed stdin and no terminal, and it refuses a service with source or data
 mounts. See
 [Native authored commands](../../reference/native-authored-commands.md).

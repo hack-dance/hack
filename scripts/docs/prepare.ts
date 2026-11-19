@@ -14,6 +14,8 @@ const output = resolve(repositoryRoot, "site/content/docs");
 const heading = /^#\s+(.+)$/m;
 const links = /(!?\[[^\]\n]*\]\()([^\s)]+)([^)]*\))/g;
 const definitions = /^(\s{0,3}\[[^\]\n]+\]:\s*)(\S+)(.*)$/gm;
+/** The closing half of a link whose text wraps from the previous line. */
+const wrappedLinkTail = /^([^[\]\n]*\]\()([^\s)]+)([^)]*\))/g;
 const privatePath =
   /(?:^|\/)(?:_docs|\.hack-local|\.claude|\.codex|test-execution|node_modules|_internal|internal|evidence)(?:\/|$)/i;
 const external = /^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i;
@@ -80,40 +82,58 @@ export function rewriteTarget(target: string, source: string): string {
   return `https://github.com/hack-dance/hack/${isFile ? "blob" : "tree"}/${activeRevision}/${encoded}${fragment}`;
 }
 
+/** Rewrite every link target on one prose line. */
+async function rewriteLine(
+  line: string,
+  source: string,
+  patterns: readonly RegExp[]
+): Promise<string> {
+  let rewritten = line;
+  for (const pattern of patterns) {
+    for (const match of [...rewritten.matchAll(pattern)]) {
+      const target = match[2];
+      if (!target) {
+        continue;
+      }
+      const replacement = await rewriteTarget(target, source);
+      const prefix = match[1] ?? "";
+      // Repository blob pages are navigable sources, not browser image assets.
+      // Keep the source available without publishing a broken image embed.
+      const publishedPrefix =
+        prefix.startsWith("!") && external.test(replacement)
+          ? `View image: ${prefix.slice(1)}`
+          : prefix;
+      rewritten = rewritten.replace(
+        match[0],
+        `${publishedPrefix}${replacement}${match[3]}`
+      );
+    }
+  }
+  return rewritten;
+}
+
 async function rewriteLinks(content: string, source: string): Promise<string> {
   // Keep command/code examples byte-for-byte. Only prose links are navigational.
   let fenced = false;
+  let openLinkText = false;
   const result: string[] = [];
   for (const line of content.split("\n")) {
     if (/^\s*(```|~~~)/.test(line)) {
       fenced = !fenced;
     }
     if (fenced) {
+      openLinkText = false;
       result.push(line);
       continue;
     }
-    let rewritten = line;
-    for (const pattern of [links, definitions]) {
-      for (const match of [...rewritten.matchAll(pattern)]) {
-        const target = match[2];
-        if (!target) {
-          continue;
-        }
-        const replacement = await rewriteTarget(target, source);
-        const prefix = match[1] ?? "";
-        // Repository blob pages are navigable sources, not browser image assets.
-        // Keep the source available without publishing a broken image embed.
-        const publishedPrefix =
-          prefix.startsWith("!") && external.test(replacement)
-            ? `View image: ${prefix.slice(1)}`
-            : prefix;
-        rewritten = rewritten.replace(
-          match[0],
-          `${publishedPrefix}${replacement}${match[3]}`
-        );
-      }
-    }
-    result.push(rewritten);
+    // Markdown allows link text to wrap; the target then starts a line.
+    const patterns = openLinkText
+      ? [wrappedLinkTail, links, definitions]
+      : [links, definitions];
+    // Stay open across a middle line of link text that has no bracket at all.
+    openLinkText =
+      /\[[^\]\n]*$/.test(line) || (openLinkText && !/[[\]]/.test(line));
+    result.push(await rewriteLine(line, source, patterns));
   }
   return result.join("\n");
 }

@@ -1,6 +1,6 @@
 # Follow native service logs (under verification)
 
-Native live logs are available in next.16 **under verification**. Real-VM
+Native live logs are **under verification** (available since next.16). Real-VM
 acceptance for authored and adopted projects remains pending. Use a disposable
 project; this page describes the released command contract, not a confirmed
 application result.

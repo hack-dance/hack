@@ -1,273 +1,288 @@
 # Sessions
 
-Sessions are **persistent project workspaces**. They keep a repo-root shell alive across terminal restarts, SSH reconnects, and long-running agent work so you can return to the same context instead of rebuilding it each time.
+A session is a named tmux session that Hack starts in a project's repository,
+with the project's env already loaded. The CLI also calls it a workspace.
 
-The guided default is **tmux**:
-- `hack session` opens a tmux-first interactive picker
-- `hack session start <project>` reuses the default project workspace unless you ask for an isolated one
-- `hack session start <project> --env qa --service api` creates a stable env-scoped workspace when you need a specific overlay
-- `hack setup tmux` installs the recommended popup binding so the picker is easy to reach from tmux
+Sessions need [tmux](https://github.com/tmux/tmux). Hack creates the tmux
+session, names it after the project, and gives you commands to attach to it,
+send it a command and read what it printed. Everything else is plain tmux.
 
-Interactive workspaces require tmux in v5. `sessions.mux=auto` detects tmux only; there is no fallback to another multiplexer. `sessions.mux=zellij` fails with migration guidance. Install tmux, then unset the setting or use `sessions.mux=tmux`.
+## Why sessions exist
 
-## Quick start
+- **Your work survives the terminal.** The shell and whatever runs in it live in
+  the tmux server, not in your terminal window. Close the window, lose an SSH
+  connection or restart your editor, then attach again and continue.
+- **One place to come back to.** A project's default session always has the
+  project's name. A person, a script or a coding agent can find it by that name,
+  send it a command, and read the output later.
+- **The right env is already there.** Hack starts the session with the project's
+  resolved env. A session for one overlay and one service carries that
+  service's values, and its name says which.
+- **Hack has somewhere to run host processes.** `hack up` runs a project's
+  lifecycle processes and its persistent `up.before` hooks in a tmux session that
+  Hack owns, so `hack down` can find them and stop them.
 
-```bash
-# Interactive picker for existing workspaces and new project workspaces
-hack session
+A session is not an instance. An [instance](core.md) is a running copy of the
+project's services. A session is a terminal that stays open beside it.
 
-# Reuse the default workspace for a project, or create it if needed
-hack session start <project>
-
-# Create an env-scoped workspace for one overlay/service combination
-hack session start <project> --env qa --service api --detach
-
-# List active workspaces
-hack session list
-
-# Attach to an existing workspace by name
-hack session attach <workspace>
-
-# Queue a command in a running workspace
-hack session exec <workspace> "bun test"
-
-# Queue a command with injected env for that run
-hack session exec <workspace> --env qa --service api "bun db:migrate"
-
-# Stop a workspace
-hack session stop <workspace>
-
-# Capture recent output (defaults to active pane)
-hack session capture <workspace>
-
-# Tail workspace output for a short window (defaults to active pane)
-hack session tail <workspace>
-
-# List panes in a workspace
-hack session panes <workspace>
-```
-
-## Core flows
-
-### Interactive picker
-
-Running `hack session` without arguments opens an interactive picker showing:
-- **Active workspaces**: running workspaces from the configured mux backend(s), with attached status when the backend can report it
-- **Available projects**: registered projects that do not currently have a default workspace
-
-When selecting an attached session, you can choose to:
-- **Attach**: detach other clients and take over the workspace
-- **Create isolated**: start a separate long-running workspace such as `project--2`
-
-This is the recommended entry point when you want to resume a project context but do not remember the exact workspace name.
-
-`hack session` with no subcommand is inherently interactive (it prompts with a picker) and is not a
-scripted/agent entry point. For scripted or agent-driven runs, use `hack session start <project>`
-(optionally with `--detach`) or `hack session list --json` instead of the bare picker.
-
-### Start and create
+## Start one
 
 ```bash
-# Reuse the default project workspace (creates it if needed)
 hack session start my-project
-
-# Force creation of an isolated numbered workspace
-hack session start my-project --new
-
-# Create an isolated workspace with a custom suffix
-hack session start my-project --name agent-1
-# Creates: my-project--agent-1
-
-# Prepare services before creating or attaching
-hack session start my-project --up
-
-# Create or reuse without attaching the current terminal
-hack session start my-project --detach
-
-# Create a stable env-scoped workspace
-hack session start my-project --env qa --service api --detach
 ```
 
-Default behavior is deliberate:
-- The first workspace for a project is just the project name, for example `my-project`
-- Passing `--env` or `--service` creates a stable scoped workspace name such as `my-project.env-qa.svc-api`
-- `--new` or `--name` creates an isolated workspace for a second agent, experiment, or review lane
-- `--detach` keeps the workspace alive for another tool or terminal to attach later
+This attaches your terminal to the session named `my-project`, and creates it
+first if it does not exist. Name a registered project, or pass its path;
+`hack session start` does not guess the project from the current folder. Run
+`hack projects` to see the names.
 
-Workspaces are created at the project's repo root, not the `.hack/` directory.
+Detach with the tmux prefix and `d`. The session keeps running. Come back with:
+
+```bash
+hack session attach my-project
+```
+
+In a terminal, run `hack session` with no arguments for a picker that lists sessions and
+projects. `hack setup tmux` installs a tmux popup binding that opens the same
+picker from inside tmux.
+
+## How it works
+
+### Names
+
+| You run | Session name |
+| --- | --- |
+| `hack session start my-project` | `my-project` |
+| `hack session start my-project --new` | `my-project--2`, then `--3`, and so on |
+| `hack session start my-project --name agent-1` | `my-project--agent-1` |
+| `hack session start my-project --env qa` | `my-project.env-qa` (`--env base` gives `.env-base`) |
+| `hack session start my-project --service api` | `my-project.svc-api` |
+| `hack session start my-project --env qa --service api` | `my-project.env-qa.svc-api` |
+| `hack up` in a project with lifecycle processes | `my-project--lifecycle` |
+| the same, in a branch instance | `my-project--lifecycle-<branch>` |
+
+```mermaid
+---
+title: What hack session start does
+---
+flowchart TD
+  Start["hack session start"] --> Flags{"--new or --name?"}
+  Flags -->|no| Exists{"Session with this name exists?"}
+  Exists -->|yes| Reuse["Reuse it"]
+  Exists -->|no| Create["Create it"]
+  Flags -->|yes| CreateNew["Create another session"]
+  Reuse --> Detach{"--detach?"}
+  Create --> Detach
+  CreateNew --> Detach
+  Detach -->|no| Attach["Attach your terminal"]
+  Detach -->|yes| Leave["Leave it in the background"]
+```
+
+- **The default session** has the project's name. `start` reuses it when it
+  exists.
+- **Another session** for the same project comes from `--new` (the next free
+  number) or `--name <suffix>`. Use one for each person or agent that should
+  not share a shell.
+- **A session for one overlay or service** comes from `--env` and `--service`.
+  Its name is stable, so starting it twice gives you the same session.
+
+A new session starts in the repository root, not in `.hack/`.
+
+### Env
+
+`hack session start` resolves the project's env and hands the values to tmux
+when it creates the session. Every shell in that session has them. `--env`
+chooses the overlay and `--service` chooses the scope, as on other commands;
+see [Environment and secrets](env.md).
+
+A session keeps the env it was created with. Changing env files does not update
+an existing session; stop it and start it again.
+
+The values then live in the tmux server's memory for that session, including
+secrets. Anything that can attach to the session can read them. Hack passes them
+to tmux on standard input, not as command arguments.
 
 ### Attach
 
-```bash
-# Attach to an existing workspace
-hack session attach my-project
+`hack session attach <name>` attaches your terminal and detaches other clients,
+so the session takes your terminal's size. From inside tmux it switches the
+current client instead of nesting. Use `--detach` on `start` when nothing should
+attach, for example from a script.
 
-# From inside tmux, this switches clients instead of nesting tmux
+### Send a command
+
+```bash
+hack session exec my-project "bun test"
 ```
 
-Use `attach` when you already know which workspace you want. If you are already inside tmux, hack switches clients instead of nesting tmux inside tmux. When attaching, tmux detaches other clients to avoid terminal size conflicts across multiple devices.
+`exec` types the command into the session's active pane and presses Enter. It
+returns at once. It does not wait for the command, and its exit code only says
+whether the keys were sent. If the pane is busy, the text goes to whatever is
+running there.
+
+With `--env` or `--service`, or in a session named for an overlay or service,
+Hack loads that env for the one command. It writes the values to a private
+temporary file that only you can read. The command's launcher reads the file
+and deletes it; a file that is not picked up expires after 10 minutes.
+
+### Read the output
+
+```bash
+hack session capture my-project --lines 200
+hack session tail my-project --max-ms 5000
+hack session panes my-project
+```
+
+| Command | What it reads | Defaults |
+| --- | --- | --- |
+| `capture` | The last lines of a pane | 200 lines, the active pane |
+| `tail` | New lines as they appear, for a short time | polls every 500 ms for 5 seconds |
+| `panes` | The panes in the session: target, window, command, folder | |
+
+All three print JSON lines by default: a `start` event, one `log` event per
+line or pane, an `error` event if a read fails, then an `end` event. `--pretty`
+prints plain text on `capture` and `tail`, and one JSON object on `panes`.
+`--json` asks for the default and cannot be combined with `--pretty`. `--target`
+picks a pane on `capture` and `tail`.
+
+`hack session list` prints a table. It has no `--json`.
 
 ### Stop
 
 ```bash
-hack session stop <workspace>
+hack session stop my-project
 ```
 
-`stop` kills the underlying mux session (`backend.killSession`) outright — anything still running
-inside it, including a long-lived dev server or an in-progress agent task, is terminated. There is
-no graceful shutdown step; if you need cleanup hooks to run first, do that before stopping.
+`stop` kills the tmux session with that exact name. Everything running in it
+ends at once; there is no graceful step. Two things to know:
 
-### Exec
+- `hack session list` shows every session on your tmux server, not only the
+  ones Hack created. `stop` kills whichever one you name.
+- Do not stop a `--lifecycle` session this way. Use `hack down`, which stops
+  the session's processes in order. If you kill the session and a process
+  outlives it, `hack down` refuses and keeps the lifecycle state until that
+  process is gone.
 
-```bash
-# Send a command to a running workspace
-hack session exec my-project "bun test"
+### Lifecycle sessions
 
-# tmux: sends the command + Enter to the active pane
+When a project declares lifecycle processes or a persistent `up.before` hook,
+`hack up` creates a session named `<project>--lifecycle` and gives each process
+its own tmux window. See [Lifecycle](lifecycle.md) for how to declare them.
 
-# Inject a selected overlay/service into the queued command
-hack session exec my-project.env-qa.svc-api --env qa --service api "bun db:migrate"
+```mermaid
+---
+title: Lifecycle session, up to down
+---
+sequenceDiagram
+  participant You
+  participant Hack
+  participant Tmux as tmux
+  participant Proc as Lifecycle process
+  You->>Hack: hack up
+  Hack->>Hack: Record an owner token
+  Hack->>Tmux: New session with the token
+  Tmux->>Proc: One window per process
+  You->>Hack: hack down
+  Hack->>Proc: Ctrl-C in each window
+  Hack->>Tmux: Token matches? Kill session
+  Hack->>Proc: TERM, then KILL if needed
+  Hack-->>You: Stopped
 ```
 
-Use `exec` when you want to drive a persistent workspace from another terminal, script, or agent without attaching interactively first.
+Hack owns this session:
 
-If you pass `--env` or `--service`, Hack resolves the selected project env and injects it into the queued command without materializing `.hack/.env`.
+- **Ownership.** Hack writes a random owner token to the project's lifecycle
+  state, then creates the tmux session with that token in one step. `hack down`
+  kills the session only when its token matches.
+- **Teardown.** `hack down` sends Ctrl-C to each window, kills the session, then
+  checks the processes it started. Processes that are still alive get TERM, and
+  KILL after a wait. `hack down` fails if any are still alive after that.
+- **Looking inside.** `hack session attach my-project--lifecycle` shows the
+  processes. Detach when you are done.
 
-### Listing panes (tmux only)
+If tmux is not installed, a `hack up` that needs a lifecycle session fails
+before it starts one. A project with no lifecycle processes and no persistent
+hooks needs no tmux for `hack up`.
 
-Use `hack session panes` to list panes with useful metadata (target, active flag, window/pane indices, command, path).
+A project can opt in to an experimental built-in supervisor for these processes
+instead of tmux, with `lifecycle.runner: "supervisor"`. It needs a matching
+supervisor executable. See [Lifecycle supervisor](lifecycle-supervisor.md).
 
-```bash
-# List panes (NDJSON start/log/end)
-hack session panes my-project
+### What is stored where
 
-# Explicit NDJSON output (same as the default)
-hack session panes my-project --json
+| What | Where | Survives a reboot |
+| --- | --- | --- |
+| A session, its shells and its env | The tmux server's memory | No |
+| Lifecycle state, with the owner token | `.hack/.internal/lifecycle/state.json` | Yes |
+| Lifecycle logs | `.hack/.internal/lifecycle/` | Yes |
 
-# Single JSON object output
-hack session panes my-project --pretty
-```
+Hack keeps no file for an interactive session. If the tmux server stops, the
+session is gone; start it again.
 
-`--json` and `--pretty` are mutually exclusive; passing both is an error.
+## Options
 
-### Capturing output (tmux only)
+| Option | On | What it does |
+| --- | --- | --- |
+| `--up` | `start` | Run `hack up -d` first, with `--env`. It uses the `hack` on your `PATH`, and the session starts even if `up` fails |
+| `--new` | `start` | Create another numbered session |
+| `--name <suffix>` | `start` | Create another session with this suffix |
+| `--detach`, `-d` | `start` | Do not attach |
+| `--env <name>` | `start`, `exec` | Choose the env overlay |
+| `--service <name>` | `start`, `exec` | Choose the env scope |
+| `--target <pane>` | `capture`, `tail` | Choose a pane |
+| `--lines <n>` | `capture`, `tail` | How many lines to read |
+| `--interval-ms`, `--max-ms` | `tail` | How often and how long to poll |
+| `--pretty` | `capture`, `tail`, `panes` | Plain text (`panes`: one JSON object) |
 
-`hack session capture` emits NDJSON events by default for machine parsing (start/log/end). By default it targets the active pane; use `--target` to select a specific pane. Use `--pretty` for raw pane output; `--json` and `--pretty` are mutually exclusive.
+The [command reference](reference/cli.md) has every flag.
 
-```bash
-# Capture last 200 lines (default) as NDJSON
-hack session capture my-project
+### Settings
 
-# Capture a specific pane target and line count (tmux pane targets use `:` and `.`)
-hack session capture my-project --target my-project:0.1 --lines 500
+| Setting | Values | Default |
+| --- | --- | --- |
+| `sessions.mux` in `.hack/hack.config.json` or the global config | `auto`, `tmux`, `none` | `auto` |
+| `HACK_SESSIONS_MUX` | the same; it wins over both config files | |
 
-# Human-friendly raw output
-hack session capture my-project --pretty
-```
-
-### Tailing output (tmux only)
-
-`hack session tail` also emits NDJSON events by default and stops after `--max-ms` (default 5000), polling every `--interval-ms` (default 500). By default it tails the active pane; use `--target` to select a specific pane. `--json` and `--pretty` are mutually exclusive.
-
-```bash
-# Poll capture-pane and emit only new lines for 5s (default)
-hack session tail my-project
-
-# Customize polling interval and max duration
-hack session tail my-project --interval-ms 250 --max-ms 10000
-
-# Human-friendly raw output
-hack session tail my-project --pretty
-```
-
-## Remote access with SSH
-
-Use `hack ssh` to get connection info for remote access:
-
-```bash
-# Interactive: choose Tailscale or direct SSH
-hack ssh
-
-# Use Tailscale SSH
-hack ssh --tailscale
-
-# Use direct SSH with hostname
-hack ssh --direct --host 192.168.1.100
-
-# Specify user and port
-hack ssh --host example.com --user dev --port 2222
-
-# Connect directly to a workspace
-hack ssh my-session
-```
-
-### What `hack ssh` shows
-
-1. **SSH command**: Copy-paste command to connect
-2. **QR code**: Scan with mobile SSH apps (Blink, Termius)
-3. **Active workspaces**: List of active workspaces on this machine, including the active mux backend when known
-4. **Action picker**: Done or connect to a workspace
-
-When you connect to an existing workspace, hack uses that workspace's backend. When you create a new one from the SSH flow, hack uses the configured default backend (`sessions.mux`).
-
-### Tailscale setup
-
-If Tailscale is stopped or not connected, `hack ssh` will prompt to start it:
-
-```
-Tailscale is stopped
-? Turn on Tailscale? › yes
-Starting Tailscale...
-Tailscale connected!
-```
-
-### Terminal size conflicts
-
-When multiple clients attach to the same tmux workspace, terminal size can get messed up. The session commands use `tmux attach -d` to detach other clients, avoiding this issue.
-
-If you're already in tmux and want to switch workspaces without detaching:
-
-```bash
-# Inside tmux: prefix + s to open session switcher
-# Or use the tmux command:
-tmux switch-client -t <session>
-```
-
-## Configuration
-
-Project config: `.hack/hack.config.json`
-
-```json
-{
-  "sessions": {
-    "mux": "auto"
-  }
-}
-```
-
-Values:
-- `auto` (default): detect tmux only
-- `tmux`: require tmux
-- `none`: disable sessions
-
-Env override: `HACK_SESSIONS_MUX=auto|tmux|none`
-
-Global default:
+`auto` and `tmux` both mean tmux. `none` turns sessions off: `list` shows
+nothing and `start` fails. The project file wins over the global config.
 
 ```bash
 hack config set --global sessions.mux tmux
 ```
 
-Recommended onboarding:
+### From another machine
 
-```bash
-# Install the tmux popup binding that launches the picker
-hack setup tmux
+`hack ssh` prints the SSH command for this machine and lists its sessions, so
+you can attach from a phone or another computer. `--tailscale` or
+`--direct --host <name>` choose the route, and it shows a QR code for a phone
+SSH app. Run `hack ssh --help` for the rest.
 
-# Require tmux globally
-hack config set --global sessions.mux tmux
-```
+## Limits
 
-## Interactive workspace contract
+- **tmux is required.** There is no other multiplexer and no fallback.
+- **A session is not a sandbox.** It runs as you, on your tmux server, with your
+  files and your network. It separates nothing. Two sessions for one project
+  share the same repository folder and the same running services.
+- **A session does not survive a reboot.** Nothing restarts it.
+- **`exec` does not report results.** To know whether a command worked, read
+  the pane with `capture` or `tail`, or run the command with
+  [`hack exec --detach` or `hack run --detach`](guides/background-commands.md),
+  which keep an exit code.
+- **A slow tmux gives an unknown result.** Hack waits at most 15 seconds for a
+  tmux command that is not interactive. After that it stops waiting and reports
+  that the outcome is unknown, because tmux may still apply the command.
+- **Secrets are visible inside the session.** Treat a session that has a
+  project's env as you would a shell with those variables set.
 
-`MuxBackend` is the interactive-workspace adapter: it lists, creates, attaches to, sends input to, and removes tmux workspaces. It is not the v5 lifecycle supervisor contract. Interactive workspaces keep tmux as their default. Non-interactive mux commands have bounded waits; a timeout means the outcome is unknown because a server may still apply the request.
+## Zellij was removed in v5
+
+v4 could use zellij. v5 uses tmux only. What happens depends on what you have:
+
+| You have | What v5 does | What to do |
+| --- | --- | --- |
+| `sessions.mux` set to `zellij` in a project or the global config, or `HACK_SESSIONS_MUX=zellij` | `hack session` commands, `hack ssh`, and a `hack up` or `hack restart` that needs a lifecycle session stop with: `sessions.mux=zellij was removed in v5. Install tmux, then unset sessions.mux (and HACK_SESSIONS_MUX) or set it to tmux.` `hack doctor` reports the same text as a `sessions mux` error. `hack global install` stops when the global setting or the variable says `zellij`. | Install tmux. Remove the setting in each place, or set it to `tmux`. |
+| A project whose lifecycle processes were started under zellij by v4 and are still recorded | `hack up`, `hack restart` and `hack down` refuse, because v5 cannot inspect or stop a zellij session. Changing the setting does not clear this. | Stop that project with the v4 CLI while zellij is still installed: run v4's `hack down`. If you already upgraded, go back to the v4 CLI for that one stop. Do not delete or edit Hack's state files. |
+| Open zellij sessions | Nothing. v5 does not stop them and does not move them to tmux. | Close them yourself. Start new sessions with `hack session start`. |
+
+The [upgrade guide](versions/v5/guides/upgrade-from-v4.md#breaking-change-zellij-workspaces-removed)
+has the full stop procedure, including the backup to take before it.

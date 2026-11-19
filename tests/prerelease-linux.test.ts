@@ -482,6 +482,61 @@ fixtureTest(
   }
 );
 
+/**
+ * Fail closed: if anything ever ran a real `curl` instead of the fixture's
+ * (for example a shell whose startup files replace PATH), it could only reach
+ * a discard port on this machine, never the network.
+ */
+const NO_NETWORK = {
+  https_proxy: "http://127.0.0.1:9",
+  HTTPS_PROXY: "http://127.0.0.1:9",
+  ALL_PROXY: "http://127.0.0.1:9",
+  NO_PROXY: "",
+  no_proxy: "",
+} as const;
+
+/**
+ * Why a shell cannot run the installer fixture hermetically, or null when it
+ * can. zsh always sources the system `zshenv`, and the user's when HOME has
+ * one. Where such a file sets PATH, the fixture's `uname` and `curl` are no
+ * longer the ones the script runs, so the fixture would not decide the
+ * platform or the download. Asked of the shell itself, started the same way
+ * and with the same environment as the test starts it.
+ */
+function shellMissesFixtureTools(
+  shell: string,
+  env: Readonly<Record<string, string>>,
+  bin: string
+): string | null {
+  const probe = spawnSyncBounded(
+    [shell, "-c", "command -v uname; command -v curl"],
+    { env: { ...env }, timeout: 10_000, stdout: "pipe", stderr: "pipe" }
+  );
+  const found = probe.stdout.toString().trim().split("\n");
+  const wanted = [join(bin, "uname"), join(bin, "curl")];
+  return probe.exitCode === 0 &&
+    JSON.stringify(found) === JSON.stringify(wanted)
+    ? null
+    : `its startup files change PATH: uname and curl resolve to ${found.join(", ") || "nothing"}, not the fixture's`;
+}
+
+/**
+ * Decided once, when the file loads, so a skip is a named line in the test
+ * output and never a silent pass.
+ */
+const ZSH = Bun.which("zsh");
+const ZSH_SKIP: string | null = (() => {
+  if (ZSH === null) {
+    return "no zsh on PATH";
+  }
+  const f = bootstrapFixture({ system: "Linux", machine: "x86_64" });
+  try {
+    return shellMissesFixtureTools(ZSH, f.env, f.bin);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+})();
+
 /** The bootstrap fixture of tests/python-free-bootstrap.test.ts, with a chosen host. */
 function bootstrapFixture(options: {
   readonly system: string;
@@ -557,6 +612,7 @@ printf '%s' '200 '`
     INVOCATION: join(root, "invocation"),
     CURL_ARGS: join(root, "curl-args"),
     FIXTURE_MANAGER: manager,
+    ...NO_NETWORK,
   };
   const run = (args: readonly string[] = []) =>
     spawnSyncBounded(["/bin/sh", bootstrap, ...args], {
@@ -1840,40 +1896,83 @@ test("the guides list the Linux platforms apart from the native platform and say
   }
 });
 
-fixtureTest(
-  "the installer runs under zsh without sh emulation, and macOS refuses --manager",
+// Native zsh does not split unquoted variables; the script must not need it.
+test.skipIf(ZSH_SKIP !== null)(
+  `the Linux installer runs under zsh without sh emulation${ZSH_SKIP === null ? "" : ` [skipped: ${ZSH_SKIP}]`}`,
   () => {
-    // Native zsh does not split unquoted variables; the script must not need it.
-    if (existsSync("/bin/zsh")) {
-      const f = bootstrapFixture({ system: "Linux", machine: "x86_64" });
-      const result = spawnSyncBounded(["/bin/zsh", f.bootstrap], {
-        env: f.env,
-        timeout: 10_000,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      expect(result.stderr.toString()).toBe("");
-      expect(result.exitCode).toBe(0);
-      expect(result.stdout.toString()).toContain(LINUX_INSTALLED_NOTE);
-    }
-    if (Bun.which("shasum")) {
-      const mac = bootstrapFixture({
-        system: "Darwin",
-        machine: "arm64",
-        tools: ["shasum", "mktemp", "chmod", "rm", "cp", "cat", "date"],
-      });
-      writeFileSync(join(mac.bin, "codesign"), "#!/bin/sh\nexit 0\n", {
-        mode: 0o755,
-      });
-      const refused = mac.run(["--manager", mac.manager]);
-      expect(refused.exitCode).not.toBe(0);
-      expect(refused.stderr.toString()).toContain(
-        "--manager is for Linux installs only."
-      );
-      expect(existsSync(mac.env.CURL_ARGS)).toBe(false);
-      expect(existsSync(mac.env.INVOCATION)).toBe(false);
-    }
-  }
+    const zsh = ZSH as string;
+    const f = bootstrapFixture({ system: "Linux", machine: "x86_64" });
+    // Checked again for this very fixture: without it the run is not hermetic.
+    expect(shellMissesFixtureTools(zsh, f.env, f.bin)).toBeNull();
+    const result = spawnSyncBounded([zsh, f.bootstrap], {
+      env: f.env,
+      timeout: 10_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.stderr.toString()).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain(LINUX_INSTALLED_NOTE);
+    // The fixture's curl made the one request, for the fixture's platform.
+    expect(readFileSync(f.env.CURL_ARGS, "utf8")).toContain(
+      `/v${VERSION}/hack-next-manager-linux-x86_64\n`
+    );
+  },
+  30_000
+);
+
+test.skipIf(ZSH === null)(
+  `a zsh whose startup files replace PATH is detected, so the zsh run is skipped there${ZSH === null ? " [skipped: no zsh on PATH]" : ""}`,
+  () => {
+    const zsh = ZSH as string;
+    const f = bootstrapFixture({ system: "Linux", machine: "x86_64" });
+    // What a system zshenv does on some machines, done here through the
+    // fixture HOME's own .zshenv: put system directories first.
+    writeFileSync(
+      join(f.home, ".zshenv"),
+      'export PATH="/usr/bin:/bin:$PATH"\n'
+    );
+    const reason = shellMissesFixtureTools(zsh, f.env, f.bin);
+    expect(reason).toContain("its startup files change PATH");
+    expect(reason).toContain("not the fixture's");
+    // And even run that way, the installer cannot reach the network: a real
+    // curl gets the discard-port proxy and the install stops unchanged.
+    const result = spawnSyncBounded([zsh, f.bootstrap], {
+      env: f.env,
+      timeout: 20_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(existsSync(f.env.CURL_ARGS)).toBe(false);
+    expect(existsSync(f.env.INVOCATION)).toBe(false);
+    expect(existsSync(join(f.home, ".hack-next"))).toBe(false);
+  },
+  60_000
+);
+
+// Independent of zsh: runs under /bin/sh wherever shasum exists.
+const SHASUM_SKIP = Bun.which("shasum") === null ? "no shasum on PATH" : null;
+test.skipIf(SHASUM_SKIP !== null)(
+  `the macOS installer refuses --manager before any transfer${SHASUM_SKIP === null ? "" : ` [skipped: ${SHASUM_SKIP}]`}`,
+  () => {
+    const mac = bootstrapFixture({
+      system: "Darwin",
+      machine: "arm64",
+      tools: ["shasum", "mktemp", "chmod", "rm", "cp", "cat", "date"],
+    });
+    writeFileSync(join(mac.bin, "codesign"), "#!/bin/sh\nexit 0\n", {
+      mode: 0o755,
+    });
+    const refused = mac.run(["--manager", mac.manager]);
+    expect(refused.exitCode).not.toBe(0);
+    expect(refused.stderr.toString()).toContain(
+      "--manager is for Linux installs only."
+    );
+    expect(existsSync(mac.env.CURL_ARGS)).toBe(false);
+    expect(existsSync(mac.env.INVOCATION)).toBe(false);
+  },
+  30_000
 );
 
 fixtureTest(

@@ -23,12 +23,26 @@ not.
 }
 ```
 
-`.cursor/Dockerfile`: start from Cursor's documented Docker recipe (Docker CE,
-the Compose plugin, `fuse-overlayfs` as the storage driver, legacy iptables, and
-a user in the `docker` group), then add `hack`:
+`.cursor/Dockerfile`: the parts of Cursor's documented Docker recipe that matter
+here (a Docker engine and the Compose plugin, `fuse-overlayfs` as the storage
+driver, legacy iptables, and a sudo user in the `docker` group), using Ubuntu's
+own Docker packages, then `hack`. The binary is committed gzipped as
+`.hack-bin/hack.gz`, because GitHub refuses files over 100 MB:
 
 ```dockerfile
-COPY .hack-bin/hack /usr/local/bin/hack
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git sudo gzip docker.io docker-compose-v2 fuse-overlayfs iptables \
+ && rm -rf /var/lib/apt/lists/*
+RUN update-alternatives --set iptables /usr/sbin/iptables-legacy \
+ && update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+RUN mkdir -p /etc/docker && printf '{"storage-driver":"fuse-overlayfs"}\n' > /etc/docker/daemon.json
+COPY .hack-bin/hack.gz /tmp/hack.gz
+RUN gunzip -c /tmp/hack.gz > /usr/local/bin/hack && chmod 0755 /usr/local/bin/hack && rm /tmp/hack.gz
+RUN (id ubuntu >/dev/null 2>&1 || useradd -m -s /bin/bash ubuntu) \
+ && echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu \
+ && usermod -aG docker ubuntu
+USER ubuntu
 ```
 
 **Secret:** in the Cursor dashboard, **Cloud Agents → Secrets**, add

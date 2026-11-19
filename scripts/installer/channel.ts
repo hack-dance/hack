@@ -1113,7 +1113,14 @@ export class Channel {
     );
     this.validate();
   }
-  async run(arguments_: string[]) {
+  /**
+   * Runs the selected CLI. `childUmask` is the caller's umask: the manager
+   * keeps a private umask (077) for its own files, and the CLI must not
+   * inherit it. Under 077 every file the CLI writes is owner-only, and on
+   * Linux the non-root containers that read its bind-mounted configs exit
+   * with "permission denied" (HACK-2381).
+   */
+  async run(arguments_: string[], childUmask?: number) {
     const compose = composeOnly(this.platform);
     let backend =
       process.env.HACK_RUNTIME_BACKEND || (compose ? "compose" : "native");
@@ -1158,21 +1165,34 @@ export class Channel {
         ? verified.directory
         : this.verifyVersion(version, checksum);
     this.signatures(join(directory, "bundle"));
-    const child = Bun.spawn(
-      [
-        join(
-          directory,
-          backend === "compose" ? "bundle/hack-cli" : "bundle/hack-v5"
-        ),
-        ...arguments_,
-      ],
-      {
-        env: this.environment(version, backend),
-        stdin: "inherit",
-        stdout: "inherit",
-        stderr: "inherit",
+    // The child takes its umask when it is spawned; the manager's own is put
+    // back straight after, before anything else can create a file.
+    const spawnChild = () =>
+      Bun.spawn(
+        [
+          join(
+            directory,
+            backend === "compose" ? "bundle/hack-cli" : "bundle/hack-v5"
+          ),
+          ...arguments_,
+        ],
+        {
+          env: this.environment(version, backend),
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
+        }
+      );
+    const managerUmask =
+      childUmask === undefined ? null : process.umask(childUmask);
+    let child: ReturnType<typeof spawnChild>;
+    try {
+      child = spawnChild();
+    } finally {
+      if (managerUmask !== null) {
+        process.umask(managerUmask);
       }
-    );
+    }
     const handlers = new Map<NodeJS.Signals, () => void>();
     try {
       for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {

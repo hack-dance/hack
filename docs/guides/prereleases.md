@@ -352,6 +352,11 @@ version to confirm quiescence. It moves the complete channel, including its home
 to a private sibling and prints a rollback manifest. Stable Hack, its home and your
 shell PATH are unchanged. No candidate data is deleted.
 
+Uninstalling does not stop Hack's global containers. If you ran `global install`
+through `hack-next`, run `hack-next global down` before `uninstall --apply`;
+afterwards the launcher is gone, and the proxy and logging containers would keep
+running until you stop them with Docker.
+
 To undo it, run the retained `manager` executable with the original `--root` and
 `uninstall --rollback-manifest /path/to/manifest`. Rollback checks the retained
 channel identity and refuses to replace an occupied original path. Keep the

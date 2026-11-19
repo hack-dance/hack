@@ -9,6 +9,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -150,6 +151,7 @@ const fixtureManager = async (output: string) => {
 /** A fixture CLI: reports the version, otherwise prints what it was started with. */
 const FIXTURE_CLI = `#!/bin/sh
 if [ "\${1-}" = --version ]; then echo "hack v${VERSION}"; exit 0; fi
+if [ "\${1-}" = write-umask ]; then umask > "$2"; : > "$2.created"; exit 0; fi
 printf 'backend=%s\\n' "\${HACK_RUNTIME_BACKEND-<unset>}"
 printf 'entrypoint=%s\\n' "\${HACK_CANDIDATE_ENTRYPOINT-<unset>}"
 printf 'native_binary=%s\\n' "\${HACK_NATIVE_BINARY-<unset>}"
@@ -461,6 +463,34 @@ fixtureTest(
       if (saved === undefined) {
         Reflect.deleteProperty(process.env, "HACK_RUNTIME_BACKEND");
       } else {
+        process.env.HACK_RUNTIME_BACKEND = saved;
+      }
+    }
+
+    // HACK-2381: the manager's private umask must not reach the CLI. With the
+    // manager at 077, the CLI runs with the caller's umask, the files it
+    // creates get that umask, and the manager is back at 077 afterwards.
+    Reflect.deleteProperty(process.env, "HACK_RUNTIME_BACKEND");
+    const managerUmask = process.umask(0o077);
+    try {
+      for (const [caller, text, created] of [
+        [0o022, "0022", 0o644],
+        [0o027, "0027", 0o640],
+        [0o077, "0077", 0o600],
+      ] as const) {
+        const seen = join(root, `umask-${text}`);
+        expect(await channel.run(["write-umask", seen], caller)).toBe(0);
+        expect(readFileSync(seen, "utf8").trim()).toBe(text);
+        expect(statSync(`${seen}.created`).mode & 0o777).toBe(created);
+        expect(process.umask()).toBe(0o077);
+      }
+      // Without a caller umask the child inherits the manager's, as before.
+      const inherited = join(root, "umask-inherited");
+      expect(await channel.run(["write-umask", inherited])).toBe(0);
+      expect(readFileSync(inherited, "utf8").trim()).toBe("0077");
+    } finally {
+      process.umask(managerUmask);
+      if (saved !== undefined) {
         process.env.HACK_RUNTIME_BACKEND = saved;
       }
     }
@@ -1771,6 +1801,32 @@ test.skipIf(linuxHost === null || linuxHost === "darwin-arm64")(
     expect(run([launcher, "--version"]).stdout.toString()).toBe(
       `hack v${VERSION}\n`
     );
+    // HACK-2381: through the real launcher and compiled manager, the CLI gets
+    // the caller's umask, not the manager's 077, while the manager's own
+    // files stay private.
+    for (const caller of ["0022", "0027", "0077"]) {
+      const seen = join(root, `launcher-umask-${caller}`);
+      const viaLauncher = run([
+        "/bin/sh",
+        "-c",
+        `umask ${caller}; exec "$0" write-umask "$1"`,
+        launcher,
+        seen,
+      ]);
+      expect(viaLauncher.stderr.toString()).toBe("");
+      expect(viaLauncher.exitCode).toBe(0);
+      expect(readFileSync(seen, "utf8").trim()).toBe(caller);
+    }
+    expect(
+      statSync(join(root, "launcher-umask-0022.created")).mode & 0o777
+    ).toBe(0o644);
+    run(["/bin/sh", "-c", 'umask 022; exec "$0" --manager stable', launcher]);
+    run(["/bin/sh", "-c", 'umask 022; exec "$0" --manager rollback', launcher]);
+    expect(
+      statSync(join(home, ".hack-next/.selection.json")).mode & 0o777
+    ).toBe(0o600);
+    expect(statSync(join(home, ".hack-next")).mode & 0o777).toBe(0o700);
+
     // Unset selects Compose on Linux; native selectors never reach the CLI.
     const up = run([launcher, "up", "-d"]);
     expect(up.exitCode).toBe(0);

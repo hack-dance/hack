@@ -104,6 +104,8 @@ What differs from the macOS bundle:
   `native-home` or `cli-home` directories: Compose runs use your own Hack home
   (`HACK_HOME`, default `~/.hack`), as described under
   [Test both backends](#test-both-backends).
+- `uninstall` does not stop the global proxy and logging containers either: run
+  `hack-next global down` before `hack-next --manager uninstall --apply`.
 - Selection changes (`upgrade`, `select`, `rollback`, `stable`, `uninstall`) do
   not stop or inspect your Compose projects. They take the channel lock, which
   refuses while a `hack-next` command is running.

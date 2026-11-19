@@ -1,7 +1,7 @@
 # GitHub Codespaces and dev containers
 
 > **Dev container: verified on 2026-11-19** with the Dev Container CLI 0.90.0
-> on Linux x86_64 and `hack` built from `next` at `95ea63e497`.
+> on Linux x86_64 and `hack` built from `next` at `6447491b33`.
 > `devcontainer up` with the files below started the project with no other
 > command. The install step copied in that built binary, since v5 has no Linux
 > release yet.
@@ -69,16 +69,16 @@ processes, including `postStartCommand`. Locally, the Dev Container CLI does the
 same with `--secrets-file`, a JSON file such as
 `{"HACK_ENV_SECRET_KEY": "..."}` kept outside the repository with mode 0600.
 
-## The one command
+## Start it
 
-Locally:
+Locally (verified):
 
 ```sh
 devcontainer up --workspace-folder . --secrets-file ~/secrets/project.json
 ```
 
-In Codespaces: create a codespace on the branch. `postStartCommand` starts the
-project.
+In Codespaces (not run yet): create a codespace on the branch;
+`postStartCommand` should start the project.
 
 ## Check it
 
@@ -88,8 +88,7 @@ In the container's terminal (use your project's host):
 curl --noproxy hello.hack --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
 ```
 
-In the verified run (base images already pulled), `devcontainer up` took 24
-seconds. The key came from `--secrets-file`, the page printed `token-present`,
+In the verified run, `devcontainer up` started the project. The key came from `--secrets-file`, the page printed `token-present`,
 and the key did not appear in the CLI's output.
 
 ## What is different from a laptop

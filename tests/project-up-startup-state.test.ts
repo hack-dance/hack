@@ -198,6 +198,18 @@ const shellMock = await registerScopedModuleMock({
   },
 });
 
+// These tests drive Compose through the mocked runtime backend; the engine
+// preflight would otherwise run the host's real `docker` (absent on some CI
+// runners). Its own behavior is covered in compose-engine-preflight.test.ts.
+const enginePreflightMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/compose-engine-preflight.ts",
+  overrides: {
+    preflightComposeEngine: () => Promise.resolve(null),
+    preflightSharedNetworks: () => Promise.resolve(null),
+  },
+});
+
 const loggerMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
   specifier: "../src/ui/logger.ts",
@@ -227,6 +239,7 @@ beforeAll(() => {
   runtimeBackendMock.activate();
   runtimeProjectsMock.activate();
   shellMock.activate();
+  enginePreflightMock.activate();
   loggerMock.activate();
 });
 
@@ -285,6 +298,7 @@ afterAll(() => {
   runtimeBackendMock.deactivate();
   runtimeProjectsMock.deactivate();
   shellMock.deactivate();
+  enginePreflightMock.deactivate();
   loggerMock.deactivate();
 });
 
@@ -1708,4 +1722,125 @@ test("a one-shot started under another profile is still seen by the restart guar
     data?: { interrupted?: string[] };
   };
   expect(envelope.data?.interrupted).toEqual(["api"]);
+});
+
+/** HACK-2358: api binds the checkout at /app and keeps node_modules local. */
+async function createLocalDirectoriesProject(
+  localDirectories: unknown
+): Promise<string> {
+  const projectRoot = await createProject();
+  const composeFile = resolve(projectRoot, ".hack", PROJECT_COMPOSE_FILENAME);
+  const compose = YAML.parse(await readFile(composeFile, "utf8")) as {
+    services: Record<string, Record<string, unknown>>;
+  };
+  compose.services.api!.volumes = ["..:/app"];
+  await writeFile(composeFile, YAML.stringify(compose));
+  const configPath = resolve(projectRoot, ".hack", PROJECT_CONFIG_FILENAME);
+  const config = JSON.parse(await readFile(configPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  await writeFile(
+    configPath,
+    `${JSON.stringify({ ...config, localDirectories })}\n`
+  );
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+  );
+  return projectRoot;
+}
+
+function localDirectoriesOverrides(files: readonly string[]): string[] {
+  return files.filter((file) =>
+    file.endsWith("compose.local-directories.override.yml")
+  );
+}
+
+for (const operation of [runDetachedUp, runRestart]) {
+  test(`${operation.name} keeps a declared local directory on a volume`, async () => {
+    const projectRoot = await createLocalDirectoriesProject(["node_modules"]);
+    expect(await operation({ projectRoot })).toBe(0);
+    const up = runtimeCalls.find((call) => call.kind === "up");
+    if (up?.kind !== "up") {
+      throw new Error("Missing up");
+    }
+    const [override] = localDirectoriesOverrides(up.opts.composeFiles);
+    expect(override).toBeDefined();
+    const parsed = YAML.parse(await readFile(override!, "utf8")) as {
+      services: Record<string, { volumes: Record<string, unknown>[] }>;
+      volumes: Record<string, { labels: Record<string, string> }>;
+    };
+    const mount = parsed.services.api?.volumes[0];
+    expect(mount).toMatchObject({
+      type: "volume",
+      target: "/app/node_modules",
+    });
+    expect(parsed.volumes[String(mount?.source)]?.labels).toEqual({
+      "hack.local-directory": "node_modules",
+      "hack.cache.disposable": "true",
+    });
+    // Services without a source bind are not touched.
+    expect(Object.keys(parsed.services)).toEqual(["api"]);
+  });
+}
+
+test("run uses the same local-directory override as up", async () => {
+  const projectRoot = await createLocalDirectoriesProject(["node_modules"]);
+  await runDetachedUp({ projectRoot });
+  const up = runtimeCalls.find((call) => call.kind === "up")!;
+  runtimeCalls.length = 0;
+  const result = await runCommand.handler({
+    ctx: { cwd: projectRoot, cli: CLI_SPEC },
+    args: {
+      options: { path: projectRoot, env: "base" },
+      positionals: { service: "api", cmd: [] },
+      raw: { argv: [], positionals: [] },
+    },
+  } as unknown as Parameters<typeof runCommand.handler>[0]);
+  expect(result).toBe(0);
+  const run = runtimeCalls[0]!;
+  expect(localDirectoriesOverrides(run.opts.composeFiles)).toEqual(
+    localDirectoriesOverrides(up.opts.composeFiles)
+  );
+  expect(localDirectoriesOverrides(run.opts.composeFiles)).toHaveLength(1);
+});
+
+for (const operation of [runDetachedUp, runRestart]) {
+  test(`${operation.name} refuses an invalid localDirectories before anything starts or stops`, async () => {
+    const projectRoot = await createLocalDirectoriesProject(["../outside"]);
+    expect(await operation({ projectRoot })).toBe(1);
+    // No up, and for restart no down of the running project either.
+    expect(runtimeCalls).toHaveLength(0);
+    expect(downCalls).toBe(0);
+    // Reported once, as the refusal, not also as a parse warning.
+    expect(warnMessages.some((line) => line.includes("localDirectories"))).toBe(
+      false
+    );
+  });
+}
+
+test("a targeted restart recreates the service with the local-directory override", async () => {
+  const projectRoot = await createLocalDirectoriesProject(["node_modules"]);
+  expect(await runRestart({ projectRoot, services: ["api"] })).toBe(0);
+  const up = runtimeCalls.find((call) => call.kind === "up");
+  if (up?.kind !== "up") {
+    throw new Error("Missing up");
+  }
+  expect(localDirectoriesOverrides(up.opts.composeFiles)).toHaveLength(1);
+});
+
+test("up says which entries it cannot keep local", async () => {
+  const projectRoot = await createLocalDirectoriesProject(["node_modules"]);
+  const composeFile = resolve(projectRoot, ".hack", PROJECT_COMPOSE_FILENAME);
+  const compose = YAML.parse(await readFile(composeFile, "utf8")) as {
+    services: Record<string, Record<string, unknown>>;
+    volumes?: Record<string, unknown>;
+  };
+  compose.services.api!.volumes = ["..:/app", "deps:/app/node_modules"];
+  compose.volumes = { deps: {} };
+  await writeFile(composeFile, YAML.stringify(compose));
+  expect(await runDetachedUp({ projectRoot })).toBe(0);
+  expect(warnMessages).toContain(
+    "localDirectories: service api already mounts /app/node_modules; that mount is kept for node_modules."
+  );
 });

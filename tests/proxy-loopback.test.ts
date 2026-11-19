@@ -844,7 +844,7 @@ test("on Linux an unresolved name gives the no-DNS curl form for the proxy's own
   expect(https?.dns).toBe("unresolved");
   expect(https?.hint).toContain("systemd-resolved");
   expect(https?.hint).toContain(
-    "curl --resolve 'hello.hack:443:127.0.0.1' 'https://hello.hack/api/health?verbose=1'"
+    "curl --noproxy 'hello.hack' --resolve 'hello.hack:443:127.0.0.1' 'https://hello.hack/api/health?verbose=1'"
   );
   expect(https?.hint).toContain("hack global trust");
   for (const [scope, target] of [
@@ -865,19 +865,19 @@ test("on Linux an unresolved name gives the no-DNS curl form for the proxy's own
   }
   const http = await miss("http://hello.hack/it's", all);
   expect(http?.hint).toContain(
-    "curl --resolve 'hello.hack:80:127.0.0.1' 'http://hello.hack/it'\\''s'"
+    "curl --noproxy 'hello.hack' --resolve 'hello.hack:80:127.0.0.1' 'http://hello.hack/it'\\''s'"
   );
   expect(http?.hint).not.toContain("hack global trust once");
   // Port 8080 is not the proxy's: no proxy command, only the DNS reason.
   const custom = await miss("http://hello.hack:8080/", all);
   expect(custom?.hint).toContain("systemd-resolved");
-  expect(custom?.hint).not.toContain("curl --resolve");
+  expect(custom?.hint).not.toContain("--resolve");
   const mac = await openUnresolvedHostWarning({
     url: "https://hello.hack",
     resolve: () => Promise.resolve("no-answer" as const),
     platform: "darwin",
   });
-  expect(mac?.hint).not.toContain("curl --resolve");
+  expect(mac?.hint).not.toContain("--resolve");
 });
 
 test("the hint's address comes from the rendered proxy file, not the setting", () => {
@@ -899,4 +899,27 @@ test("the hint's address comes from the rendered proxy file, not the setting", (
 `)
     )
   ).toBe("127.0.0.1");
+});
+
+test("the no-DNS hint names the same normalized host in --noproxy, --resolve and the URL", async () => {
+  const hint = async (url: string) =>
+    (
+      await openUnresolvedHostWarning({
+        url,
+        resolve: () => Promise.resolve("no-answer" as const),
+        platform: "linux",
+        proxyBind: () => Promise.resolve({ kind: "all" } as const),
+      })
+    )?.hint ?? "";
+  // URL parsing lowercases, punycodes and keeps a trailing dot; all three
+  // parts of the command must agree so curl bypasses the proxy for it.
+  for (const [input, host] of [
+    ["https://Hello.HACK/", "hello.hack"],
+    ["https://bücher.hack/", "xn--bcher-kva.hack"],
+    ["https://hello.hack./", "hello.hack."],
+  ] as const) {
+    expect(await hint(input)).toContain(
+      `curl --noproxy '${host}' --resolve '${host}:443:127.0.0.1' 'https://${host}/'`
+    );
+  }
 });

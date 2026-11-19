@@ -587,6 +587,20 @@ export function renderProjectConfigSchemaJson(): string {
           },
         },
       },
+      localDirectories: {
+        description:
+          "Checkout directories, relative to the project root, that services keep on the runtime's own disk instead of the shared source, for example node_modules or build output. Each service whose source bind mount covers a directory gets a volume there; the checkout's copy is left in place and hidden from containers. hack down keeps the volumes; hack down --prune-caches removes them on Compose.",
+        type: "array",
+        maxItems: 32,
+        uniqueItems: true,
+        items: {
+          type: "string",
+          minLength: 1,
+          maxLength: 256,
+          pattern:
+            "^(?!\\.git(/|$))(?!\\.hack(/|$))(?!.*(^|/)\\.\\.?(/|$))[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$",
+        },
+      },
       native: {
         type: "object",
         additionalProperties: true,

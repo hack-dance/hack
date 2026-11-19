@@ -72,6 +72,57 @@ describe("preflightComposeEngine", () => {
     expect(calls).toEqual([]);
   });
 
+  test("a docker on PATH that cannot be started is the same refusal as none", async () => {
+    for (const code of ["ENOENT", "EACCES"]) {
+      const error = await preflightComposeEngine({
+        deps: {
+          dockerOnPath: () => true,
+          run: () =>
+            Promise.reject(
+              Object.assign(new Error(`spawn docker ${code}`), { code })
+            ),
+        },
+      });
+      expect(error?.code).toBe("E_DOCKER_UNAVAILABLE");
+      expect(error?.message).toContain("no `docker` command");
+    }
+    // The same holds when docker goes away after the first read succeeds.
+    const later = await preflightComposeEngine({
+      deps: {
+        dockerOnPath: () => true,
+        run: (argv) =>
+          argv[1] === "compose"
+            ? Promise.reject(
+                Object.assign(new Error("spawn docker ENOENT"), {
+                  code: "ENOENT",
+                })
+              )
+            : Promise.resolve(ok),
+      },
+    });
+    expect(later?.code).toBe("E_DOCKER_UNAVAILABLE");
+    const network = await preflightSharedNetworks({
+      composeYaml: HELLO,
+      selection: ALL,
+      deps: {
+        run: () =>
+          Promise.reject(
+            Object.assign(new Error("spawn docker EACCES"), { code: "EACCES" })
+          ),
+      },
+    });
+    expect(network?.code).toBe("E_DOCKER_UNAVAILABLE");
+    // Any other failure is not diagnosed as a missing CLI.
+    await expect(
+      preflightComposeEngine({
+        deps: {
+          dockerOnPath: () => true,
+          run: () => Promise.reject(new Error("unexpected")),
+        },
+      })
+    ).rejects.toThrow("unexpected");
+  });
+
   test("a denied socket is E_PERMISSION before Compose runs", async () => {
     const { deps, calls } = fakeDocker({
       "docker version": {

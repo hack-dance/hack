@@ -30,6 +30,7 @@ const DEV_REPORT_ONLY = new Set([
   "emulated services",
   "shared volume architectures",
   "dev image tags",
+  "shared source installs",
 ]);
 const PROJECT_AREAS: Readonly<Record<string, DoctorArea>> = {
   "browser local network": "routing_dns",
@@ -64,6 +65,7 @@ const PROJECT_AREAS: Readonly<Record<string, DoctorArea>> = {
   "polling watchers": "engine",
   "shared volume architectures": "engine",
   "dev image tags": "project_files",
+  "shared source installs": "project_files",
 };
 const MACHINE_AREAS: Readonly<Record<string, DoctorArea>> = {
   bun: "engine",
@@ -100,6 +102,7 @@ const MACHINE_AREAS: Readonly<Record<string, DoctorArea>> = {
   "native ca repair": "certificates",
   "native hack.local route": "routing_dns",
   "native hack.local repair": "routing_dns",
+  "native pool idle": "native",
 };
 
 /** Closed IDs and prefixes only; never parse executable instructions from diagnostic text. */

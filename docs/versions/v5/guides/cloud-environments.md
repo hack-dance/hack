@@ -18,8 +18,8 @@ Each page says at the top whether it was run, when, and with which build.
 
 | Environment | Status | Page |
 | --- | --- | --- |
-| Any Linux machine with Docker | Verified 2026-11-19 (`next` at `95ea63e497`) | [Any Linux machine with Docker](cloud-linux-docker.md) |
-| Dev containers (local) | Verified 2026-11-19 (`next` at `95ea63e497`) | [Codespaces and dev containers](cloud-dev-containers.md) |
+| Any Linux machine with Docker | Verified 2026-11-19 (`next` at `6447491b33`) | [Any Linux machine with Docker](cloud-linux-docker.md) |
+| Dev containers (local) | Verified 2026-11-19 (`next` at `6447491b33`) | [Codespaces and dev containers](cloud-dev-containers.md) |
 | GitHub Codespaces | Not run yet | [Codespaces and dev containers](cloud-dev-containers.md) |
 | Claude Code on the web | Not run yet | [Claude Code on the web](cloud-claude-code.md) |
 | Cursor cloud agents | Not run yet | [Cursor cloud agents](cloud-cursor.md) |
@@ -72,14 +72,12 @@ proxy answers on this machine's ports 80 and 443. `hack open` then warns and
 prints the address with a command that needs no DNS, for example:
 
 ```sh
-curl --resolve 'hello.hack:443:127.0.0.1' 'https://hello.hack/'
+curl --noproxy 'hello.hack' --resolve 'hello.hack:443:127.0.0.1' 'https://hello.hack/'
 ```
 
-Where the environment sets an HTTPS proxy (`HTTPS_PROXY`, common in sandboxes),
-add `--noproxy hello.hack` so curl sends the request to this machine and not to
-the proxy.
-
-The command sends the request to the address the proxy publishes on, read from
+The command sends the request to the address the proxy publishes on, and
+`--noproxy` keeps an inherited HTTPS proxy (common in sandboxes) out of it. The
+address is read from
 Hack's proxy Compose file (`~/.hack/caddy/docker-compose.yml`): loopback by
 default, or the address `proxy.bind_address` had when `hack global install`
 last rendered that file. When the file cannot be read, the hint shows

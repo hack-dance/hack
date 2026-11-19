@@ -1,6 +1,6 @@
 # Any Linux machine with Docker
 
-> **Verified on 2026-11-19** with `hack` built from `next` at `95ea63e497`, in
+> **Verified on 2026-11-19** with `hack` built from `next` at `6447491b33`, in
 > a fresh Ubuntu 24.04 x86_64 container: a user without sudo, a private Docker
 > Engine 29.1.3 with Compose 2.40.3, and a project with one encrypted value.
 > The commands below ran as written, except step 1, which copied in the built
@@ -77,7 +77,7 @@ curl --noproxy hello.hack --resolve hello.hack:443:127.0.0.1 -k https://hello.ha
 
 You should see your app's page. `--noproxy` keeps an inherited HTTPS proxy
 (common in sandboxes) from receiving the request instead of this machine. In the verified run, the first `global install`
-took 11 seconds and `up` took 2 seconds, with images already pulled once.
+took 33 seconds (it pulls the proxy and logging images) and `up` took 3 seconds.
 
 ## What is different from a laptop
 

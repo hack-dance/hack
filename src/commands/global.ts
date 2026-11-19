@@ -90,7 +90,9 @@ import {
 } from "../lib/fs.ts";
 import {
   containerReadableGlobalPaths,
+  describeUnreadableContainerPaths,
   ensureContainerReadable,
+  unreadableContainerPaths,
 } from "../lib/global-container-config.ts";
 import { describeProxyNetworkIssue } from "../lib/global-proxy-network.ts";
 import {
@@ -1211,19 +1213,48 @@ async function materializeGlobalInstallFiles(opts: {
   readonly useStaticIps: boolean;
 }): Promise<void> {
   await ensureGlobalInstallDirectories({ paths: opts.paths });
-  await writeGlobalInstallAssets({
+  const templates = await writeGlobalInstallAssets({
     paths: opts.paths,
     useStaticIps: opts.useStaticIps,
   });
   // After the writes, and on every install whether or not a file changed:
   // the configs that non-root containers read must not depend on the umask
-  // this run, or an earlier one, happened to have (HACK-2381).
-  await ensureContainerReadable(
+  // this run, or an earlier one, happened to have (HACK-2381). Only content
+  // that is Hack's own template is widened; a file the user customised and
+  // kept is left exactly as it is.
+  const { retained } = await ensureContainerReadable(
     containerReadableGlobalPaths({
-      ...opts.paths,
+      coreDnsConfig: {
+        path: opts.paths.coreDnsConfig,
+        template: templates.coreDnsConfig,
+      },
+      lokiConfig: {
+        path: opts.paths.lokiConfig,
+        template: templates.lokiConfig,
+      },
+      grafanaDatasource: {
+        path: opts.paths.grafanaDatasource,
+        template: templates.grafanaDatasource,
+      },
+      grafanaDashboardsProvisioning: {
+        path: opts.paths.grafanaDashboardsProvisioning,
+        template: templates.grafanaDashboardsProvisioning,
+      },
       grafanaDashboardsDir: dirname(opts.paths.grafanaDashboard),
+      grafanaDashboard: {
+        path: opts.paths.grafanaDashboard,
+        template: templates.grafanaDashboard,
+      },
     })
   );
+  if (retained.length > 0) {
+    logger.warn({
+      message: [
+        "Kept the permissions of customised global configs.",
+        describeUnreadableContainerPaths(retained),
+      ].join("\n"),
+    });
+  }
 }
 
 async function ensureGlobalInstallDirectories(opts: {
@@ -1239,10 +1270,19 @@ async function ensureGlobalInstallDirectories(opts: {
   await ensureDir(dirname(opts.paths.lokiConfig));
 }
 
+/** The rendered content of the configs non-root containers read. */
+type ContainerConfigTemplates = {
+  readonly coreDnsConfig: string;
+  readonly lokiConfig: string;
+  readonly grafanaDatasource: string;
+  readonly grafanaDashboardsProvisioning: string;
+  readonly grafanaDashboard: string;
+};
+
 async function writeGlobalInstallAssets(opts: {
   readonly paths: ReturnType<typeof getGlobalPaths>;
   readonly useStaticIps: boolean;
-}): Promise<void> {
+}): Promise<ContainerConfigTemplates> {
   const defaultDomain = await resolveDefaultDomain();
   const bind = await resolveManagedProxyBind({ path: opts.paths.caddyCompose });
   if (bind.saveError !== undefined) {
@@ -1267,12 +1307,20 @@ async function writeGlobalInstallAssets(opts: {
       }),
     });
   }
-  await writeWithPromptIfDifferent(
-    opts.paths.coreDnsConfig,
-    renderGlobalCoreDnsConfig({
+  const templates: ContainerConfigTemplates = {
+    coreDnsConfig: renderGlobalCoreDnsConfig({
       useStaticCaddyIp: opts.useStaticIps,
       defaultDomain,
-    })
+    }),
+    lokiConfig: renderGlobalLokiConfigYaml(),
+    grafanaDatasource: renderGlobalGrafanaDatasourceYaml(),
+    grafanaDashboardsProvisioning:
+      renderGlobalGrafanaDashboardsProvisioningYaml(),
+    grafanaDashboard: renderGlobalGrafanaLogsDashboardJson(),
+  };
+  await writeWithPromptIfDifferent(
+    opts.paths.coreDnsConfig,
+    templates.coreDnsConfig
   );
   await writeWithPromptIfDifferent(
     opts.paths.loggingCompose,
@@ -1282,21 +1330,18 @@ async function writeGlobalInstallAssets(opts: {
     opts.paths.alloyConfig,
     renderGlobalAlloyConfig()
   );
-  await writeWithPromptIfDifferent(
-    opts.paths.lokiConfig,
-    renderGlobalLokiConfigYaml()
-  );
+  await writeWithPromptIfDifferent(opts.paths.lokiConfig, templates.lokiConfig);
   await writeWithPromptIfDifferent(
     opts.paths.grafanaDatasource,
-    renderGlobalGrafanaDatasourceYaml()
+    templates.grafanaDatasource
   );
   await writeWithPromptIfDifferent(
     opts.paths.grafanaDashboardsProvisioning,
-    renderGlobalGrafanaDashboardsProvisioningYaml()
+    templates.grafanaDashboardsProvisioning
   );
   await writeWithPromptIfDifferent(
     opts.paths.grafanaDashboard,
-    renderGlobalGrafanaLogsDashboardJson()
+    templates.grafanaDashboard
   );
   await writeWithPromptIfDifferent(
     opts.paths.configSchema,
@@ -1314,6 +1359,7 @@ async function writeGlobalInstallAssets(opts: {
     opts.paths.branchesSchema,
     renderProjectBranchesSchemaJson()
   );
+  return templates;
 }
 
 /** Returns `false` only when a confirmed host step failed (exit non-zero). */
@@ -1971,10 +2017,23 @@ async function globalContainersNotRunning(opts: {
   if (stopped.length === 0) {
     return false;
   }
+  // The usual cause on Linux: a config the container's user cannot read.
+  // Named by mode alone; nothing is read or changed here.
+  const paths = getGlobalPaths();
+  const unreadable = await unreadableContainerPaths([
+    { path: paths.coreDnsConfig, kind: "file" },
+    { path: paths.lokiConfig, kind: "file" },
+    { path: paths.grafanaDatasource, kind: "file" },
+    { path: paths.grafanaDashboardsProvisioning, kind: "file" },
+    { path: dirname(paths.grafanaDashboard), kind: "directory" },
+    { path: paths.grafanaDashboard, kind: "file" },
+  ]);
   logger.error({
     message: [
       describeContainersNotRunning({ stack: opts.stack, containers: stopped }),
-      'If a log says "permission denied" for a file under ~/.hack, run: hack global install (it resets the modes of the configs containers read).',
+      ...(unreadable.length > 0
+        ? [describeUnreadableContainerPaths(unreadable)]
+        : []),
     ].join("\n"),
   });
   return true;

@@ -26,7 +26,9 @@ logging stack is not running a moment after it started (for example CoreDNS,
 Loki or Grafana, which do not run as root and stop with `permission denied` when
 they cannot read their config under `~/.hack`). Each install sets the few configs
 those containers read to 0644, and the Grafana dashboards directory to 0755,
-whatever your umask; nothing secret is among them. See
+whatever your umask, as long as they still hold Hack's own content, which has
+nothing secret in it. A config you customised keeps its permissions; if its
+container cannot read it, the error names the file and the `chmod` to run. See
 [troubleshooting](../versions/v5/troubleshooting.md).
 
 ## DNS

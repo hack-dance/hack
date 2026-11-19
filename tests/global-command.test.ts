@@ -1095,12 +1095,24 @@ function globalCaddyComposePath(): string {
 }
 
 /** Runs `hack global install` with no terminal, capturing stdout and stderr. */
-async function runNonInteractiveInstall(): Promise<{
+async function runNonInteractiveInstall(
+  opts: {
+    /** Leave HACK_NO_INTERACTIVE unset, so a prompt is a real question. */
+    readonly interactive?: boolean;
+    /** The answer to "Overwrite existing file?" (default: no). */
+    readonly overwrite?: boolean;
+  } = {}
+): Promise<{
   readonly code: number;
   readonly output: string;
 }> {
+  const overwrite = opts.overwrite === true;
   const saved = process.env.HACK_NO_INTERACTIVE;
-  process.env.HACK_NO_INTERACTIVE = "1";
+  if (opts.interactive === true) {
+    Reflect.deleteProperty(process.env, "HACK_NO_INTERACTIVE");
+  } else {
+    process.env.HACK_NO_INTERACTIVE = "1";
+  }
   process.env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
   const chunks: string[] = [];
   const capture = (chunk: string | Uint8Array) => {
@@ -1115,7 +1127,7 @@ async function runNonInteractiveInstall(): Promise<{
       if (String(opts.message).includes(GLOBAL_CADDY_COMPOSE_FILENAME)) {
         throw new Error("The proxy Compose file must not prompt");
       }
-      return false;
+      return overwrite;
     }
   );
   try {
@@ -1690,4 +1702,65 @@ test(
     }
   },
   { timeout: 30_000 }
+);
+
+test(
+  "global install never widens a customised config: it keeps mode 600 when the overwrite is declined, interactively or not (HACK-2381)",
+  async () => {
+    await writeInstallStubs();
+    const { stat } = await import("node:fs/promises");
+    const mode = async (path: string) => (await stat(path)).mode & 0o777;
+    const loggingDir = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_LOGGING_DIR_NAME
+    );
+    const datasource = join(
+      loggingDir,
+      "grafana/provisioning/datasources/hack-datasources.yaml"
+    );
+    const loki = join(loggingDir, "loki.yaml");
+    const previous = process.umask(0o077);
+    try {
+      expect((await runNonInteractiveInstall()).code).toBe(0);
+      const template = readFileSync(datasource, "utf8");
+      // The user edits the datasource, adds credentials and keeps it private.
+      const custom = `${template}    basicAuth: true\n    secureJsonData:\n      basicAuthPassword: hunter2\n`;
+      for (const interactive of [false, true]) {
+        await writeFile(datasource, custom);
+        await chmod(datasource, 0o600);
+        // A template file left tight by an earlier run, for contrast.
+        await chmod(loki, 0o600);
+        const { code, output } = await runNonInteractiveInstall({
+          interactive,
+        });
+        expect(code).toBe(0);
+        // Declined: content kept, and so are its permissions.
+        expect(readFileSync(datasource, "utf8")).toBe(custom);
+        expect([interactive, await mode(datasource)]).toEqual([
+          interactive,
+          0o600,
+        ]);
+        expect(output).toContain(
+          "Kept the permissions of customised global configs."
+        );
+        expect(output).toContain(`${datasource} (mode 600)`);
+        expect(output).toContain(`chmod 644 ${datasource}`);
+        // The template file beside it is still repaired.
+        expect(await mode(loki)).toBe(0o644);
+      }
+      // Approving the overwrite makes it Hack's content again, and readable.
+      const approved = await runNonInteractiveInstall({
+        interactive: true,
+        overwrite: true,
+      });
+      expect(approved.code).toBe(0);
+      expect(readFileSync(datasource, "utf8")).toBe(template);
+      expect(await mode(datasource)).toBe(0o644);
+      expect(approved.output).not.toContain("Kept the permissions");
+    } finally {
+      process.umask(previous);
+    }
+  },
+  { timeout: 60_000 }
 );

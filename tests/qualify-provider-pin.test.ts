@@ -18,6 +18,7 @@ import { join, resolve } from "node:path";
 import {
   activeFields,
   BLOB_SHA256,
+  caddyProblem,
   compose,
   contentDigest,
   DEPENDENCY_SERVER,
@@ -173,14 +174,40 @@ describe("provider pin qualification", () => {
         "go together"
       );
     }
-    expect(() =>
-      parseOptions([
-        ...required,
-        ...https.slice(0, 3),
-        "ABC",
-        ...https.slice(4),
-      ])
-    ).toThrow("--caddy-sha256");
+    for (const bad of ["ABC", "A".repeat(64), "a".repeat(63)]) {
+      expect(() =>
+        parseOptions([
+          ...required,
+          ...https.slice(0, 3),
+          bad,
+          ...https.slice(4),
+        ])
+      ).toThrow("--caddy-sha256");
+    }
+    for (const port of ["80", "65536"]) {
+      expect(() =>
+        parseOptions([...required, ...https.slice(0, 5), port])
+      ).toThrow("--https-port");
+    }
+    // A run checks the pin against the binary before any work.
+    const root = mkdtempSync(join(tmpdir(), "hack-qualify-caddy-"));
+    try {
+      const binary = join(root, "caddy");
+      writeFileSync(binary, "synthetic caddy");
+      const actual = createHash("sha256")
+        .update("synthetic caddy")
+        .digest("hex");
+      expect(caddyProblem({ caddy: binary, caddySha256: actual })).toBeNull();
+      expect(caddyProblem({ caddy: binary, caddySha256: sha })).toContain(
+        "does not match"
+      );
+      expect(
+        caddyProblem({ caddy: join(root, "absent"), caddySha256: sha })
+      ).toContain("Missing");
+      expect(caddyProblem({ caddy: null, caddySha256: null })).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("a preview changes nothing and a run refuses off Apple Silicon macOS", async () => {

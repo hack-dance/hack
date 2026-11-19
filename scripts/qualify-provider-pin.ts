@@ -535,6 +535,29 @@ function httpsOptions(
   return { caddy, caddySha256, httpsPort };
 }
 
+/**
+ * Whether the selected Caddy binary is missing or its SHA-256 differs from
+ * `--caddy-sha256`. Checked before a run does any work, so a wrong pin fails in seconds
+ * rather than at the CLI's own check after preparation. `null` when HTTPS is not selected
+ * or the binary matches.
+ */
+export function caddyProblem(
+  options: Pick<Options, "caddy" | "caddySha256">
+): string | null {
+  if (options.caddy === null || options.caddySha256 === null) {
+    return null;
+  }
+  if (!existsSync(options.caddy)) {
+    return `Missing ${options.caddy}.`;
+  }
+  const actual = createHash("sha256")
+    .update(readFileSync(options.caddy))
+    .digest("hex");
+  return actual === options.caddySha256
+    ? null
+    : `--caddy-sha256 does not match ${options.caddy} (its SHA-256 is ${actual}).`;
+}
+
 /** Parse and validate arguments; throws with a usage line on any problem. */
 export function parseOptions(argv: string[]): Options {
   const values = new Map<string, string[]>();
@@ -2917,6 +2940,14 @@ export async function main(argv: string[]): Promise<number> {
       amd64: options.amd64Image,
     },
     approved_hosts: options.approvedHosts,
+    https:
+      options.caddy === null
+        ? null
+        : {
+            caddy: options.caddy,
+            caddy_sha256: options.caddySha256,
+            port: options.httpsPort,
+          },
     idle_minutes: options.idleMinutes,
     sequence: [
       "1 archive",
@@ -2963,6 +2994,11 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (problem) {
     console.error(problem);
+    return 64;
+  }
+  const caddy = caddyProblem(options);
+  if (caddy) {
+    console.error(caddy);
     return 64;
   }
   return await new Qualification(options).run();

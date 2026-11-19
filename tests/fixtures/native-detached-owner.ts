@@ -6,15 +6,19 @@ import {
   retainNativeRuntimeFailure,
 } from "../../src/backends/native-runtime-client.ts";
 import { handleRunCliError } from "../../src/cli/run.ts";
-import { ClosedCliError } from "../../src/lib/cli-result.ts";
+import { ClosedCliError, HackCliError } from "../../src/lib/cli-result.ts";
 import {
   nativeDetachedUpBranchDropped,
   nativeDetachedUpFailedServices,
   nativeDetachedUpFailure,
+  nativeDetachedUpHookFailed,
+  nativeDetachedUpPrestart,
   nativeDetachedUpProfileNotice,
+  nativeDetachedUpProgress,
   nativeDetachedUpReady,
   nativeDetachedUpShellVariables,
   runNativeDetachedOwner,
+  setNativeDetachedHeartbeatIntervalForTests,
   startNativeDetachedUp,
 } from "../../src/lib/native-detached-up.ts";
 
@@ -49,6 +53,172 @@ function publishFixtureBranchDropped(fixtureMode: string): void {
       count: 2,
     });
   }
+}
+
+/** HACK-2351 modes: phase reports against short launcher limits. */
+const DEADLINE_MODES = ["slow-images", "slow-runtime", "images-ceiling"];
+
+/** The launcher's limits for a fixture mode. */
+function fixtureLimits(fixtureMode: string) {
+  if (fixtureMode === "images-ceiling") {
+    return { budgetMs: 1000, ceilingMs: 2000 };
+  }
+  if (["timeout", "late-ready", ...DEADLINE_MODES].includes(fixtureMode)) {
+    return {
+      budgetMs: 1000,
+      ceilingMs:
+        fixtureMode === "timeout" || fixtureMode === "late-ready"
+          ? 1000
+          : 10_000,
+    };
+  }
+  return { budgetMs: 10_000, ceilingMs: 10_000 };
+}
+
+/**
+ * HACK-2351: report startup phases as native up does. `slow-images` builds
+ * for longer than the launcher's budget with heartbeats, then continues;
+ * `slow-runtime` stalls before image work; `images-ceiling` builds forever.
+ */
+async function reportFixturePhases(fixtureMode: string): Promise<void> {
+  if (!DEADLINE_MODES.includes(fixtureMode)) {
+    return;
+  }
+  setNativeDetachedHeartbeatIntervalForTests(100);
+  nativeDetachedUpProgress("input");
+  nativeDetachedUpProgress("runtime");
+  if (fixtureMode === "slow-runtime") {
+    return;
+  }
+  nativeDetachedUpProgress("images");
+  if (fixtureMode === "slow-images") {
+    await Bun.sleep(2500);
+    nativeDetachedUpProgress("services");
+  }
+}
+
+/** HACK-2339 modes whose owner fails before VM work. */
+const PRESTART_MODES = [
+  "prestart-refusal",
+  "prestart-after-runtime",
+  "prestart-plain-error",
+  "prestart-long",
+  "prestart-hook-long-line",
+  "prestart-persistent-hook",
+];
+
+/**
+ * A closed refusal longer than any one terminal line, like a source-size
+ * list; tests/native-detached-up.test.ts repeats it.
+ */
+const PRESTART_LONG_MESSAGE = `Selected source is too large. ${"assets/deeply/nested/".repeat(2100)}`;
+
+/** Run a real lifecycle phase in this owner, as native up's before hooks do. */
+async function runFixtureHooks(
+  fixtureMode: string,
+  fixtureRoot: string
+): Promise<void> {
+  const { runLifecycleCommands } = await import(
+    "../../src/commands/project.ts"
+  );
+  await runLifecycleCommands({
+    title: "Lifecycle (native up before)",
+    commands: [
+      fixtureMode === "prestart-persistent-hook"
+        ? { name: "session", command: "run-session", persistent: true }
+        : {
+            name: "seed-check",
+            command:
+              "head -c 3000000 /dev/zero | tr '\\000' x; echo; printf 'last line\\n'; exit 3",
+          },
+    ],
+    projectRoot: fixtureRoot,
+    env: {},
+    projectDir: join(fixtureRoot, ".hack"),
+    composeProject: "fixture",
+    onPersistentCommand: () =>
+      Promise.reject(new Error("Lifecycle session could not start.")),
+  });
+}
+
+/**
+ * HACK-2339: a refusal before VM work crosses as the foreground prints it;
+ * after VM work starts, or for any other error, it does not.
+ */
+async function publishFixturePrestartFailure(
+  fixtureMode: string,
+  fixtureRoot: string
+) {
+  if (!PRESTART_MODES.includes(fixtureMode)) {
+    return;
+  }
+  nativeDetachedUpPrestart(true);
+  if (fixtureMode === "prestart-long") {
+    await nativeDetachedUpFailure(
+      new HackCliError({
+        code: "E_NATIVE_PROJECT_UNSUPPORTED",
+        message: PRESTART_LONG_MESSAGE,
+      })
+    );
+    return;
+  }
+  if (
+    fixtureMode === "prestart-hook-long-line" ||
+    fixtureMode === "prestart-persistent-hook"
+  ) {
+    await runFixtureHooks(fixtureMode, fixtureRoot);
+    await nativeDetachedUpFailure(
+      new HackCliError({
+        code: "E_LIFECYCLE_FAILED",
+        message:
+          "Lifecycle (native up before) failed (exit 3); values omitted.",
+      })
+    );
+    return;
+  }
+  nativeDetachedUpHookFailed({
+    step: "Lifecycle (native up before): seed-check: ./seed.sh",
+    output: ["\u001b[31mred hook line\u001b[0m", "x".repeat(600)],
+    failure:
+      "Lifecycle (native up before) failed (exit 3): seed-check: ./seed.sh",
+  });
+  if (fixtureMode === "prestart-after-runtime") {
+    nativeDetachedUpPrestart(false);
+  }
+  await nativeDetachedUpFailure(
+    fixtureMode === "prestart-plain-error"
+      ? new Error("synthetic-private-value")
+      : new HackCliError({
+          code: "E_LIFECYCLE_FAILED",
+          message:
+            "Lifecycle (native up before) failed (exit 3); values omitted.",
+        })
+  );
+}
+
+/** Malformed pre-VM refusals the launcher must ignore. */
+function sendUnsafePrestartRefusals(fixtureMode: string): void {
+  if (fixtureMode !== "unsafe-prestart-refusal") {
+    return;
+  }
+  for (const data of [
+    { error: "hack", code: "E_NOT_A_CODE", message: "m" },
+    { error: "hack", message: "missing code" },
+    { error: "closed", code: "E_USAGE", message: "closed with code" },
+    { error: "hack", code: "E_USAGE", message: "bad\u001b[2Jcontrol" },
+    { error: "hack", code: "E_USAGE", message: "p".repeat(64 * 1024 + 1) },
+    { error: "hack", code: "E_USAGE", message: "m", extra: "x" },
+    { error: "hack", code: "E_USAGE", message: "m", hook: ["a\nb"] },
+    { error: "hack", code: "E_USAGE", message: "m", hook: [] },
+    { error: "other", message: "m" },
+  ]) {
+    process.send?.({ kind: "prestart-refusal", data });
+  }
+  process.send?.({
+    kind: "prestart-refusal",
+    data: { error: "hack", code: "E_USAGE", message: "m" },
+    extra: true,
+  });
 }
 
 const [role, root, mode] = Bun.argv.slice(2);
@@ -164,6 +334,13 @@ if (role === "channel-holder") {
   server.stop(true);
   await publish(join(root, "holder-stopped"), "stopped");
 } else if (role === "launcher") {
+  // HACK-2339: a failed hook's lines are written only to a terminal stderr.
+  if (process.env.FIXTURE_STDERR_TERMINAL === "1") {
+    Object.defineProperty(process.stderr, "isTTY", {
+      value: true,
+      configurable: true,
+    });
+  }
   const restore =
     mode === "held-channel"
       ? deferChannelClosure()
@@ -183,7 +360,9 @@ if (role === "channel-holder") {
         root,
         mode,
       ],
-      timeoutMs: ["timeout", "late-ready"].includes(mode) ? 1000 : 10_000,
+      limits: fixtureLimits(mode),
+      heartbeatStaleMs: 400,
+      unwindMs: 3000,
     });
   } catch (error) {
     process.exitCode = [
@@ -194,6 +373,14 @@ if (role === "channel-holder") {
       "immediate-failure",
       "exit-first-failure",
       "failed-services",
+      "prestart-refusal",
+      "prestart-after-runtime",
+      "prestart-plain-error",
+      "prestart-long",
+      "prestart-hook-long-line",
+      "prestart-persistent-hook",
+      "slow-runtime",
+      "images-ceiling",
     ].includes(mode)
       ? await handleRunCliError({ error, jsonRequested: true })
       : 1;
@@ -265,7 +452,15 @@ if (role === "channel-holder") {
             : failure
         );
       }
-      if (["fail", "provider-pin", "wrapped-provider-pin"].includes(mode)) {
+      await publishFixturePrestartFailure(mode, root);
+      if (
+        [
+          ...PRESTART_MODES,
+          "fail",
+          "provider-pin",
+          "wrapped-provider-pin",
+        ].includes(mode)
+      ) {
         server.stop(true);
         process.off("SIGTERM", terminate);
         return 1;
@@ -384,8 +579,10 @@ if (role === "channel-holder") {
         // handoff, with the real owner handler still processing that accept.
         process.prependListener("message", cancelAtAccept);
       }
+      await reportFixturePhases(mode);
       publishFixtureProfileNotice(mode);
       publishFixtureBranchDropped(mode);
+      sendUnsafePrestartRefusals(mode);
       if (
         [
           "ready",
@@ -397,6 +594,8 @@ if (role === "channel-holder") {
           "shell-names-empty",
           "shell-names-root-dotenv",
           "unsafe-failure",
+          "unsafe-prestart-refusal",
+          "slow-images",
         ].includes(mode)
       ) {
         notifyReady();

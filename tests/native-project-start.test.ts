@@ -1487,6 +1487,8 @@ test("foreground reports progress, one ready line after publication, and the sto
     "input",
     "runtime",
     "images",
+    // HACK-2351: image work ends here; a detached launcher counts again.
+    "plan",
     "services:web",
     "ready:web",
     "stopping",

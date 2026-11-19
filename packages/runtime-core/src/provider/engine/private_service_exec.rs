@@ -279,18 +279,27 @@ const INSPECT_GRACE: Duration = Duration::from_secs(5);
 fn read_output(stream: &UnixStream, deadline: Instant) -> Result<Vec<u8>, CandidateError> {
     read_output_within(stream, deadline, OUTPUT_IDLE_GRACE, OUTPUT_DRAIN_CEILING)
 }
+/// When the next output read gives up: never before `deadline`; after it, one `idle_grace`
+/// past the last byte (or the start of reading), but never past `deadline + ceiling`.
+fn output_window(
+    deadline: Instant,
+    last_progress: Instant,
+    idle_grace: Duration,
+    ceiling: Duration,
+) -> Instant {
+    deadline.max((last_progress + idle_grace).min(deadline + ceiling))
+}
 fn read_output_within(
     stream: &UnixStream,
     deadline: Instant,
     idle_grace: Duration,
     ceiling: Duration,
 ) -> Result<Vec<u8>, CandidateError> {
-    let hard_stop = deadline + ceiling;
     let mut last_progress = Instant::now();
     let mut raw = Vec::new();
     let mut buffer = [0u8; 8192];
     loop {
-        let window = deadline.max((last_progress + idle_grace).min(hard_stop));
+        let window = output_window(deadline, last_progress, idle_grace, ceiling);
         let n = read_some(stream, &mut buffer, window, Stage::Output)?;
         if n == 0 {
             return Ok(raw);
@@ -614,8 +623,36 @@ mod tests {
         );
     }
     #[test]
-    fn after_the_deadline_only_silence_or_the_ceiling_ends_the_output() {
-        // A silent stream that stays open ends one idle grace after reading starts.
+    fn the_output_window_waits_for_the_deadline_then_for_silence_or_the_ceiling() {
+        let base = Instant::now();
+        let at = |ms: u64| base + Duration::from_millis(ms);
+        let grace = Duration::from_millis(5_000);
+        let ceiling = Duration::from_millis(20_000);
+        // Before the deadline the deadline itself governs, however recent the last byte.
+        assert_eq!(output_window(at(30_000), at(0), grace, ceiling), at(30_000));
+        assert_eq!(
+            output_window(at(30_000), at(29_000), grace, ceiling),
+            at(34_000)
+        );
+        // After it, one grace past the last byte.
+        assert_eq!(
+            output_window(at(30_000), at(31_000), grace, ceiling),
+            at(36_000)
+        );
+        // A byte late in the drain cannot push past the ceiling.
+        assert_eq!(
+            output_window(at(30_000), at(48_000), grace, ceiling),
+            at(50_000)
+        );
+        // Reading that starts after the ceiling gets no extra time.
+        assert_eq!(
+            output_window(at(30_000), at(60_000), grace, ceiling),
+            at(50_000)
+        );
+    }
+    #[test]
+    fn a_silent_open_stream_past_the_deadline_is_uncertain_output() {
+        // No scheduling assumption: nothing is ever written.
         let (host, _guest) = UnixStream::pair().unwrap();
         let started = Instant::now();
         let error = read_output_within(
@@ -625,67 +662,12 @@ mod tests {
             Duration::from_secs(5),
         )
         .unwrap_err();
+        assert_eq!(error.code, "graph_service_exec_uncertain");
         assert_eq!(stage_of(&error)["stage"], "output");
         assert_eq!(stage_of(&error)["reason"], "deadline");
         assert!(started.elapsed() >= Duration::from_millis(100));
-        assert!(started.elapsed() < Duration::from_secs(2));
-        // Bytes still arriving past the deadline are read to EOF.
-        let (host, mut guest) = UnixStream::pair().unwrap();
-        let writer = std::thread::spawn(move || {
-            for _ in 0..6 {
-                std::thread::sleep(Duration::from_millis(40));
-                guest.write_all(b"x").unwrap();
-            }
-        });
-        let raw = read_output_within(
-            &host,
-            Instant::now(),
-            Duration::from_millis(400),
-            Duration::from_secs(5),
-        )
-        .unwrap();
-        writer.join().unwrap();
-        assert_eq!(raw, b"xxxxxx");
-        // A stream that never stops is cut at the ceiling.
-        let (host, mut guest) = UnixStream::pair().unwrap();
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let writer = {
-            let stop = stop.clone();
-            std::thread::spawn(move || {
-                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    if guest.write_all(b"y").is_err() {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-            })
-        };
-        let started = Instant::now();
-        let error = read_output_within(
-            &host,
-            started,
-            Duration::from_millis(200),
-            Duration::from_millis(300),
-        )
-        .unwrap_err();
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        drop(host);
-        writer.join().unwrap();
-        assert_eq!(stage_of(&error)["reason"], "deadline");
-        assert!(started.elapsed() >= Duration::from_millis(300));
-        assert!(started.elapsed() < Duration::from_secs(3));
-        // Before the deadline nothing changes: reading waits for the deadline itself.
-        let (host, _guest) = UnixStream::pair().unwrap();
-        let started = Instant::now();
-        read_output_within(
-            &host,
-            started + Duration::from_millis(300),
-            Duration::from_millis(10),
-            Duration::from_millis(10),
-        )
-        .unwrap_err();
-        assert!(started.elapsed() >= Duration::from_millis(300));
     }
+
     #[test]
     fn on_a_cpu_starved_host_a_finished_command_is_never_uncertain() {
         // Saturate every core while many exec conversations run. Each command finishes

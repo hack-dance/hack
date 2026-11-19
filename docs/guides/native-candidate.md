@@ -1395,7 +1395,12 @@ code. Retained exec output is limited to 1 MiB per stream.
 Exec is noninteractive: stdin is closed, no TTY is allocated, and arguments are passed
 literally without an implicit shell. The default wait is 30 seconds, configurable up
 to 120 with `--timeout-seconds`. Timeout or transport failure means completion is
-uncertain: the command may still run, and Hack does not replay it. Exec inherits the container's static environment. When the selected service has a
+uncertain: the command may still run, and Hack does not replay it. An exec that delivers
+fresh per-command values names the step that failed (`create`, `connect`, `start`, `hello`,
+`deliver`, `release`, `output` or `inspect`) and why (`deadline`, `closed`, `io` or
+`protocol`). A failure before the last value byte is sent cannot have run the command: it
+reports `graph_service_exec_not_run` and is safe to retry. From `release` on, the command may
+have run, and the error stays `graph_service_exec_uncertain`. Exec inherits the container's static environment. When the selected service has a
 committed private environment attachment on the current boot, it reuses that
 service's exact read-only launcher mounts and original expiry. No values are copied
 into engine metadata, and exec never renews credentials. With the current launcher,

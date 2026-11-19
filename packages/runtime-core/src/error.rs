@@ -192,6 +192,16 @@ pub struct BridgeSocketsDiagnostic {
     pub budget_seconds: u16,
 }
 
+/// Which step of a private service exec failed and why, from closed vocabularies, and
+/// whether the command can have run. Never carries argv, values or output.
+#[derive(Debug, Serialize)]
+pub struct ExecStageDiagnostic {
+    pub version: u8,
+    pub stage: &'static str,
+    pub reason: &'static str,
+    pub command_may_have_run: bool,
+}
+
 /// Value-free refusal locations, boxed together so every
 /// `Result<_, CandidateError>` stays small; serialized flat as
 /// `process_refusals`, `plan_change` and `route_probe`.
@@ -203,6 +213,8 @@ pub struct RefusalDiagnostics {
     pub state_component: Option<StateComponentDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bridge_sockets: Option<BridgeSocketsDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec_stage: Option<ExecStageDiagnostic>,
     /// File-only explanations. Every sentence and field is a compile-time literal;
     /// only validated service names come from the project. Never contains values.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -342,6 +354,22 @@ impl CandidateError {
 
     /// Carry one state path, relative to the state root (see [`StateComponentDiagnostic`]).
     /// A label outside the bounded path grammar is dropped, never escaped.
+    /// Carry the failed private exec step (see [`ExecStageDiagnostic`]).
+    pub fn with_exec_stage(
+        mut self,
+        stage: &'static str,
+        reason: &'static str,
+        command_may_have_run: bool,
+    ) -> Self {
+        self.refusals.get_or_insert_default().exec_stage = Some(ExecStageDiagnostic {
+            version: 1,
+            stage,
+            reason,
+            command_may_have_run,
+        });
+        self
+    }
+
     pub fn with_state_component(mut self, path: &str) -> Self {
         if !path.is_empty()
             && path.len() <= 240

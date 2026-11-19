@@ -375,7 +375,7 @@ import {
   parseOpenHostPreference,
   resolvePreferredOpenHost,
 } from "../lib/open-host.ts";
-import { openUrl } from "../lib/os.ts";
+import { openUrl, urlOpenerAvailable } from "../lib/os.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -12029,6 +12029,7 @@ export async function emitOpenOrigin(opts: {
   readonly origin: "compose" | "native";
   readonly checkLoopback?: typeof openProxyLoopbackWarning;
   readonly checkResolution?: typeof openUnresolvedHostWarning;
+  readonly openerAvailable?: () => boolean;
 }): Promise<number> {
   const warning =
     opts.origin === "compose"
@@ -12060,6 +12061,19 @@ export async function emitOpenOrigin(opts: {
       )}\n`
     );
     noteBrowserTargetsForLocalNetworkHint([opts.url]);
+    return 0;
+  }
+  if (!(opts.openerAvailable ?? urlOpenerAvailable)()) {
+    // No desktop here (a server, container or cloud sandbox): the URL is the
+    // answer. Stdout carries only the URL, so `url=$(hack open)` works; every
+    // note goes to stderr.
+    if (unresolved) {
+      process.stderr.write(`${unresolved.hint}\n`);
+    }
+    process.stderr.write(
+      "No program to open URLs on this machine (xdg-open is not installed), so open this URL yourself.\n"
+    );
+    process.stdout.write(`${opts.url}\n`);
     return 0;
   }
   if (unresolved) {

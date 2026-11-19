@@ -1604,6 +1604,61 @@ bunTest(
 );
 
 bunTest(
+  "HACK-2357: private exec failures name the step and say whether the command can have run",
+  () => {
+    const notRun =
+      "Private exec stopped before the command ran, so it had no effects. No request was replayed; it is safe to retry.";
+    expect(
+      nativeFailureDetail({
+        code: "graph_service_exec_not_run",
+        message: notRun,
+        message_fixed: true,
+        exec_stage: {
+          version: 1,
+          stage: "hello",
+          reason: "deadline",
+          command_may_have_run: false,
+        },
+      }).message
+    ).toBe(`${notRun} The hello step failed: the deadline passed.`);
+    const uncertain =
+      "Private exec completion is uncertain; command effects may have occurred. No request was replayed.";
+    expect(
+      nativeFailureDetail({
+        code: "graph_service_exec_uncertain",
+        message: uncertain,
+        message_fixed: true,
+        exec_stage: {
+          version: 1,
+          stage: "output",
+          reason: "closed",
+          command_may_have_run: true,
+        },
+      }).message
+    ).toBe(`${uncertain} The output step failed: the stream closed early.`);
+    const good = {
+      version: 1,
+      stage: "deliver",
+      reason: "io",
+      command_may_have_run: false,
+    };
+    for (const [code, exec] of [
+      ["graph_service_exec_not_run", { ...good, stage: "unknown" }],
+      ["graph_service_exec_not_run", { ...good, reason: "secret" }],
+      ["graph_service_exec_not_run", { ...good, version: 2 }],
+      ["graph_service_exec_not_run", { ...good, command_may_have_run: true }],
+      ["graph_service_exec_uncertain", good],
+      ["graph_service_exec_not_run", { ...good, argv: "sh -c" }],
+      ["invalid_state", good],
+    ] as const) {
+      expect(nativeFailureDetail({ code, exec_stage: exec }).message).toBe(
+        undefined
+      );
+    }
+  }
+);
+
+bunTest(
   "network diagnostics retain admitted underscore hosts and zero-attempt deadlines",
   () => {
     expect(

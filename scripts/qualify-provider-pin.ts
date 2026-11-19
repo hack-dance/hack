@@ -457,6 +457,8 @@ export interface Options {
   keepGoing: boolean;
   profile: "development" | "research";
   caddy: string | null;
+  /** The Caddy binary's SHA-256, which the CLI checks before it serves HTTPS. */
+  caddySha256: string | null;
   httpsPort: number | null;
   run: boolean;
 }
@@ -468,7 +470,7 @@ const USAGE = `Usage: bun scripts/qualify-provider-pin.ts --hack /abs/bundle/hac
   [--amd64-image repo@sha256:...] [--idle-minutes 0,3,10 | --skip-idle] \\
   [--warm-runs 5] [--warm-only] \\
   [--profile development|research] [--keep-going] \\
-  [--caddy /abs/caddy --https-port 8443] [--run]`;
+  [--caddy /abs/caddy --caddy-sha256 <hex> --https-port 8443] [--run]`;
 
 function idleMinutes(text: string): number[] {
   const idle = text.split(",").map(Number);
@@ -504,6 +506,34 @@ function profileOption(value: string): "development" | "research" {
 }
 
 const FLAGS = new Set(["--run", "--skip-idle", "--warm-only", "--keep-going"]);
+
+/**
+ * The optional native HTTPS selection. The CLI accepts it only as the binary, its SHA-256
+ * and the port together, so a partial set is refused here before anything runs.
+ */
+function httpsOptions(
+  caddy: string | null,
+  caddySha256: string | null,
+  portText: string | null
+): Pick<Options, "caddy" | "caddySha256" | "httpsPort"> {
+  const given = [caddy, caddySha256, portText].filter(
+    (value) => value !== null
+  );
+  if (given.length !== 0 && given.length !== 3) {
+    throw new Error("--caddy, --caddy-sha256 and --https-port go together.");
+  }
+  if (caddySha256 !== null && !/^[0-9a-f]{64}$/.test(caddySha256)) {
+    throw new Error("--caddy-sha256 must be 64 lowercase hex characters.");
+  }
+  const httpsPort = portText === null ? null : Number(portText);
+  if (
+    httpsPort !== null &&
+    !(Number.isInteger(httpsPort) && httpsPort >= 1024 && httpsPort <= 65_535)
+  ) {
+    throw new Error("--https-port must be an unprivileged port.");
+  }
+  return { caddy, caddySha256, httpsPort };
+}
 
 /** Parse and validate arguments; throws with a usage line on any problem. */
 export function parseOptions(argv: string[]): Options {
@@ -566,18 +596,11 @@ export function parseOptions(argv: string[]): Options {
     20
   );
   const profile = profileOption(one("--profile", false) ?? "development");
-  const caddy = absolute("--caddy", false);
-  const portText = one("--https-port", false);
-  const httpsPort = portText === null ? null : Number(portText);
-  if ((caddy === null) !== (httpsPort === null)) {
-    throw new Error("--caddy and --https-port go together.");
-  }
-  if (
-    httpsPort !== null &&
-    !(Number.isInteger(httpsPort) && httpsPort >= 1024 && httpsPort <= 65_535)
-  ) {
-    throw new Error("--https-port must be an unprivileged port.");
-  }
+  const { caddy, caddySha256, httpsPort } = httpsOptions(
+    absolute("--caddy", false),
+    one("--caddy-sha256", false),
+    one("--https-port", false)
+  );
   return {
     hack,
     bundle: dirname(hack),
@@ -599,6 +622,7 @@ export function parseOptions(argv: string[]): Options {
     keepGoing: flags.has("--keep-going"),
     profile,
     caddy,
+    caddySha256,
     httpsPort,
     run: flags.has("--run"),
   };
@@ -776,8 +800,9 @@ export class Qualification {
       HACK_NATIVE_DEPENDENCIES: join(root, "fixtures", "dependencies.json"),
       DOCKER_HOST: `unix://${join(root, "no-docker.sock")}`,
     };
-    if (options.caddy && options.httpsPort) {
+    if (options.caddy && options.caddySha256 && options.httpsPort) {
       this.env.HACK_NATIVE_CADDY_BINARY = options.caddy;
+      this.env.HACK_NATIVE_CADDY_SHA256 = options.caddySha256;
       this.env.HACK_NATIVE_HTTPS_PORT = String(options.httpsPort);
     }
   }

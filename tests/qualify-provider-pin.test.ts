@@ -43,6 +43,7 @@ import {
   terminalRuntimeErrorCode,
   warmPhases,
 } from "../scripts/qualify-provider-pin.ts";
+import { parseNativeHttpsSelection } from "../src/backends/native-project-start.ts";
 import { formatNativeStartupLogReport } from "../src/backends/native-startup-logs.ts";
 import { selectNativeComposeProject } from "../src/lib/native-compose-selection.ts";
 
@@ -135,6 +136,51 @@ describe("provider pin qualification", () => {
     expect(() => parseOptions([...required, "--caddy", "/bin/caddy"])).toThrow(
       "go together"
     );
+  });
+
+  test("HACK-2360: HTTPS options give the CLI the binary, its SHA-256 and the port together", () => {
+    const sha = "a".repeat(64);
+    const https = [
+      "--caddy",
+      "/opt/caddy",
+      "--caddy-sha256",
+      sha,
+      "--https-port",
+      "18443",
+    ];
+    const options = parseOptions([...required, ...https]);
+    expect(options).toMatchObject({
+      caddy: "/opt/caddy",
+      caddySha256: sha,
+      httpsPort: 18_443,
+    });
+    // The CLI's own parser accepts exactly what the run passes it.
+    expect(parseNativeHttpsSelection(new Qualification(options).env)).toEqual({
+      caddyBinary: "/opt/caddy",
+      caddySha256: sha,
+      httpsPort: 18_443,
+    });
+    // Without HTTPS options nothing HTTPS reaches the CLI.
+    expect(
+      parseNativeHttpsSelection(new Qualification(parseOptions(required)).env)
+    ).toBeUndefined();
+    for (const partial of [
+      ["--caddy", "/opt/caddy", "--https-port", "18443"],
+      ["--caddy-sha256", sha, "--https-port", "18443"],
+      ["--caddy", "/opt/caddy", "--caddy-sha256", sha],
+    ]) {
+      expect(() => parseOptions([...required, ...partial])).toThrow(
+        "go together"
+      );
+    }
+    expect(() =>
+      parseOptions([
+        ...required,
+        ...https.slice(0, 3),
+        "ABC",
+        ...https.slice(4),
+      ])
+    ).toThrow("--caddy-sha256");
   });
 
   test("a preview changes nothing and a run refuses off Apple Silicon macOS", async () => {

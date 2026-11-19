@@ -1800,6 +1800,8 @@ export type NativeStartupProgress =
         | "input"
         | "runtime"
         | "images"
+        /** Image work is done; review and plan work follow (detached clocks only). */
+        | "plan"
         | "all-stopped"
         | "stopping";
     }
@@ -2561,6 +2563,9 @@ async function startNativeProjectAttempt(
       signal: controller.signal,
       invoke: deps.invoke,
     });
+    // Image work is done: what follows counts against a detached start's
+    // budget again (HACK-2351).
+    progress({ phase: "plan" });
     const compose = JSON.parse(input.normalizedComposeJson);
     compose.services = specs;
     const pinned = { ...input, normalizedComposeJson: JSON.stringify(compose) };

@@ -329,3 +329,23 @@ test("the pre-launch report leaves an authored project to its own dispatcher", a
     })
   ).resolves.toBeUndefined();
 });
+
+test("an authored project with localDirectories only in hack.toml still gets the not-applied line", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "hack-native-local-dirs-authored-toml-")
+  );
+  roots.push(root);
+  await mkdir(join(root, ".hack"), { recursive: true });
+  await writeFile(join(root, ".hack", "hack.project.json"), "{}\n");
+  await writeFile(
+    join(root, ".hack", "hack.toml"),
+    'name = "authored"\nlocalDirectories = ["node_modules"]\n'
+  );
+  const lines: string[] = [];
+  await warnLocalDirectoriesNotApplied({
+    projectRoot: root,
+    kind: "authored or imported",
+    warn: (line) => lines.push(line),
+  });
+  expect(lines).toHaveLength(1);
+});

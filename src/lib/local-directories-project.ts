@@ -1,9 +1,6 @@
 import { resolve } from "node:path";
 import { YAML } from "bun";
-import {
-  HACK_PROJECT_DIR_PRIMARY,
-  PROJECT_CONFIG_FILENAME,
-} from "../constants.ts";
+import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
 import { HackCliError } from "./cli-result.ts";
 import { readTextFile } from "./fs.ts";
 import {
@@ -12,8 +9,8 @@ import {
 } from "./local-directories.ts";
 import {
   type ProjectContext,
-  parseProjectConfigRecord,
   readProjectConfig,
+  readProjectConfigFiles,
 } from "./project.ts";
 
 /**
@@ -86,22 +83,12 @@ export async function warnLocalDirectoriesNotApplied(opts: {
   readonly kind: string;
   readonly warn: (line: string) => void;
 }): Promise<void> {
-  const path = resolve(
-    opts.projectRoot,
-    HACK_PROJECT_DIR_PRIMARY,
-    PROJECT_CONFIG_FILENAME
-  );
-  const text = await readTextFile(path);
-  if (text === null) {
+  const config = await readProjectConfigFiles(
+    resolve(opts.projectRoot, HACK_PROJECT_DIR_PRIMARY)
+  ).catch(() => null);
+  if (config === null) {
     return;
   }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    return;
-  }
-  const config = parseProjectConfigRecord(raw, path);
   if (
     (config.localDirectories?.length ?? 0) > 0 ||
     config.localDirectoriesError

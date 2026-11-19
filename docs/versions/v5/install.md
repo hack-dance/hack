@@ -30,7 +30,7 @@ Download the installer from an exact release. Review it before running it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -105,8 +105,8 @@ Stop its projects with `hack down` first. For a login daemon, use that install's
   before removing `~/.hack-next`; that removes all its version-private homes too.
 
 Removing an executable does not undo host DNS/trust, project files or volumes.
-Intended for next.18: to see whether a newer release exists without changing
-anything, run `hack update --check --json --observe` through the same launcher;
+To see whether a newer release exists without changing
+anything (since next.18), run `hack update --check --json --observe` through the same launcher;
 it prints the upgrade command for this install.
 For a candidate rollback or return to stable, use
 [the full procedure](../guides/candidate-install.md#upgrade-roll-back-and-return-to-stable).

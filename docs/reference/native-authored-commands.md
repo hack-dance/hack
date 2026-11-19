@@ -738,7 +738,7 @@ workload readiness. After exact native Removed, the frontend stops its captured
 process groups before `down.after` and retires their owner only after known stop.
 Startup keeps the configured startup deadline; a running process has no added
 duration ceiling. This slice requires tmux because its existing backend supplies
-the captured group identity needed for stop; zellij remains unsupported here.
+the captured group identity needed for stop. tmux is the only multiplexer in v5.
 
 An explicit private source-version5 permit binds the frontend owner, run, project,
 branch, semantic selection and process-owner/ready documents. Ordinary standalone

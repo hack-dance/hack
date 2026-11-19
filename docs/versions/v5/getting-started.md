@@ -54,8 +54,8 @@ match your app. Check the local URL in the service's routing labels. Commit shar
 configuration, but never the project key `.hack.secret.key` or local env layers.
 [Project setup](guides/init-project.md) explains discovery and custom domains.
 
-For noninteractive setup, `hack init --auto` uses discovery defaults. In builds
-containing merged #791, intended for next.17, it warns **“No runnable service was
+For noninteractive setup, `hack init --auto` uses discovery defaults. Since next.17, it
+warns **“No runnable service was
 found”** when discovery wrote a placeholder `app` service (a Bun image running
 `bun run dev`). Set that service's image and command to how your app really starts
 before `up`. The notice does not appear for a discovered service or when you
@@ -171,8 +171,9 @@ on, and report the service in `data.interrupted` and `data.warnings`.
 
 These limits apply to detached Compose starts. Foreground `hack up` has no start
 limit. The native backend has one plain start limit,
-`HACK_COMPOSE_STARTUP_TIMEOUT_MS`. It has no one-shot ceiling and does not read
-the project settings.
+`HACK_COMPOSE_STARTUP_TIMEOUT_MS`, of at most 300000 ms (5 minutes). Native
+image builds use `HACK_COMPOSE_IMAGE_TIMEOUT_MS`. Native has no one-shot ceiling
+and does not read the project settings.
 
 A failed startup prints a reason. Read it before retrying; use
 [troubleshooting](troubleshooting.md) and `hack doctor` for setup problems.

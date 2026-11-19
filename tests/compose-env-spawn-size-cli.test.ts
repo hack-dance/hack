@@ -215,7 +215,13 @@ async function expectEnvTooLarge(up: {
   const args = await readFile(join(capture, "docker-args.log"), "utf8").catch(
     () => ""
   );
-  expect(args).not.toContain("compose");
+  // `up`'s engine preflight may ask `docker compose version`; it starts nothing.
+  const composeRuns = args
+    .split("\n")
+    .filter(
+      (line) => line.includes("compose") && line !== "compose version --short"
+    );
+  expect(composeRuns).toEqual([]);
   expect(await lstat(join(capture, "canary-vars.txt")).catch(() => null)).toBe(
     null
   );

@@ -40,7 +40,7 @@ launcher path below selects native and that version's private homes.
 
 Prepare the runtime with the same frontend, without another binary or a home argument.
 
-These frontend setup steps are intended for next.17; installed next.16 retains
+These frontend setup steps need next.17 or later; an installed next.16 keeps
 its [older setup procedure](setup.md#older-setup-only-homes).
 
 ```sh
@@ -90,7 +90,7 @@ collects the usual fixes. Do not remove a check or delete state
 to force a start. Keep the project on Compose if it needs unsupported behavior.
 See [Troubleshooting](../troubleshooting.md) and [the preflight reference](preflight.md).
 
-Env-file support intended for next.17 changes input checks and shell-default
+Env-file support (since next.17) changes input checks and shell-default
 selection. Before upgrading, read the [environment-file rules](https://github.com/hack-dance/hack/blob/9cd2053affe4f3307703e97d5bb4cd7fc3049830/docs/native/environment-files.md)
 and [migration notes](https://github.com/hack-dance/hack/blob/9cd2053affe4f3307703e97d5bb4cd7fc3049830/docs/guides/v5-release-notes.md#next17-what-changed-and-what-to-do).
 They explain which files are read, which declarations refuse and how to fix them.
@@ -109,13 +109,26 @@ If writable source sharing asks for consent, review the exact source roots and
 [sharing limits](full-reference.md#explicit-writable-development-source) before
 opting in. Check the app and saved data yourself; a running VM is not acceptance.
 
-In a build containing next.17's interactive exec, use
+Since next.17, use
 `"$CANDIDATE" exec api -- /bin/sh` from a foreground terminal for a live shell.
 Terminal stdin and stdout are required; redirects or `HACK_NO_INTERACTIVE=1`
 select finite exec. Use the matching runtime, and restart old managed-env
 launchers if requested. After an uncertain outcome, inspect
 `"$CANDIDATE" exec-sessions` and follow the
-[next.17 source recovery instructions](https://github.com/hack-dance/hack/blob/5002cf87bb50686b17ceae8a4c835f524ee1b3a5/docs/guides/native-candidate.md#normal-native-exec).
+[recovery instructions](https://github.com/hack-dance/hack/blob/5002cf87bb50686b17ceae8a4c835f524ee1b3a5/docs/guides/native-candidate.md#normal-native-exec).
+
+A detached start (`up --detach`, and `up --json`, which is always detached on
+native) waits for the background start to report ready. Image builds and loads
+do not count against its 15-minute budget while they are in progress, because
+their length depends on the project and host load; everything else does, and a
+60-minute ceiling bounds the whole start. Raise them with
+`HACK_NATIVE_DETACHED_START_TIMEOUT_MS` and `HACK_NATIVE_DETACHED_START_CEILING_MS`
+(milliseconds, at least 1000). When one runs out, `up` fails with
+`E_STARTUP_TIMEOUT`, names the phase it reached, asks the start to stop and waits
+up to two minutes for it. Run `down` next: while that start is still alive and has
+published nothing, `down` waits for it (up to two minutes) and stops what it
+published, or fails with `E_DOWN_INCOMPLETE` ("nothing was stopped") instead of
+reporting success. Then run `up --detach` again.
 
 Stop with the **same version and native home**:
 

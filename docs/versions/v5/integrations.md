@@ -8,7 +8,8 @@ backend.
 
 v5 retired automatic instruction injection. Hack no longer writes `AGENTS.md` or
 `CLAUDE.md` sections, Cursor rules, session hooks or global skill copies, and the
-old `hack setup sync` and `hack agent prime` paths refuse with a retirement notice.
+old `hack setup sync` path refuses with a retirement notice; `hack agent prime`
+only prints that notice.
 Existing customized files are left alone. Guidance now arrives through the
 plugin below, which the client's own plugin manager installs and updates.
 

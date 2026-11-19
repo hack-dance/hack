@@ -63,6 +63,19 @@ for (const version of ["v4", "v5"] as const) {
     }
     total++;
   }
+  if (version === "v5") {
+    // The homepage shows the install page's commands for the same release.
+    const prerelease = /next\.(\d+)/.exec(m.label)?.[1];
+    if (!prerelease) {
+      throw new Error("Missing v5 prerelease pin");
+    }
+    const tag = `v5.0.0-next.${prerelease}`;
+    const home = await read("/");
+    assertPinnedInstallers({ text: home, tag, source: "/" });
+    if (!home.includes(`releases/download/${tag}/hack-next-install.sh`)) {
+      throw new Error(`Homepage does not show the pinned installer: ${tag}`);
+    }
+  }
   const results = JSON.parse(
     await read(`/api/search?version=${version}&query=secrets`)
   );

@@ -49,8 +49,8 @@ hack exec --detach --json api -- npm test
 
 Start runs the same project resolution, env resolution, validation and refusals
 as the foreground command; a refusal (for example a service that is not running
-for `exec`) is reported at once and nothing is started. On the native backend
-the synchronous refusals of the foreground command (runtime selection,
+for `exec`) is reported at once and nothing is started. For a Compose-file
+project on the native backend, the synchronous refusals of the foreground command (runtime selection,
 `--env`/`--profile` for `exec`) run first; refusals that the native runtime
 makes later surface as a `failed` command. Start returns once the supervisor
 has recorded itself, which can take up to 10 seconds on a loaded machine. Flags, all only valid

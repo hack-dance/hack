@@ -95,10 +95,12 @@ What you give up today:
 - Following logs live as a verified native capability. `hack logs --follow` is
   available for testing; real-VM acceptance for authored and adopted projects
   is still pending.
-- Interactive shells in a container.
+- Interactive shells in a container on next.16 and earlier. Since next.17,
+  `hack exec SERVICE -- /bin/sh` is interactive on a terminal.
 - UDP ports.
 - Automatic restart for services that publish a port.
-- A one-command setup. Preparing the runtime is still manual.
+- Setup-free first use. Run `hack native setup` once per installed version;
+  interactive `hack up` can offer it.
 
 Use Compose if you need any of these.
 

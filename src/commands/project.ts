@@ -229,6 +229,11 @@ import {
   listComposeProjectContainers,
 } from "../lib/compose-down-confirmation.ts";
 import {
+  type ComposeEnginePreflightDeps,
+  preflightComposeEngine,
+  preflightSharedNetworks,
+} from "../lib/compose-engine-preflight.ts";
+import {
   inspectComposeEnvOverrideAtRest,
   removePlaintextComposeEnvOverride,
   writeComposeEnvOverride,
@@ -291,6 +296,7 @@ import {
   dependencyCacheBootstrapFailure,
 } from "../lib/dependency-cache-bootstrap.ts";
 import { removeDisposableCacheVolumes } from "../lib/disposable-cache-volumes.ts";
+import { dockerHelperRunEnvironment } from "../lib/docker-helper-environment.ts";
 import { parseDurationMs } from "../lib/duration.ts";
 import {
   isSlimExecutionMode,
@@ -358,6 +364,10 @@ import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
 import {
   isNativeDetachedOwnerProcess,
   nativeDetachedOwnerArgs,
+  nativeDetachedUpHookFailed,
+  nativeDetachedUpKeepsHookOutput,
+  nativeDetachedUpPrestart,
+  nativeDetachedUpProgress,
   nativeDetachedUpReady,
   startNativeDetachedUp,
 } from "../lib/native-detached-up.ts";
@@ -371,7 +381,7 @@ import {
   parseOpenHostPreference,
   resolvePreferredOpenHost,
 } from "../lib/open-host.ts";
-import { openUrl } from "../lib/os.ts";
+import { openUrl, urlOpenerAvailable } from "../lib/os.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -2298,6 +2308,8 @@ function runLifecycleChild(opts: {
   readonly signal?: AbortSignal;
   /** The hook's log sink, shared with its end record. */
   readonly sink: LifecycleLogSink;
+  /** Each output line, for a bounded tail of a failed hook's output. */
+  readonly onLine?: (line: string) => void;
 }): Promise<number> {
   const { sink } = opts;
   return runLifecycleCommandChild({
@@ -2311,6 +2323,7 @@ function runLifecycleChild(opts: {
         output: source === "stdout" ? opts.output : "stderr",
         service: opts.service,
         sink,
+        onLine: opts.onLine,
       }),
   });
 }
@@ -2363,6 +2376,12 @@ export async function runLifecycleCommands(opts: {
             ? error.message
             : `Failed to start persistent lifecycle command: ${serviceName}`;
         logger.error({ message });
+        // The lines the foreground just printed, for a detached owner (HACK-2339).
+        nativeDetachedUpHookFailed({
+          step: `${opts.title}: ${label}`,
+          output: [],
+          failure: message,
+        });
         return 1;
       }
       continue;
@@ -2391,8 +2410,10 @@ export async function runLifecycleCommands(opts: {
       stream: "meta",
       message: `[start] ${opts.title}: ${label}`,
     });
+    const tail = failedHookTail();
     const exitCode = await runLifecycleChild({
       sink,
+      onLine: tail.onLine,
       command: cmd.command,
       cwd,
       env: await mergeLifecycleCommandEnv(opts.env),
@@ -2416,13 +2437,47 @@ export async function runLifecycleCommands(opts: {
     });
 
     if (exitCode !== 0) {
-      logger.error({
-        message: `${opts.title} failed (exit ${exitCode}): ${label}`,
+      const failure = `${opts.title} failed (exit ${exitCode}): ${label}`;
+      logger.error({ message: failure });
+      nativeDetachedUpHookFailed({
+        step: `${opts.title}: ${label}`,
+        output: tail.lines,
+        failure,
       });
       return exitCode;
     }
   }
   return 0;
+}
+
+/** Output lines of a failed hook a detached native owner keeps for its launcher. */
+const LIFECYCLE_FAILURE_TAIL_LINES = 40;
+/** Characters kept of each such line; the launcher shows no more. */
+const LIFECYCLE_FAILURE_LINE_CHARS = 500;
+
+/**
+ * A detached native owner has no terminal: it keeps the last lines of each
+ * hook's output so a failure before VM work can show them (HACK-2339). Any
+ * other process keeps nothing.
+ */
+function failedHookTail(): {
+  readonly lines: readonly string[];
+  readonly onLine: ((line: string) => void) | undefined;
+} {
+  const lines: string[] = [];
+  return {
+    lines,
+    // Only while a detached owner is before VM work, and each line bounded
+    // as it is kept: a later hook, or a long record, retains nothing more.
+    onLine: nativeDetachedUpKeepsHookOutput()
+      ? (line) => {
+          lines.push(line.slice(0, LIFECYCLE_FAILURE_LINE_CHARS));
+          if (lines.length > LIFECYCLE_FAILURE_TAIL_LINES) {
+            lines.shift();
+          }
+        }
+      : undefined,
+  };
 }
 
 type LifecycleUpResult = {
@@ -3958,7 +4013,9 @@ async function resolveCoreDnsServer(): Promise<string | null> {
     GLOBAL_CADDY_DIR_NAME,
     GLOBAL_CADDY_COMPOSE_FILENAME
   );
-  if (!(await pathExists(composePath))) {
+  // No docker CLI means no answer, not a spawn failure: `up` reports the
+  // missing engine itself (HACK-2356), like resolveGlobalCaddyIp.
+  if (!((await pathExists(composePath)) && findExecutableInPath("docker"))) {
     return null;
   }
 
@@ -6392,6 +6449,9 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
     case "images":
       logger.step({ message: "Acquiring service images…" });
       return;
+    case "plan":
+      // Only a detached launcher's clocks use it; the terminal shows nothing.
+      return;
     case "services":
       logger.step({
         message: `Starting services: ${event.services.join(", ")}…`,
@@ -6538,6 +6598,9 @@ async function handleNativeUp({
     target: args.options.target,
     services: args.positionals.services,
   });
+  // A detached `up` owner reports a closed refusal from here until VM work
+  // starts exactly as this command prints it in the foreground (HACK-2339).
+  nativeDetachedUpPrestart(!restart);
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -6670,7 +6733,15 @@ async function handleNativeUp({
         ...services,
       });
     },
-    onProgress: reportNativeStartupProgress,
+    onProgress: (event) => {
+      if (event.phase === "runtime") {
+        // VM work starts: later failures keep the runtime's own reports.
+        nativeDetachedUpPrestart(false);
+      }
+      // A detached launcher's clocks follow these phases (HACK-2351).
+      nativeDetachedUpProgress(event.phase);
+      reportNativeStartupProgress(event);
+    },
     before: async (input) => {
       const lifecycle = await runLifecycleUpBeforeAndProcesses({
         title: "Lifecycle (native up before)",
@@ -6685,9 +6756,11 @@ async function handleNativeUp({
       const cleanup = adoptNativeLifecycleCleanup(lifecycle);
       if (lifecycle.code !== 0) {
         await cleanup();
+        // Compose reports the same failure as `Lifecycle (up before) failed
+        // (exit N)`; the hook's name and output were printed as it ran.
         throw new HackCliError({
           code: "E_LIFECYCLE_FAILED",
-          message: "Native up lifecycle preparation failed; values omitted.",
+          message: `Lifecycle (native up before) failed (exit ${lifecycle.code}); values omitted.`,
         });
       }
       // Native declares these before review; a hook cannot change them now.
@@ -7346,16 +7419,6 @@ async function runUpCommand({
   const branch = branchIdentity.branch;
   const profiles = parseCsvList(args.options.profile);
 
-  if (json && !findExecutableInPath("docker")) {
-    return emitLifecycleResult({
-      result: errorResult({
-        code: "E_DOCKER_UNAVAILABLE",
-        message: "docker is not installed or not on PATH",
-      }),
-      exitCode: 1,
-    });
-  }
-
   await recordBranchUsageIfNeeded({
     project,
     branch,
@@ -7566,6 +7629,37 @@ async function runUpCommand({
     });
   let signalCleanup = lifecycleSignalCleanup ?? installOperationSignalCleanup();
   try {
+    // After `up.before` hooks, which may start the engine, open the tunnel
+    // DOCKER_HOST needs or create a shared network, and before any pull: name
+    // a missing engine, socket permission, Compose plugin or shared network
+    // Compose will need (HACK-2356). The reads use Compose's engine selection
+    // from the project env, never its application values. A refusal here
+    // runs the same cleanup as other failures; it renders as the JSON
+    // envelope or one line.
+    const preflightDeps = composeEnginePreflightDeps(envOverrides.env);
+    const preflightRedactValues = composeEnvValuesToRedact({
+      env: envOverrides.env,
+    });
+    const preflightRefusal =
+      (await preflightComposeEngine({
+        deps: preflightDeps,
+        redactValues: preflightRedactValues,
+      })) ??
+      (await preflightSharedNetworks({
+        composeYaml: await readTextFile(project.composeFile),
+        selection: {
+          requested: requestedServices,
+          profiles: resolveEffectiveComposeProfiles({
+            cliProfiles: profiles,
+            composeEnv: envOverrides.env,
+          }),
+        },
+        deps: preflightDeps,
+        redactValues: preflightRedactValues,
+      }));
+    if (preflightRefusal !== null) {
+      throw preflightRefusal;
+    }
     // Hooks may register or remove runtime aliases; render overrides only after
     // successful preparation, while lifecycle cleanup remains installed.
     const internalOverride = await resolveInternalComposeOverride({
@@ -7891,6 +7985,24 @@ async function runUpCommand({
     foregroundTermination.guard?.dispose();
     signalCleanup.dispose();
   }
+}
+
+/**
+ * Real Docker reads for the `up` preflight. `env` is the environment Compose
+ * will get; the reads see only its platform and engine-transport settings
+ * (the Docker helper projection: DOCKER_*, Podman's CONTAINER_*, SSH agent,
+ * proxies), so they check the engine Compose will use while decrypted
+ * application values reach only the processes that deliver them.
+ */
+export function composeEnginePreflightDeps(
+  env: Readonly<Record<string, string>> | undefined
+): ComposeEnginePreflightDeps {
+  const runEnvironment = dockerHelperRunEnvironment(env);
+  return {
+    dockerOnPath: () => findExecutableInPath("docker") !== null,
+    run: async (argv, timeoutMs) =>
+      await exec(argv, { stdin: "ignore", timeoutMs, ...runEnvironment }),
+  };
 }
 
 async function maybePromptToStartGlobal(opts: {
@@ -11964,6 +12076,7 @@ export async function emitOpenOrigin(opts: {
   readonly origin: "compose" | "native";
   readonly checkLoopback?: typeof openProxyLoopbackWarning;
   readonly checkResolution?: typeof openUnresolvedHostWarning;
+  readonly openerAvailable?: () => boolean;
 }): Promise<number> {
   const warning =
     opts.origin === "compose"
@@ -11995,6 +12108,19 @@ export async function emitOpenOrigin(opts: {
       )}\n`
     );
     noteBrowserTargetsForLocalNetworkHint([opts.url]);
+    return 0;
+  }
+  if (!(opts.openerAvailable ?? urlOpenerAvailable)()) {
+    // No desktop here (a server, container or cloud sandbox): the URL is the
+    // answer. Stdout carries only the URL, so `url=$(hack open)` works; every
+    // note goes to stderr.
+    if (unresolved) {
+      process.stderr.write(`${unresolved.hint}\n`);
+    }
+    process.stderr.write(
+      "No program to open URLs on this machine (xdg-open is not installed), so open this URL yourself.\n"
+    );
+    process.stdout.write(`${opts.url}\n`);
     return 0;
   }
   if (unresolved) {

@@ -33,6 +33,12 @@ corrections. The runtime examples already contain their mount and token-scope
 fixes at this tag. Linux DNS, Linux certificate trust and daemon guides remain
 outside this corpus because this tag does not contain them.
 
+The pin moved from next.16 to next.22 with the same page allowlist and the same
+editorial pages. Snapshot pages now carry the next.22 text; for example Sessions
+describes tmux as the only multiplexer. Editorial pages that describe a feature
+as "next.16, under verification" were not re-audited in that move and keep their
+own stated source.
+
 Editorial pages state their own provenance: the pinned revision by default, or an
 explicit `sourceRevision` and `sourceLabel` when a page was written against a
 different source, as the next.5 field audits were.

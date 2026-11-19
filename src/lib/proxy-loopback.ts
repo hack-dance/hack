@@ -1,17 +1,26 @@
 import { stat } from "node:fs/promises";
 import { createConnection, isIP } from "node:net";
+import { resolve as resolvePath } from "node:path";
 import { connect } from "node:tls";
 import {
   DEFAULT_NEW_PROJECT_TLD,
   DEFAULT_OAUTH_ALIAS_ROOT,
   DEFAULT_PROJECT_TLD,
+  GLOBAL_CADDY_COMPOSE_FILENAME,
+  GLOBAL_CADDY_DIR_NAME,
   LEGACY_SCHEMAS_HOST,
 } from "../constants.ts";
 import {
   type CaddyCaIdentity,
   inspectCaddyCaIdentity,
 } from "./caddy-ca-identity.ts";
+import { resolveGlobalHackDir } from "./config-paths.ts";
+import { readTextFile } from "./fs.ts";
 import { resolveHackLocalCaCertPath } from "./local-ca.ts";
+import {
+  type ProxyBindScope,
+  readProxyBindScope,
+} from "./managed-proxy-compose.ts";
 import { findProxyPortConflicts, type HostListener } from "./proxy-bind.ts";
 import { listHostTcpListeners } from "./proxy-port-listeners.ts";
 import { exec } from "./shell.ts";
@@ -379,6 +388,81 @@ export type OpenDnsNotice = {
 const DNS_FIX =
   "hack doctor shows the DNS checks, and hack global install sets up Hack's domains (it asks for sudo once). A machine set up by an earlier Hack version may only resolve the older suffix: either run hack global install, or give the project a host under a suffix that already resolves here with hack config set dev_host <name>.<suffix>.";
 
+/** Hack's proxy publishes only these ports (see proxy-bind.ts). */
+const PROXY_DEFAULT_PORT: Readonly<Record<string, string>> = {
+  "http:": "80",
+  "https:": "443",
+};
+
+const LINUX_DNS_REASON =
+  "hack doctor's \"linux dns route\" check says whether this host can use Hack's names: on Linux they need systemd-resolved, which most containers and cloud sandboxes do not run. Where it runs, hack global install sets them up (it asks for sudo once).";
+
+/** Single-quote a value for a POSIX shell. */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * The address curl should send the request to, from the proxy Compose file
+ * Docker was given (not the setting, which may not be applied yet): loopback
+ * of the published family, or the one published address. Null when the file
+ * is missing or its publication cannot be read, so no address is invented.
+ */
+export function proxyConnectAddress(
+  scope: ProxyBindScope | null
+): string | null {
+  if (scope === null || scope.kind === "unknown") {
+    return null;
+  }
+  if (scope.kind === "all" || scope.address === "0.0.0.0") {
+    return "127.0.0.1";
+  }
+  if (scope.address === "::") {
+    return "[::1]";
+  }
+  return scope.address.includes(":") ? `[${scope.address}]` : scope.address;
+}
+
+/**
+ * The Linux fix for a name with no address. Hack's names need
+ * systemd-resolved there, which containers and cloud sandboxes usually do
+ * not run. For a URL on the proxy's own port (80 for http, 443 for https)
+ * the hint also gives a way in that needs no DNS: curl's --resolve to the
+ * address the proxy publishes on, with the full URL (HACK-2356). Other ports
+ * are not the proxy's, so they get the DNS reason only.
+ */
+export function linuxDnsFix(opts: {
+  readonly url: URL;
+  readonly proxyBind: ProxyBindScope | null;
+}): string {
+  const { url } = opts;
+  const proxyPort = PROXY_DEFAULT_PORT[url.protocol];
+  if (proxyPort === undefined || (url.port !== "" && url.port !== proxyPort)) {
+    return LINUX_DNS_REASON;
+  }
+  const address = proxyConnectAddress(opts.proxyBind);
+  if (address === null) {
+    return `${LINUX_DNS_REASON} Without it, send the request to the address Hack's proxy publishes port ${proxyPort} on, for example with curl --resolve ${shellQuote(`${url.hostname}:${proxyPort}:<address>`)} ${shellQuote(url.href)}.`;
+  }
+  const trust =
+    url.protocol === "https:"
+      ? " (for https, run hack global trust once and load the host trust env file it prints; that part needs no sudo)"
+      : "";
+  return `${LINUX_DNS_REASON} Without it, reach the app through Hack's proxy on this machine with: curl --resolve ${shellQuote(`${url.hostname}:${proxyPort}:${address}`)} ${shellQuote(url.href)}${trust}`;
+}
+
+/** How the rendered proxy Compose file publishes ports, or null when absent. */
+async function renderedProxyBind(): Promise<ProxyBindScope | null> {
+  const text = await readTextFile(
+    resolvePath(
+      resolveGlobalHackDir(),
+      GLOBAL_CADDY_DIR_NAME,
+      GLOBAL_CADDY_COMPOSE_FILENAME
+    )
+  );
+  return text === null ? null : readProxyBindScope(text);
+}
+
 /**
  * A notice for a URL whose host has no address, or whose Hack-managed suffix
  * has no DNS installed on this Mac; null when there is nothing to say. IP
@@ -390,6 +474,8 @@ export async function openUnresolvedHostWarning(opts: {
   readonly resolve?: (hostname: string) => Promise<HostResolution>;
   readonly platform?: NodeJS.Platform;
   readonly resolverFile?: (domain: string) => Promise<ResolverFileState>;
+  /** How the proxy publishes its ports; defaults to the rendered Compose file. */
+  readonly proxyBind?: () => Promise<ProxyBindScope | null>;
 }): Promise<OpenDnsNotice | null> {
   const url = new URL(opts.url);
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
@@ -408,9 +494,17 @@ export async function openUnresolvedHostWarning(opts: {
     return null;
   }
   if (resolution === "no-answer") {
+    const platform = opts.platform ?? process.platform;
     return {
       dns: "unresolved",
-      hint: `${hostname} has no address on this machine, so the URL will not open. ${DNS_FIX}`,
+      hint: `${hostname} has no address on this machine, so the URL will not open. ${
+        platform === "linux"
+          ? linuxDnsFix({
+              url,
+              proxyBind: await (opts.proxyBind ?? renderedProxyBind)(),
+            })
+          : DNS_FIX
+      }`,
     };
   }
   // Unknown stays unknown. The one thing still worth saying: on macOS a name

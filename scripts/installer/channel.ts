@@ -72,6 +72,8 @@ export const REVIEWED_PREDECESSORS: readonly string[] = [
   "2e9183b4ce7b4c4c5659f9ae33677699e1cdc9f5553e1b668bbbe6ea6846ac7b",
   // 5.0.0-next.21
   "af7d25e2db3e5d0edf8d0e308a49db928f1bc7f138beb54b9d3b0ccae83ee423",
+  // 5.0.0-next.22
+  "df75f28ef2fdd892e9d17f5528171117488b426a2fe9140ac3dd9add924ae45a",
 ];
 export const launcherBytes = () =>
   Buffer.from(

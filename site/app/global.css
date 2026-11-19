@@ -15,26 +15,57 @@ body {
   line-height: 1.75;
   overflow-wrap: anywhere;
 }
-.home .home-opening {
-  display: grid;
-  min-height: 100svh;
-  place-items: center;
-  padding: 2rem;
+.home {
+  max-width: 46rem;
+  margin-inline: auto;
+  padding: 2rem 1.5rem 4rem;
+}
+.home .home-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  column-gap: 2rem;
+  row-gap: 0.5rem;
+}
+.home .home-name {
+  font-size: 1.25rem;
+  letter-spacing: -0.04em;
+  text-decoration: none;
 }
 .home h1 {
-  margin: 0;
-  font-size: clamp(2rem, 6vw, 3.5rem);
-  font-weight: 400;
-  letter-spacing: -0.06em;
-  line-height: 1.2;
+  margin: 0 0 1rem;
+  font-size: 1rem;
+  font-weight: 600;
+}
+/* Long lines wrap inside the block, so it never scrolls sideways on a phone.
+   The wrap is visual only: a copied command keeps its own line breaks. */
+.home .home-install {
+  margin-block: 1.5rem;
+  padding-block: 1rem;
+  border-block: 1px solid var(--color-fd-border);
+  font: inherit;
+  font-size: 0.75rem;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.home .home-word {
+  white-space: nowrap;
+}
+/* Darker than the muted index text: this note and its link sit on the first
+   screen and must keep readable contrast in the light theme. */
+.home .home-note {
+  color: color-mix(
+    in srgb,
+    var(--color-fd-foreground) 75%,
+    var(--color-fd-background)
+  );
+  font-size: 0.875rem;
 }
 .home a {
   text-decoration: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 0.25em;
-}
-.home h1 a {
-  text-decoration: none;
 }
 .home a:hover {
   text-decoration: underline;
@@ -54,9 +85,6 @@ body {
   transform: none;
 }
 .home .home-index {
-  max-width: 44rem;
-  margin-inline: auto;
-  padding: 2rem 1.5rem 4rem;
   scroll-margin-block-start: 1rem;
 }
 .home nav,
@@ -67,7 +95,7 @@ body {
   row-gap: 0.5rem;
 }
 .home section {
-  margin-block: 4rem;
+  margin-block: 3rem 4rem;
 }
 .home h2 {
   margin: 0 0 1rem;

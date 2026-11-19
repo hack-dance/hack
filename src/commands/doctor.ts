@@ -865,7 +865,13 @@ async function runDoctorAudit(
 
   // Tools
   results.push(
-    await runCheck(s, "bun", () => checkTool({ name: "bun", cmd: "bun" }))
+    await runCheck(s, "bun", () =>
+      checkTool({
+        name: "bun",
+        cmd: "bun",
+        optional: bunCheckOptional(),
+      })
+    )
   );
   results.push(
     await runCheck(s, "docker", () =>
@@ -2026,6 +2032,15 @@ function createDoctorProgress(opts: {
 }
 
 export const doctorCommand = withHandler(doctorSpec, handleDoctor);
+
+/**
+ * A compiled hack carries its own runtime, so only a source run needs Bun on
+ * PATH; for a compiled CLI a missing Bun is a warning, not an error. Projects
+ * that use Bun check it in their own setup (HACK-2356).
+ */
+export function bunCheckOptional(main: string = Bun.main): boolean {
+  return main.startsWith("/$bunfs/");
+}
 
 async function checkTool(opts: {
   readonly name: string;

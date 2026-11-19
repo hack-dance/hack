@@ -229,6 +229,11 @@ import {
   listComposeProjectContainers,
 } from "../lib/compose-down-confirmation.ts";
 import {
+  type ComposeEnginePreflightDeps,
+  preflightComposeEngine,
+  preflightSharedNetworks,
+} from "../lib/compose-engine-preflight.ts";
+import {
   inspectComposeEnvOverrideAtRest,
   removePlaintextComposeEnvOverride,
   writeComposeEnvOverride,
@@ -291,6 +296,7 @@ import {
   dependencyCacheBootstrapFailure,
 } from "../lib/dependency-cache-bootstrap.ts";
 import { removeDisposableCacheVolumes } from "../lib/disposable-cache-volumes.ts";
+import { dockerHelperRunEnvironment } from "../lib/docker-helper-environment.ts";
 import { parseDurationMs } from "../lib/duration.ts";
 import {
   isSlimExecutionMode,
@@ -4007,7 +4013,9 @@ async function resolveCoreDnsServer(): Promise<string | null> {
     GLOBAL_CADDY_DIR_NAME,
     GLOBAL_CADDY_COMPOSE_FILENAME
   );
-  if (!(await pathExists(composePath))) {
+  // No docker CLI means no answer, not a spawn failure: `up` reports the
+  // missing engine itself (HACK-2356), like resolveGlobalCaddyIp.
+  if (!((await pathExists(composePath)) && findExecutableInPath("docker"))) {
     return null;
   }
 
@@ -7411,16 +7419,6 @@ async function runUpCommand({
   const branch = branchIdentity.branch;
   const profiles = parseCsvList(args.options.profile);
 
-  if (json && !findExecutableInPath("docker")) {
-    return emitLifecycleResult({
-      result: errorResult({
-        code: "E_DOCKER_UNAVAILABLE",
-        message: "docker is not installed or not on PATH",
-      }),
-      exitCode: 1,
-    });
-  }
-
   await recordBranchUsageIfNeeded({
     project,
     branch,
@@ -7631,6 +7629,37 @@ async function runUpCommand({
     });
   let signalCleanup = lifecycleSignalCleanup ?? installOperationSignalCleanup();
   try {
+    // After `up.before` hooks, which may start the engine, open the tunnel
+    // DOCKER_HOST needs or create a shared network, and before any pull: name
+    // a missing engine, socket permission, Compose plugin or shared network
+    // Compose will need (HACK-2356). The reads use Compose's engine selection
+    // from the project env, never its application values. A refusal here
+    // runs the same cleanup as other failures; it renders as the JSON
+    // envelope or one line.
+    const preflightDeps = composeEnginePreflightDeps(envOverrides.env);
+    const preflightRedactValues = composeEnvValuesToRedact({
+      env: envOverrides.env,
+    });
+    const preflightRefusal =
+      (await preflightComposeEngine({
+        deps: preflightDeps,
+        redactValues: preflightRedactValues,
+      })) ??
+      (await preflightSharedNetworks({
+        composeYaml: await readTextFile(project.composeFile),
+        selection: {
+          requested: requestedServices,
+          profiles: resolveEffectiveComposeProfiles({
+            cliProfiles: profiles,
+            composeEnv: envOverrides.env,
+          }),
+        },
+        deps: preflightDeps,
+        redactValues: preflightRedactValues,
+      }));
+    if (preflightRefusal !== null) {
+      throw preflightRefusal;
+    }
     // Hooks may register or remove runtime aliases; render overrides only after
     // successful preparation, while lifecycle cleanup remains installed.
     const internalOverride = await resolveInternalComposeOverride({
@@ -7956,6 +7985,24 @@ async function runUpCommand({
     foregroundTermination.guard?.dispose();
     signalCleanup.dispose();
   }
+}
+
+/**
+ * Real Docker reads for the `up` preflight. `env` is the environment Compose
+ * will get; the reads see only its platform and engine-transport settings
+ * (the Docker helper projection: DOCKER_*, Podman's CONTAINER_*, SSH agent,
+ * proxies), so they check the engine Compose will use while decrypted
+ * application values reach only the processes that deliver them.
+ */
+export function composeEnginePreflightDeps(
+  env: Readonly<Record<string, string>> | undefined
+): ComposeEnginePreflightDeps {
+  const runEnvironment = dockerHelperRunEnvironment(env);
+  return {
+    dockerOnPath: () => findExecutableInPath("docker") !== null,
+    run: async (argv, timeoutMs) =>
+      await exec(argv, { stdin: "ignore", timeoutMs, ...runEnvironment }),
+  };
 }
 
 async function maybePromptToStartGlobal(opts: {

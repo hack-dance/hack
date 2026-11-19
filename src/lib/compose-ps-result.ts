@@ -240,6 +240,42 @@ function composePsFailureError(opts: {
 }): HackCliError {
   const { result } = opts;
   const lower = `${result.stderr}\n${result.stdout}`.toLowerCase();
+  if (
+    lower.includes("permission denied") &&
+    !ENGINE_PERMISSION_MARKERS.some((m) => lower.includes(m))
+  ) {
+    return new HackCliError({
+      code: "E_PERMISSION",
+      message: `docker compose ps was denied access to a file or socket it needs. ${OUTPUT_OMITTED}`,
+    });
+  }
+  return (
+    dockerEngineFailureError({ ...opts, command: "docker compose ps" }) ??
+    new HackCliError({
+      code: "E_COMPOSE_FAILED",
+      message: `docker compose ps failed (exit ${result.exitCode}). ${OUTPUT_OMITTED}`,
+    })
+  );
+}
+
+/**
+ * Classify a failed Docker client run whose cause is the engine connection:
+ * a denied engine socket (`E_PERMISSION`), Hack's timeout (exit 124) or an
+ * unreachable engine (`E_DOCKER_UNAVAILABLE`). Returns null for any other
+ * failure, which the caller reports in its own terms. Only a line that starts
+ * the way the Docker client starts its own connection errors is quoted, with
+ * the same redaction as {@link readComposePsResult}.
+ *
+ * @param command The command as it should appear in the timeout message.
+ */
+export function dockerEngineFailureError(opts: {
+  readonly result: ComposePsProcessResult;
+  readonly command: string;
+  readonly redactValues?: Iterable<string>;
+  readonly inheritedEnv?: Readonly<Record<string, string | undefined>>;
+}): HackCliError | null {
+  const { result } = opts;
+  const lower = `${result.stderr}\n${result.stdout}`.toLowerCase();
   const redactValues = [
     ...(opts.redactValues ?? []),
     ...sensitiveInheritedValues({ env: opts.inheritedEnv ?? process.env }),
@@ -257,23 +293,19 @@ function composePsFailureError(opts: {
     return line === null ? "" : ` Engine said: ${line}`;
   };
 
-  if (lower.includes("permission denied")) {
-    if (ENGINE_PERMISSION_MARKERS.some((m) => lower.includes(m))) {
-      return new HackCliError({
-        code: "E_PERMISSION",
-        message: `Permission denied connecting to the Docker engine: your user cannot open its socket. Add your user to the docker group and start a new login session, or select an engine you can use with \`docker context use\`, then retry.${said(CLIENT_PERMISSION_OPENINGS)}`,
-      });
-    }
+  if (
+    lower.includes("permission denied") &&
+    ENGINE_PERMISSION_MARKERS.some((m) => lower.includes(m))
+  ) {
     return new HackCliError({
       code: "E_PERMISSION",
-      message: `docker compose ps was denied access to a file or socket it needs. ${OUTPUT_OMITTED}`,
+      message: `Permission denied connecting to the Docker engine: your user cannot open its socket. Add your user to the docker group and start a new login session, or select an engine you can use with \`docker context use\`, then retry.${said(CLIENT_PERMISSION_OPENINGS)}`,
     });
   }
   if (result.exitCode === TIMEOUT_EXIT_CODE) {
     return new HackCliError({
       code: "E_DOCKER_UNAVAILABLE",
-      message:
-        "docker compose ps did not finish within Hack's inspection time limit, so it was stopped. The Docker engine may be hung or heavily loaded; check `docker info` and retry.",
+      message: `${opts.command} did not finish within Hack's inspection time limit, so it was stopped. The Docker engine may be hung or heavily loaded; check \`docker info\` and retry.`,
     });
   }
   if (ENGINE_UNREACHABLE_MARKERS.some((m) => lower.includes(m))) {
@@ -282,10 +314,7 @@ function composePsFailureError(opts: {
       message: `The Docker engine is not reachable. Start Docker, or check \`docker context ls\` and DOCKER_HOST point at a running engine, then retry.${said(CLIENT_UNREACHABLE_OPENINGS)}`,
     });
   }
-  return new HackCliError({
-    code: "E_COMPOSE_FAILED",
-    message: `docker compose ps failed (exit ${result.exitCode}). ${OUTPUT_OMITTED}`,
-  });
+  return null;
 }
 
 /**

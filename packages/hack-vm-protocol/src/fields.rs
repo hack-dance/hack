@@ -1,19 +1,22 @@
 use super::{Error, Handle, Signal, Stream};
-use std::io::Write;
 
 pub fn take<'a>(r: &mut &'a [u8], n: usize) -> Result<&'a [u8], Error> {
     let (value, rest) = r.split_at_checked(n).ok_or(Error::Invalid)?;
     *r = rest;
     Ok(value)
 }
-pub fn put(w: &mut &mut [u8], data: &[u8]) -> Result<(), Error> {
-    w.write_all(data).map_err(|_| Error::Size)
+pub fn put(w: &mut Vec<u8>, data: &[u8]) -> Result<(), Error> {
+    if data.len() > super::MAX_FRAME - w.len() {
+        return Err(Error::Size);
+    }
+    w.extend_from_slice(data);
+    Ok(())
 }
 
 pub trait Field {
     type Value;
     fn read(r: &mut &[u8]) -> Result<Self::Value, Error>;
-    fn write(w: &mut &mut [u8], value: &Self::Value) -> Result<(), Error>;
+    fn write(w: &mut Vec<u8>, value: &Self::Value) -> Result<(), Error>;
 }
 macro_rules! integer {
     ($codec:ident,$ty:ty) => {
@@ -27,7 +30,7 @@ macro_rules! integer {
                         .map_err(|_| Error::Invalid)?,
                 ))
             }
-            fn write(w: &mut &mut [u8], v: &$ty) -> Result<(), Error> {
+            fn write(w: &mut Vec<u8>, v: &$ty) -> Result<(), Error> {
                 put(w, &v.to_be_bytes())
             }
         }
@@ -35,6 +38,7 @@ macro_rules! integer {
 }
 integer!(U16, u16);
 integer!(I32, i32);
+integer!(U32, u32);
 integer!(U64, u64);
 
 fn len(r: &mut &[u8], limit: usize) -> Result<usize, Error> {
@@ -44,7 +48,7 @@ fn len(r: &mut &[u8], limit: usize) -> Result<usize, Error> {
     }
     Ok(n)
 }
-fn write_len(w: &mut &mut [u8], n: usize, limit: usize) -> Result<(), Error> {
+fn write_len(w: &mut Vec<u8>, n: usize, limit: usize) -> Result<(), Error> {
     if n > limit {
         return Err(Error::Size);
     }
@@ -54,7 +58,7 @@ fn bytes<'a>(r: &mut &'a [u8], limit: usize) -> Result<&'a [u8], Error> {
     let n = len(r, limit)?;
     take(r, n)
 }
-fn write_bytes(w: &mut &mut [u8], v: &[u8], limit: usize) -> Result<(), Error> {
+fn write_bytes(w: &mut Vec<u8>, v: &[u8], limit: usize) -> Result<(), Error> {
     write_len(w, v.len(), limit)?;
     put(w, v)
 }
@@ -65,7 +69,7 @@ impl Field for Bytes {
     fn read(r: &mut &[u8]) -> Result<Self::Value, Error> {
         Ok(bytes(r, 32768)?.to_vec())
     }
-    fn write(w: &mut &mut [u8], v: &Self::Value) -> Result<(), Error> {
+    fn write(w: &mut Vec<u8>, v: &Self::Value) -> Result<(), Error> {
         write_bytes(w, v, 32768)
     }
 }
@@ -80,7 +84,7 @@ impl<const N: usize> Field for Text<N> {
         }
         Ok(v.to_owned())
     }
-    fn write(w: &mut &mut [u8], v: &String) -> Result<(), Error> {
+    fn write(w: &mut Vec<u8>, v: &String) -> Result<(), Error> {
         if v.contains('\0') {
             return Err(Error::Invalid);
         }
@@ -100,7 +104,7 @@ macro_rules! checked {
                 }
                 Ok(v)
             }
-            fn write(w: &mut &mut [u8], v: &Self::Value) -> Result<(), Error> {
+            fn write(w: &mut Vec<u8>, v: &Self::Value) -> Result<(), Error> {
                 if !($valid)(v) {
                     return Err(Error::Invalid);
                 }
@@ -134,7 +138,7 @@ impl Field for Execution {
             id: Id::read(r)?,
         })
     }
-    fn write(w: &mut &mut [u8], v: &Handle) -> Result<(), Error> {
+    fn write(w: &mut Vec<u8>, v: &Handle) -> Result<(), Error> {
         Uuid::write(w, &v.boot)?;
         Uuid::write(w, &v.incarnation)?;
         Id::write(w, &v.id)
@@ -147,7 +151,7 @@ impl<F: Field, const N: usize> Field for List<F, N> {
     fn read(r: &mut &[u8]) -> Result<Self::Value, Error> {
         (0..len(r, N)?).map(|_| F::read(r)).collect()
     }
-    fn write(w: &mut &mut [u8], v: &Self::Value) -> Result<(), Error> {
+    fn write(w: &mut Vec<u8>, v: &Self::Value) -> Result<(), Error> {
         write_len(w, v.len(), N)?;
         for item in v {
             F::write(w, item)?
@@ -155,7 +159,7 @@ impl<F: Field, const N: usize> Field for List<F, N> {
         Ok(())
     }
 }
-pub type Inventory = List<Execution, 16>;
+pub type Inventory = List<Execution, { super::MAX_JOBS as usize }>;
 checked!(Arguments, List<Text<4096>, 128>, |v: &Vec<String>| v
     .first()
     .is_some_and(|s| !s.is_empty()));
@@ -166,7 +170,7 @@ impl Field for EnvPair {
     fn read(r: &mut &[u8]) -> Result<Self::Value, Error> {
         Ok((Name::read(r)?, Text::<4096>::read(r)?))
     }
-    fn write(w: &mut &mut [u8], v: &Self::Value) -> Result<(), Error> {
+    fn write(w: &mut Vec<u8>, v: &Self::Value) -> Result<(), Error> {
         Name::write(w, &v.0)?;
         Text::<4096>::write(w, &v.1)
     }
@@ -179,7 +183,7 @@ macro_rules! choice {
         impl Field for $codec {
             type Value=$value;
             fn read(r:&mut &[u8])->Result<$value,Error>{match take(r,1)?[0] {$($number=>Ok($variant)),+, _=>Err(Error::Invalid)}}
-            fn write(w:&mut &mut [u8],v:&$value)->Result<(),Error>{put(w,&[match *v {$($variant=>$number),+}])}
+            fn write(w:&mut Vec<u8>,v:&$value)->Result<(),Error>{put(w,&[match *v {$($variant=>$number),+}])}
         }
     }
 }
@@ -188,3 +192,9 @@ const ON: bool = true;
 choice!(Flag,bool;0=>OFF,1=>ON);
 choice!(SignalCode,Signal;1=>Signal::Interrupt,2=>Signal::Terminate,3=>Signal::Kill);
 choice!(StreamCode,Stream;1=>Stream::Stdout,2=>Stream::Stderr);
+
+checked!(ExitCode, I32, |n: &i32| (0..=255).contains(n));
+checked!(SignalNumber, I32, |n: &i32| (1..=64).contains(n));
+checked!(Jobs, U16, |n: &u16| (1..=super::MAX_JOBS).contains(n));
+checked!(FrameSize, U32, |n: &u32| (128..=super::MAX_FRAME as u32)
+    .contains(n));

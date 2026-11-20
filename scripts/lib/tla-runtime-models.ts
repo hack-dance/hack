@@ -142,6 +142,14 @@ const restartPolicyStaleUses = [
 ] as const;
 const contracts: readonly ModelContract[] = [
   {
+    name: "guest-execution",
+    module: "GuestAgent",
+    states: 420,
+    invariant: "ResultBeforeRelease",
+    action: "Release",
+    fields: ['job = "released"', "saved = FALSE"],
+  },
+  {
     name: "autostart-start-stop",
     module: "StartStop",
     states: 41,

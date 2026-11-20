@@ -1567,7 +1567,7 @@ fn start_pool(
     {
         return Err(CandidateError::new(
             "recovery_required",
-            "Previous operation did not finish; inspect runtime status and recover before restarting.",
+            "Previous operation did not finish; run hack native recover (runtime recover --json with the executor), then start again.",
         ));
     }
     if let Some(process) = &owner.process {
@@ -1832,7 +1832,7 @@ mod boot_sequence_tests;
 fn failed_boot_stop_error(failure: CandidateError) -> CandidateError {
     CandidateError::new(
         failure.code,
-        "Failed-boot provider cleanup could not be confirmed. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",
+        "Failed-boot provider cleanup could not be confirmed. Run hack native recover before retrying (with an executor selected by hand: the same executor and --candidate-root as the failed start, then runtime recover --json).",
     )
 }
 

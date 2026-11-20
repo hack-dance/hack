@@ -140,11 +140,7 @@ fn failed_boot_stop_preserves_its_code_and_the_recovery_command() {
     assert_eq!(failure.code, "process_identity_unavailable");
     assert!(failure.message_fixed);
     assert!(failure.message.contains("runtime recover --json"));
-    assert!(
-        failure
-            .message
-            .contains("identical --candidate-root argument")
-    );
+    assert!(failure.message.contains("hack native recover"));
     assert!(!failure.message.contains("private transport detail"));
 }
 

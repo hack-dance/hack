@@ -369,6 +369,17 @@ impl<'a> ObservedGuest<'a> {
             candidate,
             owner: Owner::load(candidate)?,
         };
+        // A stopped pool is not running, not changed: `hack ps` reports it as an ordinary
+        // state (HACK-2376). `runtime_changed` stays for a pool that changes during the read.
+        if observed_stopped(&observed.owner)? {
+            return Err(CandidateError::new(
+                "runtime_not_running",
+                format!(
+                    "The candidate runtime is not running (phase {}).",
+                    observed.owner.phase
+                ),
+            ));
+        }
         observed.verify()?;
         // No mutation lease is held here: observe without repairing.
         audit_with(candidate, &observed.owner, Repair::Observe, &mut Vec::new())?;
@@ -2320,6 +2331,19 @@ const STOPPED_PHASES: [&str; 4] = [
     "recovered-unclean",
 ];
 
+/// Whether lease-free observation finds the pool stopped: a stopped phase, or a failed boot
+/// whose provider was stopped (`failed-boot-stopped`), with no live recorded provider. A
+/// transitional phase is not stopped here: an operation may be changing it.
+fn observed_stopped(owner: &Owner) -> Result<bool, CandidateError> {
+    if !STOPPED_PHASES.contains(&owner.phase.as_str()) && owner.phase != "failed-boot-stopped" {
+        return Ok(false);
+    }
+    match &owner.process {
+        None => Ok(true),
+        Some(process) => Ok(!identity::alive(process.pid)?),
+    }
+}
+
 /// A stopped phase with no live provider; no recorded provider (`None`) is as stopped
 /// as a dead one. Nothing runs from the prepared provider tree in this state.
 fn provider_stopped(phase: &str, process_alive: Option<bool>) -> bool {
@@ -2995,6 +3019,53 @@ mod log_follow_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observation_treats_only_a_stopped_pool_without_a_live_provider_as_not_running() {
+        // `ObservedGuest::connect` answers `runtime_not_running` exactly when this holds,
+        // before any identity comparison; otherwise `verify` keeps `runtime_changed`.
+        let owner = |phase: &str, process: Option<i32>| -> Owner {
+            let process = process.map(|pid| {
+                json!({"pid": pid, "start_micros": 1, "uid": 0, "executable": "/fixture/smolvm"})
+            });
+            serde_json::from_value(json!({
+                "version": 1, "checkout": "/fixture", "token": "fixture", "machine": "fixture",
+                "short_home": "/fixture", "created": true, "phase": phase,
+                "process": process, "storage": null, "overlay": null, "guest_boot_id": "boot",
+                "daemon_pid": null, "daemon_start": null, "rootfs_digest": null
+            }))
+            .unwrap()
+        };
+        let dead = {
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let pid = i32::try_from(child.id()).unwrap();
+            child.wait().unwrap();
+            pid
+        };
+        let live = i32::try_from(std::process::id()).unwrap();
+        for phase in [
+            "stopped",
+            "stopped-before-engine",
+            "stopped-after-engine-failure",
+            "recovered-unclean",
+            "failed-boot-stopped",
+        ] {
+            assert!(observed_stopped(&owner(phase, None)).unwrap(), "{phase}");
+            assert!(
+                observed_stopped(&owner(phase, Some(dead))).unwrap(),
+                "{phase}"
+            );
+            // A live recorded provider is not stopped, whatever the phase says.
+            assert!(
+                !observed_stopped(&owner(phase, Some(live))).unwrap(),
+                "{phase}"
+            );
+        }
+        // An operation may be changing a transitional phase.
+        for phase in ["running", "booting", "creating", "quiescing", "stopping"] {
+            assert!(!observed_stopped(&owner(phase, None)).unwrap(), "{phase}");
+        }
+    }
 
     #[test]
     fn source_preflight_is_read_only_and_preserves_unowned_state() {

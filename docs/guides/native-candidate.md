@@ -568,8 +568,9 @@ bridge to the container's target port, after the graph is ready. The rules:
   launches, each target container's identity (ID, network attachment, start
   time, VM boot) and health are checked again; a bridge whose container changed
   or became unhealthy is stopped and `up` refuses with `bridge_generation_stale`.
-- Stopping the foreground owner (Ctrl-C) closes each host listener before its
-  bridge and the containers stop, then retires the publication. Dead-owner
+- Stopping the foreground owner (Ctrl-C) closes every host listener of the
+  graph (together) before its bridges stop, all in one guest call, and before
+  the containers stop, then retires the publication. Dead-owner
   cleanup retires a publication only after proving its owner is gone. A
   retaining restart publishes the same ports again.
 - `graph run` and other non-foreground paths do not publish ports and keep

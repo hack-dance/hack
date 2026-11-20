@@ -447,3 +447,153 @@ fn a_changed_or_repeated_reservation_refuses_before_any_guest_call() {
     assert_eq!(guest.gets.get(), 0);
     assert!(guest.target_calls.borrow().is_empty());
 }
+
+/// Release fake: records each effect with the registry phases on disk at that moment.
+struct Release {
+    candidate: Candidate,
+    calls: RefCell<Vec<String>>,
+    fail_stop: Cell<bool>,
+}
+
+impl Release {
+    fn phases(&self) -> String {
+        read_owner_registry(&self.candidate, OWNER, 8, false)
+            .unwrap()
+            .slots
+            .iter()
+            .map(|(slot, a)| format!("{slot}={}", a.phase))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+impl ReleaseGuest for Release {
+    fn boot_id(&self) -> &str {
+        BOOT
+    }
+    fn release_publications(
+        &self,
+        run: &str,
+        reservations: &std::collections::BTreeSet<&str>,
+    ) -> Result<(), CandidateError> {
+        assert_eq!(run, RUN);
+        self.calls.borrow_mut().push(format!(
+            "publications {} [{}]",
+            reservations.len(),
+            self.phases()
+        ));
+        Ok(())
+    }
+    fn relays(&self, action: &str, selected: &[(u8, &Assignment)]) -> Result<(), CandidateError> {
+        let slots = selected
+            .iter()
+            .map(|(slot, _)| slot.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.calls
+            .borrow_mut()
+            .push(format!("{action} {slots} [{}]", self.phases()));
+        if action == "stop" && self.fail_stop.get() {
+            return Err(error("bridge_relay", "Unconfirmed relay operation."));
+        }
+        Ok(())
+    }
+    fn after_guest_stop(&self, _: &str) -> Result<(), CandidateError> {
+        Ok(())
+    }
+}
+
+fn release_store(candidate: &Candidate) -> Store {
+    initialize_registry(candidate, OWNER, 8).unwrap();
+    let mut store = read_owner_registry(candidate, OWNER, 8, false).unwrap();
+    let assignment =
+        |reservation: char, phase: &str, boot: &str, run: &str, serial: u64| Assignment {
+            reservation: reservation.to_string().repeat(32),
+            run: run.into(),
+            service: format!("svc-{reservation}"),
+            generation: "c".repeat(64),
+            container_id: "d".repeat(64),
+            network_id: "e".repeat(64),
+            boot_id: boot.into(),
+            phase: phase.into(),
+            relay: (phase != "reserved").then(|| relay::Relay {
+                transport: relay::Transport::ReservationV1,
+                launch_serial: serial,
+                binary_sha256: "9".repeat(64),
+                target_pid: 42,
+                target_start: 7,
+                port: 3000,
+            }),
+            loopback_port: None,
+        };
+    let earlier = "87654321-4321-4321-4321-cba987654321";
+    store.next_launch_serial = 5;
+    store.slots = BTreeMap::from([
+        (0, assignment('0', "running", BOOT, RUN, 1)),
+        (1, assignment('1', "starting", BOOT, RUN, 2)),
+        (2, assignment('2', "stopped", BOOT, RUN, 3)),
+        (3, assignment('3', "running", earlier, RUN, 4)),
+        (4, assignment('4', "reserved", BOOT, RUN, 0)),
+        (5, assignment('5', "running", BOOT, &"e".repeat(32), 5)),
+    ]);
+    save(candidate, &store).unwrap();
+    store
+}
+
+#[test]
+fn release_retires_each_phase_for_the_whole_run_in_order() {
+    let fixture = super::super::tests::Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    let mut store = release_store(&candidate);
+    let guest = Release {
+        candidate: Candidate::discover(&fixture.0).unwrap(),
+        calls: RefCell::default(),
+        fail_stop: Cell::new(false),
+    };
+    release_selected(&candidate, &guest, &mut store, RUN).unwrap();
+    assert_eq!(
+        *guest.calls.borrow(),
+        [
+            // Host listeners first, before any registry or guest change.
+            "publications 5 [0=running,1=starting,2=stopped,3=running,4=reserved,5=running]",
+            // Intent precedes the one guest stop; the earlier boot's relay needs none.
+            "stop 0 1 [0=stopping,1=stopping,2=stopped,3=stopped,4=reserved,5=running]",
+            "remove 0 1 2 [0=stopped,1=stopped,2=stopped,3=stopped,4=reserved,5=running]",
+        ]
+    );
+    let persisted = read_owner_registry(&candidate, OWNER, 8, false).unwrap();
+    assert_eq!(persisted.slots.keys().copied().collect::<Vec<_>>(), [5]);
+    assert_eq!(persisted.slots[&5].phase, "running");
+    assert_eq!(persisted.next_launch_serial, 5);
+}
+
+#[test]
+fn refused_batch_stop_keeps_every_slot_and_the_next_release_resumes() {
+    let fixture = super::super::tests::Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    let mut store = release_store(&candidate);
+    let guest = Release {
+        candidate: Candidate::discover(&fixture.0).unwrap(),
+        calls: RefCell::default(),
+        fail_stop: Cell::new(true),
+    };
+    assert_eq!(
+        release_selected(&candidate, &guest, &mut store, RUN)
+            .unwrap_err()
+            .code,
+        "bridge_relay"
+    );
+    assert_eq!(
+        guest.phases(),
+        "0=stopping,1=stopping,2=stopped,3=stopped,4=reserved,5=running"
+    );
+    guest.fail_stop.set(false);
+    guest.calls.borrow_mut().clear();
+    let mut store = read_owner_registry(&candidate, OWNER, 8, false).unwrap();
+    release_selected(&candidate, &guest, &mut store, RUN).unwrap();
+    assert_eq!(
+        guest.calls.borrow()[1],
+        "stop 0 1 [0=stopping,1=stopping,2=stopped,3=stopped,4=reserved,5=running]"
+    );
+    assert_eq!(guest.phases(), "5=running");
+}

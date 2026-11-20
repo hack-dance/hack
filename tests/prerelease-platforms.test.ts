@@ -454,8 +454,21 @@ fixtureTest(
       ),
     });
     await refuses(
-      "Release platform metadata for linux-x86_64 does not name its archive, manager, checksum file and backends."
+      "Release platform metadata for linux-x86_64 does not name its archive, manager, checksum file and backends (wrong: archive)."
     );
+    // Right values with the keys in another order are not called wrong
+    // names; only the final exact-rendering check objects.
+    write({
+      ...good,
+      platforms: good.platforms.map((entry) => ({
+        checksums: entry.checksums,
+        manager: entry.manager,
+        archive: entry.archive,
+        backends: entry.backends,
+        platform: entry.platform,
+      })),
+    });
+    await refuses("is not the exact rendering for this release");
     // The wrong release.
     for (const changed of [
       { version: "5.0.0-next.24" },

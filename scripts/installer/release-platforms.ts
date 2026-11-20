@@ -158,9 +158,17 @@ export function requireReleasePlatforms(opts: {
       `Release platform metadata lists ${entry.platform}, which is not a bundle platform.`
     );
     const expected = releasePlatform(opts.version, known);
+    // Field by field, whatever the key order: the message must point at a
+    // wrong value. Order and formatting are the final check's business.
+    const wrong = (
+      ["backends", "archive", "manager", "checksums"] as const
+    ).filter(
+      (field) =>
+        JSON.stringify(entry[field]) !== JSON.stringify(expected[field])
+    );
     requireThat(
-      JSON.stringify(entry) === JSON.stringify(expected),
-      `Release platform metadata for ${known} does not name its archive, manager, checksum file and backends.`
+      wrong.length === 0,
+      `Release platform metadata for ${known} does not name its archive, manager, checksum file and backends (wrong: ${wrong.join(", ")}).`
     );
     for (const name of [
       expected.archive,

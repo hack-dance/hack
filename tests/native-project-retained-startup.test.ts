@@ -55,6 +55,48 @@ test("eligible retained startup selects the retained run", async () => {
   });
 });
 
+test("a retained run stays startable from the stopped phases the runtime accepts after a failed boot (HACK-2376)", async () => {
+  for (const phase of [
+    "stopped",
+    "recovered-unclean",
+    "stopped-before-engine",
+    "stopped-after-engine-failure",
+  ]) {
+    expect(
+      (
+        await preflightNativeRetainedStartup({
+          runtime,
+          projectRoot: scope.projectRoot,
+          run,
+          invoke: async () => ({ ...eligible, runtime_phase: phase }),
+        })
+      ).runtimePhase
+    ).toBe("stopped");
+  }
+  expect(
+    (
+      await preflightNativeRetainedStartup({
+        runtime,
+        projectRoot: scope.projectRoot,
+        run,
+        invoke: async () => ({ ...eligible, runtime_phase: "running" }),
+      })
+    ).runtimePhase
+  ).toBe("running");
+  // Any other phase is not an eligible retained start.
+  for (const phase of ["failed-boot-stopped", "booting", "quiescing", "", 7]) {
+    await expectClosedRefusal(
+      preflightNativeRetainedStartup({
+        runtime,
+        projectRoot: scope.projectRoot,
+        run,
+        invoke: async () => ({ ...eligible, runtime_phase: phase }),
+      }),
+      "Native retained startup eligibility changed; no hooks or runtime start were requested."
+    );
+  }
+});
+
 test("changed retained eligibility refuses with a closed message", async () => {
   await expectClosedRefusal(
     preflightNativeRetainedStartup({

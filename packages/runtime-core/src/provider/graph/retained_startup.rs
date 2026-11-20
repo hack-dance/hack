@@ -77,7 +77,7 @@ pub(in crate::provider::graph) fn checked(
     if owner.phase == "failed-boot-stopped" {
         return Err(error(
             "graph_retained_startup",
-            "The runtime's last boot failed and was stopped; run the runtime's recover command (runtime recover --json) first. The retained data is untouched.",
+            "The runtime's last boot failed and was stopped; run hack native recover (runtime recover --json with the executor) first, then hack up. The retained data is untouched.",
         ));
     }
     let clean = matches!(owner.phase.as_str(), "running" | "stopped")
@@ -530,7 +530,7 @@ pub(in crate::provider::graph) mod tests {
             assert_eq!(error.code, "graph_retained_startup", "{case}");
             if case == "failed-boot-stopped" {
                 assert!(
-                    error.message.contains("runtime recover"),
+                    error.message.contains("hack native recover"),
                     "{}",
                     error.message
                 );

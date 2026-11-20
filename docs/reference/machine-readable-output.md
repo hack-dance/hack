@@ -109,7 +109,8 @@ success behavior stays covered by command-specific suites.
 | `hack global trust --plan --json` | Envelope; versioned `data.schema`: `hack.global-admin-plan.v1` |
 | `hack host ps --json` | Legacy bare object (no `data` envelope) |
 | `hack logs --json` | NDJSON logs; finite native modes may return a legacy snapshot object |
-| `hack native setup --json` | Native runtime result passed through unchanged (`status`, `files`, `probe`; no `data` envelope) |
+| `hack native recover --json` | Native runtime result passed through unchanged, with no `data` envelope (setup: `status`, `files`, `probe`; recover: the runtime status, such as `phase`) |
+| `hack native setup --json` | Native runtime result passed through unchanged, with no `data` envelope (setup: `status`, `files`, `probe`; recover: the runtime status, such as `phase`) |
 | `hack node add --json` | Legacy bare object (no `data` envelope) |
 | `hack node devcontainer attach --json` | Legacy bare object (no `data` envelope) |
 | `hack node devcontainer down --json` | Legacy bare object (no `data` envelope) |

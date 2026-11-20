@@ -135,11 +135,7 @@ fn missing_sockets_expire_and_name_recovery() {
         assert_eq!(failure.code, "bridge_socket_timeout");
         assert!(failure.message_fixed);
         assert!(failure.message.contains("runtime recover --json"));
-        assert!(
-            failure
-                .message
-                .contains("identical --candidate-root argument")
-        );
+        assert!(failure.message.contains("hack native recover"));
         assert_eq!(clock.now(), BUDGET);
         assert!(!fixture.path(0).exists());
     }
@@ -480,11 +476,7 @@ fn provider_loss_before_or_after_observation_is_not_readiness_or_retry_authority
         assert_eq!(failure.code, "process_identity_mismatch");
         assert!(failure.message_fixed);
         assert!(failure.message.contains("runtime recover --json"));
-        assert!(
-            failure
-                .message
-                .contains("identical --candidate-root argument")
-        );
+        assert!(failure.message.contains("hack native recover"));
         assert!(!failure.message.contains("Provider changed."));
         assert_eq!(checks.get(), fail_on);
         assert_eq!(clock.now(), Duration::ZERO);

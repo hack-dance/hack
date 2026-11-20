@@ -198,6 +198,9 @@ skip the rest, so a separate file is safe.
 
 The set is checked against this file twice on the way to a release: when the
 macOS job packages it, and again after approval, before the tag is created.
+The chart shows the other gates only as exits. A run that only prepares stops
+once the set is packaged, and a failed upload keeps its tag, which is never
+replaced.
 
 ![Prerelease publication: where the release set is checked](prerelease-publication.svg)
 

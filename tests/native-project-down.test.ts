@@ -1977,6 +1977,11 @@ test.each([
   { foreground: "uncertain", phase: "ready-observed" },
   { foreground: "absent", phase: "ready-observed" },
   { foreground: "exited", phase: "stopped-data-retained" },
+  // A start that was never confirmed has no supported recovery after a boot,
+  // so the pool is not started for it (requireRecoverableOwner).
+  { foreground: "exited", phase: "preparing" },
+  { foreground: "exited", phase: "restoring" },
+  { foreground: "exited", phase: "failed-retained" },
 ])("down --recover on a stopped pool keeps its refusal without runtime up (owner $foreground, $phase)", async ({
   foreground,
   phase,

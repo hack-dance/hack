@@ -839,15 +839,16 @@ outside this repair path.
 
 `runtime down` stops the pool even while projects run in it, because a crash or a
 host reboot ends the same way. Their containers stop with the guest and their data is
-kept. Its JSON then lists the Compose graph runs whose receipts were live in
+kept. Its JSON then lists the graph runs (Compose and native-authored) whose receipts were live in
 `interrupted_runs`, or sets `interrupted_runs_unknown` when they could not be read,
 and it writes one line on stderr saying how many it stopped. `hack up` in each of those
 projects starts the pool again and recovers its run.
 
 How a run moves across a pool stop. It is checked as the TLA+ model
 `tests/models/tla/native-pool-stop`. A run left from a boot older than the previous
-one (another project's `hack up` or a `runtime up` by hand booted the pool and it
-stopped again before this project recovered) is not recovered yet.
+one is not recovered yet: another project's `hack up` or a `runtime up` by hand
+booted the pool and it stopped again before this project recovered, or the pool
+stopped again between a recovery's `runtime up` and its recovery.
 
 ```mermaid
 ---
@@ -877,14 +878,14 @@ stateDiagram-v2
         Pool stopped or in a new boot.
     end note
     note right of recover
-        Starts a stopped pool, then
-        the existing recovery with
-        data kept (RecoverStopped).
+        runtime up first, then the
+        existing recovery as its own
+        request, data kept.
     end note
     note right of stranded
-        Known gap: another boot came
-        first. Follow-up recovers from
-        any earlier boot (any-boot).
+        Known gap: another boot, or a
+        stop mid-recovery, came first.
+        Follow-up: any-boot.
     end note
     note left of retained
         INV NoDeadEnd: some named

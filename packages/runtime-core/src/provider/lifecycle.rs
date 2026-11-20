@@ -81,8 +81,9 @@ pub struct RuntimeStatus {
     /// provider (`socket_repairs`); absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repaired_sockets: Option<socket_repairs::RepairedSockets>,
-    /// Only from `runtime down` of a running pool: Compose graph runs whose receipts
-    /// were live when it stopped the pool under them (HACK-2456). Their containers
+    /// Only from `runtime down` of a running pool: graph runs, Compose and
+    /// native-authored, whose receipts were live when it stopped the pool under them
+    /// (HACK-2456). Their containers
     /// stopped with the guest; `hack up` in each project starts the pool and recovers
     /// the run with its data kept. An empty list when there were none, absent otherwise
     /// or when the inventory could not be read (`interrupted_runs_unknown`).

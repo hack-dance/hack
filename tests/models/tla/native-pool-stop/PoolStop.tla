@@ -24,22 +24,25 @@
 \*   ByHand  - `runtime up` by hand counts as a user command (no message names it).
 \*   OtherBoots - something else may boot the pool between the stop and this
 \*             project's recovery: another project's `hack up`, or `runtime up` by hand.
+\*   RecoveryFaults - a fault may strike between the recovery's `runtime up` and its
+\*             graph recovery (two separate requests in the CLI).
+\* recovering - a recovery started the pool and has not yet recovered the run.
 EXTENDS Naturals
-CONSTANTS Fixed, Strict, ByHand, OtherBoots, MaxBoot, MaxFaults
+CONSTANTS Fixed, Strict, ByHand, OtherBoots, RecoveryFaults, MaxBoot, MaxFaults
 
-VARIABLES pool, boot, run, runBoot, owner, pub, faults
-vars == <<pool, boot, run, runBoot, owner, pub, faults>>
+VARIABLES pool, boot, run, runBoot, owner, pub, faults, recovering
+vars == <<pool, boot, run, runBoot, owner, pub, faults, recovering>>
 
 TypeOK ==
     /\ pool \in {"running", "stopped", "crashed"}
     /\ boot \in 0..MaxBoot /\ runBoot \in 0..MaxBoot
     /\ run \in {"none", "ready", "retained"}
     /\ owner \in {"none", "live", "dead"}
-    /\ pub \in BOOLEAN /\ faults \in 0..MaxFaults
+    /\ pub \in BOOLEAN /\ faults \in 0..MaxFaults /\ recovering \in BOOLEAN
 
 Init ==
     /\ pool = "stopped" /\ boot = 0 /\ run = "none" /\ runBoot = 0
-    /\ owner = "none" /\ pub = FALSE /\ faults = 0
+    /\ owner = "none" /\ pub = FALSE /\ faults = 0 /\ recovering = FALSE
 
 CanBoot == boot < MaxBoot
 \* Recovery of a dead owner's ready run in the current boot `b`.
@@ -48,43 +51,43 @@ CanRecover(b) ==
     \/ IF Strict THEN runBoot + 1 = b ELSE runBoot < b
 
 \* --- Faults and environment (bounded) -------------------------------------
-Fault == faults < MaxFaults
+Fault == faults < MaxFaults /\ (RecoveryFaults \/ ~recovering)
 \* `runtime down` while the run is live: the pool stops; the guest's containers
 \* go with it. It does not retire the foreground owner's publication.
 RuntimeDown ==
     /\ Fault /\ pool = "running"
     /\ pool' = "stopped" /\ faults' = faults + 1
-    /\ UNCHANGED <<boot, run, runBoot, owner, pub>>
+    /\ UNCHANGED <<boot, run, runBoot, owner, pub, recovering>>
 \* The VM or its provider dies (or the host reboots).
 Crash ==
     /\ Fault /\ pool = "running"
     /\ pool' = "crashed" /\ faults' = faults + 1
-    /\ UNCHANGED <<boot, run, runBoot, owner, pub>>
+    /\ UNCHANGED <<boot, run, runBoot, owner, pub, recovering>>
 \* The foreground owner dies while the pool keeps running.
 OwnerCrash ==
     /\ Fault /\ owner = "live"
     /\ owner' = "dead" /\ faults' = faults + 1
-    /\ UNCHANGED <<pool, boot, run, runBoot, pub>>
+    /\ UNCHANGED <<pool, boot, run, runBoot, pub, recovering>>
 \* The owner notices its guest is gone (the pool stopped, or a later boot
 \* replaced it) and exits without retiring its publication.
 OwnerNotices ==
     /\ owner = "live" /\ (pool /= "running" \/ runBoot /= boot)
     /\ owner' = "dead"
-    /\ UNCHANGED <<pool, boot, run, runBoot, pub, faults>>
+    /\ UNCHANGED <<pool, boot, run, runBoot, pub, faults, recovering>>
 \* A boot by something else (another project's `hack up`, or `runtime up` by hand).
 \* With ByHand it is a user command of this project; otherwise a bounded fault.
 RuntimeUp ==
     /\ pool = "stopped" /\ CanBoot /\ (ByHand \/ (OtherBoots /\ Fault))
     /\ pool' = "running" /\ boot' = boot + 1
     /\ faults' = IF ByHand THEN faults ELSE faults + 1
-    /\ UNCHANGED <<run, runBoot, owner, pub>>
+    /\ UNCHANGED <<run, runBoot, owner, pub, recovering>>
 
 \* --- User commands the CLI names ------------------------------------------
 \* `hack native recover`: a crashed pool is recorded stopped (recovered-unclean).
 PoolRecover ==
     /\ pool = "crashed"
     /\ pool' = "stopped"
-    /\ UNCHANGED <<boot, run, runBoot, owner, pub, faults>>
+    /\ UNCHANGED <<boot, run, runBoot, owner, pub, faults, recovering>>
 
 \* A fresh or retained start: boots a stopped pool first.
 Start ==
@@ -95,32 +98,30 @@ Start ==
     /\ LET b == IF pool = "running" THEN boot ELSE boot + 1
        IN /\ boot' = b /\ runBoot' = b
     /\ pool' = "running" /\ run' = "ready" /\ owner' = "live" /\ pub' = TRUE
-    /\ UNCHANGED faults
+    /\ UNCHANGED <<faults, recovering>>
 
 \* Recovery of a dead owner's ready run on a running pool (the existing
 \* `hack down --recover`, also plain `hack down` once the frontend is gone):
 \* cleanup with data retained, then the publication is retired.
 RecoverRunning ==
     /\ pool = "running" /\ run = "ready" /\ owner = "dead" /\ CanRecover(boot)
-    /\ run' = "retained" /\ pub' = FALSE /\ owner' = "none"
+    /\ run' = "retained" /\ pub' = FALSE /\ owner' = "none" /\ recovering' = FALSE
     /\ UNCHANGED <<pool, boot, runBoot, faults>>
 
-\* HACK-2456: the same with the pool stopped: start it, then recover. If the
-\* run's boot is too old to recover, the boot still happened.
+\* HACK-2456: with the pool stopped, `hack up` / `hack down --recover` first send
+\* `runtime up` (`inspectOrStartStoppedPool`), then start over; the restarted down
+\* recovers the run with RecoverRunning as a separate request.
 RecoverStopped ==
     /\ Fixed
     /\ pool = "stopped" /\ run = "ready" /\ owner = "dead" /\ CanBoot
-    /\ pool' = "running" /\ boot' = boot + 1
-    /\ IF CanRecover(boot + 1)
-       THEN run' = "retained" /\ pub' = FALSE /\ owner' = "none"
-       ELSE UNCHANGED <<run, pub, owner>>
-    /\ UNCHANGED <<runBoot, faults>>
+    /\ pool' = "running" /\ boot' = boot + 1 /\ recovering' = TRUE
+    /\ UNCHANGED <<run, runBoot, owner, pub, faults>>
 
 \* `hack down` of a live run: stop with data retained.
 Stop ==
     /\ pool = "running" /\ run = "ready" /\ owner = "live" /\ runBoot = boot
     /\ run' = "retained" /\ pub' = FALSE /\ owner' = "none"
-    /\ UNCHANGED <<pool, boot, runBoot, faults>>
+    /\ UNCHANGED <<pool, boot, runBoot, faults, recovering>>
 
 \* `hack up` = Start, or (Fixed) recovery of a dead owner's run then Start on
 \* a later command; `hack down` = Stop, RecoverRunning or (Fixed) RecoverStopped.
@@ -142,7 +143,9 @@ Settled ==
 
 \* From every reachable state some named command can act, or the owner is still
 \* noticing that its guest is gone (it exits on its own).
-NoDeadEnd == Settled \/ ENABLED User \/ ENABLED OwnerNotices \/ ~CanBoot
+NoDeadEnd == Settled \/ ENABLED User \/ ENABLED OwnerNotices
+\* The boot bound is a model limit, not a dead end: it must never be what stops a command.
+BootBoundUnreached == CanBoot
 \* Under fair user commands, with faults bounded, the project settles again and again.
 Recovers == []<>Settled
 =============================================================================

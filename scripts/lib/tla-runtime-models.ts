@@ -2361,13 +2361,15 @@ const contracts: readonly ModelContract[] = [
   },
   {
     // HACK-2456: a pool that stops or dies under a live run. Positive: this
-    // change with nothing else booting the pool; `any-boot` is recovery from any
-    // earlier boot (follow-up). `negative` is `next` before the change, `by-hand`
-    // adds an unnamed `runtime up`, `strict` keeps predecessor-only recovery while
-    // something else boots the pool: all reach a state where no command helps.
+    // change with nothing else booting the pool and no fault between its boot
+    // and its recovery; `any-boot` is recovery from any earlier boot (follow-up)
+    // with every fault. `negative` is `next` before the change, `by-hand` adds an
+    // unnamed `runtime up`, `strict` keeps predecessor-only recovery while
+    // something else boots the pool, `crash-in-recovery` lets the pool stop between
+    // the recovery's boot and its graph recovery: each reaches a dead end.
     name: "native-pool-stop",
     module: "PoolStop",
-    states: 75,
+    states: 81,
     invariant: "NoDeadEnd",
     action: "OwnerCrash",
     fields: [
@@ -2388,7 +2390,7 @@ const contracts: readonly ModelContract[] = [
       },
     ],
     additionalControls: [
-      { name: "any-boot", negative: false, states: 90 },
+      { name: "any-boot", negative: false, states: 113 },
       {
         name: "by-hand",
         negative: true,
@@ -2420,6 +2422,17 @@ const contracts: readonly ModelContract[] = [
               'owner = "dead"',
             ],
           },
+        ],
+      },
+      {
+        name: "crash-in-recovery",
+        negative: true,
+        action: "RecoverStopped",
+        fields: [
+          'pool = "running"',
+          "runBoot = 1",
+          "boot = 3",
+          "recovering = TRUE",
         ],
       },
     ],

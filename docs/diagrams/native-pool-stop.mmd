@@ -25,14 +25,14 @@ stateDiagram-v2
         Pool stopped or in a new boot.
     end note
     note right of recover
-        Starts a stopped pool, then
-        the existing recovery with
-        data kept (RecoverStopped).
+        runtime up first, then the
+        existing recovery as its own
+        request, data kept.
     end note
     note right of stranded
-        Known gap: another boot came
-        first. Follow-up recovers from
-        any earlier boot (any-boot).
+        Known gap: another boot, or a
+        stop mid-recovery, came first.
+        Follow-up: any-boot.
     end note
     note left of retained
         INV NoDeadEnd: some named

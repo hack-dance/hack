@@ -69,6 +69,13 @@ export async function pollUntil(opts: {
 export type LaneHealth =
   | { readonly kind: "none" }
   | {
+      /**
+       * No test in the Compose file: the engine uses the image's own
+       * `HEALTHCHECK`, if it has one. Not inspected, so unknown.
+       */
+      readonly kind: "image-default";
+    }
+  | {
       readonly kind: "engine-command";
       readonly test: string;
       readonly interval: string | null;
@@ -80,6 +87,11 @@ export type LaneHealth =
       readonly source: "declared" | "inferred";
       /** Why native probes the route: declared, no check, or a replaced command check. */
       readonly replaces: "nothing" | "command-check";
+    }
+  | {
+      /** Native review refuses this service's health settings; it does not start. */
+      readonly kind: "native-refuses";
+      readonly reason: string;
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -94,15 +106,22 @@ function routed(service: Record<string, unknown>): boolean {
   return isRecord(service.labels) && typeof service.labels.caddy === "string";
 }
 
-function commandHealth(health: Record<string, unknown>): LaneHealth {
+function disabled(health: Record<string, unknown>): boolean {
   const test = health.test;
-  const disabled =
-    health.disable === true ||
-    (Array.isArray(test) && test[0] === "NONE") ||
-    test === undefined;
-  if (disabled) {
+  return health.disable === true || (Array.isArray(test) && test[0] === "NONE");
+}
+
+/** How the engine runs a `healthcheck` mapping (or its absence). */
+function engineHealth(health: Record<string, unknown> | null): LaneHealth {
+  if (health === null || health.test === undefined) {
+    return health !== null && disabled(health)
+      ? { kind: "none" }
+      : { kind: "image-default" };
+  }
+  if (disabled(health)) {
     return { kind: "none" };
   }
+  const test = health.test;
   return {
     kind: "engine-command",
     test: Array.isArray(test) ? test.map(String).join(" ") : String(test),
@@ -113,12 +132,61 @@ function commandHealth(health: Record<string, unknown>): LaneHealth {
 }
 
 /**
+ * Native's choice, following its Compose review (runtime-core
+ * `project/compose/service.rs`): a declared `x-hack-http` probe runs on any
+ * service; a routed service with no `healthcheck` key, or with an enabled
+ * command check, gets an inferred `GET /` route probe instead; a routed
+ * service whose check is disabled is refused; anything else runs in the
+ * engine as on Compose.
+ */
+function nativeHealth(
+  service: Record<string, unknown>,
+  health: Record<string, unknown> | null
+): LaneHealth {
+  if (health !== null && "x-hack-http" in health) {
+    return {
+      kind: "native-route-probe",
+      source: "declared",
+      replaces: "nothing",
+    };
+  }
+  if (!routed(service)) {
+    return engineHealth(health);
+  }
+  if (health === null) {
+    return {
+      kind: "native-route-probe",
+      source: "inferred",
+      replaces: "nothing",
+    };
+  }
+  const engine = engineHealth(health);
+  if (engine.kind === "engine-command") {
+    return {
+      kind: "native-route-probe",
+      source: "inferred",
+      replaces: "command-check",
+    };
+  }
+  if (engine.kind === "none") {
+    return {
+      kind: "native-refuses",
+      reason: "a routed service's health check is disabled",
+    };
+  }
+  // A `healthcheck` key with no test: native neither infers a probe nor runs
+  // one, and its route admission needs one.
+  return {
+    kind: "native-refuses",
+    reason: "a routed service's health check has no test",
+  };
+}
+
+/**
  * The health check each service runs on one lane, from the project's Compose
- * file. Compose runs command checks in the engine and ignores `x-hack-http`.
- * Native runs non-routed command checks in its engine too, but probes every
- * routed service's route itself: a declared `x-hack-http` probe, or an
- * inferred `GET /` probe that also replaces a command check. Image health
- * checks (no `healthcheck` key) are not read and show as `none`.
+ * file alone. Compose runs command checks in the engine and ignores
+ * `x-hack-http`; without a test it uses the image's own check, reported as
+ * `image-default` because images are not inspected.
  */
 export function laneHealthChecks(opts: {
   readonly compose: unknown;
@@ -132,28 +200,20 @@ export function laneHealthChecks(opts: {
   for (const [name, raw] of Object.entries(services)) {
     const service = isRecord(raw) ? raw : {};
     const health = isRecord(service.healthcheck) ? service.healthcheck : null;
-    if (opts.lane === "native" && routed(service)) {
-      if (health && "x-hack-http" in health) {
-        result[name] = {
-          kind: "native-route-probe",
-          source: "declared",
-          replaces: "nothing",
-        };
-        continue;
-      }
-      result[name] = {
-        kind: "native-route-probe",
-        source: "inferred",
-        replaces:
-          health && commandHealth(health).kind === "engine-command"
-            ? "command-check"
-            : "nothing",
-      };
-      continue;
-    }
-    result[name] = health ? commandHealth(health) : { kind: "none" };
+    result[name] =
+      opts.lane === "native"
+        ? nativeHealth(service, health)
+        : engineHealth(health);
   }
   return result;
+}
+
+/** Services whose Compose-lane check comes from the image and was not read. */
+export function unknownHealthChecks(compose: unknown): string[] {
+  return Object.entries(laneHealthChecks({ compose, lane: "compose" }))
+    .filter(([, health]) => health.kind === "image-default")
+    .map(([name]) => name)
+    .sort();
 }
 
 /**

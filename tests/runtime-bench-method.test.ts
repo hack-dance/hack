@@ -9,6 +9,7 @@ import {
   laneHealthChecks,
   pollUntil,
   unevenHealthChecks,
+  unknownHealthChecks,
 } from "../scripts/lib/runtime-bench-method.ts";
 
 const FIXTURE = join(import.meta.dir, "../scripts/fixtures/runtime-bench");
@@ -29,8 +30,11 @@ test("the benchmark fixture runs the same health checks on both lanes", async ()
   const onCompose = laneHealthChecks({ compose, lane: "compose" });
   expect(onCompose.db).toMatchObject(engine);
   expect(onCompose.cache).toMatchObject(engine);
-  expect(onCompose.api).toEqual({ kind: "none" });
-  expect(onCompose.web).toEqual({ kind: "none" });
+  // No test: the engine would use the image's own check. The fixture's images
+  // define none (checked with docker image inspect), but the helper cannot know.
+  expect(onCompose.api).toEqual({ kind: "image-default" });
+  expect(onCompose.web).toEqual({ kind: "image-default" });
+  expect(unknownHealthChecks(compose)).toEqual(["api", "web"]);
   const onNative = laneHealthChecks({ compose, lane: "native" });
   expect(onNative.db).toEqual(onCompose.db);
   expect(onNative.cache).toEqual(onCompose.cache);
@@ -57,30 +61,74 @@ test("the version 1 fixture is reported as not like for like", async () => {
   });
 });
 
-test("a declared native probe and disabled checks are read as such", () => {
+const ROUTE = {
+  caddy: "web.example.hack",
+  "caddy.reverse_proxy": "{{upstreams 3000}}",
+};
+const PROBE = {
+  port: 3000,
+  path: "/health",
+  interval_ms: 1000,
+  timeout_ms: 1000,
+  retries: 3,
+  start_period_ms: 30_000,
+};
+
+test("each lane's health check follows native review's branches", () => {
   const compose = {
     services: {
-      web: {
-        labels: { caddy: "web.hack" },
-        healthcheck: { "x-hack-http": { port: 3000, path: "/" } },
+      declared: { labels: ROUTE, healthcheck: { "x-hack-http": PROBE } },
+      worker: { healthcheck: { "x-hack-http": PROBE } },
+      routedOff: {
+        labels: ROUTE,
+        healthcheck: { disable: true, test: ["CMD", "true"] },
       },
-      off: { healthcheck: { disable: true, test: ["CMD", "true"] } },
+      routedNone: { labels: ROUTE, healthcheck: { test: ["NONE"] } },
+      routedEmpty: { labels: ROUTE, healthcheck: { interval: "10s" } },
+      off: { healthcheck: { disable: true } },
       none: { healthcheck: { test: ["NONE"] } },
+      inherited: { image: "example/with-healthcheck:1" },
     },
   };
   expect(laneHealthChecks({ compose, lane: "native" })).toEqual({
-    web: {
+    declared: {
       kind: "native-route-probe",
       source: "declared",
       replaces: "nothing",
     },
+    worker: {
+      kind: "native-route-probe",
+      source: "declared",
+      replaces: "nothing",
+    },
+    routedOff: {
+      kind: "native-refuses",
+      reason: "a routed service's health check is disabled",
+    },
+    routedNone: {
+      kind: "native-refuses",
+      reason: "a routed service's health check is disabled",
+    },
+    routedEmpty: {
+      kind: "native-refuses",
+      reason: "a routed service's health check has no test",
+    },
     off: { kind: "none" },
     none: { kind: "none" },
+    inherited: { kind: "image-default" },
   });
-  // Compose ignores the extension field and has no test to run.
-  expect(laneHealthChecks({ compose, lane: "compose" }).web).toEqual({
-    kind: "none",
-  });
+  // Compose ignores the extension field, so a declaration without a test
+  // leaves the image's own check in place.
+  const onCompose = laneHealthChecks({ compose, lane: "compose" });
+  expect(onCompose.declared).toEqual({ kind: "image-default" });
+  expect(onCompose.worker).toEqual({ kind: "image-default" });
+  expect(onCompose.routedOff).toEqual({ kind: "none" });
+  expect(unknownHealthChecks(compose)).toEqual([
+    "declared",
+    "inherited",
+    "routedEmpty",
+    "worker",
+  ]);
   expect(unevenHealthChecks(compose)).toEqual([]);
   expect(laneHealthChecks({ compose: null, lane: "compose" })).toEqual({});
 });
@@ -118,6 +166,11 @@ test("legacy readiness checks routes one after the other and stops at a failure"
   ).toBe(false);
 });
 
+/**
+ * A fake clock whose request decides its answer when it starts and returns
+ * `requestMs` later, like a real round trip: readiness can change while a
+ * failing request is still under way.
+ */
 function fakeClock(opts: { readonly requestMs: number }) {
   let now = 0;
   return {
@@ -126,36 +179,54 @@ function fakeClock(opts: { readonly requestMs: number }) {
       now += ms;
     },
     request: (readyAt: number) => async () => {
+      const answer = now >= readyAt;
       now += opts.requestMs;
-      return now >= readyAt;
+      return answer;
     },
   };
 }
 
-test("readiness is reported within one poll of the moment it happened", async () => {
-  for (const readyAt of [0, 37, 503, 1990]) {
-    const clock = fakeClock({ requestMs: 5 });
-    const ms = await pollUntil({
-      isReady: clock.request(readyAt),
+test("readiness is late by at most the round under way, one poll pause and one round", async () => {
+  for (const requestMs of [5, 40]) {
+    for (const readyAt of [0, 1, 37, 503, 1990]) {
+      const clock = fakeClock({ requestMs });
+      const ms = await pollUntil({
+        isReady: clock.request(readyAt),
+        mode: EXACT_READINESS,
+        timeoutMs: 10_000,
+        now: clock.now,
+        sleep: clock.sleep,
+      });
+      expect(ms).not.toBeNull();
+      expect(ms as number).toBeGreaterThanOrEqual(readyAt);
+      expect(ms as number).toBeLessThanOrEqual(
+        readyAt + requestMs + 20 + requestMs
+      );
+    }
+  }
+  // Ready just after a failing round started: that round, the pause and the
+  // next round all count.
+  const clock = fakeClock({ requestMs: 40 });
+  expect(
+    await pollUntil({
+      isReady: clock.request(1),
       mode: EXACT_READINESS,
       timeoutMs: 10_000,
       now: clock.now,
       sleep: clock.sleep,
-    });
-    expect(ms).not.toBeNull();
-    expect(ms as number).toBeGreaterThanOrEqual(readyAt);
-    expect(ms as number).toBeLessThanOrEqual(readyAt + 20 + 5);
-  }
+    })
+  ).toBe(100);
   // The legacy mode can be up to half a second late.
-  const clock = fakeClock({ requestMs: 5 });
-  const late = await pollUntil({
-    isReady: clock.request(10),
-    mode: LEGACY_READINESS,
-    timeoutMs: 10_000,
-    now: clock.now,
-    sleep: clock.sleep,
-  });
-  expect(late).toBe(510);
+  const legacy = fakeClock({ requestMs: 5 });
+  expect(
+    await pollUntil({
+      isReady: legacy.request(10),
+      mode: LEGACY_READINESS,
+      timeoutMs: 10_000,
+      now: legacy.now,
+      sleep: legacy.sleep,
+    })
+  ).toBe(510);
 });
 
 test("readiness gives up at the timeout", async () => {

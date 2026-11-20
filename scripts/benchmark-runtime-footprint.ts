@@ -35,17 +35,19 @@
  *
  * Measurement boundary. Readiness is the descriptor's routed HTTP checks
  * returning the expected status through the backend's own proxy, never a
- * process start. All routes are checked at once, 20 ms apart, so a sample is
- * at most one poll (one request round trip plus 20 ms) later than the moment
- * the last route answered. Timings are wall time of the CLI command plus the
- * wait for readiness, with the 1-minute load recorded before and after.
+ * process start. All routes are checked at once, 20 ms apart. A sample can be
+ * late by the rest of a round already under way when the routes became ready
+ * (up to the slowest request), plus 20 ms, plus one more round. Timings are
+ * wall time of the CLI command plus the wait for readiness, with the 1-minute
+ * load recorded before and after.
  *
  * `result.json` records the method under `method`: the readiness mode, the
  * SHA-256 of the project's Compose file, and the health check each service
  * runs on this lane (Compose runs command checks in the engine; native runs
  * non-routed command checks in its engine and probes routed services itself).
  * A command check on a routed service runs on Compose only, so the report
- * lists it under `unevenHealthChecks`.
+ * lists it under `unevenHealthChecks`. A service with no test uses its
+ * image's own check, which is not inspected: `unknownHealthChecks` lists it.
  *
  * Memory is reported per quantity and never summed across kinds:
  *   - per container: cgroup `memory.current` and `memory.stat` (anon, file),
@@ -102,6 +104,7 @@ import {
   laneHealthChecks,
   pollUntil,
   unevenHealthChecks,
+  unknownHealthChecks,
 } from "./lib/runtime-bench-method.ts";
 
 type Env = Record<string, string>;
@@ -1456,6 +1459,7 @@ function methodRecord(): Record<string, unknown> {
       `not like for like: ${uneven.join(", ")} run a command health check on Compose only; native probes their routes instead`
     );
   }
+  const unknown = unknownHealthChecks(compose);
   return {
     readiness: {
       ...readiness,
@@ -1472,6 +1476,7 @@ function methodRecord(): Record<string, unknown> {
       lane: lane === "native" ? "native" : "compose",
     }),
     unevenHealthChecks: uneven,
+    unknownHealthChecks: unknown,
   };
 }
 

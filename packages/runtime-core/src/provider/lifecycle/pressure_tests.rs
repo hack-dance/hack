@@ -95,3 +95,83 @@ fn lease_wait_pressure_change_refuses_owner_commit_and_releases_the_mutation_lea
     // A failed fresh sample does not leave a lease or grant allocation authority.
     assert!(state::Lock::acquire(&path).is_ok());
 }
+
+/// Ties `start_pool` to the step order of `tests/models/tla/pool-start-admission/PoolStart.tla`
+/// in its `positive` configuration (root files proven under the lease). It reads source
+/// order only; what each step does is covered by the tests that model's `COVERAGE.md` names.
+#[test]
+fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
+    let source = include_str!("../lifecycle.rs");
+    let start = source.find("\nfn start_pool(").unwrap();
+    let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+    let at = |step: &str| {
+        body.find(step)
+            .unwrap_or_else(|| panic!("start_pool no longer contains `{step}`"))
+    };
+    // Model action, then the call that performs it.
+    let steps = [
+        (
+            "RestoreAliasBeforeUse",
+            "restore_released_short_home_before_use(candidate)?;",
+        ),
+        (
+            "ResumeRunning",
+            "running_start::select(candidate, profile)?",
+        ),
+        (
+            "Open: selection",
+            "admission_pool::select(candidate, profile)?",
+        ),
+        (
+            "Open: first sample",
+            "admission_pool::probe(candidate, profile, &admission_owner)?",
+        ),
+        (
+            "Open: window",
+            "admission::open(&admission, &admission_clock)?",
+        ),
+        ("ResearchSample", "admission::sample_with(profile, ||"),
+        (
+            "ProveTrees",
+            "artifact::verify_witnessed(candidate, &artifact::SMOLVM)?",
+        ),
+        (
+            "ProveTrees",
+            "artifact::verify_witnessed(candidate, &artifact::ENGINE)?",
+        ),
+        ("AcquireLease, Recheck, Qualify", "startup_admission_lease("),
+        (
+            "RestoreAliasLeased",
+            "restore_released_short_home(candidate)?;",
+        ),
+        (
+            "Settle",
+            "admission_pool::settle(candidate, &mut admission_owner, &lock, &mut samples)?",
+        ),
+        ("ProveRoot", "prepare_rootfs(candidate, &mut owner)?"),
+        ("AdmitBoot", "admission_pool::admit_boot("),
+        ("Start: final recheck", "boot.release(candidate, &lock)?"),
+        ("Start", "start_machine(candidate, &owner, permit)?"),
+    ];
+    for pair in steps.windows(2) {
+        assert!(
+            at(pair[0].1) < at(pair[1].1),
+            "{} must come before {}",
+            pair[0].0,
+            pair[1].0
+        );
+    }
+    // One clock opens the window and judges it under the lease.
+    assert_eq!(body.matches("process::MonotonicClock::new()").count(), 1);
+    let lease = &body[at("startup_admission_lease(")..];
+    assert!(lease[..lease.find(")?;").unwrap()].contains("&admission_clock,"));
+    // The pre-boot check is handed the last qualifying sample's swapout count, and nothing
+    // but the sample under the lease is added to the samples after the first window.
+    let gate = &body[at("admission_pool::admit_boot(")..];
+    assert!(
+        gate[..gate.find(")? {").unwrap()]
+            .contains("samples.last().and_then(|sample| sample.swapouts)")
+    );
+    assert_eq!(body.matches("samples.extend(").count(), 1);
+    assert_eq!(body.matches("samples.push(").count(), 0);
+}

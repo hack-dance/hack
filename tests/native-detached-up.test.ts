@@ -97,7 +97,7 @@ for (const mode of [
           : mode === "branch-dropped"
             ? "Branch feature-a: service web label caddy drops 2 sites outside this project's route namespaces; they stay with the base instance.\n"
             : mode === "hot-reload-off"
-              ? `${renderNativeHotReloadNotice({ state: "off", reason: "large_share", limit: 20_000 })}\n`
+              ? `${renderNativeHotReloadNotice({ state: "off", reason: "large_share", limit: 100_000 })}\n`
               : mode === "shell-names"
                 ? "Forwarding shell variables: A_TOKEN, Z_TOKEN.\n"
                 : mode === "shell-names-empty"

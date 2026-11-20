@@ -62,14 +62,14 @@ function publishFixtureHotReload(fixtureMode: string): void {
     nativeDetachedUpHotReload({
       state: "off",
       reason: "large_share",
-      limit: 20_000,
+      limit: 100_000,
     });
   } else if (fixtureMode === "hot-reload-unsafe") {
     // A notice that is not exactly two known names and a bounded number is dropped whole.
     nativeDetachedUpHotReload({
       state: "off",
       reason: "large_share",
-      limit: 20_000,
+      limit: 100_000,
       message: "synthetic-private-value",
     } as never);
   }

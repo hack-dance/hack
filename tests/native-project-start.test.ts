@@ -6649,13 +6649,13 @@ test("startup cleanup retains only safe runtime detail, never original errors or
 for (const [name, hotReload, expected] of [
   [
     "off for a large share",
-    { state: "off", reason: "large_share", limit: 20_000, message: "ignored" },
-    { state: "off", reason: "large_share", limit: 20_000 },
+    { state: "off", reason: "large_share", limit: 100_000, message: "ignored" },
+    { state: "off", reason: "large_share", limit: 100_000 },
   ],
   [
     "forced on",
-    { state: "on", reason: "setting", limit: 20_000 },
-    { state: "on", reason: "setting", limit: 20_000 },
+    { state: "on", reason: "setting", limit: 100_000 },
+    { state: "on", reason: "setting", limit: 100_000 },
   ],
   ["the plain default", { state: "on" }, null],
 ] as const) {

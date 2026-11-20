@@ -20,7 +20,7 @@ test("HACK-2409: a notice is two known names and a bounded number, and the runti
     hot_reload: {
       state: "off",
       reason: "large_share",
-      limit: 20_000,
+      limit: 100_000,
       message: "synthetic-private-value",
     },
   };
@@ -28,11 +28,11 @@ test("HACK-2409: a notice is two known names and a bounded number, and the runti
   expect(notice).toEqual({
     state: "off",
     reason: "large_share",
-    limit: 20_000,
+    limit: 100_000,
   });
   const line = renderNativeHotReloadNotice(notice!);
   expect(line).not.toContain("synthetic-private-value");
-  expect(line).toContain("more than 20,000 files and folders");
+  expect(line).toContain("more than 100,000 files and folders");
   expect(line).toContain("HACK_NATIVE_HOT_RELOAD=on");
   expect(line).toContain("localDirectories");
   expect(line).not.toContain("\n");
@@ -60,16 +60,16 @@ test("HACK-2409: off by setting and forced on each say what was chosen", () => {
     renderNativeHotReloadNotice({
       state: "off",
       reason: "setting",
-      limit: 20_000,
+      limit: 100_000,
     })
   ).toContain("HACK_NATIVE_HOT_RELOAD=off");
   const forced = renderNativeHotReloadNotice({
     state: "on",
     reason: "setting",
-    limit: 20_000,
+    limit: 100_000,
   });
   expect(forced).toContain("forced on (HACK_NATIVE_HOT_RELOAD=on)");
-  expect(forced).toContain("more than 20,000 files and folders");
+  expect(forced).toContain("more than 100,000 files and folders");
   // The user who forces it is told the cost of the choice.
   expect(forced).toContain(NATIVE_HOT_RELOAD_FORCED_COST);
   expect(forced).toContain("30 seconds");

@@ -3557,7 +3557,7 @@ mod tests {
             owner.hot_reload = Some(Choice {
                 enabled,
                 reason,
-                limit: 20_000,
+                limit: 100_000,
             });
             let cmd = command(&candidate, &owner);
             let env: std::collections::BTreeMap<_, _> = cmd.get_envs().collect();

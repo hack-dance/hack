@@ -1,23 +1,24 @@
 //! Whether a pool boot keeps the provider's host-to-guest change notifications ("hot reload on
 //! shared source") for its shared project directories.
 //!
-//! On macOS the pinned provider cannot use the system's file events in its boot process, so it
-//! polls: before the guest starts it reads every entry under every mounted host directory to
-//! build a baseline, and the launch waits for that. It then reads them all again every second
-//! for as long as the VM runs. For a small tree this costs nothing that shows. For a large one
-//! (installed dependencies in the checkout) the baseline takes longer than the provider allows
-//! a boot to make no progress, and the start fails; when it does fit, a host core stays busy.
+//! With notifications on, a host edit under a shared directory reaches the guest in about a
+//! tenth of a second: the new content is readable and file watchers in containers fire. The
+//! price is paid at boot. Before the guest starts, the pinned provider reads every entry under
+//! every mounted host directory to build a baseline, and the launch waits for it (it reads
+//! them once more in the background after boot, and nothing after that). For a small tree
+//! that is a fraction of a second. For a very large one it takes longer than the provider
+//! allows a boot to make no progress (30 seconds), and the start fails.
 //!
 //! So a boot whose shared project directories hold more than [`ENTRY_LIMIT`] entries starts
 //! the provider with its notifications off. The share itself is unchanged: the guest reads and
-//! writes the same files. What is lost is the provider telling the guest that the host changed
-//! a file, so a watcher inside a container does not fire for host edits and the guest may
-//! serve a cached copy of a file for a short time. `HACK_NATIVE_HOT_RELOAD` overrides the
-//! choice in either direction.
+//! writes the same files. What is lost: file watchers in the guest do not fire for host edits,
+//! a changed file can read as its old content for up to about five seconds, and lookups of
+//! names that do not exist are no longer cached. `HACK_NATIVE_HOT_RELOAD` overrides the choice
+//! in either direction.
 //!
 //! The choice is made once per boot, immediately before `machine start`, recorded in the owner
-//! receipt only when it is not the plain default, and applied to every provider invocation for that
-//! pool (see `lifecycle::command`).
+//! receipt only when it is not the plain default, and applied to every provider invocation for
+//! that pool (see `lifecycle::command`).
 
 use crate::CandidateError;
 use serde::{Deserialize, Serialize};
@@ -32,13 +33,15 @@ pub const PROVIDER_SWITCH: &str = "SMOL_NO_HOT_RELOAD";
 /// Entries (files, directories and links together) a pool's shared project directories may
 /// hold before `auto` starts the provider with notifications off.
 ///
-/// Chosen from measurement, not from the provider's limits: see the README section
-/// "Hot reload on shared source" for the boot time and idle CPU measured against entry count.
-pub const ENTRY_LIMIT: u64 = 20_000;
+/// Chosen from measurement so the provider's scan before boot stays well inside its 30-second
+/// limit: at this size it took 3 to 5 seconds on a cold file cache for installed dependency
+/// trees and about 9 seconds for the slowest tree measured. The README section "Hot reload on
+/// shared source" has the table.
+pub const ENTRY_LIMIT: u64 = 100_000;
 
 /// What forcing notifications on costs a start, for the message. From the same measurement.
-const FORCED_COST: &str = "adds seconds to the start and fails it when it takes the provider \
-                           longer than 30 seconds";
+const FORCED_COST: &str = "takes seconds for every 100,000 entries and fails the start when it \
+                           takes the provider longer than 30 seconds";
 
 /// What the user asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,19 +186,22 @@ pub fn report(recorded: Option<Choice>) -> Report {
     let message = match (choice.enabled, choice.reason) {
         (false, Reason::LargeShare) => format!(
             "Hot reload on shared source is off for this pool: its shared project directories \
-             hold more than {} entries, and the provider reads every one before each start and \
-             again every second. Set HACK_NATIVE_HOT_RELOAD=on to force it on, or remove \
-             installed dependency directories from the host checkout (`localDirectories` keeps \
-             them on the VM disk instead).",
+             hold more than {} entries, and the provider reads every one before a start, which \
+             can outlast its 30-second limit. Host edits reach the guest after up to about 5 \
+             seconds and file watchers there do not fire. Set HACK_NATIVE_HOT_RELOAD=on to \
+             force it on, or remove installed dependency directories from the host checkout \
+             (`localDirectories` keeps them on the VM disk instead).",
             choice.limit
         ),
-        (false, Reason::Setting) => {
-            "Hot reload on shared source is off for this pool: HACK_NATIVE_HOT_RELOAD=off.".into()
-        }
+        (false, Reason::Setting) => "Hot reload on shared source is off for this pool: \
+                                     HACK_NATIVE_HOT_RELOAD=off. Host edits reach the guest \
+                                     after up to about 5 seconds and file watchers there do \
+                                     not fire."
+            .into(),
         (true, _) => format!(
             "Hot reload on shared source is forced on (HACK_NATIVE_HOT_RELOAD=on) although the \
              shared project directories hold more than {} entries: the provider reads every one \
-             before each start, which {FORCED_COST}, and again every second while the pool runs.",
+             before each start, which {FORCED_COST}.",
             choice.limit
         ),
     };
@@ -359,13 +365,14 @@ mod tests {
         let large = report(Some(Choice {
             enabled: false,
             reason: Reason::LargeShare,
-            limit: 20_000,
+            limit: 100_000,
         }));
         assert_eq!(large.state, "off");
         let message = large.message.clone().unwrap();
-        assert!(message.contains("more than 20000 entries"), "{message}");
+        assert!(message.contains("more than 100000 entries"), "{message}");
         assert!(message.contains("HACK_NATIVE_HOT_RELOAD=on"), "{message}");
         assert!(message.contains("localDirectories"), "{message}");
+        assert!(message.contains("up to about 5 seconds"), "{message}");
         assert_eq!(
             serde_json::to_value(&large).unwrap()["reason"],
             serde_json::json!("large_share")
@@ -373,7 +380,7 @@ mod tests {
         let setting = report(Some(Choice {
             enabled: false,
             reason: Reason::Setting,
-            limit: 20_000,
+            limit: 100_000,
         }));
         assert_eq!(
             serde_json::to_value(&setting).unwrap()["reason"],
@@ -388,12 +395,12 @@ mod tests {
         let forced = report(Some(Choice {
             enabled: true,
             reason: Reason::Setting,
-            limit: 20_000,
+            limit: 100_000,
         }));
         assert_eq!(forced.state, "on");
         let message = forced.message.unwrap();
         assert!(message.contains("forced on"), "{message}");
-        assert!(message.contains("more than 20000 entries"), "{message}");
+        assert!(message.contains("more than 100000 entries"), "{message}");
         assert!(message.contains("30 seconds"), "{message}");
     }
 
@@ -402,12 +409,12 @@ mod tests {
         let off = Choice {
             enabled: false,
             reason: Reason::LargeShare,
-            limit: 20_000,
+            limit: 100_000,
         };
         let text = serde_json::to_string(&off).unwrap();
         assert_eq!(
             text,
-            r#"{"enabled":false,"reason":"large_share","limit":20000}"#
+            r#"{"enabled":false,"reason":"large_share","limit":100000}"#
         );
         assert_eq!(serde_json::from_str::<Choice>(&text).unwrap(), off);
         assert!(

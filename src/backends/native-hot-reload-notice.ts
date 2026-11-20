@@ -68,7 +68,11 @@ export function nativeHotReloadNoticeFromPool(
  * the runtime README, "Hot reload on shared source").
  */
 export const NATIVE_HOT_RELOAD_FORCED_COST =
-  "seconds for tens of thousands, and the start fails if that takes longer than 30 seconds";
+  "seconds for every 100,000, and the start fails if that takes longer than 30 seconds";
+
+/** What a start without notifications means for the project, in one sentence. */
+const NATIVE_HOT_RELOAD_OFF_EFFECT =
+  "Services read and write the same files, but an edit made on the Mac reaches them after up to about 5 seconds and file watchers inside them do not fire.";
 
 /** The one line shown on stderr for a notice. */
 export function renderNativeHotReloadNotice(
@@ -76,10 +80,10 @@ export function renderNativeHotReloadNotice(
 ): string {
   const limit = notice.limit.toLocaleString("en-US");
   if (notice.state === "on") {
-    return `Hot reload on shared source is forced on (HACK_NATIVE_HOT_RELOAD=on) with more than ${limit} files and folders shared: every start first reads all of them (${NATIVE_HOT_RELOAD_FORCED_COST}), and they are read again every second while the project runs.`;
+    return `Hot reload on shared source is forced on (HACK_NATIVE_HOT_RELOAD=on) with more than ${limit} files and folders shared: every start of the virtual machine first reads all of them (${NATIVE_HOT_RELOAD_FORCED_COST}).`;
   }
   if (notice.reason === "setting") {
-    return "Hot reload on shared source is off: HACK_NATIVE_HOT_RELOAD=off. Services read and write the same files; file watchers inside them do not see edits made on the Mac.";
+    return `Hot reload on shared source is off: HACK_NATIVE_HOT_RELOAD=off. ${NATIVE_HOT_RELOAD_OFF_EFFECT}`;
   }
-  return `Hot reload on shared source is off: the shared project folders hold more than ${limit} files and folders, and the virtual machine would read every one before it starts and again every second. Services read and write the same files; file watchers inside them do not see edits made on the Mac. Remove installed dependency folders from the checkout to bring it back (localDirectories keeps them on the virtual machine's disk), or set HACK_NATIVE_HOT_RELOAD=on to force it on.`;
+  return `Hot reload on shared source is off: the shared project folders hold more than ${limit} files and folders, and the virtual machine reads every one before it starts, which can make the start fail. ${NATIVE_HOT_RELOAD_OFF_EFFECT} Remove installed dependency folders from the checkout to bring it back (localDirectories keeps them on the virtual machine's disk), or set HACK_NATIVE_HOT_RELOAD=on to force it on.`;
 }

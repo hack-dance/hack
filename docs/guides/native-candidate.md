@@ -4621,7 +4621,10 @@ listener is never classified as a conflict because another publisher exited.
 
 New macOS frontend finalization records include the process birth time. Retaining
 recovery can distinguish a reused PID without signalling its replacement. A
-matching zombie also counts as exited. Unreadable identities refuse; records
+matching zombie also counts as exited. When `hack down` has just seen the frontend exit
+without finishing its cleanup, an unreadable identity row (for example, `ps` timing out
+under load) is read again, up to five reads 0.5 s apart, before down refuses. A readable
+row that shows the frontend still running refuses at once. Unreadable identities still refuse; records
 without a birth retain their PID-only behavior. Linux does not compare `ps`
 births because clock corrections can change that observation. Failure to capture
 the frontend's own birth falls back to the legacy behavior instead of failing up.

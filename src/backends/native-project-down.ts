@@ -5,7 +5,10 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
-import { nativeFrontendGone } from "./native-frontend-identity.ts";
+import {
+  nativeFrontendGone,
+  nativeFrontendGoneSettled,
+} from "./native-frontend-identity.ts";
 import { openNativeDownHookSession } from "./native-project-down-hooks.ts";
 import {
   captureNativeProjectFinalization,
@@ -48,7 +51,7 @@ function refused(): Error {
 }
 function finalizationRefused(): Error {
   return new ClosedCliError(
-    "Native down frontend finalization is unconfirmed or its ownership changed; no cleanup was replayed. Run hack ps --json to inspect this run's retained state."
+    "Native down frontend finalization is unconfirmed or its ownership changed; no cleanup was replayed, so rerunning hack down is safe. Run hack ps --json to inspect this run's retained state."
   );
 }
 async function captureFinalization(opts: {
@@ -676,9 +679,11 @@ async function nativeProjectDownOnce(opts: {
         timeoutMs: frontendGone ? 1 : opts.finalizationTimeoutMs,
       });
     } catch {
+      // The wait just saw the frontend gone without completion; one unreadable
+      // `ps` row under load must not turn that into "still running" (HACK-2372).
       if (
         finalization.version === 1 ||
-        !(await nativeFrontendGone(finalization))
+        !(await nativeFrontendGoneSettled(finalization))
       ) {
         throw finalizationRefused();
       }

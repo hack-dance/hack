@@ -17,6 +17,31 @@ pub struct Probe {
     pub exec_id: Option<String>,
     pub started_ms: u64,
     pub phase: String,
+    /// Whether this probe's mounted binary takes the start interval argument (HACK-2443).
+    /// Absent, and so false, in a receipt written by an earlier build: its binary is the
+    /// earlier one, mounted by content address, and every launch of it uses the arguments that
+    /// binary takes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start_interval_argv: bool,
+}
+
+impl Probe {
+    /// The arguments this probe's own binary takes: with the start interval for a binary of
+    /// this build, without it for one an earlier build published.
+    pub(super) fn launch_arguments(&self) -> Result<Vec<String>, CandidateError> {
+        let directory = "/run/hack-http-probe-state";
+        if self.start_interval_argv {
+            return self.config.arguments(directory, &self.generation);
+        }
+        self.config
+            .legacy_arguments(directory, &self.generation)?
+            .ok_or_else(|| {
+                error(
+                    "graph_probe_plan",
+                    "A probe from an earlier build cannot take a start interval.",
+                )
+            })
+    }
 }
 
 /// Only an inferred route's unhealthy observation gets route guidance. Explicit
@@ -134,6 +159,7 @@ pub(super) fn fresh(
                     exec_id: None,
                     started_ms: 0,
                     phase: "reserved".into(),
+                    start_interval_argv: true,
                 },
             ))
         })
@@ -270,22 +296,12 @@ fn exec(
         .id
         .as_ref()
         .ok_or_else(|| error("graph_probe_identity", "Probe lacks a container identity."))?;
-    // A probe a build before HACK-2443 started on a still running graph carries the
-    // arguments without the start interval; it is the same probe.
+    // The exec must carry exactly the arguments its probe's binary takes (HACK-2443).
     let arguments = &value["ProcessConfig"]["arguments"];
-    let current = *arguments
-        == json!(
-            p.config
-                .arguments("/run/hack-http-probe-state", &p.generation)?
-        );
-    let legacy = || -> Result<bool, CandidateError> {
-        Ok(p.config
-            .legacy_arguments("/run/hack-http-probe-state", &p.generation)?
-            .is_some_and(|legacy| *arguments == json!(legacy)))
-    };
+    let expected = json!(p.launch_arguments()?);
     if value["ContainerID"] != *container
         || value["ProcessConfig"]["entrypoint"] != "/run/hack-http-probe"
-        || !(current || legacy()?)
+        || *arguments != expected
     {
         return Err(error(
             "graph_probe_identity",
@@ -355,6 +371,44 @@ fn observe_sample(
 #[cfg(test)]
 mod observation_clock_tests {
     use super::*;
+    /// HACK-2443: a probe from an earlier build's receipt launches its own binary with the
+    /// arguments that binary takes; one created by this build adds the start interval.
+    #[test]
+    fn a_probe_launches_with_the_arguments_its_own_binary_takes() {
+        let mut probe: Probe = serde_json::from_value(serde_json::json!({
+            "config":{"port":8080,"path":"/","interval_ms":30000,"timeout_ms":1000,
+                "retries":3,"start_period_ms":240000,"policy":"route"},
+            "allocation":"a".repeat(32),"generation":"b".repeat(32),
+            "binary":format!("/storage/hack-native-http-probe/{}", "c".repeat(64)),
+            "uid":0,"gid":0,"exec_id":null,"started_ms":0,"phase":"running"
+        }))
+        .unwrap();
+        // A receipt written before the field: the earlier binary's arguments.
+        assert!(!probe.start_interval_argv);
+        let legacy = probe.launch_arguments().unwrap();
+        assert_eq!(legacy.len(), 9);
+        assert_eq!(legacy.last().unwrap(), "route");
+        assert!(
+            serde_json::to_value(&probe)
+                .unwrap()
+                .get("start_interval_argv")
+                .is_none()
+        );
+        // A probe this build created: the start interval before `route`.
+        probe.start_interval_argv = true;
+        let current = probe.launch_arguments().unwrap();
+        assert_eq!(current.len(), 10);
+        assert_eq!(current[8], "250");
+        assert_eq!(current[9], "route");
+        // An earlier binary cannot be given a declared start interval.
+        probe.start_interval_argv = false;
+        probe.config.start_interval_ms = Some(100);
+        assert_eq!(
+            probe.launch_arguments().unwrap_err().code,
+            "graph_probe_plan"
+        );
+    }
+
     #[test]
     fn slow_sample_read_uses_response_time_without_extending_freshness() {
         let probe = Probe {
@@ -376,6 +430,7 @@ mod observation_clock_tests {
             exec_id: None,
             started_ms: 10000,
             phase: "started".into(),
+            start_interval_argv: true,
         };
         let clock = std::cell::Cell::new(10000);
         let raw = format!("v1 {} 5 1 0 12000 2\n", probe.generation);
@@ -639,10 +694,7 @@ impl Session<'_, '_> {
         self.save()?;
         let p = &self.receipt.probes[name];
         let mut args = vec!["/run/hack-http-probe".to_owned()];
-        args.extend(
-            p.config
-                .arguments("/run/hack-http-probe-state", &p.generation)?,
-        );
+        args.extend(p.launch_arguments()?);
         let value=self.engine.request(Method::POST,&format!("/v1.53/containers/{id}/exec"),Some(&json!({"AttachStdout":false,"AttachStderr":false,"User":format!("{}:{}",p.uid,p.gid),"Cmd":args})))?;
         #[cfg(test)]
         self.fault_pause("probe-after-exec-create")?;
@@ -889,11 +941,7 @@ pub(super) fn rearm_after_inactive(
     fence()?;
     let probe = &receipt.probes[name];
     let mut args = vec!["/run/hack-http-probe".to_owned()];
-    args.extend(
-        probe
-            .config
-            .arguments("/run/hack-http-probe-state", &probe.generation)?,
-    );
+    args.extend(probe.launch_arguments()?);
     let value = request(
         Method::POST,
         &format!("/v1.53/containers/{id}/exec"),

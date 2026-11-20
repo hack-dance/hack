@@ -1185,6 +1185,7 @@ mod tests {
                 exec_id: None,
                 started_ms: 0,
                 phase: "reserved".into(),
+                start_interval_argv: true,
             },
         );
         let before = cleanup_effect(&receipt, "boot", false, &json!([])).unwrap();

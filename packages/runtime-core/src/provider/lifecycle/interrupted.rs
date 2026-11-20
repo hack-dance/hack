@@ -42,15 +42,20 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 
-/// Recovery cannot prove what an interrupted start left; `reason` names the condition, so the
-/// refusal says what to inspect. Nothing is adopted or removed.
-fn unrecoverable(reason: &str) -> CandidateError {
-    CandidateError::new(
-        "recovery_required",
-        format!(
-            "No retained process identity: {reason}. Manual inspection required; no state was adopted or removed."
-        ),
-    )
+/// Recovery cannot prove what an interrupted start left; the literal reason names the
+/// condition, so the refusal says what to inspect. Nothing is adopted or removed. A macro so
+/// the whole message is one static string: only fixed messages cross to the CLI.
+macro_rules! unrecoverable {
+    ($reason:literal) => {
+        crate::CandidateError::new(
+            "recovery_required",
+            concat!(
+                "No retained process identity: ",
+                $reason,
+                ". Manual inspection required; no state was adopted or removed."
+            ),
+        )
+    };
 }
 
 /// Recover `owner`, whose receipt records no provider process. Caller holds the pool lock.
@@ -72,10 +77,9 @@ pub(super) fn recover(
             }
             Ok(())
         }
-        _ => Err(unrecoverable(&format!(
-            "the receipt is in phase {} with no provider recorded",
-            owner.phase
-        ))),
+        _ => Err(unrecoverable!(
+            "the receipt is in a phase no interrupted start leaves, with no provider recorded"
+        )),
     }
 }
 
@@ -101,7 +105,7 @@ fn present<const N: usize>(
         *slot = match fs::symlink_metadata(directory.join(name)) {
             Ok(_) => true,
             Err(error) if error.kind() == ErrorKind::NotFound => false,
-            Err(_) => return Err(unrecoverable("a provider file could not be inspected")),
+            Err(_) => return Err(unrecoverable!("a provider file could not be inspected")),
         };
     }
     Ok(found)
@@ -113,7 +117,7 @@ fn recover_create(candidate: &Candidate, owner: &mut Owner) -> Result<(), Candid
         ["storage.raw", "overlay.raw"],
     )? != [false; 2]
     {
-        return Err(unrecoverable("an interrupted create already has disks"));
+        return Err(unrecoverable!("an interrupted create already has disks"));
     }
     provider_idle(candidate)?;
     if config_audit::machine_recorded(candidate, owner)? {
@@ -123,8 +127,8 @@ fn recover_create(candidate: &Candidate, owner: &mut Owner) -> Result<(), Candid
             &["machine", "delete", "--name", &owner.machine, "--force"],
         )?;
         if config_audit::machine_recorded(candidate, owner)? {
-            return Err(unrecoverable(
-                "the provider still records this machine after deleting it",
+            return Err(unrecoverable!(
+                "the provider still records this machine after deleting it"
             ));
         }
     }
@@ -143,8 +147,8 @@ fn recover_start(
         Ok(_) => present(&directory, ["storage.raw", "overlay.raw"])?,
         Err(error) if error.kind() == ErrorKind::NotFound => [false; 2],
         Err(_) => {
-            return Err(unrecoverable(
-                "the machine data directory could not be inspected",
+            return Err(unrecoverable!(
+                "the machine data directory could not be inspected"
             ));
         }
     };
@@ -154,8 +158,8 @@ fn recover_start(
         // proofs, which are repeated below before any further move.
         let templates = prepared_start::stock_templates(candidate, owner, lock)?;
         let (false, Some(templates)) = (adopted, templates) else {
-            return Err(unrecoverable(
-                "a set-aside is in progress but the disks were adopted or come from a prepared base",
+            return Err(unrecoverable!(
+                "a set-aside is in progress but the disks were adopted or come from a prepared base"
             ));
         };
         provider_idle(candidate)?;
@@ -168,11 +172,11 @@ fn recover_start(
         return owner.save(candidate);
     }
     if launched != [true; 2] {
-        return Err(unrecoverable("only one of the two machine disks exists"));
+        return Err(unrecoverable!("only one of the two machine disks exists"));
     }
     if present(&directory, ["agent.pid"])? == [true] {
         let process = recorded_process(candidate, owner)
-            .map_err(|_| unrecoverable("the provider's PID record is unreadable or incomplete"))?;
+            .map_err(|_| unrecoverable!("the provider's PID record is unreadable or incomplete"))?;
         if identity::alive(process.pid)? {
             // SAFETY: geteuid has no preconditions and cannot fail.
             identity::verify(
@@ -221,8 +225,8 @@ pub(super) fn set_aside_recorded(
         let (false, false, Some(templates)) =
             (owner.storage.is_some(), owner.overlay.is_some(), templates)
         else {
-            return Err(unrecoverable(
-                "a set-aside is in progress but the disks were adopted or come from a prepared base",
+            return Err(unrecoverable!(
+                "a set-aside is in progress but the disks were adopted or come from a prepared base"
             ));
         };
         provider_idle(candidate)?;
@@ -280,7 +284,7 @@ impl SetAside {
     fn new_label() -> Result<String, CandidateError> {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| unrecoverable("the system clock is before 1970"))?
+            .map_err(|_| unrecoverable!("the system clock is before 1970"))?
             .as_nanos();
         Ok(format!("{SET_ASIDE_PREFIX}{nanos}"))
     }
@@ -295,8 +299,8 @@ impl SetAside {
         let metadata = match fs::symlink_metadata(&pending) {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
             Err(_) => {
-                return Err(unrecoverable(
-                    "an unpublished set-aside intent could not be inspected",
+                return Err(unrecoverable!(
+                    "an unpublished set-aside intent could not be inspected"
                 ));
             }
             Ok(metadata) => metadata,
@@ -307,8 +311,8 @@ impl SetAside {
             && metadata.uid() == unsafe { libc::geteuid() }
             && metadata.mode() & 0o077 == 0;
         if !ours {
-            return Err(unrecoverable(
-                "an unpublished set-aside intent is not a private file of this user",
+            return Err(unrecoverable!(
+                "an unpublished set-aside intent is not a private file of this user"
             ));
         }
         fs::remove_file(&pending).map_err(io)
@@ -329,11 +333,15 @@ impl SetAside {
     fn load(candidate: &Candidate) -> Result<Option<Self>, CandidateError> {
         match fs::symlink_metadata(Self::path(candidate)) {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(unrecoverable("the set-aside intent could not be inspected")),
+            Err(_) => {
+                return Err(unrecoverable!(
+                    "the set-aside intent could not be inspected"
+                ));
+            }
             Ok(_) => {}
         }
         let intent: Self = state::read(&Self::path(candidate))
-            .map_err(|_| unrecoverable("the set-aside intent is unreadable"))?;
+            .map_err(|_| unrecoverable!("the set-aside intent is unreadable"))?;
         let valid = intent.version == 1
             && intent
                 .label
@@ -342,7 +350,7 @@ impl SetAside {
                     !n.is_empty() && n.len() <= 40 && n.bytes().all(|b| b.is_ascii_digit())
                 });
         if !valid {
-            return Err(unrecoverable("the set-aside intent is malformed"));
+            return Err(unrecoverable!("the set-aside intent is malformed"));
         }
         Ok(Some(intent))
     }
@@ -402,8 +410,8 @@ fn set_aside(
                 locations.push(data.join(label).join(name));
             }
             _ => {
-                return Err(unrecoverable(
-                    "a machine disk is missing from both its place and the set-aside directory",
+                return Err(unrecoverable!(
+                    "a machine disk is missing from both its place and the set-aside directory"
                 ));
             }
         }
@@ -447,7 +455,7 @@ fn set_aside(
 fn owned_file(path: &Path) -> Result<(), CandidateError> {
     use std::os::unix::fs::MetadataExt;
     let metadata = fs::symlink_metadata(path)
-        .map_err(|_| unrecoverable("a machine disk could not be inspected"))?;
+        .map_err(|_| unrecoverable!("a machine disk could not be inspected"))?;
     // SAFETY: geteuid has no preconditions and cannot fail.
     if !metadata.file_type().is_file()
         || metadata.nlink() != 1
@@ -472,8 +480,8 @@ fn move_into(directory: &Path, label: &str, names: &[&str]) -> Result<(), Candid
     state::private_directory(&aside)?;
     for name in names {
         if present(&aside, [*name])? == [true] {
-            return Err(unrecoverable(
-                "the set-aside directory already holds a file of that name",
+            return Err(unrecoverable!(
+                "the set-aside directory already holds a file of that name"
             ));
         }
         fs::rename(directory.join(name), aside.join(name)).map_err(io)?;
@@ -491,6 +499,22 @@ fn sync_moved(directory: &Path, label: &str) -> Result<(), CandidateError> {
         .map_err(io)?
         .sync_all()
         .map_err(io)
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    #[test]
+    fn every_unproven_condition_is_one_fixed_message_the_cli_shows() {
+        let error: crate::CandidateError =
+            unrecoverable!("only one of the two machine disks exists");
+        assert_eq!(error.code, "recovery_required");
+        // Only a fixed (static) message crosses to the CLI (`nativeFailureDetail`).
+        assert!(error.message_fixed);
+        assert_eq!(
+            error.message,
+            "No retained process identity: only one of the two machine disks exists. Manual inspection required; no state was adopted or removed."
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

@@ -3888,6 +3888,66 @@ mod tests {
     }
 
     #[test]
+    fn executable_cache_runs_nothing_it_copied_and_confirms_only_after_the_final_hash() {
+        let script = include_str!("guest-runc-cache.sh");
+        let lines: Vec<&str> = script
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        // A failed check ends the script, and the confirmation is its last command.
+        assert_eq!(lines.first(), Some(&"set -eu"));
+        assert_eq!(lines.last(), Some(&"printf 'engine-exec-cache-v1\\n'"));
+        // Every command is a fixed shell word or utility: no line runs a file from the cache
+        // or from the share, before or after its digest is checked.
+        for line in &lines {
+            let word = line.split_whitespace().next().unwrap();
+            assert!(
+                [
+                    "set", "test", "for", "do", "done", "case", "esac", "if", "mkdir", "mount",
+                    "chmod", "printf"
+                ]
+                .contains(&word)
+                    || ["total=", "cache=", "path=", "size="]
+                        .iter()
+                        .any(|name| word.starts_with(name)),
+                "{line}"
+            );
+        }
+        for (index, _) in script.match_indices("$(") {
+            let inner = &script[index + 2..];
+            assert!(
+                [
+                    "cat ",
+                    "findmnt ",
+                    "stat ",
+                    "tee ",
+                    "sha256sum ",
+                    "(total + size)"
+                ]
+                .iter()
+                .any(|utility| inner.starts_with(utility)),
+                "{}",
+                &inner[..inner.len().min(40)]
+            );
+        }
+        // The copy is hashed as it is written, and the bound path is hashed after the cache
+        // is read-only and bound: that second hash is the last check before the read-only
+        // checks and the confirmation.
+        let position = |needle: &str| {
+            let found: Vec<_> = script.match_indices(needle).collect();
+            assert_eq!(found.len(), 1, "{needle}");
+            found[0].0
+        };
+        let copied = position(r#"tee "$cache/$name" < "/opt/hack-engine/$name" | sha256sum"#);
+        let read_only = position(r#"mount -o remount,ro "$cache""#);
+        let bound = position(r#"mount --bind "$cache/$name" "$path""#);
+        let hashed = position(r#"test "$(sha256sum "$path" | cut -d ' ' -f 1)" = "$expected""#);
+        let confirmed = position("printf 'engine-exec-cache-v1");
+        assert!(copied < read_only && read_only < bound && bound < hashed && hashed < confirmed);
+    }
+
+    #[test]
     #[ignore = "Manual owned VM, loaded shell image HACK_LOCAL_TEST_IMAGE and watchdog required"]
     fn cached_init_executes_in_image_only_container_without_capabilities() {
         let candidate =

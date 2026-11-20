@@ -71,6 +71,10 @@ function nativeLogPhase(value: unknown): NativeLogFailurePhase | undefined {
 }
 
 const FIXED_MESSAGE = /^[\x20-\x7e]{1,400}$/;
+const FIXED_MESSAGE_LIMIT = 400;
+const PROVIDER_SAID = "The provider's own error:";
+const PROVIDER_LINE_MINIMUM = 40;
+const TRAILING_SLASHES = /\/+$/;
 
 /**
  * Keep a runtime message only when the runtime marked it fixed (a literal that
@@ -79,11 +83,101 @@ const FIXED_MESSAGE = /^[\x20-\x7e]{1,400}$/;
 function fixedNativeMessage(
   value: Record<string, unknown>
 ): string | undefined {
-  return value.message_fixed === true &&
+  const fixed =
+    value.message_fixed === true &&
     typeof value.message === "string" &&
     FIXED_MESSAGE.test(value.message)
-    ? value.message
-    : undefined;
+      ? value.message
+      : undefined;
+  const said = nativeProviderLine(value);
+  if (said === undefined) {
+    return fixed;
+  }
+  if (fixed === undefined) {
+    return `${PROVIDER_SAID} ${said}`;
+  }
+  // Both, while they fit the one bounded line every failure channel accepts;
+  // the fixed sentence wins and the provider's line is cut to what is left.
+  const room = FIXED_MESSAGE_LIMIT - fixed.length - PROVIDER_SAID.length - 2;
+  if (room < PROVIDER_LINE_MINIMUM) {
+    return fixed;
+  }
+  const line = said.length <= room ? said : `${said.slice(0, room - 3)}...`;
+  return `${fixed} ${PROVIDER_SAID} ${line}`;
+}
+
+/** The only failures a provider's line may accompany. */
+const PROVIDER_FAILURES = new Set([
+  "provider_command_failed",
+  "provider_boot_stalled",
+]);
+const LONG_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=.{17,}$/;
+const URL_CREDENTIALS = /^([a-z][a-z0-9+.-]*:\/\/)[^/@]+@/i;
+const LONG_HEX = /[0-9a-fA-F]{12,}/g;
+
+/** One printable ASCII line of 1 to 200 characters, checked character by character. */
+function boundedPrintableLine(value: unknown): value is string {
+  if (typeof value !== "string" || value.length < 1 || value.length > 200) {
+    return false;
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x20 || code > 0x7e) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The provider's own last error line for a failed provider command (HACK-2418).
+ * The runtime cleans it; this boundary does not rely on that. The line is
+ * accepted only with a provider failure code and only as one printable ASCII
+ * line of at most 200 characters, and it is redacted again here: the user's
+ * home and temporary directory, long `KEY=value` values, a bearer token, a
+ * user and password in a URL, and long hexadecimal identifiers.
+ */
+export function nativeProviderLine(
+  value: Record<string, unknown>,
+  env: Readonly<Record<string, string | undefined>> = process.env
+): string | undefined {
+  const line = value.provider_line;
+  if (
+    !(
+      typeof value.code === "string" &&
+      PROVIDER_FAILURES.has(value.code) &&
+      boundedPrintableLine(line)
+    )
+  ) {
+    return;
+  }
+  let text = line;
+  for (const [path, word] of [
+    [env.HOME, "~"],
+    [env.TMPDIR?.replace(TRAILING_SLASHES, ""), "<tmp>"],
+  ] as const) {
+    if (path !== undefined && path.length > 2) {
+      text = text.split(path).join(word);
+    }
+  }
+  let afterBearer = false;
+  return text
+    .split(" ")
+    .map((token) => {
+      const bearer = afterBearer;
+      afterBearer = token.toLowerCase() === "bearer";
+      if (bearer && token !== "") {
+        return "<value>";
+      }
+      const assignment = LONG_ASSIGNMENT.exec(token);
+      if (assignment) {
+        return `${assignment[1]}=<value>`;
+      }
+      return token
+        .replace(URL_CREDENTIALS, "$1<credentials>@")
+        .replace(LONG_HEX, "<id>");
+    })
+    .join(" ");
 }
 
 const NETWORK_HOST = /^[a-zA-Z0-9_.:[\]-]{1,253}$/;

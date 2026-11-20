@@ -661,10 +661,12 @@ is recorded as running, the engine is checked once more from the host: `GET /_pi
 the provider's forwarded engine socket. That forward can lag behind the provider's ready
 signal, and a connection it accepts in that window is never answered. So the check makes up
 to three attempts, each on a fresh connection to a socket path that is validated again for
-that attempt, and the boot fails only when all of them failed, with the last attempt's error
+that attempt. The boot fails when all of them failed, with the last attempt's error, or at
+once when the path is refused as unsafe (not this user's socket, a symlink on the way, or an
+ancestor that is not a directory); a socket file that is not there yet is tried again
 (HACK-2475: a single unanswered connection used to fail the boot after three seconds). Each
-attempt has three seconds for its request and its whole reply. A forward that never answers
-fails the boot after about 9.2 s. The check does not identify which process answers on that
+attempt has three seconds for its whole reply. A forward that never answers fails the boot
+after about 9.2 s. The check does not identify which process answers on that
 socket; it checks that the path is this user's own socket in the pool's directory.
 
 Guest control readiness does not mean exposed bridge sockets have bound. The pinned

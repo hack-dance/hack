@@ -1,4 +1,5 @@
 // biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: The terminal dashboard is intentionally event-driven and keeps renderer state and keybindings colocated.
+
 import { dirname, resolve } from "node:path";
 import {
   BoxRenderable,
@@ -29,6 +30,7 @@ import { ensureDir, writeTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { renderHackBanner } from "../lib/hack-banner.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
+import { holdProcessUntil } from "../lib/process-exit.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import {
   defaultProjectSlugFromPath,
@@ -2730,6 +2732,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       activeRenderer.off("resize", renderFooter);
       activeRenderer.stop();
       activeRenderer.destroy();
+      // Terminal restore finishes asynchronously; the CLI exits after it.
+      holdProcessUntil(activeRenderer.closed);
 
       process.off("SIGINT", handleSignal);
       process.off("SIGTERM", handleSignal);
@@ -2770,6 +2774,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         stderr: "pipe",
         stdin: "ignore",
       });
+      // Quitting mid-action must not cut the action's stderr pipe (an `up`
+      // or `down` would fail writing to it); the CLI exits after it ends.
+      holdProcessUntil(proc.exited);
 
       const actionStderr = proc.stderr;
       if (actionStderr && typeof actionStderr !== "number") {
@@ -4459,6 +4466,7 @@ function shutdownRenderer(opts: {
   }
   opts.renderer.stop();
   opts.renderer.destroy();
+  holdProcessUntil(opts.renderer.closed);
 }
 
 function formatErrorMessage(opts: { readonly error: unknown }): string {

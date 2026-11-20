@@ -380,6 +380,31 @@ async function pollComposePs(input: {
   }
 }
 
+/**
+ * Waits `ms` or until `finished` settles, whichever comes first. The timer is
+ * cleared either way, so a start that ends mid-wait leaves nothing that
+ * holds the process open (a losing `Bun.sleep` kept it alive for up to 1 s).
+ */
+export async function waitOrFinish(
+  ms: number,
+  finished: Promise<unknown>
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      finished.then(
+        () => undefined,
+        () => undefined
+      ),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Poll one-shot progress until the start ends or the watchdog decides to stop. */
 async function watchStartProgress(input: {
   readonly options: RuntimeUpOptions;
@@ -396,7 +421,7 @@ async function watchStartProgress(input: {
   let lastProgressAt = startedAt;
   let lastSeen: readonly string[] = [];
   for (;;) {
-    await Promise.race([input.finished, Bun.sleep(START_WATCH_POLL_MS)]);
+    await waitOrFinish(START_WATCH_POLL_MS, input.finished);
     if (input.isDone()) {
       return { stopped: false, lastSeen };
     }

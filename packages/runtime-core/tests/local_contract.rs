@@ -7,6 +7,34 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn engine_debug_report_preserves_command_output_and_status() {
+    let fixture = Fixture::new();
+    for reference in ["alpine:3.21", "Invalid-Reference"] {
+        let arguments = ["runtime", "admit-image", "--reference", reference, "--json"];
+        let baseline = invoke(&fixture, &arguments);
+        let mut debug_arguments = arguments.to_vec();
+        debug_arguments.push("--debug-engine-requests");
+        let measured = invoke(&fixture, &debug_arguments);
+        assert_eq!(measured.status.code(), baseline.status.code());
+        assert_eq!(measured.stdout, baseline.stdout);
+        let stderr = String::from_utf8(measured.stderr).unwrap();
+        let mut lines = stderr.lines();
+        let report: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(
+            report,
+            serde_json::json!({"kind": "engine_requests", "total": 0, "endpoints": {}})
+        );
+        assert_eq!(
+            lines.collect::<Vec<_>>(),
+            String::from_utf8(baseline.stderr)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
 fn json_image_fetch_still_refuses_unpinned_input_before_network_or_output() {
     let fixture = Fixture::new();
     let archive = fixture.0.join("must-not-exist.tar");
@@ -138,6 +166,7 @@ fn invoke(fixture: &Fixture, arguments: &[&str]) -> Output {
         .env("DOCKER_HOST", "unix:///must-not-be-contacted/docker.sock")
         .env("HACK_HOME", "/must-not-be-used")
         .env("HACK_DAEMON_URL", "http://127.0.0.1:1")
+        .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
         .env("PATH", fixture.directory("empty-path"))
         .output()
         .unwrap()

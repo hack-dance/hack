@@ -199,39 +199,96 @@ fn system_directories() -> impl Iterator<Item = &'static str> {
         .filter(|directory| *directory != ENGINE_SHARE)
 }
 
-/// One of the guest's search directories inside the root files tree at `rootfs`. A
-/// directory that is a symbolic link is followed once, inside the tree: an absolute target
-/// is taken from the tree's root, as the guest would resolve it.
-fn guest_directory(rootfs: &Path, directory: &str) -> std::path::PathBuf {
-    let inside = rootfs.join(directory.trim_start_matches('/'));
-    match std::fs::read_link(&inside) {
-        Ok(target) if target.is_absolute() => {
-            rootfs.join(target.strip_prefix("/").unwrap_or(&target))
+/// Links followed while one search directory is resolved; more is a loop or a layout this
+/// check does not understand, and the boot is refused.
+const MAX_LINKS: usize = 16;
+
+/// Where the guest path `directory` leads inside the root files tree at `rootfs`, resolved
+/// as the guest resolves it: `..` stops at the tree's root, and a symbolic link, relative or
+/// absolute, is followed inside the tree. `Ok(None)` when a component does not exist (the
+/// guest would find nothing there); `Err` when it does not resolve within [`MAX_LINKS`].
+fn guest_directory(rootfs: &Path, directory: &str) -> Result<Option<std::path::PathBuf>, ()> {
+    use std::path::Component;
+    let mut resolved: Vec<std::ffi::OsString> = Vec::new();
+    let mut pending: std::collections::VecDeque<std::ffi::OsString> = Path::new(directory)
+        .components()
+        .map(|component| component.as_os_str().to_owned())
+        .collect();
+    let mut links = 0;
+    while let Some(part) = pending.pop_front() {
+        match Path::new(&part).components().next() {
+            None | Some(Component::CurDir | Component::RootDir | Component::Prefix(_)) => continue,
+            Some(Component::ParentDir) => {
+                resolved.pop();
+                continue;
+            }
+            Some(Component::Normal(_)) => {}
         }
-        Ok(target) => inside.parent().unwrap_or(rootfs).join(target),
-        Err(_) => inside,
+        let here = resolved
+            .iter()
+            .fold(rootfs.to_path_buf(), |path, name| path.join(name))
+            .join(&part);
+        let Ok(metadata) = std::fs::symlink_metadata(&here) else {
+            return Ok(None);
+        };
+        if !metadata.file_type().is_symlink() {
+            resolved.push(part);
+            continue;
+        }
+        links += 1;
+        if links > MAX_LINKS {
+            return Err(());
+        }
+        let target = std::fs::read_link(&here).map_err(|_| ())?;
+        if target.is_absolute() {
+            resolved.clear();
+        }
+        // The link's own components come before what was still to be walked.
+        for component in target.components().rev() {
+            pending.push_front(component.as_os_str().to_owned());
+        }
     }
+    Ok(Some(
+        resolved
+            .iter()
+            .fold(rootfs.to_path_buf(), |path, name| path.join(name)),
+    ))
 }
 
 /// With the guest's own directories searched first, an engine binary resolves to the share
 /// only while the root files hold nothing of its name. Refuse before boot when a file of
 /// `engine`'s top level has a namesake in one of the guest's search directories under
-/// `rootfs` (any kind of entry, a dangling link included): the guest would run that instead.
+/// `rootfs`. Any kind of entry counts, also one the guest could not run (a directory, a
+/// dangling link): the check is deliberately wider than what the guest's shell would pick.
+/// A search directory that cannot be resolved inside the tree refuses too.
 pub(super) fn require_engine_names_unshadowed(
     rootfs: &Path,
     engine: &Path,
 ) -> Result<(), CandidateError> {
     let unreadable =
         |_| CandidateError::new("artifact_invalid", "Cannot list the prepared engine tree.");
-    for entry in std::fs::read_dir(engine).map_err(unreadable)? {
-        let name = entry.map_err(unreadable)?.file_name();
-        for directory in system_directories() {
-            if std::fs::symlink_metadata(guest_directory(rootfs, directory).join(&name)).is_ok() {
-                return Err(CandidateError::new(
-                    "guest_search_order",
-                    "The guest's root files hold a file named like an engine binary, which would run instead of the engine's; boot refused.",
+    let refused = |message: &'static str| CandidateError::new("guest_search_order", message);
+    let mut directories = Vec::new();
+    for directory in system_directories() {
+        match guest_directory(rootfs, directory) {
+            Ok(Some(path)) => directories.push(path),
+            Ok(None) => {}
+            Err(()) => {
+                return Err(refused(
+                    "A search directory in the guest's root files does not resolve inside them; boot refused.",
                 ));
             }
+        }
+    }
+    for entry in std::fs::read_dir(engine).map_err(unreadable)? {
+        let name = entry.map_err(unreadable)?.file_name();
+        if directories
+            .iter()
+            .any(|directory| std::fs::symlink_metadata(directory.join(&name)).is_ok())
+        {
+            return Err(refused(
+                "The guest's root files hold an entry named like an engine binary, which the guest would find before the engine's; boot refused.",
+            ));
         }
     }
     Ok(())
@@ -537,9 +594,12 @@ mod tests {
         );
         // The order this replaces ran the share's files first: every utility name above
         // would have come from the share.
-        let old = "/opt/hack-engine:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+        let old = format!(
+            "{ENGINE_SHARE}:{}",
+            system_directories().collect::<Vec<_>>().join(":")
+        );
         assert_eq!(
-            tree.run(old, script),
+            tree.run(&old, script),
             "share-cat\nshare-sha256sum\nshare-stat\nshare-smolvm-agent\nengine-dockerd\nengine-docker\n"
         );
     }
@@ -574,16 +634,71 @@ mod tests {
             assert_eq!(refused.code, "guest_search_order", "{path}");
             assert!(refused.message_fixed);
         }
-        // A search directory that is a link is followed inside the tree, as the guest would.
-        for target in ["../bin", "/bin"] {
-            let tree = fixture("linked");
-            std::fs::remove_dir(tree.0.join("usr/sbin")).unwrap();
-            std::os::unix::fs::symlink(target, tree.0.join("usr/sbin")).unwrap();
+        // A search directory that is a link is followed inside the tree, as the guest would:
+        // the namesake exists only where the link leads.
+        let linked = |name: &str, link: &str, target: &str, shadow: &str| {
+            let tree = fixture(name);
+            std::fs::remove_dir(tree.0.join(link)).unwrap();
+            std::os::unix::fs::symlink(target, tree.0.join(link)).unwrap();
             check(&tree).unwrap();
-            tree.stub("bin/runc", "shadow");
-            assert_eq!(check(&tree).unwrap_err().code, "guest_search_order");
-        }
-        // An engine tree that cannot be listed refuses too.
+            let shadow = tree.0.join(shadow);
+            std::fs::create_dir_all(shadow.parent().unwrap()).unwrap();
+            std::fs::write(shadow, b"shadow").unwrap();
+            check(&tree).unwrap_err().code
+        };
+        // Relative, and absolute from the tree's root.
+        assert_eq!(
+            linked("relative", "usr/sbin", "../lib/tools", "lib/tools/runc"),
+            "guest_search_order"
+        );
+        assert_eq!(
+            linked("absolute", "usr/sbin", "/lib/tools", "lib/tools/runc"),
+            "guest_search_order"
+        );
+        // `..` stops at the tree's root instead of leaving it.
+        assert_eq!(
+            linked(
+                "clamped",
+                "usr/local/bin",
+                "../../../../../opt/vendor/bin",
+                "opt/vendor/bin/dockerd"
+            ),
+            "guest_search_order"
+        );
+        // A chain of links, one of them absolute.
+        let tree = fixture("chain");
+        std::fs::remove_dir(tree.0.join("usr/sbin")).unwrap();
+        std::os::unix::fs::symlink("first", tree.0.join("usr/sbin")).unwrap();
+        std::os::unix::fs::symlink("/usr/second", tree.0.join("usr/first")).unwrap();
+        std::fs::create_dir_all(tree.0.join("usr/second")).unwrap();
+        check(&tree).unwrap();
+        tree.stub("usr/second/containerd", "shadow");
+        assert_eq!(check(&tree).unwrap_err().code, "guest_search_order");
+        // A namesake outside the tree, where a link resolved against the host would look,
+        // is not the guest's.
+        let tree = fixture("outside");
+        let outside = Tree::new("outside-host");
+        outside.stub("bin/docker", "host");
+        std::fs::remove_dir(tree.0.join("usr/sbin")).unwrap();
+        std::os::unix::fs::symlink(
+            format!(
+                "../../../{}/bin",
+                outside.0.file_name().unwrap().to_str().unwrap()
+            ),
+            tree.0.join("usr/sbin"),
+        )
+        .unwrap();
+        check(&tree).unwrap();
+        // A link loop cannot be resolved and refuses; a link to nothing has nothing in it.
+        let tree = fixture("loop");
+        std::fs::remove_dir(tree.0.join("usr/sbin")).unwrap();
+        std::os::unix::fs::symlink("sbin", tree.0.join("usr/sbin")).unwrap();
+        assert_eq!(check(&tree).unwrap_err().code, "guest_search_order");
+        let tree = fixture("nowhere");
+        std::fs::remove_dir(tree.0.join("usr/sbin")).unwrap();
+        std::os::unix::fs::symlink("/nowhere", tree.0.join("usr/sbin")).unwrap();
+        check(&tree).unwrap();
+        // An engine tree that is missing refuses too.
         let tree = fixture("unlisted");
         assert_eq!(
             require_engine_names_unshadowed(&tree.0, &tree.0.join("opt/missing"))
@@ -591,6 +706,9 @@ mod tests {
                 .code,
             "artifact_invalid"
         );
+        // Both request builders send this order: no search path in this file starts with
+        // the share any more.
+        assert!(!include_str!("agent.rs").contains(concat!("\"/opt/hack-engine", ":")));
     }
     #[test]
     fn failed_guest_output_and_malformed_metadata_never_enter_errors() {

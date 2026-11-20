@@ -1775,7 +1775,9 @@ Only names the root files do not have resolve to the share, which is how `docker
 `containerd`, `runc` and the other engine binaries are found. Before each boot the runtime
 checks that no entry in the guest's search directories has the name of a file at the top of
 the engine tree and refuses the boot (`guest_search_order`) if one does, because the guest
-would run that entry instead of the engine's.
+would find that entry before the engine's. The check resolves each search directory inside
+the root files the way the guest does (links followed inside the tree, `..` stopping at its
+root) and counts any kind of entry, so it refuses more than the guest's shell would pick.
 
 ### Starting a pool that is already running
 

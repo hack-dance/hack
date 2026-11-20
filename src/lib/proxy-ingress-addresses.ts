@@ -1,8 +1,19 @@
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import {
   DEFAULT_INGRESS_NETWORK,
+  GLOBAL_CADDY_COMPOSE_FILENAME,
+  GLOBAL_CADDY_DIR_NAME,
   GLOBAL_CADDY_PROJECT_NAME,
 } from "../constants.ts";
-import { isRecord } from "./guards.ts";
+import {
+  ensureDir,
+  pathExists,
+  readTextFile,
+  writeTextFileAtomicIfChanged,
+} from "./fs.ts";
+import { getString, isRecord } from "./guards.ts";
+import { exec, findExecutableInPath } from "./shell.ts";
 
 /**
  * Addresses of the global proxy (Caddy) and resolver (CoreDNS) containers on
@@ -15,24 +26,58 @@ export interface IngressAddresses {
 
 type IngressService = "caddy" | "coredns";
 
+/** Which container an address was read from. */
+export interface IngressContainerIdentity {
+  readonly id: string;
+  readonly startedAt: string;
+}
+
+/**
+ * What Hack last read from Docker about the global stack, kept in Hack's home
+ * next to the global Compose file. `hack global up`/`restart` rewrite it and
+ * `hack global down` removes it, so a stack Hack changed is never trusted
+ * from an old record. Only a read that found both containers running is
+ * recorded.
+ */
+export interface IngressAddressRecord {
+  readonly schema: 1;
+  readonly coreDns: string;
+  readonly caddy: string;
+  readonly containers: {
+    readonly coredns: IngressContainerIdentity;
+    readonly caddy: IngressContainerIdentity;
+  };
+  readonly recordedAt: string;
+}
+
+export interface IngressAddressResult extends IngressAddresses {
+  /** True when the addresses came from the record, without a Docker read. */
+  readonly fromRecord: boolean;
+}
+
 export interface IngressAddressDeps {
-  /** `HACK_COREDNS_IP` / `HACK_CADDY_IP` win over any Docker read. */
+  /** `HACK_COREDNS_IP` / `HACK_CADDY_IP` win over any Docker read or record. */
   readonly env: Readonly<Record<string, string | undefined>>;
   /** True when the global proxy stack is installed and `docker` is on PATH. */
   readonly stackInstalled: () => Promise<boolean>;
   readonly exec: (
     argv: readonly string[]
   ) => Promise<{ readonly exitCode: number; readonly stdout: string }>;
+  readonly readRecord: () => Promise<IngressAddressRecord | null>;
+  readonly writeRecord: (record: IngressAddressRecord) => Promise<void>;
+  readonly now?: () => Date;
 }
 
 const COMPOSE_PROJECT_LABEL = "com.docker.compose.project";
 const COMPOSE_SERVICE_LABEL = "com.docker.compose.service";
 
-/** One line per container: project, service, running, ingress networks. */
+/** One line per container: project, service, running, id, start, networks. */
 const INSPECT_FORMAT = [
   `{{index .Config.Labels "${COMPOSE_PROJECT_LABEL}"}}`,
   `{{index .Config.Labels "${COMPOSE_SERVICE_LABEL}"}}`,
   "{{.State.Running}}",
+  "{{.Id}}",
+  "{{.State.StartedAt}}",
   "{{json .NetworkSettings.Networks}}",
 ].join("\t");
 
@@ -49,17 +94,23 @@ function candidateNames(service: IngressService): readonly string[] {
 }
 
 /**
- * Resolves both global addresses with at most one `docker inspect`.
+ * Resolves both global addresses.
  *
- * It replaces two `compose ps -q` plus `inspect` pairs (four Docker CLI
- * starts). A container counts only when its Compose labels name the global
- * proxy project and the service, and it is running, as `compose ps -q` (which
- * lists running containers) required before. A missing name is absence:
- * `docker inspect` exits 1 but still prints the containers it found.
+ * - `recorded`: the record wins and no Docker call runs; with no record, one
+ *   read as for `fresh`. For commands that create a container and can rebuild
+ *   once on a failure a stale address explains (`hack run`).
+ * - `fresh`: one `docker inspect` of both containers, recorded when both run.
+ *   For `up`, `restart`, `hack global up` and a rebuild.
+ *
+ * A container counts only when its Compose labels name the global proxy
+ * project and the service, and it is running, as `compose ps -q` (which lists
+ * running containers) required before. A missing name is absence: `docker
+ * inspect` exits 1 but still prints the containers it found.
  */
 export async function resolveIngressAddresses(
-  deps: IngressAddressDeps
-): Promise<IngressAddresses> {
+  deps: IngressAddressDeps,
+  mode: "recorded" | "fresh"
+): Promise<IngressAddressResult> {
   const fromEnv = {
     coredns: (deps.env.HACK_COREDNS_IP ?? "").trim() || null,
     caddy: (deps.env.HACK_CADDY_IP ?? "").trim() || null,
@@ -68,9 +119,25 @@ export async function resolveIngressAddresses(
     (service) => fromEnv[service] === null
   );
   if (needed.length === 0 || !(await deps.stackInstalled())) {
-    return { coreDns: fromEnv.coredns, caddy: fromEnv.caddy };
+    return {
+      coreDns: fromEnv.coredns,
+      caddy: fromEnv.caddy,
+      fromRecord: false,
+    };
   }
 
+  if (mode === "recorded") {
+    const record = await deps.readRecord();
+    if (record) {
+      return {
+        coreDns: fromEnv.coredns ?? record.coreDns,
+        caddy: fromEnv.caddy ?? record.caddy,
+        fromRecord: true,
+      };
+    }
+  }
+
+  // Both are read even when an env value covers one, so the record stays whole.
   const inspect = await deps.exec([
     "docker",
     "inspect",
@@ -78,19 +145,40 @@ export async function resolveIngressAddresses(
     "container",
     "--format",
     INSPECT_FORMAT,
-    ...needed.flatMap(candidateNames),
+    ...candidateNames("coredns"),
+    ...candidateNames("caddy"),
   ]);
   const found = parseInspectLines(inspect.stdout);
+  const coredns = found.get("coredns");
+  const caddy = found.get("caddy");
+  if (coredns && caddy) {
+    await deps.writeRecord({
+      schema: 1,
+      coreDns: coredns.ip,
+      caddy: caddy.ip,
+      containers: { coredns: coredns.identity, caddy: caddy.identity },
+      recordedAt: (deps.now?.() ?? new Date()).toISOString(),
+    });
+  }
   return {
-    coreDns: fromEnv.coredns ?? found.get("coredns") ?? null,
-    caddy: fromEnv.caddy ?? found.get("caddy") ?? null,
+    coreDns: fromEnv.coredns ?? coredns?.ip ?? null,
+    caddy: fromEnv.caddy ?? caddy?.ip ?? null,
+    fromRecord: false,
   };
 }
 
-function parseInspectLines(stdout: string): Map<IngressService, string> {
-  const out = new Map<IngressService, string>();
+type FoundContainer = {
+  readonly ip: string;
+  readonly identity: IngressContainerIdentity;
+};
+
+function parseInspectLines(
+  stdout: string
+): Map<IngressService, FoundContainer> {
+  const out = new Map<IngressService, FoundContainer>();
   for (const line of stdout.split("\n")) {
-    const [project, service, running, networksJson] = line.split("\t");
+    const [project, service, running, id, startedAt, networksJson] =
+      line.split("\t");
     if (
       project !== GLOBAL_CADDY_PROJECT_NAME ||
       (service !== "caddy" && service !== "coredns") ||
@@ -101,7 +189,10 @@ function parseInspectLines(stdout: string): Map<IngressService, string> {
     }
     const ip = ingressIp(networksJson ?? "");
     if (ip !== null) {
-      out.set(service, ip);
+      out.set(service, {
+        ip,
+        identity: { id: id ?? "", startedAt: startedAt ?? "" },
+      });
     }
   }
   return out;
@@ -123,4 +214,93 @@ function ingressIp(networksJson: string): string | null {
   }
   const ip = network.IPAddress;
   return typeof ip === "string" && ip.length > 0 ? ip : null;
+}
+
+/** Parses a stored record; anything else is no record. */
+export function parseIngressAddressRecord(
+  value: unknown
+): IngressAddressRecord | null {
+  if (!isRecord(value) || value.schema !== 1) {
+    return null;
+  }
+  const coreDns = getString(value, "coreDns");
+  const caddy = getString(value, "caddy");
+  const recordedAt = getString(value, "recordedAt");
+  const containers = value.containers;
+  if (!(coreDns && caddy && recordedAt && isRecord(containers))) {
+    return null;
+  }
+  const coredns = parseIdentity(containers.coredns);
+  const caddyIdentity = parseIdentity(containers.caddy);
+  if (!(coredns && caddyIdentity)) {
+    return null;
+  }
+  return {
+    schema: 1,
+    coreDns,
+    caddy,
+    containers: { coredns, caddy: caddyIdentity },
+    recordedAt,
+  };
+}
+
+function parseIdentity(value: unknown): IngressContainerIdentity | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const id = getString(value, "id");
+  const startedAt = getString(value, "startedAt");
+  return id && startedAt ? { id, startedAt } : null;
+}
+
+const RECORD_FILENAME = "ingress-addresses.json";
+
+/** `<hack home>/caddy/ingress-addresses.json`, next to the global Compose file. */
+export function ingressAddressRecordPath(hackHome: string): string {
+  return join(hackHome, GLOBAL_CADDY_DIR_NAME, RECORD_FILENAME);
+}
+
+export async function readIngressAddressRecord(
+  hackHome: string
+): Promise<IngressAddressRecord | null> {
+  const text = await readTextFile(ingressAddressRecordPath(hackHome));
+  if (!text) {
+    return null;
+  }
+  try {
+    return parseIngressAddressRecord(JSON.parse(text));
+  } catch {
+    return null;
+  }
+}
+
+/** Removes the record; the next `hack run` reads Docker once. */
+export async function forgetIngressAddressRecord(
+  hackHome: string
+): Promise<void> {
+  await rm(ingressAddressRecordPath(hackHome), { force: true });
+}
+
+/** The real Docker and record IO for the global stack under `hackHome`. */
+export function defaultIngressAddressDeps(
+  hackHome: string
+): IngressAddressDeps {
+  return {
+    env: process.env,
+    stackInstalled: async () =>
+      findExecutableInPath("docker") !== null &&
+      (await pathExists(
+        join(hackHome, GLOBAL_CADDY_DIR_NAME, GLOBAL_CADDY_COMPOSE_FILENAME)
+      )),
+    exec: async (argv) => await exec(argv, { stdin: "ignore" }),
+    readRecord: async () => await readIngressAddressRecord(hackHome),
+    writeRecord: async (record) => {
+      const path = ingressAddressRecordPath(hackHome);
+      await ensureDir(join(hackHome, GLOBAL_CADDY_DIR_NAME));
+      await writeTextFileAtomicIfChanged(
+        path,
+        `${JSON.stringify(record, null, 2)}\n`
+      );
+    },
+  };
 }

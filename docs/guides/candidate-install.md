@@ -294,7 +294,7 @@ starts `hackd` again when you need it.
 ### Keep `.hack/.internal/` out of Git
 
 Do not commit a project's `.hack/.internal/` directory. It holds generated,
-machine-local files, such as `.hack/.internal/compose.override.yml`, and Hack
+machine-local files, such as `.hack/.internal/compose.runtime.override.yml`, and Hack
 rewrites them when project commands such as `up` run. Newer generators, including
 candidate bundles, can write different content into those files than older ones.
 If a project tracks `.hack/.internal/`, every run of a newer generator leaves its

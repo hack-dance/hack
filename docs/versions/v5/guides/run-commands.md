@@ -24,8 +24,12 @@ Hack flag.
 
 On the Compose backend, `hack exec` starts `docker compose exec` with no other
 Docker call first. If the service is not running, Compose refuses, and Hack then
-adds a hint to start the stack with `hack up -d` or use `hack run`. `hack run`
-reads the proxy and DNS addresses for its new container with one `docker inspect`.
+adds a hint to start the stack with `hack up -d` or use `hack run`.
+
+`hack run` gives its new container the proxy and DNS addresses that `hack up` or
+`hack global up` recorded, with no Docker call for them. If the command fails and
+those addresses have changed since, Hack rebuilds the setting from one
+`docker inspect`, says so on stderr, and runs the command once more.
 
 ## Overlay and scope
 

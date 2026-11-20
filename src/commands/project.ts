@@ -160,7 +160,6 @@ import {
   DEFAULT_NEW_PROJECT_TLD,
   DEFAULT_OAUTH_ALIAS_TLD,
   DEFAULT_PROJECT_TLD,
-  GLOBAL_CADDY_COMPOSE_FILENAME,
   GLOBAL_CADDY_DIR_NAME,
   HACK_PROJECT_DIR_PRIMARY,
   PROJECT_COMPOSE_FILENAME,
@@ -251,6 +250,10 @@ import {
   selectOwnedInstanceContainers,
   unionProfiles,
 } from "../lib/compose-instance-stop.ts";
+import {
+  existingInternalOverride,
+  internalOverrideStorePath,
+} from "../lib/compose-internal-override-store.ts";
 import { renderComposeEnvReferenceOverride } from "../lib/compose-managed-env.ts";
 import {
   effectiveComposeProfiles,
@@ -454,7 +457,8 @@ import {
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
 import {
-  type IngressAddresses,
+  defaultIngressAddressDeps,
+  type IngressAddressResult,
   resolveIngressAddresses,
 } from "../lib/proxy-ingress-addresses.ts";
 import {
@@ -3513,11 +3517,10 @@ async function resolveInternalComposeOverride(opts: {
   readonly devHost?: string | null;
   readonly aliasHost?: string | null;
   /**
-   * `exec` passes true: it runs in a container that already exists, so the
-   * DNS, host and trust settings in the override never reach it, and the
-   * file `up` wrote is reused as is instead of reading the global addresses.
+   * `fresh` (up, restart) reads Docker once; `recorded` (run) uses Hack's
+   * record of the global stack with no Docker call when there is one.
    */
-  readonly reuseWritten?: boolean;
+  readonly addresses: "recorded" | "fresh";
 }): Promise<string | null> {
   const internal = resolveInternalSettings(opts.cfg);
 
@@ -3535,13 +3538,6 @@ async function resolveInternalComposeOverride(opts: {
   if (services.length === 0) {
     return null;
   }
-  if (opts.reuseWritten) {
-    const written = internalComposeOverridePath(opts.project.projectDir);
-    if (await pathExists(written)) {
-      return written;
-    }
-  }
-
   const dns = await resolveInternalDnsSettings({
     project: opts.project,
     composeFile: opts.project.composeFile,
@@ -3549,6 +3545,7 @@ async function resolveInternalComposeOverride(opts: {
     branch: opts.branch ?? null,
     devHost: opts.devHost ?? null,
     aliasHost: opts.aliasHost ?? null,
+    addresses: opts.addresses,
   });
   const tls = await resolveInternalTlsPaths({ enabled: internal.tls });
   const extraHosts = buildInternalExtraHosts({
@@ -3568,7 +3565,11 @@ async function resolveInternalComposeOverride(opts: {
   });
 
   return await writeInternalComposeOverride({
-    projectDir: opts.project.projectDir,
+    path: internalOverrideStorePath({
+      hackHome: resolveGlobalHackDir(),
+      projectDir: opts.project.projectDir,
+      branch: opts.branch ?? null,
+    }),
     text,
   });
 }
@@ -3598,13 +3599,16 @@ async function resolveInternalDnsSettings(opts: {
   readonly branch: string | null;
   readonly devHost: string | null;
   readonly aliasHost: string | null;
+  readonly addresses: "recorded" | "fresh";
 }): Promise<InternalDnsSettings> {
   if (!opts.enabled) {
     return { dnsServer: null, caddyIp: null, caddyHosts: [] };
   }
 
-  const dnsServer = await resolveCoreDnsServerWithWarning();
-  const caddyIp = await resolveCaddyServerWithWarning();
+  const addresses = await resolveGlobalIngressAddresses(opts.addresses);
+  warnUnreachableIngress(addresses);
+  const dnsServer = addresses.coreDns;
+  const caddyIp = addresses.caddy;
   const caddyHosts = await resolveCaddyHostsForBranch({
     project: opts.project,
     composeFile: opts.composeFile,
@@ -3616,26 +3620,19 @@ async function resolveInternalDnsSettings(opts: {
   return { dnsServer, caddyIp, caddyHosts };
 }
 
-async function resolveCoreDnsServerWithWarning(): Promise<string | null> {
-  const dnsServer = await resolveCoreDnsServer();
-  if (!dnsServer) {
+function warnUnreachableIngress(addresses: IngressAddressResult): void {
+  if (!addresses.coreDns) {
     logger.warn({
       message:
         "CoreDNS is not reachable; internal DNS for *.hack is disabled. Run `hack global install` (or `hack global up`).",
     });
   }
-  return dnsServer;
-}
-
-async function resolveCaddyServerWithWarning(): Promise<string | null> {
-  const caddyIp = await resolveCaddyServer();
-  if (!caddyIp) {
+  if (!addresses.caddy) {
     logger.warn({
       message:
         "Caddy is not reachable; internal *.hack host mappings are disabled. Run `hack global install` (or `hack global up`).",
     });
   }
-  return caddyIp;
 }
 
 async function resolveCaddyHostsForBranch(opts: {
@@ -3799,19 +3796,14 @@ export function buildInternalTlsEnvironment(opts: {
   };
 }
 
+/** Writes the override into Hack's home (atomically: a concurrent run reads a whole file). */
 async function writeInternalComposeOverride(opts: {
-  readonly projectDir: string;
+  readonly path: string;
   readonly text: string;
 }): Promise<string> {
-  await ensureHackGitInfoExclude({ projectDir: opts.projectDir });
-  const overridePath = internalComposeOverridePath(opts.projectDir);
-  await ensureDir(dirname(overridePath));
-  await writeTextFileIfChanged(overridePath, opts.text);
-  return overridePath;
-}
-
-function internalComposeOverridePath(projectDir: string): string {
-  return resolve(projectDir, ".internal", "compose.override.yml");
+  await ensureDir(dirname(opts.path));
+  await writeTextFileAtomicIfChanged(opts.path, opts.text);
+  return opts.path;
 }
 
 function resolveInternalSettings(
@@ -4028,37 +4020,36 @@ function buildExtraHostsMap(opts: {
   return out;
 }
 
-let globalIngressAddresses: Promise<IngressAddresses> | null = null;
+const globalIngressReads = new Map<
+  "recorded" | "fresh",
+  Promise<IngressAddressResult>
+>();
 
 /**
- * The global CoreDNS and Caddy addresses, read once per process with at most
- * one `docker inspect` (see resolveIngressAddresses). No docker CLI means no
- * answer, not a spawn failure: `up` reports the missing engine itself
- * (HACK-2356). Starting the global stack clears the cached read.
+ * The global CoreDNS and Caddy addresses, once per process and mode (see
+ * resolveIngressAddresses): `recorded` costs no Docker call when Hack has a
+ * record, `fresh` one `docker inspect`. A fresh read this process also
+ * answers `recorded`. No docker CLI means no answer, not a spawn failure:
+ * `up` reports the missing engine itself (HACK-2356).
  */
-async function resolveGlobalIngressAddresses(): Promise<IngressAddresses> {
-  globalIngressAddresses ??= resolveIngressAddresses({
-    env: process.env,
-    stackInstalled: async () =>
-      findExecutableInPath("docker") !== null &&
-      (await pathExists(
-        resolve(
-          resolveGlobalHackDir(),
-          GLOBAL_CADDY_DIR_NAME,
-          GLOBAL_CADDY_COMPOSE_FILENAME
-        )
-      )),
-    exec: async (argv) => await exec(argv, { stdin: "ignore" }),
-  });
-  return await globalIngressAddresses;
+async function resolveGlobalIngressAddresses(
+  mode: "recorded" | "fresh"
+): Promise<IngressAddressResult> {
+  const cached =
+    globalIngressReads.get("fresh") ?? globalIngressReads.get(mode);
+  if (cached) {
+    return await cached;
+  }
+  const read = resolveIngressAddresses(
+    defaultIngressAddressDeps(resolveGlobalHackDir()),
+    mode
+  );
+  globalIngressReads.set(mode, read);
+  return await read;
 }
 
 async function resolveCoreDnsServer(): Promise<string | null> {
-  return (await resolveGlobalIngressAddresses()).coreDns;
-}
-
-async function resolveCaddyServer(): Promise<string | null> {
-  return (await resolveGlobalIngressAddresses()).caddy;
+  return (await resolveGlobalIngressAddresses("fresh")).coreDns;
 }
 
 async function resolveCaddyLocalCaPath(): Promise<string | null> {
@@ -7662,6 +7653,7 @@ async function runUpCommand({
       branch,
       devHost,
       aliasHost,
+      addresses: "fresh",
     });
     const composeFiles =
       branch && devHost
@@ -8034,7 +8026,7 @@ async function maybePromptToStartGlobal(opts: {
 
   const exitCode = await globalUp();
   // The stack just started: its addresses are new.
-  globalIngressAddresses = null;
+  globalIngressReads.clear();
   if (exitCode !== 0) {
     logger.warn({
       message:
@@ -9182,6 +9174,7 @@ async function runRestartUpPhase(opts: {
       branch: opts.branch,
       devHost,
       aliasHost,
+      addresses: "fresh",
     });
     const composeFiles =
       opts.branch && devHost
@@ -9389,6 +9382,7 @@ async function runTargetedServiceRestart(opts: {
     branch: opts.branch,
     devHost,
     aliasHost,
+    addresses: "fresh",
   });
   const composeFiles =
     opts.branch && devHost
@@ -10719,6 +10713,8 @@ async function handleRun({
     branch,
     devHost,
     aliasHost,
+    // A background run cannot retry, so it reads Docker once up front.
+    addresses: runAddressMode(background),
   });
   const composeFiles = branch
     ? await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })
@@ -10828,14 +10824,78 @@ async function handleRun({
     cwd: dirname(project.composeFile),
     env: envOverrides.env,
   };
-  return await runOrStartComposeCommand({
+  const dispatch = async (): Promise<number> =>
+    await runOrStartComposeCommand({
+      background,
+      project,
+      branch,
+      compose: { operation: "run", options: runOptions },
+      callerOptions: args.options,
+      envOverrides,
+    });
+  return await runWithStaleAddressRetry({
+    dispatch,
     background,
-    project,
-    branch,
-    compose: { operation: "run", options: runOptions },
-    callerOptions: args.options,
-    envOverrides,
+    internalOverride,
+    rebuild: async () =>
+      await resolveInternalComposeOverride({
+        project,
+        cfg,
+        branch,
+        devHost,
+        aliasHost,
+        addresses: "fresh",
+      }),
   });
+}
+
+function runAddressMode(background: unknown): "recorded" | "fresh" {
+  return background ? "fresh" : "recorded";
+}
+
+/**
+ * Runs a foreground one-off; on a failure, rebuilds a stale override and
+ * runs it once more (see {@link rebuildStaleInternalOverride}).
+ */
+async function runWithStaleAddressRetry(opts: {
+  readonly dispatch: () => Promise<number>;
+  readonly background: unknown;
+  readonly internalOverride: string | null;
+  readonly rebuild: () => Promise<string | null>;
+}): Promise<number> {
+  const exitCode = await opts.dispatch();
+  if (exitCode === 0 || opts.background || opts.internalOverride === null) {
+    return exitCode;
+  }
+  return (await rebuildStaleInternalOverride(opts.rebuild))
+    ? await opts.dispatch()
+    : exitCode;
+}
+
+/**
+ * After a foreground `hack run` that used recorded global addresses fails,
+ * reads them once from Docker. When they differ (the proxy or DNS container
+ * came back with new addresses outside Hack), rewrites the override at the
+ * same path and returns true so the caller runs the command once more; it
+ * never loops, because the second read is cached for this process and
+ * reports no change. Same addresses mean the failure is the command's own.
+ */
+async function rebuildStaleInternalOverride(
+  rebuild: () => Promise<string | null>
+): Promise<boolean> {
+  const used = await resolveGlobalIngressAddresses("recorded");
+  if (!used.fromRecord) {
+    return false;
+  }
+  const current = await resolveGlobalIngressAddresses("fresh");
+  if (current.coreDns === used.coreDns && current.caddy === used.caddy) {
+    return false;
+  }
+  await rebuild();
+  process.stderr.write(
+    "Hack: the global proxy or DNS address changed since Hack recorded it; rebuilt the internal override and running the command once more.\n"
+  );
+  return true;
 }
 
 /**
@@ -10955,13 +11015,13 @@ async function handleExec({
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
   const devHost = await resolveRuntimeDevHost({ project, branch });
   const aliasHost = resolveBranchAliasHost({ devHost, cfg });
-  const internalOverride = await resolveInternalComposeOverride({
-    project,
-    cfg,
+  // The container already exists: DNS, host entries and trust were applied
+  // when it was created, and Compose only needs the same file list to find
+  // the service. Use what is on disk; no Docker read, no write.
+  const internalOverride = await existingInternalOverride({
+    hackHome: resolveGlobalHackDir(),
+    projectDir: project.projectDir,
     branch,
-    devHost,
-    aliasHost,
-    reuseWritten: true,
   });
   const composeFiles = branch
     ? await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })

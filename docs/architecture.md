@@ -1184,6 +1184,11 @@ qualify the installed binary, real filesystems or an application.
   - `projects.json` (project registry; `hack projects prune` removes stale entries)
   - `daemon/hackd.sock`, `daemon/hackd.pid`, `daemon/hackd.log` (capped at 5 MiB)
   - `caddy/docker-compose.yml`, `caddy/Corefile`
+  - `caddy/ingress-addresses.json` (the proxy and DNS addresses and container ids
+    Hack last read; `hack global up` rewrites it, `hack global down` removes it)
+  - `compose-overrides/<project>-<digest>/<instance>.yml` (the generated internal
+    Compose override: DNS, `*.hack` host entries, local CA trust; `@base` or the
+    branch slug)
   - `logging/docker-compose.yml`, `logging/alloy.alloy`, `logging/loki.yaml`, `logging/grafana/`
   - `schemas/hack.config.schema.json`, `schemas/hack.branches.schema.json`
   - `certs/` (mkcert output for non-Caddy services)
@@ -1193,7 +1198,9 @@ qualify the installed binary, real filesystems or an application.
   - `hack.env.default.yaml` and optional `hack.env.<overlay>.yaml` (committed env)
   - `hack.env.local.yaml` and `hack.env.<overlay>.local.yaml` (worktree-local)
   - `.env` (only when explicitly materialized) and `.env.state.json`
-  - `.internal/compose.override.yml`, `compose.env.override.yml`, `compose.runtime.override.yml`
+  - `.internal/compose.env.override.yml`, `compose.runtime.override.yml`
+    (`.internal/compose.override.yml` is no longer written; one written by an
+    older Hack is still passed to Compose when no stored override exists)
   - `.internal/extra-hosts.json`, `.internal/branch-usage.json`
   - `.internal/lifecycle/state.json` and `.internal/lifecycle/*.log`
   - `.branch/compose.<branch>.override.yml` and `.branch/compose.<branch>.runtime.override.yml`

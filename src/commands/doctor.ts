@@ -300,6 +300,7 @@ import {
 } from "../lib/project-runtime-hygiene.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
+import { forgetIngressAddressRecord } from "../lib/proxy-ingress-addresses.ts";
 import { inspectProxyLoopback } from "../lib/proxy-loopback.ts";
 import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
@@ -5548,6 +5549,8 @@ async function maybeStartGlobalCaddyCompose(opts: {
     return;
   }
 
+  // The proxy may come back with new addresses; the next run reads them.
+  await forgetIngressAddressRecord(resolveGlobalHackDir());
   const started = await exec(
     [
       "docker",

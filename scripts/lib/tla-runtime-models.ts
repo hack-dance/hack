@@ -1847,6 +1847,25 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // src/lib/process-exit.ts: the CLI never exits while held work runs or
+    // before its output is flushed.
+    name: "cli-process-exit",
+    module: "ProcessExit",
+    states: 298,
+    invariant: "NoExitWithPendingHold",
+    action: "SnapshotSettled",
+    fields: ['phase = "flushing"', "snap = {}", "buffered = FALSE"],
+    additionalControls: [
+      {
+        name: "no-end",
+        negative: true,
+        invariant: "NoLostOutput",
+        action: "Exit",
+        fields: ['phase = "exited"', "buffered = TRUE"],
+      },
+    ],
+  },
+  {
     name: "dependency-auto-refresh",
     module: "AutoRefresh",
     states: 141,

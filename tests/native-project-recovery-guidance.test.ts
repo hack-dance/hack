@@ -40,10 +40,12 @@ test("provider identity failures never claim that the failed process was a publi
   }
 });
 
-test("a stopped runtime tells down what that means for the project and what to run (HACK-2420)", () => {
+test("a runtime that is not running names the next commands without claiming what runs (HACK-2420)", () => {
   const hint = nativeRecoveryGuidance("runtime_not_running");
-  expect(hint).toContain("None of this project's containers are running");
-  expect(hint).toContain("its data is kept");
-  expect(hint).toContain("Run hack up");
+  expect(hint).toContain("Run hack ps --json");
+  expect(hint).toContain("hack up starts the project again");
+  expect(hint).toContain("hack down --recover");
+  // A booting or quiescing pool may still run containers: never claim none run.
+  expect(hint).not.toContain("containers are running");
   expect(hint).not.toContain("confirm that the native runtime is stopped");
 });

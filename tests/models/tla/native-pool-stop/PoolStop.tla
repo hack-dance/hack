@@ -22,8 +22,10 @@
 \*             (same-boot `recover-live-owner`) or the immediate predecessor boot
 \*             (`dead_owner_cleanup`); FALSE accepts any earlier boot.
 \*   ByHand  - `runtime up` by hand counts as a user command (no message names it).
+\*   OtherBoots - something else may boot the pool between the stop and this
+\*             project's recovery: another project's `hack up`, or `runtime up` by hand.
 EXTENDS Naturals
-CONSTANTS Fixed, Strict, ByHand, MaxBoot, MaxFaults
+CONSTANTS Fixed, Strict, ByHand, OtherBoots, MaxBoot, MaxFaults
 
 VARIABLES pool, boot, run, runBoot, owner, pub, faults
 vars == <<pool, boot, run, runBoot, owner, pub, faults>>
@@ -69,9 +71,10 @@ OwnerNotices ==
     /\ owner = "live" /\ (pool /= "running" \/ runBoot /= boot)
     /\ owner' = "dead"
     /\ UNCHANGED <<pool, boot, run, runBoot, pub, faults>>
-\* `runtime up` by hand. With ByHand it is a user command; otherwise a fault.
+\* A boot by something else (another project's `hack up`, or `runtime up` by hand).
+\* With ByHand it is a user command of this project; otherwise a bounded fault.
 RuntimeUp ==
-    /\ pool = "stopped" /\ CanBoot /\ (ByHand \/ Fault)
+    /\ pool = "stopped" /\ CanBoot /\ (ByHand \/ (OtherBoots /\ Fault))
     /\ pool' = "running" /\ boot' = boot + 1
     /\ faults' = IF ByHand THEN faults ELSE faults + 1
     /\ UNCHANGED <<run, runBoot, owner, pub>>

@@ -1181,6 +1181,21 @@ fn run() -> Result<(), CandidateError> {
                 "recover" => hack_runtime_core::provider::recover(&candidate),
                 _ => return Err(CandidateError::new("unsupported_command", HELP)),
             }?;
+            // Typed by hand: say what stopped with the pool and what brings it back (HACK-2456).
+            if let Some(runs) = result
+                .interrupted_runs
+                .as_ref()
+                .filter(|runs| !runs.is_empty())
+            {
+                eprintln!(
+                    "Stopped the native runtime while {} project run(s) were running; their containers stopped with it and their data is kept. Run hack up in each project to start the runtime again and recover its run.",
+                    runs.len()
+                );
+            } else if result.interrupted_runs_unknown {
+                eprintln!(
+                    "Stopped the native runtime. Its graph runs could not be read, so any that were running are not listed; hack up in a project recovers its run."
+                );
+            }
             print_json(&result)?;
         }
         _ => return Err(CandidateError::new("unsupported_command", HELP)),

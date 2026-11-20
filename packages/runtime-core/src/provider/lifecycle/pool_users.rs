@@ -129,10 +129,80 @@ pub(super) fn pool_idle(
     }
 }
 
+/// Receipt phases of a Compose graph run whose containers may be running or about to
+/// run in the current boot.
+const LIVE_PHASES: [&str; 4] = ["preparing", "restoring", "ready-observed", "cleanup-intent"];
+/// Compose graph runs whose receipt says they are live, sorted (HACK-2456).
+///
+/// `runtime down` names these when it stops a running pool under them: their
+/// containers stop with the guest, and `hack up` (or `hack down --recover`) in each
+/// project starts the pool again and recovers the run with its data kept. This is a
+/// report, not a refusal, and like the rest of this module it reads without a lock:
+/// `None` when the inventory or a receipt cannot be read, so the caller says it could
+/// not tell instead of naming nothing.
+pub(super) fn live_graph_runs(state_root: &Path) -> Option<Vec<String>> {
+    let parent = state_root.join("run/graphs");
+    match fs::symlink_metadata(&parent) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+        Ok(metadata) if !metadata.is_dir() => return None,
+        Ok(_) => (),
+    }
+    state::check_private_directory(&parent).ok()?;
+    let mut live = Vec::new();
+    for (index, entry) in fs::read_dir(&parent)
+        .ok()?
+        .take(MAX_ENTRIES + 1)
+        .enumerate()
+    {
+        if index == MAX_ENTRIES {
+            return None;
+        }
+        let entry = entry.ok()?;
+        let name = entry.file_name().into_string().ok()?;
+        if !is_graph_run(&name) {
+            continue;
+        }
+        let receipt: serde_json::Value = state::read(&entry.path().join("state.json")).ok()?;
+        if receipt["phase"]
+            .as_str()
+            .is_some_and(|phase| LIVE_PHASES.contains(&phase))
+        {
+            live.push(name);
+        }
+    }
+    live.sort();
+    Some(live)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    #[test]
+    fn runtime_down_names_only_runs_whose_receipt_is_live() {
+        let home = Home::new();
+        assert_eq!(live_graph_runs(&home.0), Some(vec![]));
+        for (run, phase) in [
+            ("a", "ready-observed"),
+            ("b", "stopped-data-retained"),
+            ("c", "restoring"),
+            ("d", "removed"),
+        ] {
+            let dir = home.dir(&format!("run/graphs/{}", run.repeat(32)));
+            state::write(
+                &dir.join("state.json"),
+                &serde_json::json!({ "phase": phase }),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            live_graph_runs(&home.0),
+            Some(vec!["a".repeat(32), "c".repeat(32)])
+        );
+        // An unreadable receipt makes the answer unknown, never "none".
+        home.dir(&format!("run/graphs/{}", "e".repeat(32)));
+        assert_eq!(live_graph_runs(&home.0), None);
+    }
 
     fn observe(root: &Path) -> PoolUsers {
         observe_with(root, |_| Some(false))

@@ -81,6 +81,15 @@ pub struct RuntimeStatus {
     /// provider (`socket_repairs`); absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repaired_sockets: Option<socket_repairs::RepairedSockets>,
+    /// Only from `runtime down` of a running pool: Compose graph runs whose receipts
+    /// were live when it stopped the pool under them (HACK-2456). Their containers
+    /// stopped with the guest; `hack up` in each project starts the pool and recovers
+    /// the run with its data kept. An empty list when there were none, absent otherwise
+    /// or when the inventory could not be read (`interrupted_runs_unknown`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interrupted_runs: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted_runs_unknown: bool,
 }
 
 fn root(candidate: &Candidate) -> std::path::PathBuf {
@@ -355,11 +364,13 @@ fn operation_lease<T>(
 #[cfg(target_os = "macos")]
 pub(super) const OWNED_CLEANUP_LEASE_WAIT: Duration = Duration::from_secs(30);
 /// Refusals of every command that needs the running pool (source transfer,
-/// graph start, stop, inspect, exec). They name no command of their own: the
-/// CLI adds the next step for its own command (HACK-2420).
+/// graph start, stop, inspect, exec). They say only what the refusal establishes:
+/// the pool record is absent, or its phase is not `running` (which includes a pool
+/// that is still booting or quiescing, whose containers may still run). They name no
+/// command of their own: the CLI adds the next step for its own command (HACK-2420).
 const NOT_STARTED: &str =
-    "The native runtime has never been started on this host; nothing was changed.";
-const NOT_RUNNING: &str = "The native runtime is not running; nothing in it was changed.";
+    "No native runtime has been started in this Hack home; nothing was changed.";
+const NOT_RUNNING: &str = "The native runtime is not in its running state, so this command did not connect to it; nothing was changed.";
 
 /// How long ordinary startup waits for a provider lease that another operation holds, such as
 /// a finite `graph inspect` (presentation `ps` takes no provider lease).
@@ -1047,6 +1058,8 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             pool_idle: Some(false),
             guest_memory_peaks: None,
             repaired_sockets: None,
+            interrupted_runs: None,
+            interrupted_runs_unknown: false,
         });
     }
     let owner = Owner::load(candidate)?;
@@ -1118,6 +1131,8 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         )),
         persistent_disks_identified: owner.storage.is_some(),
         repaired_sockets: socket_repairs::report(&root(candidate), owner.process.as_ref()),
+        interrupted_runs: None,
+        interrupted_runs_unknown: false,
         guest_boot_id: owner.guest_boot_id,
         prepared_base: super::prepared_start::status(candidate),
         graph_runs: users.graph_runs,
@@ -2535,6 +2550,10 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
+    // Stopping a running pool stops every graph's containers with the guest. This is
+    // reported, not refused: a crash or host reboot ends the same way, and `hack up`
+    // recovers each run (HACK-2456).
+    let live = pool_users::live_graph_runs(&candidate.state_root);
     let peak = read_memory_peak(&candidate.state_root, &owner, |script, args, deadline| {
         agent::exec_until(
             &socket(candidate, &owner, "agent.sock")?,
@@ -2558,6 +2577,10 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         Err(error) => Err(error),
     };
     keep_memory_peak(&root(candidate), peak, &mut result);
+    if let Ok(status) = &mut result {
+        status.interrupted_runs_unknown = live.is_none();
+        status.interrupted_runs = live;
+    }
     result
 }
 

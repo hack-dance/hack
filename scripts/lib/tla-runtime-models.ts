@@ -2360,6 +2360,71 @@ const contracts: readonly ModelContract[] = [
     fields: ["retired = <<1>>", "alive = 1"],
   },
   {
+    // HACK-2456: a pool that stops or dies under a live run. Positive: this
+    // change with nothing else booting the pool; `any-boot` is recovery from any
+    // earlier boot (follow-up). `negative` is `next` before the change, `by-hand`
+    // adds an unnamed `runtime up`, `strict` keeps predecessor-only recovery while
+    // something else boots the pool: all reach a state where no command helps.
+    name: "native-pool-stop",
+    module: "PoolStop",
+    states: 75,
+    invariant: "NoDeadEnd",
+    action: "OwnerCrash",
+    fields: [
+      'pool = "stopped"',
+      'run = "ready"',
+      'owner = "dead"',
+      "pub = TRUE",
+    ],
+    alternativeWitnesses: [
+      {
+        action: "OwnerNotices",
+        fields: [
+          'pool = "stopped"',
+          'run = "ready"',
+          'owner = "dead"',
+          "pub = TRUE",
+        ],
+      },
+    ],
+    additionalControls: [
+      { name: "any-boot", negative: false, states: 90 },
+      {
+        name: "by-hand",
+        negative: true,
+        action: "RuntimeUp",
+        fields: [
+          'pool = "running"',
+          "runBoot = 1",
+          "boot = 3",
+          'owner = "dead"',
+        ],
+      },
+      {
+        name: "strict",
+        negative: true,
+        action: "RecoverStopped",
+        fields: [
+          'pool = "running"',
+          "runBoot = 1",
+          "boot = 3",
+          'owner = "dead"',
+        ],
+        alternativeWitnesses: [
+          {
+            action: "RuntimeUp",
+            fields: [
+              'pool = "running"',
+              "runBoot = 1",
+              "boot = 3",
+              'owner = "dead"',
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
     name: "pool-emulation",
     module: "Emulation",
     states: 13,

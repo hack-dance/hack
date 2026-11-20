@@ -837,6 +837,67 @@ data, and requires inspection before retry. No guest is started by alias recover
 Interrupted starts without a recorded process or both identified disks remain
 outside this repair path.
 
+`runtime down` stops the pool even while projects run in it, because a crash or a
+host reboot ends the same way. Their containers stop with the guest and their data is
+kept. Its JSON then lists the Compose graph runs whose receipts were live in
+`interrupted_runs`, or sets `interrupted_runs_unknown` when they could not be read,
+and it writes one line on stderr saying how many it stopped. `hack up` in each of those
+projects starts the pool again and recovers its run.
+
+How a run moves across a pool stop. It is checked as the TLA+ model
+`tests/models/tla/native-pool-stop`. A run left from a boot older than the previous
+one (another project's `hack up` or a `runtime up` by hand booted the pool and it
+stopped again before this project recovered) is not recovered yet.
+
+```mermaid
+---
+title: PoolStop · run and pool stop
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> none
+    none --> ready : hack up
+    retained --> ready : hack up
+    ready --> retained : hack down
+    ready --> orphaned : runtime down, owner dies
+    ready --> crashed : VM or provider dies
+    crashed --> orphaned : hack native recover
+    orphaned --> recover : hack up, down --recover
+    state recover <<choice>>
+    recover --> retained : [same or previous boot]
+    recover --> stranded : [older boot]
+
+    note left of orphaned
+        Receipt still ready-observed,
+        owner dead, publication left.
+        Pool stopped or in a new boot.
+    end note
+    note right of recover
+        Starts a stopped pool, then
+        the existing recovery with
+        data kept (RecoverStopped).
+    end note
+    note right of stranded
+        Known gap: another boot came
+        first. Follow-up recovers from
+        any earlier boot (any-boot).
+    end note
+    note left of retained
+        INV NoDeadEnd: some named
+        command always acts.
+        PROP Recovers.
+    end note
+
+    class ready ok
+    class orphaned wait
+    class crashed wait
+    class stranded fail
+```
+
 `runtime down` first quiesces the guest engine, which leaves the pool in phase
 `quiescing` until the engine exits. A guest agent that answers no ping lets `down`
 or `recover` stop the provider. A guest that still answers pings but whose engine
@@ -2144,11 +2205,12 @@ present it exits 0 and reports `runtime_not_running` (no phase, no service rows)
 and text output prints "Native runtime is not running; no services are running."
 That includes a pool left stopped by a failed or recovered boot (`failed-boot-stopped`,
 `recovered-unclean`, `stopped-before-engine`) whose provider is not alive; before, `ps`
-failed there with `runtime_changed`. `hack down` on a stopped runtime still refuses with
-`runtime_not_running`, but it now says what that means: "The native runtime is not
-running; nothing in it was changed. None of this project's containers are running, and
-its data is kept. Run hack up to start the project again, or hack ps --json to see its
-state." Before, it named only `hack ps --json`.
+failed there with `runtime_changed`. When a command that needs the running pool finds it in any other phase (stopped,
+or still booting or quiescing), it refuses with `runtime_not_running` and says only
+that it did not connect: "The native runtime is not in its running state, so this
+command did not connect to it; nothing was changed." `hack down` adds the next
+commands: `hack ps --json` to see the phase, then `hack up` or `hack down --recover`
+once the pool is stopped.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,

@@ -16,8 +16,6 @@ for name in runc docker-init; do
  path=/opt/hack-engine/$name
  test -f "$path"
  test ! -L "$path"
- case "$name" in runc) expected=$3;; docker-init) expected=$4;; esac
- test "$(sha256sum "$path" | cut -d ' ' -f 1)" = "$expected"
  size=$(stat -c %s "$path")
  test "$size" -gt 0
  test "$size" -le 33554432
@@ -30,12 +28,14 @@ test ! -e "$cache"
 test ! -L "$cache"
 mkdir -m 700 "$cache"
 mount -t tmpfs -o size=32m,mode=700,nosuid,nodev tmpfs "$cache"
+# One read of each executable over the host share: the bytes are hashed as they are
+# copied, so the digest is of exactly what the cache received. A short or failed read
+# gives another digest. The cached copy is hashed again below, where it is executed.
 for name in runc docker-init; do
- cp "/opt/hack-engine/$name" "$cache/$name"
+ case "$name" in runc) expected=$3;; docker-init) expected=$4;; esac
+ test "$(tee "$cache/$name" < "/opt/hack-engine/$name" | sha256sum | cut -d ' ' -f 1)" = "$expected"
  chmod 555 "$cache/$name"
  test "$(stat -c %u:%g:%a "$cache/$name")" = 0:0:555
- case "$name" in runc) expected=$3;; docker-init) expected=$4;; esac
- test "$(sha256sum "$cache/$name" | cut -d ' ' -f 1)" = "$expected"
 done
 mount -o remount,ro "$cache"
 for name in runc docker-init; do

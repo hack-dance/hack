@@ -58,6 +58,7 @@ export const JSON_COMMAND_SHAPES = {
   "setup sync": "error-only",
   "setup migrate": "envelope",
   "native setup": "runtime-passthrough",
+  "native recover": "runtime-passthrough",
   "session panes": "ndjson",
   "session capture": "ndjson",
   "session tail": "ndjson",

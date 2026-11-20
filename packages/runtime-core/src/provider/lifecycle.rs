@@ -1597,7 +1597,7 @@ fn start_pool(
     {
         return Err(CandidateError::new(
             "recovery_required",
-            "Previous operation did not finish; inspect runtime status and recover before restarting.",
+            "Previous operation did not finish; run hack native recover (runtime recover --json with the executor), then start again.",
         ));
     }
     if let Some(process) = &owner.process {
@@ -1889,7 +1889,7 @@ mod boot_sequence_tests;
 fn failed_boot_stop_error(failure: CandidateError) -> CandidateError {
     CandidateError::new(
         failure.code,
-        "Failed-boot provider cleanup could not be confirmed. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",
+        "Failed-boot provider cleanup could not be confirmed. Run hack native recover before retrying (with an executor selected by hand: the same executor and --candidate-root as the failed start, then runtime recover --json).",
     )
 }
 
@@ -3115,6 +3115,12 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         }
         // The operation lease taken above stays held through the stop and its receipt.
         stop_silent_guest(candidate, &mut owner)?;
+        return status(candidate);
+    }
+    // A stopped phase was written only after the provider's release was proven, and its
+    // provider is dead: nothing to recover, so a clean stop stays clean and repeating
+    // recovery changes nothing (a retained run's eligibility depends on the phase).
+    if STOPPED_PHASES.contains(&owner.phase.as_str()) {
         return status(candidate);
     }
     // A failed first boot whose provider was recorded (`failed-boot-stopped` after a template

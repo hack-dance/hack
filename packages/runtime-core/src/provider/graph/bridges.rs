@@ -590,8 +590,9 @@ fn reserve_all(
     Ok(reserved)
 }
 
-/// Loopback publications alone; kept for the native fixtures that reserve them.
-#[cfg(all(test, target_os = "macos"))]
+/// Loopback publications alone; kept for the native fixtures that reserve them. Those fixtures
+/// are built only with the environment launcher feature, so this is too.
+#[cfg(all(test, target_os = "macos", feature = "environment-launcher"))]
 pub(in crate::provider::graph) fn reserve_loopback_ports(
     candidate: &Candidate,
     receipt: &Receipt,

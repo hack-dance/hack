@@ -48,6 +48,9 @@ pub struct RuntimeStatus {
     pub phase: String,
     pub profile: Option<super::Profile>,
     pub reclamation: Option<state::ReclamationPolicy>,
+    /// Host-to-guest change notifications for the shared project directories, as the pool's
+    /// last boot chose them (`hot_reload`); `null` before the pool exists.
+    pub hot_reload: Option<super::hot_reload::Report>,
     pub guest_memory_mib: Option<u32>,
     pub provider_memory: Option<identity::MemoryUsage>,
     pub provider_resources: Option<super::resources::ResourceTree>,
@@ -113,6 +116,11 @@ fn command(candidate: &Candidate, owner: &Owner) -> std::process::Command {
             "SMOLVM_IDLE_RECLAIM",
             policy.idle_minutes.unwrap_or(0).to_string(),
         );
+    // The provider reads this at `machine start`; it is set on every invocation so the pool's
+    // provider processes agree. An ambient value never reaches the provider (clean command).
+    if super::hot_reload::Choice::off(owner.hot_reload) {
+        command.env(super::hot_reload::PROVIDER_SWITCH, "1");
+    }
     command
 }
 fn boot_reclamation_policy() -> state::ReclamationPolicy {
@@ -369,6 +377,17 @@ impl<'a> ObservedGuest<'a> {
             candidate,
             owner: Owner::load(candidate)?,
         };
+        // A stopped pool is not running, not changed: `hack ps` reports it as an ordinary
+        // state (HACK-2376). `runtime_changed` stays for a pool that changes during the read.
+        if observed_stopped(&observed.owner)? {
+            return Err(CandidateError::new(
+                "runtime_not_running",
+                format!(
+                    "The candidate runtime is not running (phase {}).",
+                    observed.owner.phase
+                ),
+            ));
+        }
         observed.verify()?;
         // No mutation lease is held here: observe without repairing.
         audit_with(candidate, &observed.owner, Repair::Observe, &mut Vec::new())?;
@@ -981,6 +1000,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             phase: "uninitialized".into(),
             profile: None,
             reclamation: None,
+            hot_reload: None,
             guest_memory_mib: None,
             provider_memory: None,
             provider_resources: None,
@@ -1052,6 +1072,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         },
         profile: Some(owner.profile),
         reclamation: owner.reclamation,
+        hot_reload: Some(super::hot_reload::report(owner.hot_reload)),
         guest_memory_mib: Some(owner.profile.memory_mib()),
         application_bridge: owner.application_bridge,
         phase,
@@ -1312,6 +1333,8 @@ fn start_pool(
     project_share: Option<super::ProjectShareIntent>,
     start: super::prepared_start::Start<'_>,
 ) -> Result<RuntimeStatus, CandidateError> {
+    // A mistyped setting is refused before any effect.
+    let hot_reload = super::hot_reload::Setting::from_environment()?;
     // A clean stop whose alias path another entry holds is moved to a fresh alias before
     // any strict owner read below refuses it.
     restore_released_short_home_before_use(candidate)?;
@@ -1696,6 +1719,13 @@ fn start_pool(
     let permit = boot.release(candidate, &lock)?;
     let previous_boot = owner.begin_boot();
     owner.reclamation = Some(boot_reclamation_policy());
+    // Chosen from the shares this boot mounts; the `booting` receipt below records it before
+    // `machine start` reads it.
+    owner.hot_reload = {
+        let shares = owner.project_shares();
+        let roots: Vec<&Path> = shares.iter().map(|share| share.project.as_path()).collect();
+        super::hot_reload::decide(hot_reload, &roots)
+    };
     // The previous provider was proven dead above. Until this start records its own provider,
     // the receipt names none, so recovery identifies it (`interrupted`) instead of trusting the
     // old identity.
@@ -1767,6 +1797,26 @@ fn start_machine(
         &["machine", "start", "--name", &owner.machine],
     )
     .map(drop)
+    .map_err(stalled_boot)
+}
+
+/// The pinned provider's words when it ends a start whose VM showed no boot progress for its
+/// limit (30 seconds).
+const NO_BOOT_PROGRESS: &str = "no boot progress";
+
+/// Names a start the provider ended for lack of boot progress, with a message that is safe to
+/// show. Any other failure is returned unchanged. The receipt stays `booting`, as for every
+/// failed `machine start`.
+fn stalled_boot(error: CandidateError) -> CandidateError {
+    if error.code != "provider_command_failed" || !error.message.contains(NO_BOOT_PROGRESS) {
+        return error;
+    }
+    CandidateError::new(
+        "provider_boot_stalled",
+        "The provider ended the start: the VM made no boot progress within the provider's \
+         limit. Recover the pool before retrying. A large shared project directory is one \
+         known cause; HACK_NATIVE_HOT_RELOAD=off starts without the scan that causes it.",
+    )
 }
 
 /// SIGTERM a provider whose identity is verified at the signal, then wait for it to exit.
@@ -2328,6 +2378,19 @@ const STOPPED_PHASES: [&str; 4] = [
     "stopped-after-engine-failure",
     "recovered-unclean",
 ];
+
+/// Whether lease-free observation finds the pool stopped: a stopped phase, or a failed boot
+/// whose provider was stopped (`failed-boot-stopped`), with no live recorded provider. A
+/// transitional phase is not stopped here: an operation may be changing it.
+fn observed_stopped(owner: &Owner) -> Result<bool, CandidateError> {
+    if !STOPPED_PHASES.contains(&owner.phase.as_str()) && owner.phase != "failed-boot-stopped" {
+        return Ok(false);
+    }
+    match &owner.process {
+        None => Ok(true),
+        Some(process) => Ok(!identity::alive(process.pid)?),
+    }
+}
 
 /// A stopped phase with no live provider; no recorded provider (`None`) is as stopped
 /// as a dead one. Nothing runs from the prepared provider tree in this state.
@@ -3028,6 +3091,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn observation_treats_only_a_stopped_pool_without_a_live_provider_as_not_running() {
+        // `ObservedGuest::connect` answers `runtime_not_running` exactly when this holds,
+        // before any identity comparison; otherwise `verify` keeps `runtime_changed`.
+        let owner = |phase: &str, process: Option<i32>| -> Owner {
+            let process = process.map(|pid| {
+                json!({"pid": pid, "start_micros": 1, "uid": 0, "executable": "/fixture/smolvm"})
+            });
+            serde_json::from_value(json!({
+                "version": 1, "checkout": "/fixture", "token": "fixture", "machine": "fixture",
+                "short_home": "/fixture", "created": true, "phase": phase,
+                "process": process, "storage": null, "overlay": null, "guest_boot_id": "boot",
+                "daemon_pid": null, "daemon_start": null, "rootfs_digest": null
+            }))
+            .unwrap()
+        };
+        let dead = {
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let pid = i32::try_from(child.id()).unwrap();
+            child.wait().unwrap();
+            pid
+        };
+        let live = i32::try_from(std::process::id()).unwrap();
+        for phase in [
+            "stopped",
+            "stopped-before-engine",
+            "stopped-after-engine-failure",
+            "recovered-unclean",
+            "failed-boot-stopped",
+        ] {
+            assert!(observed_stopped(&owner(phase, None)).unwrap(), "{phase}");
+            assert!(
+                observed_stopped(&owner(phase, Some(dead))).unwrap(),
+                "{phase}"
+            );
+            // A live recorded provider is not stopped, whatever the phase says.
+            assert!(
+                !observed_stopped(&owner(phase, Some(live))).unwrap(),
+                "{phase}"
+            );
+        }
+        // An operation may be changing a transitional phase.
+        for phase in ["running", "booting", "creating", "quiescing", "stopping"] {
+            assert!(!observed_stopped(&owner(phase, None)).unwrap(), "{phase}");
+        }
+    }
+
+    #[test]
     fn source_preflight_is_read_only_and_preserves_unowned_state() {
         let directory = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "hack-source-preflight-{}-{}-{}",
@@ -3483,6 +3593,83 @@ mod tests {
                 env[std::ffi::OsStr::new("SMOLVM_IDLE_RECLAIM")],
                 Some(std::ffi::OsStr::new(if policy.enabled { "2" } else { "0" }))
             );
+        }
+    }
+
+    #[test]
+    fn only_a_start_the_provider_ended_for_no_boot_progress_is_named_stalled() {
+        let provider = "Provider command exited exit status: 1; no automatic retry. Error: agent \
+                        operation failed: start machine: agent operation failed: wait for ready: \
+                        agent did not become ready within 30 seconds: no boot progress for 30 \
+                        seconds";
+        let stalled = stalled_boot(CandidateError::new(
+            "provider_command_failed",
+            provider.to_owned(),
+        ));
+        assert_eq!(stalled.code, "provider_boot_stalled");
+        assert!(stalled.message_fixed);
+        assert!(stalled.message.contains("HACK_NATIVE_HOT_RELOAD=off"));
+        // Another failure of the same command keeps its code and text.
+        let other = stalled_boot(CandidateError::new(
+            "provider_command_failed",
+            "Provider command exited exit status: 1; no automatic retry. Error: machine not found"
+                .to_owned(),
+        ));
+        assert_eq!(other.code, "provider_command_failed");
+        assert!(other.message.contains("machine not found"));
+        // The words alone, under another code, change nothing.
+        let timeout = stalled_boot(CandidateError::new(
+            "provider_timeout_uncertain",
+            format!("{NO_BOOT_PROGRESS} seen elsewhere"),
+        ));
+        assert_eq!(timeout.code, "provider_timeout_uncertain");
+    }
+
+    #[test]
+    fn provider_command_turns_notifications_off_only_for_a_recorded_choice() {
+        let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let fixture = json!({
+            "version":1, "checkout":"/fixture", "token":"fixture", "machine":"fixture",
+            "short_home":"/fixture", "created":true, "phase":"stopped", "process":null,
+            "storage":null, "overlay":null, "guest_boot_id":null,
+            "daemon_pid":null, "daemon_start":null, "rootfs_digest":null
+        });
+        // A receipt written before this field existed keeps the provider's notifications.
+        let mut owner: Owner = serde_json::from_value(fixture.clone()).unwrap();
+        assert_eq!(owner.hot_reload, None);
+        let switch = std::ffi::OsStr::new(super::super::hot_reload::PROVIDER_SWITCH);
+        assert!(
+            command(&candidate, &owner)
+                .get_envs()
+                .all(|(name, _)| name != switch)
+        );
+        // A boot that keeps them writes nothing new into the receipt.
+        assert!(
+            serde_json::to_value(&owner)
+                .unwrap()
+                .get("hot_reload")
+                .is_none()
+        );
+        use super::super::hot_reload::{Choice, Reason};
+        for (enabled, reason) in [
+            (false, Reason::LargeShare),
+            (false, Reason::Setting),
+            (true, Reason::Setting),
+        ] {
+            owner.hot_reload = Some(Choice {
+                enabled,
+                reason,
+                limit: 100_000,
+            });
+            let cmd = command(&candidate, &owner);
+            let env: std::collections::BTreeMap<_, _> = cmd.get_envs().collect();
+            // Forced on is recorded for the user's sake and starts the provider as usual.
+            assert_eq!(
+                env.get(switch).copied(),
+                (!enabled).then_some(Some(std::ffi::OsStr::new("1")))
+            );
+            let saved = serde_json::to_value(&owner).unwrap();
+            assert_eq!(serde_json::from_value::<Owner>(saved).unwrap(), owner);
         }
     }
 

@@ -1690,6 +1690,77 @@ pool that is already running does not boot and does not start it. To see what it
 read `/run/hack-local/memory-return.status` in the guest: one line such as
 `memory-return-v1 order=2 compaction=done windows=9`.
 
+### Hot reload on shared source
+
+With the provider's host-to-guest change notifications on, an edit made on the host under a
+shared directory reaches the guest in about a tenth of a second: the new content is readable
+and a file watcher inside a container fires. The price is paid at boot. Before the guest
+starts, the pinned provider reads every entry under every mounted host directory to build a
+baseline, and the launch waits for it. It reads them once more in the background right after
+boot, and nothing after that. If the read before the guest starts takes longer than the
+provider allows a boot to show no progress (30 seconds), the provider ends the start.
+
+Measured on the pinned provider alone (SmolVM 1.35.4, one host directory mounted, nothing
+running in the guest, host load 7 to 29). "Cold" means another 300,000-entry tree was read just
+before, so the host's file cache did not hold the mounted one; "warm" is the next boot.
+
+| Mounted tree | Entries | Provider boot, cold | Provider boot, warm |
+| --- | --- | --- | --- |
+| Synthetic (no links) | 1,001 | 0.38 s | 0.16 s |
+| Synthetic | 20,000 | 0.96 s | 0.42 s |
+| Synthetic | 80,000 | 1.74 s | 0.80 s |
+| Synthetic | 280,000 | 6.03 s | 6.03 s |
+| Installed dependencies, 1 copy | 33,775 | 2.03 s | 0.46 s |
+| Installed dependencies, 2 copies | 67,549 | 3.27 s | 0.84 s |
+| Installed dependencies, 4 copies | 135,097 | 5.34 s | 3.87 s |
+| Installed dependencies, 8 copies | 270,193 | 8.81 s | 7.98 s |
+| A real 11-service project's checkout | 275,999 | 22 to 27 s, or the start is ended | not measured |
+
+An entry count is only a proxy for the scan time: the real checkout is 2.5 to 3 times slower
+per entry than the copied dependency tree of the same size. The host keeps about 263,000 file
+entries cached (`kern.maxvnodes`), so a larger tree is never warm.
+
+A boot whose shared project directories hold more than `hot_reload::ENTRY_LIMIT` (100,000)
+entries in total therefore starts the provider with `SMOL_NO_HOT_RELOAD` set. At that size the
+scan took 3 to 5 seconds cold for dependency trees and about 9 seconds for the slowest tree
+measured, which leaves a margin of three to the provider's limit. Below the limit a pool boot
+waits for the scan and hot reload works; above it the boot does not wait and hot reload is off.
+
+- **What "off" costs.** The share is the same and the guest reads and writes the same files.
+  Measured with the switch set (`probe-hr-effects`): file watchers in the guest never fire for
+  a host edit; an edited file read as its old content for up to about 5 seconds (edits made
+  2.3 s and 8.3 s after a first read became readable at 5.2 s and 10.2 s), while a new file
+  showed at once; and lookups of names that do not exist are no longer cached (3,000 lookups
+  took 0.12 s every time, against 0.12 s and then nothing with notifications on). With
+  notifications on, the same edits were readable and their events arrived 40 to 90 ms later,
+  on a 1,000-entry and a 135,000-entry tree alike.
+- **The count.** Immediately before `machine start`, the runtime lists the pool's project
+  shares (nothing is opened and links are not followed) and stops one entry past the limit,
+  so the number of entries it visits is bounded by the limit whatever the checkout holds.
+  Entry types normally come from the directory listing itself; a file system that does not
+  supply them costs one metadata lookup per entry. The bound is on entries, not on time. The
+  provider follows links and the count does not, and entries that vanish or cannot be listed
+  are not counted, so the count is a lower bound of what the provider reads.
+- **The setting.** `HACK_NATIVE_HOT_RELOAD` is `auto` (the default), `on` or `off`, read by
+  `runtime up`; any other value is refused before any effect. `on` keeps the notifications
+  whatever the size; `off` drops them whatever the size. The CLI gives runtime subprocesses
+  a closed environment, so it hands this one setting to `runtime up` explicitly and refuses
+  a mistyped value itself, before the runtime starts.
+- **The record.** The choice is made at every boot and written to the owner receipt
+  (`hot_reload`) only when it is not the plain default: off, or forced on over a large share.
+  `lifecycle::command` sets the provider's switch on every invocation from that record.
+  `runtime up` and `runtime status` report `hot_reload` with `state` and, when recorded,
+  `reason` (`large_share` or `setting`), `limit` and one sentence for the user. `hack up`
+  prints its own sentence from `state`, `reason` and `limit`, once per start. An older build
+  refuses a receipt that carries the field, as for every new receipt field.
+- **A stalled start.** When the provider ends a start for lack of boot progress, the runtime
+  reports `provider_boot_stalled` with a fixed message instead of `provider_command_failed`.
+  The receipt stays `booting`, as for any failed `machine start`; recover the pool before
+  retrying.
+- **`localDirectories` does not shrink the share.** It mounts a volume from the VM disk over
+  the container path; the host directory, if it exists in the checkout, is still read by the
+  provider. Removing the host copy is what brings a checkout back under the limit.
+
 ### Starting a pool that is already running
 
 `runtime up` on a pool that is already running and owned by this home (every warm frontend

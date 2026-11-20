@@ -72,10 +72,7 @@ pub(super) fn recover(
             }
             Ok(())
         }
-        _ => Err(unrecoverable(&format!(
-            "the receipt is in phase {} with no provider recorded",
-            owner.phase
-        ))),
+        _ => Err(unrecoverable(&format!("the receipt is in phase {} with no provider recorded", owner.phase))),
     }
 }
 
@@ -123,9 +120,7 @@ fn recover_create(candidate: &Candidate, owner: &mut Owner) -> Result<(), Candid
             &["machine", "delete", "--name", &owner.machine, "--force"],
         )?;
         if config_audit::machine_recorded(candidate, owner)? {
-            return Err(unrecoverable(
-                "the provider still records this machine after deleting it",
-            ));
+            return Err(unrecoverable("the provider still records this machine after deleting it"));
         }
     }
     owner.phase = "initializing".into();
@@ -142,11 +137,7 @@ fn recover_start(
     let launched = match fs::symlink_metadata(&directory) {
         Ok(_) => present(&directory, ["storage.raw", "overlay.raw"])?,
         Err(error) if error.kind() == ErrorKind::NotFound => [false; 2],
-        Err(_) => {
-            return Err(unrecoverable(
-                "the machine data directory could not be inspected",
-            ));
-        }
+        Err(_) => return Err(unrecoverable("the machine data directory could not be inspected")),
     };
     let adopted = owner.storage.is_some() || owner.overlay.is_some();
     if let Some(intent) = SetAside::load(candidate)? {
@@ -154,9 +145,7 @@ fn recover_start(
         // proofs, which are repeated below before any further move.
         let templates = prepared_start::stock_templates(candidate, owner, lock)?;
         let (false, Some(templates)) = (adopted, templates) else {
-            return Err(unrecoverable(
-                "a set-aside is in progress but the disks were adopted or come from a prepared base",
-            ));
+            return Err(unrecoverable("a set-aside is in progress but the disks were adopted or come from a prepared base"));
         };
         provider_idle(candidate)?;
         return set_aside(candidate, owner, &templates, &intent.label);
@@ -171,8 +160,7 @@ fn recover_start(
         return Err(unrecoverable("only one of the two machine disks exists"));
     }
     if present(&directory, ["agent.pid"])? == [true] {
-        let process = recorded_process(candidate, owner)
-            .map_err(|_| unrecoverable("the provider's PID record is unreadable or incomplete"))?;
+        let process = recorded_process(candidate, owner).map_err(|_| unrecoverable("the provider's PID record is unreadable or incomplete"))?;
         if identity::alive(process.pid)? {
             // SAFETY: geteuid has no preconditions and cannot fail.
             identity::verify(
@@ -221,9 +209,7 @@ pub(super) fn set_aside_recorded(
         let (false, false, Some(templates)) =
             (owner.storage.is_some(), owner.overlay.is_some(), templates)
         else {
-            return Err(unrecoverable(
-                "a set-aside is in progress but the disks were adopted or come from a prepared base",
-            ));
+            return Err(unrecoverable("a set-aside is in progress but the disks were adopted or come from a prepared base"));
         };
         provider_idle(candidate)?;
         set_aside(candidate, owner, &templates, &intent.label)?;
@@ -294,11 +280,7 @@ impl SetAside {
         let pending = Self::path(candidate).with_extension("pending");
         let metadata = match fs::symlink_metadata(&pending) {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-            Err(_) => {
-                return Err(unrecoverable(
-                    "an unpublished set-aside intent could not be inspected",
-                ));
-            }
+            Err(_) => return Err(unrecoverable("an unpublished set-aside intent could not be inspected")),
             Ok(metadata) => metadata,
         };
         // SAFETY: geteuid has no preconditions and cannot fail.
@@ -307,9 +289,7 @@ impl SetAside {
             && metadata.uid() == unsafe { libc::geteuid() }
             && metadata.mode() & 0o077 == 0;
         if !ours {
-            return Err(unrecoverable(
-                "an unpublished set-aside intent is not a private file of this user",
-            ));
+            return Err(unrecoverable("an unpublished set-aside intent is not a private file of this user"));
         }
         fs::remove_file(&pending).map_err(io)
     }
@@ -332,8 +312,7 @@ impl SetAside {
             Err(_) => return Err(unrecoverable("the set-aside intent could not be inspected")),
             Ok(_) => {}
         }
-        let intent: Self = state::read(&Self::path(candidate))
-            .map_err(|_| unrecoverable("the set-aside intent is unreadable"))?;
+        let intent: Self = state::read(&Self::path(candidate)).map_err(|_| unrecoverable("the set-aside intent is unreadable"))?;
         let valid = intent.version == 1
             && intent
                 .label
@@ -401,11 +380,7 @@ fn set_aside(
             _ if present(&data.join(label), [name])? == [true] => {
                 locations.push(data.join(label).join(name));
             }
-            _ => {
-                return Err(unrecoverable(
-                    "a machine disk is missing from both its place and the set-aside directory",
-                ));
-            }
+            _ => return Err(unrecoverable("a machine disk is missing from both its place and the set-aside directory")),
         }
     }
     // Unadopted disks have no recorded identity for `verify_disks` to check, so check here
@@ -446,8 +421,7 @@ fn set_aside(
 /// Refuse unless `path` is a regular file owned by this user with one link.
 fn owned_file(path: &Path) -> Result<(), CandidateError> {
     use std::os::unix::fs::MetadataExt;
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| unrecoverable("a machine disk could not be inspected"))?;
+    let metadata = fs::symlink_metadata(path).map_err(|_| unrecoverable("a machine disk could not be inspected"))?;
     // SAFETY: geteuid has no preconditions and cannot fail.
     if !metadata.file_type().is_file()
         || metadata.nlink() != 1
@@ -472,9 +446,7 @@ fn move_into(directory: &Path, label: &str, names: &[&str]) -> Result<(), Candid
     state::private_directory(&aside)?;
     for name in names {
         if present(&aside, [*name])? == [true] {
-            return Err(unrecoverable(
-                "the set-aside directory already holds a file of that name",
-            ));
+            return Err(unrecoverable("the set-aside directory already holds a file of that name"));
         }
         fs::rename(directory.join(name), aside.join(name)).map_err(io)?;
     }

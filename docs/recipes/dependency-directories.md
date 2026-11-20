@@ -75,7 +75,12 @@ volumes. Your Compose file does not change.
   16-volume limit. `hack up` prints the same notices as on Compose. With
   shared source, each declared path appears in your checkout as an empty
   directory owned by you (the mountpoint); Hack keeps `.hack/.internal/` out
-  of `git status`. If you change the list while the project runs, `hack up`
+  of `git status`. A copy of the directory that already exists in your
+  checkout (from an install on macOS) stays there and is still part of the
+  share: `localDirectories` hides it from containers but does not make the
+  share smaller. Removing that copy from the checkout is what shrinks the
+  share, which matters for
+  [hot reload with a large checkout](../native/limits.md#other-limits). If you change the list while the project runs, `hack up`
   leaves the run as it is and says to restart; `hack restart` applies the
   change and says so. Adopted,
   authored and imported native projects do not apply the setting, and

@@ -16,6 +16,7 @@ import {
   type NativeConfigurationRefusal,
   readNativeConfigurationRefusals,
 } from "./native-configuration-refusals.ts";
+import { nativeHotReloadEnvironment } from "./native-hot-reload-notice.ts";
 import {
   type NativePlanChange,
   nativePlanChangeGuidance,
@@ -674,6 +675,9 @@ export async function invokeNativeRuntime(opts: {
       env[key] = value;
     }
   }
+  // The one user setting a runtime request carries in its environment; an
+  // invalid value throws here, before the subprocess exists.
+  Object.assign(env, nativeHotReloadEnvironment(opts.args));
   const child = Bun.spawn(
     [opts.runtime.binary, "--candidate-root", opts.runtime.home, ...opts.args],
     {

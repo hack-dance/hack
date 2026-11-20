@@ -1,5 +1,5 @@
 import { afterEach, test as bunTest, expect, spyOn } from "bun:test";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -165,6 +165,7 @@ if (process.argv.includes("owner-fail")) { const {appendFileSync}=await import("
 if (process.argv.includes("owner-unsafe")) { console.error(JSON.stringify({code:"graph_owner_recovery",cause_code:"synthetic-secret-diagnostic",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("fail")) { console.error("synthetic-secret-diagnostic"); process.exit(23); }
 if (process.argv.includes("garbage")) { process.stdout.write("not-json"); process.exit(0); }
+if (process.argv.includes("hot-reload-probe")) { const {appendFileSync}=await import("node:fs"); appendFileSync("hot-reload-spawns","s"); console.log(JSON.stringify({ hotReload: process.env.HACK_NATIVE_HOT_RELOAD ?? null })); process.exit(0); }
 if (process.argv.includes("overflow")) { process.stdout.write("x".repeat(17 * 1024 * 1024)); }
 else {
  const input = await Bun.stdin.text();
@@ -1734,3 +1735,46 @@ bunTest(
     ).toBeUndefined();
   }
 );
+
+test("HACK-2409: the hot-reload setting crosses the subprocess boundary for runtime up only, and a mistyped value never starts the runtime", async () => {
+  const runtime = await fixture();
+  const prior = process.env.HACK_NATIVE_HOT_RELOAD;
+  const up = ["runtime", "up", "hot-reload-probe", "--json"];
+  const ask = (args: string[]) =>
+    invokeNativeRuntime({ runtime, cwd: runtime.home, args });
+  try {
+    Reflect.deleteProperty(process.env, "HACK_NATIVE_HOT_RELOAD");
+    expect(await ask(up)).toEqual({ hotReload: null });
+    for (const value of ["auto", "on", "off"]) {
+      process.env.HACK_NATIVE_HOT_RELOAD = value;
+      expect(await ask(up)).toEqual({ hotReload: value });
+      // No other runtime command receives it.
+      expect(await ask(["runtime", "status", "hot-reload-probe"])).toEqual({
+        hotReload: null,
+      });
+    }
+    process.env.HACK_NATIVE_HOT_RELOAD = "";
+    expect(await ask(up)).toEqual({ hotReload: null });
+    const spawns = async () =>
+      (await readFile(join(runtime.home, "hot-reload-spawns"), "utf8")).length;
+    const before = await spawns();
+    for (const value of ["ON", "true", "1", " off"]) {
+      process.env.HACK_NATIVE_HOT_RELOAD = value;
+      await expect(ask(up)).rejects.toMatchObject({
+        code: "E_CONFIG_INVALID",
+        message: "HACK_NATIVE_HOT_RELOAD must be auto, on or off.",
+      });
+      // Other commands do not read the setting and are not refused for it.
+      expect(await ask(["runtime", "status", "hot-reload-probe"])).toEqual({
+        hotReload: null,
+      });
+    }
+    expect(await spawns()).toBe(before + 4);
+  } finally {
+    if (prior === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_NATIVE_HOT_RELOAD");
+    } else {
+      process.env.HACK_NATIVE_HOT_RELOAD = prior;
+    }
+  }
+});

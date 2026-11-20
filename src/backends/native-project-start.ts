@@ -13,6 +13,7 @@ import { isRecord } from "../lib/guards.ts";
 import {
   nativeDetachedUpBranchDropped,
   nativeDetachedUpFailedServices,
+  nativeDetachedUpHotReload,
   nativeDetachedUpProfileNotice,
   nativeDetachedUpShellVariables,
   nativeShellForwardingNotice,
@@ -39,6 +40,10 @@ import {
   nativeStartBudgetSeconds,
   watchNativeStartupStatus,
 } from "./native-graph-start-budget.ts";
+import {
+  nativeHotReloadNoticeFromPool,
+  renderNativeHotReloadNotice,
+} from "./native-hot-reload-notice.ts";
 import {
   admitNativeHttpProbe,
   isInferredNativeRouteProbe,
@@ -2084,6 +2089,20 @@ function emitNativeLeftOutNotice(opts: {
   );
 }
 
+/**
+ * Once per start, when the pool runs with hot reload on shared source off, or
+ * forced on over a large share: printed, or handed to a detached launcher.
+ */
+function emitNativeHotReloadNotice(
+  pool: unknown,
+  warn: (line: string) => void
+): void {
+  const notice = nativeHotReloadNoticeFromPool(pool);
+  if (notice && !nativeDetachedUpHotReload(notice)) {
+    warn(renderNativeHotReloadNotice(notice));
+  }
+}
+
 /** Prints a profile notice, or hands it to the launcher of a detached owner. */
 function emitNativeProfileNotice(
   notice: NativeProfileNotice,
@@ -2521,7 +2540,7 @@ async function startNativeProjectAttempt(
       signal: controller.signal,
     });
     progress({ phase: "runtime" });
-    await deps.invoke({
+    const pool = await deps.invoke({
       runtime: opts.runtime,
       cwd: opts.scope.projectRoot,
       args: [
@@ -2553,6 +2572,7 @@ async function startNativeProjectAttempt(
       ],
       signal: controller.signal,
     });
+    emitNativeHotReloadNotice(pool, deps.warn);
     requireActiveStartup(controller.signal);
     await verifyNativeResumedRetainedGraph({
       runtime: opts.runtime,

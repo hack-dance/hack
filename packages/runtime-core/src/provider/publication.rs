@@ -779,15 +779,25 @@ pub(super) fn release_reservations(
 }
 
 /// Retires the selected entries' publishers concurrently (each touches only its
-/// own process, directory and sockets), then drops exactly the retired entries
-/// in one journal save. A failed entry stays recorded with its files. Retiring
-/// an entry is idempotent (an exited process and an absent directory succeed),
-/// so an interruption before the save is finished by the next release.
+/// own process, directory and sockets), then drops each retired entry with its
+/// own journal save. One removal per save keeps every interrupted save a single
+/// step that `recover_pending` accepts; a multi-entry pending journal would be
+/// refused. A failed entry stays recorded with its files.
 fn release_entries(
     c: &Candidate,
     entries: &mut BTreeMap<String, Entry>,
     keys: &[String],
     retire: impl Fn(&Entry) -> Result<(), CandidateError> + Sync,
+) -> Result<(), CandidateError> {
+    release_entries_with(c, entries, keys, retire, save)
+}
+
+fn release_entries_with(
+    c: &Candidate,
+    entries: &mut BTreeMap<String, Entry>,
+    keys: &[String],
+    retire: impl Fn(&Entry) -> Result<(), CandidateError> + Sync,
+    mut commit: impl FnMut(&Candidate, &BTreeMap<String, Entry>) -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
     let outcomes = std::thread::scope(|scope| {
         let retire = &retire;
@@ -804,17 +814,17 @@ fn release_entries(
             .collect::<Vec<_>>()
     });
     let mut first = None;
-    let mut retired = false;
     for (key, outcome) in keys.iter().zip(outcomes) {
         match outcome {
-            Ok(()) => retired |= entries.remove(key).is_some(),
+            Ok(()) => {
+                if entries.remove(key).is_some() {
+                    commit(c, entries)?;
+                }
+            }
             Err(failure) => {
                 first.get_or_insert(failure);
             }
         }
-    }
-    if retired {
-        save(c, entries)?;
     }
     first.map_or(Ok(()), Err)
 }
@@ -1223,7 +1233,7 @@ mod release_tests {
     }
 
     /// Every selected publisher is retired at once; exactly the retired entries
-    /// leave the journal, in one save, and a failed one stays recorded.
+    /// leave the journal, one per save, and a failed one stays recorded.
     #[test]
     fn release_retires_selected_entries_concurrently_and_keeps_failures() {
         let fixture = crate::unique_test_root(&std::env::temp_dir(), "hack-publication-release");
@@ -1241,16 +1251,34 @@ mod release_tests {
         // All three retirements must be in flight together to pass the barrier.
         let barrier = Barrier::new(3);
         let retired = Mutex::new(Vec::new());
-        let failure = release_entries(&candidate, &mut entries, &keys, |e| {
-            barrier.wait();
-            retired.lock().unwrap().push(e.reservation.clone());
-            if e.reservation.starts_with('2') {
-                Err(error())
-            } else {
-                Ok(())
-            }
-        })
+        let mut commits = Vec::new();
+        let failure = release_entries_with(
+            &candidate,
+            &mut entries,
+            &keys,
+            |e| {
+                barrier.wait();
+                retired.lock().unwrap().push(e.reservation.clone());
+                if e.reservation.starts_with('2') {
+                    Err(error())
+                } else {
+                    Ok(())
+                }
+            },
+            |c, journal| {
+                commits.push(
+                    journal
+                        .keys()
+                        .map(|k| k[..1].to_owned())
+                        .collect::<Vec<_>>(),
+                );
+                save(c, journal)
+            },
+        )
         .unwrap_err();
+        // One removal per save: an interrupted save is always the single-step
+        // change that pending-journal recovery accepts.
+        assert_eq!(commits, [vec!["2", "3", "4"], vec!["2", "4"]]);
         assert_eq!(failure.code, "publisher_intent");
         assert_eq!(retired.lock().unwrap().len(), 3);
         let kept = state::read_bounded::<BTreeMap<String, Entry>>(

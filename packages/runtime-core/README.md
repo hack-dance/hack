@@ -824,6 +824,11 @@ for a security fix, so each bump stays small enough to review against upstream n
    fields must classify each one: inert (`INERT_RECORD_FIELDS`, mirrored in the
    qualification script), or a rule of its own (`docker_socket` must be `true`,
    `restart` must keep the `never` policy, `disk_durability` must be `full`).
+   Guest commands search the guest's own directories before the engine share (see
+   "Where guest commands find their programs"), so also compare the top level of the new
+   engine tree with the search directories of the new guest root tree: a file whose
+   name both have refuses every boot (`guest_search_order`), and an engine release that
+   ships its own copy of a system tool (for example `iptables`) would be such a name.
 3. On an Apple Silicon Mac, run [`scripts/qualify-provider-pin.ts`](../../scripts/qualify-provider-pin.ts)
    once with a bundle built from the current pin (baseline) and once with the bump,
    each in its own empty private root. Supply `--provider-archive`,
@@ -1778,6 +1783,14 @@ the engine tree and refuses the boot (`guest_search_order`) if one does, because
 would find that entry before the engine's. The check resolves each search directory inside
 the root files the way the guest does (links followed inside the tree, `..` stopping at its
 root) and counts any kind of entry, so it refuses more than the guest's shell would pick.
+
+The engine's own children inherit this search path: what `dockerd` starts (`containerd`,
+the shims, `runc`, the `iptables` tools) is found the same way, system names first.
+
+The check reads the host's copy of the root files, which is what the guest boots from. It
+does not see a file that a root process inside the guest writes into a search directory
+while the VM runs; only the guest's root can do that, and the order change is not a
+defence against it.
 
 ### Starting a pool that is already running
 

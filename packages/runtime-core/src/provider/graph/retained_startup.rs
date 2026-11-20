@@ -96,7 +96,7 @@ pub(in crate::provider::graph) fn checked(
                 return Err(refused());
             }
         }
-        // Only a later boot that never started its provider leaves none recorded.
+        // A later boot that failed before recording its provider leaves none recorded.
         (None, false) if !clean => {}
         _ => return Err(refused()),
     }
@@ -134,7 +134,7 @@ pub(in crate::provider::graph) fn checked(
     Ok((owner, receipt))
 }
 
-/// Stopped phases a later boot can leave after it failed before its guest reported a boot
+/// Stopped phases a later boot can leave after it failed before it recorded a guest boot id
 /// (HACK-2376), once `runtime recover` has run where needed. `stopped` is the phase a start
 /// writes when its boot admission refuses before anything boots: that start never calls
 /// `begin_boot`, so the boot ids stay as the failed boot left them.
@@ -145,12 +145,19 @@ const AFTER_GUESTLESS_BOOT: [&str; 4] = [
     "stopped",
 ];
 
-/// A pool whose later boot failed before its guest reported a boot id: the boot id is empty
-/// and the previous one is still the boot the retained run was stopped in, because
-/// `Owner::begin_boot` keeps it when the boot it superseded never got a guest. No guest ran
-/// since the clean retained stop, so neither the run's data nor its graph changed, and the
-/// next boot moves the same previous boot id forward as after a clean stop. A failed boot
-/// whose guest did start has a boot id here and still refuses.
+/// A pool whose later boot failed before it recorded a guest boot id (HACK-2376): the boot id
+/// is empty and the previous one is still the boot the retained run was stopped in, because
+/// `Owner::begin_boot` keeps it when the boot it superseded recorded none.
+///
+/// The boundary this relies on is the managed engine, not the guest. The VM and the guest's
+/// setup may already have run in that boot (for example a bridge socket timeout comes after
+/// `machine start`), but the engine is started only after the boot id is saved
+/// (`lifecycle::guest-daemon.sh` follows `owner.guest_boot_id = Some(..)` and its save). So no
+/// engine ran since the clean retained stop: no container, network or volume of the run was
+/// created, started or written by the engine, and restore still checks the volumes' recorded
+/// identities and the containers' and networks' absence. An unclean stop of that guest leaves
+/// the storage file system to its journal, as after any unclean stop. A boot that recorded
+/// its boot id (and so may have started the engine) still refuses.
 fn after_guestless_boot(owner: &Owner) -> bool {
     AFTER_GUESTLESS_BOOT.contains(&owner.phase.as_str())
         && owner.guest_boot_id.is_none()
@@ -472,7 +479,7 @@ pub(in crate::provider::graph) mod tests {
     #[test]
     fn a_later_boot_that_never_started_a_guest_keeps_the_retained_run_startable() {
         // The shape of both kept homes in HACK-2376: the retained run was stopped cleanly in
-        // boot P; a later boot failed before its guest reported a boot id.
+        // boot P; a later boot failed before it recorded a guest boot id, so before the engine.
         let after_failed_boot = |owner: &mut Owner, phase: &str| {
             owner.phase = phase.into();
             owner.previous_guest_boot_id = owner.guest_boot_id.take();
@@ -496,12 +503,12 @@ pub(in crate::provider::graph) mod tests {
             assert_eq!(value["runtime_phase"], phase, "{phase}");
             assert!(hex(value["selection"].as_str().unwrap(), 64), "{phase}");
         }
-        // Still refused: the failed boot not yet recovered, a failed boot whose guest did
-        // report a boot id, no previous boot, a running phase without a process, and a
-        // live recorded provider.
+        // Still refused: the failed boot not yet recovered, a failed boot that recorded its
+        // boot id (so may have started the engine), no previous boot, and a live recorded
+        // provider.
         for case in [
             "failed-boot-stopped",
-            "guest-started",
+            "boot-recorded",
             "no-previous",
             "live-pid",
         ] {
@@ -510,7 +517,7 @@ pub(in crate::provider::graph) mod tests {
             after_failed_boot(&mut owner, "recovered-unclean");
             match case {
                 "failed-boot-stopped" => owner.phase = "failed-boot-stopped".into(),
-                "guest-started" => {
+                "boot-recorded" => {
                     owner.guest_boot_id = Some("22222222-2222-2222-2222-222222222222".into())
                 }
                 "no-previous" => owner.previous_guest_boot_id = None,

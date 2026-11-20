@@ -1463,12 +1463,15 @@ this selection never replaces generation, source or resource checks. Changing th
 original Compose file uses normal image resolution and the existing compatibility
 rules, rather than silently adopting an old image for a new declaration.
 
-A retained run stays startable after a later runtime boot fails before its guest
-starts (for example `bridge_socket_timeout` or a provider that exits during boot).
-After such a failure the runtime reads `failed-boot-stopped`. Run the runtime's
-`runtime recover --json` once, then `hack up` restores the retained run as usual.
-No guest ran since the run was stopped, so its data and graph are unchanged. A
-failed boot whose guest did start still refuses retained startup.
+A retained run stays startable after a later runtime boot fails before the runtime
+recorded the guest's boot, for example `bridge_socket_timeout` or a provider that
+exits during boot. After such a failure the runtime reads `failed-boot-stopped`. Run
+the runtime's `runtime recover --json` once, then `hack up` restores the retained run
+as usual. The VM may have started in that boot, but the container engine starts only
+after the boot is recorded, so no container, network or volume of the run was touched.
+Restore still checks the volumes' recorded identities. A failed boot that had
+recorded its guest boot, and so may have started the engine, still refuses retained
+startup.
 
 Editing the Compose file of a stopped graph and running `hack up` again reconciles
 the same run, as `docker compose up` does. Every container and network is

@@ -65,7 +65,9 @@ fn owned_source_output_live() -> Result<(), CandidateError> {
     }
     let job = format!(
         "{:x}",
-        Sha256::digest(format!("output-{}", crate::node::now()).as_bytes())
+        crate::Hex(Sha256::digest(
+            format!("output-{}", crate::node::now()).as_bytes()
+        ))
     );
     let spec = SourceJob {
         namespace: namespace.clone(), revision: snapshot.receipt().revision.clone(),

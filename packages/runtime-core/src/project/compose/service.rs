@@ -115,7 +115,10 @@ fn anonymous_volume(service: &str, target: &str) -> String {
     hash.update(service.as_bytes());
     hash.update([0]);
     hash.update(target.as_bytes());
-    format!("{ANONYMOUS_PREFIX}{:.16}", format!("{:x}", hash.finalize()))
+    format!(
+        "{ANONYMOUS_PREFIX}{:.16}",
+        format!("{:x}", crate::Hex(hash.finalize()))
+    )
 }
 
 /// Refusal for an authored volume name, mount source or cache-volume label

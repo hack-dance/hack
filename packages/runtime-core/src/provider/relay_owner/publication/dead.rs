@@ -139,7 +139,7 @@ impl CleanupWitness {
             })
             .map_err(|_| refused())?,
         };
-        Ok(format!("{:x}", Sha256::digest(bytes)))
+        Ok(format!("{:x}", crate::Hex(Sha256::digest(bytes))))
     }
 
     pub(crate) fn present_identity(&self) -> Option<([u8; 16], [u8; 32])> {

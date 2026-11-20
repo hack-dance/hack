@@ -50,19 +50,23 @@ pub enum Setting {
     Auto,
     On,
     Off,
+    /// The provider's notifications off for every size, because Hack's own watcher
+    /// (`source_notify`) forwards host changes for each running project instead.
+    Watcher,
 }
 
 impl Setting {
-    /// `None`, the empty string and `auto` select [`Setting::Auto`]. Anything else but `on` and
-    /// `off` is refused, so a mistyped value never silently selects a default.
+    /// `None`, the empty string and `auto` select [`Setting::Auto`]. Anything else but `on`,
+    /// `off` and `watcher` is refused, so a mistyped value never silently selects a default.
     pub fn parse(value: Option<&str>) -> Result<Self, CandidateError> {
         match value {
             None | Some("" | "auto") => Ok(Self::Auto),
             Some("on") => Ok(Self::On),
             Some("off") => Ok(Self::Off),
+            Some("watcher") => Ok(Self::Watcher),
             Some(_) => Err(CandidateError::new(
                 "hot_reload_setting",
-                "HACK_NATIVE_HOT_RELOAD must be auto, on or off.",
+                "HACK_NATIVE_HOT_RELOAD must be auto, on, off or watcher.",
             )),
         }
     }
@@ -85,6 +89,9 @@ pub enum Reason {
     LargeShare,
     /// `HACK_NATIVE_HOT_RELOAD` was `on` or `off`.
     Setting,
+    /// `HACK_NATIVE_HOT_RELOAD=watcher`: the provider's notifications are off because Hack's
+    /// own watcher delivers them.
+    Watcher,
 }
 
 /// The owner receipt's record of a boot whose choice is worth telling the user: notifications
@@ -148,6 +155,12 @@ fn decide_with(setting: Setting, roots: &[&Path], limit: u64) -> Option<Choice> 
             reason: Reason::Setting,
             limit,
         }),
+        // No count: with Hack's own watcher no size pays the provider's scan.
+        Setting::Watcher => Some(Choice {
+            enabled: false,
+            reason: Reason::Watcher,
+            limit,
+        }),
         Setting::On => large().then_some(Choice {
             enabled: true,
             reason: Reason::Setting,
@@ -164,7 +177,9 @@ fn decide_with(setting: Setting, roots: &[&Path], limit: u64) -> Option<Choice> 
 /// What `runtime up` and `runtime status` report for the pool's last boot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Report {
-    /// `on` or `off`.
+    /// `on`, `off`, or `watcher` (the provider's notifications are off and Hack's own watcher
+    /// forwards changes for each running project; whether one is running is the project
+    /// owner's knowledge, not the pool's).
     pub state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<Reason>,
@@ -173,6 +188,19 @@ pub struct Report {
     /// One sentence for the user; absent for the plain default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// In the `watcher` state: each project's watcher this home has a note for, and whether
+    /// it is still running. A project whose watcher is not running has no hot reload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watchers: Option<Vec<super::source_notify::WatcherStatus>>,
+}
+
+/// [`report`], with the watchers of this home when the pool runs in the `watcher` state.
+pub fn report_for(candidate: &crate::Candidate, recorded: Option<Choice>) -> Report {
+    let mut report = report(recorded);
+    if report.state == "watcher" {
+        report.watchers = Some(super::source_notify::watchers(candidate));
+    }
+    report
 }
 
 /// The report for a recorded choice.
@@ -183,9 +211,20 @@ pub fn report(recorded: Option<Choice>) -> Report {
             reason: None,
             limit: None,
             message: None,
+            watchers: None,
         };
     };
     let message = match (choice.enabled, choice.reason) {
+        // Hack's own watcher is the normal state of this mode; there is nothing to tell.
+        (_, Reason::Watcher) => {
+            return Report {
+                state: "watcher",
+                reason: Some(choice.reason),
+                limit: None,
+                message: None,
+                watchers: None,
+            };
+        }
         (false, Reason::LargeShare) => format!(
             "Hot reload on shared source is off for this pool: its shared project directories \
              hold more than {} entries, and the provider reads every one before a start, which \
@@ -212,6 +251,7 @@ pub fn report(recorded: Option<Choice>) -> Report {
         reason: Some(choice.reason),
         limit: Some(choice.limit),
         message: Some(message),
+        watchers: None,
     }
 }
 
@@ -267,6 +307,7 @@ mod tests {
         assert_eq!(Setting::parse(Some("auto")).unwrap(), Setting::Auto);
         assert_eq!(Setting::parse(Some("on")).unwrap(), Setting::On);
         assert_eq!(Setting::parse(Some("off")).unwrap(), Setting::Off);
+        assert_eq!(Setting::parse(Some("watcher")).unwrap(), Setting::Watcher);
         for refused in ["ON", "true", "1", "0", " off", "auto ", "yes"] {
             let error = Setting::parse(Some(refused)).unwrap_err();
             assert_eq!(error.code, "hot_reload_setting", "{refused:?}");
@@ -347,6 +388,19 @@ mod tests {
         assert!(!Choice::off(decide_with(Setting::On, &[&root], 1)));
         assert!(Choice::off(decide_with(Setting::Off, &[&root], 1_000)));
         assert!(!Choice::off(None));
+        // Hack's own watcher: the provider's notifications are off for every size, uncounted.
+        for roots in [vec![], vec![root.as_path()]] {
+            let choice = decide_with(Setting::Watcher, &roots, 1);
+            assert_eq!(
+                choice,
+                Some(Choice {
+                    enabled: false,
+                    reason: Reason::Watcher,
+                    limit: 1
+                })
+            );
+            assert!(Choice::off(choice));
+        }
         assert_eq!(
             decide_with(Setting::Off, &[&root], 1_000),
             Some(Choice {
@@ -393,6 +447,15 @@ mod tests {
                 .message
                 .unwrap()
                 .contains("HACK_NATIVE_HOT_RELOAD=off")
+        );
+        let watcher = report(Some(Choice {
+            enabled: false,
+            reason: Reason::Watcher,
+            limit: 100_000,
+        }));
+        assert_eq!(
+            serde_json::to_value(&watcher).unwrap(),
+            serde_json::json!({"state": "watcher", "reason": "watcher"})
         );
         let forced = report(Some(Choice {
             enabled: true,

@@ -1741,7 +1741,8 @@ waits for the scan and hot reload works; above it the boot does not wait and hot
   supply them costs one metadata lookup per entry. The bound is on entries, not on time. The
   provider follows links and the count does not, and entries that vanish or cannot be listed
   are not counted, so the count is a lower bound of what the provider reads.
-- **The setting.** `HACK_NATIVE_HOT_RELOAD` is `auto` (the default), `on` or `off`, read by
+- **The setting.** `HACK_NATIVE_HOT_RELOAD` is `auto` (the default), `on`, `off` or `watcher`
+  (Hack's own watcher, below), read by
   `runtime up`; any other value is refused before any effect. `on` keeps the notifications
   whatever the size; `off` drops them whatever the size. The CLI gives runtime subprocesses
   a closed environment, so it hands this one setting to `runtime up` explicitly and refuses
@@ -1760,6 +1761,99 @@ waits for the scan and hot reload works; above it the boot does not wait and hot
 - **`localDirectories` does not shrink the share.** It mounts a volume from the VM disk over
   the container path; the host directory, if it exists in the checkout, is still read by the
   provider. Removing the host copy is what brings a checkout back under the limit.
+
+#### Hack's own watcher (`HACK_NATIVE_HOT_RELOAD=watcher`)
+
+The provider's scan exists only to give its own watcher a baseline. The guest kernel's hook
+does not need one: an event for a path fires the file-watch event on the guest inode and
+refreshes the guest's cached copy of it. With the setting at `watcher`, every pool boot sets
+the provider's switch (no scan for any size, no entry count), and each running project gets
+one small process that subscribes to the system's file events for the project's share and
+forwards every change (`provider/source_notify.rs`). The default is unchanged while this is
+new.
+
+- **Who runs it.** The project's owner process (the foreground `hack up`, or the detached
+  owner) starts `runtime source-notify --project <root> --until-stdin-closes` once the graph
+  is ready and closes its input when the run ends, so the watcher cannot outlive the run. If
+  the watcher dies while the project runs, the owner says so once, restarts it (1, 2, 5, 15,
+  then every 30 seconds) and says when it is back. A guest that refuses the events is said
+  once and not retried.
+- **How a change reaches the guest.** The provider agent's own `fs_notify` request (the one
+  its watcher uses), on the agent socket the runtime already talks to, through the read-only
+  guest access (`ObservedGuest::notify_files`): nothing in the pool's state changes, and
+  nothing is read back but how many events fired and whether the hook exists.
+- **The guest path.** The share's own mount, `/run/smolvm/virtiofs/smolvm<1 + position>`,
+  where the position is the share's place in the receipt, the order the audit proves the
+  provider's recorded mounts follow. The watcher opens with one event on that root. Unless
+  the guest answers that the hook exists and exactly that event fired, nothing else is ever
+  sent, and the watcher ends with `source_notify_unavailable`. A watcher that starts again
+  therefore tells the guest "something changed under the share" before any path event.
+- **Which changes.** Everything except paths under `.git`. Dependency and build
+  directories are forwarded, because services watch them. What the path is now decides what
+  a notification means: present is created or changed, absent is removed (a rename reports
+  each name). "The system dropped events" becomes an event on the share root, never silence.
+- **Bounds.** At most 40,960 notifications wait at any time. Changes are gathered for 50 ms,
+  at most 8,192 notifications a batch, repeats of a path merged, and sent in requests of at
+  most 256 events and 48 KiB once encoded, one in flight. Every change keeps its own name.
+  Do not "simplify" this into one event per busy directory: a watcher on a file is not woken
+  by an event on the file's directory, so a branch switch that rewrites 300 files in `src/`
+  would reload nothing.
+- **When changes are not named.** Two cases, and in both the guest is told "something
+  changed under the share" (an event on the share root), never nothing. One: more
+  notifications arrived than may wait; everything waiting is given up and later changes are
+  named again. Two: no watcher was running (it died, a request to the guest failed three
+  times, the pool or the project directory changed); the watcher that starts next opens
+  with that event. A watcher on a single file does not learn of a change announced this way
+  until the file changes again.
+- **Only the share.** The guest follows links when it resolves a path, so a link is never
+  named: its directory is reported instead, as is a removed entry the system did not call a
+  file or a folder, and anything below a directory that is itself reached through a link.
+  The watcher refuses to start unless the directory at the project path is the one the pool
+  mounted (the receipt's device and inode), checks again before every request, and ends
+  when that stops being true. One limit remains, shared with the provider's own watcher:
+  the host cannot see what the guest has cached. If the guest still holds a link at a name
+  the host has since replaced or removed, the guest resolves the event through its copy,
+  and a file on another mount of the same VM gets a watch event and a cache refresh. The
+  notification itself reads and writes no file content, but a watcher there may act on the
+  event. Closing that needs a no-follow lookup in the guest hook.
+- **One pool only.** Requests go on one connection opened to the agent and then checked
+  against the pool's identity, so a kept connection cannot reach a later pool at the same
+  socket path. A failed request is tried again on a new connection, checked the same way.
+- **Status.** A forwarding watcher leaves a note of its own under `run/source-notify/` (its
+  process identity; one file per process, removed by that process or by the next watcher
+  once the process is gone). `runtime status` reports `hot_reload.state: "watcher"` and, per project,
+  whether the noted process is still running. A project whose watcher is not running has no
+  hot reload until one runs again (edits reach services after up to about 5 seconds, watchers
+  do not fire).
+
+Measured on a real VM (pool only unless said, host load 6 to 7):
+
+| | Result |
+| --- | --- |
+| In-place edit, replace by rename, new file, removal | guest watch event and new content 60 to 80 ms after the host change |
+| 5,000 files created on the host in 0.5 s, then one edit | that edit readable in the guest 140 ms after it was made (5,066 events in 28 requests, all fired) |
+| A file watcher inside a service container, through `hack up` | fired 60 ms after the host edit; the container read the new content at the same moment |
+| Watcher killed while the project ran | status reported it not running at once; the owner restarted it; the next edit arrived in 60 ms |
+| Watcher start on a 276,000-entry share | opening event 0.09 s after start; 11.4 MB resident; 0.01 s of CPU in 30 idle seconds |
+| A real 11-service project, its web service's dev server, `hack up` in this mode | the container saw a host change 70 ms after it; the server had recompiled about 1.1 s after it (the next page answer); start 72 s |
+| The same with the provider's own watcher forced on | 30 ms; about 1.5 s; start 110 s (the scan) |
+| The same with hot reload off | the container saw the change 4.1 s later; the server never recompiled; start 74 s |
+
+Pool boot (`runtime up`, pool only, a stopped pool, host load 5 to 7):
+
+| Share | Hack's watcher | Provider's watcher | Hot reload off |
+| --- | --- | --- | --- |
+| 1,003 entries | 7.1 s | 7.2 s | 7.2 s |
+| A real project's checkout, 276,043 entries | 7.2 s | 20.5 s | 7.2 s |
+
+What this mode does not have: the provider caches lookups of missing names only while its
+own watcher runs, so they are not cached here. Measured in a service container whose
+dependencies are on the share (an installed tree of 34,000 entries), resolving 2,000 package
+names that do not exist: 76 ms and then 5 ms with the provider's watcher; 70 ms every time
+with Hack's watcher or with hot reload off, about 35 microseconds a lookup. Resolving the
+installed packages took the same in all three (about 50 ms the first time, 4 ms after). On
+the real project it made no visible difference to the first page compile (1.5 to 1.9 s here,
+2.0 s with the provider's watcher); that project keeps its dependencies on a guest volume.
 
 ### Starting a pool that is already running
 

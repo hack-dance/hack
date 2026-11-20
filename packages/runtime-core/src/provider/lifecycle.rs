@@ -422,6 +422,44 @@ impl<'a> ObservedGuest<'a> {
         socket(self.candidate, &self.owner, "docker.sock")
     }
 
+    /// Where `project` sits among the shares this pool mounts, in receipt order (the order
+    /// `audit_with` proves the provider's recorded mounts follow), with the device and inode
+    /// the receipt recorded for it.
+    pub(super) fn share(&self, project: &Path) -> Option<(usize, u64, u64)> {
+        self.owner
+            .project_shares()
+            .iter()
+            .enumerate()
+            .find(|(_, share)| share.project == project)
+            .map(|(position, share)| (position, share.device, share.inode))
+    }
+
+    /// Opens the connection host file changes are forwarded on (`source_notify`), bound to
+    /// this incarnation. The identity is verified after connecting: incarnations never come
+    /// back, so a pool that is this one both when the observation began and now was this one
+    /// when the connection was made, and a kept connection cannot move to a later guest.
+    pub(super) fn notify_channel(&self) -> Result<agent::Channel, CandidateError> {
+        let channel = agent::open_channel(&socket(self.candidate, &self.owner, "agent.sock")?)?;
+        self.verify()?;
+        Ok(channel)
+    }
+
+    /// Forwards host file changes to the guest's file-watch hook on a connection from
+    /// [`Self::notify_channel`]. It takes no mutation lease: the request changes nothing in
+    /// the pool's state and returns only how many events fired and whether the hook exists.
+    /// The pool's identity is verified again afterwards, so the caller stops promptly when
+    /// the pool changes.
+    pub(super) fn notify_files(
+        &self,
+        channel: &mut agent::Channel,
+        events: &[super::source_notify::GuestEvent],
+        timeout: Duration,
+    ) -> Result<(u32, bool), CandidateError> {
+        let fired = agent::fs_notify(channel, events, timeout)?;
+        self.verify()?;
+        Ok(fired)
+    }
+
     /// The observed runtime incarnation; receipts name the incarnation that owns them.
     #[cfg(target_os = "macos")]
     pub(super) fn incarnation(&self) -> &str {
@@ -1072,7 +1110,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         },
         profile: Some(owner.profile),
         reclamation: owner.reclamation,
-        hot_reload: Some(super::hot_reload::report(owner.hot_reload)),
+        hot_reload: Some(super::hot_reload::report_for(candidate, owner.hot_reload)),
         guest_memory_mib: Some(owner.profile.memory_mib()),
         application_bridge: owner.application_bridge,
         phase,
@@ -1815,7 +1853,8 @@ fn stalled_boot(error: CandidateError) -> CandidateError {
         "provider_boot_stalled",
         "The provider ended the start: the VM made no boot progress within the provider's \
          limit. Recover the pool before retrying. A large shared project directory is one \
-         known cause; HACK_NATIVE_HOT_RELOAD=off starts without the scan that causes it.",
+         known cause: HACK_NATIVE_HOT_RELOAD=off starts without the scan that causes it, and \
+         HACK_NATIVE_HOT_RELOAD=watcher does too and keeps hot reload.",
     )
 }
 
@@ -3608,7 +3647,16 @@ mod tests {
         ));
         assert_eq!(stalled.code, "provider_boot_stalled");
         assert!(stalled.message_fixed);
+        // Both ways out are named, in one printable line the CLI will show.
         assert!(stalled.message.contains("HACK_NATIVE_HOT_RELOAD=off"));
+        assert!(stalled.message.contains("HACK_NATIVE_HOT_RELOAD=watcher"));
+        assert!(stalled.message.len() <= 400, "{}", stalled.message.len());
+        assert!(
+            stalled
+                .message
+                .bytes()
+                .all(|byte| (0x20..=0x7e).contains(&byte))
+        );
         // Another failure of the same command keeps its code and text.
         let other = stalled_boot(CandidateError::new(
             "provider_command_failed",

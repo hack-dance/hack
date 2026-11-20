@@ -30,6 +30,18 @@ type ModelContract = {
   }[];
 };
 
+// The runtime-service controls that break AtMostOnce run one client's effect
+// twice; the two clients are symmetric, so either may be the one in the trace.
+function runtimeServiceTwice(action: string, fields: readonly string[]) {
+  return {
+    action,
+    fields: [...fields, "effects = (c1 :> 2 @@ c2 :> 0)"],
+    alternativeWitnesses: [
+      { action, fields: [...fields, "effects = (c1 :> 0 @@ c2 :> 2)"] },
+    ],
+  };
+}
+
 // Bounds and witnesses are reviewed contracts, not learned from each run.
 const laterIncompleteMissingLockStages = [
   "temp",
@@ -2384,6 +2396,81 @@ const contracts: readonly ModelContract[] = [
           "config = FALSE",
           "engine = TRUE",
         ],
+      },
+    ],
+  },
+  {
+    // HACK-2460. One runtime service per native home. The negative control
+    // binds the socket without holding service.lock: two serving processes.
+    name: "runtime-service",
+    module: "RuntimeService",
+    states: 101_674,
+    invariant: "OneOwner",
+    action: "Bind",
+    fields: ["lock = 0", "next = 3"],
+    additionalControls: [
+      {
+        // The effect runs before the durable intent record: a crash after
+        // the effect and a resend run it again.
+        name: "effect-before-accept",
+        negative: true,
+        invariant: "AtMostOnce",
+        ...runtimeServiceTwice("Begin", [
+          'intent = (c1 :> "none" @@ c2 :> "none")',
+        ]),
+      },
+      {
+        // A resent intent id is admitted again instead of answered.
+        name: "no-dedupe",
+        negative: true,
+        invariant: "AtMostOnce",
+        ...runtimeServiceTwice("Begin", ["oneLease = NoClient"]),
+      },
+      {
+        // The one-shot fallback after a frame was written.
+        name: "fallback-after-send",
+        negative: true,
+        invariant: "AtMostOnce",
+        ...runtimeServiceTwice("OneShotBegin", ["svcLease = 0"]),
+      },
+      {
+        // A service of another build admits a mutation.
+        name: "ignore-skew",
+        negative: true,
+        invariant: "SameBuild",
+        action: "Admit",
+        fields: ["svcLease = 0", "effects = (c1 :> 0 @@ c2 :> 0)"],
+      },
+      {
+        // One-shot inspection while a service process still holds the lock:
+        // a frame left in its buffer is admitted after "not done".
+        name: "inspect-while-held",
+        negative: true,
+        invariant: "ReportHonest",
+        action: "Inspect",
+        fields: ["lock = 1", 'report = (c1 :> "notdone" @@ c2 :> "none")'],
+        alternativeWitnesses: [
+          {
+            action: "Inspect",
+            fields: ["lock = 1", 'report = (c1 :> "none" @@ c2 :> "notdone")'],
+          },
+        ],
+      },
+      {
+        // Reachability: the "outcome unknown" answer happens.
+        name: "reach-unknown",
+        negative: true,
+        invariant: "NeverUnknown",
+        action: "AnswerUnknown",
+        fields: ["svcLease = 0", "effects = (c1 :> 0 @@ c2 :> 0)"],
+      },
+      {
+        // Reachability: an honest "not done" after inspection happens.
+        name: "reach-not-done",
+        negative: true,
+        invariant: "NeverNotDone",
+        action: "Inspect",
+        fields: ["lock = 0", "effects = (c1 :> 0 @@ c2 :> 0)"],
       },
     ],
   },

@@ -1449,3 +1449,57 @@ original deterministic path. This avoids admitting a new owner into an old
 pending coordinator's directory; it does not acknowledge or roll over that
 coordinator. Directory derivation and a real coordinator start/stop regression
 cover this restored-owner boundary outside the finite publisher model.
+
+## Runtime service per native home
+
+`runtime-service/RuntimeService.tla` is the design model for HACK-2460: one
+long-lived runtime service per native home, started on demand by its clients,
+with today's one-process-per-request path kept as the fallback. It has no
+implementation yet; each slice that builds one of its actions adds the test that
+walks it. Two clients (one of each build) each send one mutation with an intent
+id. Up to three service processes start, bind, lose the start race, crash at any
+step, exit when idle, or drain after a client of the other build asks them to
+retire.
+
+A written frame stays in the receiving process's socket buffer until that
+process reads it, whether or not the client is still connected: a disconnect
+never takes back a frame. Inspection is a one-shot read of real state and sees
+no process's memory, so it may say "done" or "not done" only while no process
+holds `service.lock`, or after the serving process itself answered that the
+intent was accepted and has no live attempt (its intent record then answers any
+later frame with that id).
+
+| Model operation | Planned source boundary |
+| --- | --- |
+| `Spawn` / `Connect` | The client connects, and on `ENOENT` or `ECONNREFUSED` starts the service detached with the closed environment. |
+| `TakeLock` / `Bind` / `LoseRace` | `service.lock` (exclusive `flock`) is taken before a stale socket is removed and the socket bound; a loser exits and the client connects to the winner. |
+| `Admit` / `Join` / `AnswerDone` / `AnswerUnknown` | The intent record is written and synced before any effect. A resent id joins a live attempt, gets the recorded result, or gets "outcome unknown". |
+| `RefuseDraining` / `Retire` / `ExitDrained` | A draining service unlinks its socket, refuses frames it never admitted, finishes its own attempts and exits holding the lock until then. |
+| `Begin` / `Finish` / `OneShotBegin` | The effect runs under the provider lease shared with one-shot processes. |
+| `Fallback` / `InspectWithoutService` / `Inspect` | The one-shot path only for a frame never written or refused before admission; inspection only while the lock is free. |
+
+The positive configuration exhausts 101,674 distinct states (depth 29) and
+checks `OneOwner`, `AtMostOnce`, `SameBuild`, `ReportHonest` and
+`NoEffectWithoutIntent`. Each guard-removal control must fail at its named
+action with the same-state witness:
+
+| Control | Guard removed | Fails |
+| --- | --- | --- |
+| `negative` | lock before bind | `OneOwner` at `Bind` |
+| `effect-before-accept` | intent record before the effect | `AtMostOnce` at `Begin` |
+| `no-dedupe` | resent intent answered, not re-run | `AtMostOnce` at `Begin` |
+| `fallback-after-send` | fallback only for an unsent frame | `AtMostOnce` at `OneShotBegin` |
+| `ignore-skew` | another build never runs a mutation | `SameBuild` at `Admit` |
+| `inspect-while-held` | inspection only while the lock is free | `ReportHonest` at `Inspect` |
+
+Two reachability controls must reach the "outcome unknown" answer
+(`NeverUnknown` at `AnswerUnknown`) and an honest "not done" after inspection
+(`NeverNotDone` at `Inspect`), so neither path is vacuous.
+
+Not covered: liveness (a command finishes, a drain ends); more than one intent
+per client; several leases; the per-project owners, start graph and engine (an
+effect is one abstract step); joined-attempt cancellation; event streams and
+cursors; dashboard authentication; the idle-exit race between closing the
+listener and a queued connection (atomic here); socket path attacks, uid checks
+and frame parsing; the version order (any skewed client may retire any service);
+and durability of the intent write itself.

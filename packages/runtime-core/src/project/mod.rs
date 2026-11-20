@@ -150,6 +150,16 @@ pub struct InteractivePlan {
     pub stdin_open: bool,
     pub tty: bool,
 }
+/// The health check cadence native emits when a service declares a check but not when to
+/// run it during startup (HACK-2443). The engine runs the first check one `interval` after the
+/// container starts, 30 s when that is undeclared, unless a start interval applies; native
+/// asks for a check every [`DEFAULT_START_INTERVAL_NANOS`] during the first
+/// [`DEFAULT_START_PERIOD_NANOS`] instead. The first success ends the start period. A failure
+/// inside it is not counted, as the engine defines a start period.
+pub const DEFAULT_START_INTERVAL_NANOS: u64 = 250_000_000;
+/// See [`DEFAULT_START_INTERVAL_NANOS`].
+pub const DEFAULT_START_PERIOD_NANOS: u64 = 60_000_000_000;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct HealthPlan {

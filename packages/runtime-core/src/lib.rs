@@ -1,6 +1,7 @@
 //! Checkout-local v5 candidate contracts and experimental private runtime lifecycle.
 //! Project planning remains read-only; provider commands are explicit and separately qualified.
 
+pub mod canonical_digest;
 pub mod node;
 #[cfg(test)]
 pub(crate) mod owned_tmp_root;

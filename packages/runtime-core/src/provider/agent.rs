@@ -205,8 +205,9 @@ const MAX_LINKS: usize = 16;
 
 /// Where the guest path `directory` leads inside the root files tree at `rootfs`, resolved
 /// as the guest resolves it: `..` stops at the tree's root, and a symbolic link, relative or
-/// absolute, is followed inside the tree. `Ok(None)` when a component does not exist (the
-/// guest would find nothing there); `Err` when it does not resolve within [`MAX_LINKS`].
+/// absolute, is followed inside the tree. `Ok(None)` when a component does not exist or is
+/// not a directory (the guest would find nothing there); `Err` when it does not resolve
+/// within [`MAX_LINKS`].
 fn guest_directory(rootfs: &Path, directory: &str) -> Result<Option<std::path::PathBuf>, ()> {
     use std::path::Component;
     let mut resolved: Vec<std::ffi::OsString> = Vec::new();
@@ -231,9 +232,13 @@ fn guest_directory(rootfs: &Path, directory: &str) -> Result<Option<std::path::P
         let Ok(metadata) = std::fs::symlink_metadata(&here) else {
             return Ok(None);
         };
-        if !metadata.file_type().is_symlink() {
+        if metadata.is_dir() {
             resolved.push(part);
             continue;
+        }
+        if !metadata.file_type().is_symlink() {
+            // Not a directory: the guest cannot walk through it, nor search in it.
+            return Ok(None);
         }
         links += 1;
         if links > MAX_LINKS {
@@ -680,14 +685,35 @@ mod tests {
         let outside = Tree::new("outside-host");
         outside.stub("bin/docker", "host");
         std::fs::remove_dir(tree.0.join("usr/sbin")).unwrap();
-        std::os::unix::fs::symlink(
-            format!(
-                "../../../{}/bin",
-                outside.0.file_name().unwrap().to_str().unwrap()
-            ),
-            tree.0.join("usr/sbin"),
-        )
-        .unwrap();
+        let target = format!(
+            "../../{}/bin",
+            outside.0.file_name().unwrap().to_str().unwrap()
+        );
+        std::os::unix::fs::symlink(&target, tree.0.join("usr/sbin")).unwrap();
+        // Resolved on the host, as the first version of this check did, the link reaches
+        // the planted file; resolved as the guest does, it stays inside the tree.
+        assert!(tree.0.join("usr").join(&target).join("docker").exists());
+        check(&tree).unwrap();
+        // A regular file is not walked through: the guest stops there, so what lies behind
+        // `..` after it is not one of its search directories.
+        for target in [
+            "/marker/../tools",
+            "/marker/./../tools",
+            "marker/../../tools",
+        ] {
+            let tree = fixture("not-a-directory");
+            std::fs::write(tree.0.join("marker"), b"file").unwrap();
+            std::fs::write(tree.0.join("usr/marker"), b"file").unwrap();
+            std::fs::create_dir_all(tree.0.join("tools")).unwrap();
+            tree.stub("tools/runc", "unreachable");
+            std::fs::remove_dir(tree.0.join("usr/sbin")).unwrap();
+            std::os::unix::fs::symlink(target, tree.0.join("usr/sbin")).unwrap();
+            check(&tree).unwrap();
+        }
+        // A search directory that is a regular file holds nothing.
+        let tree = fixture("file-directory");
+        std::fs::remove_dir(tree.0.join("usr/sbin")).unwrap();
+        std::fs::write(tree.0.join("usr/sbin"), b"file").unwrap();
         check(&tree).unwrap();
         // A link loop cannot be resolved and refuses; a link to nothing has nothing in it.
         let tree = fixture("loop");

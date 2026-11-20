@@ -2712,22 +2712,37 @@ home for the current pin.
 
 ## Engine request diagnostics
 
-Pass `--debug-engine-requests` to the candidate runtime before any child-command
-`--` separator. For example, `hack-local runtime engine-info --json
---debug-engine-requests` keeps normal JSON on stdout and writes one
-`{"kind":"engine_requests","total":1,"endpoints":{"GET /version":1}}` record
-on stderr when the command returns, including error returns. The example count
-is illustrative; capture actual output for measurements.
+Set an absolute `HACK_ENGINE_REQUESTS_FILE` path before a public native command.
+The frontend explicitly passes this setting through its closed runtime environment;
+runtime children and foreground owners append counter deltas to the same JSONL file.
+Command stdout, structured error stderr and exit status are unchanged. For example,
+with an already prepared isolated fixture and its runtime selected:
 
-Counts cover dispatch attempts in this process, including connection failures,
-HTTP errors, image uploads, stop retries, exec upgrades and log streams. Refusals
-before dispatch are excluded. Endpoint templates omit object IDs and all query
-values; unknown routes aggregate under `/other`. Request and response payloads
-are never recorded. This flag does not change engine admission or identity checks.
+```sh
+umask 077
+HACK_ENGINE_REQUESTS_FILE=/absolute/private/engine.jsonl ./dist/hack up -d --path /absolute/fixture --json
+```
 
-A foreground owner reports when it returns. Abrupt termination and a log reader's
-frontend-lifetime pipe exit produce no final record. Child processes, guest-side commands and other runtime owners are outside
-this record; measure them separately rather than treating this as a whole-frontend
-request total. Capture elapsed wall time separately, with the same fixture, load,
-image state and source revision. No engine performance saving is implied by these
-counters.
+Each line has fixed `role` and `command` names, numeric `engine_requests`,
+`engine_connections`, `engine_transports`, and an `endpoints` map with numeric
+counts. Object identities, query values, payloads and arbitrary command arguments
+are omitted. Unknown routes use `/other`. Requests count dispatch attempts,
+including connection and HTTP failures; local refusals before dispatch are excluded.
+Connections count HTTP connector invocations and raw exec/log socket attempts,
+including failures, rather than assuming every request opens a connection.
+Transports count HTTP client construction attempts. A keep-alive connection used
+by two requests therefore contributes two requests, one connection and one transport.
+
+Owners flush a disjoint delta before publishing readiness and continue counting.
+Normal returns, explicit exec exits and log frontend-lifetime exits flush the rest.
+Sum the lines present when `up -d` returns and save that snapshot before `down`;
+otherwise an owner's later shutdown delta would be included in startup totals.
+Abruptly killed processes can lose their unflushed counts. File appenders serialize
+complete lines; diagnostic output failures never replace command failures. Guest
+commands and external container clients are outside these host-runtime counts.
+An owner started without the setting cannot be instrumented retroactively.
+
+These are temporary diagnostic counters, not a second timing protocol. Once the
+shared span format lands, numeric counts belong in its closed `attrs` map.
+No timing saving is claimed. Measure wall time separately with diagnostics disabled
+as well, because enabled file output adds measurement overhead.

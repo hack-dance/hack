@@ -397,6 +397,7 @@ pub(in crate::provider) fn follow_socket(
     output: &mut impl Write,
 ) -> Result<(), CandidateError> {
     let running = check().map_err(|e| e.with_log_phase(LogFailurePhase::Admission))?;
+    crate::provider::engine_requests::connection();
     let mut stream =
         crate::provider::agent::connect_until(path, Instant::now() + Duration::from_secs(5))?;
     stream

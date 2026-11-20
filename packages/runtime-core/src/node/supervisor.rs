@@ -102,6 +102,7 @@ pub fn supervise(root: &Path, executable: &Path, checkout: &Path, id: &str) -> R
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::provider::engine_requests::inherit(&mut command);
     // SAFETY: setpgid is async-signal-safe; creates an owned group before exec.
     unsafe {
         command.pre_exec(|| {

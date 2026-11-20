@@ -127,7 +127,15 @@ export async function spawnNativeHttpsOwner(opts: {
       detached: true,
       stdio: "ignore",
       cwd: opts.home,
-      env: { PATH: "/usr/bin:/bin", HOME: opts.home },
+      env: {
+        PATH: "/usr/bin:/bin",
+        HOME: opts.home,
+        ...(process.env.HACK_ENGINE_REQUESTS_FILE === undefined
+          ? {}
+          : {
+              HACK_ENGINE_REQUESTS_FILE: process.env.HACK_ENGINE_REQUESTS_FILE,
+            }),
+      },
     }
   );
   await new Promise<void>((resolve, reject) => {

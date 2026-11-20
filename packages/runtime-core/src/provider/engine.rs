@@ -47,7 +47,8 @@ struct Transport {
 
 impl Transport {
     fn new(socket: &Path, timeout: Duration) -> Result<Self, CandidateError> {
-        let client = Client::builder()
+        super::engine_requests::transport();
+        let client = super::engine_requests::instrument(Client::builder())
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
@@ -1347,7 +1348,11 @@ mod tests {
         if std::env::var_os(CHILD).is_some() {
             // Disabled requests must not become part of a later debug record.
             exchange(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap();
-            let _report = crate::provider::engine_requests::enable();
+            let _report = crate::provider::engine_requests::from_environment(&[
+                "graph".into(),
+                "native".into(),
+                "serve".into(),
+            ]);
             exchange(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap();
             assert!(exchange(b"HTTP/1.1 500 Error\r\nContent-Length: 0\r\n\r\n").is_err());
             let socket =
@@ -1364,26 +1369,72 @@ mod tests {
                     .request(Method::POST, "/v1.53/containers/create", None)
                     .is_err()
             );
+            crate::provider::engine_requests::checkpoint();
+            // Two requests on one keep-alive socket must count one connection.
+            let socket =
+                std::env::temp_dir().join(format!("engine-keepalive-{}.sock", std::process::id()));
+            let listener = UnixListener::bind(&socket).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                for _ in 0..2 {
+                    let mut header = Vec::new();
+                    while !header.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).unwrap();
+                        header.push(byte[0]);
+                    }
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                        .unwrap();
+                }
+            });
+            let transport = Transport::new(&socket, Duration::from_secs(2)).unwrap();
+            for _ in 0..2 {
+                transport.request(Method::GET, "/version", None).unwrap();
+            }
+            server.join().unwrap();
+            std::fs::remove_file(socket).unwrap();
             crate::provider::engine_requests::report();
             crate::provider::engine_requests::report();
             return;
         }
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let file = std::env::temp_dir().join(format!("engine-counts-{}.jsonl", std::process::id()));
+        let children: Vec<_> = (0..4).map(|_| std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "provider::engine::tests::request_counts_include_failed_dispatches_but_not_local_refusals", "--nocapture"])
-            .env(CHILD, "1")
+            .env(CHILD, "1").env(crate::provider::engine_requests::FILE_ENV, &file)
             .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
-            .output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        let report: Value = serde_json::from_str(stderr.trim()).unwrap();
-        assert_eq!(
-            report,
-            serde_json::json!({"kind": "engine_requests", "total": 3, "endpoints": {"GET /version": 3}})
-        );
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap()).collect();
+        for child in children {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.stderr.is_empty());
+        }
+        let records = std::fs::read_to_string(&file).unwrap();
+        std::fs::remove_file(file).unwrap();
+        assert_eq!(records.lines().count(), 8);
+        let mut requests = 0;
+        let mut connections = 0;
+        let mut transports = 0;
+        for line in records.lines() {
+            let record: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(record["role"], "owner");
+            assert_eq!(record["command"], "graph.native.serve");
+            requests += record["engine_requests"].as_u64().unwrap();
+            connections += record["engine_connections"].as_u64().unwrap();
+            transports += record["engine_transports"].as_u64().unwrap();
+            assert_eq!(
+                record["engine_requests"],
+                record["endpoints"]["GET /version"]
+            );
+        }
+        assert_eq!((requests, connections, transports), (20, 16, 16));
     }
 }
 

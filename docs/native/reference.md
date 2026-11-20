@@ -53,8 +53,8 @@ are its main sections:
 
 ## Contributor diagnostics
 
-The checkout candidate runtime accepts `--debug-engine-requests` to report
-process-local engine dispatch counts on stderr when it returns. See
-[engine request diagnostics](../../packages/runtime-core/README.md#engine-request-diagnostics)
-for scope and capture limits. This is a candidate-runtime flag; the public
-`hack up` frontend does not forward it.
+Set `HACK_ENGINE_REQUESTS_FILE` to an absolute private JSONL file before a
+native command to aggregate engine requests, connection attempts and transport
+construction across its runtime children and owners. Command output and errors
+are unchanged. See [engine request diagnostics](../../packages/runtime-core/README.md#engine-request-diagnostics)
+for capture boundaries and limits.

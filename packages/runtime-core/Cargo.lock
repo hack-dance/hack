@@ -398,6 +398,8 @@ dependencies = [
  "sha2",
  "tar",
  "tokio",
+ "tower-layer",
+ "tower-service",
  "unicode-normalization",
  "zeroize",
 ]

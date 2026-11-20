@@ -1494,6 +1494,9 @@ export async function startNativeProjectHttps(opts: {
     await privateDirectory(session);
     sessionIdentity = await lstat(session);
     const env: Record<string, string> = { PATH: "/usr/bin:/bin", HOME: home };
+    if (process.env.HACK_ENGINE_REQUESTS_FILE !== undefined) {
+      env.HACK_ENGINE_REQUESTS_FILE = process.env.HACK_ENGINE_REQUESTS_FILE;
+    }
     startupStage = "authority-start";
     authority = deps.spawn({
       argv: [

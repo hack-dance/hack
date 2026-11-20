@@ -108,7 +108,7 @@ tests of the named module unless marked.
 | `Settle`, `RefuseSelection` | `lifecycle/admission_pool.rs::settle`, `Selection::reverify` | `lifecycle/admission_pool/tests.rs`: `selected_owner_or_provider_changes_refuse_reverification`, `selected_stopped_owner_drift_refuses_reverification`, `a_start_with_fresh_headroom_drops_the_reserve_and_runs_no_release_check` |
 | `AdmitBoot`, `RefuseBoot` | `lifecycle/admission_pool.rs::admit_boot` | `the_boot_gate_samples_the_qualifying_basis_and_its_swapouts`, `the_boot_gate_rechecks_the_selection_around_its_sample` |
 | `Start` | `BootAdmission::release`, `lifecycle.rs::start_machine` | `machine_start_needs_a_final_leased_recheck_of_the_selection` |
-| Order of the steps, one clock for the window, the baseline handed to `admit_boot`, the tree recheck before any write or tree read under the lease, the rechecked proofs handed to the boot's witness | `lifecycle.rs::start_pool` | `lifecycle/pressure_tests.rs`: `start_pool_takes_its_admission_steps_in_the_modelled_order`. It reads source order only. |
+| Order of the steps, one clock for the window, the baseline handed to `admit_boot`, the tree recheck as the first step after the leased sample (before the start's next write, provider command or tree read), the rechecked proofs handed to the boot's witness | `lifecycle.rs::start_pool` | `lifecycle/pressure_tests.rs`: `start_pool_takes_its_admission_steps_in_the_modelled_order`. It reads source order only. |
 
 Not covered by an executable test:
 
@@ -134,8 +134,10 @@ nothing fences them: `prepare`, `prepare_engine` and `repair_tree` take the same
 lease and install only content that matches the recorded digest, and any other
 writer ignores it.
 
-`leased_trees::recheck` runs first under the lease, after Development's second
-sample and before the start writes anything or reads a tree. For each tree it
+`leased_trees::recheck` is the start's first step after Development's second
+sample under the lease: between that sample and the recheck the start writes
+nothing, runs no provider command and reads no tree. (Before the lease it has
+already read both trees to prove them and may have repaired the HOME alias.) For each tree it
 recomputes the metadata digest and compares it, and the record's content anchor,
 with what the proof returned:
 
@@ -148,7 +150,8 @@ with what the proof returned:
   nothing, and the refusal comes before the admission record, later owner
   updates and any provider command. A HOME alias repaired before admission and
   the lease file's bookkeeping are not rolled back; `RefusalIsClean` checks that
-  no VM exists and the lease is free, not that nothing was written.
+  this start created no VM and no longer holds the lease, not that nothing was
+  written.
 
 `artifact::verify_witnessed` takes the metadata digest before the content hash and
 requires the same digest after it, so the digest the recheck compares describes

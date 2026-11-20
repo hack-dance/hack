@@ -179,8 +179,8 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
     );
     assert_eq!(body.matches("samples.extend(").count(), 1);
     assert_eq!(body.matches("samples.push(").count(), 0);
-    // The tree recheck is the first use of the lease after the sample: nothing is written,
-    // and no provider command runs, before it. The model's `ObserveRunning` branch and every
+    // The tree recheck is the first use of the lease after the sample: between the leased
+    // sample and the recheck nothing is written and no provider command runs. The model's `ObserveRunning` branch and every
     // read of a tree come after it.
     let recheck = at("leased_trees::recheck(candidate, &lock, &mut proven_trees)?;");
     for later in [

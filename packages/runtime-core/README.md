@@ -824,6 +824,11 @@ for a security fix, so each bump stays small enough to review against upstream n
    fields must classify each one: inert (`INERT_RECORD_FIELDS`, mirrored in the
    qualification script), or a rule of its own (`docker_socket` must be `true`,
    `restart` must keep the `never` policy, `disk_durability` must be `full`).
+   Guest commands search the guest's own directories before the engine share (see
+   "Where guest commands find their programs"), so also compare the top level of the new
+   engine tree with the search directories of the new guest root tree: a file whose
+   name both have refuses every boot (`guest_search_order`), and an engine release that
+   ships its own copy of a system tool (for example `iptables`) would be such a name.
 3. On an Apple Silicon Mac, run [`scripts/qualify-provider-pin.ts`](../../scripts/qualify-provider-pin.ts)
    once with a bundle built from the current pin (baseline) and once with the bump,
    each in its own empty private root. Supply `--provider-archive`,
@@ -1799,6 +1804,32 @@ waits for the scan and hot reload works; above it the boot does not wait and hot
 - **`localDirectories` does not shrink the share.** It mounts a volume from the VM disk over
   the container path; the host directory, if it exists in the checkout, is still read by the
   provider. Removing the host copy is what brings a checkout back under the limit.
+
+### Where guest commands find their programs
+
+Every command the runtime runs in the guest gets one search path (`agent::GUEST_PATH`): the
+guest's own system directories first, the engine share (`/opt/hack-engine`, mounted read-only
+from the host) last. A utility name such as `cat`, `sha256sum` or `stat` therefore always
+resolves to the guest's root files, also when the share holds a file of that name. That
+matters most before the guest has checked the engine binary it is served: a wrong or stale
+share cannot put a file of its own in front of the utilities that check it. The one cleanup
+command that releases the guest's cache has a system-only path.
+
+Only names the root files do not have resolve to the share, which is how `dockerd`,
+`containerd`, `runc` and the other engine binaries are found. Before each boot the runtime
+checks that no entry in the guest's search directories has the name of a file at the top of
+the engine tree and refuses the boot (`guest_search_order`) if one does, because the guest
+would find that entry before the engine's. The check resolves each search directory inside
+the root files the way the guest does (links followed inside the tree, `..` stopping at its
+root) and counts any kind of entry, so it refuses more than the guest's shell would pick.
+
+The engine's own children inherit this search path: what `dockerd` starts (`containerd`,
+the shims, `runc`, the `iptables` tools) is found the same way, system names first.
+
+The check reads the host's copy of the root files, which is what the guest boots from. It
+does not see a file that a root process inside the guest writes into a search directory
+while the VM runs; only the guest's root can do that, and the order change is not a
+defence against it.
 
 ### Starting a pool that is already running
 

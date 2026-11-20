@@ -1646,6 +1646,13 @@ fn start_pool(
         &lock,
     )?;
     let rootfs_metadata = prepare_rootfs(candidate, &mut owner)?;
+    // Guest commands search the guest's own directories before the engine share
+    // (`agent::GUEST_PATH`): the engine binaries are found only if the root files hold
+    // nothing of their names.
+    agent::require_engine_names_unshadowed(
+        &root(candidate).join("rootfs"),
+        &artifact::engine_root(candidate),
+    )?;
     proven_trees.insert(
         super::tree_witness::ROOTFS.to_owned(),
         super::tree_witness::Proven {

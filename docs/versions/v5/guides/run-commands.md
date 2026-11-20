@@ -27,9 +27,12 @@ Docker call first. If the service is not running, Compose refuses, and Hack then
 adds a hint to start the stack with `hack up -d` or use `hack run`.
 
 `hack run` gives its new container the proxy and DNS addresses that `hack up` or
-`hack global up` recorded, with no Docker call for them. If the command fails and
-those addresses have changed since, Hack rebuilds the setting from one
-`docker inspect`, says so on stderr, and runs the command once more.
+`hack global up` recorded, with no Docker call for them. If the command fails,
+Hack checks those addresses with one `docker inspect`. If they changed (the proxy
+or DNS container was recreated outside Hack), Hack updates the setting and says
+so on stderr. It does not run your command again, because the command may have
+done some of its work before it failed. Run it again yourself if the failure
+was a name or connection error.
 
 ## Overlay and scope
 

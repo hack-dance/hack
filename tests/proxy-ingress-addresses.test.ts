@@ -35,6 +35,7 @@ const RECORD: IngressAddressRecord = {
 
 function deps(opts: {
   readonly stdout?: string;
+  readonly stderr?: string;
   readonly exitCode?: number;
   readonly env?: Record<string, string>;
   readonly installed?: boolean;
@@ -42,21 +43,31 @@ function deps(opts: {
 }): IngressAddressDeps & {
   readonly calls: (readonly string[])[];
   readonly written: IngressAddressRecord[];
+  readonly forgotten: number[];
 } {
   const calls: (readonly string[])[] = [];
   const written: IngressAddressRecord[] = [];
+  const forgotten: number[] = [];
   return {
     calls,
     written,
+    forgotten,
     env: opts.env ?? {},
     stackInstalled: async () => opts.installed ?? true,
     exec: async (argv) => {
       calls.push(argv);
-      return { exitCode: opts.exitCode ?? 0, stdout: opts.stdout ?? "" };
+      return {
+        exitCode: opts.exitCode ?? 0,
+        stdout: opts.stdout ?? "",
+        stderr: opts.stderr ?? "",
+      };
     },
     readRecord: async () => opts.record ?? null,
     writeRecord: async (record) => {
       written.push(record);
+    },
+    forgetRecord: async () => {
+      forgotten.push(1);
     },
     now: () => new Date("2026-11-20T00:00:01.000Z"),
   };
@@ -124,6 +135,36 @@ describe("resolveIngressAddresses", () => {
       caddy: null,
       fromRecord: false,
     });
+    expect(d.written).toHaveLength(0);
+  });
+
+  test("a read that finds the containers gone forgets the record", async () => {
+    const d = deps({
+      exitCode: 1,
+      stderr: [
+        "Error response from daemon: No such container: hack-dev-proxy-coredns-1",
+        "Error response from daemon: No such container: hack-dev-proxy-caddy-1",
+        "",
+      ].join("\n"),
+      record: RECORD,
+    });
+    expect(await resolveIngressAddresses(d, "fresh")).toEqual({
+      coreDns: null,
+      caddy: null,
+      fromRecord: false,
+    });
+    expect(d.forgotten).toHaveLength(1);
+  });
+
+  test("an engine failure keeps the record", async () => {
+    const d = deps({
+      exitCode: 1,
+      stderr:
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock.\n",
+      record: RECORD,
+    });
+    await resolveIngressAddresses(d, "fresh");
+    expect(d.forgotten).toHaveLength(0);
     expect(d.written).toHaveLength(0);
   });
 

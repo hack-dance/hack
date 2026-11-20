@@ -60,11 +60,14 @@ export interface IngressAddressDeps {
   readonly env: Readonly<Record<string, string | undefined>>;
   /** True when the global proxy stack is installed and `docker` is on PATH. */
   readonly stackInstalled: () => Promise<boolean>;
-  readonly exec: (
-    argv: readonly string[]
-  ) => Promise<{ readonly exitCode: number; readonly stdout: string }>;
+  readonly exec: (argv: readonly string[]) => Promise<{
+    readonly exitCode: number;
+    readonly stdout: string;
+    readonly stderr: string;
+  }>;
   readonly readRecord: () => Promise<IngressAddressRecord | null>;
   readonly writeRecord: (record: IngressAddressRecord) => Promise<void>;
+  readonly forgetRecord: () => Promise<void>;
   readonly now?: () => Date;
 }
 
@@ -159,12 +162,39 @@ export async function resolveIngressAddresses(
       containers: { coredns: coredns.identity, caddy: caddy.identity },
       recordedAt: (deps.now?.() ?? new Date()).toISOString(),
     });
+  } else if (reachedEngine(inspect)) {
+    // A read that reached the engine and found a container stopped or gone
+    // disproves the record; an engine failure proves nothing, so it stays.
+    await deps.forgetRecord();
   }
   return {
     coreDns: fromEnv.coredns ?? coredns?.ip ?? null,
     caddy: fromEnv.caddy ?? caddy?.ip ?? null,
     fromRecord: false,
   };
+}
+
+const NO_SUCH_CONTAINER = /no such (container|object)/i;
+
+/**
+ * True when `docker inspect` answered from the engine: it exited 0, printed a
+ * container, or its only errors are names that do not exist.
+ */
+function reachedEngine(result: {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}): boolean {
+  if (result.exitCode === 0 || result.stdout.trim().length > 0) {
+    return true;
+  }
+  const errors = result.stderr
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  return (
+    errors.length > 0 && errors.every((line) => NO_SUCH_CONTAINER.test(line))
+  );
 }
 
 type FoundContainer = {
@@ -294,6 +324,7 @@ export function defaultIngressAddressDeps(
       )),
     exec: async (argv) => await exec(argv, { stdin: "ignore" }),
     readRecord: async () => await readIngressAddressRecord(hackHome),
+    forgetRecord: async () => await forgetIngressAddressRecord(hackHome),
     writeRecord: async (record) => {
       const path = ingressAddressRecordPath(hackHome);
       await ensureDir(join(hackHome, GLOBAL_CADDY_DIR_NAME));

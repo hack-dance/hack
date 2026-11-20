@@ -33,7 +33,7 @@ export function wrapLifecyclePersistentCommand(
   return wrapSharedLifecyclePersistentCommand(opts);
 }
 
-import { realpath } from "node:fs/promises";
+import { realpath, rm } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import {
   autocompleteMultiselect,
@@ -3510,7 +3510,32 @@ const INTERNAL_CA_CONTAINER_DIR = "/etc/hack/ca";
 const INTERNAL_CA_CONTAINER_PATH = `${INTERNAL_CA_CONTAINER_DIR}/caddy-local-authority.crt`;
 const INTERNAL_TRUST_BUNDLE_CONTAINER_PATH = `${INTERNAL_CA_CONTAINER_DIR}/trust-bundle.pem`;
 
-async function resolveInternalComposeOverride(opts: {
+type InternalOverrideOptions = Parameters<
+  typeof renderInternalComposeOverrideText
+>[0];
+
+/**
+ * Renders the instance's internal override and stores it in Hack's home,
+ * returning its path; when the instance needs none, removes a stored one, so
+ * neither `exec` nor a later `run` passes stale addresses.
+ */
+async function resolveInternalComposeOverride(
+  opts: InternalOverrideOptions
+): Promise<string | null> {
+  const path = internalOverrideStorePath({
+    hackHome: resolveGlobalHackDir(),
+    projectDir: opts.project.projectDir,
+    branch: opts.branch ?? null,
+  });
+  const text = await renderInternalComposeOverrideText(opts);
+  if (text === null) {
+    await rm(path, { force: true });
+    return null;
+  }
+  return await writeInternalComposeOverride({ path, text });
+}
+
+async function renderInternalComposeOverrideText(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly branch?: string | null;
@@ -3564,14 +3589,7 @@ async function resolveInternalComposeOverride(opts: {
     trustBundlePath: tls.bundlePath,
   });
 
-  return await writeInternalComposeOverride({
-    path: internalOverrideStorePath({
-      hackHome: resolveGlobalHackDir(),
-      projectDir: opts.project.projectDir,
-      branch: opts.branch ?? null,
-    }),
-    text,
-  });
+  return text;
 }
 
 function shouldBuildInternalOverride(opts: {
@@ -10833,7 +10851,7 @@ async function handleRun({
       callerOptions: args.options,
       envOverrides,
     });
-  return await runWithStaleAddressRetry({
+  return await runAndRefreshStaleAddresses({
     dispatch,
     background,
     internalOverride,
@@ -10854,10 +10872,13 @@ function runAddressMode(background: unknown): "recorded" | "fresh" {
 }
 
 /**
- * Runs a foreground one-off; on a failure, rebuilds a stale override and
- * runs it once more (see {@link rebuildStaleInternalOverride}).
+ * Runs a foreground one-off. When it fails, checks the recorded global
+ * addresses it used against Docker once (see
+ * {@link refreshStaleInternalOverride}). The command is never run again:
+ * a changed address does not show that it never started, and a one-off can
+ * have side effects (a migration) before it fails.
  */
-async function runWithStaleAddressRetry(opts: {
+async function runAndRefreshStaleAddresses(opts: {
   readonly dispatch: () => Promise<number>;
   readonly background: unknown;
   readonly internalOverride: string | null;
@@ -10867,35 +10888,31 @@ async function runWithStaleAddressRetry(opts: {
   if (exitCode === 0 || opts.background || opts.internalOverride === null) {
     return exitCode;
   }
-  return (await rebuildStaleInternalOverride(opts.rebuild))
-    ? await opts.dispatch()
-    : exitCode;
+  await refreshStaleInternalOverride(opts.rebuild);
+  return exitCode;
 }
 
 /**
- * After a foreground `hack run` that used recorded global addresses fails,
- * reads them once from Docker. When they differ (the proxy or DNS container
- * came back with new addresses outside Hack), rewrites the override at the
- * same path and returns true so the caller runs the command once more; it
- * never loops, because the second read is cached for this process and
- * reports no change. Same addresses mean the failure is the command's own.
+ * Reads the global addresses once from Docker when the failed run used
+ * recorded ones. When they differ (the proxy or DNS container came back with
+ * new addresses outside Hack), rewrites (or removes) the stored override and
+ * says so on stderr, so the next command gets the current addresses.
  */
-async function rebuildStaleInternalOverride(
+async function refreshStaleInternalOverride(
   rebuild: () => Promise<string | null>
-): Promise<boolean> {
+): Promise<void> {
   const used = await resolveGlobalIngressAddresses("recorded");
   if (!used.fromRecord) {
-    return false;
+    return;
   }
   const current = await resolveGlobalIngressAddresses("fresh");
   if (current.coreDns === used.coreDns && current.caddy === used.caddy) {
-    return false;
+    return;
   }
   await rebuild();
   process.stderr.write(
-    "Hack: the global proxy or DNS address changed since Hack recorded it; rebuilt the internal override and running the command once more.\n"
+    "Hack: the global proxy or DNS address changed since Hack recorded it, so this run may have used the old one. The internal override is updated; run the command again if the failure was a name or connection error.\n"
   );
-  return true;
 }
 
 /**
@@ -11013,30 +11030,12 @@ async function handleExec({
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
-  const devHost = await resolveRuntimeDevHost({ project, branch });
-  const aliasHost = resolveBranchAliasHost({ devHost, cfg });
-  // The container already exists: DNS, host entries and trust were applied
-  // when it was created, and Compose only needs the same file list to find
-  // the service. Use what is on disk; no Docker read, no write.
-  const internalOverride = await existingInternalOverride({
-    hackHome: resolveGlobalHackDir(),
-    projectDir: project.projectDir,
-    branch,
-  });
-  const composeFiles = branch
-    ? await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })
-    : [project.composeFile];
-  const composeFilesWithInternal = internalOverride
-    ? [...composeFiles, internalOverride]
-    : composeFiles;
-  const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
-    project,
-    composeFiles: composeFilesWithInternal,
-    branch,
-    devHost,
-    aliasHost,
-    composeProject: composeProjectName ?? baseProjectName,
-  });
+  // The container already exists: DNS, host entries, trust and runtime
+  // labels were applied when it was created, and Compose only needs the
+  // service in its file list to find it. Pass the generated files `up` left
+  // on disk; generate nothing and read no global address.
+  const { composeFilesWithInternal, runtimeMetadataOverride } =
+    await existingExecComposeFiles({ project, branch });
 
   const projectName = sanitizeProjectSlug(baseProjectName);
   const lifecycleComposeProject = resolveLifecycleComposeProjectName({
@@ -11291,6 +11290,49 @@ async function resolveCanSkipRunDependencies(opts: {
       env: opts.env,
     }))
   );
+}
+
+/**
+ * The generated Compose files an instance's `up` wrote, as far as they exist,
+ * in `up`'s order: the branch override, the internal override (stored, else
+ * the in-project file of an older Hack), the runtime metadata override.
+ */
+async function existingExecComposeFiles(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly branch: string | null;
+}): Promise<{
+  readonly composeFilesWithInternal: readonly string[];
+  readonly runtimeMetadataOverride: string | null;
+}> {
+  const { project, branch } = opts;
+  const branchOverride = branch
+    ? resolve(project.projectDir, ".branch", `compose.${branch}.override.yml`)
+    : null;
+  const runtimeOverride = branch
+    ? resolve(
+        project.projectDir,
+        ".branch",
+        `compose.${branch}.runtime.override.yml`
+      )
+    : resolve(project.projectDir, ".internal", "compose.runtime.override.yml");
+  const [hasBranchOverride, internalOverride, hasRuntimeOverride] =
+    await Promise.all([
+      branchOverride ? pathExists(branchOverride) : false,
+      existingInternalOverride({
+        hackHome: resolveGlobalHackDir(),
+        projectDir: project.projectDir,
+        branch,
+      }),
+      pathExists(runtimeOverride),
+    ]);
+  return {
+    composeFilesWithInternal: [
+      project.composeFile,
+      ...(hasBranchOverride && branchOverride ? [branchOverride] : []),
+      ...(internalOverride ? [internalOverride] : []),
+    ],
+    runtimeMetadataOverride: hasRuntimeOverride ? runtimeOverride : null,
+  };
 }
 
 /** Exit code of `docker compose exec` when the service is not running. */

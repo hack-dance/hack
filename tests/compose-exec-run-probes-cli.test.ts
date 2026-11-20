@@ -20,13 +20,17 @@ const CLI = resolve(import.meta.dir, "..", "index.ts");
  * containers at STUB_CADDY_IP (default 172.30.0.2) and 172.30.0.53;
  * `compose ps` reports `api` running unless STUB_API_STOPPED=1; `compose
  * exec` into a stopped service exits 1 as Compose does; `compose run` fails
- * with 7 once when STUB_RUN_FAIL_ONCE=1, always when STUB_RUN_FAIL=1.
+ * with 7 when STUB_RUN_FAIL=1; STUB_GLOBAL_GONE=1 removes both containers.
  */
 const STUB = `#!/bin/sh
 dir="$(dirname "$0")"
 printf '%s\\n' "$*" >> "$dir/calls.log"
 case " $* " in
   *" inspect "*)
+    if [ "\${STUB_GLOBAL_GONE:-}" = "1" ]; then
+      echo 'Error response from daemon: No such container: hack-dev-proxy-coredns-1' >&2
+      exit 1
+    fi
     printf 'hack-dev-proxy\\tcoredns\\ttrue\\tid-dns\\t2026-11-20T00:00:00Z\\t{"hack-dev":{"IPAddress":"172.30.0.53"}}\\n'
     printf 'hack-dev-proxy\\tcaddy\\ttrue\\tid-caddy\\t2026-11-20T00:00:00Z\\t{"hack-dev":{"IPAddress":"%s"}}\\n' "\${STUB_CADDY_IP:-172.30.0.2}"
     exit 1 ;;
@@ -42,10 +46,6 @@ case " $* " in
     exit 0 ;;
   *" run "*)
     if [ "\${STUB_RUN_FAIL:-}" = "1" ]; then exit 7; fi
-    if [ "\${STUB_RUN_FAIL_ONCE:-}" = "1" ] && [ ! -f "$dir/.ran" ]; then
-      : > "$dir/.ran"
-      exit 7
-    fi
     exit 0 ;;
   *) exit 0 ;;
 esac
@@ -226,21 +226,37 @@ test("after up, exec and run write nothing inside the project", async () => {
   expect(run.exitCode).toBe(0);
   expect(run.calls).toEqual(["compose ps", "compose run"]);
 
+  // Every file, including any new one.
   expect(await snapshot(project)).toEqual(before);
 });
 
-test("exec makes no Docker read and no write even with no override yet", async () => {
+test("branch exec passes the branch's generated files and generates none", async () => {
+  const up = await cli(["up", "-d", "--branch", "feat"]);
+  expect(up.exitCode).toBe(0);
   const before = await snapshot(project);
+  const exec = await cli(["exec", "--branch", "feat", "api", "--", "true"]);
+  expect(exec.exitCode).toBe(0);
+  expect(exec.calls).toEqual(["compose exec"]);
+  const argv = exec.raw[0] ?? "";
+  expect(argv).toContain("-p shop--feat");
+  expect(argv).toContain(".branch/compose.feat.override.yml");
+  expect(argv).toContain("feat.yml");
+  const after = await snapshot(project);
+  // Only the branch usage record may change (it marks the branch in use).
+  for (const name of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    if (!name.endsWith("branch-usage.json")) {
+      expect([name, after[name]]).toEqual([name, before[name]]);
+    }
+  }
+});
+
+test("exec with nothing generated yet reads and writes no override", async () => {
   const result = await cli(["exec", "api", "--", "true"]);
   expect(result.exitCode).toBe(0);
   expect(result.calls).toEqual(["compose exec"]);
   expect(await storedOverrides()).toEqual([]);
   expect(await Bun.file(RECORD()).exists()).toBe(false);
-  // Only files other generated overrides may add; never the internal one.
   expect(await Bun.file(LEGACY()).exists()).toBe(false);
-  for (const name of Object.keys(before)) {
-    expect((await snapshot(project))[name]).toBe(before[name]);
-  }
 });
 
 test("exec still passes the in-project override an older Hack wrote", async () => {
@@ -262,49 +278,49 @@ test("exec into a stopped service still names hack up -d and hack run", async ()
   expect(result.stderr).toContain("hack up -d");
 });
 
-test("run rebuilds a stale override once with one inspect and runs again", async () => {
+test("a failed run with a stale record refreshes the override and does not run again", async () => {
   await cli(["run", "api", "--", "true"]);
   // The proxy came back with a new address outside Hack.
-  const result = await cli(["run", "api", "--", "true"], {
+  const result = await cli(["run", "api", "--", "false"], {
     STUB_CADDY_IP: "172.30.0.9",
-    STUB_RUN_FAIL_ONCE: "1",
+    STUB_RUN_FAIL: "1",
   });
-  expect(result.exitCode).toBe(0);
-  expect(result.calls).toEqual([
-    "compose ps",
-    "compose run",
-    "inspect --type",
-    "compose run",
-  ]);
-  expect(result.stderr).toContain("running the command once more");
+  expect(result.exitCode).toBe(7);
+  expect(result.calls).toEqual(["compose ps", "compose run", "inspect --type"]);
+  expect(result.stderr).toContain("address changed");
   const [stored] = await storedOverrides();
   expect(await readFile(stored ?? "", "utf8")).toContain("172.30.0.9");
   expect(JSON.parse(await readFile(RECORD(), "utf8")).caddy).toBe("172.30.0.9");
+
+  // The next run uses the refreshed addresses with no Docker read.
+  const next = await cli(["run", "api", "--", "true"], {
+    STUB_CADDY_IP: "172.30.0.9",
+  });
+  expect(next.calls).toEqual(["compose ps", "compose run"]);
 });
 
-test("run with unchanged addresses returns the command's failure without a retry", async () => {
+test("a failed run with unchanged addresses only returns its exit code", async () => {
   await cli(["run", "api", "--", "true"]);
   const result = await cli(["run", "api", "--", "false"], {
     STUB_RUN_FAIL: "1",
   });
   expect(result.exitCode).toBe(7);
   expect(result.calls).toEqual(["compose ps", "compose run", "inspect --type"]);
-  expect(result.stderr).not.toContain("once more");
+  expect(result.stderr).not.toContain("address changed");
 });
 
-test("a run that fails again after a rebuild is not retried a second time", async () => {
+test("a failed run after the global stack went away drops the stored override and the record", async () => {
+  // No CA and no extra hosts: with no addresses the instance needs no override.
   await cli(["run", "api", "--", "true"]);
+  expect(await storedOverrides()).toHaveLength(1);
   const result = await cli(["run", "api", "--", "false"], {
-    STUB_CADDY_IP: "172.30.0.9",
+    STUB_GLOBAL_GONE: "1",
     STUB_RUN_FAIL: "1",
   });
   expect(result.exitCode).toBe(7);
-  expect(result.calls).toEqual([
-    "compose ps",
-    "compose run",
-    "inspect --type",
-    "compose run",
-  ]);
+  expect(await storedOverrides()).toEqual([]);
+  expect(await Bun.file(RECORD()).exists()).toBe(false);
+  expect(result.stderr).toContain("address changed");
 });
 
 test("HACK_COREDNS_IP and HACK_CADDY_IP still skip every Docker read", async () => {

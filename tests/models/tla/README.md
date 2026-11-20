@@ -1449,3 +1449,29 @@ original deterministic path. This avoids admitting a new owner into an old
 pending coordinator's directory; it does not acknowledge or roll over that
 coordinator. Directory derivation and a real coordinator start/stop regression
 cover this restored-owner boundary outside the finite publisher model.
+
+## Global proxy address record
+
+`ingress-address-record/IngressRecord.tla` checks the record `hack run` trusts
+instead of asking Docker for the global proxy and DNS addresses
+(`src/lib/proxy-ingress-addresses.ts`). Invariant `TrustedRecordIsCurrent`: a
+record a run would trust names the running address, unless a change made
+outside Hack followed the observation it came from.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `HackBegin` / `HackApply` / `HackEnd` | `withIngressChange` around `hack global up` (`runGlobalUpChange`), the proxy `down` in `hack global down`, and the doctor proxy repair: an unsettled new token, the Compose effect, a settled new token (also after a failure). |
+| `ReadToken` / `Inspect` / `Write` | `resolveIngressAddresses(..., "fresh")`: the token is read before the one `docker inspect`; a read that finds both containers writes the record with that token; one that reaches the engine and finds a container gone removes it. |
+| `Valid` | `resolveIngressAddresses(..., "recorded")`: trusted only when the record's token is the current one and settled. |
+| `External` | A container recreated outside Hack. Not detected; a failed `hack run` checks once and refreshes. |
+
+Bounds: two concurrent readers, addresses {stopped, 1, 2}, two Hack changes
+(`MaxGen = 4`). The positive configuration exhausts 250,621 distinct states at
+depth 19. Negative controls: `negative` (no generation check) and `unsettled`
+(validity ignores the settled flag) both fail `TrustedRecordIsCurrent` at
+`Write`: a reader inspects while a change is in progress, the change stops the
+stack, and the stale address would be trusted. The same interleavings are walked
+against the real record and token files in `tests/proxy-ingress-addresses.test.ts`.
+Not covered: atomicity of the file writes themselves (each is an atomic rename),
+Docker's own answers, and the stored per-instance override file, which is
+rendered from whatever addresses the command resolved.

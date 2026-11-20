@@ -1,0 +1,32 @@
+---
+title: IngressRecord · when hack run trusts the record
+---
+stateDiagram-v2
+  direction TB
+  [*] --> NoRecord
+  NoRecord --> Trusted : Write [settled token]
+  Trusted --> Trusted : run reads, no Docker call
+  Trusted --> Changing : HackBegin
+  NoRecord --> Changing : HackBegin
+  Untrusted --> Changing : HackBegin
+  Changing --> Changing : HackApply
+  Changing --> Untrusted : HackEnd
+  Untrusted --> Trusted : Write [fresh read]
+  Trusted --> NoRecord : Write [container gone]
+  note right of Changing
+    A crash here leaves the token
+    unsettled: every run reads
+    Docker until the next change.
+  end note
+  note right of Trusted
+    INV TrustedRecordIsCurrent:
+    a trusted record names the
+    running address, unless a
+    change outside Hack followed.
+  end note
+  classDef ok stroke-width:1.6px
+  classDef wait stroke-width:1.6px
+  classDef idle stroke-dasharray:4 3
+  class Trusted ok
+  class Changing wait
+  class Untrusted,NoRecord idle

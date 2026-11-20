@@ -158,8 +158,8 @@ import { withProcessDeadline } from "../lib/process-deadline.ts";
 import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
 import {
   defaultIngressAddressDeps,
-  forgetIngressAddressRecord,
   resolveIngressAddresses,
+  withIngressChange,
 } from "../lib/proxy-ingress-addresses.ts";
 import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
 import { stopRemoteCaddyRoutesStack } from "../lib/remote-caddy-routes.ts";
@@ -2076,7 +2076,21 @@ export async function globalUp(): Promise<number> {
   return (await runGlobalUp()).exit;
 }
 
+/**
+ * `hack global up` inside a change of the ingress generation (see
+ * withIngressChange), then, once routing is up, one read that records the
+ * proxy and DNS addresses under the settled token for later `hack run`s.
+ */
 async function runGlobalUp(): Promise<GlobalUpResult> {
+  const root = resolveGlobalHackDir();
+  const result = await withIngressChange(root, runGlobalUpChange);
+  if (result.exit === 0 || result.failedStage === "logging") {
+    await resolveIngressAddresses(defaultIngressAddressDeps(root), "fresh");
+  }
+  return result;
+}
+
+async function runGlobalUpChange(): Promise<GlobalUpResult> {
   const slimExit = failIfSlimMode({
     feature: "hack global up",
   });
@@ -2159,9 +2173,6 @@ async function runGlobalUp(): Promise<GlobalUpResult> {
 
   await ensureHackdForGlobalUp();
 
-  // The proxy and DNS containers may come back with new addresses: drop
-  // the record first so no project trusts it while they start.
-  await forgetIngressAddressRecord(paths.root);
   logger.step({ message: "Starting Caddy…" });
   const caddyExit = await run(
     globalRoutingUpArguments({ composeFile: paths.caddyCompose, login }),
@@ -2196,9 +2207,6 @@ async function runGlobalUp(): Promise<GlobalUpResult> {
     return { exit: 1, failedStage: "routing" };
   }
   await reconcileGlobalRoutingBridge({ enabled: !login });
-  // Record the running proxy and DNS addresses (one `docker inspect`), so a
-  // later `hack run` needs no Docker read for them.
-  await resolveIngressAddresses(defaultIngressAddressDeps(paths.root), "fresh");
 
   const loggingArguments = globalLoggingUpArguments({
     composeFile: paths.loggingCompose,
@@ -2652,10 +2660,11 @@ async function globalDown(): Promise<number> {
       cwd: dirname(paths.loggingCompose),
     });
   }
-  await forgetIngressAddressRecord(paths.root);
   if (await pathExists(paths.caddyCompose)) {
-    await run(["docker", "compose", "-f", paths.caddyCompose, "down"], {
-      cwd: dirname(paths.caddyCompose),
+    await withIngressChange(paths.root, async () => {
+      await run(["docker", "compose", "-f", paths.caddyCompose, "down"], {
+        cwd: dirname(paths.caddyCompose),
+      });
     });
   }
   const remoteRoutes = await stopRemoteCaddyRoutesStack();

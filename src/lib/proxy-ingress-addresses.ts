@@ -33,14 +33,30 @@ export interface IngressContainerIdentity {
 }
 
 /**
+ * Which state of the global stack a record belongs to. `hack global up` and
+ * `down` and the doctor proxy repair replace the token and mark it unsettled
+ * before they touch the stack, and replace it again, settled, afterwards.
+ * Missing file: `{ token: "", settled: true }`.
+ */
+export interface IngressGeneration {
+  readonly token: string;
+  readonly settled: boolean;
+}
+
+/**
  * What Hack last read from Docker about the global stack, kept in Hack's home
- * next to the global Compose file. `hack global up`/`restart` rewrite it and
- * `hack global down` removes it, so a stack Hack changed is never trusted
- * from an old record. Only a read that found both containers running is
- * recorded.
+ * next to the global Compose file, with the generation token read before the
+ * Docker read. Only a read that found both containers running is recorded.
+ *
+ * A record is trusted only under the current, settled token (model:
+ * tests/models/tla/ingress-address-record): a read that overlapped a
+ * Hack change of the stack carries an older token and is ignored, and a
+ * change that crashed midway leaves the token unsettled, so every run reads
+ * Docker until the next settled change.
  */
 export interface IngressAddressRecord {
   readonly schema: 1;
+  readonly generation: string;
   readonly coreDns: string;
   readonly caddy: string;
   readonly containers: {
@@ -65,6 +81,7 @@ export interface IngressAddressDeps {
     readonly stdout: string;
     readonly stderr: string;
   }>;
+  readonly readGeneration: () => Promise<IngressGeneration>;
   readonly readRecord: () => Promise<IngressAddressRecord | null>;
   readonly writeRecord: (record: IngressAddressRecord) => Promise<void>;
   readonly forgetRecord: () => Promise<void>;
@@ -129,9 +146,16 @@ export async function resolveIngressAddresses(
     };
   }
 
+  // Read before the inspect: a change that starts after it replaces the
+  // token, so this read's record is never trusted under the new one.
+  const generation = await deps.readGeneration();
   if (mode === "recorded") {
     const record = await deps.readRecord();
-    if (record) {
+    if (
+      record &&
+      generation.settled &&
+      record.generation === generation.token
+    ) {
       return {
         coreDns: fromEnv.coredns ?? record.coreDns,
         caddy: fromEnv.caddy ?? record.caddy,
@@ -157,6 +181,7 @@ export async function resolveIngressAddresses(
   if (coredns && caddy) {
     await deps.writeRecord({
       schema: 1,
+      generation: generation.token,
       coreDns: coredns.ip,
       caddy: caddy.ip,
       containers: { coredns: coredns.identity, caddy: caddy.identity },
@@ -253,11 +278,20 @@ export function parseIngressAddressRecord(
   if (!isRecord(value) || value.schema !== 1) {
     return null;
   }
+  const generation = value.generation;
   const coreDns = getString(value, "coreDns");
   const caddy = getString(value, "caddy");
   const recordedAt = getString(value, "recordedAt");
   const containers = value.containers;
-  if (!(coreDns && caddy && recordedAt && isRecord(containers))) {
+  if (
+    !(
+      typeof generation === "string" &&
+      coreDns &&
+      caddy &&
+      recordedAt &&
+      isRecord(containers)
+    )
+  ) {
     return null;
   }
   const coredns = parseIdentity(containers.coredns);
@@ -267,6 +301,7 @@ export function parseIngressAddressRecord(
   }
   return {
     schema: 1,
+    generation,
     coreDns,
     caddy,
     containers: { coredns, caddy: caddyIdentity },
@@ -311,6 +346,64 @@ export async function forgetIngressAddressRecord(
   await rm(ingressAddressRecordPath(hackHome), { force: true });
 }
 
+const GENERATION_FILENAME = "ingress-generation.json";
+
+function ingressGenerationPath(hackHome: string): string {
+  return join(hackHome, GLOBAL_CADDY_DIR_NAME, GENERATION_FILENAME);
+}
+
+export async function readIngressGeneration(
+  hackHome: string
+): Promise<IngressGeneration> {
+  const text = await readTextFile(ingressGenerationPath(hackHome));
+  if (!text) {
+    return { token: "", settled: true };
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (
+      isRecord(parsed) &&
+      typeof parsed.token === "string" &&
+      typeof parsed.settled === "boolean"
+    ) {
+      return { token: parsed.token, settled: parsed.settled };
+    }
+  } catch {
+    // An unreadable token trusts no record.
+  }
+  return { token: "unreadable", settled: false };
+}
+
+async function writeIngressGeneration(
+  hackHome: string,
+  settled: boolean
+): Promise<void> {
+  await ensureDir(join(hackHome, GLOBAL_CADDY_DIR_NAME));
+  await writeTextFileAtomicIfChanged(
+    ingressGenerationPath(hackHome),
+    `${JSON.stringify({ token: crypto.randomUUID(), settled })}\n`
+  );
+}
+
+/**
+ * Runs a Hack change of the global stack (`global up`/`down`, doctor proxy
+ * repair) between an unsettled and a settled new generation token, so no
+ * record read before or during it is trusted afterwards. The token is settled
+ * even when `change` fails: the stack is then whatever it is, and every
+ * record from before is already untrusted.
+ */
+export async function withIngressChange<T>(
+  hackHome: string,
+  change: () => Promise<T>
+): Promise<T> {
+  await writeIngressGeneration(hackHome, false);
+  try {
+    return await change();
+  } finally {
+    await writeIngressGeneration(hackHome, true);
+  }
+}
+
 /** The real Docker and record IO for the global stack under `hackHome`. */
 export function defaultIngressAddressDeps(
   hackHome: string
@@ -323,6 +416,7 @@ export function defaultIngressAddressDeps(
         join(hackHome, GLOBAL_CADDY_DIR_NAME, GLOBAL_CADDY_COMPOSE_FILENAME)
       )),
     exec: async (argv) => await exec(argv, { stdin: "ignore" }),
+    readGeneration: async () => await readIngressGeneration(hackHome),
     readRecord: async () => await readIngressAddressRecord(hackHome),
     forgetRecord: async () => await forgetIngressAddressRecord(hackHome),
     writeRecord: async (record) => {

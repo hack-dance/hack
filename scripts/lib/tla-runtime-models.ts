@@ -1847,6 +1847,28 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // src/lib/proxy-ingress-addresses.ts: a record `hack run` trusts names
+    // the running address unless an outside change followed its read.
+    name: "ingress-address-record",
+    module: "IngressRecord",
+    states: 250_621,
+    invariant: "TrustedRecordIsCurrent",
+    action: "Write",
+    fields: [
+      "record = [has |-> TRUE, addr |-> 1, gen |-> 1]",
+      "gen = 1",
+      "settled = FALSE",
+      "stack = 0",
+      "extSinceWrite = FALSE",
+    ],
+    additionalControls: [
+      {
+        name: "unsettled",
+        negative: true,
+      },
+    ],
+  },
+  {
     name: "dependency-auto-refresh",
     module: "AutoRefresh",
     states: 141,

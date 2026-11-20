@@ -1185,7 +1185,12 @@ qualify the installed binary, real filesystems or an application.
   - `daemon/hackd.sock`, `daemon/hackd.pid`, `daemon/hackd.log` (capped at 5 MiB)
   - `caddy/docker-compose.yml`, `caddy/Corefile`
   - `caddy/ingress-addresses.json` (the proxy and DNS addresses and container ids
-    Hack last read; `hack global up` rewrites it, `hack global down` removes it)
+    Hack last read, with the generation token read before that read) and
+    `caddy/ingress-generation.json` (the token `hack global up`/`down` and the
+    doctor proxy repair replace, unsettled during the change and settled after;
+    a record is trusted only under the current settled token; see
+    [the record chart](./diagrams/ingress-address-record.svg) and the model in
+    `tests/models/tla/ingress-address-record`)
   - `compose-overrides/<project>-<digest>/<instance>.yml` (the generated internal
     Compose override: DNS, `*.hack` host entries, local CA trust; `@base` or the
     branch slug)

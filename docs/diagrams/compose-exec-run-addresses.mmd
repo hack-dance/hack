@@ -1,0 +1,16 @@
+---
+title: hack exec and hack run · Docker reads before the command
+---
+flowchart TD
+  E[hack exec] --> F[files up left on disk]
+  F --> X[docker compose exec]
+  R[hack run] --> Q{trusted record?}
+  Q -- yes --> O[render override in memory]
+  Q -- no --> I[one docker inspect]
+  I --> O
+  O --> RUN[docker compose run]
+  RUN -- exit 0 --> D[return exit code]
+  RUN -- fails --> C[one docker inspect]
+  C -- addresses same --> D
+  C -- addresses changed --> U[refresh override, tell user]
+  U --> D

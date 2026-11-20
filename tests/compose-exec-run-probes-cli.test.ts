@@ -335,16 +335,19 @@ test("HACK_COREDNS_IP and HACK_CADDY_IP still skip every Docker read", async () 
   expect(await readFile(stored ?? "", "utf8")).toContain("10.9.0.53");
 });
 
-test("hack global down removes the record", async () => {
+test("after hack global down the record is no longer trusted", async () => {
   await cli(["run", "api", "--", "true"]);
-  expect(await Bun.file(RECORD()).exists()).toBe(true);
-  await writeFile(
-    join(hackHome, "logging", "docker-compose.yml"),
-    "services: {}\n"
-  ).catch(() => undefined);
+  const trusted = await cli(["run", "api", "--", "true"]);
+  expect(trusted.calls).toEqual(["compose ps", "compose run"]);
+  const tokenFile = join(hackHome, "caddy", "ingress-generation.json");
   const down = await cli(["global", "down"]);
   expect(down.exitCode).toBe(0);
-  expect(await Bun.file(RECORD()).exists()).toBe(false);
+  expect(JSON.parse(await readFile(tokenFile, "utf8"))).toMatchObject({
+    settled: true,
+  });
+  // The token changed: the next run reads Docker once and records again.
+  const next = await cli(["run", "api", "--", "true"]);
+  expect(next.calls).toEqual(["inspect --type", "compose ps", "compose run"]);
 });
 
 test("exec does not rewrite the env override when env config changed after up", async () => {

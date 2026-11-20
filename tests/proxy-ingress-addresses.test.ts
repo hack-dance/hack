@@ -1,9 +1,16 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  defaultIngressAddressDeps,
   type IngressAddressDeps,
   type IngressAddressRecord,
+  type IngressGeneration,
   parseIngressAddressRecord,
+  readIngressGeneration,
   resolveIngressAddresses,
+  withIngressChange,
 } from "../src/lib/proxy-ingress-addresses.ts";
 
 function line(opts: {
@@ -24,6 +31,7 @@ function line(opts: {
 
 const RECORD: IngressAddressRecord = {
   schema: 1,
+  generation: "g1",
   coreDns: "172.30.0.53",
   caddy: "172.30.0.2",
   containers: {
@@ -40,6 +48,7 @@ function deps(opts: {
   readonly env?: Record<string, string>;
   readonly installed?: boolean;
   readonly record?: IngressAddressRecord | null;
+  readonly generation?: IngressGeneration;
 }): IngressAddressDeps & {
   readonly calls: (readonly string[])[];
   readonly written: IngressAddressRecord[];
@@ -62,6 +71,8 @@ function deps(opts: {
         stderr: opts.stderr ?? "",
       };
     },
+    readGeneration: async () =>
+      opts.generation ?? { token: "g1", settled: true },
     readRecord: async () => opts.record ?? null,
     writeRecord: async (record) => {
       written.push(record);
@@ -112,6 +123,19 @@ describe("resolveIngressAddresses", () => {
       fromRecord: true,
     });
     expect(d.calls).toHaveLength(0);
+  });
+
+  test("a record under another or an unsettled token is not trusted", async () => {
+    for (const generation of [
+      { token: "g2", settled: true },
+      { token: "g1", settled: false },
+    ]) {
+      const d = deps({ record: RECORD, generation, stdout: BOTH_RUNNING });
+      const result = await resolveIngressAddresses(d, "recorded");
+      expect(result.fromRecord).toBe(false);
+      expect(d.calls).toHaveLength(1);
+      expect(d.written[0]?.generation).toBe(generation.token);
+    }
   });
 
   test("recorded with no record reads Docker once and records", async () => {
@@ -209,5 +233,104 @@ describe("parseIngressAddressRecord", () => {
     expect(
       parseIngressAddressRecord({ ...RECORD, containers: { caddy: {} } })
     ).toBeNull();
+  });
+});
+
+describe("generation token (model: tests/models/tla/ingress-address-record)", () => {
+  let home = "";
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), "hack-ingress-generation-"));
+  });
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true });
+  });
+
+  /** Real record and token files; Docker answers with `current()`. */
+  function realDeps(current: () => string): IngressAddressDeps {
+    return {
+      ...defaultIngressAddressDeps(home),
+      env: {},
+      stackInstalled: async () => true,
+      exec: async () => ({
+        exitCode: 0,
+        stdout: [
+          line({ service: "coredns", ip: current() }),
+          line({ service: "caddy", ip: current() }),
+        ].join("\n"),
+        stderr: "",
+      }),
+    };
+  }
+
+  test("a change replaces the token, unsettled during it and settled after, even on failure", async () => {
+    const before = await readIngressGeneration(home);
+    expect(before).toEqual({ token: "", settled: true });
+    let during: IngressGeneration | null = null;
+    await expect(
+      withIngressChange(home, async () => {
+        during = await readIngressGeneration(home);
+        throw new Error("compose up failed");
+      })
+    ).rejects.toThrow("compose up failed");
+    const after = await readIngressGeneration(home);
+    expect(during).toMatchObject({ settled: false });
+    expect(after.settled).toBe(true);
+    expect(after.token).not.toBe(before.token);
+    expect(after.token).not.toBe((during as IngressGeneration | null)?.token);
+  });
+
+  test("model witness: a read that overlaps a Hack change is not trusted after it", async () => {
+    let address = "172.30.0.2";
+    const d = realDeps(() => address);
+    // HackBegin, ReadToken, Inspect (old address), HackApply, Write, HackEnd.
+    await withIngressChange(home, async () => {
+      await resolveIngressAddresses(d, "fresh");
+      address = "172.30.0.9";
+    });
+    const trusted = await resolveIngressAddresses(d, "recorded");
+    expect(trusted.fromRecord).toBe(false);
+    expect(trusted.caddy).toBe("172.30.0.9");
+  });
+
+  test("model witness: a token read before a change cannot be trusted after it", async () => {
+    let address = "172.30.0.2";
+    const base = realDeps(() => address);
+    // ReadToken, then the change runs while this read inspects, then Write.
+    const d: IngressAddressDeps = {
+      ...base,
+      exec: async (argv) => {
+        const observed = await base.exec(argv);
+        await withIngressChange(home, async () => {
+          address = "172.30.0.9";
+        });
+        return observed;
+      },
+    };
+    await resolveIngressAddresses(d, "fresh");
+    const trusted = await resolveIngressAddresses(base, "recorded");
+    expect(trusted.fromRecord).toBe(false);
+    expect(trusted.caddy).toBe("172.30.0.9");
+  });
+
+  test("a settled read is trusted with no Docker call; an unreadable token trusts nothing", async () => {
+    const d = realDeps(() => "172.30.0.2");
+    await resolveIngressAddresses(d, "fresh");
+    let calls = 0;
+    const counting: IngressAddressDeps = {
+      ...d,
+      exec: async (argv) => {
+        calls += 1;
+        return await d.exec(argv);
+      },
+    };
+    expect(
+      (await resolveIngressAddresses(counting, "recorded")).fromRecord
+    ).toBe(true);
+    expect(calls).toBe(0);
+    await writeFile(join(home, "caddy", "ingress-generation.json"), "{");
+    expect(
+      (await resolveIngressAddresses(counting, "recorded")).fromRecord
+    ).toBe(false);
+    expect(calls).toBe(1);
   });
 });

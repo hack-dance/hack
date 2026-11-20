@@ -159,6 +159,7 @@ if (process.argv.includes("provider-line-other-code")) { console.error(JSON.stri
 if (process.argv.includes("provider-line-hostile")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:"pull https://user:hunter2@registry.example/v2 Authorization: Bearer synthetic-token-value TOKEN=abcdefghijklmnopqrstuvwxyz vm cf86560b70f1f4c9abcd port=8080"})); process.exit(2); }
 if (process.argv.includes("provider-line-trailing")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:"Error: failed" + (process.argv.includes("lf") ? "\\n" : process.argv.includes("cr") ? "\\r" : "\\r\\n")})); process.exit(2); }
 if (process.argv.includes("provider-line-short-values")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:"start failed PASSWORD=hunter2 --password=hunter2 TOKEN=ab12cd34ef https://user:hun=ter2@registry.example/v2?scope=pull port=8080 debug=true left= pin=12345678901"})); process.exit(2); }
+if (process.argv.includes("provider-line-urls")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:"mirrors https://u:alpha@a.example,https://v:br@vo@b.example/x failed https://b.example/user@host"})); process.exit(2); }
 if (process.argv.includes("provider-line-spaced")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:'Authorization: Bearer  synthetic-token-value then "https://user:hunter2@registry.example/v2" done'})); process.exit(2); }
 if (process.argv.includes("provider-line-expanding")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:Array(18).fill("http://a@b").join(" ")})); process.exit(2); }
 if (process.argv.includes("provider-line-unsafe")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:process.argv.includes("unsafe-newline") ? "two\\nlines" : process.argv.includes("unsafe-escape") ? "esc\\u001b[0m" : process.argv.includes("unsafe-long") ? "x".repeat(201) : process.argv.includes("unsafe-unicode") ? "caf\\u00e9" : process.argv.includes("unsafe-empty") ? "" : 7})); process.exit(2); }
@@ -1842,6 +1843,10 @@ test("HACK-2418: a failed provider command shows the provider's own last line, v
   // word stays after an equals sign.
   expect(await failure("provider-line-short-values")).toBe(
     "Native runtime request failed (provider_command_failed); inspect owned state before retrying. Runtime: The provider's own error: start failed PASSWORD=<value> --password=<value> TOKEN=<value> https://<credentials>@registry.example/v2?scope=<value> port=8080 debug=true left= pin=<value>"
+  );
+  // Every URL in a token loses its credentials, and a password may hold an at sign.
+  expect(await failure("provider-line-urls")).toBe(
+    "Native runtime request failed (provider_command_failed); inspect owned state before retrying. Runtime: The provider's own error: mirrors https://<credentials>@a.example,https://<credentials>@b.example/x failed https://b.example/user@host"
   );
   // Runs of spaces and quoted URLs do not get a credential through.
   expect(await failure("provider-line-spaced")).toBe(

@@ -97,19 +97,36 @@ fn plain_value(value: &str) -> bool {
             .any(|word| value.eq_ignore_ascii_case(word))
 }
 
+/// `token` with the user and password of every `scheme://user:password@host` in it
+/// replaced. They run to the last `@` before the first `/` after the scheme, so a password
+/// that holds `@` goes whole.
+fn without_url_credentials(token: &str) -> String {
+    let mut clean = String::with_capacity(token.len());
+    let mut rest = token;
+    while let Some(scheme) = rest.find("://") {
+        let (head, tail) = rest.split_at(scheme + 3);
+        clean.push_str(head);
+        let authority = tail.find('/').unwrap_or(tail.len());
+        rest = match tail[..authority].rfind('@') {
+            Some(at) if at > 0 => {
+                clean.push_str("<credentials>");
+                &tail[at..]
+            }
+            _ => tail,
+        };
+    }
+    clean.push_str(rest);
+    clean
+}
+
 /// One whitespace-separated token with whatever looks like a credential or an identifier
 /// replaced. `after_bearer` says the previous token was `Bearer`.
 fn redact(token: &str, after_bearer: bool) -> String {
     if after_bearer {
         return "<value>".into();
     }
-    // scheme://user:password@host, before anything is split off: a password may hold `=`.
-    let token = match (token.find("://"), token.find('@')) {
-        (Some(scheme), Some(at)) if scheme + 3 < at && !token[scheme + 3..at].contains('/') => {
-            format!("{}<credentials>{}", &token[..scheme + 3], &token[at..])
-        }
-        _ => token.to_owned(),
-    };
+    // Before anything is split off: a password may hold `=`.
+    let token = without_url_credentials(token);
     // Anything after the first `=` (`KEY=value`, `--flag=value`, a URL query) is carried
     // only when it is plainly not a secret. What is before it is cleaned like any token.
     let (token, value) = match token.split_once('=') {
@@ -345,6 +362,29 @@ mod tests {
             )
             .as_deref(),
             Some("get https://<credentials>@registry.example/v2?scope=<value> vm-<id>=7")
+        );
+    }
+
+    #[test]
+    fn every_url_in_a_token_loses_its_credentials_and_a_password_may_hold_an_at_sign() {
+        assert_eq!(
+            clean(
+                b"mirrors https://u:alpha@a.example,https://v:br@vo@b.example/x failed",
+                &places()
+            )
+            .as_deref(),
+            Some(
+                "mirrors https://<credentials>@a.example,https://<credentials>@b.example/x failed"
+            )
+        );
+        // Nothing to hide: no user, or an `@` only in the path.
+        assert_eq!(
+            clean(
+                b"get https://@a.example/x https://b.example/user@host",
+                &places()
+            )
+            .as_deref(),
+            Some("get https://@a.example/x https://b.example/user@host")
         );
     }
 

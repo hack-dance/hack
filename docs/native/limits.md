@@ -112,6 +112,9 @@ Details and the exact checks:
   installed copy lives on the virtual machine's disk) to bring hot reload back,
   or set `HACK_NATIVE_HOT_RELOAD=on` to force it on and accept a slower start
   that may fail; `off` turns it off for any size.
+  `HACK_NATIVE_HOT_RELOAD=watcher` is a preview of the replacement: Hack's own
+  file watcher runs beside each project, so hot reload works at any size and no
+  start waits for a read of the checkout. It is not the default yet.
 - **Images.** Images need a Linux arm64 variant. Local registries need an explicit
   opt-in. Registries signed by a private certificate authority are not supported.
 - **Data.** Data does not move between backends, or between prerelease versions.

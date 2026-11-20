@@ -1741,7 +1741,8 @@ waits for the scan and hot reload works; above it the boot does not wait and hot
   supply them costs one metadata lookup per entry. The bound is on entries, not on time. The
   provider follows links and the count does not, and entries that vanish or cannot be listed
   are not counted, so the count is a lower bound of what the provider reads.
-- **The setting.** `HACK_NATIVE_HOT_RELOAD` is `auto` (the default), `on` or `off`, read by
+- **The setting.** `HACK_NATIVE_HOT_RELOAD` is `auto` (the default), `on`, `off` or `watcher`
+  (Hack's own watcher, below), read by
   `runtime up`; any other value is refused before any effect. `on` keeps the notifications
   whatever the size; `off` drops them whatever the size. The CLI gives runtime subprocesses
   a closed environment, so it hands this one setting to `runtime up` explicitly and refuses
@@ -1760,6 +1761,63 @@ waits for the scan and hot reload works; above it the boot does not wait and hot
 - **`localDirectories` does not shrink the share.** It mounts a volume from the VM disk over
   the container path; the host directory, if it exists in the checkout, is still read by the
   provider. Removing the host copy is what brings a checkout back under the limit.
+
+#### Hack's own watcher (`HACK_NATIVE_HOT_RELOAD=watcher`)
+
+The provider's scan exists only to give its own watcher a baseline. The guest kernel's hook
+does not need one: an event for a path fires the file-watch event on the guest inode and
+refreshes the guest's cached copy of it. With the setting at `watcher`, every pool boot sets
+the provider's switch (no scan for any size, no entry count), and each running project gets
+one small process that subscribes to the system's file events for the project's share and
+forwards every change (`provider/source_notify.rs`). The default is unchanged while this is
+new.
+
+- **Who runs it.** The project's owner process (the foreground `hack up`, or the detached
+  owner) starts `runtime source-notify --project <root> --until-stdin-closes` once the graph
+  is ready and closes its input when the run ends, so the watcher cannot outlive the run. If
+  the watcher dies while the project runs, the owner says so once, restarts it (1, 2, 5, 15,
+  then every 30 seconds) and says when it is back. A guest that refuses the events is said
+  once and not retried.
+- **How a change reaches the guest.** The provider agent's own `fs_notify` request (the one
+  its watcher uses), on the agent socket the runtime already talks to, through the read-only
+  guest access (`ObservedGuest::notify_files`): the pool's identity is verified before and
+  after, nothing in the pool's state changes, and nothing is read back but how many events
+  fired and whether the hook exists.
+- **The guest path.** The share's own mount, `/run/smolvm/virtiofs/smolvm<1 + position>`,
+  where the position is the share's place in the receipt, the order the audit proves the
+  provider's recorded mounts follow. The watcher opens with one event on that root. Unless
+  the guest answers that the hook exists and exactly that event fired, nothing else is ever
+  sent, and the watcher ends with `source_notify_unavailable`. A watcher that starts again
+  therefore tells the guest "something changed under the share" before any path event.
+- **Which changes.** Everything except paths under `.git`. Dependency and build
+  directories are forwarded, because services watch them. What the path is now decides what
+  a notification means: present is created or changed, absent is removed (a rename reports
+  each name). "The system dropped events" becomes an event on the share root, never silence.
+- **Bounds.** Changes are gathered for 50 ms, at most 8,192 notifications a batch, repeats of
+  a path merged, and sent in requests of at most 256 events and 32 KiB of paths, one in
+  flight. Every change keeps its own name. Do not "simplify" this into one event per busy
+  directory: a watcher on a file is not woken by an event on the file's directory, so a
+  branch switch that rewrites 300 files in `src/` would reload nothing. Only when more than
+  32,768 notifications are still waiting behind a full batch is the backlog replaced by one
+  event on the share root; later changes are named again.
+- **Status.** A forwarding watcher leaves a note under `run/source-notify/` (its process
+  identity). `runtime status` reports `hot_reload.state: "watcher"` and, per project,
+  whether the noted process is still running. A project whose watcher is not running has no
+  hot reload until one runs again (edits reach services after up to about 5 seconds, watchers
+  do not fire).
+
+Measured on a real VM (pool only unless said, host load 6 to 7):
+
+| | Result |
+| --- | --- |
+| In-place edit, replace by rename, new file, removal | guest watch event and new content 60 to 80 ms after the host change |
+| 5,000 files created on the host in 0.5 s, then one edit | that edit readable in the guest 140 ms after it was made (5,066 events in 28 requests, all fired) |
+| A file watcher inside a service container, through `hack up` | fired 60 ms after the host edit; the container read the new content at the same moment |
+| Watcher killed while the project ran | status reported it not running at once; the owner restarted it; the next edit arrived in 60 ms |
+| Watcher start on a 276,000-entry share | opening event 0.09 s after start; 11.4 MB resident; 0.01 s of CPU in 30 idle seconds |
+
+What this mode does not have yet: the provider caches lookups of missing names only while
+its own watcher runs, so they are not cached here (3,000 such lookups cost 0.12 s each time).
 
 ### Starting a pool that is already running
 

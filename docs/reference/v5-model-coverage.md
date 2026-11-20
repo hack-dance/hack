@@ -128,7 +128,7 @@ liveness/reachability controls have their own documented assumptions.
 | [service-restart-policy](../../tests/models/tla/service-restart-policy/RestartPolicy.tla) | 134 | 6 |
 | [relay-fence](../../tests/models/tla/relay-fence/RelayFence.tla) | 16 | 2 |
 | [pool-emulation](../../tests/models/tla/pool-emulation/Emulation.tla) | 13 | 3 |
-| [start-graph](../../tests/models/tla/start-graph/COVERAGE.md) | 1,119,624 | 9 |
+| [start-graph](../../tests/models/tla/start-graph/COVERAGE.md) | 1,656,372 + 81,534 two-boot | 10 |
 | [native-build-retention](../../tests/models/tla/native-build-retention/BuildRetention.tla) | 6,181 | 4 |
 | [shared-helper-instance](../../tests/models/tla/shared-helper-instance/Instance.tla) | 7,649 | 11 |
 | [restore-history](../../tests/models/tla/restore-history/RestoreHistory.tla) | See named result contract | 2 |

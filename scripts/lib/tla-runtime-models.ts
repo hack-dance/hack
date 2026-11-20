@@ -140,13 +140,12 @@ const restartPolicyStaleUses = [
   { engine: "restarting", bound: 3 },
   { engine: "exited", bound: 3 },
 ] as const;
-// StartGraph's ghost flags: each control can set only the flag its guard
-// removal makes reachable, so the whole record names the unsafe step.
-const startGraphBad = (
-  flag: "start" | "publish" | "replace" | "return"
-): string =>
+// StartGraph's ghost flags: the whole record names every unsafe step taken,
+// so a control cannot pass on a violation its guard removal did not cause.
+type StartGraphFlag = "start" | "publish" | "replace" | "return";
+const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
   `bad = [${(["start", "publish", "replace", "return"] as const)
-    .map((key) => `${key} |-> ${key === flag ? "TRUE" : "FALSE"}`)
+    .map((key) => `${key} |-> ${flags.includes(key) ? "TRUE" : "FALSE"}`)
     .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
@@ -2395,17 +2394,18 @@ const contracts: readonly ModelContract[] = [
       },
     ],
   },
-  // The CI tier bounds one VM boot; keep-across-boot alone allows a reboot.
-  // Witnesses omit `cur` and `intents`: the initial spec value is free and
-  // two-worker TLC reports either one.
+  // The CI tier bounds one VM boot with two specs; positive-reboot covers two
+  // boots with one spec. Witnesses omit `cur` and `intents`: the initial spec
+  // value is free and two-worker TLC reports either one.
   {
     name: "start-graph",
     module: "StartGraph",
-    states: 1_119_624,
+    states: 1_656_372,
     invariant: "NoEffectWithoutIntent",
     action: "Create",
     fields: ["intents = {}", "acted = TRUE", 'up = "running"'],
     additionalControls: [
+      { name: "positive-reboot", negative: false, states: 81_534 },
       {
         name: "ignore-deps",
         negative: true,
@@ -2447,7 +2447,19 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "ReturnIsCurrent",
         action: "Return",
-        fields: [startGraphBad("return"), "boot = 2", 'up = "returned"'],
+        // Without the boot fence a dependent may also start on a stale
+        // dependency, so both flags are set.
+        fields: [
+          startGraphBad("start", "return"),
+          "boot = 2",
+          'up = "returned"',
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Return",
+            fields: [startGraphBad("return"), "boot = 2", 'up = "returned"'],
+          },
+        ],
       },
       {
         name: "blind-retry",
@@ -2466,27 +2478,13 @@ const contracts: readonly ModelContract[] = [
         ],
       },
       {
-        // Reachability: a later `up` of a routed project returns without
-        // planning. TLC first sees it when the earlier publication lands.
+        // Reachability: an `up` that began on a current, ready and routed
+        // project (`base`) returns without planning anything.
         name: "reachable-noop",
         negative: true,
         invariant: "NeverNoOpUp",
-        action: "Publish",
-        fields: [
-          "route = [a |-> 1, b |-> 1]",
-          "acted = FALSE",
-          'up = "returned"',
-        ],
-        alternativeWitnesses: [
-          {
-            action: "Return",
-            fields: [
-              "route = [a |-> 1, b |-> 1]",
-              "acted = FALSE",
-              'up = "returned"',
-            ],
-          },
-        ],
+        action: "Return",
+        fields: ["base = TRUE", "acted = FALSE", 'up = "returned"'],
       },
     ],
   },

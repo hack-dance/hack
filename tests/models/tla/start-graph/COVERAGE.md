@@ -9,34 +9,45 @@ table below.
 
 ## Bounds and result
 
-Two services with one dependency edge (`b` waits for `a`), two specs, two
-generations per service. The CI tier allows one VM boot (`MaxBoot = 1`). TLC 1.7.4,
-two workers, deadlock checking on (the runner's default):
+Two services with one dependency edge (`b` waits for `a`), two generations per
+service. The CI tier has two specs and one VM boot; `positive-reboot` has one spec
+and two boots, so the boot fence is checked without edits. TLC 1.7.4, two workers,
+deadlock checking on (the runner's default):
 
 | Configuration | Expected result |
 | --- | --- |
-| `positive` | no error, **1,119,624 distinct states**, depth 39 |
+| `positive` | no error, **1,656,372 distinct states**, depth 40 |
+| `positive-reboot` (`Specs = {1}`, `MaxBoot = 2`) | no error, **81,534 distinct states**, depth 36 |
 | `negative` (`NoFence`) | `NoEffectWithoutIntent` at `Create`: a create from a staged, not yet durable intent |
 | `ignore-deps` | `DepsBeforeStart` at `Start` |
 | `no-publish-fence` | `NoPublishToReplaced` at `Publish`: the container was removed between snapshot and commit |
 | `reuse-by-name` | `ReturnIsCurrent` at `Return`: an edited service kept by name |
 | `no-unpublish` | `NoReplaceWhileRouted` at `RemoveOld` |
 | `keep-across-boot` (`MaxBoot = 2`) | `ReturnIsCurrent` at `Return`: a restart-policy container kept after a reboot with attachments from the old boot |
-| `blind-retry` | `OneContainerPerService` at `Create`: a lost create reply, then a second create without inspecting |
-| `reachable-noop` | `NeverNoOpUp` is violated: a later `up` of a routed, unchanged project returns without planning anything |
+| `blind-retry` | `OneContainerPerService` at `Create`: after an uncertain create (a lost reply or an owner takeover; the witness does not tell them apart), a second create without inspecting |
+| `reachable-noop` | `NeverNoOpUp` at `Return`: an `up` that began on a current, ready and routed project (`base = TRUE`) returns without planning anything |
 
-The positive run with `MaxBoot = 2` (3,143,992 states) is outside the CI budget and
-is not part of the runner.
+The positive run with two specs and two boots is outside the CI budget and is not part
+of the runner.
+
+The boot fence is layered: `Ready`, the dependency check in `Start` and the publish
+fence each refuse a container whose attachments are from an earlier boot. Removing the
+`Ready` guard alone does not violate anything, because the other two still hold.
+Removing it together with the dependency check violates `DepsBeforeStart`, and together
+with the publish fence's boot check violates `NoPublishToReplaced`, both on
+`positive-reboot` (checked by hand when this model was added, not in CI). The unsafe-step
+flags are judged by the true condition (`DepsSafe`, `PublishSafe`), never by the guard
+they check, so a weakened guard cannot also weaken its own judgment.
 
 ## Invariants
 
 - `NoEffectWithoutIntent`: every container that exists has a durable intent naming its service, generation and spec.
-- `DepsBeforeStart`: a service starts only after every dependency is ready.
-- `NoPublishToReplaced`: a route is never committed to a replaced or unready generation.
-- `NoReplaceWhileRouted`: no container is removed while a route points at it.
+- `DepsBeforeStart`: a service starts only after every dependency is ready, with attachments made in this boot.
+- `NoPublishToReplaced`: a route is never committed to a replaced, unready or previous-boot generation.
+- `NoReplaceWhileRouted`: the owner never removes a container while a route points at it. An external removal of a routed container (`ExtRemove`) is a modelled failure and is not covered.
 - `OneContainerPerService`: at most one container exists per service.
 - `ReturnIsCurrent`: `up` returns only when every container runs the current spec with attachments made in this boot.
-- `DoneIsCurrent`: done means every service runs the current spec, made in this boot, ready and routed.
+- `DoneIsCurrent`: done means every service runs the current spec, made in this boot, ready and routed (readiness is asserted, not only guarded).
 
 ## Source mapping
 

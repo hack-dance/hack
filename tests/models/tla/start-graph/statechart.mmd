@@ -11,7 +11,7 @@ stateDiagram-v2
   kept --> started : still warming
   kept --> ready : list or probe says ready
   kept --> done : ready and routed already
-  resumed --> starting : wave start saved
+  resumed --> starting : deps ready, start saved
   planned --> unpublishing : old route live
   planned --> intent : wave intent saved
   unpublishing --> intent : slots released

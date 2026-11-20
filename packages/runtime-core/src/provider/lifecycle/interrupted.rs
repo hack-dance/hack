@@ -34,7 +34,7 @@ use super::super::{
     identity, prepared_start, state,
 };
 use super::{
-    Owner, STOP_SCAN_WAIT, binary, finish_absent, invoke, lock_disks_closed, phase,
+    Owner, STOP_SCAN_WAIT, SmolvmCli, VmBackend, binary, finish_absent, lock_disks_closed, phase,
     recorded_process, sockets_absent, stop_verified_provider, verify_templates,
 };
 use crate::{Candidate, CandidateError};
@@ -134,11 +134,7 @@ fn recover_create(candidate: &Candidate, owner: &mut Owner) -> Result<(), Candid
     }
     provider_idle(candidate)?;
     if config_audit::machine_recorded(candidate, owner)? {
-        invoke(
-            candidate,
-            owner,
-            &["machine", "delete", "--name", &owner.machine, "--force"],
-        )?;
+        SmolvmCli::new(candidate, owner).delete_forced()?;
         if config_audit::machine_recorded(candidate, owner)? {
             return Err(unrecoverable!(
                 "the provider still records this machine after deleting it"

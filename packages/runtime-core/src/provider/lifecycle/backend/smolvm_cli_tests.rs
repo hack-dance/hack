@@ -2,6 +2,89 @@ use super::*;
 use crate::provider::state;
 use serde_json::json;
 
+fn verifier_spec() -> MachineSpec {
+    MachineSpec {
+        cpus: 1,
+        memory_mib: 1024,
+        storage_gib: 4,
+        overlay_gib: 4,
+        engine_share: None,
+        amd64_translation: false,
+        project_shares: Vec::new(),
+        network: crate::provider::NetworkIntent::Isolated,
+        exposed_sockets: Vec::new(),
+        mounted_sockets: Vec::new(),
+    }
+}
+
+#[test]
+fn verifier_creation_preserves_the_command_without_engine_or_shares() {
+    assert_eq!(
+        create_arguments("fixture", "owner", &verifier_spec()).unwrap(),
+        [
+            "machine",
+            "create",
+            "--name",
+            "fixture",
+            "--label",
+            "hack-local.owner=owner",
+            "--cpus",
+            "1",
+            "--mem",
+            "1024",
+            "--storage",
+            "4",
+            "--overlay",
+            "4"
+        ]
+    );
+}
+
+#[test]
+fn pool_creation_preserves_flag_order_and_socket_directions() {
+    let mut spec = verifier_spec();
+    spec.cpus = 2;
+    spec.memory_mib = 2048;
+    spec.engine_share = Some("/fixture/engine".into());
+    spec.amd64_translation = true;
+    spec.network = crate::provider::NetworkIntent::Internet;
+    spec.exposed_sockets = vec!["/run/fixture.sock".into()];
+    spec.mounted_sockets = vec![(
+        "/fixture/dependency.sock".into(),
+        "/run/dependency.sock".into(),
+    )];
+    assert_eq!(
+        create_arguments("fixture", "owner", &spec).unwrap(),
+        [
+            "machine",
+            "create",
+            "--name",
+            "fixture",
+            "--label",
+            "hack-local.owner=owner",
+            "--cpus",
+            "2",
+            "--mem",
+            "2048",
+            "--storage",
+            "4",
+            "--overlay",
+            "4",
+            "--docker-socket",
+            "--volume",
+            "/fixture/engine:/opt/hack-engine:ro",
+            "--rosetta",
+            "--net",
+            "--net-backend",
+            "virtio-net",
+            "--expose-socket",
+            "/run/fixture.sock",
+            "--mount-socket",
+            "/fixture/dependency.sock:/run/dependency.sock"
+        ]
+    );
+}
+
 #[test]
 fn provider_command_enforces_strict_floor_for_public_egress_modes() {
     let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();

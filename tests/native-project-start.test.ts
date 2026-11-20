@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { renderNativeHotReloadNotice } from "../src/backends/native-hot-reload-notice.ts";
 import {
   type acquireNativeHttpsLease,
   NativeHttpsLeaseAcquisitionError,
@@ -6644,3 +6645,41 @@ test("startup cleanup retains only safe runtime detail, never original errors or
     });
   }
 });
+
+for (const [name, hotReload, expected] of [
+  [
+    "off for a large share",
+    { state: "off", reason: "large_share", limit: 100_000, message: "ignored" },
+    { state: "off", reason: "large_share", limit: 100_000 },
+  ],
+  [
+    "forced on",
+    { state: "on", reason: "setting", limit: 100_000 },
+    { state: "on", reason: "setting", limit: 100_000 },
+  ],
+  ["the plain default", { state: "on" }, null],
+] as const) {
+  test(`HACK-2409: a foreground start prints the hot-reload notice once (${name})`, async () => {
+    const { opts } = await fixture();
+    const invoke = opts.dependencies.invoke!;
+    let ups = 0;
+    opts.dependencies.invoke = async (call) => {
+      const result = await invoke(call);
+      if (call.args[0] === "runtime" && call.args[1] === "up") {
+        ups += 1;
+        return {
+          ...(result as Record<string, unknown>),
+          hot_reload: hotReload,
+        };
+      }
+      return result;
+    };
+    const notices: string[] = [];
+    opts.dependencies.warn = (line) => notices.push(line);
+    expect(await startNativeProject(opts)).toBe(0);
+    expect(ups).toBe(1);
+    expect(
+      notices.filter((line) => line.startsWith("Hot reload on shared source"))
+    ).toEqual(expected ? [renderNativeHotReloadNotice(expected)] : []);
+  });
+}

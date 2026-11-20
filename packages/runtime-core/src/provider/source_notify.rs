@@ -27,7 +27,11 @@
 //!
 //! Only paths inside the share are named. The guest follows links when it resolves a path,
 //! so a link is never named (its directory is, instead), and nothing is named below a
-//! directory that is itself reached through a link.
+//! directory that is itself reached through a link. This is as far as the host can see: if
+//! the guest still holds a link at a name the host has since replaced or removed, the guest
+//! resolves the event through its own copy. The effect is a watch event and a cache refresh
+//! on a file of another mount in the same VM, never a read or a write. The provider's own
+//! watcher has the same property; closing it needs a no-follow lookup in the guest hook.
 
 use super::identity::{self, ProcessIdentity};
 use crate::{Candidate, CandidateError};
@@ -499,17 +503,25 @@ fn records(candidate: &Candidate) -> PathBuf {
     candidate.state_root.join("run/source-notify")
 }
 
-fn record_path(candidate: &Candidate, project: &Path) -> PathBuf {
+/// One note per watcher process, so no watcher ever touches another's: the project's digest,
+/// then the process ID.
+fn record_path(candidate: &Candidate, project: &Path, pid: i32) -> PathBuf {
     use sha2::{Digest, Sha256};
     let digest = format!(
         "{:x}",
         Sha256::digest(project.as_os_str().as_encoded_bytes())
     );
-    records(candidate).join(format!("{}.json", &digest[..32]))
+    records(candidate).join(format!("{}.{pid}.json", &digest[..32]))
 }
 
-/// Notes that this process forwards changes for `project`. Advisory: a failure to write it
-/// costs only the status line, never the forwarding.
+fn read_record(path: &Path) -> Option<Record> {
+    let record: Record = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    (record.version == 1).then_some(record)
+}
+
+/// Notes that this process forwards changes for `project`, and clears the notes of watchers
+/// that are gone. Advisory: a failure to write it costs only the status line, never the
+/// forwarding.
 fn announce(candidate: &Candidate, project: &Path) -> Option<PathBuf> {
     use std::io::Write;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -520,45 +532,30 @@ fn announce(candidate: &Candidate, project: &Path) -> Option<PathBuf> {
         .mode(0o700)
         .create(&directory)
         .ok()?;
-    let path = record_path(candidate, project);
-    let pending = path.with_extension(format!("{}.new", process.pid));
+    if let Ok(entries) = std::fs::read_dir(&directory) {
+        for entry in entries.flatten().take(MAX_RECORDS) {
+            // A note whose process is gone describes nothing; removing it races with nobody.
+            if read_record(&entry.path()).is_some_and(|record| !running(&record.process)) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let path = record_path(candidate, project, process.pid);
     let bytes = serde_json::to_vec(&Record {
         version: 1,
         project: project.to_path_buf(),
         process,
     })
     .ok()?;
-    let written = std::fs::OpenOptions::new()
+    let _ = std::fs::remove_file(&path);
+    std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(&pending)
+        .open(&path)
         .and_then(|mut file| file.write_all(&bytes))
-        .and_then(|()| std::fs::rename(&pending, &path));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&pending);
-        return None;
-    }
+        .ok()?;
     Some(path)
-}
-
-/// Removes this process's note, and only this process's: a later watcher for the same
-/// project may have written its own at the same path.
-fn retract(path: &Path) {
-    let ours = std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
-        .is_some_and(|record| {
-            i32::try_from(std::process::id())
-                .ok()
-                .and_then(|pid| identity::observe(pid).ok())
-                .is_some_and(|own| {
-                    own.pid == record.process.pid && own.start_micros == record.process.start_micros
-                })
-        });
-    if ours {
-        let _ = std::fs::remove_file(path);
-    }
 }
 
 fn running(process: &ProcessIdentity) -> bool {
@@ -567,27 +564,26 @@ fn running(process: &ProcessIdentity) -> bool {
     })
 }
 
-/// The watchers this home has notes for, and whether each is still that same process.
-/// Unreadable notes are skipped: status never fails because of them.
+/// The projects this home has watcher notes for, and whether a watcher for each is still
+/// running. Unreadable notes are skipped: status never fails because of them.
 pub fn watchers(candidate: &Candidate) -> Vec<WatcherStatus> {
     let Ok(entries) = std::fs::read_dir(records(candidate)) else {
         return Vec::new();
     };
-    let mut found: Vec<WatcherStatus> = entries
+    let mut projects: BTreeMap<PathBuf, bool> = BTreeMap::new();
+    for record in entries
         .flatten()
         .filter(|entry| entry.path().extension().is_some_and(|kind| kind == "json"))
         .take(MAX_RECORDS)
-        .filter_map(|entry| {
-            let bytes = std::fs::read(entry.path()).ok()?;
-            let record: Record = serde_json::from_slice(&bytes).ok()?;
-            (record.version == 1).then(|| WatcherStatus {
-                running: running(&record.process),
-                project: record.project,
-            })
-        })
-        .collect();
-    found.sort_by(|left, right| left.project.cmp(&right.project));
-    found
+        .filter_map(|entry| read_record(&entry.path()))
+    {
+        let alive = running(&record.process);
+        *projects.entry(record.project).or_default() |= alive;
+    }
+    projects
+        .into_iter()
+        .map(|(project, running)| WatcherStatus { project, running })
+        .collect()
 }
 
 /// The long-running command behind `runtime source-notify`: watches `project`, which must be
@@ -661,6 +657,9 @@ pub fn watch(
         &overflow,
         &stop,
         |lines| {
+            // Checked before every request, whatever the traffic: changes under a directory
+            // moved into the project's place must never reach the mounted one.
+            same_directory()?;
             // A request that fails for a passing reason (a busy agent, a dropped connection)
             // is tried again on a new connection, which is bound to the same pool or
             // refused. A pool that changed is never retried.
@@ -698,7 +697,8 @@ pub fn watch(
         },
     );
     if let Some(path) = note.into_inner() {
-        retract(&path);
+        // This process's own note: its name carries this process ID.
+        let _ = std::fs::remove_file(path);
     }
     result
 }
@@ -1419,13 +1419,25 @@ mod tests {
             std::fs::metadata(&note).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        // The note is this process's own: its name carries the process ID.
+        assert!(
+            note.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(&format!(".{}.json", std::process::id()))
+        );
         // A note whose process is gone (the same pid with another start time): not running.
-        let mut dead: Record = serde_json::from_slice(&std::fs::read(&note).unwrap()).unwrap();
+        let mut dead = read_record(&note).unwrap();
         dead.project = PathBuf::from("/project/dead");
         dead.process.start_micros += 1;
+        let dead_note = record_path(&candidate, &dead.project, 1_999_999);
+        std::fs::write(&dead_note, serde_json::to_vec(&dead).unwrap()).unwrap();
+        // A second, dead note for the live project does not make it "not running".
+        let mut stale = read_record(&note).unwrap();
+        stale.process.start_micros += 1;
         std::fs::write(
-            record_path(&candidate, &dead.project),
-            serde_json::to_vec(&dead).unwrap(),
+            record_path(&candidate, live, 1_999_998),
+            serde_json::to_vec(&stale).unwrap(),
         )
         .unwrap();
         // Anything unreadable is skipped, never an error.
@@ -1444,12 +1456,18 @@ mod tests {
                 },
             ]
         );
-        // A watcher removes only its own note: one a later watcher wrote is left alone.
-        let other = record_path(&candidate, &dead.project);
-        retract(&other);
-        assert!(other.exists(), "another process's note must stay");
-        retract(&note);
-        assert!(!note.exists());
+        // The next watcher to announce itself clears the notes of processes that are gone,
+        // and only those.
+        let again = announce(&candidate, live).expect("note rewritten");
+        assert_eq!(again, note);
+        assert!(!dead_note.exists());
+        assert_eq!(
+            watchers(&candidate),
+            vec![WatcherStatus {
+                project: live.into(),
+                running: true
+            }]
+        );
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

@@ -1809,12 +1809,18 @@ new.
   named: its directory is reported instead, as is a removed entry the system did not call a
   file or a folder, and anything below a directory that is itself reached through a link.
   The watcher refuses to start unless the directory at the project path is the one the pool
-  mounted (the receipt's device and inode) and ends when that stops being true.
+  mounted (the receipt's device and inode), checks again before every request, and ends
+  when that stops being true. One limit remains, shared with the provider's own watcher:
+  the host cannot see what the guest has cached. If the guest still holds a link at a name
+  the host has since replaced or removed, the guest resolves the event through its copy,
+  and a file on another mount of the same VM gets a watch event and a cache refresh (never
+  a read or a write). Closing that needs a no-follow lookup in the guest hook.
 - **One pool only.** Requests go on one connection opened to the agent and then checked
   against the pool's identity, so a kept connection cannot reach a later pool at the same
   socket path. A failed request is tried again on a new connection, checked the same way.
-- **Status.** A forwarding watcher leaves a note under `run/source-notify/` (its process
-  identity). `runtime status` reports `hot_reload.state: "watcher"` and, per project,
+- **Status.** A forwarding watcher leaves a note of its own under `run/source-notify/` (its
+  process identity; one file per process, removed by that process or by the next watcher
+  once the process is gone). `runtime status` reports `hot_reload.state: "watcher"` and, per project,
   whether the noted process is still running. A project whose watcher is not running has no
   hot reload until one runs again (edits reach services after up to about 5 seconds, watchers
   do not fire).
@@ -1828,9 +1834,15 @@ Measured on a real VM (pool only unless said, host load 6 to 7):
 | A file watcher inside a service container, through `hack up` | fired 60 ms after the host edit; the container read the new content at the same moment |
 | Watcher killed while the project ran | status reported it not running at once; the owner restarted it; the next edit arrived in 60 ms |
 | Watcher start on a 276,000-entry share | opening event 0.09 s after start; 11.4 MB resident; 0.01 s of CPU in 30 idle seconds |
+| A real 11-service project, its web service's dev server, `hack up` in this mode | the container saw a host change 70 ms after it; the server had recompiled about 1.1 s after it (the next page answer); start 72 s |
+| The same with the provider's own watcher forced on | 30 ms; about 1.5 s; start 110 s (the scan) |
+| The same with hot reload off | the container saw the change 4.1 s later; the server never recompiled; start 74 s |
 
-What this mode does not have yet: the provider caches lookups of missing names only while
-its own watcher runs, so they are not cached here (3,000 such lookups cost 0.12 s each time).
+What this mode does not have: the provider caches lookups of missing names only while its
+own watcher runs, so they are not cached here (3,000 such lookups cost 0.12 s each time). On
+the real project it made no visible difference to the first page compile (1.5 to 1.9 s here,
+2.0 s with the provider's watcher); that project keeps its dependencies on a guest volume, so
+a project that resolves modules across the share may see more.
 
 ### Starting a pool that is already running
 

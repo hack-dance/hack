@@ -99,6 +99,7 @@ afterEach(async () => {
 
 type CliResult = {
   readonly exitCode: number;
+  readonly stdout: string;
   readonly stderr: string;
   /** `inspect --type`, `compose <verb>`, … in call order. */
   readonly calls: string[];
@@ -128,7 +129,7 @@ async function cli(
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [exitCode, stderr] = await Promise.all([
+  const [exitCode, stderr, stdout] = await Promise.all([
     child.exited,
     new Response(child.stderr).text(),
     new Response(child.stdout).text(),
@@ -140,7 +141,7 @@ async function cli(
       ? composeVerb(entry)
       : entry.split(" ").slice(0, 2).join(" ")
   );
-  return { exitCode, stderr, calls, raw };
+  return { exitCode, stdout, stderr, calls, raw };
 }
 
 const COMPOSE_OPTIONS_WITH_VALUE = new Set([
@@ -344,4 +345,71 @@ test("hack global down removes the record", async () => {
   const down = await cli(["global", "down"]);
   expect(down.exitCode).toBe(0);
   expect(await Bun.file(RECORD()).exists()).toBe(false);
+});
+
+test("exec does not rewrite the env override when env config changed after up", async () => {
+  const envFile = join(project, ".hack", "hack.env.default.yaml");
+  await writeFile(
+    envFile,
+    "version: 1\nsecretsprovider: project_key\nvalues:\n  global:\n    GREETING: hello\n"
+  );
+  const up = await cli(["up", "-d"]);
+  expect(up.exitCode).toBe(0);
+  const envOverride = join(
+    project,
+    ".hack",
+    ".internal",
+    "compose.env.override.yml"
+  );
+  const written = await readFile(envOverride, "utf8");
+  expect(written).toContain("GREETING");
+
+  await writeFile(
+    envFile,
+    "version: 1\nsecretsprovider: project_key\nvalues:\n  global:\n    GREETING: hello\n    FAREWELL: bye\n"
+  );
+  const before = await snapshot(project);
+  const exec = await cli(["exec", "api", "--", "true"]);
+  expect(exec.exitCode).toBe(0);
+  expect(exec.raw[0]).toContain(`-f ${envOverride}`);
+  expect(await snapshot(project)).toEqual(before);
+  expect(await readFile(envOverride, "utf8")).toBe(written);
+});
+
+test("the in-project override of an older Hack stops being used once this version renders", async () => {
+  await mkdir(join(project, ".hack", ".internal"), { recursive: true });
+  await writeFile(LEGACY(), "services:\n  api:\n    dns: [172.30.0.53]\n");
+  // Internal DNS and TLS off: this version renders no internal override.
+  await writeFile(
+    join(project, ".hack", "hack.config.json"),
+    JSON.stringify({
+      name: "shop",
+      dev_host: "shop.hack",
+      internal: { dns: false, tls: false },
+    })
+  );
+  const up = await cli(["up", "-d"]);
+  expect(up.exitCode).toBe(0);
+  expect(await Bun.file(LEGACY()).exists()).toBe(false);
+  const exec = await cli(["exec", "api", "--", "true"]);
+  expect(exec.raw[0]).not.toContain("compose.override.yml");
+});
+
+test("a failed refresh after a failed run keeps the run's exit code", async () => {
+  await cli(["run", "api", "--", "true"]);
+  // The record can no longer be replaced: its folder refuses writes.
+  await chmod(join(hackHome, "caddy"), 0o500);
+  try {
+    const result = await cli(["run", "api", "--", "false"], {
+      STUB_CADDY_IP: "172.30.0.9",
+      STUB_RUN_FAIL: "1",
+    });
+    expect(result.exitCode).toBe(7);
+    expect(result.stderr).toContain(
+      "could not check the recorded proxy and DNS addresses"
+    );
+    expect(result.stdout).not.toContain("could not check");
+  } finally {
+    await chmod(join(hackHome, "caddy"), 0o700);
+  }
 });

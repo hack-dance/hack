@@ -235,6 +235,7 @@ import {
   preflightSharedNetworks,
 } from "../lib/compose-engine-preflight.ts";
 import {
+  composeEnvOverridePath,
   inspectComposeEnvOverrideAtRest,
   removePlaintextComposeEnvOverride,
   writeComposeEnvOverride,
@@ -253,6 +254,7 @@ import {
 import {
   existingInternalOverride,
   internalOverrideStorePath,
+  legacyInternalOverridePath,
 } from "../lib/compose-internal-override-store.ts";
 import { renderComposeEnvReferenceOverride } from "../lib/compose-managed-env.ts";
 import {
@@ -1777,6 +1779,28 @@ async function scrubPlaintextComposeEnvOverride(opts: {
  * its path. A literal file that a saved adoption pins is left as the scrub
  * left it.
  */
+/**
+ * Writes the env override and returns its path, or with `persist: false`
+ * returns the path `up` left (nothing when absent) without writing.
+ */
+async function settleComposeEnvOverride(opts: {
+  readonly projectDir: string;
+  readonly text: string;
+  readonly persist: boolean | undefined;
+}): Promise<readonly string[]> {
+  if (opts.persist === false) {
+    const path = composeEnvOverridePath({ projectDir: opts.projectDir });
+    return (await pathExists(path)) ? [path] : [];
+  }
+  await ensureHackGitInfoExclude({ projectDir: opts.projectDir });
+  return [
+    await writeComposeEnvOverride({
+      projectDir: opts.projectDir,
+      text: opts.text,
+    }),
+  ];
+}
+
 async function clearComposeEnvOverride(opts: {
   readonly projectDir: string;
 }): Promise<void> {
@@ -1887,6 +1911,8 @@ export async function resolveModernComposeEnvOverrides(opts: {
   readonly targetServices: readonly string[];
   readonly allServiceNames: readonly string[];
   readonly envName?: string | null;
+  /** See resolveComposeEnvOverrides. */
+  readonly persist?: boolean;
 }): Promise<{
   readonly composeFiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
@@ -1953,9 +1979,11 @@ export async function resolveModernComposeEnvOverrides(opts: {
   // Fail closed before any write or spawn when Compose could not start.
   assertComposeSpawnEnvFits({ env: composeEnv });
   if (override === null) {
-    await clearComposeEnvOverride({
-      projectDir: opts.project.projectDir,
-    });
+    if (opts.persist !== false) {
+      await clearComposeEnvOverride({
+        projectDir: opts.project.projectDir,
+      });
+    }
     return {
       composeFiles: [],
       env: modern.globalEnv,
@@ -1965,13 +1993,12 @@ export async function resolveModernComposeEnvOverrides(opts: {
     };
   }
 
-  await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
-  const overridePath = await writeComposeEnvOverride({
-    projectDir: opts.project.projectDir,
-    text: override.text,
-  });
   return {
-    composeFiles: [overridePath],
+    composeFiles: await settleComposeEnvOverride({
+      projectDir: opts.project.projectDir,
+      text: override.text,
+      persist: opts.persist,
+    }),
     env: composeEnv,
     lifecycleEnv,
     preflightEnvByService,
@@ -2027,6 +2054,12 @@ async function resolveComposeEnvOverrides(opts: {
   readonly targetServices: readonly string[];
   readonly allServiceNames: readonly string[];
   readonly envName?: string | null;
+  /**
+   * False for `exec`: resolve the values but neither write nor clear the
+   * generated env override; pass the file `up` left, if any. The container
+   * already exists, so its environment came from that file.
+   */
+  readonly persist?: boolean;
 }): Promise<{
   readonly composeFiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
@@ -2074,9 +2107,11 @@ async function resolveComposeEnvOverrides(opts: {
   );
 
   if (resolved.contract.vars.length === 0) {
-    await clearComposeEnvOverride({
-      projectDir: opts.project.projectDir,
-    });
+    if (opts.persist !== false) {
+      await clearComposeEnvOverride({
+        projectDir: opts.project.projectDir,
+      });
+    }
     return {
       composeFiles: [],
       env: {},
@@ -2120,9 +2155,11 @@ async function resolveComposeEnvOverrides(opts: {
 
   assertComposeSpawnEnvFits({ env: resolved.envForCompose });
   if (Object.keys(overrideServices).length === 0) {
-    await clearComposeEnvOverride({
-      projectDir: opts.project.projectDir,
-    });
+    if (opts.persist !== false) {
+      await clearComposeEnvOverride({
+        projectDir: opts.project.projectDir,
+      });
+    }
     return {
       composeFiles: [],
       env: resolved.envForCompose,
@@ -2135,14 +2172,12 @@ async function resolveComposeEnvOverrides(opts: {
   const override = { services: overrideServices };
   const yaml = YAML.stringify(override, null, 2);
   const text = ensureTrailingNewline(cleanupYaml(yaml));
-  await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
-  const overridePath = await writeComposeEnvOverride({
-    projectDir: opts.project.projectDir,
-    text,
-  });
-
   return {
-    composeFiles: [overridePath],
+    composeFiles: await settleComposeEnvOverride({
+      projectDir: opts.project.projectDir,
+      text,
+      persist: opts.persist,
+    }),
     env: resolved.envForCompose,
     lifecycleEnv: selectHackEnvValues({ resolved }),
     preflightEnvByService,
@@ -3528,6 +3563,11 @@ async function resolveInternalComposeOverride(
     branch: opts.branch ?? null,
   });
   const text = await renderInternalComposeOverrideText(opts);
+  // The store now decides for this project: an in-project file an older Hack
+  // wrote would otherwise come back for `exec` once the stored one is gone.
+  await rm(legacyInternalOverridePath(opts.project.projectDir), {
+    force: true,
+  });
   if (text === null) {
     await rm(path, { force: true });
     return null;
@@ -10888,7 +10928,15 @@ async function runAndRefreshStaleAddresses(opts: {
   if (exitCode === 0 || opts.background || opts.internalOverride === null) {
     return exitCode;
   }
-  await refreshStaleInternalOverride(opts.rebuild);
+  try {
+    await refreshStaleInternalOverride(opts.rebuild);
+  } catch (error) {
+    // The command's own result stands; the refresh is only for the next one.
+    // stderr: a run's stdout is the command's own output.
+    process.stderr.write(
+      `Hack: could not check the recorded proxy and DNS addresses after the command failed: ${error instanceof Error ? error.message : String(error)}\n`
+    );
+  }
   return exitCode;
 }
 
@@ -11056,6 +11104,7 @@ async function handleExec({
     targetServices: [service],
     allServiceNames,
     envName,
+    persist: false,
   });
   const composeFilesWithEnv = [
     ...composeFilesWithInternal,

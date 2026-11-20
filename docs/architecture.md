@@ -1200,7 +1200,8 @@ qualify the installed binary, real filesystems or an application.
   - `.env` (only when explicitly materialized) and `.env.state.json`
   - `.internal/compose.env.override.yml`, `compose.runtime.override.yml`
     (`.internal/compose.override.yml` is no longer written; one written by an
-    older Hack is still passed to Compose when no stored override exists)
+    older Hack is passed to `exec` until this version renders the instance's
+    override in `up`, `restart` or `run`, which removes it)
   - `.internal/extra-hosts.json`, `.internal/branch-usage.json`
   - `.internal/lifecycle/state.json` and `.internal/lifecycle/*.log`
   - `.branch/compose.<branch>.override.yml` and `.branch/compose.<branch>.runtime.override.yml`

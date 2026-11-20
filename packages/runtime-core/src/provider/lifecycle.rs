@@ -2962,9 +2962,11 @@ fn finish_stopped(
     finish_absent(candidate, owner, value, true)
 }
 
-/// Record `value` once the provider's VM lock is free, no handle remains on the owned disks and
-/// no owned socket accepts connections. The caller has established that no provider process
-/// remains; this proves the machine it launched released everything before the receipt changes.
+/// Record `value` once the provider's VM lock is free, the disk-holder scan names no process
+/// on the owned disks and no owned socket accepts connections. The caller has established that
+/// no provider process remains; these checks look for anything the machine it launched left
+/// behind before the receipt changes. The scan inspects what `lsof` inspects and does not
+/// prove that nothing maps a disk (`disk_handles`).
 /// With `record_disks`, unadopted disks are identified now; without it they stay unadopted, so
 /// the next boot's size, format-marker and template checks decide whether to adopt them.
 fn finish_absent(

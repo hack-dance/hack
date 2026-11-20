@@ -999,11 +999,28 @@ pub(super) fn prepare_delivery(
             if let Some(test) = &values.health_test {
                 value["Test"] = json!(test);
             }
+            // A declared check that says nothing about startup gets the fast first check
+            // (HACK-2443). A disabled check gets nothing.
+            let startup = |declared: Option<u64>, default: u64| {
+                declared.or((!health.disabled).then_some(default))
+            };
             for (key, value_nanos) in [
                 ("Interval", health.interval_nanos),
                 ("Timeout", health.timeout_nanos),
-                ("StartPeriod", health.start_period_nanos),
-                ("StartInterval", health.start_interval_nanos),
+                (
+                    "StartPeriod",
+                    startup(
+                        health.start_period_nanos,
+                        crate::project::DEFAULT_START_PERIOD_NANOS,
+                    ),
+                ),
+                (
+                    "StartInterval",
+                    startup(
+                        health.start_interval_nanos,
+                        crate::project::DEFAULT_START_INTERVAL_NANOS,
+                    ),
+                ),
             ] {
                 if let Some(nanos) = value_nanos {
                     value[key] = json!(nanos);

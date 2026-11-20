@@ -422,6 +422,34 @@ impl<'a> ObservedGuest<'a> {
         socket(self.candidate, &self.owner, "docker.sock")
     }
 
+    /// Where `project` sits among the shares this pool mounts, in receipt order: the order
+    /// `audit_with` proves the provider's recorded mounts follow.
+    pub(super) fn share_position(&self, project: &Path) -> Option<usize> {
+        self.owner
+            .project_shares()
+            .iter()
+            .position(|share| share.project == project)
+    }
+
+    /// Forwards host file changes to the guest's file-watch hook (`source_notify`). It takes
+    /// no mutation lease: the request changes nothing in the pool's state and returns only
+    /// how many events fired and whether the hook exists. The pool's identity is verified
+    /// before and after, as for every read through this type.
+    pub(super) fn notify_files(
+        &self,
+        events: &[super::source_notify::GuestEvent],
+        timeout: Duration,
+    ) -> Result<(u32, bool), CandidateError> {
+        self.verify()?;
+        let fired = agent::fs_notify(
+            &socket(self.candidate, &self.owner, "agent.sock")?,
+            events,
+            timeout,
+        )?;
+        self.verify()?;
+        Ok(fired)
+    }
+
     /// The observed runtime incarnation; receipts name the incarnation that owns them.
     #[cfg(target_os = "macos")]
     pub(super) fn incarnation(&self) -> &str {

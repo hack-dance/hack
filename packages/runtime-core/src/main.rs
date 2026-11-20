@@ -480,6 +480,26 @@ fn run() -> Result<(), CandidateError> {
                 Path::new(project),
             )?)?;
         }
+        ["runtime", "source-notify", "--project", project] => {
+            hack_runtime_core::provider::source_notify::watch(
+                &discover_candidate(&requested)?,
+                Path::new(project),
+                false,
+            )?;
+        }
+        [
+            "runtime",
+            "source-notify",
+            "--project",
+            project,
+            "--until-stdin-closes",
+        ] => {
+            hack_runtime_core::provider::source_notify::watch(
+                &discover_candidate(&requested)?,
+                Path::new(project),
+                true,
+            )?;
+        }
         ["runtime", "up", arguments @ ..]
             if arguments.contains(&"--bridge-sockets")
                 || arguments.contains(&"--minimum-bridge-sockets")

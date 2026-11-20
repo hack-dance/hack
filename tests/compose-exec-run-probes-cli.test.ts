@@ -251,6 +251,40 @@ test("branch exec passes the branch's generated files and generates none", async
   }
 });
 
+test("exec regenerates the overrides when they name a service the Compose file dropped", async () => {
+  const composeFile = join(project, ".hack", "docker-compose.yml");
+  const original = await readFile(composeFile, "utf8");
+  await writeFile(
+    composeFile,
+    original.replace(
+      "networks:\n  hack-dev:",
+      "  worker:\n    image: alpine:3.22\n    networks: [hack-dev, default]\nnetworks:\n  hack-dev:"
+    )
+  );
+  const up = await cli(["up", "-d"]);
+  expect(up.exitCode).toBe(0);
+  const stored = await storedOverrides();
+  expect(stored.length).toBeGreaterThan(0);
+  expect(await readFile(stored[0] ?? "", "utf8")).toContain("worker:");
+
+  // worker is removed after up: a stored file still declaring it would make
+  // Compose reject the model (no image or build) for every service.
+  await writeFile(composeFile, original);
+  const exec = await cli(["exec", "api", "--", "true"]);
+  expect(exec.exitCode).toBe(0);
+  expect(exec.calls).toEqual(["compose exec"]);
+  const files = [...(exec.raw[0] ?? "").matchAll(/-f (\S+)/g)].map(
+    (m) => m[1] ?? ""
+  );
+  expect(files.length).toBeGreaterThan(1);
+  for (const file of files) {
+    expect([file, await readFile(file, "utf8")]).not.toEqual([
+      file,
+      expect.stringContaining("worker:"),
+    ]);
+  }
+});
+
 test("exec with nothing generated yet reads and writes no override", async () => {
   const result = await cli(["exec", "api", "--", "true"]);
   expect(result.exitCode).toBe(0);

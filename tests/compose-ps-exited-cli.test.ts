@@ -46,6 +46,16 @@ case " $* " in
           *) printf '%s\\n' 'web running' ;;
         esac ;;
     esac ;;
+  *" exec "*)
+    case "\${STUB_PS_MODE:-}" in
+      permission)
+        printf '%s\n' 'permission denied while trying to connect to the docker API at unix:///var/run/docker.sock' >&2
+        exit 1 ;;
+      unreachable)
+        printf '%s\n' 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?' >&2
+        exit 1 ;;
+    esac
+    exit 0 ;;
   *) exit 0 ;;
 esac
 `;
@@ -223,7 +233,8 @@ test("Compose ps reports the engine's cause with a stable code (HACK-2068)", asy
       expect(calls).toHaveLength(1);
       expect(calls[0]).toContain("--format");
 
-      // `hack exec` reads the same listing before running and keeps the cause.
+      // `hack exec` reads the same listing after Compose refused it, and keeps
+      // the cause.
       const exec = await cli(["exec", "web", "--", "true"], mode);
       expect(exec.exitCode).toBe(1);
       expect(`${exec.stdout}${exec.stderr}`).toContain(`${code}:`);

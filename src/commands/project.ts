@@ -11081,9 +11081,23 @@ async function handleExec({
   // The container already exists: DNS, host entries, trust and runtime
   // labels were applied when it was created, and Compose only needs the
   // service in its file list to find it. Pass the generated files `up` left
-  // on disk; generate nothing and read no global address.
+  // on disk; generate nothing and read no global address. A stored file that
+  // still names a service the Compose file no longer has would make Compose
+  // reject the whole model, so then regenerate them as before.
+  const allServiceNames = await readComposeServiceNames(project.composeFile);
+  const stored = await existingExecComposeFiles({ project, branch });
   const { composeFilesWithInternal, runtimeMetadataOverride } =
-    await existingExecComposeFiles({ project, branch });
+    (await generatedFilesMatchServices({
+      files: stored.generated,
+      serviceNames: allServiceNames,
+    }))
+      ? stored
+      : await generateExecComposeFiles({
+          project,
+          cfg,
+          branch,
+          composeProject: composeProjectName ?? baseProjectName,
+        });
 
   const projectName = sanitizeProjectSlug(baseProjectName);
   const lifecycleComposeProject = resolveLifecycleComposeProjectName({
@@ -11097,7 +11111,6 @@ async function handleExec({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
   });
-  const allServiceNames = await readComposeServiceNames(project.composeFile);
   const envOverrides = await resolveComposeEnvOverrides({
     project,
     projectName,
@@ -11349,10 +11362,7 @@ async function resolveCanSkipRunDependencies(opts: {
 async function existingExecComposeFiles(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly branch: string | null;
-}): Promise<{
-  readonly composeFilesWithInternal: readonly string[];
-  readonly runtimeMetadataOverride: string | null;
-}> {
+}): Promise<ExecComposeFiles & { readonly generated: readonly string[] }> {
   const { project, branch } = opts;
   const branchOverride = branch
     ? resolve(project.projectDir, ".branch", `compose.${branch}.override.yml`)
@@ -11374,14 +11384,69 @@ async function existingExecComposeFiles(opts: {
       }),
       pathExists(runtimeOverride),
     ]);
+  const generated = [
+    ...(hasBranchOverride && branchOverride ? [branchOverride] : []),
+    ...(internalOverride ? [internalOverride] : []),
+  ];
   return {
-    composeFilesWithInternal: [
-      project.composeFile,
-      ...(hasBranchOverride && branchOverride ? [branchOverride] : []),
-      ...(internalOverride ? [internalOverride] : []),
-    ],
+    composeFilesWithInternal: [project.composeFile, ...generated],
     runtimeMetadataOverride: hasRuntimeOverride ? runtimeOverride : null,
+    generated: [...generated, ...(hasRuntimeOverride ? [runtimeOverride] : [])],
   };
+}
+
+interface ExecComposeFiles {
+  readonly composeFilesWithInternal: readonly string[];
+  readonly runtimeMetadataOverride: string | null;
+}
+
+/**
+ * True when every service the generated `files` declare is still in
+ * `serviceNames` (the Compose file's). A local YAML read, no Docker call.
+ */
+async function generatedFilesMatchServices(opts: {
+  readonly files: readonly string[];
+  readonly serviceNames: readonly string[];
+}): Promise<boolean> {
+  const known = new Set(opts.serviceNames);
+  const declared = await Promise.all(opts.files.map(readComposeServiceNames));
+  return declared.every((names) => names.every((name) => known.has(name)));
+}
+
+/** Renders the generated Compose files against the current graph, as `up` does. */
+async function generateExecComposeFiles(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly branch: string | null;
+  readonly composeProject: string;
+}): Promise<ExecComposeFiles> {
+  const { project, cfg, branch } = opts;
+  const devHost = await resolveRuntimeDevHost({ project, branch });
+  const aliasHost = resolveBranchAliasHost({ devHost, cfg });
+  const internalOverride = await resolveInternalComposeOverride({
+    project,
+    cfg,
+    branch,
+    devHost,
+    aliasHost,
+    // The container exists; its addresses were applied when it was created.
+    addresses: "recorded",
+  });
+  const composeFiles = branch
+    ? await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })
+    : [project.composeFile];
+  const composeFilesWithInternal = internalOverride
+    ? [...composeFiles, internalOverride]
+    : composeFiles;
+  const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
+    project,
+    composeFiles: composeFilesWithInternal,
+    branch,
+    devHost,
+    aliasHost,
+    composeProject: opts.composeProject,
+  });
+  return { composeFilesWithInternal, runtimeMetadataOverride };
 }
 
 /** Exit code of `docker compose exec` when the service is not running. */
@@ -11426,7 +11491,9 @@ async function requireExecTargetReady(opts: {
 /**
  * After a foreground `compose exec` exits with Compose's refusal code, throws
  * the usage error naming `hack up -d` and `hack run` when the service is not
- * running. A failed read leaves Compose's own message and exit code standing.
+ * running, or the read's coded error (an unreachable engine, a failed
+ * Compose) when the listing cannot be read. A command that itself exited 1 in
+ * a running service gets nothing added.
  */
 async function explainRefusedForegroundExec(opts: {
   readonly exitCode: number;
@@ -11436,13 +11503,9 @@ async function explainRefusedForegroundExec(opts: {
   if (opts.background || opts.exitCode !== COMPOSE_EXEC_REFUSED_EXIT_CODE) {
     return;
   }
-  try {
-    await requireExecTargetRunning(opts.readiness);
-  } catch (error) {
-    if (error instanceof CliUsageError) {
-      throw error;
-    }
-  }
+  // A stopped service gets the `hack up -d` / `hack run` hint; an engine that
+  // cannot be reached gets its coded cause, as `hack ps` reports it.
+  await requireExecTargetRunning(opts.readiness);
 }
 
 /** The refusal when the instance runs another env overlay; no Docker read. */

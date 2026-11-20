@@ -5,6 +5,11 @@ batch of two bridges (route `r`, loopback port `p`) and a cleanup releasing
 them, with one provider lease, container replacement and health loss at any
 time, and owner and cleanup crashes between any two steps.
 
+Charts (Pele, house theme): [start](../../../../docs/assets/diagrams/bridge-batch-start.light.svg),
+[release](../../../../docs/assets/diagrams/bridge-batch-release.light.svg) and the
+[request path](../../../../docs/assets/diagrams/bridge-batch-sequence.light.svg);
+Mermaid sources sit next to them.
+
 ## Invariants (`Safe`)
 
 | Invariant | In plain words |

@@ -22,8 +22,8 @@ fn session_negotiates_before_one_request() {
                 &mut guest,
                 &Response::Welcome {
                     version,
-                    boot: "boot".into(),
-                    incarnation: "agent".into(),
+                    boot: "12345678-0000-4000-a000-000000000001".into(),
+                    incarnation: "12345678-0000-4000-a000-000000000002".into(),
                 },
             )
             .unwrap();
@@ -32,9 +32,12 @@ fn session_negotiates_before_one_request() {
                 write_frame(
                     &mut guest,
                     &Response::Facts {
-                        boot: "boot".into(),
-                        incarnation: "agent".into(),
+                        boot: "12345678-0000-4000-a000-000000000001".into(),
+                        incarnation: "12345678-0000-4000-a000-000000000002".into(),
                         arch: "guest".into(),
+                        kernel: "kernel".into(),
+                        agent_version: "1".into(),
+                        unix_ms: 1,
                     },
                 )
                 .unwrap();

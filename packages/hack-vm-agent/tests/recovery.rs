@@ -76,6 +76,7 @@ fn late_start_exit_reconnect_and_restart() {
             "test -z \"$HOME\" || exit 99; cat; printf err >&2; exit 37".into(),
         ],
         env: vec![],
+        cwd: "/".into(),
         stdin: b"input".to_vec(),
     };
     let mut frame = Vec::new();
@@ -95,6 +96,9 @@ fn late_start_exit_reconnect_and_restart() {
             _ => panic!("lost terminal result"),
         }
     }
+    assert!(
+        matches!(agent.request(Request::List {}),Response::Handles {handles} if handles == [handle()])
+    );
     assert!(agent.request(start()) == Response::Conflict {});
     for (stdout, expected) in [(true, b"input".as_slice()), (false, b"err")] {
         loop {
@@ -146,6 +150,7 @@ fn signal_exit_and_release_tombstone() {
         handle: handle(),
         argv: vec!["/bin/sleep".into(), "30".into()],
         env: vec![],
+        cwd: "/".into(),
         stdin: vec![],
     };
     assert!(agent.request(start()) == Response::Running {});
@@ -175,4 +180,68 @@ fn signal_exit_and_release_tombstone() {
     }
     assert!(agent.request(start()) == Response::Conflict {});
     assert!(agent.request(Request::Inspect { handle: handle() }) == Response::Released {});
+}
+
+#[test]
+fn output_cap_still_drains_and_preserves_exit() {
+    let dir = std::env::temp_dir().join(format!("guest-output-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let agent = Fixture::boot(dir);
+    let Response::Facts {
+        boot,
+        incarnation,
+        kernel,
+        unix_ms,
+        ..
+    } = agent.request(Request::Facts {})
+    else {
+        panic!("missing facts")
+    };
+    assert!(!kernel.is_empty() && unix_ms > 0);
+    let handle = Handle {
+        boot,
+        incarnation,
+        id: "0".repeat(32),
+    };
+    assert_eq!(
+        agent.request(Request::Start {
+            handle: handle.clone(),
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "head -c 131072 /dev/zero; exit 9".into()
+            ],
+            env: vec![],
+            cwd: "/".into(),
+            stdin: vec![]
+        }),
+        Response::Running {}
+    );
+    let end = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Response::Output {
+            bytes,
+            eof: true,
+            truncated: true,
+        } = agent.request(Request::Output {
+            handle: handle.clone(),
+            stream: Stream::Stdout,
+            offset: 65536,
+        }) {
+            assert!(bytes.is_empty());
+            break;
+        }
+        assert!(Instant::now() < end);
+        thread::sleep(Duration::from_millis(5));
+    }
+    loop {
+        if agent.request(Request::Inspect {
+            handle: handle.clone(),
+        }) == (Response::Exited { code: 9 })
+        {
+            break;
+        }
+        assert!(Instant::now() < end);
+        thread::sleep(Duration::from_millis(5));
+    }
 }

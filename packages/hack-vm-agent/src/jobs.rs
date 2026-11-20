@@ -46,7 +46,12 @@ pub struct Job {
     stderr: Pipe,
 }
 impl Job {
-    pub fn start(argv: Vec<String>, env: Vec<(String, String)>, input: Vec<u8>) -> Self {
+    pub fn start(
+        argv: Vec<String>,
+        env: Vec<(String, String)>,
+        cwd: String,
+        input: Vec<u8>,
+    ) -> Self {
         let mut job = Self {
             process: None,
             status: Response::SpawnFailed {},
@@ -56,6 +61,7 @@ impl Job {
         let Some(exe) = argv.first() else { return job };
         let Ok(mut child) = Command::new(exe)
             .args(&argv[1..])
+            .current_dir(cwd)
             .env_clear()
             .envs(env)
             .stdin(Stdio::piped())
@@ -91,12 +97,7 @@ impl Job {
         }
     }
     pub fn inspect(&self) -> Response {
-        match self.status {
-            Response::Exited { code } => Response::Exited { code },
-            Response::Signaled { signal } => Response::Signaled { signal },
-            Response::Running {} => Response::Running {},
-            _ => Response::SpawnFailed {},
-        }
+        self.status.clone()
     }
     pub fn signal(&self, signal: Signal) -> Response {
         let Some(child) = &self.process else {

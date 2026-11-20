@@ -21,21 +21,39 @@ use std::{
 struct Agent {
     boot: String,
     incarnation: String,
+    kernel: String,
     jobs: Mutex<HashMap<String, Option<Job>>>,
 }
 
 impl Agent {
-    fn valid(&self, h: &Handle) -> bool {
-        h.boot == self.boot
-            && h.incarnation == self.incarnation
-            && h.id.len() == 32
-            && h.id.bytes().all(|c| c.is_ascii_hexdigit())
-    }
     fn dispatch(&self, req: Request) -> Response {
         use Request::*;
         let handle = match &req {
+            List {} => {
+                let jobs = self.jobs.lock().unwrap();
+                let mut handles: Vec<_> = jobs
+                    .iter()
+                    .filter(|(_, job)| job.is_some())
+                    .map(|(id, _)| Handle {
+                        boot: self.boot.clone(),
+                        incarnation: self.incarnation.clone(),
+                        id: id.clone(),
+                    })
+                    .collect();
+                handles.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+                return Response::Handles { handles };
+            }
             Facts {} => {
+                let Ok(elapsed) =
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                else {
+                    return Response::Unknown {};
+                };
+
                 return Response::Facts {
+                    unix_ms: elapsed.as_millis() as u64,
+                    kernel: self.kernel.clone(),
+                    agent_version: env!("CARGO_PKG_VERSION").into(),
                     arch: std::env::consts::ARCH.into(),
                     boot: self.boot.clone(),
                     incarnation: self.incarnation.clone(),
@@ -48,7 +66,7 @@ impl Agent {
             | Output { handle, .. }
             | Release { handle } => handle,
         };
-        if !self.valid(handle) {
+        if self.boot != handle.boot || self.incarnation != handle.incarnation {
             return Response::Unknown {};
         }
         let mut jobs = self.jobs.lock().unwrap();
@@ -56,6 +74,7 @@ impl Agent {
             handle,
             argv,
             env,
+            cwd,
             stdin,
         } = req
         {
@@ -66,7 +85,7 @@ impl Agent {
                 return Response::Full {};
             }
             let slot = jobs.entry(handle.id).or_default();
-            *slot = Some(Job::start(argv, env, stdin));
+            *slot = Some(Job::start(argv, env, cwd, stdin));
             return slot.as_ref().unwrap().inspect();
         }
         let Some(slot) = jobs.get_mut(&handle.id) else {
@@ -132,6 +151,9 @@ fn run() -> io::Result<()> {
     let agent = Arc::new(Agent {
         boot,
         incarnation,
+        kernel: fs::read_to_string("/proc/sys/kernel/osrelease")?
+            .trim()
+            .to_owned(),
         jobs: Mutex::default(),
     });
     // SAFETY: single-threaded startup. All later socket creation inherits owner-only permissions.

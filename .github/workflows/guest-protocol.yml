@@ -25,7 +25,7 @@ jobs:
           distribution: temurin
           java-version: "17"
       - name: Model execution recovery
-        working-directory: packages/hack-vm-agent/model
+        working-directory: packages/hack-vm-protocol/model
         run: |
           curl --fail --location --retry 2 --max-time 60 https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar -o "$RUNNER_TEMP/tlc.jar"
           echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  $RUNNER_TEMP/tlc.jar" | sha256sum --check

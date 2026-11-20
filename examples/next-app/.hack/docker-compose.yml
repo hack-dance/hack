@@ -13,6 +13,8 @@ services:
   next-app:
     image: imbios/bun-node:latest
     working_dir: /app
+    init: true
+    stop_grace_period: 2s
     volumes:
       - ..:/app
       - node_modules:/app/node_modules
@@ -39,6 +41,13 @@ services:
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "example-db"]
+      start_period: 30s
+      start_interval: 250ms
+      interval: 10s
+      timeout: 3s
+      retries: 3
     networks:
       - default
   redis:
@@ -58,8 +67,10 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@db:5432/example-db
     depends_on:
-      - db
-      - deps
+      db:
+        condition: service_healthy
+      deps:
+        condition: service_completed_successfully
     networks:
       - default
     profiles: ["ops"]
@@ -70,4 +81,5 @@ networks:
 
 volumes:
   postgres-data:
+  redis-data:
   node_modules:

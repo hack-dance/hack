@@ -69,8 +69,10 @@ ops:
   environment:
     DATABASE_URL: postgres://postgres:postgres@db:5432/mydb
   depends_on:
-    - db
-    - deps
+    db:
+      condition: service_healthy
+    deps:
+      condition: service_completed_successfully
   networks:
     - default
   profiles: ["ops"]

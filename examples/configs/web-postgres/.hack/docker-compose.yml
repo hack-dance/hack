@@ -12,6 +12,9 @@ services:
   web:
     image: oven/bun:1.4.4-slim
     working_dir: /app
+    # A dev server stops at once on `hack down`: init passes it the stop signal.
+    init: true
+    stop_grace_period: 2s
     command: ["bun", "run", "dev"]
     volumes:
       - ..:/app
@@ -37,11 +40,14 @@ services:
       POSTGRES_DB: app
     volumes:
       - db-data:/var/lib/postgresql/data
+    # Checked every 250ms while starting, then every 10s once healthy.
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "app", "-d", "app"]
-      interval: 2s
+      start_period: 30s
+      start_interval: 250ms
+      interval: 10s
       timeout: 3s
-      retries: 30
+      retries: 3
 
 volumes:
   node_modules: {}

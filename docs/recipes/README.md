@@ -30,6 +30,8 @@ run on the default Compose backend.
 - [Dependency directories and caches](dependency-directories.md): where
   `node_modules`, build output and caches live, and the native backend's
   differences.
+- [Fast, correct health checks and shutdown](fast-health-checks.md): start
+  dependents as soon as a service is healthy, and stop dev servers at once.
 - [Clean up](cleanup.md): branch instances, worktrees, orphaned containers,
   volumes and stale `node_modules`.
 

@@ -36,6 +36,8 @@ services:
     image: oven/bun:1.4.4-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a
     platform: linux/arm64
     working_dir: /app
+    init: true
+    stop_grace_period: 2s
     command: ["bun", "src/server.ts"]
     depends_on:
       install:
@@ -48,9 +50,11 @@ services:
       - generated:/generated:ro
     healthcheck:
       test: ["CMD", "bun", "-e", "const r = await fetch('http://127.0.0.1:3000/healthz'); process.exit(r.ok ? 0 : 1)"]
-      interval: 5s
+      start_period: 30s
+      start_interval: 250ms
+      interval: 10s
       timeout: 3s
-      retries: 12
+      retries: 3
 
 volumes:
   dependencies: {}

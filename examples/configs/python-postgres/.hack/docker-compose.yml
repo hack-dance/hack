@@ -13,6 +13,8 @@ services:
   web:
     image: python:3.13-slim
     working_dir: /app
+    init: true
+    stop_grace_period: 2s
     command: ["/venv/bin/python", "app.py"]
     environment:
       PYTHONUNBUFFERED: "1"
@@ -42,9 +44,11 @@ services:
       - db-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "app", "-d", "app"]
-      interval: 2s
+      start_period: 30s
+      start_interval: 250ms
+      interval: 10s
       timeout: 3s
-      retries: 30
+      retries: 3
 
 volumes:
   venv: {}

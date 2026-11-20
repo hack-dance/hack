@@ -67,6 +67,9 @@ services:
   web:
     image: oven/bun:1.4.4-slim
     working_dir: /app
+    # A dev server stops at once on `hack down`: init passes it the stop signal.
+    init: true
+    stop_grace_period: 2s
     command: ["bun", "run", "dev"]
     volumes:
       - ..:/app
@@ -92,11 +95,14 @@ services:
       POSTGRES_DB: app
     volumes:
       - db-data:/var/lib/postgresql/data
+    # Checked every 250ms while starting, then every 10s once healthy.
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "app", "-d", "app"]
-      interval: 2s
+      start_period: 30s
+      start_interval: 250ms
+      interval: 10s
       timeout: 3s
-      retries: 30
+      retries: 3
 
 volumes:
   node_modules: {}
@@ -147,6 +153,8 @@ services:
   api:
     image: oven/bun:1.4.4-slim
     working_dir: /app
+    init: true
+    stop_grace_period: 2s
     command: ["bun", "run", "api"]
     volumes:
       - ..:/app
@@ -167,6 +175,8 @@ services:
   worker:
     image: oven/bun:1.4.4-slim
     working_dir: /app
+    init: true
+    stop_grace_period: 2s
     command: ["bun", "run", "worker"]
     volumes:
       - ..:/app
@@ -183,9 +193,11 @@ services:
       - queue-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 2s
+      start_period: 30s
+      start_interval: 250ms
+      interval: 10s
       timeout: 3s
-      retries: 30
+      retries: 3
 
 volumes:
   node_modules: {}
@@ -248,6 +260,8 @@ services:
   web:
     image: oven/bun:1.4.4-slim
     working_dir: /app/apps/web
+    init: true
+    stop_grace_period: 2s
     command: ["bun", "run", "dev"]
     volumes: *app-volumes
     depends_on:
@@ -264,6 +278,8 @@ services:
   api:
     image: oven/bun:1.4.4-slim
     working_dir: /app/apps/api
+    init: true
+    stop_grace_period: 2s
     command: ["bun", "run", "dev"]
     volumes: *app-volumes
     depends_on:
@@ -328,6 +344,8 @@ services:
   web:
     image: python:3.13-slim
     working_dir: /app
+    init: true
+    stop_grace_period: 2s
     command: ["/venv/bin/python", "app.py"]
     environment:
       PYTHONUNBUFFERED: "1"
@@ -357,9 +375,11 @@ services:
       - db-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "app", "-d", "app"]
-      interval: 2s
+      start_period: 30s
+      start_interval: 250ms
+      interval: 10s
       timeout: 3s
-      retries: 30
+      retries: 3
 
 volumes:
   venv: {}
@@ -409,6 +429,8 @@ services:
   build:
     image: oven/bun:1.4.4-slim
     working_dir: /app
+    init: true
+    stop_grace_period: 2s
     command: ["bun", "run", "watch"]
     volumes:
       - ..:/app
@@ -493,9 +515,11 @@ services:
       - db-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "app", "-d", "app"]
-      interval: 2s
+      start_period: 30s
+      start_interval: 250ms
+      interval: 10s
       timeout: 3s
-      retries: 30
+      retries: 3
 
   cache:
     image: redis:8.2-alpine

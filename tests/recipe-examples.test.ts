@@ -28,6 +28,7 @@ import {
   lockfileIssues,
   missingLifecycleScripts,
   pinnedDependencies,
+  startupTimingIssues,
 } from "./helpers/recipe-examples.ts";
 
 /**
@@ -240,6 +241,62 @@ test("each example Compose file follows the routing, image and deps rules", asyn
       )
     )
   ).toEqual([]);
+});
+
+const PATTERN_EXAMPLES = [
+  "examples/patterns/p01-dependency-bootstrap",
+  "examples/patterns/p02-portable-toolchain",
+  "examples/patterns/p07-capability-overlays",
+];
+
+test("each example starts on the first passing health check and stops at once", async () => {
+  for (const dir of [...examples, ...PATTERN_EXAMPLES]) {
+    const compose = await readRecord(
+      join(REPO_ROOT, dir, ".hack/docker-compose.yml")
+    );
+    expect(startupTimingIssues(compose), dir).toEqual([]);
+  }
+});
+
+test("negative controls: the startup timing rules reject slow settings", () => {
+  expect(
+    startupTimingIssues({
+      services: {
+        db: {
+          image: "postgres:17.6-alpine",
+          healthcheck: { test: ["CMD", "pg_isready"], interval: "2s" },
+        },
+        cache: {
+          image: "redis:8.2-alpine",
+          healthcheck: {
+            test: ["CMD", "redis-cli", "ping"],
+            start_period: "30s",
+            start_interval: "5s",
+            interval: "10s",
+          },
+        },
+        web: {
+          image: "oven/bun:1.4.4-slim",
+          command: ["bun", "run", "dev"],
+          stop_grace_period: "10s",
+          depends_on: { deps: { condition: "service_completed_successfully" } },
+        },
+        stub: { image: "postgres:17.6-alpine", command: ["sleep", "infinity"] },
+        deps: { image: "oven/bun:1.4.4-slim", command: ["bun", "install"] },
+        proxy: { image: "caddy:2.10-alpine", command: ["caddy", "run"] },
+        tool: { image: "oven/bun:1.4.4-slim", profiles: ["tools"] },
+      },
+    })
+  ).toEqual([
+    "db: health-without-start-period",
+    "db: health-without-fast-start-interval",
+    "db: health-interval-under-10s",
+    "cache: health-without-fast-start-interval",
+    "web: long-running-without-init",
+    "web: long-running-without-short-stop-grace",
+    "stub: long-running-without-init",
+    "stub: long-running-without-short-stop-grace",
+  ]);
 });
 
 test("each example env file is a committed, secret-free overlay with known scopes", async () => {

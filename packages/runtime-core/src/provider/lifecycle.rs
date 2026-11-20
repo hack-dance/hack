@@ -4298,7 +4298,8 @@ printf 'verified-cache\n'
     /// connections open and unanswered, then answers every later one with `reply` until it
     /// is dropped, one byte every `gap` when a gap is given. A client that has already given
     /// up is ignored. Dropping it stops and joins its thread, also when an assertion has
-    /// failed or no client ever connected.
+    /// failed or no client ever connected: the thread polls for connections and never blocks
+    /// in accept.
     struct Forward {
         path: std::path::PathBuf,
         done: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -4325,11 +4326,24 @@ printf 'verified-cache\n'
                 let (done, accepted) = (done.clone(), accepted.clone());
                 std::thread::spawn(move || {
                     let mut held = Vec::new();
-                    for stream in listener.incoming() {
-                        if done.load(Ordering::SeqCst) {
-                            break;
-                        }
-                        let Ok(mut stream) = stream else { break };
+                    // Never block in accept: the thread must end when it is told to, without
+                    // anybody having to connect.
+                    listener.set_nonblocking(true).unwrap();
+                    while !done.load(Ordering::SeqCst) {
+                        let mut stream = match listener.accept() {
+                            Ok((stream, _)) => stream,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(2));
+                                continue;
+                            }
+                            Err(_) => break,
+                        };
+                        // An accepted socket can inherit the listener's mode.
+                        stream.set_nonblocking(false).unwrap();
+                        // A client that connects and sends nothing must not hold the thread.
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
                         if accepted.fetch_add(1, Ordering::SeqCst) < hold {
                             held.push(stream);
                             continue;
@@ -4365,8 +4379,6 @@ printf 'verified-cache\n'
     impl Drop for Forward {
         fn drop(&mut self) {
             self.done.store(true, std::sync::atomic::Ordering::SeqCst);
-            // Wake the accept loop so it sees `done`.
-            drop(UnixStream::connect(&self.path));
             if let Some(thread) = self.thread.take() {
                 let _ = thread.join();
             }

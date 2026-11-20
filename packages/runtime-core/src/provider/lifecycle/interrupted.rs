@@ -403,7 +403,7 @@ fn set_aside(
         sync_moved(directory, label)?;
     }
     #[cfg(target_os = "macos")]
-    super::interactive_session::after_boot_stopped(candidate, owner);
+    super::super::interactive_session::after_boot_stopped(candidate, owner);
     // The owner transition commits the set-aside; the intent is removed only after it. An
     // interruption between the two leaves `stopped-before-engine` with the intent, which
     // `recover` then removes as complete.

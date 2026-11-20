@@ -1839,11 +1839,21 @@ Measured on a real VM (pool only unless said, host load 6 to 7):
 | The same with the provider's own watcher forced on | 30 ms; about 1.5 s; start 110 s (the scan) |
 | The same with hot reload off | the container saw the change 4.1 s later; the server never recompiled; start 74 s |
 
+Pool boot (`runtime up`, pool only, a stopped pool, host load 5 to 7):
+
+| Share | Hack's watcher | Provider's watcher | Hot reload off |
+| --- | --- | --- | --- |
+| 1,003 entries | 7.1 s | 7.2 s | 7.2 s |
+| A real project's checkout, 276,043 entries | 7.2 s | 20.5 s | 7.2 s |
+
 What this mode does not have: the provider caches lookups of missing names only while its
-own watcher runs, so they are not cached here (3,000 such lookups cost 0.12 s each time). On
+own watcher runs, so they are not cached here. Measured in a service container whose
+dependencies are on the share (an installed tree of 34,000 entries), resolving 2,000 package
+names that do not exist: 76 ms and then 5 ms with the provider's watcher; 70 ms every time
+with Hack's watcher or with hot reload off, about 35 microseconds a lookup. Resolving the
+installed packages took the same in all three (about 50 ms the first time, 4 ms after). On
 the real project it made no visible difference to the first page compile (1.5 to 1.9 s here,
-2.0 s with the provider's watcher); that project keeps its dependencies on a guest volume, so
-a project that resolves modules across the share may see more.
+2.0 s with the provider's watcher); that project keeps its dependencies on a guest volume.
 
 ### Starting a pool that is already running
 

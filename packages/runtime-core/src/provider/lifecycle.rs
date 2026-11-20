@@ -1853,7 +1853,8 @@ fn stalled_boot(error: CandidateError) -> CandidateError {
         "provider_boot_stalled",
         "The provider ended the start: the VM made no boot progress within the provider's \
          limit. Recover the pool before retrying. A large shared project directory is one \
-         known cause; HACK_NATIVE_HOT_RELOAD=off starts without the scan that causes it.",
+         known cause: HACK_NATIVE_HOT_RELOAD=off starts without the scan that causes it, and \
+         HACK_NATIVE_HOT_RELOAD=watcher does too and keeps hot reload.",
     )
 }
 
@@ -3646,7 +3647,16 @@ mod tests {
         ));
         assert_eq!(stalled.code, "provider_boot_stalled");
         assert!(stalled.message_fixed);
+        // Both ways out are named, in one printable line the CLI will show.
         assert!(stalled.message.contains("HACK_NATIVE_HOT_RELOAD=off"));
+        assert!(stalled.message.contains("HACK_NATIVE_HOT_RELOAD=watcher"));
+        assert!(stalled.message.len() <= 400, "{}", stalled.message.len());
+        assert!(
+            stalled
+                .message
+                .bytes()
+                .all(|byte| (0x20..=0x7e).contains(&byte))
+        );
         // Another failure of the same command keeps its code and text.
         let other = stalled_boot(CandidateError::new(
             "provider_command_failed",

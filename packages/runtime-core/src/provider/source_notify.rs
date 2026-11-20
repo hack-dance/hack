@@ -14,13 +14,20 @@
 //! Every change is forwarded by its own name, because a watcher on one file is not woken by
 //! an event on the file's directory. Bounds, so an install of thousands of files on the host
 //! can neither flood the guest nor hold up a later source edit for long:
+//! - at most [`INGRESS_LIMIT`] notifications wait at any time; one more sets an overflow mark;
 //! - changes are gathered for [`BATCH_WINDOW`], at most [`MAX_BATCH_NOTIFICATIONS`] at a time,
 //!   and repeats of one path inside a batch are merged;
 //! - a batch reaches the guest in requests of at most [`MAX_GUEST_EVENTS`] events and
-//!   [`MAX_BATCH_PATH_BYTES`] bytes of paths, one request in flight;
-//! - only when more than [`FLOOD_LIMIT`] notifications are still waiting behind a full batch
-//!   is everything waiting replaced by one "something changed under the share" event. That is
-//!   the single lossy case; no change is ever turned into silence.
+//!   [`MAX_REQUEST_BYTES`] encoded bytes, one request in flight, on one kept connection.
+//!
+//! Changes are announced only as "something changed under the share" (an event on the share
+//! root) in two cases: after an overflow, for everything that was waiting; and when a watcher
+//! starts, for whatever changed while none was running. No change is ever turned into
+//! silence.
+//!
+//! Only paths inside the share are named. The guest follows links when it resolves a path,
+//! so a link is never named (its directory is, instead), and nothing is named below a
+//! directory that is itself reached through a link.
 
 use super::identity::{self, ProcessIdentity};
 use crate::{Candidate, CandidateError};
@@ -37,11 +44,13 @@ pub const BATCH_WINDOW: Duration = Duration::from_millis(50);
 pub const MAX_GUEST_EVENTS: usize = 256;
 /// The most system notifications one batch takes from the queue; the rest wait for the next.
 pub const MAX_BATCH_NOTIFICATIONS: usize = 8192;
-/// The most bytes of guest paths one request may carry (the agent's frame is 64 KiB).
-pub const MAX_BATCH_PATH_BYTES: usize = 32 * 1024;
-/// Notifications waiting behind a full batch beyond which the backlog is given up: they are
-/// replaced by one event on the share root.
-pub const FLOOD_LIMIT: usize = 32_768;
+/// The most encoded bytes of events one request may carry (the agent's frame is 64 KiB).
+pub const MAX_REQUEST_BYTES: usize = 48 * 1024;
+/// The most notifications that may wait to be forwarded. One more is not queued: it sets the
+/// overflow mark, and everything waiting is then replaced by one event on the share root.
+pub const INGRESS_LIMIT: usize = 40_960;
+/// How often a failed request is tried again on a new connection to the same pool.
+const DELIVERY_ATTEMPTS: usize = 3;
 /// How long one batch may take to reach the guest.
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often an idle watcher checks that it should still run.
@@ -109,12 +118,13 @@ pub fn ignored(relative: &Path) -> bool {
         .any(|part| matches!(part, Component::Normal(name) if name == ".git"))
 }
 
-/// A relative path the hook can take: plain components, valid UTF-8, no line break.
+/// A relative path the hook can take: plain components, valid UTF-8, no control character
+/// (the hook is line-based, and control characters grow when encoded).
 fn sendable(relative: &Path) -> bool {
     relative.components().all(|part| match part {
         Component::Normal(name) => name
             .to_str()
-            .is_some_and(|text| !text.contains(['\n', '\r', '\0'])),
+            .is_some_and(|text| !text.chars().any(char::is_control)),
         _ => false,
     })
 }
@@ -222,24 +232,71 @@ pub fn guest_events(base: &str, events: &[HostEvent]) -> Vec<GuestEvent> {
     lines
 }
 
-/// What the file system says about a path now: `Some(true)` a directory, `Some(false)`
-/// anything else that exists, `None` nothing there.
-pub fn probe(path: &Path) -> Option<bool> {
-    std::fs::symlink_metadata(path)
-        .ok()
-        .map(|metadata| metadata.is_dir())
+/// What a path is on the host now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entry {
+    Directory,
+    Link,
+    Other,
+}
+
+/// What the file system says about a path now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seen {
+    /// `None`: nothing is there.
+    pub entry: Option<Entry>,
+    /// The nearest directory above the path that exists and is reached through no link,
+    /// relative to the share root. `None` when a link lies on the way.
+    pub anchor: Option<PathBuf>,
+}
+
+/// Looks at `path` (under the canonical `root`) without following a link at the path itself.
+pub fn probe(root: &Path, path: &Path) -> Seen {
+    let entry = std::fs::symlink_metadata(path).ok().map(|metadata| {
+        if metadata.file_type().is_symlink() {
+            Entry::Link
+        } else if metadata.is_dir() {
+            Entry::Directory
+        } else {
+            Entry::Other
+        }
+    });
+    if path == root {
+        return Seen {
+            entry,
+            anchor: Some(PathBuf::new()),
+        };
+    }
+    let mut above = path.parent();
+    let anchor = loop {
+        let Some(directory) = above.filter(|directory| directory.starts_with(root)) else {
+            break None;
+        };
+        match std::fs::canonicalize(directory) {
+            Ok(real) if real == directory => {
+                break directory.strip_prefix(root).ok().map(Path::to_path_buf);
+            }
+            // A link on the way: nothing below it is named.
+            Ok(_) => break None,
+            // Gone (or unreadable): look further up.
+            Err(_) => above = directory.parent(),
+        }
+    };
+    Seen { entry, anchor }
 }
 
 /// The changes one system notification stands for. The system's kinds are hints: a rename
 /// reports each name without saying which is which, and several changes to one path can
 /// arrive merged. So what the path is now decides: present means created or changed, absent
-/// means removed.
+/// means removed. A link, and anything the guest could only reach through a link or through
+/// a directory that is gone, is reported through the nearest real directory above it.
 pub fn from_notification(
     root: &Path,
     event: &notify::Event,
-    probe: impl Fn(&Path) -> Option<bool>,
+    probe: impl Fn(&Path) -> Seen,
 ) -> Vec<HostEvent> {
     use notify::EventKind;
+    use notify::event::{CreateKind, ModifyKind, RemoveKind};
     if event.need_rescan() {
         return vec![HostEvent::root_rescan()];
     }
@@ -251,18 +308,32 @@ pub fn from_notification(
         let Ok(relative) = path.strip_prefix(root) else {
             continue;
         };
+        let seen = probe(path);
+        let Some(anchor) = seen.anchor else {
+            changes.push(HostEvent::root_rescan());
+            continue;
+        };
+        if anchor != parent(relative) {
+            // The path's own directory is gone: its nearest real ancestor changed.
+            changes.push(rescan(anchor));
+            continue;
+        }
         let was_folder = matches!(
             event.kind,
-            EventKind::Remove(notify::event::RemoveKind::Folder)
-                | EventKind::Create(notify::event::CreateKind::Folder)
+            EventKind::Remove(RemoveKind::Folder) | EventKind::Create(CreateKind::Folder)
         );
-        let (kind, directory) = match (probe(path), event.kind) {
-            (None, _) => (Kind::Removed, was_folder),
-            (Some(directory), EventKind::Create(_))
-            | (Some(directory), EventKind::Modify(notify::event::ModifyKind::Name(_))) => {
-                (Kind::Created, directory)
+        let (kind, directory) = match (seen.entry, event.kind) {
+            // A link is never named: the guest would follow it. So is a removed entry the
+            // system did not call a file or a folder, which may have been one.
+            (Some(Entry::Link), _) | (None, EventKind::Remove(RemoveKind::Other)) => {
+                changes.push(rescan(anchor));
+                continue;
             }
-            (Some(directory), _) => (Kind::Changed, directory),
+            (None, _) => (Kind::Removed, was_folder),
+            (Some(entry), EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_))) => {
+                (Kind::Created, entry == Entry::Directory)
+            }
+            (Some(entry), _) => (Kind::Changed, entry == Entry::Directory),
         };
         changes.push(HostEvent {
             relative: relative.to_path_buf(),
@@ -273,20 +344,33 @@ pub fn from_notification(
     changes
 }
 
-/// A batch as the requests that carry it: each within the event and path-byte bounds, in
+/// What one event adds to a request once encoded: the path with its escapes (control
+/// characters never reach here), the mask and the punctuation around them.
+fn encoded_bytes(line: &GuestEvent) -> usize {
+    line.path.len()
+        + line
+            .path
+            .bytes()
+            .filter(|byte| matches!(byte, b'"' | b'\\'))
+            .count()
+        + 40
+}
+
+/// A batch as the requests that carry it: each within the event and encoded-byte bounds, in
 /// order, nothing dropped.
 pub fn requests(base: &str, events: Vec<HostEvent>) -> Vec<Vec<GuestEvent>> {
     let mut requests: Vec<Vec<GuestEvent>> = Vec::new();
     let mut bytes = 0;
     for line in guest_events(base, &coalesce(events)) {
+        let size = encoded_bytes(&line);
         let full = requests.last().is_none_or(|request| {
-            request.len() >= MAX_GUEST_EVENTS || bytes + line.path.len() > MAX_BATCH_PATH_BYTES
+            request.len() >= MAX_GUEST_EVENTS || bytes + size > MAX_REQUEST_BYTES
         });
         if full {
             requests.push(Vec::new());
             bytes = 0;
         }
-        bytes += line.path.len();
+        bytes += size;
         requests.last_mut().expect("open request").push(line);
     }
     requests
@@ -299,22 +383,26 @@ fn unavailable(message: &'static str) -> CandidateError {
 /// Forwards changes until the queue closes or `stop` is set.
 ///
 /// It opens with one event on the share root, and that event is also the check that the
-/// guest path is right: unless the guest reports the hook present and exactly that one event
-/// fired, nothing else is ever sent (no event goes to a guessed path) and the caller learns
-/// why. A watcher that starts again after a failure therefore tells the guest "something
-/// changed under the share" before any path event.
+/// guest path exists: unless the guest reports the hook present and exactly that one event
+/// fired, nothing else is ever sent and the caller learns why. A watcher that starts again
+/// therefore tells the guest "something changed under the share" before any path event.
 ///
-/// `deliver` returns how many events fired and whether the hook exists; `alive` is called on
-/// an idle watcher every few seconds and ends it when the pool is no longer the same.
+/// `overflow` is set by whoever fills the queue when a notification did not fit; everything
+/// waiting is then dropped and one event on the share root is sent in its place.
+/// `deliver` returns how many events fired and whether the hook exists; an error from it ends
+/// the watcher. `alive` is called on an idle watcher every few seconds and ends it when the
+/// pool or the project directory is no longer the same.
 pub fn forward(
     root: &Path,
     base: &str,
     changes: &Receiver<notify::Result<notify::Event>>,
+    overflow: &AtomicBool,
     stop: &AtomicBool,
     mut deliver: impl FnMut(&[GuestEvent]) -> Result<(u32, bool), CandidateError>,
     mut alive: impl FnMut() -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
-    match deliver(&guest_events(base, &[HostEvent::root_rescan()]))? {
+    let root_event = guest_events(base, &[HostEvent::root_rescan()]);
+    match deliver(&root_event)? {
         (1, true) => {}
         (_, false) => {
             return Err(unavailable(
@@ -328,35 +416,37 @@ pub fn forward(
         }
     }
     let mut verified = Instant::now();
-    // Notifications taken off the queue while measuring a backlog, in arrival order.
-    let mut carried: std::collections::VecDeque<notify::Result<notify::Event>> =
-        std::collections::VecDeque::new();
     loop {
         if stop.load(Ordering::Acquire) {
             return Ok(());
         }
-        let first = match carried.pop_front() {
-            Some(notification) => notification,
-            None => match changes.recv_timeout(IDLE_POLL) {
-                Ok(notification) => notification,
-                Err(RecvTimeoutError::Timeout) => {
-                    if verified.elapsed() >= ALIVE_INTERVAL {
-                        alive()?;
-                        verified = Instant::now();
-                    }
-                    continue;
+        if overflow.swap(false, Ordering::AcqRel) {
+            // More arrived than may wait. What is queued now is given up (at most the
+            // queue's capacity, so this ends) and announced as one event on the root.
+            for _ in 0..INGRESS_LIMIT {
+                if changes.try_recv().is_err() {
+                    break;
                 }
-                Err(RecvTimeoutError::Disconnected) => return Ok(()),
-            },
+            }
+            deliver(&root_event)?;
+            verified = Instant::now();
+            continue;
+        }
+        let first = match changes.recv_timeout(IDLE_POLL) {
+            Ok(notification) => notification,
+            Err(RecvTimeoutError::Timeout) => {
+                if verified.elapsed() >= ALIVE_INTERVAL {
+                    alive()?;
+                    verified = Instant::now();
+                }
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => return Ok(()),
         };
         // Gather what arrives inside the window; a burst beyond the cap waits its turn.
         let mut notifications = vec![first];
         let window = Instant::now() + BATCH_WINDOW;
         while notifications.len() < MAX_BATCH_NOTIFICATIONS {
-            if let Some(notification) = carried.pop_front() {
-                notifications.push(notification);
-                continue;
-            }
             let remaining = window.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 break;
@@ -367,30 +457,17 @@ pub fn forward(
             }
         }
         let mut host = Vec::new();
-        if notifications.len() == MAX_BATCH_NOTIFICATIONS {
-            // A full batch: how much is still waiting? Past the limit the backlog is given
-            // up and replaced by one event on the share root.
-            while carried.len() <= FLOOD_LIMIT {
-                match changes.try_recv() {
-                    Ok(notification) => carried.push_back(notification),
-                    Err(_) => break,
-                }
-            }
-            if carried.len() > FLOOD_LIMIT {
-                carried.clear();
-                while changes.try_recv().is_ok() {}
-                notifications.clear();
-                host.push(HostEvent::root_rescan());
-            }
-        }
         for notification in &notifications {
             match notification {
-                Ok(event) => host.extend(from_notification(root, event, probe)),
+                Ok(event) => host.extend(from_notification(root, event, |path| probe(root, path))),
                 // The system could not say what changed: something did.
                 Err(_) => host.push(HostEvent::root_rescan()),
             }
         }
         for request in requests(base, host) {
+            if stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
             deliver(&request)?;
             verified = Instant::now();
         }
@@ -465,6 +542,25 @@ fn announce(candidate: &Candidate, project: &Path) -> Option<PathBuf> {
     Some(path)
 }
 
+/// Removes this process's note, and only this process's: a later watcher for the same
+/// project may have written its own at the same path.
+fn retract(path: &Path) {
+    let ours = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
+        .is_some_and(|record| {
+            i32::try_from(std::process::id())
+                .ok()
+                .and_then(|pid| identity::observe(pid).ok())
+                .is_some_and(|own| {
+                    own.pid == record.process.pid && own.start_micros == record.process.start_micros
+                })
+        });
+    if ours {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn running(process: &ProcessIdentity) -> bool {
     identity::observe(process.pid).is_ok_and(|now| {
         now.start_micros == process.start_micros && now.executable == process.executable
@@ -495,33 +591,50 @@ pub fn watchers(candidate: &Candidate) -> Vec<WatcherStatus> {
 }
 
 /// The long-running command behind `runtime source-notify`: watches `project`, which must be
-/// one of this pool's shares, and forwards its changes until the pool changes, the process is
-/// stopped or, with `until_stdin_closes`, its parent closes its input (or exits).
+/// one of this pool's shares, and forwards its changes until the pool or the directory
+/// changes, the process is stopped or, with `until_stdin_closes`, its parent closes its input
+/// (or exits).
 pub fn watch(
     candidate: &Candidate,
     project: &Path,
     until_stdin_closes: bool,
 ) -> Result<(), CandidateError> {
     use notify::Watcher;
+    use std::os::unix::fs::MetadataExt;
     let failed = |message: &'static str| CandidateError::new("source_notify", message);
     let root = project
         .canonicalize()
         .map_err(|_| failed("Cannot resolve the project directory."))?;
     let guest = super::lifecycle::ObservedGuest::connect(candidate)?;
-    let position = guest
-        .share_position(&root)
+    let (position, device, inode) = guest
+        .share(&root)
         .ok_or_else(|| failed("This pool does not share that project directory."))?;
+    // The directory at this path must be the one the pool mounted, now and for as long as
+    // the watcher runs: a directory moved into its place is not what the guest sees.
+    let same_directory = || {
+        std::fs::symlink_metadata(&root)
+            .is_ok_and(|now| now.is_dir() && now.dev() == device && now.ino() == inode)
+            .then_some(())
+            .ok_or_else(|| failed("The project directory is not the one this pool shares."))
+    };
+    same_directory()?;
     // `ObservedGuest::connect` audited the provider's recorded mounts: the engine first, then
     // the shares in receipt order. The agent names each mount by that position.
     let base = format!("{STAGING_ROOT}/smolvm{}", position + 1);
-    let (sender, changes) = std::sync::mpsc::channel();
+    let (sender, changes) = std::sync::mpsc::sync_channel(INGRESS_LIMIT);
+    let overflow = std::sync::Arc::new(AtomicBool::new(false));
+    let overflowed = overflow.clone();
     let mut watcher = notify::recommended_watcher(move |notification| {
-        let _ = sender.send(notification);
+        // Never blocks the system's callback: what does not fit sets the mark instead.
+        if sender.try_send(notification).is_err() {
+            overflowed.store(true, Ordering::Release);
+        }
     })
     .map_err(|_| failed("The system's file events are unavailable."))?;
     watcher
         .watch(&root, notify::RecursiveMode::Recursive)
         .map_err(|_| failed("Cannot watch the project directory."))?;
+    same_directory()?;
     let stop = std::sync::Arc::new(AtomicBool::new(false));
     if until_stdin_closes {
         let stop = stop.clone();
@@ -539,27 +652,53 @@ pub fn watch(
     // Written once the opening event has fired, removed when this process ends cleanly.
     let note = std::cell::RefCell::new(None::<PathBuf>);
     let announced = std::cell::Cell::new(false);
+    let trace = std::env::var_os("HACK_LOCAL_SOURCE_NOTIFY_TRACE").is_some();
+    let mut channel = guest.notify_channel()?;
     let result = forward(
         &root,
         &base,
         &changes,
+        &overflow,
         &stop,
         |lines| {
-            let fired = guest.notify_files(lines, DELIVERY_TIMEOUT)?;
+            // A request that fails for a passing reason (a busy agent, a dropped connection)
+            // is tried again on a new connection, which is bound to the same pool or
+            // refused. A pool that changed is never retried.
+            let mut attempt = 1;
+            let fired = loop {
+                match guest.notify_files(&mut channel, lines, DELIVERY_TIMEOUT) {
+                    Ok(fired) => break fired,
+                    Err(error)
+                        if attempt < DELIVERY_ATTEMPTS
+                            && error.code == "agent_protocol_uncertain" =>
+                    {
+                        attempt += 1;
+                        std::thread::sleep(Duration::from_millis(200));
+                        channel = guest.notify_channel()?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
             if !announced.replace(true) && fired == (1, true) {
                 *note.borrow_mut() = announce(candidate, &root);
-                // One line for the parent: forwarding has begun.
-                println!("source-notify: forwarding");
+                use std::io::Write;
+                // One line for the parent: forwarding has begun. A parent that is gone is
+                // noticed through its closed input, not here.
+                let _ = writeln!(std::io::stdout(), "source-notify: forwarding");
+                let _ = std::io::stdout().flush();
             }
-            if std::env::var_os("HACK_LOCAL_SOURCE_NOTIFY_TRACE").is_some() {
+            if trace {
                 eprintln!("source-notify: {} events, {} fired", lines.len(), fired.0);
             }
             Ok(fired)
         },
-        || guest.verify(),
+        || {
+            same_directory()?;
+            guest.verify()
+        },
     );
     if let Some(path) = note.into_inner() {
-        let _ = std::fs::remove_file(path);
+        retract(&path);
     }
     result
 }
@@ -706,9 +845,7 @@ mod tests {
         assert_eq!(sent.len(), 10_001_usize.div_ceil(MAX_GUEST_EVENTS));
         for request in &sent {
             assert!(request.len() <= MAX_GUEST_EVENTS);
-            assert!(
-                request.iter().map(|line| line.path.len()).sum::<usize>() <= MAX_BATCH_PATH_BYTES
-            );
+            assert!(request.iter().map(encoded_bytes).sum::<usize>() <= MAX_REQUEST_BYTES);
         }
         assert_eq!(sent.iter().map(Vec::len).sum::<usize>(), 10_001);
         // The edit that came last is the last line, by name.
@@ -731,9 +868,7 @@ mod tests {
         assert!(sent.len() > 1);
         assert_eq!(sent.iter().map(Vec::len).sum::<usize>(), 200);
         for request in &sent {
-            assert!(
-                request.iter().map(|line| line.path.len()).sum::<usize>() <= MAX_BATCH_PATH_BYTES
-            );
+            assert!(request.iter().map(encoded_bytes).sum::<usize>() <= MAX_REQUEST_BYTES);
         }
     }
 
@@ -760,6 +895,20 @@ mod tests {
         }
     }
 
+    /// A probe answer for a path whose own directory is real.
+    fn seen(path: &Path, entry: Option<Entry>) -> Seen {
+        Seen {
+            entry,
+            anchor: Some(
+                path.strip_prefix("/project")
+                    .ok()
+                    .and_then(Path::parent)
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default(),
+            ),
+        }
+    }
+
     #[test]
     fn what_the_path_is_now_decides_what_a_notification_means() {
         let root = Path::new("/project");
@@ -770,12 +919,11 @@ mod tests {
             }
             event
         };
-        let present = |_: &Path| Some(false);
-        let folder = |_: &Path| Some(true);
-        let absent = |_: &Path| None;
-        let one = |event: &Event, probe: &dyn Fn(&Path) -> Option<bool>| {
-            from_notification(root, event, probe)
-        };
+        let present = |path: &Path| seen(path, Some(Entry::Other));
+        let folder = |path: &Path| seen(path, Some(Entry::Directory));
+        let absent = |path: &Path| seen(path, None);
+        let one =
+            |event: &Event, probe: &dyn Fn(&Path) -> Seen| from_notification(root, event, probe);
         let created = event(EventKind::Create(CreateKind::File), &["/project/src/a.ts"]);
         assert_eq!(
             one(&created, &present),
@@ -849,7 +997,49 @@ mod tests {
     }
 
     #[test]
-    fn probe_reports_what_is_there_without_following_links() {
+    fn a_link_and_anything_reached_through_one_is_never_named() {
+        let root = Path::new("/project");
+        let changed = |path: &str| {
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path(PathBuf::from(path))
+        };
+        // A link in the share: the guest would follow it out of the share, so its directory
+        // is reported instead.
+        let link = |path: &Path| seen(path, Some(Entry::Link));
+        assert_eq!(
+            from_notification(root, &changed("/project/src/link"), link),
+            vec![rescan("src".into())]
+        );
+        // A removed entry the system did not call a file or a folder may have been a link.
+        let gone = |path: &Path| seen(path, None);
+        let removed = Event::new(EventKind::Remove(RemoveKind::Other))
+            .add_path(PathBuf::from("/project/src/link"));
+        assert_eq!(
+            from_notification(root, &removed, gone),
+            vec![rescan("src".into())]
+        );
+        // A path below a directory that is itself a link: nothing below it is named.
+        let through_link = |_: &Path| Seen {
+            entry: Some(Entry::Other),
+            anchor: None,
+        };
+        assert_eq!(
+            from_notification(root, &changed("/project/linked/x.ts"), through_link),
+            vec![HostEvent::root_rescan()]
+        );
+        // A path whose own directory is gone (a removed tree): the nearest real directory
+        // above it is what changed.
+        let parent_gone = |_: &Path| Seen {
+            entry: None,
+            anchor: Some("build".into()),
+        };
+        assert_eq!(
+            from_notification(root, &changed("/project/build/out/deep/x.o"), parent_gone),
+            vec![rescan("build".into())]
+        );
+    }
+
+    #[test]
+    fn probe_sees_links_and_the_nearest_real_directory() {
         let root = std::env::temp_dir().join(format!(
             "hack-source-notify-{}-{}",
             std::process::id(),
@@ -858,26 +1048,92 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::create_dir_all(root.join("dir")).unwrap();
-        std::fs::write(root.join("file"), b"x").unwrap();
+        std::fs::create_dir_all(root.join("dir/sub")).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("dir/file"), b"x").unwrap();
         std::os::unix::fs::symlink(root.join("dir"), root.join("link")).unwrap();
-        assert_eq!(probe(&root.join("dir")), Some(true));
-        assert_eq!(probe(&root.join("file")), Some(false));
+        let at = |path: &str| probe(&root, &root.join(path));
+        assert_eq!(
+            at("dir"),
+            Seen {
+                entry: Some(Entry::Directory),
+                anchor: Some(PathBuf::new())
+            }
+        );
+        assert_eq!(
+            at("dir/file"),
+            Seen {
+                entry: Some(Entry::Other),
+                anchor: Some("dir".into())
+            }
+        );
         // A link is an entry of its own, not the directory it points at.
-        assert_eq!(probe(&root.join("link")), Some(false));
-        assert_eq!(probe(&root.join("absent")), None);
+        assert_eq!(at("link").entry, Some(Entry::Link));
+        // Below a link: no anchor, so nothing is named.
+        assert_eq!(at("link/file").anchor, None);
+        // Gone, with its directory gone too: the nearest directory that still exists.
+        assert_eq!(
+            at("dir/removed/deep/x"),
+            Seen {
+                entry: None,
+                anchor: Some("dir".into())
+            }
+        );
+        assert_eq!(at("absent").entry, None);
+        // The root itself.
+        assert_eq!(
+            probe(&root, &root),
+            Seen {
+                entry: Some(Entry::Directory),
+                anchor: Some(PathBuf::new())
+            }
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    fn notification(path: &str) -> notify::Result<Event> {
+    /// A real project directory, removed again when the test ends.
+    struct Project(PathBuf);
+    impl std::ops::Deref for Project {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for Project {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A real, canonical project directory: `forward` looks at the file system.
+    fn project() -> Project {
+        let root = std::env::temp_dir().join(format!(
+            "hack-source-notify-forward-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for package in 0..100 {
+            std::fs::create_dir_all(root.join(format!("node_modules/p{package}"))).unwrap();
+        }
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        std::fs::write(root.join("src/app.ts"), b"x").unwrap();
+        Project(root.canonicalize().unwrap())
+    }
+
+    fn notification(path: &Path) -> notify::Result<Event> {
         Ok(
             Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
-                .add_path(PathBuf::from(path)),
+                .add_path(path.to_path_buf()),
         )
     }
 
     /// Runs `forward` over prepared notifications with a recording guest.
     fn run(
+        root: &Path,
         notifications: Vec<notify::Result<Event>>,
         opening: Result<(u32, bool), &'static str>,
     ) -> (Result<(), CandidateError>, Vec<Vec<GuestEvent>>) {
@@ -888,9 +1144,10 @@ mod tests {
         drop(sender);
         let sent = std::cell::RefCell::new(Vec::new());
         let result = forward(
-            Path::new("/project"),
+            root,
             BASE,
             &changes,
+            &AtomicBool::new(false),
             &AtomicBool::new(false),
             |lines| {
                 let first = sent.borrow().is_empty();
@@ -907,7 +1164,12 @@ mod tests {
 
     #[test]
     fn a_watcher_opens_with_the_root_event_before_any_path_event() {
-        let (result, sent) = run(vec![notification("/project/src/a.ts")], Ok((1, true)));
+        let root = project();
+        let (result, sent) = run(
+            &root,
+            vec![notification(&root.join("src/a.ts"))],
+            Ok((1, true)),
+        );
         result.unwrap();
         assert_eq!(sent.len(), 2);
         assert_eq!(
@@ -924,6 +1186,7 @@ mod tests {
 
     #[test]
     fn a_failed_opening_check_sends_nothing_else_and_says_why() {
+        let root = project();
         // The root event did not fire: the path is not the share. Nothing goes to a guess.
         for (answer, text) in [
             ((0, true), "mount was not found"),
@@ -931,7 +1194,11 @@ mod tests {
             ((0, false), "no file-watch hook"),
             ((1, false), "no file-watch hook"),
         ] {
-            let (result, sent) = run(vec![notification("/project/src/a.ts")], Ok(answer));
+            let (result, sent) = run(
+                &root,
+                vec![notification(&root.join("src/a.ts"))],
+                Ok(answer),
+            );
             let error = result.unwrap_err();
             assert_eq!(error.code, "source_notify_unavailable", "{answer:?}");
             assert!(error.message.contains(text), "{}", error.message);
@@ -939,19 +1206,24 @@ mod tests {
             assert_eq!(sent.len(), 1, "{answer:?}");
         }
         // A refused request ends the watcher with that refusal, again after one attempt.
-        let (result, sent) = run(vec![notification("/project/a")], Err("runtime_changed"));
+        let (result, sent) = run(
+            &root,
+            vec![notification(&root.join("a"))],
+            Err("runtime_changed"),
+        );
         assert_eq!(result.unwrap_err().code, "runtime_changed");
         assert_eq!(sent.len(), 1);
     }
 
     #[test]
     fn a_burst_then_an_edit_reaches_the_guest_by_name_within_two_batches() {
+        let root = project();
         let mut notifications: Vec<notify::Result<Event>> = (0..10_000)
-            .map(|n| notification(&format!("/project/node_modules/p{}/f{n}.js", n % 100)))
+            .map(|n| notification(&root.join(format!("node_modules/p{}/f{n}.js", n % 100))))
             .collect();
         notifications.push(Err(notify::Error::generic("dropped")));
-        notifications.push(notification("/project/src/app.ts"));
-        let (result, sent) = run(notifications, Ok((1, true)));
+        notifications.push(notification(&root.join("src/app.ts")));
+        let (result, sent) = run(&root, notifications, Ok((1, true)));
         result.unwrap();
         for request in &sent {
             assert!(request.len() <= MAX_GUEST_EVENTS, "{}", request.len());
@@ -980,28 +1252,35 @@ mod tests {
     }
 
     #[test]
-    fn a_flood_past_the_limit_becomes_one_root_event_and_later_changes_are_named_again() {
-        let flood = MAX_BATCH_NOTIFICATIONS + FLOOD_LIMIT + 10;
-        let (sender, changes) = std::sync::mpsc::channel();
-        for n in 0..flood {
+    fn an_overflow_becomes_one_root_event_and_later_changes_are_named_again() {
+        let root = project();
+        let (sender, changes) = std::sync::mpsc::sync_channel(64);
+        // The queue filled and one more notification did not fit.
+        for n in 0..64 {
             sender
-                .send(notification(&format!("/project/build/out{n}.o")))
+                .try_send(notification(&root.join(format!("build/out{n}.o"))))
                 .unwrap();
         }
+        assert!(
+            sender
+                .try_send(notification(&root.join("build/lost.o")))
+                .is_err()
+        );
+        let overflow = AtomicBool::new(true);
         let sent = std::cell::RefCell::new(Vec::<Vec<GuestEvent>>::new());
-        let stop = AtomicBool::new(false);
         let later = std::cell::Cell::new(Some(sender));
         forward(
-            Path::new("/project"),
+            &root,
             BASE,
             &changes,
-            &stop,
+            &overflow,
+            &AtomicBool::new(false),
             |lines| {
                 sent.borrow_mut().push(lines.to_vec());
-                // After the flood is answered, one more change arrives and the queue closes.
+                // After the overflow is answered, one more change arrives and the queue closes.
                 if sent.borrow().len() == 2 {
                     if let Some(sender) = later.take() {
-                        sender.send(notification("/project/src/app.ts")).unwrap();
+                        sender.send(notification(&root.join("src/app.ts"))).unwrap();
                     }
                 }
                 Ok((lines.len() as u32, true))
@@ -1014,7 +1293,8 @@ mod tests {
             path: BASE.into(),
             mask: 0x2 | 0x4000_0000,
         }];
-        // Opening event; the whole flood as one root event; then the later edit by name.
+        // Opening event; everything that was waiting as one root event; then the later edit
+        // by name.
         assert_eq!(
             sent.len(),
             3,
@@ -1024,6 +1304,65 @@ mod tests {
         assert_eq!(sent[0], root);
         assert_eq!(sent[1], root);
         assert_eq!(sent[2][0].path, format!("{BASE}/src/app.ts"));
+        assert!(!overflow.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn a_request_that_fails_ends_the_watcher_with_that_failure() {
+        let root = project();
+        let (sender, changes) = std::sync::mpsc::channel();
+        for n in 0..600 {
+            sender
+                .send(notification(&root.join(format!("src/f{n}.ts"))))
+                .unwrap();
+        }
+        drop(sender);
+        let calls = std::cell::Cell::new(0);
+        let error = forward(
+            &root,
+            BASE,
+            &changes,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            |lines| {
+                calls.set(calls.get() + 1);
+                // The opening event and the first request succeed; the second request fails.
+                if calls.get() == 3 {
+                    return Err(CandidateError::new("agent_protocol_uncertain", "timeout"));
+                }
+                Ok((lines.len() as u32, true))
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "agent_protocol_uncertain");
+        // Nothing further was attempted after the failure: the caller restarts the watcher,
+        // which opens with the root event.
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn encoded_size_bounds_a_request_whatever_the_names_hold() {
+        // Names full of characters that double when encoded.
+        let quoted = "\"\\".repeat(100);
+        let events: Vec<HostEvent> = (0..256)
+            .map(|n| change(&format!("src/{quoted}{n}.ts"), Kind::Changed))
+            .collect();
+        let sent = requests(BASE, events);
+        assert!(sent.len() > 1);
+        for request in &sent {
+            let encoded = serde_json::to_vec(
+                &request
+                    .iter()
+                    .map(|line| serde_json::json!({"path": line.path, "mask": line.mask}))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert!(encoded.len() <= MAX_REQUEST_BYTES, "{}", encoded.len());
+        }
+        // A control character in a name is never sent: its directory is reported instead.
+        let control = coalesce(vec![change("src/a\u{1}b.ts", Kind::Changed)]);
+        assert_eq!(control, vec![rescan("src".into())]);
     }
 
     #[test]
@@ -1035,6 +1374,7 @@ mod tests {
             Path::new("/project"),
             BASE,
             &changes,
+            &AtomicBool::new(false),
             &stop,
             |_| Ok((1, true)),
             || panic!("a stopped watcher verifies nothing"),
@@ -1047,6 +1387,7 @@ mod tests {
             Path::new("/project"),
             BASE,
             &changes,
+            &AtomicBool::new(false),
             &stop,
             |_| Ok((1, true)),
             || Err(CandidateError::new("runtime_changed", "changed")),
@@ -1103,6 +1444,12 @@ mod tests {
                 },
             ]
         );
+        // A watcher removes only its own note: one a later watcher wrote is left alone.
+        let other = record_path(&candidate, &dead.project);
+        retract(&other);
+        assert!(other.exists(), "another process's note must stay");
+        retract(&note);
+        assert!(!note.exists());
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

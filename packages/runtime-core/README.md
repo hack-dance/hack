@@ -1780,9 +1780,8 @@ new.
   once and not retried.
 - **How a change reaches the guest.** The provider agent's own `fs_notify` request (the one
   its watcher uses), on the agent socket the runtime already talks to, through the read-only
-  guest access (`ObservedGuest::notify_files`): the pool's identity is verified before and
-  after, nothing in the pool's state changes, and nothing is read back but how many events
-  fired and whether the hook exists.
+  guest access (`ObservedGuest::notify_files`): nothing in the pool's state changes, and
+  nothing is read back but how many events fired and whether the hook exists.
 - **The guest path.** The share's own mount, `/run/smolvm/virtiofs/smolvm<1 + position>`,
   where the position is the share's place in the receipt, the order the audit proves the
   provider's recorded mounts follow. The watcher opens with one event on that root. Unless
@@ -1793,13 +1792,27 @@ new.
   directories are forwarded, because services watch them. What the path is now decides what
   a notification means: present is created or changed, absent is removed (a rename reports
   each name). "The system dropped events" becomes an event on the share root, never silence.
-- **Bounds.** Changes are gathered for 50 ms, at most 8,192 notifications a batch, repeats of
-  a path merged, and sent in requests of at most 256 events and 32 KiB of paths, one in
-  flight. Every change keeps its own name. Do not "simplify" this into one event per busy
-  directory: a watcher on a file is not woken by an event on the file's directory, so a
-  branch switch that rewrites 300 files in `src/` would reload nothing. Only when more than
-  32,768 notifications are still waiting behind a full batch is the backlog replaced by one
-  event on the share root; later changes are named again.
+- **Bounds.** At most 40,960 notifications wait at any time. Changes are gathered for 50 ms,
+  at most 8,192 notifications a batch, repeats of a path merged, and sent in requests of at
+  most 256 events and 48 KiB once encoded, one in flight. Every change keeps its own name.
+  Do not "simplify" this into one event per busy directory: a watcher on a file is not woken
+  by an event on the file's directory, so a branch switch that rewrites 300 files in `src/`
+  would reload nothing.
+- **When changes are not named.** Two cases, and in both the guest is told "something
+  changed under the share" (an event on the share root), never nothing. One: more
+  notifications arrived than may wait; everything waiting is given up and later changes are
+  named again. Two: no watcher was running (it died, a request to the guest failed three
+  times, the pool or the project directory changed); the watcher that starts next opens
+  with that event. A watcher on a single file does not learn of a change announced this way
+  until the file changes again.
+- **Only the share.** The guest follows links when it resolves a path, so a link is never
+  named: its directory is reported instead, as is a removed entry the system did not call a
+  file or a folder, and anything below a directory that is itself reached through a link.
+  The watcher refuses to start unless the directory at the project path is the one the pool
+  mounted (the receipt's device and inode) and ends when that stops being true.
+- **One pool only.** Requests go on one connection opened to the agent and then checked
+  against the pool's identity, so a kept connection cannot reach a later pool at the same
+  socket path. A failed request is tried again on a new connection, checked the same way.
 - **Status.** A forwarding watcher leaves a note under `run/source-notify/` (its process
   identity). `runtime status` reports `hot_reload.state: "watcher"` and, per project,
   whether the noted process is still running. A project whose watcher is not running has no

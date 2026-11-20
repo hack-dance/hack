@@ -191,3 +191,21 @@ test("HACK-2409: stopping a watcher that ignores the request ends it anyway", as
   expect(performance.now() - started).toBeLessThan(4000);
   expect(await text(join(runtime.home, "stopped"))).toBeUndefined();
 }, 10_000);
+
+test("HACK-2409: a watcher that cannot even be started is reported and retried, never thrown into the owner", async () => {
+  const home = await mkdtemp(join(tmpdir(), "hack-source-notify-"));
+  roots.push(home);
+  const warnings: string[] = [];
+  const stop = startNativeSourceNotify({
+    runtime: { binary: join(home, "absent-binary"), home },
+    projectRoot: home,
+    pool: WATCHER_POOL,
+    warn: (line) => warnings.push(line),
+    restartDelaysMs: [20],
+  });
+  expect(stop).toBeDefined();
+  await Bun.sleep(150);
+  // Said once, however many attempts fail.
+  expect(warnings).toEqual([NATIVE_SOURCE_NOTIFY_STOPPED]);
+  await stop?.();
+});

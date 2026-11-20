@@ -120,29 +120,58 @@ export function startNativeSourceNotify(opts: {
   let current: Child | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
+  /** The watcher is not running: say so once, and try again unless it cannot help. */
+  const retry = (permanent: boolean): void => {
+    if (stopped) {
+      return;
+    }
+    if (!down) {
+      down = true;
+      opts.warn(
+        permanent
+          ? NATIVE_SOURCE_NOTIFY_UNAVAILABLE
+          : NATIVE_SOURCE_NOTIFY_STOPPED
+      );
+    }
+    if (permanent) {
+      return;
+    }
+    const delay = delays[Math.min(failures, delays.length - 1)] ?? 30_000;
+    failures += 1;
+    timer = setTimeout(launch, delay);
+  };
+
   const launch = (): void => {
     if (stopped) {
       return;
     }
-    const child: Child = Bun.spawn(
-      [
-        opts.runtime.binary,
-        "--candidate-root",
-        opts.runtime.home,
-        "runtime",
-        "source-notify",
-        "--project",
-        opts.projectRoot,
-        "--until-stdin-closes",
-      ],
-      {
-        cwd: opts.projectRoot,
-        env: childEnvironment(env),
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-      }
-    );
+    let child: Child;
+    try {
+      child = Bun.spawn(
+        [
+          opts.runtime.binary,
+          "--candidate-root",
+          opts.runtime.home,
+          "runtime",
+          "source-notify",
+          "--project",
+          opts.projectRoot,
+          "--until-stdin-closes",
+        ],
+        {
+          cwd: opts.projectRoot,
+          env: childEnvironment(env),
+          stdin: "pipe",
+          stdout: "pipe",
+          stderr: "pipe",
+        }
+      );
+    } catch {
+      // The executable or the project directory is gone: as a watcher that
+      // exited at once, reported and retried like one.
+      retry(false);
+      return;
+    }
     current = child;
     let forwarding = false;
     void drain(child.stdout, (text) => {
@@ -161,21 +190,7 @@ export function startNativeSourceNotify(opts: {
       if (stopped || current !== child) {
         return;
       }
-      const permanent = code !== undefined && PERMANENT.has(code);
-      if (!down) {
-        down = true;
-        opts.warn(
-          permanent
-            ? NATIVE_SOURCE_NOTIFY_UNAVAILABLE
-            : NATIVE_SOURCE_NOTIFY_STOPPED
-        );
-      }
-      if (permanent) {
-        return;
-      }
-      const delay = delays[Math.min(failures, delays.length - 1)] ?? 30_000;
-      failures += 1;
-      timer = setTimeout(launch, delay);
+      retry(code !== undefined && PERMANENT.has(code));
     });
   };
   launch();

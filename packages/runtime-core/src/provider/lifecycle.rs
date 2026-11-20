@@ -422,30 +422,40 @@ impl<'a> ObservedGuest<'a> {
         socket(self.candidate, &self.owner, "docker.sock")
     }
 
-    /// Where `project` sits among the shares this pool mounts, in receipt order: the order
-    /// `audit_with` proves the provider's recorded mounts follow.
-    pub(super) fn share_position(&self, project: &Path) -> Option<usize> {
+    /// Where `project` sits among the shares this pool mounts, in receipt order (the order
+    /// `audit_with` proves the provider's recorded mounts follow), with the device and inode
+    /// the receipt recorded for it.
+    pub(super) fn share(&self, project: &Path) -> Option<(usize, u64, u64)> {
         self.owner
             .project_shares()
             .iter()
-            .position(|share| share.project == project)
+            .enumerate()
+            .find(|(_, share)| share.project == project)
+            .map(|(position, share)| (position, share.device, share.inode))
     }
 
-    /// Forwards host file changes to the guest's file-watch hook (`source_notify`). It takes
-    /// no mutation lease: the request changes nothing in the pool's state and returns only
-    /// how many events fired and whether the hook exists. The pool's identity is verified
-    /// before and after, as for every read through this type.
+    /// Opens the connection host file changes are forwarded on (`source_notify`), bound to
+    /// this incarnation. The identity is verified after connecting: incarnations never come
+    /// back, so a pool that is this one both when the observation began and now was this one
+    /// when the connection was made, and a kept connection cannot move to a later guest.
+    pub(super) fn notify_channel(&self) -> Result<agent::Channel, CandidateError> {
+        let channel = agent::open_channel(&socket(self.candidate, &self.owner, "agent.sock")?)?;
+        self.verify()?;
+        Ok(channel)
+    }
+
+    /// Forwards host file changes to the guest's file-watch hook on a connection from
+    /// [`Self::notify_channel`]. It takes no mutation lease: the request changes nothing in
+    /// the pool's state and returns only how many events fired and whether the hook exists.
+    /// The pool's identity is verified again afterwards, so the caller stops promptly when
+    /// the pool changes.
     pub(super) fn notify_files(
         &self,
+        channel: &mut agent::Channel,
         events: &[super::source_notify::GuestEvent],
         timeout: Duration,
     ) -> Result<(u32, bool), CandidateError> {
-        self.verify()?;
-        let fired = agent::fs_notify(
-            &socket(self.candidate, &self.owner, "agent.sock")?,
-            events,
-            timeout,
-        )?;
+        let fired = agent::fs_notify(channel, events, timeout)?;
         self.verify()?;
         Ok(fired)
     }

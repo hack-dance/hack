@@ -112,12 +112,23 @@ fn exchange(
     serde_json::from_slice(&body).map_err(|_| failure("Malformed guest response."))
 }
 
+/// A connection to the agent kept open for many requests. Whatever answers on it is the agent
+/// that was listening when it was opened: a later guest at the same socket path cannot.
+pub(super) struct Channel(UnixStream);
+
+pub(super) fn open_channel(path: &Path) -> Result<Channel, CandidateError> {
+    UnixStream::connect(path)
+        .map(Channel)
+        .map_err(|_| failure("Cannot connect to the owned guest socket; no automatic start."))
+}
+
 /// Host-originated file changes for the guest's file-watch hook, sent with the provider
-/// agent's own request (the one its watcher uses). The agent writes one line per event to the
-/// hook. Returns how many fired and whether this guest's kernel has the hook at all. Nothing
-/// in the pool's state changes and nothing is read back but those two values.
+/// agent's own request (the one its watcher uses) on a kept connection. The agent writes one
+/// line per event to the hook. Returns how many fired and whether this guest's kernel has the
+/// hook at all. Nothing in the pool's state changes and nothing is read back but those two
+/// values.
 pub(super) fn fs_notify(
-    path: &Path,
+    channel: &mut Channel,
     events: &[super::source_notify::GuestEvent],
     timeout: Duration,
 ) -> Result<(u32, bool), CandidateError> {
@@ -125,7 +136,13 @@ pub(super) fn fs_notify(
         .iter()
         .map(|event| json!({"path": event.path, "mask": event.mask}))
         .collect();
-    let response = request(path, json!({"method":"fs_notify","events":events}), timeout)?;
+    let body = encode(&json!({"method":"fs_notify","events":events}))?;
+    // `exchange` leaves the stream non-blocking for its bounded read.
+    channel
+        .0
+        .set_nonblocking(false)
+        .map_err(|_| failure("Cannot configure the guest connection."))?;
+    let response = exchange(&mut channel.0, &body, timeout)?;
     let data = &response["data"];
     match (
         response["status"].as_str(),

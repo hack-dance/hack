@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
   countJsonValues,
+  globalContainersVerdict,
   groupWritableAncestors,
   installedLauncher,
   parseCheckArgs,
@@ -186,4 +187,35 @@ test("installer mode installs under the check's HOME and validates its local inp
       message
     );
   }
+});
+
+test("every global container must be running, and the note names the ones that are not (HACK-2381)", () => {
+  const all = [
+    "hack-dev-proxy hack-dev-proxy-caddy-1 running",
+    "hack-dev-proxy hack-dev-proxy-coredns-1 running",
+    "hack-logging hack-logging-loki-1 running",
+    "hack-logging hack-logging-alloy-1 running",
+    "hack-logging hack-logging-grafana-1 running",
+    "lq-abc123 lq-abc123-web-1 exited",
+  ];
+  expect(globalContainersVerdict(all.join("\n"))).toEqual({
+    ok: true,
+    note: "all 5 global containers running",
+  });
+  // The state the release shipped in: Caddy and Alloy up, the three
+  // non-root containers exited. The Caddy-only proxy step passed on it.
+  const shipped = all
+    .join("\n")
+    .replace("coredns-1 running", "coredns-1 exited")
+    .replace("loki-1 running", "loki-1 exited")
+    .replace("grafana-1 running", "grafana-1 exited");
+  expect(globalContainersVerdict(shipped)).toEqual({
+    ok: false,
+    note: "not running: hack-dev-proxy-coredns-1 exited, hack-logging-loki-1 exited, hack-logging-grafana-1 exited",
+  });
+  expect(globalContainersVerdict(all.slice(0, 4).join("\n"))).toEqual({
+    ok: false,
+    note: "not running: hack-logging-grafana-1 missing",
+  });
+  expect(globalContainersVerdict("").ok).toBe(false);
 });

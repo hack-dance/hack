@@ -194,6 +194,19 @@ export async function runNativeRecover(opts: {
   readonly invoke: typeof invokeNativeRuntime;
   readonly write: (text: string) => void;
 }): Promise<number> {
+  // Read-only and best-effort, to say afterwards whether recovery changed anything. A
+  // home recovery is for may refuse status (a missing provider HOME, for example); that
+  // never stops the recovery itself.
+  const before = opts.json
+    ? undefined
+    : await opts
+        .invoke({
+          runtime: opts.runtime,
+          cwd: opts.cwd,
+          args: ["runtime", "status", "--json"],
+          timeoutMs: 60_000,
+        })
+        .then(phaseOf, () => undefined);
   const result = await opts.invoke({
     runtime: opts.runtime,
     cwd: opts.cwd,
@@ -204,16 +217,33 @@ export async function runNativeRecover(opts: {
     opts.write(`${JSON.stringify(result)}\n`);
     return 0;
   }
-  const phase =
-    isRecord(result) && typeof result.phase === "string"
-      ? result.phase
-      : "unknown";
-  opts.write(
-    phase === "uninitialized"
-      ? "Native runtime has nothing to recover in this home.\n"
-      : `Native runtime recovered; its state is now ${phase}. Run hack up to start again.\n`
-  );
+  const phase = phaseOf(result) ?? "unknown";
+  if (phase === "uninitialized") {
+    opts.write("Native runtime has nothing to recover in this home.\n");
+  } else if (before === phase && STOPPED_PHASES.has(phase)) {
+    opts.write(
+      `Native runtime has nothing to recover; its state is ${phase}. Run hack up to start.\n`
+    );
+  } else {
+    opts.write(
+      `Native runtime recovered; its state is now ${phase}. Run hack up to start again.\n`
+    );
+  }
   return 0;
+}
+
+/** Stopped states recovery leaves unchanged (the runtime's own stopped phases). */
+const STOPPED_PHASES = new Set([
+  "stopped",
+  "stopped-before-engine",
+  "stopped-after-engine-failure",
+  "recovered-unclean",
+]);
+
+function phaseOf(value: unknown): string | undefined {
+  return isRecord(value) && typeof value.phase === "string"
+    ? value.phase
+    : undefined;
 }
 
 /** Explicit native operations never change the project's Compose backend. */

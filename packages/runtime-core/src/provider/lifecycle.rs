@@ -3036,6 +3036,12 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         stop_silent_guest(candidate, &mut owner)?;
         return status(candidate);
     }
+    // A stopped phase was written only after the provider's release was proven, and its
+    // provider is dead: nothing to recover, so a clean stop stays clean and repeating
+    // recovery changes nothing (a retained run's eligibility depends on the phase).
+    if STOPPED_PHASES.contains(&owner.phase.as_str()) {
+        return status(candidate);
+    }
     // A failed first boot whose provider was recorded (`failed-boot-stopped` after a template
     // refusal) must not reach the stopped path, which adopts its disks unchecked.
     if interrupted::set_aside_recorded(candidate, &mut owner, &lock)? {

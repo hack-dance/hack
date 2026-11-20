@@ -77,6 +77,19 @@ pub(super) fn recover(
             }
             Ok(())
         }
+        // Already stopped with no provider recorded, as a failed boot's recovery or a refused
+        // start leaves it: the stopped phases retained startup and `up` accept. Nothing ran
+        // that recovery could stop, so repeating recovery changes nothing.
+        ("stopped" | "recovered-unclean" | "stopped-after-engine-failure", _) => {
+            if SetAside::load(candidate)?.is_some() {
+                // Only `stopped-before-engine` commits a set-aside; an intent here is not one
+                // this recovery wrote.
+                return Err(unrecoverable!(
+                    "a set-aside intent remains beside a pool that never set its disks aside"
+                ));
+            }
+            Ok(())
+        }
         _ => Err(unrecoverable!(
             "the receipt is in a phase no interrupted start leaves, with no provider recorded"
         )),
@@ -963,6 +976,47 @@ mod tests {
         // Adopted disks are left to the stopped path.
         let mut adopted = pool.owner("failed-boot-stopped", true, true);
         assert!(!set_aside_recorded(&pool.candidate, &mut adopted, &lock).unwrap());
+    }
+
+    #[test]
+    fn recovery_of_an_already_stopped_pool_without_a_provider_changes_nothing_twice() {
+        // The failed-first-boot homes after their first recovery: `recovered-unclean`, no
+        // provider recorded, nothing running (lead's real-VM run of #1001).
+        for phase in [
+            "recovered-unclean",
+            "stopped",
+            "stopped-after-engine-failure",
+            "stopped-before-engine",
+        ] {
+            let pool = Pool::new(&format!("already-stopped-{phase}"));
+            let mut owner = pool.owner(phase, true, false);
+            owner.save(&pool.candidate).unwrap();
+            let before = fs::read(root(&pool.candidate).join("owner.json")).unwrap();
+            for _ in 0..2 {
+                pool.recover(&mut owner).unwrap();
+                assert_eq!(owner.phase, phase);
+                assert_eq!(
+                    fs::read(root(&pool.candidate).join("owner.json")).unwrap(),
+                    before,
+                    "{phase}"
+                );
+            }
+        }
+        // An intent beside such a pool was not written by this recovery and refuses.
+        let pool = Pool::new("already-stopped-intent");
+        let mut owner = pool.owner("recovered-unclean", true, false);
+        state::write(
+            &root(&pool.candidate).join(SET_ASIDE),
+            &SetAside {
+                version: 1,
+                label: "untrusted-first-boot-1".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            pool.recover(&mut owner).unwrap_err().code,
+            "recovery_required"
+        );
     }
 
     #[test]

@@ -788,7 +788,9 @@ still missing and how many were not yet private at the deadline (counts only). U
 `hack native recover` does the same for the selected native home without naming the
 executor: it runs the runtime's recovery and prints the state it left (for example
 `recovered-unclean`), after which `hack up` starts again. `--json` passes the runtime
-result through. A refusal names the condition it could not prove.
+result through. A refusal names the condition it could not prove. On a home that is already
+stopped (for example `recovered-unclean` after an earlier recovery) it changes nothing and
+says there was nothing to recover, however often it runs; a clean stop stays clean.
 If you explicitly selected an installed executor with `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME`, use those same non-empty values:
 

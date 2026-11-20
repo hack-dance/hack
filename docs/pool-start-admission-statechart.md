@@ -92,9 +92,12 @@ refusal below conjoins the model's `Refuse`, which returns the lease.
 | `RefuseOther` | any | any other check of the start refuses | various |
 | `Crash` | any | the process dies | none |
 
-`RefuseTreeRecheck` writes nothing before it refuses: the recheck is the first
-step under the lease after the sample. The `changed-tree-start` control removes
-the recheck and reaches `Started` with a changed tree.
+The recheck writes nothing, and in the code it is the first step under the lease
+after the sample, so `RefuseTreeRecheck` comes before the admission record and
+any provider command. A HOME alias the start repaired before admission stays
+repaired. The model is coarser here: it still allows the alias repair under the
+lease before the guard. The `changed-tree-start` control removes the recheck and
+reaches `Started` with a changed tree.
 
 ## Environment
 

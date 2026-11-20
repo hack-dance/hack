@@ -1890,9 +1890,12 @@ from rewriting them. So the first thing the start does with the lease, after the
 sample, is compare each tree with its proof: if the tree's metadata digest and its
 record's content digest are what the proof saw, on a filesystem where metadata is trusted
 (APFS), the proof stands; otherwise the tree is proven by content again under the lease,
-and a tree that no longer matches refuses the start with `artifact_digest_mismatch`
-before anything is written or started. The comparison is one metadata walk per tree and
-reads no file content. It is not part of the boot measurement above. A unit bench
+and a tree that no longer matches refuses the start with `artifact_digest_mismatch`.
+The recheck itself writes nothing, and a refusal comes before the admission record, any
+later owner record update, a HOME alias repair under the lease and any provider command.
+What the start did earlier stays: a HOME alias it repaired before admission, and the
+lease file's own bookkeeping. The comparison is one metadata walk per tree and reads no
+file content. It is not part of the boot measurement above. A unit bench
 (`bench_one_metadata_walk_of_a_prepared_tree`, an unoptimized test build on a busy Apple
 Silicon host, not a boot) timed one walk at 11 to 20 ms for a tree with the 936 entries
 of the pinned provider tree and under 1 ms for the engine tree's 8 entries. On any other

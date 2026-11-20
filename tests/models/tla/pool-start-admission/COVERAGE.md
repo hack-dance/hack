@@ -144,7 +144,11 @@ with what the proof returned:
 - Anything else, including a tree off a qualified filesystem: the tree is proven
   by content again under the lease. A change that kept the bytes (a touch, or a
   repair that reinstalled the recorded content) continues; a changed byte refuses
-  `artifact_digest_mismatch` with nothing written and the lease returned.
+  `artifact_digest_mismatch` and the lease is returned. The recheck writes
+  nothing, and the refusal comes before the admission record, later owner
+  updates and any provider command. A HOME alias repaired before admission and
+  the lease file's bookkeeping are not rolled back; `RefusalIsClean` checks that
+  no VM exists and the lease is free, not that nothing was written.
 
 `artifact::verify_witnessed` takes the metadata digest before the content hash and
 requires the same digest after it, so the digest the recheck compares describes

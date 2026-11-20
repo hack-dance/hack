@@ -1690,6 +1690,36 @@ pool that is already running does not boot and does not start it. To see what it
 read `/run/hack-local/memory-return.status` in the guest: one line such as
 `memory-return-v1 order=2 compaction=done windows=9`.
 
+### Guest memory peak (a record only)
+
+A fresh boot starts a second best-effort guest job
+([`guest-memory-peak.sh`](src/provider/guest-memory-peak.sh)) at the same point and under
+the same rules: background mode, result ignored, owner token and boot ID checked first, at
+most once per boot, nothing written under `/storage`. Every five seconds it reads memory in
+use (`MemTotal` minus `MemAvailable`) and keeps the highest value for the boot in one line
+at `/run/hack-local/memory-peak.status`, together with counters the kernel keeps since
+boot: memory stall time (`/proc/pressure/memory`), OOM kills and major page faults. A
+sample can miss a short peak; those counters cannot miss a guest that ran short of memory.
+A sample is read with shell builtins, so the loop starts one process every five seconds
+(`sleep`).
+
+`runtime down` reads that line once from a running guest, after its live check and before
+the stop. Once the stop has succeeded it appends the reading to `guest-memory-peaks.json`
+beside the pool's owner record: the last five boots, each with boot ID, guest size, vCPU
+count, the reading, and the graph runs the home recorded at that time with their plan IDs.
+The read is bounded at two seconds and is best-effort, and the record is written only
+after the stop and its own state writes, so it cannot take the time or the disk space the
+stop needs. A guest that does not answer, a line that does not decode and a record that
+cannot be written leave `down` and its result exactly as they were. A record at that
+name that is a symlink, has a second link or is not private to the user is left in place
+and nothing is recorded; the write goes through a temporary file of its own and removes
+nothing that was there before. A VM that ends without `runtime down` leaves no
+reading for that boot. `runtime status` reports the record as `guest_memory_peaks` when
+there is one.
+
+Nothing reads the record to make a decision. It exists so that guest sizes can be chosen
+from measured use later; no start changes size because of it.
+
 ### Hot reload on shared source
 
 With the provider's host-to-guest change notifications on, an edit made on the host under a

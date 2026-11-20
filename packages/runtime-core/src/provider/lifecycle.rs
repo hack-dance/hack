@@ -1,5 +1,6 @@
 mod admission_pool;
 mod disk_handles;
+mod guest_memory_peak;
 pub mod host_filesystem;
 mod interrupted;
 mod operating_guard;
@@ -72,6 +73,10 @@ pub struct RuntimeStatus {
     /// `null` when that cannot be established. An active image build is not
     /// observed here; `runtime down` refuses during one.
     pub pool_idle: Option<bool>,
+    /// Guest memory peaks of the pool's last boots that ended in `runtime down`, oldest
+    /// first (see `guest_memory_peak`). A record only; absent when there is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guest_memory_peaks: Option<Vec<guest_memory_peak::Boot>>,
     /// Provider sockets native found world-accessible and made private for the running
     /// provider (`socket_repairs`); absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1013,6 +1018,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             prepared_base: None,
             graph_runs: users.graph_runs,
             pool_idle: Some(false),
+            guest_memory_peaks: None,
             repaired_sockets: None,
         });
     }
@@ -1089,6 +1095,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         prepared_base: super::prepared_start::status(candidate),
         graph_runs: users.graph_runs,
         pool_idle,
+        guest_memory_peaks: guest_memory_peak::history(&root(candidate)),
     })
 }
 
@@ -2148,6 +2155,9 @@ exit 43"#,
     start_memory_return(owner, |script, args, background| {
         guest(candidate, owner, script, args, background)
     });
+    start_memory_peak(owner, |script, args, background| {
+        guest(candidate, owner, script, args, background)
+    });
     phase(candidate, owner, "running")?;
     status(candidate)
 }
@@ -2169,6 +2179,67 @@ fn start_memory_return(
         &[&owner.token, boot],
         true,
     );
+}
+
+/// Start the guest job that records this boot's memory peak (`guest-memory-peak.sh`), the
+/// same way as [`start_memory_return`]: background mode, result ignored, fresh boots only.
+fn start_memory_peak(
+    owner: &Owner,
+    run: impl FnOnce(&str, &[&str], bool) -> Result<String, CandidateError>,
+) {
+    let Some(boot) = owner.guest_boot_id.as_deref() else {
+        return;
+    };
+    let _ = run(
+        include_str!("guest-memory-peak.sh"),
+        &[&owner.token, boot],
+        true,
+    );
+}
+
+/// Read this boot's memory peak from a running guest, just before `down` stops it. Best-effort
+/// and bounded by [`guest_memory_peak::READ_BUDGET`]: a guest that does not answer and a
+/// reading that does not decode give `None`, and `down` goes on exactly as it would have.
+/// Nothing is written here; `down` keeps the reading only after the stop has finished.
+fn read_memory_peak(
+    state_root: &Path,
+    owner: &Owner,
+    read: impl FnOnce(&str, &[&str], Instant) -> Result<String, CandidateError>,
+) -> Option<guest_memory_peak::Boot> {
+    if owner.phase != "running" {
+        return None;
+    }
+    let boot = owner.guest_boot_id.as_deref()?;
+    let deadline = Instant::now() + guest_memory_peak::READ_BUDGET;
+    let output = read(
+        guest_memory_peak::READ_SCRIPT,
+        &[&owner.token, boot],
+        deadline,
+    )
+    .ok()?;
+    Some(guest_memory_peak::Boot {
+        boot_id: boot.to_owned(),
+        guest_memory_mib: owner.profile.memory_mib(),
+        cpus: owner.profile.cpus(),
+        reading: guest_memory_peak::parse(&output)?,
+        graphs: guest_memory_peak::graph_runs(state_root),
+    })
+}
+
+/// Keep a reading taken before the stop, once `down` has succeeded. It runs after the stop
+/// and every owner write the stop needs, so the record cannot take the disk space or the
+/// time of either, and a record that cannot be written leaves `result` as it is.
+fn keep_memory_peak(
+    pool_root: &Path,
+    peak: Option<guest_memory_peak::Boot>,
+    result: &mut Result<RuntimeStatus, CandidateError>,
+) {
+    let (Some(boot), Ok(status)) = (peak, result.as_mut()) else {
+        return;
+    };
+    if let Ok(boots) = guest_memory_peak::record(pool_root, boot) {
+        status.guest_memory_peaks = Some(boots);
+    }
 }
 
 /// Copy (once) and prove the pool's guest rootfs by content. Returns its metadata digest
@@ -2421,7 +2492,15 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
-    match guest_stop(candidate, &mut owner) {
+    let peak = read_memory_peak(&candidate.state_root, &owner, |script, args, deadline| {
+        agent::exec_until(
+            &socket(candidate, &owner, "agent.sock")?,
+            script,
+            args,
+            deadline,
+        )
+    });
+    let mut result = match guest_stop(candidate, &mut owner) {
         Ok(()) => status(candidate),
         Err(error)
             if error.code == "agent_protocol_uncertain" && agent_silent(candidate, &owner)? =>
@@ -2434,7 +2513,9 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             status(candidate)
         }
         Err(error) => Err(error),
-    }
+    };
+    keep_memory_peak(&root(candidate), peak, &mut result);
+    result
 }
 
 /// The code `guest_stop` returns when the engine quiesce failed again on a resumed stop.

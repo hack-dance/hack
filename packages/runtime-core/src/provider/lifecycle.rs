@@ -3888,112 +3888,62 @@ mod tests {
         }
     }
 
-    /// Whether every command of the executable cache script is a fixed shell word or utility.
-    /// It reads each word in command position: the first of a line, and the one after `;`,
-    /// `|`, `&&`, `||`, `if`, `then`, `else`, `do`, a `case` pattern or an assignment. So a
-    /// line cannot run a file from the cache or the share after its first command either.
-    /// It splits on whitespace, so it refuses what that cannot read: an operator written
-    /// against a word (`a;b`, `a|b`), any `&` but `&&`, any `(` or `{` outside `$(`, a `case`
-    /// pattern the script does not use, and an assignment from a command substitution that
-    /// is not the whole rest of its line.
-    fn cache_script_runs_only_fixed_commands(script: &str) -> Result<(), String> {
-        const COMMANDS: [&str; 20] = [
-            "set",
-            "test",
-            "for",
-            "do",
-            "done",
-            "case",
-            "esac",
-            "if",
-            "then",
-            "fi",
-            "mkdir",
-            "mount",
-            "chmod",
-            "printf",
-            "exit",
-            "sha256sum",
-            "cut",
-            "mountpoint",
-            ";;",
-            "else",
-        ];
-        const ASSIGNED: [&str; 5] = ["total=", "cache=", "path=", "size=", "expected="];
-        // The `case` patterns the script uses, read only where a `case` line expects one.
-        // Any other word ending in `)` is not a pattern: `(file)` would be a subshell.
-        const PATTERNS: [&str; 5] = ["*[!0-9a-f]*)", "runc)", "docker-init)", "*,ro,*)", "*)"];
-        if script.contains('`') {
-            return Err("a backquoted command".into());
-        }
-        for line in script
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        {
-            let refused = |word: &str| Err(format!("{word} in {line}"));
-            let case = line.starts_with("case ");
-            // `command`: the next word is run. `arm`: the next word is a `case` pattern.
-            let (mut command, mut arm) = (true, false);
-            for word in line.split_whitespace() {
-                // An operator this reading would not see as one.
-                let ends = word.trim_end_matches(';');
-                let plain = word.replace("$((", "").replace("$(", "").replace("${", "");
-                if ends.contains(';')
-                    || (word.contains(['|', '&']) && !["|", "||", "&&"].contains(&word))
-                    || plain.contains(['(', '{'])
-                {
-                    return refused(word);
-                }
-                if arm {
-                    if word == "esac" {
-                        arm = false;
-                    } else if PATTERNS.contains(&word) {
-                        (command, arm) = (true, false);
-                    } else {
-                        return refused(word);
-                    }
-                    continue;
-                }
-                let assigned = ASSIGNED.iter().any(|name| word.starts_with(name));
-                if command && !(COMMANDS.contains(&ends) || COMMANDS.contains(&word) || assigned) {
-                    return refused(word);
-                }
-                if command && assigned && word.contains("$(") {
-                    // `name=$(...)`: the substitution must be the rest of the line, so no
-                    // command follows the assignment. Its own command is checked below.
-                    if !line.ends_with(')') || line.matches("$(").count() != 1 {
-                        return refused(word);
-                    }
-                    command = false;
-                    continue;
-                }
-                arm = case && (word == "in" || word.ends_with(";;"));
-                // A plain assignment is a prefix: the next word is still a command.
-                command = !arm
-                    && ((command && assigned && !word.ends_with(';'))
-                        || word.ends_with(';')
-                        || ["|", "||", "&&", "if", "then", "else", "do"].contains(&word));
-            }
-        }
-        for (index, _) in script.match_indices("$(") {
-            let inner = &script[index + 2..];
-            if ![
-                "cat ",
-                "findmnt ",
-                "stat ",
-                "tee ",
-                "sha256sum ",
-                "(total + size)",
-            ]
-            .iter()
-            .any(|utility| inner.starts_with(utility))
-            {
-                return Err(inner[..inner.len().min(40)].into());
-            }
-        }
-        Ok(())
-    }
+    /// Every active line of the executable cache script, in order. None of them runs a file
+    /// from the cache or from the share: each command is a shell word or a fixed utility
+    /// (`test`, `cat`, `findmnt`, `stat`, `mountpoint`, `mkdir`, `mount`, `tee`, `sha256sum`,
+    /// `cut`, `chmod`, `printf`). A change to the script must change this list, and whoever
+    /// changes it answers for that property. An exact list is used because a reader of shell
+    /// words cannot be made tight without parsing quotes, comments and substitutions.
+    const CACHE_SCRIPT_LINES: [&str; 48] = [
+        "set -eu",
+        r#"test "$#" = 4"#,
+        r#"for digest in "$3" "$4"; do"#,
+        r#"test "${#digest}" = 64"#,
+        r#"case "$digest" in *[!0-9a-f]*) exit 64;; esac"#,
+        "done",
+        r#"test "$(cat /storage/.hack-local-owner)" = "$1""#,
+        r#"test "$(cat /proc/sys/kernel/random/boot_id)" = "$2""#,
+        r#"test "$(findmnt -n -o FSTYPE --mountpoint /opt/hack-engine)" = virtiofs"#,
+        r#"test "$(findmnt -n -o FSTYPE --mountpoint /run/hack-local)" = tmpfs"#,
+        r#"test "$(stat -c %u:%g:%a /run/hack-local)" = 0:0:700"#,
+        "total=0",
+        "for name in runc docker-init; do",
+        "path=/opt/hack-engine/$name",
+        r#"test -f "$path""#,
+        r#"test ! -L "$path""#,
+        r#"size=$(stat -c %s "$path")"#,
+        r#"test "$size" -gt 0"#,
+        r#"test "$size" -le 33554432"#,
+        "total=$((total + size))",
+        r#"if mountpoint -q "$path"; then exit 44; fi"#,
+        "done",
+        r#"test "$total" -le 33554432"#,
+        "cache=/run/hack-local/engine-exec",
+        r#"test ! -e "$cache""#,
+        r#"test ! -L "$cache""#,
+        r#"mkdir -m 700 "$cache""#,
+        r#"mount -t tmpfs -o size=32m,mode=700,nosuid,nodev tmpfs "$cache""#,
+        "for name in runc docker-init; do",
+        r#"case "$name" in runc) expected=$3;; docker-init) expected=$4;; esac"#,
+        r#"test "$(tee "$cache/$name" < "/opt/hack-engine/$name" | sha256sum | cut -d ' ' -f 1)" = "$expected""#,
+        r#"chmod 555 "$cache/$name""#,
+        r#"test "$(stat -c %u:%g:%a "$cache/$name")" = 0:0:555"#,
+        "done",
+        r#"mount -o remount,ro "$cache""#,
+        "for name in runc docker-init; do",
+        "path=/opt/hack-engine/$name",
+        r#"mount --bind "$cache/$name" "$path""#,
+        r#"mount -o remount,bind,ro "$path""#,
+        r#"test "$(findmnt -n -o FSTYPE --mountpoint "$path")" = tmpfs"#,
+        r#"test "$(stat -c %u:%g:%a "$path")" = 0:0:555"#,
+        r#"case "$name" in runc) expected=$3;; docker-init) expected=$4;; esac"#,
+        r#"test "$(sha256sum "$path" | cut -d ' ' -f 1)" = "$expected""#,
+        "done",
+        r#"for target in "$cache" /opt/hack-engine/runc /opt/hack-engine/docker-init; do"#,
+        r#"case ",$(findmnt -n -o OPTIONS --mountpoint "$target")," in *,ro,*) ;; *) exit 45;; esac"#,
+        "done",
+        r#"printf 'engine-exec-cache-v1\n'"#,
+    ];
 
     #[test]
     fn executable_cache_runs_nothing_it_copied_and_confirms_only_after_the_final_hash() {
@@ -4003,41 +3953,17 @@ mod tests {
             .map(str::trim)
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
             .collect();
-        // A failed check ends the script, and the confirmation is its last command.
+        // The script is exactly the reviewed lines: a failed check ends it (`set -eu`), and
+        // the confirmation is its last command.
+        assert_eq!(lines, CACHE_SCRIPT_LINES);
         assert_eq!(lines.first(), Some(&"set -eu"));
         assert_eq!(lines.last(), Some(&"printf 'engine-exec-cache-v1\\n'"));
-        // No line runs a file from the cache or from the share, before or after its digest
-        // is checked: not as its first command and not after one.
-        assert_eq!(cache_script_runs_only_fixed_commands(script), Ok(()));
-        let chmod = r#" chmod 555 "$cache/$name""#;
-        assert_eq!(script.matches(chmod).count(), 1);
-        for run in [
-            r#" chmod 555 "$cache/$name"; "$cache/$name""#,
-            r#" chmod 555 "$cache/$name" && "$cache/$name""#,
-            r#" chmod 555 "$cache/$name" | "$path""#,
-            r#" "$cache/$name""#,
-            r#" test "$("$cache/$name")" = ok"#,
-            " if test 1 = 1; then /opt/hack-engine/runc; fi",
-            " case x in x) /opt/hack-engine/runc;; esac",
-            " chmod 555 `/opt/hack-engine/runc`",
-            r#" chmod 555 "$cache/$name";"$cache/$name""#,
-            r#" chmod 555 "$cache/$name" & /opt/hack-engine/runc"#,
-            r#" chmod 555 "$cache/$name"|"$path""#,
-            " path=ignored /opt/hack-engine/runc",
-            r#" size=$(stat -c %s "$path") /opt/hack-engine/runc"#,
-            r#" size=$(stat -c %s "$path") $(cat /opt/hack-engine/runc)"#,
-            " ! /opt/hack-engine/runc",
-            " ( /opt/hack-engine/runc )",
-            r#" chmod 555 "$cache/$name"; (/opt/hack-engine/runc)"#,
-            r#" chmod 555 "$cache/$name"; {/opt/hack-engine/runc;}"#,
-            " case x in *) /opt/hack-engine/runc;; esac",
-        ] {
-            let changed = script.replace(chmod, run);
-            assert!(
-                cache_script_runs_only_fixed_commands(&changed).is_err(),
-                "{run}"
-            );
+        // No quoted text runs over a line end, so a comment line is a comment to the shell too.
+        for line in &lines {
+            assert_eq!(line.matches('"').count() % 2, 0, "{line}");
+            assert_eq!(line.matches('\'').count() % 2, 0, "{line}");
         }
+        assert!(!script.contains('`'));
         // The copy is hashed as it is written, and the bound path is hashed after the cache
         // is read-only and bound: that second hash is the last check before the read-only
         // checks and the confirmation.

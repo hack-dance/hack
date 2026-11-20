@@ -30,6 +30,8 @@ fn fresh_boot_waits_before_audit_and_never_adopts_failed_socket_readiness() {
         "provider-after",
     ] {
         let directory = crate::unique_test_root(&std::env::temp_dir(), "boot-bridge");
+        // The provider's socket directory is owned and private; the wait requires it.
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
         let path = directory.join("bridge-00.sock");
         if mode == "unsafe" {
             fs::write(&path, b"foreign").unwrap();
@@ -69,12 +71,13 @@ fn fresh_boot_waits_before_audit_and_never_adopts_failed_socket_readiness() {
                     Ok(())
                 }
             },
-            |_| {
+            |_, _| {
                 // Deleting the production wait now fails this assertion: the
                 // scheduled bind has not occurred when audit runs immediately.
                 super::super::bridge::verify_sockets(
                     &directory,
                     super::super::bridge::BridgeIntent::new(1)?,
+                    &mut Vec::new(),
                 )?;
                 events.borrow_mut().push("audit");
                 Ok(())
@@ -120,7 +123,7 @@ fn template_refusal_cannot_reach_socket_observation_audit_or_adoption() {
         &mut (),
         |_| Err(CandidateError::new("disk_template_untrusted", "fixture")),
         |_| panic!("no socket observation"),
-        |_| panic!("no audit"),
+        |_, _| panic!("no audit"),
         |_| -> Result<(), CandidateError> { panic!("no adoption") },
         &clock,
     )

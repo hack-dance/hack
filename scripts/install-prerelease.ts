@@ -59,7 +59,9 @@ export async function main(inputArgv: string[]) {
   }
   const platform = hostBundlePlatform();
   requireThat(platform, UNSUPPORTED_HOST);
-  process.umask(0o077);
+  // Private for everything the manager itself creates. The caller's umask is
+  // kept for the CLI that `run` starts, which must not inherit this one.
+  const callerUmask = process.umask(0o077);
   // Also applies to uninstall rollback, whose original root no longer exists.
   requireThat(
     import.meta.path.startsWith("/$bunfs/"),
@@ -158,7 +160,10 @@ export async function main(inputArgv: string[]) {
         selectionTarget({ command, version, state: channel.state })
       );
     } else if (command === "run") {
-      return await channel.run(rest[0] === "--" ? rest.slice(1) : rest);
+      return await channel.run(
+        rest[0] === "--" ? rest.slice(1) : rest,
+        callerUmask
+      );
     }
     console.log(
       JSON.stringify({

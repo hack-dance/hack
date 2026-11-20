@@ -485,6 +485,50 @@ function firstError(ran: Ran): string {
 }
 
 const GLOBAL_PROJECTS = ["hack-dev-proxy", "hack-logging"] as const;
+
+/** How long started global containers get to fail before they are judged. */
+const GLOBAL_SETTLE_MS = 5000;
+
+/** The services `hack global install` starts, by Compose project. */
+const GLOBAL_SERVICES: Readonly<Record<string, readonly string[]>> = {
+  "hack-dev-proxy": ["caddy", "coredns"],
+  "hack-logging": ["loki", "alloy", "grafana"],
+};
+
+/**
+ * Judges `docker ps -a` lines of the form `<project> <name> <state>`: every
+ * service of both global projects must have a container, and each must be
+ * `running`. The note names each one that is missing or not running.
+ */
+export function globalContainersVerdict(stdout: string): {
+  readonly ok: boolean;
+  readonly note: string;
+} {
+  const seen = new Map<string, string>();
+  for (const line of stdout.split("\n")) {
+    const [project, name, state] = line.trim().split(" ");
+    if (project && name && state && project in GLOBAL_SERVICES) {
+      seen.set(name, state);
+    }
+  }
+  const problems: string[] = [];
+  let expected = 0;
+  for (const [project, services] of Object.entries(GLOBAL_SERVICES)) {
+    for (const service of services) {
+      expected++;
+      const name = `${project}-${service}-1`;
+      const state = seen.get(name);
+      if (state === undefined) {
+        problems.push(`${name} missing`);
+      } else if (state !== "running") {
+        problems.push(`${name} ${state}`);
+      }
+    }
+  }
+  return problems.length === 0
+    ? { ok: true, note: `all ${expected} global containers running` }
+    : { ok: false, note: `not running: ${problems.join(", ")}` };
+}
 const REQUIRED_TOOLS = ["docker", "curl", "sh", "grep", "pgrep"] as const;
 
 async function preflight(run: FirstRun): Promise<boolean> {
@@ -759,6 +803,31 @@ async function globalSetup(run: FirstRun): Promise<boolean> {
     seconds: caddy.seconds,
     result: caddy.stdout.includes("hack-dev=172.30.0.2") ? "pass" : "fail",
     note: caddy.stdout.trim() || "no proxy container",
+  });
+  // The proxy step above looks at Caddy only, and Caddy runs as root: it
+  // stayed up while CoreDNS, Loki and Grafana had exited because they could
+  // not read configs written under the prerelease manager's umask
+  // (HACK-2381). Every container of both global projects must be running.
+  // A container that cannot read its config takes a second or two to exit,
+  // so look only after they have had time to fail.
+  await Bun.sleep(GLOBAL_SETTLE_MS);
+  const states = await run.sh([
+    "docker",
+    "ps",
+    "-a",
+    "--filter",
+    "label=com.docker.compose.project",
+    "--format",
+    '{{.Label "com.docker.compose.project"}} {{.Names}} {{.State}}',
+  ]);
+  const containers = globalContainersVerdict(states.stdout);
+  run.record({
+    step: "2 global containers running",
+    command: "docker ps -a (hack-dev-proxy, hack-logging)",
+    exit: states.exit,
+    seconds: states.seconds,
+    result: states.exit === 0 && containers.ok ? "pass" : "fail",
+    note: containers.note,
   });
   await run.step("2 global trust (no sudo)", ["global", "trust"], (r) => {
     const code =

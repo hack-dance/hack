@@ -773,8 +773,14 @@ On a fresh pool boot or a boot after stopping the pool, native waits up to 10 se
 plus 1 second per bridge slot (20 seconds for 10 slots, at most 42) for every declared
 bridge socket to appear with the required private ownership and mode.
 The provider's guest-ready signal can arrive before its bridge threads bind. Native
-rechecks the same provider identity around each observation; it never accepts an unsafe
-socket, changes its permissions or removes it to make startup pass. Existing running-pool
+rechecks the same provider identity around each observation; it never accepts a socket of
+another type, user or link count, or removes one, to make startup pass. A socket of this user
+that the provider left world-accessible has its group and other access removed, inside the
+private socket directory. The agent and engine sockets, and the provider's other sockets in
+that directory (`port-forward.sock`, `control.sock` and the rest), are treated the same way.
+`runtime up --json` and `runtime status --json` list what was repaired for the running provider
+as `repaired_sockets` (`count` and `names`), so a repair is visible without inspecting the
+directory. Existing running-pool
 audits do not wait. A socket timeout or identity refusal takes the verified failed-boot
 stop path and names the recovery command. A timeout also says how many sockets were
 still missing and how many were not yet private at the deadline (counts only). Use the same selected executor and identical

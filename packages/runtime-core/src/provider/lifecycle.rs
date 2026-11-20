@@ -14,6 +14,7 @@ mod provider_repair_tests;
 mod relay_process;
 mod running_start;
 mod short_home;
+mod socket_repairs;
 use super::{
     admission, agent, artifact, identity, process,
     state::{self, Owner, io},
@@ -68,6 +69,10 @@ pub struct RuntimeStatus {
     /// `null` when that cannot be established. An active image build is not
     /// observed here; `runtime down` refuses during one.
     pub pool_idle: Option<bool>,
+    /// Provider sockets native found world-accessible and made private for the running
+    /// provider (`socket_repairs`); absent when there were none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repaired_sockets: Option<socket_repairs::RepairedSockets>,
 }
 
 fn root(candidate: &Candidate) -> std::path::PathBuf {
@@ -365,7 +370,8 @@ impl<'a> ObservedGuest<'a> {
             owner: Owner::load(candidate)?,
         };
         observed.verify()?;
-        audit_boot(candidate, &observed.owner)?;
+        // No mutation lease is held here: observe without repairing.
+        audit_with(candidate, &observed.owner, Repair::Observe, &mut Vec::new())?;
         observed.verify()?;
         Ok(observed)
     }
@@ -814,10 +820,51 @@ fn enable_amd64_emulation(
 }
 
 fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
+    audit_boot_after(candidate, owner, Vec::new())
+}
+
+/// [`audit_boot`], also recording `earlier` repairs (the fresh-boot socket wait's).
+fn audit_boot_after(
+    candidate: &Candidate,
+    owner: &Owner,
+    mut repaired: Vec<String>,
+) -> Result<(), CandidateError> {
+    let result = audit_with(candidate, owner, Repair::Allowed, &mut repaired);
+    // Recorded even when the audit then refuses: a mode already changed stays changed.
+    socket_repairs::record(&root(candidate), owner.process.as_ref(), &repaired);
+    result
+}
+
+/// Whether an audit may repair the provider's world-accessible sockets (HACK-2375). Only a
+/// caller holding the provider's mutation lease (boot, warm start, a leased operation)
+/// repairs; lease-free observation stays read-only and refuses such a bridge socket as before.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Repair {
+    Allowed,
+    Observe,
+}
+
+/// Adds each provider socket this audit repairs to `repaired` as it is repaired, also when a
+/// later check refuses (none under `Repair::Observe`).
+fn audit_with(
+    candidate: &Candidate,
+    owner: &Owner,
+    repair: Repair,
+    repaired: &mut Vec<String>,
+) -> Result<(), CandidateError> {
     super::config_audit::verify(candidate, owner)?;
     super::dependency_socket::verify(candidate, owner)?;
+    if repair == Repair::Allowed {
+        // The provider's own sockets share the bridge sockets' umask exposure.
+        super::bridge::secure_provider_sockets(&owner.real_data_dir(candidate)?, repaired)?;
+    }
     if let Some(bridge) = owner.application_bridge {
-        super::bridge::verify_sockets(&owner.real_data_dir(candidate)?, bridge)?;
+        let directory = owner.real_data_dir(candidate)?;
+        if repair == Repair::Allowed {
+            super::bridge::verify_sockets(&directory, bridge, repaired)?;
+        } else {
+            super::bridge::observe_sockets(&directory, bridge)?;
+        }
     }
     // The pinned SmolVM consumes and removes boot-config.json. Its retained running config plus
     // independently observed disk descriptors form the host audit boundary.
@@ -946,6 +993,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             prepared_base: None,
             graph_runs: users.graph_runs,
             pool_idle: Some(false),
+            repaired_sockets: None,
         });
     }
     let owner = Owner::load(candidate)?;
@@ -1015,6 +1063,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             owner.data_dir().join("docker.sock").display()
         )),
         persistent_disks_identified: owner.storage.is_some(),
+        repaired_sockets: socket_repairs::report(&root(candidate), owner.process.as_ref()),
         guest_boot_id: owner.guest_boot_id,
         prepared_base: super::prepared_start::status(candidate),
         graph_runs: users.graph_runs,
@@ -1812,7 +1861,7 @@ fn finish_boot(
                 .transpose()
         },
         |owner| verify_live(candidate, owner),
-        |owner| audit_boot(candidate, owner),
+        |owner, repaired| audit_boot_after(candidate, owner, repaired),
         |owner| adopt_boot(candidate, owner, previous_boot, lock),
         &process::MonotonicClock::new(),
     )
@@ -1829,7 +1878,7 @@ fn finish_boot_with<S, T>(
         CandidateError,
     >,
     mut verify_provider: impl FnMut(&S) -> Result<(), CandidateError>,
-    audit: impl FnOnce(&S) -> Result<(), CandidateError>,
+    audit: impl FnOnce(&S, Vec<String>) -> Result<(), CandidateError>,
     adopt: impl FnOnce(&mut S) -> Result<T, CandidateError>,
     clock: &impl process::Clock,
 ) -> Result<T, CandidateError> {
@@ -1838,10 +1887,12 @@ fn finish_boot_with<S, T>(
     // The provider's agent-ready signal can precede expose-thread socket binds.
     // Wait before adoption, without weakening the immediate audit used by
     // running-pool commands. Failure keeps the existing verified-stop path.
+    let mut repaired = Vec::new();
     if let Some((directory, bridge)) = bridge {
-        super::bridge::wait_for_sockets(&directory, bridge, || verify_provider(owner), clock)?;
+        repaired =
+            super::bridge::wait_for_sockets(&directory, bridge, || verify_provider(owner), clock)?;
     }
-    audit(owner)?;
+    audit(owner, repaired)?;
     adopt(owner)
 }
 

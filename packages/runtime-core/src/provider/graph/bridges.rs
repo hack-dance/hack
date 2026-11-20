@@ -171,13 +171,15 @@ fn bridge_endpoint<'s>(snapshot: &'s Snapshot, a: &Assignment) -> Option<&'s Gue
 }
 /// The bridge fence: the current identity of selected publication targets.
 ///
-/// Endpoints carry the same generation as [`inspect_using`] (owned container id
-/// and labels, every declared network attachment, endpoint id, address, start
-/// time, guest boot), resolved from one GET per graph network and one per target
-/// container instead of the whole graph. Health is not resampled here: the
-/// reservation snapshot required it, and the foreground owner supervises it.
-/// A target that is absent, stopped, restarting or detached has no endpoint, so
-/// every assignment on it reads as stale.
+/// Endpoints are admitted exactly as [`inspect_using`] admits them (a committed
+/// ready graph; route endpoints only while the target's probe is healthy, port
+/// endpoints while it is healthy or has no healthcheck) and carry the same
+/// generation (owned container id and labels, every declared network attachment,
+/// endpoint id, address, start time, guest boot). They are read from one GET per
+/// graph network and, per target container, its GET plus, when probed, its probe
+/// exec and sample: never the rest of the graph. A target that is absent,
+/// stopped, restarting, detached or unhealthy has no endpoint, so every
+/// assignment on it reads as stale.
 pub(super) struct Targets {
     receipt: Receipt,
     /// Route endpoints, keyed by service, at the service's probe port.
@@ -248,8 +250,8 @@ pub(super) fn inspect_targets(
         let Some(value) = inspect_resource(engine, receipt, resource)? else {
             continue;
         };
-        if value["State"]["Running"] != true
-            || value["State"]["Restarting"] == true
+        let observation = probes::observe(engine, receipt, service, &value)?;
+        if !matches!(observation, Observation::Running { .. })
             || endpoint_network(receipt, &value, &networks)?.is_none()
         {
             continue;
@@ -259,17 +261,29 @@ pub(super) fn inspect_targets(
             boot,
             service,
         };
-        if let Some(probe) = receipt.probes.get(*service) {
+        if observation
+            == (Observation::Running {
+                health: Health::Healthy,
+            })
+            && let Some(probe) = receipt.probes.get(*service)
+        {
             endpoints.insert(
                 (*service).to_owned(),
                 endpoints::resolve_attached(&value, &networks, probe.config.port, &scope)?,
             );
         }
-        for port in &resource.loopback_ports {
-            port_endpoints.insert(
-                port_endpoint_key(service, port.target),
-                endpoints::resolve_attached(&value, &networks, port.target, &scope)?,
-            );
+        if matches!(
+            observation,
+            Observation::Running {
+                health: Health::Healthy | Health::None
+            }
+        ) {
+            for port in &resource.loopback_ports {
+                port_endpoints.insert(
+                    port_endpoint_key(service, port.target),
+                    endpoints::resolve_attached(&value, &networks, port.target, &scope)?,
+                );
+            }
         }
         if let Some(pid) = value["State"]["Pid"]
             .as_u64()

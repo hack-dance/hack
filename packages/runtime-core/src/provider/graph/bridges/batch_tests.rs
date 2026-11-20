@@ -42,6 +42,10 @@ struct Guest {
     restarts: RefCell<BTreeMap<String, u32>>,
     /// (stage, service): restart `service` when the batch reaches `stage`.
     restart_at: Cell<Option<(&'static str, &'static str)>>,
+    /// Stage at which the routed service's probe exits; its container stays.
+    unhealthy_at: Cell<Option<&'static str>>,
+    unhealthy: Cell<bool>,
+    fail_relays: Cell<bool>,
     gets: Cell<usize>,
     target_calls: RefCell<Vec<Vec<u32>>>,
     relay_calls: RefCell<Vec<Vec<u8>>>,
@@ -55,6 +59,9 @@ impl Guest {
             receipt: receipt(),
             restarts: RefCell::default(),
             restart_at: Cell::new(None),
+            unhealthy_at: Cell::new(None),
+            unhealthy: Cell::new(false),
+            fail_relays: Cell::new(false),
             gets: Cell::new(0),
             target_calls: RefCell::default(),
             relay_calls: RefCell::default(),
@@ -63,6 +70,9 @@ impl Guest {
         }
     }
     fn stage(&self, stage: &str) {
+        if self.unhealthy_at.get() == Some(stage) {
+            self.unhealthy.set(true);
+        }
         if let Some((at, service)) = self.restart_at.get()
             && at == stage
         {
@@ -106,6 +116,12 @@ impl Inspection for Guest {
                     API:{"EndpointID":endpoint("api"),"IPv4Address":"172.18.0.3/16"}}}),
             );
         }
+        let probe = &self.receipt.probes["web"];
+        if path == format!("/v1.53/exec/{}/json", probe.exec_id.as_ref().unwrap()) {
+            return Ok(json!({"ContainerID":WEB,"Running":!self.unhealthy.get(),
+                "ProcessConfig":{"entrypoint":"/run/hack-http-probe",
+                    "arguments":probe.config.arguments("/run/hack-http-probe-state", &probe.generation)?}}));
+        }
         let service = if path == format!("/v1.53/containers/{WEB}/json") {
             "web"
         } else if path == format!("/v1.53/containers/{API}/json") {
@@ -125,8 +141,14 @@ impl Inspection for Guest {
                 "EndpointID":endpoint(service),"IPAddress":Self::address(service)}}}}),
         )
     }
-    fn probe_status(&self, _: &str) -> Result<Option<String>, CandidateError> {
-        panic!("the bridge fence never samples health")
+    fn probe_status(&self, id: &str) -> Result<Option<String>, CandidateError> {
+        assert_eq!(id, WEB);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let generation = &self.receipt.probes["web"].generation;
+        Ok(Some(format!("v1 {generation} 5 1 0 {now} 2\n")))
     }
 }
 
@@ -152,6 +174,9 @@ impl RelayGuest for Guest {
             .borrow_mut()
             .push(selected.iter().map(|(slot, _)| *slot).collect());
         self.stage("start_relays");
+        if self.fail_relays.get() {
+            return Err(error("bridge_relay", "Unconfirmed relay operation."));
+        }
         Ok(())
     }
     fn stop_slot(&self, store: &mut Store, slot: u8) -> Result<(), CandidateError> {
@@ -292,9 +317,9 @@ fn one_lease_starts_every_relay_with_one_guest_call_per_step() {
     assert_eq!(started.len(), 2);
     assert_eq!(*guest.target_calls.borrow(), [vec![100, 101]]);
     assert_eq!(*guest.relay_calls.borrow(), [vec![0, 1]]);
-    // Three fences, each one network and two container reads: no whole-graph
-    // snapshot and no health reads.
-    assert_eq!(guest.gets.get(), 3 * 3);
+    // Three fences, each one network, two container and one probe exec read:
+    // never the rest of the graph.
+    assert_eq!(guest.gets.get(), 3 * 4);
     let persisted = read_owner_registry(&batch.candidate, OWNER, 4, false).unwrap();
     for (slot, target_pid, port) in [(0, 100, 8080), (1, 101, 3000)] {
         let entry = &persisted.slots[&slot];
@@ -342,6 +367,54 @@ fn target_restarted_mid_batch_stops_only_its_relay_and_refuses() {
     assert_eq!(persisted.slots[&0].phase, "running");
     assert_eq!(persisted.slots[&1].phase, "stopped");
     assert_eq!(persisted.next_launch_serial, 2);
+}
+
+#[test]
+fn health_lost_after_reservation_refuses_like_a_restart() {
+    // The routed probe exits while the container keeps its identity: every
+    // fence still admits only healthy route endpoints, as the snapshot did.
+    for stage in ["target_starts", "start_relays"] {
+        let (batch, guest) = reserved_batch();
+        guest.unhealthy_at.set(Some(stage));
+        let before = registry(&batch);
+        assert_eq!(
+            start(&batch, &guest).unwrap_err().code,
+            "bridge_generation_stale",
+            "{stage}"
+        );
+        if stage == "target_starts" {
+            assert_eq!(registry(&batch), before);
+            assert!(guest.relay_calls.borrow().is_empty());
+        } else {
+            assert_eq!(*guest.stopped.borrow(), [0]);
+            let persisted = read_owner_registry(&batch.candidate, OWNER, 4, false).unwrap();
+            assert_eq!(persisted.slots[&1].phase, "running");
+        }
+    }
+    // A publisher child fences the same way before it launches.
+    let (batch, guest) = reserved_batch();
+    guest.unhealthy.set(true);
+    let targets = inspect_targets(
+        &batch.candidate,
+        &guest,
+        RUN,
+        &std::collections::BTreeSet::from(["web"]),
+    )
+    .unwrap();
+    assert!(!targets.current(&batch.reserved.routes["web"].assignment, BOOT));
+}
+
+#[test]
+fn unconfirmed_relay_start_retains_every_launch_intent_for_cleanup() {
+    let (batch, guest) = reserved_batch();
+    guest.fail_relays.set(true);
+    assert_eq!(start(&batch, &guest).unwrap_err().code, "bridge_relay");
+    let persisted = read_owner_registry(&batch.candidate, OWNER, 4, false).unwrap();
+    for slot in [0, 1] {
+        assert_eq!(persisted.slots[&slot].phase, "starting");
+        assert!(persisted.slots[&slot].relay.is_some());
+    }
+    assert!(guest.stopped.borrow().is_empty());
 }
 
 #[test]

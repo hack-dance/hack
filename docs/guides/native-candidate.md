@@ -564,9 +564,10 @@ bridge to the container's target port, after the graph is ready. The rules:
   publication.
 - Routes and published ports start as one batch: one reservation, one provider
   lease that starts every bridge together, then every host listener launched at
-  once. Before and after the bridges start, each target container's identity
-  (ID, network attachment, start time, VM boot) is checked again; a bridge whose
-  container changed is stopped and `up` refuses with `bridge_generation_stale`.
+  once. Before and after the bridges start, and again before each listener
+  launches, each target container's identity (ID, network attachment, start
+  time, VM boot) and health are checked again; a bridge whose container changed
+  or became unhealthy is stopped and `up` refuses with `bridge_generation_stale`.
 - Stopping the foreground owner (Ctrl-C) closes each host listener before its
   bridge and the containers stop, then retires the publication. Dead-owner
   cleanup retires a publication only after proving its owner is gone. A

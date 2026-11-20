@@ -4336,16 +4336,23 @@ printf 'verified-cache\n'
                                 std::thread::sleep(Duration::from_millis(2));
                                 continue;
                             }
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                                continue;
+                            }
                             Err(_) => break,
                         };
-                        // An accepted socket can inherit the listener's mode.
-                        stream.set_nonblocking(false).unwrap();
-                        // A client that connects and sends nothing must not hold the thread.
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(1)))
-                            .unwrap();
                         if accepted.fetch_add(1, Ordering::SeqCst) < hold {
                             held.push(stream);
+                            continue;
+                        }
+                        // An accepted socket can inherit the listener's mode, and a client
+                        // that sends nothing must not hold the thread. A client that has
+                        // already gone makes these fail: drop it and carry on.
+                        if stream.set_nonblocking(false).is_err()
+                            || stream
+                                .set_read_timeout(Some(Duration::from_secs(1)))
+                                .is_err()
+                        {
                             continue;
                         }
                         let mut request = [0_u8; 64];

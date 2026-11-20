@@ -135,11 +135,14 @@ pub(in crate::provider::graph) fn checked(
 }
 
 /// Stopped phases a later boot can leave after it failed before its guest reported a boot
-/// (HACK-2376), once `runtime recover` has run where needed.
-const AFTER_GUESTLESS_BOOT: [&str; 3] = [
+/// (HACK-2376), once `runtime recover` has run where needed. `stopped` is the phase a start
+/// writes when its boot admission refuses before anything boots: that start never calls
+/// `begin_boot`, so the boot ids stay as the failed boot left them.
+const AFTER_GUESTLESS_BOOT: [&str; 4] = [
     "recovered-unclean",
     "stopped-before-engine",
     "stopped-after-engine-failure",
+    "stopped",
 ];
 
 /// A pool whose later boot failed before its guest reported a boot id: the boot id is empty
@@ -478,6 +481,9 @@ pub(in crate::provider::graph) mod tests {
             ("recovered-unclean", true),
             ("stopped-before-engine", false),
             ("stopped-after-engine-failure", true),
+            // A later start refused at boot admission, after one of the above.
+            ("stopped", false),
+            ("stopped", true),
         ] {
             let fixture = Fixture::new();
             let mut owner = Owner::load(&fixture.candidate).unwrap();

@@ -5,15 +5,15 @@
 //! regions. libproc answers for this user's processes only; another user's process answers
 //! `EPERM`.
 //!
-//! The memory regions are read with a query the SDK header does not declare
-//! (`PROC_PIDREGIONPATHINFO2`). The shipped `lsof` reads them with the same query and takes
-//! its first `EINVAL` as the end of a process's mappings. This scan trusts the query less:
-//! [`method`] tests it before every scan, and [`mapped_only_here`] has the declared region
-//! query confirm what the walks found. A scan that fails either is left to `lsof`, whole.
+//! This inspects what the shipped `lsof` inspects for the same files, through the same
+//! kernel calls. In particular the memory regions are read with the query `lsof` uses,
+//! which the SDK header does not declare (`PROC_PIDREGIONPATHINFO2`), with the same end
+//! condition (see [`Inspector::mappings`]). [`method`] tests that query before every scan,
+//! and a scan that fails the test or meets anything it cannot read is left to `lsof`,
+//! whole. Like `lsof`, it does not prove that nothing maps a disk.
 use super::{Fallback, Found, Hold, Holder, Method};
 use libc::c_int;
 use std::ffi::OsString;
-use std::fs::File;
 use std::mem::{size_of, size_of_val};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
@@ -25,9 +25,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 const PROC_PIDFDVNODEINFO: c_int = 1;
 /// `proc_pidfdinfo`: a file descriptor's status and name.
 const PROC_PIDFDVNODEPATHINFO: c_int = 2;
-/// `proc_pidinfo`: the memory region at or above an address, of any kind, without its
-/// file. Declared in the SDK header.
-const PROC_PIDREGIONINFO: c_int = 7;
 /// `proc_pidinfo`: the list of file ports.
 const PROC_PIDLISTFILEPORTS: c_int = 14;
 /// `proc_pidfileportinfo`: a file port's status and name.
@@ -38,22 +35,15 @@ const PROC_PIDFILEPORTVNODEPATHINFO: c_int = 2;
 /// does not declare it, so no scan uses it untested ([`method`]).
 const PROC_PIDREGIONPATHINFO2: c_int = 22;
 
-// From `<sys/mman.h>` and `<mach/vm_inherit.h>`; libc 0.2 declares neither.
-unsafe extern "C" {
-    fn minherit(address: *mut libc::c_void, length: usize, inheritance: c_int) -> c_int;
-}
-/// `minherit`: the pages are absent from a forked child.
-const VM_INHERIT_NONE: c_int = 2;
-
 /// Entries a descriptor, file-port or process list may reach before the scan gives up.
 const LIST_LIMIT: usize = 1 << 20;
 /// Room a list read must leave unused to be taken as whole (see [`list`]).
 const LIST_MARGIN: usize = 32;
-/// File-backed memory regions of one process the scan walks before it gives up.
-const REGION_LIMIT: usize = 1 << 22;
-/// What the declared region query counts on a file mapped by one page and nothing else:
-/// the file's own pager and that page.
-const ALONE: u32 = 2;
+/// File-backed memory regions of one process the walk reads before it gives the scan to
+/// `lsof`. The shipped `lsof` stops silently after 10,000 of them; this walk goes on to
+/// thirteen times that, so it can only find more. The cost is bounded: at the 10 to 25
+/// microseconds a call measured here, a process that reaches the limit takes 1.3 to 3.3 s.
+const REGION_LIMIT: usize = 1 << 17;
 
 /// The most threads one scan uses; it uses half the host's cores up to this. Most of a scan
 /// is kernel time spent walking each process's memory regions, and several threads walk
@@ -133,23 +123,14 @@ struct NamedDescriptorFile {
     file: libc::vnode_info_path,
 }
 
-/// `struct proc_regioninfo`, of which the reference count of the region's memory object
-/// and the region's address and size are read.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RegionInfo {
-    _attributes: [u32; 13],
-    references: u32,
-    _counts: [u32; 6],
-    address: u64,
-    size: u64,
-}
-
-/// `struct proc_regionwithpathinfo`: the region, then the mapped file and its name.
+/// `struct proc_regionwithpathinfo`: `struct proc_regioninfo`, of which only the trailing
+/// address and size are read, then the mapped file and its name.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Region {
-    info: RegionInfo,
+    _attributes: [u64; 10],
+    address: u64,
+    size: u64,
     file: libc::vnode_info_path,
 }
 
@@ -160,8 +141,6 @@ const _: () = {
     assert!(size_of::<FilePort>() == 8);
     assert!(size_of::<DescriptorFile>() == 176);
     assert!(size_of::<NamedDescriptorFile>() == 1200);
-    assert!(size_of::<RegionInfo>() == 96);
-    assert!(std::mem::offset_of!(RegionInfo, references) == 52);
     assert!(size_of::<Region>() == 1272);
 };
 
@@ -171,7 +150,6 @@ unsafe impl Record for libc::proc_fdinfo {}
 unsafe impl Record for FilePort {}
 unsafe impl Record for DescriptorFile {}
 unsafe impl Record for NamedDescriptorFile {}
-unsafe impl Record for RegionInfo {}
 unsafe impl Record for Region {}
 
 /// One libproc call: the count it returns, or the errno of a refused call. libproc returns
@@ -253,23 +231,22 @@ fn file_backed_region(pid: c_int, cursor: u64, region: &mut Region) -> Result<us
 
 type RegionQuery = fn(c_int, u64, &mut Region) -> Result<usize, c_int>;
 
-/// How an errno from a call about one process ends that process's inspection. `otherwise`
-/// is the reason `lsof` must scan when the errno is neither of the two that mean "not a
-/// holder this scan may see".
-fn ended(errno: c_int, otherwise: Fallback) -> Ended {
+/// How an errno from a call about one process ends that process's inspection: the two
+/// that mean "not a holder this scan may see", or the scan cannot answer.
+fn ended(errno: c_int) -> Ended {
     match errno {
         libc::ESRCH => Ended::Exited,
         libc::EPERM => Ended::NotInspectable,
-        _ => Ended::Incomplete(otherwise),
+        _ => Ended::Incomplete(Fallback::ScanIncomplete),
     }
 }
 
 /// Require one whole record: the kernel writes exactly the size it gives the record.
-fn whole<T>(bytes: usize, otherwise: Fallback) -> Result<(), Ended> {
+fn whole<T>(bytes: usize) -> Result<(), Ended> {
     if bytes == size_of::<T>() {
         Ok(())
     } else {
-        Err(Ended::Incomplete(otherwise))
+        Err(Ended::Incomplete(Fallback::ScanIncomplete))
     }
 }
 
@@ -286,12 +263,12 @@ fn records<T>(bytes: usize) -> Result<usize, Ended> {
 ///
 /// The kernel fills what fits and reports no truncation. It also takes the list's size
 /// before it fills its own buffer, so a list that grew in between comes back cut at the
-/// old size even when the caller had room for more. Neither can be seen in one answer. A
-/// read is therefore taken as whole only when it leaves [`LIST_MARGIN`] entries unused,
-/// and is repeated into a larger buffer until it does; a list that never settles is
-/// [`Fallback::ScanIncomplete`]. This narrows the window and does not make the read
-/// atomic: an entry added while the kernel fills the buffer can still be missed, by this
-/// scan as by `lsof`.
+/// old size even when the caller had room for more. Neither can be seen in one answer. So
+/// a read is accepted only when it leaves [`LIST_MARGIN`] entries unused, a margin against
+/// truncation, and is repeated into a larger buffer until it does; a list that never
+/// settles is [`Fallback::ScanIncomplete`]. The margin does not make the read atomic or
+/// show the list whole: an entry added while the kernel fills the buffer can still be
+/// missed, by this scan as by `lsof`.
 fn list<T: Record>(
     records: &mut Vec<T>,
     mut read: impl FnMut(&mut [T]) -> Result<usize, Ended>,
@@ -352,118 +329,20 @@ fn hold(
     }
 }
 
-/// One page of a file, mapped shared and read-only in this process with no descriptor
-/// kept. Dropping it unmaps the page.
-struct Page {
-    address: *mut libc::c_void,
-    length: usize,
-}
-
-impl Page {
-    /// `None` when the page cannot be mapped.
-    fn of(file: &File) -> Option<Self> {
-        use std::os::fd::AsRawFd;
-        // SAFETY: `sysconf` has no preconditions.
-        let length = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).ok()?;
-        // SAFETY: a new read-only shared mapping of one page of a live descriptor at an
-        // address the kernel chooses. The page is never read, so a shorter file is safe.
-        let address = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                length,
-                libc::PROT_READ,
-                libc::MAP_SHARED,
-                file.as_raw_fd(),
-                0,
-            )
-        };
-        if address == libc::MAP_FAILED {
-            return None;
-        }
-        // A child this process forks meanwhile must not inherit the page: it would count
-        // as another mapping of the file until the child executes its program.
-        // SAFETY: exactly the page mapped above.
-        unsafe { minherit(address, length, VM_INHERIT_NONE) };
-        Some(Self { address, length })
-    }
-
-    /// What the declared region query counts as references to the memory object of the
-    /// file this page maps: [`ALONE`] when nothing else maps the file, and one more for
-    /// each other mapping of it in any process, shared or private. `None` when the query
-    /// does not answer for this page.
-    ///
-    /// This is XNU's own bookkeeping, not a documented contract, which is why [`method`]
-    /// tests it before every scan. It has one known slack: while the object is being paged
-    /// (a mapper writing through its mapping and syncing it), the kernel reports one
-    /// reference fewer for some of the time. An open descriptor does not count.
-    fn references(&self) -> Option<u32> {
-        // SAFETY: `getpid` has no preconditions.
-        let pid = unsafe { libc::getpid() };
-        let address = self.address as u64;
-        let mut region = RegionInfo::empty();
-        let bytes = process_info(
-            pid,
-            PROC_PIDREGIONINFO,
-            address,
-            std::slice::from_mut(&mut region),
-        )
-        .ok()?;
-        let covers = region.address <= address && address - region.address < region.size;
-        (bytes == size_of::<RegionInfo>() && covers).then_some(region.references)
-    }
-}
-
-impl Drop for Page {
-    fn drop(&mut self) {
-        // SAFETY: exactly the mapping `of` created; nothing else refers to it.
-        unsafe { libc::munmap(self.address, self.length) };
-    }
-}
-
-/// Whether the declared region query shows that nothing but this call maps any of `disks`.
-///
-/// The mapping walks cannot show that they were complete (see [`Inspector::mappings`]). This
-/// asks the kernel from the other side: it maps one page of each disk, reads the reference
-/// count of the disk's memory object with the declared query and unmaps the page. Any
-/// mapping the walks missed, in any process of any user, holds a reference, so a count
-/// above [`ALONE`] means the walks were not complete. So does a disk that cannot be opened,
-/// is no longer the file that was identified, or cannot be mapped or asked about.
-fn mapped_only_here(disks: &[Disk]) -> bool {
-    disks.iter().all(|disk| {
-        let Ok(file) = File::open(&disk.path) else {
-            return false;
-        };
-        let same = file
-            .metadata()
-            .is_ok_and(|status| status.dev() == disk.device && status.ino() == disk.inode);
-        let page = Page::of(&file);
-        // The descriptor is closed before the count is read, so only the page is this
-        // call's.
-        drop(file);
-        same && page.is_some_and(|page| page.references() == Some(ALONE))
-    })
-}
-
-/// Whether this scan may run in this process, tested on the properties the scan relies on.
+/// Whether this scan may run in this process, tested on the property the scan relies on.
 ///
 /// A process that mapped a disk and closed its descriptor is the holder `lsof` finds and
 /// the one the undeclared region query must find. A kernel that stopped answering the
 /// query would be noticed at once, but one that answered with a slightly different meaning
-/// would report no such holder and turn a pass into a false "nothing holds the disks". So
-/// the test makes that very case in this process: a file of its own, one page of it mapped
-/// shared, its descriptor closed. It then requires:
-///
-/// * the undeclared query, asked at the page's address, to report that region with that
-///   file's device and inode;
-/// * the walk a scan makes to find it;
-/// * the declared query to count the page as the file's only mapping, to count a second
-///   mapping of the file, and to stop counting it once it is unmapped.
+/// would report no such holder. So the test makes that very case in this process: a file
+/// of its own, one page of it mapped shared, its descriptor closed. It then requires the
+/// query, asked at the page's address, to report that region with that file's device and
+/// inode, and the walk a scan makes to find it.
 ///
 /// What this establishes is narrow. The flavor exists and reports the device and inode of
-/// an ordinary shared file mapping, and the declared count moves with mappings, on this
-/// kernel, now. It does not establish coverage of every kind of mapping: XNU skips submaps
-/// (the shared library cache) in both region queries, as it does for `lsof`, and regions
-/// backed by other pagers are not tested here.
+/// an ordinary shared file mapping, on this kernel, now. It does not establish coverage of
+/// every kind of mapping: XNU skips submaps (the shared library cache) in this query, for
+/// this scan as for `lsof`, and regions backed by other pagers are not tested here.
 pub(super) fn method() -> Method {
     let tested = Probe::map(&std::env::temp_dir())
         .ok_or(Fallback::SelfTestUnavailable)
@@ -475,17 +354,22 @@ pub(super) fn method() -> Method {
 }
 
 /// The self-test's own file with one page of it mapped in this process and its descriptor
-/// closed. Dropping it unmaps the page and removes the file.
+/// closed: the only mapping this module ever makes. Dropping it unmaps the page and removes
+/// the file.
 struct Probe {
-    page: Page,
+    address: *mut libc::c_void,
+    length: usize,
     file: Disk,
 }
 
 impl Probe {
     /// `None` when the file or the mapping cannot be made in `directory`.
     fn map(directory: &Path) -> Option<Self> {
+        use std::os::fd::AsRawFd;
         use std::os::unix::fs::OpenOptionsExt;
         static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        // SAFETY: `sysconf` has no preconditions.
+        let length = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).ok()?;
         let path = directory.join(format!(
             ".hack-disk-scan-probe.{}.{}",
             std::process::id(),
@@ -501,11 +385,23 @@ impl Probe {
             .custom_flags(libc::O_NOFOLLOW)
             .open(&path)
             .ok()?;
-        let made = (|| {
-            let status = opened.metadata().ok()?;
-            opened.set_len(1).ok()?;
-            Some(Self {
-                page: Page::of(&opened)?,
+        let mapped = opened.metadata().ok().and_then(|status| {
+            // SAFETY: a new read-only shared mapping of one page of a live descriptor at
+            // an address the kernel chooses. The page is never read, so the empty file
+            // behind it is safe.
+            let address = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    length,
+                    libc::PROT_READ,
+                    libc::MAP_SHARED,
+                    opened.as_raw_fd(),
+                    0,
+                )
+            };
+            (address != libc::MAP_FAILED).then(|| Self {
+                address,
+                length,
                 file: Disk {
                     path: path.clone(),
                     real: path.clone(),
@@ -513,21 +409,20 @@ impl Probe {
                     inode: status.ino(),
                 },
             })
-        })();
-        if made.is_none() {
+        });
+        if mapped.is_none() {
             let _ = std::fs::remove_file(&path);
         }
         // From here only the page holds the file: the descriptor closes with `opened`.
-        made
+        mapped
     }
 
     /// Require `flavor`, asked about this process, to report the probe's page with the
-    /// probe's file, the scan's own walk to find it, and the declared query to count the
-    /// file's mappings.
+    /// probe's file, and the scan's own walk to find it.
     fn found_by(&self, flavor: c_int) -> Result<(), Fallback> {
         // SAFETY: `getpid` has no preconditions.
         let pid = unsafe { libc::getpid() };
-        let address = self.page.address as u64;
+        let address = self.address as u64;
         let mut region = Region::empty();
         match process_info(pid, flavor, address, std::slice::from_mut(&mut region)) {
             Ok(bytes) if bytes == size_of::<Region>() => {}
@@ -535,8 +430,7 @@ impl Probe {
             Ok(_) => return Err(Fallback::SelfTestFailed),
             Err(_) => return Err(Fallback::QueryUnanswered),
         }
-        let covers =
-            region.info.address <= address && address - region.info.address < region.info.size;
+        let covers = region.address <= address && address - region.address < region.size;
         let disks = std::slice::from_ref(&self.file);
         if !covers || matching(disks, &region.file.vip_vi.vi_stat).is_none() {
             return Err(Fallback::SelfTestFailed);
@@ -547,24 +441,14 @@ impl Probe {
         if walked != Ok(()) || !found {
             return Err(Fallback::SelfTestFailed);
         }
-        self.counted().ok_or(Fallback::SelfTestFailed)
-    }
-
-    /// The declared query counts this file's mappings: the page alone, then a second
-    /// mapping, then the page alone again.
-    fn counted(&self) -> Option<()> {
-        let count = |expected: u32| (self.page.references() == Some(expected)).then_some(());
-        count(ALONE)?;
-        let second = Page::of(&File::open(&self.file.path).ok()?)?;
-        count(ALONE + 1)?;
-        (second.references() == Some(ALONE + 1)).then_some(())?;
-        drop(second);
-        count(ALONE)
+        Ok(())
     }
 }
 
 impl Drop for Probe {
     fn drop(&mut self) {
+        // SAFETY: exactly the mapping `map` created; nothing else refers to it.
+        unsafe { libc::munmap(self.address, self.length) };
         let _ = std::fs::remove_file(&self.file.path);
     }
 }
@@ -625,10 +509,8 @@ impl Inspector {
         disks: &[Disk],
         holders: &mut Vec<Holder>,
     ) -> Result<(), Ended> {
-        let incomplete = Fallback::ScanIncomplete;
         let count = list(&mut self.descriptors, |table| {
-            let bytes = process_info(pid, libc::PROC_PIDLISTFDS, 0, table)
-                .map_err(|errno| ended(errno, incomplete))?;
+            let bytes = process_info(pid, libc::PROC_PIDLISTFDS, 0, table).map_err(ended)?;
             records::<libc::proc_fdinfo>(bytes)
         })?;
         for listed in &self.descriptors[..count] {
@@ -637,11 +519,11 @@ impl Inspector {
             }
             let mut open = DescriptorFile::empty();
             match descriptor_info(pid, listed.proc_fd, PROC_PIDFDVNODEINFO, &mut open) {
-                Ok(bytes) => whole::<DescriptorFile>(bytes, incomplete)?,
+                Ok(bytes) => whole::<DescriptorFile>(bytes)?,
                 // Closed, or replaced by another kind of file, since it was listed
                 // (`EBADF`); or its file was revoked (`ENOENT`). Not a hold.
                 Err(libc::EBADF | libc::ENOENT) => continue,
-                Err(errno) => return Err(ended(errno, incomplete)),
+                Err(errno) => return Err(ended(errno)),
             }
             if let Some(disk) = matching(disks, &open.file.vi_stat) {
                 hold(holders, pid, Hold::Descriptor, disk, || {
@@ -662,10 +544,8 @@ impl Inspector {
         disks: &[Disk],
         holders: &mut Vec<Holder>,
     ) -> Result<(), Ended> {
-        let incomplete = Fallback::ScanIncomplete;
         let count = list(&mut self.ports, |ports| {
-            let bytes = process_info(pid, PROC_PIDLISTFILEPORTS, 0, ports)
-                .map_err(|errno| ended(errno, incomplete))?;
+            let bytes = process_info(pid, PROC_PIDLISTFILEPORTS, 0, ports).map_err(ended)?;
             records::<FilePort>(bytes)
         })?;
         for listed in &self.ports[..count] {
@@ -674,11 +554,11 @@ impl Inspector {
             }
             let mut sent = NamedDescriptorFile::empty();
             match file_port_info(pid, listed.name, PROC_PIDFILEPORTVNODEPATHINFO, &mut sent) {
-                Ok(bytes) => whole::<NamedDescriptorFile>(bytes, incomplete)?,
+                Ok(bytes) => whole::<NamedDescriptorFile>(bytes)?,
                 // Released since it was listed (`EINVAL`), carrying another kind of file
                 // now (`ENOTSUP`), or its file was revoked (`ENOENT`). Not a hold.
                 Err(libc::EINVAL | libc::ENOTSUP | libc::ENOENT) => continue,
-                Err(errno) => return Err(ended(errno, incomplete)),
+                Err(errno) => return Err(ended(errno)),
             }
             if let Some(disk) = matching(disks, &sent.file.vip_vi.vi_stat) {
                 hold(holders, pid, Hold::FilePort, disk, || name(&sent.file));
@@ -690,62 +570,66 @@ impl Inspector {
     /// Walk the process's file-backed memory regions upward from address zero. Each answer
     /// is the first such region at or above the cursor.
     fn mappings(&self, pid: i32, disks: &[Disk], holders: &mut Vec<Holder>) -> Result<(), Ended> {
-        let incomplete = Fallback::WalkIncomplete;
         let mut cursor = 0_u64;
         let mut asked_again = false;
         for _ in 0..REGION_LIMIT {
             let mut region = Region::empty();
             match (self.regions)(pid, cursor, &mut region) {
-                Ok(bytes) => whole::<Region>(bytes, incomplete)?,
-                // XNU answers this undeclared query with `EINVAL` both when the process
-                // has no further file-backed region and when it cannot get the vnode of the
-                // next one (`proc_pidregionpathinfo2`: `vnode_getwithvid` fails for a vnode
-                // that is being reclaimed). So `EINVAL` alone never shows that the walk was
-                // complete, and this walk does not claim it. It asks once more, which gets
-                // past a region whose reclaim has finished, and then stops here without a
-                // verdict. The declared region query decides: `mapped_only_here` must show
-                // that nothing but the scan maps each disk, and a scan whose walks cannot
-                // be shown complete that way is sent whole to `lsof`
-                // (`Fallback::WalkIncomplete`). That check and that fallback are a safety
-                // property. Do not remove either as an optimization.
+                Ok(bytes) => whole::<Region>(bytes)?,
+                // XNU answers this undeclared query with `EINVAL` when the process has no
+                // further file-backed region, and also for a region whose vnode it cannot
+                // get (`proc_pidregionpathinfo2`: `vnode_getwithvid` fails while a vnode is
+                // reclaimed). The two cannot be told apart from here.
                 //
-                // The declared query cannot decide here, region by region. It reports
-                // regions of every kind, and following it from this cursor to the end of
-                // each address space measured 2.5 million calls and 7.7 s for one scan of a
-                // host with 1,300 processes, ten times the `lsof` child.
+                // The shipped `lsof` ends its walk there too. That was established on lsof
+                // 4.91 as shipped with macOS 26.5 by disassembling its `proc_pidinfo` call
+                // sites: it asks for flavor `0x16` (this query) with a 1,272-byte record,
+                // leaves the loop on any non-positive return, and never asks for the
+                // declared flavor 8. This walk matches it, and asks once more first, which
+                // can only find more: a region whose reclaim has finished is passed.
+                //
+                // Neither walk proves that nothing maps a disk. Following the declared
+                // query region by region from here would show the end of the address
+                // space, and was measured at about 2.5 million calls and 7.7 s for one
+                // scan, ten times the `lsof` child, which is why it is not done.
+                //
+                // What this scan adds to `lsof` is only that it distrusts itself: a failed
+                // self-test, and anything here that is not one of the answers above, send
+                // the whole scan to `lsof`. That fallback is a safety property. Do not
+                // remove it as an optimization.
                 Err(libc::EINVAL) if !asked_again => {
                     asked_again = true;
                     continue;
                 }
                 Err(libc::EINVAL) => return Ok(()),
-                Err(errno) => return Err(ended(errno, incomplete)),
+                Err(errno) => return Err(ended(errno)),
             }
             asked_again = false;
             let file = &region.file.vip_vi.vi_stat;
             // The kernel reads the file's status as this process, and reports the region
             // without one when this process may not read it (a file another program
-            // keeps private; hosts have dozens mapped). A disk is a file this process
-            // has just read the status of, so such a region is not one, unless the kernel
-            // names it as one: then the status failed for another reason and the walk
-            // cannot tell.
+            // keeps private; hosts have dozens mapped). `lsof` cannot match such a region
+            // either. A disk is a file this process has just read the status of, so the
+            // region is not one, unless the kernel names it as one: then the status
+            // failed for another reason and the walk cannot tell.
             if file.vst_dev == 0 && file.vst_ino == 0 {
                 let named = name(&region.file);
                 if disks
                     .iter()
                     .any(|disk| named.as_deref() == Some(&disk.real))
                 {
-                    return Err(Ended::Incomplete(incomplete));
+                    return Err(Ended::Incomplete(Fallback::ScanIncomplete));
                 }
             }
             if let Some(disk) = matching(disks, file) {
                 hold(holders, pid, Hold::Mapping, disk, || name(&region.file));
             }
-            cursor = match region.info.address.checked_add(region.info.size) {
+            cursor = match region.address.checked_add(region.size) {
                 Some(next) if next > cursor => next,
-                _ => return Err(Ended::Incomplete(incomplete)),
+                _ => return Err(Ended::Incomplete(Fallback::ScanIncomplete)),
             };
         }
-        Err(Ended::Incomplete(incomplete))
+        Err(Ended::Incomplete(Fallback::ScanIncomplete))
     }
 }
 
@@ -776,9 +660,6 @@ fn scan_with(
         .map(|path| Disk::identify(path))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| Fallback::ScanIncomplete)?;
-    // Taken before the walks as well as after them, so a mapping that is being paged
-    // during one reading (see `Page::references`) still has two more to show up in.
-    let unmapped_before = mapped_only_here(&disks);
     let processes = processes()?;
     // Each thread takes the next process nobody has taken, so one large process does not
     // hold up a whole share of the list.
@@ -840,13 +721,6 @@ fn scan_with(
     }
     if let Some(why) = incomplete {
         return Err(why);
-    }
-    // A holder is an answer by itself. "No holder" is one only once the declared query
-    // shows the mapping walks were complete (see `Inspector::mappings`).
-    if found.holders.is_empty()
-        && !(unmapped_before && mapped_only_here(&disks) && mapped_only_here(&disks))
-    {
-        return Err(Fallback::WalkIncomplete);
     }
     Ok(found)
 }

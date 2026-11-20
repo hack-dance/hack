@@ -630,8 +630,8 @@ after the guest has booted from it. Size, owner and mode checks are not integrit
 digest is. A mismatch refuses with `disk_template_untrusted` and changes no files. Before a start,
 removing the refused file lets SmolVM re-expand it from the verified compressed template. After a
 start, the boot is stopped as a failed boot without adopting its disks. `runtime recover --json`
-then proves the provider stopped and idle, takes the VM lock with the disk handles closed, and
-renames the unadopted `storage.raw` and `overlay.raw`, plus any owned expanded template that
+then proves the provider stopped and idle, takes the VM lock, finds no process holding the
+disks (the disk-handle scan below), and renames the unadopted `storage.raw` and `overlay.raw`, plus any owned expanded template that
 failed, into an `untrusted-first-boot-<n>` directory beside each. It deletes nothing and keeps
 the compressed templates, and it returns the pool to `stopped-before-engine`, so the next start
 expands and clones again and verifies before adoption. Those disks were never adopted, so they
@@ -716,7 +716,8 @@ candidate's provider binary. An interrupted create that never recorded its machi
 this pool's own machine record and returns to `initializing`. A start that created no disks
 returns to `stopped-before-engine`. A launched start becomes an unclean stop after the
 provider's own PID record is verified (and the provider stopped if alive), or after it has
-exited, and after its VM lock, disk handles and sockets are proven released. Recovery never
+exited, and after its VM lock is free, the disk-handle scan finds no holder of its disks and
+its sockets accept no connection. Recovery never
 adopts disks: a first start's disks stay unadopted until the next boot's template, size and
 format checks accept them. Missing adopted disks, a partial launch and other phases still
 refuse for manual inspection. `down` treats a stopped pool with no recorded provider as already
@@ -1911,7 +1912,8 @@ the pin. To measure a build, run
 `runtime network extend --allow-host pkg-npm.githubusercontent.com --json` adds
 explicit hostnames to an existing approved-host pool without replacing its disks
 or starting it. It requires the retained provider process to be absent, its PID
-record and database identity to match, the VM lock and disk handles to be free,
+record and database identity to match, the VM lock to be free, the disk-handle scan to
+find no holder,
 and existing disk/configuration/owner-registry checks to pass. Isolated and
 host-gateway pools cannot be converted through this command.
 
@@ -2264,40 +2266,42 @@ next clean `down`. Clean also requires a creation receipt, rootfs pin, both disk
 identities and declared sizes, the recorded executable and user, a dead recorded
 provider and no pending owner update; these receipt checks are read-only, take no
 provider lock and run around every sample, including `runtime probe`. The disk-handle
-scan looks for processes that still hold either disk. On macOS it runs inside the runtime:
-it reads the host's process table through libproc and looks, in every process the user
-may inspect, for an open descriptor, a memory mapping or a file port on either disk,
-matched by device and inode. That is what the `lsof` child it replaced reports; the scan
-is faster because it walks processes on several threads (half the host's cores, at most
-eight). On every other platform the scan is still the `lsof` child (`/usr/sbin/lsof`,
-then `/usr/bin/lsof`). A Linux scan of `/proc` was written and removed: `/proc/<pid>/maps`
-names a mapped file by a path that may no longer lead to it and by an inode that overlay
-filesystems report differently from `stat`, and the `map_files` links that would settle
-it cannot be followed without privilege.
+scan looks for processes that still hold either disk. It was an `lsof` child. On macOS it
+now runs inside the runtime, and it is faster because it walks processes on several
+threads (half the host's cores, at most eight).
 
-A scan that passes is an observation, not an atomic proof, with either method. The process
-table is read while it changes, so a process, descriptor or mapping that appears during
-the scan can be missed; processes of other users are not inspected; and each kernel list
-is taken from a size the kernel read before filling it.
+The in-process scan inspects what the shipped `lsof` inspects for these files (vnode
+descriptors, file ports, and file mappings through the same kernel query with the same
+end condition), matched by device and inode, and falls back to `lsof` whenever it cannot
+trust itself. It does not prove that nothing maps a disk, and neither did `lsof`. With
+either method the process table is read while it changes, processes of other users are
+not inspected, and the mapping query ends a process's walk at a region whose file it
+cannot get as it does at the last region.
 
-On macOS the scan reads mappings with a kernel query the SDK header does not declare (the
-shipped `lsof` uses the same one), so it answers only when it can back its answer:
+The scan falls back when its self-test fails or when it reads something it cannot use.
+The mapping query is one the SDK header does not declare, so every scan first maps a file
+of its own, closes the descriptor and requires the query to report that mapping with that
+file's device and inode. A list that will not settle, a partial record, an unexpected
+error or a process with more mapped files than the walk reads also hand the scan over.
+The whole scan is then run again through `lsof` (`/usr/sbin/lsof`, then `/usr/bin/lsof`),
+and only `lsof`'s answer counts.
 
-- Every scan first tests the query. It maps a file of its own, closes the descriptor and
-  requires the query to report that mapping with that file's device and inode.
-- The query answers `EINVAL` both at the end of a process's mappings and for a region
-  whose file it cannot get, so the mapping walks alone never show they were complete. The
-  declared region query decides: asked about a page the scan maps of each disk, it must
-  report that nothing else maps that disk.
-- Every list and record the scan reads must be whole.
+On every other platform the scan is still the `lsof` child. A Linux scan of `/proc` was
+written and removed: `/proc/<pid>/maps` names a mapped file by a path that may no longer
+lead to it and by an inode that overlay filesystems report differently from `stat`, and
+the `map_files` links that would settle it cannot be followed without privilege. The
+`lsof` scan there differs from the earlier one in four ways: `lsof` is started by the
+scan's thread instead of the caller, the method is recorded, `/usr/bin/lsof` is tried
+when `/usr/sbin/lsof` is absent, and a timed-out scan always reports
+`provider_timeout_uncertain` with the scan's own message.
 
-A scan that fails any of these is run again, whole, through `lsof`, and only `lsof`'s
-answer counts. Each scan records its method beside the owner record, in
+Each scan that answers records what ran beside the owner record, in
 `disk-handle-scan.json`: `{"version": 1, "method": "in-process"}`, or `"method": "lsof"`
 with a `reason` of `not_built_for_this_platform`, `query_unanswered`, `self_test_failed`,
-`self_test_unavailable`, `scan_incomplete` or `walk_incomplete`. The record is a report
-only. `runtime status --json` shows it without the version as `disk_handle_scan`, and
-leaves the field out for a pool no scan has recorded.
+`self_test_unavailable` or `scan_incomplete`. The record is a report only: it is written
+after the scan has answered, never for a scan that timed out, and it decides nothing.
+`runtime status --json` shows it without the version as `disk_handle_scan`, and leaves
+the field out for a pool no scan has recorded.
 
 Scanning every process to learn whether a VM disk is held is a consequence of not owning
 the VM process: a launcher of our own would hold an exclusive lock on each disk, and the
@@ -2305,9 +2309,10 @@ question would be one lock attempt. This scan is the fix for today's provider an
 not be built on further.
 
 The stop paths (`down`, `recover`) and the release checks wait at most 30 s for the scan,
-which covers choosing the method, the scan and the `lsof` child when one is needed. A scan
-that has not answered by then ends the stop as `provider_timeout_uncertain`, without the
-marker. The 30 s limit the wait, not the work: a scan thread blocked in a system call can
+which covers choosing the method, the scan, and finding, starting and waiting for `lsof`
+when it is needed. A scan that has not answered by then ends the stop as
+`provider_timeout_uncertain`, without the marker. The 30 s limit the wait, not the work:
+an `lsof` child is killed and reaped, but a scan thread blocked in a system call can
 outlive the timeout, and whatever it answers later is discarded.
 `scripts/measure-lsof-scan.ts` re-measures a host: the runtime's scan with `--scan-binary`
 (macOS), the `lsof` child without.
@@ -2320,8 +2325,8 @@ start whose free disk lies between the host reserve and the fresh budget keeps t
 selection. `runtime probe` takes no lease and settles no basis, so it reports the reserve
 basis for a qualifying stopped pool whatever its headroom; the start's `admission.json`
 records the basis that start used. Under the lease, before any restart effect and again immediately before
-`machine start`, its release checks also require a free VM lock, no open disk handle
-(the same scan, waited on for at most 30 seconds because it walks every process and is
+`machine start`, its release checks also require a free VM lock, no holder found by the
+disk-handle scan (the same scan, waited on for at most 30 seconds because it walks every process and is
 slow on a loaded host), no owned listener and an unchanged audited provider configuration. The short-HOME
 alias is checked on every owner load, and the rootfs content against its pin before
 boot.

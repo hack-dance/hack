@@ -536,6 +536,58 @@ fn host_lsof_closed_disks_child() {
     assert_eq!(code(&result), "ok", "{:?}", result.as_ref().err());
 }
 
+/// The record a host scan leaves once it has answered. It is written after the answer
+/// is delivered, so a test waits a moment for it.
+pub(super) fn recorded(pool: &Path) -> Option<Method> {
+    let started = std::time::Instant::now();
+    loop {
+        let method = last_scan::read(pool);
+        if method.is_some() || started.elapsed() > Duration::from_secs(5) {
+            return method;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// A host scan whose choice of method and whose `lsof` are the given stand-ins.
+fn host_scan_with<'a>(
+    pool: &'a Path,
+    decide: Decide,
+    locate: impl Fn() -> Result<Lsof, CandidateError> + Send + Sync + 'static,
+) -> HostScan<'a> {
+    HostScan {
+        record: Some(pool),
+        decide,
+        locate: Arc::new(locate),
+    }
+}
+
+fn left_to_lsof(_: &[PathBuf], _: &AtomicBool) -> Result<Found, Fallback> {
+    Err(Fallback::ScanIncomplete)
+}
+
+/// Gives the scan to `lsof` only once the caller has given up.
+fn left_to_lsof_too_late(_: &[PathBuf], stop: &AtomicBool) -> Result<Found, Fallback> {
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    Err(Fallback::ScanIncomplete)
+}
+
+/// A stand-in `lsof` that says it started, by writing its process id beside itself, and
+/// then stays until it is killed.
+fn lingering_lsof(directory: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let (script, started) = (directory.join("lsof"), directory.join("lsof.pid"));
+    std::fs::write(
+        &script,
+        "#!/bin/sh\necho $$ > \"$0.pid\"\nexec /bin/sleep 600\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    (script, started)
+}
+
 /// A host scan records the method that answered beside the owner record: on macOS the
 /// scan in this process, which finds the disk this process holds; elsewhere `lsof`,
 /// because no scan in this process is built there.
@@ -562,27 +614,21 @@ fn a_host_scan_records_its_method_in_the_pool() {
     } else {
         Method::Lsof(Fallback::NotBuiltForThisPlatform)
     };
-    assert_eq!(last_scan::read(pool.path()), Some(expected));
+    assert_eq!(recorded(pool.path()), Some(expected));
 }
 
-/// A host scan that must be left to `lsof` is: the thread's reason is recorded, the
-/// `lsof` child answers, and what it lists is the result.
+/// A host scan that must be left to `lsof` is: the `lsof` child answers, what it lists is
+/// the result, and the record names `lsof` with the reason once the child has run.
 #[test]
 fn a_scan_left_to_lsof_is_answered_by_lsof() {
     if host_lsof().is_none() {
         return;
     }
-    fn left_to_lsof(_: &[PathBuf], _: &AtomicBool) -> Result<Found, Fallback> {
-        Err(Fallback::WalkIncomplete)
-    }
     let pool = Scratch::new();
     let directory = Scratch::new();
     let disks = sparse_disks(directory.path());
     let _held = File::open(&disks[1]).unwrap();
-    let probe = HostScan {
-        record: Some(pool.path()),
-        decide: left_to_lsof,
-    };
+    let probe = host_scan_with(pool.path(), left_to_lsof, Lsof::host);
     let mut scan = probe.start(&disks).unwrap();
     let clock = process::MonotonicClock::new();
     let found = process::wait_within(scan.as_mut(), LOADED_HOST_SCAN_WAIT, &clock).unwrap();
@@ -595,27 +641,48 @@ fn a_scan_left_to_lsof_is_answered_by_lsof() {
         "{found:?}"
     );
     assert_eq!(
-        last_scan::read(pool.path()),
-        Some(Method::Lsof(Fallback::WalkIncomplete))
+        recorded(pool.path()),
+        Some(Method::Lsof(Fallback::ScanIncomplete))
     );
 }
 
-/// Starting a host scan does none of its work: the method is chosen, the scan made and
-/// the record written on the scan's thread, inside the caller's bound. A choice that
-/// never returns therefore ends as a timeout at the bound instead of hanging the stop.
+/// A fallback that cannot be started refuses as `provider_spawn_failed` and records
+/// nothing: the record names what ran, and nothing did.
 #[test]
-fn choosing_the_method_is_inside_the_bound() {
-    fn never_decides(_: &[PathBuf], stop: &AtomicBool) -> Result<Found, Fallback> {
-        while !stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        Err(Fallback::SelfTestUnavailable)
-    }
+fn an_lsof_that_cannot_be_started_refuses_and_records_nothing() {
     let pool = Scratch::new();
-    let probe = HostScan {
-        record: Some(pool.path()),
-        decide: never_decides,
-    };
+    let missing = pool.path().join("no-lsof-here");
+    let unfound = || Err(CandidateError::new("provider_spawn_failed", "no lsof"));
+    let unstartable = move || Ok(Lsof::at(&missing));
+    for probe in [
+        host_scan_with(pool.path(), left_to_lsof, unfound),
+        host_scan_with(pool.path(), left_to_lsof, unstartable),
+    ] {
+        let result = disks_closed(
+            &probe,
+            &process::MonotonicClock::new(),
+            &disks(Path::new("/pool")),
+            LOADED_HOST_SCAN_WAIT,
+        );
+        assert_eq!(code(&result), "provider_spawn_failed");
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(last_scan::read(pool.path()), None);
+}
+
+/// Starting a host scan does none of its work: the method is chosen and the scan made on
+/// the scan's thread, inside the caller's bound. A choice that does not return in time
+/// ends as a timeout at the bound instead of hanging the stop. No `lsof` is looked for or
+/// started for a caller that has already given up, and nothing is recorded.
+#[test]
+fn a_fallback_due_after_the_bound_starts_no_lsof() {
+    let pool = Scratch::new();
+    let looked = Arc::new(AtomicBool::new(false));
+    let seen = looked.clone();
+    let probe = host_scan_with(pool.path(), left_to_lsof_too_late, move || {
+        seen.store(true, Ordering::Relaxed);
+        Lsof::host()
+    });
     let started = std::time::Instant::now();
     let result = disks_closed(
         &probe,
@@ -625,6 +692,75 @@ fn choosing_the_method_is_inside_the_bound() {
     );
     assert_eq!(code(&result), "provider_timeout_uncertain");
     assert!(started.elapsed() < Duration::from_secs(20));
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!looked.load(Ordering::Relaxed), "lsof was looked for");
+    assert_eq!(last_scan::read(pool.path()), None);
+}
+
+/// A lookup of `lsof` that outlasts the caller's bound does not stretch the caller's wait,
+/// and the child is not started once the lookup returns.
+#[test]
+fn an_lsof_lookup_that_outlasts_the_bound_starts_no_child() {
+    let pool = Scratch::new();
+    let (script, child_started) = lingering_lsof(pool.path());
+    let probe = host_scan_with(pool.path(), left_to_lsof, move || {
+        std::thread::sleep(Duration::from_millis(600));
+        Ok(Lsof::at(&script))
+    });
+    let started = std::time::Instant::now();
+    let result = disks_closed(
+        &probe,
+        &process::MonotonicClock::new(),
+        &disks(Path::new("/pool")),
+        Duration::from_millis(100),
+    );
+    assert_eq!(code(&result), "provider_timeout_uncertain");
+    // The bound, then the moment the caller gives the thread to stop; not the lookup.
+    assert!(started.elapsed() < Duration::from_millis(100) + REAP_GRACE * 2);
+    std::thread::sleep(Duration::from_millis(900));
+    assert!(!child_started.exists(), "a child was started for nobody");
+    assert_eq!(last_scan::read(pool.path()), None);
+}
+
+/// An `lsof` child that is running when the caller's bound expires is killed and reaped
+/// by the thread that started it, and the timed-out scan records nothing. A child whose
+/// start straddles the expiry takes the same path: the thread looks before its first wait.
+#[test]
+fn an_lsof_child_running_at_the_bound_is_killed_and_reaped() {
+    let pool = Scratch::new();
+    let (script, child_started) = lingering_lsof(pool.path());
+    let probe = host_scan_with(pool.path(), left_to_lsof, move || Ok(Lsof::at(&script)));
+    let mut scan = probe.start(&disks(Path::new("/pool"))).unwrap();
+    // Wait for the child itself, so the bound certainly expires while it runs.
+    let started = std::time::Instant::now();
+    let child = loop {
+        assert!(scan.poll().unwrap().is_none());
+        let pid = std::fs::read_to_string(&child_started)
+            .ok()
+            .and_then(|pid| pid.trim().parse::<i32>().ok());
+        if let Some(pid) = pid {
+            break pid;
+        }
+        assert!(
+            started.elapsed() < ISOLATED_HANG_GUARD,
+            "lsof never started"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    // SAFETY: signal 0 only asks whether this test's own child still exists.
+    let alive = |pid| unsafe { libc::kill(pid, 0) } == 0;
+    assert!(alive(child));
+    assert_eq!(scan.expire().code, "provider_timeout_uncertain");
+    // Gone, not a zombie: reaped by the thread within the moment `expire` gave it.
+    let started = std::time::Instant::now();
+    while alive(child) {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the child outlived the scan"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(last_scan::read(pool.path()), None);
 }
 
 /// A scan whose thread dies without an answer is refused, never read as "no holder".
@@ -633,17 +769,15 @@ fn a_scan_thread_that_panics_is_refused() {
     fn panics(_: &[PathBuf], _: &AtomicBool) -> Result<Found, Fallback> {
         panic!("the scan thread panics on purpose");
     }
-    let probe = HostScan {
-        record: None,
-        decide: panics,
-    };
+    let pool = Scratch::new();
     let result = disks_closed(
-        &probe,
+        &host_scan_with(pool.path(), panics, Lsof::host),
         &process::MonotonicClock::new(),
         &disks(Path::new("/pool")),
         LOADED_HOST_SCAN_WAIT,
     );
     assert_eq!(code(&result), "stop_uncertain");
+    assert_eq!(last_scan::read(pool.path()), None);
 }
 
 /// The real host scan is expired at its bound like any other: with no time at all it ends

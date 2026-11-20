@@ -1,82 +1,79 @@
 //! Bounded scan for processes that still hold a pool's owned disks.
 //!
 //! A stop (`down`, `recover`, host-filesystem inspection) and a reserve release check both
-//! prove the provider let its disks go by asking which processes hold them. On macOS the
-//! scan runs in this process and reads the host's process table through libproc
-//! (`disk_handles/macos.rs`). It replaces a `lsof -n -P -t` child, which took 0.6 s of a
-//! quiet `down` and over 5 s on a loaded host, and it keeps that scan's contract. `lsof`
-//! remains the fallback on macOS and the only scan everywhere else (below).
+//! look for processes that still hold the provider's disks. The scan was a
+//! `lsof -n -P -t` child, which took 0.6 s of a quiet `down` and over 5 s on a loaded host.
+//! On macOS it now runs in this process (`disk_handles/macos.rs`), with `lsof` as its
+//! fallback; everywhere else it is still the `lsof` child.
 //!
 //! Scanning every process to learn whether a VM disk is held is a consequence of not owning
 //! the VM process: a launcher of our own would hold an exclusive lock on each disk, and the
 //! question would be one lock attempt. This scan is the fix for today's provider and should
 //! not be built on further.
 //!
-//! # What a scan establishes
+//! # What the scan in this process is
 //!
-//! A scan that passes saw, in every process this user may inspect, no open descriptor, no
-//! memory mapping and, on macOS, no file port (a descriptor in transit in a Mach message)
-//! on any of the disks. `lsof` reports the same three. A disk is matched by its device and
-//! inode, so a holder is found whatever name it opened the file by.
+//! It inspects what the shipped `lsof` inspects for these files: file descriptors, file
+//! ports (a descriptor in transit in a Mach message) and file mappings, the mappings
+//! through the same kernel query with the same end condition, in every process this user
+//! may inspect, matched by device and inode. It falls back to `lsof` whenever it cannot
+//! trust itself. It does not prove that nothing maps a disk, and neither did `lsof`.
 //!
-//! That is an observation, not an atomic proof, with either method:
+//! What both methods share, because the kernel gives no more:
 //!
 //! * The process table is read while it changes. A process, descriptor or mapping that
-//!   appears while the scan runs can be missed, as it can by `lsof`.
+//!   appears while the scan runs can be missed.
 //! * Processes of other users and system processes answer `EPERM` and are not inspected.
-//!   `lsof`, run by the same user, is refused by the same processes.
-//! * The kernel fills each list from a size it took before filling. A list is read again
-//!   until its answer leaves a margin (see `macos::list`), which narrows that window and
-//!   does not close it.
+//! * The mapping query answers `EINVAL` both at the end of a process's mappings and for a
+//!   region whose file it cannot get, and each walk ends there (`macos::Inspector`).
+//! * The kernel fills each list from a size it took before filling.
 //!
-//! # Which scan runs
+//! # When `lsof` scans instead
 //!
-//! On macOS the mappings are read with a kernel query the SDK header does not declare, the
-//! same one the shipped `lsof` uses. A kernel that answered it with a slightly different
-//! meaning would turn a pass into a false "nothing holds the disks". So a scan in this
-//! process answers only when three things hold; otherwise the whole scan is run again
-//! through the `lsof` child, exactly as before ([`Lsof`]), and its answer alone counts. No
-//! answer mixes the two.
+//! On macOS the mappings are read with a kernel query the SDK header does not declare. A
+//! kernel that answered it with a slightly different meaning would make the scan miss a
+//! holder. So the scan in this process answers only when its self-test passed (the query
+//! reported a mapping the scan made of a file of its own, `macos::method`) and every list
+//! and record it read was one it could use. In every other case the whole scan is run
+//! again through the `lsof` child ([`Lsof`]), and its answer alone counts; no answer mixes
+//! the two. That fallback is a safety property, not a convenience.
 //!
-//! * The self-test passed: the query reported a mapping the scan made of a file of its own
-//!   (`macos::method`).
-//! * Every list and record it read was whole (`scan_incomplete` otherwise).
-//! * The mapping walks can be shown complete. The undeclared query answers `EINVAL` both at
-//!   the end of a process's mappings and for a region whose file it cannot get, so the
-//!   walks alone never show it. The declared region query decides: asked about a page the
-//!   scan maps of each disk, it must report that nothing else maps that disk
-//!   (`walk_incomplete` otherwise; see `macos::mapped_only_here`).
-//!
-//! On every other platform the scan is the `lsof` child (`not_built_for_this_platform`).
-//! A scan of `/proc` was written and removed: `/proc/<pid>/maps` names a mapped file by a
-//! path that may no longer lead to it and by an inode that overlay filesystems report
-//! differently from `stat`. Telling whether a mapping is the disk needs
-//! `/proc/<pid>/map_files`, whose links an unprivileged process may not follow. Do not
-//! bring an in-process Linux scan back without it.
+//! On every other platform the scan is the `lsof` child. A scan of `/proc` was written and
+//! removed: `/proc/<pid>/maps` names a mapped file by a path that may no longer lead to it
+//! and by an inode that overlay filesystems report differently from `stat`. Telling
+//! whether a mapping is the disk needs `/proc/<pid>/map_files`, whose links an unprivileged
+//! process may not follow. Do not bring an in-process Linux scan back without it. The
+//! `lsof` scan there differs from the one before this module scanned in process in four
+//! ways: `lsof` is started by the scan's thread, not by the caller; the method is recorded
+//! ([`last_scan`]); `/usr/bin/lsof` is tried when `/usr/sbin/lsof` is absent; and a
+//! timed-out scan always reports `provider_timeout_uncertain`, with this module's message.
 //!
 //! [`last_scan`] records which method the pool's last scan used, and why when it was
-//! `lsof`, in `disk-handle-scan.json` beside the owner record.
+//! `lsof`, in `disk-handle-scan.json` beside the owner record. The record is written after
+//! the answer is delivered and never decides anything.
 //!
 //! # What refuses
 //!
 //! A holder fails the scan as `stop_uncertain`. So does an `lsof` answer that is anything
 //! but its silent "nothing found": a diagnostic, another exit status, a disk it cannot
 //! read. A scan that cannot start fails as `provider_spawn_failed`. A scan that cannot
-//! answer is never read as "nothing holds the disks".
+//! answer is never read as "nothing found".
 //!
 //! # Time bound
 //!
 //! The caller waits at most its bound ([`STOP_HANDLE_WAIT`], [`RELEASE_HANDLE_WAIT`]) for
-//! the whole scan: choosing the method, the scan in this process, recording the method and
-//! the `lsof` child if one is needed all happen inside it. A scan that does not answer in
-//! time fails as `provider_timeout_uncertain`: `down` then writes no clean-stop marker and
-//! the next start falls back to the fresh disk budget.
+//! the whole scan: choosing the method, the scan in this process, finding and starting
+//! `lsof` and waiting for it all happen on the scan's thread, inside the bound. A scan that
+//! does not answer in time fails as `provider_timeout_uncertain`: `down` then writes no
+//! clean-stop marker and the next start falls back to the fresh disk budget.
 //!
-//! The bound limits the wait, not the work. The scan's threads are told to stop and each
-//! ends at its next process, but a thread blocked in a system call (a stuck filesystem)
-//! outlives the timeout; whatever it answers later is discarded. An `lsof` child is
-//! signalled and reaped. Both bounds were set well above the slowest `lsof` scan measured
-//! on a loaded host and are unchanged. `scripts/measure-lsof-scan.ts` re-measures a host.
+//! The bound limits the wait, not the work. The scan's threads are told to stop: no `lsof`
+//! child is started after that, and one that is running is killed and reaped by the thread
+//! that started it, which the caller gives a moment ([`REAP_GRACE`]) to do so. A thread
+//! blocked in a system call (a stuck filesystem) outlives the timeout; whatever it answers
+//! later is discarded and it records nothing. Both bounds were set well above the slowest
+//! `lsof` scan measured on a loaded host and are unchanged.
+//! `scripts/measure-lsof-scan.ts` re-measures a host.
 //!
 //! Finding mappings is nearly all of the time: the kernel walks every memory region of
 //! every process, for this scan as it does for `lsof`. The scan is faster than the `lsof`
@@ -90,7 +87,7 @@ use crate::provider::process::{self, Captured, Clock, Pending};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::Duration;
 
 pub(super) mod last_scan;
@@ -143,10 +140,8 @@ pub(super) enum Fallback {
     SelfTestFailed,
     /// The test could not make its own file and mapping, so the queries were not tested.
     SelfTestUnavailable,
-    /// A list or record the scan read was partial, did not settle or failed.
+    /// Something the scan read was partial, did not settle, failed or passed a limit.
     ScanIncomplete,
-    /// The mapping walks could not be shown complete.
-    WalkIncomplete,
 }
 
 /// How a process holds a disk.
@@ -214,12 +209,23 @@ fn decide(_disks: &[PathBuf], _stop: &AtomicBool) -> Result<Found, Fallback> {
     Err(Fallback::NotBuiltForThisPlatform)
 }
 
+/// Finds the `lsof` to run. A test puts another in its place.
+type Locate = Arc<dyn Fn() -> Result<Lsof, CandidateError> + Send + Sync>;
+
+/// How long a caller whose bound expired gives the scan's thread to stop: long enough to
+/// kill and reap an `lsof` child, short beside the bound.
+const REAP_GRACE: Duration = Duration::from_millis(250);
+
+/// How often the scan's thread looks whether its caller gave up while `lsof` runs.
+const STOP_CHECK: Duration = Duration::from_millis(20);
+
 /// The scan of this host: in this process when this scan may trust it, else through
 /// `lsof` (see the module header).
 pub(super) struct HostScan<'a> {
     /// The pool's state directory, where the method each scan used is recorded.
     record: Option<&'a Path>,
     decide: Decide,
+    locate: Locate,
 }
 
 impl<'a> HostScan<'a> {
@@ -228,116 +234,171 @@ impl<'a> HostScan<'a> {
         Self {
             record: Some(pool),
             decide,
+            locate: Arc::new(Lsof::host),
         }
     }
 }
 
 impl HandleProbe for HostScan<'_> {
     /// Nothing that can block runs here: the caller's bound starts only once this returns,
-    /// so the self-test, the scan and the record are all left to the thread.
+    /// so the whole scan is left to its thread.
     fn start(&self, disks: &[PathBuf]) -> Result<Box<dyn Pending<Found>>, CandidateError> {
         let stop = Arc::new(AtomicBool::new(false));
-        let (answer, decided) = mpsc::channel();
-        let (decide, stopped) = (self.decide, stop.clone());
-        let (scanned, pool) = (disks.to_vec(), self.record.map(Path::to_owned));
+        let (answer, answered) = mpsc::channel();
+        let work = Work {
+            disks: disks.to_vec(),
+            pool: self.record.map(Path::to_owned),
+            turn: last_scan::Turn::next(),
+            decide: self.decide,
+            locate: self.locate.clone(),
+            stop: stop.clone(),
+            answer,
+        };
         std::thread::Builder::new()
             .name("disk-handle-scan".into())
-            .spawn(move || {
-                let found = decide(&scanned, &stopped);
-                let method = match &found {
-                    Ok(_) => Method::InProcess,
-                    Err(why) => Method::Lsof(*why),
-                };
-                // Best-effort and inside the bound: a stop never waits on it unbounded.
-                if let Some(pool) = &pool {
-                    last_scan::record(pool, method);
-                }
-                // The receiver is gone once the wait expired or failed; the answer is then
-                // late and nobody may use it.
-                let _ = answer.send(found.ok());
-            })
+            .spawn(move || work.run())
             .map_err(|error| CandidateError::new("provider_spawn_failed", error.to_string()))?;
         Ok(Box::new(Scanning {
-            disks: disks.to_vec(),
+            answered,
+            early: None,
+            finished: false,
             stop,
-            state: State::Deciding {
-                decided,
-                answered: None,
-            },
         }))
     }
 }
 
-/// A host scan under way. Dropping it tells its threads to stop.
-struct Scanning {
+/// One host scan as its thread runs it.
+struct Work {
     disks: Vec<PathBuf>,
+    pool: Option<PathBuf>,
+    turn: last_scan::Turn,
+    decide: Decide,
+    locate: Locate,
+    /// Set once the caller gave up: start nothing more, and stop what runs.
     stop: Arc<AtomicBool>,
-    state: State,
+    answer: Sender<Result<Found, CandidateError>>,
 }
 
-enum State {
-    /// The thread is choosing the method and, if it may, scanning in this process. It
-    /// sends what it found, or `None` when `lsof` must scan instead.
-    Deciding {
-        decided: Receiver<Option<Found>>,
-        /// What it sent, once [`Pending::wait`] received it and until the next poll.
-        answered: Option<Option<Found>>,
-    },
-    /// The `lsof` child scans.
-    Listing(Box<dyn Pending<Found>>),
+impl Work {
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    fn run(self) {
+        // What actually ran, and what it answered. Nothing ran when `lsof` was needed and
+        // could not be started.
+        let (ran, result) = match (self.decide)(&self.disks, &self.stop) {
+            Ok(found) => (Some(Method::InProcess), Ok(found)),
+            Err(why) => match self.listed() {
+                Listed::Answered(result) => (Some(Method::Lsof(why)), result),
+                Listed::NotStarted(why_not) => (None, Err(why_not)),
+                // There is nobody to answer and nothing to record.
+                Listed::GivenUp => return,
+            },
+        };
+        // The caller gets the answer first: the record never decides or delays a stop.
+        let delivered = self.answer.send(result).is_ok();
+        if let (Some(pool), Some(method)) = (&self.pool, ran)
+            && delivered
+            && !self.stopped()
+        {
+            last_scan::record(pool, self.turn, method);
+        }
+    }
+
+    /// Run the whole scan through the `lsof` child.
+    ///
+    /// The child is found, started, waited for and, if the caller gives up, killed and
+    /// reaped here, on the scan's thread. So a slow lookup or spawn cannot stretch the
+    /// caller's wait, no child is started once the caller has given up, and a child is
+    /// never left without an owner.
+    fn listed(&self) -> Listed {
+        if self.stopped() {
+            return Listed::GivenUp;
+        }
+        let lsof = match (self.locate)() {
+            Ok(lsof) => lsof,
+            Err(missing) => return Listed::NotStarted(missing),
+        };
+        if self.stopped() {
+            return Listed::GivenUp;
+        }
+        let mut child = match lsof.start(&self.disks) {
+            Ok(child) => child,
+            Err(refused) => return Listed::NotStarted(refused),
+        };
+        let clock = process::MonotonicClock::new();
+        loop {
+            // Looked at before the first wait as well: a child whose start outlasted the
+            // caller's bound is killed and reaped at once.
+            if self.stopped() {
+                let _ = child.expire();
+                return Listed::GivenUp;
+            }
+            match child.poll() {
+                Ok(Some(found)) => return Listed::Answered(Ok(found)),
+                Ok(None) => child.wait(STOP_CHECK, &clock),
+                Err(lost) => return Listed::Answered(Err(lost)),
+            }
+        }
+    }
+}
+
+/// How running a scan through `lsof` ended.
+enum Listed {
+    /// The child was started and this is its answer, or how waiting for it failed.
+    Answered(Result<Found, CandidateError>),
+    /// `lsof` could not be found or started.
+    NotStarted(CandidateError),
+    /// The caller gave up; no child was started, or the one started was killed and reaped.
+    GivenUp,
+}
+
+/// A host scan under way, as its caller waits for it.
+struct Scanning {
+    answered: Receiver<Result<Found, CandidateError>>,
+    /// The answer, once [`Pending::wait`] received it and until the next poll takes it.
+    early: Option<Result<Found, CandidateError>>,
+    /// The caller has its answer or has given up.
+    finished: bool,
+    stop: Arc<AtomicBool>,
 }
 
 impl Pending<Found> for Scanning {
     fn poll(&mut self) -> Result<Option<Found>, CandidateError> {
-        let decision = match &mut self.state {
-            State::Listing(listing) => return listing.poll(),
-            State::Deciding { decided, answered } => match answered.take() {
-                Some(decision) => decision,
-                None => match decided.try_recv() {
-                    Ok(decision) => decision,
-                    Err(TryRecvError::Empty) => return Ok(None),
-                    // The thread ended without an answer, which only a panic in it does.
-                    Err(TryRecvError::Disconnected) => return Err(cannot_inspect()),
-                },
+        let answer = match self.early.take() {
+            Some(answer) => answer,
+            None => match self.answered.try_recv() {
+                Ok(answer) => answer,
+                Err(TryRecvError::Empty) => return Ok(None),
+                // The thread ended without an answer, which only a panic in it does.
+                Err(TryRecvError::Disconnected) => Err(cannot_inspect()),
             },
         };
-        match decision {
-            Some(found) => Ok(Some(found)),
-            None => {
-                let mut listing = Lsof::host()?.start(&self.disks)?;
-                let polled = listing.poll();
-                self.state = State::Listing(listing);
-                polled
-            }
-        }
+        self.finished = true;
+        answer.map(Some)
     }
 
     fn expire(&mut self) -> CandidateError {
-        match &mut self.state {
-            State::Listing(listing) => listing.expire(),
-            State::Deciding { .. } => {
-                self.stop.store(true, Ordering::Relaxed);
-                CandidateError::new(
-                    "provider_timeout_uncertain",
-                    "Disk-handle scan timed out. Owned disks may still be held; inspect before \
-                     retry.",
-                )
-            }
-        }
+        self.finished = true;
+        self.stop.store(true, Ordering::Relaxed);
+        // Give the thread a moment to kill and reap an `lsof` child before this returns.
+        // It ends by answering or by dropping its end; neither is used.
+        let _ = self.answered.recv_timeout(REAP_GRACE);
+        CandidateError::new(
+            "provider_timeout_uncertain",
+            "Disk-handle scan timed out. Owned disks may still be held; inspect before retry.",
+        )
     }
 
-    /// Block until the thread answers or the `lsof` child changes, for at most `limit`.
+    /// Block until the thread answers, for at most `limit`.
     fn wait(&mut self, limit: Duration, clock: &dyn Clock) {
-        let (decided, answered) = match &mut self.state {
-            State::Listing(listing) => return listing.wait(limit, clock),
-            State::Deciding { decided, answered } => (decided, answered),
-        };
-        if answered.is_some() {
+        if self.early.is_some() {
             return;
         }
         let started = clock.now();
-        match decided.recv_timeout(limit) {
-            Ok(decision) => *answered = Some(decision),
+        match self.answered.recv_timeout(limit) {
+            Ok(answer) => self.early = Some(answer),
             // The next poll reports the lost thread.
             Err(RecvTimeoutError::Disconnected) => {}
             Err(RecvTimeoutError::Timeout) => {
@@ -353,13 +414,17 @@ impl Pending<Found> for Scanning {
 }
 
 impl Drop for Scanning {
+    /// A caller that leaves without its answer stops the scan. One that has its answer
+    /// does not: the thread is finishing and may still record what ran.
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        if !self.finished {
+            self.stop.store(true, Ordering::Relaxed);
+        }
     }
 }
 
 /// The host's `lsof`, with a clean environment: the only scan before one ran in this
-/// process, the fallback on macOS since, and still the only scan elsewhere.
+/// process, the fallback on macOS since, and still the scan everywhere else.
 pub(super) struct Lsof {
     executable: PathBuf,
 }

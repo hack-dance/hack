@@ -1,19 +1,33 @@
 //! Which method a pool's last disk-handle scan used.
 //!
-//! A scan normally runs in this process and falls back to an `lsof` child when it cannot
-//! trust itself (see the parent module). Which one ran is otherwise invisible, and a host
-//! that silently fell back is slower at every stop. Each scan therefore records its method,
-//! and the reason for a fallback, in `disk-handle-scan.json` beside the owner record.
+//! A scan runs in this process where one is built and it can trust itself, and through an
+//! `lsof` child otherwise (see the parent module). Which one ran is otherwise invisible,
+//! and a host that silently fell back is slower at every stop. Each scan that answered its
+//! caller therefore records the method that actually ran, and the reason for a fallback,
+//! in `disk-handle-scan.json` beside the owner record.
 //!
-//! This is a report only. Recording never fails or changes a stop or a release check: every
-//! write error is ignored, and a missing, malformed, foreign, oversized or special file
-//! reads as none without being waited on. The record is rewritten only when the method
-//! changes.
+//! This is a report only, and it never decides a stop or a release check:
+//!
+//! * It is written after the scan's answer has been handed to its caller, and not at all
+//!   for a scan that was cancelled or timed out.
+//! * Every write error is ignored, and a missing, malformed, foreign, oversized or special
+//!   file reads as none without being waited on.
+//! * It is rewritten only when the method changes.
+//!
+//! Within a process a scan writes only if no later scan of the same pool has ([`Turn`]),
+//! so a slow thread of an earlier scan cannot put an older answer back. Across processes
+//! nothing orders the writes but the pool's VM lock, which a stop holds while it waits for
+//! its scan and no longer. A process whose stop has returned writes nothing for it, apart
+//! from the instant between its last check and the rename. A reader must take the record
+//! for what it is: the method of a recent scan, not a lock on anything.
 use super::{Fallback, Method};
 use crate::provider::state;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 const FILE: &str = "disk-handle-scan.json";
 const VERSION: u32 = 1;
@@ -22,7 +36,8 @@ const MAX_BYTES: u64 = 4096;
 
 /// The record as stored: `{"version": 1, "method": "in-process"}`, or
 /// `{"version": 1, "method": "lsof", "reason": "self_test_failed"}` with the reason one of
-/// `query_unanswered`, `self_test_failed` and `self_test_unavailable`.
+/// `not_built_for_this_platform`, `query_unanswered`, `self_test_failed`,
+/// `self_test_unavailable` and `scan_incomplete`.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
@@ -95,9 +110,30 @@ pub(in crate::provider::lifecycle) fn read(pool: &Path) -> Option<Method> {
         .method()
 }
 
-/// Record that a scan of the pool at `pool` uses `method`. Best-effort: see the module
-/// contract. The caller holds the pool's VM lock, so scans of one pool do not interleave.
-pub(super) fn record(pool: &Path, method: Method) {
+/// One scan's place in the order in which this process started its scans.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Turn(u64);
+
+impl Turn {
+    /// The turn of a scan starting now: later than every turn taken before.
+    pub(super) fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// Record that the scan with `turn` of the pool at `pool` ran `method`, unless a later scan
+/// of that pool in this process already recorded. Best-effort: see the module contract.
+pub(super) fn record(pool: &Path, turn: Turn, method: Method) {
+    /// The latest turn that recorded, for each pool. Held across the write, so two scans'
+    /// writes cannot interleave either.
+    static RECORDED: Mutex<BTreeMap<PathBuf, u64>> = Mutex::new(BTreeMap::new());
+    let mut recorded = RECORDED.lock().unwrap_or_else(PoisonError::into_inner);
+    let latest = recorded.entry(pool.to_owned()).or_insert(0);
+    if turn.0 <= *latest {
+        return;
+    }
+    *latest = turn.0;
     if read(pool) != Some(method) {
         let _ = replace(pool, &Record::of(method));
     }
@@ -107,11 +143,11 @@ pub(super) fn record(pool: &Path, method: Method) {
 /// record. Not synchronized to disk: the record is a report, and a synchronized write would
 /// cost a stop more than the scan saves.
 fn replace(pool: &Path, record: &Record) -> std::io::Result<()> {
-    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
     let temporary = pool.join(format!(
         "{FILE}.{}.{}.new",
         std::process::id(),
-        SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        SERIAL.fetch_add(1, Ordering::Relaxed)
     ));
     replace_through(pool, record, &temporary)
 }
@@ -166,9 +202,19 @@ mod tests {
                 r#""method": "lsof""#,
                 Some(r#""reason": "self_test_unavailable""#),
             ),
+            (
+                Method::Lsof(Fallback::ScanIncomplete),
+                r#""method": "lsof""#,
+                Some(r#""reason": "scan_incomplete""#),
+            ),
+            (
+                Method::Lsof(Fallback::NotBuiltForThisPlatform),
+                r#""method": "lsof""#,
+                Some(r#""reason": "not_built_for_this_platform""#),
+            ),
         ];
         for (method, name, reason) in methods {
-            record(pool.path(), method);
+            record(pool.path(), Turn::next(), method);
             assert_eq!(read(pool.path()), Some(method));
             let stored = fs::read_to_string(path(pool.path())).unwrap();
             assert!(stored.contains(r#""version": 1"#), "{stored}");
@@ -193,12 +239,16 @@ mod tests {
     fn the_status_report_names_the_recorded_method() {
         let pool = Scratch::new();
         assert_eq!(report(pool.path()), None);
-        record(pool.path(), Method::InProcess);
+        record(pool.path(), Turn::next(), Method::InProcess);
         assert_eq!(
             serde_json::to_string(&report(pool.path())).unwrap(),
             r#"{"method":"in-process"}"#
         );
-        record(pool.path(), Method::Lsof(Fallback::QueryUnanswered));
+        record(
+            pool.path(),
+            Turn::next(),
+            Method::Lsof(Fallback::QueryUnanswered),
+        );
         assert_eq!(
             serde_json::to_string(&report(pool.path())).unwrap(),
             r#"{"method":"lsof","reason":"query_unanswered"}"#
@@ -210,11 +260,15 @@ mod tests {
     fn an_unchanged_method_is_not_rewritten() {
         use std::os::unix::fs::MetadataExt;
         let pool = Scratch::new();
-        record(pool.path(), Method::InProcess);
+        record(pool.path(), Turn::next(), Method::InProcess);
         let first = fs::metadata(path(pool.path())).unwrap().ino();
-        record(pool.path(), Method::InProcess);
+        record(pool.path(), Turn::next(), Method::InProcess);
         assert_eq!(fs::metadata(path(pool.path())).unwrap().ino(), first);
-        record(pool.path(), Method::Lsof(Fallback::SelfTestFailed));
+        record(
+            pool.path(),
+            Turn::next(),
+            Method::Lsof(Fallback::SelfTestFailed),
+        );
         assert_ne!(fs::metadata(path(pool.path())).unwrap().ino(), first);
     }
 
@@ -243,10 +297,10 @@ mod tests {
         // The same record readable by others is not this pool's private record.
         fs::set_permissions(path(pool.path()), fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(read(pool.path()), None);
-        record(pool.path(), Method::InProcess);
+        record(pool.path(), Turn::next(), Method::InProcess);
         assert_eq!(read(pool.path()), Some(Method::InProcess));
         let missing = pool.path().join("missing");
-        record(&missing, Method::InProcess);
+        record(&missing, Turn::next(), Method::InProcess);
         assert_eq!(read(&missing), None);
     }
 
@@ -269,7 +323,7 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         assert_eq!(read(pool.path()), None);
         assert_eq!(report(pool.path()), None);
-        record(pool.path(), Method::InProcess);
+        record(pool.path(), Turn::next(), Method::InProcess);
         assert_eq!(read(pool.path()), Some(Method::InProcess));
     }
 
@@ -292,5 +346,36 @@ mod tests {
         let created = pool.path().join("created.new");
         assert!(replace_through(pool.path(), &record, &created).is_err());
         assert!(!created.exists());
+    }
+
+    /// A scan that started earlier does not overwrite what a later scan of the same pool
+    /// recorded, whenever its thread gets to it. Another pool's scans are not affected.
+    #[test]
+    fn an_earlier_scan_does_not_overwrite_a_later_record() {
+        let pool = Scratch::new();
+        let other = Scratch::new();
+        let (earlier, later) = (Turn::next(), Turn::next());
+        record(pool.path(), later, Method::InProcess);
+        record(pool.path(), earlier, Method::Lsof(Fallback::ScanIncomplete));
+        assert_eq!(read(pool.path()), Some(Method::InProcess));
+        // The same earlier turn is the first, and so the latest, for another pool.
+        record(
+            other.path(),
+            earlier,
+            Method::Lsof(Fallback::ScanIncomplete),
+        );
+        assert_eq!(
+            read(other.path()),
+            Some(Method::Lsof(Fallback::ScanIncomplete))
+        );
+        record(
+            pool.path(),
+            Turn::next(),
+            Method::Lsof(Fallback::SelfTestFailed),
+        );
+        assert_eq!(
+            read(pool.path()),
+            Some(Method::Lsof(Fallback::SelfTestFailed))
+        );
     }
 }

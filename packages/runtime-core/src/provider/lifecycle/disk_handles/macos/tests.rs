@@ -1,8 +1,9 @@
-use super::super::tests::{Scratch, host_lsof, isolated, sparse_disks};
-use super::super::{HandleProbe, HostScan, Lsof, last_scan};
+use super::super::tests::{Scratch, host_lsof, isolated, recorded, sparse_disks};
+use super::super::{HandleProbe, HostScan, Lsof};
 use super::*;
 use crate::provider::process;
 use crate::provider::test_executable::LOADED_HOST_SCAN_WAIT;
+use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::AtomicI32;
@@ -48,9 +49,38 @@ fn holds(holders: &[Holder]) -> Vec<(i32, Hold, &Path)> {
         .collect()
 }
 
-/// A shared mapping of a disk in this process, with its descriptor closed.
-fn mapping(disk: &Path) -> Page {
-    Page::of(&File::open(disk).unwrap()).unwrap()
+/// A shared mapping of a disk in this process, with its descriptor closed. Unmapped on
+/// drop.
+struct Mapping {
+    address: *mut libc::c_void,
+    length: usize,
+}
+
+fn mapping(disk: &Path) -> Mapping {
+    use std::os::fd::AsRawFd;
+    let file = File::open(disk).unwrap();
+    let length = 1 << 16;
+    // SAFETY: a new read-only shared mapping of a live descriptor at an address the
+    // kernel chooses; the file is longer than `length`.
+    let address = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            length,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+    assert_ne!(address, libc::MAP_FAILED);
+    Mapping { address, length }
+}
+
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        // SAFETY: exactly the mapping `mapping` created; nothing else refers to it.
+        unsafe { libc::munmap(self.address, self.length) };
+    }
 }
 
 const FIXTURES: &str = "macos::tests";
@@ -63,18 +93,13 @@ fn alone(fixture: &str) {
 
 /// Each errno ends a process's inspection as the scan documents: only an exited process
 /// and one this user may not inspect are "not holding". Every other errno leaves the
-/// scan to `lsof`, for the reason the caller gives.
+/// scan to `lsof`.
 #[test]
 fn an_errno_ends_a_process_as_documented() {
-    let why = Fallback::ScanIncomplete;
-    assert_eq!(ended(libc::ESRCH, why), Ended::Exited);
-    assert_eq!(ended(libc::EPERM, why), Ended::NotInspectable);
+    assert_eq!(ended(libc::ESRCH), Ended::Exited);
+    assert_eq!(ended(libc::EPERM), Ended::NotInspectable);
     for errno in [libc::EIO, libc::ENOMEM, libc::EINVAL, libc::EBADF] {
-        assert_eq!(ended(errno, why), Ended::Incomplete(why));
-        assert_eq!(
-            ended(errno, Fallback::WalkIncomplete),
-            Ended::Incomplete(Fallback::WalkIncomplete)
-        );
+        assert_eq!(ended(errno), Ended::Incomplete(Fallback::ScanIncomplete));
     }
 }
 
@@ -82,24 +107,21 @@ fn an_errno_ends_a_process_as_documented() {
 /// records, are incomplete, never an empty or shorter answer.
 #[test]
 fn a_partial_record_is_incomplete() {
-    let why = Fallback::WalkIncomplete;
-    assert_eq!(whole::<Region>(size_of::<Region>(), why), Ok(()));
+    let incomplete = Ended::Incomplete(Fallback::ScanIncomplete);
+    assert_eq!(whole::<Region>(size_of::<Region>()), Ok(()));
     for bytes in [0, size_of::<Region>() - 8, size_of::<Region>() + 8] {
-        assert_eq!(whole::<Region>(bytes, why), Err(Ended::Incomplete(why)));
+        assert_eq!(whole::<Region>(bytes).as_ref(), Err(&incomplete));
     }
     assert_eq!(records::<FilePort>(0), Ok(0));
     assert_eq!(records::<FilePort>(24), Ok(3));
     for bytes in [1, 7, 9, 28] {
-        assert_eq!(
-            records::<FilePort>(bytes),
-            Err(Ended::Incomplete(Fallback::ScanIncomplete))
-        );
+        assert_eq!(records::<FilePort>(bytes).as_ref(), Err(&incomplete));
     }
 }
 
-/// A list read is whole only when it leaves the margin unused. A read that comes back
-/// within the margin of its buffer is repeated into a larger one, and a list that never
-/// settles is incomplete at the limit.
+/// A list read is accepted only when it leaves the margin against truncation unused. A
+/// read that comes back within the margin of its buffer is repeated into a larger one, and
+/// a list that never settles is incomplete at the limit.
 #[test]
 fn a_list_is_read_again_until_it_leaves_a_margin() {
     let mut reads = Vec::new();
@@ -191,42 +213,32 @@ fn an_exited_process_is_not_holding() {
 ///
 /// This test is meant to fail on a kernel that does not: production is then still
 /// correct, because every scan falls back to the `lsof` child, but each stop is slower
-/// and somebody should know that the runner's kernel changed what the queries report.
+/// and somebody should know that the runner's kernel changed what the query reports.
 #[test]
 fn this_kernel_passes_the_mapping_self_test() {
-    alone("self_test_fixture");
-}
-
-#[test]
-#[ignore = "isolated fixture launched by this_kernel_passes_the_mapping_self_test"]
-fn self_test_fixture() {
     let method = method();
     assert_eq!(
         method,
         Method::InProcess,
         "this kernel does not pass the disk-holder scan's self-test ({method:?}): the \
-         undeclared region query PROC_PIDREGIONPATHINFO2 or the declared reference count \
-         no longer reports what the scan relies on. Production is unaffected in \
-         correctness: every scan on such a kernel falls back to the lsof child and records \
-         that reason in disk-handle-scan.json. This test fails so that the change is seen; \
-         it is not a product failure"
+         undeclared region query PROC_PIDREGIONPATHINFO2 no longer reports what the scan \
+         relies on. Production is unaffected in correctness: every scan on such a kernel \
+         falls back to the lsof child and records that reason in disk-handle-scan.json. \
+         This test fails so that the change is seen; it is not a product failure"
     );
 }
 
 /// A flavor number no kernel answers.
 const UNKNOWN_FLAVOR: c_int = 9_999;
+/// `PROC_PIDREGIONINFO`, the declared query for a region without its file: it answers
+/// with a shorter record.
+const REGION_WITHOUT_FILE: c_int = 7;
 
-/// Each way the queries could stop meaning what the scan needs sends the scan to `lsof`
+/// Each way the query could stop meaning what the scan needs sends the scan to `lsof`
 /// with its own reason: no answer, a partial answer, an answer naming another file, and
 /// a test that could not be set up at all. The test leaves nothing behind either way.
 #[test]
 fn a_query_that_does_not_report_the_test_mapping_is_not_trusted() {
-    alone("untrusted_query_fixture");
-}
-
-#[test]
-#[ignore = "isolated fixture launched by a_query_that_does_not_report_the_test_mapping_is_not_trusted"]
-fn untrusted_query_fixture() {
     let directory = Scratch::new();
     let probe = Probe::map(directory.path()).unwrap();
     let file = probe.file.path.clone();
@@ -236,9 +248,8 @@ fn untrusted_query_fixture() {
         probe.found_by(UNKNOWN_FLAVOR),
         Err(Fallback::QueryUnanswered)
     );
-    // The declared query for a region without its file answers with a shorter record.
     assert_eq!(
-        probe.found_by(PROC_PIDREGIONINFO),
+        probe.found_by(REGION_WITHOUT_FILE),
         Err(Fallback::SelfTestFailed)
     );
     drop(probe);
@@ -263,39 +274,6 @@ fn untrusted_query_fixture() {
 
     assert!(Probe::map(&directory.path().join("missing")).is_none());
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
-}
-
-/// The declared query counts the mappings of a file: a page alone, one more for each
-/// other mapping, and the page alone again once the others are gone. An open descriptor
-/// is not a mapping and does not count.
-#[test]
-fn the_declared_query_counts_other_mappings_of_a_file() {
-    alone("declared_count_fixture");
-}
-
-#[test]
-#[ignore = "isolated fixture launched by the_declared_query_counts_other_mappings_of_a_file"]
-fn declared_count_fixture() {
-    let directory = Scratch::new();
-    let paths = sparse_disks(directory.path());
-    let disks = identified(&paths);
-    assert!(mapped_only_here(&disks));
-    let descriptor = File::open(&paths[0]).unwrap();
-    assert!(mapped_only_here(&disks));
-    let other = mapping(&paths[1]);
-    assert_eq!(other.references(), Some(ALONE));
-    assert!(!mapped_only_here(&disks));
-    assert!(mapped_only_here(&disks[..1]));
-    drop(other);
-    assert!(mapped_only_here(&disks));
-    drop(descriptor);
-
-    // A disk that is no longer the file that was identified cannot be vouched for.
-    let mut replaced = disks.clone();
-    replaced[0].inode += 1;
-    assert!(!mapped_only_here(&replaced));
-    std::fs::remove_file(&paths[1]).unwrap();
-    assert!(!mapped_only_here(&disks));
 }
 
 /// The host scan finds a disk this process holds open and names this process.
@@ -339,7 +317,7 @@ fn host_scan_closed_disks_child() {
         super::super::STOP_HANDLE_WAIT,
     );
     assert!(result.is_ok(), "{:?}", result.err());
-    assert_eq!(last_scan::read(pool.path()), Some(Method::InProcess));
+    assert_eq!(recorded(pool.path()), Some(Method::InProcess));
 }
 
 /// A child that holds whatever it was given as standard input, killed and reaped on drop.
@@ -484,7 +462,7 @@ fn a_disk_that_cannot_be_identified_is_left_to_lsof() {
     );
     assert_eq!(result.err().map(|error| error.code), Some("stop_uncertain"));
     assert_eq!(
-        last_scan::read(pool.path()),
+        recorded(pool.path()),
         Some(Method::Lsof(Fallback::ScanIncomplete))
     );
 }
@@ -691,8 +669,7 @@ static INTERFERED: AtomicI32 = AtomicI32::new(0);
 /// How many answers [`unresolved_once`] has still to refuse.
 static REFUSALS: AtomicI32 = AtomicI32::new(0);
 
-/// The real query, except that it answers `EINVAL` for every region of one process: what
-/// a scan sees when a region below a disk mapping never resolves to its file.
+/// The real query, except that it answers `EINVAL` for every region of one process.
 fn never_resolved(pid: c_int, cursor: u64, region: &mut Region) -> Result<usize, c_int> {
     if pid == INTERFERED.load(Ordering::Relaxed) {
         return Err(libc::EINVAL);
@@ -709,78 +686,24 @@ fn unresolved_once(pid: c_int, cursor: u64, region: &mut Region) -> Result<usize
     file_backed_region(pid, cursor, region)
 }
 
-/// A region the path query cannot resolve, below a mapping of the disk in another
-/// process, must not hide that holder.
-///
-/// No test can make XNU keep such a region, so the walk is driven through a stand-in
-/// query that answers `EINVAL` where the real one would report the holder's regions. The
-/// walk then ends short of the disk mapping, as the reviewer's case has it. The declared
-/// query still counts that mapping, so the scan in this process does not answer "no
-/// holder": it is left whole to `lsof`, which names the holder.
+/// `EINVAL` from the path query ends a process's walk, as it ends `lsof`'s, but only once
+/// it has been asked twice at the same place. A region the query cannot resolve once,
+/// because its file was being reclaimed, is passed and the holder above it is named. A
+/// region it never resolves ends the walk there: what lies above is not seen, by this
+/// scan or by `lsof`, and that is not reported as an error.
 #[test]
-fn a_walk_cut_short_below_a_disk_mapping_does_not_hide_the_holder() {
-    alone("cut_short_walk_fixture");
+fn einval_ends_a_walk_only_when_asked_twice() {
+    alone("einval_fixture");
 }
 
 #[test]
-#[ignore = "isolated fixture launched by a_walk_cut_short_below_a_disk_mapping_does_not_hide_the_holder"]
-fn cut_short_walk_fixture() {
-    fn cut_short(paths: &[PathBuf], stop: &AtomicBool) -> Result<Found, Fallback> {
-        scan_with(never_resolved, SCAN_THREADS, paths, stop)
-    }
-    let directory = Scratch::new();
-    let disks = sparse_disks(directory.path());
-    let mut holder = DiskHolder::holding("mapping", &disks[0]).unwrap();
-    INTERFERED.store(holder.pid(), Ordering::Relaxed);
-
-    // The walk alone sees nothing: the holder's regions are all refused.
-    let mut holders = Vec::new();
-    let walked =
-        Inspector::new(never_resolved).mappings(holder.pid(), &identified(&disks), &mut holders);
-    assert_eq!(walked, Ok(()));
-    assert!(holders.is_empty());
-    // The scan does not take that for an answer.
-    assert_eq!(
-        cut_short(&disks, &AtomicBool::new(false)).err(),
-        Some(Fallback::WalkIncomplete)
-    );
-
-    // And the host scan, with that walk, is answered by `lsof`, which names the holder.
-    let pool = Scratch::new();
-    let probe = HostScan {
-        record: Some(pool.path()),
-        decide: cut_short,
-    };
-    let mut scan = probe.start(&disks).unwrap();
-    let clock = process::MonotonicClock::new();
-    let found = process::wait_within(scan.as_mut(), LOADED_HOST_SCAN_WAIT, &clock).unwrap();
-    assert_eq!(pids(&found), [holder.pid()], "{found:?}");
-    assert!(found.holders.iter().all(|held| held.hold == Hold::Listed));
-    assert_eq!(
-        last_scan::read(pool.path()),
-        Some(Method::Lsof(Fallback::WalkIncomplete))
-    );
-
-    // Once the holder is gone the same cut-short walk is vouched for again.
-    holder.exit();
-    let found = cut_short(&disks, &AtomicBool::new(false)).unwrap();
-    assert!(found.holders.is_empty() && found.unknown.is_empty());
-}
-
-/// A region the path query cannot resolve once, because its file was being reclaimed, is
-/// passed when the query is asked again: the walk goes on and names the holder above it.
-#[test]
-fn a_region_unresolved_once_does_not_end_the_walk() {
-    alone("unresolved_once_fixture");
-}
-
-#[test]
-#[ignore = "isolated fixture launched by a_region_unresolved_once_does_not_end_the_walk"]
-fn unresolved_once_fixture() {
+#[ignore = "isolated fixture launched by einval_ends_a_walk_only_when_asked_twice"]
+fn einval_fixture() {
     let directory = Scratch::new();
     let disks = sparse_disks(directory.path());
     let holder = DiskHolder::holding("mapping", &disks[0]).unwrap();
     INTERFERED.store(holder.pid(), Ordering::Relaxed);
+
     REFUSALS.store(1, Ordering::Relaxed);
     let found = scan_with(
         unresolved_once,
@@ -798,6 +721,37 @@ fn unresolved_once_fixture() {
         REFUSALS.load(Ordering::Relaxed) <= 0,
         "the stand-in query was not asked"
     );
+
+    let mut holders = Vec::new();
+    let walked =
+        Inspector::new(never_resolved).mappings(holder.pid(), &identified(&disks), &mut holders);
+    assert_eq!(walked, Ok(()));
+    assert!(holders.is_empty());
+}
+
+/// A process with more file-backed regions than the walk reads is not passed over: the
+/// scan is left to `lsof`.
+#[test]
+fn a_walk_past_the_region_limit_is_incomplete() {
+    /// A region that always lies just above the cursor: a process with no end of them.
+    fn endless(_: c_int, cursor: u64, region: &mut Region) -> Result<usize, c_int> {
+        region.address = cursor;
+        region.size = 0x4000;
+        region.file.vip_vi.vi_stat.vst_dev = 1;
+        region.file.vip_vi.vi_stat.vst_ino = 1;
+        Ok(size_of::<Region>())
+    }
+    /// A region that does not lie above the cursor: a walk that would never advance.
+    fn stuck(_: c_int, _: u64, region: &mut Region) -> Result<usize, c_int> {
+        region.file.vip_vi.vi_stat.vst_ino = 1;
+        Ok(size_of::<Region>())
+    }
+    let incomplete = Ended::Incomplete(Fallback::ScanIncomplete);
+    let mut holders = Vec::new();
+    let endless = Inspector::new(endless).mappings(own_pid(), &[], &mut holders);
+    assert_eq!(endless.as_ref(), Err(&incomplete));
+    let stuck = Inspector::new(stuck).mappings(own_pid(), &[], &mut holders);
+    assert_eq!(stuck.as_ref(), Err(&incomplete));
 }
 
 fn spread(mut samples: Vec<Duration>) -> String {
@@ -823,8 +777,8 @@ fn timed(runs: usize, mut scan: impl FnMut()) -> Vec<Duration> {
 }
 
 /// Prints this host's scan time beside the `lsof` child it falls back to, over the same
-/// two unheld files, with what the self-test and the declared check add and the scan's
-/// time on one to eight threads. Run it alone:
+/// two unheld files, with what the self-test adds and the scan's time on one to eight
+/// threads. Run it alone:
 /// `cargo test --lib -- --ignored --nocapture --exact
 /// provider::lifecycle::disk_handles::macos::tests::host_scan_timing_against_lsof`.
 #[test]
@@ -832,7 +786,6 @@ fn timed(runs: usize, mut scan: impl FnMut()) -> Vec<Duration> {
 fn host_scan_timing_against_lsof() {
     let directory = Scratch::new();
     let paths = sparse_disks(directory.path());
-    let disks = identified(&paths);
     let pool = Scratch::new();
     println!(
         "disk-handle scan timing on a host with {} processes",
@@ -840,8 +793,6 @@ fn host_scan_timing_against_lsof() {
     );
     let chosen = timed(200, || assert_eq!(method(), Method::InProcess));
     println!("  self-test:                {}", spread(chosen));
-    let vouched = timed(200, || assert!(mapped_only_here(&disks)));
-    println!("  declared mapping check:   {}", spread(vouched));
     let scans = timed(20, || assert!(host_scan(&paths).holders.is_empty()));
     println!("  scan in this process:     {}", spread(scans));
     let bounded = timed(20, || {
@@ -850,7 +801,7 @@ fn host_scan_timing_against_lsof() {
         super::super::disks_closed(&probe, &clock, &paths, super::super::STOP_HANDLE_WAIT).unwrap();
     });
     println!("  through disks_closed:     {}", spread(bounded));
-    assert_eq!(last_scan::read(pool.path()), Some(Method::InProcess));
+    assert_eq!(recorded(pool.path()), Some(Method::InProcess));
     let lsof = host_lsof().expect("macOS installs lsof");
     let children = timed(5, || {
         let listed = process::capture(

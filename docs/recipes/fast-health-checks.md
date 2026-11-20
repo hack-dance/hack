@@ -33,6 +33,12 @@ first check runs about 250 milliseconds after the container starts. The first
 successful check ends the start period and marks the service healthy, and the
 engine then checks at the steady `interval`.
 
+![Engine health states with start_period and start_interval](../diagrams/health-check-states.svg)
+
+[Diagram source](../diagrams/health-check-states.mmd). `retries` failures in a row are
+needed to leave `starting` or `healthy` for `unhealthy`; one passing check returns to
+`healthy`.
+
 ```yaml
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "app", "-d", "app"]

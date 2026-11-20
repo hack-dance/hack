@@ -1745,7 +1745,7 @@ test("HACK-2409: the hot-reload setting crosses the subprocess boundary for runt
   try {
     Reflect.deleteProperty(process.env, "HACK_NATIVE_HOT_RELOAD");
     expect(await ask(up)).toEqual({ hotReload: null });
-    for (const value of ["auto", "on", "off"]) {
+    for (const value of ["auto", "on", "off", "watcher"]) {
       process.env.HACK_NATIVE_HOT_RELOAD = value;
       expect(await ask(up)).toEqual({ hotReload: value });
       // No other runtime command receives it.
@@ -1762,7 +1762,7 @@ test("HACK-2409: the hot-reload setting crosses the subprocess boundary for runt
       process.env.HACK_NATIVE_HOT_RELOAD = value;
       await expect(ask(up)).rejects.toMatchObject({
         code: "E_CONFIG_INVALID",
-        message: "HACK_NATIVE_HOT_RELOAD must be auto, on or off.",
+        message: "HACK_NATIVE_HOT_RELOAD must be auto, on, off or watcher.",
       });
       // Other commands do not read the setting and are not refused for it.
       expect(await ask(["runtime", "status", "hot-reload-probe"])).toEqual({

@@ -89,7 +89,10 @@ export function renderNativeHotReloadNotice(
   return `Hot reload on shared source is off: the shared project folders hold more than ${limit} files and folders, and the virtual machine reads every one before it starts, which can make the start fail. ${NATIVE_HOT_RELOAD_OFF_EFFECT} Remove installed dependency folders from the checkout to bring it back (localDirectories keeps them on the virtual machine's disk), or set HACK_NATIVE_HOT_RELOAD=on to force it on.`;
 }
 
-/** The setting the runtime reads at `runtime up`: `auto` (the default), `on` or `off`. */
+/**
+ * The setting the runtime reads at `runtime up`: `auto` (the default), `on`,
+ * `off`, or `watcher` (Hack's own file watcher; see `native-source-notify.ts`).
+ */
 export const NATIVE_HOT_RELOAD_SETTING = "HACK_NATIVE_HOT_RELOAD";
 
 /**
@@ -110,10 +113,17 @@ export function nativeHotReloadEnvironment(
   if (value === undefined || value === "") {
     return {};
   }
-  if (!(value === "auto" || value === "on" || value === "off")) {
+  if (
+    !(
+      value === "auto" ||
+      value === "on" ||
+      value === "off" ||
+      value === "watcher"
+    )
+  ) {
     throw new HackCliError({
       code: "E_CONFIG_INVALID",
-      message: `${NATIVE_HOT_RELOAD_SETTING} must be auto, on or off.`,
+      message: `${NATIVE_HOT_RELOAD_SETTING} must be auto, on, off or watcher.`,
     });
   }
   return { [NATIVE_HOT_RELOAD_SETTING]: value };

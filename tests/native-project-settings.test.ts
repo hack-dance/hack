@@ -784,10 +784,10 @@ test("HACK-2409: a mistyped HACK_NATIVE_HOT_RELOAD is refused with the other set
       f.host({ HACK_NATIVE_HOT_RELOAD: value })
     ).rejects.toMatchObject({
       code: "E_CONFIG_INVALID",
-      message: "HACK_NATIVE_HOT_RELOAD must be auto, on or off.",
+      message: "HACK_NATIVE_HOT_RELOAD must be auto, on, off or watcher.",
     });
   }
-  for (const value of ["auto", "on", "off", ""]) {
+  for (const value of ["auto", "on", "off", "watcher", ""]) {
     await expect(
       f.host({ HACK_NATIVE_HOT_RELOAD: value })
     ).resolves.toBeDefined();

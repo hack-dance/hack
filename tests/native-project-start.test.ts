@@ -6683,3 +6683,29 @@ for (const [name, hotReload, expected] of [
     ).toEqual(expected ? [renderNativeHotReloadNotice(expected)] : []);
   });
 }
+
+test("HACK-2409: a start hands the pool's runtime up result to the watcher once the run is ready and stops it when the run ends", async () => {
+  const { opts } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  const watcherPool = { hot_reload: { state: "watcher", reason: "watcher" } };
+  opts.dependencies.invoke = async (call) => {
+    const result = await invoke(call);
+    return call.args[0] === "runtime" && call.args[1] === "up"
+      ? { ...(result as Record<string, unknown>), ...watcherPool }
+      : result;
+  };
+  const events: string[] = [];
+  opts.dependencies.sourceNotify = (request) => {
+    events.push(
+      `start ${JSON.stringify((request.pool as typeof watcherPool).hot_reload)} ${request.projectRoot === opts.scope.projectRoot}`
+    );
+    return async () => {
+      events.push("stop");
+    };
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(events).toEqual([
+    'start {"state":"watcher","reason":"watcher"} true',
+    "stop",
+  ]);
+});

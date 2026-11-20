@@ -213,6 +213,7 @@ import {
   monitorNativeServiceExits,
   type NativeServiceExit,
 } from "./native-service-exit-monitor.ts";
+import { startNativeSourceNotify } from "./native-source-notify.ts";
 import { formatNativeStartupLogReport } from "./native-startup-logs.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
@@ -424,6 +425,7 @@ type Dependencies = {
   selectReview: typeof selectNativeProjectReviewIdentity;
   retainedImages: typeof selectNativeRetainedImages;
   serve: typeof serveNativeProjectGraph;
+  sourceNotify: typeof startNativeSourceNotify;
   https: typeof acquireNativeHttpsLease;
   recoverHttps: typeof recoverNativeHttpsLease;
   cleanupTemporary: (directory: string) => Promise<void>;
@@ -460,6 +462,7 @@ const DEFAULTS: Dependencies = {
   selectReview: selectNativeProjectReviewIdentity,
   retainedImages: selectNativeRetainedImages,
   serve: serveNativeProjectGraph,
+  sourceNotify: startNativeSourceNotify,
   https: acquireNativeHttpsLease,
   recoverHttps: recoverNativeHttpsLease,
   cleanupTemporary: (directory) =>
@@ -2801,6 +2804,7 @@ async function startNativeProjectAttempt(
           );
           const servicesRequestedAt = performance.now();
           let stopWatching: (() => Promise<void>) | undefined;
+          let stopSourceNotify: (() => Promise<void>) | undefined;
           // The runtime removes a failed start's containers before it returns:
           // keep the graph's status as it stands while the start waits.
           const startupStatus = watchNativeStartupStatus({
@@ -2957,6 +2961,13 @@ async function startNativeProjectAttempt(
                     .catch(() => undefined);
                 }
                 await hooks?.ready?.();
+                // Watcher mode only: forward host file changes for this run.
+                stopSourceNotify = deps.sourceNotify({
+                  runtime: opts.runtime,
+                  projectRoot: opts.scope.projectRoot,
+                  pool,
+                  warn: deps.warn,
+                });
                 stopWatching = watchServiceExits({
                   runtime: opts.runtime,
                   projectRoot: opts.scope.projectRoot,
@@ -2991,6 +3002,7 @@ async function startNativeProjectAttempt(
             await startupStatus.stop();
             delivery.payload?.fill(0);
             await stopWatching?.();
+            await stopSourceNotify?.();
           }
           try {
             let final: unknown;

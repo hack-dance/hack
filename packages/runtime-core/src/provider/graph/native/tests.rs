@@ -326,6 +326,15 @@ fn real_compiler_native_configs_feed_jobs_readiness_and_exact_process_driver() {
     assert_eq!(web["Healthcheck"]["Test"], fixture["native"]["health_test"]);
     assert_eq!(web["Healthcheck"]["Interval"], 1_000_000_000u64);
     assert_eq!(web["Healthcheck"]["Timeout"], 100_000_000u64);
+    // HACK-2443: authored readiness has no startup cadence, so every check gets the fast one.
+    assert_eq!(
+        web["Healthcheck"]["StartInterval"],
+        crate::project::DEFAULT_START_INTERVAL_NANOS
+    );
+    assert_eq!(
+        web["Healthcheck"]["StartPeriod"],
+        crate::project::DEFAULT_START_PERIOD_NANOS
+    );
     assert_eq!(
         lowered.containers()["z.seed"]["Cmd"],
         fixture["native"]["job_command"]

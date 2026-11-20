@@ -14,14 +14,15 @@ stateDiagram-v2
     draining --> dead : Crash
     dead --> [*]
     note right of serving
-        INV OneOwner: at most one
-        process serving or draining.
-        Bind only with service.lock.
+        INV LockedOwner: a live process
+        holds service.lock.
+        INV OneOwner: at most one.
     end note
     note right of dead
         Crash frees the lock and lease,
         drops memory and unread frames.
-        Intent records stay on disk.
+        Intent records stay on disk;
+        started work may still complete.
     end note
     class starting wait
     class serving live

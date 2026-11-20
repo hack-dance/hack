@@ -12,7 +12,7 @@ stateDiagram-v2
     sent --> idle : RefuseDraining
     sent --> replied : Finish or AnswerDone
     sent --> unknown : AnswerUnknown
-    idle --> oneshot : Fallback [never sent]
+    idle --> oneshot : Fallback
     oneshot --> oneshotRunning : OneShotBegin
     oneshotRunning --> finished : OneShotEnd
     idle --> inspect : InspectWithoutService
@@ -23,16 +23,18 @@ stateDiagram-v2
     note right of hello
         Retire only for another build.
         Send only to the same build.
+        Fallback only when unsure = 0.
     end note
     note right of sent
         INV AtMostOnce. A resend keeps
-        the intent id. A written frame
-        stays in the service's buffer.
+        the intent id, on a new
+        connection; a reply comes
+        only on its own connection.
     end note
     note right of inspect
-        Without a service only while
-        no process holds service.lock.
-        INV ReportHonest
+        Entry from idle needs unsure > 0
+        and service.lock free at entry.
+        Started, not complete: unknown.
     end note
     class sent live
     class unknown wait

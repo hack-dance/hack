@@ -1461,6 +1461,15 @@ fn start_pool(
     // Recheck a clean stop's alias under the lease before the release checks probe its
     // sockets or the provider runs with it as HOME.
     restore_released_short_home(candidate)?;
+    // First under the lease, before admission or anything else can rewrite the phase: a
+    // set-aside of a previous failed first boot must not meet this start's new disks.
+    if root(candidate)
+        .join("owner.json")
+        .try_exists()
+        .map_err(io)?
+    {
+        interrupted::before_boot(candidate, &Owner::load(candidate)?)?;
+    }
     // Under the lease: the selection is rechecked. A stopped pool keeps the reserve only if
     // a sample needs it, and then its provider release (VM lock, disk handles, listeners,
     // provider configuration) is proven; otherwise this start uses the fresh budget.
@@ -2814,6 +2823,23 @@ fn lock_absent_disks_within(
     handle_wait: Duration,
 ) -> Result<VmLock, CandidateError> {
     let directory = owner.real_data_dir(candidate)?;
+    lock_disks_closed(
+        candidate,
+        owner,
+        &[directory.join("storage.raw"), directory.join("overlay.raw")],
+        handle_wait,
+    )
+}
+
+/// [`lock_absent_disks_within`] for disks at `disks`, which a resumed set-aside of
+/// unadopted disks (`interrupted`) may have partly moved.
+fn lock_disks_closed(
+    candidate: &Candidate,
+    owner: &Owner,
+    disks: &[std::path::PathBuf],
+    handle_wait: Duration,
+) -> Result<VmLock, CandidateError> {
+    let directory = owner.real_data_dir(candidate)?;
     let vm_lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -2837,7 +2863,7 @@ fn lock_absent_disks_within(
     disk_handles::disks_closed(
         &disk_handles::Lsof::host(),
         &process::MonotonicClock::new(),
-        &[directory.join("storage.raw"), directory.join("overlay.raw")],
+        disks,
         handle_wait,
     )?;
     verify_disks(candidate, owner)?;
@@ -2945,6 +2971,11 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         }
         // The operation lease taken above stays held through the stop and its receipt.
         stop_silent_guest(candidate, &mut owner)?;
+        return status(candidate);
+    }
+    // A failed first boot whose provider was recorded (`failed-boot-stopped` after a template
+    // refusal) must not reach the stopped path, which adopts its disks unchecked.
+    if interrupted::set_aside_recorded(candidate, &mut owner, &lock)? {
         return status(candidate);
     }
     finish_stopped(candidate, &mut owner, "recovered-unclean")?;

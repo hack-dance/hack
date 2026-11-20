@@ -628,7 +628,25 @@ cloned. SmolVM expands and clones within one start, so a first-start expansion i
 after the guest has booted from it. Size, owner and mode checks are not integrity; the content
 digest is. A mismatch refuses with `disk_template_untrusted` and changes no files. Before a start,
 removing the refused file lets SmolVM re-expand it from the verified compressed template. After a
-start, the boot is stopped as a failed boot without adopting its disks and needs manual recovery.
+start, the boot is stopped as a failed boot without adopting its disks. `runtime recover --json`
+then proves the provider stopped and idle, takes the VM lock with the disk handles closed, and
+renames the unadopted `storage.raw` and `overlay.raw`, plus any owned expanded template that
+failed, into an `untrusted-first-boot-<n>` directory beside each. It deletes nothing and keeps
+the compressed templates, and it returns the pool to `stopped-before-engine`, so the next start
+expands and clones again and verifies before adoption. Those disks were never adopted, so they
+held no project data. Adopted disks, a prepared-base activation, and a template that is
+hard-linked, foreign-owned, group/world-writable or not a regular file still refuse with
+nothing moved (HACK-2376). This also covers a first start cut off by the provider timeout
+(`provider_timeout_uncertain`). A refusal before the first move records nothing, not even the
+provider process, so a retry checks the templates again. Before the first move recovery writes
+`untrusted-first-boot.json` beside the owner record, and an interrupted set-aside resumes from it.
+The disks must be regular files of this user with one link. Every attempt syncs the directories
+it moved files between, and the intent is removed only after the owner records
+`stopped-before-engine`. The next start also removes a completed intent first, before admission, and refuses with
+`recovery_required` while one is unfinished.
+The same applies when the failed boot's provider was recorded and is proven dead
+(`failed-boot-stopped` after a template refusal): recovery sets those disks aside instead of
+adopting them on the stopped path. Repeating recovery on the resulting pool changes nothing.
 
 Guest control readiness does not mean exposed bridge sockets have bound. The pinned
 [SmolVM 1.35.4 guest](https://github.com/smol-machines/smolvm/blob/v1.35.4/crates/smolvm-agent/src/main.rs#L664)

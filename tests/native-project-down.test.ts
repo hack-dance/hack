@@ -1982,9 +1982,26 @@ test.each([
   { foreground: "exited", phase: "preparing" },
   { foreground: "exited", phase: "restoring" },
   { foreground: "exited", phase: "failed-retained" },
-])("down --recover on a stopped pool keeps its refusal without runtime up (owner $foreground, $phase)", async ({
+  // Same-boot recoveries (recover-live-owner) cannot run after the boot this
+  // would start, so the pool is not started for them either.
+  {
+    foreground: "exited",
+    phase: "failed-retained",
+    extra: { failed_start_recoverable: true },
+  },
+  {
+    foreground: "exited",
+    phase: "ready-observed",
+    extra: { live_owner_recovery: "a".repeat(64) },
+  },
+] as {
+  foreground: string;
+  phase: string;
+  extra?: Record<string, unknown>;
+}[])("down --recover on a stopped pool keeps its refusal without runtime up (owner $foreground, $phase)", async ({
   foreground,
   phase,
+  extra,
 }) => {
   const opts = await fixture();
   const calls: string[] = [];
@@ -1995,7 +2012,7 @@ test.each([
       const command = request.args[1]!;
       calls.push(command);
       if (command === "foreground-owner") {
-        return ownerSelection(foreground, phase);
+        return { ...ownerSelection(foreground, phase), ...extra };
       }
       throw poolStoppedError();
     },

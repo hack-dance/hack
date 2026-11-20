@@ -2218,7 +2218,9 @@ owner exits and the run is left neither running nor stopped (after a VM crash, r
 pool, recovers the run with its data retained, and starts it again. `hack down --recover`
 (and plain `hack down`) start the pool to recover the run the same way, then leave the
 pool running and say so; run `runtime down` to stop it. A run whose owner is still alive,
-or that is already stopped with data retained, keeps the refusal above.
+or that is already stopped with data retained, keeps the refusal above, and so does one
+whose only recovery needs the boot it ran in (a failed start, or an interrupted
+same-boot recovery): starting the pool begins a new boot, so it would not help.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,

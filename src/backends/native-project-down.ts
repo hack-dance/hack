@@ -561,13 +561,16 @@ export const NATIVE_RECOVERY_RUNTIME_STARTED_NOTE =
 /**
  * Whether the lock-free `graph foreground-owner` selection (host files only;
  * it needs no running pool) shows an exited owner whose run the recovery after a
- * boot will accept: exactly the exited cases {@link requireRecoverableOwner}
- * lets through (a ready run, a recoverable failed start, or an interrupted
- * recovery that resumes by its own selection). Anything else, including an
- * exited owner of a start that was never confirmed (`preparing`, `restoring`),
- * a live, absent or uncertain owner, a retained stop (whose unadmitted owner is
- * retired without the pool) or an unreadable selection, is false: the caller
- * keeps its refusal and never starts a pool it could not then use.
+ * boot can still recover. Starting the pool begins a new boot, so only the
+ * cross-boot dead-owner recovery applies: a ready run, or an interrupted
+ * dead-owner recovery resuming by its own selection. The same-boot recoveries
+ * (`recover-live-owner`, which a recoverable failed start and an interrupted
+ * live-owner recovery use) need the original boot's relay identity and cannot run
+ * after it, so those cases, an exited owner of a start that was never confirmed
+ * (`preparing`, `restoring`), a live, absent or uncertain owner, a retained stop
+ * (whose unadmitted owner is retired without the pool) and an unreadable
+ * selection are all false: the caller keeps its refusal and never starts a pool
+ * it could not then use.
  */
 async function deadOwnerOfLiveRun(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -579,10 +582,10 @@ async function deadOwnerOfLiveRun(opts: {
     const selection = await selectForegroundOwner(opts);
     return (
       selection.foreground === "exited" &&
+      // A pending same-boot recovery is resumed by its own selection after the
+      // boot too, through recover-live-owner, which a new boot refuses.
+      selection.liveOwnerRecovery === null &&
       (selection.phase === "ready-observed" ||
-        (selection.phase === "failed-retained" &&
-          selection.failedStartRecoverable) ||
-        selection.liveOwnerRecovery !== null ||
         selection.deadOwnerRecovery !== null)
     );
   } catch {

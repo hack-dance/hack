@@ -405,6 +405,7 @@ pub(in crate::provider) fn follow_socket(
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|_| failure())?;
+    crate::provider::engine_requests::record("GET", "/v1.53/containers/{id}/logs");
     stream
         .write_all(request(container, &options).as_bytes())
         .map_err(|_| failure())?;

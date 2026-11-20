@@ -140,7 +140,8 @@ Normalized public input for project plan/capture/publish-source/verify-source an
 Build with: ./scripts/build-hack-local.sh
 Native graph commands require native-config-plan and are a bounded image-only prerequisite with an owned outbound project network. Foreground serve/control require macOS; ordinary frontend startup remains a separate gate.
 Runtime commands affect only the candidate pool. Graph commands support a bounded pinned-image subset; full project up/exec/down remains unimplemented.
-The installed hack and its state are never used as a fallback.";
+The installed hack and its state are never used as a fallback.
+Diagnostic flag: --debug-engine-requests emits process-local endpoint dispatch counts on stderr when the command returns; place it before any child-command -- separator.";
 
 fn main() {
     if let Err(error) = run() {
@@ -216,8 +217,47 @@ fn resolve_candidate_root(root: &Path) -> Result<std::path::PathBuf, CandidateEr
     Ok(requested)
 }
 
+fn take_engine_debug_flag(arguments: &mut Vec<String>) -> bool {
+    // Only the runtime's arguments participate; preserve an exec child's flags.
+    let end = arguments
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(arguments.len());
+    let debug = arguments[..end]
+        .iter()
+        .position(|arg| arg == "--debug-engine-requests");
+    if let Some(index) = debug {
+        arguments.remove(index);
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod engine_debug_tests {
+    #[test]
+    fn debug_flag_preserves_the_child_command() {
+        let mut args = [
+            "graph",
+            "exec",
+            "--debug-engine-requests",
+            "--",
+            "program",
+            "--debug-engine-requests",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert!(super::take_engine_debug_flag(&mut args));
+        assert_eq!(
+            args,
+            ["graph", "exec", "--", "program", "--debug-engine-requests"]
+        );
+        assert!(!super::take_engine_debug_flag(&mut args));
+    }
+}
+
 fn run() -> Result<(), CandidateError> {
-    let arguments: Vec<String> = std::env::args_os()
+    let mut arguments: Vec<String> = std::env::args_os()
         .skip(1)
         .map(|argument| {
             argument.into_string().map_err(|_| {
@@ -225,6 +265,8 @@ fn run() -> Result<(), CandidateError> {
             })
         })
         .collect::<Result<_, _>>()?;
+    let _engine_requests = take_engine_debug_flag(&mut arguments)
+        .then(hack_runtime_core::provider::engine_requests::enable);
     if arguments.len() < 2 || arguments[0] != "--candidate-root" {
         return Err(CandidateError::new(
             "missing_candidate_root",
@@ -361,6 +403,7 @@ fn run() -> Result<(), CandidateError> {
             )?;
             print_json(&response)?;
             if response["ok"] == false {
+                hack_runtime_core::provider::engine_requests::report();
                 std::process::exit(2);
             }
         }
@@ -390,6 +433,7 @@ fn run() -> Result<(), CandidateError> {
         }
         ["graph", "exec-interactive", arguments @ ..] => {
             let code = interactive_exec_cli::command(&discover_candidate(&requested)?, arguments)?;
+            hack_runtime_core::provider::engine_requests::report();
             std::process::exit(code);
         }
         ["graph", "interactive-sessions", arguments @ ..] => {
@@ -407,6 +451,7 @@ fn run() -> Result<(), CandidateError> {
                     CandidateError::new("graph_exec_result", "Missing service command exit status.")
                 })?;
                 if code != 0 {
+                    hack_runtime_core::provider::engine_requests::report();
                     std::process::exit(i32::try_from(code).unwrap_or(1));
                 }
             }

@@ -18,6 +18,7 @@ pub use dependency_socket::{
 mod disk_audit;
 mod disk_template;
 mod engine;
+pub mod engine_requests;
 pub mod environment;
 #[cfg(test)]
 mod environment_probe_test;

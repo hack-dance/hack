@@ -270,6 +270,7 @@ fn batch(
 /// One HTTP stop. A non-connect failure is never retried: the request may have
 /// reached the engine, and only later ownership-checked inspection decides.
 fn send(client: &Client, path: &str, remaining: Duration) -> Attempt {
+    crate::provider::engine_requests::record("POST", path);
     let response = client.post(path).timeout(remaining).send().map_err(|error| {
         let stage = if error.is_connect() && error.is_timeout() {
             StopFailureStage::ConnectTimeout

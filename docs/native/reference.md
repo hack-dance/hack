@@ -50,3 +50,11 @@ are its main sections:
   explains ownership, startup and cleanup with state charts.
 - [Model coverage](../reference/v5-model-coverage.md) lists what the formal models
   check and what they do not.
+
+## Contributor diagnostics
+
+The checkout candidate runtime accepts `--debug-engine-requests` to report
+process-local engine dispatch counts on stderr when it returns. See
+[engine request diagnostics](../../packages/runtime-core/README.md#engine-request-diagnostics)
+for scope and capture limits. This is a candidate-runtime flag; the public
+`hack up` frontend does not forward it.

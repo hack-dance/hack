@@ -103,6 +103,7 @@ impl Transport {
         }
         require_owned_network(&method, path, body)?;
         let requires_admission = ![Method::GET, Method::HEAD, Method::DELETE].contains(&method);
+        let request_method = method.clone();
         let mut request = self
             .client
             .request(method, format!("http://hack-local{path}"));
@@ -130,6 +131,7 @@ impl Transport {
                 (a, b) => a.or(b),
             },
         )?);
+        super::engine_requests::record(request_method.as_str(), path);
         let response = request.send().map_err(|_| failure("Engine request failed or timed out; its effect may be uncertain. No request was replayed."))?;
         response_bytes(response)
     }
@@ -332,6 +334,7 @@ impl<'a> Engine<'a> {
         }
         self.guest.verify()?;
         self.guest.before_effect()?;
+        super::engine_requests::record("POST", "/v1.53/images/load");
         let response = self
             .transport
             .client
@@ -1334,6 +1337,53 @@ mod tests {
         );
         assert!(exchange(b"HTTP/1.1 200 OK\r\nContent-Length: 4194305\r\n\r\n").is_err());
         assert!(exchange(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n{\"x\":").is_err());
+    }
+
+    #[test]
+    fn request_counts_include_failed_dispatches_but_not_local_refusals() {
+        // A separate test process keeps command-wide counters isolated from the
+        // parallel suite, just as each real runtime command owns its counters.
+        const CHILD: &str = "HACK_ENGINE_COUNT_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            // Disabled requests must not become part of a later debug record.
+            exchange(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap();
+            let _report = crate::provider::engine_requests::enable();
+            exchange(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap();
+            assert!(exchange(b"HTTP/1.1 500 Error\r\nContent-Length: 0\r\n\r\n").is_err());
+            let socket =
+                std::env::temp_dir().join(format!("engine-missing-{}.sock", std::process::id()));
+            let transport = Transport::new(&socket, Duration::from_millis(100)).unwrap();
+            assert!(transport.request(Method::GET, "/version", None).is_err());
+            assert!(
+                transport
+                    .request(Method::GET, "//private-value", None)
+                    .is_err()
+            );
+            assert!(
+                transport
+                    .request(Method::POST, "/v1.53/containers/create", None)
+                    .is_err()
+            );
+            crate::provider::engine_requests::report();
+            crate::provider::engine_requests::report();
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "provider::engine::tests::request_counts_include_failed_dispatches_but_not_local_refusals", "--nocapture"])
+            .env(CHILD, "1")
+            .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let report: Value = serde_json::from_str(stderr.trim()).unwrap();
+        assert_eq!(
+            report,
+            serde_json::json!({"kind": "engine_requests", "total": 3, "endpoints": {"GET /version": 3}})
+        );
     }
 }
 

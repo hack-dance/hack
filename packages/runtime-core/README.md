@@ -2709,3 +2709,25 @@ mismatch reports `provider_pin_changed`, rather than interpreting that path as a
 changed PID file. This diagnostic grants no cross-version recovery authority;
 use the release that started the pool for recovery and stop, then prepare a fresh
 home for the current pin.
+
+## Engine request diagnostics
+
+Pass `--debug-engine-requests` to the candidate runtime before any child-command
+`--` separator. For example, `hack-local runtime engine-info --json
+--debug-engine-requests` keeps normal JSON on stdout and writes one
+`{"kind":"engine_requests","total":1,"endpoints":{"GET /version":1}}` record
+on stderr when the command returns, including error returns. The example count
+is illustrative; capture actual output for measurements.
+
+Counts cover dispatch attempts in this process, including connection failures,
+HTTP errors, image uploads, stop retries, exec upgrades and log streams. Refusals
+before dispatch are excluded. Endpoint templates omit object IDs and all query
+values; unknown routes aggregate under `/other`. Request and response payloads
+are never recorded. This flag does not change engine admission or identity checks.
+
+A foreground owner reports when it returns. Abrupt termination and a log reader's
+frontend-lifetime pipe exit produce no final record. Child processes, guest-side commands and other runtime owners are outside
+this record; measure them separately rather than treating this as a whole-frontend
+request total. Capture elapsed wall time separately, with the same fixture, load,
+image state and source revision. No engine performance saving is implied by these
+counters.

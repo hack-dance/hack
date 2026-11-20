@@ -4122,6 +4122,9 @@ test("restore startup passes the retained run and selected generation to its own
 test("ordinary up resumes a stopped owned VM once and requires live proof before restore", async () => {
   for (const failed of [
     "none",
+    // HACK-2376: a home whose later boot failed and was recovered (`recovered-unclean`)
+    // starts its retained run exactly as a clean stop does.
+    "none-recovered-unclean",
     "resume-timeout",
     "live-proof",
     "changed-mapping",
@@ -4157,7 +4160,10 @@ test("ordinary up resumes a stopped owned VM once and requires live proof before
         if (failed === "cancel-preflight") {
           controller.abort();
         }
-        return retainedPreflight(saved, "stopped");
+        return retainedPreflight(
+          saved,
+          failed === "none-recovered-unclean" ? "recovered-unclean" : "stopped"
+        );
       }
       if (request.args[0] === "runtime" && request.args[1] === "up") {
         up++;
@@ -4211,7 +4217,7 @@ test("ordinary up resumes a stopped owned VM once and requires live proof before
       return await serve(request);
     };
     const attempt = startNativeProject({ ...opts, signal: controller.signal });
-    if (failed === "none") {
+    if (failed === "none" || failed === "none-recovered-unclean") {
       expect(await attempt).toBe(0);
       expect(served).toBe(1);
     } else {
@@ -4219,7 +4225,14 @@ test("ordinary up resumes a stopped owned VM once and requires live proof before
       expect(served).toBe(0);
     }
     expect(up).toBe(
-      ["none", "resume-timeout", "live-proof"].includes(failed) ? 1 : 0
+      [
+        "none",
+        "none-recovered-unclean",
+        "resume-timeout",
+        "live-proof",
+      ].includes(failed)
+        ? 1
+        : 0
     );
     if (failed === "cancel-preflight") {
       expect(events).toEqual(["offline-preflight"]);

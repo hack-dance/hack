@@ -1746,7 +1746,7 @@ hack projects prune [options]
 
 ## `hack native`
 
-Set up the opt-in native runtime
+Set up or recover the opt-in native runtime
 
 ### Usage
 
@@ -1759,6 +1759,7 @@ hack native <subcommand> [options]
 | Command | Summary |
 | --- | --- |
 | `hack native setup` | Download and prepare the pinned native runtime for this home |
+| `hack native recover` | Recover this home's native runtime after an interrupted or failed start |
 
 ### Options
 
@@ -1789,6 +1790,27 @@ Verifies and resumes pinned downloads without starting a VM. Requires Apple Sili
 | `--archive <path>` | Offline pinned provider archive (requires the complete offline input set) |
 | `--engine-archive <path>` | Offline pinned engine archive |
 | `--network-tools-directory <path>` | Private directory containing all pinned networking packages |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack native recover`
+
+Recover this home's native runtime after an interrupted or failed start
+
+### Usage
+
+```bash
+hack native recover [options]
+```
+
+Runs the runtime's own recovery for this native home: it proves what a failed or interrupted start left behind, records the stopped state, and then a normal hack up starts again. It never adopts or deletes data it cannot prove. --json passes the runtime result through unchanged.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

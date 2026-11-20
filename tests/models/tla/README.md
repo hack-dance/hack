@@ -712,28 +712,40 @@ Actual Rosetta execution in the guest needs host evidence.
 ## Native probe readiness
 
 `probe-readiness/ProbeReadiness.tla` checks how the host reads one native HTTP probe
-before a start counts its service ready (HACK-2440 c and d, HACK-2416). The positive
-control explores 53,245 distinct states to depth 37. It models the probe loop in
-`guest/http-probe.c`: the patient first attempt, failures counted only after the first
-success or the grace, and the start interval. It also models an app whose first answer
-takes 1..`MaxCompile` ticks and whose compile an abandoned request restarts, plus the
-host's reading in `assess` and `observe_finding`. Faults are an exec that exits or never
-starts, a probe that stops publishing, a frozen status dated in the future, and a
-missing or torn read. Bounds, in ticks: grace 3, timeout 1, start interval 1, interval 2,
-two retries, `MaxCompile` 2 and a horizon one tick past `Limit` (14).
+before a start counts its service ready (HACK-2440 c and d, HACK-2416). It models the
+probe loop in `guest/http-probe.c`: the patient first attempt, failures counted only
+after the first success or once the grace has passed, and the start interval. The app
+is chosen at the start: `slow` (its first answer takes 1..`MaxCompile` ticks, and an
+abandoned request restarts its compile), `refusing` (every request fails at once) or
+`hanging` (accepts, never answers). It also models the host's reading in `assess`,
+`observe_finding` and `observe_sample`. Faults are an exec that exits or never starts,
+a probe that stops publishing, a frozen status dated in the future, and a missing or
+torn read. Bounds, in ticks: grace 3, timeout 1, start interval 1 (2 with `Legacy`),
+interval 2, two retries, `MaxCompile` 2, `Limit` 14 and a horizon of 15.
 
-Invariants: `NoFalseFailure` (an unhealthy reading needs a fault), `BoundedStarting`
-(no starting reading past `Limit`), `NoReadyWithoutSuccess`, and `OneCompile` (the
-probe never restarts the app's compile). Each switch, set to FALSE, is the behaviour
-before the change and is a control:
+The positive control explores 175,757 distinct states to depth 52; `legacy` (the
+steady cadence before the first success, as a probe launched with an earlier build's
+arguments) explores 132,615. Both check:
 
-- `negative` (`Patient = FALSE`) fails `OneCompile` in a `Begin` state with
-  `compiles = 2`: the second request starts the compile again.
-- `no-host-bound` (`HostBound = FALSE`) fails `BoundedStarting` in an `Observe` state
-  with `verdict = "starting"`, `skewed = TRUE` and `vt = 15`: a frozen future-dated
-  status holds the start open.
-- `no-tolerance` (`Tolerate = FALSE`) fails `NoFalseFailure` in an `Observe` state
-  with `verdict = "unhealthy"`: an exec read before it has started fails the start.
+- `NoFalseFailure`: an app that answers within its grace is never failed without a
+  probe fault.
+- `NoPrematureFailure`: without a probe fault, the host fails a start only once the
+  probe itself has reached unhealthy, so its bounds never cut a working probe short.
+- `BoundedStarting`: no reading says starting later than `Limit`, counted on the host.
+- `NoReadyWithoutSuccess`, and `OneCompile`: inside the grace the probe never makes
+  the app start its compile again.
+
+Controls, each required to fail in the named state:
+
+- `negative` (`Patient = FALSE`): `OneCompile` in a `Begin` state with `restarts = 1`.
+- `no-host-bound` (`HostBound = FALSE`): `BoundedStarting` in an `Observe` state with
+  `verdict = "starting"`, `skewed = TRUE` and `vt = 15`.
+- `no-tolerance` (`Tolerate = FALSE`): `NoFalseFailure` in an `Observe` state with
+  `verdict = "unhealthy"` and `app = "slow"`.
+- `exhausts`: `NeverExhausted` in an `Expire` state with `health = "unhealthy"` and
+  `failures = 2`. It shows the positive run reaches exhausted retries.
+- `tight-bound` (`TightBound = TRUE`, a bound without the failed attempts after the
+  grace): `NoPrematureFailure` in an `Observe` state with `verdict = "unhealthy"`.
 
 | Model action | Implementation boundary |
 | --- | --- |
@@ -747,9 +759,10 @@ branch of `V` through `observe_sample` with the model's constants (one tick = 10
 It fails if the code's bounds drift from the model. `http_probe.rs`
 `inside_the_start_period_one_slow_first_answer_is_waited_for` runs the compiled probe
 against a server that answers in 300 ms with a 40 ms timeout. The model assumes
-`MaxCompile < Grace`: an app answering exactly at the end of its grace races the
-attempt's own deadline. It does not model HTTP parsing, several probes, the
-whole-graph deadline or the engine's exec scheduling.
+`MaxCompile < Grace` (an app answering exactly at the end of its grace races the
+attempt's own deadline) and an exec that starts within one tick of its recorded start.
+It does not model HTTP parsing, several probes, the whole-graph deadline or arbitrary
+engine scheduling delays.
 
 ## Stopped retained-pool startup
 

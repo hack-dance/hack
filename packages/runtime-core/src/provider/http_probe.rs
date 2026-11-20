@@ -895,10 +895,11 @@ mod tests {
             // start period the first attempt may run for the rest of the period,
             // so one request succeeds instead of many abandoned ones.
             let mut f = Fixture::new(16, 5000);
-            assert_eq!(f.wait(Health::Healthy, 0), 1);
-            // The probe's own record of request 1: healthy, after waiting out the
-            // 300 ms answer, far past the 40 ms timeout. (A second request may
-            // already be under way, so the connection count is not the proof.)
+            f.wait(Health::Healthy, 0);
+            // The probe's own record of request 1, which later requests never
+            // replace: healthy, after waiting out the 300 ms answer, far past the
+            // 40 ms timeout. The live status and connection count may already show
+            // later requests, so they are not the proof.
             let first = fs::read_to_string(f.root.join("first-sample")).unwrap();
             let fields: Vec<&str> = first.trim_end().split(' ').collect();
             assert_eq!(fields[2..5], ["1", "1", "0"], "{first}");

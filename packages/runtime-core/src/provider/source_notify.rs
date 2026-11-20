@@ -22,7 +22,9 @@
 //!   is everything waiting replaced by one "something changed under the share" event. That is
 //!   the single lossy case; no change is ever turned into silence.
 
+use super::identity::{self, ProcessIdentity};
 use crate::{Candidate, CandidateError};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -395,6 +397,103 @@ pub fn forward(
     }
 }
 
+/// What `runtime status` says about one project's watcher.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WatcherStatus {
+    pub project: PathBuf,
+    /// False once the recorded process is gone: until a watcher runs again the project has
+    /// no hot reload (edits reach services after up to about 5 seconds, watchers do not fire).
+    pub running: bool,
+}
+
+/// A running watcher's own note, so status can tell a live watcher from a dead one.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Record {
+    version: u32,
+    project: PathBuf,
+    process: ProcessIdentity,
+}
+
+/// The most watcher notes status reads (a pool shares at most eight projects).
+const MAX_RECORDS: usize = 64;
+
+fn records(candidate: &Candidate) -> PathBuf {
+    candidate.state_root.join("run/source-notify")
+}
+
+fn record_path(candidate: &Candidate, project: &Path) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(project.as_os_str().as_encoded_bytes())
+    );
+    records(candidate).join(format!("{}.json", &digest[..32]))
+}
+
+/// Notes that this process forwards changes for `project`. Advisory: a failure to write it
+/// costs only the status line, never the forwarding.
+fn announce(candidate: &Candidate, project: &Path) -> Option<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let process = identity::observe(i32::try_from(std::process::id()).ok()?).ok()?;
+    let directory = records(candidate);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&directory)
+        .ok()?;
+    let path = record_path(candidate, project);
+    let pending = path.with_extension(format!("{}.new", process.pid));
+    let bytes = serde_json::to_vec(&Record {
+        version: 1,
+        project: project.to_path_buf(),
+        process,
+    })
+    .ok()?;
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&pending)
+        .and_then(|mut file| file.write_all(&bytes))
+        .and_then(|()| std::fs::rename(&pending, &path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&pending);
+        return None;
+    }
+    Some(path)
+}
+
+fn running(process: &ProcessIdentity) -> bool {
+    identity::observe(process.pid).is_ok_and(|now| {
+        now.start_micros == process.start_micros && now.executable == process.executable
+    })
+}
+
+/// The watchers this home has notes for, and whether each is still that same process.
+/// Unreadable notes are skipped: status never fails because of them.
+pub fn watchers(candidate: &Candidate) -> Vec<WatcherStatus> {
+    let Ok(entries) = std::fs::read_dir(records(candidate)) else {
+        return Vec::new();
+    };
+    let mut found: Vec<WatcherStatus> = entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|kind| kind == "json"))
+        .take(MAX_RECORDS)
+        .filter_map(|entry| {
+            let bytes = std::fs::read(entry.path()).ok()?;
+            let record: Record = serde_json::from_slice(&bytes).ok()?;
+            (record.version == 1).then(|| WatcherStatus {
+                running: running(&record.process),
+                project: record.project,
+            })
+        })
+        .collect();
+    found.sort_by(|left, right| left.project.cmp(&right.project));
+    found
+}
+
 /// The long-running command behind `runtime source-notify`: watches `project`, which must be
 /// one of this pool's shares, and forwards its changes until the pool changes, the process is
 /// stopped or, with `until_stdin_closes`, its parent closes its input (or exits).
@@ -437,20 +536,32 @@ pub fn watch(
             })
             .map_err(|_| failed("Cannot observe the parent process."))?;
     }
-    forward(
+    // Written once the opening event has fired, removed when this process ends cleanly.
+    let note = std::cell::RefCell::new(None::<PathBuf>);
+    let announced = std::cell::Cell::new(false);
+    let result = forward(
         &root,
         &base,
         &changes,
         &stop,
         |lines| {
             let fired = guest.notify_files(lines, DELIVERY_TIMEOUT)?;
+            if !announced.replace(true) && fired == (1, true) {
+                *note.borrow_mut() = announce(candidate, &root);
+                // One line for the parent: forwarding has begun.
+                println!("source-notify: forwarding");
+            }
             if std::env::var_os("HACK_LOCAL_SOURCE_NOTIFY_TRACE").is_some() {
                 eprintln!("source-notify: {} events, {} fired", lines.len(), fired.0);
             }
             Ok(fired)
         },
         || guest.verify(),
-    )
+    );
+    if let Some(path) = note.into_inner() {
+        let _ = std::fs::remove_file(path);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -943,5 +1054,55 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, "runtime_changed");
         assert!(started.elapsed() >= ALIVE_INTERVAL);
+    }
+
+    #[test]
+    fn status_tells_a_live_watcher_from_a_dead_one() {
+        let home = std::env::temp_dir().join(format!(
+            "hack-source-notify-status-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let mut candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        candidate.state_root = home.clone();
+        assert_eq!(watchers(&candidate), Vec::new());
+        // This test process announces itself: it is running.
+        let live = Path::new("/project/live");
+        let note = announce(&candidate, live).expect("note written");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&note).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // A note whose process is gone (the same pid with another start time): not running.
+        let mut dead: Record = serde_json::from_slice(&std::fs::read(&note).unwrap()).unwrap();
+        dead.project = PathBuf::from("/project/dead");
+        dead.process.start_micros += 1;
+        std::fs::write(
+            record_path(&candidate, &dead.project),
+            serde_json::to_vec(&dead).unwrap(),
+        )
+        .unwrap();
+        // Anything unreadable is skipped, never an error.
+        std::fs::write(records(&candidate).join("junk.json"), b"not json").unwrap();
+        std::fs::write(records(&candidate).join("other.txt"), b"ignored").unwrap();
+        assert_eq!(
+            watchers(&candidate),
+            vec![
+                WatcherStatus {
+                    project: "/project/dead".into(),
+                    running: false
+                },
+                WatcherStatus {
+                    project: live.into(),
+                    running: true
+                },
+            ]
+        );
+        std::fs::remove_dir_all(&home).unwrap();
     }
 }

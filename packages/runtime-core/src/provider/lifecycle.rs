@@ -1100,7 +1100,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         },
         profile: Some(owner.profile),
         reclamation: owner.reclamation,
-        hot_reload: Some(super::hot_reload::report(owner.hot_reload)),
+        hot_reload: Some(super::hot_reload::report_for(candidate, owner.hot_reload)),
         guest_memory_mib: Some(owner.profile.memory_mib()),
         application_bridge: owner.application_bridge,
         phase,

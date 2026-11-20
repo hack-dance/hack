@@ -1469,6 +1469,9 @@ holds `service.lock`, or after the serving process itself answered that the
 intent was accepted and has no live attempt (its intent record then answers any
 later frame with that id).
 
+State charts: [one service process](../../../docs/diagrams/runtime-service-process.svg) and
+[one client mutation](../../../docs/diagrams/runtime-service-client.svg) (Mermaid sources beside them).
+
 | Model operation | Planned source boundary |
 | --- | --- |
 | `Spawn` / `Connect` | The client connects, and on `ENOENT` or `ECONNREFUSED` starts the service detached with the closed environment. |

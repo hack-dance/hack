@@ -1,0 +1,29 @@
+---
+title: RuntimeService · process
+---
+stateDiagram-v2
+    direction TB
+    [*] --> starting : Spawn
+    starting --> serving : TakeLock, Bind
+    starting --> dead : LoseRace [lock held]
+    serving --> draining : Retire [other build]
+    serving --> dead : IdleExit [nothing queued]
+    draining --> dead : ExitDrained [no attempt]
+    starting --> dead : Crash
+    serving --> dead : Crash
+    draining --> dead : Crash
+    dead --> [*]
+    note right of serving
+        INV OneOwner: at most one
+        process serving or draining.
+        Bind only with service.lock.
+    end note
+    note right of dead
+        Crash frees the lock and lease,
+        drops memory and unread frames.
+        Intent records stay on disk.
+    end note
+    class starting wait
+    class serving live
+    class draining wait
+    class dead idle

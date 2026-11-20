@@ -1,0 +1,40 @@
+---
+title: RuntimeService · client
+---
+stateDiagram-v2
+    direction TB
+    [*] --> idle
+    idle --> hello : Connect
+    hello --> sent : Send
+    hello --> idle : Retire or Disconnect
+    hello --> oneshot : Fallback
+    sent --> idle : Disconnect or Crash
+    sent --> idle : RefuseDraining
+    sent --> replied : Finish or AnswerDone
+    sent --> unknown : AnswerUnknown
+    idle --> oneshot : Fallback [never sent]
+    oneshot --> oneshotRunning : OneShotBegin
+    oneshotRunning --> finished : OneShotEnd
+    idle --> inspect : InspectWithoutService
+    unknown --> inspect : StartInspect
+    inspect --> finished : Inspect
+    replied --> finished : Report
+    finished --> [*]
+    note right of hello
+        Retire only for another build.
+        Send only to the same build.
+    end note
+    note right of sent
+        INV AtMostOnce. A resend keeps
+        the intent id. A written frame
+        stays in the service's buffer.
+    end note
+    note right of inspect
+        Without a service only while
+        no process holds service.lock.
+        INV ReportHonest
+    end note
+    class sent live
+    class unknown wait
+    class inspect wait
+    class finished ok

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   appendFile,
   chmod,
+  link,
   mkdtemp,
   realpath,
   rename,
@@ -155,4 +156,23 @@ test("a file that grows during the read is refused", async () => {
   await expect(digests.sha256(path, { refused })).rejects.toBeInstanceOf(
     Refused
   );
+});
+
+test("a single-link check refuses a hard-linked or empty executable, cached or not", async () => {
+  const { root, path } = await executable("version-a");
+  const digests = createNativeExecutableDigests({ nowNs: later });
+  expect(await digests.sha256(path, { refused, singleLink: true })).toBe(
+    sha("version-a")
+  );
+  // A second hard link appears after the digest was cached.
+  await link(path, join(root, "second-link"));
+  await expect(
+    digests.sha256(path, { refused, singleLink: true })
+  ).rejects.toBeInstanceOf(Refused);
+  // Callers without the rule still accept it.
+  expect(await digests.sha256(path, { refused })).toBe(sha("version-a"));
+  const empty = await executable("");
+  await expect(
+    digests.sha256(empty.path, { refused, singleLink: true })
+  ).rejects.toBeInstanceOf(Refused);
 });

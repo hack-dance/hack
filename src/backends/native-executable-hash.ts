@@ -38,7 +38,15 @@ const RACY_WINDOW_NS = 2_000_000_000n;
 export interface NativeExecutableDigests {
   sha256(
     path: string,
-    opts: { readonly refused: () => Error; readonly fresh?: boolean }
+    opts: {
+      readonly refused: () => Error;
+      readonly fresh?: boolean;
+      /**
+       * Also require exactly one hard link and a non-empty file (the Caddy
+       * binary's admission rule). Checked on every call's fresh stat.
+       */
+      readonly singleLink?: boolean;
+    }
   ): Promise<string>;
 }
 
@@ -86,7 +94,7 @@ export function createNativeExecutableDigests(
   let reads = 0;
   return {
     reads: () => reads,
-    async sha256(path, { refused, fresh }) {
+    async sha256(path, { refused, fresh, singleLink }) {
       const startedNs = nowNs();
       const file = await open(
         path,
@@ -99,6 +107,7 @@ export function createNativeExecutableDigests(
           (stat.mode & 0o022n) !== 0n ||
           (stat.mode & 0o111n) === 0n ||
           stat.size > BigInt(MAX_EXECUTABLE_BYTES) ||
+          (singleLink === true && (stat.nlink !== 1n || stat.size < 1n)) ||
           (await realpath(path)) !== path
         ) {
           throw refused();

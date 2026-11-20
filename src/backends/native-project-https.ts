@@ -953,6 +953,7 @@ export async function inspectActiveNativeHttpsOwner(opts: {
     if (
       (await nativeExecutableDigests.sha256(receipt.listener.executable, {
         refused,
+        singleLink: true,
       })) !== receipt.caddySha256
     ) {
       throw refused();
@@ -1365,8 +1366,10 @@ export async function startNativeProjectHttps(opts: {
     throw refused();
   }
   if (
-    (await nativeExecutableDigests.sha256(opts.caddyBinary, { refused })) !==
-    opts.caddySha256
+    (await nativeExecutableDigests.sha256(opts.caddyBinary, {
+      refused,
+      singleLink: true,
+    })) !== opts.caddySha256
   ) {
     throw refused();
   }

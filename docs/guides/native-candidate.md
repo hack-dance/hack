@@ -2144,7 +2144,11 @@ present it exits 0 and reports `runtime_not_running` (no phase, no service rows)
 and text output prints "Native runtime is not running; no services are running."
 That includes a pool left stopped by a failed or recovered boot (`failed-boot-stopped`,
 `recovered-unclean`, `stopped-before-engine`) whose provider is not alive; before, `ps`
-failed there with `runtime_changed`.
+failed there with `runtime_changed`. `hack down` on a stopped runtime still refuses with
+`runtime_not_running`, but it now says what that means: "The native runtime is not
+running; nothing in it was changed. None of this project's containers are running, and
+its data is kept. Run hack up to start the project again, or hack ps --json to see its
+state." Before, it named only `hack ps --json`.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,

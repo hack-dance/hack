@@ -354,6 +354,12 @@ fn operation_lease<T>(
 /// still bound, so this waits longer than startup does.
 #[cfg(target_os = "macos")]
 pub(super) const OWNED_CLEANUP_LEASE_WAIT: Duration = Duration::from_secs(30);
+/// Refusals of every command that needs the running pool (source transfer,
+/// graph start, stop, inspect, exec). They name no command of their own: the
+/// CLI adds the next step for its own command (HACK-2420).
+const NOT_STARTED: &str =
+    "The native runtime has never been started on this host; nothing was changed.";
+const NOT_RUNNING: &str = "The native runtime is not running; nothing in it was changed.";
 
 /// How long ordinary startup waits for a provider lease that another operation holds, such as
 /// a finite `graph inspect` (presentation `ps` takes no provider lease).
@@ -588,17 +594,11 @@ impl<'a> OwnedGuest<'a> {
             .try_exists()
             .map_err(io)?
         {
-            return Err(CandidateError::new(
-                "runtime_not_running",
-                "Start the owned candidate runtime before transferring source.",
-            ));
+            return Err(CandidateError::new("runtime_not_running", NOT_STARTED));
         }
         let owner = Owner::load(candidate)?;
         if owner.phase != "running" || owner.guest_boot_id.is_none() {
-            return Err(CandidateError::new(
-                "runtime_not_running",
-                "Start the owned candidate runtime before transferring source.",
-            ));
+            return Err(CandidateError::new("runtime_not_running", NOT_RUNNING));
         }
         let (lock, current) = operation_lease(&root(candidate), deadline, || {
             let current = Owner::load(candidate)?;

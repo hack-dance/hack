@@ -1761,6 +1761,22 @@ waits for the scan and hot reload works; above it the boot does not wait and hot
   the container path; the host directory, if it exists in the checkout, is still read by the
   provider. Removing the host copy is what brings a checkout back under the limit.
 
+### Where guest commands find their programs
+
+Every command the runtime runs in the guest gets one search path (`agent::GUEST_PATH`): the
+guest's own system directories first, the engine share (`/opt/hack-engine`, mounted read-only
+from the host) last. A utility name such as `cat`, `sha256sum` or `stat` therefore always
+resolves to the guest's root files, also when the share holds a file of that name. That
+matters most before the guest has checked the engine binary it is served: a wrong or stale
+share cannot put a file of its own in front of the utilities that check it. The one cleanup
+command that releases the guest's cache has a system-only path.
+
+Only names the root files do not have resolve to the share, which is how `dockerd`,
+`containerd`, `runc` and the other engine binaries are found. Before each boot the runtime
+checks that no entry in the guest's search directories has the name of a file at the top of
+the engine tree and refuses the boot (`guest_search_order`) if one does, because the guest
+would run that entry instead of the engine's.
+
 ### Starting a pool that is already running
 
 `runtime up` on a pool that is already running and owned by this home (every warm frontend

@@ -35,7 +35,7 @@ const SHAPES: Record<
     "Native compiler protocol object (`transport_version`, `ok`, result / diagnostics)",
   "error-only": "Retired: usage-error envelope, no success payload",
   "runtime-passthrough":
-    "Native runtime result passed through unchanged (`status`, `files`, `probe`; no `data` envelope)",
+    "Native runtime result passed through unchanged, with no `data` envelope (setup: `status`, `files`, `probe`; recover: the runtime status, such as `phase`)",
 };
 
 export function renderJsonInventory(cli: CliSpec): string {

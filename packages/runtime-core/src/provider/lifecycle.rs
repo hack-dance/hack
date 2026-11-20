@@ -1,5 +1,6 @@
 mod admission_pool;
 mod disk_handles;
+mod guest_memory_peak;
 pub mod host_filesystem;
 mod interrupted;
 mod operating_guard;
@@ -72,6 +73,10 @@ pub struct RuntimeStatus {
     /// `null` when that cannot be established. An active image build is not
     /// observed here; `runtime down` refuses during one.
     pub pool_idle: Option<bool>,
+    /// Guest memory peaks of the pool's last boots that ended in `runtime down`, oldest
+    /// first (see `guest_memory_peak`). A record only; absent when there is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guest_memory_peaks: Option<Vec<guest_memory_peak::Boot>>,
     /// Provider sockets native found world-accessible and made private for the running
     /// provider (`socket_repairs`); absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -136,9 +141,36 @@ fn boot_reclamation_policy() -> state::ReclamationPolicy {
     state::ReclamationPolicy::default()
 }
 fn invoke(candidate: &Candidate, owner: &Owner, args: &[&str]) -> Result<String, CandidateError> {
-    process::run(
+    let output = process::capture(
         command(candidate, owner).args(args),
         Duration::from_secs(60),
+    )?;
+    if output.status.success() {
+        return String::from_utf8(output.stdout)
+            .map_err(|_| CandidateError::new("provider_protocol", "Non-UTF8 provider response."));
+    }
+    // The provider's own last line, cleaned, travels with the failure so the CLI can show it.
+    let shares = owner.project_shares();
+    let roots: Vec<&Path> = shares.iter().map(|share| share.project.as_path()).collect();
+    Err(super::provider_line::attach(
+        failed_provider_command(&output),
+        &output.stderr,
+        candidate,
+        &owner.short_home,
+        &roots,
+    ))
+}
+
+/// The error `process::run` gives a provider command that exited unsuccessfully, word for
+/// word (a test compares them), built here because the whole stderr is needed as well.
+fn failed_provider_command(output: &process::Captured) -> CandidateError {
+    CandidateError::new(
+        "provider_command_failed",
+        format!(
+            "Provider command exited {}; no automatic retry. {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr[..output.stderr.len().min(8192)]).trim()
+        ),
     )
 }
 /// Record a lifecycle phase. Every phase other than `stopped` clears the clean-stop marker
@@ -1013,6 +1045,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             prepared_base: None,
             graph_runs: users.graph_runs,
             pool_idle: Some(false),
+            guest_memory_peaks: None,
             repaired_sockets: None,
         });
     }
@@ -1089,6 +1122,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         prepared_base: super::prepared_start::status(candidate),
         graph_runs: users.graph_runs,
         pool_idle,
+        guest_memory_peaks: guest_memory_peak::history(&root(candidate)),
     })
 }
 
@@ -1590,7 +1624,7 @@ fn start_pool(
     {
         return Err(CandidateError::new(
             "recovery_required",
-            "Previous operation did not finish; inspect runtime status and recover before restarting.",
+            "Previous operation did not finish; run hack native recover (runtime recover --json with the executor), then start again.",
         ));
     }
     if let Some(process) = &owner.process {
@@ -1612,6 +1646,13 @@ fn start_pool(
         &lock,
     )?;
     let rootfs_metadata = prepare_rootfs(candidate, &mut owner)?;
+    // Guest commands search the guest's own directories before the engine share
+    // (`agent::GUEST_PATH`): the engine binaries are found only if the root files hold
+    // nothing of their names.
+    agent::require_engine_names_unshadowed(
+        &root(candidate).join("rootfs"),
+        &artifact::engine_root(candidate),
+    )?;
     proven_trees.insert(
         super::tree_witness::ROOTFS.to_owned(),
         super::tree_witness::Proven {
@@ -1811,12 +1852,21 @@ fn stalled_boot(error: CandidateError) -> CandidateError {
     if error.code != "provider_command_failed" || !error.message.contains(NO_BOOT_PROGRESS) {
         return error;
     }
-    CandidateError::new(
+    let stalled = CandidateError::new(
         "provider_boot_stalled",
         "The provider ended the start: the VM made no boot progress within the provider's \
          limit. Recover the pool before retrying. A large shared project directory is one \
          known cause; HACK_NATIVE_HOT_RELOAD=off starts without the scan that causes it.",
-    )
+    );
+    // The provider's own line stays with the renamed failure.
+    match error
+        .refusals
+        .as_ref()
+        .and_then(|diagnostics| diagnostics.provider_line.as_deref())
+    {
+        Some(line) => stalled.with_provider_line(line),
+        None => stalled,
+    }
 }
 
 /// SIGTERM a provider whose identity is verified at the signal, then wait for it to exit.
@@ -1882,7 +1932,7 @@ mod boot_sequence_tests;
 fn failed_boot_stop_error(failure: CandidateError) -> CandidateError {
     CandidateError::new(
         failure.code,
-        "Failed-boot provider cleanup could not be confirmed. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",
+        "Failed-boot provider cleanup could not be confirmed. Run hack native recover before retrying (with an executor selected by hand: the same executor and --candidate-root as the failed start, then runtime recover --json).",
     )
 }
 
@@ -2148,6 +2198,9 @@ exit 43"#,
     start_memory_return(owner, |script, args, background| {
         guest(candidate, owner, script, args, background)
     });
+    start_memory_peak(owner, |script, args, background| {
+        guest(candidate, owner, script, args, background)
+    });
     phase(candidate, owner, "running")?;
     status(candidate)
 }
@@ -2169,6 +2222,67 @@ fn start_memory_return(
         &[&owner.token, boot],
         true,
     );
+}
+
+/// Start the guest job that records this boot's memory peak (`guest-memory-peak.sh`), the
+/// same way as [`start_memory_return`]: background mode, result ignored, fresh boots only.
+fn start_memory_peak(
+    owner: &Owner,
+    run: impl FnOnce(&str, &[&str], bool) -> Result<String, CandidateError>,
+) {
+    let Some(boot) = owner.guest_boot_id.as_deref() else {
+        return;
+    };
+    let _ = run(
+        include_str!("guest-memory-peak.sh"),
+        &[&owner.token, boot],
+        true,
+    );
+}
+
+/// Read this boot's memory peak from a running guest, just before `down` stops it. Best-effort
+/// and bounded by [`guest_memory_peak::READ_BUDGET`]: a guest that does not answer and a
+/// reading that does not decode give `None`, and `down` goes on exactly as it would have.
+/// Nothing is written here; `down` keeps the reading only after the stop has finished.
+fn read_memory_peak(
+    state_root: &Path,
+    owner: &Owner,
+    read: impl FnOnce(&str, &[&str], Instant) -> Result<String, CandidateError>,
+) -> Option<guest_memory_peak::Boot> {
+    if owner.phase != "running" {
+        return None;
+    }
+    let boot = owner.guest_boot_id.as_deref()?;
+    let deadline = Instant::now() + guest_memory_peak::READ_BUDGET;
+    let output = read(
+        guest_memory_peak::READ_SCRIPT,
+        &[&owner.token, boot],
+        deadline,
+    )
+    .ok()?;
+    Some(guest_memory_peak::Boot {
+        boot_id: boot.to_owned(),
+        guest_memory_mib: owner.profile.memory_mib(),
+        cpus: owner.profile.cpus(),
+        reading: guest_memory_peak::parse(&output)?,
+        graphs: guest_memory_peak::graph_runs(state_root),
+    })
+}
+
+/// Keep a reading taken before the stop, once `down` has succeeded. It runs after the stop
+/// and every owner write the stop needs, so the record cannot take the disk space or the
+/// time of either, and a record that cannot be written leaves `result` as it is.
+fn keep_memory_peak(
+    pool_root: &Path,
+    peak: Option<guest_memory_peak::Boot>,
+    result: &mut Result<RuntimeStatus, CandidateError>,
+) {
+    let (Some(boot), Ok(status)) = (peak, result.as_mut()) else {
+        return;
+    };
+    if let Ok(boots) = guest_memory_peak::record(pool_root, boot) {
+        status.guest_memory_peaks = Some(boots);
+    }
 }
 
 /// Copy (once) and prove the pool's guest rootfs by content. Returns its metadata digest
@@ -2421,7 +2535,15 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
-    match guest_stop(candidate, &mut owner) {
+    let peak = read_memory_peak(&candidate.state_root, &owner, |script, args, deadline| {
+        agent::exec_until(
+            &socket(candidate, &owner, "agent.sock")?,
+            script,
+            args,
+            deadline,
+        )
+    });
+    let mut result = match guest_stop(candidate, &mut owner) {
         Ok(()) => status(candidate),
         Err(error)
             if error.code == "agent_protocol_uncertain" && agent_silent(candidate, &owner)? =>
@@ -2434,7 +2556,9 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             status(candidate)
         }
         Err(error) => Err(error),
-    }
+    };
+    keep_memory_peak(&root(candidate), peak, &mut result);
+    result
 }
 
 /// The code `guest_stop` returns when the engine quiesce failed again on a resumed stop.
@@ -3036,6 +3160,12 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         stop_silent_guest(candidate, &mut owner)?;
         return status(candidate);
     }
+    // A stopped phase was written only after the provider's release was proven, and its
+    // provider is dead: nothing to recover, so a clean stop stays clean and repeating
+    // recovery changes nothing (a retained run's eligibility depends on the phase).
+    if STOPPED_PHASES.contains(&owner.phase.as_str()) {
+        return status(candidate);
+    }
     // A failed first boot whose provider was recorded (`failed-boot-stopped` after a template
     // refusal) must not reach the stopped path, which adopts its disks unchecked.
     if interrupted::set_aside_recorded(candidate, &mut owner, &lock)? {
@@ -3608,6 +3738,22 @@ mod tests {
         ));
         assert_eq!(stalled.code, "provider_boot_stalled");
         assert!(stalled.message_fixed);
+        assert!(
+            serde_json::to_value(&stalled)
+                .unwrap()
+                .get("provider_line")
+                .is_none()
+        );
+        // A stalled start that carried the provider's own line keeps it under the new code.
+        let with_line = stalled_boot(
+            CandidateError::new("provider_command_failed", provider.to_owned())
+                .with_provider_line("Error: no boot progress for 30 seconds"),
+        );
+        assert_eq!(with_line.code, "provider_boot_stalled");
+        assert_eq!(
+            serde_json::to_value(&with_line).unwrap()["provider_line"],
+            "Error: no boot progress for 30 seconds"
+        );
         assert!(stalled.message.contains("HACK_NATIVE_HOT_RELOAD=off"));
         // Another failure of the same command keeps its code and text.
         let other = stalled_boot(CandidateError::new(
@@ -3623,6 +3769,27 @@ mod tests {
             format!("{NO_BOOT_PROGRESS} seen elsewhere"),
         ));
         assert_eq!(timeout.code, "provider_timeout_uncertain");
+    }
+
+    #[test]
+    fn a_failed_provider_command_keeps_the_error_process_run_gives_it() {
+        let shell = |script: &str| {
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args(["-c", script]);
+            command
+        };
+        for script in [
+            "echo out; echo 'Error: machine not found' >&2; exit 3",
+            "exit 1",
+            "i=0; while [ $i -lt 600 ]; do echo 'warning: filler filler filler' >&2; i=$((i+1)); done; exit 2",
+        ] {
+            let expected = process::run(&mut shell(script), Duration::from_secs(20)).unwrap_err();
+            let output = process::capture(&mut shell(script), Duration::from_secs(20)).unwrap();
+            let built = failed_provider_command(&output);
+            assert_eq!(built.code, expected.code, "{script}");
+            assert_eq!(built.message, expected.message, "{script}");
+            assert_eq!(built.message_fixed, expected.message_fixed);
+        }
     }
 
     #[test]

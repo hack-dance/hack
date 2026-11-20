@@ -71,6 +71,10 @@ function nativeLogPhase(value: unknown): NativeLogFailurePhase | undefined {
 }
 
 const FIXED_MESSAGE = /^[\x20-\x7e]{1,400}$/;
+const FIXED_MESSAGE_LIMIT = 400;
+const PROVIDER_SAID = "The provider's own error:";
+const PROVIDER_LINE_MINIMUM = 40;
+const TRAILING_SLASHES = /\/+$/;
 
 /**
  * Keep a runtime message only when the runtime marked it fixed (a literal that
@@ -79,11 +83,119 @@ const FIXED_MESSAGE = /^[\x20-\x7e]{1,400}$/;
 function fixedNativeMessage(
   value: Record<string, unknown>
 ): string | undefined {
-  return value.message_fixed === true &&
+  const fixed =
+    value.message_fixed === true &&
     typeof value.message === "string" &&
     FIXED_MESSAGE.test(value.message)
-    ? value.message
-    : undefined;
+      ? value.message
+      : undefined;
+  const said = nativeProviderLine(value);
+  if (said === undefined) {
+    return fixed;
+  }
+  if (fixed === undefined) {
+    return `${PROVIDER_SAID} ${said}`;
+  }
+  // Both, while they fit the one bounded line every failure channel accepts;
+  // the fixed sentence wins and the provider's line is cut to what is left.
+  const room = FIXED_MESSAGE_LIMIT - fixed.length - PROVIDER_SAID.length - 2;
+  if (room < PROVIDER_LINE_MINIMUM) {
+    return fixed;
+  }
+  const line = said.length <= room ? said : `${said.slice(0, room - 3)}...`;
+  return `${fixed} ${PROVIDER_SAID} ${line}`;
+}
+
+/** The only failures a provider's line may accompany. */
+const PROVIDER_FAILURES = new Set([
+  "provider_command_failed",
+  "provider_boot_stalled",
+]);
+/** A `key=value` token keeps its value only as a short number or one of these words. */
+const PLAIN_VALUE = /^(?:\d{0,10}|on|off|true|false|yes|no|none)$/i;
+// Up to the last `@` before the first `/`, `?` or `#`: a password may hold an
+// `@`, and one in a query must not hide the query's `=` from the next rule.
+const URL_CREDENTIALS = /(:\/\/)[^/?#\s]+@/g;
+const WHITE_SPACE = /\s+/;
+const PROVIDER_LINE_LIMIT = 200;
+const LONG_HEX = /[0-9a-fA-F]{12,}/g;
+
+/** One printable ASCII line of 1 to 200 characters, checked character by character. */
+function boundedPrintableLine(value: unknown): value is string {
+  if (typeof value !== "string" || value.length < 1 || value.length > 200) {
+    return false;
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x20 || code > 0x7e) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The provider's own last error line for a failed provider command (HACK-2418).
+ * The runtime cleans it; this boundary does not rely on that. The line is
+ * accepted only with a provider failure code and only as one printable ASCII
+ * line of at most 200 characters, and it is redacted again here: the user's
+ * home and temporary directory, the value of a `key=value` token unless it
+ * is a short number or a fixed word such as `on` or `false`, a bearer token, a
+ * user and password in a URL, and long hexadecimal identifiers.
+ */
+export function nativeProviderLine(
+  value: Record<string, unknown>,
+  env: Readonly<Record<string, string | undefined>> = process.env
+): string | undefined {
+  const line = value.provider_line;
+  if (
+    !(
+      typeof value.code === "string" &&
+      PROVIDER_FAILURES.has(value.code) &&
+      boundedPrintableLine(line)
+    )
+  ) {
+    return;
+  }
+  let text = line;
+  for (const [path, word] of [
+    [env.HOME, "~"],
+    [env.TMPDIR?.replace(TRAILING_SLASHES, ""), "<tmp>"],
+  ] as const) {
+    if (path !== undefined && path.length > 2) {
+      text = text.split(path).join(word);
+    }
+  }
+  let afterBearer = false;
+  const redacted = text
+    .split(WHITE_SPACE)
+    .filter((token) => token !== "")
+    .map((token) => {
+      const bearer = afterBearer;
+      afterBearer = token.toLowerCase() === "bearer";
+      if (bearer) {
+        return "<value>";
+      }
+      // Anything after the first `=` is shown only when it is plainly not a
+      // secret; a short value is not safe by being short.
+      // URL credentials go first: a password may hold an equals sign.
+      const safe = token.replace(URL_CREDENTIALS, "$1<credentials>@");
+      const equals = safe.indexOf("=");
+      const head = (equals < 0 ? safe : safe.slice(0, equals)).replace(
+        LONG_HEX,
+        "<id>"
+      );
+      if (equals < 0) {
+        return head;
+      }
+      const value = safe.slice(equals + 1);
+      return `${head}=${PLAIN_VALUE.test(value) ? value : "<value>"}`;
+    })
+    .join(" ");
+  // Redaction can lengthen the line: the bound holds for what is shown.
+  return redacted.length <= PROVIDER_LINE_LIMIT
+    ? redacted
+    : `${redacted.slice(0, PROVIDER_LINE_LIMIT - 3)}...`;
 }
 
 const NETWORK_HOST = /^[a-zA-Z0-9_.:[\]-]{1,253}$/;

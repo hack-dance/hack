@@ -166,21 +166,28 @@ skip the rest, so a separate file is safe.
   "platforms": [
     {
       "platform": "darwin-arm64",
-      "backends": ["native", "compose"],
+      "backends": [
+        "native",
+        "compose"
+      ],
       "archive": "hack-5.0.0-next.25-darwin-arm64-native.tar.gz",
       "manager": "hack-next-manager-darwin-arm64",
       "checksums": "SHA256SUMS"
     },
     {
       "platform": "linux-x86_64",
-      "backends": ["compose"],
+      "backends": [
+        "compose"
+      ],
       "archive": "hack-5.0.0-next.25-linux-x86_64-compose.tar.gz",
       "manager": "hack-next-manager-linux-x86_64",
       "checksums": "SHA256SUMS-linux"
     },
     {
       "platform": "linux-arm64",
-      "backends": ["compose"],
+      "backends": [
+        "compose"
+      ],
       "archive": "hack-5.0.0-next.25-linux-arm64-compose.tar.gz",
       "manager": "hack-next-manager-linux-arm64",
       "checksums": "SHA256SUMS-linux"

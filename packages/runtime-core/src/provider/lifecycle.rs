@@ -3893,8 +3893,9 @@ mod tests {
     /// `|`, `&&`, `||`, `if`, `then`, `else`, `do`, a `case` pattern or an assignment. So a
     /// line cannot run a file from the cache or the share after its first command either.
     /// It splits on whitespace, so it refuses what that cannot read: an operator written
-    /// against a word (`a;b`, `a|b`), any `&` but `&&`, and an assignment from a command
-    /// substitution that is not the whole rest of its line.
+    /// against a word (`a;b`, `a|b`), any `&` but `&&`, any `(` or `{` outside `$(`, a `case`
+    /// pattern the script does not use, and an assignment from a command substitution that
+    /// is not the whole rest of its line.
     fn cache_script_runs_only_fixed_commands(script: &str) -> Result<(), String> {
         const COMMANDS: [&str; 20] = [
             "set",
@@ -3919,10 +3920,9 @@ mod tests {
             "else",
         ];
         const ASSIGNED: [&str; 5] = ["total=", "cache=", "path=", "size=", "expected="];
-        // A `case` pattern such as `runc)` or `*,ro,*)`: no expansion and no quote.
-        let pattern = |word: &str| {
-            word.ends_with(')') && !word.ends_with("))") && !word.contains(['$', '"', '\''])
-        };
+        // The `case` patterns the script uses, read only where a `case` line expects one.
+        // Any other word ending in `)` is not a pattern: `(file)` would be a subshell.
+        const PATTERNS: [&str; 5] = ["*[!0-9a-f]*)", "runc)", "docker-init)", "*,ro,*)", "*)"];
         if script.contains('`') {
             return Err("a backquoted command".into());
         }
@@ -3932,22 +3932,31 @@ mod tests {
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
         {
             let refused = |word: &str| Err(format!("{word} in {line}"));
-            let mut command = true;
+            let case = line.starts_with("case ");
+            // `command`: the next word is run. `arm`: the next word is a `case` pattern.
+            let (mut command, mut arm) = (true, false);
             for word in line.split_whitespace() {
                 // An operator this reading would not see as one.
                 let ends = word.trim_end_matches(';');
+                let plain = word.replace("$((", "").replace("$(", "").replace("${", "");
                 if ends.contains(';')
                     || (word.contains(['|', '&']) && !["|", "||", "&&"].contains(&word))
+                    || plain.contains(['(', '{'])
                 {
                     return refused(word);
                 }
+                if arm {
+                    if word == "esac" {
+                        arm = false;
+                    } else if PATTERNS.contains(&word) {
+                        (command, arm) = (true, false);
+                    } else {
+                        return refused(word);
+                    }
+                    continue;
+                }
                 let assigned = ASSIGNED.iter().any(|name| word.starts_with(name));
-                if command
-                    && !(COMMANDS.contains(&ends)
-                        || COMMANDS.contains(&word)
-                        || assigned
-                        || pattern(word))
-                {
+                if command && !(COMMANDS.contains(&ends) || COMMANDS.contains(&word) || assigned) {
                     return refused(word);
                 }
                 if command && assigned && word.contains("$(") {
@@ -3959,11 +3968,12 @@ mod tests {
                     command = false;
                     continue;
                 }
+                arm = case && (word == "in" || word.ends_with(";;"));
                 // A plain assignment is a prefix: the next word is still a command.
-                command = (command && assigned && !word.ends_with(';'))
-                    || word.ends_with(';')
-                    || ["|", "||", "&&", "if", "then", "else", "do"].contains(&word)
-                    || pattern(word);
+                command = !arm
+                    && ((command && assigned && !word.ends_with(';'))
+                        || word.ends_with(';')
+                        || ["|", "||", "&&", "if", "then", "else", "do"].contains(&word));
             }
         }
         for (index, _) in script.match_indices("$(") {
@@ -4018,6 +4028,9 @@ mod tests {
             r#" size=$(stat -c %s "$path") $(cat /opt/hack-engine/runc)"#,
             " ! /opt/hack-engine/runc",
             " ( /opt/hack-engine/runc )",
+            r#" chmod 555 "$cache/$name"; (/opt/hack-engine/runc)"#,
+            r#" chmod 555 "$cache/$name"; {/opt/hack-engine/runc;}"#,
+            " case x in *) /opt/hack-engine/runc;; esac",
         ] {
             let changed = script.replace(chmod, run);
             assert!(

@@ -43,13 +43,15 @@ impl Clock for MonotonicClock {
     }
 }
 
-/// A started child that [`wait_within`] waits on until it completes or its bound expires.
-pub trait Pending {
-    /// `Some` once the child exited and both its output streams closed; `None` while it runs
-    /// or a detached helper still holds a stream open.
-    fn poll(&mut self) -> Result<Option<Captured>, CandidateError>;
-    /// The bound expired: signal and reap only the unreaped direct child (no PID-file or
-    /// process-group kill) and return the uncertain outcome.
+/// Started work that [`wait_within`] waits on until it completes or its bound expires. `T`
+/// is what the finished work reports: a child's [`Captured`] exit and output unless stated.
+pub trait Pending<T = Captured> {
+    /// `Some` once the work finished. For a child: once it exited and both its output
+    /// streams closed; `None` while it runs or a detached helper still holds a stream open.
+    fn poll(&mut self) -> Result<Option<T>, CandidateError>;
+    /// The bound expired: stop only what this value owns and return the uncertain outcome.
+    /// For a child: signal and reap only the unreaped direct child (no PID-file or
+    /// process-group kill).
     fn expire(&mut self) -> CandidateError;
     /// Return once the next [`Pending::poll`] may answer differently, and after at most
     /// `limit` on `clock` either way. Returning early is always allowed.
@@ -293,17 +295,17 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// signalled. A child still running, or one whose streams are still held open, at the bound
 /// is expired by [`Pending::expire`], which keeps the timeout and output-retention outcomes
 /// apart.
-pub fn wait_within(
-    pending: &mut dyn Pending,
+pub fn wait_within<T>(
+    pending: &mut dyn Pending<T>,
     timeout: Duration,
     clock: &dyn Clock,
-) -> Result<Captured, CandidateError> {
+) -> Result<T, CandidateError> {
     let start = clock.now();
     loop {
         let polled = pending.poll()?;
         let left = timeout.saturating_sub(clock.now().saturating_sub(start));
         match polled {
-            Some(captured) if !left.is_zero() => return Ok(captured),
+            Some(finished) if !left.is_zero() => return Ok(finished),
             Some(_) => return Err(completed_late()),
             None if !left.is_zero() => pending.wait(left, clock),
             None => return Err(pending.expire()),

@@ -566,7 +566,7 @@ pinned release and SHA-256 verified, for default and all-feature tests. Each tes
 runs in its own process: on macOS the two-call close-on-exec setup briefly permits
 another test's spawned child to inherit a socket and delay EOF. Retries are zero.
 The admission-pool test group retains the old mutex's serialization of whole-host
-`lsof` scans. Ignored helpers remain ignored and their owning tests still invoke
+disk-handle scans. Ignored helpers remain ignored and their owning tests still invoke
 them explicitly; `cargo test --doc` runs separately because nextest omits doctests.
 Focused target selections such as `bun run test:local --lib` or `--test <name>`
 skip doctests, matching Cargo; explicit `--doc` selection runs through Cargo alone.
@@ -2264,11 +2264,34 @@ next clean `down`. Clean also requires a creation receipt, rootfs pin, both disk
 identities and declared sizes, the recorded executable and user, a dead recorded
 provider and no pending owner update; these receipt checks are read-only, take no
 provider lock and run around every sample, including `runtime probe`. The disk-handle
-scan (`lsof` over both disks) that proves the provider's release is bounded at 30 s on
-the stop paths (`down`, `recover`) and in release checks, well above the slowest scan
-measured on a loaded host. A scan that still does not finish ends the stop as
-`provider_timeout_uncertain`, without the marker. `scripts/measure-lsof-scan.ts`
-re-measures a host.
+scan that proves the provider's release runs inside the runtime. It reads the host's
+process table (libproc on macOS, `/proc` on Linux) and looks, in every process the user
+may inspect, for an open descriptor, a memory mapping or (macOS) a file port on either
+disk, matched by device and inode. That is what the `lsof` child it replaced reported; the
+scan is faster because it walks processes on several threads (half the host's cores, at
+most eight). A process that exits during the scan, or that the user may not inspect,
+counts as not holding; any other error, or a disk whose identity cannot be read, ends the
+stop as `stop_uncertain`.
+
+On macOS the scan reads mappings with a kernel query the SDK header does not declare, so
+every scan first tests it: it maps a file of its own, closes the descriptor and requires
+the query to report that mapping with that file's device and inode. A scan whose test
+does not pass runs whole through `lsof` (`/usr/sbin/lsof`, then `/usr/bin/lsof`), as every
+scan did before. Each scan records its method beside the owner record, in
+`disk-handle-scan.json`: `{"version": 1, "method": "in-process"}`, or `"method": "lsof"`
+with a `reason` of `query_unanswered`, `self_test_failed` or `self_test_unavailable`. The
+record is a report only, and `runtime status` does not show it yet.
+
+Scanning every process to learn whether a VM disk is held is a consequence of not owning
+the VM process: a launcher of our own would hold an exclusive lock on each disk, and the
+question would be one lock attempt. This scan is the fix for today's provider and should
+not be built on further.
+
+The scan is bounded at 30 s on the stop paths (`down`, `recover`) and in release checks,
+well above the slowest scan measured on a loaded host. A scan that still does not finish
+ends the stop as `provider_timeout_uncertain`, without the marker.
+`scripts/measure-lsof-scan.ts` re-measures a host: the runtime's scan with `--scan-binary`,
+the `lsof` baseline without.
 
 The reserve is used only when a start needs it. Once the startup lease is held, a
 start whose every qualifying sample, including the lease recheck, also fits the 58 GiB
@@ -2279,8 +2302,8 @@ selection. `runtime probe` takes no lease and settles no basis, so it reports th
 basis for a qualifying stopped pool whatever its headroom; the start's `admission.json`
 records the basis that start used. Under the lease, before any restart effect and again immediately before
 `machine start`, its release checks also require a free VM lock, no open disk handle
-(`lsof`, bounded at 30 seconds because it scans every process and is slow on a loaded
-host), no owned listener and an unchanged audited provider configuration. The short-HOME
+(the same scan, bounded at 30 seconds because it walks every process and is slow on a
+loaded host), no owned listener and an unchanged audited provider configuration. The short-HOME
 alias is checked on every owner load, and the rootfs content against its pin before
 boot.
 
@@ -2290,8 +2313,8 @@ Each refusal maps to a closed code: `retained_reserve_foreign_owner`,
 keeps the 58 GiB fresh-allocation budget, and the admission report carries
 `retained_reserve_refusal` with that code; the reserve is never relaxed. A selected pool
 that fails a later check refuses the start with the code. Because only a start that
-needs the reserve runs the release checks, a release-check refusal, including an `lsof`
-scan that times out, never refuses a start whose samples all fit the fresh budget. `machine create` requires an
+needs the reserve runs the release checks, a release-check refusal, including a
+disk-handle scan that times out, never refuses a start whose samples all fit the fresh budget. `machine create` requires an
 authority only a start without a reserve selection obtains, and `machine start` requires
 one issued only by the pre-boot admission on the qualifying basis followed by the final
 leased recheck. The start sequence itself is typed: the check before any restart effect

@@ -2993,7 +2993,7 @@ impl Drop for VmLock {
 #[cfg(not(test))]
 const STOP_SCAN_WAIT: Duration = disk_handles::STOP_HANDLE_WAIT;
 /// The unit-test build of [`STOP_SCAN_WAIT`]. Release-check fixtures prove what the scan
-/// reports (status 1, no output), not how fast it reports it, and they run beside other
+/// reports (no holder, nothing unknown), not how fast it reports it, and they run beside other
 /// tests' work; on a loaded host one scan took longer than 5 s and the fixture failed as
 /// `provider_timeout_uncertain` before its result under test (HACK-1457). The production
 /// bounds themselves are tested on a fake clock in [`disk_handles`].
@@ -3052,7 +3052,7 @@ fn lock_disks_closed(
     }
     let vm_lock = VmLock(vm_lock);
     disk_handles::disks_closed(
-        &disk_handles::Lsof::host(),
+        &disk_handles::HostScan::recording(&root(candidate)),
         &process::MonotonicClock::new(),
         disks,
         handle_wait,

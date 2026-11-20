@@ -1,27 +1,38 @@
 #!/usr/bin/env bun
 /**
- * Time the disk-handle scan the native stop and release paths run
- * (`lsof -n -P -t -- storage.raw overlay.raw`, see
+ * Time the disk-handle scan the native stop and release paths run (see
  * `packages/runtime-core/src/provider/lifecycle/disk_handles.rs`), so the bounds
  * `STOP_HANDLE_WAIT` and `RELEASE_HANDLE_WAIT` can be checked against the host.
  *
- * `lsof` walks every process's descriptors, so its time grows with the process
- * count and with CPU contention. The scan targets two fresh sparse files in a
- * temporary directory; nothing holds them, so a healthy scan exits 1 with no
- * output, exactly the stop path's success case.
+ * The runtime scans the host's process table in its own process. With
+ * `--scan-binary` this script times that scan: it runs the runtime's ignored
+ * unit-test fixture `one_timed_host_scan`, which scans for two fresh unheld
+ * files and prints the scan's own time, and reports that time, without the
+ * test binary's start-up. Build the binary with
+ * `cargo test --lib --no-run` in `packages/runtime-core`; Cargo prints its path.
+ *
+ * Without `--scan-binary` it times the `lsof` child the runtime ran before and
+ * still falls back to (`lsof -n -P -t -- storage.raw overlay.raw`), as a
+ * baseline to compare with. `lsof` exits 1 with no output when nothing holds
+ * the files.
+ *
+ * Either scan walks every process, so its time grows with the process count
+ * and with CPU contention.
  *
  * Usage: bun scripts/measure-lsof-scan.ts [--runs N] [--concurrency C] [--burn B]
- *                                          [--scan-timeout SECONDS] [--lsof PATH]
+ *                                          [--scan-timeout SECONDS]
+ *                                          [--scan-binary PATH | --lsof PATH]
  *   --runs          scans per round (default 20)
  *   --concurrency   scans started at once in the concurrent round (default 8)
  *   --burn          busy-loop processes to run during both rounds (default 0),
  *                   to add CPU contention on an otherwise idle host
  *   --scan-timeout  bound on one scan, its exit and its output (default 120)
- *   --lsof          the lsof to time (default /usr/sbin/lsof, the runtime's)
+ *   --scan-binary   the runtime-core unit-test binary; times the runtime's scan
+ *   --lsof          the lsof to time as the baseline (default /usr/sbin/lsof)
  *
- * Prints one JSON report: host platform, process count, load averages and
- * min/median/p95/max seconds for a sequential and a concurrent round. It
- * prints no paths, hostnames or process names.
+ * Prints one JSON report: host platform, which scan was timed, process count,
+ * load averages and min/median/p95/max seconds for a sequential and a
+ * concurrent round. It prints no paths, hostnames or process names.
  *
  * Every child (scan and burner) is registered the moment it is spawned and is
  * killed and awaited on every exit path: success, a failed spawn part-way
@@ -32,8 +43,57 @@ import { cpus, loadavg, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
-/** The fixed `lsof` the runtime invokes on both platforms. */
+/** The first `lsof` the runtime's fallback tries; it then tries /usr/bin/lsof. */
 export const HOST_LSOF = "/usr/sbin/lsof";
+
+/** The runtime's ignored unit-test fixture that runs and times one scan. */
+export const SCAN_FIXTURE =
+  "provider::lifecycle::disk_handles::tests::one_timed_host_scan";
+
+/** The line the fixture prints: the seconds its scan took. */
+const FIXTURE_SECONDS = /disk_handle_scan_seconds=(\d+(?:\.\d+)?)/;
+
+/** What one scan runs and how its result is read. */
+type Scanner = {
+  readonly name: "in-process" | "lsof";
+  command(disks: string[]): string[];
+  /** The scan's seconds when it proved nothing holds the files, else null. */
+  clean(result: {
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+    wallSeconds: number;
+  }): number | null;
+};
+
+/** The runtime's own scan, through its fixture, timed by the fixture itself. */
+function inProcessScanner(binary: string): Scanner {
+  return {
+    name: "in-process",
+    // The fixture scans for two files of its own, so `disks` is not passed.
+    command: () => [
+      binary,
+      "--exact",
+      SCAN_FIXTURE,
+      "--ignored",
+      "--nocapture",
+    ],
+    clean: ({ exitCode, stdout }) => {
+      const seconds = FIXTURE_SECONDS.exec(stdout)?.[1];
+      return exitCode === 0 && seconds !== undefined ? Number(seconds) : null;
+    },
+  };
+}
+
+/** The `lsof` child the runtime ran before, timed from spawn to exit. */
+function lsofScanner(lsof: string): Scanner {
+  return {
+    name: "lsof",
+    command: (disks) => [lsof, "-n", "-P", "-t", "--", ...disks],
+    clean: ({ exitCode, stdout, stderr, wallSeconds }) =>
+      exitCode === 1 && stdout === "" && stderr === "" ? wallSeconds : null,
+  };
+}
 
 type Child = {
   readonly pid: number;
@@ -57,6 +117,8 @@ export type MeasureOptions = {
   concurrency: number;
   burn: number;
   scanTimeoutMs: number;
+  /** The runtime-core unit-test binary; when set, its scan is timed. */
+  scanBinary?: string;
   lsof?: string;
   spawn?: Spawn;
 };
@@ -144,7 +206,7 @@ class Aborted extends Error {
  */
 async function scan(
   owned: Owned,
-  lsof: string,
+  scanner: Scanner,
   disks: string[],
   timeoutMs: number,
   run: AbortSignal
@@ -153,7 +215,7 @@ async function scan(
     throw new Aborted();
   }
   const started = performance.now();
-  const child = owned.spawn([lsof, "-n", "-P", "-t", "--", ...disks], {
+  const child = owned.spawn(scanner.command(disks), {
     env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C" },
     stdout: "pipe",
     stderr: "pipe",
@@ -191,10 +253,16 @@ async function scan(
     return { seconds, exitCode: null, clean: false, timedOut: true };
   }
   const [stdout, stderr, exitCode] = outcome;
-  return {
-    seconds,
+  const clean = scanner.clean({
     exitCode,
-    clean: exitCode === 1 && stdout === "" && stderr === "",
+    stdout,
+    stderr,
+    wallSeconds: seconds,
+  });
+  return {
+    seconds: clean ?? seconds,
+    exitCode,
+    clean: clean !== null,
     timedOut: false,
   };
 }
@@ -231,7 +299,10 @@ export async function measure(options: MeasureOptions, signal?: AbortSignal) {
     throw new Aborted();
   }
   const owned = new Owned(options.spawn ?? defaultSpawn);
-  const lsof = options.lsof ?? HOST_LSOF;
+  const scanner =
+    options.scanBinary === undefined
+      ? lsofScanner(options.lsof ?? HOST_LSOF)
+      : inProcessScanner(options.scanBinary);
   // Aborted by the caller's signal, or by teardown after any failure, so a
   // sibling scan never outlives the run.
   const run = new AbortController();
@@ -255,7 +326,7 @@ export async function measure(options: MeasureOptions, signal?: AbortSignal) {
     const one = () => {
       const pending = scan(
         owned,
-        lsof,
+        scanner,
         disks,
         options.scanTimeoutMs,
         run.signal
@@ -281,6 +352,7 @@ export async function measure(options: MeasureOptions, signal?: AbortSignal) {
     }
     return {
       platform: platform(),
+      scanner: scanner.name,
       cpus: cpus().length,
       burn: options.burn,
       scanTimeoutSeconds: options.scanTimeoutMs / 1000,
@@ -305,6 +377,7 @@ function parseOptions(): MeasureOptions {
       concurrency: { type: "string", default: "8" },
       burn: { type: "string", default: "0" },
       "scan-timeout": { type: "string", default: "120" },
+      "scan-binary": { type: "string" },
       lsof: { type: "string", default: HOST_LSOF },
     },
   });
@@ -324,6 +397,7 @@ function parseOptions(): MeasureOptions {
     burn,
     scanTimeoutMs:
       positive("--scan-timeout", Number(values["scan-timeout"])) * 1000,
+    scanBinary: values["scan-binary"],
     lsof: values.lsof,
   };
 }

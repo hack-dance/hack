@@ -2211,6 +2211,13 @@ that it did not connect: "The native runtime is not in its running state, so thi
 command did not connect to it; nothing was changed." `hack down` adds the next
 commands: `hack ps --json` to see the phase, then `hack up` or `hack down --recover`
 once the pool is stopped.
+When the pool stopped or the VM died under a running project, the run's foreground
+owner exits and the run is left neither running nor stopped (after a VM crash, run
+`hack native recover` first so the pool is recorded as stopped). `hack up` then starts the
+pool, recovers the run with its data retained, and starts it again. `hack down --recover`
+(and plain `hack down`) start the pool to recover the run the same way, then leave the
+pool running and say so; run `runtime down` to stop it. A run whose owner is still alive,
+or that is already stopped with data retained, keeps the refusal above.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,

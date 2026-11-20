@@ -73,6 +73,7 @@ import {
 } from "../backends/native-profile-selection.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import {
+  NATIVE_RECOVERY_RUNTIME_STARTED_NOTE,
   nativeDownEnvironment,
   nativeProjectDown,
 } from "../backends/native-project-down.ts";
@@ -6764,6 +6765,31 @@ async function handleNativeUp({
       env: process.env,
       project: cfg.native?.startTimeoutSeconds,
     }),
+    // HACK-2456: the pool stopped under this run; `hack down --recover`
+    // starts it and stops the run with data retained before this start.
+    // Restart keeps its own refusals.
+    ...(restart
+      ? {}
+      : {
+          recoverStoppedPool: async () => {
+            const scope = {
+              projectRoot: project.projectRoot,
+              projectDir: project.projectDir,
+              nativeHome: native.home,
+              branch,
+            };
+            await nativeProjectDown({
+              ...(await nativeDownRequest({
+                project,
+                native,
+                scope,
+                branch,
+                routeStdoutToStderr: args.options.json === true,
+              })),
+              recover: true,
+            });
+          },
+        }),
     onProgress: (event) => {
       if (event.phase === "runtime") {
         // VM work starts: later failures keep the runtime's own reports.
@@ -8150,6 +8176,94 @@ function refuseNativeDownOptions(options: DownArgs["options"]): void {
   }
 }
 
+/**
+ * The project half of a native down: lifecycle hooks, host process retirement
+ * and shared-helper marking. Shared by `hack down` and by `hack up`, which
+ * runs `hack down --recover` when the pool stopped under its run (HACK-2456).
+ */
+async function nativeDownRequest(opts: {
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly native: NonNullable<
+    ReturnType<typeof resolveNativeRuntimeSelection>
+  >;
+  readonly scope: Parameters<typeof nativeProjectDown>[0]["scope"];
+  readonly branch: string | null;
+  readonly routeStdoutToStderr: boolean;
+}): Promise<
+  Pick<
+    Parameters<typeof nativeProjectDown>[0],
+    "runtime" | "scope" | "retireHostProcesses" | "hooks" | "beforeCleanup"
+  >
+> {
+  const { project, scope, branch } = opts;
+  const cfg = await readProjectConfig(project);
+  if (cfg.parseError) {
+    throw new CliUsageError(
+      "Native down requires valid lifecycle configuration; values omitted."
+    );
+  }
+  let lifecycleEnv: Readonly<Record<string, string>> | undefined;
+  const hasHooks = Boolean(
+    cfg.lifecycle?.down?.before?.length || cfg.lifecycle?.down?.after?.length
+  );
+  const projectName = sanitizeProjectSlug(
+    await resolveComposeProjectName({ project, cfg })
+  );
+  const composeProject = resolveLifecycleComposeProjectName({
+    projectName,
+    branch,
+  });
+  const hook = async (phase: "before" | "after", graphStopped: boolean) => {
+    const code = await runLifecycleCommands({
+      title: `Lifecycle (native down ${phase})`,
+      commands: cfg.lifecycle?.down?.[phase],
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      composeProject,
+      env: lifecycleEnv ?? {},
+      routeStdoutToStderr: opts.routeStdoutToStderr,
+    });
+    if (code !== 0) {
+      throw new Error(
+        `Native down ${phase} hook failed (exit ${code})${graphStopped ? "; native graph cleanup was confirmed and data retained" : "; cleanup was not requested"}.`
+      );
+    }
+  };
+  return {
+    runtime: opts.native,
+    scope,
+    retireHostProcesses: async () => {
+      await stopLifecycleProcesses({
+        project,
+        cfg,
+        projectName,
+        branch,
+        composeProject,
+      });
+    },
+    // Journaled: a foreground Ctrl-C may already have run them, or left
+    // them owed after a crash; unknown completion refuses.
+    hooks: {
+      configured: hasHooks,
+      run: async ({ phase, run, graphStopped }) => {
+        if (!hasHooks) {
+          return;
+        }
+        lifecycleEnv ??= await nativeDownEnvironment({
+          scope,
+          run,
+          serviceNames: await readComposeServiceNames(project.composeFile),
+        });
+        await hook(phase, graphStopped);
+      },
+    },
+    // Only a committed down (its before hook succeeded and the ownership
+    // and finalization rechecks passed) may supersede a concurrent up.
+    beforeCleanup: () =>
+      markLifecycleSharedHelpersStopping({ cfg, composeProject }),
+  };
+}
+
 async function handleDown(
   input: Parameters<typeof handleDownUnlocked>[0]
 ): Promise<number> {
@@ -8276,74 +8390,17 @@ async function handleDownUnlocked({
         json: args.options.json === true,
       });
     }
-    const cfg = await readProjectConfig(project);
-    if (cfg.parseError) {
-      throw new CliUsageError(
-        "Native down requires valid lifecycle configuration; values omitted."
-      );
-    }
-    let lifecycleEnv: Readonly<Record<string, string>> | undefined;
-    const hasHooks = Boolean(
-      cfg.lifecycle?.down?.before?.length || cfg.lifecycle?.down?.after?.length
-    );
-    const projectName = sanitizeProjectSlug(
-      await resolveComposeProjectName({ project, cfg })
-    );
-    const composeProject = resolveLifecycleComposeProjectName({
-      projectName,
-      branch,
-    });
-    const hook = async (phase: "before" | "after", graphStopped: boolean) => {
-      const code = await runLifecycleCommands({
-        title: `Lifecycle (native down ${phase})`,
-        commands: cfg.lifecycle?.down?.[phase],
-        projectRoot: project.projectRoot,
-        projectDir: project.projectDir,
-        composeProject,
-        env: lifecycleEnv ?? {},
-        routeStdoutToStderr: args.options.json === true,
-      });
-      if (code !== 0) {
-        throw new Error(
-          `Native down ${phase} hook failed (exit ${code})${graphStopped ? "; native graph cleanup was confirmed and data retained" : "; cleanup was not requested"}.`
-        );
-      }
-    };
     const result = await nativeProjectDown({
-      runtime: native,
-      scope,
+      ...(await nativeDownRequest({
+        project,
+        native,
+        scope,
+        branch,
+        routeStdoutToStderr: args.options.json === true,
+      })),
       recover: args.options.recoverNativeCompose,
       deferFinalization,
       invoke,
-      retireHostProcesses: async () => {
-        await stopLifecycleProcesses({
-          project,
-          cfg,
-          projectName,
-          branch,
-          composeProject,
-        });
-      },
-      // Journaled: a foreground Ctrl-C may already have run them, or left
-      // them owed after a crash; unknown completion refuses.
-      hooks: {
-        configured: hasHooks,
-        run: async ({ phase, run, graphStopped }) => {
-          if (!hasHooks) {
-            return;
-          }
-          lifecycleEnv ??= await nativeDownEnvironment({
-            scope,
-            run,
-            serviceNames: await readComposeServiceNames(project.composeFile),
-          });
-          await hook(phase, graphStopped);
-        },
-      },
-      // Only a committed down (its before hook succeeded and the ownership
-      // and finalization rechecks passed) may supersede a concurrent up.
-      beforeCleanup: () =>
-        markLifecycleSharedHelpersStopping({ cfg, composeProject }),
     });
     if (args.options.json) {
       process.stdout.write(`${JSON.stringify(result)}\n`);
@@ -8354,6 +8411,9 @@ async function handleDownUnlocked({
             ? "Native project stopped; data retained."
             : "Native project is not started.",
       });
+      if (result.runtimeStarted) {
+        logger.info({ message: NATIVE_RECOVERY_RUNTIME_STARTED_NOTE });
+      }
     }
     return 0;
   }

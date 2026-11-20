@@ -97,6 +97,11 @@ Read the numbers with these limits:
   only is listed under `unevenHealthChecks` and noted. A service with no test in the
   Compose file uses its image's own check, which the benchmark does not inspect; it is
   listed under `unknownHealthChecks` (the fixture's images define none).
+
+  ![Which health check a lane runs](diagrams/bench-health-checks.svg)
+
+  [Diagram source](diagrams/bench-health-checks.mmd). It follows native review in
+  `packages/runtime-core/src/project/compose/service.rs` and `routing.rs`.
 - Results from before Nov 2026 used fixture version 1 and polled routes one after the
   other, 500 ms apart, which added up to half a second to each start. To reproduce them,
   copy `scripts/fixtures/runtime-bench/legacy/docker-compose.v1.yml` over

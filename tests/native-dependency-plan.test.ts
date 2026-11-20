@@ -21,10 +21,10 @@ const VECTORS = [
     // A path with a space, non-ASCII letters, a quote, a backslash and a
     // control character: serde_json and JSON.stringify escape them alike.
     plan: "0123456789abcdef".repeat(4),
-    artifact: '/Users/a b/été "q"\\/\u0001/hack-relay-guest',
+    artifact: '/opt/a b/été "q"\\/\u0001/hack-relay-guest',
     artifactSha256: "c".repeat(64),
-    id: "5ed5e8c2efe97563a8608a5829c4843de03271c5f1fd63a28889fc16a7ba53de",
-    bytes: `["hack-graph-dependencies-v1",{"version":1,"plan":"${"0123456789abcdef".repeat(4)}","artifact":"/Users/a b/été \\"q\\"\\\\/\\u0001/hack-relay-guest","artifact_sha256":"${"c".repeat(64)}","dependencies":[]},[]]`,
+    id: "8e821eb6fa98d6633b0ad00ac60dd2c87c5de816a253a075c7d18946e3d6706a",
+    bytes: `["hack-graph-dependencies-v1",{"version":1,"plan":"${"0123456789abcdef".repeat(4)}","artifact":"/opt/a b/été \\"q\\"\\\\/\\u0001/hack-relay-guest","artifact_sha256":"${"c".repeat(64)}","dependencies":[]},[]]`,
   },
 ];
 

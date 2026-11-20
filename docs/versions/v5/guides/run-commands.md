@@ -22,6 +22,11 @@ Hack options go before the command tail. After the service name or `--`, everyth
 is passed through unchanged, so a child's `--json` or `--help` is never read as a
 Hack flag.
 
+On the Compose backend, `hack exec` starts `docker compose exec` with no other
+Docker call first. If the service is not running, Compose refuses, and Hack then
+adds a hint to start the stack with `hack up -d` or use `hack run`. `hack run`
+reads the proxy and DNS addresses for its new container with one `docker inspect`.
+
 ## Overlay and scope
 
 These two words answer two different questions.

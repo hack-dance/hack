@@ -29,9 +29,10 @@
 //! so a link is never named (its directory is, instead), and nothing is named below a
 //! directory that is itself reached through a link. This is as far as the host can see: if
 //! the guest still holds a link at a name the host has since replaced or removed, the guest
-//! resolves the event through its own copy. The effect is a watch event and a cache refresh
-//! on a file of another mount in the same VM, never a read or a write. The provider's own
-//! watcher has the same property; closing it needs a no-follow lookup in the guest hook.
+//! resolves the event through its own copy. A file of another mount in the same VM then gets
+//! a watch event and a cache refresh. The notification itself reads and writes no file
+//! content, but a watcher there may act on the event. The provider's own watcher has the
+//! same property; closing it needs a no-follow lookup in the guest hook.
 
 use super::identity::{self, ProcessIdentity};
 use crate::{Candidate, CandidateError};
@@ -504,14 +505,19 @@ fn records(candidate: &Candidate) -> PathBuf {
 }
 
 /// One note per watcher process, so no watcher ever touches another's: the project's digest,
-/// then the process ID.
-fn record_path(candidate: &Candidate, project: &Path, pid: i32) -> PathBuf {
+/// then the process ID and its start time (a reused ID is another name).
+fn record_path(candidate: &Candidate, project: &Path, process: &ProcessIdentity) -> PathBuf {
     use sha2::{Digest, Sha256};
     let digest = format!(
         "{:x}",
         Sha256::digest(project.as_os_str().as_encoded_bytes())
     );
-    records(candidate).join(format!("{}.{pid}.json", &digest[..32]))
+    records(candidate).join(format!(
+        "{}.{}.{}.json",
+        &digest[..32],
+        process.pid,
+        process.start_micros
+    ))
 }
 
 fn read_record(path: &Path) -> Option<Record> {
@@ -540,7 +546,7 @@ fn announce(candidate: &Candidate, project: &Path) -> Option<PathBuf> {
             }
         }
     }
-    let path = record_path(candidate, project, process.pid);
+    let path = record_path(candidate, project, &process);
     let bytes = serde_json::to_vec(&Record {
         version: 1,
         project: project.to_path_buf(),
@@ -1419,24 +1425,24 @@ mod tests {
             std::fs::metadata(&note).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        // The note is this process's own: its name carries the process ID.
+        // The note is this process's own: its name carries the process ID and start time.
         assert!(
             note.file_name()
                 .unwrap()
                 .to_string_lossy()
-                .ends_with(&format!(".{}.json", std::process::id()))
+                .contains(&format!(".{}.", std::process::id()))
         );
         // A note whose process is gone (the same pid with another start time): not running.
         let mut dead = read_record(&note).unwrap();
         dead.project = PathBuf::from("/project/dead");
         dead.process.start_micros += 1;
-        let dead_note = record_path(&candidate, &dead.project, 1_999_999);
+        let dead_note = record_path(&candidate, &dead.project, &dead.process);
         std::fs::write(&dead_note, serde_json::to_vec(&dead).unwrap()).unwrap();
         // A second, dead note for the live project does not make it "not running".
         let mut stale = read_record(&note).unwrap();
         stale.process.start_micros += 1;
         std::fs::write(
-            record_path(&candidate, live, 1_999_998),
+            record_path(&candidate, live, &stale.process),
             serde_json::to_vec(&stale).unwrap(),
         )
         .unwrap();

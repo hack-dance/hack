@@ -77,7 +77,7 @@ const BLOCK: u64 = 4096;
 const MAX_ALLOCATED_READ: u64 = 256 * 1024 * 1024;
 /// Remedy once SmolVM has already formatted disks from the refused template. The caller
 /// stops that boot through its failed-boot path, so no disk is adopted.
-const AFTER_FIRST_START: &str = "No file was changed. The disks SmolVM formatted from it were not adopted; the failed boot needs manual recovery.";
+const AFTER_FIRST_START: &str = "No file was changed. The disks SmolVM formatted from it were not adopted; run runtime recover --json, which sets those disks and the refused template aside so the next start formats new ones.";
 
 /// When a start that can format unadopted disks verifies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +130,47 @@ fn verify_with(
         }
     }
     Ok(())
+}
+
+/// Refusal reasons that describe a file this candidate may not own, as opposed to content that
+/// is incomplete or wrong. Recovery never moves such a file.
+const NOT_OURS: [&str; 4] = [
+    "is not a regular file",
+    "is hard-linked",
+    "is not owned by the candidate user",
+    "is group- or world-writable",
+];
+
+/// For recovery of a first start that never adopted its disks: the pinned templates in `dir`
+/// that are present, owned by this candidate and not verified (a partial, interrupted or wrong
+/// expansion). Verified and missing templates are not listed. A template that may not be ours
+/// refuses with `disk_template_untrusted`. Read-only, like every check in this module.
+pub(super) fn owned_unverified(dir: &Path) -> Result<Vec<&'static str>, CandidateError> {
+    owned_unverified_with(dir, &PINNED, MAX_ALLOCATED_READ)
+}
+
+fn owned_unverified_with<'a>(
+    dir: &Path,
+    expected: &[Template<'a>],
+    max_read: u64,
+) -> Result<Vec<&'a str>, CandidateError> {
+    let mut found = Vec::new();
+    for template in expected {
+        match check_file(&dir.join(template.name), template, max_read)? {
+            Check::Verified | Check::Missing => {}
+            Check::Refused(reason) if NOT_OURS.contains(&reason) => {
+                return Err(CandidateError::new(
+                    "disk_template_untrusted",
+                    format!(
+                        "Expanded disk template {} {reason}. No file was changed; inspect it manually.",
+                        template.name
+                    ),
+                ));
+            }
+            Check::Refused(_) => found.push(template.name),
+        }
+    }
+    Ok(found)
 }
 
 /// Outcome of [`check_file`].
@@ -445,7 +486,7 @@ mod tests {
             (Stage::BeforeUse, "re-expands it"),
             (
                 Stage::AfterFirstStart,
-                "were not adopted; the failed boot needs manual recovery",
+                "were not adopted; run runtime recover --json",
             ),
         ] {
             let error = verify_with(&fixture.0, stage, &pinned, MAX_ALLOCATED_READ).unwrap_err();
@@ -553,6 +594,45 @@ mod tests {
             error.message
         );
         assert!(partial.exists());
+    }
+
+    #[test]
+    fn recovery_lists_only_owned_unverified_templates_and_refuses_foreign_ones() {
+        let good = content_with(&[(0, b"ext4")]);
+        let pinned = [
+            pinned_for("storage-template.ext4", &good),
+            pinned_for("overlay-template.ext4", &good),
+        ];
+        // Verified and missing templates are not listed; a partial or corrupt owned one is.
+        let fixture = Fixture::new("owned-unverified");
+        fixture.sparse("storage-template.ext4", LEN, &[(0, b"ext4")]);
+        assert!(
+            owned_unverified_with(&fixture.0, &pinned, MAX_ALLOCATED_READ)
+                .unwrap()
+                .is_empty()
+        );
+        fixture.sparse("overlay-template.ext4", LEN / 2, &[(0, b"ext4")]);
+        assert_eq!(
+            owned_unverified_with(&fixture.0, &pinned, MAX_ALLOCATED_READ).unwrap(),
+            ["overlay-template.ext4"]
+        );
+        fixture.sparse("overlay-template.ext4", LEN, &[(0, b"tampered")]);
+        assert_eq!(
+            owned_unverified_with(&fixture.0, &pinned, MAX_ALLOCATED_READ).unwrap(),
+            ["overlay-template.ext4"]
+        );
+        // A template that may not be ours is never offered for moving.
+        let linked = Fixture::new("owned-unverified-linked");
+        let path = linked.sparse("storage-template.ext4", LEN, &[(0, b"tampered")]);
+        fs::hard_link(&path, linked.0.join("second-link")).unwrap();
+        let error = owned_unverified_with(&linked.0, &pinned, MAX_ALLOCATED_READ).unwrap_err();
+        assert_eq!(error.code, "disk_template_untrusted");
+        assert!(
+            error.message.contains("is hard-linked"),
+            "{}",
+            error.message
+        );
+        assert!(path.exists());
     }
 
     #[test]

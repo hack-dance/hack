@@ -1,6 +1,11 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
+  type NativeHotReloadNotice,
+  parseNativeHotReloadNotice,
+  renderNativeHotReloadNotice,
+} from "../backends/native-hot-reload-notice.ts";
+import {
   type NativeProfileNotice,
   parseNativeProfileNotice,
   renderNativeProfileNotice,
@@ -50,6 +55,7 @@ type Ready = {
 let publishReady: ((ready: Ready) => void) | undefined;
 let publishProfileNotice: ((notice: NativeProfileNotice) => void) | undefined;
 let publishBranchDropped: ((details: BranchDroppedSites) => void) | undefined;
+let publishHotReload: ((notice: NativeHotReloadNotice) => void) | undefined;
 let publishShellVariables:
   | ((names: readonly string[], ignoredRootDotenv?: boolean) => void)
   | undefined;
@@ -523,6 +529,41 @@ function writeBranchDropped(value: unknown): boolean {
   return true;
 }
 
+/**
+ * Hands the pool's hot-reload notice to the launcher of a detached owner, as
+ * two names and a number; false otherwise, so the caller prints it.
+ */
+export function nativeDetachedUpHotReload(
+  notice: NativeHotReloadNotice
+): boolean {
+  if (!publishHotReload) {
+    return false;
+  }
+  publishHotReload(notice);
+  return true;
+}
+
+/** Prints a validated hot-reload notice; true when `value` was one. */
+function writeHotReload(value: unknown): boolean {
+  if (!(isRecord(value) && value.kind === "hot-reload")) {
+    return false;
+  }
+  const notice = parseNativeHotReloadNotice(value.notice);
+  if (notice) {
+    process.stderr.write(`${renderNativeHotReloadNotice(notice)}\n`);
+  }
+  return true;
+}
+
+/** Prints any validated owner notice; true when `value` was one. */
+function writeOwnerNotice(value: unknown): boolean {
+  return (
+    writeProfileNotice(value) ||
+    writeBranchDropped(value) ||
+    writeHotReload(value)
+  );
+}
+
 /** Names-only notice: never accepts or forwards an environment map or output text. */
 export function nativeDetachedUpShellVariables(
   names: readonly string[],
@@ -617,6 +658,10 @@ export async function runNativeDetachedOwner(opts: {
           readonly kind: "branch-dropped";
           readonly details: BranchDroppedSites;
         }
+      | {
+          readonly kind: "hot-reload";
+          readonly notice: NativeHotReloadNotice;
+        }
       | { readonly kind: "prestart-refusal"; readonly data: PrestartRefusal }
       | {
           readonly kind: "progress";
@@ -680,6 +725,11 @@ export async function runNativeDetachedOwner(opts: {
       send({ kind: "branch-dropped", details });
     }
   };
+  publishHotReload = (notice) => {
+    if (!stopping) {
+      send({ kind: "hot-reload", notice });
+    }
+  };
   // A fresh owner starts with no names from any earlier attempt.
   failedStartupServices = [];
   publishFailure = async (data) => {
@@ -709,6 +759,7 @@ export async function runNativeDetachedOwner(opts: {
     publishShellVariables = undefined;
     publishProfileNotice = undefined;
     publishBranchDropped = undefined;
+    publishHotReload = undefined;
     publishFailure = undefined;
     failedStartupServices = [];
     publishPrestartRefusal = undefined;
@@ -939,10 +990,7 @@ export async function startNativeDetachedUp(opts: {
       result.reject(refused);
       return;
     }
-    if (writeProfileNotice(value)) {
-      return;
-    }
-    if (writeBranchDropped(value)) {
+    if (writeOwnerNotice(value)) {
       return;
     }
     if (isRecord(value) && value.kind === "shell-variables") {

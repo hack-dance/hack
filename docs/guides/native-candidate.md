@@ -800,6 +800,11 @@ home or `.hack-local` directory; from that checkout run `./hack-local runtime re
 Provider-verification failures during the wait carry this guidance too; recovery still
 independently proves ownership before stopping anything. Then retry. This preserves
 retained disks and records an unclean stop; it does not claim the guest shut down cleanly.
+One exception: if the failed start was the pool's first and the disk templates it used do
+not verify (`disk_template_untrusted`, for example after a first start ended in
+`provider_timeout_uncertain`), recovery moves the never-adopted disks and the failed
+templates into an `untrusted-first-boot-<n>` directory instead and returns the pool to
+`stopped-before-engine`. The next start formats new disks. Those disks never held project data, and nothing is deleted.
 `hack down` may say the project was not started because no project mapping was published.
 
 Host cleanup or a reboot can still remove the alias. For a clean stop, observation
@@ -1463,6 +1468,16 @@ this selection never replaces generation, source or resource checks. Changing th
 original Compose file uses normal image resolution and the existing compatibility
 rules, rather than silently adopting an old image for a new declaration.
 
+A retained run stays startable after a later runtime boot fails before the runtime
+recorded the guest's boot, for example `bridge_socket_timeout` or a provider that
+exits during boot. After such a failure the runtime reads `failed-boot-stopped`. Run
+the runtime's `runtime recover --json` once, then `hack up` restores the retained run
+as usual. The VM may have started in that boot, but the container engine starts only
+after the boot is recorded, so no container, network or volume of the run was touched.
+Restore still checks the volumes' recorded identities. A failed boot that had
+recorded its guest boot, and so may have started the engine, still refuses retained
+startup.
+
 Editing the Compose file of a stopped graph and running `hack up` again reconciles
 the same run, as `docker compose up` does. Every container and network is
 recreated from the new review, so changed commands, images, environment and added
@@ -2122,6 +2137,9 @@ owner could not be authenticated, while `runtime_degraded` means its runtime che
 failed. A stopped candidate runtime is an ordinary state for `ps`: with a mapping
 present it exits 0 and reports `runtime_not_running` (no phase, no service rows),
 and text output prints "Native runtime is not running; no services are running."
+That includes a pool left stopped by a failed or recovered boot (`failed-boot-stopped`,
+`recovered-unclean`, `stopped-before-engine`) whose provider is not alive; before, `ps`
+failed there with `runtime_changed`.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,
@@ -4621,7 +4639,10 @@ listener is never classified as a conflict because another publisher exited.
 
 New macOS frontend finalization records include the process birth time. Retaining
 recovery can distinguish a reused PID without signalling its replacement. A
-matching zombie also counts as exited. Unreadable identities refuse; records
+matching zombie also counts as exited. When `hack down` has just seen the frontend exit
+without finishing its cleanup, an unreadable identity row (for example, `ps` timing out
+under load) is read again, up to five reads 0.5 s apart, before down refuses. A readable
+row that shows the frontend still running refuses at once. Unreadable identities still refuse; records
 without a birth retain their PID-only behavior. Linux does not compare `ps`
 births because clock corrections can change that observation. Failure to capture
 the frontend's own birth falls back to the legacy behavior instead of failing up.

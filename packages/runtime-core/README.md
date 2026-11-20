@@ -1831,6 +1831,33 @@ does not see a file that a root process inside the guest writes into a search di
 while the VM runs; only the guest's root can do that, and the order change is not a
 defence against it.
 
+### Starting a stopped pool: the steps and their size
+
+`runtime up` on a pool whose disks exist but whose VM is not running (after a host reboot
+or a `runtime down`) runs these steps in this order. The times are one measurement, three
+boots of about 3.1 s each on an Apple Silicon host under moderate load, pool only, with a
+scratch build that timed each step. They show the order and relative size of the steps,
+not a guarantee.
+
+| Step | About | Note |
+| --- | --- | --- |
+| First admission sample | 50 ms | host memory, pressure, swapouts, thermal state, disk |
+| Provider and engine trees proven by content | 940 ms | fills the one-second admission window |
+| Startup lease, rest of the window, second sample | 115 ms | only the rest of the window is slept |
+| Root files proven by content | 180 ms | under the lease |
+| Pre-boot sample, configuration audit, template check | 75 ms | |
+| `machine start` | 210 ms | the provider starts the VM |
+| Guest setup | 680 ms | about 430 ms is the guest hashing the engine binary over the share |
+| Network tools in the guest | 100 ms | |
+| Executable cache (`runc`, `docker-init`) | 300 ms | |
+| Engine start | 390 ms | until the engine answers |
+| Everything else | 60 ms | identity checks, disk adoption, pings |
+
+The content proof of the provider and engine trees costs a start nothing extra: it runs
+between the two admission samples, which must be at least one second apart. A brand-new
+home adds `machine create`, the provider's first-start disk template copy and the root
+files copy, about 5 s in the same measurement.
+
 ### Starting a pool that is already running
 
 `runtime up` on a pool that is already running and owned by this home (every warm frontend

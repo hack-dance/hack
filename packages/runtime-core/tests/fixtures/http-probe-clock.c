@@ -5,12 +5,14 @@
 #undef main
 
 int main(int argc, char **argv) {
-    if (argc != 6) return 125;
+    if (argc != 6 && argc != 7) return 125;
     uint64_t grace = number(argv[1], 0, 3600000);
     uint64_t interval = number(argv[2], 10, 3600000);
     uint64_t timeout = number(argv[3], 1, 60000);
     uint64_t retries = number(argv[4], 1, 100);
     uint64_t ready_after = number(argv[5], 0, 3600000);
+    // The start interval; the route default before HACK-2443 was 1,000 ms.
+    uint64_t start_interval = argc == 7 ? number(argv[6], 10, 3600000) : 1000;
     uint64_t now = 0, failures = 0;
     int health = 2;
     bool ever_healthy = false;
@@ -23,7 +25,7 @@ int main(int argc, char **argv) {
         sample_health(success, now, grace, retries, &failures, &health, &ever_healthy);
         printf("%llu %d %llu\n", (unsigned long long)now, health,
             (unsigned long long)failures);
-        uint64_t next = begun + sample_period(true, ever_healthy, interval);
+        uint64_t next = begun + sample_period(ever_healthy, interval, start_interval);
         if (next > now) now = next;
     }
     return 0;

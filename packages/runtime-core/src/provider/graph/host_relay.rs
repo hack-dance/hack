@@ -1174,6 +1174,7 @@ mod tests {
                     timeout_ms: 100,
                     retries: 1,
                     start_period_ms: 0,
+                    start_interval_ms: None,
                     policy: None,
                 },
                 allocation: "1".repeat(32),
@@ -1184,6 +1185,7 @@ mod tests {
                 exec_id: None,
                 started_ms: 0,
                 phase: "reserved".into(),
+                start_interval_argv: true,
             },
         );
         let before = cleanup_effect(&receipt, "boot", false, &json!([])).unwrap();

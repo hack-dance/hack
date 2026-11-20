@@ -3177,11 +3177,23 @@ bind source may be a directory or a single regular file inside the project root 
 example `./scripts/entrypoint.sh:/entrypoint.sh:ro`), reached without symlinks; a
 source that is not refuses with `graph_bind_source`, naming the service.
 
+#### Fast first health check
+
+A command `healthcheck` that sets no `start_interval` runs every 250 ms during its
+startup period, and one that sets no `start_period` gets a 60 s startup period. So
+`service_healthy` and readiness see the first passing check within about a quarter
+second, not one `interval` (30 s by default) after the container starts. The first
+success ends the startup period, and after it the check runs every `interval`.
+Failures inside the startup period don't count toward `retries`, as the engine
+defines it. Declared values are kept, and a disabled check gets neither. Authored
+native readiness (`readiness.exec`) gets the same cadence. A container started by an
+earlier build, without these fields, is still accepted as the same container.
+
 #### Native HTTP readiness probe
 
 For a complete Caddy route with no authored `healthcheck`, native reviews a default
 probe: `GET /` on the route port, a 1000 ms timeout, three consecutive
-failures, and a 240000 ms initial startup grace. It checks every second until its
+failures, and a 240000 ms initial startup grace. It checks every 250 ms until its
 first success, then every 30 seconds for the rest of that probe generation.
 This allows slow first-page compilation, including a server first answering after
 120 seconds. With a full timeout on each request, the grace plus three failed
@@ -3248,8 +3260,8 @@ final-status and reviewed-redirect rules remain unchanged.
 `healthcheck.x-hack-http` declares an explicit readiness probe native startup uses for a
 service. It must be the only key in that service's `healthcheck`: it cannot be
 combined with `test`, `disable`, `interval`, `timeout`, `start_period`,
-`start_interval` or `retries`. Docker Compose ignores the extension field. All six
-fields are required, and no other field is accepted:
+`start_interval` or `retries`. Docker Compose ignores the extension field. The first
+six fields are required, `start_interval_ms` is optional, and no other field is accepted:
 
 | Field | Type and range | Meaning |
 | --- | --- | --- |
@@ -3259,6 +3271,7 @@ fields are required, and no other field is accepted:
 | `timeout_ms` | integer, 1–60000 | Limit for connecting, sending the request and reading the response headers. |
 | `retries` | integer, 1–100 | Consecutive failed samples that make the service unhealthy. |
 | `start_period_ms` | integer, 0–3600000 | Startup grace. Failures in this period do not count until the first success. |
+| `start_interval_ms` | optional integer, 10 up to `interval_ms` | Time between requests until the first success; 250 ms when absent. After the first success the probe uses `interval_ms`, and an unhealthy sample never brings the fast cadence back. |
 
 A sample succeeds only when the response status line is `HTTP/1.1` or `HTTP/1.0`
 with a `2xx` status. A redirect (`3xx`) or any other status is a failure, so point

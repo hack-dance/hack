@@ -239,7 +239,10 @@ export async function nativeProjectExec(opts: {
   }
   const stdout = decode(value.stdout_base64),
     stderr = decode(value.stderr_base64);
-  const after = await nativeProjectPs(opts);
+  // The fence against a container changed mid-exec: the same run and the
+  // same container still serve this service. Owner liveness was confirmed
+  // before the exec; it says nothing about which container ran the command.
+  const after = await nativeProjectPs({ ...opts, confirmOwner: false });
   if (after.status === "provider_pin_changed") {
     throw new NativeRuntimeRequestError({
       nativeCode: "provider_pin_changed",

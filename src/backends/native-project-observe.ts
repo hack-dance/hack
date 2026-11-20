@@ -50,6 +50,12 @@ type Options = {
   readonly invoke?: typeof invokeNativeRuntime;
   /** Internal admission callers need completion roles; ordinary ps output is unchanged. */
   readonly includeReadiness?: boolean;
+  /**
+   * `false` reads only the graph's container status and skips the foreground
+   * owner's liveness request. For a caller that rechecks container identity
+   * after its own request (exec), not for reporting health.
+   */
+  readonly confirmOwner?: boolean;
 };
 function refused(): Error {
   return new ClosedCliError(
@@ -318,7 +324,11 @@ export async function nativeProjectPs(
   let status: "observed" | "owner_unconfirmed" | "runtime_degraded" =
     "observed";
   let ports = snapshot.ports;
-  if (snapshot.foreground && snapshot.phase === "ready-observed") {
+  if (
+    opts.confirmOwner !== false &&
+    snapshot.foreground &&
+    snapshot.phase === "ready-observed"
+  ) {
     try {
       const owner = await (opts.invoke ?? invokeNativeRuntime)({
         runtime: opts.runtime,

@@ -120,7 +120,7 @@ async function fixture(opts: {
       };
     },
     dependencies: {
-      staticReview: async () => {},
+      staticReview: async () => undefined,
       prepareStorage: async () => {},
       retainedImages: async () => new Map(),
       load: async () => null,

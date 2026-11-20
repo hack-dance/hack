@@ -277,8 +277,10 @@ test("native exec makes exactly these runtime requests", async () => {
     "graph owner-status",
     "graph exec-selection",
     "graph exec",
-    // After: the same run and container still serve the service.
+    // After: the same run and container still serve the service, and the
+    // owner still verifies its runtime (publishers, host dependencies).
     "graph status",
+    "graph owner-status",
   ]);
 });
 
@@ -298,4 +300,35 @@ test("the detached owner trusts its launcher's setup inspection", async () => {
   expect(inspected).toBe(1);
   expect(await requireNativeSetup({ ...opts, detachedOwner: true })).toBe(0);
   expect(inspected).toBe(1);
+});
+
+test("exec refuses when the owner stops verifying its runtime during the command", async () => {
+  const p = await project();
+  const run = await savedRun(p);
+  const runtime = fakeRuntime({
+    root: p.root,
+    state: { run: run.run, ready: true },
+  });
+  let executed = false;
+  const invoke: typeof invokeNativeRuntime = async (request) => {
+    const reply = await runtime.invoke(request);
+    if (request.args[1] === "exec") {
+      executed = true;
+    }
+    // A host dependency listener went away after the command ran: the owner
+    // is alive but no longer verifies its runtime.
+    return executed && request.args[1] === "owner-status"
+      ? { ...(reply as Record<string, unknown>), runtime_verified: false }
+      : reply;
+  };
+  await expect(
+    nativeProjectExec({
+      runtime: p.runtime,
+      scope: p.scope,
+      service: "web",
+      argv: ["true"],
+      composeFile: p.composeFile,
+      invoke,
+    })
+  ).rejects.toThrow("Native exec identity or response is unconfirmed");
 });

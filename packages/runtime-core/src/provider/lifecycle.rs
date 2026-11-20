@@ -1798,10 +1798,7 @@ fn start_pool(
         let cleanup = stop_verified_provider(process, &binary(candidate));
         state::write(
             &root(candidate).join("failed-boot.json"),
-            &json!({
-                "failure_code": error.code, "process": process,
-                "process_absent": cleanup.is_ok(), "disk_adoption": false,
-            }),
+            &failed_boot_record(error, process, cleanup.is_ok()),
         )?;
         if cleanup.is_ok() {
             phase(candidate, &mut owner, "failed-boot-stopped")?;
@@ -1928,6 +1925,27 @@ fn verify_disk_allocation(
 #[cfg(test)]
 #[path = "lifecycle/boot_sequence_tests.rs"]
 mod boot_sequence_tests;
+
+/// The record of a boot that failed after its provider process was recorded
+/// (`failed-boot.json` in the pool's private state directory). `process_absent` says whether
+/// the cleanup that followed the failure confirmed the provider stopped; it does not mean the
+/// provider had exited by itself.
+///
+/// The record keeps the failure's message as well as its code. A command reports most
+/// failures by code alone, because a message that is not a fixed literal can carry a path or
+/// another runtime value; many failures share one code (`provider_state` is any I/O error),
+/// and without the message the cause of a failed boot can only be found by reproducing it.
+/// This file is private to the home, like the paths it may name.
+fn failed_boot_record(
+    failure: &CandidateError,
+    process: &identity::ProcessIdentity,
+    cleanup_confirmed: bool,
+) -> serde_json::Value {
+    json!({
+        "failure_code": failure.code, "failure_message": failure.message,
+        "process": process, "process_absent": cleanup_confirmed, "disk_adoption": false,
+    })
+}
 
 fn failed_boot_stop_error(failure: CandidateError) -> CandidateError {
     CandidateError::new(
@@ -2454,14 +2472,61 @@ pub(super) fn verify_retained_rootfs(
     Ok(())
 }
 
+/// The reply deadline of each attempt of the host-side engine check after a boot, in order.
+///
+/// The last attempt keeps the three seconds a single attempt had, so a forward that answers
+/// slowly but does answer passes as it did before. The earlier attempts are short: what
+/// they are for is a connection that will never be answered. When every attempt waits out
+/// its deadline the check takes about 6.3 s (it took 3 s), which is under the ten seconds
+/// the boot has just allowed the engine to answer inside the guest.
+const ENGINE_PING_DEADLINES: [Duration; 4] = [
+    Duration::from_secs(1),
+    Duration::from_secs(1),
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+];
+/// The pause before each further attempt.
+const ENGINE_PING_PAUSE: Duration = Duration::from_millis(100);
+
+/// Confirm from the host that the engine answers through the provider's forwarded socket.
+///
+/// The engine has already answered inside the guest when this runs. The provider's host
+/// socket is a forward to it, and the forward can lag behind the provider's ready signal:
+/// a connection accepted in that window is never answered. One such connection used to
+/// fail the whole boot (HACK-2475: the request was written, no reply came for three
+/// seconds, and the boot was stopped as failed). So every attempt opens a fresh connection,
+/// and the boot fails only when all of them failed. The error is the last attempt's, so the
+/// failure codes are the ones a single attempt reported.
 fn engine_ping(path: &Path) -> Result<(), CandidateError> {
+    engine_ping_within(path, &ENGINE_PING_DEADLINES, ENGINE_PING_PAUSE)
+}
+
+fn engine_ping_within(
+    path: &Path,
+    deadlines: &[Duration],
+    pause: Duration,
+) -> Result<(), CandidateError> {
+    let mut result = Err(CandidateError::new(
+        "engine_not_ready",
+        "Private engine ping was not attempted.",
+    ));
+    for (attempt, deadline) in deadlines.iter().enumerate() {
+        if attempt > 0 {
+            std::thread::sleep(pause);
+        }
+        result = engine_ping_once(path, *deadline);
+        if result.is_ok() {
+            break;
+        }
+    }
+    result
+}
+
+/// One attempt on its own connection: `deadline` bounds the write and each read.
+fn engine_ping_once(path: &Path, deadline: Duration) -> Result<(), CandidateError> {
     let mut stream = UnixStream::connect(path).map_err(io)?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .map_err(io)?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(3)))
-        .map_err(io)?;
+    stream.set_read_timeout(Some(deadline)).map_err(io)?;
+    stream.set_write_timeout(Some(deadline)).map_err(io)?;
     stream
         .write_all(b"GET /_ping HTTP/1.0\r\nHost: localhost\r\n\r\n")
         .map_err(io)?;
@@ -3219,6 +3284,37 @@ mod log_follow_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failed boot's record names the failure by code and by message, so a code shared by
+    /// many causes (`provider_state` is any I/O error) can be told apart afterwards.
+    #[test]
+    fn a_failed_boot_record_keeps_the_failure_message() {
+        let process = identity::ProcessIdentity {
+            pid: 41,
+            start_micros: 7,
+            uid: 501,
+            executable: std::path::PathBuf::from("/fixture/smolvm-bin"),
+        };
+        let failure = state::io(std::io::Error::other("fixture: socket vanished"));
+        let record = failed_boot_record(&failure, &process, true);
+        assert_eq!(
+            record,
+            json!({
+                "failure_code": "provider_state",
+                "failure_message": "fixture: socket vanished",
+                "process": {
+                    "pid": 41, "start_micros": 7, "uid": 501,
+                    "executable": "/fixture/smolvm-bin",
+                },
+                "process_absent": true,
+                "disk_adoption": false,
+            })
+        );
+        assert_eq!(
+            failed_boot_record(&failure, &process, false)["process_absent"],
+            json!(false)
+        );
+    }
 
     #[test]
     fn observation_treats_only_a_stopped_pool_without_a_live_provider_as_not_running() {
@@ -4139,6 +4235,87 @@ printf 'verified-cache\n'
         });
         assert!(agent_silent_at(&path));
         closing.join().unwrap();
+    }
+
+    /// HACK-2475: the provider's forwarded engine socket can accept a connection it never
+    /// answers while the forward is still coming up. A later, fresh connection must be
+    /// tried before the boot is failed.
+    #[test]
+    fn the_engine_check_tries_a_fresh_connection_when_one_is_never_answered() {
+        use std::os::unix::net::UnixListener;
+        const OK: &[u8] = b"HTTP/1.0 200 OK\r\n\r\nOK";
+        let short = Duration::from_millis(150);
+        let deadlines = [short, short, Duration::from_millis(600)];
+        let pause = Duration::from_millis(10);
+        let directory = ShortDirectory::new();
+        let path = directory.0.join("docker.sock");
+
+        // The first connection is accepted and held unanswered; the second is answered.
+        let listener = UnixListener::bind(&path).unwrap();
+        let forward = std::thread::spawn(move || {
+            let (held, _) = listener.accept().unwrap();
+            let (mut answered, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 64];
+            let read = answered.read(&mut request).unwrap();
+            assert!(request[..read].starts_with(b"GET /_ping "));
+            answered.write_all(OK).unwrap();
+            drop(answered);
+            // Hold the first connection open until the check is over.
+            held
+        });
+        let started = Instant::now();
+        engine_ping_within(&path, &deadlines, pause).unwrap();
+        assert!(
+            started.elapsed() >= short,
+            "the first attempt waited out its deadline"
+        );
+        drop(forward.join().unwrap());
+        fs::remove_file(&path).unwrap();
+
+        // A forward that never answers any connection fails the check with the code a
+        // single attempt reported, after every attempt, each on its own connection.
+        let listener = UnixListener::bind(&path).unwrap();
+        let attempts = deadlines.len();
+        let forward = std::thread::spawn(move || {
+            // Keep every connection open and unanswered until the check is over.
+            listener
+                .incoming()
+                .take(attempts)
+                .map(Result::unwrap)
+                .collect::<Vec<_>>()
+        });
+        let started = Instant::now();
+        let error = engine_ping_within(&path, &deadlines, pause).unwrap_err();
+        assert_eq!(error.code, "provider_state");
+        assert!(started.elapsed() >= deadlines.iter().sum::<Duration>());
+        assert_eq!(forward.join().unwrap().len(), attempts);
+        fs::remove_file(&path).unwrap();
+
+        // No listener at all: every attempt is refused, and the check still ends.
+        let error = engine_ping_within(&path, &deadlines, pause).unwrap_err();
+        assert_eq!(error.code, "provider_state");
+
+        // An engine that answers at once is confirmed on the first connection, and one
+        // that answers something else keeps `engine_not_ready`.
+        for (reply, code) in [
+            (OK, None),
+            (&b"HTTP/1.0 503 no\r\n\r\n"[..], Some("engine_not_ready")),
+        ] {
+            let listener = UnixListener::bind(&path).unwrap();
+            let connections = if code.is_some() { attempts } else { 1 };
+            let forward = std::thread::spawn(move || {
+                for stream in listener.incoming().take(connections) {
+                    let mut stream = stream.unwrap();
+                    let mut request = [0_u8; 64];
+                    let _ = stream.read(&mut request).unwrap();
+                    stream.write_all(reply).unwrap();
+                }
+            });
+            let result = engine_ping_within(&path, &deadlines, pause);
+            assert_eq!(result.err().map(|error| error.code), code);
+            forward.join().unwrap();
+            fs::remove_file(&path).unwrap();
+        }
     }
 
     /// HACK-1968: a guest whose agent still answers pings, but whose engine never finishes

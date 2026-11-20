@@ -113,8 +113,9 @@ const PROVIDER_FAILURES = new Set([
 ]);
 /** A `key=value` token keeps its value only as a short number or one of these words. */
 const PLAIN_VALUE = /^(?:\d{0,10}|on|off|true|false|yes|no|none)$/i;
-// Up to the last `@` before the first `/`: a password may hold an `@`.
-const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)[^/\s]+@/gi;
+// Up to the last `@` before the first `/`, `?` or `#`: a password may hold an
+// `@`, and one in a query must not hide the query's `=` from the next rule.
+const URL_CREDENTIALS = /(:\/\/)[^/?#\s]+@/g;
 const WHITE_SPACE = /\s+/;
 const PROVIDER_LINE_LIMIT = 200;
 const LONG_HEX = /[0-9a-fA-F]{12,}/g;

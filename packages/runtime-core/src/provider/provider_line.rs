@@ -98,15 +98,17 @@ fn plain_value(value: &str) -> bool {
 }
 
 /// `token` with the user and password of every `scheme://user:password@host` in it
-/// replaced. They run to the last `@` before the first `/` after the scheme, so a password
-/// that holds `@` goes whole.
+/// replaced. They run to the last `@` before the first `/`, `?` or `#` after the scheme, so
+/// a password that holds `@` goes whole.
 fn without_url_credentials(token: &str) -> String {
     let mut clean = String::with_capacity(token.len());
     let mut rest = token;
     while let Some(scheme) = rest.find("://") {
         let (head, tail) = rest.split_at(scheme + 3);
         clean.push_str(head);
-        let authority = tail.find('/').unwrap_or(tail.len());
+        // The host part ends at a path, a query or a fragment: an `@` after that is not
+        // the end of a password, and what follows a query's `=` is replaced on its own.
+        let authority = tail.find(['/', '?', '#']).unwrap_or(tail.len());
         rest = match tail[..authority].rfind('@') {
             Some(at) if at > 0 => {
                 clean.push_str("<credentials>");
@@ -375,6 +377,17 @@ mod tests {
             .as_deref(),
             Some(
                 "mirrors https://<credentials>@a.example,https://<credentials>@b.example/x failed"
+            )
+        );
+        // An `@` in a query does not stretch the credentials over the query's `=`.
+        assert_eq!(
+            clean(
+                b"get https://u:p@a.example?token=alpha@bravo 1://u:p@b.example#x@y",
+                &places()
+            )
+            .as_deref(),
+            Some(
+                "get https://<credentials>@a.example?token=<value> 1://<credentials>@b.example#x@y"
             )
         );
         // Nothing to hide: no user, or an `@` only in the path.

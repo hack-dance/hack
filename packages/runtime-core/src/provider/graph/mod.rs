@@ -1098,8 +1098,10 @@ impl Driver for Session<'_, '_> {
                     "Restart requires a confirmed immutable container ID.",
                 )
             })?;
-            self.engine
-                .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+            crate::timings::measure(crate::timings::Step::ContainerStart, Some(1), |_| {
+                self.engine
+                    .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)
+            })?;
             self.start_probe(service, id)?;
             return Ok(());
         }
@@ -1192,8 +1194,10 @@ impl Driver for Session<'_, '_> {
             startup.verify(&self.engine, &mut self.receipt, &self.root)?;
         }
         self.check_cancelled()?;
-        self.engine
-            .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+        crate::timings::measure(crate::timings::Step::ContainerStart, Some(1), |_| {
+            self.engine
+                .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)
+        })?;
         if let Some(startup) = self.startup.as_mut() {
             startup.started(
                 &self.engine,

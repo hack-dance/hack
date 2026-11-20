@@ -143,7 +143,21 @@ Runtime commands affect only the candidate pool. Graph commands support a bounde
 The installed hack and its state are never used as a fallback.";
 
 fn main() {
-    if let Err(error) = run() {
+    // Reserved leading argument belongs to the parent transport, never a guest argv.
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(
+            hack_runtime_core::timings::REQUEST_ARGUMENT,
+        ))
+    {
+        hack_runtime_core::timings::enable();
+    }
+    let result = hack_runtime_core::timings::measure(
+        hack_runtime_core::timings::Step::RuntimeDispatch,
+        None,
+        |_| run(),
+    );
+    hack_runtime_core::timings::emit();
+    if let Err(error) = result {
         // Keep errors structured even before a connection to a runtime exists.
         eprintln!(
             "{}",
@@ -219,6 +233,7 @@ fn resolve_candidate_root(root: &Path) -> Result<std::path::PathBuf, CandidateEr
 fn run() -> Result<(), CandidateError> {
     let arguments: Vec<String> = std::env::args_os()
         .skip(1)
+        .skip_while(|argument| argument == hack_runtime_core::timings::REQUEST_ARGUMENT)
         .map(|argument| {
             argument.into_string().map_err(|_| {
                 CandidateError::new("unsupported_path", "Arguments must be valid UTF-8.")

@@ -876,3 +876,11 @@ without a separate safety review and approval.
 
 Native recovery investigations can use the explicit, value-free
 [process census phase diagnostics](guides/native-census-diagnostics.md).
+
+## Built-in timing contract
+
+The CLI and Rust runtime share [versioned timing records](reference/timings.md).
+The initial runtime integration is opt-in through its internal parent transport;
+it adds observation wrappers without changing lifecycle state machines. Child
+records use relative monotonic offsets so the CLI can join repeated runtime
+requests without relying on synchronized process clocks.

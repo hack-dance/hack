@@ -38,6 +38,19 @@ impl Engine<'_> {
         deadline: Instant,
         fresh: &dyn Fn() -> Result<(), CandidateError>,
     ) -> Result<ExecOutput, CandidateError> {
+        crate::timings::measure(crate::timings::Step::ContainerExec, Some(1), |_| {
+            self.service_exec_observed(container, argv, workdir, deadline, fresh)
+        })
+    }
+
+    fn service_exec_observed(
+        &self,
+        container: &str,
+        argv: &[String],
+        workdir: Option<&str>,
+        deadline: Instant,
+        fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<ExecOutput, CandidateError> {
         if self.cleanup_only {
             return Err(failure("A cleanup connection cannot execute commands."));
         }
@@ -84,6 +97,18 @@ impl Engine<'_> {
     /// removal of a named one-off container. Caller-owned identity checks share the
     /// original observation deadline; nothing is replayed after an uncertain step.
     pub(in crate::provider) fn service_one_off_until(
+        &self,
+        name: &str,
+        config: &Value,
+        deadline: Instant,
+        fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<OneOffOutput, CandidateError> {
+        crate::timings::measure(crate::timings::Step::ContainerRun, Some(1), |_| {
+            self.service_one_off_observed(name, config, deadline, fresh)
+        })
+    }
+
+    fn service_one_off_observed(
         &self,
         name: &str,
         config: &Value,

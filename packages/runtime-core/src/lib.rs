@@ -8,6 +8,7 @@ pub mod project;
 pub mod provider;
 #[cfg(test)]
 mod test_root;
+pub mod timings;
 #[cfg(test)]
 pub(crate) use test_root::{private_test_root, unique_test_root};
 

@@ -1367,6 +1367,28 @@ fn start_pool(
     project_share: Option<super::ProjectShareIntent>,
     start: super::prepared_start::Start<'_>,
 ) -> Result<RuntimeStatus, CandidateError> {
+    crate::timings::measure(crate::timings::Step::VmBoot, Some(1), |_| {
+        start_pool_observed(
+            candidate,
+            profile,
+            bridge_request,
+            network,
+            dependency_request,
+            project_share,
+            start,
+        )
+    })
+}
+
+fn start_pool_observed(
+    candidate: &Candidate,
+    profile: super::Profile,
+    bridge_request: super::bridge::Request,
+    network: Option<super::NetworkIntent>,
+    dependency_request: super::dependency_socket::Request,
+    project_share: Option<super::ProjectShareIntent>,
+    start: super::prepared_start::Start<'_>,
+) -> Result<RuntimeStatus, CandidateError> {
     // A mistyped setting is refused before any effect.
     let hot_reload = super::hot_reload::Setting::from_environment()?;
     // A clean stop whose alias path another entry holds is moved to a fresh alias before
@@ -2513,6 +2535,12 @@ fn provider_stopped(phase: &str, process_alive: Option<bool>) -> bool {
 }
 
 pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
+    crate::timings::measure(crate::timings::Step::VmStop, Some(1), |_| {
+        down_observed(candidate)
+    })
+}
+
+fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     // Status is read-only and idempotent down on an uninitialized pool creates nothing.
     let initial = status(candidate)?;
     if initial.phase == "uninitialized" {

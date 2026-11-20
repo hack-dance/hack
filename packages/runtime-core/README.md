@@ -2292,14 +2292,16 @@ lead to it and by an inode that overlay filesystems report differently from `sta
 the `map_files` links that would settle it cannot be followed without privilege. The
 `lsof` scan there differs from the earlier one in four ways: `lsof` is started by the
 scan's thread instead of the caller, the method is recorded, `/usr/bin/lsof` is tried
-when `/usr/sbin/lsof` is absent, and a timed-out scan always reports
-`provider_timeout_uncertain` with the scan's own message.
+when `/usr/sbin/lsof` is absent, and a scan whose wait expires while it runs reports
+`provider_timeout_uncertain` with the scan's own message, whatever the child was doing.
 
-Each scan that answers records what ran beside the owner record, in
-`disk-handle-scan.json`: `{"version": 1, "method": "in-process"}`, or `"method": "lsof"`
-with a `reason` of `not_built_for_this_platform`, `query_unanswered`, `self_test_failed`,
-`self_test_unavailable` or `scan_incomplete`. The record is a report only: it is written
-after the scan has answered, never for a scan that timed out, and it decides nothing.
+A scan records what ran beside the owner record, in `disk-handle-scan.json`:
+`{"version": 1, "method": "in-process"}`, or `"method": "lsof"` with a `reason` of
+`not_built_for_this_platform`, `query_unanswered`, `self_test_failed`,
+`self_test_unavailable` or `scan_incomplete`. The record is a report only and decides
+nothing. It is the method of a recently finished scan of this pool, possibly written
+after that scan's caller returned or timed out; within one process an earlier scan never
+overwrites a later one, and across processes a stale write is possible.
 `runtime status --json` shows it without the version as `disk_handle_scan`, and leaves
 the field out for a pool no scan has recorded.
 
@@ -2310,10 +2312,13 @@ not be built on further.
 
 The stop paths (`down`, `recover`) and the release checks wait at most 30 s for the scan,
 which covers choosing the method, the scan, and finding, starting and waiting for `lsof`
-when it is needed. A scan that has not answered by then ends the stop as
-`provider_timeout_uncertain`, without the marker. The 30 s limit the wait, not the work:
-an `lsof` child is killed and reaped, but a scan thread blocked in a system call can
-outlive the timeout, and whatever it answers later is discarded.
+when it is needed. A scan whose wait expires while it runs ends the stop as
+`provider_timeout_uncertain`, without the marker; an error that had already arrived is
+reported as itself, and both refuse. The 30 s limit the wait, not the work. An `lsof`
+child that is running, or that is started after the caller gave up, is stopped and
+reaped by the scan's thread; the caller waits up to 250 ms more for that, which bounds
+its extra wait and not the reaping. A scan thread blocked in a system call can outlive
+the timeout, and whatever it answers later is discarded.
 `scripts/measure-lsof-scan.ts` re-measures a host: the runtime's scan with `--scan-binary`
 (macOS), the `lsof` child without.
 

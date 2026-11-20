@@ -392,7 +392,7 @@ struct AnsweredProbe(i32, &'static [u8], &'static [u8]);
 impl HandleProbe for AnsweredProbe {
     fn start(&self, _disks: &[PathBuf]) -> Result<Box<dyn Pending<Found>>, CandidateError> {
         let listed = answer(self.0, self.1, self.2);
-        Ok(Box::new(Listing(Answered(Some(listed)))))
+        Ok(Box::new(Listing::of(Answered(Some(listed)))))
     }
 }
 
@@ -559,7 +559,96 @@ fn host_scan_with<'a>(
         record: Some(pool),
         decide,
         locate: Arc::new(locate),
+        recorder: Arc::new(last_scan::record),
     }
+}
+
+/// An `lsof` child that counts how often it is expired. Its poll fails, answers or finds
+/// the child still running, as the test sets it.
+struct Counted {
+    polls: Result<Option<()>, ()>,
+    expired: Rc<Cell<u32>>,
+}
+
+impl Pending for Counted {
+    fn poll(&mut self) -> Result<Option<Captured>, CandidateError> {
+        match self.polls {
+            Ok(answered) => Ok(answered.map(|()| answer(1, b"", b""))),
+            Err(()) => Err(CandidateError::new(
+                "provider_wait_failed",
+                "fake wait failed",
+            )),
+        }
+    }
+    fn expire(&mut self) -> CandidateError {
+        self.expired.set(self.expired.get() + 1);
+        CandidateError::new("provider_timeout_uncertain", "fake lsof expired")
+    }
+}
+
+/// An `lsof` child never loses its owner without being stopped and reaped: a wrapper
+/// dropped after a failed poll, or while the child still runs (an owner that unwinds),
+/// expires the child. One that answered, or that was already expired, is left alone.
+#[test]
+fn an_lsof_child_dropped_unsettled_is_expired() {
+    let expirations = |polls: Result<Option<()>, ()>, also_expire: bool| {
+        let expired = Rc::new(Cell::new(0));
+        let mut listing = Listing::of(Counted {
+            polls,
+            expired: expired.clone(),
+        });
+        let polled = listing.poll();
+        assert_eq!(polled.is_err(), polls.is_err());
+        if also_expire {
+            let _ = listing.expire();
+        }
+        drop(listing);
+        expired.get()
+    };
+    assert_eq!(expirations(Err(()), false), 1, "after a failed poll");
+    assert_eq!(expirations(Ok(None), false), 1, "while the child runs");
+    assert_eq!(expirations(Ok(None), true), 1, "expired once, not twice");
+    assert_eq!(expirations(Ok(Some(())), false), 0, "after it answered");
+}
+
+/// The caller has its answer before the record is written: with a recorder that blocks,
+/// the stop still returns, and the recorder is found waiting only afterwards.
+#[test]
+fn a_scan_answers_before_it_records() {
+    fn nothing_found(_: &[PathBuf], _: &AtomicBool) -> Result<Found, Fallback> {
+        Ok(Found::default())
+    }
+    let pool = Scratch::new();
+    let (entered, was_entered) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let released = std::sync::Mutex::new(released);
+    let entered = std::sync::Mutex::new(entered);
+    let probe = HostScan {
+        record: Some(pool.path()),
+        decide: nothing_found,
+        locate: Arc::new(Lsof::host),
+        recorder: Arc::new(move |pool, turn, method| {
+            entered.lock().unwrap().send(method).unwrap();
+            // Blocks until the test has seen the stop return.
+            let _ = released.lock().unwrap().recv();
+            last_scan::record(pool, turn, method);
+        }),
+    };
+    let result = disks_closed(
+        &probe,
+        &process::MonotonicClock::new(),
+        &disks(Path::new("/pool")),
+        LOADED_HOST_SCAN_WAIT,
+    );
+    assert_eq!(code(&result), "ok");
+    // The stop has returned; the recorder is blocked, or has not even been entered yet.
+    assert_eq!(
+        was_entered.recv_timeout(Duration::from_secs(30)),
+        Ok(Method::InProcess)
+    );
+    assert_eq!(last_scan::read(pool.path()), None);
+    release.send(()).unwrap();
+    assert_eq!(recorded(pool.path()), Some(Method::InProcess));
 }
 
 fn left_to_lsof(_: &[PathBuf], _: &AtomicBool) -> Result<Found, Fallback> {

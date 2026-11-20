@@ -77,8 +77,10 @@ pub struct RuntimeStatus {
     /// first (see `guest_memory_peak`). A record only; absent when there is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guest_memory_peaks: Option<Vec<guest_memory_peak::Boot>>,
-    /// How this pool's last disk-holder scan read the host (`disk_handles`): in this
-    /// process, or through `lsof` with the reason. A record only; absent before a scan ran.
+    /// How a recently finished disk-holder scan of this pool read the host
+    /// (`disk_handles`): in this process, or through `lsof` with the reason. A record only,
+    /// possibly written after that scan's caller returned or timed out, and possibly stale
+    /// when another process scanned since; absent before a scan ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_handle_scan: Option<disk_handles::last_scan::Report>,
     /// Provider sockets native found world-accessible and made private for the running

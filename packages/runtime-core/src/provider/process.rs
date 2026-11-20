@@ -117,12 +117,48 @@ pub fn spawn(command: &mut Command) -> Result<Running, CandidateError> {
 
 /// [`spawn`] with the blocking exit observation injected, so a test can take it away.
 fn start(command: &mut Command, observe_exit: fn(u32) -> bool) -> Result<Running, CandidateError> {
-    let mut child = command
+    let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| CandidateError::new("provider_spawn_failed", e.to_string()))?;
+    supervise(child, observe_exit, helper)
+}
+
+/// Starts one helper thread of a [`Running`] child. Injected so a test can make it fail.
+type Helper = fn(Box<dyn FnOnce() + Send>) -> std::io::Result<std::thread::JoinHandle<()>>;
+
+fn helper(work: Box<dyn FnOnce() + Send>) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new().spawn(work)
+}
+
+/// A spawned child nobody owns yet: killed and reaped on drop unless it was handed on.
+struct Unowned(Option<std::process::Child>);
+
+impl Drop for Unowned {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            // No watcher exists yet (it is started last), so reaping here cannot leave one
+            // waiting on a recycled PID.
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Take ownership of a child that was just spawned with both streams piped: start its
+/// stream readers and its exit watcher.
+///
+/// The child has an owner from here on. If a helper thread cannot be started (the host is
+/// out of threads), the child is killed and reaped and the caller gets
+/// `provider_spawn_failed`, as if the child had never started, instead of a panic that
+/// left the child running with nobody to stop or reap it.
+fn supervise(
+    child: std::process::Child,
+    observe_exit: fn(u32) -> bool,
+    helper: Helper,
+) -> Result<Running, CandidateError> {
     fn drain(mut pipe: impl Read) -> Vec<u8> {
         let mut output = Vec::new();
         let mut buffer = [0; 4096];
@@ -135,27 +171,37 @@ fn start(command: &mut Command, observe_exit: fn(u32) -> bool) -> Result<Running
         }
         output
     }
+    let mut unowned = Unowned(Some(child));
+    let child = unowned.0.as_mut().expect("the child was just put here");
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let pid = child.id();
     let (report, progress) = mpsc::channel();
+    let thread = |work: Box<dyn FnOnce() + Send>| {
+        helper(work).map_err(|e| {
+            CandidateError::new(
+                "provider_spawn_failed",
+                format!("Cannot start a helper thread for a provider child: {e}"),
+            )
+        })
+    };
     // A send fails only when the owner dropped the child's handle; nobody is waiting then.
     let (out, err) = (report.clone(), report.clone());
-    std::thread::spawn(move || {
+    thread(Box::new(move || {
         let _ = out.send(Progress::Stdout(drain(stdout)));
-    });
-    std::thread::spawn(move || {
+    }))?;
+    thread(Box::new(move || {
         let _ = err.send(Progress::Stderr(drain(stderr)));
-    });
-    let watcher = std::thread::spawn(move || {
+    }))?;
+    let watcher = thread(Box::new(move || {
         let _ = report.send(if observe_exit(pid) {
             Progress::Exited
         } else {
             Progress::ExitUnobserved
         });
-    });
+    }))?;
     Ok(Running {
-        child,
+        child: unowned.0.take().expect("the child is still here"),
         status: None,
         exit: ExitWatch::Watching,
         watcher: Some(watcher),
@@ -452,6 +498,63 @@ mod tests {
         let mut command = clean_command(std::path::Path::new("/bin/sh"));
         command.args(["-c", script]);
         command
+    }
+
+    /// A child whose helper threads cannot all be started has no reader or watcher to own
+    /// it. It is killed and reaped at once and the caller gets an error, whichever of the
+    /// three threads failed, instead of a panic that left the child running.
+    #[test]
+    fn a_child_whose_helper_thread_cannot_start_is_killed_and_reaped() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        /// Which helper of the child under test fails to start; the earlier ones start.
+        static FAILING: AtomicUsize = AtomicUsize::new(0);
+        static STARTED: AtomicUsize = AtomicUsize::new(0);
+        fn out_of_threads(
+            work: Box<dyn FnOnce() + Send>,
+        ) -> std::io::Result<std::thread::JoinHandle<()>> {
+            if STARTED.fetch_add(1, Ordering::Relaxed) == FAILING.load(Ordering::Relaxed) {
+                return Err(std::io::Error::from_raw_os_error(libc::EAGAIN));
+            }
+            helper(work)
+        }
+        for failing in 0..3 {
+            FAILING.store(failing, Ordering::Relaxed);
+            STARTED.store(0, Ordering::Relaxed);
+            let child = shell("exec sleep 600")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let pid = child.id() as i32;
+            // SAFETY: signal 0 only asks whether this test's own child still exists.
+            assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+            let error = supervise(child, exited, out_of_threads).err().unwrap();
+            assert_eq!(error.code, "provider_spawn_failed", "helper {failing}");
+            assert_eq!(STARTED.load(Ordering::Relaxed), failing + 1);
+            // Gone and reaped: a zombie would still answer the signal.
+            // SAFETY: as above; a reaped child of this process has no process left.
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "helper {failing}");
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+        // The same child is owned and waited for as usual when every helper starts.
+        let child = shell("printf done")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut running = supervise(child, exited, helper).unwrap();
+        let output = wait_within(
+            &mut running,
+            Duration::from_secs(30),
+            &MonotonicClock::new(),
+        )
+        .unwrap();
+        assert_eq!(output.stdout, b"done");
     }
 
     #[test]

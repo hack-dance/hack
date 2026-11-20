@@ -45,12 +45,13 @@
 //! process may not follow. Do not bring an in-process Linux scan back without it. The
 //! `lsof` scan there differs from the one before this module scanned in process in four
 //! ways: `lsof` is started by the scan's thread, not by the caller; the method is recorded
-//! ([`last_scan`]); `/usr/bin/lsof` is tried when `/usr/sbin/lsof` is absent; and a
-//! timed-out scan always reports `provider_timeout_uncertain`, with this module's message.
+//! ([`last_scan`]); `/usr/bin/lsof` is tried when `/usr/sbin/lsof` is absent; and a scan
+//! whose bound expires while it runs reports `provider_timeout_uncertain` with this
+//! module's message, whatever the child was doing.
 //!
-//! [`last_scan`] records which method the pool's last scan used, and why when it was
-//! `lsof`, in `disk-handle-scan.json` beside the owner record. The record is written after
-//! the answer is delivered and never decides anything.
+//! [`last_scan`] records which method a recently finished scan of the pool used, and why
+//! when it was `lsof`, in `disk-handle-scan.json` beside the owner record. The record is
+//! written after the answer is handed over and never decides anything.
 //!
 //! # What refuses
 //!
@@ -65,14 +66,18 @@
 //! the whole scan: choosing the method, the scan in this process, finding and starting
 //! `lsof` and waiting for it all happen on the scan's thread, inside the bound. A scan that
 //! does not answer in time fails as `provider_timeout_uncertain`: `down` then writes no
-//! clean-stop marker and the next start falls back to the fresh disk budget.
+//! clean-stop marker and the next start falls back to the fresh disk budget. A scan whose
+//! bound expires while it runs reports that code; an error that had already arrived when
+//! the bound was looked at is reported as itself. Both refuse.
 //!
-//! The bound limits the wait, not the work. The scan's threads are told to stop: no `lsof`
-//! child is started after that, and one that is running is killed and reaped by the thread
-//! that started it, which the caller gives a moment ([`REAP_GRACE`]) to do so. A thread
-//! blocked in a system call (a stuck filesystem) outlives the timeout; whatever it answers
-//! later is discarded and it records nothing. Both bounds were set well above the slowest
-//! `lsof` scan measured on a loaded host and are unchanged.
+//! The bound limits the wait, not the work. The scan's threads are told to stop. An `lsof`
+//! child that is running, or that is started after the caller gave up, is stopped and
+//! reaped by the scan's thread. The caller waits a moment more for that ([`REAP_GRACE`]),
+//! which bounds its extra wait and not the reaping: a child slow to die is reaped by the
+//! thread later, while the process lives. A thread blocked in a system call (a stuck
+//! filesystem) outlives the timeout, and whatever it answers later is discarded. Both
+//! bounds were set well above the slowest `lsof` scan measured on a loaded host and are
+//! unchanged.
 //! `scripts/measure-lsof-scan.ts` re-measures a host.
 //!
 //! Finding mappings is nearly all of the time: the kernel walks every memory region of
@@ -212,8 +217,13 @@ fn decide(_disks: &[PathBuf], _stop: &AtomicBool) -> Result<Found, Fallback> {
 /// Finds the `lsof` to run. A test puts another in its place.
 type Locate = Arc<dyn Fn() -> Result<Lsof, CandidateError> + Send + Sync>;
 
-/// How long a caller whose bound expired gives the scan's thread to stop: long enough to
-/// kill and reap an `lsof` child, short beside the bound.
+/// Writes the record of what a scan ran. A test puts another in its place.
+type Recorder = Arc<dyn Fn(&Path, last_scan::Turn, Method) + Send + Sync>;
+
+/// How long a caller whose bound expired waits for the scan's thread to stop. It bounds
+/// the caller's extra wait, not the reaping: it is long enough for the thread to kill and
+/// reap an `lsof` child in the ordinary case, and a child that takes longer to die (stuck
+/// in uninterruptible I/O) is reaped by the thread later, while this process lives.
 const REAP_GRACE: Duration = Duration::from_millis(250);
 
 /// How often the scan's thread looks whether its caller gave up while `lsof` runs.
@@ -226,6 +236,7 @@ pub(super) struct HostScan<'a> {
     record: Option<&'a Path>,
     decide: Decide,
     locate: Locate,
+    recorder: Recorder,
 }
 
 impl<'a> HostScan<'a> {
@@ -235,6 +246,7 @@ impl<'a> HostScan<'a> {
             record: Some(pool),
             decide,
             locate: Arc::new(Lsof::host),
+            recorder: Arc::new(last_scan::record),
         }
     }
 }
@@ -251,6 +263,7 @@ impl HandleProbe for HostScan<'_> {
             turn: last_scan::Turn::next(),
             decide: self.decide,
             locate: self.locate.clone(),
+            recorder: self.recorder.clone(),
             stop: stop.clone(),
             answer,
         };
@@ -274,6 +287,7 @@ struct Work {
     turn: last_scan::Turn,
     decide: Decide,
     locate: Locate,
+    recorder: Recorder,
     /// Set once the caller gave up: start nothing more, and stop what runs.
     stop: Arc<AtomicBool>,
     answer: Sender<Result<Found, CandidateError>>,
@@ -297,12 +311,14 @@ impl Work {
             },
         };
         // The caller gets the answer first: the record never decides or delays a stop.
+        // "Delivered" means queued for a caller that is still there; it may yet refuse the
+        // answer as late, and it may return before the record is written (`last_scan`).
         let delivered = self.answer.send(result).is_ok();
         if let (Some(pool), Some(method)) = (&self.pool, ran)
             && delivered
             && !self.stopped()
         {
-            last_scan::record(pool, self.turn, method);
+            (self.recorder)(pool, self.turn, method);
         }
     }
 
@@ -310,8 +326,10 @@ impl Work {
     ///
     /// The child is found, started, waited for and, if the caller gives up, killed and
     /// reaped here, on the scan's thread. So a slow lookup or spawn cannot stretch the
-    /// caller's wait, no child is started once the caller has given up, and a child is
-    /// never left without an owner.
+    /// caller's wait, and a child started after the caller gave up (it can give up
+    /// between the last look and the spawn) is stopped and reaped by this thread. The
+    /// child is owned by `child` below until it has answered: a failed poll and an
+    /// unwinding thread both drop it, which stops and reaps it ([`Listing`]).
     fn listed(&self) -> Listed {
         if self.stopped() {
             return Listed::GivenUp;
@@ -462,22 +480,50 @@ impl HandleProbe for Lsof {
         )?;
         #[cfg(test)]
         let running = serial.hold(running);
-        Ok(Box::new(Listing(running)))
+        Ok(Box::new(Listing::of(running)))
     }
 }
 
 /// An `lsof -t` child whose exit and output are read as what a scan found.
-struct Listing<Child>(Child);
+///
+/// The child has an owner for as long as this value lives. Dropping it before the child
+/// has answered or been expired stops and reaps the child: that covers a poll that failed
+/// and an owner that unwinds, neither of which may leave `lsof` running or unreaped.
+struct Listing<Child: Pending> {
+    child: Child,
+    /// The child has answered or has been expired; nothing is left to stop or reap.
+    settled: bool,
+}
+
+impl<Child: Pending> Listing<Child> {
+    fn of(child: Child) -> Self {
+        Self {
+            child,
+            settled: false,
+        }
+    }
+}
 
 impl<Child: Pending> Pending<Found> for Listing<Child> {
     fn poll(&mut self) -> Result<Option<Found>, CandidateError> {
-        Ok(self.0.poll()?.map(|listed| Found::listed(&listed)))
+        let listed = self.child.poll()?;
+        self.settled |= listed.is_some();
+        Ok(listed.map(|listed| Found::listed(&listed)))
     }
     fn expire(&mut self) -> CandidateError {
-        self.0.expire()
+        self.settled = true;
+        self.child.expire()
     }
     fn wait(&mut self, limit: Duration, clock: &dyn Clock) {
-        self.0.wait(limit, clock);
+        self.child.wait(limit, clock);
+    }
+}
+
+impl<Child: Pending> Drop for Listing<Child> {
+    fn drop(&mut self) {
+        if !self.settled {
+            let _ = self.child.expire();
+        }
     }
 }
 

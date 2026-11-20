@@ -1,25 +1,25 @@
-//! Which method a pool's last disk-handle scan used.
+//! Which method a recently finished disk-handle scan of a pool used.
 //!
 //! A scan runs in this process where one is built and it can trust itself, and through an
 //! `lsof` child otherwise (see the parent module). Which one ran is otherwise invisible,
-//! and a host that silently fell back is slower at every stop. Each scan that answered its
-//! caller therefore records the method that actually ran, and the reason for a fallback,
-//! in `disk-handle-scan.json` beside the owner record.
+//! and a host that silently fell back is slower at every stop. A scan therefore records
+//! the method that actually ran, and the reason for a fallback, in `disk-handle-scan.json`
+//! beside the owner record.
 //!
-//! This is a report only, and it never decides a stop or a release check:
+//! The record is a report only, and its contract is narrow: it is the method of a recently
+//! finished scan of this pool, possibly written after that scan's caller returned or timed
+//! out.
 //!
-//! * It is written after the scan's answer has been handed to its caller, and not at all
-//!   for a scan that was cancelled or timed out.
+//! * It never decides a stop or a release check, and it is written after the scan's answer
+//!   has been handed to its caller, so writing it delays nothing.
+//! * A scan that was cancelled before it finished writes nothing. A scan that finished
+//!   just as its caller's bound expired may still write.
+//! * Within one process an earlier scan never overwrites a later one ([`Turn`]). Across
+//!   processes a stale write is possible: nothing orders their writes but the pool's VM
+//!   lock, which a stop holds while it waits for its scan and no longer.
 //! * Every write error is ignored, and a missing, malformed, foreign, oversized or special
 //!   file reads as none without being waited on.
 //! * It is rewritten only when the method changes.
-//!
-//! Within a process a scan writes only if no later scan of the same pool has ([`Turn`]),
-//! so a slow thread of an earlier scan cannot put an older answer back. Across processes
-//! nothing orders the writes but the pool's VM lock, which a stop holds while it waits for
-//! its scan and no longer. A process whose stop has returned writes nothing for it, apart
-//! from the instant between its last check and the rename. A reader must take the record
-//! for what it is: the method of a recent scan, not a lock on anything.
 use super::{Fallback, Method};
 use crate::provider::state;
 use serde::{Deserialize, Serialize};
@@ -78,8 +78,9 @@ impl Record {
     }
 }
 
-/// What `runtime status` says of the last scan: `{"method": "in-process"}`, or
-/// `{"method": "lsof", "reason": "self_test_failed"}` with the record's reasons.
+/// What `runtime status` says of a recently finished scan (see the module contract):
+/// `{"method": "in-process"}`, or `{"method": "lsof", "reason": "self_test_failed"}` with
+/// the record's reasons.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct Report {
     method: Name,
@@ -87,8 +88,8 @@ pub struct Report {
     reason: Option<Fallback>,
 }
 
-/// The last scan of the pool at `pool` as `runtime status` reports it; none without a
-/// readable record.
+/// What the record of the pool at `pool` says, as `runtime status` reports it; none
+/// without a readable record.
 pub(in crate::provider::lifecycle) fn report(pool: &Path) -> Option<Report> {
     let Record { method, reason, .. } = Record::of(read(pool)?);
     Some(Report { method, reason })
@@ -98,7 +99,8 @@ fn path(pool: &Path) -> PathBuf {
     pool.join(FILE)
 }
 
-/// The method the last scan of the pool at `pool` used, if a readable record says so.
+/// The method a recently finished scan of the pool at `pool` used, if a readable record
+/// says so.
 ///
 /// Read as the provider's receipts are (`state::read_bounded`): only a small regular file
 /// of this user's, private and singly linked, opened without blocking. So a FIFO or a huge

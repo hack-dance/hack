@@ -102,11 +102,17 @@ pub(super) fn observe_sockets(
 
 /// Verify the pool's bridge sockets, repairing a world-accessible one. Callers hold the
 /// provider's mutation lease (boot, warm start, a leased operation).
+///
+/// Adds the file names of the sockets it repaired to `repaired`, also when it then refuses.
 pub(super) fn verify_sockets(
     directory: &std::path::Path,
     intent: BridgeIntent,
+    repaired: &mut Vec<String>,
 ) -> Result<(), CandidateError> {
-    if socket_states(directory, intent)?.ready() {
+    let mut slots = 0;
+    let states = socket_states_into(directory, intent, true, &mut slots);
+    repaired.extend(names_of(intent, slots));
+    if states?.ready() {
         Ok(())
     } else {
         Err(socket_identity())
@@ -189,7 +195,7 @@ fn entry(
 /// private socket of ours. What remains is the gap between that last read and the system
 /// call, reachable only by a process running as this same user, which could equally rewrite
 /// the pool's disks, as for the disk templates (`disk_template`). `Ok(false)` only when the
-/// mode cannot be set.
+/// mode cannot be set (`Mode::Open`).
 /// The identity checks of [`private_socket`] without any change: whether this owned socket
 /// is already private.
 #[allow(clippy::useless_conversion)]
@@ -208,7 +214,7 @@ fn private_socket(
     directory: &std::fs::File,
     name: &std::ffi::CStr,
     stat: libc::stat,
-) -> Result<bool, CandidateError> {
+) -> Result<Mode, CandidateError> {
     use std::os::fd::AsRawFd;
     // SAFETY: geteuid has no preconditions and cannot fail.
     let uid = unsafe { libc::geteuid() };
@@ -220,7 +226,7 @@ fn private_socket(
     }
     let mode = u32::from(stat.st_mode) & 0o7777;
     if mode & 0o077 == 0 {
-        return Ok(true);
+        return Ok(Mode::Private);
     }
     let same = |other: &libc::stat| {
         identity(other) && other.st_dev == stat.st_dev && other.st_ino == stat.st_ino
@@ -242,12 +248,23 @@ fn private_socket(
         )
     } == 0;
     if !changed {
-        return Ok(false);
+        return Ok(Mode::Open);
     }
     match entry(directory, name)? {
-        Some(after) if same(&after) && u32::from(after.st_mode) & 0o077 == 0 => Ok(true),
+        Some(after) if same(&after) && u32::from(after.st_mode) & 0o077 == 0 => Ok(Mode::Repaired),
         _ => Err(socket_identity()),
     }
+}
+
+/// What [`private_socket`] found or did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// Already private; nothing changed.
+    Private,
+    /// Had group or other bits and is private now.
+    Repaired,
+    /// Has group or other bits and its mode could not be set.
+    Open,
 }
 
 /// How many of the pool's sockets are still pending in each way.
@@ -255,11 +272,29 @@ fn private_socket(
 struct SocketStates {
     missing: u8,
     not_private: u8,
+    /// Slots repaired by this observation, one bit per slot (at most 32).
+    repaired: u32,
 }
 impl SocketStates {
     fn ready(self) -> bool {
         self.missing == 0 && self.not_private == 0
     }
+}
+
+fn names_of(intent: BridgeIntent, slots: u32) -> Vec<String> {
+    intent
+        .guest_paths()
+        .into_iter()
+        .enumerate()
+        .filter(|(slot, _)| slots & (1 << slot) != 0)
+        .map(|(_, path)| {
+            std::path::Path::new(&path)
+                .file_name()
+                .expect("fixed socket name")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
 }
 
 /// Missing nodes may converge during boot; an owned socket with group or other bits is
@@ -277,9 +312,23 @@ fn socket_states_with(
     intent: BridgeIntent,
     repair: bool,
 ) -> Result<SocketStates, CandidateError> {
+    let mut slots = 0;
+    let mut states = socket_states_into(directory, intent, repair, &mut slots)?;
+    states.repaired = slots;
+    Ok(states)
+}
+
+/// [`socket_states_with`], setting each repaired slot's bit in `repaired` as soon as it is
+/// repaired, so a later refusal in the same observation does not lose it.
+fn socket_states_into(
+    directory: &std::path::Path,
+    intent: BridgeIntent,
+    repair: bool,
+    repaired: &mut u32,
+) -> Result<SocketStates, CandidateError> {
     let directory = private_directory(directory)?;
     let mut states = SocketStates::default();
-    for path in intent.guest_paths() {
+    for (slot, path) in intent.guest_paths().into_iter().enumerate() {
         let name = std::path::Path::new(&path)
             .file_name()
             .expect("fixed socket name");
@@ -288,32 +337,82 @@ fn socket_states_with(
             states.missing += 1;
             continue;
         };
-        let private = if repair {
+        let mode = if repair {
             private_socket(&directory, &name, stat)?
+        } else if observe_socket(stat)? {
+            Mode::Private
         } else {
-            observe_socket(stat)?
+            Mode::Open
         };
-        if !private {
-            states.not_private += 1;
+        match mode {
+            Mode::Private => {}
+            Mode::Repaired => *repaired |= 1 << slot,
+            Mode::Open => states.not_private += 1,
         }
     }
     Ok(states)
 }
 
-/// The provider's own sockets in the same directory: the guest agent and the exposed engine
-/// socket. Bound by the same provider process, they have the same umask exposure; nothing
-/// waited for them before. Each one present gets the same identity check and mode repair;
-/// an absent one is left for the code that connects to it.
+/// The provider's own sockets in the same directory, which native connects to: the guest
+/// agent and the exposed engine socket. Bound by the same provider process, they have the
+/// same umask exposure. Each one present gets the same identity check and mode repair; an
+/// absent one is left for the code that connects to it.
 pub(super) const PROVIDER_SOCKETS: [&str; 2] = ["agent.sock", "docker.sock"];
 
-pub(super) fn secure_provider_sockets(directory: &std::path::Path) -> Result<(), CandidateError> {
+/// Every other socket the pinned SmolVM 1.35.4 binds in the machine directory, from its
+/// source (`src/agent/launcher.rs` and `src/internal_boot.rs` at v1.35.4):
+/// - bound by libkrun for a vsock port, with the umask exposure above: `agent.ready` (the
+///   readiness doorbell, `vsock_socket.with_extension("ready")`), `port-forward.sock`
+///   (`network::port_forward::PORT_FORWARD_SOCKET`) and `auto-ports.sock`
+///   (`network::auto_ports::AUTO_PORTS_SOCKET`);
+/// - bound by SmolVM's own listeners: `agent.logs` (the workload log listener,
+///   `with_extension("logs")`), `control.sock` (`platform::uds`) and `ports.sock`
+///   (`smolvm_network::PORTS_SOCKET`).
+///
+/// Native never connects to these, so only an owned socket with one link is repaired; an
+/// entry of another type, owner or link count is left unchanged rather than refusing a boot.
+/// A provider-pin upgrade must re-derive this list (`artifact::VERSION`).
+pub(super) const OTHER_PROVIDER_SOCKETS: [&str; 6] = [
+    "agent.ready",
+    "agent.logs",
+    "port-forward.sock",
+    "auto-ports.sock",
+    "control.sock",
+    "ports.sock",
+];
+
+/// Repair the provider's own sockets in `directory`, adding each name repaired to `repaired`
+/// as it is repaired, so a later refusal does not lose it.
+pub(super) fn secure_provider_sockets(
+    directory: &std::path::Path,
+    repaired: &mut Vec<String>,
+) -> Result<(), CandidateError> {
     let directory = private_directory(directory)?;
     for name in PROVIDER_SOCKETS {
-        let name = std::ffi::CString::new(name).expect("fixed socket name");
-        if let Some(stat) = entry(&directory, &name)? {
-            if !private_socket(&directory, &name, stat)? {
-                return Err(socket_identity());
+        let entry_name = std::ffi::CString::new(name).expect("fixed socket name");
+        if let Some(stat) = entry(&directory, &entry_name)? {
+            match private_socket(&directory, &entry_name, stat)? {
+                Mode::Private => {}
+                Mode::Repaired => repaired.push(name.to_owned()),
+                Mode::Open => return Err(socket_identity()),
             }
+        }
+    }
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    for name in OTHER_PROVIDER_SOCKETS {
+        let entry_name = std::ffi::CString::new(name).expect("fixed socket name");
+        let Some(stat) = entry(&directory, &entry_name)? else {
+            continue;
+        };
+        if stat.st_mode & libc::S_IFMT != libc::S_IFSOCK || stat.st_uid != uid || stat.st_nlink != 1
+        {
+            continue;
+        }
+        match private_socket(&directory, &entry_name, stat)? {
+            Mode::Private => {}
+            Mode::Repaired => repaired.push(name.to_owned()),
+            Mode::Open => return Err(socket_identity()),
         }
     }
     Ok(())
@@ -361,7 +460,7 @@ pub(super) fn wait_for_sockets(
     intent: BridgeIntent,
     verify_provider: impl FnMut() -> Result<(), CandidateError>,
     clock: &impl super::process::Clock,
-) -> Result<(), CandidateError> {
+) -> Result<Vec<String>, CandidateError> {
     wait_for_sockets_with(
         directory,
         intent,
@@ -377,9 +476,10 @@ fn wait_for_sockets_with(
     mut verify_provider: impl FnMut() -> Result<(), CandidateError>,
     clock: &impl super::process::Clock,
     budget: std::time::Duration,
-) -> Result<(), CandidateError> {
+) -> Result<Vec<String>, CandidateError> {
     let deadline = clock.now().saturating_add(budget);
     let mut last = None;
+    let mut repaired = 0;
     loop {
         if clock.now() >= deadline {
             return Err(startup_socket_timeout(intent, last, budget));
@@ -392,13 +492,14 @@ fn wait_for_sockets_with(
             )
         })?;
         verify_provider().map_err(startup_provider_failure)?;
+        repaired |= states.repaired;
         last = Some(states);
         let remaining = deadline.saturating_sub(clock.now());
         if remaining.is_zero() {
             return Err(startup_socket_timeout(intent, last, budget));
         }
         if states.ready() {
-            return Ok(());
+            return Ok(names_of(intent, repaired));
         }
         clock.sleep(remaining.min(BOOT_SOCKET_POLL));
     }
@@ -459,20 +560,20 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         let intent = BridgeIntent::new(1).unwrap();
-        verify_sockets(&root, intent).unwrap();
+        verify_sockets(&root, intent, &mut Vec::new()).unwrap();
         // An owned socket's group and other bits are repaired, not refused (HACK-2375).
         fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
-        verify_sockets(&root, intent).unwrap();
+        verify_sockets(&root, intent, &mut Vec::new()).unwrap();
         assert_eq!(
             fs::symlink_metadata(&path).unwrap().permissions().mode() & 0o777,
             0o700
         );
         fs::remove_file(&path).unwrap();
         fs::write(&path, b"foreign").unwrap();
-        assert!(verify_sockets(&root, intent).is_err());
+        assert!(verify_sockets(&root, intent, &mut Vec::new()).is_err());
         fs::remove_file(&path).unwrap();
         symlink(root.join("other"), &path).unwrap();
-        assert!(verify_sockets(&root, intent).is_err());
+        assert!(verify_sockets(&root, intent, &mut Vec::new()).is_err());
         drop(listener);
         fs::remove_dir_all(root).unwrap();
     }

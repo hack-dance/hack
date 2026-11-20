@@ -29,6 +29,7 @@ import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { listenPublishedUnixSocket } from "../lib/unix-socket-publish.ts";
+import { nativeExecutableDigests } from "./native-executable-hash.ts";
 import { checkNativeHttpsPort } from "./native-https-port.ts";
 import { NativeHttpsStartupError } from "./native-https-startup-failure.ts";
 import {
@@ -949,18 +950,10 @@ export async function inspectActiveNativeHttpsOwner(opts: {
       path: ownerSocket,
       publicKey: receipt.owner.publicKey,
     });
-    const caddyMetadata = await lstat(receipt.listener.executable);
     if (
-      !caddyMetadata.isFile() ||
-      (caddyMetadata.mode & 0o022) !== 0 ||
-      (caddyMetadata.mode & 0o111) === 0 ||
-      (await realpath(receipt.listener.executable)) !==
-        receipt.listener.executable ||
-      createHash("sha256")
-        .update(
-          await boundedFile(receipt.listener.executable, 256 * 1024 * 1024)
-        )
-        .digest("hex") !== receipt.caddySha256
+      (await nativeExecutableDigests.sha256(receipt.listener.executable, {
+        refused,
+      })) !== receipt.caddySha256
     ) {
       throw refused();
     }
@@ -1371,15 +1364,9 @@ export async function startNativeProjectHttps(opts: {
   ) {
     throw refused();
   }
-  const metadata = await lstat(opts.caddyBinary);
   if (
-    !metadata.isFile() ||
-    (metadata.mode & 0o022) !== 0 ||
-    (metadata.mode & 0o111) === 0 ||
-    (await realpath(opts.caddyBinary)) !== opts.caddyBinary ||
-    createHash("sha256")
-      .update(await boundedFile(opts.caddyBinary, 256 * 1024 * 1024))
-      .digest("hex") !== opts.caddySha256
+    (await nativeExecutableDigests.sha256(opts.caddyBinary, { refused })) !==
+    opts.caddySha256
   ) {
     throw refused();
   }

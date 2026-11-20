@@ -1169,6 +1169,20 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "executable-digest-cache",
+    module: "DigestCache",
+    states: 1943,
+    invariant: "CacheNeverStale",
+    action: "CacheHit",
+    fields: [
+      "staleHit = TRUE",
+      "cache = <<1, 1, 1>>",
+      "content = 2",
+      "ctime = 1",
+      "clock = 1",
+    ],
+  },
+  {
     name: "native-status-start",
     module: "StatusStart",
     states: 110,

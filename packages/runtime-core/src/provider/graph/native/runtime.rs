@@ -546,6 +546,13 @@ fn verify_config(
         } else {
             &actual["Config"][key]
         };
+        let compatible;
+        let value = if key == "Healthcheck" {
+            compatible = crate::provider::graph::startup_compatible(value, observed);
+            &compatible
+        } else {
+            value
+        };
         if mismatch(value, observed, key).is_some() {
             return Err(refused());
         }

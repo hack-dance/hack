@@ -67,6 +67,7 @@ fn a_route_first_answering_at_120_seconds_starts_under_the_graph_budget() {
             config.timeout_ms.to_string(),
             config.retries.to_string(),
             "120000".into(),
+            config.start_interval().to_string(),
         ])
         .output()
         .unwrap();

@@ -230,6 +230,26 @@ mod tests {
     }
 
     #[test]
+    fn a_rewrite_that_puts_the_modification_time_back_still_takes_the_full_proof() {
+        // Size and modification time are as the proof saw them; the status-change time,
+        // which a writer cannot set back, is not.
+        let tree = Tree::new("mtime-restored");
+        let agent = tree.0.join("usr/bin/agent");
+        let early = tree.proven();
+        let modified = fs::metadata(&agent).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&agent, b"agent BINARY").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&agent)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert_eq!(fs::metadata(&agent).unwrap().modified().unwrap(), modified);
+        assert_eq!(tree.held(&early), None);
+    }
+
+    #[test]
     fn every_ordinary_change_between_the_proof_and_the_lease_takes_the_full_proof() {
         for change in 0..5 {
             let tree = Tree::new(&format!("change-{change}"));

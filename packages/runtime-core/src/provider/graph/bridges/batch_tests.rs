@@ -30,7 +30,8 @@ fn receipt() -> Receipt {
             "retries":3,"start_period_ms":0},
             "allocation":"b".repeat(32),"generation":"a".repeat(32),
             "binary":format!("/storage/hack-native-http-probe/{}","f".repeat(64)),
-            "uid":1000,"gid":1000,"exec_id":"c".repeat(64),"started_ms":1,"phase":"running"}}
+            "uid":1000,"gid":1000,"exec_id":"c".repeat(64),"started_ms":1,"phase":"running",
+            "start_interval_argv":true}}
     }))
     .unwrap()
 }
@@ -120,7 +121,7 @@ impl Inspection for Guest {
         if path == format!("/v1.53/exec/{}/json", probe.exec_id.as_ref().unwrap()) {
             return Ok(json!({"ContainerID":WEB,"Running":!self.unhealthy.get(),
                 "ProcessConfig":{"entrypoint":"/run/hack-http-probe",
-                    "arguments":probe.config.arguments("/run/hack-http-probe-state", &probe.generation)?}}));
+                    "arguments":probe.launch_arguments()?}}));
         }
         let service = if path == format!("/v1.53/containers/{WEB}/json") {
             "web"

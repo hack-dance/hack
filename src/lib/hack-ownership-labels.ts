@@ -6,8 +6,8 @@
  * both source trees to keep this list complete and free of stale entries.
  *
  * - `io.hack-local.`: native runtime graph ownership (`owner`, `graph`,
- *   `namespace`, `plan`, `kind`, `resource`, `job`, cache and probe labels),
- *   which the runtime-core provider writes and verifies before cleanup.
+ *   `namespace`, `plan`, `kind`, `resource`, `spec`, `job`, cache and probe
+ *   labels), which the runtime-core provider writes and verifies before cleanup.
  * - `io.hack.native-config.`: native-config Compose ownership (`version`,
  *   `instance`, `owner`, `generation`, `workload`, `storage`), which the
  *   native-config renderer writes and its generation inventory, route owner

@@ -288,9 +288,9 @@ describe("provider pin watch", () => {
     );
     const variables = [
       ...between(
-        readFileSync(join(provider, "backend/smolvm_cli.rs"), "utf8"),
-        "fn command(",
-        "pub(in crate::provider) fn invoke("
+        readFileSync(join(provider, "lifecycle/backend/smolvm_cli.rs"), "utf8"),
+        "// BEGIN provider command environment",
+        "// END provider command environment"
       ).matchAll(/"(SMOLVM_[A-Z_]+)"/g),
     ].map((match) => match[1]);
     expect(flags.length).toBeGreaterThan(10);

@@ -53,7 +53,7 @@ fn provider_command_disables_trim_despite_ambient_override() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "provider::backend::smolvm_cli::tests::provider_command_uses_recorded_reclamation_policy",
+                "provider::lifecycle::backend::smolvm_cli::tests::provider_command_uses_recorded_reclamation_policy",
                 "--nocapture",
             ])
             .env("SMOLVM_DISK_TRIM", "1")

@@ -3,13 +3,14 @@ use crate::provider::{artifact, process, state::Owner};
 use crate::{Candidate, CandidateError};
 use std::{path::Path, time::Duration};
 
-pub(in crate::provider) fn root(candidate: &Candidate) -> std::path::PathBuf {
+pub(in crate::provider::lifecycle) fn root(candidate: &Candidate) -> std::path::PathBuf {
     candidate.state_root.join("run/smolvm")
 }
-pub(in crate::provider) fn binary(candidate: &Candidate) -> std::path::PathBuf {
+pub(in crate::provider::lifecycle) fn binary(candidate: &Candidate) -> std::path::PathBuf {
     artifact::root(candidate).join("smolvm-bin")
 }
 
+// BEGIN provider command environment
 fn command(candidate: &Candidate, owner: &Owner) -> std::process::Command {
     let mut command = process::clean_command(&binary(candidate));
     command
@@ -49,7 +50,8 @@ fn command(candidate: &Candidate, owner: &Owner) -> std::process::Command {
     }
     command
 }
-pub(in crate::provider) fn invoke(
+// END provider command environment
+pub(in crate::provider::lifecycle) fn invoke(
     candidate: &Candidate,
     owner: &Owner,
     args: &[&str],
@@ -89,7 +91,7 @@ fn failed_provider_command(output: &process::Captured) -> CandidateError {
 
 /// Start only the host transport; the caller retains its existing guest identity and wait loop.
 #[cfg(target_os = "macos")]
-pub(in crate::provider) fn spawn_exec(
+pub(in crate::provider::lifecycle) fn spawn_exec(
     candidate: &Candidate,
     owner: &Owner,
     arguments: &[&str],

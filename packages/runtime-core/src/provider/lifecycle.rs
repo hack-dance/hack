@@ -1,5 +1,6 @@
-use super::backend::smolvm_cli::{binary, invoke, root};
+use backend::smolvm_cli::{binary, invoke, root};
 mod admission_pool;
+mod backend;
 mod disk_handles;
 mod guest_memory_peak;
 pub mod host_filesystem;
@@ -29,6 +30,7 @@ pub use prepared_boot::{
 #[cfg(target_os = "macos")]
 pub(super) use private_child::{RelayChild, RelayLaunch};
 pub(super) use relay_process::RelayProcess;
+
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::fs::{self, File, OpenOptions};
@@ -39,6 +41,12 @@ use std::os::unix::{
 };
 use std::path::Path;
 use std::time::{Duration, Instant};
+
+/// Expected executable for read-only identity checks; grants no launch authority.
+#[cfg(target_os = "macos")]
+pub(super) fn provider_binary(candidate: &Candidate) -> std::path::PathBuf {
+    binary(candidate)
+}
 
 #[derive(Debug, Serialize)]
 pub struct RuntimeStatus {

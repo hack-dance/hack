@@ -2,9 +2,9 @@
 #[cfg(target_os = "macos")]
 use super::OwnedGuest;
 use super::RelayProcess;
-use crate::CandidateError;
 #[cfg(target_os = "macos")]
-use crate::provider::backend::smolvm_cli;
+use super::backend::smolvm_cli;
+use crate::CandidateError;
 #[cfg(target_os = "macos")]
 use crate::provider::relay_auth::PrivateInput;
 #[cfg(any(target_os = "macos", test))]
@@ -13,7 +13,7 @@ use std::{
     io::{self, Read},
     net::Ipv4Addr,
     os::fd::AsRawFd,
-    process::{Child, ChildStderr, ChildStdout, ExitStatus, Stdio},
+    process::{Child, ChildStderr, ChildStdout, ExitStatus},
 };
 
 fn refused() -> CandidateError {
@@ -506,6 +506,7 @@ printf 'relay-guest-absent-v1\n'
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Stdio;
     /// Hang guard for a fixture shell to exit or print its marker, not a correctness bound:
     /// on a loaded host spawning `/bin/sh` alone took longer than the former 2 s (HACK-1457,
     /// load average ~230). Only a fixture that never exits or never prints should reach it.

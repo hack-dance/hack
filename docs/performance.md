@@ -84,7 +84,22 @@ Phases, each optional through `--phases`:
 Read the numbers with these limits:
 
 - A start counts only when the routed checks pass, and a data marker written after the
-  first start must read back after every later start.
+  first start must read back after every later start. All routes are checked at once,
+  20 ms apart, so a start sample is at most one poll later than the moment the last
+  route answered. Each start timing also records `readySeconds`, the wait after the
+  CLI command exited.
+- Both backends run the same health checks: the fixture's Postgres and Redis checks run
+  in the engine on both, with `start_interval: 250ms` and a 10 s steady interval, and
+  its routed services have no command check, because native probes their routes itself.
+  `result.json` records under `method` the readiness mode, the Compose file's SHA-256
+  and each service's health check on that lane. A command check that runs on Compose
+  only is listed under `unevenHealthChecks` and noted.
+- Results from before Nov 2026 used fixture version 1 and polled routes one after the
+  other, 500 ms apart, which added up to half a second to each start. To reproduce them,
+  copy `scripts/fixtures/runtime-bench/legacy/docker-compose.v1.yml` over
+  `.hack/docker-compose.yml` in the fixture copy and pass `--legacy-readiness`. Version 1
+  is not like for like: its API health check (`bun -e fetch` every 5 s) runs on Compose
+  only, and its 2 s intervals delay each start by about 2 s on both backends.
 - Each timing carries the 1-minute load before and after. Above `--max-load` (default
   40) it is flagged and kept in `result.json`. `summary` groups timings by operation and
   leaves flagged ones out of its medians; each phase's own figures use every completed

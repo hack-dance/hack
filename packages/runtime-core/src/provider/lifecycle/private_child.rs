@@ -1,8 +1,10 @@
 //! Typed private relay delivery. Dropping a transport is not proof of guest exit.
-use super::RelayProcess;
 #[cfg(target_os = "macos")]
-use super::{OwnedGuest, command};
+use super::OwnedGuest;
+use super::RelayProcess;
 use crate::CandidateError;
+#[cfg(target_os = "macos")]
+use crate::provider::backend::smolvm_cli;
 #[cfg(target_os = "macos")]
 use crate::provider::relay_auth::PrivateInput;
 #[cfg(any(target_os = "macos", test))]
@@ -351,13 +353,10 @@ impl OwnedGuest<'_> {
         let guarded = format!(
             "set -eu\ntest \"$(cat /proc/sys/kernel/random/boot_id)\" = \"$1\"\ntest \"$(cat /storage/.hack-local-owner)\" = \"$2\"\nshift 2\n{script}"
         );
-        let stop = command(self.candidate, &self.owner)
-            .args([
-                "machine",
-                "exec",
-                "--name",
-                &self.owner.machine,
-                "--",
+        let stop = smolvm_cli::spawn_exec(
+            self.candidate,
+            &self.owner,
+            &[
                 "/bin/sh",
                 "-c",
                 &guarded,
@@ -371,12 +370,9 @@ impl OwnedGuest<'_> {
                 &process.address.to_string(),
                 &process.port.to_string(),
                 &child.stop_user(),
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|_| refused())?;
+            ],
+        )
+        .map_err(|_| refused())?;
         let mut stop = RelayChild::from_child(
             stop,
             RelayLaunch {

@@ -2,6 +2,7 @@
 pub mod admission;
 mod agent;
 mod artifact;
+mod backend;
 mod bridge;
 pub mod build_policy;
 pub mod build_scan;

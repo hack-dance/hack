@@ -111,7 +111,8 @@ const PROVIDER_FAILURES = new Set([
   "provider_command_failed",
   "provider_boot_stalled",
 ]);
-const LONG_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=.{17,}$/;
+/** A `key=value` token keeps its value only as a short number or one of these words. */
+const PLAIN_VALUE = /^(?:\d{0,10}|on|off|true|false|yes|no|none)$/i;
 const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)[^/@\s"'`]+@/gi;
 const WHITE_SPACE = /\s+/;
 const PROVIDER_LINE_LIMIT = 200;
@@ -136,7 +137,8 @@ function boundedPrintableLine(value: unknown): value is string {
  * The runtime cleans it; this boundary does not rely on that. The line is
  * accepted only with a provider failure code and only as one printable ASCII
  * line of at most 200 characters, and it is redacted again here: the user's
- * home and temporary directory, long `KEY=value` values, a bearer token, a
+ * home and temporary directory, the value of a `key=value` token unless it
+ * is a short number or a fixed word such as `on` or `false`, a bearer token, a
  * user and password in a URL, and long hexadecimal identifiers.
  */
 export function nativeProviderLine(
@@ -172,13 +174,20 @@ export function nativeProviderLine(
       if (bearer) {
         return "<value>";
       }
-      const assignment = LONG_ASSIGNMENT.exec(token);
-      if (assignment) {
-        return `${assignment[1]}=<value>`;
+      // Anything after the first `=` is shown only when it is plainly not a
+      // secret; a short value is not safe by being short.
+      // URL credentials go first: a password may hold an equals sign.
+      const safe = token.replace(URL_CREDENTIALS, "$1<credentials>@");
+      const equals = safe.indexOf("=");
+      const head = (equals < 0 ? safe : safe.slice(0, equals)).replace(
+        LONG_HEX,
+        "<id>"
+      );
+      if (equals < 0) {
+        return head;
       }
-      return token
-        .replace(URL_CREDENTIALS, "$1<credentials>@")
-        .replace(LONG_HEX, "<id>");
+      const value = safe.slice(equals + 1);
+      return `${head}=${PLAIN_VALUE.test(value) ? value : "<value>"}`;
     })
     .join(" ");
   // Redaction can lengthen the line: the bound holds for what is shown.

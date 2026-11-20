@@ -5,18 +5,21 @@
 //! because it can hold anything. This module takes one line of it and removes what must not
 //! travel: escape sequences and control characters; the native home, the pool's short home
 //! and the temp root it lives under, every shared project root, the user's home; long
-//! identifiers; credentials in the shapes they usually take (`KEY=value`, `Bearer ...`, a
-//! user and password in a URL); and anything that is not printable ASCII. The result is at
-//! most [`MAX`] characters. The CLI validates and redacts the line again before printing it
-//! and does not rely on this cleaning.
+//! identifiers; credentials in the shapes they usually take (whatever follows an `=`, unless
+//! it is a short number or a fixed word such as `on`; `Bearer ...`; a user and password in a
+//! URL); and anything that is not printable ASCII. The result is at most [`MAX`] characters.
+//! The CLI validates and redacts the line again before printing it and does not rely on this
+//! cleaning.
 
 use crate::{Candidate, CandidateError};
 use std::path::Path;
 
 /// The most characters of the provider's line that are carried.
 pub const MAX: usize = 200;
-/// A `KEY=value` token keeps its value only up to this many characters.
-const MAX_VALUE: usize = 16;
+/// The longest run of digits a `key=value` token keeps as its value: ports, counts, codes.
+const MAX_NUMBER: usize = 10;
+/// The only words a `key=value` token keeps as its value.
+const PLAIN_WORDS: [&str; 7] = ["on", "off", "true", "false", "yes", "no", "none"];
 /// Only this much of the end of the captured stderr is looked at: the reason is the last
 /// thing printed. `process::capture` itself keeps the first 64 KiB of stderr, so a reason
 /// printed after more output than that is not seen; the provider's commands print far less.
@@ -84,31 +87,35 @@ fn replace_place(text: &str, path: &str, word: &str) -> String {
     replaced
 }
 
+/// Whether the value of a `key=value` token says nothing private: empty, a short number or
+/// one of [`PLAIN_WORDS`]. A short value is not safe by being short (`PASSWORD=hunter2`).
+fn plain_value(value: &str) -> bool {
+    value.is_empty()
+        || (value.len() <= MAX_NUMBER && value.bytes().all(|byte| byte.is_ascii_digit()))
+        || PLAIN_WORDS
+            .iter()
+            .any(|word| value.eq_ignore_ascii_case(word))
+}
+
 /// One whitespace-separated token with whatever looks like a credential or an identifier
 /// replaced. `after_bearer` says the previous token was `Bearer`.
 fn redact(token: &str, after_bearer: bool) -> String {
     if after_bearer {
         return "<value>".into();
     }
-    // KEY=value with a value too long to be a number or a word.
-    if let Some((key, value)) = token.split_once('=') {
-        let named = key
-            .chars()
-            .next()
-            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
-            && key
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || character == '_');
-        if named && value.chars().count() > MAX_VALUE {
-            return format!("{key}=<value>");
-        }
-    }
-    // scheme://user:password@host
+    // scheme://user:password@host, before anything is split off: a password may hold `=`.
     let token = match (token.find("://"), token.find('@')) {
         (Some(scheme), Some(at)) if scheme + 3 < at && !token[scheme + 3..at].contains('/') => {
             format!("{}<credentials>{}", &token[..scheme + 3], &token[at..])
         }
         _ => token.to_owned(),
+    };
+    // Anything after the first `=` (`KEY=value`, `--flag=value`, a URL query) is carried
+    // only when it is plainly not a secret. What is before it is cleaned like any token.
+    let (token, value) = match token.split_once('=') {
+        Some((key, value)) if plain_value(value) => (key, Some(value)),
+        Some((key, _)) => (key, Some("<value>")),
+        None => (token.as_str(), None),
     };
     // Long runs of hexadecimal digits: machine identifiers and digests.
     let mut plain = String::with_capacity(token.len());
@@ -127,6 +134,10 @@ fn redact(token: &str, after_bearer: bool) -> String {
         plain.push(character);
     }
     plain.pop();
+    if let Some(value) = value {
+        plain.push('=');
+        plain.push_str(value);
+    }
     plain
 }
 
@@ -306,21 +317,34 @@ mod tests {
     }
 
     #[test]
-    fn a_long_value_after_an_equals_sign_is_never_carried() {
-        let line = "start failed TOKEN=abcdefghijklmnopqrstuvwxyz0123456789 port=8080 \
-                    path=/some/where/quite/long/indeed a=b==c x=12345678901234567";
+    fn a_value_after_an_equals_sign_is_carried_only_as_a_number_or_a_fixed_word() {
+        // Short is not safe: a short secret-shaped value goes like a long one.
+        let line = "start failed PASSWORD=hunter2 TOKEN=ab12cd34ef --password=hunter2 \
+                    REGION_NAME=sixteen-chars-xx path=/some/where a=b==c =orphan";
         assert_eq!(
             clean(line.as_bytes(), &places()).as_deref(),
-            Some("start failed TOKEN=<value> port=8080 path=<value> a=b==c x=<value>")
+            Some(
+                "start failed PASSWORD=<value> TOKEN=<value> --password=<value> \
+                 REGION_NAME=<value> path=<value> a=<value> =<value>"
+            )
         );
-        // Exactly sixteen characters of value stay; not an assignment stays whole.
+        // A short number, a fixed word and an empty value stay.
         assert_eq!(
             clean(
-                b"k=ghijklmnopqrstuv port=8080 9lives=ghijklmnopqrstuvwxyz",
+                b"port=8080 code=13 debug=TRUE mode=off retry=no left= pin=12345678901 on=maybe",
                 &places()
             )
             .as_deref(),
-            Some("k=ghijklmnopqrstuv port=8080 9lives=ghijklmnopqrstuvwxyz")
+            Some("port=8080 code=13 debug=TRUE mode=off retry=no left= pin=<value> on=<value>")
+        );
+        // What is before the `=` is still cleaned: credentials in a URL, a long identifier.
+        assert_eq!(
+            clean(
+                b"get https://user:hun=ter2@registry.example/v2?scope=pull vm-cf86560b70f1f4c9abcd=7",
+                &places()
+            )
+            .as_deref(),
+            Some("get https://<credentials>@registry.example/v2?scope=<value> vm-<id>=7")
         );
     }
 

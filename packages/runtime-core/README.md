@@ -1761,8 +1761,8 @@ waits for the scan and hot reload works; above it the boot does not wait and hot
   line of the provider's stderr in `provider_line`, cleaned where it is produced
   (`provider/provider_line.rs`): escape sequences removed; the native home, the pool's short
   home and its temp root, every shared project root and the user's home replaced by fixed
-  words; long hexadecimal identifiers, long `KEY=value` values, bearer tokens and URL
-  credentials replaced; printable ASCII only; at most 200 characters. The line is looked for
+  words; long hexadecimal identifiers, whatever follows an `=` (unless it is a short number or a
+  fixed word such as `on` or `false`), bearer tokens and URL credentials replaced; printable ASCII only; at most 200 characters. The line is looked for
   in the last 16 KiB of what `process::capture` keeps of stderr (its first 64 KiB). The CLI
   shows it after its own validation and redaction, for `provider_command_failed` and
   `provider_boot_stalled` only; the message that holds the raw stderr is still never shown.

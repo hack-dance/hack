@@ -2368,7 +2368,10 @@ const contracts: readonly ModelContract[] = [
     states: 175_757,
     invariant: "OneCompile",
     action: "Begin",
-    fields: ["restarts = 1"],
+    fields: ["restarts = 1", 'app = "slow"'],
+    alternativeWitnesses: [
+      { action: "Begin", fields: ["restarts = 1", 'app = "hanging"'] },
+    ],
     additionalControls: [
       { name: "legacy", negative: false, states: 132_615 },
       {
@@ -2398,7 +2401,7 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NoPrematureFailure",
         action: "Observe",
-        fields: ['verdict = "unhealthy"'],
+        fields: ['verdict = "unhealthy"', 'vh = "starting"'],
       },
     ],
   },

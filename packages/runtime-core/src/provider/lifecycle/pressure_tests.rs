@@ -59,14 +59,29 @@ fn lease_wait_pressure_change_refuses_owner_commit_and_releases_the_mutation_lea
         changed.store(4, Ordering::SeqCst);
         drop(held);
     });
-    let prelease = [report(pressure.load(Ordering::SeqCst))];
+    // A clock that sleeps without waiting: the window is this module's contract with
+    // `admission`, whose own tests measure it.
+    struct Skipping(std::cell::Cell<Duration>);
+    impl process::Clock for Skipping {
+        fn now(&self) -> Duration {
+            self.0.get()
+        }
+        fn sleep(&self, duration: Duration) {
+            self.0.set(self.0.get() + duration);
+        }
+    }
+    let clock = Skipping(std::cell::Cell::new(Duration::ZERO));
+    let opened = admission::open(&report(pressure.load(Ordering::SeqCst)), &clock).unwrap();
     let owner = path.join("owner.json");
     let checked = startup_admission_lease(
         &path,
         Duration::from_secs(2),
         Profile::Development,
-        &prelease,
+        Some(opened),
+        &clock,
         || {
+            // Sampled only once the window has passed, and only under the lease.
+            assert!(clock.0.get() >= admission::DEVELOPMENT_WINDOW);
             assert!(
                 matches!(state::Lock::acquire(&path), Err(error) if error.code == "provider_busy")
             );

@@ -1836,7 +1836,7 @@ defence against it.
 `runtime up` on a pool that is already running and owned by this home (every warm frontend
 `up` and `restart`) takes a named fast path, `lifecycle::running_start`. It allocates
 nothing, so it skips the host admission windows, which guard memory, swapout, thermal and
-disk headroom for a VM allocation (four one-second sampling pauses for Development, two
+disk headroom for a VM allocation (a one-second window for Development, two
 fifteen-second pauses for Research). Under the startup lease it re-checks the receipt, the
 provider identity, disk identity and size, the request (bridges, dependency sockets,
 network, project share and translation), the owner registry, dependency sockets, network
@@ -1945,12 +1945,17 @@ The development profile's guest allocation is 6 GiB; guest allocation plus
 Startup requires the unchanged 10 GiB free-plus-file-cache estimate: 6 GiB guest,
 2 GiB provisional provider overhead and 2 GiB host reserve. Development admits
 observed normal or warning macOS memory pressure only with that headroom, normal
-thermal/performance status, and unchanged swapouts. It samples before acquiring
-the startup lease, then samples a fresh three-observation window under the lease
-before creating ownership, aliases, disks or provider capacity. Swapouts must
-remain at the pre-lease baseline; a stale or incomplete observation refuses.
-The final pre-boot check remains in place. Research keeps its normal-only pressure
-policy, 16 GiB raw-free-memory floor and three samples 15 seconds apart.
+thermal/performance status, and unchanged swapouts. It samples once before
+acquiring the startup lease and once under the lease, before creating ownership,
+aliases, disks or provider capacity. The sample under the lease starts at least
+one second, on a monotonic clock, after the first one finished. The start's own
+checks and any lease wait count towards that second, so only the remainder is
+slept and a start that already took that long does not pause. Each sample must
+pass every check on its own, and swapouts must stay at the first sample's count
+through the sample under the lease and the final pre-boot check, which remains
+in place; a stale or incomplete observation refuses. Research keeps its
+normal-only pressure policy, 16 GiB raw-free-memory floor and three samples
+15 seconds apart.
 
 Before new live Development effects, normal pressure requires at least 2 GiB of
 estimated host headroom; warning requires 4 GiB, retaining both provisional

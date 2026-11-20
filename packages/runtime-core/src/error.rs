@@ -229,6 +229,10 @@ pub struct RefusalDiagnostics {
     /// Value-free location of a refused retained-run edit; see [`PlanChangeDiagnostic`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_change: Option<PlanChangeDiagnostic>,
+    /// The provider's own last error line for a failed provider command, cleaned where it is
+    /// produced (`provider::provider_line`); see [`CandidateError::with_provider_line`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_line: Option<Box<str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_probe: Option<RouteProbeDiagnostic>,
 }
@@ -508,6 +512,17 @@ impl CandidateError {
         self.cause_code = Some(code.into_boxed_str());
         self
     }
+
+    /// Carry the provider's own last error line. The caller cleans it; anything that is not
+    /// one line of 1 to 200 printable ASCII characters is dropped here rather than carried.
+    pub fn with_provider_line(mut self, line: &str) -> Self {
+        let valid = (1..=200).contains(&line.len())
+            && line.bytes().all(|byte| (0x20..=0x7e).contains(&byte));
+        if valid {
+            self.refusals.get_or_insert_default().provider_line = Some(line.into());
+        }
+        self
+    }
 }
 
 #[cfg(test)]
@@ -527,6 +542,60 @@ mod tests {
         .unwrap();
         assert!(formatted.get("message_fixed").is_none());
         assert!(formatted.get("service").is_none());
+    }
+
+    #[test]
+    fn the_provider_line_is_carried_only_when_valid_and_changes_nothing_when_absent() {
+        // Without the line an error serializes exactly as it always has.
+        let plain =
+            serde_json::to_string(&CandidateError::new("graph_image", "Fixed text.")).unwrap();
+        assert_eq!(
+            plain,
+            r#"{"code":"graph_image","message":"Fixed text.","message_fixed":true}"#
+        );
+        let formatted = serde_json::to_string(&CandidateError::new(
+            "provider_command_failed",
+            format!("exited {}", 3),
+        ))
+        .unwrap();
+        assert_eq!(
+            formatted,
+            r#"{"code":"provider_command_failed","message":"exited 3"}"#
+        );
+        // With it, one flat field is added and nothing else moves.
+        let carried = serde_json::to_string(
+            &CandidateError::new("provider_command_failed", format!("exited {}", 3))
+                .with_provider_line("Error: machine not found"),
+        )
+        .unwrap();
+        assert_eq!(
+            carried,
+            r#"{"code":"provider_command_failed","message":"exited 3","provider_line":"Error: machine not found"}"#
+        );
+        // Anything but one bounded printable line is dropped, not carried.
+        for invalid in [
+            "",
+            "two\nlines",
+            "tab\there",
+            "caf\u{e9}",
+            "esc\u{1b}[0m",
+            &"x".repeat(201),
+        ] {
+            let error = CandidateError::new("provider_command_failed", format!("exited {}", 3))
+                .with_provider_line(invalid);
+            assert_eq!(
+                serde_json::to_string(&error).unwrap(),
+                formatted,
+                "{invalid:?}"
+            );
+        }
+        let longest = "x".repeat(200);
+        let error = CandidateError::new("graph_image", "Fixed text.").with_provider_line(&longest);
+        assert_eq!(
+            serde_json::to_value(&error).unwrap()["provider_line"],
+            longest.as_str()
+        );
+        assert!(std::mem::size_of::<CandidateError>() <= 128);
     }
 
     #[test]

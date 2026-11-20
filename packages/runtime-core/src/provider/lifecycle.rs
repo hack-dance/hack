@@ -141,9 +141,36 @@ fn boot_reclamation_policy() -> state::ReclamationPolicy {
     state::ReclamationPolicy::default()
 }
 fn invoke(candidate: &Candidate, owner: &Owner, args: &[&str]) -> Result<String, CandidateError> {
-    process::run(
+    let output = process::capture(
         command(candidate, owner).args(args),
         Duration::from_secs(60),
+    )?;
+    if output.status.success() {
+        return String::from_utf8(output.stdout)
+            .map_err(|_| CandidateError::new("provider_protocol", "Non-UTF8 provider response."));
+    }
+    // The provider's own last line, cleaned, travels with the failure so the CLI can show it.
+    let shares = owner.project_shares();
+    let roots: Vec<&Path> = shares.iter().map(|share| share.project.as_path()).collect();
+    Err(super::provider_line::attach(
+        failed_provider_command(&output),
+        &output.stderr,
+        candidate,
+        &owner.short_home,
+        &roots,
+    ))
+}
+
+/// The error `process::run` gives a provider command that exited unsuccessfully, word for
+/// word (a test compares them), built here because the whole stderr is needed as well.
+fn failed_provider_command(output: &process::Captured) -> CandidateError {
+    CandidateError::new(
+        "provider_command_failed",
+        format!(
+            "Provider command exited {}; no automatic retry. {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr[..output.stderr.len().min(8192)]).trim()
+        ),
     )
 }
 /// Record a lifecycle phase. Every phase other than `stopped` clears the clean-stop marker
@@ -1818,12 +1845,21 @@ fn stalled_boot(error: CandidateError) -> CandidateError {
     if error.code != "provider_command_failed" || !error.message.contains(NO_BOOT_PROGRESS) {
         return error;
     }
-    CandidateError::new(
+    let stalled = CandidateError::new(
         "provider_boot_stalled",
         "The provider ended the start: the VM made no boot progress within the provider's \
          limit. Recover the pool before retrying. A large shared project directory is one \
          known cause; HACK_NATIVE_HOT_RELOAD=off starts without the scan that causes it.",
-    )
+    );
+    // The provider's own line stays with the renamed failure.
+    match error
+        .refusals
+        .as_ref()
+        .and_then(|diagnostics| diagnostics.provider_line.as_deref())
+    {
+        Some(line) => stalled.with_provider_line(line),
+        None => stalled,
+    }
 }
 
 /// SIGTERM a provider whose identity is verified at the signal, then wait for it to exit.
@@ -3695,6 +3731,22 @@ mod tests {
         ));
         assert_eq!(stalled.code, "provider_boot_stalled");
         assert!(stalled.message_fixed);
+        assert!(
+            serde_json::to_value(&stalled)
+                .unwrap()
+                .get("provider_line")
+                .is_none()
+        );
+        // A stalled start that carried the provider's own line keeps it under the new code.
+        let with_line = stalled_boot(
+            CandidateError::new("provider_command_failed", provider.to_owned())
+                .with_provider_line("Error: no boot progress for 30 seconds"),
+        );
+        assert_eq!(with_line.code, "provider_boot_stalled");
+        assert_eq!(
+            serde_json::to_value(&with_line).unwrap()["provider_line"],
+            "Error: no boot progress for 30 seconds"
+        );
         assert!(stalled.message.contains("HACK_NATIVE_HOT_RELOAD=off"));
         // Another failure of the same command keeps its code and text.
         let other = stalled_boot(CandidateError::new(
@@ -3710,6 +3762,27 @@ mod tests {
             format!("{NO_BOOT_PROGRESS} seen elsewhere"),
         ));
         assert_eq!(timeout.code, "provider_timeout_uncertain");
+    }
+
+    #[test]
+    fn a_failed_provider_command_keeps_the_error_process_run_gives_it() {
+        let shell = |script: &str| {
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args(["-c", script]);
+            command
+        };
+        for script in [
+            "echo out; echo 'Error: machine not found' >&2; exit 3",
+            "exit 1",
+            "i=0; while [ $i -lt 600 ]; do echo 'warning: filler filler filler' >&2; i=$((i+1)); done; exit 2",
+        ] {
+            let expected = process::run(&mut shell(script), Duration::from_secs(20)).unwrap_err();
+            let output = process::capture(&mut shell(script), Duration::from_secs(20)).unwrap();
+            let built = failed_provider_command(&output);
+            assert_eq!(built.code, expected.code, "{script}");
+            assert_eq!(built.message, expected.message, "{script}");
+            assert_eq!(built.message_fixed, expected.message_fixed);
+        }
     }
 
     #[test]

@@ -115,6 +115,7 @@ pub fn prepare_network_tools(
 pub use network_intent::NetworkIntent;
 mod process;
 mod profile;
+mod provider_line;
 pub use profile::Profile;
 pub mod publication;
 mod publication_stage;

@@ -131,15 +131,27 @@ pub(super) fn pool_idle(
 
 /// Receipt phases whose containers may be running or about to run in the current
 /// boot: Compose graph runs (`run/graphs`) and native-authored graph runs
-/// (`run/native-graphs`, kebab-case `journal::Phase`).
+/// (`run/native-graphs`, kebab-case `journal::Phase`). `failed-retained` is
+/// included: a failed start keeps the services that did start, uncleaned.
 const LIVE_PHASES: [(&str, &[&str]); 2] = [
     (
         "run/graphs",
-        &["preparing", "restoring", "ready-observed", "cleanup-intent"],
+        &[
+            "preparing",
+            "restoring",
+            "ready-observed",
+            "failed-retained",
+            "cleanup-intent",
+        ],
     ),
     (
         "run/native-graphs",
-        &["preparing", "ready-observed", "stop-intent"],
+        &[
+            "preparing",
+            "ready-observed",
+            "failed-retained",
+            "stop-intent",
+        ],
     ),
 ];
 /// Graph runs, Compose and native-authored, whose receipt says they are live,
@@ -200,6 +212,7 @@ mod tests {
             ("b", "stopped-data-retained"),
             ("c", "restoring"),
             ("d", "removed"),
+            ("6", "failed-retained"),
         ] {
             let dir = home.dir(&format!("run/graphs/{}", run.repeat(32)));
             state::write(
@@ -210,13 +223,14 @@ mod tests {
         }
         assert_eq!(
             live_graph_runs(&home.0),
-            Some(vec!["a".repeat(32), "c".repeat(32)])
+            Some(vec!["6".repeat(32), "a".repeat(32), "c".repeat(32)])
         );
         // Native-authored graphs are listed by their own phases.
         for (run, phase) in [
             ("f", "ready-observed"),
             ("9", "stopped"),
             ("8", "stop-intent"),
+            ("7", "failed-retained"),
         ] {
             let dir = home.dir(&format!("run/native-graphs/{}", run.repeat(32)));
             state::write(
@@ -228,6 +242,8 @@ mod tests {
         assert_eq!(
             live_graph_runs(&home.0),
             Some(vec![
+                "6".repeat(32),
+                "7".repeat(32),
                 "8".repeat(32),
                 "a".repeat(32),
                 "c".repeat(32),

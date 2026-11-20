@@ -839,7 +839,7 @@ outside this repair path.
 
 `runtime down` stops the pool even while projects run in it, because a crash or a
 host reboot ends the same way. Their containers stop with the guest and their data is
-kept. Its JSON then lists the graph runs (Compose and native-authored) whose receipts were live in
+kept. Its JSON then lists the graph runs (Compose and native-authored) whose receipts were live, including a failed start that kept its started services, in
 `interrupted_runs`, or sets `interrupted_runs_unknown` when they could not be read,
 and it writes one line on stderr saying how many it stopped. `hack up` in each of those
 projects starts the pool again and recovers its run.

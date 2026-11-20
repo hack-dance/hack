@@ -158,6 +158,8 @@ if (process.argv.includes("provider-line-home")) { console.error(JSON.stringify(
 if (process.argv.includes("provider-line-other-code")) { console.error(JSON.stringify({code:"graph_image",message:"Pinned image architecture or implicit volumes are incompatible.",message_fixed:true,provider_line:"Authorization: Bearer synthetic-token-value"})); process.exit(2); }
 if (process.argv.includes("provider-line-hostile")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:"pull https://user:hunter2@registry.example/v2 Authorization: Bearer synthetic-token-value TOKEN=abcdefghijklmnopqrstuvwxyz vm cf86560b70f1f4c9abcd port=8080"})); process.exit(2); }
 if (process.argv.includes("provider-line-trailing")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:"Error: failed" + (process.argv.includes("lf") ? "\\n" : process.argv.includes("cr") ? "\\r" : "\\r\\n")})); process.exit(2); }
+if (process.argv.includes("provider-line-spaced")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:'Authorization: Bearer  synthetic-token-value then "https://user:hunter2@registry.example/v2" done'})); process.exit(2); }
+if (process.argv.includes("provider-line-expanding")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:Array(18).fill("http://a@b").join(" ")})); process.exit(2); }
 if (process.argv.includes("provider-line-unsafe")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:process.argv.includes("unsafe-newline") ? "two\\nlines" : process.argv.includes("unsafe-escape") ? "esc\\u001b[0m" : process.argv.includes("unsafe-long") ? "x".repeat(201) : process.argv.includes("unsafe-unicode") ? "caf\\u00e9" : process.argv.includes("unsafe-empty") ? "" : 7})); process.exit(2); }
 if (process.argv.includes("fixed-message")) { console.error(JSON.stringify({code:"graph_image",message:"Pinned image architecture or implicit volumes are incompatible.",message_fixed:true,service:"web"})); process.exit(2); }
 if (process.argv.includes("bridge-socket-failure")) { console.error(JSON.stringify({code:"bridge_socket_timeout",message:"Native bridge sockets did not become private and owned before the startup deadline. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",message_fixed:true})); process.exit(2); }
@@ -1835,6 +1837,16 @@ test("HACK-2418: a failed provider command shows the provider's own last line, v
   expect(await failure("provider-line-hostile")).toBe(
     "Native runtime request failed (provider_command_failed); inspect owned state before retrying. Runtime: The provider's own error: pull https://<credentials>@registry.example/v2 Authorization: Bearer <value> TOKEN=<value> vm <id> port=8080"
   );
+  // Runs of spaces and quoted URLs do not get a credential through.
+  expect(await failure("provider-line-spaced")).toBe(
+    'Native runtime request failed (provider_command_failed); inspect owned state before retrying. Runtime: The provider\'s own error: Authorization: Bearer <value> then "https://<credentials>@registry.example/v2" done'
+  );
+  // Redaction can lengthen a line; what is shown stays within the bound.
+  const expanded = await failure("provider-line-expanding");
+  const shown = expanded.slice(expanded.indexOf("own error: ") + 11);
+  expect(shown.length).toBe(200);
+  expect(shown.endsWith("...")).toBe(true);
+  expect(shown).not.toContain("a@b");
   // A line that ends in a line break is not one line.
   for (const ending of ["lf", "cr", "crlf"]) {
     expect(await failure("provider-line-trailing", ending)).toBe(

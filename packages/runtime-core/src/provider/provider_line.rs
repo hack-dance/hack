@@ -17,7 +17,9 @@ use std::path::Path;
 pub const MAX: usize = 200;
 /// A `KEY=value` token keeps its value only up to this many characters.
 const MAX_VALUE: usize = 16;
-/// Only this much of the end of stderr is looked at: the reason is the last thing printed.
+/// Only this much of the end of the captured stderr is looked at: the reason is the last
+/// thing printed. `process::capture` itself keeps the first 64 KiB of stderr, so a reason
+/// printed after more output than that is not seen; the provider's commands print far less.
 const TAIL: usize = 16 * 1024;
 /// A run of hexadecimal digits at least this long is an identifier, not a word.
 const MAX_HEX: usize = 12;
@@ -51,23 +53,30 @@ fn without_controls(line: &str) -> String {
     plain
 }
 
-/// A character that can continue a file or directory name.
-fn names(character: char) -> bool {
-    character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+/// Whether `character`, straight after a place, ends that place: a separator, the end of a
+/// quoted or bracketed path, punctuation that follows a path in a sentence, or white space.
+/// Anything else continues a longer name (a sibling called `app+private` or `app2` is not
+/// `app`), and a longer name is left as it is.
+fn ends_place(character: char) -> bool {
+    character == '/'
+        || character.is_whitespace()
+        || matches!(
+            character,
+            '"' | '\'' | '`' | ':' | ';' | ',' | ')' | ']' | '}' | '>'
+        )
 }
 
-/// Replaces `path` by `word` wherever it stands as a whole path prefix: not where it is the
-/// beginning of a longer name (a directory named `person-else` beside `person` is not `person`).
+/// Replaces `path` by `word` wherever it stands as a whole path prefix.
 fn replace_place(text: &str, path: &str, word: &str) -> String {
     let mut replaced = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(found) = rest.find(path) {
         let after = &rest[found + path.len()..];
         replaced.push_str(&rest[..found]);
-        if after.chars().next().is_some_and(names) {
-            replaced.push_str(path);
-        } else {
+        if after.chars().next().is_none_or(ends_place) {
             replaced.push_str(word);
+        } else {
+            replaced.push_str(path);
         }
         rest = after;
     }
@@ -320,12 +329,13 @@ mod tests {
         let mut places = places();
         places.push((Path::new("/Volumes/client-disk/app"), "<project>"));
         let line = "virtiofs: cannot share /Volumes/client-disk/app/src: gone; \
-                    other /Volumes/client-disk/app-two/x and /data/person-else/y";
+                    other /Volumes/client-disk/app-two/x /Volumes/client-disk/app+b/y \
+                    /Volumes/client-disk/app2 and /data/person-else/y";
         assert_eq!(
             clean(line.as_bytes(), &places).as_deref(),
             Some(
                 "virtiofs: cannot share <project>/src: gone; other /Volumes/client-disk/app-two/x \
-                 and /data/person-else/y"
+                 /Volumes/client-disk/app+b/y /Volumes/client-disk/app2 and /data/person-else/y"
             )
         );
         // A place at the end of the text, before a quote or a colon, is a whole place.

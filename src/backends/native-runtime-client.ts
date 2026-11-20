@@ -112,7 +112,9 @@ const PROVIDER_FAILURES = new Set([
   "provider_boot_stalled",
 ]);
 const LONG_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=.{17,}$/;
-const URL_CREDENTIALS = /^([a-z][a-z0-9+.-]*:\/\/)[^/@]+@/i;
+const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)[^/@\s"'`]+@/gi;
+const WHITE_SPACE = /\s+/;
+const PROVIDER_LINE_LIMIT = 200;
 const LONG_HEX = /[0-9a-fA-F]{12,}/g;
 
 /** One printable ASCII line of 1 to 200 characters, checked character by character. */
@@ -161,12 +163,13 @@ export function nativeProviderLine(
     }
   }
   let afterBearer = false;
-  return text
-    .split(" ")
+  const redacted = text
+    .split(WHITE_SPACE)
+    .filter((token) => token !== "")
     .map((token) => {
       const bearer = afterBearer;
       afterBearer = token.toLowerCase() === "bearer";
-      if (bearer && token !== "") {
+      if (bearer) {
         return "<value>";
       }
       const assignment = LONG_ASSIGNMENT.exec(token);
@@ -178,6 +181,10 @@ export function nativeProviderLine(
         .replace(LONG_HEX, "<id>");
     })
     .join(" ");
+  // Redaction can lengthen the line: the bound holds for what is shown.
+  return redacted.length <= PROVIDER_LINE_LIMIT
+    ? redacted
+    : `${redacted.slice(0, PROVIDER_LINE_LIMIT - 3)}...`;
 }
 
 const NETWORK_HOST = /^[a-zA-Z0-9_.:[\]-]{1,253}$/;

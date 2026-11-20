@@ -6,9 +6,9 @@ stateDiagram-v2
   [*] --> NoRecord
   NoRecord --> Trusted : Write [settled token]
   Trusted --> Trusted : run reads, no Docker call
-  Trusted --> Changing : HackBegin
-  NoRecord --> Changing : HackBegin
-  Untrusted --> Changing : HackBegin
+  Trusted --> Changing : HackBegin [lock free]
+  NoRecord --> Changing : HackBegin [lock free]
+  Untrusted --> Changing : HackBegin [lock free]
   Changing --> Changing : HackApply
   Changing --> Untrusted : HackEnd
   Untrusted --> Trusted : Write [fresh read]
@@ -17,6 +17,8 @@ stateDiagram-v2
     A crash here leaves the token
     unsettled: every run reads
     Docker until the next change.
+    One change at a time: a second
+    waits on ingress-change.lock.
   end note
   note right of Trusted
     INV TrustedRecordIsCurrent:

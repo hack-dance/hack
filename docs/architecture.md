@@ -1188,7 +1188,8 @@ qualify the installed binary, real filesystems or an application.
     Hack last read, with the generation token read before that read) and
     `caddy/ingress-generation.json` (the token `hack global up`/`down` and the
     doctor proxy repair replace, unsettled during the change and settled after;
-    a record is trusted only under the current settled token; see
+    one change runs at a time under `caddy/ingress-change.lock`, reclaimed only
+    from a dead owner; a record is trusted only under the current settled token; see
     [the record chart](./diagrams/ingress-address-record.svg) and the model in
     `tests/models/tla/ingress-address-record`)
   - `compose-overrides/<project>-<digest>/<instance>.yml` (the generated internal

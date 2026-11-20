@@ -1833,11 +1833,13 @@ defence against it.
 
 ### Starting a stopped pool: the steps and their size
 
-`runtime up` on a pool whose disks exist but whose VM is not running (after a host reboot
-or a `runtime down`) runs these steps in this order. The times are one measurement, three
-boots of about 3.1 s each on an Apple Silicon host under moderate load, pool only, with a
-scratch build that timed each step. They show the order and relative size of the steps,
-not a guarantee.
+`runtime up` on a Development pool whose disks exist but whose VM is not running (after a
+host reboot or a `runtime down`) runs these steps in this order. The times are one
+measurement, three boots of about 3.1 s each on an Apple Silicon host under moderate load,
+pool only, with a scratch build that timed each step. They show the order and relative
+size of the steps, not a guarantee. A Research pool admits differently: three qualifying
+samples fifteen seconds apart before the lease and none under it, so its start is longer
+by those pauses.
 
 | Step | About | Note |
 | --- | --- | --- |
@@ -1853,8 +1855,10 @@ not a guarantee.
 | Engine start | 390 ms | until the engine answers |
 | Everything else | 60 ms | identity checks, disk adoption, pings |
 
-The content proof of the provider and engine trees costs a start nothing extra: it runs
-between the two admission samples, which must be at least one second apart. A brand-new
+In this measurement the content proof of the provider and engine trees added nothing to
+the start: it ran between the two admission samples, which must be at least one second
+apart, and finished inside that second. Only the rest of the window is slept, so a proof
+or a lease wait that takes longer than the window lengthens the start by the excess. A brand-new
 home adds `machine create`, the provider's first-start disk template copy and the root
 files copy, about 5 s in the same measurement.
 

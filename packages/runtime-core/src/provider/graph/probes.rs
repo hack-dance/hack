@@ -270,13 +270,22 @@ fn exec(
         .id
         .as_ref()
         .ok_or_else(|| error("graph_probe_identity", "Probe lacks a container identity."))?;
+    // A probe a build before HACK-2443 started on a still running graph carries the
+    // arguments without the start interval; it is the same probe.
+    let arguments = &value["ProcessConfig"]["arguments"];
+    let current = *arguments
+        == json!(
+            p.config
+                .arguments("/run/hack-http-probe-state", &p.generation)?
+        );
+    let legacy = || -> Result<bool, CandidateError> {
+        Ok(p.config
+            .legacy_arguments("/run/hack-http-probe-state", &p.generation)?
+            .is_some_and(|legacy| *arguments == json!(legacy)))
+    };
     if value["ContainerID"] != *container
         || value["ProcessConfig"]["entrypoint"] != "/run/hack-http-probe"
-        || value["ProcessConfig"]["arguments"]
-            != json!(
-                p.config
-                    .arguments("/run/hack-http-probe-state", &p.generation)?
-            )
+        || !(current || legacy()?)
     {
         return Err(error(
             "graph_probe_identity",
@@ -356,6 +365,7 @@ mod observation_clock_tests {
                 timeout_ms: 40,
                 retries: 3,
                 start_period_ms: 0,
+                start_interval_ms: None,
                 policy: None,
             },
             allocation: "a".repeat(32),

@@ -12,6 +12,12 @@ pub struct HttpProbe {
     pub timeout_ms: u64,
     pub retries: u32,
     pub start_period_ms: u64,
+    /// How often to try until the first success (HACK-2443); absent means
+    /// [`DEFAULT_START_INTERVAL_MS`]. Never longer than `interval_ms`. After the first success
+    /// the probe keeps `interval_ms`, and an unhealthy sample never brings the fast cadence
+    /// back. Absent in receipts written before it existed, which compare equal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_interval_ms: Option<u64>,
     /// Generated route readiness only; absent for authored HTTP healthchecks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<HttpProbePolicy>,
@@ -21,6 +27,9 @@ pub struct HttpProbe {
 pub enum HttpProbePolicy {
     Route,
 }
+/// The cadence of every native HTTP probe until its first success, when it declares none.
+pub const DEFAULT_START_INTERVAL_MS: u64 = 250;
+
 fn invalid() -> CandidateError {
     CandidateError::new(
         "http_probe",
@@ -46,6 +55,7 @@ impl HttpProbe {
             timeout_ms: 1_000,
             retries: 3,
             start_period_ms: 240_000,
+            start_interval_ms: None,
             policy: Some(HttpProbePolicy::Route),
         }
     }
@@ -61,6 +71,9 @@ impl HttpProbe {
             || !(1..=60_000).contains(&self.timeout_ms)
             || !(1..=100).contains(&self.retries)
             || self.start_period_ms > 3_600_000
+            || self
+                .start_interval_ms
+                .is_some_and(|value| !(10..=self.interval_ms).contains(&value))
         {
             return Err(invalid());
         }
@@ -88,11 +101,33 @@ impl HttpProbe {
             self.start_period_ms.to_string(),
             directory.into(),
             generation.into(),
+            self.start_interval().to_string(),
         ];
         if self.policy == Some(HttpProbePolicy::Route) {
             arguments.push("route".into());
         }
         Ok(arguments)
+    }
+    /// The cadence until the first success: declared, else [`DEFAULT_START_INTERVAL_MS`],
+    /// never longer than the steady interval.
+    pub fn start_interval(&self) -> u64 {
+        self.start_interval_ms
+            .unwrap_or(DEFAULT_START_INTERVAL_MS)
+            .min(self.interval_ms)
+    }
+    /// The arguments a probe exec started by a build before HACK-2443 carries: the same without
+    /// the start interval. Only a probe that declares no start interval can have one.
+    pub fn legacy_arguments(
+        &self,
+        directory: &str,
+        generation: &str,
+    ) -> Result<Option<Vec<String>>, CandidateError> {
+        if self.start_interval_ms.is_some() {
+            return Ok(None);
+        }
+        let mut arguments = self.arguments(directory, generation)?;
+        arguments.remove(8);
+        Ok(Some(arguments))
     }
     /// A historical healthy sample cannot outlive its exec, generation, or freshness window.
     pub fn health(
@@ -169,6 +204,7 @@ mod tests {
             timeout_ms: 40,
             retries: 3,
             start_period_ms: 0,
+            start_interval_ms: None,
             policy: None,
         }
     }
@@ -246,16 +282,59 @@ mod tests {
                 .arguments("/private/probe", GENERATION)
                 .unwrap()
                 .len(),
-            8
+            9
+        );
+        // The start interval (HACK-2443) is the ninth argument: the default when undeclared,
+        // capped at the steady interval, and a probe started before it carries the same
+        // without it.
+        assert_eq!(
+            explicit.start_interval(),
+            DEFAULT_START_INTERVAL_MS.min(explicit.interval_ms)
+        );
+        assert_eq!(
+            explicit.arguments("/private/probe", GENERATION).unwrap()[8],
+            explicit.start_interval().to_string()
+        );
+        let legacy = explicit
+            .legacy_arguments("/private/probe", GENERATION)
+            .unwrap()
+            .unwrap();
+        assert_eq!(legacy.len(), 8);
+        assert_eq!(
+            legacy[..],
+            explicit.arguments("/private/probe", GENERATION).unwrap()[..8]
+        );
+        let mut declared = config();
+        declared.start_interval_ms = Some(100);
+        assert_eq!(
+            declared.arguments("/private/probe", GENERATION).unwrap()[8],
+            "100"
+        );
+        assert!(
+            declared
+                .legacy_arguments("/private/probe", GENERATION)
+                .unwrap()
+                .is_none()
+        );
+        // Never longer than the steady interval, and absent from receipts unless declared.
+        declared.start_interval_ms = Some(declared.interval_ms + 1);
+        assert!(declared.validate().is_err());
+        assert!(
+            serde_json::to_value(&explicit)
+                .unwrap()
+                .get("start_interval_ms")
+                .is_none()
         );
         let inferred = HttpProbe::inferred_route(3000);
         inferred.validate().unwrap();
         // Even a timeout on every startup sample exhausts grace and retries
-        // before the frontend's 300-second graph budget. Startup cadence is at
-        // most one second; the steady interval is thirty seconds.
+        // before the frontend's 300-second graph budget. Startup cadence is the
+        // start interval (250 ms by default); the steady interval is thirty seconds.
         assert_eq!(inferred.interval_ms, 30_000);
+        assert_eq!(inferred.start_interval(), DEFAULT_START_INTERVAL_MS);
         assert!(
-            inferred.start_period_ms + u64::from(inferred.retries) * (1_000 + inferred.timeout_ms)
+            inferred.start_period_ms
+                + u64::from(inferred.retries) * (inferred.start_interval() + inferred.timeout_ms)
                 < 300_000
         );
         assert_eq!(serde_json::to_value(&inferred).unwrap()["policy"], "route");

@@ -824,6 +824,13 @@ impl Session<'_, '_> {
             } else {
                 &inspected["Config"][key]
             };
+            let compatible;
+            let value = if key == "Healthcheck" {
+                compatible = startup_compatible(value, actual);
+                &compatible
+            } else {
+                value
+            };
             if let Some(path) = mismatch(value, actual, key) {
                 return Err(CandidateError::new(
                     "graph_config_mismatch",
@@ -2273,6 +2280,31 @@ fn cleanup_owned_fenced(
     #[cfg(target_os = "macos")]
     crate::provider::interactive_session::after_cleanup(candidate, &receipt.run);
     Ok(receipt)
+}
+
+/// The compiled `Healthcheck` to compare with a container's, accepting one created before
+/// native emitted the fast first check (HACK-2443): a `StartPeriod` or `StartInterval` equal
+/// to the injected default is dropped from the comparison when the container has none. A
+/// container that has the field must match it, and any other value is compared as compiled.
+pub(super) fn startup_compatible(expected: &Value, actual: &Value) -> Value {
+    let mut expected = expected.clone();
+    if let Some(fields) = expected.as_object_mut() {
+        for (key, default) in [
+            ("StartPeriod", crate::project::DEFAULT_START_PERIOD_NANOS),
+            (
+                "StartInterval",
+                crate::project::DEFAULT_START_INTERVAL_NANOS,
+            ),
+        ] {
+            let absent = actual
+                .get(key)
+                .is_none_or(|value| value.is_null() || value == 0);
+            if absent && fields.get(key).and_then(Value::as_u64) == Some(default) {
+                fields.remove(key);
+            }
+        }
+    }
+    expected
 }
 
 fn mismatch(expected: &Value, actual: &Value, path: &str) -> Option<String> {

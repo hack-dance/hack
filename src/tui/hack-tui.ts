@@ -47,6 +47,7 @@ import { exec, run } from "../lib/shell.ts";
 import { parseTimeInput } from "../lib/time.ts";
 import { copyToClipboard } from "../ui/clipboard.ts";
 import type { LogStreamBackend, LogStreamEvent } from "../ui/log-stream.ts";
+import { consumeLogStream } from "./log-stream.ts";
 import { runWithTerminalHandoff } from "./terminal-handoff.ts";
 
 /** Matches block characters used in ASCII banners */
@@ -2774,24 +2775,27 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         stderr: "pipe",
         stdin: "ignore",
       });
-      // Quitting mid-action must not cut the action's stderr pipe (an `up`
-      // or `down` would fail writing to it); the CLI exits after it ends.
-      holdProcessUntil(proc.exited);
-
       const actionStderr = proc.stderr;
-      if (actionStderr && typeof actionStderr !== "number") {
-        void consumeLogStream({
-          stream: actionStderr,
-          isActive: () => isActive,
-          onLine: (line) =>
-            appendLogEntry(
-              formatSystemLine({
-                message: `[${opts.label}] ${line}`,
-                tone: "warn",
-              })
-            ),
-        });
-      }
+      // Quitting mid-action must neither cut the action's stderr pipe (an
+      // `up` or `down` would fail writing to it) nor stop draining it (a full
+      // pipe would block the child forever): the stream is read to its end
+      // and the CLI exits after the child and the drain finish.
+      const drained =
+        actionStderr && typeof actionStderr !== "number"
+          ? consumeLogStream({
+              stream: actionStderr,
+              isActive: () => isActive,
+              drainWhenInactive: true,
+              onLine: (line) =>
+                appendLogEntry(
+                  formatSystemLine({
+                    message: `[${opts.label}] ${line}`,
+                    tone: "warn",
+                  })
+                ),
+            })
+          : Promise.resolve();
+      holdProcessUntil(Promise.all([proc.exited, drained]));
 
       const exitCode = await proc.exited;
       appendLogEntry(
@@ -4414,48 +4418,6 @@ function xtermToRgba(code: number): RGBA {
   const b = index % 6;
   const steps = [0, 95, 135, 175, 215, 255];
   return RGBA.fromInts(steps[r] ?? 0, steps[g] ?? 0, steps[b] ?? 0, 255);
-}
-
-async function consumeLogStream(opts: {
-  readonly stream: ReadableStream<Uint8Array>;
-  readonly isActive: () => boolean;
-  readonly onLine: (line: string) => void;
-}): Promise<void> {
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  const reader = opts.stream.getReader();
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) {
-        break;
-      }
-      if (!opts.isActive()) {
-        break;
-      }
-      if (!value || value.length === 0) {
-        continue;
-      }
-      buffer += decoder.decode(value, { stream: true });
-      let idx = buffer.indexOf("\n");
-      while (idx >= 0) {
-        const line = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 1);
-        if (line.trim().length > 0) {
-          opts.onLine(line);
-        }
-        idx = buffer.indexOf("\n");
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const rest = buffer.trim();
-  if (rest.length > 0 && opts.isActive()) {
-    opts.onLine(rest);
-  }
 }
 
 function shutdownRenderer(opts: {

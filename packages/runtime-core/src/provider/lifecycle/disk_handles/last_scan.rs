@@ -60,6 +60,22 @@ impl Record {
     }
 }
 
+/// What `runtime status` says of the last scan: `{"method": "in-process"}`, or
+/// `{"method": "lsof", "reason": "self_test_failed"}` with the record's reasons.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct Report {
+    method: Name,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<Fallback>,
+}
+
+/// The last scan of the pool at `pool` as `runtime status` reports it; none without a
+/// readable record.
+pub(in crate::provider::lifecycle) fn report(pool: &Path) -> Option<Report> {
+    let Record { method, reason, .. } = Record::of(read(pool)?);
+    Some(Report { method, reason })
+}
+
 fn path(pool: &Path) -> PathBuf {
     pool.join(FILE)
 }
@@ -151,6 +167,24 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(left, [FILE]);
+    }
+
+    /// `runtime status` reports the recorded method without the record's version, and
+    /// nothing for a pool no scan has recorded.
+    #[test]
+    fn the_status_report_names_the_recorded_method() {
+        let pool = Scratch::new();
+        assert_eq!(report(pool.path()), None);
+        record(pool.path(), Method::InProcess);
+        assert_eq!(
+            serde_json::to_string(&report(pool.path())).unwrap(),
+            r#"{"method":"in-process"}"#
+        );
+        record(pool.path(), Method::Lsof(Fallback::QueryUnanswered));
+        assert_eq!(
+            serde_json::to_string(&report(pool.path())).unwrap(),
+            r#"{"method":"lsof","reason":"query_unanswered"}"#
+        );
     }
 
     /// The record is rewritten only when the method changes.

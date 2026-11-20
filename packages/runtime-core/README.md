@@ -2280,7 +2280,8 @@ does not pass runs whole through `lsof` (`/usr/sbin/lsof`, then `/usr/bin/lsof`)
 scan did before. Each scan records its method beside the owner record, in
 `disk-handle-scan.json`: `{"version": 1, "method": "in-process"}`, or `"method": "lsof"`
 with a `reason` of `query_unanswered`, `self_test_failed` or `self_test_unavailable`. The
-record is a report only, and `runtime status` does not show it yet.
+record is a report only. `runtime status --json` shows it without the version as
+`disk_handle_scan`, and leaves the field out for a pool no scan has recorded.
 
 Scanning every process to learn whether a VM disk is held is a consequence of not owning
 the VM process: a launcher of our own would hold an exclusive lock on each disk, and the

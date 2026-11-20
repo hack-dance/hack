@@ -77,6 +77,10 @@ pub struct RuntimeStatus {
     /// first (see `guest_memory_peak`). A record only; absent when there is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guest_memory_peaks: Option<Vec<guest_memory_peak::Boot>>,
+    /// How this pool's last disk-holder scan read the host (`disk_handles`): in this
+    /// process, or through `lsof` with the reason. A record only; absent before a scan ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_handle_scan: Option<disk_handles::last_scan::Report>,
     /// Provider sockets native found world-accessible and made private for the running
     /// provider (`socket_repairs`); absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1048,6 +1052,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             graph_runs: users.graph_runs,
             pool_idle: Some(false),
             guest_memory_peaks: None,
+            disk_handle_scan: None,
             repaired_sockets: None,
             hashing: crate::sha256_backend::report(),
         });
@@ -1127,6 +1132,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         graph_runs: users.graph_runs,
         pool_idle,
         guest_memory_peaks: guest_memory_peak::history(&root(candidate)),
+        disk_handle_scan: disk_handles::last_scan::report(&root(candidate)),
     })
 }
 

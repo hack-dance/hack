@@ -3890,8 +3890,11 @@ mod tests {
 
     /// Whether every command of the executable cache script is a fixed shell word or utility.
     /// It reads each word in command position: the first of a line, and the one after `;`,
-    /// `|`, `&&`, `||`, `if`, `then`, `else`, `do` or a `case` pattern. So a line cannot run
-    /// a file from the cache or the share after its first command either.
+    /// `|`, `&&`, `||`, `if`, `then`, `else`, `do`, a `case` pattern or an assignment. So a
+    /// line cannot run a file from the cache or the share after its first command either.
+    /// It splits on whitespace, so it refuses what that cannot read: an operator written
+    /// against a word (`a;b`, `a|b`), any `&` but `&&`, and an assignment from a command
+    /// substitution that is not the whole rest of its line.
     fn cache_script_runs_only_fixed_commands(script: &str) -> Result<(), String> {
         const COMMANDS: [&str; 20] = [
             "set",
@@ -3928,17 +3931,37 @@ mod tests {
             .map(str::trim)
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
         {
+            let refused = |word: &str| Err(format!("{word} in {line}"));
             let mut command = true;
             for word in line.split_whitespace() {
+                // An operator this reading would not see as one.
+                let ends = word.trim_end_matches(';');
+                if ends.contains(';')
+                    || (word.contains(['|', '&']) && !["|", "||", "&&"].contains(&word))
+                {
+                    return refused(word);
+                }
+                let assigned = ASSIGNED.iter().any(|name| word.starts_with(name));
                 if command
-                    && !(COMMANDS.contains(&word.trim_end_matches(';'))
+                    && !(COMMANDS.contains(&ends)
                         || COMMANDS.contains(&word)
-                        || ASSIGNED.iter().any(|name| word.starts_with(name))
+                        || assigned
                         || pattern(word))
                 {
-                    return Err(format!("{word} in {line}"));
+                    return refused(word);
                 }
-                command = word.ends_with(';')
+                if command && assigned && word.contains("$(") {
+                    // `name=$(...)`: the substitution must be the rest of the line, so no
+                    // command follows the assignment. Its own command is checked below.
+                    if !line.ends_with(')') || line.matches("$(").count() != 1 {
+                        return refused(word);
+                    }
+                    command = false;
+                    continue;
+                }
+                // A plain assignment is a prefix: the next word is still a command.
+                command = (command && assigned && !word.ends_with(';'))
+                    || word.ends_with(';')
                     || ["|", "||", "&&", "if", "then", "else", "do"].contains(&word)
                     || pattern(word);
             }
@@ -3987,6 +4010,14 @@ mod tests {
             " if test 1 = 1; then /opt/hack-engine/runc; fi",
             " case x in x) /opt/hack-engine/runc;; esac",
             " chmod 555 `/opt/hack-engine/runc`",
+            r#" chmod 555 "$cache/$name";"$cache/$name""#,
+            r#" chmod 555 "$cache/$name" & /opt/hack-engine/runc"#,
+            r#" chmod 555 "$cache/$name"|"$path""#,
+            " path=ignored /opt/hack-engine/runc",
+            r#" size=$(stat -c %s "$path") /opt/hack-engine/runc"#,
+            r#" size=$(stat -c %s "$path") $(cat /opt/hack-engine/runc)"#,
+            " ! /opt/hack-engine/runc",
+            " ( /opt/hack-engine/runc )",
         ] {
             let changed = script.replace(chmod, run);
             assert!(

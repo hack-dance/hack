@@ -1,6 +1,17 @@
 //! Resident localhost HTTP probe used by native graph readiness checks.
 //! Status is ephemeral and needs both a live exec identity and a fresh generation-bound sample.
-use crate::{CandidateError, project::execution::Health};
+use crate::{CandidateError, ProbeReason, project::execution::Health};
+
+/// One sample judged (see [`HttpProbe::assess`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Assessment {
+    pub health: Health,
+    /// Why, when unhealthy.
+    pub reason: Option<ProbeReason>,
+    pub sequence: u64,
+    pub failures: u64,
+    pub elapsed_ms: u64,
+}
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,6 +148,18 @@ impl HttpProbe {
         exec_running: bool,
         now_ms: u64,
     ) -> Result<Health, CandidateError> {
+        self.assess(raw, generation, exec_running, now_ms)
+            .map(|assessment| assessment.health)
+    }
+    /// [`Self::health`] with why an unhealthy sample is unhealthy and the sample's counts
+    /// (HACK-2416). An unreadable sample is an error, as before.
+    pub fn assess(
+        &self,
+        raw: &str,
+        generation: &str,
+        exec_running: bool,
+        now_ms: u64,
+    ) -> Result<Assessment, CandidateError> {
         self.validate()?;
         if raw.len() > 256 || !raw.ends_with('\n') || !generation_valid(generation) {
             return Err(invalid());
@@ -158,7 +181,7 @@ impl HttpProbe {
                 v.parse().map_err(|_| invalid())
             })
             .collect::<Result<_, _>>()?;
-        let [sequence, health, failures, observed_ms, _elapsed_ms] = numbers[..] else {
+        let [sequence, health, failures, observed_ms, elapsed_ms] = numbers[..] else {
             return Err(invalid());
         };
         if health > 2
@@ -172,16 +195,41 @@ impl HttpProbe {
         }
         // A small wall-clock allowance is explicit; excessive skew fails closed.
         let freshness = self.interval_ms + self.timeout_ms + 1_000;
-        if !exec_running
-            || observed_ms > now_ms.saturating_add(1_000)
-            || now_ms.saturating_sub(observed_ms) > freshness
-        {
-            return Ok(Health::Unhealthy);
+        let judged = |health: Health, reason: Option<ProbeReason>| Assessment {
+            health,
+            reason,
+            sequence,
+            failures,
+            elapsed_ms,
+        };
+        if !exec_running {
+            return Ok(judged(Health::Unhealthy, Some(ProbeReason::ExecNotRunning)));
+        }
+        // A sample from before the first success (health 2) can make nothing ready, so a
+        // doubt about it is not a failure (HACK-2416): a guest clock ahead of the host's, or
+        // an age up to the startup grace plus one attempt, which a patient first attempt can
+        // take (HACK-2440), reads as still starting. Older than that, it is stale.
+        if health == 2 {
+            let patient = self.start_period_ms.max(freshness) + self.timeout_ms + 1_000;
+            return Ok(if now_ms.saturating_sub(observed_ms) > patient {
+                judged(Health::Unhealthy, Some(ProbeReason::SampleStale))
+            } else {
+                judged(Health::Starting, None)
+            });
+        }
+        if observed_ms > now_ms.saturating_add(1_000) {
+            return Ok(judged(
+                Health::Unhealthy,
+                Some(ProbeReason::SampleClockAhead),
+            ));
+        }
+        if now_ms.saturating_sub(observed_ms) > freshness {
+            return Ok(judged(Health::Unhealthy, Some(ProbeReason::SampleStale)));
         }
         Ok(match health {
-            0 => Health::Unhealthy,
-            1 => Health::Healthy,
-            _ => Health::Starting,
+            0 => judged(Health::Unhealthy, Some(ProbeReason::FailuresExhausted)),
+            1 => judged(Health::Healthy, None),
+            _ => judged(Health::Starting, None),
         })
     }
 }
@@ -452,6 +500,10 @@ mod tests {
                                 let response = format!("HTTP/1.1 200 OK\r\nX-Large: {}\r\n\r\n", "x".repeat(8192));
                                 let _ = stream.write_all(response.as_bytes());
                                 continue;
+                            }
+                            16 => {
+                                thread::sleep(Duration::from_millis(300));
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
                             }
                             _ => b"NOT-HTTP 200 OK\r\n\r\n",
                         };
@@ -822,6 +874,19 @@ mod tests {
                 let mut f = Fixture::new(mode, 0);
                 f.wait(Health::Unhealthy, 0);
             }
+        }
+        #[test]
+        fn inside_the_start_period_one_slow_first_answer_is_waited_for() {
+            // The app takes 300 ms to answer against a 40 ms timeout. Inside the
+            // start period the first attempt may run for the rest of the period,
+            // so one request succeeds instead of many abandoned ones.
+            let mut f = Fixture::new(16, 5000);
+            let seq = f.wait(Health::Healthy, 0);
+            assert_eq!(seq, 1);
+            assert_eq!(f.accepted.load(Ordering::SeqCst), 1);
+            // Without a start period the same answer is too slow.
+            let mut f = Fixture::new(16, 0);
+            f.wait(Health::Unhealthy, 0);
         }
         #[test]
         fn startup_grace_does_not_mask_failure_after_first_success() {

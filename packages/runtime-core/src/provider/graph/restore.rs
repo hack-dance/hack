@@ -652,6 +652,7 @@ fn restore_inputs(
         receipt,
         configs: prepared.configs,
         expected_environment,
+        probe_findings: BTreeMap::new(),
         restarting: false,
         fresh_cache_completion: false,
         cache_initializers: BTreeMap::new(),

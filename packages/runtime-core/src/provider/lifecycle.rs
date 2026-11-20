@@ -16,6 +16,7 @@ mod private_child;
 #[cfg(all(test, target_os = "macos"))]
 mod provider_repair_tests;
 mod relay_process;
+mod rootfs_proof;
 mod running_start;
 mod short_home;
 mod socket_repairs;
@@ -1469,17 +1470,26 @@ fn start_pool_observed(
         (samples, None)
     };
     // The content proofs, taken inside the admission window and rechecked under the lease
-    // (`leased_trees`). A boot records them in its tree witness (`tree_witness`).
-    let mut proven_trees = std::collections::BTreeMap::from([
-        (
-            super::tree_witness::SMOLVM.to_owned(),
-            artifact::verify_witnessed(candidate, &artifact::SMOLVM)?,
-        ),
-        (
-            super::tree_witness::ENGINE.to_owned(),
-            artifact::verify_witnessed(candidate, &artifact::ENGINE)?,
-        ),
-    ]);
+    // (`leased_trees`). A boot records them in its tree witness (`tree_witness`). An existing
+    // pool's root files are proven beside them, read-only (`rootfs_proof`): both fill the
+    // window instead of adding to the start after it.
+    let (proven_trees, early_rootfs) = std::thread::scope(|scope| {
+        let early = scope.spawn(|| rootfs_proof::prove(candidate));
+        let trees = artifact::verify_witnessed(candidate, &artifact::SMOLVM).and_then(|smolvm| {
+            let engine = artifact::verify_witnessed(candidate, &artifact::ENGINE)?;
+            Ok(std::collections::BTreeMap::from([
+                (super::tree_witness::SMOLVM.to_owned(), smolvm),
+                (super::tree_witness::ENGINE.to_owned(), engine),
+            ]))
+        });
+        // A proof that panicked is no proof: the start proves under the lease.
+        (trees, early.join().ok().flatten())
+    });
+    let mut proven_trees = proven_trees?;
+    if early_rootfs.is_some() {
+        // The proof ran on its own thread; count it where tests look.
+        super::tree_witness::note_content_proof();
+    }
     super::network_tools::verify(candidate)?;
     let (lock, fresh_samples) = startup_admission_lease(
         &root(candidate),
@@ -1494,6 +1504,10 @@ fn start_pool_observed(
     // anything below reads or executes them, each must still be what its proof saw, or be
     // proven again; the witness this boot records names these proofs (`leased_trees`).
     leased_trees::recheck(candidate, &lock, &mut proven_trees)?;
+    // The same for the root files proven beside them: still what that proof saw, or proven
+    // again here, before the admission record, any owner record update or any provider
+    // command (`rootfs_proof`). The recheck writes nothing.
+    let leased_rootfs = rootfs_proof::recheck(candidate, &lock, early_rootfs)?;
     // Recheck a clean stop's alias under the lease before the release checks probe its
     // sockets or the provider runs with it as HOME.
     restore_released_short_home(candidate)?;
@@ -1626,7 +1640,7 @@ fn start_pool_observed(
         &mut restart,
         &lock,
     )?;
-    let rootfs_metadata = prepare_rootfs(candidate, &mut owner)?;
+    let rootfs_metadata = prepare_rootfs(candidate, &mut owner, leased_rootfs.as_ref())?;
     // Guest commands search the guest's own directories before the engine share
     // (`agent::GUEST_PATH`): the engine binaries are found only if the root files hold
     // nothing of their names.
@@ -2287,8 +2301,14 @@ fn keep_memory_peak(
 }
 
 /// Copy (once) and prove the pool's guest rootfs by content. Returns its metadata digest
-/// (`tree_witness`), taken around the final content proof.
-fn prepare_rootfs(candidate: &Candidate, owner: &mut Owner) -> Result<String, CandidateError> {
+/// (`tree_witness`), taken around the final content proof. `leased` is what this start's
+/// recheck under the lease established for the root files (`rootfs_proof::recheck`); it
+/// stands in for the proof here only for the marker and the pin it was made against.
+fn prepare_rootfs(
+    candidate: &Candidate,
+    owner: &mut Owner,
+    leased: Option<&rootfs_proof::Leased>,
+) -> Result<String, CandidateError> {
     let templates = root(candidate).join("home/.smolvm");
     state::private_directory(&templates)?;
     for name in ["storage-template.ext4.zst", "overlay-template.ext4.zst"] {
@@ -2344,6 +2364,11 @@ fn prepare_rootfs(candidate: &Candidate, owner: &mut Owner) -> Result<String, Ca
         }
         owner.rootfs_digest = Some(source_hash);
         owner.save(candidate)?;
+    }
+    if let Some(metadata) =
+        leased.and_then(|leased| leased.stands(&marker, owner.rootfs_digest.as_deref()))
+    {
+        return Ok(metadata);
     }
     prove_rootfs(&destination, &marker, owner.rootfs_digest.as_deref())
 }

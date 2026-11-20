@@ -136,17 +136,29 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
         ),
         ("ResearchSample", "admission::sample_with(profile, ||"),
         (
+            "ProveRootEarly, on a thread beside ProveTrees",
+            "scope.spawn(|| rootfs_proof::prove(candidate))",
+        ),
+        (
             "ProveTrees",
-            "artifact::verify_witnessed(candidate, &artifact::SMOLVM)?",
+            "artifact::verify_witnessed(candidate, &artifact::SMOLVM).and_then(",
         ),
         (
             "ProveTrees",
             "artifact::verify_witnessed(candidate, &artifact::ENGINE)?",
         ),
+        (
+            "RefuseTree: a failed tree proof returns before the lease",
+            "let mut proven_trees = proven_trees?;",
+        ),
         ("AcquireLease, Recheck, Qualify", "startup_admission_lease("),
         (
             "RefuseTreeRecheck, the tree guard of Settle and ObserveRunning",
             "leased_trees::recheck(candidate, &lock, &mut proven_trees)?;",
+        ),
+        (
+            "RecheckRoot and its RefuseRoot",
+            "rootfs_proof::recheck(candidate, &lock, early_rootfs)?;",
         ),
         (
             "RestoreAliasLeased",
@@ -156,7 +168,10 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
             "Settle",
             "admission_pool::settle(candidate, &mut admission_owner, &lock, &mut samples)?",
         ),
-        ("ProveRoot", "prepare_rootfs(candidate, &mut owner)?"),
+        (
+            "ProveRoot, or the digest RecheckRoot took under the lease",
+            "prepare_rootfs(candidate, &mut owner, leased_rootfs.as_ref())?",
+        ),
         ("AdmitBoot", "admission_pool::admit_boot("),
         ("Start: final recheck", "boot.release(candidate, &lock)?"),
         ("Start", "start_machine(candidate, &owner, permit)?"),
@@ -208,7 +223,35 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
             "the tree recheck must come before `{later}`"
         );
     }
-    // The boot's witness is the rechecked proofs, with the root files proof added to them.
+    // The root files recheck is the step after the tree recheck: between the two nothing is
+    // written and no provider command runs, and the same later steps come after it.
+    let tree_recheck = "leased_trees::recheck(candidate, &lock, &mut proven_trees)?;";
+    let root_recheck = at("let leased_rootfs = rootfs_proof::recheck(");
+    assert!(
+        body[recheck + tree_recheck.len()..root_recheck]
+            .lines()
+            .all(|line| line.trim().is_empty() || line.trim().starts_with("//")),
+        "nothing runs between the tree recheck and the root files recheck"
+    );
+    for later in [
+        "restore_released_short_home(candidate)?;",
+        "interrupted::before_boot(",
+        "Owner::create_with_project_share(",
+        "state::write(&root(candidate).join(\"admission.json\")",
+        "if owner.phase == \"running\" {",
+        "enable_amd64_emulation(",
+        "create_machine(candidate",
+    ] {
+        assert!(
+            root_recheck < at(later),
+            "the root files recheck must come before `{later}`"
+        );
+    }
+    // The boot's witness is the rechecked proofs, with the root files proof added to them:
+    // the digest the recheck took under the lease, or the full proof `prepare_rootfs` ran.
+    let root = &body[at("let rootfs_metadata = prepare_rootfs(")..];
+    let root = &root[..root.find("if !owner.created {").unwrap()];
+    assert!(root.contains("leased_rootfs.as_ref()") && root.contains("metadata: rootfs_metadata,"));
     let witness = &body[at("tree_witness::record_boot(")..];
     assert!(witness[..witness.find(");").unwrap()].contains("proven_trees,"));
     assert_eq!(body.matches("let mut proven_trees").count(), 1);

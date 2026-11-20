@@ -151,9 +151,10 @@ impl Drop for Unowned {
 /// stream readers and its exit watcher.
 ///
 /// The child has an owner from here on. If a helper thread cannot be started (the host is
-/// out of threads), the child is killed and reaped and the caller gets
-/// `provider_spawn_failed`, as if the child had never started, instead of a panic that
-/// left the child running with nobody to stop or reap it.
+/// out of threads), supervision failed after the spawn: the direct child is killed and
+/// reaped and the caller gets `provider_spawn_failed`, instead of a panic that left the
+/// child running with nobody to stop or reap it. The child did run until then, so whatever
+/// it had already done is not undone, and a caller must not take the error to mean no effect.
 fn supervise(
     child: std::process::Child,
     observe_exit: fn(u32) -> bool,

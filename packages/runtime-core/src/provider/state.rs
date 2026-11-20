@@ -399,6 +399,11 @@ pub struct Owner {
     /// a later rewrite of the phase to `stopped` never relabels an unclean stop as clean.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean_stop: Option<CleanStop>,
+    /// This boot's choice for the provider's host-to-guest change notifications when it is
+    /// not the plain default (`hot_reload`): off, or forced on over a large share. Re-derived
+    /// at every boot, and applied to every provider invocation while it stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot_reload: Option<super::hot_reload::Choice>,
 }
 
 /// The engine identity of the boot whose `down` completed cleanly.
@@ -795,6 +800,7 @@ impl Owner {
             previous_guest_boot_id: None,
             reclamation: None,
             clean_stop: None,
+            hot_reload: None,
             daemon_pid: None,
             daemon_start: None,
             rootfs_digest: None,

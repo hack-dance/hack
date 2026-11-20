@@ -12,6 +12,7 @@ import {
   nativeDetachedUpFailedServices,
   nativeDetachedUpFailure,
   nativeDetachedUpHookFailed,
+  nativeDetachedUpHotReload,
   nativeDetachedUpPrestart,
   nativeDetachedUpProfileNotice,
   nativeDetachedUpProgress,
@@ -52,6 +53,25 @@ function publishFixtureBranchDropped(fixtureMode: string): void {
       label: "caddy",
       count: 2,
     });
+  }
+}
+
+/** HACK-2409: a detached owner hands the pool's hot-reload notice to the launcher. */
+function publishFixtureHotReload(fixtureMode: string): void {
+  if (fixtureMode === "hot-reload-off") {
+    nativeDetachedUpHotReload({
+      state: "off",
+      reason: "large_share",
+      limit: 20_000,
+    });
+  } else if (fixtureMode === "hot-reload-unsafe") {
+    // A notice that is not exactly two known names and a bounded number is dropped whole.
+    nativeDetachedUpHotReload({
+      state: "off",
+      reason: "large_share",
+      limit: 20_000,
+      message: "synthetic-private-value",
+    } as never);
   }
 }
 
@@ -582,12 +602,15 @@ if (role === "channel-holder") {
       await reportFixturePhases(mode);
       publishFixtureProfileNotice(mode);
       publishFixtureBranchDropped(mode);
+      publishFixtureHotReload(mode);
       sendUnsafePrestartRefusals(mode);
       if (
         [
           "ready",
           "profile-notice",
           "branch-dropped",
+          "hot-reload-off",
+          "hot-reload-unsafe",
           "restart-action",
           "cancel-at-accept",
           "shell-names",

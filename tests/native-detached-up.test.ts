@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { renderNativeHotReloadNotice } from "../src/backends/native-hot-reload-notice.ts";
 import { NATIVE_PROVIDER_PIN_MESSAGE } from "../src/backends/native-runtime-client.ts";
 import {
   NATIVE_HOOK_OUTPUT_TERMINAL_ONLY,
@@ -48,6 +49,8 @@ for (const mode of [
   "ready",
   "profile-notice",
   "branch-dropped",
+  "hot-reload-off",
+  "hot-reload-unsafe",
   "restart-action",
   "shell-names",
   "shell-names-empty",
@@ -93,19 +96,23 @@ for (const mode of [
           ? "Not starting 1 service whose Compose profiles are not selected: jobs. Selected profiles: none (from no --profile or COMPOSE_PROFILES). Select others with --profile or COMPOSE_PROFILES.\n"
           : mode === "branch-dropped"
             ? "Branch feature-a: service web label caddy drops 2 sites outside this project's route namespaces; they stay with the base instance.\n"
-            : mode === "shell-names"
-              ? "Forwarding shell variables: A_TOKEN, Z_TOKEN.\n"
-              : mode === "shell-names-empty"
-                ? "Forwarding shell variables: (none).\n"
-                : mode === "shell-names-root-dotenv"
-                  ? `Forwarding shell variables: (none).\n${NATIVE_ROOT_DOTENV_IGNORED_NOTICE}\n`
-                  : ""
+            : mode === "hot-reload-off"
+              ? `${renderNativeHotReloadNotice({ state: "off", reason: "large_share", limit: 20_000 })}\n`
+              : mode === "shell-names"
+                ? "Forwarding shell variables: A_TOKEN, Z_TOKEN.\n"
+                : mode === "shell-names-empty"
+                  ? "Forwarding shell variables: (none).\n"
+                  : mode === "shell-names-root-dotenv"
+                    ? `Forwarding shell variables: (none).\n${NATIVE_ROOT_DOTENV_IGNORED_NOTICE}\n`
+                    : ""
       );
       if (
         [
           "ready",
           "profile-notice",
           "branch-dropped",
+          "hot-reload-off",
+          "hot-reload-unsafe",
           "restart-action",
           "shell-names",
           "shell-names-empty",
@@ -169,6 +176,8 @@ for (const mode of [
             "ready",
             "profile-notice",
             "branch-dropped",
+            "hot-reload-off",
+            "hot-reload-unsafe",
             "restart-action",
             "shell-names",
             "shell-names-root-dotenv",

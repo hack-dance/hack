@@ -1810,6 +1810,8 @@ const contracts: readonly ModelContract[] = [
     // (the second under the startup lease, a window after the first), Research's
     // three pre-lease samples, the content proofs, the tree recheck under the
     // lease and the pre-boot check, on a host that can fail and recover once.
+    // This configuration proves the root files under the lease: a start
+    // without an early root files proof.
     name: "pool-start-admission",
     module: "PoolStart",
     states: 58_022,
@@ -1818,8 +1820,8 @@ const contracts: readonly ModelContract[] = [
     action: "Recheck",
     fields: ['pc = "Proven"', 'profile = "development"'],
     additionalControls: [
-      // The follow-up ordering: root files proven in the window, rechecked
-      // under the lease.
+      // The implementation's other path, a stopped pool's start: root files
+      // proven in the window, rechecked under the lease.
       { name: "root-before-lease", negative: false, states: 73_754 },
       {
         name: "window-not-enforced",

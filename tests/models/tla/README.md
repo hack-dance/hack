@@ -878,7 +878,8 @@ of a pool that is not running. A Development start takes one sample before the
 startup lease and one under it, at least the admission window after the first; a
 Research start keeps three samples before the lease. The positive control explores
 58,022 states for both profiles, with the provider and engine trees rechecked and
-the root files proven under the lease.
+the root files proven under the lease: a start without an early root files proof,
+such as the first boot of a new home.
 The clock, a host that fails and passes again once, the swapout count, another
 lease holder, a concurrent start, a changed tree or root file, a squatted HOME
 alias and a crash interleave with every step. See its
@@ -894,15 +895,16 @@ the count it was compared against (`BootSampleMatchesBaseline`). No VM starts fr
 engine tree that changed after its content proof (`NoStartFromChangedTree`). A
 refusal, a crash or a pool that a concurrent start already booted leaves no VM
 started and the lease returned. The `root-before-lease` control (73,754 states)
-checks the same invariants for the follow-up ordering, in which the root files
-are proven before the lease and their metadata is rechecked under it.
+checks the same invariants for the other path of the implementation, a stopped
+pool's start, in which the root files are proven before the lease and rechecked
+under it.
 
 Twelve controls remove one mechanism each and must fail the named invariant: the
 second sample before the lease (`negative`, `SecondSampleUnderLease`), no window
 (`window-not-enforced`), no swapout comparison at the second sample
 (`unchained-recheck`) or at the pre-boot check (`unchained-boot`), two Research
-samples (`research-two-samples`), no root recheck in the follow-up ordering
-(`root-unchecked`), no tree recheck under the lease (`changed-tree-start`,
+samples (`research-two-samples`), no root files recheck after a proof before the
+lease (`root-unchecked`), no tree recheck under the lease (`changed-tree-start`,
 `NoStartFromChangedTree`), no predicate check of the first sample
 (`first-sample-unchecked`), of Development's sample under the lease
 (`second-sample-unchecked`) or of Research's later samples
@@ -927,7 +929,9 @@ any other tree is proven by content again, and a changed tree refuses the start.
 `changed-tree-start` is the start without that recheck: a tree that changes
 between its proof and the lease is booted once, and only the next command's
 witness check refuses it. The model keeps one bit for the trees, so the metadata
-comparison and the second proof are one guard in it. A sample is one atomic
+comparison and the second proof are one guard in it. A stopped pool's root files
+are held to the same rule (`lifecycle/rootfs_proof.rs`): proven in the window,
+rechecked as the step after the tree recheck, with one bit in the model. A sample is one atomic
 observation, pressure that comes and goes between samples is invisible, tree and
 root changes are assumed absent while the lease is held, and nothing after
 `machine start` is modelled. There is no fairness or eventual-start claim, and a

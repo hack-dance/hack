@@ -1869,12 +1869,12 @@ by those pauses.
 | First admission sample | 50 ms | host memory, pressure, swapouts, thermal state, disk |
 | Provider and engine trees proven by content | 940 ms | fills the one-second admission window |
 | Startup lease, rest of the window, second sample, then both trees compared with their proof | 115 ms | only the rest of the window is slept; measured before the tree comparison was added |
-| Root files proven by content | 180 ms | under the lease |
+| Root files proven by content | 180 ms | measured under the lease; the proof now runs in the admission window beside the tree proofs, and only a metadata comparison is left here (below) |
 | Pre-boot sample, configuration audit, template check | 75 ms | |
 | `machine start` | 210 ms | the provider starts the VM |
 | Guest setup | 680 ms | about 430 ms is the guest hashing the engine binary over the share |
 | Network tools in the guest | 100 ms | |
-| Executable cache (`runc`, `docker-init`) | 300 ms | |
+| Executable cache (`runc`, `docker-init`) | 300 ms | measured when each binary was read over the share twice; it is now read once and hashed as it is copied |
 | Engine start | 390 ms | until the engine answers |
 | Everything else | 60 ms | identity checks, disk adoption, pings |
 
@@ -1901,6 +1901,22 @@ Silicon host, not a boot) timed one walk at 11 to 20 ms for a tree with the 936 
 of the pinned provider tree and under 1 ms for the engine tree's 8 entries. On any other
 filesystem both trees are hashed a second time under the lease, which the table does not
 show either.
+
+A stopped pool's root files are held to the same rule (`lifecycle::rootfs_proof`). Their
+content proof runs before the lease, read-only, on a thread beside the tree proofs, so it
+fills the admission window too. The step after the tree comparison is the same comparison
+for the root files, against the owner record the lease now fences: if the readiness
+marker and the pin are the ones that record names, the metadata digest is what the proof
+saw and the filesystem is one where metadata is trusted, the proof stands; otherwise the
+root files are proven by content again under the lease, and root files that no longer
+match their pin refuse the start with `artifact_digest_mismatch`. This recheck writes
+nothing either, and such a refusal comes before the admission record, any later owner
+record update and any provider command. The digest taken under the lease is the one the
+boot's witness records. A start with no earlier proof is unchanged: the first boot of a
+new home copies the root files and proves them by content under the lease, and so does
+any start whose earlier proof could not be made (no pin in the owner record, an alias, an
+unreadable entry, or root files that did not match before the lease). The table's 180 ms
+was measured before this change and the root files comparison was not timed on its own.
 
 The order of the admission steps, and what can change between them, is modelled in
 [`pool-start-admission`](../../tests/models/tla/pool-start-admission/COVERAGE.md);

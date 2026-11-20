@@ -5,7 +5,8 @@
   [COVERAGE.md](../tests/models/tla/pool-start-admission/COVERAGE.md).
 - Source: `start_pool` and `startup_admission_lease` in
   `packages/runtime-core/src/provider/lifecycle.rs`, `provider/admission.rs`,
-  `provider/lifecycle/leased_trees.rs` and `provider/lifecycle/admission_pool.rs`.
+  `provider/lifecycle/leased_trees.rs`, `provider/lifecycle/rootfs_proof.rs` and
+  `provider/lifecycle/admission_pool.rs`.
 - Boundary: one `runtime up` of a pool that is not running, from its first host
   sample to `machine start`. A pool that already runs takes
   `lifecycle::running_start` and samples nothing.
@@ -25,7 +26,7 @@ Each state is one value of the model's `pc`.
 | --- | --- | --- |
 | `Idle` | Nothing sampled yet. A squatted clean-stop alias is moved here. | Not held |
 | `Opened` | The first sample qualified and the window clock started. Research takes its second and third samples here. | Not held |
-| `Proven` | The provider and engine trees were proven by content. Nothing fences them until the lease is taken. | Not held |
+| `Proven` | The provider and engine trees were proven by content, and a stopped pool's root files beside them. Nothing fences them until the lease is taken. | Not held |
 | `Leased` | The startup lease is held. Development sleeps the rest of the window here. | Held |
 | `Qualified` | Every qualifying sample exists: two for Development, three for Research. The trees are rechecked against their proof here. | Held |
 | `Settled` | The trees are still what their proof saw, the reserve selection, if any, still names the owner record, and the pool is not running. | Held |
@@ -45,15 +46,15 @@ Each state is one value of the model's `pc`.
 | `Open` | `hostOk` | first sample recorded; `elapsed` reset; reserve selection bound to the owner record | `admission_pool::select`, `probe`; `admission::open` |
 | `ResearchSample` | Research; `WindowElapsed`; `hostOk`; `SameSwapouts` | next pre-lease sample recorded | `admission::sample_with` |
 | `ProveTrees` | `treeOk`; Research has all its samples | trees proven by content | `artifact::verify_witnessed` |
-| `ProveRootEarly` | `RootProofBeforeLease`; `rootOk` | root files proven in the window | follow-up ordering only |
+| `ProveRootEarly` | `RootProofBeforeLease`; `rootOk` | root files proven in the window | `rootfs_proof::prove`, on a thread beside `ProveTrees` |
 | `AcquireLease` | `lease = free` | lease held | `startup_lease` |
 | `Recheck` | Development; `WindowElapsed`; `hostOk`; `SameSwapouts` | second sample recorded under the lease | `admission::recheck_after_lease` |
 | `Qualify` | Research (all samples already taken) | none | `admission::recheck_after_lease` returns no sample |
 | `RestoreAliasLeased` | alias path held by another entry | owner record names a fresh alias | `restore_released_short_home` |
 | `Settle` | `TreesStillProven`; `SameOwner`; pool not running | selection settled | `leased_trees::recheck`; `admission_pool::settle` and the owner checks after it |
 | `ObserveRunning` | `TreesStillProven`; `poolRunning`; no selection | report the running pool | `leased_trees::recheck`; the `owner.phase == "running"` branch of `start_pool` |
-| `ProveRoot` | `rootOk`; root proof under the lease | root files proven by content | `prepare_rootfs`, `prove_rootfs` |
-| `RecheckRoot` | `RootProofBeforeLease`; `rootOk` | earlier proof's metadata still holds | follow-up ordering only |
+| `ProveRoot` | `rootOk`; no root proof before the lease | root files proven by content | `prepare_rootfs`, `prove_rootfs` |
+| `RecheckRoot` | `RootProofBeforeLease`; `rootOk` | the earlier proof still describes the root files, or they passed a second content proof | `rootfs_proof::recheck`; `prepare_rootfs` takes its digest |
 | `AdmitBoot` | `hostOk`; `SameSwapouts` | baseline is the last sample's swapout count; the observation is recorded with the host as it was | `admission_pool::admit_boot` |
 | `Start` | none | VM started | `BootAdmission::release`, `start_machine` |
 
@@ -69,8 +70,22 @@ first under the lease, before the alias restore; the model folds it into the two
 steps that leave `Qualified` without refusing. No tree changes under the lease, so
 that changes no checked invariant.
 
-In this tree `RootProofBeforeLease` is false: the root files are proven under
-the lease by `ProveRoot`, and `ProveRootEarly` and `RecheckRoot` never fire.
+`RootProofBeforeLease` names which of two paths one start takes. With an early
+proof of the root files it is true: `ProveRootEarly` and `RecheckRoot` fire and
+`ProveRoot` does not. That is every start of a stopped pool whose owner record
+names a root files pin that the root files matched before the lease. Without one
+it is false: the root files are proven under the lease by `ProveRoot`. That is
+the first boot of a new home, and any start whose early proof gave nothing. The
+model checks each path as its own configuration (`root-before-lease`,
+`positive`).
+
+`RecheckRoot` is drawn after `Settle`. The code runs it as the step after the tree
+recheck, before the alias restore and the settle step; `prepare_rootfs`, where
+the model's `RootProven` is reached, takes the digest it computed. No root file
+changes under the lease, so that changes no checked invariant. One difference is
+not folded away: the model's `RefuseRoot` from `Proven` refuses before the lease
+when the early proof fails, and the code instead continues without an early
+proof and refuses the same root files at `ProveRoot`.
 
 ## Exits
 
@@ -87,7 +102,7 @@ refusal below conjoins the model's `Refuse`, which returns the lease.
 | `RefuseRecheck` | `Leased` | the sample under the lease does not qualify, its swapouts changed, or the selection cannot be read | `admission_rejected`, `foreign_state` |
 | `RefuseTreeRecheck` | `Qualified` | a tree changed after its proof and no longer matches its pin | `artifact_digest_mismatch` |
 | `RefuseSelection` | `Qualified` | the selection no longer names the owner record, or the pool is running | `admission_owner_changed` |
-| `RefuseRoot` | `Proven`, `Settled` | the root files do not match their pin, or changed since their proof | `artifact_digest_mismatch` |
+| `RefuseRoot` | `Proven` (model only), `Settled` | the root files do not match their pin, or changed since their proof and no longer match it | `artifact_digest_mismatch` |
 | `RefuseBoot` | `RootProven` | the pre-boot sample does not qualify or its swapouts changed | `admission_rejected` |
 | `RefuseOther` | any | any other check of the start refuses | various |
 | `Crash` | any | the process dies | none |
@@ -98,6 +113,12 @@ any provider command. A HOME alias the start repaired before admission stays
 repaired. The model is coarser here: it still allows the alias repair under the
 lease before the guard. The `changed-tree-start` control removes the recheck and
 reaches `Started` with a changed tree.
+
+The root files recheck is the code's next step after the tree recheck and writes
+nothing either, so a `RefuseRoot` that follows an early proof also comes before
+the admission record and any provider command. A `RefuseRoot` without an early
+proof comes from `prepare_rootfs`, after them. The `root-unchecked` control
+removes the recheck and reaches `RootProven` with changed root files.
 
 ## Environment
 

@@ -824,6 +824,11 @@ for a security fix, so each bump stays small enough to review against upstream n
    fields must classify each one: inert (`INERT_RECORD_FIELDS`, mirrored in the
    qualification script), or a rule of its own (`docker_socket` must be `true`,
    `restart` must keep the `never` policy, `disk_durability` must be `full`).
+   Guest commands search the guest's own directories before the engine share (see
+   "Where guest commands find their programs"), so also compare the top level of the new
+   engine tree with the search directories of the new guest root tree: a file whose
+   name both have refuses every boot (`guest_search_order`), and an engine release that
+   ships its own copy of a system tool (for example `iptables`) would be such a name.
 3. On an Apple Silicon Mac, run [`scripts/qualify-provider-pin.ts`](../../scripts/qualify-provider-pin.ts)
    once with a bundle built from the current pin (baseline) and once with the bump,
    each in its own empty private root. Supply `--provider-archive`,
@@ -1690,6 +1695,36 @@ pool that is already running does not boot and does not start it. To see what it
 read `/run/hack-local/memory-return.status` in the guest: one line such as
 `memory-return-v1 order=2 compaction=done windows=9`.
 
+### Guest memory peak (a record only)
+
+A fresh boot starts a second best-effort guest job
+([`guest-memory-peak.sh`](src/provider/guest-memory-peak.sh)) at the same point and under
+the same rules: background mode, result ignored, owner token and boot ID checked first, at
+most once per boot, nothing written under `/storage`. Every five seconds it reads memory in
+use (`MemTotal` minus `MemAvailable`) and keeps the highest value for the boot in one line
+at `/run/hack-local/memory-peak.status`, together with counters the kernel keeps since
+boot: memory stall time (`/proc/pressure/memory`), OOM kills and major page faults. A
+sample can miss a short peak; those counters cannot miss a guest that ran short of memory.
+A sample is read with shell builtins, so the loop starts one process every five seconds
+(`sleep`).
+
+`runtime down` reads that line once from a running guest, after its live check and before
+the stop. Once the stop has succeeded it appends the reading to `guest-memory-peaks.json`
+beside the pool's owner record: the last five boots, each with boot ID, guest size, vCPU
+count, the reading, and the graph runs the home recorded at that time with their plan IDs.
+The read is bounded at two seconds and is best-effort, and the record is written only
+after the stop and its own state writes, so it cannot take the time or the disk space the
+stop needs. A guest that does not answer, a line that does not decode and a record that
+cannot be written leave `down` and its result exactly as they were. A record at that
+name that is a symlink, has a second link or is not private to the user is left in place
+and nothing is recorded; the write goes through a temporary file of its own and removes
+nothing that was there before. A VM that ends without `runtime down` leaves no
+reading for that boot. `runtime status` reports the record as `guest_memory_peaks` when
+there is one.
+
+Nothing reads the record to make a decision. It exists so that guest sizes can be chosen
+from measured use later; no start changes size because of it.
+
 ### Hot reload on shared source
 
 With the provider's host-to-guest change notifications on, an edit made on the host under a
@@ -1757,9 +1792,44 @@ waits for the scan and hot reload works; above it the boot does not wait and hot
   reports `provider_boot_stalled` with a fixed message instead of `provider_command_failed`.
   The receipt stays `booting`, as for any failed `machine start`; recover the pool before
   retrying.
+- **The provider's own words.** When a provider command fails, the error carries the last
+  line of the provider's stderr in `provider_line`, cleaned where it is produced
+  (`provider/provider_line.rs`): escape sequences removed; the native home, the pool's short
+  home and its temp root, every shared project root and the user's home replaced by fixed
+  words; long hexadecimal identifiers, whatever follows an `=` (unless it is a short number or a
+  fixed word such as `on` or `false`), bearer tokens and URL credentials replaced; printable ASCII only; at most 200 characters. The line is looked for
+  in the last 16 KiB of what `process::capture` keeps of stderr (its first 64 KiB). The CLI
+  shows it after its own validation and redaction, for `provider_command_failed` and
+  `provider_boot_stalled` only; the message that holds the raw stderr is still never shown.
 - **`localDirectories` does not shrink the share.** It mounts a volume from the VM disk over
   the container path; the host directory, if it exists in the checkout, is still read by the
   provider. Removing the host copy is what brings a checkout back under the limit.
+
+### Where guest commands find their programs
+
+Every command the runtime runs in the guest gets one search path (`agent::GUEST_PATH`): the
+guest's own system directories first, the engine share (`/opt/hack-engine`, mounted read-only
+from the host) last. A utility name such as `cat`, `sha256sum` or `stat` therefore always
+resolves to the guest's root files, also when the share holds a file of that name. That
+matters most before the guest has checked the engine binary it is served: a wrong or stale
+share cannot put a file of its own in front of the utilities that check it. The one cleanup
+command that releases the guest's cache has a system-only path.
+
+Only names the root files do not have resolve to the share, which is how `dockerd`,
+`containerd`, `runc` and the other engine binaries are found. Before each boot the runtime
+checks that no entry in the guest's search directories has the name of a file at the top of
+the engine tree and refuses the boot (`guest_search_order`) if one does, because the guest
+would find that entry before the engine's. The check resolves each search directory inside
+the root files the way the guest does (links followed inside the tree, `..` stopping at its
+root) and counts any kind of entry, so it refuses more than the guest's shell would pick.
+
+The engine's own children inherit this search path: what `dockerd` starts (`containerd`,
+the shims, `runc`, the `iptables` tools) is found the same way, system names first.
+
+The check reads the host's copy of the root files, which is what the guest boots from. It
+does not see a file that a root process inside the guest writes into a search directory
+while the VM runs; only the guest's root can do that, and the order change is not a
+defence against it.
 
 ### Starting a pool that is already running
 

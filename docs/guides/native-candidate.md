@@ -785,6 +785,12 @@ audits do not wait. A socket timeout or identity refusal takes the verified fail
 stop path and names the recovery command. A timeout also says how many sockets were
 still missing and how many were not yet private at the deadline (counts only). Use the same selected executor and identical
 `--candidate-root` argument as the failed start, followed by `runtime recover --json`.
+`hack native recover` does the same for the selected native home without naming the
+executor: it runs the runtime's recovery and prints the state it left (for example
+`recovered-unclean`), after which `hack up` starts again. `--json` passes the runtime
+result through. A refusal names the condition it could not prove. On a home that is already
+stopped (for example `recovered-unclean` after an earlier recovery) it changes nothing and
+says there was nothing to recover, however often it runs; a clean stop stays clean.
 If you explicitly selected an installed executor with `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME`, use those same non-empty values:
 
@@ -1471,8 +1477,7 @@ rules, rather than silently adopting an old image for a new declaration.
 A retained run stays startable after a later runtime boot fails before the runtime
 recorded the guest's boot, for example `bridge_socket_timeout` or a provider that
 exits during boot. After such a failure the runtime reads `failed-boot-stopped`. Run
-the runtime's `runtime recover --json` once, then `hack up` restores the retained run
-as usual. The VM may have started in that boot, but the container engine starts only
+`hack native recover` once, then `hack up` restores the retained run as usual. The VM may have started in that boot, but the container engine starts only
 after the boot is recorded, so no container, network or volume of the run was touched.
 Restore still checks the volumes' recorded identities. A failed boot that had
 recorded its guest boot, and so may have started the engine, still refuses retained

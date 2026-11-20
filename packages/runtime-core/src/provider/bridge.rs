@@ -436,7 +436,7 @@ fn startup_socket_timeout(
 ) -> CandidateError {
     let failure = CandidateError::new(
         "bridge_socket_timeout",
-        "Native bridge sockets did not become private and owned before the startup deadline. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",
+        "Native bridge sockets did not become private and owned before the startup deadline. Run hack native recover before retrying (with an executor selected by hand: the same executor and --candidate-root as the failed start, then runtime recover --json).",
     );
     match last {
         Some(states) if !states.ready() => failure.with_bridge_sockets(
@@ -488,7 +488,7 @@ fn wait_for_sockets_with(
         let states = socket_states(directory, intent).map_err(|_| {
             CandidateError::new(
                 "bridge_socket_identity",
-                "Bridge socket identity is unsafe; startup was refused. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",
+                "Bridge socket identity is unsafe; startup was refused. Run hack native recover before retrying (with an executor selected by hand: the same executor and --candidate-root as the failed start, then runtime recover --json).",
             )
         })?;
         verify_provider().map_err(startup_provider_failure)?;
@@ -510,7 +510,7 @@ fn wait_for_sockets_with(
 fn startup_provider_failure(failure: CandidateError) -> CandidateError {
     CandidateError::new(
         failure.code,
-        "The retained provider could not be verified while waiting for bridge sockets; startup was refused. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",
+        "The retained provider could not be verified while waiting for bridge sockets; startup was refused. Run hack native recover before retrying (with an executor selected by hand: the same executor and --candidate-root as the failed start, then runtime recover --json).",
     )
 }
 

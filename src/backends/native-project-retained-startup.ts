@@ -13,6 +13,18 @@ import type {
 } from "./native-runtime-client.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
+/**
+ * Stopped runtime phases the runtime's retained preflight accepts, besides a
+ * clean `stopped` (HACK-2376): a later boot that failed before recording its
+ * guest boot, after `runtime recover` where needed. To this caller each is a
+ * stopped runtime that `runtime up` boots; the runtime itself keeps the checks.
+ */
+const RETAINED_STOPPED_PHASES = new Set([
+  "stopped",
+  "recovered-unclean",
+  "stopped-before-engine",
+  "stopped-after-engine-failure",
+]);
 /** Offline boot eligibility only. Live compute/volume proof and restore selection
  * remain required after runtime up; this response cannot authorize graph restore.
  */
@@ -41,8 +53,9 @@ export async function preflightNativeRetainedStartup(opts: {
       value.namespace === opts.run.namespace &&
       value.plan === opts.run.planId &&
       value.live_resources_verified === false &&
+      typeof value.runtime_phase === "string" &&
       (value.runtime_phase === "running" ||
-        value.runtime_phase === "stopped") &&
+        RETAINED_STOPPED_PHASES.has(value.runtime_phase)) &&
       typeof value.selection === "string" &&
       SHA.test(value.selection)
     )
@@ -52,7 +65,7 @@ export async function preflightNativeRetainedStartup(opts: {
     );
   }
   return {
-    runtimePhase: value.runtime_phase,
+    runtimePhase: value.runtime_phase === "running" ? "running" : "stopped",
     flags: [
       "--expect-retained-run",
       opts.run.run,

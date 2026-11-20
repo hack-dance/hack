@@ -1474,6 +1474,12 @@ lock later has none of the old frames and never resumes an accepted intent.
 After the serving process answers "accepted, no live attempt", its intent record
 answers any later frame with that id.
 
+The model makes dispatched work visible as started in the same step. An
+implementation must not rely on that: each mutation's inspector distinguishes
+proven absence from missing evidence (for example work a provider accepted but
+has not yet made visible), and missing evidence yields "unknown", never "not
+done".
+
 State charts: [one service process](../../../docs/diagrams/runtime-service-process.svg) and
 [one client mutation](../../../docs/diagrams/runtime-service-client.svg) (Mermaid sources beside them).
 

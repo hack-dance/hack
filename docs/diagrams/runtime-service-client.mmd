@@ -7,8 +7,9 @@ stateDiagram-v2
     idle --> hello : Connect
     hello --> sent : Send
     hello --> idle : Retire or Disconnect
+    hello --> idle : Crash or ExitDrained
     hello --> oneshot : Fallback
-    sent --> idle : Disconnect or Crash
+    sent --> idle : Disconnect, Crash, ExitDrained
     sent --> idle : RefuseDraining
     sent --> replied : Finish or AnswerDone
     sent --> unknown : AnswerUnknown
@@ -30,6 +31,8 @@ stateDiagram-v2
         the intent id, on a new
         connection; a reply comes
         only on its own connection.
+        A dropped frame stays unsure;
+        RefuseDraining clears it.
     end note
     note right of inspect
         Entry from idle needs unsure > 0

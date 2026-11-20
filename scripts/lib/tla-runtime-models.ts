@@ -2387,6 +2387,136 @@ const contracts: readonly ModelContract[] = [
       },
     ],
   },
+  {
+    // HACK-2461: when a stored step result may replace the work, when garbage
+    // collection may delete it, and which digest a command uses for a tag.
+    // `positive` is the boot class with drift; the slot and cas classes are
+    // the two other positives. Each control removes one guard.
+    name: "step-store",
+    module: "StepStore",
+    states: 1_082_240,
+    invariant: "NoUnsoundSkip",
+    action: "Skip",
+    fields: [
+      "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+      "done = TRUE",
+      "world = {}",
+    ],
+    additionalControls: [
+      { name: "positive-slot", negative: false, states: 284_160 },
+      { name: "positive-cas", negative: false, states: 184_320 },
+      {
+        name: "no-verify-slot",
+        negative: true,
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+          "done = TRUE",
+        ],
+      },
+      {
+        name: "no-verify-boot",
+        negative: true,
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+          "done = TRUE",
+          "world = {}",
+        ],
+      },
+      {
+        name: "no-epoch",
+        negative: true,
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+          "boot = 2",
+          "world = {}",
+        ],
+      },
+      {
+        name: "late-key",
+        negative: true,
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+          "done = TRUE",
+        ],
+      },
+      {
+        name: "no-pin",
+        negative: true,
+        invariant: "NoPruneInUse",
+        action: "PruneFinish",
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> FALSE, use |-> TRUE, mixed |-> FALSE, stale |-> FALSE]",
+          "store = {}",
+          "pruning = <<0, 0>>",
+        ],
+      },
+      {
+        name: "object-first",
+        negative: true,
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+          "done = TRUE",
+          "world = {}",
+        ],
+      },
+      {
+        name: "ignore-ttl",
+        negative: true,
+        invariant: "NoSilentStaleTag",
+        action: "UseTag",
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> FALSE, use |-> FALSE, mixed |-> FALSE, stale |-> TRUE]",
+          "resolved = FALSE",
+          "offline = FALSE",
+        ],
+      },
+      {
+        name: "resolve-per-use",
+        negative: true,
+        invariant: "OneDigestPerCommand",
+        action: "UseTag",
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> FALSE, use |-> FALSE, mixed |-> TRUE, stale |-> FALSE]",
+          "resolved = TRUE",
+        ],
+      },
+    ],
+  },
+  {
+    // HACK-2461: a file hash reused by stat key (dev, ino, size, mtime, ctime)
+    // under the racy rule. `negative` drops the racy check; `reachability`
+    // proves a reused hash is reachable at all.
+    name: "stat-keyed-hash",
+    module: "StatKeyedHash",
+    states: 108_942,
+    invariant: "HitIsFresh",
+    action: "HashStore",
+    fields: ['content = "B"', 'readv = "A"'],
+    // The same counterexample is found either at the store of a racy hash or at
+    // the same-tick write that follows it; the stat key is unchanged in both.
+    alternativeWitnesses: [
+      { action: "Write", fields: ['content = "B"', 'readv = "A"'] },
+    ],
+    additionalControls: [
+      {
+        name: "mtime-only",
+        negative: true,
+        action: "SetMtime",
+        fields: ['content = "B"', 'readv = "A"'],
+      },
+      {
+        name: "racy-at-store",
+        negative: true,
+        fields: ['content = "B"', 'readv = "A"'],
+      },
+      {
+        name: "reachability",
+        negative: true,
+        invariant: "NeverHits",
+        fields: ['content = "A"', 'readv = "A"'],
+      },
+    ],
+  },
 ];
 
 export const runtimeModels = contracts.map((contract) => ({

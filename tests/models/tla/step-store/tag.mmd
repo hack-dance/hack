@@ -1,0 +1,30 @@
+---
+title: StepStore · one tag record (tag)
+---
+stateDiagram-v2
+  direction TB
+  [*] --> absent : Init
+  absent --> fresh : Resolve
+  fresh --> fresh : UseTag
+  fresh --> fresh : Resolve [hack pull]
+  fresh --> expired : Tick [age over TTL]
+  expired --> fresh : Resolve
+  expired --> expired : UseTag [offline, stale]
+  note right of fresh
+    A command resolves at most
+    once; every use repeats
+    that digest.
+    INV OneDigestPerCommand
+    INV PullResolves
+  end note
+  note right of expired
+    INV NoSilentStaleTag: used
+    only after a failed resolve
+    in the same command
+  end note
+  classDef ok stroke-width:1.6px
+  classDef wait stroke-width:1.6px
+  classDef idle stroke-width:1.6px
+  class fresh ok
+  class expired wait
+  class absent idle

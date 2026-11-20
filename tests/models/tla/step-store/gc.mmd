@@ -1,0 +1,19 @@
+---
+title: StepStore · garbage collection (pruning)
+---
+stateDiagram-v2
+  direction TB
+  [*] --> none : Init
+  none --> pruning : PruneStart [k not pinned]
+  pruning --> none : PruneFinish
+  note right of pruning
+    PruneStart deletes the record.
+    PruneFinish deletes the cas
+    object only if no record or
+    pin names it again.
+    INV NoPruneInUse
+  end note
+  classDef live stroke-width:1.6px
+  classDef idle stroke-width:1.6px
+  class pruning live
+  class none idle

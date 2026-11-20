@@ -3169,6 +3169,11 @@ defines it. Declared values are kept, and a disabled check gets neither. Authore
 native readiness (`readiness.exec`) gets the same cadence. A container started by an
 earlier build, without these fields, is still accepted as the same container.
 
+The 250 ms cadence applies only inside the startup period that follows a container
+start. After a pause and resume the container's startup period is not restarted, so
+the check runs every `interval` from the resume, and readiness can take up to one
+`interval` to see it.
+
 #### Native HTTP readiness probe
 
 For a complete Caddy route with no authored `healthcheck`, native reviews a default

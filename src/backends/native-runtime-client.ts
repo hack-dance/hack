@@ -397,16 +397,19 @@ function execStageFailureMessage(
 }
 
 /** What an unhealthy probe last observed (route probe diagnostic version 2, HACK-2416). */
-const PROBE_REASONS: Readonly<Record<string, string>> = {
-  exec_not_running: "the probe process inside the container was gone",
-  exec_exited: "the probe process inside the container exited",
-  sample_missing: "the probe never wrote a result",
-  sample_invalid: "the probe's result could not be read",
-  sample_clock_ahead: "the guest clock was ahead of the host's",
-  sample_stale: "the probe's last result was too old",
-  failures_exhausted:
+// A Map, not an object literal: inherited keys such as "toString" are not reasons.
+const PROBE_REASONS: ReadonlyMap<string, string> = new Map([
+  ["exec_not_running", "the probe process inside the container was gone"],
+  ["exec_exited", "the probe process inside the container exited"],
+  ["sample_missing", "the probe never wrote a result"],
+  ["sample_invalid", "the probe's result could not be read"],
+  ["sample_clock_ahead", "the guest clock was ahead of the host's"],
+  ["sample_stale", "the probe's last result was too old"],
+  [
+    "failures_exhausted",
     "the route answered no request in time, retries exhausted",
-};
+  ],
+]);
 const PROBE_COUNT = (value: unknown): value is number =>
   typeof value === "number" &&
   Number.isSafeInteger(value) &&
@@ -415,7 +418,9 @@ const PROBE_COUNT = (value: unknown): value is number =>
 
 function routeProbeObservation(probe: Record<string, unknown>): string | null {
   const reason =
-    typeof probe.reason === "string" ? PROBE_REASONS[probe.reason] : undefined;
+    typeof probe.reason === "string"
+      ? PROBE_REASONS.get(probe.reason)
+      : undefined;
   if (!(reason && PROBE_COUNT(probe.since_start_ms))) {
     return null;
   }

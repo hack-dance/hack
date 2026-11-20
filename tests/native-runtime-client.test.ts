@@ -1148,6 +1148,9 @@ test("a version 2 route probe failure says what the probe observed (HACK-2416)",
   // Unknown reasons, extra fields or bad counts render nothing of the probe.
   for (const route_probe of [
     { ...reply.route_probe, reason: "anything" },
+    { ...reply.route_probe, reason: "toString" },
+    { ...reply.route_probe, reason: "constructor" },
+    { ...reply.route_probe, reason: "__proto__" },
     { ...reply.route_probe, response: "text" },
     { ...reply.route_probe, sequence: -1 },
     { ...reply.route_probe, since_start_ms: "1" },

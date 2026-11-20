@@ -2360,6 +2360,32 @@ const contracts: readonly ModelContract[] = [
     fields: ["retired = <<1>>", "alive = 1"],
   },
   {
+    // HACK-2440 (c, d), HACK-2416: a patient first request, no failure on one
+    // doubtful reading, and a host-side bound on "starting".
+    name: "probe-readiness",
+    module: "ProbeReadiness",
+    states: 53_245,
+    invariant: "OneCompile",
+    action: "Begin",
+    fields: ["compiles = 2", 'verdict = "none"'],
+    additionalControls: [
+      {
+        name: "no-host-bound",
+        negative: true,
+        invariant: "BoundedStarting",
+        action: "Observe",
+        fields: ['verdict = "starting"', "skewed = TRUE", "vt = 15"],
+      },
+      {
+        name: "no-tolerance",
+        negative: true,
+        invariant: "NoFalseFailure",
+        action: "Observe",
+        fields: ['verdict = "unhealthy"'],
+      },
+    ],
+  },
+  {
     name: "pool-emulation",
     module: "Emulation",
     states: 13,

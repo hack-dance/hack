@@ -419,6 +419,21 @@ fn observe_sample(
     let starting = since_start_ms <= probe.config.start_period_ms;
     Ok(match sample {
         Some(raw) => match probe.config.assess(&raw, &probe.generation, true, now) {
+            // The sample's own timestamp is the guest's; the host decides when "starting"
+            // can no longer be true (see `starting_bound_ms`).
+            Ok(assessment)
+                if assessment.health == Health::Starting
+                    && since_start_ms > probe.config.starting_bound_ms() =>
+            {
+                (
+                    Health::Unhealthy,
+                    Some(finding(
+                        ProbeReason::SampleStale,
+                        Some(&assessment),
+                        since_start_ms,
+                    )),
+                )
+            }
             Ok(assessment) => (
                 assessment.health,
                 assessment
@@ -556,6 +571,119 @@ mod observation_clock_tests {
     /// sample that cannot be read, a missing one, and a starting sample from a guest clock
     /// ahead of the host's all read as still starting; after the grace they fail, and say why.
     #[test]
+    /// The host's reading, branch by branch, as `V(read)` in
+    /// tests/models/tla/probe-readiness/ProbeReadiness.tla decides it, with the model's own
+    /// constants at one tick = 1000 ms. If a bound here drifts from the model, this fails.
+    fn the_probe_readiness_model_verdicts_match_observe_sample() {
+        let tick = 1000;
+        let (grace, timeout, interval, retries) = (3, 1, 2, 2u32);
+        let fresh = interval + timeout + 1;
+        let patient_age = grace.max(fresh) + timeout + 1;
+        let limit =
+            grace + timeout + u64::from(retries) * (interval + timeout) + (interval + timeout) + 1;
+        let started = 100_000;
+        let probe: Probe = serde_json::from_value(serde_json::json!({
+            "config":{"port":8080,"path":"/","interval_ms":interval * tick,
+                "timeout_ms":timeout * tick,"retries":retries,"start_period_ms":grace * tick},
+            "allocation":"a".repeat(32),"generation":"b".repeat(32),"binary":"",
+            "uid":0,"gid":0,"exec_id":null,"started_ms":started,"phase":"running",
+            "start_interval_argv":true
+        }))
+        .unwrap();
+        assert_eq!(probe.config.starting_bound_ms(), limit * tick, "Limit");
+        let at = |t: u64| started + t * tick;
+        let sample = |health: u8, published: u64| {
+            let failures = if health == 0 { retries } else { 0 };
+            format!(
+                "v1 {} 5 {health} {failures} {published} 0\n",
+                probe.generation
+            )
+        };
+        let future = u64::MAX;
+        use Health::{Healthy, Starting, Unhealthy};
+        use ProbeReason::{SampleInvalid, SampleMissing, SampleStale};
+        let rows = [
+            ("none, t <= Grace", None, grace, Starting, None),
+            ("none, Grace < t <= Fresh", None, fresh, Starting, None),
+            (
+                "none, t > Fresh",
+                None,
+                fresh + 1,
+                Unhealthy,
+                Some(SampleMissing),
+            ),
+            (
+                "garbage, t <= Grace",
+                Some("torn".into()),
+                grace,
+                Starting,
+                None,
+            ),
+            (
+                "garbage, t > Grace",
+                Some("torn".into()),
+                grace + 1,
+                Unhealthy,
+                Some(SampleInvalid),
+            ),
+            (
+                "starting, age <= PatientAge",
+                Some(sample(2, at(1))),
+                1 + patient_age,
+                Starting,
+                None,
+            ),
+            (
+                "starting, age > PatientAge",
+                Some(sample(2, at(1))),
+                2 + patient_age,
+                Unhealthy,
+                Some(SampleStale),
+            ),
+            (
+                "skewed starting, t <= Limit",
+                Some(sample(2, future)),
+                limit,
+                Starting,
+                None,
+            ),
+            (
+                "skewed starting, t > Limit",
+                Some(sample(2, future)),
+                limit + 1,
+                Unhealthy,
+                Some(SampleStale),
+            ),
+            (
+                "healthy, age <= Fresh",
+                Some(sample(1, at(5))),
+                5 + fresh,
+                Healthy,
+                None,
+            ),
+            (
+                "healthy, age > Fresh",
+                Some(sample(1, at(5))),
+                6 + fresh,
+                Unhealthy,
+                Some(SampleStale),
+            ),
+            (
+                "unhealthy",
+                Some(sample(0, at(5))),
+                5,
+                Unhealthy,
+                Some(ProbeReason::FailuresExhausted),
+            ),
+        ];
+        for (branch, raw, t, health, reason) in rows {
+            let (observed, found) =
+                observe_sample(&probe, || Ok(raw.clone()), || Ok(at(t))).unwrap();
+            assert_eq!(observed, health, "{branch}");
+            assert_eq!(found.map(|found| found.reason), reason, "{branch}");
+        }
+    }
+    #[test]
     fn inside_the_startup_grace_a_doubtful_sample_is_not_a_failure() {
         let mut probe: Probe = serde_json::from_value(serde_json::json!({
             "config":{"port":8080,"path":"/","interval_ms":30000,"timeout_ms":1000,
@@ -590,6 +718,21 @@ mod observation_clock_tests {
             assert_eq!(health, expected, "{raw:?} at {at}");
             assert_eq!(found.map(|found| found.reason), reason, "{raw:?} at {at}");
         }
+        // A frozen "starting" sample dated far in the future reads as starting only until
+        // the host-side bound from the probe's start; after it, it is stale.
+        let bound = probe.config.starting_bound_ms();
+        assert_eq!(bound, 60_000 + 1_000 + 3 * 31_000 + 31_000 + 1_000);
+        let frozen = format!("v1 {} 4 2 2 {} 0\n", probe.generation, u64::MAX);
+        let at_bound = 10000 + bound;
+        let (health, _) =
+            observe_sample(&probe, || Ok(Some(frozen.clone())), || Ok(at_bound)).unwrap();
+        assert_eq!(health, Health::Starting);
+        let (health, found) =
+            observe_sample(&probe, || Ok(Some(frozen)), || Ok(at_bound + 1)).unwrap();
+        assert_eq!(health, Health::Unhealthy);
+        let found = found.unwrap();
+        assert_eq!(found.reason, ProbeReason::SampleStale);
+        assert_eq!(found.sequence, Some(4));
         // A sample that has already been healthy or unhealthy keeps the strict clock check.
         probe.config.start_period_ms = 0;
         let healthy_ahead = format!("v1 {} 1 1 0 {} 0\n", probe.generation, inside + 5_000);

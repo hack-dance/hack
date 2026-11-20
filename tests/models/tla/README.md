@@ -709,6 +709,48 @@ The model omits image selection, the registry and Docker's own platform handling
 those are covered by `registry_image`, `image_ensure` and graph admission unit tests.
 Actual Rosetta execution in the guest needs host evidence.
 
+## Native probe readiness
+
+`probe-readiness/ProbeReadiness.tla` checks how the host reads one native HTTP probe
+before a start counts its service ready (HACK-2440 c and d, HACK-2416). The positive
+control explores 53,245 distinct states to depth 37. It models the probe loop in
+`guest/http-probe.c`: the patient first attempt, failures counted only after the first
+success or the grace, and the start interval. It also models an app whose first answer
+takes 1..`MaxCompile` ticks and whose compile an abandoned request restarts, plus the
+host's reading in `assess` and `observe_finding`. Faults are an exec that exits or never
+starts, a probe that stops publishing, a frozen status dated in the future, and a
+missing or torn read. Bounds, in ticks: grace 3, timeout 1, start interval 1, interval 2,
+two retries, `MaxCompile` 2 and a horizon one tick past `Limit` (14).
+
+Invariants: `NoFalseFailure` (an unhealthy reading needs a fault), `BoundedStarting`
+(no starting reading past `Limit`), `NoReadyWithoutSuccess`, and `OneCompile` (the
+probe never restarts the app's compile). Each switch, set to FALSE, is the behaviour
+before the change and is a control:
+
+- `negative` (`Patient = FALSE`) fails `OneCompile` in a `Begin` state with
+  `compiles = 2`: the second request starts the compile again.
+- `no-host-bound` (`HostBound = FALSE`) fails `BoundedStarting` in an `Observe` state
+  with `verdict = "starting"`, `skewed = TRUE` and `vt = 15`: a frozen future-dated
+  status holds the start open.
+- `no-tolerance` (`Tolerate = FALSE`) fails `NoFalseFailure` in an `Observe` state
+  with `verdict = "unhealthy"`: an exec read before it has started fails the start.
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `ExecStart` | `start_probe` creates and starts the exec; the probe publishes sequence 0, health 2 |
+| `Begin` / `Answer` / `Expire` | `request` with `attempt_timeout`, then `sample_health` and `publish` in `guest/http-probe.c` |
+| `Observe` / `V` | `graph/probes.rs::observe_finding` and `observe_sample`, `HttpProbe::assess` and `starting_bound_ms` in `http_probe.rs` |
+| `ExecExit` / `Wedge` / `Skew` | An exited exec, a probe that stops publishing, a guest clock ahead of the host's |
+
+`graph/probes.rs` `the_probe_readiness_model_verdicts_match_observe_sample` walks each
+branch of `V` through `observe_sample` with the model's constants (one tick = 1000 ms).
+It fails if the code's bounds drift from the model. `http_probe.rs`
+`inside_the_start_period_one_slow_first_answer_is_waited_for` runs the compiled probe
+against a server that answers in 300 ms with a 40 ms timeout. The model assumes
+`MaxCompile < Grace`: an app answering exactly at the end of its grace races the
+attempt's own deadline. It does not model HTTP parsing, several probes, the
+whole-graph deadline or the engine's exec scheduling.
+
 ## Stopped retained-pool startup
 
 `native-startup-owner/Owner.tla` checks project ownership after a foreground

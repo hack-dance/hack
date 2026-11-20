@@ -126,6 +126,20 @@ impl HttpProbe {
             .unwrap_or(DEFAULT_START_INTERVAL_MS)
             .min(self.interval_ms)
     }
+    /// The longest a working probe can go on reporting "starting", measured on the host
+    /// from when the probe was started: the startup grace, one patient attempt that may
+    /// end a timeout after it, `retries` failed attempts after it at no more than the
+    /// steady cadence (an earlier build's binary may use it), and the sample freshness
+    /// allowance. A "starting" sample read later than this is stale whatever its own
+    /// timestamp says, so a frozen or future-dated sample cannot hold a start open.
+    pub fn starting_bound_ms(&self) -> u64 {
+        let attempt = self.interval_ms.saturating_add(self.timeout_ms);
+        self.start_period_ms
+            .saturating_add(self.timeout_ms)
+            .saturating_add(u64::from(self.retries).saturating_mul(attempt))
+            .saturating_add(attempt)
+            .saturating_add(1_000)
+    }
     /// The arguments a probe exec started by a build before HACK-2443 carries: the same without
     /// the start interval. Only a probe that declares no start interval can have one.
     pub fn legacy_arguments(
@@ -881,9 +895,14 @@ mod tests {
             // start period the first attempt may run for the rest of the period,
             // so one request succeeds instead of many abandoned ones.
             let mut f = Fixture::new(16, 5000);
-            let seq = f.wait(Health::Healthy, 0);
-            assert_eq!(seq, 1);
-            assert_eq!(f.accepted.load(Ordering::SeqCst), 1);
+            assert_eq!(f.wait(Health::Healthy, 0), 1);
+            // The probe's own record of request 1: healthy, after waiting out the
+            // 300 ms answer, far past the 40 ms timeout. (A second request may
+            // already be under way, so the connection count is not the proof.)
+            let first = fs::read_to_string(f.root.join("first-sample")).unwrap();
+            let fields: Vec<&str> = first.trim_end().split(' ').collect();
+            assert_eq!(fields[2..5], ["1", "1", "0"], "{first}");
+            assert!(fields[6].parse::<u64>().unwrap() >= 300, "{first}");
             // Without a start period the same answer is too slow.
             let mut f = Fixture::new(16, 0);
             f.wait(Health::Unhealthy, 0);

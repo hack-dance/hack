@@ -1,0 +1,11 @@
+stateDiagram-v2
+    [*] --> Disconnected
+    Disconnected --> Connected: negotiate
+    Connected --> HalfOpen: link stalls
+    HalfOpen --> Disconnected: deadline
+    Connected --> Disconnected: host restart
+    Connected --> Disconnected: guest restart
+        [*] --> Absent
+        Absent --> Running: reserve and spawn
+        Running --> Terminal: reap child
+        Terminal --> Released: host records result

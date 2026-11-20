@@ -1,0 +1,178 @@
+//! Walk Connect, Lose, HostRestart, Start, Exit, Inspect and GuestRestart
+//! against an actual agent. Restarting only the agent also invalidates handles.
+use hack_vm_protocol::{
+    Handle, Request, Response, Stream,
+    client::{GuestClient, Session},
+    write_frame,
+};
+use std::{
+    fs,
+    io::Write,
+    os::unix::net::UnixStream,
+    path::PathBuf,
+    process::{Child, Command},
+    thread,
+    time::{Duration, Instant},
+};
+
+struct Fixture {
+    dir: PathBuf,
+    child: Child,
+}
+impl Fixture {
+    fn boot(dir: PathBuf) -> Self {
+        let child = Command::new(env!("CARGO_BIN_EXE_hack-vm-agent"))
+            .env_clear()
+            .env("HOME", &dir)
+            .arg(dir.join("agent.sock"))
+            .spawn()
+            .unwrap();
+        Self { dir, child }
+    }
+    fn connect(&self) -> UnixStream {
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(s) = UnixStream::connect(self.dir.join("agent.sock")) {
+                return s;
+            }
+            assert!(Instant::now() < end);
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    fn request(&self, r: Request) -> Response {
+        let s = self.connect();
+        Session::negotiate(&s, Duration::from_secs(2))
+            .unwrap()
+            .execute(&r)
+            .unwrap()
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[test]
+fn late_start_exit_reconnect_and_restart() {
+    let dir = std::env::temp_dir().join(format!("guest-wire-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let agent = Fixture::boot(dir.clone());
+    let mut old = agent.connect();
+    let hello = Session::negotiate(&old, Duration::from_secs(2)).unwrap();
+    let (boot, incarnation) = (hello.boot, hello.incarnation);
+    let handle = || Handle {
+        boot: boot.clone(),
+        incarnation: incarnation.clone(),
+        id: "00000000000000000000000000000001".into(),
+    };
+    let start = || Request::Start {
+        handle: handle(),
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "test -z \"$HOME\" || exit 99; cat; printf err >&2; exit 37".into(),
+        ],
+        env: vec![],
+        stdin: b"input".to_vec(),
+    };
+    let mut frame = Vec::new();
+    write_frame(&mut frame, &start()).unwrap();
+    // The new client sees absent while the old stream has only a frame prefix.
+    old.write_all(&frame[..4]).unwrap();
+    assert!(agent.request(Request::Inspect { handle: handle() }) == Response::Absent {});
+    old.write_all(&frame[4..]).unwrap();
+    drop(old);
+    let end = Instant::now() + Duration::from_secs(3);
+    loop {
+        match agent.request(Request::Inspect { handle: handle() }) {
+            Response::Exited { code: 37 } => break,
+            Response::Running {} | Response::Absent {} if Instant::now() < end => {
+                thread::sleep(Duration::from_millis(5))
+            }
+            _ => panic!("lost terminal result"),
+        }
+    }
+    assert!(agent.request(start()) == Response::Conflict {});
+    for (stdout, expected) in [(true, b"input".as_slice()), (false, b"err")] {
+        loop {
+            let stream = if stdout {
+                Stream::Stdout
+            } else {
+                Stream::Stderr
+            };
+            match agent.request(Request::Output {
+                handle: handle(),
+                stream,
+                offset: 0,
+            }) {
+                Response::Output {
+                    bytes,
+                    eof: true,
+                    truncated: false,
+                } => {
+                    assert_eq!(bytes, expected);
+                    break;
+                }
+                Response::Output { eof: false, .. } if Instant::now() < end => {
+                    thread::sleep(Duration::from_millis(5))
+                }
+                _ => panic!("output unavailable"),
+            }
+        }
+    }
+    assert!(agent.request(Request::Inspect { handle: handle() }) == Response::Exited { code: 37 });
+    drop(agent);
+    fs::create_dir(&dir).unwrap();
+    let restarted = Fixture::boot(dir);
+    assert!(restarted.request(Request::Inspect { handle: handle() }) == Response::Unknown {});
+}
+
+#[test]
+fn signal_exit_and_release_tombstone() {
+    let dir = std::env::temp_dir().join(format!("guest-signal-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let agent = Fixture::boot(dir);
+    let s = agent.connect();
+    let hello = Session::negotiate(&s, Duration::from_secs(2)).unwrap();
+    let handle = || Handle {
+        boot: hello.boot.clone(),
+        incarnation: hello.incarnation.clone(),
+        id: "00000000000000000000000000000002".into(),
+    };
+    let start = || Request::Start {
+        handle: handle(),
+        argv: vec!["/bin/sleep".into(), "30".into()],
+        env: vec![],
+        stdin: vec![],
+    };
+    assert!(agent.request(start()) == Response::Running {});
+    assert!(agent.request(Request::Release { handle: handle() }) == Response::Conflict {});
+    assert!(
+        agent.request(Request::Signal {
+            handle: handle(),
+            signal: hack_vm_protocol::Signal::Terminate
+        }) == Response::Ack {}
+    );
+    let end = Instant::now() + Duration::from_secs(3);
+    loop {
+        match agent.request(Request::Inspect { handle: handle() }) {
+            Response::Signaled { signal: 15 } => break,
+            Response::Running {} if Instant::now() < end => thread::sleep(Duration::from_millis(5)),
+            _ => panic!("missing terminating signal"),
+        }
+    }
+    loop {
+        match agent.request(Request::Release { handle: handle() }) {
+            Response::Released {} => break,
+            Response::Conflict {} if Instant::now() < end => {
+                thread::sleep(Duration::from_millis(5))
+            }
+            _ => panic!("release did not settle"),
+        }
+    }
+    assert!(agent.request(start()) == Response::Conflict {});
+    assert!(agent.request(Request::Inspect { handle: handle() }) == Response::Released {});
+}

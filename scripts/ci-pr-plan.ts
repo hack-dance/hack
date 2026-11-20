@@ -87,8 +87,11 @@ export function touchesCompilerHost(path: string): boolean {
 /** Rust crate inputs retain Linux checks even when the PR defers macOS. */
 export function touchesRustInput(path: string): boolean {
   return (
+    /^tests\/models\/tla\/guest-execution\//.test(path) ||
     /^packages\/relay-guest\//.test(path) ||
-    (/^packages\/(?:runtime-core|config-compiler)\//.test(path) &&
+    (/^packages\/(?:runtime-core|config-compiler|hack-vm-(?:agent|protocol))\//.test(
+      path
+    ) &&
       !path.endsWith(".md"))
   );
 }

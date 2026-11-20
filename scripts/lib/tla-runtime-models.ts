@@ -1804,10 +1804,11 @@ const contracts: readonly ModelContract[] = [
   {
     // One start of a pool that is not running: two chained Development samples
     // (the second under the startup lease, a window after the first), Research's
-    // three pre-lease samples, the content proofs and the pre-boot check.
+    // three pre-lease samples, the content proofs, the tree recheck under the
+    // lease and the pre-boot check.
     name: "pool-start-admission",
     module: "PoolStart",
-    states: 21_400,
+    states: 21_028,
     // Development's second sample taken before the startup lease.
     invariant: "SecondSampleUnderLease",
     action: "Recheck",
@@ -1815,9 +1816,7 @@ const contracts: readonly ModelContract[] = [
     additionalControls: [
       // The follow-up ordering: root files proven in the window, rechecked
       // under the lease.
-      { name: "root-before-lease", negative: false, states: 27_304 },
-      // Hypothetical: a tree recheck under the lease, which no code performs.
-      { name: "tree-recheck", negative: false, states: 21_076 },
+      { name: "root-before-lease", negative: false, states: 27_004 },
       {
         name: "window-not-enforced",
         negative: true,
@@ -1853,8 +1852,8 @@ const contracts: readonly ModelContract[] = [
         action: "RecheckRoot",
         fields: ['pc = "RootProven"', "rootOk = FALSE", "rootProved = TRUE"],
       },
-      // The remaining gap, kept explicit: the trees are proven before the
-      // lease and not rechecked under it.
+      // Without the tree recheck under the lease, a tree that changed after
+      // its proof before the lease is booted from.
       {
         name: "changed-tree-start",
         negative: true,

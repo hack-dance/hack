@@ -3,7 +3,8 @@
 \* content proofs, the startup lease and the first `machine start`.
 \* Source: packages/runtime-core/src/provider/lifecycle.rs (start_pool,
 \* startup_admission_lease), provider/admission.rs (open, recheck_after_lease,
-\* check, sample_checked) and lifecycle/admission_pool.rs (settle, admit_boot).
+\* check, sample_checked), lifecycle/leased_trees.rs (recheck) and
+\* lifecycle/admission_pool.rs (settle, admit_boot).
 EXTENDS Naturals, Sequences
 CONSTANTS Window,               \* ticks between chained samples
           ResearchQuota,        \* Research samples before the lease
@@ -14,7 +15,7 @@ CONSTANTS Window,               \* ticks between chained samples
           EnforceChain,         \* ... and the first sample's swapout count
           ChainToBoot,          \* pre-boot check uses the last sample's count
           EnforceRootRecheck,   \* root metadata recheck under the lease
-          EnforceTreeRecheck    \* hypothetical: no such code exists
+          EnforceTreeRecheck    \* trees rechecked under the lease
 VARIABLES profile, pc, lease, elapsed, hostOk, swapouts, samples, baseline,
           treeOk, treeProved, rootOk, rootProved, alias, selected,
           poolRunning, vm
@@ -167,11 +168,16 @@ Qualify == /\ pc = "Leased" /\ Len(samples) = Quota /\ pc' = "Qualified"
 RestoreAliasLeased == /\ pc = "Qualified" /\ alias = "foreign" /\ alias' = "moved"
                       /\ UNCHANGED <<profile, pc, lease, elapsed, host, samples,
                                       baseline, proofs, selected, poolRunning, vm>>
+\* leased_trees::recheck, first under the lease after the sample: each tree is
+\* still what its proof saw, or is proven by content again. It is folded into
+\* the two steps that leave Qualified without refusing; no tree changes under
+\* the lease, so its place among the leased steps does not matter here.
+TreesStillProven == EnforceTreeRecheck => treeOk
 \* admission_pool::settle and the owner checks: the selection still names the
 \* owner record, and no concurrent start made the pool running.
 Settle == /\ pc = "Qualified" /\ alias # "foreign" /\ ~poolRunning
           /\ SameOwner
-          /\ (EnforceTreeRecheck => treeOk)
+          /\ TreesStillProven
           /\ pc' = "Settled"
           /\ UNCHANGED <<profile, lease, elapsed, host, samples, baseline, proofs,
                           owner, poolRunning, vm>>
@@ -180,7 +186,7 @@ RefuseSelection == /\ pc = "Qualified" /\ alias # "foreign" /\ selected # 0
 RefuseTreeRecheck == /\ EnforceTreeRecheck /\ pc = "Qualified" /\ ~treeOk /\ Refuse
 \* The pool became running after running_start::select: report it, start nothing.
 ObserveRunning == /\ pc = "Qualified" /\ alias # "foreign" /\ poolRunning
-                  /\ selected = 0
+                  /\ selected = 0 /\ TreesStillProven
                   /\ pc' = "Joined" /\ lease' = "free"
                   /\ UNCHANGED <<profile, elapsed, host, samples, baseline, proofs,
                                   owner, poolRunning, vm>>
@@ -266,6 +272,8 @@ StartFromProvenRoot ==
 \* A reserve selection that continues still names the current owner record.
 SelectionBound ==
     pc \in {"Settled", "RootProven", "BootAdmitted", "Started"} => SameOwner
+\* No boot uses a tree that changed after its content proof.
+NoStartFromChangedTree == vm => treeOk
 NoSecondVm == ~(vm /\ poolRunning)
 \* Every way out without a start leaves no VM and returns the lease.
 RefusalIsClean == pc \in {"Refused", "Crashed", "Joined"} => (~vm /\ lease # "self")
@@ -273,8 +281,6 @@ LeaseHeldForEffects == pc \in UnderLease => lease = "self"
 VmOnlyWhenStarted == vm <=> pc = "Started"
 
 \* Not invariants of the implementation: each control below must be violated.
-\* The trees are not rechecked under the lease, so this one is reachable.
-NoStartFromChangedTree == vm => treeOk
 NeverStartsDevelopment == ~(vm /\ Development)
 NeverStartsResearch == ~(vm /\ ~Development)
 NeverStartsOnMovedAlias == ~(vm /\ alias = "moved" /\ selected = 2)

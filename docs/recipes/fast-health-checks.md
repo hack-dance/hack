@@ -20,16 +20,18 @@ convert `start_period` or `start_interval` yet
 
 ## Start quickly: `start_period` and `start_interval`
 
-The engine runs a health check for the first time one full `interval` after the
-container starts, then once every `interval`. A service that waits on
-`condition: service_healthy` waits at least that long, even when the dependency
-was ready after half a second. With `interval: 2s`, every start pays about two
-seconds for each level of healthy dependencies.
+Without a start interval, the engine runs a health check for the first time one
+full `interval` after the container starts, then once every `interval`. A
+service that waits on `condition: service_healthy` waits at least that long,
+even when the dependency was ready after half a second. With `interval: 2s`,
+every start pays about two seconds for each level of healthy dependencies.
 
 `start_period` is a startup grace period: failed checks in it do not count
 towards `retries`. `start_interval` is the time between checks during that
-period. The first successful check ends the start period and marks the service
-healthy, and the engine then checks at the steady `interval`.
+period, including the wait before the first check: with the settings below, the
+first check runs about 250 milliseconds after the container starts. The first
+successful check ends the start period and marks the service healthy, and the
+engine then checks at the steady `interval`.
 
 ```yaml
     healthcheck:
@@ -90,5 +92,8 @@ warm start waiting for the first health check at `interval: 2s`.
 - Compose specification, [`healthcheck`](https://github.com/compose-spec/compose-spec/blob/main/workload_spec.md#healthcheck)
   (`start_interval` since Compose 2.20.2), [`init`](https://github.com/compose-spec/compose-spec/blob/main/container_spec.md#init)
   and [`stop_grace_period`](https://github.com/compose-spec/compose-spec/blob/main/container_spec.md#stop_grace_period).
+- The engine's health monitor uses `start_interval` for every check while the
+  container is starting, the first one included
+  ([moby v25.0.0 `daemon/health.go`](https://github.com/moby/moby/blob/v25.0.0/daemon/health.go)).
 - Docker Compose refuses `start_interval` without `start_period`
   ([moby/moby#48874](https://github.com/moby/moby/issues/48874)).

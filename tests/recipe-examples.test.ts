@@ -281,6 +281,15 @@ test("negative controls: the startup timing rules reject slow settings", () => {
           stop_grace_period: "10s",
           depends_on: { deps: { condition: "service_completed_successfully" } },
         },
+        queue: {
+          image: "redis:8.2-alpine",
+          healthcheck: {
+            test: ["CMD", "redis-cli", "ping"],
+            start_period: "0s",
+            start_interval: "0s",
+            interval: "10s",
+          },
+        },
         stub: { image: "postgres:17.6-alpine", command: ["sleep", "infinity"] },
         deps: { image: "oven/bun:1.4.4-slim", command: ["bun", "install"] },
         proxy: { image: "caddy:2.10-alpine", command: ["caddy", "run"] },
@@ -294,6 +303,8 @@ test("negative controls: the startup timing rules reject slow settings", () => {
     "cache: health-without-fast-start-interval",
     "web: long-running-without-init",
     "web: long-running-without-short-stop-grace",
+    "queue: health-without-start-period",
+    "queue: health-without-fast-start-interval",
     "stub: long-running-without-init",
     "stub: long-running-without-short-stop-grace",
   ]);

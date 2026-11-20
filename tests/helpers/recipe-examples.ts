@@ -247,11 +247,14 @@ function healthTimingIssues(health: unknown): string[] {
     return [];
   }
   const issues: string[] = [];
-  if (composeDurationMs(health.start_period) === null) {
+  // Zero turns the start period off, and a zero start interval falls back to
+  // the steady interval in the engine, so both must be positive.
+  const startPeriod = composeDurationMs(health.start_period);
+  if (startPeriod === null || startPeriod <= 0) {
     issues.push("health-without-start-period");
   }
   const startInterval = composeDurationMs(health.start_interval);
-  if (startInterval === null || startInterval > 1000) {
+  if (startInterval === null || startInterval <= 0 || startInterval > 1000) {
     issues.push("health-without-fast-start-interval");
   }
   const interval = composeDurationMs(health.interval);

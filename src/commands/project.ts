@@ -1787,10 +1787,21 @@ async function settleComposeEnvOverride(opts: {
   readonly projectDir: string;
   readonly text: string;
   readonly persist: boolean | undefined;
+  /** The Compose file's services; a stored file naming others is left out. */
+  readonly serviceNames: readonly string[];
 }): Promise<readonly string[]> {
   if (opts.persist === false) {
+    // The stored file `up` left. One that still declares a service the
+    // Compose file dropped would make Compose reject the model; exec does not
+    // need it then, since a running container already has its environment.
     const path = composeEnvOverridePath({ projectDir: opts.projectDir });
-    return (await pathExists(path)) ? [path] : [];
+    const usable =
+      (await pathExists(path)) &&
+      (await generatedFilesMatchServices({
+        files: [path],
+        serviceNames: opts.serviceNames,
+      }));
+    return usable ? [path] : [];
   }
   await ensureHackGitInfoExclude({ projectDir: opts.projectDir });
   return [
@@ -1998,6 +2009,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
       projectDir: opts.project.projectDir,
       text: override.text,
       persist: opts.persist,
+      serviceNames: opts.allServiceNames,
     }),
     env: composeEnv,
     lifecycleEnv,
@@ -2177,6 +2189,7 @@ async function resolveComposeEnvOverrides(opts: {
       projectDir: opts.project.projectDir,
       text,
       persist: opts.persist,
+      serviceNames: opts.allServiceNames,
     }),
     env: resolved.envForCompose,
     lifecycleEnv: selectHackEnvValues({ resolved }),

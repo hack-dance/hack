@@ -261,11 +261,24 @@ test("exec regenerates the overrides when they name a service the Compose file d
       "  worker:\n    image: alpine:3.22\n    networks: [hack-dev, default]\nnetworks:\n  hack-dev:"
     )
   );
+  // A global managed value: `up` then also writes an env override for every
+  // service, which exec reuses.
+  await writeFile(
+    join(project, ".hack", "hack.env.default.yaml"),
+    'version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global:\n    FLAG: "on"\n'
+  );
+  const envOverride = join(
+    project,
+    ".hack",
+    ".internal",
+    "compose.env.override.yml"
+  );
   const up = await cli(["up", "-d"]);
   expect(up.exitCode).toBe(0);
   const stored = await storedOverrides();
   expect(stored.length).toBeGreaterThan(0);
   expect(await readFile(stored[0] ?? "", "utf8")).toContain("worker:");
+  expect(await readFile(envOverride, "utf8")).toContain("worker:");
 
   // worker is removed after up: a stored file still declaring it would make
   // Compose reject the model (no image or build) for every service.
@@ -283,6 +296,13 @@ test("exec regenerates the overrides when they name a service the Compose file d
       expect.stringContaining("worker:"),
     ]);
   }
+  expect(files).not.toContain(envOverride);
+
+  // Once `up` rendered them against the current file, exec reuses them all.
+  expect((await cli(["up", "-d"])).exitCode).toBe(0);
+  const again = await cli(["exec", "api", "--", "true"]);
+  expect(again.exitCode).toBe(0);
+  expect(again.raw[0] ?? "").toContain(envOverride);
 });
 
 test("exec with nothing generated yet reads and writes no override", async () => {

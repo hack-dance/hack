@@ -84,14 +84,29 @@ export async function captureNativeFrontendBirth(): Promise<
  */
 export async function nativeFrontendGone(
   identity: NativeFrontendIdentity,
-  io: {
-    readonly platform?: NodeJS.Platform;
-    readonly absent?: (pid: number) => boolean;
-    readonly observe?: (pid: number) => Promise<Observation | null>;
-    /** ESRCH is still checked on every call; callers may throttle the ps read. */
-    readonly inspectBirth?: boolean;
-  } = {}
+  io: NativeFrontendExitIo = {}
 ): Promise<boolean> {
+  return (await nativeFrontendExit(identity, io)) === "gone";
+}
+
+export type NativeFrontendExitIo = {
+  readonly platform?: NodeJS.Platform;
+  readonly absent?: (pid: number) => boolean;
+  readonly observe?: (pid: number) => Promise<Observation | null>;
+  /** ESRCH is still checked on every call; callers may throttle the ps read. */
+  readonly inspectBirth?: boolean;
+};
+
+/**
+ * The same proof, keeping an unreadable identity row apart from a live one:
+ * `gone` is exit proof, `alive` is the recorded incarnation still running, and
+ * `unknown` is a row that could not be read (for example, `ps` timing out under
+ * load). Only `gone` grants anything.
+ */
+export async function nativeFrontendExit(
+  identity: NativeFrontendIdentity,
+  io: NativeFrontendExitIo = {}
+): Promise<"gone" | "alive" | "unknown"> {
   const absent =
     io.absent ??
     ((pid: number) => {
@@ -103,19 +118,51 @@ export async function nativeFrontendGone(
       }
     });
   if (absent(identity.pid)) {
-    return true;
+    return "gone";
   }
   if (
     (io.platform ?? process.platform) !== "darwin" ||
     io.inspectBirth === false ||
     !isNativeFrontendBirth(identity.birth)
   ) {
-    return false;
+    return "alive";
   }
   const row = await (io.observe ?? observe)(identity.pid);
-  return (
-    row !== null &&
-    (row.birth !== identity.birth ||
-      (row.uid === process.getuid?.() && row.zombie))
-  );
+  if (row === null) {
+    return "unknown";
+  }
+  return row.birth !== identity.birth ||
+    (row.uid === process.getuid?.() && row.zombie)
+    ? "gone"
+    : "alive";
+}
+
+/** Bounds of {@link nativeFrontendGoneSettled}. */
+export const FRONTEND_EXIT_READS = 5;
+export const FRONTEND_EXIT_READ_DELAY_MS = 500;
+
+/**
+ * Exit proof that one unreadable `ps` row does not turn into "still running"
+ * (HACK-2372). An unknown read is retried, at most {@link FRONTEND_EXIT_READS}
+ * reads in all; a read that shows the recorded incarnation alive ends the wait
+ * at once. Still only `gone` grants anything.
+ */
+export async function nativeFrontendGoneSettled(
+  identity: NativeFrontendIdentity,
+  io: NativeFrontendExitIo & {
+    readonly reads?: number;
+    readonly sleep?: (ms: number) => Promise<void>;
+  } = {}
+): Promise<boolean> {
+  const reads = io.reads ?? FRONTEND_EXIT_READS;
+  for (let read = 1; ; read++) {
+    const exit = await nativeFrontendExit(identity, io);
+    if (exit !== "unknown") {
+      return exit === "gone";
+    }
+    if (read >= reads) {
+      return false;
+    }
+    await (io.sleep ?? Bun.sleep)(FRONTEND_EXIT_READ_DELAY_MS);
+  }
 }

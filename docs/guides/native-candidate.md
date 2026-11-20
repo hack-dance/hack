@@ -2127,6 +2127,9 @@ owner could not be authenticated, while `runtime_degraded` means its runtime che
 failed. A stopped candidate runtime is an ordinary state for `ps`: with a mapping
 present it exits 0 and reports `runtime_not_running` (no phase, no service rows),
 and text output prints "Native runtime is not running; no services are running."
+That includes a pool left stopped by a failed or recovered boot (`failed-boot-stopped`,
+`recovered-unclean`, `stopped-before-engine`) whose provider is not alive; before, `ps`
+failed there with `runtime_changed`.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,

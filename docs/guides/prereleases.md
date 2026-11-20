@@ -196,6 +196,13 @@ skip the rest, so a separate file is safe.
 }
 ```
 
+The set is checked against this file twice on the way to a release: when the
+macOS job packages it, and again after approval, before the tag is created.
+
+![Prerelease publication: where the release set is checked](prerelease-publication.svg)
+
+Diagram [source](prerelease-publication.mmd); rendered with Pele 1.9.0.
+
 Packaging writes it, and both packaging and publication refuse a set it does not
 describe: it must list exactly the platforms that have an archive or a manager in
 the set, with those asset names, each present; and each archive's own

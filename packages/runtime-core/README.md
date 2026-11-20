@@ -1862,6 +1862,10 @@ or a lease wait that takes longer than the window lengthens the start by the exc
 home adds `machine create`, the provider's first-start disk template copy and the root
 files copy, about 5 s in the same measurement.
 
+The order of the admission steps, and what can change between them, is modelled in
+[`pool-start-admission`](../../tests/models/tla/pool-start-admission/COVERAGE.md);
+[its statechart](../../docs/pool-start-admission-statechart.md) names each step.
+
 ### Starting a pool that is already running
 
 `runtime up` on a pool that is already running and owned by this home (every warm frontend

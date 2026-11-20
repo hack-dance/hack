@@ -5,6 +5,13 @@ three-sample windows, can a VM start without a second qualifying sample taken un
 the startup lease, at least the window after the first, with one unbroken swapout
 count from the first sample to the pre-boot check?
 
+![PoolStart: pool start admission](../../../../docs/diagrams/pool-start-admission.svg)
+
+[Diagram source](../../../../docs/diagrams/pool-start-admission.mmd); states,
+transitions and exits are listed in
+[the statechart page](../../../../docs/pool-start-admission-statechart.md). The
+diagram is a review aid, not an additional checked model.
+
 `PoolStart.tla` enumerates one `runtime up` of a pool that is not running, for both
 profiles, against a host that changes underneath it. The starting process samples
 the host, proves the provider and engine trees, takes the startup lease, samples

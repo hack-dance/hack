@@ -825,7 +825,8 @@ Research start keeps three samples before the lease. The positive control explor
 21,400 states for both profiles, with the root files proven under the lease.
 The clock, host pressure, the swapout count, another lease holder, a concurrent
 start, a changed tree or root file, a squatted HOME alias and a crash interleave
-with every step. See its [coverage](pool-start-admission/COVERAGE.md).
+with every step. See its [coverage](pool-start-admission/COVERAGE.md) and
+[statechart](../../../docs/pool-start-admission-statechart.md).
 
 A VM starts only on the qualifying samples of its profile, with one unbroken
 swapout count from the first sample to the pre-boot check, and the pre-boot check

@@ -1,5 +1,5 @@
 //! Run under guest supervision with a socket in a private runtime directory.
-use hack_vm_protocol::client::Exchange;
+use hack_vm_protocol::{Frame, MAX_FRAME, MAX_JOBS, client::Exchange};
 mod jobs;
 use hack_vm_protocol::{Handle, Request, Response, negotiate, read_frame, write_frame};
 use jobs::Job;
@@ -81,7 +81,7 @@ impl Agent {
             if jobs.contains_key(&handle.id) {
                 return Response::Conflict {};
             }
-            if jobs.len() >= 256 || jobs.values().flatten().count() >= 16 {
+            if jobs.len() >= 256 || jobs.values().flatten().count() >= usize::from(MAX_JOBS) {
                 return Response::Full {};
             }
             let slot = jobs.entry(handle.id).or_default();
@@ -114,16 +114,27 @@ fn serve(stream: UnixStream, agent: &Agent) {
         stream: &stream,
         deadline: Instant::now() + Duration::from_secs(10),
     };
-    let Ok(Request::Hello { min, max }) = read_frame(&mut io) else {
+    let Ok(Frame {
+        channel: 0,
+        end: true,
+        message: Request::Hello { min, max, .. },
+    }) = read_frame(&mut io)
+    else {
         return;
     };
     let Some(version) = negotiate(min, max) else {
-        let _ = write_frame(&mut io, &Response::Invalid {});
+        let _ = write_frame(&mut io, 0, true, &Response::Invalid {});
         return;
     };
     if write_frame(
         &mut io,
+        0,
+        true,
         &Response::Welcome {
+            capabilities: 0,
+            max_frame: MAX_FRAME as u32,
+            max_jobs: MAX_JOBS,
+            output_retention: jobs::CAP as u32,
             version,
             boot: agent.boot.clone(),
             incarnation: agent.incarnation.clone(),
@@ -133,8 +144,24 @@ fn serve(stream: UnixStream, agent: &Agent) {
     {
         return;
     }
-    if let Ok(req) = read_frame(&mut io) {
-        let _ = write_frame(&mut io, &agent.dispatch(req));
+    let mut last = 0;
+    loop {
+        io.deadline = Instant::now() + Duration::from_secs(10);
+        let Ok(Frame {
+            channel,
+            end: true,
+            message,
+        }) = read_frame(&mut io)
+        else {
+            return;
+        };
+        if channel <= last {
+            return;
+        }
+        last = channel;
+        if write_frame(&mut io, channel, true, &agent.dispatch(message)).is_err() {
+            return;
+        }
     }
 }
 

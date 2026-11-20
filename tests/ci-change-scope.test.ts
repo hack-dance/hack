@@ -67,6 +67,9 @@ describe("change scope classification", () => {
       ["LICENSE", "docs"],
       ["packages/runtime-core/src/main.rs", "runtime-core"],
       ["packages/relay-guest/src/main.zig", "runtime-core"],
+      ["packages/hack-vm-protocol/src/lib.rs", "runtime-core"],
+      ["packages/hack-vm-agent/src/main.rs", "runtime-core"],
+      ["tests/models/tla/guest-execution/positive.cfg", "runtime-core"],
       ["scripts/build-hack-local.sh", "runtime-core"],
       // The checkout launcher: local_contract.rs copies it, CI runs it.
       ["hack-local", "runtime-core"],

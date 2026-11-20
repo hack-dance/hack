@@ -80,7 +80,7 @@ fn late_start_exit_reconnect_and_restart() {
         stdin: b"input".to_vec(),
     };
     let mut frame = Vec::new();
-    write_frame(&mut frame, &start()).unwrap();
+    write_frame(&mut frame, 1, true, &start()).unwrap();
     // The new client sees absent while the old stream has only a frame prefix.
     old.write_all(&frame[..4]).unwrap();
     assert!(agent.request(Request::Inspect { handle: handle() }) == Response::Absent {});
@@ -116,6 +116,7 @@ fn late_start_exit_reconnect_and_restart() {
                     bytes,
                     eof: true,
                     truncated: false,
+                    start_offset: 0,
                 } => {
                     assert_eq!(bytes, expected);
                     break;
@@ -132,6 +133,31 @@ fn late_start_exit_reconnect_and_restart() {
     fs::create_dir(&dir).unwrap();
     let restarted = Fixture::boot(dir);
     assert!(restarted.request(Request::Inspect { handle: handle() }) == Response::Unknown {});
+    // Drive the guest fence directly, bypassing the client's local stale-handle check.
+    let mut stream = restarted.connect();
+    let hello = Session::negotiate(&stream, Duration::from_secs(2)).unwrap();
+    let fresh = Handle {
+        boot: hello.boot,
+        incarnation: hello.incarnation,
+        id: handle().id,
+    };
+    write_frame(&mut stream, 1, true, &start()).unwrap();
+    assert_eq!(
+        hack_vm_protocol::read_frame::<Response>(&mut stream)
+            .unwrap()
+            .message,
+        Response::Unknown {}
+    );
+    assert_eq!(
+        restarted.request(Request::Start {
+            handle: fresh,
+            argv: vec!["/bin/true".into()],
+            env: vec![],
+            cwd: "/".into(),
+            stdin: vec![]
+        }),
+        Response::Running {}
+    );
 }
 
 #[test]
@@ -169,6 +195,13 @@ fn signal_exit_and_release_tombstone() {
             _ => panic!("missing terminating signal"),
         }
     }
+    assert_eq!(
+        agent.request(Request::Signal {
+            handle: handle(),
+            signal: hack_vm_protocol::Signal::Kill
+        }),
+        Response::Signaled { signal: 15 }
+    );
     loop {
         match agent.request(Request::Release { handle: handle() }) {
             Response::Released {} => break,
@@ -220,13 +253,11 @@ fn output_cap_still_drains_and_preserves_exit() {
     let end = Instant::now() + Duration::from_secs(5);
     loop {
         if let Response::Output {
-            bytes,
-            eof: true,
-            truncated: true,
+            bytes, eof: true, ..
         } = agent.request(Request::Output {
             handle: handle.clone(),
             stream: Stream::Stdout,
-            offset: 65536,
+            offset: 131072,
         }) {
             assert!(bytes.is_empty());
             break;
@@ -234,6 +265,9 @@ fn output_cap_still_drains_and_preserves_exit() {
         assert!(Instant::now() < end);
         thread::sleep(Duration::from_millis(5));
     }
+    assert!(
+        matches!(agent.request(Request::Output{handle:handle.clone(),stream:Stream::Stdout,offset:0}),Response::Output{start_offset:65536,bytes,truncated:true,..} if bytes.len()==4096)
+    );
     loop {
         if agent.request(Request::Inspect {
             handle: handle.clone(),
@@ -244,4 +278,44 @@ fn output_cap_still_drains_and_preserves_exit() {
         assert!(Instant::now() < end);
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+#[test]
+fn complete_inventory_at_advertised_capacity() {
+    let dir = std::env::temp_dir().join(format!("guest-inventory-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let agent = Fixture::boot(dir);
+    let stream = agent.connect();
+    let mut session = Session::negotiate(&stream, Duration::from_secs(2)).unwrap();
+    let make = |n: u16| Handle {
+        boot: session.boot.clone(),
+        incarnation: session.incarnation.clone(),
+        id: format!("{n:032x}"),
+    };
+    let handles: Vec<_> = (0..=session.max_jobs).map(make).collect();
+    for (i, h) in handles.iter().enumerate() {
+        let result = session
+            .execute(&Request::Start {
+                handle: h.clone(),
+                argv: vec!["/missing-probe-program".into()],
+                env: vec![],
+                cwd: "/".into(),
+                stdin: vec![],
+            })
+            .unwrap();
+        assert_eq!(
+            result,
+            if i < usize::from(session.max_jobs) {
+                Response::SpawnFailed {}
+            } else {
+                Response::Full {}
+            }
+        );
+    }
+    assert_eq!(
+        session.execute(&Request::List {}).unwrap(),
+        Response::Handles {
+            handles: handles[..usize::from(session.max_jobs)].to_vec()
+        }
+    );
 }

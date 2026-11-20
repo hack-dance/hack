@@ -1,21 +1,16 @@
 name: Guest protocol
-on:
-  pull_request:
-    paths:
-      - "packages/hack-vm-agent/**"
-      - "packages/hack-vm-protocol/**"
-      - ".github/workflows/guest-protocol.yml"
-  push:
-    branches: [next, main]
-    paths:
-      - "packages/hack-vm-agent/**"
-      - "packages/hack-vm-protocol/**"
-      - ".github/workflows/guest-protocol.yml"
+on: workflow_call
+concurrency:
+  group: guest-protocol-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
   guest:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -25,12 +20,20 @@ jobs:
           distribution: temurin
           java-version: "17"
       - name: Model execution recovery
-        working-directory: packages/hack-vm-protocol/model
+        if: runner.os == 'Linux'
+        working-directory: tests/models/tla/guest-execution
         run: |
           curl --fail --location --retry 2 --max-time 60 https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar -o "$RUNNER_TEMP/tlc.jar"
           echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  $RUNNER_TEMP/tlc.jar" | sha256sum --check
-          java -cp "$RUNNER_TEMP/tlc.jar" tlc2.TLC -workers 1 GuestAgent
-      - name: Test framing and Linux process recovery
+          java -cp "$RUNNER_TEMP/tlc.jar" tlc2.TLC -workers 1 -config positive.cfg GuestAgent
+      - name: Test bounded guest protocol
         run: |
+          cargo fmt --check --manifest-path packages/hack-vm-protocol/Cargo.toml
+          cargo clippy --locked --all-targets --manifest-path packages/hack-vm-protocol/Cargo.toml -- -D warnings
           cargo test --locked --manifest-path packages/hack-vm-protocol/Cargo.toml
+      - name: Test guest command execution on Linux
+        if: runner.os == 'Linux'
+        run: |
+          cargo fmt --check --manifest-path packages/hack-vm-agent/Cargo.toml
+          cargo clippy --locked --all-targets --manifest-path packages/hack-vm-agent/Cargo.toml -- -D warnings
           cargo test --locked --manifest-path packages/hack-vm-agent/Cargo.toml

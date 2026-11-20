@@ -7,11 +7,12 @@ use std::{
     thread,
 };
 
-const CAP: usize = 65536;
+pub const CAP: usize = 65536;
 
 #[derive(Default)]
 struct Buffer {
-    data: Vec<u8>,
+    data: std::collections::VecDeque<u8>,
+    first: u64,
     eof: bool,
     truncated: bool,
 }
@@ -31,9 +32,10 @@ fn drain(mut reader: impl Read + Send + 'static, sink: Pipe) {
                 }
             };
             let mut b = sink.lock().unwrap();
-            let keep = n.min(CAP - b.data.len());
-            b.data.extend_from_slice(&chunk[..keep]);
-            b.truncated |= keep != n;
+            let drop_count = (b.data.len() + n).saturating_sub(CAP);
+            b.data.drain(..drop_count);
+            b.first += drop_count as u64;
+            b.data.extend(&chunk[..n]);
         }
         sink.lock().unwrap().eof = true;
     });
@@ -127,17 +129,19 @@ impl Job {
         }
         .lock()
         .unwrap();
-        let Ok(pos) = usize::try_from(offset) else {
+        let start_offset = offset.max(pipe.first);
+        let Ok(index) = usize::try_from(start_offset - pipe.first) else {
             return Response::Invalid {};
         };
-        let Some(remaining) = pipe.data.get(pos..) else {
+        if index > pipe.data.len() {
             return Response::Invalid {};
-        };
-        let n = remaining.len().min(4096);
+        }
+        let bytes: Vec<_> = pipe.data.range(index..).take(4096).copied().collect();
         Response::Output {
-            bytes: remaining[..n].to_vec(),
-            eof: pipe.eof && n == remaining.len(),
-            truncated: pipe.truncated,
+            start_offset,
+            eof: pipe.eof && index + bytes.len() == pipe.data.len(),
+            truncated: offset < pipe.first || pipe.truncated,
+            bytes,
         }
     }
 }

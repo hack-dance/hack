@@ -4,17 +4,17 @@
  * `packages/runtime-core/src/provider/lifecycle/disk_handles.rs`), so the bounds
  * `STOP_HANDLE_WAIT` and `RELEASE_HANDLE_WAIT` can be checked against the host.
  *
- * The runtime scans the host's process table in its own process. With
+ * On macOS the runtime scans the host's process table in its own process. With
  * `--scan-binary` this script times that scan: it runs the runtime's ignored
  * unit-test fixture `one_timed_host_scan`, which scans for two fresh unheld
  * files and prints the scan's own time, and reports that time, without the
  * test binary's start-up. Build the binary with
  * `cargo test --lib --no-run` in `packages/runtime-core`; Cargo prints its path.
  *
- * Without `--scan-binary` it times the `lsof` child the runtime ran before and
- * still falls back to (`lsof -n -P -t -- storage.raw overlay.raw`), as a
- * baseline to compare with. `lsof` exits 1 with no output when nothing holds
- * the files.
+ * Without `--scan-binary` it times the `lsof` child
+ * (`lsof -n -P -t -- storage.raw overlay.raw`): the scan the runtime ran
+ * before, still falls back to on macOS and always runs elsewhere. `lsof`
+ * exits 1 with no output when nothing holds the files.
  *
  * Either scan walks every process, so its time grows with the process count
  * and with CPU contention.
@@ -48,7 +48,7 @@ export const HOST_LSOF = "/usr/sbin/lsof";
 
 /** The runtime's ignored unit-test fixture that runs and times one scan. */
 export const SCAN_FIXTURE =
-  "provider::lifecycle::disk_handles::tests::one_timed_host_scan";
+  "provider::lifecycle::disk_handles::macos::tests::one_timed_host_scan";
 
 /** The line the fixture prints: the seconds its scan took. */
 const FIXTURE_SECONDS = /disk_handle_scan_seconds=(\d+(?:\.\d+)?)/;

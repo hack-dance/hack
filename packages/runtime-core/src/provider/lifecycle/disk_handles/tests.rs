@@ -2,11 +2,9 @@ use super::*;
 use crate::provider::test_executable::{ISOLATED_HANG_GUARD, LOADED_HOST_SCAN_WAIT, run_isolated};
 use std::cell::{Cell, RefCell};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader};
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::process::ExitStatus;
 use std::rc::Rc;
-use std::time::Instant;
 
 /// Real `lsof` scans in this test binary run one at a time across every test process
 /// (isolated children included), and each scan's bound starts once it holds the turn.
@@ -367,331 +365,6 @@ pub(super) fn sparse_disks(directory: &Path) -> Vec<PathBuf> {
     disks
 }
 
-/// One whole scan of this host, never stopped early.
-fn host_scan(disks: &[PathBuf]) -> Found {
-    scan(disks, &AtomicBool::new(false))
-}
-
-/// Every hold a scan saw, as `(pid, hold, disk)`.
-fn holds(found: &Found) -> Vec<(i32, Hold, &Path)> {
-    found
-        .holders
-        .iter()
-        .map(|holder| {
-            let disk = holder
-                .disk
-                .as_deref()
-                .expect("an in-process hold names its disk");
-            (holder.pid, holder.hold, disk)
-        })
-        .collect()
-}
-
-fn own_pid() -> i32 {
-    i32::try_from(std::process::id()).unwrap()
-}
-
-/// A child that holds whatever it was given as standard input, killed and reaped on drop.
-struct Sleeper(Child);
-
-impl Sleeper {
-    fn holding(file: File) -> Self {
-        // The command, and with it this process's copy of the descriptor, is dropped
-        // when this statement ends: only the child holds the file afterwards.
-        Self(
-            Command::new("/bin/sleep")
-                .arg("120")
-                .stdin(Stdio::from(file))
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        )
-    }
-    fn pid(&self) -> i32 {
-        i32::try_from(self.0.id()).unwrap()
-    }
-    fn exit(mut self) {
-        self.0.kill().unwrap();
-        self.0.wait().unwrap();
-    }
-}
-
-impl Drop for Sleeper {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// The host scan finds a disk this process holds open, through the same interpretation
-/// and the stop path's bound, and names this process as the holder.
-#[test]
-fn host_scan_finds_a_held_disk() {
-    let directory = Scratch::new();
-    let disks = sparse_disks(directory.path());
-    let _held = File::open(&disks[1]).unwrap();
-    let result = disks_closed(
-        &HostScan::unrecorded(),
-        &process::MonotonicClock::new(),
-        &disks,
-        STOP_HANDLE_WAIT,
-    );
-    assert_eq!(code(&result), "stop_uncertain");
-    let found = host_scan(&disks);
-    assert!(
-        holds(&found).contains(&(own_pid(), Hold::Descriptor, disks[1].as_path())),
-        "{found:?}"
-    );
-    assert!(
-        !holds(&found).iter().any(|(_, _, disk)| *disk == disks[0]),
-        "{found:?}"
-    );
-}
-
-/// The host scan proves closed disks closed within the stop path's bound. It runs alone in
-/// a child process: in the shared test process an unrelated test's pre-exec fork can
-/// briefly hold a copy of the disk descriptors this fixture just closed.
-#[test]
-fn host_scan_proves_closed_disks_closed() {
-    isolated("host_scan_closed_disks_child");
-}
-
-#[test]
-#[ignore = "isolated host-scan fixture launched by host_scan_proves_closed_disks_closed"]
-fn host_scan_closed_disks_child() {
-    let directory = Scratch::new();
-    let disks = sparse_disks(directory.path());
-    let found = host_scan(&disks);
-    assert!(
-        found.holders.is_empty() && found.unknown.is_empty(),
-        "{found:?}"
-    );
-    let result = disks_closed(
-        &HostScan::unrecorded(),
-        &process::MonotonicClock::new(),
-        &disks,
-        STOP_HANDLE_WAIT,
-    );
-    assert_eq!(code(&result), "ok", "{:?}", result.as_ref().err());
-}
-
-/// Run one ignored fixture of this module alone in a child test process, so its exact
-/// holder lists cannot include another test's pre-exec fork.
-fn isolated(fixture: &str) {
-    run_isolated(
-        &format!("provider::lifecycle::disk_handles::tests::{fixture}"),
-        ISOLATED_HANG_GUARD,
-    );
-}
-
-/// Another process that holds a disk open is found by the disk's device and inode and
-/// reported with its pid, and is no longer found once it has exited.
-#[test]
-fn a_child_holding_a_disk_is_found_until_it_exits() {
-    isolated("child_holder_fixture");
-}
-
-#[test]
-#[ignore = "isolated host-scan fixture launched by a_child_holding_a_disk_is_found_until_it_exits"]
-fn child_holder_fixture() {
-    let directory = Scratch::new();
-    let disks = sparse_disks(directory.path());
-    assert_eq!(holds(&host_scan(&disks)), []);
-
-    let child = Sleeper::holding(File::open(&disks[1]).unwrap());
-    let found = host_scan(&disks);
-    assert_eq!(
-        holds(&found),
-        [(child.pid(), Hold::Descriptor, disks[1].as_path())],
-        "{found:?}"
-    );
-    assert_eq!(found.holders[0].name.as_deref(), Some(disks[1].as_path()));
-    assert_eq!(found.unknown, [] as [String; 0]);
-    let refused = disks_closed(
-        &HostScan::unrecorded(),
-        &process::MonotonicClock::new(),
-        &disks,
-        STOP_HANDLE_WAIT,
-    );
-    assert_eq!(code(&refused), "stop_uncertain");
-
-    child.exit();
-    let found = host_scan(&disks);
-    assert!(
-        found.holders.is_empty() && found.unknown.is_empty(),
-        "{found:?}"
-    );
-}
-
-/// A holder is found whatever name it opened the disk by: through a hard link, after that
-/// link is renamed, and after it is removed. A path comparison would miss all three.
-#[test]
-fn a_disk_held_through_another_name_is_found() {
-    isolated("other_name_holder_fixture");
-}
-
-#[test]
-#[ignore = "isolated host-scan fixture launched by a_disk_held_through_another_name_is_found"]
-fn other_name_holder_fixture() {
-    let directory = Scratch::new();
-    let disks = sparse_disks(directory.path());
-    let link = directory.path().join("linked.raw");
-    std::fs::hard_link(&disks[0], &link).unwrap();
-    let child = Sleeper::holding(File::open(&link).unwrap());
-    let expected = [(child.pid(), Hold::Descriptor, disks[0].as_path())];
-
-    let found = host_scan(&disks);
-    assert_eq!(holds(&found), expected, "through a hard link: {found:?}");
-
-    let moved = directory.path().join("moved.raw");
-    std::fs::rename(&link, &moved).unwrap();
-    let found = host_scan(&disks);
-    assert_eq!(holds(&found), expected, "after a rename: {found:?}");
-
-    std::fs::remove_file(&moved).unwrap();
-    let found = host_scan(&disks);
-    assert_eq!(holds(&found), expected, "after the link is gone: {found:?}");
-
-    child.exit();
-    assert_eq!(holds(&host_scan(&disks)), []);
-}
-
-/// A shared mapping of a disk, unmapped on drop.
-pub(super) struct Mapping {
-    address: *mut libc::c_void,
-    length: usize,
-}
-
-impl Mapping {
-    /// Map the start of `disk` and close the descriptor, so only the mapping holds it.
-    pub(super) fn of(disk: &Path) -> Self {
-        use std::os::fd::AsRawFd;
-        let file = File::open(disk).unwrap();
-        let length = 1 << 16;
-        // SAFETY: a new read-only shared mapping of a live descriptor at an address the
-        // kernel chooses; the file is longer than `length`.
-        let address = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                length,
-                libc::PROT_READ,
-                libc::MAP_SHARED,
-                file.as_raw_fd(),
-                0,
-            )
-        };
-        assert_ne!(address, libc::MAP_FAILED);
-        Self { address, length }
-    }
-}
-
-impl Drop for Mapping {
-    fn drop(&mut self) {
-        // SAFETY: exactly the mapping `of` created; nothing else refers to it.
-        unsafe { libc::munmap(self.address, self.length) };
-    }
-}
-
-/// A process that mapped a disk and closed its descriptor still holds it, as it did for
-/// `lsof`, until the mapping is gone.
-#[test]
-fn a_mapping_without_a_descriptor_is_found() {
-    isolated("mapping_holder_fixture");
-}
-
-#[test]
-#[ignore = "isolated host-scan fixture launched by a_mapping_without_a_descriptor_is_found"]
-fn mapping_holder_fixture() {
-    let directory = Scratch::new();
-    let disks = sparse_disks(directory.path());
-    let mapping = Mapping::of(&disks[0]);
-    let found = host_scan(&disks);
-    assert_eq!(
-        holds(&found),
-        [(own_pid(), Hold::Mapping, disks[0].as_path())],
-        "{found:?}"
-    );
-    assert_eq!(found.unknown, [] as [String; 0]);
-    drop(mapping);
-    assert_eq!(holds(&host_scan(&disks)), []);
-}
-
-/// A disk whose device and inode cannot be read fails the scan as unknown before any
-/// process is inspected, as `lsof`'s status error for a missing file did.
-#[test]
-fn a_disk_that_cannot_be_identified_is_unknown() {
-    let directory = Scratch::new();
-    let mut disks = sparse_disks(directory.path());
-    disks.push(directory.path().join("missing.raw"));
-    let found = host_scan(&disks);
-    assert!(found.holders.is_empty(), "{found:?}");
-    assert_eq!(found.unknown.len(), 1, "{found:?}");
-    let result = disks_closed(
-        &HostScan::unrecorded(),
-        &process::MonotonicClock::new(),
-        &disks,
-        STOP_HANDLE_WAIT,
-    );
-    assert_eq!(code(&result), "stop_uncertain");
-}
-
-/// A process that has exited answers as exited, which is "not holding", not unknown.
-#[test]
-fn an_exited_process_is_not_holding() {
-    let directory = Scratch::new();
-    let disks: Vec<Disk> = sparse_disks(directory.path())
-        .iter()
-        .map(|disk| Disk::identify(disk).unwrap())
-        .collect();
-    let mut child = Command::new("/bin/sh")
-        .args(["-c", "exit 0"])
-        .spawn()
-        .unwrap();
-    let pid = i32::try_from(child.id()).unwrap();
-    child.wait().unwrap();
-    let mut holders = Vec::new();
-    assert_eq!(
-        host::Inspector::new().inspect(pid, &disks, &mut holders),
-        Err(Ended::Exited)
-    );
-    assert!(holders.is_empty());
-}
-
-/// A scan told to stop reports that it did not finish; it never reports "no holder".
-#[test]
-fn a_stopped_scan_is_unknown() {
-    let directory = Scratch::new();
-    let disks = sparse_disks(directory.path());
-    let found = scan(&disks, &AtomicBool::new(true));
-    assert!(found.holders.is_empty(), "{found:?}");
-    assert!(!found.unknown.is_empty(), "{found:?}");
-    let refused = fake_scan(
-        Outcome {
-            takes: Some(Duration::ZERO),
-            holder: false,
-            unknown: true,
-        },
-        STOP_HANDLE_WAIT,
-    );
-    assert_eq!(code(&refused.result), "stop_uncertain");
-}
-
-/// The real scan is expired at its bound like any other: with no time at all it ends as
-/// `provider_timeout_uncertain`, whether or not its thread had already answered.
-#[test]
-fn the_host_scan_past_its_bound_is_uncertain() {
-    let directory = Scratch::new();
-    let disks = sparse_disks(directory.path());
-    let result = disks_closed(
-        &HostScan::unrecorded(),
-        &process::MonotonicClock::new(),
-        &disks,
-        Duration::ZERO,
-    );
-    assert_eq!(code(&result), "provider_timeout_uncertain");
-}
-
 /// An `lsof` answer as a finished child would report it.
 fn answer(code: i32, stdout: &[u8], stderr: &[u8]) -> Captured {
     Captured {
@@ -786,7 +459,7 @@ fn an_lsof_listing_is_read_as_its_process_ids() {
 
 /// The host `lsof` this test binary can run, from the locations the fallback tries. macOS
 /// must have it.
-fn host_lsof() -> Option<PathBuf> {
+pub(super) fn host_lsof() -> Option<PathBuf> {
     let found = LSOF
         .into_iter()
         .map(PathBuf::from)
@@ -801,11 +474,14 @@ fn host_lsof() -> Option<PathBuf> {
     found
 }
 
-/// One whole `lsof` scan, bounded for a loaded host once it has its serial turn.
-fn lsof_scan(lsof: &Path, disks: &[PathBuf]) -> Found {
-    let mut scan = Lsof::at(lsof).start(disks).unwrap();
-    let clock = process::MonotonicClock::new();
-    process::wait_within(scan.as_mut(), LOADED_HOST_SCAN_WAIT, &clock).unwrap()
+/// Run one ignored fixture under this module (`tests::<name>`, `macos::tests::<name>`)
+/// alone in a child test process, so that nothing else in the test process can hold or map
+/// what the fixture scans for.
+pub(super) fn isolated(fixture: &str) {
+    run_isolated(
+        &format!("provider::lifecycle::disk_handles::{fixture}"),
+        ISOLATED_HANG_GUARD,
+    );
 }
 
 /// The fallback finds the same `lsof` the tests found, and refuses when there is none.
@@ -842,7 +518,7 @@ fn host_lsof_proves_closed_disks_closed() {
     if host_lsof().is_none() {
         return;
     }
-    isolated("host_lsof_closed_disks_child");
+    isolated("tests::host_lsof_closed_disks_child");
 }
 
 #[test]
@@ -860,10 +536,14 @@ fn host_lsof_closed_disks_child() {
     assert_eq!(code(&result), "ok", "{:?}", result.as_ref().err());
 }
 
-/// A scan with a pool records the method it used beside the owner record; on this host
-/// that is the method the self-test chose.
+/// A host scan records the method that answered beside the owner record: on macOS the
+/// scan in this process, which finds the disk this process holds; elsewhere `lsof`,
+/// because no scan in this process is built there.
 #[test]
 fn a_host_scan_records_its_method_in_the_pool() {
+    if host_lsof().is_none() {
+        return;
+    }
     let pool = Scratch::new();
     let directory = Scratch::new();
     let disks = sparse_disks(directory.path());
@@ -877,286 +557,107 @@ fn a_host_scan_records_its_method_in_the_pool() {
     );
     // The scan refused, and its method is recorded all the same.
     assert_eq!(code(&result), "stop_uncertain");
-    assert_eq!(last_scan::read(pool.path()), Some(host::method()));
+    let expected = if cfg!(target_os = "macos") {
+        Method::InProcess
+    } else {
+        Method::Lsof(Fallback::NotBuiltForThisPlatform)
+    };
+    assert_eq!(last_scan::read(pool.path()), Some(expected));
 }
 
-const HOLD: &str = "HACK_TEST_DISK_HOLD";
-const HOLD_FILE: &str = "HACK_TEST_DISK_HOLD_FILE";
-const HOLDING: &str = "disk-holder: holding";
-const CANNOT_HOLD: &str = "disk-holder: cannot hold";
-
-/// Turn `file` into a file port and close its descriptor, so only the port holds the
-/// file. `None` when this host does not export `fileport_makeport`: the call is in the
-/// system library but in no SDK header, so it is looked up at run time instead of linked.
-#[cfg(target_os = "macos")]
-fn file_port(file: File) -> Option<u32> {
-    use std::os::fd::AsRawFd;
-    type MakePort = unsafe extern "C" fn(libc::c_int, *mut u32) -> libc::c_int;
-    // SAFETY: a lookup of a NUL-terminated name in the images already loaded.
-    let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"fileport_makeport".as_ptr()) };
-    if symbol.is_null() {
-        return None;
-    }
-    // SAFETY: the system library's `int fileport_makeport(int, mach_port_t *)`.
-    let make_port = unsafe { std::mem::transmute::<*mut libc::c_void, MakePort>(symbol) };
-    let mut port = 0_u32;
-    // SAFETY: a live descriptor and a valid place for the port name.
-    let made = unsafe { make_port(file.as_raw_fd(), &mut port) };
-    (made == 0 && port != 0).then_some(port)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn file_port(_file: File) -> Option<u32> {
-    None
-}
-
-/// The process the cross-check fixtures launch: it holds one file in one way, says so, and
-/// exits when its standard input closes. It does nothing in an ordinary `--ignored` run.
+/// A host scan that must be left to `lsof` is: the thread's reason is recorded, the
+/// `lsof` child answers, and what it lists is the result.
 #[test]
-#[ignore = "holder process launched by the cross-check fixtures"]
-fn disk_holder_process() {
-    let (Some(how), Some(file)) = (std::env::var_os(HOLD), std::env::var_os(HOLD_FILE)) else {
+fn a_scan_left_to_lsof_is_answered_by_lsof() {
+    if host_lsof().is_none() {
         return;
-    };
-    let file = PathBuf::from(file);
-    let held: Option<Box<dyn std::any::Any>> = match how.to_str() {
-        Some("descriptor") => Some(Box::new(File::open(&file).unwrap())),
-        Some("mapping") => Some(Box::new(Mapping::of(&file))),
-        Some("file-port") => file_port(File::open(&file).unwrap())
-            .map(|port| Box::new(port) as Box<dyn std::any::Any>),
-        _ => panic!("unknown hold {how:?}"),
-    };
-    println!("{}", if held.is_some() { HOLDING } else { CANNOT_HOLD });
-    let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
-    drop(held);
-}
-
-/// A running [`disk_holder_process`], released and reaped on drop.
-struct DiskHolder {
-    child: Child,
-    release: Option<ChildStdin>,
-    /// Kept open so the process can still print when it exits.
-    output: BufReader<std::process::ChildStdout>,
-}
-
-impl DiskHolder {
-    /// `None` when this host cannot hold a file that way.
-    fn holding(how: &str, file: &Path) -> Option<Self> {
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args(["--ignored", "--exact", "--nocapture", "--test-threads=1"])
-            .arg("provider::lifecycle::disk_handles::tests::disk_holder_process")
-            .env(HOLD, how)
-            .env(HOLD_FILE, file)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let release = child.stdin.take();
-        let output = BufReader::new(child.stdout.take().unwrap());
-        let mut holder = Self {
-            child,
-            release,
-            output,
-        };
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let read = holder.output.read_line(&mut line).unwrap();
-            assert_ne!(read, 0, "the disk holder exited without holding by {how}");
-            if line.contains(HOLDING) {
-                return Some(holder);
-            }
-            if line.contains(CANNOT_HOLD) {
-                holder.exit();
-                return None;
-            }
-        }
     }
-    fn pid(&self) -> i32 {
-        i32::try_from(self.child.id()).unwrap()
+    fn left_to_lsof(_: &[PathBuf], _: &AtomicBool) -> Result<Found, Fallback> {
+        Err(Fallback::WalkIncomplete)
     }
-    /// Close its standard input and wait for it to exit.
-    fn exit(&mut self) {
-        drop(self.release.take());
-        self.child.wait().unwrap();
-    }
-}
-
-impl Drop for DiskHolder {
-    fn drop(&mut self) {
-        drop(self.release.take());
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// The scan in this process and the `lsof` scan give the same answer about one process
-/// that holds a disk in one way: the same holder while it holds, and none after it exits.
-/// This is the check that fails first if an OS update changes what the undeclared region
-/// query or the other libproc calls report.
-fn both_scans_agree(how: &str) {
-    let Some(lsof) = host_lsof() else { return };
+    let pool = Scratch::new();
     let directory = Scratch::new();
     let disks = sparse_disks(directory.path());
-    let Some(mut holder) = DiskHolder::holding(how, &disks[0]) else {
-        println!("skipping: this host cannot hold a file by {how}");
-        return;
+    let _held = File::open(&disks[1]).unwrap();
+    let probe = HostScan {
+        record: Some(pool.path()),
+        decide: left_to_lsof,
     };
-    let pids = |found: &Found| -> Vec<i32> {
-        let mut pids: Vec<i32> = found.holders.iter().map(|held| held.pid).collect();
-        pids.dedup();
-        pids
-    };
-
-    let in_process = host_scan(&disks);
-    let listed = lsof_scan(&lsof, &disks);
-    assert_eq!(
-        pids(&in_process),
-        [holder.pid()],
-        "in process: {in_process:?}"
-    );
-    assert_eq!(pids(&listed), [holder.pid()], "lsof: {listed:?}");
-    assert!(in_process.unknown.is_empty(), "{in_process:?}");
-    assert!(listed.unknown.is_empty(), "{listed:?}");
-    let expected = match how {
-        "descriptor" => Hold::Descriptor,
-        "file-port" => Hold::FilePort,
-        _ => Hold::Mapping,
-    };
-    assert_eq!(
-        holds(&in_process),
-        [(holder.pid(), expected, disks[0].as_path())],
-        "{in_process:?}"
-    );
-
-    holder.exit();
-    let in_process = host_scan(&disks);
-    let listed = lsof_scan(&lsof, &disks);
+    let mut scan = probe.start(&disks).unwrap();
+    let clock = process::MonotonicClock::new();
+    let found = process::wait_within(scan.as_mut(), LOADED_HOST_SCAN_WAIT, &clock).unwrap();
+    let own = i32::try_from(std::process::id()).unwrap();
     assert!(
-        in_process.holders.is_empty() && in_process.unknown.is_empty(),
-        "in process after exit: {in_process:?}"
-    );
-    assert!(
-        listed.holders.is_empty() && listed.unknown.is_empty(),
-        "lsof after exit: {listed:?}"
-    );
-}
-
-#[test]
-fn both_scans_agree_on_a_descriptor_holder() {
-    isolated("agree_on_a_descriptor_fixture");
-}
-
-#[test]
-#[ignore = "isolated cross-check fixture launched by both_scans_agree_on_a_descriptor_holder"]
-fn agree_on_a_descriptor_fixture() {
-    both_scans_agree("descriptor");
-}
-
-#[test]
-fn both_scans_agree_on_a_mapping_only_holder() {
-    isolated("agree_on_a_mapping_fixture");
-}
-
-#[test]
-#[ignore = "isolated cross-check fixture launched by both_scans_agree_on_a_mapping_only_holder"]
-fn agree_on_a_mapping_fixture() {
-    both_scans_agree("mapping");
-}
-
-#[test]
-#[cfg(target_os = "macos")]
-fn both_scans_agree_on_a_file_port_holder() {
-    isolated("agree_on_a_file_port_fixture");
-}
-
-#[test]
-#[cfg(target_os = "macos")]
-#[ignore = "isolated cross-check fixture launched by both_scans_agree_on_a_file_port_holder"]
-fn agree_on_a_file_port_fixture() {
-    both_scans_agree("file-port");
-}
-
-fn spread(mut samples: Vec<Duration>) -> String {
-    samples.sort();
-    format!(
-        "min {:.1} ms, median {:.1} ms, max {:.1} ms over {} runs",
-        samples[0].as_secs_f64() * 1e3,
-        samples[samples.len() / 2].as_secs_f64() * 1e3,
-        samples[samples.len() - 1].as_secs_f64() * 1e3,
-        samples.len()
-    )
-}
-
-/// Time `runs` calls of `scan`, which must each prove the disks closed.
-pub(super) fn timed(runs: usize, mut scan: impl FnMut()) -> Vec<Duration> {
-    (0..runs)
-        .map(|_| {
-            let started = Instant::now();
-            scan();
-            started.elapsed()
-        })
-        .collect()
-}
-
-/// Prints this host's scan time beside the `lsof` child it falls back to, over the same
-/// two unheld files. Run it alone:
-/// `cargo test --lib -- --ignored --nocapture --exact
-/// provider::lifecycle::disk_handles::tests::host_scan_timing_against_lsof`.
-#[test]
-#[ignore = "timing report for a quiet host; run alone with --ignored --nocapture"]
-fn host_scan_timing_against_lsof() {
-    let directory = Scratch::new();
-    let disks = sparse_disks(directory.path());
-    let processes = host::processes().unwrap().len();
-    println!("disk-handle scan timing on a host with {processes} processes");
-    let chosen = timed(200, || assert_eq!(host::method(), Method::InProcess));
-    println!("  choosing the method:     {}", spread(chosen));
-    let scans = timed(20, || {
-        let found = host_scan(&disks);
-        assert!(
-            found.holders.is_empty() && found.unknown.is_empty(),
-            "{found:?}"
-        );
-    });
-    println!("  scan in this process:    {}", spread(scans));
-    let bounded = timed(20, || {
-        let clock = process::MonotonicClock::new();
-        disks_closed(&HostScan::unrecorded(), &clock, &disks, STOP_HANDLE_WAIT).unwrap();
-    });
-    println!("  through disks_closed:    {}", spread(bounded));
-    let Some(lsof) = host_lsof() else {
-        println!("  lsof: not installed on this host");
-        return;
-    };
-    let children = timed(5, || {
-        let listed = process::capture(
-            process::clean_command(&lsof)
-                .args(["-n", "-P", "-t", "--"])
-                .args(&disks),
-            Duration::from_secs(120),
-        )
-        .unwrap();
-        assert_eq!(listed.status.code(), Some(1));
-        assert!(listed.stdout.is_empty() && listed.stderr.is_empty());
-    });
-    println!("  lsof child, the fallback: {}", spread(children));
-}
-
-/// One scan over two unheld files, timed. `scripts/measure-lsof-scan.ts` runs this fixture
-/// to measure a host under load and reads the line it prints.
-#[test]
-#[ignore = "one timed scan for scripts/measure-lsof-scan.ts"]
-fn one_timed_host_scan() {
-    let directory = Scratch::new();
-    let disks = sparse_disks(directory.path());
-    let started = Instant::now();
-    let found = host_scan(&disks);
-    let seconds = started.elapsed().as_secs_f64();
-    assert!(
-        found.holders.is_empty() && found.unknown.is_empty(),
+        found
+            .holders
+            .iter()
+            .any(|held| held.pid == own && held.hold == Hold::Listed),
         "{found:?}"
     );
-    println!("disk_handle_scan_seconds={seconds:.6}");
+    assert_eq!(
+        last_scan::read(pool.path()),
+        Some(Method::Lsof(Fallback::WalkIncomplete))
+    );
+}
+
+/// Starting a host scan does none of its work: the method is chosen, the scan made and
+/// the record written on the scan's thread, inside the caller's bound. A choice that
+/// never returns therefore ends as a timeout at the bound instead of hanging the stop.
+#[test]
+fn choosing_the_method_is_inside_the_bound() {
+    fn never_decides(_: &[PathBuf], stop: &AtomicBool) -> Result<Found, Fallback> {
+        while !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Err(Fallback::SelfTestUnavailable)
+    }
+    let pool = Scratch::new();
+    let probe = HostScan {
+        record: Some(pool.path()),
+        decide: never_decides,
+    };
+    let started = std::time::Instant::now();
+    let result = disks_closed(
+        &probe,
+        &process::MonotonicClock::new(),
+        &disks(Path::new("/pool")),
+        Duration::from_millis(200),
+    );
+    assert_eq!(code(&result), "provider_timeout_uncertain");
+    assert!(started.elapsed() < Duration::from_secs(20));
+}
+
+/// A scan whose thread dies without an answer is refused, never read as "no holder".
+#[test]
+fn a_scan_thread_that_panics_is_refused() {
+    fn panics(_: &[PathBuf], _: &AtomicBool) -> Result<Found, Fallback> {
+        panic!("the scan thread panics on purpose");
+    }
+    let probe = HostScan {
+        record: None,
+        decide: panics,
+    };
+    let result = disks_closed(
+        &probe,
+        &process::MonotonicClock::new(),
+        &disks(Path::new("/pool")),
+        LOADED_HOST_SCAN_WAIT,
+    );
+    assert_eq!(code(&result), "stop_uncertain");
+}
+
+/// The real host scan is expired at its bound like any other: with no time at all it ends
+/// as `provider_timeout_uncertain`, whether or not its thread had already answered.
+#[test]
+fn the_host_scan_past_its_bound_is_uncertain() {
+    let directory = Scratch::new();
+    let disks = sparse_disks(directory.path());
+    let pool = Scratch::new();
+    let result = disks_closed(
+        &HostScan::recording(pool.path()),
+        &process::MonotonicClock::new(),
+        &disks,
+        Duration::ZERO,
+    );
+    assert_eq!(code(&result), "provider_timeout_uncertain");
 }

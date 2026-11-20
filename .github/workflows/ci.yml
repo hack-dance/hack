@@ -122,8 +122,8 @@ jobs:
                     relocated_cli=true ;;
                 esac
                 case "$path" in
-                  packages/runtime-core/*.md|packages/config-compiler/*.md) ;;
-                  packages/runtime-core/*|packages/config-compiler/*|packages/relay-guest/*)
+                  packages/runtime-core/*.md|packages/config-compiler/*.md|packages/hack-vm-agent/*.md|packages/hack-vm-protocol/*.md) ;;
+                  packages/runtime-core/*|packages/config-compiler/*|packages/relay-guest/*|packages/hack-vm-agent/*|packages/hack-vm-protocol/*|tests/models/tla/guest-execution/*)
                     linux_rust=true ;;
                 esac
                 case "$path" in

@@ -1,3 +1,4 @@
+import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 
 /**
@@ -86,4 +87,34 @@ export function renderNativeHotReloadNotice(
     return `Hot reload on shared source is off: HACK_NATIVE_HOT_RELOAD=off. ${NATIVE_HOT_RELOAD_OFF_EFFECT}`;
   }
   return `Hot reload on shared source is off: the shared project folders hold more than ${limit} files and folders, and the virtual machine reads every one before it starts, which can make the start fail. ${NATIVE_HOT_RELOAD_OFF_EFFECT} Remove installed dependency folders from the checkout to bring it back (localDirectories keeps them on the virtual machine's disk), or set HACK_NATIVE_HOT_RELOAD=on to force it on.`;
+}
+
+/** The setting the runtime reads at `runtime up`: `auto` (the default), `on` or `off`. */
+export const NATIVE_HOT_RELOAD_SETTING = "HACK_NATIVE_HOT_RELOAD";
+
+/**
+ * The environment addition for one runtime request. Runtime subprocesses get
+ * a closed system environment, so the setting is handed to `runtime up`, the
+ * one command that reads it, and to nothing else. A value that is not one of
+ * the three words is refused here, before the subprocess starts, instead of
+ * quietly becoming the default.
+ */
+export function nativeHotReloadEnvironment(
+  args: readonly string[],
+  env: Readonly<Record<string, string | undefined>> = process.env
+): Record<string, string> {
+  if (!(args[0] === "runtime" && args[1] === "up")) {
+    return {};
+  }
+  const value = env[NATIVE_HOT_RELOAD_SETTING];
+  if (value === undefined || value === "") {
+    return {};
+  }
+  if (!(value === "auto" || value === "on" || value === "off")) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: `${NATIVE_HOT_RELOAD_SETTING} must be auto, on or off.`,
+    });
+  }
+  return { [NATIVE_HOT_RELOAD_SETTING]: value };
 }

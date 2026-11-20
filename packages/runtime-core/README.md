@@ -1717,13 +1717,17 @@ waits for the scan and hot reload works; above it the boot does not wait and hot
   notifications on, the same edits were readable and their events arrived 40 to 90 ms later,
   on a 1,000-entry and a 135,000-entry tree alike.
 - **The count.** Immediately before `machine start`, the runtime lists the pool's project
-  shares (directory listings only; nothing is opened and links are not followed) and stops
-  one entry past the limit, so its cost is bounded by the limit whatever the checkout holds.
-  The provider follows links and the count does not, so the count is a lower bound of what
-  the provider reads.
+  shares (nothing is opened and links are not followed) and stops one entry past the limit,
+  so the number of entries it visits is bounded by the limit whatever the checkout holds.
+  Entry types normally come from the directory listing itself; a file system that does not
+  supply them costs one metadata lookup per entry. The bound is on entries, not on time. The
+  provider follows links and the count does not, and entries that vanish or cannot be listed
+  are not counted, so the count is a lower bound of what the provider reads.
 - **The setting.** `HACK_NATIVE_HOT_RELOAD` is `auto` (the default), `on` or `off`, read by
   `runtime up`; any other value is refused before any effect. `on` keeps the notifications
-  whatever the size; `off` drops them whatever the size.
+  whatever the size; `off` drops them whatever the size. The CLI gives runtime subprocesses
+  a closed environment, so it hands this one setting to `runtime up` explicitly and refuses
+  a mistyped value itself, before the runtime starts.
 - **The record.** The choice is made at every boot and written to the owner receipt
   (`hot_reload`) only when it is not the plain default: off, or forced on over a large share.
   `lifecycle::command` sets the provider's switch on every invocation from that record.

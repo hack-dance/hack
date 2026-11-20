@@ -109,10 +109,12 @@ impl Choice {
 
 /// Entries under `roots`, counted only until the count passes `limit`.
 ///
-/// Directory listings alone: no entry is opened or examined, and a link is counted but never
-/// followed, so the work is bounded by `limit` whatever the trees hold. A directory that
-/// cannot be listed counts as its own entry and nothing more. The result is exact when it is
-/// at most `limit`; a larger result only says "more than `limit`".
+/// No entry is opened and a link is counted but never followed, so the number of entries
+/// visited is bounded by `limit` whatever the trees hold. Entry types normally come from the
+/// directory listing itself; a file system that does not supply them costs one metadata lookup
+/// per entry. A directory that cannot be listed counts as its own entry and nothing more, and
+/// the trees may change while they are counted. The result is exact for an unchanging readable
+/// tree when it is at most `limit`; a larger result only says "more than `limit`".
 pub fn count(roots: &[&Path], limit: u64) -> u64 {
     let mut seen = 0_u64;
     let mut pending: Vec<PathBuf> = roots.iter().map(|root| root.to_path_buf()).collect();

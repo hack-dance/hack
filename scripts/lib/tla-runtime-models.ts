@@ -140,6 +140,14 @@ const restartPolicyStaleUses = [
   { engine: "restarting", bound: 3 },
   { engine: "exited", bound: 3 },
 ] as const;
+// StartGraph's ghost flags: each control can set only the flag its guard
+// removal makes reachable, so the whole record names the unsafe step.
+const startGraphBad = (
+  flag: "start" | "publish" | "replace" | "return"
+): string =>
+  `bad = [${(["start", "publish", "replace", "return"] as const)
+    .map((key) => `${key} |-> ${key === flag ? "TRUE" : "FALSE"}`)
+    .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
     name: "autostart-start-stop",
@@ -2383,6 +2391,101 @@ const contracts: readonly ModelContract[] = [
           "intent = TRUE",
           "config = FALSE",
           "engine = TRUE",
+        ],
+      },
+    ],
+  },
+  // The CI tier bounds one VM boot; keep-across-boot alone allows a reboot.
+  // Witnesses omit `cur` and `intents`: the initial spec value is free and
+  // two-worker TLC reports either one.
+  {
+    name: "start-graph",
+    module: "StartGraph",
+    states: 1_119_624,
+    invariant: "NoEffectWithoutIntent",
+    action: "Create",
+    fields: ["intents = {}", "acted = TRUE", 'up = "running"'],
+    additionalControls: [
+      {
+        name: "ignore-deps",
+        negative: true,
+        invariant: "DepsBeforeStart",
+        action: "Start",
+        fields: [
+          startGraphBad("start"),
+          "rgen = [a |-> 0, b |-> 1]",
+          'up = "running"',
+        ],
+      },
+      {
+        name: "no-publish-fence",
+        negative: true,
+        invariant: "NoPublishToReplaced",
+        action: "Publish",
+        fields: [startGraphBad("publish"), "route = [a |-> 1, b |-> 0]"],
+      },
+      {
+        name: "reuse-by-name",
+        negative: true,
+        invariant: "ReturnIsCurrent",
+        action: "Return",
+        fields: [startGraphBad("return"), "boot = 1", 'up = "returned"'],
+      },
+      {
+        name: "no-unpublish",
+        negative: true,
+        invariant: "NoReplaceWhileRouted",
+        action: "RemoveOld",
+        fields: [
+          startGraphBad("replace"),
+          "route = [a |-> 1, b |-> 0]",
+          "nextGen = [a |-> 3, b |-> 1]",
+        ],
+      },
+      {
+        name: "keep-across-boot",
+        negative: true,
+        invariant: "ReturnIsCurrent",
+        action: "Return",
+        fields: [startGraphBad("return"), "boot = 2", 'up = "returned"'],
+      },
+      {
+        name: "blind-retry",
+        negative: true,
+        invariant: "OneContainerPerService",
+        action: "Create",
+        fields: ["rgen = [a |-> 2, b |-> 0]", "nextGen = [a |-> 3, b |-> 1]"],
+        alternativeWitnesses: [
+          {
+            action: "Create",
+            fields: [
+              "rgen = [a |-> 0, b |-> 2]",
+              "nextGen = [a |-> 1, b |-> 3]",
+            ],
+          },
+        ],
+      },
+      {
+        // Reachability: a later `up` of a routed project returns without
+        // planning. TLC first sees it when the earlier publication lands.
+        name: "reachable-noop",
+        negative: true,
+        invariant: "NeverNoOpUp",
+        action: "Publish",
+        fields: [
+          "route = [a |-> 1, b |-> 1]",
+          "acted = FALSE",
+          'up = "returned"',
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Return",
+            fields: [
+              "route = [a |-> 1, b |-> 1]",
+              "acted = FALSE",
+              'up = "returned"',
+            ],
+          },
         ],
       },
     ],

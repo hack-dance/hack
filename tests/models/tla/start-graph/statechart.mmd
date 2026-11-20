@@ -1,0 +1,57 @@
+---
+title: Start graph · one service node
+---
+stateDiagram-v2
+  direction TB
+  [*] --> observing : up begins
+  observing --> kept : label, boot and state agree
+  observing --> resumed : created, never started
+  observing --> planned : spec changed or missing
+  observing --> retiring : not in the plan
+  kept --> started : still warming
+  kept --> ready : list or probe says ready
+  kept --> done : ready and routed already
+  resumed --> starting : wave start saved
+  planned --> unpublishing : old route live
+  planned --> intent : wave intent saved
+  unpublishing --> intent : slots released
+  intent --> removing : old generation exists
+  intent --> creating : no old generation
+  removing --> creating : old generation gone
+  creating --> created : reply with id
+  creating --> unsure : reply lost
+  unsure --> created : inspect finds it
+  unsure --> planned : inspect finds none
+  created --> starting : deps ready, W2 saved
+  created --> blocked : dependency failed
+  starting --> started : W3 saved
+  starting --> unsure_start : start reply lost
+  unsure_start --> started : list says running
+  unsure_start --> failed : list says exited
+  started --> ready : list or probe says ready
+  started --> failed : exited or unhealthy
+  ready --> publishing : ready set batched
+  ready --> done : not routed
+  publishing --> published : fence holds
+  publishing --> started : fence saw a change
+  published --> done : batch complete
+  retiring --> done : removed
+  done --> [*] : up done
+  failed --> [*] : retained for cleanup
+  blocked --> [*] : retained for cleanup
+  note right of intent
+    INV NoEffectWithoutIntent
+    one save per wave
+  end note
+  note right of unsure
+    Rule 3: inspect by name
+    before any retry
+  end note
+  classDef live stroke-width:1.6px
+  classDef ok stroke-width:1.6px
+  classDef wait stroke-width:1.6px
+  classDef fail stroke-width:1.6px
+  class creating,starting,publishing live
+  class kept,published,done ok
+  class unsure,unsure_start wait
+  class failed,blocked fail

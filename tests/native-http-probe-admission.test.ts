@@ -63,3 +63,20 @@ test("an authored probe cannot opt into the generated route policy", () => {
     })
   ).toThrow("healthcheck.x-hack-http");
 });
+
+test("an authored probe may set start_interval_ms up to its interval (HACK-2443)", () => {
+  for (const start_interval_ms of [10, 50, 100]) {
+    expect(() =>
+      admitNativeHttpProbe("web", {
+        healthcheck: { "x-hack-http": { ...valid, start_interval_ms } },
+      })
+    ).not.toThrow();
+  }
+  for (const start_interval_ms of [9, 101, 1.5, "250"]) {
+    expect(() =>
+      admitNativeHttpProbe("web", {
+        healthcheck: { "x-hack-http": { ...valid, start_interval_ms } },
+      })
+    ).toThrow("healthcheck.x-hack-http.start_interval_ms");
+  }
+});

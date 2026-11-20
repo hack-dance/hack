@@ -158,12 +158,31 @@ function engineHealth(health: Record<string, unknown> | null): LaneHealth {
 }
 
 /**
+ * Native's engine defaults for a command check that leaves them out
+ * (runtime-core `project::DEFAULT_START_INTERVAL_NANOS` and
+ * `DEFAULT_START_PERIOD_NANOS`). The Compose backend adds none.
+ */
+export const NATIVE_DEFAULT_START_INTERVAL = "250ms";
+export const NATIVE_DEFAULT_START_PERIOD = "60s";
+
+function withNativeDefaults(health: LaneHealth): LaneHealth {
+  if (health.kind !== "engine-command") {
+    return health;
+  }
+  return {
+    ...health,
+    startPeriod: health.startPeriod ?? NATIVE_DEFAULT_START_PERIOD,
+    startInterval: health.startInterval ?? NATIVE_DEFAULT_START_INTERVAL,
+  };
+}
+
+/**
  * Native's choice, following its Compose review (runtime-core
  * `project/compose/service.rs`): a declared `x-hack-http` probe runs on any
  * service; a routed service with no `healthcheck` key, or with an enabled
  * command check, gets an inferred `GET /` route probe instead; a routed
  * service whose check is disabled is refused; anything else runs in the
- * engine as on Compose.
+ * engine as on Compose, with native's start defaults filled in.
  */
 function nativeHealth(
   service: Record<string, unknown>,
@@ -177,7 +196,7 @@ function nativeHealth(
     };
   }
   if (!routed(service)) {
-    return engineHealth(health);
+    return withNativeDefaults(engineHealth(health));
   }
   if (health === null) {
     return {
@@ -245,16 +264,26 @@ export function unknownHealthChecks(compose: unknown): string[] {
 /**
  * Services whose health check differs between the two lanes for a reason
  * other than the backend's own route probe: a command check that Compose runs
- * but native replaces. Such a check costs CPU on one lane only.
+ * but native replaces, or an engine check whose start settings differ because
+ * native fills in defaults the Compose backend does not. Either costs time or
+ * CPU on one lane only.
  */
 export function unevenHealthChecks(compose: unknown): string[] {
+  const onCompose = laneHealthChecks({ compose, lane: "compose" });
   const native = laneHealthChecks({ compose, lane: "native" });
   return Object.entries(native)
-    .filter(
-      ([, health]) =>
-        health.kind === "native-route-probe" &&
-        health.replaces === "command-check"
-    )
+    .filter(([name, health]) => {
+      if (health.kind === "native-route-probe") {
+        return health.replaces === "command-check";
+      }
+      const other = onCompose[name];
+      return (
+        health.kind === "engine-command" &&
+        other?.kind === "engine-command" &&
+        (health.startInterval !== other.startInterval ||
+          health.startPeriod !== other.startPeriod)
+      );
+    })
     .map(([name]) => name)
     .sort();
 }

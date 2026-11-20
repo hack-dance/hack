@@ -94,7 +94,9 @@ Read the numbers with these limits:
   its routed services have no command check, because native probes their routes itself.
   `result.json` records under `method` the readiness mode, the Compose file's SHA-256
   and each service's health check on that lane. A command check that runs on Compose
-  only is listed under `unevenHealthChecks` and noted. A service with no test in the
+  only is listed under `unevenHealthChecks` and noted, and so is a command check whose
+  start settings differ between lanes because native fills in a 250 ms start interval
+  and a 60 s start period that the Compose backend does not. A service with no test in the
   Compose file uses its image's own check, which the benchmark does not inspect; it is
   listed under `unknownHealthChecks` (the fixture's images define none).
 
@@ -107,7 +109,10 @@ Read the numbers with these limits:
   copy `scripts/fixtures/runtime-bench/legacy/docker-compose.v1.yml` over
   `.hack/docker-compose.yml` in the fixture copy and pass `--legacy-readiness`. Version 1
   is not like for like: its API health check (`bun -e fetch` every 5 s) runs on Compose
-  only, and its 2 s intervals delay each start by about 2 s on both backends.
+  only, and its 2 s intervals delay each start by about 2 s on Compose. A native build
+  that fills in a 250 ms start interval when a check sets none no longer has that delay
+  on native, so version 1 reproduces earlier native numbers only with the CLI build that
+  produced them.
 - Each timing carries the 1-minute load before and after. Above `--max-load` (default
   40) it is flagged and kept in `result.json`. `summary` groups timings by operation and
   leaves flagged ones out of its medians; each phase's own figures use every completed

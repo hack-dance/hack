@@ -1456,7 +1456,7 @@ function methodRecord(): Record<string, unknown> {
   const uneven = unevenHealthChecks(compose);
   if (uneven.length > 0) {
     notes.push(
-      `not like for like: ${uneven.join(", ")} run a command health check on Compose only; native probes their routes instead`
+      `not like for like: ${uneven.join(", ")} run a different health check on each lane (a command check native replaces with a route probe, or start settings native fills in and Compose does not); see method.healthChecks`
     );
   }
   const unknown = unknownHealthChecks(compose);

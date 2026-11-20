@@ -11,7 +11,7 @@ flowchart TD
     K -->|disabled or no test| F[Native refuses]
     R -->|no| T{test in Compose file?}
     C([Compose lane]) --> T
-    T -->|yes| E[Engine command check]
+    T -->|yes| E[Engine command check<br/>native fills start defaults]
     T -->|disabled| O[No check]
     T -->|no test| U[Image's own check<br/>listed as unknown]
     class D,I,E ok

@@ -49,7 +49,19 @@ test("the benchmark fixture runs the same health checks on both lanes", async ()
 
 test("the version 1 fixture is reported as not like for like", async () => {
   const compose = await fixtureCompose("legacy/docker-compose.v1.yml");
-  expect(unevenHealthChecks(compose)).toEqual(["api"]);
+  // api's command check runs on Compose only, and db and cache leave the start
+  // settings to the backend: native fills in 250ms and 60s, Compose none.
+  expect(unevenHealthChecks(compose)).toEqual(["api", "cache", "db"]);
+  expect(laneHealthChecks({ compose, lane: "native" }).db).toMatchObject({
+    kind: "engine-command",
+    startInterval: "250ms",
+    startPeriod: "60s",
+  });
+  expect(laneHealthChecks({ compose, lane: "compose" }).db).toMatchObject({
+    kind: "engine-command",
+    startInterval: null,
+    startPeriod: null,
+  });
   expect(laneHealthChecks({ compose, lane: "compose" }).api).toMatchObject({
     kind: "engine-command",
     interval: "5s",
@@ -161,7 +173,9 @@ test("route detection reads list-form labels and skips inert declarations", () =
   });
   expect(onNative.inert).toMatchObject({ kind: "engine-command" });
   expect(onNative.inertBare).toEqual({ kind: "image-default" });
-  expect(unevenHealthChecks(compose)).toEqual(["listed"]);
+  // inert's command check leaves the start settings out, so native fills in
+  // its defaults and the lanes differ.
+  expect(unevenHealthChecks(compose)).toEqual(["inert", "listed"]);
 });
 
 test("concurrent readiness starts every route check at once", async () => {

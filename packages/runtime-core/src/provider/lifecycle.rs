@@ -2197,7 +2197,7 @@ exit 43"#,
         ));
     }
     owner.save(candidate)?;
-    engine_ping(&socket(candidate, owner, "docker.sock")?)?;
+    engine_ping(|| socket(candidate, owner, "docker.sock"))?;
     if network_mode != "isolated" {
         // Build-bridge isolation is not a startup requirement: graph containers never
         // join the default bridge. A failure leaves no readiness marker, and native
@@ -2472,21 +2472,20 @@ pub(super) fn verify_retained_rootfs(
     Ok(())
 }
 
-/// The reply deadline of each attempt of the host-side engine check after a boot, in order.
+/// How long one attempt of the host-side engine check may take from its request to the end
+/// of the reply, and how many attempts a boot makes.
 ///
-/// The last attempt keeps the three seconds a single attempt had, so a forward that answers
-/// slowly but does answer passes as it did before. The earlier attempts are short: what
-/// they are for is a connection that will never be answered. When every attempt waits out
-/// its deadline the check takes about 6.3 s (it took 3 s), which is under the ten seconds
-/// the boot has just allowed the engine to answer inside the guest.
-const ENGINE_PING_DEADLINES: [Duration; 4] = [
-    Duration::from_secs(1),
-    Duration::from_secs(1),
-    Duration::from_secs(1),
-    Duration::from_secs(3),
-];
+/// Three seconds is what the single attempt allowed each read before, so the first attempt
+/// accepts every reply the old check accepted, apart from one that arrives in pieces more
+/// than three seconds apart in total: the limit now covers the whole exchange, where it used
+/// to start again at every read. A forward that never answers fails the boot after about
+/// 9.2 s (three attempts and two pauses); it used to fail it after 3 s.
+const ENGINE_PING_LIMIT: Duration = Duration::from_secs(3);
+const ENGINE_PING_ATTEMPTS: u32 = 3;
 /// The pause before each further attempt.
 const ENGINE_PING_PAUSE: Duration = Duration::from_millis(100);
+/// The longest single wait for reply bytes within an attempt.
+const ENGINE_PING_WAIT: Duration = Duration::from_millis(250);
 
 /// Confirm from the host that the engine answers through the provider's forwarded socket.
 ///
@@ -2497,44 +2496,89 @@ const ENGINE_PING_PAUSE: Duration = Duration::from_millis(100);
 /// seconds, and the boot was stopped as failed). So every attempt opens a fresh connection,
 /// and the boot fails only when all of them failed. The error is the last attempt's, so the
 /// failure codes are the ones a single attempt reported.
-fn engine_ping(path: &Path) -> Result<(), CandidateError> {
-    engine_ping_within(path, &ENGINE_PING_DEADLINES, ENGINE_PING_PAUSE)
+///
+/// `socket` yields the path to connect to and is asked again for every attempt, so each
+/// connection is made to a path whose checks have just passed, as the single attempt's was.
+/// A path refused as `foreign_state` ends the check at once: that is not a forward that is
+/// still coming up. The check does not identify which process answers; it never did.
+fn engine_ping(
+    socket: impl Fn() -> Result<std::path::PathBuf, CandidateError>,
+) -> Result<(), CandidateError> {
+    engine_ping_within(
+        socket,
+        ENGINE_PING_LIMIT,
+        ENGINE_PING_ATTEMPTS,
+        ENGINE_PING_PAUSE,
+    )
 }
 
 fn engine_ping_within(
-    path: &Path,
-    deadlines: &[Duration],
+    socket: impl Fn() -> Result<std::path::PathBuf, CandidateError>,
+    limit: Duration,
+    attempts: u32,
     pause: Duration,
 ) -> Result<(), CandidateError> {
     let mut result = Err(CandidateError::new(
         "engine_not_ready",
         "Private engine ping was not attempted.",
     ));
-    for (attempt, deadline) in deadlines.iter().enumerate() {
+    for attempt in 0..attempts {
         if attempt > 0 {
             std::thread::sleep(pause);
         }
-        result = engine_ping_once(path, *deadline);
-        if result.is_ok() {
-            break;
+        result = socket().and_then(|path| engine_ping_once(&path, limit));
+        match &result {
+            Ok(()) => break,
+            Err(error) if error.code == "foreign_state" => break,
+            Err(_) => {}
         }
     }
     result
 }
 
-/// One attempt on its own connection: `deadline` bounds the write and each read.
-fn engine_ping_once(path: &Path, deadline: Duration) -> Result<(), CandidateError> {
+/// One attempt on its own connection. `limit` covers the request and the whole reply: the
+/// reply is read in waits of at most [`ENGINE_PING_WAIT`], and the attempt ends when the
+/// limit has passed, so a reply that trickles in cannot outlast it. Connecting to a local
+/// socket is not timed; it returns at once or is refused.
+///
+/// Both socket timeouts are set once, before the request is written. Setting one later is
+/// not safe here: on macOS it fails with `EINVAL` on a connection the engine has already
+/// closed, which is what the engine does as soon as it has answered.
+fn engine_ping_once(path: &Path, limit: Duration) -> Result<(), CandidateError> {
+    let deadline = Instant::now() + limit;
     let mut stream = UnixStream::connect(path).map_err(io)?;
-    stream.set_read_timeout(Some(deadline)).map_err(io)?;
-    stream.set_write_timeout(Some(deadline)).map_err(io)?;
+    stream.set_write_timeout(Some(limit)).map_err(io)?;
+    stream
+        .set_read_timeout(Some(limit.min(ENGINE_PING_WAIT)))
+        .map_err(io)?;
     stream
         .write_all(b"GET /_ping HTTP/1.0\r\nHost: localhost\r\n\r\n")
         .map_err(io)?;
-    let mut response = String::new();
-    stream
-        .take(8192)
-        .read_to_string(&mut response)
-        .map_err(io)?;
+    let mut reply = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    while reply.len() < 8192 {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => reply.extend_from_slice(&chunk[..read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(io(error)),
+        }
+        if Instant::now() >= deadline {
+            return Err(io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the engine did not answer through its forwarded socket in time",
+            )));
+        }
+    }
+    reply.truncate(8192);
+    let response = String::from_utf8(reply)
+        .map_err(|error| io(std::io::Error::new(std::io::ErrorKind::InvalidData, error)))?;
     if !response.starts_with("HTTP/1.0 200 ") && !response.starts_with("HTTP/1.1 200 ") {
         return Err(CandidateError::new(
             "engine_not_ready",
@@ -4237,85 +4281,176 @@ printf 'verified-cache\n'
         closing.join().unwrap();
     }
 
+    /// A stand-in for the provider's forwarded engine socket. It holds its first `hold`
+    /// connections open and unanswered, then answers every later one with `reply` until it
+    /// is dropped. A client that has already given up is ignored. Dropping it stops and joins
+    /// its thread, also when an assertion has failed.
+    struct Forward {
+        path: std::path::PathBuf,
+        done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Forward {
+        fn bind(path: &Path, hold: usize, reply: &'static [u8]) -> Self {
+            use std::sync::atomic::Ordering;
+            let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let thread = {
+                let (done, accepted) = (done.clone(), accepted.clone());
+                std::thread::spawn(move || {
+                    let mut held = Vec::new();
+                    for stream in listener.incoming() {
+                        if done.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        let Ok(mut stream) = stream else { break };
+                        if accepted.fetch_add(1, Ordering::SeqCst) < hold {
+                            held.push(stream);
+                            continue;
+                        }
+                        let mut request = [0_u8; 64];
+                        let _ = stream.read(&mut request);
+                        let _ = stream.write_all(reply);
+                    }
+                })
+            };
+            Self {
+                path: path.to_owned(),
+                done,
+                accepted,
+                thread: Some(thread),
+            }
+        }
+
+        fn accepted(&self) -> usize {
+            self.accepted.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for Forward {
+        fn drop(&mut self) {
+            self.done.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Wake the accept loop so it sees `done`.
+            drop(UnixStream::connect(&self.path));
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
     /// HACK-2475: the provider's forwarded engine socket can accept a connection it never
     /// answers while the forward is still coming up. A later, fresh connection must be
     /// tried before the boot is failed.
     #[test]
     fn the_engine_check_tries_a_fresh_connection_when_one_is_never_answered() {
-        use std::os::unix::net::UnixListener;
         const OK: &[u8] = b"HTTP/1.0 200 OK\r\n\r\nOK";
-        let short = Duration::from_millis(150);
-        let deadlines = [short, short, Duration::from_millis(600)];
+        let limit = Duration::from_millis(400);
         let pause = Duration::from_millis(10);
         let directory = ShortDirectory::new();
         let path = directory.0.join("docker.sock");
+        let check = |attempts| engine_ping_within(|| Ok(path.clone()), limit, attempts, pause);
 
-        // The first connection is accepted and held unanswered; the second is answered.
-        let listener = UnixListener::bind(&path).unwrap();
-        let forward = std::thread::spawn(move || {
-            let (held, _) = listener.accept().unwrap();
-            let (mut answered, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 64];
-            let read = answered.read(&mut request).unwrap();
-            assert!(request[..read].starts_with(b"GET /_ping "));
-            answered.write_all(OK).unwrap();
-            drop(answered);
-            // Hold the first connection open until the check is over.
-            held
-        });
-        let started = Instant::now();
-        engine_ping_within(&path, &deadlines, pause).unwrap();
-        assert!(
-            started.elapsed() >= short,
-            "the first attempt waited out its deadline"
-        );
-        drop(forward.join().unwrap());
-        fs::remove_file(&path).unwrap();
-
-        // A forward that never answers any connection fails the check with the code a
-        // single attempt reported, after every attempt, each on its own connection.
-        let listener = UnixListener::bind(&path).unwrap();
-        let attempts = deadlines.len();
-        let forward = std::thread::spawn(move || {
-            // Keep every connection open and unanswered until the check is over.
-            listener
-                .incoming()
-                .take(attempts)
-                .map(Result::unwrap)
-                .collect::<Vec<_>>()
-        });
-        let started = Instant::now();
-        let error = engine_ping_within(&path, &deadlines, pause).unwrap_err();
-        assert_eq!(error.code, "provider_state");
-        assert!(started.elapsed() >= deadlines.iter().sum::<Duration>());
-        assert_eq!(forward.join().unwrap().len(), attempts);
-        fs::remove_file(&path).unwrap();
-
+        // The first connection is accepted and never answered; the second is answered.
+        {
+            let forward = Forward::bind(&path, 1, OK);
+            let started = Instant::now();
+            check(8).unwrap();
+            assert!(
+                started.elapsed() >= limit,
+                "the first attempt used its whole limit"
+            );
+            assert!(forward.accepted() >= 2);
+        }
+        // A forward that never answers fails the check with the code a single attempt
+        // reported, after every attempt, each on its own connection.
+        {
+            let forward = Forward::bind(&path, usize::MAX, OK);
+            let started = Instant::now();
+            let error = check(3).unwrap_err();
+            assert_eq!(error.code, "provider_state");
+            assert!(
+                error.message.contains("did not answer"),
+                "{}",
+                error.message
+            );
+            assert!(started.elapsed() >= limit * 3);
+            assert_eq!(forward.accepted(), 3);
+        }
         // No listener at all: every attempt is refused, and the check still ends.
-        let error = engine_ping_within(&path, &deadlines, pause).unwrap_err();
-        assert_eq!(error.code, "provider_state");
-
-        // An engine that answers at once is confirmed on the first connection, and one
-        // that answers something else keeps `engine_not_ready`.
-        for (reply, code) in [
-            (OK, None),
-            (&b"HTTP/1.0 503 no\r\n\r\n"[..], Some("engine_not_ready")),
-        ] {
-            let listener = UnixListener::bind(&path).unwrap();
-            let connections = if code.is_some() { attempts } else { 1 };
-            let forward = std::thread::spawn(move || {
-                for stream in listener.incoming().take(connections) {
-                    let mut stream = stream.unwrap();
-                    let mut request = [0_u8; 64];
-                    let _ = stream.read(&mut request).unwrap();
-                    stream.write_all(reply).unwrap();
+        assert_eq!(check(3).unwrap_err().code, "provider_state");
+        // An engine that answers at once is confirmed on the first connection.
+        {
+            let forward = Forward::bind(&path, 0, OK);
+            check(3).unwrap();
+            assert_eq!(forward.accepted(), 1);
+        }
+        // A wrong reply keeps `engine_not_ready`, after every attempt.
+        {
+            let forward = Forward::bind(&path, 0, b"HTTP/1.0 503 no\r\n\r\n");
+            assert_eq!(check(3).unwrap_err().code, "engine_not_ready");
+            assert_eq!(forward.accepted(), 3);
+        }
+        // A reply that trickles in cannot outlast the limit of its attempt.
+        {
+            let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            let trickle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                for byte in OK {
+                    if stream.write_all(&[*byte]).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
                 }
             });
-            let result = engine_ping_within(&path, &deadlines, pause);
-            assert_eq!(result.err().map(|error| error.code), code);
-            forward.join().unwrap();
+            let started = Instant::now();
+            assert_eq!(check(1).unwrap_err().code, "provider_state");
+            assert!(started.elapsed() < limit * 3);
+            trickle.join().unwrap();
             fs::remove_file(&path).unwrap();
         }
+    }
+
+    /// Every attempt of the engine check asks for the socket path again, and a path refused
+    /// as foreign ends the check at once instead of being retried.
+    #[test]
+    fn the_engine_check_validates_its_socket_for_every_attempt() {
+        let calls = std::cell::Cell::new(0_u32);
+        let missing = std::path::PathBuf::from("/nonexistent/hack-fixture/docker.sock");
+        let error = engine_ping_within(
+            || {
+                calls.set(calls.get() + 1);
+                Ok(missing.clone())
+            },
+            Duration::from_millis(50),
+            3,
+            Duration::ZERO,
+        )
+        .unwrap_err();
+        assert_eq!((error.code, calls.get()), ("provider_state", 3));
+
+        calls.set(0);
+        let error = engine_ping_within(
+            || {
+                calls.set(calls.get() + 1);
+                if calls.get() == 2 {
+                    Err(CandidateError::new(
+                        "foreign_state",
+                        "Expected a private owned Unix socket.",
+                    ))
+                } else {
+                    Ok(missing.clone())
+                }
+            },
+            Duration::from_millis(50),
+            5,
+            Duration::ZERO,
+        )
+        .unwrap_err();
+        assert_eq!((error.code, calls.get()), ("foreign_state", 2));
     }
 
     /// HACK-1968: a guest whose agent still answers pings, but whose engine never finishes

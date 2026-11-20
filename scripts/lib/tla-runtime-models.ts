@@ -1851,20 +1851,23 @@ const contracts: readonly ModelContract[] = [
     // the running address unless an outside change followed its read.
     name: "ingress-address-record",
     module: "IngressRecord",
-    states: 250_621,
+    states: 922_875,
     invariant: "TrustedRecordIsCurrent",
     action: "Write",
-    fields: [
-      "record = [has |-> TRUE, addr |-> 1, gen |-> 1]",
-      "gen = 1",
-      "settled = FALSE",
-      "stack = 0",
-      "extSinceWrite = FALSE",
-    ],
+    // Addresses and changers are symmetric, so a two-worker search may end
+    // on either; the pinned fields are the ones every first witness shares.
+    fields: ["gen = 1", "settled = FALSE", "extSinceWrite = FALSE"],
     additionalControls: [
       {
         name: "unsettled",
         negative: true,
+      },
+      {
+        // Overlapping changes: one settles while the other still moves the
+        // containers, and a read in between is trusted.
+        name: "unlocked",
+        negative: true,
+        fields: ["gen = 3", "settled = TRUE", "extSinceWrite = FALSE"],
       },
     ],
   },

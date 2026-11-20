@@ -312,6 +312,40 @@ describe("generation token (model: tests/models/tla/ingress-address-record)", ()
     expect(trusted.caddy).toBe("172.30.0.9");
   });
 
+  test("model control unlocked: overlapping changes run one after another", async () => {
+    let address = "172.30.0.2";
+    const d = realDeps(() => address);
+    const order: string[] = [];
+    let releaseA: () => void = () => undefined;
+    const aRunning = new Promise<void>((resolve) => {
+      const a = withIngressChange(home, async () => {
+        order.push("A begin");
+        resolve();
+        await new Promise<void>((done) => {
+          releaseA = done;
+        });
+        order.push("A end");
+      });
+      void a;
+    });
+    await aRunning;
+    // B starts while A holds the lock: its effect must wait for A to settle.
+    const b = withIngressChange(home, async () => {
+      order.push("B begin");
+      address = "172.30.0.9";
+    });
+    await Bun.sleep(100);
+    expect(order).toEqual(["A begin"]);
+    releaseA();
+    await b;
+    expect(order).toEqual(["A begin", "A end", "B begin"]);
+    // A read now sees B's settled change, never a state between A and B.
+    await resolveIngressAddresses(d, "fresh");
+    const trusted = await resolveIngressAddresses(d, "recorded");
+    expect(trusted.fromRecord).toBe(true);
+    expect(trusted.caddy).toBe("172.30.0.9");
+  });
+
   test("a settled read is trusted with no Docker call; an unreadable token trusts nothing", async () => {
     const d = realDeps(() => "172.30.0.2");
     await resolveIngressAddresses(d, "fresh");

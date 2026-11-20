@@ -13,6 +13,7 @@ import {
   writeTextFileAtomicIfChanged,
 } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
+import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 import { exec, findExecutableInPath } from "./shell.ts";
 
 /**
@@ -385,24 +386,43 @@ async function writeIngressGeneration(
   );
 }
 
+/** A `hack global up` may pull images while a second change waits. */
+const INGRESS_CHANGE_LOCK_TIMEOUT_MS = 15 * 60_000;
+
 /**
  * Runs a Hack change of the global stack (`global up`/`down`, doctor proxy
  * repair) between an unsettled and a settled new generation token, so no
  * record read before or during it is trusted afterwards. The token is settled
  * even when `change` fails: the stack is then whatever it is, and every
  * record from before is already untrusted.
+ *
+ * Changes are serialized across processes: without that, one change's settled
+ * token could land while another change is still moving the containers, and a
+ * read in between would be trusted (model control `unlocked`). The lock is
+ * reclaimed only from an owner whose process is gone; a crashed change leaves
+ * its token unsettled until the next change settles it.
  */
 export async function withIngressChange<T>(
   hackHome: string,
   change: () => Promise<T>
 ): Promise<T> {
-  await writeIngressGeneration(hackHome, false);
-  try {
-    return await change();
-  } finally {
-    await writeIngressGeneration(hackHome, true);
-  }
+  await ensureDir(join(hackHome, GLOBAL_CADDY_DIR_NAME));
+  return await withProjectsRegistryLock({
+    lockPath: join(hackHome, GLOBAL_CADDY_DIR_NAME, CHANGE_LOCK_FILENAME),
+    timeoutMs: INGRESS_CHANGE_LOCK_TIMEOUT_MS,
+    label: "Global proxy change",
+    run: async () => {
+      await writeIngressGeneration(hackHome, false);
+      try {
+        return await change();
+      } finally {
+        await writeIngressGeneration(hackHome, true);
+      }
+    },
+  });
 }
+
+const CHANGE_LOCK_FILENAME = "ingress-change.lock";
 
 /** The real Docker and record IO for the global stack under `hackHome`. */
 export function defaultIngressAddressDeps(

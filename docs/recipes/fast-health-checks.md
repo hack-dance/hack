@@ -12,8 +12,12 @@ later. Hack's Compose backend uses your own engine and Compose; check them with
 `start_interval`, so it checks at the steady `interval` from the start.
 
 The native backend's engine is pinned to a newer version and passes these
-settings through for services without a route. A routed service's command
-health check is replaced by a route probe on native (see
+settings through for services without a route. When a health check sets no
+`start_interval`, native uses 250 ms, and when it sets no `start_period`, 60 s.
+The Compose backend adds no defaults: your engine runs the file as written. So
+the examples write both keys, and they start quickly on either backend. A routed
+service's command health check is replaced by a route probe on native, which
+also tries every 250 ms until its first success (see
 [Native candidate](../guides/native-candidate.md)). `hack config import` does not
 convert `start_period` or `start_interval` yet
 ([Native config import](../reference/native-config-import.md)).

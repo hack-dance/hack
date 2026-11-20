@@ -1505,8 +1505,9 @@ fn start_pool_observed(
     // proven again; the witness this boot records names these proofs (`leased_trees`).
     leased_trees::recheck(candidate, &lock, &mut proven_trees)?;
     // The same for the root files proven beside them: still what that proof saw, or proven
-    // again here, before the admission record, any owner record update or any provider
-    // command (`rootfs_proof`). The recheck writes nothing.
+    // again here, before the admission record, any later owner record update or any
+    // provider command (`rootfs_proof`). The recheck writes nothing; an alias repaired
+    // before admission stays repaired.
     let leased_rootfs = rootfs_proof::recheck(candidate, &lock, early_rootfs)?;
     // Recheck a clean stop's alias under the lease before the release checks probe its
     // sockets or the provider runs with it as HOME.
@@ -3887,6 +3888,80 @@ mod tests {
         }
     }
 
+    /// Whether every command of the executable cache script is a fixed shell word or utility.
+    /// It reads each word in command position: the first of a line, and the one after `;`,
+    /// `|`, `&&`, `||`, `if`, `then`, `else`, `do` or a `case` pattern. So a line cannot run
+    /// a file from the cache or the share after its first command either.
+    fn cache_script_runs_only_fixed_commands(script: &str) -> Result<(), String> {
+        const COMMANDS: [&str; 20] = [
+            "set",
+            "test",
+            "for",
+            "do",
+            "done",
+            "case",
+            "esac",
+            "if",
+            "then",
+            "fi",
+            "mkdir",
+            "mount",
+            "chmod",
+            "printf",
+            "exit",
+            "sha256sum",
+            "cut",
+            "mountpoint",
+            ";;",
+            "else",
+        ];
+        const ASSIGNED: [&str; 5] = ["total=", "cache=", "path=", "size=", "expected="];
+        // A `case` pattern such as `runc)` or `*,ro,*)`: no expansion and no quote.
+        let pattern = |word: &str| {
+            word.ends_with(')') && !word.ends_with("))") && !word.contains(['$', '"', '\''])
+        };
+        if script.contains('`') {
+            return Err("a backquoted command".into());
+        }
+        for line in script
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let mut command = true;
+            for word in line.split_whitespace() {
+                if command
+                    && !(COMMANDS.contains(&word.trim_end_matches(';'))
+                        || COMMANDS.contains(&word)
+                        || ASSIGNED.iter().any(|name| word.starts_with(name))
+                        || pattern(word))
+                {
+                    return Err(format!("{word} in {line}"));
+                }
+                command = word.ends_with(';')
+                    || ["|", "||", "&&", "if", "then", "else", "do"].contains(&word)
+                    || pattern(word);
+            }
+        }
+        for (index, _) in script.match_indices("$(") {
+            let inner = &script[index + 2..];
+            if ![
+                "cat ",
+                "findmnt ",
+                "stat ",
+                "tee ",
+                "sha256sum ",
+                "(total + size)",
+            ]
+            .iter()
+            .any(|utility| inner.starts_with(utility))
+            {
+                return Err(inner[..inner.len().min(40)].into());
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn executable_cache_runs_nothing_it_copied_and_confirms_only_after_the_final_hash() {
         let script = include_str!("guest-runc-cache.sh");
@@ -3898,37 +3973,25 @@ mod tests {
         // A failed check ends the script, and the confirmation is its last command.
         assert_eq!(lines.first(), Some(&"set -eu"));
         assert_eq!(lines.last(), Some(&"printf 'engine-exec-cache-v1\\n'"));
-        // Every command is a fixed shell word or utility: no line runs a file from the cache
-        // or from the share, before or after its digest is checked.
-        for line in &lines {
-            let word = line.split_whitespace().next().unwrap();
+        // No line runs a file from the cache or from the share, before or after its digest
+        // is checked: not as its first command and not after one.
+        assert_eq!(cache_script_runs_only_fixed_commands(script), Ok(()));
+        let chmod = r#" chmod 555 "$cache/$name""#;
+        assert_eq!(script.matches(chmod).count(), 1);
+        for run in [
+            r#" chmod 555 "$cache/$name"; "$cache/$name""#,
+            r#" chmod 555 "$cache/$name" && "$cache/$name""#,
+            r#" chmod 555 "$cache/$name" | "$path""#,
+            r#" "$cache/$name""#,
+            r#" test "$("$cache/$name")" = ok"#,
+            " if test 1 = 1; then /opt/hack-engine/runc; fi",
+            " case x in x) /opt/hack-engine/runc;; esac",
+            " chmod 555 `/opt/hack-engine/runc`",
+        ] {
+            let changed = script.replace(chmod, run);
             assert!(
-                [
-                    "set", "test", "for", "do", "done", "case", "esac", "if", "mkdir", "mount",
-                    "chmod", "printf"
-                ]
-                .contains(&word)
-                    || ["total=", "cache=", "path=", "size="]
-                        .iter()
-                        .any(|name| word.starts_with(name)),
-                "{line}"
-            );
-        }
-        for (index, _) in script.match_indices("$(") {
-            let inner = &script[index + 2..];
-            assert!(
-                [
-                    "cat ",
-                    "findmnt ",
-                    "stat ",
-                    "tee ",
-                    "sha256sum ",
-                    "(total + size)"
-                ]
-                .iter()
-                .any(|utility| inner.starts_with(utility)),
-                "{}",
-                &inner[..inner.len().min(40)]
+                cache_script_runs_only_fixed_commands(&changed).is_err(),
+                "{run}"
             );
         }
         // The copy is hashed as it is written, and the bound path is hashed after the cache

@@ -12,7 +12,8 @@
 //!
 //! [`recheck`] runs under the lease, straight after the provider and engine trees are
 //! rechecked (`leased_trees`): after the sample under the lease and before the admission
-//! record, any owner record update or any provider command. It writes nothing. It reads
+//! record, any later owner record update or any provider command. It writes nothing; what
+//! the start wrote before admission (a repaired HOME alias) is not rolled back. It reads
 //! the owner record the lease now fences and recomputes only the metadata digest
 //! ([`Early::holds`]). The early proof stands when all of these are true: the marker and
 //! the pin are the ones the lease-held owner record names; the root files are on a

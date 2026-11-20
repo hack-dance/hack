@@ -1927,7 +1927,7 @@ const contracts: readonly ModelContract[] = [
     // see tests/models/tla/bridge-batch/COVERAGE.md.
     name: "bridge-batch",
     module: "BridgeBatch",
-    states: 12_706,
+    states: 14_674,
     invariant: "Safe",
     action: "Relays",
     fields: ['opc = "late"', 'relay = [r |-> "running", p |-> "running"]'],
@@ -1935,7 +1935,7 @@ const contracts: readonly ModelContract[] = [
       {
         name: "child-fence",
         negative: true,
-        action: "ChildPublish",
+        action: "ChildLaunch",
         fields: ["staleLaunch = TRUE", 'lease = "free"'],
       },
       {
@@ -1957,6 +1957,13 @@ const contracts: readonly ModelContract[] = [
         invariant: "NeverReleased",
         action: "CleanDrop",
         fields: ['rpc = "done"', 'lease = "free"'],
+      },
+      {
+        name: "release-after-ready",
+        negative: true,
+        invariant: "NeverReleasedAfterReady",
+        action: "CleanDrop",
+        fields: ['rpc = "done"', "everReady = TRUE"],
       },
       {
         name: "stale-stop-reachable",

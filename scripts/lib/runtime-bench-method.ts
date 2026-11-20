@@ -102,8 +102,34 @@ function text(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
+/** Compose labels in either form (mapping, or `key=value` list) as a map. */
+function labelMap(value: unknown): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (typeof item === "string") {
+        const at = item.indexOf("=");
+        result[at < 0 ? item : item.slice(0, at)] =
+          at < 0 ? "" : item.slice(at + 1);
+      }
+    }
+  } else if (isRecord(value)) {
+    for (const [key, item] of Object.entries(value)) {
+      result[key] = String(item);
+    }
+  }
+  return result;
+}
+
+/**
+ * Routed as native review reads it (runtime-core
+ * `project/compose/routing.rs`): `caddy` with `caddy.reverse_proxy`. A
+ * `caddy` host without a reverse proxy is an inert declaration and gets no
+ * route probe.
+ */
 function routed(service: Record<string, unknown>): boolean {
-  return isRecord(service.labels) && typeof service.labels.caddy === "string";
+  const labels = labelMap(service.labels);
+  return "caddy" in labels && "caddy.reverse_proxy" in labels;
 }
 
 function disabled(health: Record<string, unknown>): boolean {

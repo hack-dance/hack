@@ -64,6 +64,7 @@ test("the version 1 fixture is reported as not like for like", async () => {
 const ROUTE = {
   caddy: "web.example.hack",
   "caddy.reverse_proxy": "{{upstreams 3000}}",
+  "caddy.tls": "internal",
 };
 const PROBE = {
   port: 3000,
@@ -131,6 +132,36 @@ test("each lane's health check follows native review's branches", () => {
   ]);
   expect(unevenHealthChecks(compose)).toEqual([]);
   expect(laneHealthChecks({ compose: null, lane: "compose" })).toEqual({});
+});
+
+test("route detection reads list-form labels and skips inert declarations", () => {
+  const command = { test: ["CMD", "true"], interval: "10s" };
+  const compose = {
+    services: {
+      listed: {
+        labels: [
+          "caddy=web.example.hack",
+          "caddy.reverse_proxy={{upstreams 3000}}",
+          "caddy.tls=internal",
+        ],
+        healthcheck: command,
+      },
+      inert: {
+        labels: { caddy: "docs.example.hack", "caddy.tls": "internal" },
+        healthcheck: command,
+      },
+      inertBare: { labels: ["caddy=docs.example.hack", "caddy.tls=internal"] },
+    },
+  };
+  const onNative = laneHealthChecks({ compose, lane: "native" });
+  expect(onNative.listed).toEqual({
+    kind: "native-route-probe",
+    source: "inferred",
+    replaces: "command-check",
+  });
+  expect(onNative.inert).toMatchObject({ kind: "engine-command" });
+  expect(onNative.inertBare).toEqual({ kind: "image-default" });
+  expect(unevenHealthChecks(compose)).toEqual(["listed"]);
 });
 
 test("concurrent readiness starts every route check at once", async () => {

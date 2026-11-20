@@ -1,14 +1,14 @@
 //! Observe allocation requests only during a single-threaded decode.
-use hack_vm_protocol::{MAX_FRAME, Request, Response, read_frame};
+use hack_vm_protocol::{Handle, MAX_FRAME, Request, Response, read_frame, write_frame};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-thread_local! { static PEAK:Cell<Option<usize>>=const {Cell::new(None)}; }
+thread_local! { static PEAK:Cell<Option<(usize,usize)>>=const {Cell::new(None)}; }
 struct Observe;
 fn record(n: usize) {
     PEAK.with(|p| {
         if let Some(prev) = p.get() {
-            p.set(Some(prev.max(n)));
+            p.set(Some((prev.0.max(n), prev.1 + n)));
         }
     })
 }
@@ -37,22 +37,65 @@ fn arbitrary_frames_never_panic_or_allocate_over_the_frame_limit() {
         seed ^= seed << 5;
         seed
     };
-    for i in 0..8192 {
-        let len = (next() % 1024) as usize;
-        let mut frame = vec![0; len + 4];
-        let prefix = if i % 4 == 0 { next() } else { len as u32 };
-        frame[..4].copy_from_slice(&prefix.to_be_bytes());
-        for b in &mut frame[4..] {
-            *b = next() as u8;
+    let handle = Handle {
+        boot: "12345678-0000-4000-a000-000000000001".into(),
+        incarnation: "12345678-0000-4000-a000-000000000002".into(),
+        id: "a".repeat(32),
+    };
+    let mut start = Vec::new();
+    write_frame(
+        &mut start,
+        1,
+        true,
+        &Request::Start {
+            handle,
+            argv: vec!["a".repeat(4000); 7],
+            env: (0..120)
+                .map(|i| (format!("N{i}"), "v".repeat(16)))
+                .collect(),
+            cwd: "/".into(),
+            stdin: vec![255; 32768],
+        },
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    write_frame(
+        &mut output,
+        2,
+        false,
+        &Response::Output {
+            start_offset: 999,
+            bytes: vec![255; 32768],
+            eof: false,
+            truncated: true,
+        },
+    )
+    .unwrap();
+    for i in 0..2048 {
+        let mut frame = if i % 2 == 0 {
+            start.clone()
+        } else {
+            output.clone()
+        };
+        if i > 1 {
+            let pos = next() as usize % frame.len();
+            frame[pos] ^= 1 + (next() % 255) as u8;
         }
-        if len >= 2 && i % 2 == 0 {
-            frame[4] = 1 + (next() % 2) as u8;
-            frame[5] = 1 + (next() % 15) as u8;
+        PEAK.set(Some((0, 0)));
+        let ok = if i % 2 == 0 {
+            read_frame::<Request>(&frame[..]).is_ok()
+        } else {
+            read_frame::<Response>(&frame[..]).is_ok()
+        };
+        let (largest, total) = PEAK.replace(None).unwrap();
+        assert!(largest <= MAX_FRAME && total <= 3 * MAX_FRAME);
+        if i < 2 {
+            assert!(ok && total > frame.len());
         }
-        PEAK.set(Some(0));
-        let _ = read_frame::<Request>(&frame[..]);
-        let _ = read_frame::<Response>(&frame[..]);
-        let peak = PEAK.replace(None).unwrap();
-        assert!(peak <= MAX_FRAME);
     }
+    // Oversized declared payloads must fail before any heap allocation.
+    PEAK.set(Some((0, 0)));
+    let result = read_frame::<Request>(&u32::MAX.to_be_bytes()[..]);
+    assert_eq!(PEAK.replace(None), Some((0, 0)));
+    assert!(result.is_err());
 }

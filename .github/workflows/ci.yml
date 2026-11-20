@@ -951,13 +951,18 @@ jobs:
           TEST_FOCUS: ${{ needs.changes.outputs.test_focus }}
         run: bun scripts/test-shard.ts run --focus="$TEST_FOCUS"
 
+  guest-protocol:
+    needs: changes
+    if: ${{ needs.changes.outputs.runtime_core == 'true' }}
+    uses: ./.github/workflows/guest-protocol.yml
+
   test:
     # The required `test` check (repository ruleset) for `next` and `main`. It
     # always runs. When the change scope runs the suite, every bun shard must
     # succeed; when it runs a focus instead, the focused job must. A cancelled
     # result fails, as do a failure, a failed scope or any skip of
     # the job in scope still fails rather than surfacing as a skipped check.
-    needs: [changes, test-shard, test-focus, linux-process-lifetime, config-compiler]
+    needs: [changes, test-shard, test-focus, linux-process-lifetime, config-compiler, guest-protocol]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -972,6 +977,8 @@ jobs:
           TEST_FOCUS: ${{ needs.changes.outputs.test_focus }}
           SHARD_RESULT: ${{ needs.test-shard.result }}
           FOCUS_RESULT: ${{ needs.test-focus.result }}
+          GUEST_ENABLED: ${{ needs.changes.outputs.runtime_core }}
+          GUEST_RESULT: ${{ needs.guest-protocol.result }}
           COMPILER_ENABLED: ${{ needs.changes.outputs.compiler_hosts != '[]' }}
           COMPILER_RESULT: ${{ needs.config-compiler.result }}
           LIFETIME_ENABLED: ${{ needs.changes.outputs.docker_suite }}
@@ -989,6 +996,10 @@ jobs:
             echo "change scope did not succeed (result: $CHANGES_RESULT)"
             exit 1
           fi
+          case "$GUEST_ENABLED:$GUEST_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "Guest protocol evidence missing or failed"; exit 1 ;;
+          esac
           case "$COMPILER_ENABLED:$COMPILER_RESULT" in
             true:success|false:skipped) ;;
             *) echo "Compiler acceptance evidence did not match its plan (enabled: $COMPILER_ENABLED, result: $COMPILER_RESULT)" >&2; exit 1 ;;

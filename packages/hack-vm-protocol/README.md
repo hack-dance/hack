@@ -10,12 +10,17 @@ both ends of the socket bridge to their owner. All peer input is untrusted.
 A four-byte big-endian length counts the following payload. Its first two bytes
 are family and opcode. Family 1 is a request, 2 is a response, and 3 is reserved
 for negotiated server events. A peer may send multiple complete frames on a
-stream. V1 uses Hello/Welcome and one command/reply per connection. All fields
+stream. A flags byte and u32 channel follow the opcode. END (bit zero)
+finishes this direction of the channel. Reject other flag bits. Channel zero
+negotiates, then the host assigns increasing nonzero channels. Responses echo
+their channel. Several exchanges share a connection; negotiated stream
+extensions can interleave data frames before END. All fields
 are positional and required, in the order below. Reject unknown codes, trailing
 or repeated fields and truncated frames. Adding a field requires a new version.
 
 The 65536-byte payload limit bounds each transport allocation and leaves room
-for a 32768-byte chunk and metadata. Byte strings use raw bytes and two length
+for a 32768-byte chunk and metadata. The seven header bytes leave an aggregate
+budget of 65529 bytes for all fields including their counts and lengths. Byte strings use raw bytes and two length
 bytes. Text is a byte string containing UTF-8 with no NUL. Integers and counts
 are big endian; counts and byte lengths are unsigned 16-bit. Flags occupy one
 byte, zero or one. An exchange deadline also applies to peers sending partial
@@ -30,7 +35,7 @@ stays stable across command versions. V1 is the only implementation today.
 
 | Opcode | Message | Fields in wire order |
 | --- | --- | --- |
-| 1 | Hello | min, max supported versions |
+| 1 | Hello | min, max supported versions, u64 capability offer (unknown bits ignored) |
 | 2 | Facts | none |
 | 3 | Start | handle, argv list, env pair list, absolute cwd, initial stdin bytes |
 | 4 | Inspect | handle |
@@ -51,7 +56,7 @@ is at most 4096 bytes. Initial stdin is at most 32768 bytes.
 
 | Opcode | Message | Fields in wire order and meaning |
 | --- | --- | --- |
-| 1 | Welcome | selected u16 version, boot UUID, agent-incarnation UUID |
+| 1 | Welcome | selected u16 version, u64 common capabilities, u32 max frame, u16 max jobs, u32 per-stream retention in bytes, boot UUID, agent-incarnation UUID |
 | 2 | Facts | architecture (64 bytes), kernel release (256), agent version (64), UTC Unix milliseconds (u64), boot UUID, agent-incarnation UUID |
 | 3 | Absent | no current record at inspection time |
 | 4 | Running | child owned, terminal outcome pending |
@@ -59,7 +64,7 @@ is at most 4096 bytes. Initial stdin is at most 32768 bytes.
 | 6 | Released | ID tombstoned after result release |
 | 7 | Exited | signed 32-bit normal exit code |
 | 8 | Signaled | signed 32-bit terminating Linux signal |
-| 9 | Output | up to 32768 raw bytes, EOF flag for this offset, truncation flag for this stream |
+| 9 | Output | absolute u64 start offset, up to 32768 raw bytes, EOF flag for this offset, truncation flag for this stream |
 | 10 | Ack | request accepted |
 | 11 | Unknown | uncertain outcome or wrong incarnation |
 | 12 | Conflict | duplicate start or incompatible state |
@@ -78,11 +83,27 @@ identity selection and per-process resource limits require negotiated extensions
 The existing guest path continues to serve callers needing those operations.
 
 The Guest protocol CI workflow runs the locked Rust tests and the bounded
-execution model in this crate's model directory. The lockfile and ignored
+execution model registered under tests/models/tla/guest-execution. The lockfile and ignored
 target directory belong to this standalone Cargo package.
 
-On Unix, the host client negotiates on an already connected stream. It exposes
-the boot and agent identities before accepting one request, then consumes the
-session. One absolute deadline covers negotiation and the request/reply
-exchange. The runtime exposes the client under its optional guest-agent-client
-feature. Callers own connection establishment, execution IDs and recovery.
+The guest socket lives in an owner-only directory (0700), has mode 0600, and is
+exposed to the host through a private Unix socket bridge. Ordinary containers
+have separate mount namespaces and receive neither the socket nor its parent.
+A privileged container, engine-control access, or a host-root bind mount can
+defeat this boundary. Any caller that can reach the agent can execute as its UID.
+
+A timeout never makes Absent final while a previous submission can still arrive.
+Retry the same immutable command and handle within its incarnation; on Conflict
+inspect the original. The agent never evicts an ID from the current incarnation.
+It refuses new IDs at 256 records including tombstones. List includes every
+unreleased job (maximum advertised in Welcome, at most 16). A terminal Signal
+returns the cached status without signalling a PID. Release discards all bytes
+and retains only the tombstone. Each pipe keeps its newest advertised retention
+bytes and continues draining. A lagging reader resumes at start_offset plus the
+returned byte count. A 1 GiB writer retains only that finite tail.
+
+The optional runtime guest-agent-client feature exposes Session on an already
+connected Unix stream. Negotiation has its own deadline; each subsequent call
+gets one deadline for its complete write and read. Poll readiness and per-call
+nonblocking I/O preserve the owner's socket settings. A failed exchange retires
+the session. Reconnect to reconcile an uncertain effect.

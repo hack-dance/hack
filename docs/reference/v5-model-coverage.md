@@ -221,3 +221,13 @@ chmod-before-after-state recording and completion. Resume followed by rollback
 restores original bytes and mode. A linked-worktree regression covers two targets
 sharing one primary key. This adds implementation evidence, not finite-model
 coverage or protection against arbitrary concurrent filesystem writers.
+
+### Guest execution recovery
+
+The guest-execution model permits one execution ID per incarnation, two
+incarnations, lost or delayed submissions, a half-open connection, host
+restart, inventory and result inspection. Its negative control releases a
+terminal result before durable host observation. The positive run explores
+420 states. Weak fairness for child completion assumes the command eventually
+terminates. Kernel scheduling, pipe throughput, multi-job capacity and
+provider socket isolation require implementation and VM tests.

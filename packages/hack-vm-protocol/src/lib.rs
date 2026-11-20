@@ -129,3 +129,6 @@ pub fn write_frame<T: Serialize>(mut stream: impl Write, value: &T) -> Result<()
         .and_then(|()| stream.write_all(&body[..size]))
         .map_err(|_| Error::Io)
 }
+
+#[cfg(unix)]
+pub mod client;

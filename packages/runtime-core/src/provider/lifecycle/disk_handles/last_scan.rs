@@ -6,16 +6,19 @@
 //! and the reason for a fallback, in `disk-handle-scan.json` beside the owner record.
 //!
 //! This is a report only. Recording never fails or changes a stop or a release check: every
-//! write error is ignored, and a missing or malformed record reads as none. The record is
-//! written when a scan starts, so it also names the method of a scan that then refused or
-//! timed out, and it is rewritten only when the method changes.
+//! write error is ignored, and a missing, malformed, foreign, oversized or special file
+//! reads as none without being waited on. The record is rewritten only when the method
+//! changes.
 use super::{Fallback, Method};
+use crate::provider::state;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const FILE: &str = "disk-handle-scan.json";
 const VERSION: u32 = 1;
+/// Far more than a record holds; a larger file is not one.
+const MAX_BYTES: u64 = 4096;
 
 /// The record as stored: `{"version": 1, "method": "in-process"}`, or
 /// `{"version": 1, "method": "lsof", "reason": "self_test_failed"}` with the reason one of
@@ -81,9 +84,15 @@ fn path(pool: &Path) -> PathBuf {
 }
 
 /// The method the last scan of the pool at `pool` used, if a readable record says so.
+///
+/// Read as the provider's receipts are (`state::read_bounded`): only a small regular file
+/// of this user's, private and singly linked, opened without blocking. So a FIFO or a huge
+/// file at the record's path neither stalls a stop or a status nor exhausts memory; it
+/// reads as none.
 pub(in crate::provider::lifecycle) fn read(pool: &Path) -> Option<Method> {
-    let bytes = fs::read(path(pool)).ok()?;
-    serde_json::from_slice::<Record>(&bytes).ok()?.method()
+    state::read_bounded::<Record>(&path(pool), MAX_BYTES)
+        .ok()?
+        .method()
 }
 
 /// Record that a scan of the pool at `pool` uses `method`. Best-effort: see the module
@@ -95,36 +104,45 @@ pub(super) fn record(pool: &Path, method: Method) {
 }
 
 /// Write through a temporary file only this call creates and names, then rename it over the
-/// record. A failed write removes only that temporary file. Not synchronized to disk: the
-/// record is a report, and a synchronized write would cost a stop more than the scan saves.
+/// record. Not synchronized to disk: the record is a report, and a synchronized write would
+/// cost a stop more than the scan saves.
 fn replace(pool: &Path, record: &Record) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let bytes = serde_json::to_vec_pretty(record).map_err(std::io::Error::other)?;
     let temporary = pool.join(format!(
         "{FILE}.{}.{}.new",
         std::process::id(),
         SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    let written = fs::OpenOptions::new()
+    replace_through(pool, record, &temporary)
+}
+
+/// [`replace`] through `temporary`. A file already at that name is not this call's: the
+/// exclusive create fails and the call returns without touching it. Only a file this call
+/// created is removed when a later step fails.
+fn replace_through(pool: &Path, record: &Record, temporary: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let bytes = serde_json::to_vec_pretty(record).map_err(std::io::Error::other)?;
+    let mut created = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(&temporary)
-        .and_then(|mut file| file.write_all(&bytes))
-        .and_then(|()| fs::rename(&temporary, path(pool)));
-    if written.is_err() {
-        let _ = fs::remove_file(&temporary);
+        .open(temporary)?;
+    let published = created
+        .write_all(&bytes)
+        .and_then(|()| fs::rename(temporary, path(pool)));
+    if published.is_err() {
+        let _ = fs::remove_file(temporary);
     }
-    written
+    published
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::tests::Scratch;
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     /// Each method is stored under its documented name and read back as itself.
     #[test]
@@ -205,6 +223,8 @@ mod tests {
     #[test]
     fn a_bad_record_reads_as_none_and_recording_never_fails() {
         let pool = Scratch::new();
+        let good = r#"{"version": 1, "method": "in-process"}"#;
+        let oversized = format!("{good}{}", " ".repeat(MAX_BYTES as usize));
         for bad in [
             "",
             "{",
@@ -213,14 +233,64 @@ mod tests {
             r#"{"version": 1, "method": "in-process", "reason": "self_test_failed"}"#,
             r#"{"version": 1, "method": "in-process", "extra": true}"#,
             r#"{"version": 1, "method": "dtrace"}"#,
+            oversized.as_str(),
         ] {
-            fs::write(path(pool.path()), bad).unwrap();
+            private(&path(pool.path()), bad);
             assert_eq!(read(pool.path()), None, "{bad}");
         }
+        private(&path(pool.path()), good);
+        assert_eq!(read(pool.path()), Some(Method::InProcess));
+        // The same record readable by others is not this pool's private record.
+        fs::set_permissions(path(pool.path()), fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(read(pool.path()), None);
         record(pool.path(), Method::InProcess);
         assert_eq!(read(pool.path()), Some(Method::InProcess));
         let missing = pool.path().join("missing");
         record(&missing, Method::InProcess);
         assert_eq!(read(&missing), None);
+    }
+
+    /// Write `text` as a private file, as a record is stored.
+    fn private(file: &Path, text: &str) {
+        let _ = fs::remove_file(file);
+        fs::write(file, text).unwrap();
+        fs::set_permissions(file, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    /// A FIFO at the record's path is not waited on: it reads as none at once, and
+    /// recording replaces it. Opening it as a plain file would block until a writer came.
+    #[test]
+    fn a_fifo_at_the_record_reads_as_none_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+        let pool = Scratch::new();
+        let fifo = path(pool.path());
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path in this test's own directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert_eq!(read(pool.path()), None);
+        assert_eq!(report(pool.path()), None);
+        record(pool.path(), Method::InProcess);
+        assert_eq!(read(pool.path()), Some(Method::InProcess));
+    }
+
+    /// A file already at the temporary name is somebody else's: the write fails and
+    /// leaves it alone. A temporary file this call created is removed when the rename
+    /// fails.
+    #[test]
+    fn a_failed_write_removes_only_the_file_it_created() {
+        let pool = Scratch::new();
+        let record = Record::of(Method::InProcess);
+        let existing = pool.path().join("existing.new");
+        fs::write(&existing, "not this call's").unwrap();
+        assert!(replace_through(pool.path(), &record, &existing).is_err());
+        assert_eq!(fs::read_to_string(&existing).unwrap(), "not this call's");
+        assert_eq!(read(pool.path()), None);
+
+        // A directory at the record's path makes the rename fail after the create.
+        fs::create_dir(path(pool.path())).unwrap();
+        fs::write(path(pool.path()).join("kept"), "").unwrap();
+        let created = pool.path().join("created.new");
+        assert!(replace_through(pool.path(), &record, &created).is_err());
+        assert!(!created.exists());
     }
 }

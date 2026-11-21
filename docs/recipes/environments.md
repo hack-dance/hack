@@ -65,6 +65,8 @@ The complete project is in
      app:
        # Stand-in for your app: prints the settings it received, then waits.
        image: alpine:3.22
+       init: true
+       stop_grace_period: 2s
        command:
          - sh
          - -c

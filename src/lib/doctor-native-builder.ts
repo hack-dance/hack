@@ -159,7 +159,7 @@ export async function checkNativeImageBuilder(opts: {
   return nativeBuilderCheckResult({
     buildServices,
     builder: reported?.state ?? "unknown",
-    paths: reported,
+    paths: reported?.paths,
     launcher: opts.launcher,
   });
 }

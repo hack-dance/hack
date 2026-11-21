@@ -175,7 +175,7 @@ const setup = withHandler(setupSpec, async ({ ctx, args }) => {
     offline,
     // For the summary's notice when the run leaves the home without the image
     // builder, or with one that does not match the pinned release.
-    builder: inspection.builder,
+    builder: inspection.builder?.paths,
   });
 });
 

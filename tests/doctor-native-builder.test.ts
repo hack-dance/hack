@@ -40,7 +40,10 @@ const built = {
 const imagesOnly = { services: { web: { image: "nginx:1" }, db: {} } };
 
 /** A runtime whose setup inspection reports this builder state, and what it was asked. */
-function inspecting(state: string | undefined) {
+function inspecting(
+  state: string | undefined,
+  paths: { readonly directory?: string; readonly record?: string } = PATHS
+) {
   const requests: (readonly string[])[] = [];
   const invoke = (opts: { readonly args: readonly string[] }) => {
     requests.push(opts.args);
@@ -56,7 +59,7 @@ function inspecting(state: string | undefined) {
       ],
       ...(state === undefined
         ? {}
-        : { builder: { state, file: "builder.bin", ...PATHS } }),
+        : { builder: { state, file: "builder.bin", ...paths } }),
     });
   };
   return { requests, invoke: invoke as never };
@@ -151,6 +154,46 @@ test("a changed builder, a silent runtime and a failed inspection warn without c
       "2 services build an image, but the image builder in this native home does not match the pinned release, so native up refuses to build with it. Remove .hack-local/providers/builder-1.0.0 and .hack-local/providers/builder.json from the native home, then run hack native setup --accept-downloads.",
     nativeBuilder: { buildServices: 2, builder: "changed" },
   });
+  // A runtime that reports the builder's state without its paths (or with one
+  // of them) is not an unknown builder: the state is kept, the missing-builder
+  // remedy is unchanged, and the changed remedy says where the two paths are.
+  for (const paths of [{}, { record: PATHS.record }]) {
+    const missing = await checkNativeImageBuilder({
+      runtime,
+      cwd: "/project",
+      compose: built,
+      invoke: inspecting("not_prepared", paths).invoke,
+      launcher,
+    });
+    expect(missing).toMatchObject({
+      status: "warn",
+      message: `2 services build an image, but the image builder is not installed in this native home, so native up cannot build them. ${REMEDY}`,
+      nativeBuilder: { buildServices: 2, builder: "not_prepared" },
+    });
+    const withoutPaths = await checkNativeImageBuilder({
+      runtime,
+      cwd: "/project",
+      compose: built,
+      invoke: inspecting("changed", paths).invoke,
+      launcher,
+    });
+    expect(withoutPaths).toMatchObject({
+      status: "warn",
+      message:
+        "2 services build an image, but the image builder in this native home does not match the pinned release, so native up refuses to build with it. Remove the image builder's directory and record from .hack-local/providers in the native home, then run hack native setup --accept-downloads.",
+      nativeBuilder: { buildServices: 2, builder: "changed" },
+    });
+    expect(
+      (
+        await checkNativeImageBuilder({
+          runtime,
+          cwd: "/project",
+          compose: built,
+          invoke: inspecting("prepared", paths).invoke,
+        })
+      ).nativeBuilder
+    ).toEqual({ buildServices: 2, builder: "prepared" });
+  }
   // An older runtime does not report the builder; a failing one reports nothing.
   const failing = () => Promise.reject(new Error("runtime unavailable"));
   for (const invoke of [inspecting(undefined).invoke, failing as never]) {

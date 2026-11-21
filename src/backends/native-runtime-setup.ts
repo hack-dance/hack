@@ -44,10 +44,16 @@ export type NativeSetupBuilderState = (typeof BUILDER_STATES)[number];
  * The image builder, reported apart from `state`: a home is ready without it
  * and only image builds need it. A record-level observation, like `state`.
  */
-export type NativeSetupBuilder = NativeBuilderPaths & {
+export type NativeSetupBuilder = {
   readonly state: NativeSetupBuilderState;
   /** The builder's own entry in `pins`. */
   readonly pin: NativeSetupPin;
+  /**
+   * The builder's directory and record under the native home, when the
+   * runtime names both. A runtime that reports the state without them is
+   * still read; messages then name where the two are without their names.
+   */
+  readonly paths?: NativeBuilderPaths;
 };
 /** What a setup run did about the image builder (the result's `builder`). */
 const BUILDER_OUTCOMES = [
@@ -121,7 +127,22 @@ function state(value: unknown): NativeSetupState | undefined {
   return STATES.find((candidate) => candidate === value);
 }
 
-/** The builder names its pin by file name; anything else is not this protocol. */
+/** A builder path the runtime supplied; an omitted one is not an error. */
+function builderPath(value: unknown): string | undefined {
+  if (value === undefined) {
+    return;
+  }
+  if (typeof value !== "string" || !BUILDER_PATH.test(value)) {
+    throw new Error("Invalid native setup builder.");
+  }
+  return value;
+}
+
+/**
+ * The builder names its pin by file name; anything else is not this protocol.
+ * Its `directory` and `record` are optional: a supplied one must be one name
+ * under the runtime's providers directory, and only both together are kept.
+ */
 function parseBuilder(
   value: unknown,
   pins: readonly NativeSetupPin[]
@@ -137,24 +158,17 @@ function parseBuilder(
         (candidate) => basename(new URL(candidate.url).pathname) === value.file
       )
     : undefined;
-  if (
-    !(
-      isRecord(value) &&
-      builderState &&
-      pin &&
-      typeof value.directory === "string" &&
-      typeof value.record === "string" &&
-      BUILDER_PATH.test(value.directory) &&
-      BUILDER_PATH.test(value.record)
-    )
-  ) {
+  if (!(isRecord(value) && builderState && pin)) {
     throw new Error("Invalid native setup builder.");
   }
+  const directory = builderPath(value.directory);
+  const record = builderPath(value.record);
   return {
     state: builderState,
     pin,
-    directory: value.directory,
-    record: value.record,
+    ...(directory !== undefined && record !== undefined
+      ? { paths: { directory, record } }
+      : {}),
   };
 }
 

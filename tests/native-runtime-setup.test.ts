@@ -61,7 +61,7 @@ if (args.includes("inspect")) {
     reply.pins.push(${JSON.stringify(BUILDER_PIN)});
     // Record-level, as the runtime's inspection is: a builder whose bytes changed
     // still reads as prepared here.
-    reply.builder = { state: existsSync(join(home, "builder")) ? "prepared" : "not_prepared", file: "builder.bin", ...${JSON.stringify(BUILDER_PATHS)} };
+    reply.builder = { state: existsSync(join(home, "builder")) ? "prepared" : "not_prepared", file: "builder.bin", ...(existsSync(${JSON.stringify(join(root, "builder-without-paths"))}) ? {} : ${JSON.stringify(BUILDER_PATHS)}) };
   }
   console.log(JSON.stringify(reply));
 } else if (args[2] === "runtime" && args[3] === "setup") {
@@ -182,8 +182,20 @@ test("setup inspection reports the image builder apart from readiness", () => {
     expect(inspection.builder).toEqual({
       state,
       pin: BUILDER_PIN,
-      ...BUILDER_PATHS,
+      paths: BUILDER_PATHS,
     });
+    // A runtime that reports the builder's state without its paths, or with
+    // only one of them, is still read: the state is kept and no path is.
+    for (const partial of [
+      { state, file: "builder.bin" },
+      { state, file: "builder.bin", record: BUILDER_PATHS.record },
+      { state, file: "builder.bin", directory: BUILDER_PATHS.directory },
+    ]) {
+      expect(parseNativeSetupInspection(reply(partial)).builder).toEqual({
+        state,
+        pin: BUILDER_PIN,
+      });
+    }
   }
   for (const builder of [
     null,
@@ -191,8 +203,14 @@ test("setup inspection reports the image builder apart from readiness", () => {
     { ...named, state: "future" },
     { state: "prepared" },
     { ...named, state: "prepared", file: "not-a-listed-pin" },
-    // Its paths are one name under the runtime's providers directory, nothing else.
-    { state: "prepared", file: "builder.bin", record: BUILDER_PATHS.record },
+    // A supplied path is one name under the runtime's providers directory,
+    // nothing else, also when the other path is omitted.
+    {
+      state: "prepared",
+      file: "builder.bin",
+      record: "/absolute/builder.json",
+    },
+    { state: "prepared", file: "builder.bin", directory: 7 },
     { ...named, state: "prepared", directory: "/absolute/builder-1.0.0" },
     { ...named, state: "prepared", record: ".hack-local/providers/../x" },
     { ...named, state: "prepared", record: ".hack-local/providers/a/b" },
@@ -528,4 +546,43 @@ test("a builder that does not match the pin is a warning, never a failed setup",
     '{"status":"installed","files":[],"builder":"changed"}\n'
   );
   expect(json.stderr).toBe("");
+}, 60_000);
+
+test("a runtime that reports the builder without its paths still sets up, with the remedy that names no paths", async () => {
+  const f = await fixture();
+  await writeFile(join(f.root, "report-builder"), "the runtime reports it");
+  await writeFile(join(f.root, "builder-without-paths"), "state and file only");
+  await mkdir(f.home, { mode: 0o700 });
+  await writeFile(join(f.home, "installed"), "fixture");
+
+  // The inspection is accepted, so setup runs and says how to add the builder.
+  const missing = await f.cli(["native", "setup"]);
+  expect(missing.exitCode).toBe(0);
+  expect(missing.stdout).toBe(`Native runtime is set up.\n${BUILDER_HINT}`);
+  expect(missing.stdout + missing.stderr).not.toContain(
+    "Unsupported native setup inspection"
+  );
+  expect(missing.stdout + missing.stderr).not.toContain(
+    "Invalid native setup builder"
+  );
+
+  // A changed builder is still a warning; without the paths it says where the
+  // directory and record are instead of naming them.
+  await writeFile(join(f.home, "builder"), "changed bytes");
+  await writeFile(join(f.root, "builder-changed"), "the run reports it");
+  const changed = await f.cli(["native", "setup"]);
+  expect(changed.exitCode).toBe(0);
+  expect(changed.stdout).toBe("Native runtime is set up.\n");
+  expect(changed.stderr).toContain(
+    "WARN: Setup found that the image builder in this native home does not match the pinned release, so image builds are refused until it is replaced. Setup left it as it is. Remove the image builder's directory and record from .hack-local/providers in the native home, then run hack native setup --accept-downloads.\n"
+  );
+  expect(changed.stderr).not.toContain("builder-1.0.0");
+  const calls = (await readFile(f.calls, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(calls.filter((call) => !call.includes("inspect"))).toEqual([
+    ["runtime", "setup", "--no-interactive"],
+    ["runtime", "setup", "--no-interactive"],
+  ]);
 }, 60_000);

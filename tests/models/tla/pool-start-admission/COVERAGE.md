@@ -360,10 +360,12 @@ What the model leaves out about the record:
   takes `Reuse` only when the sample fits. The discarded sample costs time, not
   a state.
 - The order of the start's own write. The code writes the record after the tree
-  and root files rechecks and before the alias restore; the model folds it into
-  `Settle` and `ObserveRunning`, so a start refused between those steps has
-  written a record in the code and not in the model. No invariant reads the
-  record after the start's sample under the lease.
+  and root files rechecks, the alias restore, the settle and the creation of the
+  pool's owner record, and before the check before boot; the model folds it into
+  `Settle` and `ObserveRunning`. A start refused before the owner record exists
+  has written no record in the code, and one refused at the check before boot
+  removes the record it wrote. No invariant reads the record after the start's
+  sample under the lease.
 - A later start that reads what this start wrote. The model has one start; a
   record another start or a stop wrote is `OtherRecords`.
 - Removing the record. The code unlinks it when a sample Hack took fails, is
@@ -373,7 +375,8 @@ What the model leaves out about the record:
   so the model's safety properties do not depend on the removal; its evidence is
   `a_sample_that_fails_under_the_lease_removes_the_record`,
   `a_refusal_before_the_lease_removes_the_record_only_if_the_lease_is_free`,
-  `the_stop_never_waits_for_its_sample` and
+  `a_stop_sample_is_settled_without_waiting`,
+  `a_stop_sample_is_taken_on_its_own_thread_for_a_development_pool_only` and
   `a_pool_without_its_owner_record_gets_no_record_and_its_root_stays_as_it_was`
   in `admission/opening/tests.rs`.
 - `runtime down` itself. Its writer is `OtherRecords`: an operation holding the

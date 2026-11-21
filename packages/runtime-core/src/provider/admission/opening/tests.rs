@@ -1392,40 +1392,76 @@ fn a_refusal_before_the_lease_removes_the_record_only_if_the_lease_is_free() {
 }
 
 #[test]
-fn the_stop_never_waits_for_its_sample() {
+fn a_stop_sample_is_settled_without_waiting() {
     use std::sync::mpsc;
     let home = Home::new();
     let clock = TestClock::at(FIRST);
     let host = TestHost::on(&clock);
-    // A Research pool takes no sample and leaves the record alone.
-    usable(&home);
-    let sample = StopSample::beside(
-        Profile::Research,
-        || panic!("Research took a stop sample"),
-        || panic!("Research read the clock"),
-    );
-    assert!(matches!(sample, StopSample::NotTaken));
-    assert!(!sample.settle(&home.root, &home.lease, &host));
-    assert!(home.record().is_some());
     // A sample that is back when the stop is done is recorded with the time it was taken.
-    let (taken, back) = mpsc::channel();
-    let sample = StopSample::beside(
-        Profile::Development,
-        || Ok(passing(COUNT + 7)),
-        move || {
-            taken.send(()).unwrap();
-            Some(FIRST + Duration::from_secs(3))
-        },
-    );
-    back.recv().unwrap();
-    // The thread sends its result right after reading the time.
-    std::thread::sleep(Duration::from_millis(200));
-    assert!(sample.settle(&home.root, &home.lease, &host));
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send((Ok(passing(COUNT + 7)), Some(FIRST + Duration::from_secs(3))))
+        .unwrap();
+    assert!(StopSample::Taking(receiver).settle(&home.root, &home.lease, &host));
     let written = home.record().unwrap();
     assert_eq!(written["swapouts"], COUNT + 7);
     assert_eq!(written["monotonic_nanos"], 1_003_000_000_000_u64);
-    // A sample that is not back (a slow or hung host command) is not waited for: settling
-    // returns at once and removes the record.
+    // A sample that is back and failed, or could not be taken, removes the record.
+    let mut failing = passing(COUNT);
+    failing.memory_pressure = MemoryPressure::from_level(Some(4));
+    for sample in [
+        Ok(failing),
+        Err(CandidateError::new("admission_unavailable", "fixture")),
+    ] {
+        home.holds(BOOT, FIRST, COUNT);
+        let (sender, receiver) = mpsc::channel();
+        sender.send((sample, Some(FIRST))).unwrap();
+        assert!(!StopSample::Taking(receiver).settle(&home.root, &home.lease, &host));
+        assert_eq!(home.record(), None);
+    }
+    // A sample that is not back is not waited for: settling returns at once and removes the
+    // record. The sender is still alive, as a sampling thread's would be.
+    home.holds(BOOT, FIRST, COUNT);
+    let (sender, receiver) =
+        mpsc::channel::<(Result<Admission, CandidateError>, Option<Duration>)>();
+    assert!(!StopSample::Taking(receiver).settle(&home.root, &home.lease, &host));
+    assert_eq!(home.record(), None);
+    drop(sender);
+    // No sample taken (a Research pool, or no thread): the record is left alone.
+    home.holds(BOOT, FIRST, COUNT);
+    assert!(!StopSample::NotTaken.settle(&home.root, &home.lease, &host));
+    assert!(home.record().is_some());
+}
+
+#[test]
+fn a_stop_sample_is_taken_on_its_own_thread_for_a_development_pool_only() {
+    use std::sync::mpsc;
+    // Research takes no sample and reads no clock.
+    assert!(matches!(
+        StopSample::beside(
+            Profile::Research,
+            || panic!("Research took a stop sample"),
+            || panic!("Research read the clock"),
+        ),
+        StopSample::NotTaken
+    ));
+    // Development: the sample and the time read after it arrive on the channel.
+    let StopSample::Taking(receiver) = StopSample::beside(
+        Profile::Development,
+        || Ok(passing(COUNT + 7)),
+        || Some(FIRST + Duration::from_secs(3)),
+    ) else {
+        panic!("a Development stop took no sample");
+    };
+    let (sample, at) = receiver.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert_eq!(sample.unwrap().swapouts, Some(COUNT + 7));
+    assert_eq!(at, Some(FIRST + Duration::from_secs(3)));
+    // A host command that hangs keeps only its own thread: the caller has its handle back
+    // at once, and settling it does not wait.
+    let home = Home::new();
+    let clock = TestClock::at(FIRST);
+    let host = TestHost::on(&clock);
+    usable(&home);
     let (release, held) = mpsc::channel::<()>();
     let sample = StopSample::beside(
         Profile::Development,
@@ -1435,24 +1471,7 @@ fn the_stop_never_waits_for_its_sample() {
         },
         || Some(FIRST),
     );
-    let before = std::time::Instant::now();
     assert!(!sample.settle(&home.root, &home.lease, &host));
-    assert!(before.elapsed() < Duration::from_secs(1));
     assert_eq!(home.record(), None);
     release.send(()).unwrap();
-    // A sample that is back and failed removes the record too.
-    usable(&home);
-    let (taken, back) = mpsc::channel();
-    let sample = StopSample::beside(
-        Profile::Development,
-        || Err(CandidateError::new("admission_unavailable", "fixture")),
-        move || {
-            taken.send(()).unwrap();
-            Some(FIRST)
-        },
-    );
-    back.recv().unwrap();
-    std::thread::sleep(Duration::from_millis(200));
-    assert!(!sample.settle(&home.root, &home.lease, &host));
-    assert_eq!(home.record(), None);
 }

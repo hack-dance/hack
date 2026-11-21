@@ -1455,12 +1455,17 @@ fn start_pool_observed(
     // independently verified ownership of existing disks (a live pool, or an exactly
     // clean stopped pool this start reuses) avoids charging a second VM's disks.
     let mut admission_owner = admission_pool::select(candidate, profile)?;
-    let admission = admission_pool::probe(candidate, profile, &admission_owner)?;
-    if !admission.admitted {
-        // A host this start just saw failing is not one an earlier record may vouch for.
+    // A host this start sees failing, or cannot observe, before it holds the lease is not
+    // one an earlier record may vouch for: the record is removed if the lease is free.
+    let forget_record = || {
         if profile == super::Profile::Development {
             admission::opening::forget_unleased(&root(candidate));
         }
+    };
+    let admission = admission_pool::probe(candidate, profile, &admission_owner)
+        .inspect_err(|_| forget_record())?;
+    if !admission.admitted {
+        forget_record();
         return Err(CandidateError::new(
             "admission_rejected",
             admission.reasons.join(" "),
@@ -1471,7 +1476,8 @@ fn start_pool_observed(
     // so only the remainder of it is ever slept.
     let admission_clock = process::MonotonicClock::new();
     let (mut samples, opened) = if profile == super::Profile::Development {
-        let opened = admission::open(&admission, &admission_clock)?;
+        let opened =
+            admission::open(&admission, &admission_clock).inspect_err(|_| forget_record())?;
         (vec![admission], Some(opened))
     } else {
         // Retain the frozen Research window and baseline semantics.
@@ -1703,14 +1709,24 @@ fn start_pool_observed(
     }
     // A fresh admission immediately before boot, on the qualification's basis, closes
     // installation/lock delays. `machine start` needs the permit it leads to.
+    // The check before boot is a host sample too: one that fails or cannot be taken removes
+    // the record this start wrote above, so a retry waits its window again.
+    let forget_leased = || {
+        if profile == super::Profile::Development {
+            admission::opening::forget(&pool_root, &lock);
+        }
+    };
     let boot = match admission_pool::admit_boot(
         candidate,
         profile,
         &restart,
         samples.last().and_then(|sample| sample.swapouts),
-    )? {
+    )
+    .inspect_err(|_| forget_leased())?
+    {
         admission_pool::BootGate::Admitted(boot) => boot,
         admission_pool::BootGate::Refused(error) => {
+            forget_leased();
             // Nothing booted: a clean stop stays clean, an unclean one stays unclean.
             phase(candidate, &mut owner, "stopped")?;
             return Err(error);

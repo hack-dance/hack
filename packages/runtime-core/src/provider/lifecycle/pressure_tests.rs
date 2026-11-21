@@ -246,11 +246,11 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
         ),
         (
             "Open: first sample",
-            "admission_pool::probe(candidate, profile, &admission_owner)?",
+            "let admission = admission_pool::probe(candidate, profile, &admission_owner)\n        .inspect_err(|_| forget_record())?;",
         ),
         (
             "Open: window",
-            "admission::open(&admission, &admission_clock)?",
+            "admission::open(&admission, &admission_clock).inspect_err(|_| forget_record())?;",
         ),
         ("ResearchSample", "admission::sample_with(profile, ||"),
         (
@@ -326,7 +326,7 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
     // but the sample under the lease is added to the samples after the first window.
     let gate = &body[at("admission_pool::admit_boot(")..];
     assert!(
-        gate[..gate.find(")? {").unwrap()]
+        gate[..gate.find("\n    )\n").unwrap()]
             .contains("samples.last().and_then(|sample| sample.swapouts)")
     );
     assert_eq!(body.matches("samples.extend(").count(), 1);
@@ -384,6 +384,17 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
         );
     }
     assert!(recorded < at("state::write(&root(candidate).join(\"admission.json\")"));
+    // A host sample this start sees failing removes the record: before the lease if the
+    // lease is free, and under the lease at the check before boot.
+    assert_eq!(body.matches("forget_record()").count(), 3);
+    assert!(
+        at("admission::opening::forget_unleased(&root(candidate));")
+            < at("startup_admission_lease(")
+    );
+    let gate = &body[at("admission_pool::admit_boot(")..];
+    let gate = &gate[..gate.find("\n    };\n").unwrap()];
+    assert_eq!(gate.matches("forget_leased()").count(), 2);
+    assert!(body.contains("admission::opening::forget(&pool_root, &lock);"));
     for later in [
         "restore_released_short_home(candidate)?;",
         "interrupted::before_boot(",

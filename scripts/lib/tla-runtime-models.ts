@@ -1820,7 +1820,7 @@ const contracts: readonly ModelContract[] = [
     action: "Recheck",
     fields: ['pc = "Proven"', 'profile = "development"'],
     additionalControls: [
-      // The implementation's other path, a stopped pool's start: root files
+      // The implementation's other path, a cleanly stopped pool's start: root files
       // proven in the window, rechecked under the lease.
       { name: "root-before-lease", negative: false, states: 73_754 },
       {

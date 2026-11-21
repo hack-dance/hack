@@ -166,8 +166,9 @@ ProveTrees == /\ pc = "Opened" /\ PreLeaseSampled /\ treeOk
               /\ UNCHANGED <<profile, lease, elapsed, host, samples, boot, treeOk,
                               rootOk, rootProved, owner, poolRunning, vm>>
 RefuseTree == pc = "Opened" /\ PreLeaseSampled /\ ~treeOk /\ Refuse
-\* rootfs_proof::prove: a stopped pool's root files are proven inside the
-\* window. A start without that proof is RootProofBeforeLease = FALSE.
+\* rootfs_proof::prove: a cleanly stopped pool's root files are proven
+\* inside the window. A start without that proof is
+\* RootProofBeforeLease = FALSE.
 ProveRootEarly == /\ RootProofBeforeLease /\ pc = "Proven" /\ ~rootProved /\ rootOk
                   /\ rootProved' = TRUE
                   /\ UNCHANGED <<profile, pc, lease, elapsed, host, samples, boot,
@@ -228,10 +229,11 @@ ObserveRunning == /\ pc = "Qualified" /\ alias # "foreign" /\ poolRunning
                   /\ pc' = "Joined" /\ lease' = "free"
                   /\ UNCHANGED <<profile, elapsed, host, samples, boot, proofs,
                                   owner, poolRunning, vm>>
-\* prepare_rootfs under the lease without an earlier proof, or
-\* rootfs_proof::recheck of the metadata the earlier proof recorded. The code
-\* runs that recheck straight after the tree recheck; no root file changes
-\* under the lease, so its place among the leased steps does not matter here.
+\* prepare_rootfs under the lease without an earlier proof, or the comparison
+\* of the root files with the metadata the earlier proof recorded. The code
+\* compares twice: rootfs_proof::recheck straight after the tree recheck, and
+\* Leased::stands in prepare_rootfs, which is this action's place. No root
+\* file changes under the lease here, so one comparison or two is one guard.
 ProveRoot == /\ ~RootProofBeforeLease /\ pc = "Settled" /\ rootOk
              /\ pc' = "RootProven" /\ rootProved' = TRUE
              /\ UNCHANGED <<profile, lease, elapsed, host, samples, boot, treeOk,

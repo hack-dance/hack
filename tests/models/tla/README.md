@@ -895,9 +895,9 @@ the count it was compared against (`BootSampleMatchesBaseline`). No VM starts fr
 engine tree that changed after its content proof (`NoStartFromChangedTree`). A
 refusal, a crash or a pool that a concurrent start already booted leaves no VM
 started and the lease returned. The `root-before-lease` control (73,754 states)
-checks the same invariants for the other path of the implementation, a stopped
-pool's start, in which the root files are proven before the lease and rechecked
-under it.
+checks the same invariants for the other path of the implementation, a cleanly
+stopped pool's start, in which the root files are proven before the lease and
+rechecked under it.
 
 Twelve controls remove one mechanism each and must fail the named invariant: the
 second sample before the lease (`negative`, `SecondSampleUnderLease`), no window
@@ -929,9 +929,10 @@ any other tree is proven by content again, and a changed tree refuses the start.
 `changed-tree-start` is the start without that recheck: a tree that changes
 between its proof and the lease is booted once, and only the next command's
 witness check refuses it. The model keeps one bit for the trees, so the metadata
-comparison and the second proof are one guard in it. A stopped pool's root files
-are held to the same rule (`lifecycle/rootfs_proof.rs`): proven in the window,
-rechecked as the step after the tree recheck, with one bit in the model. A sample is one atomic
+comparison and the second proof are one guard in it. A cleanly stopped pool's
+root files are held to the same rule (`lifecycle/rootfs_proof.rs`): proven in the
+window, rechecked as the step after the tree recheck and compared once more where
+their digest is used, with one bit and one recheck action in the model. A sample is one atomic
 observation, pressure that comes and goes between samples is invisible, tree and
 root changes are assumed absent while the lease is held, and nothing after
 `machine start` is modelled. There is no fairness or eventual-start claim, and a

@@ -1874,7 +1874,7 @@ by those pauses.
 | `machine start` | 210 ms | the provider starts the VM |
 | Guest setup | 680 ms | about 430 ms is the guest hashing the engine binary over the share |
 | Network tools in the guest | 100 ms | |
-| Executable cache (`runc`, `docker-init`) | 300 ms | measured when each binary was read over the share twice; it is now read once and hashed as it is copied |
+| Executable cache (`runc`, `docker-init`) | 300 ms | measured when each binary was read over the share twice; it is now read over the share once, by the copy, and the cache's own copy is hashed before it is made executable and again where it is executed |
 | Engine start | 390 ms | until the engine answers |
 | Everything else | 60 ms | identity checks, disk adoption, pings |
 
@@ -1902,20 +1902,28 @@ of the pinned provider tree and under 1 ms for the engine tree's 8 entries. On a
 filesystem both trees are hashed a second time under the lease, which the table does not
 show either.
 
-A stopped pool's root files are held to the same rule (`lifecycle::rootfs_proof`). Their
-content proof runs before the lease, read-only, on a thread beside the tree proofs, so it
-fills the admission window too. The step after the tree comparison is the same comparison
+A cleanly stopped pool's root files are held to the same rule (`lifecycle::rootfs_proof`):
+a pool whose owner record is the `stopped` phase with the marker a completed `down` writes.
+Their content proof runs before the lease, read-only, on a thread beside the tree proofs,
+so it fills the admission window too. If the host cannot start that thread, or the proof
+fails in any way, the start has no early proof and proves the root files under the lease;
+it is never refused for that. The step after the tree comparison is the same comparison
 for the root files, against the owner record the lease now fences: if the readiness
 marker and the pin are the ones that record names, the metadata digest is what the proof
 saw and the filesystem is one where metadata is trusted, the proof stands; otherwise the
 root files are proven by content again under the lease, and root files that no longer
 match their pin refuse the start with `artifact_digest_mismatch`. This recheck writes
 nothing either, and such a refusal comes before the admission record, any later owner
-record update and any provider command. The digest taken under the lease is the one the
-boot's witness records. A start with no earlier proof is unchanged: the first boot of a
-new home copies the root files and proves them by content under the lease, and so does
-any start whose earlier proof could not be made (no pin in the owner record, an alias, an
-unreadable entry, or root files that did not match before the lease). The table's 180 ms
+record update and any provider command. The root files are compared once more where the
+result is used, after the owner record updates and after `machine update --rosetta` when
+translation is being enabled: one more metadata walk, no file content read, and the
+content proof at that point if anything differs. The digest of that last comparison is
+the one the boot's witness records. From there to `machine start` nothing looks at the
+root files again, as before. A start with no earlier proof is unchanged: the first boot
+of a new home copies the root files and proves them by content under the lease, and so
+does any start whose earlier proof could not be made (an owner record that is not a clean
+stop or has no pin, an alias, an unreadable entry, or root files that did not match
+before the lease). The table's 180 ms
 was measured before this change and the root files comparison was not timed on its own.
 
 The order of the admission steps, and what can change between them, is modelled in

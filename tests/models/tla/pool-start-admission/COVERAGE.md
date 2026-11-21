@@ -38,17 +38,19 @@ the lease are rechecked under it (`EnforceTreeRecheck = TRUE`). Both check the
 same invariants.
 
 - `root-before-lease` is a start that has an early proof of the root files
-  (`lifecycle/rootfs_proof.rs::prove`): the owner record names a root files pin,
-  and the root files matched it before the lease. That is every start of a stopped
-  pool whose root files are intact. The proof runs in the window before the lease
-  and is rechecked under it (`RootProofBeforeLease = TRUE`,
-  `EnforceRootRecheck = TRUE`).
+  (`lifecycle/rootfs_proof.rs::prove`): the owner record is a clean stop (the
+  `stopped` phase with the marker a completed `down` writes) and names a root
+  files pin, and the root files matched it before the lease. That is every start
+  of a cleanly stopped pool whose root files are intact. The proof runs in the
+  window before the lease and is rechecked under it
+  (`RootProofBeforeLease = TRUE`, `EnforceRootRecheck = TRUE`).
 - `positive` is a start without one: the root files are proven by content under
   the lease, where no step trusts an earlier proof (`RootProofBeforeLease = FALSE`).
   That is the first boot of a new home, whose root files are copied under the
-  lease, and any start whose early proof gave nothing: an owner record without a
-  pin, an alias, an unreadable entry, root files that did not match their pin
-  before the lease, or a proof thread that died.
+  lease, and any start whose early proof gave nothing: an owner record that is
+  not a clean stop (stopped by a failure, recovered, interrupted) or has no pin,
+  an alias, an unreadable entry, root files that did not match their pin before
+  the lease, a proof thread the host could not start, or one that died.
 
 | Configuration | Kind | Distinct states | Result |
 | --- | --- | ---: | --- |
@@ -248,12 +250,12 @@ tests of the named module unless marked.
 | `Qualify` | `admission.rs::recheck_after_lease` (Research returns no sample) | last assertions of `post_lease_sample_blocks_allocation_when_prelease_admission_goes_stale` |
 | `RestoreAliasLeased` | `lifecycle.rs::restore_released_short_home` | `lifecycle/short_home/tests.rs`: `a_clean_stop_whose_alias_host_cleanup_removed_is_restored_exactly`, `a_squatted_alias_is_never_used_and_the_receipt_moves_to_a_fresh_alias` |
 | `TreesStillProven` in `Settle` and `ObserveRunning`, `RefuseTreeRecheck` | `lifecycle/leased_trees.rs::recheck`, `tree_witness.rs::qualified_digest`, `artifact.rs::verify_record`, `verify_witnessed` | `lifecycle/leased_trees/tests.rs`: `unchanged_trees_keep_their_proofs_and_hash_nothing_under_the_lease`, `a_tree_changed_between_its_proof_and_the_lease_refuses_before_any_effect`, `a_tree_whose_metadata_changed_but_whose_bytes_did_not_is_proven_again_and_continues`, `a_tree_reinstalled_with_its_recorded_content_is_proven_again_and_continues`, `off_a_qualified_filesystem_both_trees_are_proven_again_under_the_lease`, `a_rewritten_record_or_an_aliased_tree_is_refused_under_the_lease`, `the_recorded_witness_names_what_was_verified_under_the_lease` |
-| `ProveRootEarly` | `lifecycle/rootfs_proof.rs::prove`, `lifecycle.rs::prove_rootfs` | `lifecycle/rootfs_proof.rs`: `unchanged_root_files_are_accepted_without_a_second_content_proof`, `root_files_that_do_not_match_the_pin_or_cannot_be_read_give_no_early_proof` |
-| `RecheckRoot`, and `RefuseRoot` after an early proof | `lifecycle/rootfs_proof.rs::recheck`, `Early::holds`, `Leased::stands`; `tree_witness.rs::qualified_digest`; `lifecycle.rs::prove_rootfs` | `lifecycle/rootfs_proof.rs`: `the_recheck_keeps_an_unchanged_proof_and_hashes_nothing_under_the_lease`, `a_root_file_changed_between_the_proof_and_the_lease_refuses_at_the_recheck`, `root_files_whose_metadata_changed_but_whose_bytes_did_not_are_proven_again`, `off_a_qualified_filesystem_the_root_files_are_proven_again_under_the_lease`, `another_marker_or_pin_under_the_lease_is_proven_against_the_lease_held_record`, `the_recheck_reads_the_lease_held_owner_record_and_writes_nothing`, `a_rewrite_that_puts_the_modification_time_back_still_takes_the_full_proof`, `every_ordinary_change_between_the_proof_and_the_lease_takes_the_full_proof` |
+| `ProveRootEarly` | `lifecycle/rootfs_proof.rs::prove`, `lifecycle.rs::prove_rootfs` | `lifecycle/rootfs_proof.rs`: `unchanged_root_files_are_accepted_without_a_second_content_proof`, `root_files_that_do_not_match_the_pin_or_cannot_be_read_give_no_early_proof`, `a_pool_that_is_not_cleanly_stopped_gets_no_early_proof_and_no_recheck`; the thread beside the tree proofs: `a_proof_that_panics_is_no_proof_and_no_refusal`, `a_tree_proof_error_is_returned_after_the_proof_thread_has_ended`, `a_thread_the_host_cannot_start_is_no_proof_and_no_refusal` |
+| `RecheckRoot`, and `RefuseRoot` after an early proof | `lifecycle/rootfs_proof.rs::recheck`, `Early::holds`, `Leased::stands`; `tree_witness.rs::qualified_digest`; `lifecycle.rs::prove_rootfs` | `lifecycle/rootfs_proof.rs`: `the_recheck_keeps_an_unchanged_proof_and_hashes_nothing_under_the_lease`, `a_root_file_changed_between_the_proof_and_the_lease_refuses_at_the_recheck`, `root_files_whose_metadata_changed_but_whose_bytes_did_not_are_proven_again`, `off_a_qualified_filesystem_the_root_files_are_proven_again_under_the_lease`, `another_marker_or_pin_under_the_lease_is_proven_against_the_lease_held_record`, `the_recheck_reads_the_lease_held_owner_record_and_writes_nothing`, `a_rewrite_that_puts_the_modification_time_back_still_takes_the_full_proof`, `every_ordinary_change_between_the_proof_and_the_lease_takes_the_full_proof`; the comparison where the digest is used: `where_the_digest_is_used_the_root_files_are_walked_again_and_nothing_is_hashed`, `a_root_file_changed_after_the_recheck_is_not_accepted_where_the_digest_is_used`, `prepare_rootfs_refuses_a_root_file_changed_after_the_recheck_under_the_lease` |
 | `Settle`, `RefuseSelection` | `lifecycle/admission_pool.rs::settle`, `Selection::reverify` | `lifecycle/admission_pool/tests.rs`: `selected_owner_or_provider_changes_refuse_reverification`, `selected_stopped_owner_drift_refuses_reverification`, `a_start_with_fresh_headroom_drops_the_reserve_and_runs_no_release_check` |
 | `AdmitBoot`, `RefuseBoot`; `BootSampleOnPassingHost`, `BootSampleMatchesBaseline` | `lifecycle/admission_pool.rs::admit_boot`, `admit_boot_with` (the `admitted` check, then the swapout comparison) | `the_boot_gate_samples_the_qualifying_basis_and_its_swapouts`, `the_boot_gate_rechecks_the_selection_around_its_sample` |
 | `Start` | `BootAdmission::release`, `lifecycle.rs::start_machine` | `machine_start_needs_a_final_leased_recheck_of_the_selection` |
-| Order of the steps, one clock for the window, the baseline handed to `admit_boot`, the tree recheck as the first step after the leased sample (before the start's next write, provider command or tree read), the root files recheck as the step after it, the rechecked proofs and the root files digest taken under the lease handed to the boot's witness | `lifecycle.rs::start_pool_observed` | `lifecycle/pressure_tests.rs`: `start_pool_takes_its_admission_steps_in_the_modelled_order`. It reads source order only. |
+| Order of the steps, one clock for the window, the baseline handed to `admit_boot`, the tree recheck as the first step after the leased sample (before the start's next write, provider command or tree read), the root files recheck as the step after it, the root files compared again in `prepare_rootfs` after the provider command a start can run before it, the rechecked proofs and the root files digest of that last comparison handed to the boot's witness | `lifecycle.rs::start_pool_observed` | `lifecycle/pressure_tests.rs`: `start_pool_takes_its_admission_steps_in_the_modelled_order`. It reads source order only. |
 
 Not covered by an executable test:
 
@@ -266,12 +268,14 @@ Not covered by an executable test:
   lease is the source order test's claim. A tree changed between the proof and the
   lease of a real `runtime up` was not exercised.
 - `ProveRoot` and `RefuseRoot` in a cold start (`prepare_rootfs`, `prove_rootfs`).
-- The root files recheck inside a real start. Its tests call
-  `rootfs_proof::recheck` under a real lease on a fixture pool, and the function
-  it wraps on fixture trees; that `start_pool_observed` calls it straight after the tree
-  recheck, and hands its digest to the boot's witness, is the source order test's
-  claim. A root file changed between the proof and the lease of a real
-  `runtime up` was not exercised.
+- The root files comparisons inside a real start. Their tests call
+  `rootfs_proof::recheck` under a real lease on a fixture pool, `prepare_rootfs`
+  on that pool, and the functions they wrap on fixture trees; that
+  `start_pool_observed` calls the recheck straight after the tree recheck, calls
+  `prepare_rootfs` after `enable_amd64_emulation`, and hands its digest to the
+  boot's witness, is the source order test's claim. A root file changed between
+  the proof and the lease, or between the lease and its use, of a real
+  `runtime up` was not exercised here.
 - `Crash`. The model relies on the kernel returning an advisory file lock when its
   holder dies; no test kills a start.
 - `RefuseRoot` from `Proven`. The model refuses before the lease when the early
@@ -377,14 +381,17 @@ the content changes that keep all metadata, which `tree_witness` lists.
 
 ## The root files proof before the lease
 
-A stopped pool's root files are proven by content in the admission window too
-(`ProveRootEarly`, `lifecycle/rootfs_proof.rs::prove`), on a thread beside the
-tree proofs, against the pin the owner record names. The proof is read-only and
-grants nothing by itself.
+A cleanly stopped pool's root files are proven by content in the admission
+window too (`ProveRootEarly`, `lifecycle/rootfs_proof.rs::prove`), on a thread
+beside the tree proofs (`rootfs_proof::beside`), against the pin the owner record
+names. The proof is read-only and grants nothing by itself. A thread the host
+cannot start, or a proof that panics, is no early proof and never a refusal.
 
 `rootfs_proof::recheck` is the start's next step after the tree recheck: between
 the two the start writes nothing and runs no provider command. It reads the owner
-record the lease now fences and recomputes the root files' metadata digest:
+record the lease now fences and recomputes the root files' metadata digest. A
+record that is no longer a clean stop (another start booted the pool) is not
+rechecked at all and takes the path it took before. Otherwise:
 
 - The marker and the pin are the ones the lease-held record names, the root files
   are on a qualified filesystem and the digest equals what the proof saw: the
@@ -396,25 +403,38 @@ record the lease now fences and recomputes the root files' metadata digest:
   updates and any provider command. What the start did before the lease is not
   rolled back, as for the tree recheck.
 
-`prepare_rootfs` then takes the digest the recheck computed under the lease, for
-the marker and pin the recheck used, instead of a second content proof, and
-`start_pool_observed` hands it to the boot's tree witness with the rechecked tree proofs.
+The root files are compared a third time where the result is used.
+`prepare_rootfs` runs after the owner record updates of the start and after the
+provider command a start can run before it (`machine update --rosetta`, when
+translation is being enabled). There `Leased::stands` walks the metadata once
+more, reading no file content: for the marker and pin the recheck used, on a
+qualified filesystem, a digest equal to the recheck's stands in for a second
+content proof; anything else runs the content proof at that point, where it ran
+before the early proof existed. `start_pool_observed` hands the digest of that
+last walk, or of that proof, to the boot's tree witness with the rechecked tree
+proofs. From there to `machine start` nothing looks at the root files again,
+which is the interval the proof under the lease left too.
 
 Without an early proof nothing is rechecked and `prepare_rootfs` proves the root
 files by content under the lease (`ProveRoot`), which is `positive`. Doubt before
 the lease never accepts and never refuses by itself.
 
 The model keeps one bit, `rootOk`: the content is what the pin names.
-`RecheckRoot` is the recheck's outcome on that bit, and a change that keeps the
-bytes is not modelled. The model places `RecheckRoot` after `Settle`; the code
-runs it before the alias restore and the settle step. No root file changes while
-the lease is held, so its place among the leased steps changes no checked
-invariant. `root-unchecked` removes the recheck and reaches `RootProven` with
-`rootOk = FALSE`.
+`RecheckRoot` is the outcome of the comparisons under the lease on that bit, and a
+change that keeps the bytes is not modelled. The model has one `RecheckRoot`,
+after `Settle`: that is where the code's last comparison is (`prepare_rootfs`).
+The code's first comparison under the lease, straight after the tree recheck and
+before the alias restore and the settle step, has no action of its own. In the
+model no root file changes while the lease is held, so one comparison or two, and
+their place among the leased steps, change no checked invariant; the second
+comparison exists for what the model assumes away, a root file changed under the
+lease by the start's own provider command or by a writer that ignores the lease,
+and its evidence is its unit tests. `root-unchecked` removes the recheck and
+reaches `RootProven` with `rootOk = FALSE`.
 
-What the recheck does not cover is what the tree recheck does not cover: a writer
-that ignores the lease after the recheck, and the content changes that keep all
-metadata (`tree_witness`).
+What the comparisons do not cover: a writer that ignores the lease after the last
+of them, and the content changes that keep all metadata (`tree_witness`) between
+the content proof before the lease and that last comparison.
 
 ## The alias rewrite before the first sample
 

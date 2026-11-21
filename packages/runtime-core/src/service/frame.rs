@@ -407,60 +407,77 @@ mod tests {
     #[test]
     fn a_slow_trickle_cannot_stretch_the_read_deadline() {
         let (mut a, mut b) = pair();
-        a.write_all(&64u32.to_be_bytes()).unwrap();
+        // The frame is far longer than the trickle could deliver in any test run
+        // (one byte every 20 ms for 128 KiB is about 45 minutes), so a reader whose
+        // deadline restarted on each byte would never return and the hang guard
+        // fails the test. However late the reader starts, only a few bytes have
+        // been buffered, so a correct reader gives Truncated at its frame deadline.
+        a.write_all(&(CONTROL_FRAME_LIMIT as u32).to_be_bytes())
+            .unwrap();
         let writer = std::thread::spawn(move || {
-            for _ in 0..64 {
-                if a.write_all(b"x").is_err() {
-                    return;
-                }
+            while a.write_all(b"x").is_ok() {
                 std::thread::sleep(Duration::from_millis(20));
             }
         });
-        // The trickle takes about 1.3 s to deliver all 64 bytes, so a reader whose
-        // deadline restarted on each byte would return the whole frame. One
-        // deadline for the frame gives Truncated instead.
         let frame = Duration::from_millis(200);
         let result =
             within(move || read_within(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT, frame));
         assert_eq!(result, Err(FrameError::Truncated));
+        // The reader end is gone, so the writer's next write fails and it stops.
         writer.join().unwrap();
     }
 
-    #[test]
-    fn partial_writes_under_backpressure_cannot_stretch_the_write_deadline() {
-        let (mut a, b) = pair();
+    /// Shrink the writer's send buffer and the reader's receive buffer so that a
+    /// control frame cannot fit at once. Fails the test if the platform refuses.
+    fn small_buffers(writer: &UnixStream, reader: &UnixStream) {
         let small: libc::c_int = 4096;
-        // SAFETY: valid socket descriptors and a correctly sized option value.
-        unsafe {
-            for (fd, option) in [
-                (a.as_raw_fd(), libc::SO_SNDBUF),
-                (b.as_raw_fd(), libc::SO_RCVBUF),
-            ] {
+        for (fd, option) in [
+            (writer.as_raw_fd(), libc::SO_SNDBUF),
+            (reader.as_raw_fd(), libc::SO_RCVBUF),
+        ] {
+            // SAFETY: a valid socket descriptor and a correctly sized option value.
+            let set = unsafe {
                 libc::setsockopt(
                     fd,
                     libc::SOL_SOCKET,
                     option,
                     (&small as *const libc::c_int).cast(),
                     std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
-            }
+                )
+            };
+            assert_eq!(set, 0, "setsockopt: {}", std::io::Error::last_os_error());
         }
-        // The reader drains 1 KiB every 10 ms until the writer closes, so every
-        // single write makes progress and a writer without one deadline for the
-        // whole frame would finish it (about 1.3 s) and return Ok. With the
-        // deadline it gives up with bytes left over. The reader counts what it got.
-        let reader = std::thread::spawn(move || {
-            let mut b = b;
+    }
+
+    /// Read until end-of-file, `pause` between reads, and return the byte count.
+    fn drain(
+        mut reader: UnixStream,
+        start_after: Duration,
+        pause: Duration,
+    ) -> std::thread::JoinHandle<usize> {
+        std::thread::spawn(move || {
+            std::thread::sleep(start_after);
             let mut chunk = [0u8; 1024];
             let mut received = 0;
             loop {
-                match b.read(&mut chunk) {
+                match reader.read(&mut chunk) {
                     Ok(0) | Err(_) => return received,
                     Ok(count) => received += count,
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(pause);
             }
-        });
+        })
+    }
+
+    #[test]
+    fn partial_writes_under_backpressure_cannot_stretch_the_write_deadline() {
+        let (mut a, b) = pair();
+        small_buffers(&a, &b);
+        // The reader drains 1 KiB every 10 ms until the writer closes, so every
+        // single write makes progress and a writer without one deadline for the
+        // whole frame would finish it (about 1.3 s) and return Ok. With the
+        // deadline it gives up with bytes left over.
+        let reader = drain(b, Duration::ZERO, Duration::from_millis(10));
         let frame = Duration::from_millis(200);
         let result = within(move || {
             let body = vec![b'x'; CONTROL_FRAME_LIMIT];
@@ -470,10 +487,31 @@ mod tests {
         });
         assert_eq!(result, Err(FrameError::Truncated));
         let received = reader.join().unwrap();
+        // The bytes that fit before the first wait always arrive: the write made
+        // progress on the body before it gave up, and did not finish.
+        assert!(received > 4, "no body byte was written: {received} bytes");
         assert!(
             received < CONTROL_FRAME_LIMIT + 4,
             "the whole frame went through: {received} bytes"
         );
+    }
+
+    #[test]
+    fn a_write_that_has_to_wait_for_room_still_finishes_within_its_deadline() {
+        // The counterpart: the reader starts only after the writer has filled the
+        // small buffers and must wait, then drains as fast as it can. A writer that
+        // gave up at its first wait for room fails here.
+        let (mut a, b) = pair();
+        small_buffers(&a, &b);
+        let reader = drain(b, Duration::from_millis(100), Duration::ZERO);
+        let result = within(move || {
+            let body = vec![b'x'; CONTROL_FRAME_LIMIT];
+            let result = write_within(&mut a, &body, CONTROL_FRAME_LIMIT, Duration::from_secs(20));
+            drop(a);
+            result
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(reader.join().unwrap(), CONTROL_FRAME_LIMIT + 4);
     }
 
     const SIGPIPE_CHILD: &str = "HACK_FRAME_SIGPIPE_CHILD";

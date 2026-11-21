@@ -2063,6 +2063,31 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // src/lib/proxy-ingress-addresses.ts: a record `hack run` trusts names
+    // the running address unless an outside change followed its read.
+    name: "ingress-address-record",
+    module: "IngressRecord",
+    states: 922_875,
+    invariant: "TrustedRecordIsCurrent",
+    action: "Write",
+    // Addresses and changers are symmetric, so a two-worker search may end
+    // on either; the pinned fields are the ones every first witness shares.
+    fields: ["gen = 1", "settled = FALSE", "extSinceWrite = FALSE"],
+    additionalControls: [
+      {
+        name: "unsettled",
+        negative: true,
+      },
+      {
+        // Overlapping changes: one settles while the other still moves the
+        // containers, and a read in between is trusted.
+        name: "unlocked",
+        negative: true,
+        fields: ["gen = 3", "settled = TRUE", "extSinceWrite = FALSE"],
+      },
+    ],
+  },
+  {
     name: "dependency-auto-refresh",
     module: "AutoRefresh",
     states: 141,

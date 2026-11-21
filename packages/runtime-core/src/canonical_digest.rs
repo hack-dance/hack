@@ -49,6 +49,8 @@ impl Domain {
 pub const CONTAINER_SPEC: Domain = Domain::new("hack.container-spec/1");
 /// Stored step keys.
 pub const STEP: Domain = Domain::new("hack.step/1");
+/// Integrity checks for stored step records.
+pub const STEP_RECORD: Domain = Domain::new("hack.step-record/1");
 
 const fn valid_domain(bytes: &[u8]) -> bool {
     const PREFIX: &[u8] = b"hack.";

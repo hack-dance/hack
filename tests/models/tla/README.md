@@ -700,27 +700,33 @@ publication left. `BootBoundUnreached` shows the boot bound (8) never limits a c
 
 | Control | Switches | Result |
 | --- | --- | --- |
-| `positive` | this change; nothing else boots the pool; no fault between a recovery's boot and its graph recovery | 81 states, depth 12; `NoDeadEnd`, `BootBoundUnreached` and `Recovers` hold |
-| `any-boot` | recovery from any earlier boot; every fault | 113 states; all hold |
+| `positive` | stopped-pool recovery and recovery from any earlier boot; something else may boot the pool; a fault may strike between a recovery's boot and its graph recovery | 113 states; `NoDeadEnd`, `BootBoundUnreached` and `Recovers` hold |
 | `negative` | `next` before HACK-2456 | `NoDeadEnd` fails in an `OwnerCrash` or `OwnerNotices` state: stopped pool, ready run, dead owner, publication left |
 | `by-hand` | `next`, counting an unnamed `runtime up` | fails in a `RuntimeUp` state with `boot = 3`, `runBoot = 1` |
-| `strict` | this change while something else boots the pool | fails in `RecoverStopped` (or `RuntimeUp`) with `boot = 3`, `runBoot = 1` |
-| `crash-in-recovery` | this change; the pool stops between the recovery's boot and its graph recovery | fails in `RecoverStopped` with `boot = 3`, `runBoot = 1`, `recovering = TRUE` |
+| `strict` | stopped-pool recovery with the old predecessor-only rule, while something else boots the pool | fails in `RecoverStopped` (or `RuntimeUp`) with `boot = 3`, `runBoot = 1` |
+| `crash-in-recovery` | the old predecessor-only rule; the pool stops between the recovery's boot and its graph recovery | fails in `RecoverStopped` with `boot = 3`, `runBoot = 1`, `recovering = TRUE` |
 
 `Recovers` also fails on `next` (TLC exit 13: the behavior stutters in the dead end).
 That is checked by hand, because the runner's controls are invariant violations only.
 
-The last three controls are the known gap. Recovery of a dead owner's ready run
-accepts only the immediate predecessor boot, because it needs that boot's raw id to
-find its host-side relays, and `owner.json` keeps only the current and previous ids.
-Recovery from any earlier boot (`any-boot`) needs a boot-history record and is a
-follow-up.
+`strict` and `crash-in-recovery` document the old rule: recovery of a dead owner's
+ready run accepted only the immediate predecessor boot, because it needs that boot's
+raw id to find its host-side relays, and `owner.json` keeps only the current and
+previous ids. Each boot now first records the ids it supersedes in a bounded
+boot history (`provider/boot_history.rs`, 16 boots, bound to the pool's owner
+token), and `graph/boot_match.rs` selects the one earlier boot the run's receipt
+names (relay cleanup marker, control root, or one-off job boot); zero or several
+matches, or the current boot, refuse. The model does not bound the history: a run
+whose boot was evicted after 16 later boots is refused with its data kept. Two paths
+stay predecessor-only and are not modeled: a stopped-pool `graph recover-cleanup`
+selection (`prepare`; boots in between may have restarted the run's containers),
+and absent-publication cleanup after a host reboot.
 
 | Model action | Implementation boundary |
 | --- | --- |
 | `RuntimeDown` | `provider/lifecycle.rs::down`, which reports `interrupted_runs` (`lifecycle/pool_users.rs::live_graph_runs`) |
 | `RecoverStopped` | `inspectOrStartStoppedPool` / `StoppedPoolStarted` in `native-project-down.ts`; `selectNativeStartupRecoveringStoppedPool` in `native-project-start.ts` |
-| `RecoverRunning` | `resumeSelectedOwner` → `recover-cleanup` → `retire-recovered-publisher`; `CanRecover` with `Strict` is `graph/dead_owner_cleanup.rs` `recovery_selection` / `execute` |
+| `RecoverRunning` | `resumeSelectedOwner` → `recover-cleanup` → `retire-recovered-publisher`; `CanRecover` without `Strict` is `graph/dead_owner_cleanup.rs` `recovery_selection` / `execute` with `graph/boot_match.rs` over `provider/boot_history.rs` |
 | `Start` / `Stop` | ordinary `hack up` (fresh or retained) and `hack down` |
 | `PoolRecover` | `hack native recover` (`lifecycle::recover`) |
 

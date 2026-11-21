@@ -12,19 +12,25 @@ services:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U bench -d bench"]
-      interval: 2s
+      start_period: 30s
+      start_interval: 250ms
+      interval: 10s
       timeout: 3s
-      retries: 30
+      retries: 3
   cache:
     image: redis:8-alpine
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 2s
+      start_period: 30s
+      start_interval: 250ms
+      interval: 10s
       timeout: 3s
-      retries: 30
+      retries: 3
   api:
     image: oven/bun:1.4.4-alpine
     working_dir: /app
+    init: true
+    stop_grace_period: 2s
     command: ["bun", "--watch", "server.ts"]
     environment:
       PORT: "3001"
@@ -38,11 +44,9 @@ services:
         condition: service_healthy
       cache:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "bun", "-e", "const r = await fetch('http://127.0.0.1:3001/health'); process.exit(r.ok ? 0 : 1)"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
+    # No command health check on the routed services: native would replace it with
+    # its own route probe, so it would run (and cost CPU) on Compose only. Readiness
+    # is the benchmark's own route check on both backends.
     labels:
       caddy: api.hack-runtime-bench.hack
       caddy.reverse_proxy: "{{upstreams 3001}}"
@@ -53,6 +57,8 @@ services:
   web:
     image: oven/bun:1.4.4-alpine
     working_dir: /app
+    init: true
+    stop_grace_period: 2s
     command: ["bun", "--watch", "dev.ts"]
     environment:
       PORT: "3000"
@@ -61,8 +67,8 @@ services:
       - ../web:/app
       # A named volume for the install-on-volume task: the same install off the shared source.
       - deps:/deps
-    # service_started: native replaces a routed service's command healthcheck with a
-    # route probe, so it refuses service_healthy on a routed dependency.
+    # service_started: native probes a routed dependency's route itself, so it
+    # refuses service_healthy on one.
     depends_on:
       api:
         condition: service_started

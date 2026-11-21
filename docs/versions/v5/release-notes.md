@@ -9,9 +9,8 @@
 > arrived in next.21; an installed next.20 or earlier does not have them.
 
 Hack 5 keeps the v4 project model. Your `.hack/` folder, your encrypted env
-values, branch instances and lifecycle processes carry over. Docker Compose is
-still the default way to run services. This page lists what changed for a user,
-starting with what you will meet first.
+values, branch instances and lifecycle processes carry over. Stable v4 uses
+Compose. Native is the planned default for stable v5.
 
 In short:
 
@@ -118,10 +117,11 @@ most commands have `--json`, and every command takes `--no-interactive`. See
 [Agent integrations](integrations.md).
 
 **The native backend (beta).** On an Apple Silicon Mac, prepared projects can
-run in a small Linux virtual machine without a Docker app. It ships only through
-`hack-next`. Nothing selects it for you, and it does not claim to match Compose
-for every project. See [Try native](native/start.md) and
-[What works and known limits](native/limits.md).
+run in a Linux virtual machine without a Docker app. The current `hack-next`
+and manual `hack-v5` launchers select native by default on Apple Silicon macOS.
+Use `HACK_RUNTIME_BACKEND=compose` for Compose. Supported Linux candidates
+are Compose-only. See [Try native](native/start.md) and
+[What works and known limits](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md).
 
 ## 6. What is gone
 

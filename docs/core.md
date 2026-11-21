@@ -38,9 +38,10 @@ A **service** is one part of a project, such as a web app, API or database. Each
 instance runs its own copy of every service. Branch instances let you run
 different versions of one project side by side.
 
-A **backend** is what actually runs the containers. Compose is the default; it
-runs services with Docker Compose behind shared local routing for HTTPS. Native
-is an opt-in beta on Apple Silicon macOS. New projects use `.hack.local` names. Existing `.hack` names and custom
+A **backend** runs the containers. Stable `hack` uses Compose behind shared
+local routing for HTTPS. Native is a beta on Apple Silicon macOS. On either
+backend, a fresh `hack init` uses `.hack.local` unless you set a global
+`default_domain` or supply `--dev-host`. Existing `.hack` names and custom
 domains keep working. Use `hack open` to find the URL for your instance rather than
 guessing a port or hostname.
 
@@ -115,8 +116,8 @@ Use the [CLI overview](cli.md) to choose a command and the
 
 ## Backends
 
-Docker Compose is the default backend and the one every example on this page uses.
-v5 adds a native backend (beta) for Apple Silicon macOS, available through the
-`hack-next` channel, whose launcher selects native unless you set `HACK_RUNTIME_BACKEND=compose`, that runs explicitly prepared projects without Docker Desktop or OrbStack
-and supports a bounded command subset. See [Upgrade to v5](guides/upgrade-to-v5.md)
+The examples on this page use Compose. The current v5 prerelease launcher
+`hack-next` selects native on Apple Silicon macOS unless you set
+`HACK_RUNTIME_BACKEND=compose`. On supported Linux it selects Compose and
+refuses native. Native is the planned default for stable v5. Native runs prepared projects without Docker Desktop or OrbStack. See [Upgrade to v5](guides/upgrade-to-v5.md)
 and [the native backend overview](native/README.md).

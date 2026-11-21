@@ -148,8 +148,8 @@ The `hack` command reads the project's `.hack/` folder and starts its services
 through Docker Compose. One shared local proxy gives every instance its names and
 HTTPS, with local DNS helpers for the names and Caddy for the certificates. An
 optional daemon, `hackd`, caches project state so status commands answer quickly.
-Compose is the default way to run services; the native VM is an opt-in beta,
-described under [versions and backends](#versions-and-backends).
+Stable `hack` uses Compose. See [versions and backends](#versions-and-backends)
+for prerelease backend selection.
 
 ## First run
 
@@ -232,7 +232,7 @@ instance. See [agent integrations](docs/integrations.md).
 Homebrew or the release installer above.
 
 **v5 is in prerelease.** It keeps the same commands and the same `.hack/` folder
-and replaces the runtime layer underneath. Docker Compose stays the default. The
+and replaces the runtime layer underneath. Stable v4 uses Compose. The
 current prerelease is `5.0.0-next.24`. Prerelease builds install beside stable
 Hack through the separate `hack-next` channel and do not change the stable
 install. Read
@@ -244,15 +244,18 @@ v5 work; `main` holds the stable line.
 **Native backend (beta, Apple Silicon macOS).** A second way to run the same
 project. Hack runs the project's containers in a Linux VM, without Docker Desktop
 or OrbStack. Preparing that VM is a separate step today. Your `.hack/` folder and
-your commands stay the same. It is opt-in and ships only through `hack-next`.
+your commands stay the same. The current `hack-next` prerelease selects native by default on Apple Silicon
+macOS and Compose on supported Linux. Native is the planned default for stable v5.
 
 - It runs a whole multi-service Compose project: start, stop, restart, logs for
   every service and `hack open`.
 - It supports part of what Compose supports. When a project needs something
   outside that part, Hack refuses and names the feature.
-- One project runs in a native pool at a time.
-- A worktree gets its own instance automatically only on Compose. On native,
-  pass `--branch <name>`, which needs a prepared source share.
+- One native development pool can serve several projects and linked worktrees
+  at once. Add any required source roots while the pool is stopped.
+- An attached linked worktree can select its own branch instance on Compose
+  and for Compose-backed projects on native. Use `--branch <name>` to override
+  automatic selection.
 - Native data does not carry over when you move to a new prerelease, and it does
   not move between backends.
 - We have published no speed, memory or battery comparison with Compose. Do not

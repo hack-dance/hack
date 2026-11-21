@@ -16,21 +16,43 @@ its older behavior.
 | Linux and Windows | Not supported. Use the Compose backend. |
 | Stable `hack` (Homebrew or the release installer) | Does not contain the native backend |
 
-## Commands that work
+## Commands on native
 
-| You want to | Native today |
-| --- | --- |
-| Start the whole project | `hack up` in the foreground, or `hack up -d` in the background |
-| Restart the whole project | `hack restart`, in the foreground; with `--json` it runs under a detached owner (since next.22) |
-| Stop the project | `hack down`, and `hack down --recover` after a crash |
-| See what is running | `hack ps` |
-| Read recent logs | `hack logs <service> --no-follow`, a bounded snapshot |
-| Run a command in a running service | Since next.17: foreground terminal `hack exec SERVICE -- /bin/sh` is interactive; redirected input/output and `HACK_NO_INTERACTIVE=1` use finite exec |
-| Run a one-off command | `hack run`, for services without source, data or private env mounts |
-| Preview without starting | `hack config validate`, `hack config plan`, `hack config import --dry-run`, `hack config adopt --dry-run` |
+These are the current Apple Silicon prerelease forms. The refusal column
+covers the listed gaps. Other failures, such as missing setup or an unready
+service, have their own codes.
 
-The exact rules for each command are in
-[native authored commands](../reference/native-authored-commands.md).
+| Command | Supported on native | Refusal for unsupported forms | What a Compose project can use that native lacks |
+| --- | --- | --- | --- |
+| `hack up` | Whole project in the foreground, with `--detach`, or with `--json` (detached) | `E_USAGE` for a service subset or `--target` | Start selected services or use a remote target. See the configuration gaps below. |
+| `hack restart` | Whole project in the foreground. Since next.22, Compose-backed projects also support detached restart through `--json`. | `E_USAGE` for service selection or `--target` on Compose-backed projects. Authored projects return `E_NATIVE_PROJECT_UNSUPPORTED` for those forms and for `--json`. The parser rejects `--detach` on either backend. | Restart selected services or target another host. |
+| `hack down`, `hack down --recover` | Whole-project stop and explicit recovery for an interrupted native run | `E_NATIVE_PROJECT_UNSUPPORTED` for authored `down --json` or env/profile overrides | Use JSON for ordinary stops with an authored project. Native recovery applies to native owners. |
+| `hack ps` | Status and `--json` | `E_NATIVE_PROJECT_UNSUPPORTED` for an authored `ps --profile` | Select Compose profiles when listing services. |
+| `hack logs` | Finite snapshots and live follow under verification. Compose-backed projects accept a service name or all services. Authored projects require one service. | `E_USAGE` for `--loki`, `--services`, `--query`, `--until` and `--pretty`. Authored projects without a service return `E_NATIVE_PROJECT_UNSUPPORTED`. | Query Loki history, choose several services with `--services`, and use Compose log formatting and line-size controls. |
+| `hack exec` | One running service, with a TTY in a foreground terminal or finite exec with closed stdin | `E_USAGE` for env/profile overrides on Compose-backed projects. On authored projects, nonempty overrides return `E_NATIVE_PROJECT_UNSUPPORTED`. | Pass Compose selection flags. Native exec uses the running service environment. |
+| `hack run` | One-off commands for eligible services. Compose-backed native one-offs cannot use source, data or private env mounts. | `E_USAGE` for empty env/profile selections or a selection that conflicts with the running Compose-backed instance. Authored input has its own admission checks. | Use one-off containers with the service's source and data mounts. |
+| `hack config validate`, `hack config plan`, `hack config import --dry-run` | Read-only configuration checks and previews | Input-specific diagnostics | These commands preview or validate native configuration. |
+| `hack config adopt`, including `--dry-run` | Compose backend required | `E_NATIVE_PROJECT_UNSUPPORTED` | Adopt eligible legacy configuration and existing Docker data volumes. |
+
+See [native authored commands](../reference/native-authored-commands.md) for the
+authored project contract and [the native reference](../guides/native-candidate.md#frontend-integration-status)
+for other frontend operations.
+
+## Native startup limits
+
+- Detached `up` (including `--json`) starts with a 15-minute budget and a
+  60-minute ceiling. Image builds and loads pause the budget. The ceiling
+  continues to count wall time. Set `HACK_NATIVE_DETACHED_START_TIMEOUT_MS` or
+  `HACK_NATIVE_DETACHED_START_CEILING_MS` in milliseconds (at least 1000).
+  Invalid settings give `E_USAGE`. Expiry gives `E_STARTUP_TIMEOUT`.
+- For a Compose-backed native project, the graph readiness limit defaults to
+  300 seconds. Use `native.startTimeoutSeconds` in `.hack/hack.config.json`
+  or override it with `HACK_NATIVE_START_TIMEOUT_SECONDS`. Values must be whole
+  seconds from 60 to 600. Invalid settings give `E_CONFIG_INVALID`. The
+  runtime reports expiry as `graph_timeout`.
+- Authored native startup uses `HACK_COMPOSE_STARTUP_TIMEOUT_MS` with a
+  90,000 ms default and a 300,000 ms maximum. Out-of-range values give
+  `E_USAGE`. This is separate from the detached launcher ceiling.
 
 ## Not supported yet
 

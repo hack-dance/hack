@@ -81,9 +81,9 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 How it is maintained:
 
 Tracked legacy overlays are shared project inputs. `hack doctor --fix` leaves
-their index entries and tracked templates/backups alone. Run
-`hack doctor --migrate-env-config` to preserve overlay values before considering
-removal; committing an automatic index removal would delete teammates' copies.
+their index entries and tracked templates/backups alone. Preview with
+`hack env migrate --json` and apply with `hack env migrate --apply` to preserve
+overlay values before considering removal; committing an automatic index removal would delete teammates' copies.
 
 - created by `hack init` for a new project, and refreshed when you write
   machine-local env overrides (`hack env set --local`, `hack env hydrate`)
@@ -1384,7 +1384,7 @@ creates a private snapshot outside the working tree and records idempotent steps
 in a journal. Re-run it after interruption; a finished migration is a no-op.
 `doctor --migrate-env-config` still applies migration; its existing hygiene
 repairs can run before the migration snapshot and are reported separately.
-Use `hack env migrate --apply` for migration-only preview and rollback.
+Use `hack env migrate` to preview, apply or roll back the migration itself.
 Both backends use the
 same file migration; Compose users need no native runtime, and neither preview
 nor apply needs Docker or a daemon.

@@ -4,7 +4,7 @@ A project can have more than one running copy. Each copy is an **instance**. A
 second copy for another branch is a **branch instance**: it has its own
 containers, its own addresses and its own logs, and it runs beside the main one.
 On the Compose backend, `hack up` in a linked git worktree starts one, named
-after its branch. On native, pass `--branch`.
+after its branch on Compose and for Compose-backed projects on native.
 
 Start from a configured repository. Read
 [Worktrees and watchers](../../guides/development-runtime-safety.md) before choosing
@@ -53,5 +53,9 @@ cleanup skips removal rather than guessing which files are unused.
 
 ## Native backend
 
-On the native backend, branch selection is explicit (`--branch`) and needs the
-prepared source share described in [the native reference](../../guides/native-candidate.md#explicit-writable-development-source).
+For Compose-backed projects on native, an attached linked worktree selects its
+branch automatically with `worktree.auto_branch` enabled. Use `--branch` to
+override selection. An exact writable source root must be available to the
+pool when the workload requires it. A pool can serve several prepared roots
+at once. See [source sharing](../../guides/native-candidate.md#explicit-writable-development-source).
+Authored native configuration uses its [explicit branch selector](https://github.com/hack-dance/hack/blob/next/docs/reference/native-authored-commands.md).

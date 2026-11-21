@@ -138,6 +138,8 @@ sequenceDiagram
   Hack-->>You: Project started
 ```
 
+These limits apply to Compose. Native has [separate startup limits](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md#native-startup-limits).
+
 Set a limit for one command with a host variable. You can also set the two
 start limits for the project in `.hack/hack.config.json`. The image limit has
 only the host variable. A host variable wins over the project setting. Values

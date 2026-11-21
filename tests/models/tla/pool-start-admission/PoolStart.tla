@@ -1,9 +1,10 @@
 ----------------------------- MODULE PoolStart -----------------------------
 \* One `runtime up` of a pool that is not running: host admission samples, the
 \* content proofs, the startup lease and the first `machine start`.
-\* Source: packages/runtime-core/src/provider/lifecycle.rs (start_pool,
+\* Source: packages/runtime-core/src/provider/lifecycle.rs (start_pool_observed,
 \* startup_admission_lease), provider/admission.rs (open, recheck_after_lease,
-\* check, sample_checked), lifecycle/leased_trees.rs (recheck) and
+\* check, sample_checked), lifecycle/leased_trees.rs (recheck),
+\* lifecycle/rootfs_proof.rs (prove, recheck) and
 \* lifecycle/admission_pool.rs (settle, admit_boot).
 EXTENDS Naturals, Sequences
 CONSTANTS Window,               \* ticks between chained samples
@@ -13,7 +14,7 @@ CONSTANTS Window,               \* ticks between chained samples
           EnforceFirstCheck,    \* the first sample must pass every predicate
           EnforceRecheckHost,   \* ... and Development's sample under the lease
           EnforceResearchHost,  \* ... and Research's second and third samples
-          RootProofBeforeLease, \* FALSE: root files proven under the lease
+          RootProofBeforeLease, \* TRUE: this start proved them in the window
           SampleUnderLease,     \* Development's second sample needs the lease
           EnforceWindow,        \* ... and the elapsed window
           EnforceChain,         \* ... and the first sample's swapout count
@@ -165,7 +166,9 @@ ProveTrees == /\ pc = "Opened" /\ PreLeaseSampled /\ treeOk
               /\ UNCHANGED <<profile, lease, elapsed, host, samples, boot, treeOk,
                               rootOk, rootProved, owner, poolRunning, vm>>
 RefuseTree == pc = "Opened" /\ PreLeaseSampled /\ ~treeOk /\ Refuse
-\* Follow-up ordering only: the root files are proven inside the window.
+\* rootfs_proof::prove: a cleanly stopped pool's root files are proven
+\* inside the window. A start without that proof is
+\* RootProofBeforeLease = FALSE.
 ProveRootEarly == /\ RootProofBeforeLease /\ pc = "Proven" /\ ~rootProved /\ rootOk
                   /\ rootProved' = TRUE
                   /\ UNCHANGED <<profile, pc, lease, elapsed, host, samples, boot,
@@ -226,8 +229,11 @@ ObserveRunning == /\ pc = "Qualified" /\ alias # "foreign" /\ poolRunning
                   /\ pc' = "Joined" /\ lease' = "free"
                   /\ UNCHANGED <<profile, elapsed, host, samples, boot, proofs,
                                   owner, poolRunning, vm>>
-\* prepare_rootfs under the lease (this change), or the follow-up's recheck of
-\* the metadata the earlier proof recorded.
+\* prepare_rootfs under the lease without an earlier proof, or the comparison
+\* of the root files with the metadata the earlier proof recorded. The code
+\* compares twice: rootfs_proof::recheck straight after the tree recheck, and
+\* Leased::stands in prepare_rootfs, which is this action's place. No root
+\* file changes under the lease here, so one comparison or two is one guard.
 ProveRoot == /\ ~RootProofBeforeLease /\ pc = "Settled" /\ rootOk
              /\ pc' = "RootProven" /\ rootProved' = TRUE
              /\ UNCHANGED <<profile, lease, elapsed, host, samples, boot, treeOk,

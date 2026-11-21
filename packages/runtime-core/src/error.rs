@@ -130,13 +130,58 @@ pub struct PlanChangeDiagnostic {
     pub field: PlanChangeField,
 }
 
-/// Only the public reviewed port of an unhealthy inferred probe. No path,
-/// response, other configuration or application output crosses this boundary.
+/// Only the public reviewed port of an unhealthy inferred probe and, from version 2, what the
+/// probe observed (HACK-2416): a closed reason and counts. No path, response, other
+/// configuration or application output crosses this boundary.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteProbeDiagnostic {
     pub version: u8,
     pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ProbeReason>,
+    /// Requests the probe had completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
+    /// Consecutive failed requests it had counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failures: Option<u64>,
+    /// How long its last request took, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_elapsed_ms: Option<u64>,
+    /// How long the probe had been running when it was judged unhealthy, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_start_ms: Option<u64>,
+}
+
+/// Why an HTTP probe was judged unhealthy. A closed vocabulary: never response bytes.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeReason {
+    /// The probe's process inside the container is gone.
+    ExecNotRunning,
+    /// The probe's process exited.
+    ExecExited,
+    /// The probe never wrote a sample.
+    SampleMissing,
+    /// The probe's sample could not be read as one.
+    SampleInvalid,
+    /// The guest clock was ahead of the host's by more than the allowance.
+    SampleClockAhead,
+    /// The probe's last sample was too old.
+    SampleStale,
+    /// The probe counted its configured number of failed requests.
+    FailuresExhausted,
+}
+
+/// What a probe observation found when it was unhealthy; see [`RouteProbeDiagnostic`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProbeFinding {
+    pub reason: ProbeReason,
+    pub sequence: Option<u64>,
+    pub failures: Option<u64>,
+    pub last_elapsed_ms: Option<u64>,
+    pub since_start_ms: u64,
 }
 
 /// Network authority and bounded attempt count only; never a URL, token or response.
@@ -229,6 +274,10 @@ pub struct RefusalDiagnostics {
     /// Value-free location of a refused retained-run edit; see [`PlanChangeDiagnostic`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_change: Option<PlanChangeDiagnostic>,
+    /// The provider's own last error line for a failed provider command, cleaned where it is
+    /// produced (`provider::provider_line`); see [`CandidateError::with_provider_line`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_line: Option<Box<str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_probe: Option<RouteProbeDiagnostic>,
 }
@@ -482,8 +531,29 @@ impl CandidateError {
     }
 
     pub fn with_route_probe(mut self, port: u16) -> Self {
-        self.refusals.get_or_insert_default().route_probe =
-            Some(RouteProbeDiagnostic { version: 1, port });
+        self.refusals.get_or_insert_default().route_probe = Some(RouteProbeDiagnostic {
+            version: 1,
+            port,
+            reason: None,
+            sequence: None,
+            failures: None,
+            last_elapsed_ms: None,
+            since_start_ms: None,
+        });
+        self
+    }
+
+    /// [`Self::with_route_probe`] with what the probe observed (version 2).
+    pub fn with_route_probe_finding(mut self, port: u16, finding: ProbeFinding) -> Self {
+        self.refusals.get_or_insert_default().route_probe = Some(RouteProbeDiagnostic {
+            version: 2,
+            port,
+            reason: Some(finding.reason),
+            sequence: finding.sequence,
+            failures: finding.failures,
+            last_elapsed_ms: finding.last_elapsed_ms,
+            since_start_ms: Some(finding.since_start_ms),
+        });
         self
     }
 
@@ -508,6 +578,17 @@ impl CandidateError {
         self.cause_code = Some(code.into_boxed_str());
         self
     }
+
+    /// Carry the provider's own last error line. The caller cleans it; anything that is not
+    /// one line of 1 to 200 printable ASCII characters is dropped here rather than carried.
+    pub fn with_provider_line(mut self, line: &str) -> Self {
+        let valid = (1..=200).contains(&line.len())
+            && line.bytes().all(|byte| (0x20..=0x7e).contains(&byte));
+        if valid {
+            self.refusals.get_or_insert_default().provider_line = Some(line.into());
+        }
+        self
+    }
 }
 
 #[cfg(test)]
@@ -527,6 +608,60 @@ mod tests {
         .unwrap();
         assert!(formatted.get("message_fixed").is_none());
         assert!(formatted.get("service").is_none());
+    }
+
+    #[test]
+    fn the_provider_line_is_carried_only_when_valid_and_changes_nothing_when_absent() {
+        // Without the line an error serializes exactly as it always has.
+        let plain =
+            serde_json::to_string(&CandidateError::new("graph_image", "Fixed text.")).unwrap();
+        assert_eq!(
+            plain,
+            r#"{"code":"graph_image","message":"Fixed text.","message_fixed":true}"#
+        );
+        let formatted = serde_json::to_string(&CandidateError::new(
+            "provider_command_failed",
+            format!("exited {}", 3),
+        ))
+        .unwrap();
+        assert_eq!(
+            formatted,
+            r#"{"code":"provider_command_failed","message":"exited 3"}"#
+        );
+        // With it, one flat field is added and nothing else moves.
+        let carried = serde_json::to_string(
+            &CandidateError::new("provider_command_failed", format!("exited {}", 3))
+                .with_provider_line("Error: machine not found"),
+        )
+        .unwrap();
+        assert_eq!(
+            carried,
+            r#"{"code":"provider_command_failed","message":"exited 3","provider_line":"Error: machine not found"}"#
+        );
+        // Anything but one bounded printable line is dropped, not carried.
+        for invalid in [
+            "",
+            "two\nlines",
+            "tab\there",
+            "caf\u{e9}",
+            "esc\u{1b}[0m",
+            &"x".repeat(201),
+        ] {
+            let error = CandidateError::new("provider_command_failed", format!("exited {}", 3))
+                .with_provider_line(invalid);
+            assert_eq!(
+                serde_json::to_string(&error).unwrap(),
+                formatted,
+                "{invalid:?}"
+            );
+        }
+        let longest = "x".repeat(200);
+        let error = CandidateError::new("graph_image", "Fixed text.").with_provider_line(&longest);
+        assert_eq!(
+            serde_json::to_value(&error).unwrap()["provider_line"],
+            longest.as_str()
+        );
+        assert!(std::mem::size_of::<CandidateError>() <= 128);
     }
 
     #[test]

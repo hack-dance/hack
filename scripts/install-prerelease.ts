@@ -5,7 +5,9 @@ import { Channel, rollbackUninstall } from "./installer/channel.ts";
 import {
   candidateVersion,
   compareCandidateVersions,
+  hostBundlePlatform,
   requireThat,
+  UNSUPPORTED_HOST,
 } from "./installer/integrity.ts";
 
 /**
@@ -55,11 +57,11 @@ export async function main(inputArgv: string[]) {
     );
     return 0;
   }
-  requireThat(
-    process.platform === "darwin" && process.arch === "arm64",
-    "Native prereleases support Apple Silicon macOS only."
-  );
-  process.umask(0o077);
+  const platform = hostBundlePlatform();
+  requireThat(platform, UNSUPPORTED_HOST);
+  // Private for everything the manager itself creates. The caller's umask is
+  // kept for the CLI that `run` starts, which must not inherit this one.
+  const callerUmask = process.umask(0o077);
   // Also applies to uninstall rollback, whose original root no longer exists.
   requireThat(
     import.meta.path.startsWith("/$bunfs/"),
@@ -95,7 +97,7 @@ export async function main(inputArgv: string[]) {
     if (rest[0] === "--rollback-manifest") {
       console.log(
         JSON.stringify(
-          rollbackUninstall(root, rest[1] as string, process.execPath)
+          rollbackUninstall(root, rest[1] as string, process.execPath, platform)
         )
       );
       return 0;
@@ -129,7 +131,7 @@ export async function main(inputArgv: string[]) {
       "--archive and --sha256 must be supplied together."
     );
   }
-  const channel = new Channel(root, process.execPath);
+  const channel = new Channel(root, process.execPath, {}, platform);
   if (command === "install" || command === "upgrade") {
     channel.initialize();
   }
@@ -158,7 +160,10 @@ export async function main(inputArgv: string[]) {
         selectionTarget({ command, version, state: channel.state })
       );
     } else if (command === "run") {
-      return await channel.run(rest[0] === "--" ? rest.slice(1) : rest);
+      return await channel.run(
+        rest[0] === "--" ? rest.slice(1) : rest,
+        callerUmask
+      );
     }
     console.log(
       JSON.stringify({

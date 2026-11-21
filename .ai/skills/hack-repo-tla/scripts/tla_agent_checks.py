@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-JAVA_TOOL = "java@temurin-17.0.20+101"
+JAVA_TOOL = "java@temurin-17.0.20.1+1"
 APALACHE_JAVA_TOOL = "java@temurin-21.0.12+101.0.LTS"
 TLA_VERSION = "1.7.4"
 APALACHE_VERSION = "0.62.4"

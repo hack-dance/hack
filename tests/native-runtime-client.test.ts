@@ -1,5 +1,5 @@
 import { afterEach, test as bunTest, expect, spyOn } from "bun:test";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -150,6 +150,19 @@ async function fixture() {
 if (process.argv.includes("hang")) await Bun.sleep(60_000);
 if (process.argv.includes("configuration-batch")) { console.error(JSON.stringify({code:"invalid_dependency_cache",message:"synthetic-secret-diagnostic",configuration_refusals:Array.from({length:128},(_,i)=>({text_fixed:true,service:"s"+i,field:"labels.hack.dependencies.lockfiles",message:"The file list is invalid.",fix:"Use relative paths without variables."})),startup_logs:[{service:"web",lines:["synthetic-secret-diagnostic"]}]})); process.exit(2); }
 if (process.argv.includes("old-provider")) { console.error(JSON.stringify({code:"provider_pin_changed",message:"synthetic-secret-diagnostic"})); process.exit(2); }
+if (process.argv.includes("provider-line")) { console.error(JSON.stringify({code:"provider_command_failed",message:"Provider command exited exit status: 1; no automatic retry. synthetic-secret-diagnostic",provider_line:"Error: machine not found"})); process.exit(2); }
+if (process.argv.includes("provider-line-stalled")) { console.error(JSON.stringify({code:"provider_boot_stalled",message:"The provider ended the start: the VM made no boot progress within the provider's limit.",message_fixed:true,provider_line:"Error: agent did not become ready within 30 seconds: no boot progress for 30 seconds"})); process.exit(2); }
+if (process.argv.includes("provider-line-long-fixed")) { console.error(JSON.stringify({code:"provider_boot_stalled",message:"F".repeat(330),message_fixed:true,provider_line:"L".repeat(200)})); process.exit(2); }
+if (process.argv.includes("provider-line-full-fixed")) { console.error(JSON.stringify({code:"provider_boot_stalled",message:"F".repeat(380),message_fixed:true,provider_line:"Error: something"})); process.exit(2); }
+if (process.argv.includes("provider-line-home")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:"open " + process.env.HOME + "/native/x.sock and " + (process.env.TMPDIR ?? "/nonexistent-tmp").replace(/\\/+$/, "") + "/y: denied"})); process.exit(2); }
+if (process.argv.includes("provider-line-other-code")) { console.error(JSON.stringify({code:"graph_image",message:"Pinned image architecture or implicit volumes are incompatible.",message_fixed:true,provider_line:"Authorization: Bearer synthetic-token-value"})); process.exit(2); }
+if (process.argv.includes("provider-line-hostile")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:"pull https://user:hunter2@registry.example/v2 Authorization: Bearer synthetic-token-value TOKEN=abcdefghijklmnopqrstuvwxyz vm cf86560b70f1f4c9abcd port=8080"})); process.exit(2); }
+if (process.argv.includes("provider-line-trailing")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:"Error: failed" + (process.argv.includes("lf") ? "\\n" : process.argv.includes("cr") ? "\\r" : "\\r\\n")})); process.exit(2); }
+if (process.argv.includes("provider-line-short-values")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:"start failed PASSWORD=hunter2 --password=hunter2 TOKEN=ab12cd34ef https://user:hun=ter2@registry.example/v2?scope=pull port=8080 debug=true left= pin=12345678901"})); process.exit(2); }
+if (process.argv.includes("provider-line-urls")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:"mirrors https://u:alpha@a.example,https://v:br@vo@b.example/x failed https://b.example/user@host https://u:p@c.example?token=alpha@bravo 1://u:p@d.example#x@y"})); process.exit(2); }
+if (process.argv.includes("provider-line-spaced")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:'Authorization: Bearer  synthetic-token-value then "https://user:hunter2@registry.example/v2" done'})); process.exit(2); }
+if (process.argv.includes("provider-line-expanding")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:Array(18).fill("http://a@b").join(" ")})); process.exit(2); }
+if (process.argv.includes("provider-line-unsafe")) { console.error(JSON.stringify({code:"provider_command_failed",message:"x",provider_line:process.argv.includes("unsafe-newline") ? "two\\nlines" : process.argv.includes("unsafe-escape") ? "esc\\u001b[0m" : process.argv.includes("unsafe-long") ? "x".repeat(201) : process.argv.includes("unsafe-unicode") ? "caf\\u00e9" : process.argv.includes("unsafe-empty") ? "" : 7})); process.exit(2); }
 if (process.argv.includes("fixed-message")) { console.error(JSON.stringify({code:"graph_image",message:"Pinned image architecture or implicit volumes are incompatible.",message_fixed:true,service:"web"})); process.exit(2); }
 if (process.argv.includes("bridge-socket-failure")) { console.error(JSON.stringify({code:"bridge_socket_timeout",message:"Native bridge sockets did not become private and owned before the startup deadline. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",message_fixed:true})); process.exit(2); }
 if (process.argv.includes("route-probe-failure")) { console.error(JSON.stringify({code:"graph_service_failed",message:"synthetic-private-response",service:"web",route_probe:{version:1,port:3000}})); process.exit(2); }
@@ -165,6 +178,7 @@ if (process.argv.includes("owner-fail")) { const {appendFileSync}=await import("
 if (process.argv.includes("owner-unsafe")) { console.error(JSON.stringify({code:"graph_owner_recovery",cause_code:"synthetic-secret-diagnostic",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("fail")) { console.error("synthetic-secret-diagnostic"); process.exit(23); }
 if (process.argv.includes("garbage")) { process.stdout.write("not-json"); process.exit(0); }
+if (process.argv.includes("hot-reload-probe")) { const {appendFileSync}=await import("node:fs"); appendFileSync("hot-reload-spawns","s"); console.log(JSON.stringify({ hotReload: process.env.HACK_NATIVE_HOT_RELOAD ?? null })); process.exit(0); }
 if (process.argv.includes("overflow")) { process.stdout.write("x".repeat(17 * 1024 * 1024)); }
 else {
  const input = await Bun.stdin.text();
@@ -1099,6 +1113,54 @@ test("structured failures expose only a bounded code, never their message", asyn
   );
 });
 
+test("a version 2 route probe failure says what the probe observed (HACK-2416)", () => {
+  const reply = {
+    code: "graph_service_failed",
+    service: "web",
+    route_probe: {
+      version: 2,
+      port: 3000,
+      reason: "failures_exhausted",
+      sequence: 31,
+      failures: 3,
+      last_elapsed_ms: 1000,
+      since_start_ms: 271_400,
+    },
+    message: "synthetic-private-response",
+  };
+  const detail = nativeFailureDetail(reply);
+  expect(detail.message).toBe(
+    "Inferred route probe on port 3000 is unhealthy. The probe observed that the route answered no request in time, retries exhausted after 31 requests (3 failed in a row, the last took 1000 ms), 271 s after it started. Check hack logs web in the same project/branch, fix the route port, or declare healthcheck.x-hack-http with a longer start_period_ms and a readiness path, within the 300-second graph budget."
+  );
+  expect(detail.message).not.toContain("synthetic-private-response");
+  const exec = nativeFailureDetail({
+    ...reply,
+    route_probe: {
+      version: 2,
+      port: 3000,
+      reason: "exec_exited",
+      since_start_ms: 900,
+    },
+  });
+  expect(exec.message).toContain(
+    "The probe observed that the probe process inside the container exited, 1 s after it started."
+  );
+  // Unknown reasons, extra fields or bad counts render nothing of the probe.
+  for (const route_probe of [
+    { ...reply.route_probe, reason: "anything" },
+    { ...reply.route_probe, reason: "toString" },
+    { ...reply.route_probe, reason: "constructor" },
+    { ...reply.route_probe, reason: "__proto__" },
+    { ...reply.route_probe, response: "text" },
+    { ...reply.route_probe, sequence: -1 },
+    { ...reply.route_probe, since_start_ms: "1" },
+  ]) {
+    expect(
+      nativeFailureDetail({ ...reply, route_probe }).message ?? ""
+    ).not.toContain("Inferred route probe");
+  }
+});
+
 test("inferred route failures render only validated service and port guidance", async () => {
   const reply = {
     code: "graph_service_failed",
@@ -1734,3 +1796,133 @@ bunTest(
     ).toBeUndefined();
   }
 );
+
+test("HACK-2409: the hot-reload setting crosses the subprocess boundary for runtime up only, and a mistyped value never starts the runtime", async () => {
+  const runtime = await fixture();
+  const prior = process.env.HACK_NATIVE_HOT_RELOAD;
+  const up = ["runtime", "up", "hot-reload-probe", "--json"];
+  const ask = (args: string[]) =>
+    invokeNativeRuntime({ runtime, cwd: runtime.home, args });
+  try {
+    Reflect.deleteProperty(process.env, "HACK_NATIVE_HOT_RELOAD");
+    expect(await ask(up)).toEqual({ hotReload: null });
+    for (const value of ["auto", "on", "off"]) {
+      process.env.HACK_NATIVE_HOT_RELOAD = value;
+      expect(await ask(up)).toEqual({ hotReload: value });
+      // No other runtime command receives it.
+      expect(await ask(["runtime", "status", "hot-reload-probe"])).toEqual({
+        hotReload: null,
+      });
+    }
+    process.env.HACK_NATIVE_HOT_RELOAD = "";
+    expect(await ask(up)).toEqual({ hotReload: null });
+    const spawns = async () =>
+      (await readFile(join(runtime.home, "hot-reload-spawns"), "utf8")).length;
+    const before = await spawns();
+    for (const value of ["ON", "true", "1", " off"]) {
+      process.env.HACK_NATIVE_HOT_RELOAD = value;
+      await expect(ask(up)).rejects.toMatchObject({
+        code: "E_CONFIG_INVALID",
+        message: "HACK_NATIVE_HOT_RELOAD must be auto, on or off.",
+      });
+      // Other commands do not read the setting and are not refused for it.
+      expect(await ask(["runtime", "status", "hot-reload-probe"])).toEqual({
+        hotReload: null,
+      });
+    }
+    expect(await spawns()).toBe(before + 4);
+  } finally {
+    if (prior === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_NATIVE_HOT_RELOAD");
+    } else {
+      process.env.HACK_NATIVE_HOT_RELOAD = prior;
+    }
+  }
+});
+
+test("HACK-2418: a failed provider command shows the provider's own last line, validated here whatever the runtime sent", async () => {
+  const runtime = await fixture();
+  const failure = async (...args: string[]) =>
+    (
+      (await invokeNativeRuntime({ runtime, cwd: runtime.home, args }).catch(
+        (caught: unknown) => caught
+      )) as Error
+    ).message;
+  // No fixed message: the line is the note, and the runtime's own text never is.
+  expect(await failure("provider-line")).toBe(
+    "Native runtime request failed (provider_command_failed); inspect owned state before retrying. Runtime: The provider's own error: Error: machine not found"
+  );
+  expect(await failure("provider-line")).not.toContain(
+    "synthetic-secret-diagnostic"
+  );
+  // A fixed message keeps its place and the line follows it.
+  expect(await failure("provider-line-stalled")).toBe(
+    "Native runtime request failed (provider_boot_stalled); inspect owned state before retrying. Runtime: The provider's own error: Error: agent did not become ready within 30 seconds: no boot progress for 30 seconds".replace(
+      "Runtime: ",
+      "Runtime: The provider ended the start: the VM made no boot progress within the provider's limit. "
+    )
+  );
+  // Together they stay one bounded line: the fixed sentence whole, the line cut to what is left.
+  const cut = await failure("provider-line-long-fixed");
+  const note = cut.slice(cut.indexOf("Runtime: ") + "Runtime: ".length);
+  expect(note.length).toBeLessThanOrEqual(400);
+  expect(note.startsWith("F".repeat(330))).toBe(true);
+  expect(note.endsWith("...")).toBe(true);
+  expect(note).toContain("The provider's own error: LLL");
+  // No room for a useful part of the line: the fixed sentence alone.
+  expect(await failure("provider-line-full-fixed")).toBe(
+    `Native runtime request failed (provider_boot_stalled); inspect owned state before retrying. Runtime: ${"F".repeat(380)}`
+  );
+  // The user's home and temporary directory are replaced here too.
+  const home = await failure("provider-line-home");
+  expect(home).toContain("open ~/native/x.sock and ");
+  expect(home).not.toContain(process.env.HOME ?? "/nonexistent-home");
+  // The line belongs to provider failures only: with any other code it is ignored.
+  const other = await failure("provider-line-other-code");
+  expect(other).toContain("Pinned image architecture");
+  expect(other).not.toContain("provider's own error");
+  expect(other).not.toContain("synthetic-token-value");
+  // Printable is not the same as safe: the usual shapes of a credential and
+  // long identifiers are redacted here, whatever the runtime did.
+  expect(await failure("provider-line-hostile")).toBe(
+    "Native runtime request failed (provider_command_failed); inspect owned state before retrying. Runtime: The provider's own error: pull https://<credentials>@registry.example/v2 Authorization: Bearer <value> TOKEN=<value> vm <id> port=8080"
+  );
+  // A short value is not safe by being short: only a short number or a fixed
+  // word stays after an equals sign.
+  expect(await failure("provider-line-short-values")).toBe(
+    "Native runtime request failed (provider_command_failed); inspect owned state before retrying. Runtime: The provider's own error: start failed PASSWORD=<value> --password=<value> TOKEN=<value> https://<credentials>@registry.example/v2?scope=<value> port=8080 debug=true left= pin=<value>"
+  );
+  // Every URL in a token loses its credentials, and a password may hold an at sign.
+  expect(await failure("provider-line-urls")).toBe(
+    "Native runtime request failed (provider_command_failed); inspect owned state before retrying. Runtime: The provider's own error: mirrors https://<credentials>@a.example,https://<credentials>@b.example/x failed https://b.example/user@host https://<credentials>@c.example?token=<value> 1://<credentials>@d.example#x@y"
+  );
+  // Runs of spaces and quoted URLs do not get a credential through.
+  expect(await failure("provider-line-spaced")).toBe(
+    'Native runtime request failed (provider_command_failed); inspect owned state before retrying. Runtime: The provider\'s own error: Authorization: Bearer <value> then "https://<credentials>@registry.example/v2" done'
+  );
+  // Redaction can lengthen a line; what is shown stays within the bound.
+  const expanded = await failure("provider-line-expanding");
+  const shown = expanded.slice(expanded.indexOf("own error: ") + 11);
+  expect(shown.length).toBe(200);
+  expect(shown.endsWith("...")).toBe(true);
+  expect(shown).not.toContain("a@b");
+  // A line that ends in a line break is not one line.
+  for (const ending of ["lf", "cr", "crlf"]) {
+    expect(await failure("provider-line-trailing", ending)).toBe(
+      "Native runtime request failed (provider_command_failed); inspect owned state before retrying."
+    );
+  }
+  // Anything but one bounded printable line is dropped whole.
+  for (const kind of [
+    "unsafe-newline",
+    "unsafe-escape",
+    "unsafe-long",
+    "unsafe-unicode",
+    "unsafe-empty",
+    "unsafe-number",
+  ]) {
+    expect(await failure("provider-line-unsafe", kind)).toBe(
+      "Native runtime request failed (provider_command_failed); inspect owned state before retrying."
+    );
+  }
+});

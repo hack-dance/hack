@@ -24,9 +24,12 @@ import {
 } from "./bundle.ts";
 import { officialArchive } from "./download.ts";
 import {
+  type BundlePlatform,
   candidateVersion,
   canonical,
   compareCandidateVersions,
+  composeOnly,
+  DEFAULT_BUNDLE_PLATFORM,
   digest,
   exact,
   hash,
@@ -53,7 +56,9 @@ const STAGE = /^\.stage-[0-9a-f]{32}$(?![\s\S])/;
  * replaces only these. A channel root holds a byte copy of the manager that
  * installed it, so its digest is the release's. Add each new release's manager
  * when it publishes; the prerelease upgrade gate fails until a successor accepts
- * the previous release's manager (HACK-2262).
+ * the previous release's manager (HACK-2262). Linux managers
+ * (`hack-next-manager-linux-x86_64`, `-arm64`, listed in `SHA256SUMS-linux`)
+ * go in the same list from the first release that ships them.
  */
 export const REVIEWED_PREDECESSORS: readonly string[] = [
   // 5.0.0-next.6 and next.7
@@ -74,6 +79,14 @@ export const REVIEWED_PREDECESSORS: readonly string[] = [
   "af7d25e2db3e5d0edf8d0e308a49db928f1bc7f138beb54b9d3b0ccae83ee423",
   // 5.0.0-next.22
   "df75f28ef2fdd892e9d17f5528171117488b426a2fe9140ac3dd9add924ae45a",
+  // 5.0.0-next.23: darwin-arm64, then linux-x86_64 and linux-arm64
+  "c9cc02744bf801986f8962699fe633566790cb3a6e7bfff2beb0536107a56b66",
+  "e946ba95a49018b0eff8ff81161d1ccf1a086627773e62a30db53e4e94c9195b",
+  "be1599a85cd4251df4a9779f2e7fa16480094ebb48ec97ca4e9dad6dd73d0094",
+  // 5.0.0-next.24: darwin-arm64, then linux-x86_64 and linux-arm64
+  "892c4cdf3a99e309df4b4d406f7e76e2b422b72f4dd2a47bef1f0b36dd29ee27",
+  "00e6e01b05bd6f05ac32a41ab06b7309767d701653b220ede5148c2ffb66388c",
+  "f52beab69e5ec62e237da74ae64a0cdef7887bcae51380ca6a0270e4b45e4d27",
 ];
 export const launcherBytes = () =>
   Buffer.from(
@@ -148,10 +161,26 @@ interface Hooks {
   predecessors?: readonly string[];
   checkpoint?: (point: string) => void;
 }
+/**
+ * The private directories a version keeps beside its bundle. A Compose-only
+ * Linux version keeps none: Compose runs use the caller's own Hack home.
+ */
+function versionHomes(platform: BundlePlatform): string[] {
+  return composeOnly(platform) ? [] : ["native-home", "cli-home"];
+}
+/** The refusal for a native selection on a Compose-only Linux channel. */
+export const COMPOSE_ONLY_NATIVE_REFUSAL =
+  "This is a Compose-only Linux candidate; the native backend is Apple Silicon macOS only. Unset HACK_RUNTIME_BACKEND (or set it to compose).";
 /** One owner for receipts, retained bytes and atomic selection. Hooks are fixture-only injection. */
 export class Channel {
   readonly root: string;
   readonly source: string;
+  /**
+   * The bundle kind this channel installs and runs: the host's, as the
+   * compiled manager passes it. The default keeps the macOS contract for
+   * callers that do not choose.
+   */
+  readonly platform: BundlePlatform;
   /**
    * What the validation inside `lock()` verified, per version: the directory
    * and the receipt checksum it was verified against. An entry lets one
@@ -172,16 +201,26 @@ export class Channel {
     previous: null,
   };
   private readonly hooks: Hooks;
-  constructor(root: string, source: string, hooks: Hooks = {}) {
+  constructor(
+    root: string,
+    source: string,
+    hooks: Hooks = {},
+    platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
+  ) {
     this.root = canonical(root);
     this.source = canonical(source);
     this.hooks = hooks;
+    this.platform = platform;
   }
   private path(name: string) {
     return join(this.root, name);
   }
   private signatures(bundle: string) {
-    (this.hooks.signatures ?? verifySignatures)(bundle);
+    if (this.hooks.signatures) {
+      this.hooks.signatures(bundle);
+      return;
+    }
+    verifySignatures(bundle, this.platform);
   }
   private refuseLegacy() {
     if (
@@ -534,7 +573,7 @@ export class Channel {
     requireThat(
       sameJson(
         readdirSync(directory).sort(),
-        ["bundle", "native-home", "cli-home", ".receipt.json"].sort()
+        ["bundle", ...versionHomes(this.platform), ".receipt.json"].sort()
       ),
       "Incomplete or foreign version installation."
     );
@@ -557,15 +596,19 @@ export class Channel {
         SHA256.test(receipt.archive_sha256),
       "Malformed version receipt."
     );
-    const verified = verifyBundle(join(directory, "bundle"), version);
+    const verified = verifyBundle(
+      join(directory, "bundle"),
+      version,
+      this.platform
+    );
     requireThat(
       sameJson(receipt.metadata, verified.identity) &&
         sameJson(receipt.checksums, verified.manifest),
       "Candidate identity or checksum receipt changed."
     );
     const homes = object(receipt.homes);
-    exact(homes, ["native-home", "cli-home"]);
-    for (const name of ["native-home", "cli-home"]) {
+    exact(homes, versionHomes(this.platform));
+    for (const name of versionHomes(this.platform)) {
       const info = owned(join(directory, name), true, 0o700);
       requireThat(
         sameJson(homes[name], { device: info.dev, inode: info.ino }),
@@ -606,6 +649,12 @@ export class Channel {
     this.signatures(join(directory, "bundle"));
     if (this.hooks.quiescence) {
       this.hooks.quiescence(directory, this.environment(version));
+      return;
+    }
+    // A Compose-only version owns no runtime and no home: its projects run in
+    // the caller's Docker engine and Hack home, which a selection change does
+    // not touch. The exclusive manager lock already refuses active launchers.
+    if (composeOnly(this.platform)) {
       return;
     }
     for (const action of ["status", "down", "status"]) {
@@ -810,17 +859,18 @@ export class Channel {
     try {
       const input = archive
         ? { archive: canonical(archive), checksum: checksum as string }
-        : await officialArchive(stage, version);
+        : await officialArchive(stage, version, undefined, this.platform);
       const installation = join(stage, "installation");
       mkdirSync(installation, { mode: 0o700 });
       const verified = extractArchive({
         ...input,
         destination: join(installation, "bundle"),
         version,
+        platform: this.platform,
         signatures: (bundle) => this.signatures(bundle),
       });
       const homes: Record<string, { device: number; inode: number }> = {};
-      for (const name of ["native-home", "cli-home"]) {
+      for (const name of versionHomes(this.platform)) {
         mkdirSync(join(installation, name), { mode: 0o700 });
         const info = owned(join(installation, name), true, 0o700);
         syncDirectory(join(installation, name));
@@ -1067,14 +1117,27 @@ export class Channel {
     );
     this.validate();
   }
-  async run(arguments_: string[]) {
-    let backend = process.env.HACK_RUNTIME_BACKEND || "native";
+  /**
+   * Runs the selected CLI. `childUmask` is the caller's umask: the manager
+   * keeps a private umask (077) for its own files, and the CLI must not
+   * inherit it. Under 077 every file the CLI writes is owner-only, and on
+   * Linux the non-root containers that read its bind-mounted configs exit
+   * with "permission denied" (HACK-2381).
+   */
+  async run(arguments_: string[], childUmask?: number) {
+    const compose = composeOnly(this.platform);
+    let backend =
+      process.env.HACK_RUNTIME_BACKEND || (compose ? "compose" : "native");
     requireThat(
       backend === "native" || backend === "compose",
-      "HACK_RUNTIME_BACKEND must be native or compose (unset selects native)."
+      `HACK_RUNTIME_BACKEND must be native or compose (unset selects ${compose ? "compose" : "native"}).`
     );
-    // Explicit native operations select native setup even from a Compose shell.
-    if (
+    if (compose) {
+      // `native ...` commands still reach the CLI on Compose, which answers
+      // them itself (`native setup` refuses with E_UNSUPPORTED_PLATFORM).
+      requireThat(backend === "compose", COMPOSE_ONLY_NATIVE_REFUSAL);
+    } else if (
+      // Explicit native operations select native setup even from a Compose shell.
       arguments_.filter((argument) => argument !== "--no-interactive")[0] ===
       "native"
     ) {
@@ -1106,21 +1169,34 @@ export class Channel {
         ? verified.directory
         : this.verifyVersion(version, checksum);
     this.signatures(join(directory, "bundle"));
-    const child = Bun.spawn(
-      [
-        join(
-          directory,
-          backend === "compose" ? "bundle/hack-cli" : "bundle/hack-v5"
-        ),
-        ...arguments_,
-      ],
-      {
-        env: this.environment(version, backend),
-        stdin: "inherit",
-        stdout: "inherit",
-        stderr: "inherit",
+    // The child takes its umask when it is spawned; the manager's own is put
+    // back straight after, before anything else can create a file.
+    const spawnChild = () =>
+      Bun.spawn(
+        [
+          join(
+            directory,
+            backend === "compose" ? "bundle/hack-cli" : "bundle/hack-v5"
+          ),
+          ...arguments_,
+        ],
+        {
+          env: this.environment(version, backend),
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
+        }
+      );
+    const managerUmask =
+      childUmask === undefined ? null : process.umask(childUmask);
+    let child: ReturnType<typeof spawnChild>;
+    try {
+      child = spawnChild();
+    } finally {
+      if (managerUmask !== null) {
+        process.umask(managerUmask);
       }
-    );
+    }
     const handlers = new Map<NodeJS.Signals, () => void>();
     try {
       for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
@@ -1147,7 +1223,8 @@ import { parseJson as parseJsonStatus } from "./integrity.ts";
 export function rollbackUninstall(
   root: string,
   manifestPath: string,
-  source: string
+  source: string,
+  platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
 ) {
   canonical(root);
   canonical(manifestPath);
@@ -1178,7 +1255,7 @@ export function rollbackUninstall(
       manifestPath === `${backup}.json`,
     "Uninstall manifest target is not its retained sibling."
   );
-  const retained = new Channel(backup, source);
+  const retained = new Channel(backup, source, {}, platform);
   const release = retained.lock(false, false, root);
   try {
     const info = owned(backup, true, 0o700);
@@ -1199,7 +1276,7 @@ export function rollbackUninstall(
       "Original channel path is occupied; nothing replaced."
     );
     syncDirectory(dirname(root));
-    new Channel(root, join(root, "manager")).validate();
+    new Channel(root, join(root, "manager"), {}, platform).validate();
     return { restored: root, manifest: manifestPath };
   } finally {
     release();

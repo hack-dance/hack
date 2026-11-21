@@ -99,6 +99,19 @@ Details and the exact checks:
   behind. This is a fault in the virtual machine's file share and is still present in
   the pinned SmolVM 1.35.4. Run the command again, remove the folder from the Mac, or
   keep that folder on a named volume.
+- **Hot reload with a large checkout.** Normally an edit made on the Mac reaches
+  services within about a tenth of a second and file watchers inside them fire.
+  When the project folders shared into the virtual machine hold more than 100,000
+  files and folders in total, native starts without those change notifications
+  and `hack up` says so: an edit then reaches services after up to about 5
+  seconds, and a file watcher inside a service does not see it, so restart the
+  service after an edit. The reason is that the virtual machine reads every
+  shared entry before it starts, and past that size the read can make the start
+  fail. The usual cause is installed dependencies in the checkout
+  (`node_modules`). Remove the checkout's copy (with `localDirectories` the
+  installed copy lives on the virtual machine's disk) to bring hot reload back,
+  or set `HACK_NATIVE_HOT_RELOAD=on` to force it on and accept a slower start
+  that may fail; `off` turns it off for any size.
 - **Images.** Images need a Linux arm64 variant. Local registries need an explicit
   opt-in. Registries signed by a private certificate authority are not supported.
 - **Data.** Data does not move between backends, or between prerelease versions.

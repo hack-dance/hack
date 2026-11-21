@@ -12,9 +12,10 @@ already provisioned (an estimate; the first run records real times). Every step 
 [pass criteria](#pass-criteria) say what counts as a pass. Write the results
 into the [result record](#result-record).
 
-It tests the CLI built from an exact commit of the `next` branch. v5
-prerelease bundles are published for Apple Silicon macOS only, so on Linux you
-build `hack` from source.
+It tests the CLI built from an exact commit of the `next` branch. Releases
+through `5.0.0-next.22` have no Linux bundle, so this runbook builds `hack` from
+source. The [first-run check](#first-run-check-without-sudo) can also install a
+Compose-only Linux prerelease through its installer.
 
 ## The host
 
@@ -438,3 +439,20 @@ re-invokes an installed one, and refuses a scratch directory below a directory
 other users can write (hackd would refuse that HOME). Linux DNS and system trust
 stay root steps: the table records the codes Hack reports for them. This is not
 a pass of the runbook above.
+
+Installer mode installs a Compose-only Linux prerelease first and then runs the
+same steps through the installed `~/.hack-next/bin/hack-next`:
+
+```sh
+bun scripts/linux-first-run-check.ts --installer /abs/hack-next-install.sh \
+  --scratch /abs/new/scratch-dir
+```
+
+It adds these steps: the installer refusing an unsupported architecture without
+touching `HOME`, the install itself (no `sudo`, and the closing line that says the
+native backend is macOS only), `hack-next --manager status`, `stable`, `rollback`
+and `uninstall`, and what the uninstall leaves on disk. Without more flags the
+installer downloads the published release. `--archive /abs/archive --sha256 DIGEST`
+and `--manager /abs/manager` install local files instead; the installer still
+checks the manager against the digest it carries. The prerelease workflow's
+`build-linux` job runs this mode on x86_64 and arm64 before a release is packaged.

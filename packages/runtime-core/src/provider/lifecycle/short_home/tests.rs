@@ -155,7 +155,7 @@ impl Drop for Pool {
 /// receipt. In the shared parallel test process, an unrelated test's pre-exec fork
 /// (`process::clean_command`) holds a copy of every descriptor open at the fork until it
 /// execs, so a disk this test just read or a listener it just dropped can still show up to
-/// the host-wide `lsof` scan or accept a connection, and recovery correctly refuses as
+/// the host-wide disk-handle scan or accept a connection, and recovery correctly refuses as
 /// `stop_uncertain`. Every test that expects those release checks to pass runs isolated.
 fn isolated(child: &str) {
     use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
@@ -763,16 +763,22 @@ fn released_recovery_child() {
     let pool = Pool::new().cleanly_stopped();
     pool.remove_alias();
     let recovered = crate::provider::recover(&pool.candidate).unwrap();
-    assert_eq!(recovered.phase, "recovered-unclean");
+    // A clean stop has nothing to recover: it stays a clean stop (a retained run's
+    // eligibility depends on that), and recovery still restores its released alias first.
+    assert_eq!(recovered.phase, "stopped");
     assert_eq!(
         fs::read_link(&pool.owner.short_home).unwrap(),
         root(&pool.candidate).join("home")
     );
-    // The recovered receipt needs its alias, and has it.
+    let owner = Owner::load(&pool.candidate).unwrap();
+    assert_eq!(owner.phase, "stopped");
+    assert!(owner.clean_stop.is_some(), "the clean stop is kept");
+    // Repeating recovery changes nothing.
     assert_eq!(
-        Owner::load(&pool.candidate).unwrap().phase,
-        "recovered-unclean"
+        crate::provider::recover(&pool.candidate).unwrap().phase,
+        "stopped"
     );
+    assert_eq!(Owner::load(&pool.candidate).unwrap(), owner);
 }
 
 #[test]
@@ -789,8 +795,11 @@ fn squatted_recovery_child() {
     let squatted = pool.owner.short_home.clone();
     let inode = pool.alias_inode();
     let recovered = crate::provider::recover(&pool.candidate).unwrap();
-    assert_eq!(recovered.phase, "recovered-unclean");
+    // Still a clean stop, now under a fresh alias; the squatter is left alone.
+    assert_eq!(recovered.phase, "stopped");
     let owner = Owner::load(&pool.candidate).unwrap();
+    assert_eq!(owner.phase, "stopped");
+    assert!(owner.clean_stop.is_some(), "the clean stop is kept");
     assert_ne!(owner.short_home, squatted);
     assert_eq!(
         fs::read_link(&owner.short_home).unwrap(),

@@ -267,6 +267,66 @@ export async function selectNativeProjectReviewIdentity(opts: {
   };
 }
 
+type ReviewSelectionInput = Pick<
+  Parameters<typeof selectNativeProjectReviewIdentity>[0],
+  "projectRoot" | "composeFile" | "profiles" | "branch" | "input" | "retained"
+>;
+
+/** An original-input identity and the exact request it was selected for. */
+export interface NativeProjectReviewSelection {
+  readonly identity: NativeProjectReviewIdentity;
+  readonly request: string;
+}
+
+/**
+ * Only an identity that depends on nothing but its request is reusable: a
+ * retained branch selection also reads live graph state, so it never is.
+ */
+function selectionRequest(opts: ReviewSelectionInput): string | undefined {
+  if (opts.branch && opts.retained) {
+    return;
+  }
+  return JSON.stringify([
+    opts.projectRoot,
+    opts.composeFile,
+    opts.branch ?? null,
+    opts.profiles ?? [],
+    opts.input.originalSha256,
+  ]);
+}
+
+/** Select an original-input identity that a later review of the same request may reuse. */
+export async function selectNativeProjectReviewSelection(
+  opts: Parameters<typeof selectNativeProjectReviewIdentity>[0]
+): Promise<{
+  readonly identity: NativeProjectReviewIdentity;
+  readonly selection?: NativeProjectReviewSelection;
+}> {
+  const identity = await selectNativeProjectReviewIdentity(opts);
+  const request = selectionRequest(opts);
+  return request === undefined
+    ? { identity }
+    : { identity, selection: { identity, request } };
+}
+
+function reusableSelection(
+  opts: ReviewSelectionInput & {
+    readonly reviewIdentity?: NativeProjectReviewIdentity;
+    readonly selectedIdentity?: NativeProjectReviewSelection;
+  }
+): NativeProjectReviewIdentity | undefined {
+  const request = selectionRequest(opts);
+  if (
+    opts.reviewIdentity ||
+    !opts.selectedIdentity ||
+    request === undefined ||
+    request !== opts.selectedIdentity.request
+  ) {
+    return;
+  }
+  return opts.selectedIdentity.identity;
+}
+
 /**
  * Native code owns namespace and plan identities. Hold only public normalized
  * bytes in a private temporary directory while the caller publishes/starts the
@@ -284,9 +344,19 @@ export async function withNativeProjectReview<T>(opts: {
   readonly invoke?: typeof invokeNativeRuntime;
   readonly retainedMode?: "stopped" | "active";
   readonly reviewIdentity?: NativeProjectReviewIdentity;
+  /**
+   * An identity this process already selected for the same project, Compose
+   * file, branch, profiles and original input (the static start review's).
+   * Reusing it skips a second original-input `project plan`: the normalized
+   * plan below still re-reads the original file and refuses a changed hash
+   * or namespace (`--expect-original`, `--expect-namespace`). Retained
+   * branch adoption never passes one; it re-selects under `reviewIdentity`.
+   */
+  readonly selectedIdentity?: NativeProjectReviewSelection;
   readonly run: (review: NativeProjectReview) => Promise<T>;
 }): Promise<T> {
-  const identity = await selectNativeProjectReviewIdentity(opts);
+  const identity =
+    reusableSelection(opts) ?? (await selectNativeProjectReviewIdentity(opts));
   if (
     opts.reviewIdentity &&
     JSON.stringify(opts.reviewIdentity) !== JSON.stringify(identity)

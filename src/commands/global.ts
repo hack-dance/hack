@@ -88,7 +88,18 @@ import {
   writeTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import {
+  containerReadableGlobalPaths,
+  describeUnreadableContainerPaths,
+  ensureContainerReadable,
+  unreadableContainerPaths,
+} from "../lib/global-container-config.ts";
 import { describeProxyNetworkIssue } from "../lib/global-proxy-network.ts";
+import {
+  describeContainersNotRunning,
+  parseComposePs,
+  watchStartedContainers,
+} from "../lib/global-stack-state.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import {
@@ -145,6 +156,11 @@ import { isLinux, isMac } from "../lib/os.ts";
 import { resolveTrustedSudo } from "../lib/privileged-sudo.ts";
 import { withProcessDeadline } from "../lib/process-deadline.ts";
 import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
+import {
+  defaultIngressAddressDeps,
+  resolveIngressAddresses,
+  withIngressChange,
+} from "../lib/proxy-ingress-addresses.ts";
 import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
 import { stopRemoteCaddyRoutesStack } from "../lib/remote-caddy-routes.ts";
 import {
@@ -1202,10 +1218,48 @@ async function materializeGlobalInstallFiles(opts: {
   readonly useStaticIps: boolean;
 }): Promise<void> {
   await ensureGlobalInstallDirectories({ paths: opts.paths });
-  await writeGlobalInstallAssets({
+  const templates = await writeGlobalInstallAssets({
     paths: opts.paths,
     useStaticIps: opts.useStaticIps,
   });
+  // After the writes, and on every install whether or not a file changed:
+  // the configs that non-root containers read must not depend on the umask
+  // this run, or an earlier one, happened to have (HACK-2381). Only content
+  // that is Hack's own template is widened; a file the user customised and
+  // kept is left exactly as it is.
+  const { retained } = await ensureContainerReadable(
+    containerReadableGlobalPaths({
+      coreDnsConfig: {
+        path: opts.paths.coreDnsConfig,
+        template: templates.coreDnsConfig,
+      },
+      lokiConfig: {
+        path: opts.paths.lokiConfig,
+        template: templates.lokiConfig,
+      },
+      grafanaDatasource: {
+        path: opts.paths.grafanaDatasource,
+        template: templates.grafanaDatasource,
+      },
+      grafanaDashboardsProvisioning: {
+        path: opts.paths.grafanaDashboardsProvisioning,
+        template: templates.grafanaDashboardsProvisioning,
+      },
+      grafanaDashboardsDir: dirname(opts.paths.grafanaDashboard),
+      grafanaDashboard: {
+        path: opts.paths.grafanaDashboard,
+        template: templates.grafanaDashboard,
+      },
+    })
+  );
+  if (retained.length > 0) {
+    logger.warn({
+      message: [
+        "Kept the permissions of global configs whose content differs from what this Hack writes.",
+        describeUnreadableContainerPaths(retained),
+      ].join("\n"),
+    });
+  }
 }
 
 async function ensureGlobalInstallDirectories(opts: {
@@ -1221,10 +1275,19 @@ async function ensureGlobalInstallDirectories(opts: {
   await ensureDir(dirname(opts.paths.lokiConfig));
 }
 
+/** The rendered content of the configs non-root containers read. */
+type ContainerConfigTemplates = {
+  readonly coreDnsConfig: string;
+  readonly lokiConfig: string;
+  readonly grafanaDatasource: string;
+  readonly grafanaDashboardsProvisioning: string;
+  readonly grafanaDashboard: string;
+};
+
 async function writeGlobalInstallAssets(opts: {
   readonly paths: ReturnType<typeof getGlobalPaths>;
   readonly useStaticIps: boolean;
-}): Promise<void> {
+}): Promise<ContainerConfigTemplates> {
   const defaultDomain = await resolveDefaultDomain();
   const bind = await resolveManagedProxyBind({ path: opts.paths.caddyCompose });
   if (bind.saveError !== undefined) {
@@ -1249,12 +1312,20 @@ async function writeGlobalInstallAssets(opts: {
       }),
     });
   }
-  await writeWithPromptIfDifferent(
-    opts.paths.coreDnsConfig,
-    renderGlobalCoreDnsConfig({
+  const templates: ContainerConfigTemplates = {
+    coreDnsConfig: renderGlobalCoreDnsConfig({
       useStaticCaddyIp: opts.useStaticIps,
       defaultDomain,
-    })
+    }),
+    lokiConfig: renderGlobalLokiConfigYaml(),
+    grafanaDatasource: renderGlobalGrafanaDatasourceYaml(),
+    grafanaDashboardsProvisioning:
+      renderGlobalGrafanaDashboardsProvisioningYaml(),
+    grafanaDashboard: renderGlobalGrafanaLogsDashboardJson(),
+  };
+  await writeWithPromptIfDifferent(
+    opts.paths.coreDnsConfig,
+    templates.coreDnsConfig
   );
   await writeWithPromptIfDifferent(
     opts.paths.loggingCompose,
@@ -1264,21 +1335,18 @@ async function writeGlobalInstallAssets(opts: {
     opts.paths.alloyConfig,
     renderGlobalAlloyConfig()
   );
-  await writeWithPromptIfDifferent(
-    opts.paths.lokiConfig,
-    renderGlobalLokiConfigYaml()
-  );
+  await writeWithPromptIfDifferent(opts.paths.lokiConfig, templates.lokiConfig);
   await writeWithPromptIfDifferent(
     opts.paths.grafanaDatasource,
-    renderGlobalGrafanaDatasourceYaml()
+    templates.grafanaDatasource
   );
   await writeWithPromptIfDifferent(
     opts.paths.grafanaDashboardsProvisioning,
-    renderGlobalGrafanaDashboardsProvisioningYaml()
+    templates.grafanaDashboardsProvisioning
   );
   await writeWithPromptIfDifferent(
     opts.paths.grafanaDashboard,
-    renderGlobalGrafanaLogsDashboardJson()
+    templates.grafanaDashboard
   );
   await writeWithPromptIfDifferent(
     opts.paths.configSchema,
@@ -1296,6 +1364,7 @@ async function writeGlobalInstallAssets(opts: {
     opts.paths.branchesSchema,
     renderProjectBranchesSchemaJson()
   );
+  return templates;
 }
 
 /** Returns `false` only when a confirmed host step failed (exit non-zero). */
@@ -1921,6 +1990,81 @@ async function reportProxyStartFailure(opts: {
   });
 }
 
+/**
+ * How long each stack is watched after its start. Caddy and CoreDNS read
+ * their config at once. Grafana migrates its database before it provisions
+ * datasources and dashboards, so a config it cannot read can stop it several
+ * seconds after the start; the logging stack gets longer. A container that
+ * stops later than this is not caught here: `hack doctor` and the stack's
+ * own symptoms report it.
+ */
+const ROUTING_SETTLE_MS = 2000;
+const LOGGING_SETTLE_MS = 10_000;
+
+/**
+ * After a successful `docker compose up -d`: watches the stack's containers
+ * for a short time and reports any that are not running, by name (HACK-2381). `up -d`
+ * exits 0 for a container that starts and then fails at once, so without
+ * this a stack with exited containers was reported as up. Returns whether a
+ * container was found not running. No answer from Docker is not a finding.
+ */
+async function globalContainersNotRunning(opts: {
+  readonly composeFile: string;
+  readonly stack: string;
+  readonly login: boolean;
+  /** How long the stack is watched; a stopped container ends it early. */
+  readonly settleMs: number;
+}): Promise<boolean> {
+  const stopped = await watchStartedContainers({
+    settleMs: opts.settleMs,
+    read: async () => {
+      const ps = await exec(
+        [
+          "docker",
+          "compose",
+          // The same environment rule as the `up` this follows.
+          ...(opts.login ? ["--env-file", "/dev/null"] : []),
+          "-f",
+          opts.composeFile,
+          "ps",
+          "--all",
+          "--format",
+          "json",
+        ],
+        { stdin: "ignore" }
+      );
+      return ps.exitCode === 0 ? parseComposePs(ps.stdout) : [];
+    },
+  });
+  if (stopped.length === 0) {
+    return false;
+  }
+  // The usual cause on Linux: a config the container's user cannot read.
+  // Named by mode alone; nothing is read or changed here.
+  const paths = getGlobalPaths();
+  // Only the configs this stack's containers mount.
+  const unreadable = await unreadableContainerPaths(
+    opts.composeFile === paths.caddyCompose
+      ? [{ path: paths.coreDnsConfig, kind: "file" }]
+      : [
+          { path: paths.lokiConfig, kind: "file" },
+          { path: paths.grafanaDatasource, kind: "file" },
+          { path: paths.grafanaDashboardsProvisioning, kind: "file" },
+          { path: dirname(paths.grafanaDashboard), kind: "directory" },
+          { path: paths.grafanaDashboard, kind: "file" },
+        ]
+  );
+  logger.error({
+    message: [
+      describeContainersNotRunning({ stack: opts.stack, containers: stopped }),
+      ...(unreadable.length > 0
+        ? [describeUnreadableContainerPaths(unreadable)]
+        : []),
+    ].join("\n"),
+  });
+  return true;
+}
+
 /** Which part of `hack global up` failed, for install's decision (HACK-2328). */
 type GlobalUpResult = {
   readonly exit: number;
@@ -1932,7 +2076,21 @@ export async function globalUp(): Promise<number> {
   return (await runGlobalUp()).exit;
 }
 
+/**
+ * `hack global up` inside a change of the ingress generation (see
+ * withIngressChange), then, once routing is up, one read that records the
+ * proxy and DNS addresses under the settled token for later `hack run`s.
+ */
 async function runGlobalUp(): Promise<GlobalUpResult> {
+  const root = resolveGlobalHackDir();
+  const result = await withIngressChange(root, runGlobalUpChange);
+  if (result.exit === 0 || result.failedStage === "logging") {
+    await resolveIngressAddresses(defaultIngressAddressDeps(root), "fresh");
+  }
+  return result;
+}
+
+async function runGlobalUpChange(): Promise<GlobalUpResult> {
   const slimExit = failIfSlimMode({
     feature: "hack global up",
   });
@@ -2039,6 +2197,15 @@ async function runGlobalUp(): Promise<GlobalUpResult> {
     });
     return { exit: 1, failedStage: "routing" };
   }
+  const stoppedRouting = await globalContainersNotRunning({
+    composeFile: paths.caddyCompose,
+    stack: "The global proxy (Caddy and CoreDNS)",
+    login,
+    settleMs: ROUTING_SETTLE_MS,
+  });
+  if (stoppedRouting) {
+    return { exit: 1, failedStage: "routing" };
+  }
   await reconcileGlobalRoutingBridge({ enabled: !login });
 
   const loggingArguments = globalLoggingUpArguments({
@@ -2052,6 +2219,15 @@ async function runGlobalUp(): Promise<GlobalUpResult> {
     });
     if (logExit !== 0) {
       return { exit: logExit, failedStage: "logging" };
+    }
+    const stoppedLogging = await globalContainersNotRunning({
+      composeFile: paths.loggingCompose,
+      stack: "The logging stack (Grafana, Loki, Alloy)",
+      login,
+      settleMs: LOGGING_SETTLE_MS,
+    });
+    if (stoppedLogging) {
+      return { exit: 1, failedStage: "logging" };
     }
   }
 
@@ -2485,8 +2661,10 @@ async function globalDown(): Promise<number> {
     });
   }
   if (await pathExists(paths.caddyCompose)) {
-    await run(["docker", "compose", "-f", paths.caddyCompose, "down"], {
-      cwd: dirname(paths.caddyCompose),
+    await withIngressChange(paths.root, async () => {
+      await run(["docker", "compose", "-f", paths.caddyCompose, "down"], {
+        cwd: dirname(paths.caddyCompose),
+      });
     });
   }
   const remoteRoutes = await stopRemoteCaddyRoutesStack();

@@ -274,9 +274,13 @@ fn configuration_with_source(
             }
         }
         if let Some(readiness) = &workload.readiness {
+            // The authored readiness schema has no startup cadence: every check gets the fast
+            // first check (HACK-2443).
             config["Healthcheck"] = json!({
                 "Test":readiness.test,"Interval":u64::from(readiness.interval_ms)*1_000_000,
-                "Timeout":u64::from(readiness.timeout_ms)*1_000_000,"Retries":readiness.retries
+                "Timeout":u64::from(readiness.timeout_ms)*1_000_000,"Retries":readiness.retries,
+                "StartPeriod":crate::project::DEFAULT_START_PERIOD_NANOS,
+                "StartInterval":crate::project::DEFAULT_START_INTERVAL_NANOS
             });
         }
         resources.insert(format!("container:{name}"), resource);

@@ -33,7 +33,7 @@ fn bytes(value: &impl Serialize) -> Result<Vec<u8>, CandidateError> {
     serde_json::to_vec_pretty(value).map_err(|_| refused())
 }
 fn digest(receipt: &Receipt) -> Result<String, CandidateError> {
-    Ok(format!("{:x}", Sha256::digest(bytes(receipt)?)))
+    Ok(format!("{:x}", crate::Hex(Sha256::digest(bytes(receipt)?))))
 }
 fn validate(receipt: &Receipt, current: &Receipt) -> Result<(), CandidateError> {
     if receipt.version != 1

@@ -1,8 +1,9 @@
-import { resolve } from "node:path";
 import { YAML } from "bun";
 
 import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
-import { pathExists, readTextFile } from "./fs.ts";
+import { listInternalOverrides } from "./compose-internal-override-store.ts";
+import { resolveGlobalHackDir } from "./config-paths.ts";
+import { readTextFile } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import { exec, findExecutableInPath } from "./shell.ts";
 
@@ -129,21 +130,33 @@ export async function observeGlobalCaddyIp(opts: {
   return typeof ip === "string" && ip.length > 0 ? ip : null;
 }
 
+/**
+ * The Caddy address the project's generated internal override maps `*.hack`
+ * hosts to: from the overrides stored in Hack's home (base instance first),
+ * then the in-project file an older Hack wrote.
+ */
 export async function readInternalExtraHostsIp(opts: {
   readonly projectDir: string | null;
+  readonly hackHome?: string;
 }): Promise<string | null> {
   if (!opts.projectDir) {
     return null;
   }
-  const overridePath = resolve(
-    opts.projectDir,
-    ".internal",
-    "compose.override.yml"
-  );
-  if (!(await pathExists(overridePath))) {
-    return null;
+  const paths = await listInternalOverrides({
+    hackHome: opts.hackHome ?? resolveGlobalHackDir(),
+    projectDir: opts.projectDir,
+  });
+  for (const path of paths) {
+    const ip = await readOverrideExtraHostsIp(path);
+    if (ip) {
+      return ip;
+    }
   }
-  const text = await readTextFile(overridePath);
+  return null;
+}
+
+async function readOverrideExtraHostsIp(path: string): Promise<string | null> {
+  const text = await readTextFile(path);
   if (!text) {
     return null;
   }
@@ -167,8 +180,7 @@ export async function readInternalExtraHostsIp(opts: {
     if (!isRecord(service)) {
       continue;
     }
-    const extraHosts = service.extra_hosts;
-    const ip = extractExtraHostsIp(extraHosts);
+    const ip = extractExtraHostsIp(service.extra_hosts);
     if (ip) {
       return ip;
     }

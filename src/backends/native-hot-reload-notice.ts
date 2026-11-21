@@ -1,0 +1,120 @@
+import { HackCliError } from "../lib/cli-result.ts";
+import { isRecord } from "../lib/guards.ts";
+
+/**
+ * What the runtime reports (`runtime up --json`, field `hot_reload`) for a
+ * pool boot whose choice about host-to-guest change notifications is not the
+ * plain default: off, or forced on over shared folders past the entry limit.
+ */
+export type NativeHotReloadNotice = {
+  readonly state: "on" | "off";
+  readonly reason: "large_share" | "setting";
+  readonly limit: number;
+};
+
+const LIMIT_MAX = 100_000_000;
+
+/**
+ * A notice from exactly `{state, reason, limit}` and nothing else, or null.
+ * The runtime's own message is never read: what is printed is one of the
+ * fixed sentences below with one bounded number in it.
+ */
+export function parseNativeHotReloadNotice(
+  value: unknown
+): NativeHotReloadNotice | null {
+  if (
+    !(
+      isRecord(value) &&
+      Object.keys(value).every((key) =>
+        ["state", "reason", "limit"].includes(key)
+      )
+    )
+  ) {
+    return null;
+  }
+  const { state, reason, limit } = value;
+  if (
+    !(
+      (state === "on" || state === "off") &&
+      (reason === "large_share" || reason === "setting") &&
+      Number.isSafeInteger(limit) &&
+      Number(limit) > 0 &&
+      Number(limit) <= LIMIT_MAX
+    ) ||
+    // On with a large share and no setting is the default the runtime never reports.
+    (state === "on" && reason === "large_share")
+  ) {
+    return null;
+  }
+  return { state, reason, limit: Number(limit) };
+}
+
+/**
+ * The notice in a `runtime up` or `runtime status` result, or null when the
+ * pool keeps the plain default (the runtime then reports only `state: "on"`)
+ * or the result is not what this build expects.
+ */
+export function nativeHotReloadNoticeFromPool(
+  pool: unknown
+): NativeHotReloadNotice | null {
+  if (!(isRecord(pool) && isRecord(pool.hot_reload))) {
+    return null;
+  }
+  const { state, reason, limit } = pool.hot_reload;
+  return parseNativeHotReloadNotice({ state, reason, limit });
+}
+
+/**
+ * What forcing it on costs a start, as measured on the pinned provider (see
+ * the runtime README, "Hot reload on shared source").
+ */
+export const NATIVE_HOT_RELOAD_FORCED_COST =
+  "seconds for every 100,000, and the start fails if that takes longer than 30 seconds";
+
+/** What a start without notifications means for the project, in one sentence. */
+const NATIVE_HOT_RELOAD_OFF_EFFECT =
+  "Services read and write the same files, but an edit made on the Mac reaches them after up to about 5 seconds and file watchers inside them do not fire.";
+
+/** The one line shown on stderr for a notice. */
+export function renderNativeHotReloadNotice(
+  notice: NativeHotReloadNotice
+): string {
+  const limit = notice.limit.toLocaleString("en-US");
+  if (notice.state === "on") {
+    return `Hot reload on shared source is forced on (HACK_NATIVE_HOT_RELOAD=on) with more than ${limit} files and folders shared: every start of the virtual machine first reads all of them (${NATIVE_HOT_RELOAD_FORCED_COST}).`;
+  }
+  if (notice.reason === "setting") {
+    return `Hot reload on shared source is off: HACK_NATIVE_HOT_RELOAD=off. ${NATIVE_HOT_RELOAD_OFF_EFFECT}`;
+  }
+  return `Hot reload on shared source is off: the shared project folders hold more than ${limit} files and folders, and the virtual machine reads every one before it starts, which can make the start fail. ${NATIVE_HOT_RELOAD_OFF_EFFECT} Remove installed dependency folders from the checkout to bring it back (localDirectories keeps them on the virtual machine's disk), or set HACK_NATIVE_HOT_RELOAD=on to force it on.`;
+}
+
+/** The setting the runtime reads at `runtime up`: `auto` (the default), `on` or `off`. */
+export const NATIVE_HOT_RELOAD_SETTING = "HACK_NATIVE_HOT_RELOAD";
+
+/**
+ * The environment addition for one runtime request. Runtime subprocesses get
+ * a closed system environment, so the setting is handed to `runtime up`, the
+ * one command that reads it, and to nothing else. A value that is not one of
+ * the three words is refused here, before the subprocess starts, instead of
+ * quietly becoming the default.
+ */
+export function nativeHotReloadEnvironment(
+  args: readonly string[],
+  env: Readonly<Record<string, string | undefined>> = process.env
+): Record<string, string> {
+  if (!(args[0] === "runtime" && args[1] === "up")) {
+    return {};
+  }
+  const value = env[NATIVE_HOT_RELOAD_SETTING];
+  if (value === undefined || value === "") {
+    return {};
+  }
+  if (!(value === "auto" || value === "on" || value === "off")) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: `${NATIVE_HOT_RELOAD_SETTING} must be auto, on or off.`,
+    });
+  }
+  return { [NATIVE_HOT_RELOAD_SETTING]: value };
+}

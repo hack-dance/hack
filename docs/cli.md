@@ -578,7 +578,9 @@ volumes. Changed fingerprints, uncertain container identity, or caches mounted o
 by other services leave dependency reconciliation to Compose. This does not certify
 cache completeness or skip installer/generation commands by itself.
 
-`hack exec` uses the existing container and its existing mounts. After changing a
+`hack exec` uses the existing container and its existing mounts, and the internal
+override `up` stored in Hack's home, so it makes no Docker call or write before
+`docker compose exec`. After changing a
 lockfile/runtime input, use `hack restart` to move the long-running service to the
 new cache; a successful one-off `run` does not remount that existing service.
 Unlabelled services retain their existing behavior. Old cache volumes are retained;

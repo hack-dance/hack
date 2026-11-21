@@ -9,6 +9,7 @@ import {
   type NativeGcloudSelection,
   parseNativeGcloudSelection,
 } from "./native-gcloud-environment.ts";
+import { nativeHotReloadEnvironment } from "./native-hot-reload-notice.ts";
 import {
   type NativePreparedBase,
   parseNativePreparedBase,
@@ -643,6 +644,10 @@ export async function resolveNativeHostSettings(opts: {
   readonly uid?: number;
 }): Promise<NativeHostSettings> {
   const env = opts.env;
+  // Checked with the other variables, before any hook, stop or runtime
+  // request: a mistyped value must not stop a running project first. The
+  // value itself travels to `runtime up` at that request (HACK-2409).
+  nativeHotReloadEnvironment(["runtime", "up"], env);
   const machine = await readMachineSettings({
     env,
     projectName: opts.projectName,

@@ -38,7 +38,7 @@ fn absent(path: &Path) -> Result<bool, CandidateError> {
     }
 }
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 fn intent_path(root: &Path, publisher: &str) -> PathBuf {
     root.join(format!("{PREFIX}{publisher}-intent.json"))

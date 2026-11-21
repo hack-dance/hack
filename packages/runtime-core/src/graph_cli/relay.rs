@@ -239,7 +239,10 @@ impl Selection {
         }
         let bytes = serde_json::to_vec(&("hack-graph-dependencies-v1", self, evidence))
             .map_err(|_| refused())?;
-        Ok((format!("{:x}", Sha256::digest(bytes)), dependencies))
+        Ok((
+            format!("{:x}", hack_runtime_core::Hex(Sha256::digest(bytes))),
+            dependencies,
+        ))
     }
 }
 pub(super) fn discover(executable: &Path, port: u16) -> Result<Value, CandidateError> {

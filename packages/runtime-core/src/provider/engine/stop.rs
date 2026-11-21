@@ -169,11 +169,13 @@ impl Engine<'_> {
     ) -> Result<(), StopBatchFailure> {
         validate(stops).map_err(StopBatchFailure::plain)?;
         self.guest.verify().map_err(StopBatchFailure::plain)?;
-        let result = batch(
-            &self.transport.client,
-            stops,
-            Instant::now() + stop_budget(stops),
-        );
+        let result = crate::timings::measure(crate::timings::Step::ContainerStop, None, |_| {
+            batch(
+                &self.transport.client,
+                stops,
+                Instant::now() + stop_budget(stops),
+            )
+        });
         self.guest.verify().map_err(StopBatchFailure::plain)?;
         result
     }
@@ -202,6 +204,11 @@ const STOP_CONCURRENCY: usize = 4;
 const CONNECT_RETRY_WINDOW: Duration = Duration::from_secs(30);
 const CONNECT_BACKOFF_START: Duration = Duration::from_millis(25);
 const CONNECT_BACKOFF_MAX: Duration = Duration::from_millis(500);
+/// A connect retry starts only with at least this long left (HACK-2368). A retry with a
+/// few milliseconds left is cut by the request timeout, which cannot say whether the
+/// connection was made, so it would turn a clean "the engine never answered" into an
+/// uncertain timeout.
+const CONNECT_RETRY_MIN_BUDGET: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy)]
 struct Policy {
@@ -209,9 +216,14 @@ struct Policy {
     connect_window: Duration,
     backoff_start: Duration,
     backoff_max: Duration,
+    /// The least time left for a connect retry to start; see [`CONNECT_RETRY_MIN_BUDGET`].
+    retry_min_budget: Duration,
     /// Waits between connect attempts. Tests substitute a scheduler that
     /// oversleeps, as a loaded host does.
     pause: fn(Duration),
+    /// The clock `attempt` reads; tests substitute a virtual one so the retry bounds
+    /// are checked without depending on the host's scheduling.
+    now: fn() -> Instant,
 }
 
 const POLICY: Policy = Policy {
@@ -219,7 +231,9 @@ const POLICY: Policy = Policy {
     connect_window: CONNECT_RETRY_WINDOW,
     backoff_start: CONNECT_BACKOFF_START,
     backoff_max: CONNECT_BACKOFF_MAX,
+    retry_min_budget: CONNECT_RETRY_MIN_BUDGET,
     pause: std::thread::sleep,
+    now: Instant::now,
 };
 
 type Attempt = Result<(), (CandidateError, StopFailureStage)>;
@@ -374,7 +388,7 @@ where
     let mut last_connect = None;
     loop {
         let Some(remaining) = deadline
-            .checked_duration_since(Instant::now())
+            .checked_duration_since((policy.now)())
             .filter(|remaining| !remaining.is_zero())
         else {
             return Err(last_connect.unwrap_or_else(|| {
@@ -384,6 +398,15 @@ where
                 )
             }));
         };
+        // Only connect failures so far, and too little time for another attempt to finish:
+        // the stop never reached the engine, so report the last connect failure rather than
+        // start a request whose timeout could not say so. A pause that overslept on a
+        // loaded host lands here.
+        if remaining < policy.retry_min_budget {
+            if let Some(last) = last_connect.take() {
+                return Err(last);
+            }
+        }
         match send(index, remaining) {
             Err((error, stage))
                 if matches!(
@@ -391,9 +414,11 @@ where
                     StopFailureStage::Connect | StopFailureStage::ConnectTimeout
                 ) =>
             {
-                let now = Instant::now();
+                let now = (policy.now)();
                 let until = (*window.get_or_insert(now + policy.connect_window)).min(deadline);
-                if unreachable.load(Ordering::SeqCst) || now + backoff >= until {
+                if unreachable.load(Ordering::SeqCst)
+                    || now + backoff + policy.retry_min_budget > until
+                {
                     unreachable.store(true, Ordering::SeqCst);
                     return Err((error, stage));
                 }
@@ -495,7 +520,9 @@ mod tests {
             connect_window: window,
             backoff_start: Duration::from_millis(1),
             backoff_max: Duration::from_millis(4),
+            retry_min_budget: Duration::ZERO,
             pause: std::thread::sleep,
+            now: Instant::now,
         }
     }
 
@@ -624,18 +651,119 @@ mod tests {
         let transport = Transport::new(&path, Duration::from_secs(1)).unwrap();
         let id = "a".repeat(64);
         let started = Instant::now();
+        // Room for the first attempt and at least one retry with the full retry budget, so
+        // only a connect failure can end it; the bound logic itself is checked without a
+        // socket below.
         let failure = batch(
             &transport.client,
             &[(id.clone(), 0)],
-            Instant::now() + Duration::from_millis(400),
+            Instant::now() + Duration::from_millis(1_500),
         )
         .err()
         .unwrap();
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(failure.error.code, "engine_protocol");
         assert_eq!(failure.failures.len(), 1);
         assert_eq!(failure.failures[0].id, id);
         assert_eq!(failure.failures[0].stage, StopFailureStage::Connect);
+    }
+
+    thread_local! {
+        /// A virtual clock for `attempt`: only the injected pause and send move it.
+        static VIRTUAL: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    }
+    fn virtual_now() -> Instant {
+        VIRTUAL.with(|clock| clock.get().expect("virtual clock set"))
+    }
+    fn virtual_advance(by: Duration) {
+        VIRTUAL.with(|clock| clock.set(Some(virtual_now() + by)));
+    }
+    fn virtual_policy(pause: fn(Duration)) -> Policy {
+        Policy {
+            concurrency: 1,
+            connect_window: Duration::from_secs(30),
+            backoff_start: Duration::from_millis(25),
+            backoff_max: Duration::from_millis(500),
+            retry_min_budget: Duration::from_millis(250),
+            pause,
+            now: virtual_now,
+        }
+    }
+
+    #[test]
+    fn a_connect_retry_never_starts_without_its_budget_and_the_deadline_reports_connect() {
+        // HACK-2368: only connect failures were seen and the deadline ends the retries, so
+        // the stop never reached the engine and the stage is the last connect failure. No
+        // retry starts with less than its budget, so none can end in an ambiguous timeout.
+        // Virtual time: each send takes 5 ms, and the pause either sleeps exactly or
+        // oversleeps the way a loaded host does.
+        let exact: fn(Duration) = virtual_advance;
+        let oversleep: fn(Duration) =
+            |backoff| virtual_advance(backoff * 3 + Duration::from_millis(20));
+        for (pause, expected_sends) in [(exact, 5), (oversleep, 3)] {
+            let base = Instant::now();
+            VIRTUAL.with(|clock| clock.set(Some(base)));
+            let budgets = std::cell::RefCell::new(Vec::new());
+            let policy = virtual_policy(pause);
+            let outcome = attempt(
+                0,
+                base + Duration::from_millis(700),
+                policy,
+                &AtomicBool::new(false),
+                &|_, remaining| {
+                    budgets.borrow_mut().push(remaining);
+                    virtual_advance(Duration::from_millis(5));
+                    connect_failure(StopFailureStage::Connect)
+                },
+            );
+            assert_eq!(outcome.unwrap_err().1, StopFailureStage::Connect);
+            let budgets = budgets.into_inner();
+            assert_eq!(budgets.len(), expected_sends, "{budgets:?}");
+            assert!(
+                budgets[1..]
+                    .iter()
+                    .all(|remaining| *remaining >= policy.retry_min_budget),
+                "a retry started without its budget: {budgets:?}"
+            );
+        }
+        // A pause that overslept past the budget ends the retries with the connect failure.
+        let base = Instant::now();
+        VIRTUAL.with(|clock| clock.set(Some(base)));
+        let sends = std::cell::Cell::new(0);
+        let outcome = attempt(
+            0,
+            base + Duration::from_millis(700),
+            virtual_policy(|_| virtual_advance(Duration::from_millis(600))),
+            &AtomicBool::new(false),
+            &|_, _| {
+                sends.set(sends.get() + 1);
+                connect_failure(StopFailureStage::Connect)
+            },
+        );
+        assert_eq!(outcome.unwrap_err().1, StopFailureStage::Connect);
+        assert_eq!(sends.get(), 1);
+        // A first attempt always runs, however little is left, and reports its own stage.
+        let base = Instant::now();
+        VIRTUAL.with(|clock| clock.set(Some(base)));
+        let outcome = attempt(
+            0,
+            base + Duration::from_millis(10),
+            virtual_policy(virtual_advance),
+            &AtomicBool::new(false),
+            &|_, _| connect_failure(StopFailureStage::ConnectTimeout),
+        );
+        assert_eq!(outcome.unwrap_err().1, StopFailureStage::ConnectTimeout);
+        // With no connect failure recorded, an expired deadline still reports Deadline.
+        let base = Instant::now();
+        VIRTUAL.with(|clock| clock.set(Some(base + Duration::from_millis(1))));
+        let outcome = attempt(
+            0,
+            base,
+            virtual_policy(virtual_advance),
+            &AtomicBool::new(false),
+            &|_, _| panic!("no send after the deadline"),
+        );
+        assert_eq!(outcome.unwrap_err().1, StopFailureStage::Deadline);
     }
 
     #[test]

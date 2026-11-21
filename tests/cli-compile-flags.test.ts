@@ -21,12 +21,13 @@ const NO_AUTOLOAD_FLAGS = [
 
 /**
  * Files whose `bun build ... --compile` lines produce a shipped executable:
- * the candidate's `hack-cli` and `hack-mcp-backend`, and the runtime images'
- * `hack`. `scripts/build-macos-release.sh` (the retained, unsupported app) is
+ * the candidate's `hack-cli` and `hack-mcp-backend`, the Linux candidate's
+ * `hack-cli`, and the runtime images' `hack`. `scripts/build-macos-release.sh` (the retained, unsupported app) is
  * not held to this.
  */
 const LINE_COMPILE_SITES = [
   "scripts/build-native-candidate.sh",
+  "scripts/build-compose-candidate.sh",
   "docker/slim-runtime/Dockerfile",
   "docker/node-runtime/Dockerfile",
 ] as const;
@@ -163,18 +164,18 @@ test("the dev, release and candidate builds keep the bytecode cache", async () =
   for (const flag of BYTECODE_FLAGS) {
     expect(release).toContain(`      "${flag}",\n`);
   }
-  const candidate = (
-    await readFile(
-      join(repository, "scripts/build-native-candidate.sh"),
-      "utf8"
-    )
-  )
-    .split("\n")
-    .filter((line) => line.includes("bun build index.ts --compile"));
-  expect(candidate.length).toBeGreaterThan(0);
-  for (const line of candidate) {
-    expect(line.split(" ")).toEqual(
-      expect.arrayContaining([...BYTECODE_FLAGS])
-    );
+  for (const script of [
+    "scripts/build-native-candidate.sh",
+    "scripts/build-compose-candidate.sh",
+  ]) {
+    const candidate = (await readFile(join(repository, script), "utf8"))
+      .split("\n")
+      .filter((line) => line.includes("bun build index.ts --compile"));
+    expect(candidate.length).toBeGreaterThan(0);
+    for (const line of candidate) {
+      expect(line.split(" ")).toEqual(
+        expect.arrayContaining([...BYTECODE_FLAGS])
+      );
+    }
   }
 });

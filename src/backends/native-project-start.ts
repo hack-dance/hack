@@ -13,6 +13,7 @@ import { isRecord } from "../lib/guards.ts";
 import {
   nativeDetachedUpBranchDropped,
   nativeDetachedUpFailedServices,
+  nativeDetachedUpHotReload,
   nativeDetachedUpProfileNotice,
   nativeDetachedUpShellVariables,
   nativeShellForwardingNotice,
@@ -25,6 +26,7 @@ import {
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
+import { emptyNativeDependencyPlanId } from "./native-dependency-plan.ts";
 import {
   adaptNativeGcloudEnvironment,
   hasNativeGcloudCredentialMount,
@@ -39,6 +41,10 @@ import {
   nativeStartBudgetSeconds,
   watchNativeStartupStatus,
 } from "./native-graph-start-budget.ts";
+import {
+  nativeHotReloadNoticeFromPool,
+  renderNativeHotReloadNotice,
+} from "./native-hot-reload-notice.ts";
 import {
   admitNativeHttpProbe,
   isInferredNativeRouteProbe,
@@ -415,6 +421,7 @@ type Dependencies = {
   /** Value-free operator notices (for example credential expiry); stderr by default. */
   warn: (line: string) => void;
   review: typeof withNativeProjectReview;
+  /** May return the original-input identity the final review reuses. */
   staticReview: typeof requireNativeStaticStartReview;
   selectReview: typeof selectNativeProjectReviewIdentity;
   retainedImages: typeof selectNativeRetainedImages;
@@ -2084,6 +2091,20 @@ function emitNativeLeftOutNotice(opts: {
   );
 }
 
+/**
+ * Once per start, when the pool runs with hot reload on shared source off, or
+ * forced on over a large share: printed, or handed to a detached launcher.
+ */
+function emitNativeHotReloadNotice(
+  pool: unknown,
+  warn: (line: string) => void
+): void {
+  const notice = nativeHotReloadNoticeFromPool(pool);
+  if (notice && !nativeDetachedUpHotReload(notice)) {
+    warn(renderNativeHotReloadNotice(notice));
+  }
+}
+
 /** Prints a profile notice, or hands it to the launcher of a detached owner. */
 function emitNativeProfileNotice(
   notice: NativeProfileNotice,
@@ -2334,7 +2355,8 @@ async function startNativeProjectAttempt(
     selectedDependencyFile !== undefined,
     buildServices
   );
-  await deps.staticReview({
+  // Reused by the final review when its request is the same (HACK-2445).
+  const staticSelection = await deps.staticReview({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
     composeFile: opts.composeFile,
@@ -2521,7 +2543,7 @@ async function startNativeProjectAttempt(
       signal: controller.signal,
     });
     progress({ phase: "runtime" });
-    await deps.invoke({
+    const pool = await deps.invoke({
       runtime: opts.runtime,
       cwd: opts.scope.projectRoot,
       args: [
@@ -2553,8 +2575,9 @@ async function startNativeProjectAttempt(
       ],
       signal: controller.signal,
     });
+    emitNativeHotReloadNotice(pool, deps.warn);
     requireActiveStartup(controller.signal);
-    await verifyNativeResumedRetainedGraph({
+    const resumed = await verifyNativeResumedRetainedGraph({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       run: retained,
@@ -2601,6 +2624,7 @@ async function startNativeProjectAttempt(
       amd64Emulation: input.amd64Emulation,
       restore,
       invoke: deps.invoke,
+      observed: resumed,
     });
     progress({ phase: "images" });
     await buildNativeProjectImages({
@@ -2641,7 +2665,9 @@ async function startNativeProjectAttempt(
       branch: opts.scope.branch,
       retained: restore,
       reviewIdentity,
+      selectedIdentity: staticSelection,
       input: pinned,
+      invoke: deps.invoke,
       run: async (review) => {
         requireEnrollmentCompatible(review.report.plan);
         reportNativeRestartPolicyNotices(review.report.plan, deps.warn);
@@ -2724,17 +2750,28 @@ async function startNativeProjectAttempt(
             }),
             { mode: 0o600, flag: "wx" }
           );
-          const plan = await deps.invoke({
-            runtime: opts.runtime,
-            cwd: opts.scope.projectRoot,
-            args: [
-              "graph",
-              "dependency-plan",
-              "--dependencies",
-              dependencyFile,
-              "--json",
-            ],
-          });
+          // With no bindings there is no host evidence to capture: the ID
+          // covers only these selection bytes, and serve recomputes it.
+          const plan =
+            hostDependencies.length === 0
+              ? {
+                  dependency_plan_id: emptyNativeDependencyPlanId({
+                    plan: review.planId,
+                    artifact,
+                    artifactSha256: artifactHash,
+                  }),
+                }
+              : await deps.invoke({
+                  runtime: opts.runtime,
+                  cwd: opts.scope.projectRoot,
+                  args: [
+                    "graph",
+                    "dependency-plan",
+                    "--dependencies",
+                    dependencyFile,
+                    "--json",
+                  ],
+                });
           if (
             !isRecord(plan) ||
             typeof plan.dependency_plan_id !== "string" ||

@@ -68,6 +68,82 @@ fn compose(image: &str, marker: &str, fail: bool) -> Value {
     check["depends_on"] = json!({"web":{"condition":"service_healthy"}});
     json!({"services":{"init":base(init,true),"web":web,"check":check},"networks":{"private":{"internal":true}},"volumes":{"data":{}}})
 }
+/// HACK-2443: a declared command healthcheck without a startup cadence gets the fast first
+/// check; declared values are kept; a disabled check gets nothing.
+#[test]
+fn a_declared_healthcheck_gets_the_fast_first_check_unless_it_says_otherwise() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let disabled_check =
+        |document: &Value| document["services"]["web"]["healthcheck"]["disable"] == true;
+    let compiled = |healthcheck: Value| {
+        let mut document = compose(&image, "marker", false);
+        document["services"]["web"]["expose"] = json!(["3000"]);
+        document["services"]["web"]["healthcheck"] = healthcheck;
+        // A disabled check cannot satisfy `service_healthy`; this test is about the check.
+        document["services"]["check"]["depends_on"] =
+            json!({"web":{"condition":"service_started"}});
+        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let mut goals = goals();
+        if disabled_check(&document) {
+            goals.insert("web".into(), Condition::Started);
+        }
+        config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None)
+            .unwrap()
+            .configs["web"]["Healthcheck"]
+            .clone()
+    };
+    let test = json!(["CMD", "/usr/local/bin/bun", "-e", "process.exit(0)"]);
+    let undeclared = compiled(json!({"test": test, "interval": "30s"}));
+    assert_eq!(
+        undeclared["StartInterval"],
+        crate::project::DEFAULT_START_INTERVAL_NANOS
+    );
+    assert_eq!(
+        undeclared["StartPeriod"],
+        crate::project::DEFAULT_START_PERIOD_NANOS
+    );
+    assert_eq!(undeclared["Interval"], 30_000_000_000u64);
+    let declared = compiled(json!({"test": test, "start_interval": "1s", "start_period": "5s"}));
+    assert_eq!(declared["StartInterval"], 1_000_000_000u64);
+    assert_eq!(declared["StartPeriod"], 5_000_000_000u64);
+    let disabled = compiled(json!({"disable": true}));
+    assert!(disabled.get("StartInterval").is_none(), "{disabled}");
+    assert!(disabled.get("StartPeriod").is_none(), "{disabled}");
+}
+
+/// A container created before HACK-2443 has no startup cadence; it still matches the compiled
+/// config. A container that has one, or a non-default value, is compared as compiled.
+#[test]
+fn a_container_from_before_the_fast_first_check_still_matches() {
+    let compiled = json!({"Test":["CMD","true"],"Interval":1u64,
+        "StartPeriod":crate::project::DEFAULT_START_PERIOD_NANOS,
+        "StartInterval":crate::project::DEFAULT_START_INTERVAL_NANOS});
+    let legacy = json!({"Test":["CMD","true"],"Interval":1u64});
+    assert!(mismatch(&startup_compatible(&compiled, &legacy), &legacy, "h").is_none());
+    let zero = json!({"Test":["CMD","true"],"Interval":1u64,"StartPeriod":0,"StartInterval":0});
+    assert!(mismatch(&startup_compatible(&compiled, &zero), &zero, "h").is_none());
+    let current = compiled.clone();
+    assert!(mismatch(&startup_compatible(&compiled, &current), &current, "h").is_none());
+    // A different value on the container is a mismatch; so is a declared non-default value
+    // that the container lacks.
+    let other =
+        json!({"Test":["CMD","true"],"Interval":1u64,"StartPeriod":1u64,"StartInterval":1u64});
+    assert!(mismatch(&startup_compatible(&compiled, &other), &other, "h").is_some());
+    let declared = json!({"Test":["CMD","true"],"Interval":1u64,"StartPeriod":5u64});
+    assert!(mismatch(&startup_compatible(&declared, &legacy), &legacy, "h").is_some());
+}
+
 #[test]
 fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
     let fixture = Fixture::new();
@@ -1735,7 +1811,7 @@ fn owned_driver_live() -> Result<(), CandidateError> {
             let export_path = Path::new(exported["path"].as_str().expect("export path"));
             let payload = fs::read(export_path).map_err(state::io)?;
             use sha2::Digest;
-            if exported["sha256"] != format!("{:x}", sha2::Sha256::digest(&payload))
+            if exported["sha256"] != format!("{:x}", crate::Hex(sha2::Sha256::digest(&payload)))
                 || exported["original_retained"] != true
             {
                 return Err(error(

@@ -170,13 +170,23 @@ impl Lock {
                 "Unsafe operation lock.",
             ));
         }
-        // SAFETY: file is a live owned descriptor; flock does not retain pointers.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        if flock(&file, libc::LOCK_EX | libc::LOCK_NB).is_err() {
             return Err(CandidateError::new("provider_busy", holder_message(&file)));
         }
         Ok(Self(file, false))
     }
 }
+
+/// Apply a flock operation to a borrowed descriptor. Closing it releases the lock.
+pub(crate) fn flock(file: &File, operation: libc::c_int) -> std::io::Result<()> {
+    // SAFETY: file is a live owned descriptor; flock does not retain pointers.
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 impl Drop for Lock {
     fn drop(&mut self) {
         if self.1 {
@@ -399,6 +409,11 @@ pub struct Owner {
     /// a later rewrite of the phase to `stopped` never relabels an unclean stop as clean.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean_stop: Option<CleanStop>,
+    /// This boot's choice for the provider's host-to-guest change notifications when it is
+    /// not the plain default (`hot_reload`): off, or forced on over a large share. Re-derived
+    /// at every boot, and applied to every provider invocation while it stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot_reload: Option<super::hot_reload::Choice>,
 }
 
 /// The engine identity of the boot whose `down` completed cleanly.
@@ -795,6 +810,7 @@ impl Owner {
             previous_guest_boot_id: None,
             reclamation: None,
             clean_stop: None,
+            hot_reload: None,
             daemon_pid: None,
             daemon_start: None,
             rootfs_digest: None,
@@ -861,7 +877,7 @@ impl Owner {
     }
     pub fn data_dir(&self) -> PathBuf {
         use sha2::{Digest, Sha256};
-        let hash = format!("{:x}", Sha256::digest(self.machine.as_bytes()));
+        let hash = format!("{:x}", crate::Hex(Sha256::digest(self.machine.as_bytes())));
         self.short_home
             .join("Library/Caches/smolvm/vms")
             .join(&hash[..16])

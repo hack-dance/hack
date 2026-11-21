@@ -57,6 +57,7 @@ import {
 } from "../daemon/service-summary.ts";
 import { diagnoseDaemonDirectory } from "../daemon/socket-permissions.ts";
 import { spawnDetachedDaemon } from "../daemon/spawn.ts";
+import { waitForDetachedDaemonStart } from "../daemon/start-wait.ts";
 import {
   buildDaemonRepairMessage,
   buildDaemonStatusReport,
@@ -887,6 +888,27 @@ async function startReplacementDirectly(opts: {
   });
 }
 
+/**
+ * What a direct start that did not become ready says. A state directory
+ * hackd refuses names that reason. Otherwise a process that already ended
+ * says so with its exit code, and one that is still running after the whole
+ * budget keeps the "not ready yet" message.
+ */
+export function detachedStartFailureMessage(opts: {
+  readonly outcome: "exited" | "timeout";
+  readonly directoryRefusal: string | null;
+  readonly exitCode: number | null;
+}): string {
+  if (opts.directoryRefusal !== null) {
+    return `hackd did not start: ${opts.directoryRefusal}`;
+  }
+  const check =
+    "Check: hack daemon logs --tail 200, or run hack daemon start --foreground to see its error";
+  return opts.outcome === "exited"
+    ? `hackd exited before it was ready${opts.exitCode === null ? "" : ` (exit code ${opts.exitCode})`} | ${check}`
+    : `Started hackd process but it did not report ready yet | ${check}`;
+}
+
 async function startDaemonDetached(opts: {
   readonly paths: DaemonPaths;
   /**
@@ -914,16 +936,27 @@ async function startDaemonDetached(opts: {
   // A directly started hackd never runs the login autostart pass (its
   // environment drops HACK_DAEMON_LOGIN_SERVICE); say so once per launch.
   await reportManualAutostartSkip();
-  spawnDetachedDaemon({ argv: [...argv], path: opts.path });
+  const spawned = spawnDetachedDaemon({ argv: [...argv], path: opts.path });
 
-  const started = await waitForDaemonStart({ paths });
-  if (!started) {
+  // Returns as soon as hackd is ready, and as soon as the spawned process is
+  // gone with no hackd recorded; only a process that is alive but not ready
+  // uses the whole budget (HACK-2371).
+  const outcome = await waitForDetachedDaemonStart({
+    isReady: async () => {
+      const status = await readDaemonStatus({ paths });
+      return status.running && status.socketExists;
+    },
+    spawnedExitCode: spawned.exitCode,
+    daemonAlive: async () => (await readDaemonStatus({ paths })).running,
+  });
+  if (outcome.kind !== "ready") {
     const late = diagnoseDaemonDirectory({ root: paths.root });
     logger.warn({
-      message:
-        late === null
-          ? "Started hackd process but it did not report ready yet | Check: hack daemon logs --tail 200, or run hack daemon start --foreground to see its error"
-          : `hackd did not start: ${late}`,
+      message: detachedStartFailureMessage({
+        outcome: outcome.kind,
+        directoryRefusal: late,
+        exitCode: spawned.exitCode(),
+      }),
     });
     return 1;
   }

@@ -9,6 +9,7 @@ import {
   type NativeProcessRefusal,
   readNativeProcessRefusals,
 } from "../lib/native-process-wrappers.ts";
+import { stepStoreRuntimeArgs } from "../lib/step-store/location.ts";
 import type { SubprocessSignal } from "../lib/subprocess-signal.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import { nativeBetaCandidatePointer } from "./native-beta.ts";
@@ -16,6 +17,7 @@ import {
   type NativeConfigurationRefusal,
   readNativeConfigurationRefusals,
 } from "./native-configuration-refusals.ts";
+import { nativeHotReloadEnvironment } from "./native-hot-reload-notice.ts";
 import {
   type NativePlanChange,
   nativePlanChangeGuidance,
@@ -70,6 +72,10 @@ function nativeLogPhase(value: unknown): NativeLogFailurePhase | undefined {
 }
 
 const FIXED_MESSAGE = /^[\x20-\x7e]{1,400}$/;
+const FIXED_MESSAGE_LIMIT = 400;
+const PROVIDER_SAID = "The provider's own error:";
+const PROVIDER_LINE_MINIMUM = 40;
+const TRAILING_SLASHES = /\/+$/;
 
 /**
  * Keep a runtime message only when the runtime marked it fixed (a literal that
@@ -78,11 +84,119 @@ const FIXED_MESSAGE = /^[\x20-\x7e]{1,400}$/;
 function fixedNativeMessage(
   value: Record<string, unknown>
 ): string | undefined {
-  return value.message_fixed === true &&
+  const fixed =
+    value.message_fixed === true &&
     typeof value.message === "string" &&
     FIXED_MESSAGE.test(value.message)
-    ? value.message
-    : undefined;
+      ? value.message
+      : undefined;
+  const said = nativeProviderLine(value);
+  if (said === undefined) {
+    return fixed;
+  }
+  if (fixed === undefined) {
+    return `${PROVIDER_SAID} ${said}`;
+  }
+  // Both, while they fit the one bounded line every failure channel accepts;
+  // the fixed sentence wins and the provider's line is cut to what is left.
+  const room = FIXED_MESSAGE_LIMIT - fixed.length - PROVIDER_SAID.length - 2;
+  if (room < PROVIDER_LINE_MINIMUM) {
+    return fixed;
+  }
+  const line = said.length <= room ? said : `${said.slice(0, room - 3)}...`;
+  return `${fixed} ${PROVIDER_SAID} ${line}`;
+}
+
+/** The only failures a provider's line may accompany. */
+const PROVIDER_FAILURES = new Set([
+  "provider_command_failed",
+  "provider_boot_stalled",
+]);
+/** A `key=value` token keeps its value only as a short number or one of these words. */
+const PLAIN_VALUE = /^(?:\d{0,10}|on|off|true|false|yes|no|none)$/i;
+// Up to the last `@` before the first `/`, `?` or `#`: a password may hold an
+// `@`, and one in a query must not hide the query's `=` from the next rule.
+const URL_CREDENTIALS = /(:\/\/)[^/?#\s]+@/g;
+const WHITE_SPACE = /\s+/;
+const PROVIDER_LINE_LIMIT = 200;
+const LONG_HEX = /[0-9a-fA-F]{12,}/g;
+
+/** One printable ASCII line of 1 to 200 characters, checked character by character. */
+function boundedPrintableLine(value: unknown): value is string {
+  if (typeof value !== "string" || value.length < 1 || value.length > 200) {
+    return false;
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x20 || code > 0x7e) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The provider's own last error line for a failed provider command (HACK-2418).
+ * The runtime cleans it; this boundary does not rely on that. The line is
+ * accepted only with a provider failure code and only as one printable ASCII
+ * line of at most 200 characters, and it is redacted again here: the user's
+ * home and temporary directory, the value of a `key=value` token unless it
+ * is a short number or a fixed word such as `on` or `false`, a bearer token, a
+ * user and password in a URL, and long hexadecimal identifiers.
+ */
+export function nativeProviderLine(
+  value: Record<string, unknown>,
+  env: Readonly<Record<string, string | undefined>> = process.env
+): string | undefined {
+  const line = value.provider_line;
+  if (
+    !(
+      typeof value.code === "string" &&
+      PROVIDER_FAILURES.has(value.code) &&
+      boundedPrintableLine(line)
+    )
+  ) {
+    return;
+  }
+  let text = line;
+  for (const [path, word] of [
+    [env.HOME, "~"],
+    [env.TMPDIR?.replace(TRAILING_SLASHES, ""), "<tmp>"],
+  ] as const) {
+    if (path !== undefined && path.length > 2) {
+      text = text.split(path).join(word);
+    }
+  }
+  let afterBearer = false;
+  const redacted = text
+    .split(WHITE_SPACE)
+    .filter((token) => token !== "")
+    .map((token) => {
+      const bearer = afterBearer;
+      afterBearer = token.toLowerCase() === "bearer";
+      if (bearer) {
+        return "<value>";
+      }
+      // Anything after the first `=` is shown only when it is plainly not a
+      // secret; a short value is not safe by being short.
+      // URL credentials go first: a password may hold an equals sign.
+      const safe = token.replace(URL_CREDENTIALS, "$1<credentials>@");
+      const equals = safe.indexOf("=");
+      const head = (equals < 0 ? safe : safe.slice(0, equals)).replace(
+        LONG_HEX,
+        "<id>"
+      );
+      if (equals < 0) {
+        return head;
+      }
+      const value = safe.slice(equals + 1);
+      return `${head}=${PLAIN_VALUE.test(value) ? value : "<value>"}`;
+    })
+    .join(" ");
+  // Redaction can lengthen the line: the bound holds for what is shown.
+  return redacted.length <= PROVIDER_LINE_LIMIT
+    ? redacted
+    : `${redacted.slice(0, PROVIDER_LINE_LIMIT - 3)}...`;
 }
 
 const NETWORK_HOST = /^[a-zA-Z0-9_.:[\]-]{1,253}$/;
@@ -283,6 +397,58 @@ function execStageFailureMessage(
   return fixed ? `${fixed} ${step}` : step;
 }
 
+/** What an unhealthy probe last observed (route probe diagnostic version 2, HACK-2416). */
+// A Map, not an object literal: inherited keys such as "toString" are not reasons.
+const PROBE_REASONS: ReadonlyMap<string, string> = new Map([
+  ["exec_not_running", "the probe process inside the container was gone"],
+  ["exec_exited", "the probe process inside the container exited"],
+  ["sample_missing", "the probe never wrote a result"],
+  ["sample_invalid", "the probe's result could not be read"],
+  ["sample_clock_ahead", "the guest clock was ahead of the host's"],
+  ["sample_stale", "the probe's last result was too old"],
+  [
+    "failures_exhausted",
+    "the route answered no request in time, retries exhausted",
+  ],
+]);
+const PROBE_COUNT = (value: unknown): value is number =>
+  typeof value === "number" &&
+  Number.isSafeInteger(value) &&
+  value >= 0 &&
+  value <= 1e12;
+
+function routeProbeObservation(probe: Record<string, unknown>): string | null {
+  const reason =
+    typeof probe.reason === "string"
+      ? PROBE_REASONS.get(probe.reason)
+      : undefined;
+  if (!(reason && PROBE_COUNT(probe.since_start_ms))) {
+    return null;
+  }
+  for (const key of ["sequence", "failures", "last_elapsed_ms"]) {
+    if (probe[key] !== undefined && !PROBE_COUNT(probe[key])) {
+      return null;
+    }
+  }
+  const allowed = new Set([
+    "version",
+    "port",
+    "reason",
+    "sequence",
+    "failures",
+    "last_elapsed_ms",
+    "since_start_ms",
+  ]);
+  if (Object.keys(probe).some((key) => !allowed.has(key))) {
+    return null;
+  }
+  const counts =
+    typeof probe.sequence === "number"
+      ? ` after ${probe.sequence} requests (${probe.failures ?? 0} failed in a row, the last took ${probe.last_elapsed_ms ?? 0} ms)`
+      : "";
+  return ` The probe observed that ${reason}${counts}, ${Math.round((probe.since_start_ms as number) / 1000)} s after it started.`;
+}
+
 /** Render only the closed inferred-route diagnostic; never runtime error text. */
 function routeProbeFailureMessage(
   value: Record<string, unknown>,
@@ -297,8 +463,6 @@ function routeProbeFailureMessage(
       ) &&
       isRecord(probe)
     ) ||
-    Object.keys(probe).length !== 2 ||
-    probe.version !== 1 ||
     typeof probe.port !== "number" ||
     !Number.isSafeInteger(probe.port) ||
     probe.port < 1 ||
@@ -306,7 +470,19 @@ function routeProbeFailureMessage(
   ) {
     return;
   }
-  return `Inferred route probe on port ${probe.port} is unhealthy. Check hack logs ${service} in the same project/branch, fix the route port, or declare healthcheck.x-hack-http with a longer start_period_ms and a readiness path, within the 300-second graph budget.`;
+  let observed = "";
+  if (probe.version === 1 && Object.keys(probe).length === 2) {
+    observed = "";
+  } else if (probe.version === 2) {
+    const text = routeProbeObservation(probe);
+    if (text === null) {
+      return;
+    }
+    observed = text;
+  } else {
+    return;
+  }
+  return `Inferred route probe on port ${probe.port} is unhealthy.${observed} Check hack logs ${service} in the same project/branch, fix the route port, or declare healthcheck.x-hack-http with a longer start_period_ms and a readiness path, within the 300-second graph budget.`;
 }
 
 /** Fixed/closed diagnostic text and the validated service a failure carries. */
@@ -674,8 +850,18 @@ export async function invokeNativeRuntime(opts: {
       env[key] = value;
     }
   }
+  // The one user setting a runtime request carries in its environment; an
+  // invalid value throws here, before the subprocess exists.
+  Object.assign(env, nativeHotReloadEnvironment(opts.args));
   const child = Bun.spawn(
-    [opts.runtime.binary, "--candidate-root", opts.runtime.home, ...opts.args],
+    [
+      opts.runtime.binary,
+      "--candidate-root",
+      opts.runtime.home,
+      // HACK-2461: the per-user step store, only with HACK_STEP_STORE=on.
+      ...stepStoreRuntimeArgs(),
+      ...opts.args,
+    ],
     {
       cwd: opts.cwd,
       env: childEnvironment(env),

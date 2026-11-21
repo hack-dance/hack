@@ -776,3 +776,20 @@ test("HACK-2324: the gcloud ADC consent is a machine setting or the variable, an
     await expect(f.host()).rejects.toMatchObject({ code: "E_CONFIG_INVALID" });
   }
 });
+
+test("HACK-2409: a mistyped HACK_NATIVE_HOT_RELOAD is refused with the other settings, before anything starts or stops", async () => {
+  const f = await fixture();
+  for (const value of ["ON", "true", "1", " off"]) {
+    await expect(
+      f.host({ HACK_NATIVE_HOT_RELOAD: value })
+    ).rejects.toMatchObject({
+      code: "E_CONFIG_INVALID",
+      message: "HACK_NATIVE_HOT_RELOAD must be auto, on or off.",
+    });
+  }
+  for (const value of ["auto", "on", "off", ""]) {
+    await expect(
+      f.host({ HACK_NATIVE_HOT_RELOAD: value })
+    ).resolves.toBeDefined();
+  }
+});

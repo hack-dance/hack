@@ -9,6 +9,7 @@ const FIELDS = new Set([
   "timeout_ms",
   "retries",
   "start_period_ms",
+  "start_interval_ms",
 ]);
 const PATH = /^\/[\x21-\x22\x24-\x7e]*$/;
 
@@ -69,6 +70,12 @@ export function admitNativeHttpProbe(
       timeout_ms: bounded(probe.timeout_ms, 1, 60_000),
       retries: bounded(probe.retries, 1, 100),
       start_period_ms: bounded(probe.start_period_ms, 0, 3_600_000),
+      // Optional (HACK-2443): the cadence until the first success, at most interval_ms.
+      start_interval_ms:
+        probe.start_interval_ms === undefined ||
+        (bounded(probe.start_interval_ms, 10, 3_600_000) &&
+          typeof probe.interval_ms === "number" &&
+          (probe.start_interval_ms as number) <= probe.interval_ms),
     };
     field = Object.keys(checks).find((key) => !checks[key]);
     if (

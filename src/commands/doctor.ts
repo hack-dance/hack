@@ -300,6 +300,7 @@ import {
 } from "../lib/project-runtime-hygiene.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
+import { withIngressChange } from "../lib/proxy-ingress-addresses.ts";
 import { inspectProxyLoopback } from "../lib/proxy-loopback.ts";
 import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
@@ -5548,20 +5549,26 @@ async function maybeStartGlobalCaddyCompose(opts: {
     return;
   }
 
-  const started = await exec(
-    [
-      "docker",
-      "compose",
-      "-f",
-      opts.paths.caddyCompose,
-      "up",
-      "-d",
-      "--remove-orphans",
-    ],
-    {
-      cwd: dirname(opts.paths.caddyCompose),
-      stdin: "ignore",
-    }
+  // The proxy may come back with new addresses: no record read before or
+  // during the repair is trusted after it.
+  const started = await withIngressChange(
+    resolveGlobalHackDir(),
+    async () =>
+      await exec(
+        [
+          "docker",
+          "compose",
+          "-f",
+          opts.paths.caddyCompose,
+          "up",
+          "-d",
+          "--remove-orphans",
+        ],
+        {
+          cwd: dirname(opts.paths.caddyCompose),
+          stdin: "ignore",
+        }
+      )
   );
   if (started.exitCode !== 0) {
     note(commandFailureDetail({ result: started }), "runtime repair");

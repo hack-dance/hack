@@ -168,6 +168,13 @@ test("the released compiled managers are reviewed predecessors", () => {
     "2e9183b4ce7b4c4c5659f9ae33677699e1cdc9f5553e1b668bbbe6ea6846ac7b", // next.20
     "af7d25e2db3e5d0edf8d0e308a49db928f1bc7f138beb54b9d3b0ccae83ee423", // next.21
     "df75f28ef2fdd892e9d17f5528171117488b426a2fe9140ac3dd9add924ae45a", // next.22
+    "c9cc02744bf801986f8962699fe633566790cb3a6e7bfff2beb0536107a56b66", // next.23
+    // From next.23 on, the Linux managers in that release's SHA256SUMS-linux.
+    "e946ba95a49018b0eff8ff81161d1ccf1a086627773e62a30db53e4e94c9195b", // next.23 linux-x86_64
+    "be1599a85cd4251df4a9779f2e7fa16480094ebb48ec97ca4e9dad6dd73d0094", // next.23 linux-arm64
+    "892c4cdf3a99e309df4b4d406f7e76e2b422b72f4dd2a47bef1f0b36dd29ee27", // next.24
+    "00e6e01b05bd6f05ac32a41ab06b7309767d701653b220ede5148c2ffb66388c", // next.24 linux-x86_64
+    "f52beab69e5ec62e237da74ae64a0cdef7887bcae51380ca6a0270e4b45e4d27", // next.24 linux-arm64
   ]);
 });
 
@@ -264,6 +271,18 @@ test("the gate runs a previous release only from its own reviewed pins", () => {
         "df75f28ef2fdd892e9d17f5528171117488b426a2fe9140ac3dd9add924ae45a",
       archive:
         "a0d36c68d0e670a2d9b8dfad895136a17fa6706fc7b84072a962afa6d1994f51",
+    },
+    "5.0.0-next.23": {
+      manager:
+        "c9cc02744bf801986f8962699fe633566790cb3a6e7bfff2beb0536107a56b66",
+      archive:
+        "c17cb20bfe955fb188273701f8e39016cd7e4394ebc6cb7a1714959ff2a842a4",
+    },
+    "5.0.0-next.24": {
+      manager:
+        "892c4cdf3a99e309df4b4d406f7e76e2b422b72f4dd2a47bef1f0b36dd29ee27",
+      archive:
+        "b77eb0908d62db66fda707ec66e2c237ae217ea340b128ebafcb57d0ee60e59d",
     },
   });
   for (const { manager } of Object.values(PUBLISHED_RELEASES)) {

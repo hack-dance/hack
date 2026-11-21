@@ -268,9 +268,12 @@ describe("provider pin watch", () => {
     }
     // Every flag the runtime passes to the provider, and every SMOLVM_ variable it sets, is
     // watched.
-    const lifecycle = readFileSync(join(provider, "lifecycle.rs"), "utf8");
     const passed = [
-      between(lifecycle, '"machine".to_owned(),', "create_machine("),
+      between(
+        readFileSync(join(provider, "lifecycle/backend/smolvm_cli.rs"), "utf8"),
+        "// BEGIN provider create arguments",
+        "// END provider create arguments"
+      ),
       between(
         readFileSync(join(provider, "network_intent.rs"), "utf8"),
         "fn arguments(",
@@ -288,9 +291,9 @@ describe("provider pin watch", () => {
     );
     const variables = [
       ...between(
-        lifecycle,
-        "fn command(",
-        "fn boot_reclamation_policy("
+        readFileSync(join(provider, "lifecycle/backend/smolvm_cli.rs"), "utf8"),
+        "// BEGIN provider command environment",
+        "// END provider command environment"
       ).matchAll(/"(SMOLVM_[A-Z_]+)"/g),
     ].map((match) => match[1]);
     expect(flags.length).toBeGreaterThan(10);

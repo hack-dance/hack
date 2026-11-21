@@ -562,12 +562,32 @@ bridge to the container's target port, after the graph is ready. The rules:
 - A connection is forwarded only to the container incarnation the bridge was
   started for. A replaced container does not receive traffic from an older
   publication.
-- Stopping the foreground owner (Ctrl-C) closes each host listener before its
-  bridge and the containers stop, then retires the publication. Dead-owner
+- Routes and published ports start as one batch: one reservation, one provider
+  lease that starts every bridge together, then every host listener launched at
+  once. Before and after the bridges start, and again before each listener
+  launches, each target container's identity (ID, network attachment, start
+  time, VM boot) and health are checked again; a bridge whose container changed
+  or became unhealthy is stopped and `up` refuses with `bridge_generation_stale`.
+- Stopping the foreground owner (Ctrl-C) closes every host listener of the
+  graph (together) before its bridges stop, all in one guest call, and before
+  the containers stop, then retires the publication. Dead-owner
   cleanup retires a publication only after proving its owner is gone. A
   retaining restart publishes the same ports again.
 - `graph run` and other non-foreground paths do not publish ports and keep
   refusing them with `graph_subset`.
+
+How one batch of bridges starts and how a run's bridges are released is
+modeled in [bridge-batch](../../tests/models/tla/bridge-batch/COVERAGE.md):
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/diagrams/bridge-batch-start.dark.svg">
+  <img alt="State chart: reserve, three fences around one relay batch, then every publisher child, ready or failed" src="../assets/diagrams/bridge-batch-start.light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/diagrams/bridge-batch-release.dark.svg">
+  <img alt="State chart: release every listener, then stopping, stop, stopped, remove and drop for the whole run; a crash resumes" src="../assets/diagrams/bridge-batch-release.light.svg">
+</picture>
 
 The loopback check is point-in-time. A process that binds the same port on all
 interfaces between the check and native's own bind can still share loopback
@@ -773,12 +793,24 @@ On a fresh pool boot or a boot after stopping the pool, native waits up to 10 se
 plus 1 second per bridge slot (20 seconds for 10 slots, at most 42) for every declared
 bridge socket to appear with the required private ownership and mode.
 The provider's guest-ready signal can arrive before its bridge threads bind. Native
-rechecks the same provider identity around each observation; it never accepts an unsafe
-socket, changes its permissions or removes it to make startup pass. Existing running-pool
+rechecks the same provider identity around each observation; it never accepts a socket of
+another type, user or link count, or removes one, to make startup pass. A socket of this user
+that the provider left world-accessible has its group and other access removed, inside the
+private socket directory. The agent and engine sockets, and the provider's other sockets in
+that directory (`port-forward.sock`, `control.sock` and the rest), are treated the same way.
+`runtime up --json` and `runtime status --json` list what was repaired for the running provider
+as `repaired_sockets` (`count` and `names`), so a repair is visible without inspecting the
+directory. Existing running-pool
 audits do not wait. A socket timeout or identity refusal takes the verified failed-boot
 stop path and names the recovery command. A timeout also says how many sockets were
 still missing and how many were not yet private at the deadline (counts only). Use the same selected executor and identical
 `--candidate-root` argument as the failed start, followed by `runtime recover --json`.
+`hack native recover` does the same for the selected native home without naming the
+executor: it runs the runtime's recovery and prints the state it left (for example
+`recovered-unclean`), after which `hack up` starts again. `--json` passes the runtime
+result through. A refusal names the condition it could not prove. On a home that is already
+stopped (for example `recovered-unclean` after an earlier recovery) it changes nothing and
+says there was nothing to recover, however often it runs; a clean stop stays clean.
 If you explicitly selected an installed executor with `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME`, use those same non-empty values:
 
@@ -794,6 +826,11 @@ home or `.hack-local` directory; from that checkout run `./hack-local runtime re
 Provider-verification failures during the wait carry this guidance too; recovery still
 independently proves ownership before stopping anything. Then retry. This preserves
 retained disks and records an unclean stop; it does not claim the guest shut down cleanly.
+One exception: if the failed start was the pool's first and the disk templates it used do
+not verify (`disk_template_untrusted`, for example after a first start ended in
+`provider_timeout_uncertain`), recovery moves the never-adopted disks and the failed
+templates into an `untrusted-first-boot-<n>` directory instead and returns the pool to
+`stopped-before-engine`. The next start formats new disks. Those disks never held project data, and nothing is deleted.
 `hack down` may say the project was not started because no project mapping was published.
 
 Host cleanup or a reboot can still remove the alias. For a clean stop, observation
@@ -1457,6 +1494,15 @@ this selection never replaces generation, source or resource checks. Changing th
 original Compose file uses normal image resolution and the existing compatibility
 rules, rather than silently adopting an old image for a new declaration.
 
+A retained run stays startable after a later runtime boot fails before the runtime
+recorded the guest's boot, for example `bridge_socket_timeout` or a provider that
+exits during boot. After such a failure the runtime reads `failed-boot-stopped`. Run
+`hack native recover` once, then `hack up` restores the retained run as usual. The VM may have started in that boot, but the container engine starts only
+after the boot is recorded, so no container, network or volume of the run was touched.
+Restore still checks the volumes' recorded identities. A failed boot that had
+recorded its guest boot, and so may have started the engine, still refuses retained
+startup.
+
 Editing the Compose file of a stopped graph and running `hack up` again reconciles
 the same run, as `docker compose up` does. Every container and network is
 recreated from the new review, so changed commands, images, environment and added
@@ -2116,6 +2162,9 @@ owner could not be authenticated, while `runtime_degraded` means its runtime che
 failed. A stopped candidate runtime is an ordinary state for `ps`: with a mapping
 present it exits 0 and reports `runtime_not_running` (no phase, no service rows),
 and text output prints "Native runtime is not running; no services are running."
+That includes a pool left stopped by a failed or recovered boot (`failed-boot-stopped`,
+`recovered-unclean`, `stopped-before-engine`) whose provider is not alive; before, `ps`
+failed there with `runtime_changed`.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,
@@ -3128,11 +3177,28 @@ bind source may be a directory or a single regular file inside the project root 
 example `./scripts/entrypoint.sh:/entrypoint.sh:ro`), reached without symlinks; a
 source that is not refuses with `graph_bind_source`, naming the service.
 
+#### Fast first health check
+
+A command `healthcheck` that sets no `start_interval` runs every 250 ms during its
+startup period, and one that sets no `start_period` gets a 60 s startup period. So
+`service_healthy` and readiness see the first passing check within about a quarter
+second, not one `interval` (30 s by default) after the container starts. The first
+success ends the startup period, and after it the check runs every `interval`.
+Failures inside the startup period don't count toward `retries`, as the engine
+defines it. Declared values are kept, and a disabled check gets neither. Authored
+native readiness (`readiness.exec`) gets the same cadence. A container started by an
+earlier build, without these fields, is still accepted as the same container.
+
+The 250 ms cadence applies only inside the startup period that follows a container
+start. After a pause and resume the container's startup period is not restarted, so
+the check runs every `interval` from the resume, and readiness can take up to one
+`interval` to see it.
+
 #### Native HTTP readiness probe
 
 For a complete Caddy route with no authored `healthcheck`, native reviews a default
 probe: `GET /` on the route port, a 1000 ms timeout, three consecutive
-failures, and a 240000 ms initial startup grace. It checks every second until its
+failures, and a 240000 ms initial startup grace. It checks every 250 ms until its
 first success, then every 30 seconds for the rest of that probe generation.
 This allows slow first-page compilation, including a server first answering after
 120 seconds. With a full timeout on each request, the grace plus three failed
@@ -3143,6 +3209,83 @@ missing listener or HTTP 5xx during boot, check `hack logs <service>` in the sam
 project/branch, fix the route
 port, or declare `healthcheck.x-hack-http` with a longer `start_period_ms` and a
 readiness path that answers 2xx.
+
+Until its first success, inside `start_period_ms`, one probe request may run for
+the rest of the startup period instead of `timeout_ms`. An app that compiles its
+first page on the first request gets one request that waits for the page, not a
+series of abandoned requests that each start the compile again. After the first
+success, or once the startup period has passed, each request has `timeout_ms`.
+
+Inside the startup period a start is not failed on one doubtful reading. A probe
+process that hasn't started yet, a status file that is missing or unreadable, or
+a "starting" status that is late because one request is still waiting all read
+as starting. A service fails only on a definite unhealthy result: failures used
+up after the startup period, the probe process gone, a status still missing or
+unreadable after the startup period, or a "starting" status read later than the
+startup period, the patient attempt and `retries` further attempts allow, counted
+on the host from when the probe started, whatever time the status itself carries. The failure message says which of
+these the probe saw, how many requests it made, how many failed in a row, how
+long the last one took and how long after the probe started it was seen.
+
+The host's reading of one probe. It is checked as the TLA+ model
+`tests/models/tla/probe-readiness`; `Grace` is `start_period_ms` and `Limit` is the
+bound described above.
+
+```mermaid
+---
+title: ProbeReadiness · one probe
+---
+stateDiagram-v2
+    direction TB
+    classDef wait stroke-width:1.6px
+    classDef ok stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> created : start_probe
+    created --> starting : ExecStart
+    created --> doubt : Observe [not started]
+    starting --> doubt : Observe [missing or torn]
+    starting --> starting : Begin / Expire [in grace]
+    starting --> healthy : Answer
+    starting --> limit : Observe [starting sample]
+    healthy --> healthy : Answer
+    healthy --> unhealthy : Observe [stale or exhausted]
+    starting --> unhealthy : ExecExit
+    starting --> unhealthy : Expire [retries used up]
+
+    state doubt <<choice>>
+    doubt --> starting : [t <= Grace]
+    doubt --> unhealthy : [t > Grace]
+
+    state limit <<choice>>
+    limit --> starting : [t <= Limit]
+    limit --> unhealthy : [t > Limit]
+
+    unhealthy --> [*] : start fails
+
+    note right of starting
+        Patient: before the first
+        success, in the grace, one
+        attempt may use the rest of
+        the grace (attempt_timeout).
+    end note
+    note left of limit
+        Limit is host time since the
+        probe started, not the time
+        the sample carries
+        (starting_bound_ms).
+    end note
+    note right of unhealthy
+        INV NoFalseFailure
+        INV BoundedStarting
+        INV NoReadyWithoutSuccess
+        INV OneCompile
+    end note
+
+    class starting wait
+    class healthy ok
+    class unhealthy fail
+```
 
 The graph start deadline (300 seconds by default) belongs to the whole graph; it
 is not renewed when a service starts. Slow earlier services or `service_healthy`
@@ -3199,8 +3342,8 @@ final-status and reviewed-redirect rules remain unchanged.
 `healthcheck.x-hack-http` declares an explicit readiness probe native startup uses for a
 service. It must be the only key in that service's `healthcheck`: it cannot be
 combined with `test`, `disable`, `interval`, `timeout`, `start_period`,
-`start_interval` or `retries`. Docker Compose ignores the extension field. All six
-fields are required, and no other field is accepted:
+`start_interval` or `retries`. Docker Compose ignores the extension field. The first
+six fields are required, `start_interval_ms` is optional, and no other field is accepted:
 
 | Field | Type and range | Meaning |
 | --- | --- | --- |
@@ -3210,6 +3353,7 @@ fields are required, and no other field is accepted:
 | `timeout_ms` | integer, 1–60000 | Limit for connecting, sending the request and reading the response headers. |
 | `retries` | integer, 1–100 | Consecutive failed samples that make the service unhealthy. |
 | `start_period_ms` | integer, 0–3600000 | Startup grace. Failures in this period do not count until the first success. |
+| `start_interval_ms` | optional integer, 10 up to `interval_ms` | Time between requests until the first success; 250 ms when absent. After the first success the probe uses `interval_ms`, and an unhealthy sample never brings the fast cadence back. |
 
 A sample succeeds only when the response status line is `HTTP/1.1` or `HTTP/1.0`
 with a `2xx` status. A redirect (`3xx`) or any other status is a failure, so point
@@ -4615,7 +4759,10 @@ listener is never classified as a conflict because another publisher exited.
 
 New macOS frontend finalization records include the process birth time. Retaining
 recovery can distinguish a reused PID without signalling its replacement. A
-matching zombie also counts as exited. Unreadable identities refuse; records
+matching zombie also counts as exited. When `hack down` has just seen the frontend exit
+without finishing its cleanup, an unreadable identity row (for example, `ps` timing out
+under load) is read again, up to five reads 0.5 s apart, before down refuses. A readable
+row that shows the frontend still running refuses at once. Unreadable identities still refuse; records
 without a birth retain their PID-only behavior. Linux does not compare `ps`
 births because clock corrections can change that observation. Failure to capture
 the frontend's own birth falls back to the legacy behavior instead of failing up.

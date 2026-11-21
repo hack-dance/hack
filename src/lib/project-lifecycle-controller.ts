@@ -30,7 +30,10 @@ import {
   withLifecycleSupervisorControllerLock,
 } from "./lifecycle-supervisor.ts";
 import { holdSignalCleanup } from "./process-exit.ts";
-import { readProcessIdentities } from "./process-tree.ts";
+import {
+  type ProcessIdentityRow,
+  readProcessIdentities,
+} from "./process-tree.ts";
 import {
   type ProjectLifecycleCommand,
   type ProjectLifecycleProcess,
@@ -1415,6 +1418,62 @@ async function assertAbsentSessionGroupsRetired(opts: {
   }
 }
 
+/**
+ * Maximum wait (ms) after sending `C-c` to lifecycle tmux panes for their
+ * `cleanup_lifecycle` INT trap to stop the wrapped command, remove its FIFO,
+ * and let the pane exit before force-retiring any surviving process groups.
+ */
+export const LIFECYCLE_TMUX_INTERRUPT_GRACE_MS = 750;
+/** Poll interval (ms) while waiting for interrupted lifecycle tmux panes to exit. */
+export const LIFECYCLE_TMUX_INTERRUPT_POLL_INTERVAL_MS = 25;
+
+/**
+ * Poll tmux panes after `send-keys ... C-c` until every pane exits or the
+ * bounded grace period elapses. Replaces the unconditional 750 ms sleep so
+ * fast-exiting lifecycle processes stop immediately without waiting out the
+ * full grace period.
+ */
+export async function waitForInterruptedTmuxPanes(opts: {
+  readonly windowNames: readonly string[];
+  readonly readPanes: (windowName: string) => Promise<readonly number[]>;
+  readonly graceMs?: number;
+  readonly pollIntervalMs?: number;
+  readonly now?: () => number;
+  readonly sleep?: (ms: number) => Promise<void>;
+  readonly assertFresh?: () => Promise<void>;
+}): Promise<readonly (readonly number[])[]> {
+  if (opts.windowNames.length === 0) {
+    return [];
+  }
+  const graceMs = Math.max(
+    0,
+    opts.graceMs ?? LIFECYCLE_TMUX_INTERRUPT_GRACE_MS
+  );
+  const pollIntervalMs = Math.max(
+    1,
+    opts.pollIntervalMs ?? LIFECYCLE_TMUX_INTERRUPT_POLL_INTERVAL_MS
+  );
+  const now = opts.now ?? Date.now;
+  const sleep = opts.sleep ?? ((ms: number) => Bun.sleep(ms));
+  const deadline = now() + graceMs;
+
+  let panes: readonly (readonly number[])[] = [];
+  for (;;) {
+    await opts.assertFresh?.();
+    panes = await Promise.all(
+      opts.windowNames.map((windowName) => opts.readPanes(windowName))
+    );
+    if (panes.every((pids) => pids.length === 0)) {
+      return panes;
+    }
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) {
+      return panes;
+    }
+    await sleep(Math.min(pollIntervalMs, remainingMs));
+  }
+}
+
 async function interruptLifecycleTmuxProcesses(opts: {
   readonly backend: MuxBackend;
   readonly retireSession?: ReturnType<typeof createLifecycleSessionRetirement>;
@@ -1441,25 +1500,27 @@ async function interruptLifecycleTmuxProcesses(opts: {
     );
   }
 
-  await Bun.sleep(750);
-  const panes = await Promise.all(
-    processWindows.map((processInfo) =>
+  const panes = await waitForInterruptedTmuxPanes({
+    windowNames: processWindows.map((processInfo) => processInfo.windowName),
+    readPanes: (windowName) =>
       readTmuxPanePids({
         sessionName: opts.sessionName,
-        windowName: processInfo.windowName,
-      })
-    )
-  );
-  let identities = await readProcessIdentities();
-  if (identities.length === 0) {
+        windowName,
+      }),
+    assertFresh: opts.assertFresh,
+  });
+  const remainingPids = panes.flat();
+  let identities: readonly ProcessIdentityRow[] = [];
+  if (remainingPids.length > 0) {
     identities = await readProcessIdentities();
+    if (identities.length === 0) {
+      identities = await readProcessIdentities();
+    }
   }
-  const processes = panes.flatMap((pids) =>
-    pids.map((panePid) => ({
-      panePid,
-      paneBirth: identities.find((row) => row.pid === panePid)?.birth,
-    }))
-  );
+  const processes = remainingPids.map((panePid) => ({
+    panePid,
+    paneBirth: identities.find((row) => row.pid === panePid)?.birth,
+  }));
   await opts.assertFresh?.();
   const retired = await (
     opts.retireSession ?? createLifecycleSessionRetirement()

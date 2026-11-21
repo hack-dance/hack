@@ -225,10 +225,23 @@ import {
   okResult,
 } from "../lib/cli-result.ts";
 import {
+  parseComposeDownTimeoutFlag,
+  resolveComposeDownCapMs,
+  resolveComposeDownTimeoutSeconds,
+} from "../lib/compose-down-budget.ts";
+import {
   confirmComposeDownStopped,
   describeUnconfirmedComposeDown,
   listComposeProjectContainers,
 } from "../lib/compose-down-confirmation.ts";
+import {
+  buildSlowStopHints,
+  clearProjectSlowStops,
+  observeComposeDownSlowStops,
+  recordProjectSlowStops,
+  type SlowStopExec,
+  type SlowStopHint,
+} from "../lib/compose-down-slow-stop.ts";
 import {
   type ComposeEnginePreflightDeps,
   preflightComposeEngine,
@@ -710,6 +723,14 @@ const downOptions = [
   optBranch,
   optProfile,
   optTarget,
+  defineOption({
+    name: "timeout",
+    type: "string",
+    long: "--timeout",
+    valueHint: "<seconds>",
+    description:
+      "Compose backend: container stop timeout in seconds (0-600) passed to docker compose down --timeout",
+  } as const),
   optPruneCaches,
   defineOption({
     name: "removeData",
@@ -1157,6 +1178,8 @@ export type LifecycleJsonData = {
   readonly cacheVolumesRemoved?: readonly string[];
   /** One-shot dependencies this command stopped mid-run (HACK-2310). */
   readonly interrupted?: readonly string[];
+  /** Compose services killed with exit 137 after the stop grace period during `down`. */
+  readonly slowStops?: readonly SlowStopHint[];
   readonly warnings?: readonly string[];
   readonly durationMs: number;
 };
@@ -1267,8 +1290,18 @@ export function buildLifecycleJsonData(opts: {
   readonly failed?: readonly string[];
   readonly cacheVolumesRemoved?: readonly string[];
   readonly interruption?: OneShotInterruption;
+  readonly slowStops?: readonly SlowStopHint[];
   readonly durationMs: number;
 }): LifecycleJsonData {
+  const warnings: string[] = [];
+  if (opts.interruption && opts.interruption.services.length > 0) {
+    warnings.push(opts.interruption.warning);
+  }
+  const slowStops =
+    opts.slowStops && opts.slowStops.length > 0 ? [...opts.slowStops] : [];
+  for (const entry of slowStops) {
+    warnings.push(entry.hint);
+  }
   return {
     action: opts.action,
     project: opts.project,
@@ -1284,11 +1317,10 @@ export function buildLifecycleJsonData(opts: {
       ? { cacheVolumesRemoved: [...opts.cacheVolumesRemoved].sort() }
       : {}),
     ...(opts.interruption && opts.interruption.services.length > 0
-      ? {
-          interrupted: [...opts.interruption.services],
-          warnings: [opts.interruption.warning],
-        }
+      ? { interrupted: [...opts.interruption.services] }
       : {}),
+    ...(slowStops.length > 0 ? { slowStops } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
     durationMs: opts.durationMs,
   };
 }
@@ -7020,6 +7052,7 @@ async function restartNativeImageProject({
             env: undefined,
             profile: undefined,
             target: undefined,
+            timeout: undefined,
             json: false,
             pruneCaches: false,
             removeData: false,
@@ -8143,14 +8176,15 @@ function refuseNativeDownOptions(options: DownArgs["options"]): void {
       options.env,
       options.profile,
       options.target,
+      options.timeout !== undefined,
       options.pruneCaches,
       !removeData && options.yes,
     ].some(Boolean)
   ) {
     throw new CliUsageError(
       removeData
-        ? "Native down --remove-data does not support --env, --profile, --target or --prune-caches."
-        : "Native down preserves data and does not support --env, --profile, --target, --prune-caches or --yes (--yes confirms --remove-data)."
+        ? "Native down --remove-data does not support --env, --profile, --target, --timeout or --prune-caches."
+        : "Native down preserves data and does not support --env, --profile, --target, --timeout, --prune-caches or --yes (--yes confirms --remove-data)."
     );
   }
 }
@@ -8159,6 +8193,9 @@ async function handleDown(
   input: Parameters<typeof handleDownUnlocked>[0]
 ): Promise<number> {
   parseRequestedTarget({ raw: input.args.options.target });
+  if (process.env.HACK_RUNTIME_BACKEND !== "native") {
+    parseComposeDownTimeoutFlag(input.args.options.timeout);
+  }
   // Publish stop intent before waiting for an earlier start to release its lock.
   const resolvedDownTarget =
     process.env.HACK_RUNTIME_BACKEND === "native"
@@ -8240,6 +8277,7 @@ async function handleDownUnlocked({
     recover: args.options.recoverNativeCompose,
     unsupportedOptions: [
       args.options.target,
+      args.options.timeout !== undefined,
       args.options.pruneCaches,
       args.options.removeData,
       args.options.yes,
@@ -8391,17 +8429,24 @@ async function handleDownUnlocked({
 }
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Down coordinates remote routing, ownership reconciliation, lifecycle hooks, Compose teardown, optional cache cleanup, and JSON reporting in one ordered transaction.
-async function runDownCommand({
+export async function runDownCommand({
   ctx,
   args,
   json,
   startedAtMs,
+  slowStopDeps,
 }: {
   readonly ctx: CliContext;
   readonly args: DownArgs;
   readonly json: boolean;
   readonly startedAtMs?: number;
+  readonly slowStopDeps?: {
+    readonly nowMs?: () => number;
+    readonly perfNowMs?: () => number;
+    readonly execImpl?: SlowStopExec;
+  };
 }): Promise<number> {
+  parseComposeDownTimeoutFlag(args.options.timeout);
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -8476,6 +8521,10 @@ async function runDownCommand({
   if (sharedHelperRefusal !== null) {
     return sharedHelperRefusal;
   }
+  const downTimeoutSeconds = resolveComposeDownTimeoutSeconds({
+    flagValue: args.options.timeout,
+    projectValue: cfg.compose?.downTimeoutSeconds,
+  });
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   let runtime: readonly RuntimeProject[] | null = null;
@@ -8586,6 +8635,11 @@ async function runDownCommand({
   let code: number;
   let stopObservation: DownObservation = { complete: true };
   let helperReleaseFailures: readonly string[] = [];
+  const readNowMs = slowStopDeps?.nowMs ?? Date.now;
+  const readPerfNowMs = slowStopDeps?.perfNowMs ?? (() => performance.now());
+  let downStartedAtMs = 0;
+  let downEndedAtMs = 0;
+  let downElapsedMs = 0;
   try {
     const beforeCode = await runLifecycleCommands({
       title: "Lifecycle (down before)",
@@ -8613,6 +8667,8 @@ async function runDownCommand({
       composeProject: lifecycleComposeProject,
     });
     reportLifecycleProgress({ service: null, phase: "stopping" });
+    downStartedAtMs = readNowMs();
+    const downStartedPerfMs = readPerfNowMs();
     code = await composeRuntimeBackend.down({
       composeFiles: [project.composeFile],
       composeProject: composeProjectName,
@@ -8620,6 +8676,7 @@ async function runDownCommand({
       cwd: dirname(project.composeFile),
       env: lifecycleEnv,
       routeStdoutToStderr: json,
+      timeoutSeconds: downTimeoutSeconds,
     });
     if (code === 0) {
       stopObservation = await finishInstanceStop({
@@ -8628,8 +8685,11 @@ async function runDownCommand({
         profiles: stopSelection.profiles,
         env: lifecycleEnv,
         routeStdoutToStderr: json,
+        timeoutSeconds: downTimeoutSeconds,
       });
     }
+    downEndedAtMs = readNowMs();
+    downElapsedMs = Math.max(0, readPerfNowMs() - downStartedPerfMs);
     helperReleaseFailures = await lifecycleDownCleanup(
       await confirmComposeDownForHelpers({
         cfg,
@@ -8697,6 +8757,30 @@ async function runDownCommand({
     logger.error({ message });
     return 1;
   }
+  const effectiveComposeProject = composeProjectName ?? baseProjectName;
+  const slowStopObservation = await observeComposeDownSlowStops({
+    composeProject: effectiveComposeProject,
+    downElapsedMs,
+    downStartedAtMs,
+    downEndedAtMs,
+    timeoutSeconds: downTimeoutSeconds,
+    cwd: dirname(project.composeFile),
+    env: lifecycleEnv,
+    execImpl: slowStopDeps?.execImpl,
+  });
+  const slowStops = buildSlowStopHints(slowStopObservation.services);
+  if (slowStops.length > 0) {
+    await recordProjectSlowStops({
+      projectDir: project.projectDir,
+      composeProject: effectiveComposeProject,
+      services: slowStops.map((entry) => entry.service),
+    });
+  } else if (downTimeoutSeconds !== 0) {
+    await clearProjectSlowStops({
+      projectDir: project.projectDir,
+      composeProject: effectiveComposeProject,
+    });
+  }
   const cacheRemoval = await removeDisposableCacheVolumes({
     candidates: cachePruneCandidates,
   });
@@ -8716,6 +8800,9 @@ async function runDownCommand({
   });
 
   if (!json) {
+    for (const slowStop of slowStops) {
+      logger.warn({ message: slowStop.hint });
+    }
     if (cacheRemoval.removed.length > 0) {
       logger.success({
         message: `Removed disposable cache volumes: ${cacheRemoval.removed.join(", ")}`,
@@ -8760,10 +8847,11 @@ async function runDownCommand({
         action: "down",
         project: baseProjectName,
         branch,
-        composeProject: composeProjectName ?? baseProjectName,
+        composeProject: effectiveComposeProject,
         stopped: classifyComposeStartupState(statesBeforeDown).running,
         cacheVolumesRemoved: cacheRemoval.removed,
         interruption: interruptionCheck.interruption,
+        slowStops,
         durationMs: Date.now() - (startedAtMs ?? Date.now()),
       }),
     }),
@@ -8789,6 +8877,11 @@ async function runRestartDownPhase(opts: {
   /** Helpers whose release failed; the restart must stop. */
   readonly sharedHelperFailures?: readonly string[];
 }> {
+  const downTimeoutSeconds = opts.preserveComposeRuntime
+    ? undefined
+    : resolveComposeDownTimeoutSeconds({
+        projectValue: opts.cfg.compose?.downTimeoutSeconds,
+      });
   // As in hack down: holders are released only once the containers are
   // confirmed stopped. A restart that preserves the Compose runtime keeps
   // the containers running, so it keeps their holders (not a failure); the
@@ -8836,6 +8929,7 @@ async function runRestartDownPhase(opts: {
           profiles: opts.profiles,
           cwd: dirname(opts.project.composeFile),
           routeStdoutToStderr: opts.routeStdoutToStderr === true,
+          timeoutSeconds: downTimeoutSeconds,
         });
     // A preserved Compose runtime was never shut down: its containers are
     // kept, so their helpers stay held.
@@ -10352,6 +10446,7 @@ async function finishInstanceStop(opts: {
   readonly profiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
   readonly routeStdoutToStderr: boolean;
+  readonly timeoutSeconds?: number;
 }): Promise<DownObservation> {
   const leftovers = await listInstanceContainers(opts);
   if (leftovers.ok) {
@@ -10363,10 +10458,17 @@ async function finishInstanceStop(opts: {
       const ids = owned.map((container) => container.id);
       // The same env Compose ran with, so a managed DOCKER_HOST or
       // DOCKER_CONTEXT targets the same daemon.
-      await exec(["docker", "stop", ...ids], {
+      const stopCmd =
+        opts.timeoutSeconds === undefined
+          ? ["docker", "stop", ...ids]
+          : ["docker", "stop", "-t", String(opts.timeoutSeconds), ...ids];
+      await exec(stopCmd, {
         stdin: "ignore",
         env: { ...opts.env },
-        timeoutMs: INSTANCE_STOP_GRACE_CAP_MS,
+        timeoutMs: Math.max(
+          INSTANCE_STOP_GRACE_CAP_MS,
+          resolveComposeDownCapMs(opts.timeoutSeconds)
+        ),
       });
       await exec(["docker", "rm", ...ids], {
         stdin: "ignore",
@@ -10380,6 +10482,7 @@ async function finishInstanceStop(opts: {
         cwd: dirname(opts.project.composeFile),
         env: opts.env,
         routeStdoutToStderr: opts.routeStdoutToStderr,
+        timeoutSeconds: opts.timeoutSeconds,
       });
     }
   }

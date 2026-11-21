@@ -152,8 +152,22 @@ HACK_COMPOSE_STARTUP_TIMEOUT_MS=300000 hack up -d
 ```
 
 ```json
-{ "compose": { "startupTimeoutMs": 180000, "startupCeilingMs": 3600000 } }
+{
+  "compose": {
+    "startupTimeoutMs": 180000,
+    "startupCeilingMs": 3600000,
+    "downTimeoutSeconds": 5
+  }
+}
 ```
+
+`compose.downTimeoutSeconds` (whole seconds, `0` to `600`) sets the stop grace
+period passed to `docker compose down --timeout`, and `hack down --timeout <seconds>`
+overrides it for one run. Leaving both unset keeps Docker Compose's default
+10-second grace period. If `hack down` feels slow and reports a service exiting
+`137`, that service ignored `SIGTERM` until Docker sent `SIGKILL`; add
+`init: true` to the service in `.hack/docker-compose.yml` or handle
+`SIGTERM`/`SIGINT` so it stops immediately.
 
 If the start stops at the ceiling while a one-shot still runs, the
 `E_STARTUP_TIMEOUT` error names that service. The one-shot keeps running, but

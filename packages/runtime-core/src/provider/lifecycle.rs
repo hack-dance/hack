@@ -4227,6 +4227,66 @@ printf 'verified-cache\n'
             assert_eq!(error.code, "guest_command_failed");
             verify();
         }
+        // The replays above end where the script first meets the live cache (its bound
+        // executables are mount points), before any digest is compared. So the script's
+        // copy-and-check loop, verbatim, is replayed on a scratch directory beside the
+        // cache: it reaches the comparison of each copy's digest, passes with the right
+        // digests and stops at the comparison with a wrong one, leaving the copy it
+        // refused not executable. The scratch directory is a tmpfs of its own, as the
+        // cache is (`/run/hack-local` holds 16 MiB), and is unmounted and removed each time.
+        let replay = format!(
+            r#"
+scratch=/run/hack-local/engine-exec-replay
+test ! -e "$scratch"
+test ! -L "$scratch"
+mkdir -m 700 "$scratch"
+trap 'umount "$scratch" 2>/dev/null; rmdir "$scratch"' EXIT
+mount -t tmpfs -o size=32m,mode=700,nosuid,nodev tmpfs "$scratch"
+set +e
+(set -eu; cache=$scratch; set -- - - "$1" "$2"
+{}) >/dev/null 2>&1
+status=$?
+set -e
+left=
+for name in runc docker-init; do
+ if test -e "$scratch/$name"; then left="$left $name:$(stat -c %a "$scratch/$name")"; fi
+done
+printf 'status=%s%s\n' "$status" "$left"
+"#,
+            cache_copy_loop()
+        );
+        let replayed = |runc: &str, init: &str| {
+            let reply = owned.execute_cleanup(&replay, &[runc, init]).unwrap();
+            let mut fields = reply.split_whitespace().map(str::to_owned);
+            let passed = fields.next().unwrap() == "status=0";
+            (passed, fields.collect::<Vec<_>>())
+        };
+        assert_eq!(
+            replayed(&digest, &init_digest),
+            (
+                true,
+                vec!["runc:555".to_owned(), "docker-init:555".to_owned()]
+            )
+        );
+        // A wrong `runc` digest: copied, compared, refused; never made executable, and the
+        // loop went no further.
+        let (passed, left) = replayed(&"0".repeat(64), &init_digest);
+        assert!(!passed);
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(
+            left[0].starts_with("runc:") && left[0] != "runc:555",
+            "{left:?}"
+        );
+        // A wrong `docker-init` digest: `runc` passed its comparison, `docker-init` did not.
+        let (passed, left) = replayed(&digest, &"0".repeat(64));
+        assert!(!passed);
+        assert_eq!(left.len(), 2, "{left:?}");
+        assert_eq!(left[0], "runc:555");
+        assert!(
+            left[1].starts_with("docker-init:") && left[1] != "docker-init:555",
+            "{left:?}"
+        );
+        verify();
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

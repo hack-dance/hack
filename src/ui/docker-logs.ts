@@ -1,4 +1,5 @@
 import { childEnvironment } from "../lib/child-environment.ts";
+import { dockerLogsTime } from "../lib/duration.ts";
 import { pathExists } from "../lib/fs.ts";
 import {
   type LifecycleLogRecord,
@@ -446,8 +447,8 @@ function buildComposeLogsCommand(opts: {
     String(opts.tail),
     "--timestamps",
     "--no-color",
-    ...(opts.since ? ["--since", opts.since] : []),
-    ...(opts.until ? ["--until", opts.until] : []),
+    ...(opts.since ? ["--since", dockerLogsTime(opts.since)] : []),
+    ...(opts.until ? ["--until", dockerLogsTime(opts.until)] : []),
     ...(opts.services ?? []),
   ];
 }

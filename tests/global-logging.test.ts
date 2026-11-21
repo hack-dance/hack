@@ -113,3 +113,18 @@ test("an existing home's choice is saved once; a new or decided home saves nothi
   ).toEqual({ enabled: false, source: "config", saved: false });
   expect(saved).toEqual([true]);
 });
+
+test("a failed save keeps the existing home's stack on for this run and reports the error", async () => {
+  await writeCompose();
+  expect(
+    await resolveAndSaveGlobalLogging({
+      loggingCompose: compose(),
+      save: () => Promise.reject(new Error("EACCES: permission denied")),
+    })
+  ).toEqual({
+    enabled: true,
+    source: "existing-home",
+    saved: false,
+    saveError: "EACCES: permission denied",
+  });
+});

@@ -81,12 +81,28 @@ export async function resolveGlobalLogging(opts: {
 export async function resolveAndSaveGlobalLogging(opts: {
   readonly loggingCompose: string;
   readonly save: (value: boolean) => Promise<unknown>;
-}): Promise<GlobalLoggingSetting & { readonly saved: boolean }> {
+}): Promise<
+  GlobalLoggingSetting & {
+    readonly saved: boolean;
+    /** Set when saving failed: the choice still holds for this run. */
+    readonly saveError?: string;
+  }
+> {
   const setting = await resolveGlobalLogging(opts);
   if (setting.source !== "existing-home") {
     return { ...setting, saved: false };
   }
-  await opts.save(true);
+  try {
+    await opts.save(true);
+  } catch (error) {
+    // Not saved: the stack stays on for this run (the directory marker still
+    // decides next time), and the caller reports it. Routing is not blocked.
+    return {
+      ...setting,
+      saved: false,
+      saveError: error instanceof Error ? error.message : String(error),
+    };
+  }
   return { enabled: true, source: "config", saved: true };
 }
 
@@ -123,5 +139,5 @@ export function renderLoggingOffMessage(opts: {
   /** What could not run, for example "Loki-backed logs". */
   readonly feature: string;
 }): string {
-  return `${opts.feature} need the global logging stack (Loki, Alloy, Grafana), which is off. Turn it on with: ${LOGGING_ENABLE_COMMAND}`;
+  return `${opts.feature} cannot run: the global logging stack (Loki, Alloy, Grafana) is off. Turn it on with: ${LOGGING_ENABLE_COMMAND}`;
 }

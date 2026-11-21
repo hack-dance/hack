@@ -25,9 +25,14 @@ stateDiagram-v2
   end note
   note right of Stopped
     INV NoSurpriseDataLoss: off
-    stops the containers (found
-    by project label) and keeps
-    their volumes.
+    stops this home's containers
+    (found by Compose labels) and
+    keeps their volumes.
+  end note
+  note left of ExistingHome
+    A failed save warns and this
+    run still follows the choice;
+    routing is not blocked.
   end note
   note left of NewHome
     INV FreshNeverStartsUnasked:

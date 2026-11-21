@@ -118,6 +118,26 @@ test("with the stack off, --since alone reads container logs with that range", a
   expect(calls[0]).toContain("--since 10m");
 }, 60_000);
 
+test("with the stack off, --since 2d and --until 1d are converted to hours Docker accepts", async () => {
+  const result = await runLogs(["--no-follow", "--since", "2d", "web"]);
+  expect(result.exitCode).toBe(0);
+  const ranged = await runLogs([
+    "--no-follow",
+    "--since",
+    "1w",
+    "--until",
+    "1d",
+    "web",
+  ]);
+  expect(ranged.exitCode).toBe(0);
+  const calls = await composeLogsCalls();
+  expect(calls).toHaveLength(2);
+  // Docker rejects "2d" (Go durations have no day unit).
+  expect(calls[0]).toContain("--since 48h");
+  expect(calls[1]).toContain("--since 168h");
+  expect(calls[1]).toContain("--until 24h");
+}, 60_000);
+
 test("with the stack off, --loki and --query fail with E_LOGGING_OFF and read nothing", async () => {
   for (const args of [
     ["--loki", "--no-follow"],
@@ -127,7 +147,7 @@ test("with the stack off, --loki and --query fail with E_LOGGING_OFF and read no
     expect(result.exitCode).toBe(1);
     expect(`${result.stdout}${result.stderr}`).toContain("E_LOGGING_OFF");
     expect(`${result.stdout}${result.stderr}`).toContain(
-      "need the global logging stack (Loki, Alloy, Grafana), which is off. Turn it on with: hack global up --logging"
+      "cannot run: the global logging stack (Loki, Alloy, Grafana) is off. Turn it on with: hack global up --logging"
     );
   }
   const json = await runLogs(["--loki", "--no-follow", "--json"]);
@@ -137,6 +157,22 @@ test("with the stack off, --loki and --query fail with E_LOGGING_OFF and read no
     ok: false,
     error: { code: "E_LOGGING_OFF" },
   });
+  expect(await composeLogsCalls()).toEqual([]);
+}, 60_000);
+
+test("with the stack off, hack open logs fails with E_LOGGING_OFF and opens nothing", async () => {
+  const text = await runHack(["open", "logs"]);
+  expect(text.exitCode).toBe(1);
+  expect(`${text.stdout}${text.stderr}`).toContain(
+    "Grafana (hack open logs) cannot run: the global logging stack (Loki, Alloy, Grafana) is off. Turn it on with: hack global up --logging"
+  );
+  const json = await runHack(["open", "logs", "--json"]);
+  expect(json.exitCode).toBe(1);
+  expect(JSON.parse(json.stdout)).toMatchObject({
+    ok: false,
+    error: { code: "E_LOGGING_OFF" },
+  });
+  // No browser opener was started, and Docker was not asked for Grafana.
   expect(await composeLogsCalls()).toEqual([]);
 }, 60_000);
 

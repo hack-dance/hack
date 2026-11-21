@@ -21,6 +21,9 @@ export const HACK_ERROR_CODES = [
   "E_GLOBAL_INFRA_DOWN",
   // The opt-in global logging stack is off (HACK-2468).
   "E_LOGGING_OFF",
+  // `hack global up`: a global container did not become ready, or stopped.
+  "E_GLOBAL_NOT_READY",
+  "E_GLOBAL_STOPPED",
   "E_CONFIG_PARSE",
   "E_CONFIG_INVALID",
   "E_PROJECT_NOT_FOUND",

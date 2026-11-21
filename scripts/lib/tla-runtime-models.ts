@@ -2151,7 +2151,7 @@ const contracts: readonly ModelContract[] = [
     // it unasked, and turning it off never removes its logs.
     name: "global-logging-optin",
     module: "LoggingOptIn",
-    states: 542,
+    states: 1014,
     invariant: "FreshNeverStartsUnasked",
     action: "Install",
     fields: [
@@ -2205,6 +2205,15 @@ const contracts: readonly ModelContract[] = [
             ],
           },
         ],
+      },
+      {
+        // A failed save of `--logging` that is not reported: the stack runs
+        // with the setting still off, and nothing told the user.
+        name: "unsaved-silent",
+        negative: true,
+        invariant: "OffMeansStopped",
+        action: "UpFlag",
+        fields: ['setting = "off"', "unsaved = FALSE", "running = TRUE"],
       },
     ],
   },

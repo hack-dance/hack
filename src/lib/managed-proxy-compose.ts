@@ -15,7 +15,10 @@ import { constants } from "node:fs";
 import { copyFile } from "node:fs/promises";
 
 import { GLOBAL_CADDY_PROJECT_NAME } from "../constants.ts";
-import { renderGlobalCaddyCompose } from "../templates.ts";
+import {
+  renderGlobalCaddyCompose,
+  renderGlobalLoggingCompose,
+} from "../templates.ts";
 import { updateGlobalConfig } from "./config.ts";
 import { readTextFile, writeTextFileIfChanged } from "./fs.ts";
 import {
@@ -49,6 +52,13 @@ export function isHackRenderedProxyCompose(text: string): boolean {
     }
   }
   return false;
+}
+
+/** Whether `text` is exactly one of the logging Compose files Hack renders. */
+export function isHackRenderedLoggingCompose(text: string): boolean {
+  return [false, true].some(
+    (startInterval) => renderGlobalLoggingCompose({ startInterval }) === text
+  );
 }
 
 /**
@@ -194,20 +204,26 @@ export type ManagedProxyComposeWrite =
   | { readonly kind: "replaced-hand-edit"; readonly backupPath: string };
 
 /**
- * Writes the rendered proxy Compose file without prompting. A hand-edited
- * existing file is copied to `<path>.bak-<UTC stamp>` first.
+ * Writes a rendered global Compose file (the proxy's, or the logging
+ * stack's) without prompting: Hack owns these files, and an engine upgrade
+ * changes their healthchecks. An existing file that is not one of Hack's
+ * renderings (edited by hand, or written by an older Hack) is copied to
+ * `<path>.bak-<UTC stamp>` first.
  */
 export async function writeManagedProxyCompose(opts: {
   readonly path: string;
   readonly content: string;
   /** Injected for tests; defaults to the current time. */
   readonly now?: Date;
+  /** Which existing text is Hack's own; defaults to the proxy template. */
+  readonly isHackRendered?: (text: string) => boolean;
 }): Promise<ManagedProxyComposeWrite> {
   const existing = await readTextFile(opts.path);
   if (existing === opts.content) {
     return { kind: "unchanged" };
   }
-  if (existing === null || isHackRenderedProxyCompose(existing)) {
+  const isHackRendered = opts.isHackRendered ?? isHackRenderedProxyCompose;
+  if (existing === null || isHackRendered(existing)) {
     await writeTextFileIfChanged(opts.path, opts.content);
     return { kind: "written" };
   }

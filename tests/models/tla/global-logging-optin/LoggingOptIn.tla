@@ -9,16 +9,21 @@
    project label, and keeps its volumes; only
    `hack global logs-reset` removes them. The user may run any command, edit
    the setting, or move the compose file aside, at any time; the whole
-   directory only after the home's first manual start. *)
+   directory only after the home's first manual start.
+   Failure assumption: any save of the setting may fail (SaveMayFail). The
+   run then follows the choice anyway, so routing is not blocked, and says
+   it was not saved; `unsaved` records that warning until a later save. *)
 EXTENDS Naturals
 CONSTANTS FilesDecideUnset,   \* unset follows the compose file (else: off)
           InstallOnlyWhenOn,  \* install writes the files only while on
           OffKeepsVolumes,    \* turning off stops, never `down -v`
-          SaveDecision        \* the first manual start saves an existing home's `on`
+          SaveDecision,       \* the first manual start saves an existing home's `on`
+          SaveMayFail,        \* a save of the setting can fail
+          ReportUnsaved       \* a failed save is reported (sets `unsaved`)
 VARIABLES setting, files, dir, running, data, existing, asked, cleared,
-          ran, last, prevData
+          ran, last, prevData, unsaved
 vars == <<setting, files, dir, running, data, existing, asked, cleared,
-          ran, last, prevData>>
+          ran, last, prevData, unsaved>>
 
 Settings == {"unset", "on", "off"}
 Actions == {"init", "install", "up", "upFlag", "set", "down", "reset", "move",
@@ -31,7 +36,7 @@ Init == /\ setting = "unset" /\ last = "init" /\ asked = FALSE
               /\ running \in BOOLEAN
            \/ /\ existing = FALSE /\ files = FALSE /\ dir = FALSE
               /\ data = FALSE /\ running = FALSE
-        /\ prevData = data
+        /\ prevData = data /\ unsaved = FALSE
 
 \* `d`: the logging directory exists.
 On(s, d) == s = "on" \/ (s = "unset" /\ FilesDecideUnset /\ d)
@@ -39,6 +44,13 @@ On(s, d) == s = "on" \/ (s = "unset" /\ FilesDecideUnset /\ d)
 \* The setting a manual install or up leaves: an existing home's `on` saved.
 Saved(s, d) ==
     IF SaveDecision /\ s = "unset" /\ FilesDecideUnset /\ d THEN "on" ELSE s
+
+\* Saving `s` as the setting: it is saved, or (SaveMayFail) the setting is
+\* left as it was and the failure is reported.
+SaveOrReport(s) ==
+    \/ setting' = s /\ unsaved' = (unsaved /\ s = setting)
+    \/ /\ SaveMayFail /\ s # setting /\ setting' = setting
+       /\ unsaved' = (unsaved \/ ReportUnsaved)
 
 \* `hack global up` with setting `s`, compose file `f` and directory `d`:
 \* start when on (writing missing files), else stop whatever runs of the
@@ -49,39 +61,43 @@ UpWith(s, f, d) ==
       ELSE /\ files' = f /\ dir' = d /\ running' = FALSE
            /\ data' = (data /\ OffKeepsVolumes)
 
+\* Each run uses the choice it made (`s`), saved or not.
 Install == /\ LET writes == On(setting, dir) \/ ~InstallOnlyWhenOn
                   s == Saved(setting, dir)
-              IN /\ setting' = s
+              IN /\ SaveOrReport(s)
                  /\ UpWith(s, files \/ writes, dir \/ writes)
            /\ last' = "install" /\ prevData' = data /\ ran' = TRUE
            /\ UNCHANGED <<existing, asked, cleared>>
 Up == /\ LET s == Saved(setting, dir)
-         IN /\ setting' = s /\ UpWith(s, files, dir)
+         IN /\ SaveOrReport(s) /\ UpWith(s, files, dir)
       /\ last' = "up" /\ prevData' = data /\ ran' = TRUE
       /\ UNCHANGED <<existing, asked, cleared>>
-\* `--logging` / `--no-logging`: save the setting, then up.
-UpFlag(v) == /\ setting' = v /\ asked' = (asked \/ v = "on")
+\* `--logging` / `--no-logging`: save the setting, then up with it.
+UpFlag(v) == /\ SaveOrReport(v) /\ asked' = (asked \/ v = "on")
              /\ UpWith(v, files, dir)
              /\ last' = "upFlag" /\ prevData' = data /\ ran' = TRUE
              /\ UNCHANGED <<existing, cleared>>
 \* `hack config set|unset --global logging.enabled`: no Docker effect.
 Set(v) == /\ setting' = v /\ asked' = (asked \/ v = "on") /\ last' = "set"
-          /\ cleared' = (v = "unset") /\ prevData' = data
+          /\ cleared' = (v = "unset") /\ prevData' = data /\ unsaved' = FALSE
           /\ UNCHANGED <<files, dir, running, data, existing, ran>>
 Down == /\ running' = FALSE /\ last' = "down" /\ prevData' = data
-        /\ UNCHANGED <<setting, files, dir, data, existing, asked, cleared, ran>>
+        /\ UNCHANGED <<setting, files, dir, data, existing, asked, cleared, ran,
+                       unsaved>>
 \* `hack global logs-reset`: the one asked-for data removal.
 Reset == /\ files /\ running' = FALSE /\ data' = FALSE /\ last' = "reset"
          /\ prevData' = data
-         /\ UNCHANGED <<setting, files, dir, existing, asked, cleared, ran>>
+         /\ UNCHANGED <<setting, files, dir, existing, asked, cleared, ran,
+                        unsaved>>
 \* The compose file moved aside by hand (the directory stays).
 MoveFiles == /\ files /\ files' = FALSE /\ last' = "move" /\ prevData' = data
              /\ UNCHANGED <<setting, dir, running, data, existing, asked, cleared,
-                            ran>>
+                            ran, unsaved>>
 \* The whole logging directory moved aside, after the first manual start.
 MoveDir == /\ ran /\ dir /\ files' = FALSE /\ dir' = FALSE /\ last' = "moveDir"
            /\ prevData' = data
-           /\ UNCHANGED <<setting, running, data, existing, asked, cleared, ran>>
+           /\ UNCHANGED <<setting, running, data, existing, asked, cleared, ran,
+                          unsaved>>
 
 Next == \/ Install \/ Up \/ Down \/ Reset \/ MoveFiles \/ MoveDir
         \/ \E v \in {"on", "off"} : UpFlag(v)
@@ -93,20 +109,26 @@ TypeOK == /\ setting \in Settings /\ last \in Actions
           /\ files \in BOOLEAN /\ dir \in BOOLEAN /\ running \in BOOLEAN
           /\ data \in BOOLEAN /\ existing \in BOOLEAN /\ asked \in BOOLEAN
           /\ cleared \in BOOLEAN /\ ran \in BOOLEAN /\ prevData \in BOOLEAN
+          /\ unsaved \in BOOLEAN
 
 \* A new home never runs the stack unless someone turned it on.
 FreshNeverStartsUnasked == running => (existing \/ asked)
 \* After a start, an existing home keeps the stack unless someone turned it
-\* off or cleared the setting, even with its files moved aside.
+\* off or cleared the setting, even with its files moved aside; or Hack said
+\* its choice was not saved (then the directory still decides).
 ExistingHomeKept ==
-    (existing /\ ~cleared /\ setting \in {"unset", "on"}
+    (existing /\ ~cleared /\ ~unsaved /\ setting \in {"unset", "on"}
        /\ last \in {"install", "up"}) => running
-\* After a start with logging off, its containers are stopped.
+\* After a start with logging off, its containers are stopped, unless Hack
+\* said this run's choice (`--logging`) was not saved.
 OffMeansStopped ==
-    (setting = "off" /\ last \in {"install", "up", "upFlag"}) => ~running
-\* After any start, a running stack is one the setting says is on.
+    (setting = "off" /\ ~unsaved /\ last \in {"install", "up", "upFlag"})
+        => ~running
+\* After any start, a running stack is one the setting says is on, unless
+\* Hack said this run's choice was not saved.
 NoOrphanedStack ==
-    (last \in {"install", "up", "upFlag"} /\ running) => On(setting, dir)
+    (last \in {"install", "up", "upFlag"} /\ running)
+        => (On(setting, dir) \/ unsaved)
 \* Logs disappear only in a step the user asked to remove them (logs-reset).
 \* `prevData` is `data` before the last step, so this is a step property.
 NoSurpriseDataLoss == (prevData /\ ~data) => last = "reset"

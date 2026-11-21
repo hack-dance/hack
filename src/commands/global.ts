@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { note, spinner } from "@clack/prompts";
 import {
@@ -67,7 +68,7 @@ import {
   inspectCaddyCaIdentity,
 } from "../lib/caddy-ca-identity.ts";
 import { observeGlobalCaddyIp } from "../lib/caddy-hosts.ts";
-import { emitCliResult, errorResult } from "../lib/cli-result.ts";
+import { emitCliResult, errorResult, HackCliError } from "../lib/cli-result.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import {
   resolveGlobalConfigPath,
@@ -106,8 +107,9 @@ import {
 } from "../lib/global-logging.ts";
 import { describeProxyNetworkIssue } from "../lib/global-proxy-network.ts";
 import {
-  probeAddress,
-  ROUTE_PROBE_NAME,
+  classifyCurl,
+  classifyNslookup,
+  routeProbeAddress,
   waitForRoutes,
 } from "../lib/global-route-probe.ts";
 import {
@@ -136,6 +138,8 @@ import {
 import { inspectMacCaEligibility } from "../lib/mac-ca-trust.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import {
+  isHackRenderedLoggingCompose,
+  readProxyBindScope,
   removeUnstartedProxyContainers,
   resolveManagedProxyBind,
   writeManagedProxyCompose,
@@ -175,8 +179,10 @@ import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
 import {
   defaultIngressAddressDeps,
   resolveIngressAddresses,
+  selectedDockerEngine,
   withIngressChange,
 } from "../lib/proxy-ingress-addresses.ts";
+import { proxyConnectAddress } from "../lib/proxy-loopback.ts";
 import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
 import { stopRemoteCaddyRoutesStack } from "../lib/remote-caddy-routes.ts";
 import {
@@ -569,12 +575,20 @@ export const globalCommand = defineCommand({
         return 1;
       }
       if (choice !== null) {
-        await updateGlobalConfig({
-          path: LOGGING_ENABLED_CONFIG_KEY,
-          value: choice,
-        });
+        try {
+          await updateGlobalConfig({
+            path: LOGGING_ENABLED_CONFIG_KEY,
+            value: choice,
+          });
+        } catch (error) {
+          // Not saved: this run still follows the flag, and routing starts.
+          logger.warn({
+            message: `${LOGGING_ENABLED_CONFIG_KEY}=${choice} was not saved: ${error instanceof Error ? error.message : String(error)}. This run uses it; later runs follow the saved setting.`,
+          });
+          return await globalUpCommand({ loggingOverride: choice });
+        }
       }
-      return await globalUp();
+      return await globalUpCommand({});
     }),
     withHandler(globalDownSpec, async () => await globalDown()),
     withHandler(globalStatusSpec, handleGlobalStatus),
@@ -1136,6 +1150,9 @@ async function globalInstall(): Promise<number> {
   });
   logger.success({ message: "Global files ready in ~/.hack/" });
   const up = await runGlobalUp();
+  if (up.error) {
+    logger.error({ message: `${up.error.code}: ${up.error.message}` });
+  }
   if (up.failedStage === "routing") {
     // Host DNS and trust steps would point at a proxy that is not running;
     // stop before them and before the success next steps (HACK-2328).
@@ -1434,7 +1451,7 @@ async function writeGlobalInstallAssets(opts: {
   if (bind.keep !== undefined) {
     logger.warn({ message: `Proxy file not updated: ${bind.keep}` });
   } else {
-    await writeGlobalProxyCompose({
+    await writeGlobalManagedCompose({
       path: opts.paths.caddyCompose,
       content: renderGlobalCaddyCompose({
         useStaticCoreDnsIp: opts.useStaticIps,
@@ -1481,9 +1498,11 @@ async function writeGlobalInstallAssets(opts: {
 }
 
 /**
- * The logging stack's files. Its compose file is also what marks a home that
- * had the stack before it became opt-in (see `resolveGlobalLogging`), so it
- * is written only when logging is on.
+ * The logging stack's files, written only when logging is on. Its compose
+ * file is Hack's, like the proxy's: replaced without a prompt (an engine
+ * upgrade changes its healthchecks), with a backup when it was not Hack's
+ * rendering. The configs beside it (Loki, Alloy, Grafana) are ones users
+ * customise, so they still ask before an overwrite.
  */
 async function writeGlobalLoggingAssets(opts: {
   readonly paths: ReturnType<typeof getGlobalPaths>;
@@ -1491,10 +1510,11 @@ async function writeGlobalLoggingAssets(opts: {
   readonly startInterval: boolean;
 }): Promise<void> {
   const { paths, templates } = opts;
-  await writeWithPromptIfDifferent(
-    paths.loggingCompose,
-    renderGlobalLoggingCompose({ startInterval: opts.startInterval })
-  );
+  await writeGlobalManagedCompose({
+    path: paths.loggingCompose,
+    content: renderGlobalLoggingCompose({ startInterval: opts.startInterval }),
+    isHackRendered: isHackRenderedLoggingCompose,
+  });
   await writeWithPromptIfDifferent(
     paths.alloyConfig,
     renderGlobalAlloyConfig()
@@ -1563,6 +1583,49 @@ async function bootstrapMacGlobalInstall(): Promise<void> {
   await maybeOfferMacRecoverySetup();
 }
 
+/**
+ * `logs-reset` with logging off and no logging files: the stack's volumes
+ * can still exist (its files were deleted, or the stack ran before they
+ * were). Compose labels volumes with the project only, not the home, so
+ * Hack cannot tell this home's from another's on the same engine: it lists
+ * them with the command to remove them, and deletes nothing. Exit 1 when
+ * any remain or Docker could not be asked, since nothing was reset.
+ */
+async function reportLeftoverLoggingVolumes(): Promise<number> {
+  const found = await exec(
+    [
+      "docker",
+      "volume",
+      "ls",
+      "-q",
+      "--filter",
+      `label=com.docker.compose.project=${GLOBAL_LOGGING_PROJECT_NAME}`,
+    ],
+    { stdin: "ignore", timeoutMs: 10_000 }
+  ).catch(() => null);
+  if (!found || found.exitCode !== 0) {
+    logger.error({
+      message: `Could not ask Docker for the logging stack's volumes${found?.stderr.trim() ? `: ${found.stderr.trim().split("\n")[0]}` : "."} Nothing was reset.`,
+    });
+    return 1;
+  }
+  const volumes = found.stdout.split(WHITESPACE).filter(Boolean);
+  if (volumes.length === 0) {
+    logger.info({
+      message: `The logging stack (Loki, Alloy, Grafana) is off, with no files or volumes here, so there are no logs to reset. Turn it on with: ${LOGGING_ENABLE_COMMAND}`,
+    });
+    return 0;
+  }
+  logger.error({
+    message: [
+      `The logging stack is off and its files are gone, but Docker still has ${volumes.length} of its volume${volumes.length === 1 ? "" : "s"}: ${volumes.join(", ")}.`,
+      "Hack cannot tell which Hack home made them, so it did not delete them. If they are this home's, remove them with:",
+      `  docker volume rm ${volumes.join(" ")}`,
+    ].join("\n"),
+  });
+  return 1;
+}
+
 async function globalLogsReset(): Promise<number> {
   const slimExit = failIfSlimMode({
     feature: "hack global logs-reset",
@@ -1580,10 +1643,7 @@ async function globalLogsReset(): Promise<number> {
       loggingCompose: paths.loggingCompose,
     }).catch(() => null);
     if (logging && !logging.enabled) {
-      logger.info({
-        message: `The logging stack (Loki, Alloy, Grafana) is off and has no files here, so there are no logs to reset. Turn it on with: ${LOGGING_ENABLE_COMMAND}`,
-      });
-      return 0;
+      return await reportLeftoverLoggingVolumes();
     }
     logger.error({
       message: `Missing ${paths.loggingCompose}. Run: hack global install`,
@@ -2058,9 +2118,10 @@ export async function maybeOfferMacHackdLaunchdInstall(): Promise<void> {
  * The proxy Compose file is rendered from settings, so it is replaced without
  * a prompt (HACK-2328); see {@link writeManagedProxyCompose}.
  */
-async function writeGlobalProxyCompose(opts: {
+async function writeGlobalManagedCompose(opts: {
   readonly path: string;
   readonly content: string;
+  readonly isHackRendered?: (text: string) => boolean;
 }): Promise<void> {
   const result = await writeManagedProxyCompose(opts);
   if (result.kind === "replaced-hand-edit") {
@@ -2156,8 +2217,8 @@ async function reportProxyStartFailure(opts: {
  * doctor` and the stack's own symptoms report it.
  */
 /** Stable codes for a global stack that did not become ready, or stopped. */
-const GLOBAL_NOT_READY_CODE = "E_GLOBAL_NOT_READY";
-const GLOBAL_STOPPED_CODE = "E_GLOBAL_STOPPED";
+const GLOBAL_NOT_READY_CODE = "E_GLOBAL_NOT_READY" as const;
+const GLOBAL_STOPPED_CODE = "E_GLOBAL_STOPPED" as const;
 
 const ROUTING_READY_TIMEOUT_MS = 30_000;
 const LOGGING_READY_TIMEOUT_MS = 120_000;
@@ -2183,7 +2244,7 @@ async function globalStackNotReady(opts: {
   readonly login: boolean;
   readonly timeoutMs: number;
   readonly legacyWatchMs: number;
-}): Promise<boolean> {
+}): Promise<HackCliError | null> {
   const notReady = await waitForStartedContainers({
     timeoutMs: opts.timeoutMs,
     withoutHealthchecksMs: opts.legacyWatchMs,
@@ -2207,18 +2268,18 @@ async function globalStackNotReady(opts: {
     },
   });
   if (notReady === null) {
-    return false;
+    return null;
   }
   if (notReady.reason !== "stopped") {
-    logger.error({
-      message: `${GLOBAL_NOT_READY_CODE}: ${describeContainersNotHealthy({
+    return new HackCliError({
+      code: GLOBAL_NOT_READY_CODE,
+      message: describeContainersNotHealthy({
         stack: opts.stack,
         reason: notReady.reason,
         timeoutMs: opts.timeoutMs,
         containers: notReady.containers,
-      })}`,
+      }),
     });
-    return true;
   }
   // The usual cause on Linux: a config the container's user cannot read.
   // Named by mode alone; nothing is read or changed here.
@@ -2235,85 +2296,104 @@ async function globalStackNotReady(opts: {
           { path: paths.grafanaDashboard, kind: "file" },
         ]
   );
-  logger.error({
+  return new HackCliError({
+    code: GLOBAL_STOPPED_CODE,
     message: [
-      `${GLOBAL_STOPPED_CODE}: ${describeContainersNotRunning({
+      describeContainersNotRunning({
         stack: opts.stack,
         containers: notReady.containers,
-      })}`,
+      }),
       ...(unreadable.length > 0
         ? [describeUnreadableContainerPaths(unreadable)]
         : []),
     ].join("\n"),
   });
-  return true;
 }
 
-/** A three-digit HTTP status from `curl -w %{http_code}` (000 means none). */
-const HTTP_STATUS = /^[1-5]\d\d$/;
 const WHITESPACE = /\s+/;
 
 /** The most `hack global up` waits for DNS and HTTPS through the proxy. */
 const ROUTES_READY_TIMEOUT_MS = 15_000;
 
 /**
- * After the proxy's containers are ready: waits until a `.hack` name
- * resolves through CoreDNS and an HTTPS request reaches Caddy through its
- * published port (see src/lib/global-route-probe.ts), with progress output.
- * Returns whether routing failed to become ready.
+ * After the proxy's containers are ready: waits, bounded and with progress,
+ * until a `.hack` name resolves through CoreDNS and an HTTPS request answers
+ * through the published port (see src/lib/global-route-probe.ts). A step
+ * Hack cannot check is reported and does not fail `global up`; only a real
+ * refusal or a wrong answer does; that is returned as a coded error.
  */
 async function globalRoutesNotReady(opts: {
   readonly paths: ReturnType<typeof getGlobalPaths>;
   readonly login: boolean;
-}): Promise<boolean> {
+}): Promise<HackCliError | null> {
   const { paths, login } = opts;
-  const address = probeAddress(
-    readProxyBindFromCompose((await readTextFile(paths.caddyCompose)) ?? "")
+  const scope = readProxyBindScope(
+    (await readTextFile(paths.caddyCompose)) ?? ""
   );
+  const address = routeProbeAddress({
+    engine: `host:${await dockerEngineEndpoint()}`,
+    localAddress: proxyConnectAddress(scope),
+    publishesAllInterfaces:
+      scope.kind === "all" ||
+      (scope.kind === "address" &&
+        (scope.address === "0.0.0.0" || scope.address === "::")),
+  });
   const curl = findExecutableInPath("curl");
   const result = await waitForRoutes(
     {
-      resolveName: async (name) =>
-        (
-          await exec(
-            [
-              "docker",
-              "compose",
-              ...(login ? ["--env-file", "/dev/null"] : []),
-              "-f",
-              paths.caddyCompose,
-              "exec",
-              "-T",
-              "caddy",
-              "nslookup",
-              name,
-              "coredns",
-            ],
-            { stdin: "ignore", timeoutMs: 3000 }
-          )
-        ).exitCode === 0,
-      requestHttps: curl
-        ? async (name) => {
-            const response = await exec(
-              [
-                curl,
-                "-sk",
-                "--max-time",
-                "2",
-                "--resolve",
-                `${name}:443:${address.includes(":") ? `[${address}]` : address}`,
-                "-o",
-                "/dev/null",
-                "-w",
-                "%{http_code}",
-                `https://${name}/`,
-              ],
-              { stdin: "ignore", timeoutMs: 4000 }
-            );
-            const status = response.stdout.trim();
-            return response.exitCode === 0 && HTTP_STATUS.test(status);
-          }
-        : null,
+      resolveName: async (name) => {
+        const answer = await exec(
+          [
+            "docker",
+            "compose",
+            ...(login ? ["--env-file", "/dev/null"] : []),
+            "-f",
+            paths.caddyCompose,
+            "exec",
+            "-T",
+            "caddy",
+            "nslookup",
+            name,
+            "coredns",
+          ],
+          { stdin: "ignore", timeoutMs: 3000 }
+        );
+        return classifyNslookup({
+          exitCode: answer.exitCode,
+          output: `${answer.stdout}\n${answer.stderr}`,
+        });
+      },
+      requestHttps:
+        curl && address
+          ? async (name) => {
+              const response = await exec(
+                [
+                  curl,
+                  "-sk",
+                  "--noproxy",
+                  "*",
+                  "--max-time",
+                  "2",
+                  "--resolve",
+                  `${name}:443:${address}`,
+                  "-o",
+                  "/dev/null",
+                  "-w",
+                  "%{http_code}",
+                  `https://${name}/`,
+                ],
+                { stdin: "ignore", timeoutMs: 4000 }
+              );
+              return classifyCurl({
+                exitCode: response.exitCode,
+                status: response.stdout,
+                address,
+              });
+            }
+          : null,
+      httpsSkipped: curl
+        ? "the Docker engine is not local and its address is not known here, so HTTPS through the proxy was not checked"
+        : "curl is not on PATH, so HTTPS through the proxy was not checked",
       progress: login
         ? undefined
         : ({ waitingFor, elapsedMs }) =>
@@ -2323,27 +2403,59 @@ async function globalRoutesNotReady(opts: {
     },
     { timeoutMs: ROUTES_READY_TIMEOUT_MS }
   );
-  if (result.ready) {
-    if (result.skipped.includes("https") && !login) {
-      logger.info({
-        message:
-          "curl is not on PATH, so only DNS through the proxy was checked, not HTTPS.",
-      });
-    }
-    return false;
-  }
-  const failed = result.waitingFor.map((step) =>
-    step === "dns"
-      ? `a .hack name (${ROUTE_PROBE_NAME}) did not resolve through CoreDNS`
-      : `an HTTPS request for ${ROUTE_PROBE_NAME} through port 443 on ${address} got no answer`
+  const notReady = (["dns", "https"] as const).filter(
+    (step) => result[step].state === "not-ready"
   );
-  logger.error({
+  for (const step of ["dns", "https"] as const) {
+    const outcome = result[step];
+    if (outcome.state === "unknown" && !login) {
+      logger.info({ message: `Not checked: ${outcome.detail}.` });
+    }
+  }
+  if (notReady.length === 0) {
+    return null;
+  }
+  return new HackCliError({
+    code: GLOBAL_NOT_READY_CODE,
     message: [
-      `${GLOBAL_NOT_READY_CODE}: The global proxy's containers are running, but within ${Math.round(ROUTES_READY_TIMEOUT_MS / 1000)} s ${failed.join(", and ")}.`,
+      `The global proxy's containers are running, but within ${Math.round(ROUTES_READY_TIMEOUT_MS / 1000)} s ${notReady
+        .map((step) => {
+          const outcome = result[step];
+          return outcome.state === "not-ready" ? outcome.detail : "";
+        })
+        .join(", and ")}.`,
       "See why: docker logs --tail 50 hack-dev-proxy-caddy-1; docker logs --tail 50 hack-dev-proxy-coredns-1; hack doctor",
     ].join("\n"),
   });
-  return true;
+}
+
+/**
+ * The endpoint `docker` talks to, without starting anything: `DOCKER_HOST`,
+ * else the selected context's endpoint (one `docker context inspect`), else
+ * the default local socket.
+ */
+async function dockerEngineEndpoint(): Promise<string> {
+  const engine = await selectedDockerEngine(process.env);
+  if (engine.startsWith("host:")) {
+    return engine.slice("host:".length);
+  }
+  const context = engine.slice("context:".length);
+  if (context === "default") {
+    return "unix://default";
+  }
+  const inspect = await exec(
+    [
+      "docker",
+      "context",
+      "inspect",
+      context,
+      "--format",
+      "{{.Endpoints.docker.Host}}",
+    ],
+    { stdin: "ignore", timeoutMs: 3000 }
+  ).catch(() => null);
+  const endpoint = inspect?.exitCode === 0 ? inspect.stdout.trim() : "";
+  return endpoint === "" ? "unknown://" : endpoint;
 }
 
 /** Which part of `hack global up` failed, for install's decision (HACK-2328). */
@@ -2351,10 +2463,28 @@ type GlobalUpResult = {
   readonly exit: number;
   /** `routing`: proxy/CoreDNS (or a prerequisite); `logging`: only the logging stack. */
   readonly failedStage: "routing" | "logging" | null;
+  /** A coded readiness failure (E_GLOBAL_NOT_READY / E_GLOBAL_STOPPED). */
+  readonly error?: HackCliError;
 };
 
+/** For callers that continue on failure: prints a coded failure, returns the code. */
 export async function globalUp(): Promise<number> {
-  return (await runGlobalUp()).exit;
+  const result = await runGlobalUp();
+  if (result.error) {
+    logger.error({
+      message: `${result.error.code}: ${result.error.message}`,
+    });
+  }
+  return result.exit;
+}
+
+/** `hack global up`: a coded failure is thrown, for its text line or JSON envelope. */
+async function globalUpCommand(opts: UpOptions): Promise<number> {
+  const result = await runGlobalUp(opts);
+  if (result.error) {
+    throw result.error;
+  }
+  return result.exit;
 }
 
 /**
@@ -2362,16 +2492,81 @@ export async function globalUp(): Promise<number> {
  * withIngressChange), then, once routing is up, one read that records the
  * proxy and DNS addresses under the settled token for later `hack run`s.
  */
-async function runGlobalUp(): Promise<GlobalUpResult> {
+type UpOptions = {
+  /** A `--logging`/`--no-logging` choice that could not be saved. */
+  readonly loggingOverride?: boolean;
+};
+
+async function runGlobalUp(opts: UpOptions = {}): Promise<GlobalUpResult> {
   const root = resolveGlobalHackDir();
-  const result = await withIngressChange(root, runGlobalUpChange);
+  const result = await withIngressChange(root, () => runGlobalUpChange(opts));
   if (result.exit === 0 || result.failedStage === "logging") {
     await resolveIngressAddresses(defaultIngressAddressDeps(root), "fresh");
   }
   return result;
 }
 
-async function runGlobalUpChange(): Promise<GlobalUpResult> {
+/**
+ * The logging setting this run uses: an unsaved flag choice as given;
+ * login only reads the setting; a manual start also saves an existing
+ * home's choice.
+ */
+async function upLoggingChoice(opts: {
+  readonly opts: UpOptions;
+  readonly paths: ReturnType<typeof getGlobalPaths>;
+  readonly login: boolean;
+}): Promise<{ readonly enabled: boolean }> {
+  if (opts.opts.loggingOverride !== undefined) {
+    return { enabled: opts.opts.loggingOverride };
+  }
+  if (opts.login) {
+    return await resolveGlobalLogging({
+      loggingCompose: opts.paths.loggingCompose,
+    });
+  }
+  return await settleGlobalLoggingSetting({ paths: opts.paths });
+}
+
+/**
+ * Moves other containers off the proxy's reserved ingress IPs before it
+ * starts. False when some still hold them (reported).
+ */
+async function clearReservedIngressIps(opts: {
+  readonly composePath: string;
+}): Promise<boolean> {
+  const reservedIps = await resolveReservedIngressIps(opts);
+  if (reservedIps.length === 0) {
+    return true;
+  }
+  const blockersOf = (conflicts: readonly IngressIpConflict[]) =>
+    conflicts.filter(
+      (conflict) => !isGlobalProxyContainer({ name: conflict.containerName })
+    );
+  const blockers = blockersOf(await findIngressIpConflicts({ reservedIps }));
+  if (blockers.length === 0) {
+    return true;
+  }
+  logger.warn({
+    message: [
+      `Reserved ingress IPs are currently occupied on ${DEFAULT_INGRESS_NETWORK}.`,
+      "Attempting to reassign conflicting containers and retry global startup…",
+    ].join("\n"),
+  });
+  await reassignIngressIpConflicts({ conflicts: blockers, reservedIps });
+  const remaining = blockersOf(await findIngressIpConflicts({ reservedIps }));
+  if (remaining.length > 0) {
+    logger.error({
+      message: renderIngressConflictMessage({ conflicts: remaining }),
+    });
+    return false;
+  }
+  logger.success({
+    message: "Recovered reserved ingress IP conflicts; continuing startup.",
+  });
+  return true;
+}
+
+async function runGlobalUpChange(opts: UpOptions): Promise<GlobalUpResult> {
   const slimExit = failIfSlimMode({
     feature: "hack global up",
   });
@@ -2382,11 +2577,7 @@ async function runGlobalUpChange(): Promise<GlobalUpResult> {
   const paths = getGlobalPaths();
   const login = process.env.HACK_AUTOSTART_LOGIN === "1";
   await secureGlobalLoginRouting({ root: paths.root, login });
-  // Login only reads the setting; a manual start also saves an existing
-  // home's choice.
-  const logging = login
-    ? await resolveGlobalLogging({ loggingCompose: paths.loggingCompose })
-    : await settleGlobalLoggingSetting({ paths });
+  const logging = await upLoggingChoice({ opts, paths, login });
 
   await ensureDockerRunning({ login });
   await assertGlobalLoginRoutingImages({
@@ -2414,45 +2605,8 @@ async function runGlobalUpChange(): Promise<GlobalUpResult> {
     return { exit: proxyRepairExit, failedStage: "routing" };
   }
 
-  const reservedIps = await resolveReservedIngressIps({
-    composePath: paths.caddyCompose,
-  });
-  if (reservedIps.length > 0) {
-    const conflicts = await findIngressIpConflicts({ reservedIps });
-    let blockers = conflicts.filter(
-      (conflict) => !isGlobalProxyContainer({ name: conflict.containerName })
-    );
-    if (blockers.length > 0) {
-      logger.warn({
-        message: [
-          `Reserved ingress IPs are currently occupied on ${DEFAULT_INGRESS_NETWORK}.`,
-          "Attempting to reassign conflicting containers and retry global startup…",
-        ].join("\n"),
-      });
-
-      await reassignIngressIpConflicts({
-        conflicts: blockers,
-        reservedIps,
-      });
-
-      const remainingConflicts = await findIngressIpConflicts({
-        reservedIps,
-      });
-      blockers = remainingConflicts.filter(
-        (conflict) => !isGlobalProxyContainer({ name: conflict.containerName })
-      );
-
-      if (blockers.length > 0) {
-        logger.error({
-          message: renderIngressConflictMessage({ conflicts: blockers }),
-        });
-        return { exit: 1, failedStage: "routing" };
-      }
-
-      logger.success({
-        message: "Recovered reserved ingress IP conflicts; continuing startup.",
-      });
-    }
+  if (!(await clearReservedIngressIps({ composePath: paths.caddyCompose }))) {
+    return { exit: 1, failedStage: "routing" };
   }
 
   await ensureHackdForGlobalUp();
@@ -2481,28 +2635,26 @@ async function runGlobalUpChange(): Promise<GlobalUpResult> {
     });
     return { exit: 1, failedStage: "routing" };
   }
-  const stoppedRouting = await globalStackNotReady({
-    composeFile: paths.caddyCompose,
-    stack: "The global proxy (Caddy and CoreDNS)",
-    login,
-    timeoutMs: ROUTING_READY_TIMEOUT_MS,
-    legacyWatchMs: ROUTING_LEGACY_WATCH_MS,
-  });
-  if (stoppedRouting) {
-    return { exit: 1, failedStage: "routing" };
-  }
-  if (await globalRoutesNotReady({ paths, login })) {
-    return { exit: 1, failedStage: "routing" };
+  const routingError =
+    (await globalStackNotReady({
+      composeFile: paths.caddyCompose,
+      stack: "The global proxy (Caddy and CoreDNS)",
+      login,
+      timeoutMs: ROUTING_READY_TIMEOUT_MS,
+      legacyWatchMs: ROUTING_LEGACY_WATCH_MS,
+    })) ?? (await globalRoutesNotReady({ paths, login }));
+  if (routingError) {
+    return { exit: 1, failedStage: "routing", error: routingError };
   }
   await reconcileGlobalRoutingBridge({ enabled: !login });
 
-  const loggingExit = await settleGlobalLogging({
+  const loggingResult = await settleGlobalLogging({
     paths,
     login,
     enabled: logging.enabled,
   });
-  if (loggingExit !== 0) {
-    return { exit: loggingExit, failedStage: "logging" };
+  if (loggingResult.exit !== 0) {
+    return { ...loggingResult, failedStage: "logging" };
   }
   logger.success({ message: "Global infra is up" });
   return { exit: 0, failedStage: null };
@@ -2517,33 +2669,33 @@ async function settleGlobalLogging(opts: {
   readonly paths: ReturnType<typeof getGlobalPaths>;
   readonly login: boolean;
   readonly enabled: boolean;
-}): Promise<number> {
+}): Promise<{ readonly exit: number; readonly error?: HackCliError }> {
   const { paths, login } = opts;
   if (!opts.enabled) {
-    return await stopDisabledLoggingStack({ paths, login });
+    return { exit: await stopDisabledLoggingStack({ paths, login }) };
   }
   const loggingArguments = globalLoggingUpArguments({
     composeFile: paths.loggingCompose,
     login,
   });
   if (!loggingArguments) {
-    return 0;
+    return { exit: 0 };
   }
   logger.step({ message: "Starting logging stack…" });
   const logExit = await run(loggingArguments, {
     cwd: dirname(paths.loggingCompose),
   });
   if (logExit !== 0) {
-    return logExit;
+    return { exit: logExit };
   }
-  const notReady = await globalStackNotReady({
+  const error = await globalStackNotReady({
     composeFile: paths.loggingCompose,
     stack: "The logging stack (Grafana, Loki, Alloy)",
     login,
     timeoutMs: LOGGING_READY_TIMEOUT_MS,
     legacyWatchMs: LOGGING_LEGACY_WATCH_MS,
   });
-  return notReady ? 1 : 0;
+  return error ? { exit: 1, error } : { exit: 0 };
 }
 
 /** {@link resolveAndSaveGlobalLogging} for this home, saying when it saved. */
@@ -2558,6 +2710,10 @@ async function settleGlobalLoggingSetting(opts: {
   if (logging.saved) {
     logger.info({
       message: `This home already ran the logging stack, so it stays on: saved ${LOGGING_ENABLED_CONFIG_KEY}=true. Turn it off with: hack global up --no-logging`,
+    });
+  } else if (logging.saveError !== undefined) {
+    logger.warn({
+      message: `This home already ran the logging stack, so it stays on for this run, but ${LOGGING_ENABLED_CONFIG_KEY}=true was not saved: ${logging.saveError}. Hack decides again from the home's files next time; save it with: hack config set --global ${LOGGING_ENABLED_CONFIG_KEY} true`,
     });
   }
   return logging;
@@ -2574,22 +2730,10 @@ async function stopDisabledLoggingStack(opts: {
   readonly login: boolean;
 }): Promise<number> {
   if (!opts.login) {
-    // Found by their Compose project label, so containers are stopped even
-    // when the compose file or the whole logging directory is gone.
-    const found = await exec(
-      [
-        "docker",
-        "ps",
-        "-q",
-        "--filter",
-        `label=com.docker.compose.project=${GLOBAL_LOGGING_PROJECT_NAME}`,
-      ],
-      { stdin: "ignore" }
-    );
     const ids =
-      found.exitCode === 0
-        ? found.stdout.split(WHITESPACE).filter(Boolean)
-        : [];
+      (await thisHomeLoggingContainers({
+        loggingDir: dirname(opts.paths.loggingCompose),
+      })) ?? [];
     const stop =
       ids.length > 0
         ? await exec(["docker", "stop", ...ids], { stdin: "ignore" })
@@ -3340,7 +3484,44 @@ type ComposeServiceStatus = {
   readonly ports: string;
 };
 
-/** Status of the logging stack while it is off: not running, as asked. */
+/**
+ * The running containers of this home's logging stack: Compose project
+ * `hack-logging` whose recorded working directory is this home's logging
+ * directory (as written, or with symlinks resolved), so another Hack home on
+ * the same engine is never touched. Null when Docker could not be asked.
+ * Found by labels, so they are found even when the compose file is gone.
+ */
+async function thisHomeLoggingContainers(opts: {
+  readonly loggingDir: string;
+  readonly timeoutMs?: number;
+}): Promise<string[] | null> {
+  const found = await exec(
+    [
+      "docker",
+      "ps",
+      "--filter",
+      `label=com.docker.compose.project=${GLOBAL_LOGGING_PROJECT_NAME}`,
+      "--format",
+      '{{.ID}}\t{{.Label "com.docker.compose.project.working_dir"}}',
+    ],
+    { stdin: "ignore", timeoutMs: opts.timeoutMs }
+  ).catch(() => null);
+  if (!found || found.exitCode !== 0) {
+    return null;
+  }
+  const dirs = new Set([
+    opts.loggingDir,
+    await realpath(opts.loggingDir).catch(() => opts.loggingDir),
+  ]);
+  return found.stdout
+    .split("\n")
+    .map((line) => line.split("\t"))
+    .filter(
+      ([id, dir]) => Boolean(id) && dir !== undefined && dirs.has(dir.trim())
+    )
+    .map(([id]) => (id ?? "").trim());
+}
+
 /**
  * Status of the logging stack while it is off. Docker is still asked: after
  * `hack config set --global logging.enabled false` and before the next
@@ -3354,17 +3535,11 @@ async function loggingOffStatus(opts?: {
   readonly error: string | null;
   readonly services: readonly [];
 }> {
-  const found = await exec(
-    [
-      "docker",
-      "ps",
-      "-q",
-      "--filter",
-      `label=com.docker.compose.project=${GLOBAL_LOGGING_PROJECT_NAME}`,
-    ],
-    { stdin: "ignore", timeoutMs: opts?.timeoutMs }
-  ).catch(() => null);
-  if (!found || found.exitCode !== 0) {
+  const ids = await thisHomeLoggingContainers({
+    loggingDir: dirname(getGlobalPaths().loggingCompose),
+    timeoutMs: opts?.timeoutMs,
+  });
+  if (ids === null) {
     return {
       ok: "unknown",
       enabled: false,
@@ -3372,13 +3547,13 @@ async function loggingOffStatus(opts?: {
       services: [],
     };
   }
-  const running = found.stdout.split(WHITESPACE).filter(Boolean).length;
+  const running = ids.length;
   return running === 0
     ? { ok: true, enabled: false, error: null, services: [] }
     : {
         ok: false,
         enabled: false,
-        error: `Logging is off, but ${running} of its container${running === 1 ? " is" : "s are"} still running. Stop ${running === 1 ? "it" : "them"} with: hack global up`,
+        error: `Logging is off, but ${running} logging container${running === 1 ? " is" : "s are"} still running. Stop ${running === 1 ? "it" : "them"} with: hack global up`,
         services: [],
       };
 }

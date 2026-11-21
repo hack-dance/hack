@@ -1739,11 +1739,15 @@ logging stack (Loki, Alloy, Grafana): `src/lib/global-logging.ts` and
 `logging.enabled` decides when set; unset is on only for a home that has the
 stack's directory (`~/.hack/logging/`), which every install before opt-in
 wrote, and the first manual install or up in such a home saves `on`.
+Any save may fail (`SaveMayFail`): the run then uses its choice anyway, so
+routing is not blocked, and warns that it was not saved; `unsaved` records
+that warning until a later save.
 
 | Model operation | Source boundary |
 | --- | --- |
 | `On` | `resolveGlobalLogging`: the config value, else whether `logging/` exists. |
 | `Saved` | `resolveAndSaveGlobalLogging` (via `settleGlobalLoggingSetting`): an existing home's first manual install or up writes `logging.enabled: true`; login only reads. |
+| `SaveOrReport` | The same save, and the `--logging`/`--no-logging` save in the `global up` handler: a failure keeps the setting, warns "was not saved", and the run follows the choice (`saveError`, `loggingOverride`). |
 | `Install` | `globalInstall`: `materializeGlobalInstallFiles` writes the logging files only when on, then `runGlobalUp`. |
 | `Up` / `UpWith` | `runGlobalUp`: on writes missing files (`materializeGlobalLoggingFiles`) and starts the stack; off stops its containers found by their Compose project label (`stopDisabledLoggingStack`), with or without its files. |
 | `UpFlag` | `hack global up --logging` / `--no-logging`: saves `logging.enabled`, then `runGlobalUp`. |
@@ -1755,15 +1759,17 @@ Invariants:
 - `FreshNeverStartsUnasked`: a new home runs the stack only after someone turned it on.
 - `ExistingHomeKept`: after a start, a home that had the stack still has it unless someone turned it off or cleared the setting, even with its files moved aside.
 - `OffMeansStopped` and `NoOrphanedStack`: after any start, a running stack is one the setting says is on.
+- These three hold unless Hack warned that this home's choice was not saved (`unsaved`): then the run followed a choice the setting does not hold yet.
 - `NoSurpriseDataLoss`: logs disappear only in a `logs-reset` step. `prevData` is `data` before the step, so this step property is an invariant.
 
-Bounds: one home that is either from before opt-in (directory, compose file, logs, running or not) or new; every command, setting change and move, in any order. The positive configuration exhausts 542 distinct states at depth 7.
+Bounds: one home that is either from before opt-in (directory, compose file, logs, running or not) or new; every command, setting change and move, in any order. Every save may fail. The positive configuration exhausts 1,014 distinct states at depth 7.
 
 Controls:
 - `negative` (install writes the logging files whatever the setting) fails `FreshNeverStartsUnasked` at a new home's first `Install`.
 - `legacy-unset-off` (unset means off) fails `ExistingHomeKept` at `Install` or `Up`.
 - `off-removes-volumes` (off is `down -v`) fails `NoSurpriseDataLoss` at `UpFlag`.
 - `decision-not-saved` (the first start does not save `on`) fails `ExistingHomeKept` once the logging directory is moved aside.
+- `unsaved-silent` (a failed save is not reported) fails `OffMeansStopped` at `UpFlag`: `--logging` ran the stack while the setting stayed off, and nothing said so.
 
 Writing the model found two code gaps, fixed with it: stopping only when the compose file existed, and keying the decision on that file rather than on the directory.
 

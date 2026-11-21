@@ -3265,6 +3265,11 @@ defines it. Declared values are kept, and a disabled check gets neither. Authore
 native readiness (`readiness.exec`) gets the same cadence. A container started by an
 earlier build, without these fields, is still accepted as the same container.
 
+The 250 ms cadence applies only inside the startup period that follows a container
+start. After a pause and resume the container's startup period is not restarted, so
+the check runs every `interval` from the resume, and readiness can take up to one
+`interval` to see it.
+
 #### Native HTTP readiness probe
 
 For a complete Caddy route with no authored `healthcheck`, native reviews a default
@@ -3280,6 +3285,83 @@ missing listener or HTTP 5xx during boot, check `hack logs <service>` in the sam
 project/branch, fix the route
 port, or declare `healthcheck.x-hack-http` with a longer `start_period_ms` and a
 readiness path that answers 2xx.
+
+Until its first success, inside `start_period_ms`, one probe request may run for
+the rest of the startup period instead of `timeout_ms`. An app that compiles its
+first page on the first request gets one request that waits for the page, not a
+series of abandoned requests that each start the compile again. After the first
+success, or once the startup period has passed, each request has `timeout_ms`.
+
+Inside the startup period a start is not failed on one doubtful reading. A probe
+process that hasn't started yet, a status file that is missing or unreadable, or
+a "starting" status that is late because one request is still waiting all read
+as starting. A service fails only on a definite unhealthy result: failures used
+up after the startup period, the probe process gone, a status still missing or
+unreadable after the startup period, or a "starting" status read later than the
+startup period, the patient attempt and `retries` further attempts allow, counted
+on the host from when the probe started, whatever time the status itself carries. The failure message says which of
+these the probe saw, how many requests it made, how many failed in a row, how
+long the last one took and how long after the probe started it was seen.
+
+The host's reading of one probe. It is checked as the TLA+ model
+`tests/models/tla/probe-readiness`; `Grace` is `start_period_ms` and `Limit` is the
+bound described above.
+
+```mermaid
+---
+title: ProbeReadiness · one probe
+---
+stateDiagram-v2
+    direction TB
+    classDef wait stroke-width:1.6px
+    classDef ok stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> created : start_probe
+    created --> starting : ExecStart
+    created --> doubt : Observe [not started]
+    starting --> doubt : Observe [missing or torn]
+    starting --> starting : Begin / Expire [in grace]
+    starting --> healthy : Answer
+    starting --> limit : Observe [starting sample]
+    healthy --> healthy : Answer
+    healthy --> unhealthy : Observe [stale or exhausted]
+    starting --> unhealthy : ExecExit
+    starting --> unhealthy : Expire [retries used up]
+
+    state doubt <<choice>>
+    doubt --> starting : [t <= Grace]
+    doubt --> unhealthy : [t > Grace]
+
+    state limit <<choice>>
+    limit --> starting : [t <= Limit]
+    limit --> unhealthy : [t > Limit]
+
+    unhealthy --> [*] : start fails
+
+    note right of starting
+        Patient: before the first
+        success, in the grace, one
+        attempt may use the rest of
+        the grace (attempt_timeout).
+    end note
+    note left of limit
+        Limit is host time since the
+        probe started, not the time
+        the sample carries
+        (starting_bound_ms).
+    end note
+    note right of unhealthy
+        INV NoFalseFailure
+        INV BoundedStarting
+        INV NoReadyWithoutSuccess
+        INV OneCompile
+    end note
+
+    class starting wait
+    class healthy ok
+    class unhealthy fail
+```
 
 The graph start deadline (300 seconds by default) belongs to the whole graph; it
 is not renewed when a service starts. Slow earlier services or `service_healthy`

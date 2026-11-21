@@ -3,6 +3,7 @@ pub mod acquisition;
 pub mod endpoint;
 pub mod environment;
 pub mod file;
+mod hex;
 pub mod host;
 mod json;
 pub mod local;
@@ -10,8 +11,10 @@ pub mod model;
 pub mod network;
 pub mod process;
 pub mod routing;
+mod sha256_guard;
 mod shape;
 mod validate;
+pub(crate) use hex::Hex;
 pub use json::MAX_INPUT_BYTES;
 use model::{Plan, Project};
 use schemars::JsonSchema;
@@ -254,7 +257,7 @@ fn compile_inner(bytes: &[u8], profiles: &[String]) -> Result<Compiled, Diagnost
     let endpoint_uses = endpoint::uses(&project);
     let plan = validate::lower(project, profiles, &at)?;
     let encoded = serde_json::to_vec(&plan).map_err(|_| at("encoding_failed", ""))?;
-    let semantic_hash = format!("{:x}", Sha256::digest(encoded));
+    let semantic_hash = format!("{:x}", crate::Hex(Sha256::digest(encoded)));
     Ok(Compiled {
         plan,
         semantic_hash,

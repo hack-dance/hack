@@ -15,7 +15,10 @@ fn refused() -> CandidateError {
 }
 fn hash(value: &impl Serialize) -> Result<String, CandidateError> {
     let bytes = zeroize::Zeroizing::new(serde_json::to_vec(value).map_err(|_| refused())?);
-    Ok(format!("{:x}", Sha256::digest(bytes.as_slice())))
+    Ok(format!(
+        "{:x}",
+        crate::Hex(Sha256::digest(bytes.as_slice()))
+    ))
 }
 
 /// Only public fingerprints are retained. This contract does not authorize
@@ -357,7 +360,7 @@ mod tests {
     ) -> (project::PlanReport, snapshot::Snapshot) {
         let bytes = serde_json::to_vec(value).unwrap();
         fs::write(source.join("compose.yaml"), &bytes).unwrap();
-        let original = format!("{:x}", Sha256::digest(&bytes));
+        let original = format!("{:x}", crate::Hex(Sha256::digest(&bytes)));
         let namespace = candidate.plan(source).unwrap().namespace;
         let report = project::plan_normalized(
             candidate,
@@ -478,7 +481,7 @@ mod tests {
             .remove("env_file");
         let normalized = serde_json::to_vec(&original).unwrap();
         let namespace = candidate.plan(&source).unwrap().namespace;
-        let original_hash = format!("{:x}", Sha256::digest(&original_bytes));
+        let original_hash = format!("{:x}", crate::Hex(Sha256::digest(&original_bytes)));
         let capture = || {
             let plan = project::plan_normalized(
                 &candidate,

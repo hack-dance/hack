@@ -44,7 +44,7 @@ pub fn digest(path: &Path) -> Result<String, CandidateError> {
         }
         hash.update(&buffer[..n]);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(format!("{:x}", crate::Hex(hash.finalize())))
 }
 
 pub fn root(candidate: &Candidate) -> PathBuf {
@@ -113,7 +113,7 @@ pub fn rootfs_digest(root: &Path, marker: Option<&str>) -> Result<String, Candid
     }
     let mut hash = Sha256::new();
     visit(root, root, &mut hash, marker)?;
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(format!("{:x}", crate::Hex(hash.finalize())))
 }
 
 pub fn prepare(candidate: &Candidate, archive: &Path) -> Result<Artifact, CandidateError> {
@@ -1149,7 +1149,7 @@ mod tests {
     }
     fn test_pin(bytes: &[u8]) -> BinaryPin {
         let sha256: &'static str =
-            Box::leak(format!("{:x}", Sha256::digest(bytes)).into_boxed_str());
+            Box::leak(format!("{:x}", crate::Hex(Sha256::digest(bytes))).into_boxed_str());
         BinaryPin {
             label: "Test client",
             version: "1.2.3",

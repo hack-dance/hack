@@ -93,7 +93,7 @@ pub(super) fn retain_file(
         .map_err(state::io)?;
     state::write(
         &selected.join("retention.json"),
-        &serde_json::json!({"bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(&bytes)),"policy":"retained bytes are evidence only; never publication authority"}),
+        &serde_json::json!({"bytes":bytes.len(),"sha256":format!("{:x}",crate::Hex(Sha256::digest(&bytes))),"policy":"retained bytes are evidence only; never publication authority"}),
     )?;
     Ok(Some(selected))
 }

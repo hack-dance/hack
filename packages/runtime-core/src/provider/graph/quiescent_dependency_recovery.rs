@@ -248,7 +248,7 @@ fn graph_proof(
         run: run.into(),
         graph_root: id(&root)?,
         state_file: id(&state_path)?,
-        state_sha256: format!("{:x}", Sha256::digest(state_bytes)),
+        state_sha256: format!("{:x}", crate::Hex(Sha256::digest(state_bytes))),
         foreground_root: foreground.directory,
         retained_volumes,
     })
@@ -295,7 +295,7 @@ fn observe(
     let selected = Selection {
         version: 1,
         checkout: candidate.checkout.clone(),
-        owner_sha256: format!("{:x}", Sha256::digest(owner_bytes)),
+        owner_sha256: format!("{:x}", crate::Hex(Sha256::digest(owner_bytes))),
         owner_file: id(&owner_path)?,
         owner_root: id(&owner_root)?,
         owner_token: owner.token.clone(),
@@ -334,7 +334,7 @@ impl<'a> Guard<'a> {
         let engine = Engine::connect_cleanup_wait(candidate)?;
         let (owner, selected) = observe(candidate, &engine, &foreground)?;
         let bytes = serde_json::to_vec(&selected).map_err(|_| refused())?;
-        let sha256 = format!("{:x}", Sha256::digest(bytes));
+        let sha256 = format!("{:x}", crate::Hex(Sha256::digest(bytes)));
         let guard = Self {
             candidate,
             gate,

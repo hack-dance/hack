@@ -166,7 +166,7 @@ pub(super) fn root(candidate: &Candidate, run: &str) -> Result<PathBuf, Candidat
         .map_err(|_| refused())?;
     Ok(format!(
         "/private/tmp/hknf-{}",
-        &format!("{:x}", Sha256::digest(bytes))[..24]
+        &format!("{:x}", crate::Hex(Sha256::digest(bytes)))[..24]
     )
     .into())
 }
@@ -341,7 +341,7 @@ pub(super) struct RecoverySelection {
 }
 impl RecoverySelection {
     pub(super) fn fingerprint(&self) -> String {
-        format!("{:x}", Sha256::digest(self.bytes.as_bytes()))
+        format!("{:x}", crate::Hex(Sha256::digest(self.bytes.as_bytes())))
     }
     fn record(
         &self,

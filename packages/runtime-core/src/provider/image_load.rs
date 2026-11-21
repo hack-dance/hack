@@ -56,7 +56,7 @@ fn hex(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 
 fn verify_digest(
@@ -81,7 +81,7 @@ fn verify_digest(
         }
         digest.update(&buffer[..n]);
     }
-    if format!("{:x}", digest.finalize()) != expected {
+    if format!("{:x}", crate::Hex(digest.finalize())) != expected {
         return Err(error("Image archive digest mismatch."));
     }
     Ok(total)
@@ -117,7 +117,7 @@ impl<R> Hashing<R> {
             self.blocks.push(self.block.finalize().into());
         }
         (
-            format!("{:x}", self.digest.finalize()),
+            format!("{:x}", crate::Hex(self.digest.finalize())),
             self.total,
             self.blocks,
         )
@@ -211,7 +211,10 @@ impl<R: Read> HeldTail<R> {
                     Err(e) => return Err(e),
                 }
             };
-            let actual = format!("{:x}", std::mem::take(&mut self.digest).finalize());
+            let actual = format!(
+                "{:x}",
+                crate::Hex(std::mem::take(&mut self.digest).finalize())
+            );
             if longer || self.total != self.expected_len || actual != self.expected {
                 return Err(changed());
             }
@@ -435,7 +438,7 @@ fn validated(
             members.insert(
                 name,
                 Member {
-                    decoded: format!("sha256:{:x}", digest.finalize()),
+                    decoded: format!("sha256:{:x}", crate::Hex(digest.finalize())),
                     retained,
                 },
             );

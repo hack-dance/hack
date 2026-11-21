@@ -117,7 +117,7 @@ pub struct TransferReceipt {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 
 pub fn publish(

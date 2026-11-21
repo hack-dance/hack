@@ -20,7 +20,11 @@ pub const CANDIDATE_VERSION: &str = "5.0.0-dev.6";
 
 mod error;
 mod error_stop_diagnostics;
+mod hex;
+pub mod sha256_backend;
+mod sha256_guard;
 pub use error::{CandidateError, ErrorMessage, LogFailurePhase};
+pub use hex::Hex;
 #[cfg(all(test, feature = "native-config-plan"))]
 mod test_budget;
 #[cfg(test)]
@@ -133,9 +137,9 @@ impl Candidate {
             digest.update(project_text.as_bytes());
             digest.update(b"\0");
             digest.update(branch.as_bytes());
-            format!("{:x}", digest.finalize())
+            format!("{:x}", crate::Hex(digest.finalize()))
         } else {
-            format!("{:x}", Sha256::digest(project_text.as_bytes()))
+            format!("{:x}", crate::Hex(Sha256::digest(project_text.as_bytes())))
         };
         let planned_paths = PlannedPaths {
             provider_home: self.state_root.join("run/provider"),

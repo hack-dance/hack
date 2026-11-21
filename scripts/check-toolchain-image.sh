@@ -25,4 +25,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 run_docker build --no-cache --progress plain -t "$image" -f .hack/toolchain/Dockerfile .
 run_docker run --rm --init --name "$image" "$image" exec sh -ec \
-  'bun --version; node --version; zig version; cargo --version; java -version; java -cp "$TLA2TOOLS_JAR" tlc2.TLC -help >/dev/null'
+  'bun --version; node --version; zig version; cargo --version; java -version
+  mkdir /tmp/toolchain-smoke
+  cd /tmp/toolchain-smoke
+  printf "%s\n" "---- MODULE Smoke ----" "VARIABLE x" "Init == x = 0" "Next == UNCHANGED x" "====" > Smoke.tla
+  printf "%s\n" "INIT Init" "NEXT Next" > Smoke.cfg
+  java -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers 1 Smoke'

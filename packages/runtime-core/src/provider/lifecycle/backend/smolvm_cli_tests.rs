@@ -266,7 +266,11 @@ fn backend_effects_require_consumed_admission_tokens() {
         let _: fn(&B, StartPermit) -> Result<(), CandidateError> = B::start;
     }
     trait_signatures::<SmolvmCli<'_>>();
-    let _: fn(&SmolvmCli<'_>, &MachineSpec, FreshCreate) -> Result<(), CandidateError> =
-        SmolvmCli::create;
-    let _: fn(&SmolvmCli<'_>, StartPermit) -> Result<(), CandidateError> = SmolvmCli::start;
+    fn implementation_signatures<'a>() {
+        let _: fn(&SmolvmCli<'a>, &MachineSpec, FreshCreate) -> Result<(), CandidateError> =
+            SmolvmCli::<'a>::create;
+        let _: fn(&SmolvmCli<'a>, StartPermit) -> Result<(), CandidateError> =
+            SmolvmCli::<'a>::start;
+    }
+    implementation_signatures();
 }

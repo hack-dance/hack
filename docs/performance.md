@@ -876,3 +876,10 @@ without a separate safety review and approval.
 
 Native recovery investigations can use the explicit, value-free
 [process census phase diagnostics](guides/native-census-diagnostics.md).
+
+## Built-in timing contract
+
+The Rust runtime emits opt-in [versioned timing spans](reference/timings.md) on a
+dedicated inherited pipe. The TypeScript reader and public CLI timing flags are not
+implemented yet. Current wrappers add observations without changing lifecycle state
+machines; local format tests do not establish command coverage or low overhead.

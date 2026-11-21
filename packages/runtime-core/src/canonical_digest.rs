@@ -12,8 +12,13 @@
 //! Canonical JSON:
 //! - no insignificant whitespace; arrays keep their order;
 //! - object keys sorted by Unicode code point (UTF-8 byte order);
-//! - numbers are integers within +-(2^53 - 1), written in shortest decimal
-//!   form; any other number is refused, so no float formatting is ever hashed;
+//! - numbers are identified by value and must be integers: every i64 and u64
+//!   integer is written exactly in decimal; a float with an integral value
+//!   within +-(2^53 - 1) is written as that integer (`1.0` and `1e3` are `1`
+//!   and `1000`, `-0` is `0`), as a JavaScript encoder sees them; fractions
+//!   and larger floats (not exact) are refused, so no float formatting is ever
+//!   hashed. A twin in a language whose JSON numbers are doubles must parse
+//!   vectors beyond +-(2^53 - 1) losslessly (big integers);
 //! - strings are UTF-8 with exactly these escapes: `\"`, `\\`, `\b`, `\f`,
 //!   `\n`, `\r`, `\t`, and `\u00xx` (lowercase hex) for every other code
 //!   point below U+0020. Everything else, including `/` and non-ASCII, is
@@ -121,12 +126,21 @@ fn write(value: &Value, out: &mut Vec<u8>) -> Result<(), CandidateError> {
         Value::Bool(true) => out.extend_from_slice(b"true"),
         Value::Bool(false) => out.extend_from_slice(b"false"),
         Value::Number(number) => {
-            let integer = number
-                .as_i64()
-                .or_else(|| number.as_u64().and_then(|v| i64::try_from(v).ok()))
-                .filter(|v| (-MAX_SAFE..=MAX_SAFE).contains(v))
-                .ok_or_else(|| refused("Canonical numbers are integers within the safe range."))?;
-            out.extend_from_slice(integer.to_string().as_bytes());
+            let text = if let Some(integer) = number.as_i64() {
+                integer.to_string()
+            } else if let Some(integer) = number.as_u64() {
+                integer.to_string()
+            } else {
+                let float = number.as_f64().unwrap_or(f64::NAN);
+                if float.fract() != 0.0 || float.abs() > MAX_SAFE as f64 {
+                    return Err(refused(
+                        "Canonical numbers are integers; a float must be an exact integer value.",
+                    ));
+                }
+                // Exact: integral and within the range a double holds exactly.
+                (float as i64).to_string()
+            };
+            out.extend_from_slice(text.as_bytes());
         }
         Value::String(text) => write_string(text, out),
         Value::Array(items) => {
@@ -200,9 +214,14 @@ mod tests {
     struct Vector {
         name: String,
         domain: String,
-        input: Value,
+        /// Exact JSON text: numbers are identified by value, not spelling.
+        input_text: String,
         canonical: String,
         sha256: String,
+        /// Integers beyond +-(2^53 - 1): a double-based twin parses losslessly.
+        #[serde(default)]
+        #[allow(dead_code)]
+        lossless_parse: bool,
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -228,9 +247,10 @@ mod tests {
     fn shared_vectors_match_canonical_bytes_and_digest() {
         let file = vectors();
         assert_eq!(file.schema, "hack.canonical-digest-vectors/1");
-        assert!(file.vectors.len() >= 10);
+        assert!(file.vectors.len() >= 15);
         for vector in &file.vectors {
-            let bytes = canonical_json(&vector.input).unwrap();
+            let input: Value = serde_json::from_str(&vector.input_text).unwrap();
+            let bytes = canonical_json(&input).unwrap();
             assert_eq!(
                 String::from_utf8(bytes).unwrap(),
                 vector.canonical,
@@ -238,9 +258,7 @@ mod tests {
                 vector.name
             );
             assert_eq!(
-                digest(domain(&vector.domain), &vector.input)
-                    .unwrap()
-                    .to_string(),
+                digest(domain(&vector.domain), &input).unwrap().to_string(),
                 vector.sha256,
                 "{}",
                 vector.name

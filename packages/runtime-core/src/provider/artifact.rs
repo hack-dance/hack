@@ -617,10 +617,11 @@ const BUILDER: BinaryPin = BinaryPin {
     record: "buildx.json",
     staging: "buildx-installing",
     verify_signature: true,
+    not_prepared: BUILDER_NOT_PREPARED_MESSAGE,
 };
 
 /// One pinned single-file provider executable and where its prepared tree lives.
-struct BinaryPin {
+pub(super) struct BinaryPin {
     label: &'static str,
     version: &'static str,
     sha256: &'static str,
@@ -629,6 +630,8 @@ struct BinaryPin {
     record: &'static str,
     staging: &'static str,
     verify_signature: bool,
+    /// The fixed refusal for a home that never prepared this executable; it names the fix.
+    not_prepared: &'static str,
 }
 
 fn binary_root(candidate: &Candidate, pin: &BinaryPin) -> PathBuf {
@@ -655,9 +658,37 @@ pub fn builder_executable(candidate: &Candidate) -> PathBuf {
     binary_root(candidate, &BUILDER).join(BUILDER.executable)
 }
 
-/// Verify the prepared BuildKit client before any use.
+/// Verify the prepared BuildKit client before any use. A home that never prepared it
+/// is refused with [`BUILDER_NOT_PREPARED`]; a prepared client that changed keeps the
+/// `artifact_digest_mismatch` refusal.
 pub fn verify_builder(candidate: &Candidate) -> Result<Artifact, CandidateError> {
     verify_binary(candidate, &BUILDER)
+}
+
+/// Whether the prepared BuildKit client verifies: `false` for a home that never
+/// prepared it, an error for a prepared client that changed.
+pub fn builder_prepared(candidate: &Candidate) -> Result<bool, CandidateError> {
+    match verify_builder(candidate) {
+        Ok(_) => Ok(true),
+        Err(error) if error.code == BUILDER_NOT_PREPARED => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// The refusal code for a native home whose image builder was never prepared. Setup
+/// adds the builder to such a home; nothing else in the home is wrong.
+pub const BUILDER_NOT_PREPARED: &str = "builder_not_prepared";
+
+/// Fixed text: the frontend shows it to the user as written, so it names the remedy.
+const BUILDER_NOT_PREPARED_MESSAGE: &str = "The image builder is not installed in this native home, so no image was built. Run hack native setup --accept-downloads to add it (runtime setup --accept-downloads with the executor). Offline, add --builder <pinned builder file> to the offline setup inputs, or run runtime prepare-builder --archive <pinned builder file>.";
+
+/// Whether anything, a dangling symlink included, has this name.
+fn present(path: &Path) -> Result<bool, CandidateError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io(error)),
+    }
 }
 
 fn binary_mismatch(pin: &BinaryPin, detail: &str) -> CandidateError {
@@ -667,7 +698,7 @@ fn binary_mismatch(pin: &BinaryPin, detail: &str) -> CandidateError {
     )
 }
 
-fn prepare_binary(
+pub(super) fn prepare_binary(
     candidate: &Candidate,
     source: &Path,
     pin: &BinaryPin,
@@ -683,6 +714,7 @@ fn prepare_binary(
     let providers = candidate.state_root.join("providers");
     state::private_directory(&providers)?;
     if binary_root(candidate, pin).try_exists().map_err(io)? {
+        record_interrupted_binary(candidate, pin)?;
         return verify_binary(candidate, pin);
     }
     let staging = providers.join(pin.staging);
@@ -732,14 +764,71 @@ fn prepare_binary(
     Ok(artifact)
 }
 
-fn verify_binary(candidate: &Candidate, pin: &BinaryPin) -> Result<Artifact, CandidateError> {
+/// Finish a preparation that stopped between publishing the prepared directory and
+/// writing its record. The caller holds the provider lock. The record is written only
+/// when the directory is exactly what preparation publishes: the one owned, private,
+/// singly linked executable whose bytes are the pin, which preparation published only
+/// after its signature check. A directory holding anything else was changed and is
+/// refused; it is never repaired or removed here.
+fn record_interrupted_binary(candidate: &Candidate, pin: &BinaryPin) -> Result<(), CandidateError> {
+    let providers = candidate.state_root.join("providers");
+    let record = providers.join(pin.record);
+    if present(&record)? {
+        return Ok(());
+    }
     let root = binary_root(candidate, pin);
     reject_aliased_state(&root)?;
-    let artifact: Artifact = state::read(&candidate.state_root.join("providers").join(pin.record))?;
-    let executable = fs::symlink_metadata(root.join(pin.executable)).map_err(io)?;
+    let changed = || binary_mismatch(pin, "prepared tree changed; refusing execution.");
+    let mut entries = fs::read_dir(&root).map_err(io)?;
+    let only = match (entries.next(), entries.next()) {
+        (Some(entry), None) => entry.map_err(io)?,
+        _ => return Err(changed()),
+    };
+    let metadata = fs::symlink_metadata(only.path()).map_err(io)?;
+    // SAFETY: geteuid has no preconditions.
+    if only.file_name() != pin.executable
+        || !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o7777 != 0o700
+        || digest(&only.path())? != pin.sha256
+    {
+        return Err(changed());
+    }
+    state::write(
+        &record,
+        &Artifact {
+            version: pin.version.into(),
+            archive_sha256: pin.sha256.into(),
+            tree_sha256: tree_digest(&root)?,
+        },
+    )?;
+    // Only the interrupted run's now-empty staging directory; never recursive.
+    let _ = fs::remove_dir(providers.join(pin.staging));
+    Ok(())
+}
+
+pub(super) fn verify_binary(
+    candidate: &Candidate,
+    pin: &BinaryPin,
+) -> Result<Artifact, CandidateError> {
+    let root = binary_root(candidate, pin);
+    reject_aliased_state(&root)?;
+    let record = candidate.state_root.join("providers").join(pin.record);
+    // Never prepared, or a preparation that setup can finish: say so and name the fix
+    // instead of reporting the missing file.
+    if !present(&record)? || !present(&root)? {
+        return Err(CandidateError::new(BUILDER_NOT_PREPARED, pin.not_prepared));
+    }
+    let artifact: Artifact = state::read(&record)?;
+    let executable = match fs::symlink_metadata(root.join(pin.executable)) {
+        Ok(metadata) => metadata.is_file(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(io(error)),
+    };
     if artifact.version != pin.version
         || artifact.archive_sha256 != pin.sha256
-        || !executable.is_file()
+        || !executable
         || artifact.tree_sha256 != tree_digest(&root)?
     {
         return Err(binary_mismatch(
@@ -748,6 +837,25 @@ fn verify_binary(candidate: &Candidate, pin: &BinaryPin) -> Result<Artifact, Can
         ));
     }
     Ok(artifact)
+}
+
+/// A single-file pin for `bytes`, without a signature check: setup and preparation tests
+/// run the real preparation and verification against it.
+#[cfg(test)]
+pub(super) fn test_binary_pin(bytes: &[u8]) -> BinaryPin {
+    let sha256: &'static str =
+        Box::leak(format!("{:x}", crate::Hex(Sha256::digest(bytes))).into_boxed_str());
+    BinaryPin {
+        label: "Test client",
+        version: "1.2.3",
+        sha256,
+        directory: "test-client-1.2.3",
+        executable: "test-client",
+        record: "test-client.json",
+        staging: "test-client-installing",
+        verify_signature: false,
+        not_prepared: "Test client is not prepared.",
+    }
 }
 
 /// Prepared-tree fixtures with nested empty directories, laid out exactly as preparation
@@ -1148,18 +1256,117 @@ mod tests {
         assert_eq!(BUILDER.sha256, BUILDER_SHA256);
     }
     fn test_pin(bytes: &[u8]) -> BinaryPin {
-        let sha256: &'static str =
-            Box::leak(format!("{:x}", crate::Hex(Sha256::digest(bytes))).into_boxed_str());
-        BinaryPin {
-            label: "Test client",
-            version: "1.2.3",
-            sha256,
-            directory: "test-client-1.2.3",
-            executable: "test-client",
-            record: "test-client.json",
-            staging: "test-client-installing",
-            verify_signature: false,
+        test_binary_pin(bytes)
+    }
+    #[test]
+    fn a_home_without_the_builder_is_refused_by_name_with_the_setup_remedy() {
+        let root = fixture();
+        let candidate = Candidate::discover(&root).unwrap();
+        // A brand-new home, then one whose provider set was set up without a builder.
+        for prepared_providers in [false, true] {
+            if prepared_providers {
+                state::private_directory(&providers(&candidate)).unwrap();
+            }
+            let error = verify_builder(&candidate).unwrap_err();
+            assert_eq!(error.code, "builder_not_prepared");
+            assert_eq!(error.code, BUILDER_NOT_PREPARED);
+            // Fixed text reaches the user as written; the missing file's OS error never does.
+            assert!(error.message_fixed);
+            assert_eq!(error.message, BUILDER_NOT_PREPARED_MESSAGE);
+            assert!(!error.message.contains("os error"));
+            // The preflight reports the same home as lacking the builder, not as failed.
+            assert!(!builder_prepared(&candidate).unwrap());
         }
+        for text in [
+            "image builder is not installed in this native home",
+            "hack native setup --accept-downloads",
+            "--builder <pinned builder file>",
+            "runtime prepare-builder --archive <pinned builder file>",
+        ] {
+            assert!(BUILDER_NOT_PREPARED_MESSAGE.contains(text), "{text}");
+        }
+        // The frontend keeps a fixed message only as one printable line of at most 400
+        // characters, and a build failure line is cut at 512.
+        assert!(BUILDER_NOT_PREPARED_MESSAGE.len() <= 400);
+        assert!(
+            BUILDER_NOT_PREPARED_MESSAGE
+                .bytes()
+                .all(|byte| (0x20..=0x7e).contains(&byte))
+        );
+        // Looking created nothing.
+        assert!(!candidate.state_root.join("run").exists());
+        assert!(!candidate.state_root.join("setup").exists());
+        assert_eq!(fs::read_dir(providers(&candidate)).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_half_prepared_binary_is_not_prepared_and_preparing_again_finishes_it() {
+        let root = fixture();
+        let candidate = Candidate::discover(&root).unwrap();
+        let bytes = b"#!/bin/sh\nexit 0\n";
+        let pin = test_pin(bytes);
+        let source = root.join("release-asset");
+        fs::write(&source, bytes).unwrap();
+        let prepared = prepare_binary(&candidate, &source, &pin).unwrap();
+        let record = providers(&candidate).join(pin.record);
+        let tree = binary_root(&candidate, &pin);
+        let executable = tree.join(pin.executable);
+        let not_prepared = |candidate: &Candidate| {
+            let error = verify_binary(candidate, &pin).unwrap_err();
+            assert_eq!(error.code, BUILDER_NOT_PREPARED);
+            assert_eq!(error.message, pin.not_prepared);
+            assert!(error.message_fixed);
+        };
+
+        // A record without its directory: preparing again installs the directory.
+        fs::rename(&tree, root.join("moved-aside")).unwrap();
+        not_prepared(&candidate);
+        let again = prepare_binary(&candidate, &source, &pin).unwrap();
+        assert_eq!(again.tree_sha256, prepared.tree_sha256);
+        verify_binary(&candidate, &pin).unwrap();
+
+        // A directory without its record, as a preparation interrupted between publishing
+        // the directory and writing the record leaves it: preparing again writes the record
+        // for the unchanged directory and replaces nothing.
+        fs::remove_file(&record).unwrap();
+        fs::create_dir(providers(&candidate).join(pin.staging)).unwrap();
+        let identity = fs::metadata(&executable).unwrap().ino();
+        not_prepared(&candidate);
+        let finished = prepare_binary(&candidate, &source, &pin).unwrap();
+        assert_eq!(finished.tree_sha256, prepared.tree_sha256);
+        assert_eq!(fs::metadata(&executable).unwrap().ino(), identity);
+        assert!(!providers(&candidate).join(pin.staging).exists());
+        verify_binary(&candidate, &pin).unwrap();
+
+        // A directory without a record that is not exactly the pinned executable is
+        // refused as changed. It gets no record and is not repaired.
+        let refused = |change: &str| {
+            let error = prepare_binary(&candidate, &source, &pin).unwrap_err();
+            assert_eq!(error.code, "artifact_digest_mismatch", "{change}");
+            assert!(!record.exists(), "{change}");
+        };
+        fs::remove_file(&record).unwrap();
+        fs::write(tree.join("plugin"), b"extra").unwrap();
+        refused("an extra file");
+        fs::remove_file(tree.join("plugin")).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        refused("a wider mode");
+        fs::write(&executable, b"#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        refused("other bytes");
+        fs::remove_file(&executable).unwrap();
+        refused("an empty directory");
+
+        // With its record, a directory that lost its executable is changed, not absent.
+        fs::write(&executable, bytes).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        prepare_binary(&candidate, &source, &pin).unwrap();
+        fs::remove_file(&executable).unwrap();
+        assert_eq!(
+            verify_binary(&candidate, &pin).unwrap_err().code,
+            "artifact_digest_mismatch"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn a_builder_binary_that_misses_the_pin_creates_no_state() {
@@ -1174,7 +1381,10 @@ mod tests {
         let error = prepare_binary(&candidate, &directory, &BUILDER).unwrap_err();
         assert_eq!(error.code, "artifact_digest_mismatch");
         assert!(!candidate.state_root.exists());
-        assert!(verify_builder(&candidate).is_err());
+        assert_eq!(
+            verify_builder(&candidate).unwrap_err().code,
+            BUILDER_NOT_PREPARED
+        );
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

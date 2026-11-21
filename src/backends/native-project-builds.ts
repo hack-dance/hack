@@ -5,6 +5,11 @@ import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  NATIVE_BUILDER_MISSING,
+  NATIVE_BUILDER_NOT_PREPARED,
+  nativeBuilderRemedy,
+} from "../lib/native-image-builder.ts";
+import {
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
@@ -684,10 +689,11 @@ const BUILD_SOURCE_POLICY: Readonly<Record<string, string>> = {
 
 /**
  * Name the services of a failed `runtime build-image`. A refusal from the build
- * source policy says so and what to change; any other runtime failure keeps its
- * message. The native code is kept for callers that classify failures.
- * Cancellation and closed client errors carry no service-specific cause and pass
- * through unchanged.
+ * source policy says so and what to change; a home without the image builder
+ * says so and how to add it, naming this install's own command; any other
+ * runtime failure keeps its message. The native code is kept for callers that
+ * classify failures. Cancellation and closed client errors carry no
+ * service-specific cause and pass through unchanged.
  */
 function nameBuildFailure(
   services: readonly string[],
@@ -702,10 +708,14 @@ function nameBuildFailure(
     code !== undefined && Object.hasOwn(BUILD_SOURCE_POLICY, code)
       ? BUILD_SOURCE_POLICY[code]
       : undefined;
-  const message =
-    change === undefined
-      ? `Native foreground up could not build ${which}: ${error.message}`
-      : `Native foreground up cannot build ${which}: the native build source policy refused it. ${error.message} ${change} No image was adopted.`;
+  let message: string;
+  if (code === NATIVE_BUILDER_NOT_PREPARED) {
+    message = `Native foreground up cannot build ${which}: ${NATIVE_BUILDER_MISSING}. ${nativeBuilderRemedy()} No image was built.`;
+  } else if (change === undefined) {
+    message = `Native foreground up could not build ${which}: ${error.message}`;
+  } else {
+    message = `Native foreground up cannot build ${which}: the native build source policy refused it. ${error.message} ${change} No image was adopted.`;
+  }
   return new NativeRuntimeRequestError({
     message,
     nativeCode: error.nativeCode,

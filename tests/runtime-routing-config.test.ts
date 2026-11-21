@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { YAML } from "bun";
 
 type ComposeService = {
+  readonly user?: string;
   readonly image?: string;
   readonly command?: string | readonly string[];
   readonly build?: { readonly context?: string };
@@ -40,6 +41,8 @@ test("repo runtime keeps local dependencies and an opt-in isolated toolchain", a
   const deps = compose.services?.deps;
   expect(deps?.command).toBe("bun install --frozen-lockfile");
   expect(deps?.image).toBe("oven/bun:1.4.4");
+  expect(deps?.user).toBe("${HACK_DEPS_USER:-65534:65534}");
+  expect(deps?.volumes).toEqual(["..:/app"]);
   expect(deps?.profiles).toEqual(["deps"]);
   expect(deps?.networks).toEqual(["default"]);
   expect(deps?.labels).toBeUndefined();

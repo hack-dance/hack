@@ -13,10 +13,12 @@ committed SVGs for GitHub; after changing their adjacent `.mmd` sources or the
 house theme, run `bun run docs:readme-diagrams`. `docs:check` re-renders and rejects
 stale pictures in either theme.
 
-From the repository root, run `hack up` and open
-[the local docs site](https://docs.hack-cli.hack.local). Edit site components or
-editorial pages under `docs/versions/` to reload the preview. Run `hack down` to
-stop it. See [the contributor runtime](../.hack/README.md) for other entry points.
+From a linked worktree, pick a unique instance name, such as `docs-preview`.
+Run `hack up --branch docs-preview --detach`, then
+`hack open docs --branch docs-preview --json` to get its URL. Edit site
+components or editorial pages under `docs/versions/` to reload the preview.
+Stop it with `hack down --branch docs-preview`. In the main checkout you can
+omit `--branch` from all three commands. See [the contributor runtime](../.hack/README.md).
 
 For standalone verification, use the repository's pinned Bun. Site dependencies and `site/bun.lock` are
 independent of the CLI workspace; Next.js also needs Node.js 20.9 or newer.

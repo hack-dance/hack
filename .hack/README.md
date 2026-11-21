@@ -1,12 +1,21 @@
 # Develop Hack using Hack
 
-Run `hack up` from the repository root and open
-[the local docs site](https://docs.hack-cli.hack.local). The Compose backend needs
-the usual Hack local routing setup. Next.js reloads site changes, and the docs
-service restages edits under `docs/versions/`. After changing site dependencies
-or top-level site configuration, run `hack up` again to rebuild the image.
-Stop it with `hack down`, or use `hack down --prune-caches --yes` to also remove
-the docs dependency and build volumes.
+In a linked worktree, choose an instance name unique to that checkout (for
+example, `docs-preview`). Use the same name even if Git has a detached HEAD:
+
+```sh
+hack up --branch docs-preview --detach
+hack open docs --branch docs-preview --json
+hack down --branch docs-preview
+```
+
+Open the URL in the JSON output. In the main checkout you can omit `--branch`
+from all three commands. Local HTTPS needs Hack's local routing setup.
+Next.js reloads site changes and restages editorial edits under `docs/versions/`.
+Run the same `up` command again after editing site dependencies or top-level
+site configuration. To delete the docs dependency and build volumes, add
+`--prune-caches --yes` **when stopping the running instance**. After a plain
+`down`, a second `down` can no longer discover those volumes.
 
 | Development entry point | What it starts | Where to run it |
 | --- | --- | --- |
@@ -17,10 +26,13 @@ the docs dependency and build volumes.
 | `bun run turbo:dev` | Runs workspace `dev` scripts in parallel, currently the CLI | Same paths as the CLI. The site has its own lockfile outside the workspace. |
 | `bun run macos:dev` | Generates the native project and opens Xcode | macOS host with Xcode |
 | `bun run install:dev` | Installs the development CLI on the host | Host whose CLI installation should change |
-| `deps` service | Installs the workspace dependencies in a named volume | `hack run --profile deps deps` |
+| `deps` service | Installs Linux workspace dependencies in the checkout as the invoking user | `HACK_DEPS_USER="$(id -u):$(id -g)" hack run --profile deps deps` (add `--branch docs-preview` before the service in a worktree). Use the host’s pinned Bun for macOS dependencies. |
 | `dev` in `examples/basic`, `next-app`, `configs/web-postgres`, `configs/monorepo/apps/{api,web}` and `recipes/deps-service` | Sample Bun servers or Next.js | `hack up` from the example project root |
 | `configs/host-dev-server` package `dev` | Host Bun server managed by a lifecycle hook | `hack up` from the example root |
 | `configs/api-worker-queue` package `api` and `worker`, `configs/static-site` package `watch` | Sample API and worker, or watched static-site build | `hack up` from the example root |
+
+On Linux, run `sh scripts/check-deps-ownership.sh` after `bun run build` to verify
+the installer in a clean clone and run the source CLI against its dependencies.
 
 Run portable checks in the opt-in `toolchain` service. The host needs Hack and a
 working container runtime; Bun, Rust, Java and TLC are installed inside the image.

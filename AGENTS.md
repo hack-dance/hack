@@ -65,7 +65,9 @@ concurrency, cancellation and recovery. Keep platform effects behind explicit bo
 
 ## Verification
 
-Run the docs development site with `hack up` from the repository root.
+Run the docs site with `hack up`. In a linked worktree choose a unique instance
+name and use it throughout, e.g. `hack up --branch docs-preview --detach`,
+`hack open docs --branch docs-preview --json` for the URL, and `hack down --branch docs-preview`.
 Prefer the repository's Hack-managed `toolchain` service for portable checks; see
 [.hack/README.md](.hack/README.md). Use the current branch CLI as the outer command
 when testing Hack behavior. Keep host-native virtualization, routing/trust, and

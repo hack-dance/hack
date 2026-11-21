@@ -1,5 +1,5 @@
 use super::*;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -154,13 +154,135 @@ fn swapouts_must_be_observed_and_unchanged_across_the_full_window() {
     }
 }
 
+/// A clock tests move by hand. `sleep` advances it by the full request, except that the
+/// first `early_wakes` sleeps return after half of it.
+struct TestClock {
+    now: Cell<Duration>,
+    slept: RefCell<Vec<Duration>>,
+    early_wakes: Cell<u32>,
+}
+
+impl TestClock {
+    fn at(now: Duration) -> Self {
+        Self {
+            now: Cell::new(now),
+            slept: RefCell::new(Vec::new()),
+            early_wakes: Cell::new(0),
+        }
+    }
+
+    fn advance(&self, by: Duration) {
+        self.now.set(self.now.get() + by);
+    }
+}
+
+impl Clock for TestClock {
+    fn now(&self) -> Duration {
+        self.now.get()
+    }
+
+    fn sleep(&self, duration: Duration) {
+        self.slept.borrow_mut().push(duration);
+        if self.early_wakes.get() > 0 {
+            self.early_wakes.set(self.early_wakes.get() - 1);
+            self.advance(duration / 2);
+        } else {
+            self.advance(duration);
+        }
+    }
+}
+
+const START: Duration = Duration::from_secs(5);
+
+fn opened(clock: &TestClock, level: Option<u32>) -> Opened {
+    open(&observation(Profile::Development, level, 10 * GIB), clock).unwrap()
+}
+
 #[test]
-fn post_lease_window_blocks_allocation_when_prelease_admission_goes_stale() {
-    let prelease = [observation(Profile::Development, Some(2), 10 * GIB)];
-    for defect in 0..7 {
+fn the_first_development_sample_must_pass_every_predicate_to_open_the_window() {
+    let clock = TestClock::at(START);
+    for defect in 0..8 {
+        let mut sample = observation(Profile::Development, Some(2), 10 * GIB);
+        match defect {
+            0 => sample.free_plus_file_cache_estimate_bytes = Some(10 * GIB - 1),
+            1 => sample.memory_pressure = MemoryPressure::from_level(Some(4)),
+            2 => sample.memory_pressure = MemoryPressure::from_level(None),
+            3 => sample.swapouts = None,
+            4 => sample.thermal_normal = false,
+            5 => sample.profile = Profile::Research,
+            6 => sample.host_supported = false,
+            _ => {
+                sample.admitted = false;
+                sample.reasons.push("disk budget".into());
+            }
+        }
+        assert!(
+            matches!(open(&sample, &clock), Err(error) if error.code == "admission_rejected"),
+            "{defect}"
+        );
+    }
+    assert!(
+        open(
+            &observation(Profile::Development, Some(1), 10 * GIB),
+            &clock
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_fast_start_still_waits_out_the_admission_window_and_a_slow_one_does_not_pause() {
+    for (elapsed_ms, slept) in [
+        (0, vec![Duration::from_secs(1)]),
+        (200, vec![Duration::from_millis(800)]),
+        (999, vec![Duration::from_millis(1)]),
+        (1000, vec![]),
+        (3000, vec![]),
+    ] {
+        let clock = TestClock::at(START);
+        let window = opened(&clock, Some(1));
+        clock.advance(Duration::from_millis(elapsed_ms));
+        let samples = recheck_after_lease(Profile::Development, Some(window), &clock, || {
+            // The sample under the lease never starts inside the window.
+            assert!(clock.now() - START >= DEVELOPMENT_WINDOW, "{elapsed_ms}");
+            Ok(observation(Profile::Development, Some(1), 10 * GIB))
+        })
+        .unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(*clock.slept.borrow(), slept, "{elapsed_ms}");
+    }
+}
+
+#[test]
+fn an_early_wake_does_not_shorten_the_admission_window() {
+    let clock = TestClock::at(START);
+    let window = opened(&clock, Some(1));
+    clock.early_wakes.set(2);
+    recheck_after_lease(Profile::Development, Some(window), &clock, || {
+        assert!(clock.now() - START >= DEVELOPMENT_WINDOW);
+        Ok(observation(Profile::Development, Some(1), 10 * GIB))
+    })
+    .unwrap();
+    assert_eq!(
+        *clock.slept.borrow(),
+        [
+            Duration::from_secs(1),
+            Duration::from_millis(500),
+            Duration::from_millis(250)
+        ]
+    );
+}
+
+#[test]
+fn post_lease_sample_blocks_allocation_when_prelease_admission_goes_stale() {
+    for defect in 0..8 {
+        let clock = TestClock::at(START);
+        let window = opened(&clock, Some(2));
+        // The window has already passed: a refusal is never a matter of timing.
+        clock.advance(Duration::from_secs(2));
         let allocated = Cell::new(false);
         let calls = Cell::new(0);
-        let checked = recheck_after_lease(Profile::Development, &prelease, || {
+        let checked = recheck_after_lease(Profile::Development, Some(window), &clock, || {
             calls.set(calls.get() + 1);
             let mut sample = observation(Profile::Development, Some(2), 10 * GIB);
             match defect {
@@ -169,7 +291,8 @@ fn post_lease_window_blocks_allocation_when_prelease_admission_goes_stale() {
                 2 => sample.memory_pressure = MemoryPressure::from_level(None),
                 3 => sample.swapouts = Some(43),
                 4 => sample.swapouts = Some(41),
-                5 => sample.thermal_normal = false,
+                5 => sample.swapouts = None,
+                6 => sample.thermal_normal = false,
                 _ => {
                     sample.admitted = false;
                     sample.reasons.push("disk budget".into());
@@ -182,27 +305,54 @@ fn post_lease_window_blocks_allocation_when_prelease_admission_goes_stale() {
         assert!(!allocated.get());
         assert_eq!(calls.get(), 1);
     }
-    assert!(recheck_after_lease(Profile::Development, &[], || panic!("missing baseline")).is_err());
+    let clock = TestClock::at(START);
     assert!(
-        recheck_after_lease(Profile::Research, &[], || panic!(
+        recheck_after_lease(Profile::Development, None, &clock, || panic!(
+            "missing baseline"
+        ))
+        .is_err()
+    );
+    assert!(
+        recheck_after_lease(Profile::Research, None, &clock, || panic!(
             "research timing unchanged"
         ))
         .unwrap()
         .is_empty()
     );
+    assert!(clock.slept.borrow().is_empty());
+}
+
+#[test]
+fn a_swapout_change_between_the_chained_samples_refuses_whatever_the_wait() {
+    for elapsed_ms in [0, 1000, 60_000] {
+        for swaps in [43, 41] {
+            let clock = TestClock::at(START);
+            let window = opened(&clock, Some(1));
+            clock.advance(Duration::from_millis(elapsed_ms));
+            let error = recheck_after_lease(Profile::Development, Some(window), &clock, || {
+                let mut sample = observation(Profile::Development, Some(1), 10 * GIB);
+                sample.swapouts = Some(swaps);
+                Ok(sample)
+            })
+            .unwrap_err();
+            assert_eq!(error.code, "admission_rejected");
+            assert_eq!(error.message, "Swapouts changed during admission.");
+        }
+    }
 }
 
 #[test]
 fn healthy_post_lease_warning_is_resampled_before_allocation() {
-    let prelease = [observation(Profile::Development, Some(1), 10 * GIB)];
+    let clock = TestClock::at(START);
+    let window = opened(&clock, Some(1));
     let calls = Cell::new(0);
-    let samples = recheck_after_lease(Profile::Development, &prelease, || {
+    let samples = recheck_after_lease(Profile::Development, Some(window), &clock, || {
         calls.set(calls.get() + 1);
         Ok(observation(Profile::Development, Some(2), 10 * GIB))
     })
     .unwrap();
-    assert_eq!(calls.get(), 3);
-    assert_eq!(samples.len(), 3);
+    assert_eq!(calls.get(), 1);
+    assert_eq!(samples.len(), 1);
     assert!(
         samples
             .iter()

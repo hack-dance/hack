@@ -768,7 +768,8 @@ async function runPinnedNativeHttpsOwner(opts: {
     [binding.runtime.binary, binding.runtimeSha256],
     [binding.caddyBinary, binding.caddySha256],
   ] as const) {
-    if ((await nativeHttpsExecutableSha256(path)) !== hash) {
+    // The owner verifies what it executes from the file itself, never a cache.
+    if ((await nativeHttpsExecutableSha256(path, { fresh: true })) !== hash) {
       throw nativeHttpsOwnerRefused();
     }
   }

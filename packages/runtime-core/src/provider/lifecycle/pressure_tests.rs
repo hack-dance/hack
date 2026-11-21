@@ -97,9 +97,11 @@ fn lease_wait_pressure_change_refuses_owner_commit_and_releases_the_mutation_lea
 }
 
 /// Ties `start_pool` to the step order of `tests/models/tla/pool-start-admission/PoolStart.tla`
-/// in its `positive` configuration (trees rechecked and root files proven under the lease).
-/// It reads source order only; what each step does is covered by the tests that model's
-/// `COVERAGE.md` names.
+/// in both configurations that describe the code: `root-before-lease` (a cleanly stopped
+/// pool: root files proven in the window, rechecked under the lease and compared again
+/// where their digest is used) and `positive` (no early proof: root files proven under the
+/// lease). In both the trees are rechecked under the lease. It reads source order only;
+/// what each step does is covered by the tests that model's `COVERAGE.md` names.
 #[test]
 fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
     let source = include_str!("../lifecycle.rs");
@@ -137,11 +139,11 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
         ("ResearchSample", "admission::sample_with(profile, ||"),
         (
             "ProveRootEarly, on a thread beside ProveTrees",
-            "scope.spawn(|| rootfs_proof::prove(candidate))",
+            "rootfs_proof::beside(\n        || rootfs_proof::prove(candidate),",
         ),
         (
             "ProveTrees",
-            "artifact::verify_witnessed(candidate, &artifact::SMOLVM).and_then(",
+            "artifact::verify_witnessed(candidate, &artifact::SMOLVM)?",
         ),
         (
             "ProveTrees",
@@ -247,8 +249,31 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
             "the root files recheck must come before `{later}`"
         );
     }
+    // The root files are compared once more where the recheck's digest is used. That point,
+    // `prepare_rootfs`, comes after the provider command a start can run before it
+    // (`machine update --rosetta`, in `enable_amd64_emulation`); from it to `machine start`
+    // the only provider command is `machine create`, which a pool with an early proof never
+    // reaches. Inside `prepare_rootfs` the walk decides before the content proof it falls
+    // back to, which is the function's last expression.
+    let used = at("let rootfs_metadata = prepare_rootfs(");
+    let started = at("start_machine(candidate, &owner, permit)?");
+    assert!(at("enable_amd64_emulation(") < used);
+    assert_eq!(body.matches("enable_amd64_emulation(").count(), 1);
+    assert!(!body[used..started].contains("invoke("));
+    assert_eq!(body.matches("create_machine(").count(), 1);
+    let create = at("create_machine(candidate");
+    assert!(used < at("if !owner.created {") && at("if !owner.created {") < create);
+    assert!(create < started);
+    let prepare = source.find("\nfn prepare_rootfs(").unwrap();
+    let prepare = &source[prepare..prepare + source[prepare..].find("\n}\n").unwrap()];
+    let walk = prepare
+        .find("leased.stands(&destination, &marker, owner.rootfs_digest.as_deref())")
+        .expect("prepare_rootfs compares the root files again before it uses the digest");
+    let proof = "\n    prove_rootfs(&destination, &marker, owner.rootfs_digest.as_deref())";
+    assert!(walk < prepare.rfind(proof).unwrap());
+    assert!(prepare.ends_with(proof));
     // The boot's witness is the rechecked proofs, with the root files proof added to them:
-    // the digest the recheck took under the lease, or the full proof `prepare_rootfs` ran.
+    // the digest of that last walk, or of the full proof `prepare_rootfs` ran.
     let root = &body[at("let rootfs_metadata = prepare_rootfs(")..];
     let root = &root[..root.find("if !owner.created {").unwrap()];
     assert!(root.contains("leased_rootfs.as_ref()") && root.contains("metadata: rootfs_metadata,"));

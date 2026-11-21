@@ -1470,21 +1470,21 @@ fn start_pool_observed(
         (samples, None)
     };
     // The content proofs, taken inside the admission window and rechecked under the lease
-    // (`leased_trees`). A boot records them in its tree witness (`tree_witness`). An existing
-    // pool's root files are proven beside them, read-only (`rootfs_proof`): both fill the
-    // window instead of adding to the start after it.
-    let (proven_trees, early_rootfs) = std::thread::scope(|scope| {
-        let early = scope.spawn(|| rootfs_proof::prove(candidate));
-        let trees = artifact::verify_witnessed(candidate, &artifact::SMOLVM).and_then(|smolvm| {
+    // (`leased_trees`). A boot records them in its tree witness (`tree_witness`). A cleanly
+    // stopped pool's root files are proven beside them, read-only, on a thread of their own
+    // (`rootfs_proof`): both fill the window instead of adding to the start after it. No
+    // thread, or a proof that fails or panics, is no early proof, never a refusal.
+    let (proven_trees, early_rootfs) = rootfs_proof::beside(
+        || rootfs_proof::prove(candidate),
+        || -> Result<_, CandidateError> {
+            let smolvm = artifact::verify_witnessed(candidate, &artifact::SMOLVM)?;
             let engine = artifact::verify_witnessed(candidate, &artifact::ENGINE)?;
             Ok(std::collections::BTreeMap::from([
                 (super::tree_witness::SMOLVM.to_owned(), smolvm),
                 (super::tree_witness::ENGINE.to_owned(), engine),
             ]))
-        });
-        // A proof that panicked is no proof: the start proves under the lease.
-        (trees, early.join().ok().flatten())
-    });
+        },
+    );
     let mut proven_trees = proven_trees?;
     if early_rootfs.is_some() {
         // The proof ran on its own thread; count it where tests look.
@@ -1641,6 +1641,9 @@ fn start_pool_observed(
         &mut restart,
         &lock,
     )?;
+    // The root files were last compared before the owner record updates and provider
+    // commands above: `prepare_rootfs` walks their metadata once more before the digest of
+    // the recheck is used, and proves them by content on any difference (`rootfs_proof`).
     let rootfs_metadata = prepare_rootfs(candidate, &mut owner, leased_rootfs.as_ref())?;
     // Guest commands search the guest's own directories before the engine share
     // (`agent::GUEST_PATH`): the engine binaries are found only if the root files hold
@@ -2304,7 +2307,9 @@ fn keep_memory_peak(
 /// Copy (once) and prove the pool's guest rootfs by content. Returns its metadata digest
 /// (`tree_witness`), taken around the final content proof. `leased` is what this start's
 /// recheck under the lease established for the root files (`rootfs_proof::recheck`); it
-/// stands in for the proof here only for the marker and the pin it was made against.
+/// stands in for the proof here only for the marker and the pin it was made against, and
+/// only while one more metadata walk, made here, finds the root files as the recheck left
+/// them (`rootfs_proof::Leased::stands`).
 fn prepare_rootfs(
     candidate: &Candidate,
     owner: &mut Owner,
@@ -2366,8 +2371,8 @@ fn prepare_rootfs(
         owner.rootfs_digest = Some(source_hash);
         owner.save(candidate)?;
     }
-    if let Some(metadata) =
-        leased.and_then(|leased| leased.stands(&marker, owner.rootfs_digest.as_deref()))
+    if let Some(metadata) = leased
+        .and_then(|leased| leased.stands(&destination, &marker, owner.rootfs_digest.as_deref()))
     {
         return Ok(metadata);
     }

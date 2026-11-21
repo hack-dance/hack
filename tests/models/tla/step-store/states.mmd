@@ -1,0 +1,34 @@
+---
+title: StepStore · one step (pc)
+---
+stateDiagram-v2
+  direction TB
+  [*] --> idle : Init
+  idle --> idle : Skip [Usable]
+  idle --> effected : Execute [not Usable]
+  effected --> idle : Record [effect observed]
+  effected --> idle : RecordLost [effect gone]
+  effected --> idle : Crash or Reboot
+  idle --> recorded : Execute [RecordFirst]
+  recorded --> idle : EffectAfterRecord
+  recorded --> idle : Crash or Reboot
+  note right of idle
+    Usable: a record for the
+    current input and boot, and
+    for slot and boot classes
+    the output is observed
+  end note
+  note right of effected
+    INV NoUnsoundSkip: a Skip
+    has a record for its exact
+    input and the output is
+    present
+  end note
+  note left of recorded
+    Reached only in the
+    RecordFirst control
+  end note
+  classDef live stroke-width:1.6px
+  classDef fail stroke-width:1.6px
+  class effected live
+  class recorded fail

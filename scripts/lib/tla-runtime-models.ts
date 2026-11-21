@@ -1955,6 +1955,58 @@ const contracts: readonly ModelContract[] = [
     fields: ["alive = TRUE", "recoveredLive = TRUE"],
   },
   {
+    // HACK-2442: one batch of route/port bridges, its fences and its release;
+    // see tests/models/tla/bridge-batch/COVERAGE.md.
+    name: "bridge-batch",
+    module: "BridgeBatch",
+    states: 14_674,
+    invariant: "Safe",
+    action: "Relays",
+    fields: ['opc = "late"', 'relay = [r |-> "running", p |-> "running"]'],
+    additionalControls: [
+      {
+        name: "child-fence",
+        negative: true,
+        action: "ChildLaunch",
+        fields: ["staleLaunch = TRUE", 'lease = "free"'],
+      },
+      {
+        name: "release-order",
+        negative: true,
+        action: "CleanStop",
+        fields: ['rpc = "late"', 'lease = "cleanup"'],
+      },
+      {
+        name: "ready-reachable",
+        negative: true,
+        invariant: "NeverReady",
+        action: "Await",
+        fields: ['opc = "ready"', 'cpc = [r |-> "done", p |-> "done"]'],
+      },
+      {
+        name: "release-reachable",
+        negative: true,
+        invariant: "NeverReleased",
+        action: "CleanDrop",
+        fields: ['rpc = "done"', 'lease = "free"'],
+      },
+      {
+        name: "release-after-ready",
+        negative: true,
+        invariant: "NeverReleasedAfterReady",
+        action: "CleanDrop",
+        fields: ['rpc = "done"', "everReady = TRUE"],
+      },
+      {
+        name: "stale-stop-reachable",
+        negative: true,
+        invariant: "NeverStaleStop",
+        action: "Fence3",
+        fields: ['opc = "failed"', 'lease = "free"'],
+      },
+    ],
+  },
+  {
     // Loopback TCP publication of Compose `ports`: one listener per host
     // port, no forwarding to a replaced container, no recovery of a live
     // owner, no listener after acknowledged stop; see tests/models/tla/README.md.
@@ -2390,6 +2442,52 @@ const contracts: readonly ModelContract[] = [
     invariant: "Safe",
     action: "Launch",
     fields: ["retired = <<1>>", "alive = 1"],
+  },
+  {
+    // HACK-2440 (c, d), HACK-2416: a patient first request, no failure on one
+    // doubtful reading, and a host-side bound on "starting". Slow, refusing and
+    // hanging apps; `legacy` runs the steady cadence before the first success.
+    name: "probe-readiness",
+    module: "ProbeReadiness",
+    states: 175_757,
+    invariant: "OneCompile",
+    action: "Begin",
+    fields: ["restarts = 1", 'app = "slow"'],
+    alternativeWitnesses: [
+      { action: "Begin", fields: ["restarts = 1", 'app = "hanging"'] },
+    ],
+    additionalControls: [
+      { name: "legacy", negative: false, states: 132_615 },
+      {
+        name: "no-host-bound",
+        negative: true,
+        invariant: "BoundedStarting",
+        action: "Observe",
+        fields: ['verdict = "starting"', "skewed = TRUE", "vt = 15"],
+      },
+      {
+        name: "no-tolerance",
+        negative: true,
+        invariant: "NoFalseFailure",
+        action: "Observe",
+        fields: ['verdict = "unhealthy"', 'app = "slow"'],
+      },
+      {
+        // Reachability: the positive run does exhaust retries.
+        name: "exhausts",
+        negative: true,
+        invariant: "NeverExhausted",
+        action: "Expire",
+        fields: ['health = "unhealthy"', "failures = 2"],
+      },
+      {
+        name: "tight-bound",
+        negative: true,
+        invariant: "NoPrematureFailure",
+        action: "Observe",
+        fields: ['verdict = "unhealthy"', 'vh = "starting"'],
+      },
+    ],
   },
   {
     name: "pool-emulation",

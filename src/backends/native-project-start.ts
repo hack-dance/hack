@@ -26,6 +26,7 @@ import {
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
+import { emptyNativeDependencyPlanId } from "./native-dependency-plan.ts";
 import {
   adaptNativeGcloudEnvironment,
   hasNativeGcloudCredentialMount,
@@ -420,6 +421,7 @@ type Dependencies = {
   /** Value-free operator notices (for example credential expiry); stderr by default. */
   warn: (line: string) => void;
   review: typeof withNativeProjectReview;
+  /** May return the original-input identity the final review reuses. */
   staticReview: typeof requireNativeStaticStartReview;
   selectReview: typeof selectNativeProjectReviewIdentity;
   retainedImages: typeof selectNativeRetainedImages;
@@ -2353,7 +2355,8 @@ async function startNativeProjectAttempt(
     selectedDependencyFile !== undefined,
     buildServices
   );
-  await deps.staticReview({
+  // Reused by the final review when its request is the same (HACK-2445).
+  const staticSelection = await deps.staticReview({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
     composeFile: opts.composeFile,
@@ -2574,7 +2577,7 @@ async function startNativeProjectAttempt(
     });
     emitNativeHotReloadNotice(pool, deps.warn);
     requireActiveStartup(controller.signal);
-    await verifyNativeResumedRetainedGraph({
+    const resumed = await verifyNativeResumedRetainedGraph({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       run: retained,
@@ -2621,6 +2624,7 @@ async function startNativeProjectAttempt(
       amd64Emulation: input.amd64Emulation,
       restore,
       invoke: deps.invoke,
+      observed: resumed,
     });
     progress({ phase: "images" });
     await buildNativeProjectImages({
@@ -2661,7 +2665,9 @@ async function startNativeProjectAttempt(
       branch: opts.scope.branch,
       retained: restore,
       reviewIdentity,
+      selectedIdentity: staticSelection,
       input: pinned,
+      invoke: deps.invoke,
       run: async (review) => {
         requireEnrollmentCompatible(review.report.plan);
         reportNativeRestartPolicyNotices(review.report.plan, deps.warn);
@@ -2744,17 +2750,28 @@ async function startNativeProjectAttempt(
             }),
             { mode: 0o600, flag: "wx" }
           );
-          const plan = await deps.invoke({
-            runtime: opts.runtime,
-            cwd: opts.scope.projectRoot,
-            args: [
-              "graph",
-              "dependency-plan",
-              "--dependencies",
-              dependencyFile,
-              "--json",
-            ],
-          });
+          // With no bindings there is no host evidence to capture: the ID
+          // covers only these selection bytes, and serve recomputes it.
+          const plan =
+            hostDependencies.length === 0
+              ? {
+                  dependency_plan_id: emptyNativeDependencyPlanId({
+                    plan: review.planId,
+                    artifact,
+                    artifactSha256: artifactHash,
+                  }),
+                }
+              : await deps.invoke({
+                  runtime: opts.runtime,
+                  cwd: opts.scope.projectRoot,
+                  args: [
+                    "graph",
+                    "dependency-plan",
+                    "--dependencies",
+                    dependencyFile,
+                    "--json",
+                  ],
+                });
           if (
             !isRecord(plan) ||
             typeof plan.dependency_plan_id !== "string" ||

@@ -396,6 +396,58 @@ function execStageFailureMessage(
   return fixed ? `${fixed} ${step}` : step;
 }
 
+/** What an unhealthy probe last observed (route probe diagnostic version 2, HACK-2416). */
+// A Map, not an object literal: inherited keys such as "toString" are not reasons.
+const PROBE_REASONS: ReadonlyMap<string, string> = new Map([
+  ["exec_not_running", "the probe process inside the container was gone"],
+  ["exec_exited", "the probe process inside the container exited"],
+  ["sample_missing", "the probe never wrote a result"],
+  ["sample_invalid", "the probe's result could not be read"],
+  ["sample_clock_ahead", "the guest clock was ahead of the host's"],
+  ["sample_stale", "the probe's last result was too old"],
+  [
+    "failures_exhausted",
+    "the route answered no request in time, retries exhausted",
+  ],
+]);
+const PROBE_COUNT = (value: unknown): value is number =>
+  typeof value === "number" &&
+  Number.isSafeInteger(value) &&
+  value >= 0 &&
+  value <= 1e12;
+
+function routeProbeObservation(probe: Record<string, unknown>): string | null {
+  const reason =
+    typeof probe.reason === "string"
+      ? PROBE_REASONS.get(probe.reason)
+      : undefined;
+  if (!(reason && PROBE_COUNT(probe.since_start_ms))) {
+    return null;
+  }
+  for (const key of ["sequence", "failures", "last_elapsed_ms"]) {
+    if (probe[key] !== undefined && !PROBE_COUNT(probe[key])) {
+      return null;
+    }
+  }
+  const allowed = new Set([
+    "version",
+    "port",
+    "reason",
+    "sequence",
+    "failures",
+    "last_elapsed_ms",
+    "since_start_ms",
+  ]);
+  if (Object.keys(probe).some((key) => !allowed.has(key))) {
+    return null;
+  }
+  const counts =
+    typeof probe.sequence === "number"
+      ? ` after ${probe.sequence} requests (${probe.failures ?? 0} failed in a row, the last took ${probe.last_elapsed_ms ?? 0} ms)`
+      : "";
+  return ` The probe observed that ${reason}${counts}, ${Math.round((probe.since_start_ms as number) / 1000)} s after it started.`;
+}
+
 /** Render only the closed inferred-route diagnostic; never runtime error text. */
 function routeProbeFailureMessage(
   value: Record<string, unknown>,
@@ -410,8 +462,6 @@ function routeProbeFailureMessage(
       ) &&
       isRecord(probe)
     ) ||
-    Object.keys(probe).length !== 2 ||
-    probe.version !== 1 ||
     typeof probe.port !== "number" ||
     !Number.isSafeInteger(probe.port) ||
     probe.port < 1 ||
@@ -419,7 +469,19 @@ function routeProbeFailureMessage(
   ) {
     return;
   }
-  return `Inferred route probe on port ${probe.port} is unhealthy. Check hack logs ${service} in the same project/branch, fix the route port, or declare healthcheck.x-hack-http with a longer start_period_ms and a readiness path, within the 300-second graph budget.`;
+  let observed = "";
+  if (probe.version === 1 && Object.keys(probe).length === 2) {
+    observed = "";
+  } else if (probe.version === 2) {
+    const text = routeProbeObservation(probe);
+    if (text === null) {
+      return;
+    }
+    observed = text;
+  } else {
+    return;
+  }
+  return `Inferred route probe on port ${probe.port} is unhealthy.${observed} Check hack logs ${service} in the same project/branch, fix the route port, or declare healthcheck.x-hack-http with a longer start_period_ms and a readiness path, within the 300-second graph budget.`;
 }
 
 /** Fixed/closed diagnostic text and the validated service a failure carries. */

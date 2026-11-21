@@ -487,20 +487,54 @@ pub(super) fn open(first: &Admission, clock: &impl Clock) -> Result<Opened, Cand
     })
 }
 
+/// What the sample under the lease may use in place of waiting out the window: an earlier
+/// sample of this home that passed every predicate on its own ([`opening`]).
+pub(super) trait Earlier {
+    /// The swapout count of a recorded earlier sample that may replace the wait now. Asked
+    /// under the startup lease, at most once, and only when a wait is due.
+    fn usable(&self) -> Option<u64>;
+    /// The time a sample taken now is recorded with, or `None` when it cannot be read.
+    fn now(&self) -> Option<Duration>;
+}
+
+/// The outcome of [`recheck_after_lease`].
+#[derive(Debug)]
+pub(super) struct Leased {
+    /// The qualifying sample taken under the lease. Research takes none here.
+    pub(super) samples: Vec<Admission>,
+    /// Whether a recorded earlier sample replaced the wait. `None` when no sample was
+    /// taken here.
+    pub(super) reused: Option<bool>,
+    /// [`Earlier::now`] when the sample was accepted: the time it may be recorded with.
+    pub(super) sampled_at: Option<Duration>,
+}
+
 /// Development's sample under the startup lease, before creating an owner, disks, provider
 /// capacity, or any aliases. It starts no sooner than [`DEVELOPMENT_WINDOW`] after the first
 /// sample finished: only the remainder of that time is slept, so a start whose own checks
 /// and lease wait already took that long does not pause. The sample must pass every
 /// predicate and show the first sample's swapout count; the caller chains the pre-boot
-/// check to it. Research keeps its frozen pre-lease window and takes no sample here.
+/// check to it. Research keeps its frozen pre-lease window: it takes no sample here and
+/// never asks `earlier`.
+///
+/// When a wait is due and `earlier` holds a usable recorded sample, the sample is taken at
+/// once instead. It replaces the wait only if it passes every predicate and shows both the
+/// first sample's swapout count and the recorded one's. Otherwise it is discarded, and the
+/// start waits and samples exactly as it does without a record: a record never refuses a
+/// start and never stands in for a sample.
 pub(super) fn recheck_after_lease(
     profile: Profile,
     opened: Option<Opened>,
     clock: &impl Clock,
-    observe: impl FnOnce() -> Result<Admission, CandidateError>,
-) -> Result<Vec<Admission>, CandidateError> {
+    earlier: &impl Earlier,
+    mut observe: impl FnMut() -> Result<Admission, CandidateError>,
+) -> Result<Leased, CandidateError> {
     if profile == Profile::Research {
-        return Ok(Vec::new());
+        return Ok(Leased {
+            samples: Vec::new(),
+            reused: None,
+            sampled_at: None,
+        });
     }
     let opened = opened.ok_or_else(|| {
         CandidateError::new(
@@ -508,16 +542,33 @@ pub(super) fn recheck_after_lease(
             "Cannot observe the swapout baseline.",
         )
     })?;
-    // Judge by the clock, not by having asked to sleep: an early wake sleeps again.
-    while let Some(rest) = DEVELOPMENT_WINDOW
-        .checked_sub(clock.now().saturating_sub(opened.at))
-        .filter(|rest| !rest.is_zero())
+    let due = || {
+        DEVELOPMENT_WINDOW
+            .checked_sub(clock.now().saturating_sub(opened.at))
+            .filter(|rest| !rest.is_zero())
+    };
+    if due().is_some()
+        && let Some(recorded) = earlier.usable()
+        && let Ok(sample) = observe()
+        && check(profile, &sample, Some(opened.swapouts)).is_ok_and(|count| count == recorded)
     {
+        return Ok(Leased {
+            samples: vec![sample],
+            reused: Some(true),
+            sampled_at: earlier.now(),
+        });
+    }
+    // Judge by the clock, not by having asked to sleep: an early wake sleeps again.
+    while let Some(rest) = due() {
         clock.sleep(rest);
     }
     let sample = observe()?;
     check(profile, &sample, Some(opened.swapouts))?;
-    Ok(vec![sample])
+    Ok(Leased {
+        samples: vec![sample],
+        reused: Some(false),
+        sampled_at: earlier.now(),
+    })
 }
 
 /// Every startup predicate for one sample, and its swapout count. With a baseline, the
@@ -582,6 +633,7 @@ fn sample_checked(
     Ok(samples)
 }
 
+pub(super) mod opening;
 #[cfg(test)]
 mod pressure_tests;
 

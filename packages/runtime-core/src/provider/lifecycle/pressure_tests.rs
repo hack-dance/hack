@@ -30,27 +30,62 @@ fn report(level: u32) -> Admission {
     }
 }
 
+/// A private provider root for one test, removed when the test ends.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let path = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "hkl-{name}-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                crate::next_test_scratch()
+            ));
+        state::private_directory(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A clock that sleeps without waiting: the window is this module's contract with
+/// `admission`, whose own tests measure it.
+struct Skipping(std::cell::Cell<Duration>);
+
+impl process::Clock for Skipping {
+    fn now(&self) -> Duration {
+        self.0.get()
+    }
+    fn sleep(&self, duration: Duration) {
+        self.0.set(self.0.get() + duration);
+    }
+}
+
+/// A home with no recorded earlier sample.
+struct NoRecord;
+
+impl admission::Earlier for NoRecord {
+    fn usable(&self) -> Option<u64> {
+        None
+    }
+    fn now(&self) -> Option<Duration> {
+        None
+    }
+}
+
 #[test]
 fn lease_wait_pressure_change_refuses_owner_commit_and_releases_the_mutation_lease() {
-    let path = std::fs::canonicalize(std::env::temp_dir())
-        .unwrap()
-        .join(format!(
-            "hkl-pressure-lease-{}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            crate::next_test_scratch()
-        ));
-    struct Remove(std::path::PathBuf);
-    impl Drop for Remove {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-    let _remove = Remove(path.clone());
-    state::private_directory(&path).unwrap();
+    let scratch = Scratch::new("pressure-lease");
+    let path = scratch.0.clone();
     let held = state::Lock::acquire(&path).unwrap();
     let pressure = Arc::new(AtomicU32::new(2));
     let changed = Arc::clone(&pressure);
@@ -59,17 +94,6 @@ fn lease_wait_pressure_change_refuses_owner_commit_and_releases_the_mutation_lea
         changed.store(4, Ordering::SeqCst);
         drop(held);
     });
-    // A clock that sleeps without waiting: the window is this module's contract with
-    // `admission`, whose own tests measure it.
-    struct Skipping(std::cell::Cell<Duration>);
-    impl process::Clock for Skipping {
-        fn now(&self) -> Duration {
-            self.0.get()
-        }
-        fn sleep(&self, duration: Duration) {
-            self.0.set(self.0.get() + duration);
-        }
-    }
     let clock = Skipping(std::cell::Cell::new(Duration::ZERO));
     let opened = admission::open(&report(pressure.load(Ordering::SeqCst)), &clock).unwrap();
     let owner = path.join("owner.json");
@@ -79,6 +103,7 @@ fn lease_wait_pressure_change_refuses_owner_commit_and_releases_the_mutation_lea
         Profile::Development,
         Some(opened),
         &clock,
+        &NoRecord,
         || {
             // Sampled only once the window has passed, and only under the lease.
             assert!(clock.0.get() >= admission::DEVELOPMENT_WINDOW);
@@ -94,6 +119,91 @@ fn lease_wait_pressure_change_refuses_owner_commit_and_releases_the_mutation_lea
     assert!(!owner.exists());
     // A failed fresh sample does not leave a lease or grant allocation authority.
     assert!(state::Lock::acquire(&path).is_ok());
+}
+
+/// A start that reuses this home's recorded sample still takes both of its own samples,
+/// the second under the lease, and records two. The record replaced only the wait, and the
+/// start's own sample under the lease becomes the home's next record.
+#[test]
+fn a_start_that_reuses_a_recorded_sample_still_takes_and_records_two_samples() {
+    use admission::opening;
+    const BOOT: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    struct Host<'a>(&'a Skipping);
+    impl opening::Host for Host<'_> {
+        fn boot_session(&self) -> Option<String> {
+            Some(BOOT.into())
+        }
+        fn now(&self) -> Option<Duration> {
+            Some(process::Clock::now(self.0))
+        }
+    }
+    let scratch = Scratch::new("opening-reuse");
+    let path = scratch.0.clone();
+    let record = || -> Value {
+        serde_json::from_slice(&fs::read(path.join("admission-opening.json")).unwrap()).unwrap()
+    };
+    let clock = Skipping(std::cell::Cell::new(Duration::from_secs(100)));
+    let host = Host(&clock);
+    // An earlier operation of this home recorded a passing sample, under its lease.
+    {
+        let lease = state::Lock::acquire(&path).unwrap();
+        assert!(opening::record(
+            &path,
+            &lease,
+            &host,
+            &report(1),
+            process::Clock::now(&clock).into()
+        ));
+    }
+    assert_eq!(record()["monotonic_nanos"], 100_000_000_000_u64);
+    // Three seconds later a start takes its first sample, and holds the lease 100 ms on.
+    clock.0.set(Duration::from_secs(103));
+    let sampled = std::cell::Cell::new(0);
+    let sample = || {
+        sampled.set(sampled.get() + 1);
+        report(1)
+    };
+    let first = sample();
+    let opened = admission::open(&first, &clock).unwrap();
+    let mut samples = vec![first];
+    clock.0.set(Duration::from_millis(103_100));
+    let reuse = opening::Reuse::parse(None).unwrap();
+    let earlier = opening::Opening::new(&path, &host, reuse);
+    let (lease, leased) = startup_admission_lease(
+        &path,
+        Duration::from_secs(2),
+        Profile::Development,
+        Some(opened),
+        &clock,
+        &earlier,
+        || {
+            // The start's own second sample, taken under the lease.
+            assert!(
+                matches!(state::Lock::acquire(&path), Err(error) if error.code == "provider_busy")
+            );
+            Ok(sample())
+        },
+    )
+    .unwrap();
+    // No wait: the clock stands where the lease was taken.
+    assert_eq!(clock.0.get(), Duration::from_millis(103_100));
+    assert_eq!(leased.reused, Some(true));
+    samples.extend(leased.samples);
+    assert_eq!((sampled.get(), samples.len()), (2, 2));
+    // `admission.json` is these samples, in the shape it always had.
+    let recorded = serde_json::to_value(&samples).unwrap();
+    assert_eq!(recorded.as_array().unwrap().len(), 2);
+    assert!(recorded[0].get("reused").is_none() && recorded[1].get("reused").is_none());
+    // The sample under the lease is now the home's recorded sample.
+    assert!(opening::record(
+        &path,
+        &lease,
+        &host,
+        samples.last().unwrap(),
+        leased.sampled_at
+    ));
+    assert_eq!(record()["monotonic_nanos"], 103_100_000_000_u64);
+    assert_eq!(record()["swapouts"], 42);
 }
 
 /// Ties `start_pool` to the step order of `tests/models/tla/pool-start-admission/PoolStart.tla`
@@ -163,6 +273,10 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
             "rootfs_proof::recheck(candidate, &lock, early_rootfs)?;",
         ),
         (
+            "RecordOpening, which the model folds into Settle and ObserveRunning",
+            "admission::opening::record(&pool_root, &lock, &opening_host, sample, sampled_at);",
+        ),
+        (
             "RestoreAliasLeased",
             "restore_released_short_home(candidate)?;",
         ),
@@ -189,10 +303,19 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
             pair[1].0
         );
     }
-    // One clock opens the window and judges it under the lease.
+    // One clock opens the window and judges it under the lease. The recorded earlier sample
+    // (`Reuse`) is read inside that call, so under the lease, and nowhere else.
     assert_eq!(body.matches("process::MonotonicClock::new()").count(), 1);
     let lease = &body[at("startup_admission_lease(")..];
-    assert!(lease[..lease.find(")?;").unwrap()].contains("&admission_clock,"));
+    let lease = &lease[..lease.find(")?;").unwrap()];
+    assert!(lease.contains("&admission_clock,") && lease.contains("&opening,"));
+    assert_eq!(body.matches("&opening,").count(), 1);
+    assert_eq!(body.matches("admission::opening::Opening::new(").count(), 1);
+    // A mistyped bound is refused with the other settings, before the first effect.
+    assert!(
+        at("admission::opening::Reuse::from_environment()?")
+            < at("restore_released_short_home_before_use(candidate)?;")
+    );
     // The pre-boot check is handed the last qualifying sample's swapout count, and nothing
     // but the sample under the lease is added to the samples after the first window.
     let gate = &body[at("admission_pool::admit_boot(")..];
@@ -216,6 +339,7 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
         );
     }
     for later in [
+        "admission::opening::record(",
         "interrupted::before_boot(",
         "Owner::create_with_project_share(",
         "state::write(&root(candidate).join(\"admission.json\")",
@@ -238,7 +362,11 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
             .all(|line| line.trim().is_empty() || line.trim().starts_with("//")),
         "nothing runs between the tree recheck and the root files recheck"
     );
+    // The record of this start's sample is the first write under the lease, and it is the
+    // only place `start_pool_observed` writes that record.
+    assert_eq!(body.matches("admission::opening::record(").count(), 1);
     for later in [
+        "admission::opening::record(",
         "restore_released_short_home(candidate)?;",
         "interrupted::before_boot(",
         "Owner::create_with_project_share(",
@@ -285,4 +413,47 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
     let witness = &body[at("tree_witness::record_boot(")..];
     assert!(witness[..witness.find(");").unwrap()].contains("proven_trees,"));
     assert_eq!(body.matches("let mut proven_trees").count(), 1);
+}
+
+/// `runtime down` takes its one host sample for the record under its lease, as soon as it
+/// knows the pool's profile and before it stops anything, and its outcome is not read: the
+/// stop does not depend on it.
+#[test]
+fn down_samples_the_host_under_its_lease_before_it_stops_anything() {
+    let source = include_str!("../lifecycle.rs");
+    let start = source.find("\nfn down_observed(").unwrap();
+    let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+    let at = |step: &str| {
+        body.find(step)
+            .unwrap_or_else(|| panic!("down_observed no longer contains `{step}`"))
+    };
+    let steps = [
+        "let lock = state::Lock::acquire(&root(candidate))?;",
+        "let mut owner = Owner::load(candidate)?;",
+        "admission::opening::record_at_stop(",
+        "artifact::verify(candidate)?;",
+        "super::hostname_authority::managed::stop(candidate, &owner)?;",
+        "super::publication::release(",
+        "guest_stop(candidate, &mut owner)",
+    ];
+    for pair in steps.windows(2) {
+        assert!(
+            at(pair[0]) < at(pair[1]),
+            "{} must come before {}",
+            pair[0],
+            pair[1]
+        );
+    }
+    assert_eq!(
+        body.matches("admission::opening::record_at_stop(").count(),
+        1
+    );
+    let call = &body[at("admission::opening::record_at_stop(")..];
+    let call = &call[..call.find("\n    );\n").unwrap()];
+    assert!(call.contains("&lock,") && call.contains("owner.profile,"));
+    assert!(!call.contains('?'), "the stop must not fail on its sample");
+    assert!(
+        body.contains("\n    admission::opening::record_at_stop(\n"),
+        "the sample's outcome must not be bound or returned"
+    );
 }

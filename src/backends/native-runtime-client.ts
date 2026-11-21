@@ -9,6 +9,7 @@ import {
   type NativeProcessRefusal,
   readNativeProcessRefusals,
 } from "../lib/native-process-wrappers.ts";
+import { stepStoreRuntimeArgs } from "../lib/step-store/location.ts";
 import type { SubprocessSignal } from "../lib/subprocess-signal.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import { nativeBetaCandidatePointer } from "./native-beta.ts";
@@ -853,7 +854,14 @@ export async function invokeNativeRuntime(opts: {
   // invalid value throws here, before the subprocess exists.
   Object.assign(env, nativeHotReloadEnvironment(opts.args));
   const child = Bun.spawn(
-    [opts.runtime.binary, "--candidate-root", opts.runtime.home, ...opts.args],
+    [
+      opts.runtime.binary,
+      "--candidate-root",
+      opts.runtime.home,
+      // HACK-2461: the per-user step store, only with HACK_STEP_STORE=on.
+      ...stepStoreRuntimeArgs(),
+      ...opts.args,
+    ],
     {
       cwd: opts.cwd,
       env: childEnvironment(env),

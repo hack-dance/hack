@@ -1,0 +1,169 @@
+{
+  "schema": "hack.step-store-vectors/1",
+  "note": "Shared by the Rust store (src/store/) and its TypeScript twin (src/lib/step-store/). `key` is the canonical digest of the parts under hack.step/1. `text` is the exact canonical record a writer produces for that key, output, time and run, with its check under hack.step-record/1.",
+  "keys": [
+    {
+      "name": "cas, two inputs, no epoch",
+      "step": "plan.compile",
+      "stepVersion": 1,
+      "class": "cas",
+      "inputs": {
+        "compose": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "branch": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "epoch": null,
+      "build": "runtime-build-1",
+      "key": "sha256:7d7989f84ca5b3187b254bfb352a74f1d6e52b6cc8c63d44baba7be91b2c3610"
+    },
+    {
+      "name": "boot, epoch set",
+      "step": "guest.upload",
+      "stepVersion": 2,
+      "class": "boot",
+      "inputs": {
+        "payload": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "epoch": "boot-7f3a",
+      "build": "runtime-build-1",
+      "key": "sha256:65b98ddd54955d748c5c70421e9b3e8b7f8eaf9a973ad5184733b2ec8c096a5c"
+    },
+    {
+      "name": "slot, no inputs",
+      "step": "compose.override",
+      "stepVersion": 1,
+      "class": "slot",
+      "inputs": {},
+      "epoch": null,
+      "build": "runtime-build-1",
+      "key": "sha256:8ad063ef4d7719699955fd2fbb31f9157a3cb6b591f977e207cc11f37b833b4d"
+    },
+    {
+      "name": "file-identity, epoch with identifier punctuation",
+      "step": "exec.hash",
+      "stepVersion": 1,
+      "class": "file-identity",
+      "inputs": {
+        "stat": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "epoch": "boot:2026-11_21+a.b",
+      "build": "5.0.0-next.25+gabc123",
+      "key": "sha256:ad0cfaa14b45f52fa850f8f2dc1d5b1f468d5b68c7abce1e5d6612f94bdcd123"
+    },
+    {
+      "name": "same as first, other build",
+      "step": "plan.compile",
+      "stepVersion": 1,
+      "class": "cas",
+      "inputs": {
+        "branch": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "compose": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "epoch": null,
+      "build": "runtime-build-2",
+      "key": "sha256:256fd7d74301eaa663616e2da9921a1276be09fdff50c14d0b6649319c89cf53"
+    },
+    {
+      "name": "boundaries: u32 max version, 64-char names, 128-char identifiers",
+      "step": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+      "stepVersion": 4294967295,
+      "class": "slot",
+      "inputs": {
+        "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "epoch": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "build": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "key": "sha256:232c1119e2f660eb7ff0b42d4995f3788f3d890c4d01cbce1101a8ba66aa21e6"
+    }
+  ],
+  "records": [
+    {
+      "name": "cas record",
+      "keyIndex": 0,
+      "output": {
+        "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "ref": "cas"
+      },
+      "observedAt": 1763650000000,
+      "run": "run-0001",
+      "text": "{\"check\":\"sha256:af13fdfaba13af2e1b0ff645dfe633acee289b8e78d3ee9aa4d78125480cbec7\",\"class\":\"cas\",\"epoch\":null,\"inputs\":{\"branch\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"compose\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"key\":\"sha256:7d7989f84ca5b3187b254bfb352a74f1d6e52b6cc8c63d44baba7be91b2c3610\",\"observedAt\":1763650000000,\"output\":{\"digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"ref\":\"cas\"},\"producedBy\":{\"build\":\"runtime-build-1\",\"run\":\"run-0001\"},\"step\":\"plan.compile\",\"stepVersion\":1,\"v\":1}"
+    },
+    {
+      "name": "boot record, no cas reference",
+      "keyIndex": 1,
+      "output": {
+        "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "ref": null
+      },
+      "observedAt": 1763650000001,
+      "run": "run-0002",
+      "text": "{\"check\":\"sha256:5b5613f7ffc97c1ea6aac65b8a81c68d368bab3e6dd86d7066bcd56a66183711\",\"class\":\"boot\",\"epoch\":\"boot-7f3a\",\"inputs\":{\"payload\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"key\":\"sha256:65b98ddd54955d748c5c70421e9b3e8b7f8eaf9a973ad5184733b2ec8c096a5c\",\"observedAt\":1763650000001,\"output\":{\"digest\":\"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"ref\":null},\"producedBy\":{\"build\":\"runtime-build-1\",\"run\":\"run-0002\"},\"step\":\"guest.upload\",\"stepVersion\":2,\"v\":1}"
+    },
+    {
+      "name": "boundaries: largest time, 128-char run",
+      "keyIndex": 5,
+      "output": {
+        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "ref": null
+      },
+      "observedAt": 9007199254740991,
+      "run": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+      "text": "{\"check\":\"sha256:db9e6b1e5b5fd5dff2d25422836f581f1a6db166f453238545833ad5f51c9861\",\"class\":\"slot\",\"epoch\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"inputs\":{\"iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii\":\"sha256:1111111111111111111111111111111111111111111111111111111111111111\"},\"key\":\"sha256:232c1119e2f660eb7ff0b42d4995f3788f3d890c4d01cbce1101a8ba66aa21e6\",\"observedAt\":9007199254740991,\"output\":{\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"ref\":null},\"producedBy\":{\"build\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"run\":\"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr\"},\"step\":\"ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss\",\"stepVersion\":4294967295,\"v\":1}"
+    }
+  ],
+  "refused": [
+    {
+      "name": "trailing space",
+      "keyIndex": 0,
+      "expect": "torn-record",
+      "text": "{\"check\":\"sha256:af13fdfaba13af2e1b0ff645dfe633acee289b8e78d3ee9aa4d78125480cbec7\",\"class\":\"cas\",\"epoch\":null,\"inputs\":{\"branch\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"compose\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"key\":\"sha256:7d7989f84ca5b3187b254bfb352a74f1d6e52b6cc8c63d44baba7be91b2c3610\",\"observedAt\":1763650000000,\"output\":{\"digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"ref\":\"cas\"},\"producedBy\":{\"build\":\"runtime-build-1\",\"run\":\"run-0001\"},\"step\":\"plan.compile\",\"stepVersion\":1,\"v\":1} "
+    },
+    {
+      "name": "number written 1.0",
+      "keyIndex": 0,
+      "expect": "torn-record",
+      "text": "{\"check\":\"sha256:af13fdfaba13af2e1b0ff645dfe633acee289b8e78d3ee9aa4d78125480cbec7\",\"class\":\"cas\",\"epoch\":null,\"inputs\":{\"branch\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"compose\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"key\":\"sha256:7d7989f84ca5b3187b254bfb352a74f1d6e52b6cc8c63d44baba7be91b2c3610\",\"observedAt\":1763650000000,\"output\":{\"digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"ref\":\"cas\"},\"producedBy\":{\"build\":\"runtime-build-1\",\"run\":\"run-0001\"},\"step\":\"plan.compile\",\"stepVersion\":1.0,\"v\":1}"
+    },
+    {
+      "name": "check of other bytes",
+      "keyIndex": 0,
+      "expect": "torn-record",
+      "text": "{\"check\":\"sha256:af13fdfaba13af2e1b0ff645dfe633acee289b8e78d3ee9aa4d78125480cbec7\",\"class\":\"cas\",\"epoch\":null,\"inputs\":{\"branch\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"compose\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"key\":\"sha256:7d7989f84ca5b3187b254bfb352a74f1d6e52b6cc8c63d44baba7be91b2c3610\",\"observedAt\":1763650000000,\"output\":{\"digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"ref\":\"cas\"},\"producedBy\":{\"build\":\"runtime-build-1\",\"run\":\"run-0009\"},\"step\":\"plan.compile\",\"stepVersion\":1,\"v\":1}"
+    },
+    {
+      "name": "missing epoch, rechecked",
+      "keyIndex": 0,
+      "expect": "torn-record",
+      "text": "{\"check\":\"sha256:b6177b90b443cde83adfee817f1167681ca5366a3a04823ee919accce6c78063\",\"class\":\"cas\",\"inputs\":{\"branch\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"compose\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"key\":\"sha256:7d7989f84ca5b3187b254bfb352a74f1d6e52b6cc8c63d44baba7be91b2c3610\",\"observedAt\":1763650000000,\"output\":{\"digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"ref\":\"cas\"},\"producedBy\":{\"build\":\"runtime-build-1\",\"run\":\"run-0001\"},\"step\":\"plan.compile\",\"stepVersion\":1,\"v\":1}"
+    },
+    {
+      "name": "extra field, rechecked",
+      "keyIndex": 0,
+      "expect": "torn-record",
+      "text": "{\"check\":\"sha256:b9f821c2786cbe276f4187f502c6da2eaa133861cfa6e2ff26cdbe5ecf2e7422\",\"class\":\"cas\",\"epoch\":null,\"extra\":1,\"inputs\":{\"branch\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"compose\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"key\":\"sha256:7d7989f84ca5b3187b254bfb352a74f1d6e52b6cc8c63d44baba7be91b2c3610\",\"observedAt\":1763650000000,\"output\":{\"digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"ref\":\"cas\"},\"producedBy\":{\"build\":\"runtime-build-1\",\"run\":\"run-0001\"},\"step\":\"plan.compile\",\"stepVersion\":1,\"v\":1}"
+    },
+    {
+      "name": "run with a space, rechecked",
+      "keyIndex": 0,
+      "expect": "torn-record",
+      "text": "{\"check\":\"sha256:1d2e7a1a8e1e50ba3fbc95f3b4a841d654565f0e168c237d4c98c1e816a464ef\",\"class\":\"cas\",\"epoch\":null,\"inputs\":{\"branch\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"compose\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"key\":\"sha256:7d7989f84ca5b3187b254bfb352a74f1d6e52b6cc8c63d44baba7be91b2c3610\",\"observedAt\":1763650000000,\"output\":{\"digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"ref\":\"cas\"},\"producedBy\":{\"build\":\"runtime-build-1\",\"run\":\"run with space\"},\"step\":\"plan.compile\",\"stepVersion\":1,\"v\":1}"
+    },
+    {
+      "name": "time above 2^53 - 1, rechecked",
+      "keyIndex": 0,
+      "expect": "torn-record",
+      "text": "{\"check\":\"sha256:4eda25749598ae8641458361ede7199b6fc9d33b305a7f06f6567372b760d5a8\",\"class\":\"cas\",\"epoch\":null,\"inputs\":{\"branch\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"compose\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"key\":\"sha256:7d7989f84ca5b3187b254bfb352a74f1d6e52b6cc8c63d44baba7be91b2c3610\",\"observedAt\":9007199254740992,\"output\":{\"digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"ref\":\"cas\"},\"producedBy\":{\"build\":\"runtime-build-1\",\"run\":\"run-0001\"},\"step\":\"plan.compile\",\"stepVersion\":1,\"v\":1}"
+    },
+    {
+      "name": "other build, rechecked",
+      "keyIndex": 0,
+      "expect": "torn-record",
+      "text": "{\"check\":\"sha256:d4c0e653d988293cbd250b97d7b72f1920b390e12c3adfc7cabc712855b2150f\",\"class\":\"cas\",\"epoch\":null,\"inputs\":{\"branch\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"compose\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"key\":\"sha256:7d7989f84ca5b3187b254bfb352a74f1d6e52b6cc8c63d44baba7be91b2c3610\",\"observedAt\":1763650000000,\"output\":{\"digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"ref\":\"cas\"},\"producedBy\":{\"build\":\"runtime-build-9\",\"run\":\"run-0001\"},\"step\":\"plan.compile\",\"stepVersion\":1,\"v\":1}"
+    },
+    {
+      "name": "version 2, rechecked",
+      "keyIndex": 0,
+      "expect": "version-changed",
+      "text": "{\"check\":\"sha256:99bbd76df810989a1baa283f702f8a41ac3c36557a6df899530d6e7284d9a025\",\"class\":\"cas\",\"epoch\":null,\"inputs\":{\"branch\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"compose\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"key\":\"sha256:7d7989f84ca5b3187b254bfb352a74f1d6e52b6cc8c63d44baba7be91b2c3610\",\"observedAt\":1763650000000,\"output\":{\"digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"ref\":\"cas\"},\"producedBy\":{\"build\":\"runtime-build-1\",\"run\":\"run-0001\"},\"step\":\"plan.compile\",\"stepVersion\":1,\"v\":2}"
+    }
+  ]
+}

@@ -7,16 +7,21 @@
 //! beside the owner record.
 //!
 //! The record is a report only, and its contract is narrow: it is the method of a recently
-//! finished scan of this pool, possibly written after that scan's caller returned or timed
-//! out.
+//! finished scan of this pool.
 //!
-//! * It never decides a stop or a release check, and it is written after the scan's answer
-//!   has been handed to its caller, so writing it delays nothing.
-//! * A scan that was cancelled before it finished writes nothing. A scan that finished
-//!   just as its caller's bound expired may still write.
+//! * It never decides a stop or a release check. The scan's answer is handed to its caller
+//!   first; the caller then waits at most 100 ms for the record and returns either way.
+//! * Nothing is written into the pool's directory once the scan's caller has returned. The
+//!   scan's thread looks whether the caller is gone before it creates its temporary file
+//!   and again before it renames it over the record, and removes the temporary file
+//!   instead when the caller has gone. What remains is the instant between such a look and
+//!   the file operation after it, and only when the write took longer than the caller's
+//!   wait. A caller may therefore remove or set aside the directory right after a scan.
+//! * A record can be missing or old after a scan: when the scan was cancelled or timed out,
+//!   when the write failed, and when it took longer than the caller waited.
 //! * Within one process an earlier scan never overwrites a later one ([`Turn`]). Across
-//!   processes a stale write is possible: nothing orders their writes but the pool's VM
-//!   lock, which a stop holds while it waits for its scan and no longer.
+//!   processes the pool's VM lock orders the writes, because a stop holds it while it waits
+//!   for its scan and for the record; the exception is the instant above.
 //! * Every write error is ignored, and a missing, malformed, foreign, oversized or special
 //!   file reads as none without being waited on.
 //! * It is rewritten only when the method changes.
@@ -26,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 const FILE: &str = "disk-handle-scan.json";
@@ -125,51 +130,64 @@ impl Turn {
 }
 
 /// Record that the scan with `turn` of the pool at `pool` ran `method`, unless a later scan
-/// of that pool in this process already recorded. Best-effort: see the module contract.
-pub(super) fn record(pool: &Path, turn: Turn, method: Method) {
+/// of that pool in this process already recorded, or `gone` says the scan's caller has
+/// returned. Best-effort: see the module contract.
+pub(super) fn record(pool: &Path, turn: Turn, method: Method, gone: &AtomicBool) {
     /// The latest turn that recorded, for each pool. Held across the write, so two scans'
     /// writes cannot interleave either.
     static RECORDED: Mutex<BTreeMap<PathBuf, u64>> = Mutex::new(BTreeMap::new());
     let mut recorded = RECORDED.lock().unwrap_or_else(PoisonError::into_inner);
     let latest = recorded.entry(pool.to_owned()).or_insert(0);
-    if turn.0 <= *latest {
+    if turn.0 <= *latest || gone.load(Ordering::Relaxed) {
         return;
     }
     *latest = turn.0;
     if read(pool) != Some(method) {
-        let _ = replace(pool, &Record::of(method));
+        let _ = replace(pool, &Record::of(method), gone);
     }
 }
 
 /// Write through a temporary file only this call creates and names, then rename it over the
 /// record. Not synchronized to disk: the record is a report, and a synchronized write would
 /// cost a stop more than the scan saves.
-fn replace(pool: &Path, record: &Record) -> std::io::Result<()> {
+fn replace(pool: &Path, record: &Record, gone: &AtomicBool) -> std::io::Result<()> {
     static SERIAL: AtomicU64 = AtomicU64::new(0);
     let temporary = pool.join(format!(
         "{FILE}.{}.{}.new",
         std::process::id(),
         SERIAL.fetch_add(1, Ordering::Relaxed)
     ));
-    replace_through(pool, record, &temporary)
+    replace_through(pool, record, &temporary, gone)
 }
 
 /// [`replace`] through `temporary`. A file already at that name is not this call's: the
 /// exclusive create fails and the call returns without touching it. Only a file this call
-/// created is removed when a later step fails.
-fn replace_through(pool: &Path, record: &Record, temporary: &Path) -> std::io::Result<()> {
+/// created is removed when a later step fails, or when `gone` says the scan's caller
+/// returned while it was written: the record is then left as it was.
+fn replace_through(
+    pool: &Path,
+    record: &Record,
+    temporary: &Path,
+    gone: &AtomicBool,
+) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let bytes = serde_json::to_vec_pretty(record).map_err(std::io::Error::other)?;
+    if gone.load(Ordering::Relaxed) {
+        return Err(std::io::Error::other("the scan's caller has returned"));
+    }
     let mut created = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(temporary)?;
-    let published = created
-        .write_all(&bytes)
-        .and_then(|()| fs::rename(temporary, path(pool)));
+    let published = created.write_all(&bytes).and_then(|()| {
+        if gone.load(Ordering::Relaxed) {
+            return Err(std::io::Error::other("the scan's caller has returned"));
+        }
+        fs::rename(temporary, path(pool))
+    });
     if published.is_err() {
         let _ = fs::remove_file(temporary);
     }
@@ -181,6 +199,11 @@ mod tests {
     use super::super::tests::Scratch;
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// The scan's caller is still there.
+    static HERE: AtomicBool = AtomicBool::new(false);
+    /// The scan's caller has returned.
+    static GONE: AtomicBool = AtomicBool::new(true);
 
     /// Each method is stored under its documented name and read back as itself.
     #[test]
@@ -216,7 +239,7 @@ mod tests {
             ),
         ];
         for (method, name, reason) in methods {
-            record(pool.path(), Turn::next(), method);
+            record(pool.path(), Turn::next(), method, &HERE);
             assert_eq!(read(pool.path()), Some(method));
             let stored = fs::read_to_string(path(pool.path())).unwrap();
             assert!(stored.contains(r#""version": 1"#), "{stored}");
@@ -241,7 +264,7 @@ mod tests {
     fn the_status_report_names_the_recorded_method() {
         let pool = Scratch::new();
         assert_eq!(report(pool.path()), None);
-        record(pool.path(), Turn::next(), Method::InProcess);
+        record(pool.path(), Turn::next(), Method::InProcess, &HERE);
         assert_eq!(
             serde_json::to_string(&report(pool.path())).unwrap(),
             r#"{"method":"in-process"}"#
@@ -250,6 +273,7 @@ mod tests {
             pool.path(),
             Turn::next(),
             Method::Lsof(Fallback::QueryUnanswered),
+            &HERE,
         );
         assert_eq!(
             serde_json::to_string(&report(pool.path())).unwrap(),
@@ -262,14 +286,15 @@ mod tests {
     fn an_unchanged_method_is_not_rewritten() {
         use std::os::unix::fs::MetadataExt;
         let pool = Scratch::new();
-        record(pool.path(), Turn::next(), Method::InProcess);
+        record(pool.path(), Turn::next(), Method::InProcess, &HERE);
         let first = fs::metadata(path(pool.path())).unwrap().ino();
-        record(pool.path(), Turn::next(), Method::InProcess);
+        record(pool.path(), Turn::next(), Method::InProcess, &HERE);
         assert_eq!(fs::metadata(path(pool.path())).unwrap().ino(), first);
         record(
             pool.path(),
             Turn::next(),
             Method::Lsof(Fallback::SelfTestFailed),
+            &HERE,
         );
         assert_ne!(fs::metadata(path(pool.path())).unwrap().ino(), first);
     }
@@ -299,10 +324,10 @@ mod tests {
         // The same record readable by others is not this pool's private record.
         fs::set_permissions(path(pool.path()), fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(read(pool.path()), None);
-        record(pool.path(), Turn::next(), Method::InProcess);
+        record(pool.path(), Turn::next(), Method::InProcess, &HERE);
         assert_eq!(read(pool.path()), Some(Method::InProcess));
         let missing = pool.path().join("missing");
-        record(&missing, Turn::next(), Method::InProcess);
+        record(&missing, Turn::next(), Method::InProcess, &HERE);
         assert_eq!(read(&missing), None);
     }
 
@@ -325,7 +350,7 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         assert_eq!(read(pool.path()), None);
         assert_eq!(report(pool.path()), None);
-        record(pool.path(), Turn::next(), Method::InProcess);
+        record(pool.path(), Turn::next(), Method::InProcess, &HERE);
         assert_eq!(read(pool.path()), Some(Method::InProcess));
     }
 
@@ -338,7 +363,7 @@ mod tests {
         let record = Record::of(Method::InProcess);
         let existing = pool.path().join("existing.new");
         fs::write(&existing, "not this call's").unwrap();
-        assert!(replace_through(pool.path(), &record, &existing).is_err());
+        assert!(replace_through(pool.path(), &record, &existing, &HERE).is_err());
         assert_eq!(fs::read_to_string(&existing).unwrap(), "not this call's");
         assert_eq!(read(pool.path()), None);
 
@@ -346,7 +371,7 @@ mod tests {
         fs::create_dir(path(pool.path())).unwrap();
         fs::write(path(pool.path()).join("kept"), "").unwrap();
         let created = pool.path().join("created.new");
-        assert!(replace_through(pool.path(), &record, &created).is_err());
+        assert!(replace_through(pool.path(), &record, &created, &HERE).is_err());
         assert!(!created.exists());
     }
 
@@ -357,14 +382,20 @@ mod tests {
         let pool = Scratch::new();
         let other = Scratch::new();
         let (earlier, later) = (Turn::next(), Turn::next());
-        record(pool.path(), later, Method::InProcess);
-        record(pool.path(), earlier, Method::Lsof(Fallback::ScanIncomplete));
+        record(pool.path(), later, Method::InProcess, &HERE);
+        record(
+            pool.path(),
+            earlier,
+            Method::Lsof(Fallback::ScanIncomplete),
+            &HERE,
+        );
         assert_eq!(read(pool.path()), Some(Method::InProcess));
         // The same earlier turn is the first, and so the latest, for another pool.
         record(
             other.path(),
             earlier,
             Method::Lsof(Fallback::ScanIncomplete),
+            &HERE,
         );
         assert_eq!(
             read(other.path()),
@@ -374,10 +405,58 @@ mod tests {
             pool.path(),
             Turn::next(),
             Method::Lsof(Fallback::SelfTestFailed),
+            &HERE,
         );
         assert_eq!(
             read(pool.path()),
             Some(Method::Lsof(Fallback::SelfTestFailed))
         );
+    }
+
+    /// Nothing is written for a caller that has returned: not the record, and not a
+    /// temporary file left behind, whether the caller left before the write began or
+    /// while the temporary file was being written. The record already there stays.
+    #[test]
+    fn nothing_is_written_once_the_caller_has_returned() {
+        let pool = Scratch::new();
+        let entries = || fs::read_dir(pool.path()).unwrap().count();
+        record(pool.path(), Turn::next(), Method::InProcess, &GONE);
+        assert_eq!(entries(), 0);
+        // Gone when the rename is due: the temporary file is created, then removed.
+        let unpublished = Record::of(Method::InProcess);
+        let temporary = pool.path().join("created.new");
+        // `replace_through` looks twice; a flag set between the looks is what a caller
+        // returning mid-write looks like. Set it from another thread once the file exists.
+        let gone = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let started = std::time::Instant::now();
+                while !temporary.exists() && started.elapsed().as_secs() < 5 {
+                    std::thread::yield_now();
+                }
+                gone.store(true, Ordering::Relaxed);
+            });
+            // Whether the flag lands before the second look or after the rename, no
+            // temporary file may be left; when it lands before, no record either.
+            let published = replace_through(pool.path(), &unpublished, &temporary, &gone);
+            assert_eq!(published.is_ok(), read(pool.path()).is_some());
+        });
+        assert!(!temporary.exists());
+        let _ = fs::remove_file(path(pool.path()));
+
+        // The plain case, without the race: gone before the write starts.
+        assert!(replace_through(pool.path(), &unpublished, &temporary, &GONE).is_err());
+        assert_eq!(entries(), 0);
+
+        // A record in place is not touched for a caller that has returned.
+        record(pool.path(), Turn::next(), Method::InProcess, &HERE);
+        record(
+            pool.path(),
+            Turn::next(),
+            Method::Lsof(Fallback::ScanIncomplete),
+            &GONE,
+        );
+        assert_eq!(read(pool.path()), Some(Method::InProcess));
+        assert_eq!(entries(), 1);
     }
 }

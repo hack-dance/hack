@@ -611,44 +611,87 @@ fn an_lsof_child_dropped_unsettled_is_expired() {
     assert_eq!(expirations(Ok(Some(())), false), 0, "after it answered");
 }
 
-/// The caller has its answer before the record is written: with a recorder that blocks,
-/// the stop still returns, and the recorder is found waiting only afterwards.
+/// A record write that stalls neither fails nor hangs the stop, and nothing is written
+/// into the pool's directory once the stop has returned. With a recorder that blocks, the
+/// caller has its answer, waits its short grace for the record and returns. When the
+/// recorder is released afterwards, it finds the caller gone and writes neither the
+/// record nor a temporary file.
 #[test]
-fn a_scan_answers_before_it_records() {
+fn a_stalled_record_does_not_trail_the_stop() {
     fn nothing_found(_: &[PathBuf], _: &AtomicBool) -> Result<Found, Fallback> {
         Ok(Found::default())
     }
     let pool = Scratch::new();
     let (entered, was_entered) = mpsc::channel();
     let (release, released) = mpsc::channel::<()>();
-    let released = std::sync::Mutex::new(released);
-    let entered = std::sync::Mutex::new(entered);
+    let (finished, was_finished) = mpsc::channel();
+    let channels = std::sync::Mutex::new((entered, released, finished));
     let probe = HostScan {
         record: Some(pool.path()),
         decide: nothing_found,
         locate: Arc::new(Lsof::host),
-        recorder: Arc::new(move |pool, turn, method| {
-            entered.lock().unwrap().send(method).unwrap();
+        recorder: Arc::new(move |pool, turn, method, gone| {
+            let channels = channels.lock().unwrap();
+            channels.0.send(method).unwrap();
             // Blocks until the test has seen the stop return.
-            let _ = released.lock().unwrap().recv();
-            last_scan::record(pool, turn, method);
+            let _ = channels.1.recv();
+            last_scan::record(pool, turn, method, gone);
+            channels.2.send(gone.load(Ordering::Relaxed)).unwrap();
         }),
     };
+    let started = std::time::Instant::now();
     let result = disks_closed(
         &probe,
         &process::MonotonicClock::new(),
         &disks(Path::new("/pool")),
         LOADED_HOST_SCAN_WAIT,
     );
+    let waited = started.elapsed();
+    // The answer is the scan's, whatever the record does, and the stop waited no longer
+    // for the record than its grace (with room for a loaded host's scheduling).
     assert_eq!(code(&result), "ok");
-    // The stop has returned; the recorder is blocked, or has not even been entered yet.
+    assert!(waited >= RECORD_GRACE, "returned after {waited:?}");
+    assert!(waited < RECORD_GRACE + Duration::from_secs(20));
     assert_eq!(
         was_entered.recv_timeout(Duration::from_secs(30)),
         Ok(Method::InProcess)
     );
-    assert_eq!(last_scan::read(pool.path()), None);
+    let entries = || std::fs::read_dir(pool.path()).unwrap().count();
+    assert_eq!(entries(), 0);
     release.send(()).unwrap();
-    assert_eq!(recorded(pool.path()), Some(Method::InProcess));
+    // The recorder ran to its end knowing the caller had gone, and wrote nothing.
+    assert_eq!(was_finished.recv_timeout(Duration::from_secs(30)), Ok(true));
+    assert_eq!(entries(), 0);
+    assert_eq!(last_scan::read(pool.path()), None);
+}
+
+/// A scan whose record is written at once does not make the stop wait its grace, and the
+/// record is in place when the stop returns: the pool's directory can be removed at once.
+#[test]
+fn a_prompt_record_is_written_before_the_stop_returns() {
+    fn nothing_found(_: &[PathBuf], _: &AtomicBool) -> Result<Found, Fallback> {
+        Ok(Found::default())
+    }
+    for _ in 0..200 {
+        let pool = Scratch::new();
+        let nested = pool.path().join("run/smolvm");
+        std::fs::create_dir_all(&nested).unwrap();
+        let probe = host_scan_with(&nested, nothing_found, Lsof::host);
+        let started = std::time::Instant::now();
+        let result = disks_closed(
+            &probe,
+            &process::MonotonicClock::new(),
+            &disks(Path::new("/pool")),
+            LOADED_HOST_SCAN_WAIT,
+        );
+        assert_eq!(code(&result), "ok");
+        // Already there, without waiting for it, and nothing else beside it.
+        assert_eq!(last_scan::read(&nested), Some(Method::InProcess));
+        assert_eq!(std::fs::read_dir(&nested).unwrap().count(), 1);
+        assert!(started.elapsed() < Duration::from_secs(20));
+        // What the failing fixture did next, which a trailing write made fail.
+        std::fs::remove_dir_all(pool.path().join("run")).unwrap();
+    }
 }
 
 fn left_to_lsof(_: &[PathBuf], _: &AtomicBool) -> Result<Found, Fallback> {

@@ -50,8 +50,10 @@
 //! module's message, whatever the child was doing.
 //!
 //! [`last_scan`] records which method a recently finished scan of the pool used, and why
-//! when it was `lsof`, in `disk-handle-scan.json` beside the owner record. The record is
-//! written after the answer is handed over and never decides anything.
+//! when it was `lsof`, in `disk-handle-scan.json` beside the owner record. The record
+//! never decides anything: the answer is handed over first, the caller waits at most
+//! [`RECORD_GRACE`] for the record, and nothing is written into the pool's directory once
+//! the caller has returned.
 //!
 //! # What refuses
 //!
@@ -217,8 +219,15 @@ fn decide(_disks: &[PathBuf], _stop: &AtomicBool) -> Result<Found, Fallback> {
 /// Finds the `lsof` to run. A test puts another in its place.
 type Locate = Arc<dyn Fn() -> Result<Lsof, CandidateError> + Send + Sync>;
 
-/// Writes the record of what a scan ran. A test puts another in its place.
-type Recorder = Arc<dyn Fn(&Path, last_scan::Turn, Method) + Send + Sync>;
+/// Writes the record of what a scan ran, unless the flag says the caller has returned. A
+/// test puts another in its place.
+type Recorder = Arc<dyn Fn(&Path, last_scan::Turn, Method, &AtomicBool) + Send + Sync>;
+
+/// How long a caller that has its answer waits for the scan's thread to finish recording
+/// before it returns and the thread may no longer write. This is the most a record can
+/// add to a stop, and it adds nothing when the record is up to date or written at once,
+/// which ends the wait. A stop never waits longer and never fails for it.
+const RECORD_GRACE: Duration = Duration::from_millis(100);
 
 /// How long a caller whose bound expired waits for the scan's thread to stop. It bounds
 /// the caller's extra wait, not the reaping: it is long enough for the thread to kill and
@@ -256,6 +265,7 @@ impl HandleProbe for HostScan<'_> {
     /// so the whole scan is left to its thread.
     fn start(&self, disks: &[PathBuf]) -> Result<Box<dyn Pending<Found>>, CandidateError> {
         let stop = Arc::new(AtomicBool::new(false));
+        let gone = Arc::new(AtomicBool::new(false));
         let (answer, answered) = mpsc::channel();
         let work = Work {
             disks: disks.to_vec(),
@@ -265,6 +275,7 @@ impl HandleProbe for HostScan<'_> {
             locate: self.locate.clone(),
             recorder: self.recorder.clone(),
             stop: stop.clone(),
+            gone: gone.clone(),
             answer,
         };
         std::thread::Builder::new()
@@ -276,6 +287,7 @@ impl HandleProbe for HostScan<'_> {
             early: None,
             finished: false,
             stop,
+            gone,
         }))
     }
 }
@@ -290,6 +302,8 @@ struct Work {
     recorder: Recorder,
     /// Set once the caller gave up: start nothing more, and stop what runs.
     stop: Arc<AtomicBool>,
+    /// Set once the caller has returned: write nothing more into the pool's directory.
+    gone: Arc<AtomicBool>,
     answer: Sender<Result<Found, CandidateError>>,
 }
 
@@ -310,15 +324,17 @@ impl Work {
                 Listed::GivenUp => return,
             },
         };
-        // The caller gets the answer first: the record never decides or delays a stop.
-        // "Delivered" means queued for a caller that is still there; it may yet refuse the
-        // answer as late, and it may return before the record is written (`last_scan`).
+        // The caller gets the answer first: the record never decides a stop. "Delivered"
+        // means queued for a caller that is still there; it may yet refuse the answer as
+        // late. The caller then waits a moment for this thread to end ([`RECORD_GRACE`]),
+        // which it does when `self`, and with it the sending end, is dropped below; after
+        // that the recorder finds the caller gone and writes nothing.
         let delivered = self.answer.send(result).is_ok();
         if let (Some(pool), Some(method)) = (&self.pool, ran)
             && delivered
             && !self.stopped()
         {
-            (self.recorder)(pool, self.turn, method);
+            (self.recorder)(pool, self.turn, method, &self.gone);
         }
     }
 
@@ -380,6 +396,8 @@ struct Scanning {
     /// The caller has its answer or has given up.
     finished: bool,
     stop: Arc<AtomicBool>,
+    /// Set when this value is dropped: the caller is returning.
+    gone: Arc<AtomicBool>,
 }
 
 impl Pending<Found> for Scanning {
@@ -400,6 +418,7 @@ impl Pending<Found> for Scanning {
     fn expire(&mut self) -> CandidateError {
         self.finished = true;
         self.stop.store(true, Ordering::Relaxed);
+        self.gone.store(true, Ordering::Relaxed);
         // Give the thread a moment to kill and reap an `lsof` child before this returns.
         // It ends by answering or by dropping its end; neither is used.
         let _ = self.answered.recv_timeout(REAP_GRACE);
@@ -432,12 +451,20 @@ impl Pending<Found> for Scanning {
 }
 
 impl Drop for Scanning {
-    /// A caller that leaves without its answer stops the scan. One that has its answer
-    /// does not: the thread is finishing and may still record what ran.
+    /// The caller is returning. One that leaves without its answer stops the scan. One
+    /// that has its answer lets the thread finish recording what ran, for at most
+    /// [`RECORD_GRACE`]: the thread ends, and drops its end of the channel, as soon as it
+    /// has recorded or has nothing to record. Either way the thread is then told the caller
+    /// is gone, and it writes nothing into the pool's directory after that. So a pool
+    /// directory that is removed or set aside right after a scan does not get a late file.
     fn drop(&mut self) {
         if !self.finished {
             self.stop.store(true, Ordering::Relaxed);
+        } else if !self.gone.load(Ordering::Relaxed) {
+            // The answer was taken, so the only thing left to arrive is the thread's end.
+            let _ = self.answered.recv_timeout(RECORD_GRACE);
         }
+        self.gone.store(true, Ordering::Relaxed);
     }
 }
 

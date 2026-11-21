@@ -2299,9 +2299,15 @@ A scan records what ran beside the owner record, in `disk-handle-scan.json`:
 `{"version": 1, "method": "in-process"}`, or `"method": "lsof"` with a `reason` of
 `not_built_for_this_platform`, `query_unanswered`, `self_test_failed`,
 `self_test_unavailable` or `scan_incomplete`. The record is a report only and decides
-nothing. It is the method of a recently finished scan of this pool, possibly written
-after that scan's caller returned or timed out; within one process an earlier scan never
-overwrites a later one, and across processes a stale write is possible.
+nothing. It is the method of a recently finished scan of this pool. The scan answers its
+caller first; the caller then waits at most 100 ms for the record, which costs nothing
+when the record is up to date or written at once, and returns either way. Nothing is
+written into the pool's directory after the caller has returned, apart from the instant
+between the writer's look at whether the caller is gone and the file operation after it,
+so the directory can be removed or set aside right after a scan. The record can be
+missing or old: after a scan that timed out, after a failed write, and after a write
+that took longer than the caller waited. Within one process an earlier scan never
+overwrites a later one.
 `runtime status --json` shows it without the version as `disk_handle_scan`, and leaves
 the field out for a pool no scan has recorded.
 
@@ -2317,7 +2323,8 @@ when it is needed. A scan whose wait expires while it runs ends the stop as
 reported as itself, and both refuse. The 30 s limit the wait, not the work. An `lsof`
 child that is running, or that is started after the caller gave up, is stopped and
 reaped by the scan's thread; the caller waits up to 250 ms more for that, which bounds
-its extra wait and not the reaping. A scan thread blocked in a system call can outlive
+its extra wait and not the reaping. A scan that answered in time can add up to 100 ms
+for its record, as above. A scan thread blocked in a system call can outlive
 the timeout, and whatever it answers later is discarded.
 `scripts/measure-lsof-scan.ts` re-measures a host: the runtime's scan with `--scan-binary`
 (macOS), the `lsof` child without.

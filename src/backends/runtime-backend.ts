@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import {
@@ -126,11 +127,19 @@ function shouldDisableExecTty(): boolean {
   return !(process.stdin.isTTY === true && process.stdout.isTTY === true);
 }
 
+/**
+ * `docker compose` with the project, files and profiles. `--project-directory`
+ * names the first file's folder, which Compose would choose anyway; it is
+ * explicit because Hack's generated overrides live outside the project (in
+ * Hack's home) and must never become the base for relative paths.
+ */
 export function buildComposeArgs(opts: RuntimeBaseOptions): string[] {
+  const first = opts.composeFiles[0];
   return [
     "docker",
     "compose",
     ...(opts.composeProject ? ["-p", opts.composeProject] : []),
+    ...(first ? ["--project-directory", dirname(first)] : []),
     ...opts.composeFiles.flatMap((file) => ["-f", file] as const),
     ...(opts.profiles
       ? opts.profiles.flatMap((profile) => ["--profile", profile] as const)

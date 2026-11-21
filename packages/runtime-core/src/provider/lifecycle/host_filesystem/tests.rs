@@ -153,7 +153,7 @@ impl Drop for Pool {
 /// Inspection and migration first prove the pool's disks have no open handle. In the shared
 /// parallel test process, an unrelated test's pre-exec fork (`process::clean_command`) holds a
 /// copy of every descriptor open at the fork until it execs, so a disk this fixture just wrote
-/// or read can still show up to the host-wide `lsof` scan, which correctly refuses as
+/// or read can still show up to the host-wide disk-handle scan, which correctly refuses as
 /// `stop_uncertain` before the result under test. Every test that needs that proof to pass,
 /// to reach a later check or effect, runs isolated.
 fn isolated(child: &str) {

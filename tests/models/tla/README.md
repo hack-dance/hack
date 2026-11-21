@@ -709,6 +709,61 @@ The model omits image selection, the registry and Docker's own platform handling
 those are covered by `registry_image`, `image_ensure` and graph admission unit tests.
 Actual Rosetta execution in the guest needs host evidence.
 
+## Native probe readiness
+
+`probe-readiness/ProbeReadiness.tla` checks how the host reads one native HTTP probe
+before a start counts its service ready (HACK-2440 c and d, HACK-2416). It models the
+probe loop in `guest/http-probe.c`: the patient first attempt, failures counted only
+after the first success or once the grace has passed, and the start interval. The app
+is chosen at the start: `slow` (its first answer takes 1..`MaxCompile` ticks, and an
+abandoned request restarts its compile), `refusing` (every request fails at once) or
+`hanging` (accepts, never answers). It also models the host's reading in `assess`,
+`observe_finding` and `observe_sample`. Faults are an exec that exits or never starts,
+a probe that stops publishing, a frozen status dated in the future, and a missing or
+torn read. Bounds, in ticks: grace 3, timeout 1, start interval 1 (2 with `Legacy`),
+interval 2, two retries, `MaxCompile` 2, `Limit` 14 and a horizon of 15.
+
+The positive control explores 175,757 distinct states to depth 52; `legacy` (the
+steady cadence before the first success, as a probe launched with an earlier build's
+arguments) explores 132,615. Both check:
+
+- `NoFalseFailure`: an app that answers within its grace is never failed without a
+  probe fault.
+- `NoPrematureFailure`: without a probe fault, the host fails a start only once the
+  probe itself has reached unhealthy, so its bounds never cut a working probe short.
+- `BoundedStarting`: no reading says starting later than `Limit`, counted on the host.
+- `NoReadyWithoutSuccess`, and `OneCompile`: inside the grace the probe never makes
+  the app start its compile again.
+
+Controls, each required to fail in the named state:
+
+- `negative` (`Patient = FALSE`): `OneCompile` in a `Begin` state with `restarts = 1`.
+- `no-host-bound` (`HostBound = FALSE`): `BoundedStarting` in an `Observe` state with
+  `verdict = "starting"`, `skewed = TRUE` and `vt = 15`.
+- `no-tolerance` (`Tolerate = FALSE`): `NoFalseFailure` in an `Observe` state with
+  `verdict = "unhealthy"` and `app = "slow"`.
+- `exhausts`: `NeverExhausted` in an `Expire` state with `health = "unhealthy"` and
+  `failures = 2`. It shows the positive run reaches exhausted retries.
+- `tight-bound` (`TightBound = TRUE`, a bound without the failed attempts after the
+  grace): `NoPrematureFailure` in an `Observe` state with `verdict = "unhealthy"`.
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `ExecStart` | `start_probe` creates and starts the exec; the probe publishes sequence 0, health 2 |
+| `Begin` / `Answer` / `Expire` | `request` with `attempt_timeout`, then `sample_health` and `publish` in `guest/http-probe.c` |
+| `Observe` / `V` | `graph/probes.rs::observe_finding` and `observe_sample`, `HttpProbe::assess` and `starting_bound_ms` in `http_probe.rs` |
+| `ExecExit` / `Wedge` / `Skew` | An exited exec, a probe that stops publishing, a guest clock ahead of the host's |
+
+`graph/probes.rs` `the_probe_readiness_model_verdicts_match_observe_sample` walks each
+branch of `V` through `observe_sample` with the model's constants (one tick = 1000 ms).
+It fails if the code's bounds drift from the model. `http_probe.rs`
+`inside_the_start_period_one_slow_first_answer_is_waited_for` runs the compiled probe
+against a server that answers in 300 ms with a 40 ms timeout. The model assumes
+`MaxCompile < Grace` (an app answering exactly at the end of its grace races the
+attempt's own deadline) and an exec that starts within one tick of its recorded start.
+It does not model HTTP parsing, several probes, the whole-graph deadline or arbitrary
+engine scheduling delays.
+
 ## Stopped retained-pool startup
 
 `native-startup-owner/Owner.tla` checks project ownership after a foreground
@@ -815,6 +870,68 @@ volume integrity and live application behavior remain separate tests. `Cancel`
 represents an observed abort check, not arbitrary OS signal delivery; cancellation
 does not reverse an already-admitted boot. There is no fairness or eventual-start
 claim, and a model pass is not native startup qualification.
+
+## Pool start admission
+
+`pool-start-admission/PoolStart.tla` checks the host admission of one `runtime up`
+of a pool that is not running. A Development start takes one sample before the
+startup lease and one under it, at least the admission window after the first; a
+Research start keeps three samples before the lease. The positive control explores
+58,022 states for both profiles, with the provider and engine trees rechecked and
+the root files proven under the lease.
+The clock, a host that fails and passes again once, the swapout count, another
+lease holder, a concurrent start, a changed tree or root file, a squatted HOME
+alias and a crash interleave with every step. See its
+[coverage](pool-start-admission/COVERAGE.md) and
+[statechart](../../../docs/pool-start-admission-statechart.md).
+
+A VM starts only on the qualifying samples of its profile, each taken on a
+passing host (`SamplesTakenOnPassingHost`), with one unbroken swapout count from
+the first sample to the pre-boot check, and the pre-boot check compares against
+the last qualifying sample. The pre-boot observation is recorded apart from the
+samples: it was taken on a passing host (`BootSampleOnPassingHost`) and showed
+the count it was compared against (`BootSampleMatchesBaseline`). No VM starts from a provider or
+engine tree that changed after its content proof (`NoStartFromChangedTree`). A
+refusal, a crash or a pool that a concurrent start already booted leaves no VM
+started and the lease returned. The `root-before-lease` control (73,754 states)
+checks the same invariants for the follow-up ordering, in which the root files
+are proven before the lease and their metadata is rechecked under it.
+
+Twelve controls remove one mechanism each and must fail the named invariant: the
+second sample before the lease (`negative`, `SecondSampleUnderLease`), no window
+(`window-not-enforced`), no swapout comparison at the second sample
+(`unchained-recheck`) or at the pre-boot check (`unchained-boot`), two Research
+samples (`research-two-samples`), no root recheck in the follow-up ordering
+(`root-unchecked`), no tree recheck under the lease (`changed-tree-start`,
+`NoStartFromChangedTree`), no predicate check of the first sample
+(`first-sample-unchecked`), of Development's sample under the lease
+(`second-sample-unchecked`) or of Research's later samples
+(`research-sample-unchecked`), and a pre-boot check that admits without its
+predicate check (`boot-host-unchecked`) or without its swapout comparison
+(`boot-swapouts-unchecked`). Three more show that a Development start, a Research
+start and a start after an alias rewrite are reachable.
+
+Three reachability controls state what the observations do not see:
+`development-dip-start-reachable` and `research-dip-start-reachable` require a
+start that is admitted although the host failed at some moment between two of its
+accepted samples, and `boot-dip-start-reachable` one admitted although the host
+failed between its last sample and the pre-boot observation. Nothing reads the
+host between observations except the cumulative swapout count, so such a dip
+passes; with two Development samples instead of seven it has fewer samples to
+miss. The model shows that the gap exists, not how wide it is.
+
+The provider and engine trees are proven by content before the lease, inside the
+admission window, and rechecked first under it (`lifecycle/leased_trees.rs`): a
+tree whose metadata digest and content anchor equal its proof's keeps the proof,
+any other tree is proven by content again, and a changed tree refuses the start.
+`changed-tree-start` is the start without that recheck: a tree that changes
+between its proof and the lease is booted once, and only the next command's
+witness check refuses it. The model keeps one bit for the trees, so the metadata
+comparison and the second proof are one guard in it. A sample is one atomic
+observation, pressure that comes and goes between samples is invisible, tree and
+root changes are assumed absent while the lease is held, and nothing after
+`machine start` is modelled. There is no fairness or eventual-start claim, and a
+model pass is not a measured boot.
 
 ## Retained-data handoff across plan changes
 
@@ -1475,6 +1592,39 @@ arrived. `tests/process-exit.test.ts` walks both against real processes. Not
 covered: whether every command that outlives `runCli` registers a hold (an
 audit, listed in the PR), and a reader that never drains (the exit waits, as
 the event loop did before).
+
+## Global proxy address record
+
+`ingress-address-record/IngressRecord.tla` checks the record `hack run` trusts
+instead of asking Docker for the global proxy and DNS addresses
+(`src/lib/proxy-ingress-addresses.ts`). Invariant `TrustedRecordIsCurrent`: a
+record a run would trust names the running address, unless a change made
+outside Hack followed the observation it came from.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `HackBegin` / `HackApply` / `HackEnd` | `withIngressChange` around `hack global up` (`runGlobalUpChange`), the proxy `down` in `hack global down`, and the doctor proxy repair: under the `ingress-change.lock` cross-process lock, an unsettled new token, the Compose effect, a settled new token (also after a failure). |
+| `Crash` | The changer's process dies: the lock is reclaimed from a dead owner only, and the token stays unsettled until the next change settles it. |
+| `ReadToken` / `Inspect` / `Write` | `resolveIngressAddresses(..., "fresh")`: the token is read before the one `docker inspect`; a read that finds both containers writes the record with that token; one that reaches the engine and finds a container gone removes it. |
+| `Valid` | `resolveIngressAddresses(..., "recorded")`: trusted only when the record's token is the current one and settled. |
+| `External` | A container recreated outside Hack. Not detected; a failed `hack run` checks once and refreshes. |
+
+Bounds: two concurrent readers, two changers that each run once and may
+crash at any step, addresses {stopped, 1, 2}, `MaxGen = 4`. The positive
+configuration exhausts 922,875 distinct states at depth 19 (about 12 s with
+two workers). Negative controls, all failing `TrustedRecordIsCurrent` at
+`Write`: `negative` (no generation check) and `unsettled` (validity ignores the
+settled flag), where a reader inspects while a change is in progress and the
+change stops the stack; and `unlocked` (changes not serialized), where one
+change settles the token while the other is still moving the containers. The same interleavings are walked
+against the real record and token files in `tests/proxy-ingress-addresses.test.ts`.
+Not covered: atomicity of the file writes themselves (each is an atomic rename),
+Docker's own answers, and the stored per-instance override file, which is
+rendered from whatever addresses the command resolved. The model has one
+Docker engine; in the code a record is also trusted only for the engine it
+was read from (`engine`: `DOCKER_HOST`, else the Docker context), which
+`tests/proxy-ingress-addresses.test.ts` and
+`tests/compose-exec-run-probes-cli.test.ts` cover.
 
 ## Runtime service per native home
 

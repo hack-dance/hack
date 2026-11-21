@@ -136,6 +136,16 @@ static void sample_health(bool success, uint64_t elapsed, uint64_t grace, uint64
 }
 // Every probe tries at its start interval until its first success (HACK-2443), then keeps the
 // reviewed steady interval; an unhealthy sample never brings the fast cadence back.
+// One attempt's time limit (HACK-2440). Until the first success, inside the startup grace, an
+// attempt may wait as long as the grace that is left: a server that accepted the connection
+// and is still compiling its first answer gets one request, not one per timeout. Outside it,
+// the reviewed timeout. A refused connection still fails at once, so a server that is not
+// listening yet is retried at the start interval.
+static uint64_t attempt_timeout(bool ever_healthy, uint64_t elapsed, uint64_t grace, uint64_t timeout) {
+    if (ever_healthy || elapsed >= grace) return timeout;
+    uint64_t left = grace - elapsed;
+    return left > timeout ? left : timeout;
+}
 static uint64_t sample_period(bool ever_healthy, uint64_t interval, uint64_t start_interval) {
     return !ever_healthy && start_interval < interval ? start_interval : interval;
 }
@@ -178,7 +188,7 @@ int main(int argc, char **argv) {
     if (!publish(directory, "status", argv[8], sequence, health, failures, 0)) return 125;
     while (!stopping) {
         uint64_t begun = millis(CLOCK_MONOTONIC);
-        bool success = request(port, argv[2], timeout, route);
+        bool success = request(port, argv[2], attempt_timeout(ever_healthy, begun - start, grace, timeout), route);
         if (stopping) break;
         uint64_t finished = millis(CLOCK_MONOTONIC);
         sample_health(success, finished - start, grace, retries, &failures, &health, &ever_healthy);

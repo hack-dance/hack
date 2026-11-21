@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { link, lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
+import { nativeExecutableDigests } from "./native-executable-hash.ts";
 import {
   isNativeHttpsLeaseRelease,
   isNativeHttpsOwnerConfiguration,
@@ -296,38 +297,18 @@ export async function nativeHttpsRemoveFile(
   }
   await unlink(path);
 }
+/**
+ * SHA-256 of a native executable through the process-wide digest cache
+ * ({@link nativeExecutableDigests}): every check runs on a fresh stat, and the
+ * read is skipped when that stat equals the cached identity. `fresh` always
+ * reads the file (the HTTPS owner's check of the binaries it executes).
+ */
 export async function nativeHttpsExecutableSha256(
-  path: string
+  path: string,
+  opts: { readonly fresh?: boolean } = {}
 ): Promise<string> {
-  const file = await open(
-    path,
-    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-  );
-  try {
-    const stat = await file.stat();
-    if (
-      !stat.isFile() ||
-      (stat.mode & 0o022) !== 0 ||
-      (stat.mode & 0o111) === 0 ||
-      stat.size > 256 * 1024 * 1024 ||
-      (await realpath(path)) !== path
-    ) {
-      throw nativeHttpsOwnerRefused();
-    }
-    const hash = createHash("sha256");
-    for await (const chunk of file.createReadStream({ autoClose: false })) {
-      hash.update(chunk);
-    }
-    const after = await file.stat();
-    if (
-      after.ctimeMs !== stat.ctimeMs ||
-      after.mtimeMs !== stat.mtimeMs ||
-      after.size !== stat.size
-    ) {
-      throw nativeHttpsOwnerRefused();
-    }
-    return hash.digest("hex");
-  } finally {
-    await file.close();
-  }
+  return await nativeExecutableDigests.sha256(path, {
+    refused: nativeHttpsOwnerRefused,
+    fresh: opts.fresh,
+  });
 }

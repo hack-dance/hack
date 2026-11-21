@@ -1710,3 +1710,40 @@ idle-exit race between closing the listener and a queued connection (atomic
 here); socket path attacks, uid checks and frame parsing; the version order
 (any skewed client may retire any service); and durability of the intent write
 itself.
+
+## Global logging opt-in
+
+`global-logging-optin/LoggingOptIn.tla` checks when Hack runs the global
+logging stack (Loki, Alloy, Grafana): `src/lib/global-logging.ts` and
+`hack global install` / `up` / `down` in `src/commands/global.ts`.
+`logging.enabled` decides when set; unset is on only for a home that has the
+stack's compose file, which every install before opt-in wrote.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `On` | `resolveGlobalLogging`: the config value, else whether `logging/docker-compose.yml` exists. |
+| `Install` | `globalInstall`: `materializeGlobalInstallFiles` writes the logging files only when on, then `runGlobalUp`. |
+| `Up` / `UpWith` | `runGlobalUp`: on writes missing files (`materializeGlobalLoggingFiles`) and starts the stack; off runs `compose stop` where the files exist (`stopDisabledLoggingStack`). |
+| `UpFlag` | `hack global up --logging` / `--no-logging`: saves `logging.enabled`, then `runGlobalUp`. |
+| `Set` | `hack config set|unset --global logging.enabled` (no Docker effect). |
+| `Down` / `Reset` | `hack global down` (`compose down`, volumes kept) and `hack global logs-reset` (`down -v`). |
+
+Invariants: `FreshNeverStartsUnasked` (a new home runs the stack only after
+someone turned it on), `ExistingHomeKept` (after a start, a home that had the
+stack still has it while the setting is unset), `OffMeansStopped` and
+`NoSurpriseDataLoss` (logs disappear only in a `logs-reset` step; `prevData` is
+`data` before the step, so this step property is an invariant).
+
+Bounds: one home that is either from before opt-in (files, logs, running or
+not) or new, every command and setting change in any order. The positive
+configuration exhausts 121 distinct states at depth 5. Controls: `negative`
+(install writes the logging files whatever the setting) fails
+`FreshNeverStartsUnasked` at a new home's first `Install`, the hazard the
+compose-file rule creates; `legacy-unset-off` (unset means off) fails
+`ExistingHomeKept` at `Install` or `Up`; `off-removes-volumes` (off is
+`down -v`) fails `NoSurpriseDataLoss` at `UpFlag`. `tests/global-command.test.ts`
+("the opt-in logging stack") walks the same paths with a stub Docker, and
+`tests/global-logging.test.ts` the resolution rule. Not covered: readiness
+(healthchecks and their bounds are in `tests/global-stack-state.test.ts`), the
+login autostart path (routing only, as before), and a compose file the user
+deletes by hand, which turns an unset home off.

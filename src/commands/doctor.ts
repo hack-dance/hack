@@ -189,6 +189,11 @@ import {
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import {
+  LOGGING_ENABLE_COMMAND,
+  resolveGlobalLogging,
+  resolveGlobalLoggingForHome,
+} from "../lib/global-logging.ts";
 import { describeProxyNetworkIssue } from "../lib/global-proxy-network.ts";
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
@@ -1104,21 +1109,8 @@ async function runDoctorAudit(
   results.push(oauthDns);
   await appendCustomDomainDnsChecks({ results, progress: s, defaultDomain });
 
-  // Endpoint reachability (best-effort). Skip if DNS isn't set up.
-  if (dns.status === "ok") {
-    results.push(
-      await runCheck(s, "grafana", () => checkGrafanaReachable(), {
-        timeoutMs: 2000,
-      })
-    );
-  } else {
-    results.push({
-      name: "grafana",
-      status: "warn",
-      message: `Skipped reachability (DNS for ${LEGACY_GRAFANA_HOST} not configured)`,
-      durationMs: 0,
-    });
-  }
+  // Endpoint reachability (best-effort).
+  results.push(await checkGrafanaUnlessOff({ progress: s, dns }));
 
   // Authenticate loopback independently of direct container reachability.
   results.push(
@@ -2296,14 +2288,33 @@ async function checkGlobalFiles(): Promise<CheckResult> {
     GLOBAL_LOGGING_COMPOSE_FILENAME
   );
 
+  const logging = await resolveGlobalLogging({ loggingCompose });
+  const caddyText = await readTextFile(caddyCompose);
   const ok =
-    (await pathExists(caddyCompose)) && (await pathExists(loggingCompose));
+    caddyText !== null &&
+    (!logging.enabled || (await pathExists(loggingCompose)));
+  if (!ok) {
+    return {
+      name: "global files",
+      status: "warn",
+      message: `Missing compose files under ${root} (run: hack global install)`,
+    };
+  }
+  // A proxy file from before healthchecks: `hack global up` then keeps its
+  // old fixed waits instead of waiting for readiness.
+  if (!caddyText.includes("healthcheck:")) {
+    return {
+      name: "global files",
+      status: "warn",
+      message: `${root}: the global stack files predate readiness checks, so \`hack global up\` waits a fixed time for them (run: hack global install)`,
+    };
+  }
   return {
     name: "global files",
-    status: ok ? "ok" : "warn",
-    message: ok
+    status: "ok",
+    message: logging.enabled
       ? root
-      : `Missing compose files under ${root} (run: hack global install)`,
+      : `${root} (logging stack off; turn it on with: ${LOGGING_ENABLE_COMMAND})`,
   };
 }
 
@@ -2687,6 +2698,40 @@ async function checkOauthAliasDns(): Promise<CheckResult> {
       message: `Unable to resolve ${host} (run: hack global install)`,
     };
   }
+}
+
+/**
+ * Grafana reachability, skipped when DNS is not set up, and reported as off
+ * when the opt-in logging stack is off (there is no Grafana to reach).
+ */
+async function checkGrafanaUnlessOff(opts: {
+  readonly progress: Parameters<typeof runCheck>[0];
+  readonly dns: CheckResult;
+}): Promise<TimedCheckResult> {
+  if (!(await resolveGlobalLoggingForHome()).enabled) {
+    return {
+      name: "grafana",
+      status: "ok",
+      message: `Logging stack off (opt-in); turn it on with: ${LOGGING_ENABLE_COMMAND}`,
+      durationMs: 0,
+    };
+  }
+  if (opts.dns.status === "ok") {
+    return await runCheck(
+      opts.progress,
+      "grafana",
+      () => checkGrafanaReachable(),
+      {
+        timeoutMs: 2000,
+      }
+    );
+  }
+  return {
+    name: "grafana",
+    status: "warn",
+    message: `Skipped reachability (DNS for ${LEGACY_GRAFANA_HOST} not configured)`,
+    durationMs: 0,
+  };
 }
 
 async function checkGrafanaReachable(): Promise<CheckResult> {

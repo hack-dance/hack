@@ -427,6 +427,23 @@ test("missing assets are never created and unknown mounted content is refused", 
   expect(await Bun.file(root).exists()).toBe(false);
 });
 
+test("a home without the opt-in logging stack authenticates its routing assets; a partial one still refuses", async () => {
+  // HACK-2468: install writes no logging files while logging is off.
+  const logging = join(root, GLOBAL_LOGGING_DIR_NAME);
+  await rm(logging, { recursive: true });
+  await secure();
+  expect(await Bun.file(logging).exists()).toBe(false);
+  expect((await lstat(caddyCompose())).mode & 0o777).toBe(0o644);
+
+  // A logging path that is there is checked in full: an empty directory
+  // (no compose file, no dashboards) still refuses.
+  await mkdir(logging, { mode: 0o700 });
+  await expect(secure()).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await rm(logging, { recursive: true });
+  await writeFile(logging, "not a directory");
+  await expect(secure()).rejects.toMatchObject({ code: "E_PERMISSION" });
+});
+
 test("login plans routing without starting default-credential logging services", () => {
   const composeFile = "/example/logging/compose.yml";
   expect(globalLoggingUpArguments({ composeFile, login: true })).toBeNull();

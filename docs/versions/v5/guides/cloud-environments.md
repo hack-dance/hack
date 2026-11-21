@@ -60,6 +60,7 @@ Coder. They have no page yet.
   `hack config set --global proxy.bind_address 127.0.0.1` before
   `hack global install`. Without it, Hack's proxy listens on every interface,
   and anyone who can reach the machine's ports 80 and 443 can open the app,
+  and with the opt-in logging stack on (`hack global up --logging`) also
   query Hack's log store (Loki, whose API has no authentication) and reach the
   Grafana log viewer's sign-in page, which keeps its default admin password
   unless you change it. Leave it unset only if you want that

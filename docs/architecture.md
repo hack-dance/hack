@@ -1197,6 +1197,8 @@ qualify the installed binary, real filesystems or an application.
     Compose override: DNS, `*.hack` host entries, local CA trust; `@base` or the
     branch slug)
   - `logging/docker-compose.yml`, `logging/alloy.alloy`, `logging/loki.yaml`, `logging/grafana/`
+    (written only while the opt-in logging stack is on; an existing
+    `logging/docker-compose.yml` keeps the stack on while `logging.enabled` is unset)
   - `schemas/hack.config.schema.json`, `schemas/hack.branches.schema.json`
   - `certs/` (mkcert output for non-Caddy services)
 - `<repo>/.hack/`

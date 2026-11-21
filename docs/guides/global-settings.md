@@ -21,6 +21,18 @@ Common settings:
 - `controlPlane.tui.logs.historyTailStep` (default `200`) — history page size.
 - `controlPlane.usage.watchIntervalMs` (default `2000`) — sample interval for `hack usage --watch`.
 - `controlPlane.usage.historySize` (default `24`) — sample history for `hack usage --watch`.
+- `logging.enabled` (`true|false`; default unset) — whether Hack runs the
+  global logging stack (Loki, Alloy and Grafana). It is opt-in: unset is off
+  for a home without `~/.hack/logging/docker-compose.yml`, and on for a home
+  that has it, so a home that ran the stack before keeps it until you change
+  this. `hack global up --logging` saves `true`, writes the stack's files if
+  needed and starts it; `hack global up --no-logging` saves `false` and stops
+  its containers. Turning it off keeps the stack's volumes (logs, Grafana
+  state); `hack global logs-reset` removes them. With it off, plain
+  `hack logs` reads container logs and `hack logs --loki` says how to turn
+  the stack on. A Loki named by `HACK_LOKI_URL` is used whatever this says.
+  See [the opt-in state chart](../diagrams/global-logging-optin.svg) and the
+  model in `tests/models/tla/global-logging-optin`.
 - `proxy.bind_address` (default unset: Docker's default, every IPv4 and IPv6
   interface, for a new proxy file) — host address the global
   Caddy proxy publishes ports 80 and 443 on. Accepts one IPv4 or IPv6 address,

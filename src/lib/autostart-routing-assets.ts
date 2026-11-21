@@ -67,6 +67,10 @@ const MAX_ASSET_BYTES = 1024 * 1024;
  * read-only; publication replaces matching nonsecret bytes on fresh 0644 inodes so an
  * older writable descriptor cannot change what the upcoming Compose run reads.
  * Missing/custom assets refuse; this is neither installation nor migration.
+ * The one exception is the opt-in logging stack: a home with no logging
+ * directory at all never turned it on, and login never starts it, so its
+ * files are not part of the set. A logging directory that exists is checked
+ * in full, as before.
  */
 export async function secureAutostartRoutingAssets(
   opts: AutostartRoutingAssetsOptions
@@ -76,7 +80,8 @@ export async function secureAutostartRoutingAssets(
       throw new Error("Unavailable owner");
     }
     const uid = process.getuid();
-    const assets = routingAssets(opts);
+    const logging = await loggingDirectoryPresent(opts.root);
+    const assets = routingAssets({ ...opts, logging });
     for (const asset of assets) {
       await assertSafeAssetParent({ root: opts.root, path: asset.path, uid });
     }
@@ -89,14 +94,16 @@ export async function secureAutostartRoutingAssets(
         GLOBAL_BRANCHES_SCHEMA_FILENAME,
       ],
     });
-    await assertMountedDirectory({
-      path: resolve(
-        opts.root,
-        GLOBAL_LOGGING_DIR_NAME,
-        GLOBAL_GRAFANA_DASHBOARDS_DIR
-      ),
-      names: [basename(GLOBAL_GRAFANA_DASHBOARD_FILENAME)],
-    });
+    if (logging) {
+      await assertMountedDirectory({
+        path: resolve(
+          opts.root,
+          GLOBAL_LOGGING_DIR_NAME,
+          GLOBAL_GRAFANA_DASHBOARDS_DIR
+        ),
+        names: [basename(GLOBAL_GRAFANA_DASHBOARD_FILENAME)],
+      });
+    }
     const observed: ObservedAsset[] = [];
     for (const asset of assets) {
       observed.push(await readCurrentAsset({ asset, uid }));
@@ -123,8 +130,25 @@ export async function secureAutostartRoutingAssets(
   }
 }
 
+/**
+ * Whether `<root>/logging` exists at all. Only a missing path (`ENOENT`) means
+ * "no logging stack"; anything else there, a file or a link included, is
+ * checked as a logging directory and refused if it is not a safe one.
+ */
+async function loggingDirectoryPresent(root: string): Promise<boolean> {
+  try {
+    await lstat(resolve(root, GLOBAL_LOGGING_DIR_NAME));
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
 function routingAssets(
-  opts: AutostartRoutingAssetsOptions
+  opts: AutostartRoutingAssetsOptions & { readonly logging: boolean }
 ): readonly RoutingAsset[] {
   const bindAddress =
     opts.bindAddress === null ? null : parseProxyBindAddress(opts.bindAddress);
@@ -152,24 +176,25 @@ function routingAssets(
         renderGlobalCoreDnsConfig({ useStaticCaddyIp, defaultDomain })
       ),
     },
-    ...(
-      [
-        [GLOBAL_LOGGING_COMPOSE_FILENAME, renderGlobalLoggingCompose()],
-        [GLOBAL_ALLOY_FILENAME, renderGlobalAlloyConfig()],
-        [GLOBAL_LOKI_CONFIG_FILENAME, renderGlobalLokiConfigYaml()],
-        [
-          GLOBAL_GRAFANA_DATASOURCE_FILENAME,
-          renderGlobalGrafanaDatasourceYaml(),
-        ],
-        [
-          GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
-          renderGlobalGrafanaDashboardsProvisioningYaml(),
-        ],
-        [
-          GLOBAL_GRAFANA_DASHBOARD_FILENAME,
-          renderGlobalGrafanaLogsDashboardJson(),
-        ],
-      ] as const
+    ...(opts.logging
+      ? ([
+          [GLOBAL_LOGGING_COMPOSE_FILENAME, renderGlobalLoggingCompose()],
+          [GLOBAL_ALLOY_FILENAME, renderGlobalAlloyConfig()],
+          [GLOBAL_LOKI_CONFIG_FILENAME, renderGlobalLokiConfigYaml()],
+          [
+            GLOBAL_GRAFANA_DATASOURCE_FILENAME,
+            renderGlobalGrafanaDatasourceYaml(),
+          ],
+          [
+            GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
+            renderGlobalGrafanaDashboardsProvisioningYaml(),
+          ],
+          [
+            GLOBAL_GRAFANA_DASHBOARD_FILENAME,
+            renderGlobalGrafanaLogsDashboardJson(),
+          ],
+        ] as const)
+      : []
     ).map(([name, text]) => ({
       path: resolve(logging, name),
       accepted: [text],

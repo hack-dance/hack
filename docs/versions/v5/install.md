@@ -106,7 +106,10 @@ hack global install
 ```
 
 Read the prompts for DNS and certificate trust. Host changes can require your
-approval. Then continue to [First project on Compose](getting-started.md).
+approval. This starts the proxy and DNS only. The logging stack (Loki, Alloy and
+Grafana, for log history and queries) is opt-in: add it any time with
+`hack global up --logging`. Then continue to
+[First project on Compose](getting-started.md).
 
 ## Stop using or remove an install
 

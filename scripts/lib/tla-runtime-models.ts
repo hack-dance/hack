@@ -2065,6 +2065,44 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // src/lib/global-logging.ts and `hack global install/up`: the logging
+    // stack is opt-in; a home that had it keeps it, a new one never starts
+    // it unasked, and turning it off never removes its logs.
+    name: "global-logging-optin",
+    module: "LoggingOptIn",
+    states: 121,
+    invariant: "FreshNeverStartsUnasked",
+    action: "Install",
+    fields: [
+      "existing = FALSE",
+      "asked = FALSE",
+      "running = TRUE",
+      'setting = "unset"',
+    ],
+    additionalControls: [
+      {
+        name: "legacy-unset-off",
+        negative: true,
+        invariant: "ExistingHomeKept",
+        action: "Install",
+        fields: ["existing = TRUE", 'setting = "unset"', "running = FALSE"],
+        alternativeWitnesses: [
+          {
+            action: "Up",
+            fields: ["existing = TRUE", 'setting = "unset"', "running = FALSE"],
+          },
+        ],
+      },
+      {
+        name: "off-removes-volumes",
+        negative: true,
+        invariant: "NoSurpriseDataLoss",
+        action: "UpFlag",
+        fields: ["prevData = TRUE", "data = FALSE", 'setting = "off"'],
+      },
+    ],
+  },
+  {
     // src/lib/process-exit.ts: the CLI never exits while held work runs or
     // before its output is flushed.
     name: "cli-process-exit",

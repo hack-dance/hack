@@ -382,7 +382,8 @@ fn connections_queued_at_shutdown_are_refused_and_cannot_hold_it_open() {
     // Two clients connect, the service decides to stop before accepting them,
     // and one of them asks it to retire.
     let mut queued: Vec<_> = (0..2).map(|_| connect(&root.0)).collect();
-    shared.stop(Outcome::Idle);
+    // A budget no scheduling delay can exhaust: refusal must happen.
+    shared.stop_until(Outcome::Idle, Instant::now() + HANG_GUARD);
     let retire = json!({"v": 1, "id": "r", "op": "service.retire"});
     for stream in &mut queued {
         let bytes = serde_json::to_vec(&retire).unwrap();
@@ -404,6 +405,7 @@ fn connections_queued_at_shutdown_are_refused_and_cannot_hold_it_open() {
             Err(frame::FrameError::Closed)
         );
     }
+    assert_eq!(shared.state().refused, 2);
     assert!(!paths.socket.exists());
     drop(lock);
 }
@@ -595,8 +597,12 @@ fn a_request_queued_before_idle_expiry_gets_a_refusal_not_silence() {
     let hello = json!({"v": 1, "id": "h", "op": "hello", "args": {"client": {"kind": "cli"}}});
     let bytes = serde_json::to_vec(&hello).unwrap();
     frame::write(&mut queued, &bytes, CONTROL_FRAME_LIMIT).unwrap();
-    shared.stop(Outcome::Idle);
-    assert_eq!(shut_down(&shared, listener), Outcome::Idle);
+    shared.stop_until(Outcome::Idle, Instant::now() + HANG_GUARD);
+    let stopping = Arc::clone(&shared);
+    assert_eq!(
+        within(move || shut_down(&stopping, listener)),
+        Outcome::Idle
+    );
     let body = frame::read(&mut queued, Duration::from_secs(2), CONTROL_FRAME_LIMIT).unwrap();
     let reply: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(reply["id"], "h");
@@ -641,21 +647,25 @@ fn partial_requests_queued_at_shutdown_cannot_hold_the_lock() {
             stream
         })
         .collect();
-    shared.stop(Outcome::Idle);
-    // Both paths that refuse queued connections draw on the same budget, so at
-    // most QUEUED_BUDGET / QUEUED_WAIT of the 24 stalled peers are waited on
-    // (fewer when the machine is slow); without the shared cap all 24 are.
-    accept_queued(&shared, &listener).unwrap();
+    // The budget has already run out when stopping begins. Both paths that
+    // refuse queued connections must draw on this one instant, so neither may
+    // wait on any peer: a path that started a budget of its own would wait on
+    // some of the 24 and fail here, whatever the machine's load.
+    shared.stop_until(Outcome::Idle, Instant::now());
+    let accepting = Arc::clone(&shared);
+    let listener = within(move || {
+        accept_queued(&accepting, &listener).unwrap();
+        listener
+    });
     let stopping = Arc::clone(&shared);
     assert_eq!(
         within(move || shut_down(&stopping, listener)),
         Outcome::Idle
     );
-    let waited = shared.state().refused;
-    let cap = (QUEUED_BUDGET.as_millis() / QUEUED_WAIT.as_millis()) as usize + 1;
-    assert!(
-        waited <= cap,
-        "{waited} queued peers were waited on, cap {cap}"
+    assert_eq!(
+        shared.state().refused,
+        0,
+        "a queued peer was waited on after the budget"
     );
     drop(stalled);
     drop(lock);
@@ -676,7 +686,7 @@ fn a_connection_accepted_after_stop_is_refused_not_handed_to_a_worker() {
     let hello = json!({"v": 1, "id": "q", "op": "hello", "args": {"client": {"kind": "cli"}}});
     let bytes = serde_json::to_vec(&hello).unwrap();
     frame::write(&mut queued, &bytes, CONTROL_FRAME_LIMIT).unwrap();
-    shared.stop(Outcome::Retired);
+    shared.stop_until(Outcome::Retired, Instant::now() + HANG_GUARD);
     accept_queued(&shared, &listener).unwrap();
     assert_eq!(shared.state().sessions, 0, "no worker was started");
     let body = frame::read(&mut queued, Duration::from_secs(2), CONTROL_FRAME_LIMIT).unwrap();

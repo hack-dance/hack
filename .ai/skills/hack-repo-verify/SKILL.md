@@ -60,6 +60,24 @@ compiler, native planning or config-import changes, run them locally after
 new `scripts/check-native-*-plan-cli.ts` is missing from that command or from CI.
 CI also lints those scripts and runs their transport tests; lint changed ones explicitly.
 
+Runtime-core and other candidate bundle changes must at least `cargo check` every target and feature set
+built by `scripts/build-native-candidate.sh`; host-only checks do not cover the
+guest's libc API. Read that script for the current invocations. With Rust 1.97.1,
+check the host runtime bins with the script's exact features, the
+`packages/relay-guest` binary on `aarch64-unknown-linux-musl`, and runtime-core's
+`hack-storage-root-witness` binary on that target with
+`--features storage-root-witness-tool`. For musl checks, use the script's Zig
+compiler/linker for cross-target C dependencies. Linux checks do not replace the macOS host check or
+actual candidate bundle build. List target/feature commands and results in the
+ready note; do not infer guest compilation from host tests or green hosted jobs.
+
+After merging runtime changes, run the whole `bun run test:local` suite on the
+merged tree, not only the previously touched test filters. A clean text merge can
+break source-order/model-binding tests when an entry point becomes a wrapper.
+Audit those readers after a wrap or rename: inspect the function holding the
+steps, retain every step assertion, and assert that the entry point delegates to
+it. Report the whole-suite result separately from focused tests.
+
 Rust default gates are `bun run check:local` and `bun run test:local`. Add `--all-features` to equivalent Cargo commands for feature
 changes; the toolchain Rust tasks already enable all features. Keep default coverage.
 

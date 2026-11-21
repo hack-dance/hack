@@ -23,7 +23,7 @@ mod error_stop_diagnostics;
 mod hex;
 pub mod sha256_backend;
 mod sha256_guard;
-pub use error::{CandidateError, ErrorMessage, LogFailurePhase};
+pub use error::{CandidateError, ErrorMessage, LogFailurePhase, ProbeFinding, ProbeReason};
 pub use hex::Hex;
 #[cfg(all(test, feature = "native-config-plan"))]
 mod test_budget;

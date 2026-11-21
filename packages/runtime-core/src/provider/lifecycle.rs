@@ -87,6 +87,14 @@ pub struct RuntimeStatus {
     /// first (see `guest_memory_peak`). A record only; absent when there is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guest_memory_peaks: Option<Vec<guest_memory_peak::Boot>>,
+    /// How a disk-holder scan started now would read the host (`disk_handles`): in this
+    /// process, or through `lsof` with the reason; or unknown when the self-test did not
+    /// answer in time. Computed when status runs, by the self-test a scan runs first, so
+    /// it describes this host and build and no pool or earlier scan. On macOS that test
+    /// makes and removes a private file in the process's temporary directory; status
+    /// waits at most 100 ms for it, and failing to make the file is reported as a
+    /// reason, never an error.
+    pub disk_handle_scan: disk_handles::MethodReport,
     /// Provider sockets native found world-accessible and made private for the running
     /// provider (`socket_repairs`); absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -976,6 +984,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             graph_runs: users.graph_runs,
             pool_idle: Some(false),
             guest_memory_peaks: None,
+            disk_handle_scan: disk_handles::method_within(disk_handles::STATUS_METHOD_WAIT),
             repaired_sockets: None,
             hashing: crate::sha256_backend::report(),
         });
@@ -1055,6 +1064,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         graph_runs: users.graph_runs,
         pool_idle,
         guest_memory_peaks: guest_memory_peak::history(&root(candidate)),
+        disk_handle_scan: disk_handles::method_within(disk_handles::STATUS_METHOD_WAIT),
     })
 }
 
@@ -2967,9 +2977,11 @@ fn finish_stopped(
     finish_absent(candidate, owner, value, true)
 }
 
-/// Record `value` once the provider's VM lock is free, no handle remains on the owned disks and
-/// no owned socket accepts connections. The caller has established that no provider process
-/// remains; this proves the machine it launched released everything before the receipt changes.
+/// Record `value` once the provider's VM lock is free, the disk-holder scan names no process
+/// on the owned disks and no owned socket accepts connections. The caller has established that
+/// no provider process remains; these checks look for anything the machine it launched left
+/// behind before the receipt changes. The scan inspects what `lsof` inspects and does not
+/// prove that nothing maps a disk (`disk_handles`).
 /// With `record_disks`, unadopted disks are identified now; without it they stay unadopted, so
 /// the next boot's size, format-marker and template checks decide whether to adopt them.
 fn finish_absent(
@@ -3004,7 +3016,7 @@ impl Drop for VmLock {
 #[cfg(not(test))]
 const STOP_SCAN_WAIT: Duration = disk_handles::STOP_HANDLE_WAIT;
 /// The unit-test build of [`STOP_SCAN_WAIT`]. Release-check fixtures prove what the scan
-/// reports (status 1, no output), not how fast it reports it, and they run beside other
+/// reports (no holder, nothing unknown), not how fast it reports it, and they run beside other
 /// tests' work; on a loaded host one scan took longer than 5 s and the fixture failed as
 /// `provider_timeout_uncertain` before its result under test (HACK-1457). The production
 /// bounds themselves are tested on a fake clock in [`disk_handles`].
@@ -3063,7 +3075,7 @@ fn lock_disks_closed(
     }
     let vm_lock = VmLock(vm_lock);
     disk_handles::disks_closed(
-        &disk_handles::Lsof::host(),
+        &disk_handles::HostScan::host(),
         &process::MonotonicClock::new(),
         disks,
         handle_wait,

@@ -1,0 +1,41 @@
+---
+title: BridgeBatch · start a batch
+---
+stateDiagram-v2
+  direction TB
+  classDef live stroke-width:1.6px
+  [*] --> idle
+  idle --> start : Reserve [all healthy]
+  start --> fence1 : OwnerAcquire [lease free]
+  fence1 --> fence2 : Fence1 [all current]
+  fence2 --> intent : Fence2 [all current]
+  intent --> relays : Intent (one save)
+  relays --> fence3 : Relays (one guest call)
+  fence3 --> spawn : Fence3 [all current]
+  spawn --> await : Spawn (all children)
+  await --> ready : Await [all published]
+  fence1 --> failed : OwnerRefuse
+  fence2 --> failed : OwnerRefuse
+  fence3 --> failed : [stale: stop it]
+  await --> failed : [a child refused]
+  start --> crashed : OwnerCrash
+  relays --> crashed : OwnerCrash
+  ready --> shutdown : Shutdown
+  ready --> crashed : OwnerCrash
+  failed --> [*] : cleanup
+  crashed --> [*] : cleanup
+  shutdown --> [*] : cleanup
+  note right of intent
+    INV IntentBeforeEffect:
+    starting is saved before
+    any relay starts
+  end note
+  note right of await
+    Each child: lease, fence,
+    then launch what the
+    fence admitted.
+    INV NoUnadmittedPublication
+  end note
+  class relays,await live
+  class ready ok
+  class failed,crashed fail

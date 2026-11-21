@@ -1980,6 +1980,58 @@ const contracts: readonly ModelContract[] = [
     fields: ["alive = TRUE", "recoveredLive = TRUE"],
   },
   {
+    // HACK-2442: one batch of route/port bridges, its fences and its release;
+    // see tests/models/tla/bridge-batch/COVERAGE.md.
+    name: "bridge-batch",
+    module: "BridgeBatch",
+    states: 14_674,
+    invariant: "Safe",
+    action: "Relays",
+    fields: ['opc = "late"', 'relay = [r |-> "running", p |-> "running"]'],
+    additionalControls: [
+      {
+        name: "child-fence",
+        negative: true,
+        action: "ChildLaunch",
+        fields: ["staleLaunch = TRUE", 'lease = "free"'],
+      },
+      {
+        name: "release-order",
+        negative: true,
+        action: "CleanStop",
+        fields: ['rpc = "late"', 'lease = "cleanup"'],
+      },
+      {
+        name: "ready-reachable",
+        negative: true,
+        invariant: "NeverReady",
+        action: "Await",
+        fields: ['opc = "ready"', 'cpc = [r |-> "done", p |-> "done"]'],
+      },
+      {
+        name: "release-reachable",
+        negative: true,
+        invariant: "NeverReleased",
+        action: "CleanDrop",
+        fields: ['rpc = "done"', 'lease = "free"'],
+      },
+      {
+        name: "release-after-ready",
+        negative: true,
+        invariant: "NeverReleasedAfterReady",
+        action: "CleanDrop",
+        fields: ['rpc = "done"', "everReady = TRUE"],
+      },
+      {
+        name: "stale-stop-reachable",
+        negative: true,
+        invariant: "NeverStaleStop",
+        action: "Fence3",
+        fields: ['opc = "failed"', 'lease = "free"'],
+      },
+    ],
+  },
+  {
     // Loopback TCP publication of Compose `ports`: one listener per host
     // port, no forwarding to a replaced container, no recovery of a live
     // owner, no listener after acknowledged stop; see tests/models/tla/README.md.

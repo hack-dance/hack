@@ -191,7 +191,7 @@ fn memory_return_is_started_after_the_engine_answers_and_before_the_running_phas
             .find(needle)
             .unwrap_or_else(|| panic!("missing {needle}"))
     };
-    let engine = position("engine_ping(&socket(candidate, owner, \"docker.sock\")?)?;");
+    let engine = position("engine_ping(|| socket(candidate, owner, \"docker.sock\"))?;");
     let build_network = position("include_str!(\"guest-build-network.sh\")");
     let memory = position("start_memory_return(owner, |script, args, background| {");
     let running = memory

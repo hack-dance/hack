@@ -16,8 +16,6 @@ for name in runc docker-init; do
  path=/opt/hack-engine/$name
  test -f "$path"
  test ! -L "$path"
- case "$name" in runc) expected=$3;; docker-init) expected=$4;; esac
- test "$(sha256sum "$path" | cut -d ' ' -f 1)" = "$expected"
  size=$(stat -c %s "$path")
  test "$size" -gt 0
  test "$size" -le 33554432
@@ -30,12 +28,16 @@ test ! -e "$cache"
 test ! -L "$cache"
 mkdir -m 700 "$cache"
 mount -t tmpfs -o size=32m,mode=700,nosuid,nodev tmpfs "$cache"
+# One read of each executable over the host share, by the copy. A copy that fails to read
+# or to write ends the script at that line, and the file it leaves is not executable. The
+# digest is then taken of the cache's own copy, so it is of what the cache holds, before
+# that copy is made executable. It is hashed again below, at the path it is executed from.
 for name in runc docker-init; do
- cp "/opt/hack-engine/$name" "$cache/$name"
+ case "$name" in runc) expected=$3;; docker-init) expected=$4;; esac
+ cat "/opt/hack-engine/$name" > "$cache/$name"
+ test "$(sha256sum "$cache/$name" | cut -d ' ' -f 1)" = "$expected"
  chmod 555 "$cache/$name"
  test "$(stat -c %u:%g:%a "$cache/$name")" = 0:0:555
- case "$name" in runc) expected=$3;; docker-init) expected=$4;; esac
- test "$(sha256sum "$cache/$name" | cut -d ' ' -f 1)" = "$expected"
 done
 mount -o remount,ro "$cache"
 for name in runc docker-init; do

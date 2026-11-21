@@ -866,6 +866,9 @@ function launchLimits(
   return override ?? resolveNativeDetachedStartLimits(process.env);
 }
 
+/** Upper bound for handing the `cancel` message to a live local IPC channel. */
+const CANCEL_SEND_MS = 5000;
+
 /** Wait for `promise`, but never longer than `ms` (default 120 s). */
 async function settleWithin(
   promise: Promise<void>,
@@ -1092,11 +1095,20 @@ export async function startNativeDetachedUp(opts: {
         // Acceptance may already be queued when the caller cancels. Explicit
         // cancellation requests stop even if the child accepted just before
         // it observed disconnection; disconnection alone cannot undo that.
-        child.send("cancel", () => {
-          if (child.connected) {
-            child.disconnect();
-          }
+        // The CLI exits explicitly once this command returns, so wait (bounded)
+        // until the message has been handed to the channel.
+        // A closed channel or an exited child ends the wait as well: then the
+        // callback may never run, and there is nobody left to deliver to.
+        const sent = new Promise<void>((resolve) => {
+          child.once("disconnect", resolve);
+          child.send("cancel", () => {
+            if (child.connected) {
+              child.disconnect();
+            }
+            resolve();
+          });
         });
+        await settleWithin(Promise.race([sent, exited]), CANCEL_SEND_MS);
       }
     }
     // After a timeout, give the owner a bounded chance to stop what it started

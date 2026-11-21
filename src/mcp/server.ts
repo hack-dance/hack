@@ -32,6 +32,7 @@ import { ensureDir, pathExists } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { HACK_VERSION } from "../lib/hack-version.ts";
+import { holdProcessUntil } from "../lib/process-exit.ts";
 import { findProjectContext } from "../lib/project.ts";
 import {
   AmbiguousProjectNameError,
@@ -399,12 +400,17 @@ async function connectStdioServer(server: McpServer): Promise<void> {
   process.on("SIGINT", close);
   process.stdin.once("end", close);
   process.stdin.once("close", close);
+  const { promise: closed, resolve: markClosed } =
+    Promise.withResolvers<void>();
   server.server.onclose = () => {
     process.stdin.off("end", close);
     process.stdin.off("close", close);
+    markClosed();
   };
   try {
     await server.connect(transport);
+    // `hack mcp serve` returns once connected; serve until the session closes.
+    holdProcessUntil(closed);
   } catch (error) {
     process.off("SIGTERM", close);
     process.off("SIGINT", close);
@@ -2569,9 +2575,13 @@ async function runHackCommand(opts: {
       ...(timedOut ? { timedOut: true } : {}),
     };
   };
-  return opts.context.admission
-    ? await opts.context.admission.run(work)
-    : await work();
+  // A session that closes mid-call still drains the call: its process group
+  // is stopped and its audit line written before the CLI exits.
+  const call = opts.context.admission
+    ? opts.context.admission.run(work)
+    : work();
+  holdProcessUntil(call);
+  return await call;
 }
 
 type HackLogCollection = {
@@ -2716,9 +2726,13 @@ async function runHackLogCollect(opts: {
       }),
     };
   };
-  return opts.context.admission
-    ? await opts.context.admission.run(work)
-    : await work();
+  // A session that closes mid-call still drains the call: its process group
+  // is stopped and its audit line written before the CLI exits.
+  const call = opts.context.admission
+    ? opts.context.admission.run(work)
+    : work();
+  holdProcessUntil(call);
+  return await call;
 }
 
 function formatCommand(parts: readonly string[]): string {

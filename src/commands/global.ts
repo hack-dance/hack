@@ -156,6 +156,11 @@ import { isLinux, isMac } from "../lib/os.ts";
 import { resolveTrustedSudo } from "../lib/privileged-sudo.ts";
 import { withProcessDeadline } from "../lib/process-deadline.ts";
 import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
+import {
+  defaultIngressAddressDeps,
+  resolveIngressAddresses,
+  withIngressChange,
+} from "../lib/proxy-ingress-addresses.ts";
 import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
 import { stopRemoteCaddyRoutesStack } from "../lib/remote-caddy-routes.ts";
 import {
@@ -2071,7 +2076,21 @@ export async function globalUp(): Promise<number> {
   return (await runGlobalUp()).exit;
 }
 
+/**
+ * `hack global up` inside a change of the ingress generation (see
+ * withIngressChange), then, once routing is up, one read that records the
+ * proxy and DNS addresses under the settled token for later `hack run`s.
+ */
 async function runGlobalUp(): Promise<GlobalUpResult> {
+  const root = resolveGlobalHackDir();
+  const result = await withIngressChange(root, runGlobalUpChange);
+  if (result.exit === 0 || result.failedStage === "logging") {
+    await resolveIngressAddresses(defaultIngressAddressDeps(root), "fresh");
+  }
+  return result;
+}
+
+async function runGlobalUpChange(): Promise<GlobalUpResult> {
   const slimExit = failIfSlimMode({
     feature: "hack global up",
   });
@@ -2642,8 +2661,10 @@ async function globalDown(): Promise<number> {
     });
   }
   if (await pathExists(paths.caddyCompose)) {
-    await run(["docker", "compose", "-f", paths.caddyCompose, "down"], {
-      cwd: dirname(paths.caddyCompose),
+    await withIngressChange(paths.root, async () => {
+      await run(["docker", "compose", "-f", paths.caddyCompose, "down"], {
+        cwd: dirname(paths.caddyCompose),
+      });
     });
   }
   const remoteRoutes = await stopRemoteCaddyRoutesStack();

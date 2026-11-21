@@ -139,7 +139,7 @@ pub use source_probe::{ProbeReceipt, verify as verify_source};
 pub use source_sync::{SyncReceipt, SyncSession, sync_status};
 pub mod setup;
 mod socket_requests;
-mod state;
+pub(crate) mod state;
 mod tree_witness;
 pub use lifecycle::{
     PreparedBaseBuilt, build_prepared_base, check_project_share, down, prepared_base_status,

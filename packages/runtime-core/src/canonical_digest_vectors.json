@@ -1,0 +1,131 @@
+{
+  "schema": "hack.canonical-digest-vectors/1",
+  "note": "Shared by the Rust encoder (canonical_digest.rs) and its TypeScript twin. Expected values come from an independent encoder. Parse `input_text` (exact JSON text): numbers are compared by value, so a twin must parse vectors marked lossless_parse with big integers. Refused inputs are JSON text.",
+  "vectors": [
+    {
+      "name": "empty object",
+      "domain": "hack.test-vector/1",
+      "canonical": "{}",
+      "sha256": "sha256:0600076b377b39093c1a193c763b025e1d4b7395daba06023c22aab403ffc298",
+      "input_text": "{}"
+    },
+    {
+      "name": "empty array",
+      "domain": "hack.test-vector/1",
+      "canonical": "[]",
+      "sha256": "sha256:8e0e0d9cbc37afa44e6bb71207a6ac45a416867d9220844d846d8d14e99451d4",
+      "input_text": "[]"
+    },
+    {
+      "name": "scalars",
+      "domain": "hack.test-vector/1",
+      "canonical": "[null,true,false,0,-1,42]",
+      "sha256": "sha256:a0785defe14acfcafb2d8721333231c8eba45fb0e34c1c8df3e67bc136d4ed0b",
+      "input_text": "[null,true,false,0,-1,42]"
+    },
+    {
+      "name": "safe integer bounds",
+      "domain": "hack.test-vector/1",
+      "canonical": "[9007199254740991,-9007199254740991]",
+      "sha256": "sha256:0cf2a1dc0311b99d0b0f9251260d97b03d061505df6717c2b8a2fb030f612fea",
+      "input_text": "[9007199254740991,-9007199254740991]"
+    },
+    {
+      "name": "integral floats are their integer value",
+      "domain": "hack.test-vector/1",
+      "canonical": "[1,1000,0,0,25]",
+      "sha256": "sha256:0d2f9e8757d7d1d2e9c38eb687b335e7a7d0edb9fbf5895c16761e8c676457be",
+      "input_text": "[1.0,1e3,-0,-0.0,2.50e1]"
+    },
+    {
+      "name": "integers beyond the double range are exact",
+      "domain": "hack.test-vector/1",
+      "canonical": "[9007199254740993,18446744073709551615,-9223372036854775808]",
+      "sha256": "sha256:a4783634a305f2d9f8f5e612172ecbf677741dece75ed049f984d44372676db8",
+      "lossless_parse": true,
+      "input_text": "[9007199254740993,18446744073709551615,-9223372036854775808]"
+    },
+    {
+      "name": "engine nanoseconds",
+      "domain": "hack.test-vector/1",
+      "canonical": "{\"Healthcheck\":{\"Interval\":10800000000000000}}",
+      "sha256": "sha256:34e9553aaa7944e42817eb8918f0d696ba144f76d585ddf5a50d935790a2dcf0",
+      "lossless_parse": true,
+      "input_text": "{\"Healthcheck\":{\"Interval\":10800000000000000}}"
+    },
+    {
+      "name": "keys sorted, nested",
+      "domain": "hack.test-vector/1",
+      "canonical": "{\"A\":0,\"_\":1,\"a\":\"x\",\"b\":{\"a\":[3,2,1],\"z\":1}}",
+      "sha256": "sha256:23eb2835b70868c0062999a24be099c40785d438b7deca6a1bcd963f39b2431d",
+      "input_text": "{\"b\":{\"z\":1,\"a\":[3,2,1]},\"a\":\"x\",\"A\":0,\"_\":1}"
+    },
+    {
+      "name": "key order by code point, not by UTF-16",
+      "domain": "hack.test-vector/1",
+      "canonical": "{\"z\":3,\"é\":4,\"｡\":2,\"😀\":1}",
+      "sha256": "sha256:c2c83c84cc68d5f2d3c1e7b920b29d351531fa6baebf165f1ee05073254749c7",
+      "input_text": "{\"\\ud83d\\ude00\": 1, \"\\uff61\": 2, \"z\": 3, \"\\u00e9\": 4}"
+    },
+    {
+      "name": "string escapes",
+      "domain": "hack.test-vector/1",
+      "canonical": "{\"s\":\"quote\\\" backslash\\\\ slash/ nl\\n cr\\r tab\\t bs\\b ff\\f nul\\u0000 us\\u001f del\"}",
+      "sha256": "sha256:6cf9877ff268085c513b047f053965f0ded1908714aa30d3bfce972b1920d80f",
+      "input_text": "{\"s\": \"quote\\\" backslash\\\\ slash/ nl\\n cr\\r tab\\t bs\\b ff\\f nul\\u0000 us\\u001f del\\u007f\"}"
+    },
+    {
+      "name": "non-ASCII and line separators kept literal",
+      "domain": "hack.test-vector/1",
+      "canonical": "[\"café\",\"  \",\"😀\"]",
+      "sha256": "sha256:dd33736e17ac74ce80a170a16b2c8bae3b5b47aa992f8a87c706f2d3d1473ef6",
+      "input_text": "[\"caf\\u00e9\", \"\\u2028\\u2029\", \"\\ud83d\\ude00\"]"
+    },
+    {
+      "name": "array order kept",
+      "domain": "hack.test-vector/1",
+      "canonical": "{\"Cmd\":[\"b\",\"a\"],\"Env\":[\"B=1\",\"A=2\"]}",
+      "sha256": "sha256:7d02e6b1c8349291573c209897552eee6e4340d4ea03a5d3b79810d3346a9b79",
+      "input_text": "{\"Cmd\":[\"b\",\"a\"],\"Env\":[\"B=1\",\"A=2\"]}"
+    },
+    {
+      "name": "container spec shaped body",
+      "domain": "hack.container-spec/1",
+      "canonical": "{\"Cmd\":[\"serve\"],\"HostConfig\":{\"Memory\":0,\"Mounts\":[{\"ReadOnly\":false,\"Source\":\"volume:data\",\"Target\":\"/data\",\"Type\":\"volume\"}],\"NanoCpus\":500000000,\"NetworkMode\":\"network:default\"},\"Image\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"Labels\":{\"hack.route\":\"web\"},\"x-hack\":{}}",
+      "sha256": "sha256:7bae2797a134eef4182f0e0790bdfc90544ea43f25c62111577e1e1381eb85a4",
+      "input_text": "{\"Image\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"Cmd\": [\"serve\"], \"HostConfig\": {\"Memory\": 0, \"NanoCpus\": 500000000, \"Mounts\": [{\"Type\": \"volume\", \"Source\": \"volume:data\", \"Target\": \"/data\", \"ReadOnly\": false}], \"NetworkMode\": \"network:default\"}, \"Labels\": {\"hack.route\": \"web\"}, \"x-hack\": {}}"
+    },
+    {
+      "name": "step domain",
+      "domain": "hack.step/1",
+      "canonical": "{\"a\":1}",
+      "sha256": "sha256:2ed41cd75a6a58cb1d104f3dff8709f933ba56b335f29aef4c55b39c62f89eb0",
+      "input_text": "{\"a\":1}"
+    },
+    {
+      "name": "same value, other domain",
+      "domain": "hack.test-vector/1",
+      "canonical": "{\"a\":1}",
+      "sha256": "sha256:fe1e8b6603ca9853532386621c2dd9030be70c52acab04efb464ff8c0282c21c",
+      "input_text": "{\"a\":1}"
+    }
+  ],
+  "refused": [
+    {
+      "name": "fraction",
+      "input": "{\"a\":1.5}"
+    },
+    {
+      "name": "negative fraction",
+      "input": "[-0.5]"
+    },
+    {
+      "name": "float beyond the exact range",
+      "input": "[1e16]"
+    },
+    {
+      "name": "float just beyond the exact range",
+      "input": "[9007199254740993.0]"
+    }
+  ]
+}

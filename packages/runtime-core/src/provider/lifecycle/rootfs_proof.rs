@@ -52,8 +52,10 @@
 //! the interval the content proof under the lease left too. What changed is the strength
 //! of the look: a content change that keeps size, times, inode, link count, mode and owner
 //! (what `tree_witness` lists) between step 1 and step 3 is not seen, where a content proof
-//! at step 3 would see it; and off a qualified filesystem every start hashes the root files
-//! twice. A writer that ignores the lease after step 3 is not stopped, as before.
+//! at step 3 would see it. Off a qualified filesystem no metadata comparison is trusted, so
+//! a start of a cleanly stopped pool hashes the root files at each of the three steps,
+//! where it hashed them once before. A writer that ignores the lease after step 3 is not
+//! stopped, as before.
 use super::{prove_rootfs, root, rootfs_marker};
 use crate::provider::state::{Lock, Owner};
 use crate::provider::tree_witness;

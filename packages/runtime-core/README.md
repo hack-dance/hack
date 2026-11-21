@@ -1919,7 +1919,8 @@ result is used, after the owner record updates and after `machine update --roset
 translation is being enabled: one more metadata walk, no file content read, and the
 content proof at that point if anything differs. The digest of that last comparison is
 the one the boot's witness records. From there to `machine start` nothing looks at the
-root files again, as before. A start with no earlier proof is unchanged: the first boot
+root files again, as before. On a filesystem where metadata is not trusted each of the
+three comparisons is a content proof, so such a start hashes the root files three times. A start with no earlier proof is unchanged: the first boot
 of a new home copies the root files and proves them by content under the lease, and so
 does any start whose earlier proof could not be made (an owner record that is not a clean
 stop or has no pin, an alias, an unreadable entry, or root files that did not match

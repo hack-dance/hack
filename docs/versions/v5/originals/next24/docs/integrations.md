@@ -1,8 +1,9 @@
 # Agent integrations
 
-Hack is a local CLI. An agent with shell access can use it directly, with `--json`
-for structured results and `--no-interactive` to avoid prompts. Everything below is
-optional and none of it installs Hack or prepares its runtime.
+A coding agent with a shell can use Hack as it is. Hack is a local CLI: the agent
+runs the same commands you do, with `--json` for structured results and
+`--no-interactive` to avoid prompts. The optional `hack` plugin adds skills for
+the agent, and nothing below installs Hack or prepares a backend.
 
 An agent can drive the CLI through shell access or an explicitly installed MCP
 server, then inspect the result before choosing its next action.

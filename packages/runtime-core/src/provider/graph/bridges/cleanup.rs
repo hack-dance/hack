@@ -96,10 +96,18 @@ fn validate_selection_with_absence(
     {
         return Err(invalid());
     }
-    let previous = if selection.previous_boot.is_some() {
-        crate::provider::state::Owner::load(engine.guest().candidate())?.previous_guest_boot_id
-    } else {
-        None
+    // A recorded earlier boot is admitted only while the pool still knows it as one
+    // of its earlier boots (never the current one); `validate_bindings` then binds the
+    // selection to exactly that boot.
+    let previous = match &selection.previous_boot {
+        Some(recorded) => {
+            let candidate = engine.guest().candidate();
+            let owner = crate::provider::state::Owner::load(candidate)?;
+            crate::provider::boot_history::earlier_boots(candidate, &owner)?
+                .into_iter()
+                .find(|boot| boot == recorded && boot != &selection.boot)
+        }
+        None => None,
     };
     validate_bindings(receipt, selection, previous.as_deref())?;
     if let Some(expected) = &selection.predecessor_owner {
@@ -404,7 +412,8 @@ fn pending_interrupted(receipt: &Receipt, previous: &str) -> bool {
 }
 
 /// Explicit dead-owner recovery only: guest helper absence follows the audited
-/// immediate boot transition, never a fabricated live-helper observation.
+/// boot transition since the run's earlier boot (guest tmpfs does not survive any
+/// reboot), never a fabricated live-helper observation.
 pub(crate) fn capture_previous_boot(
     candidate: &Candidate,
     engine: &Engine<'_>,
@@ -461,7 +470,7 @@ pub(crate) fn capture_previous_boot(
             if prior.selected.is_empty() {
                 // Zero ingress is still an enrolled graph cleanup. The prior
                 // empty sidecar alone cannot authorize it: require the exact
-                // dead pinned predecessor from the immediate old boot.
+                // dead pinned predecessor from the run's earlier boot.
                 selection.predecessor_owner = Some(predecessor_owner(receipt, previous, host_pin)?);
             } else {
                 selection.selected = prior

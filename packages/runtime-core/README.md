@@ -1118,7 +1118,7 @@ relay enrollment left when an older publisher exited before cleanup. The old
 coordinator must be EffectStarted for the exact dead owner, graph, operation,
 effect and saved bridge/environment inventories. Recovery pins its bytes in a
 new version3/4 intent (present/absent relay respectively); version1/2 recovery
-records remain unchanged. After an audited immediate successor boot, the frontend
+records remain unchanged. After an audited later boot, the frontend
 selects `recover-cleanup` followed by publication retirement. Its new version2
 intent pins the legacy Ready/Pending coordinator; ordinary version1 predecessor
 recovery records remain unchanged. The old coordinator is retained without an ACK or

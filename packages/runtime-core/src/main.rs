@@ -325,7 +325,17 @@ fn run() -> Result<(), CandidateError> {
                 rlim_max: 0,
             };
             // SAFETY: a valid rlimit value; lowering a limit needs no privilege.
-            unsafe { libc::setrlimit(libc::RLIMIT_CORE, &no_core) };
+            if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &no_core) } != 0 {
+                let refused = serde_json::json!({"refused": {"code": "service_core_limit"}});
+                if let Some(mut file) = notify {
+                    use std::io::Write;
+                    let _ = writeln!(file, "{refused}");
+                }
+                return Err(CandidateError::new(
+                    "service_core_limit",
+                    "Could not disable core dumps for the runtime service.",
+                ));
+            }
             hack_runtime_core::service::serve(
                 &candidate.state_root,
                 hack_runtime_core::service::Options { idle },
@@ -1754,13 +1764,17 @@ fn service_serve_arguments(
                     .ok()
                     .filter(|fd| (3..=1023).contains(fd))
                     .ok_or_else(invalid)?;
-                // SAFETY: F_GETFD only queries the descriptor table.
-                if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+                // Open, and open for writing: the one line must be deliverable.
+                // SAFETY: F_GETFL only queries the descriptor's status flags.
+                let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+                if flags < 0 || flags & libc::O_ACCMODE == libc::O_RDONLY {
                     return Err(invalid());
                 }
                 // Never inherited by anything the service starts later.
                 // SAFETY: F_SETFD on a descriptor just checked to be open.
-                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+                if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                    return Err(invalid());
+                }
                 // SAFETY: an open descriptor the starter handed over for this one line; owned here.
                 ready = Some(unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) });
             }

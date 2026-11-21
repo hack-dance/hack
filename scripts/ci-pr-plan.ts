@@ -109,6 +109,20 @@ function shouldRunCandidate(opts: {
   );
 }
 
+function shouldRunModels(opts: {
+  readonly draft: boolean;
+  readonly integration: boolean;
+  readonly full: boolean;
+  readonly changed: readonly string[] | null;
+}): boolean {
+  return (
+    !opts.draft &&
+    (opts.integration ||
+      opts.full ||
+      opts.changed?.some(touchesStateModels) === true)
+  );
+}
+
 export async function planPullRequest(opts: {
   readonly repoRoot: string;
   readonly changed: readonly string[] | null;
@@ -182,9 +196,12 @@ export async function planPullRequest(opts: {
     test_shards: JSON.stringify([...macos, ...linux]),
     selection_mode: selection.mode,
     docker_suite: e2e,
-    state_models:
-      !opts.draft &&
-      (integration || full || opts.changed?.some(touchesStateModels) === true),
+    state_models: shouldRunModels({
+      draft: opts.draft,
+      integration,
+      full,
+      changed: opts.changed,
+    }),
     defer_macos: !mac,
     build_smoke: !opts.draft && (integration || full),
   };

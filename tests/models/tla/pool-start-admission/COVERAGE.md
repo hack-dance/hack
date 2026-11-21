@@ -40,15 +40,16 @@ Both check the same invariants.
 
 | Configuration | Kind | Distinct states | Result |
 | --- | --- | ---: | --- |
-| `positive` | the implementation | 56,252 | no error |
-| `root-before-lease` | follow-up ordering | 71,588 | no error |
+| `positive` | the implementation | 58,022 | no error |
+| `root-before-lease` | follow-up ordering | 73,754 | no error |
 
 Earlier revisions of this model: `positive` had no tree recheck (21,400 states)
 and the recheck was a hypothetical third configuration, `tree-recheck`, until it
 became code (`lifecycle/leased_trees.rs`). Then the host could only fail, never
 pass again, and a sample did not record the host it was taken on (21,028 and
 27,004 states). Every behaviour of that revision is a behaviour of this one, in
-which the host never recovers.
+which the host never recovers. Then the pre-boot check recorded only the count
+it compared against, not what it observed (56,252 and 71,588 states).
 
 ## Invariants
 
@@ -59,7 +60,10 @@ Every invariant holds in `positive` and `root-before-lease`.
 | `DevelopmentTwoSamples`, `SecondSampleUnderLease`, `WindowRespected` | A Development VM starts only on two qualifying samples, the second taken under the startup lease and at least the window after the first. |
 | `SamplesTakenOnPassingHost` | Every sample a start accepted was taken on a passing host: the first sample of either profile, Research's second and third, and Development's sample under the lease. Each recorded sample carries whether the host passed every predicate at the moment it was taken. |
 | `ChainUnbroken` | No accepted sample shows a swapout count other than the first sample's. A sample that fails a predicate or shows another count is never appended: the only step from it is a refusal. |
-| `BootBaselineIsLastSample`, `BootChecked` | The pre-boot check ran before every start and compared against the last qualifying sample's swapout count. |
+| `BootChecked` | A pre-boot check ran before every start: its baseline and its observation exist. It says nothing about what the observation showed. |
+| `BootBaselineIsLastSample` | The swapout count the pre-boot check was handed as its baseline is the last qualifying sample's. |
+| `BootSampleOnPassingHost` | The pre-boot observation was taken on a passing host. The observation is recorded apart from the qualifying samples, with the host as it was at that moment. |
+| `BootSampleMatchesBaseline` | The pre-boot observation showed the swapout count it was compared against. With `BootBaselineIsLastSample`, that is the last qualifying sample's count. |
 | `ResearchThreeSamples` | A Research VM starts only on three samples, each at least the window after the one before, and none under the lease. |
 | `TreesProvenThisStart` | The provider and engine trees were proven by content in this start before the lease was taken. |
 | `NoStartFromChangedTree` | No VM starts from a tree that changed after that proof: the recheck under the lease refuses it. |
@@ -84,6 +88,8 @@ control stops at its first violation, so it has no state count of its own.
 | `root-unchecked` | follow-up ordering without the recheck under the lease | `StartFromProvenRoot` | `RecheckRoot`, `rootOk = FALSE` |
 | `changed-tree-start` | the trees are not rechecked under the lease | `NoStartFromChangedTree` | `Start`, `treeOk = FALSE` |
 | `first-sample-unchecked` | the first sample is recorded without its predicate check | `SamplesTakenOnPassingHost` | `Open`, `hostOk = FALSE` |
+| `boot-host-unchecked` | the pre-boot check admits without its predicate check | `BootSampleOnPassingHost` | `AdmitBoot`, `hostOk = FALSE` |
+| `boot-swapouts-unchecked` | the pre-boot check admits without comparing its swapout count with the baseline | `BootSampleMatchesBaseline` | `AdmitBoot`, `swapouts = 1`, `baseline = <<0>>` |
 
 `changed-tree-start` is the implementation as it was before the recheck; see "What
 a proof before the lease relies on". `first-sample-unchecked` removes the check
@@ -91,12 +97,21 @@ that `admission::open` makes. Before the two-sample change the first probe was
 read only for its `admitted` field, and the samples after it carried the
 predicates; now the first probe is itself a qualifying sample.
 
-Five reachability controls state that something never happens and must be
+`boot-host-unchecked` and `boot-swapouts-unchecked` remove one of the two checks
+`admission_pool::admit_boot` makes on its observation. In the first, the host
+fails after the last sample and the boot is admitted on it: `Open`, the window,
+`ProveTrees`, `AcquireLease`, `Recheck`, then `Degrade`, `Settle`, `ProveRoot`
+and `AdmitBoot` with `hostOk = FALSE`. The second has `Swapout` in the place of
+`Degrade`, and `AdmitBoot` observes one swapout against a baseline of none.
+`unchained-boot` is a different fault: there the check is handed its own count as
+the baseline, so the observation matches the baseline and the baseline is wrong.
+
+Six reachability controls state that something never happens and must be
 violated at `Start`. Three show that the invariants are not vacuous:
 `development-start-reachable`, `research-start-reachable` and
 `moved-alias-start-reachable` (a start whose alias moved before its first sample,
-on a reserve selection bound to the rewritten owner record). Two show what the
-samples do not see; the next section describes them.
+on a reserve selection bound to the rewritten owner record). Three show what the
+observations do not see; the next section describes them.
 
 ## What the samples do not see
 
@@ -113,6 +128,7 @@ neither reads the host while it waits. The model checks it as a reachable fact:
 | --- | --- | --- |
 | `development-dip-start-reachable` | a Development VM starts although the host failed between its two samples (`NeverStartsDevelopmentAcrossADip`) | `Start`, `acrossDip = TRUE`, `dips = 1` |
 | `research-dip-start-reachable` | a Research VM starts although the host failed between two of its three samples (`NeverStartsResearchAcrossADip`) | `Start`, `acrossDip = TRUE`, `dips = 1` |
+| `boot-dip-start-reachable` | a VM starts although the host failed between its last sample and the pre-boot observation (`NeverStartsAcrossADipBeforeBoot`) | `Start`, `bootAcrossDip = TRUE`, `dips = 1` |
 
 One Development trace that TLC reports:
 
@@ -131,10 +147,17 @@ second samples, then the third sample, `Qualify` and the same last four steps.
 With two workers TLC does not always report the same interleaving; the dip can
 sit anywhere after one accepted sample and before the next.
 
-`failedSince` is set when the host fails while a later sample is still due, and
-cleared by the next accepted sample, which copies it into `acrossDip`. A sample
-is accepted only on a passing host, so `acrossDip` means a failure that began
-after one accepted sample and ended before the next.
+`failedSince` is set when the host fails while a later observation is still
+due, and cleared by the next accepted one. An accepted sample copies it into
+`acrossDip`. A sample is accepted only on a passing host, so `acrossDip` means a
+failure that began after one accepted sample and ended before the next.
+
+The pre-boot observation leaves the same gap after the last sample, and it is
+not part of the two-sample change: nothing in `start_pool` reads the host
+between its last sample and `admit_boot`. `AdmitBoot` copies `failedSince` into
+`bootAcrossDip`. The trace of `boot-dip-start-reachable` is a start whose two
+samples are taken with no dip, then `Degrade` and `Recover` under the lease,
+then `Settle`, `ProveRoot`, `AdmitBoot` on a passing host and `Start`.
 
 This is the weakening of the two-sample change, and its size is not something
 the model measures. The earlier code took seven samples around four fixed
@@ -146,9 +169,12 @@ for both and does not compare them.
 What still holds across a dip, in `positive` and `root-before-lease`:
 
 - `ChainUnbroken`: a swapout during the dip refuses the next sample
-  (`RefuseRecheck`, `RefuseSample`) or the pre-boot check (`RefuseBoot`).
+  (`RefuseRecheck`, `RefuseSample`).
+- `BootSampleMatchesBaseline` with `BootBaselineIsLastSample`: the same at the
+  pre-boot check, whose observation shows the last sample's count.
 - `SamplesTakenOnPassingHost`: the host passed every predicate at each sample.
-- `BootChecked`: the pre-boot check passed on its own after the last sample.
+- `BootSampleOnPassingHost`: and at the pre-boot observation after the last
+  sample. `BootChecked` adds only that this observation exists before a start.
 
 Two starts that pass together on a host with room for one are outside this
 model: it has one start, and each home samples the host by itself. More samples
@@ -164,7 +190,12 @@ host (`RefuseFirst`, `RefuseSample`, `RefuseRecheck`, `RefuseBoot`) are enabled
 exactly as before: `Recover` adds the behaviours in which the host passes again
 before the check and removes none, so every earlier counterexample is still a
 behaviour. Each control now searches a larger state space for the same first
-violation, and the two passing configurations grew to the counts above.
+violation, and the two passing configurations grew.
+
+Recording the pre-boot observation changed no existing control either. It adds
+two history variables and two guards that are on in every earlier configuration.
+`unchained-boot` still fails `BootBaselineIsLastSample` and nothing else: its
+observation matches the baseline it was handed, which is its own count.
 
 ## Source and regression mapping
 
@@ -186,7 +217,7 @@ tests of the named module unless marked.
 | `RestoreAliasLeased` | `lifecycle.rs::restore_released_short_home` | `lifecycle/short_home/tests.rs`: `a_clean_stop_whose_alias_host_cleanup_removed_is_restored_exactly`, `a_squatted_alias_is_never_used_and_the_receipt_moves_to_a_fresh_alias` |
 | `TreesStillProven` in `Settle` and `ObserveRunning`, `RefuseTreeRecheck` | `lifecycle/leased_trees.rs::recheck`, `tree_witness.rs::qualified_digest`, `artifact.rs::verify_record`, `verify_witnessed` | `lifecycle/leased_trees/tests.rs`: `unchanged_trees_keep_their_proofs_and_hash_nothing_under_the_lease`, `a_tree_changed_between_its_proof_and_the_lease_refuses_before_any_effect`, `a_tree_whose_metadata_changed_but_whose_bytes_did_not_is_proven_again_and_continues`, `a_tree_reinstalled_with_its_recorded_content_is_proven_again_and_continues`, `off_a_qualified_filesystem_both_trees_are_proven_again_under_the_lease`, `a_rewritten_record_or_an_aliased_tree_is_refused_under_the_lease`, `the_recorded_witness_names_what_was_verified_under_the_lease` |
 | `Settle`, `RefuseSelection` | `lifecycle/admission_pool.rs::settle`, `Selection::reverify` | `lifecycle/admission_pool/tests.rs`: `selected_owner_or_provider_changes_refuse_reverification`, `selected_stopped_owner_drift_refuses_reverification`, `a_start_with_fresh_headroom_drops_the_reserve_and_runs_no_release_check` |
-| `AdmitBoot`, `RefuseBoot` | `lifecycle/admission_pool.rs::admit_boot` | `the_boot_gate_samples_the_qualifying_basis_and_its_swapouts`, `the_boot_gate_rechecks_the_selection_around_its_sample` |
+| `AdmitBoot`, `RefuseBoot`; `BootSampleOnPassingHost`, `BootSampleMatchesBaseline` | `lifecycle/admission_pool.rs::admit_boot`, `admit_boot_with` (the `admitted` check, then the swapout comparison) | `the_boot_gate_samples_the_qualifying_basis_and_its_swapouts`, `the_boot_gate_rechecks_the_selection_around_its_sample` |
 | `Start` | `BootAdmission::release`, `lifecycle.rs::start_machine` | `machine_start_needs_a_final_leased_recheck_of_the_selection` |
 | Order of the steps, one clock for the window, the baseline handed to `admit_boot`, the tree recheck as the first step after the leased sample (before the start's next write, provider command or tree read), the rechecked proofs handed to the boot's witness | `lifecycle.rs::start_pool` | `lifecycle/pressure_tests.rs`: `start_pool_takes_its_admission_steps_in_the_modelled_order`. It reads source order only. |
 
@@ -335,11 +366,10 @@ acquisitions by others. One start; a retry is a new behaviour from `Idle`.
 - `hostOk` stands for every predicate of `admission::check` except the swapout
   chain, as one bit: which predicate failed, and by how much, is not modelled.
   The host recovers at most once. Pressure that comes and goes between two
-  samples is invisible to the code; the model records it (`failedSince`,
-  `acrossDip`) so that the two dip controls can show it. `failedSince` is tracked
-  only while a later sample is due: a dip between the last sample and the
-  pre-boot check is equally unseen and is not given a control of its own. The
-  swapout count is the only cumulative signal.
+  observations is invisible to the code; the model records it (`failedSince`,
+  `acrossDip`, `bootAcrossDip`) so that the three dip controls can show it.
+  `failedSince` is tracked from the first sample to the pre-boot observation and
+  not after it. The swapout count is the only cumulative signal.
 - The pre-boot check is modelled with the same predicate as a sample. The code
   uses the probe's `admitted` field there, which the probe computes from the same
   observations.

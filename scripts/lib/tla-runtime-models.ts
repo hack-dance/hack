@@ -1808,7 +1808,7 @@ const contracts: readonly ModelContract[] = [
     // lease and the pre-boot check, on a host that can fail and recover once.
     name: "pool-start-admission",
     module: "PoolStart",
-    states: 56_252,
+    states: 58_022,
     // Development's second sample taken before the startup lease.
     invariant: "SecondSampleUnderLease",
     action: "Recheck",
@@ -1816,7 +1816,7 @@ const contracts: readonly ModelContract[] = [
     additionalControls: [
       // The follow-up ordering: root files proven in the window, rechecked
       // under the lease.
-      { name: "root-before-lease", negative: false, states: 71_588 },
+      { name: "root-before-lease", negative: false, states: 73_754 },
       {
         name: "window-not-enforced",
         negative: true,
@@ -1920,6 +1920,30 @@ const contracts: readonly ModelContract[] = [
           "dips = 1",
           "vm = TRUE",
         ],
+      },
+      // The same between the last sample and the pre-boot observation.
+      {
+        name: "boot-dip-start-reachable",
+        negative: true,
+        invariant: "NeverStartsAcrossADipBeforeBoot",
+        action: "Start",
+        fields: ["bootAcrossDip = TRUE", "dips = 1", "vm = TRUE"],
+      },
+      // The pre-boot observation admitted without its predicate check ...
+      {
+        name: "boot-host-unchecked",
+        negative: true,
+        invariant: "BootSampleOnPassingHost",
+        action: "AdmitBoot",
+        fields: ['pc = "BootAdmitted"', "hostOk = FALSE"],
+      },
+      // ... or without comparing its swapout count with the baseline.
+      {
+        name: "boot-swapouts-unchecked",
+        negative: true,
+        invariant: "BootSampleMatchesBaseline",
+        action: "AdmitBoot",
+        fields: ['pc = "BootAdmitted"', "baseline = <<0>>", "swapouts = 1"],
       },
     ],
   },

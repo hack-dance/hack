@@ -30,7 +30,7 @@ Each state is one value of the model's `pc`.
 | `Qualified` | Every qualifying sample exists: two for Development, three for Research. The trees are rechecked against their proof here. | Held |
 | `Settled` | The trees are still what their proof saw, the reserve selection, if any, still names the owner record, and the pool is not running. | Held |
 | `RootProven` | The guest root files were proven, or rechecked against their earlier proof. | Held |
-| `BootAdmitted` | The pre-boot sample passed against the last qualifying sample's swapout count. | Held |
+| `BootAdmitted` | The pre-boot observation was admitted: taken on a passing host, showing the last qualifying sample's swapout count. | Held |
 | `Started` | `machine start` ran. The lease stays held for the rest of the boot. | Held |
 | `Joined` | The pool was already running, or a concurrent start made it so. Nothing was started. | Returned |
 | `Refused` | A check refused. Nothing was started. | Returned |
@@ -54,7 +54,7 @@ Each state is one value of the model's `pc`.
 | `ObserveRunning` | `TreesStillProven`; `poolRunning`; no selection | report the running pool | `leased_trees::recheck`; the `owner.phase == "running"` branch of `start_pool` |
 | `ProveRoot` | `rootOk`; root proof under the lease | root files proven by content | `prepare_rootfs`, `prove_rootfs` |
 | `RecheckRoot` | `RootProofBeforeLease`; `rootOk` | earlier proof's metadata still holds | follow-up ordering only |
-| `AdmitBoot` | `hostOk`; `SameSwapouts` | baseline is the last sample's swapout count | `admission_pool::admit_boot` |
+| `AdmitBoot` | `hostOk`; `SameSwapouts` | baseline is the last sample's swapout count; the observation is recorded with the host as it was | `admission_pool::admit_boot` |
 | `Start` | none | VM started | `BootAdmission::release`, `start_machine` |
 
 `WindowElapsed` is `elapsed = Window`: at least one second for Development and
@@ -108,6 +108,13 @@ controls, `development-dip-start-reachable` and `research-dip-start-reachable`,
 require that such a start is reachable. `SamplesTakenOnPassingHost` holds all the
 same: `hostOk` was true at each sample, on the `Open`, `ResearchSample` and
 `Recheck` edges.
+
+The pre-boot observation on the `AdmitBoot` edge is recorded apart from the
+samples. `BootSampleOnPassingHost` says it was taken on a passing host, and
+`BootSampleMatchesBaseline` that it showed the swapout count it was compared
+against; `BootChecked` says only that it exists before a start. A dip between
+the last sample and that observation is unseen in the same way
+(`bootAcrossDip`, control `boot-dip-start-reachable`).
 
 | Action | Meaning |
 | --- | --- |

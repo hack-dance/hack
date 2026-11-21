@@ -115,7 +115,10 @@ fn anonymous_volume(service: &str, target: &str) -> String {
     hash.update(service.as_bytes());
     hash.update([0]);
     hash.update(target.as_bytes());
-    format!("{ANONYMOUS_PREFIX}{:.16}", format!("{:x}", hash.finalize()))
+    format!(
+        "{ANONYMOUS_PREFIX}{:.16}",
+        format!("{:x}", crate::Hex(hash.finalize()))
+    )
 }
 
 /// Refusal for an authored volume name, mount source or cache-volume label
@@ -1264,7 +1267,7 @@ fn compile_services(
             });
             diagnostics.push(Diagnostic::warning(
                 "route_command_healthcheck_replaced", &format!("{field}.healthcheck"),
-                "The command healthcheck is not run on native: route readiness is an HTTP probe. Native sends GET / to the route port; a complete HTTP 200-499 response counts as ready, 5xx and timeouts do not. To probe a real health path, replace the healthcheck with healthcheck.x-hack-http, for example {port: <route port>, path: /health, interval_ms: 30000, timeout_ms: 1000, retries: 3, start_period_ms: 240000} (all six fields are required).",
+                "The command healthcheck is not run on native: route readiness is an HTTP probe. Native sends GET / to the route port; a complete HTTP 200-499 response counts as ready, 5xx and timeouts do not. To probe a real health path, replace the healthcheck with healthcheck.x-hack-http, for example {port: <route port>, path: /health, interval_ms: 30000, timeout_ms: 1000, retries: 3, start_period_ms: 240000}. Those six fields are required. Until its first success the probe tries every 250 ms (start_interval_ms, optional, at most interval_ms); interval_ms applies after that.",
             ));
         }
         if !m.contains_key("healthcheck") {

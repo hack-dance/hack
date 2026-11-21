@@ -28,7 +28,7 @@ fn owned_root(candidate: &Candidate, run: &str) -> OwnedTmpRoot {
         serde_json::to_vec(&("hack-graph-foreground-v1", &candidate.state_root, run)).unwrap();
     OwnedTmpRoot::new(format!(
         "/private/tmp/hkgf-{}",
-        &format!("{:x}", Sha256::digest(bytes))[..24]
+        &format!("{:x}", crate::Hex(Sha256::digest(bytes)))[..24]
     ))
 }
 #[test]

@@ -156,7 +156,7 @@ fn exercise(previous_boot: bool) {
         let before = snapshot(&candidate, &runs[0], deadline).receipt;
         let expected = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec_pretty(&before).unwrap())
+            crate::Hex(Sha256::digest(serde_json::to_vec_pretty(&before).unwrap()))
         );
         first.child.kill().unwrap();
         first.wait(deadline);
@@ -302,7 +302,9 @@ fn exercise(previous_boot: bool) {
         let selected = snapshot(&candidate, &runs[0], deadline).receipt;
         let expected = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec_pretty(&selected).unwrap())
+            crate::Hex(Sha256::digest(
+                serde_json::to_vec_pretty(&selected).unwrap()
+            ))
         );
         let bytes_before = fs::read(
             graph::directory(&candidate, &runs[0])

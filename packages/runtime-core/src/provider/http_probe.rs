@@ -1,6 +1,17 @@
 //! Resident localhost HTTP probe used by native graph readiness checks.
 //! Status is ephemeral and needs both a live exec identity and a fresh generation-bound sample.
-use crate::{CandidateError, project::execution::Health};
+use crate::{CandidateError, ProbeReason, project::execution::Health};
+
+/// One sample judged (see [`HttpProbe::assess`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Assessment {
+    pub health: Health,
+    /// Why, when unhealthy.
+    pub reason: Option<ProbeReason>,
+    pub sequence: u64,
+    pub failures: u64,
+    pub elapsed_ms: u64,
+}
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -12,6 +23,12 @@ pub struct HttpProbe {
     pub timeout_ms: u64,
     pub retries: u32,
     pub start_period_ms: u64,
+    /// How often to try until the first success (HACK-2443); absent means
+    /// [`DEFAULT_START_INTERVAL_MS`]. Never longer than `interval_ms`. After the first success
+    /// the probe keeps `interval_ms`, and an unhealthy sample never brings the fast cadence
+    /// back. Absent in receipts written before it existed, which compare equal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_interval_ms: Option<u64>,
     /// Generated route readiness only; absent for authored HTTP healthchecks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<HttpProbePolicy>,
@@ -21,6 +38,9 @@ pub struct HttpProbe {
 pub enum HttpProbePolicy {
     Route,
 }
+/// The cadence of every native HTTP probe until its first success, when it declares none.
+pub const DEFAULT_START_INTERVAL_MS: u64 = 250;
+
 fn invalid() -> CandidateError {
     CandidateError::new(
         "http_probe",
@@ -46,6 +66,7 @@ impl HttpProbe {
             timeout_ms: 1_000,
             retries: 3,
             start_period_ms: 240_000,
+            start_interval_ms: None,
             policy: Some(HttpProbePolicy::Route),
         }
     }
@@ -61,6 +82,9 @@ impl HttpProbe {
             || !(1..=60_000).contains(&self.timeout_ms)
             || !(1..=100).contains(&self.retries)
             || self.start_period_ms > 3_600_000
+            || self
+                .start_interval_ms
+                .is_some_and(|value| !(10..=self.interval_ms).contains(&value))
         {
             return Err(invalid());
         }
@@ -88,11 +112,47 @@ impl HttpProbe {
             self.start_period_ms.to_string(),
             directory.into(),
             generation.into(),
+            self.start_interval().to_string(),
         ];
         if self.policy == Some(HttpProbePolicy::Route) {
             arguments.push("route".into());
         }
         Ok(arguments)
+    }
+    /// The cadence until the first success: declared, else [`DEFAULT_START_INTERVAL_MS`],
+    /// never longer than the steady interval.
+    pub fn start_interval(&self) -> u64 {
+        self.start_interval_ms
+            .unwrap_or(DEFAULT_START_INTERVAL_MS)
+            .min(self.interval_ms)
+    }
+    /// The longest a working probe can go on reporting "starting", measured on the host
+    /// from when the probe was started: the startup grace, one patient attempt that may
+    /// end a timeout after it, `retries` failed attempts after it at no more than the
+    /// steady cadence (an earlier build's binary may use it), and the sample freshness
+    /// allowance. A "starting" sample read later than this is stale whatever its own
+    /// timestamp says, so a frozen or future-dated sample cannot hold a start open.
+    pub fn starting_bound_ms(&self) -> u64 {
+        let attempt = self.interval_ms.saturating_add(self.timeout_ms);
+        self.start_period_ms
+            .saturating_add(self.timeout_ms)
+            .saturating_add(u64::from(self.retries).saturating_mul(attempt))
+            .saturating_add(attempt)
+            .saturating_add(1_000)
+    }
+    /// The arguments a probe exec started by a build before HACK-2443 carries: the same without
+    /// the start interval. Only a probe that declares no start interval can have one.
+    pub fn legacy_arguments(
+        &self,
+        directory: &str,
+        generation: &str,
+    ) -> Result<Option<Vec<String>>, CandidateError> {
+        if self.start_interval_ms.is_some() {
+            return Ok(None);
+        }
+        let mut arguments = self.arguments(directory, generation)?;
+        arguments.remove(8);
+        Ok(Some(arguments))
     }
     /// A historical healthy sample cannot outlive its exec, generation, or freshness window.
     pub fn health(
@@ -102,6 +162,18 @@ impl HttpProbe {
         exec_running: bool,
         now_ms: u64,
     ) -> Result<Health, CandidateError> {
+        self.assess(raw, generation, exec_running, now_ms)
+            .map(|assessment| assessment.health)
+    }
+    /// [`Self::health`] with why an unhealthy sample is unhealthy and the sample's counts
+    /// (HACK-2416). An unreadable sample is an error, as before.
+    pub fn assess(
+        &self,
+        raw: &str,
+        generation: &str,
+        exec_running: bool,
+        now_ms: u64,
+    ) -> Result<Assessment, CandidateError> {
         self.validate()?;
         if raw.len() > 256 || !raw.ends_with('\n') || !generation_valid(generation) {
             return Err(invalid());
@@ -123,7 +195,7 @@ impl HttpProbe {
                 v.parse().map_err(|_| invalid())
             })
             .collect::<Result<_, _>>()?;
-        let [sequence, health, failures, observed_ms, _elapsed_ms] = numbers[..] else {
+        let [sequence, health, failures, observed_ms, elapsed_ms] = numbers[..] else {
             return Err(invalid());
         };
         if health > 2
@@ -137,16 +209,41 @@ impl HttpProbe {
         }
         // A small wall-clock allowance is explicit; excessive skew fails closed.
         let freshness = self.interval_ms + self.timeout_ms + 1_000;
-        if !exec_running
-            || observed_ms > now_ms.saturating_add(1_000)
-            || now_ms.saturating_sub(observed_ms) > freshness
-        {
-            return Ok(Health::Unhealthy);
+        let judged = |health: Health, reason: Option<ProbeReason>| Assessment {
+            health,
+            reason,
+            sequence,
+            failures,
+            elapsed_ms,
+        };
+        if !exec_running {
+            return Ok(judged(Health::Unhealthy, Some(ProbeReason::ExecNotRunning)));
+        }
+        // A sample from before the first success (health 2) can make nothing ready, so a
+        // doubt about it is not a failure (HACK-2416): a guest clock ahead of the host's, or
+        // an age up to the startup grace plus one attempt, which a patient first attempt can
+        // take (HACK-2440), reads as still starting. Older than that, it is stale.
+        if health == 2 {
+            let patient = self.start_period_ms.max(freshness) + self.timeout_ms + 1_000;
+            return Ok(if now_ms.saturating_sub(observed_ms) > patient {
+                judged(Health::Unhealthy, Some(ProbeReason::SampleStale))
+            } else {
+                judged(Health::Starting, None)
+            });
+        }
+        if observed_ms > now_ms.saturating_add(1_000) {
+            return Ok(judged(
+                Health::Unhealthy,
+                Some(ProbeReason::SampleClockAhead),
+            ));
+        }
+        if now_ms.saturating_sub(observed_ms) > freshness {
+            return Ok(judged(Health::Unhealthy, Some(ProbeReason::SampleStale)));
         }
         Ok(match health {
-            0 => Health::Unhealthy,
-            1 => Health::Healthy,
-            _ => Health::Starting,
+            0 => judged(Health::Unhealthy, Some(ProbeReason::FailuresExhausted)),
+            1 => judged(Health::Healthy, None),
+            _ => judged(Health::Starting, None),
         })
     }
 }
@@ -169,6 +266,7 @@ mod tests {
             timeout_ms: 40,
             retries: 3,
             start_period_ms: 0,
+            start_interval_ms: None,
             policy: None,
         }
     }
@@ -246,16 +344,59 @@ mod tests {
                 .arguments("/private/probe", GENERATION)
                 .unwrap()
                 .len(),
-            8
+            9
+        );
+        // The start interval (HACK-2443) is the ninth argument: the default when undeclared,
+        // capped at the steady interval, and a probe started before it carries the same
+        // without it.
+        assert_eq!(
+            explicit.start_interval(),
+            DEFAULT_START_INTERVAL_MS.min(explicit.interval_ms)
+        );
+        assert_eq!(
+            explicit.arguments("/private/probe", GENERATION).unwrap()[8],
+            explicit.start_interval().to_string()
+        );
+        let legacy = explicit
+            .legacy_arguments("/private/probe", GENERATION)
+            .unwrap()
+            .unwrap();
+        assert_eq!(legacy.len(), 8);
+        assert_eq!(
+            legacy[..],
+            explicit.arguments("/private/probe", GENERATION).unwrap()[..8]
+        );
+        let mut declared = config();
+        declared.start_interval_ms = Some(100);
+        assert_eq!(
+            declared.arguments("/private/probe", GENERATION).unwrap()[8],
+            "100"
+        );
+        assert!(
+            declared
+                .legacy_arguments("/private/probe", GENERATION)
+                .unwrap()
+                .is_none()
+        );
+        // Never longer than the steady interval, and absent from receipts unless declared.
+        declared.start_interval_ms = Some(declared.interval_ms + 1);
+        assert!(declared.validate().is_err());
+        assert!(
+            serde_json::to_value(&explicit)
+                .unwrap()
+                .get("start_interval_ms")
+                .is_none()
         );
         let inferred = HttpProbe::inferred_route(3000);
         inferred.validate().unwrap();
         // Even a timeout on every startup sample exhausts grace and retries
-        // before the frontend's 300-second graph budget. Startup cadence is at
-        // most one second; the steady interval is thirty seconds.
+        // before the frontend's 300-second graph budget. Startup cadence is the
+        // start interval (250 ms by default); the steady interval is thirty seconds.
         assert_eq!(inferred.interval_ms, 30_000);
+        assert_eq!(inferred.start_interval(), DEFAULT_START_INTERVAL_MS);
         assert!(
-            inferred.start_period_ms + u64::from(inferred.retries) * (1_000 + inferred.timeout_ms)
+            inferred.start_period_ms
+                + u64::from(inferred.retries) * (inferred.start_interval() + inferred.timeout_ms)
                 < 300_000
         );
         assert_eq!(serde_json::to_value(&inferred).unwrap()["policy"], "route");
@@ -373,6 +514,10 @@ mod tests {
                                 let response = format!("HTTP/1.1 200 OK\r\nX-Large: {}\r\n\r\n", "x".repeat(8192));
                                 let _ = stream.write_all(response.as_bytes());
                                 continue;
+                            }
+                            16 => {
+                                thread::sleep(Duration::from_millis(300));
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
                             }
                             _ => b"NOT-HTTP 200 OK\r\n\r\n",
                         };
@@ -743,6 +888,25 @@ mod tests {
                 let mut f = Fixture::new(mode, 0);
                 f.wait(Health::Unhealthy, 0);
             }
+        }
+        #[test]
+        fn inside_the_start_period_one_slow_first_answer_is_waited_for() {
+            // The app takes 300 ms to answer against a 40 ms timeout. Inside the
+            // start period the first attempt may run for the rest of the period,
+            // so one request succeeds instead of many abandoned ones.
+            let mut f = Fixture::new(16, 5000);
+            f.wait(Health::Healthy, 0);
+            // The probe's own record of request 1, which later requests never
+            // replace: healthy, after waiting out the 300 ms answer, far past the
+            // 40 ms timeout. The live status and connection count may already show
+            // later requests, so they are not the proof.
+            let first = fs::read_to_string(f.root.join("first-sample")).unwrap();
+            let fields: Vec<&str> = first.trim_end().split(' ').collect();
+            assert_eq!(fields[2..5], ["1", "1", "0"], "{first}");
+            assert!(fields[6].parse::<u64>().unwrap() >= 300, "{first}");
+            // Without a start period the same answer is too slow.
+            let mut f = Fixture::new(16, 0);
+            f.wait(Health::Unhealthy, 0);
         }
         #[test]
         fn startup_grace_does_not_mask_failure_after_first_success() {

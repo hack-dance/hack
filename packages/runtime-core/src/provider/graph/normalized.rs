@@ -210,7 +210,7 @@ mod tests {
         fs::write(project.join("compose.yaml"), bytes).unwrap();
         let candidate = Candidate::discover(&fixture.0).unwrap();
         let namespace = candidate.plan(&project).unwrap().namespace;
-        let original = format!("{:x}", Sha256::digest(bytes));
+        let original = format!("{:x}", crate::Hex(Sha256::digest(bytes)));
         let report = project::plan_normalized(
             &candidate,
             project::NormalizedComposeOptions {
@@ -314,7 +314,7 @@ mod tests {
         let candidate = Candidate::discover(&fixture.0).unwrap();
         let namespace = candidate.plan(&project).unwrap().namespace;
         let review = |bytes: &[u8]| {
-            let original = format!("{:x}", Sha256::digest(bytes));
+            let original = format!("{:x}", crate::Hex(Sha256::digest(bytes)));
             let report = project::plan_normalized(
                 &candidate,
                 project::NormalizedComposeOptions {
@@ -453,7 +453,7 @@ mod tests {
             fs::write(project.join("compose.yml"), original).unwrap();
             let candidate = Candidate::discover(&checkout).unwrap();
             let namespace = candidate.plan(&project).unwrap().namespace;
-            let hash = format!("{:x}", Sha256::digest(original));
+            let hash = format!("{:x}", crate::Hex(Sha256::digest(original)));
             let normalized =
                 b"services:\n  web:\n    image: alpine:3.21\n    command: [echo, normalized]\n";
             let compose = NormalizedComposeOptions {

@@ -30,6 +30,38 @@ type ModelContract = {
   }[];
 };
 
+// The two runtime-service clients are symmetric, so a control may show either
+// one as the client that breaks the invariant.
+type Client = "c1" | "c2";
+type ClientFields = (me: Client) => readonly string[];
+function pairOf(
+  variable: string,
+  me: Client,
+  mine: string,
+  theirs: string
+): string {
+  const [first, second] = me === "c1" ? [mine, theirs] : [theirs, mine];
+  return `${variable} = (c1 :> ${first} @@ c2 :> ${second})`;
+}
+function runtimeServiceEither(
+  action: string,
+  fields: ClientFields,
+  also?: { readonly action: string; readonly fields: ClientFields }
+) {
+  const witnesses = [
+    { action, fields: fields("c1") },
+    { action, fields: fields("c2") },
+    ...(also
+      ? [
+          { action: also.action, fields: also.fields("c1") },
+          { action: also.action, fields: also.fields("c2") },
+        ]
+      : []),
+  ];
+  const [first, ...alternativeWitnesses] = witnesses;
+  return { ...first, alternativeWitnesses };
+}
+
 // Bounds and witnesses are reviewed contracts, not learned from each run.
 const laterIncompleteMissingLockStages = [
   "temp",
@@ -1169,6 +1201,20 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "executable-digest-cache",
+    module: "DigestCache",
+    states: 1943,
+    invariant: "CacheNeverStale",
+    action: "CacheHit",
+    fields: [
+      "staleHit = TRUE",
+      "cache = <<1, 1, 1>>",
+      "content = 2",
+      "ctime = 1",
+      "clock = 1",
+    ],
+  },
+  {
     name: "native-status-start",
     module: "StatusStart",
     states: 110,
@@ -1756,6 +1802,95 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // One start of a pool that is not running: two chained Development samples
+    // (the second under the startup lease, a window after the first), Research's
+    // three pre-lease samples, the content proofs and the pre-boot check.
+    name: "pool-start-admission",
+    module: "PoolStart",
+    states: 21_400,
+    // Development's second sample taken before the startup lease.
+    invariant: "SecondSampleUnderLease",
+    action: "Recheck",
+    fields: ['pc = "Proven"', 'profile = "development"'],
+    additionalControls: [
+      // The follow-up ordering: root files proven in the window, rechecked
+      // under the lease.
+      { name: "root-before-lease", negative: false, states: 27_304 },
+      // Hypothetical: a tree recheck under the lease, which no code performs.
+      { name: "tree-recheck", negative: false, states: 21_076 },
+      {
+        name: "window-not-enforced",
+        negative: true,
+        invariant: "WindowRespected",
+        action: "Recheck",
+        fields: ['pc = "Qualified"', 'profile = "development"'],
+      },
+      {
+        name: "unchained-recheck",
+        negative: true,
+        invariant: "ChainUnbroken",
+        action: "Recheck",
+        fields: ['pc = "Qualified"', "swapouts = 1"],
+      },
+      {
+        name: "unchained-boot",
+        negative: true,
+        invariant: "BootBaselineIsLastSample",
+        action: "AdmitBoot",
+        fields: ['pc = "BootAdmitted"', "baseline = <<1>>", "swapouts = 1"],
+      },
+      {
+        name: "research-two-samples",
+        negative: true,
+        invariant: "ResearchThreeSamples",
+        action: "Start",
+        fields: ['pc = "Started"', 'profile = "research"', "vm = TRUE"],
+      },
+      {
+        name: "root-unchecked",
+        negative: true,
+        invariant: "StartFromProvenRoot",
+        action: "RecheckRoot",
+        fields: ['pc = "RootProven"', "rootOk = FALSE", "rootProved = TRUE"],
+      },
+      // The remaining gap, kept explicit: the trees are proven before the
+      // lease and not rechecked under it.
+      {
+        name: "changed-tree-start",
+        negative: true,
+        invariant: "NoStartFromChangedTree",
+        action: "Start",
+        fields: [
+          'pc = "Started"',
+          "treeOk = FALSE",
+          "treeProved = TRUE",
+          "vm = TRUE",
+        ],
+      },
+      {
+        name: "development-start-reachable",
+        negative: true,
+        invariant: "NeverStartsDevelopment",
+        action: "Start",
+        fields: ['profile = "development"', "vm = TRUE"],
+      },
+      {
+        name: "research-start-reachable",
+        negative: true,
+        invariant: "NeverStartsResearch",
+        action: "Start",
+        fields: ['profile = "research"', "vm = TRUE"],
+      },
+      {
+        name: "moved-alias-start-reachable",
+        negative: true,
+        invariant: "NeverStartsOnMovedAlias",
+        action: "Start",
+        fields: ['alias = "moved"', "selected = 2", "vm = TRUE"],
+      },
+    ],
+  },
+  {
     name: "multi-root-share",
     module: "Shares",
     states: 55,
@@ -1921,6 +2056,58 @@ const contracts: readonly ModelContract[] = [
     invariant: "Safe",
     action: "Recover",
     fields: ["alive = TRUE", "recoveredLive = TRUE"],
+  },
+  {
+    // HACK-2442: one batch of route/port bridges, its fences and its release;
+    // see tests/models/tla/bridge-batch/COVERAGE.md.
+    name: "bridge-batch",
+    module: "BridgeBatch",
+    states: 14_674,
+    invariant: "Safe",
+    action: "Relays",
+    fields: ['opc = "late"', 'relay = [r |-> "running", p |-> "running"]'],
+    additionalControls: [
+      {
+        name: "child-fence",
+        negative: true,
+        action: "ChildLaunch",
+        fields: ["staleLaunch = TRUE", 'lease = "free"'],
+      },
+      {
+        name: "release-order",
+        negative: true,
+        action: "CleanStop",
+        fields: ['rpc = "late"', 'lease = "cleanup"'],
+      },
+      {
+        name: "ready-reachable",
+        negative: true,
+        invariant: "NeverReady",
+        action: "Await",
+        fields: ['opc = "ready"', 'cpc = [r |-> "done", p |-> "done"]'],
+      },
+      {
+        name: "release-reachable",
+        negative: true,
+        invariant: "NeverReleased",
+        action: "CleanDrop",
+        fields: ['rpc = "done"', 'lease = "free"'],
+      },
+      {
+        name: "release-after-ready",
+        negative: true,
+        invariant: "NeverReleasedAfterReady",
+        action: "CleanDrop",
+        fields: ['rpc = "done"', "everReady = TRUE"],
+      },
+      {
+        name: "stale-stop-reachable",
+        negative: true,
+        invariant: "NeverStaleStop",
+        action: "Fence3",
+        fields: ['opc = "failed"', 'lease = "free"'],
+      },
+    ],
   },
   {
     // Loopback TCP publication of Compose `ports`: one listener per host
@@ -2360,6 +2547,52 @@ const contracts: readonly ModelContract[] = [
     fields: ["retired = <<1>>", "alive = 1"],
   },
   {
+    // HACK-2440 (c, d), HACK-2416: a patient first request, no failure on one
+    // doubtful reading, and a host-side bound on "starting". Slow, refusing and
+    // hanging apps; `legacy` runs the steady cadence before the first success.
+    name: "probe-readiness",
+    module: "ProbeReadiness",
+    states: 175_757,
+    invariant: "OneCompile",
+    action: "Begin",
+    fields: ["restarts = 1", 'app = "slow"'],
+    alternativeWitnesses: [
+      { action: "Begin", fields: ["restarts = 1", 'app = "hanging"'] },
+    ],
+    additionalControls: [
+      { name: "legacy", negative: false, states: 132_615 },
+      {
+        name: "no-host-bound",
+        negative: true,
+        invariant: "BoundedStarting",
+        action: "Observe",
+        fields: ['verdict = "starting"', "skewed = TRUE", "vt = 15"],
+      },
+      {
+        name: "no-tolerance",
+        negative: true,
+        invariant: "NoFalseFailure",
+        action: "Observe",
+        fields: ['verdict = "unhealthy"', 'app = "slow"'],
+      },
+      {
+        // Reachability: the positive run does exhaust retries.
+        name: "exhausts",
+        negative: true,
+        invariant: "NeverExhausted",
+        action: "Expire",
+        fields: ['health = "unhealthy"', "failures = 2"],
+      },
+      {
+        name: "tight-bound",
+        negative: true,
+        invariant: "NoPrematureFailure",
+        action: "Observe",
+        fields: ['verdict = "unhealthy"', 'vh = "starting"'],
+      },
+    ],
+  },
+  {
     name: "pool-emulation",
     module: "Emulation",
     states: 13,
@@ -2384,6 +2617,119 @@ const contracts: readonly ModelContract[] = [
           "config = FALSE",
           "engine = TRUE",
         ],
+      },
+    ],
+  },
+  {
+    // HACK-2460. One runtime service per native home. The negative control
+    // binds the socket without holding service.lock.
+    name: "runtime-service",
+    module: "RuntimeService",
+    states: 1_006_849,
+    invariant: "LockedOwner",
+    action: "Bind",
+    fields: ["lock = 0", "svcLease = 0"],
+    alternativeWitnesses: ["lock = 1", "lock = 2"].map((lock) => ({
+      action: "Bind",
+      fields: [lock, "svcLease = 0"],
+    })),
+    additionalControls: [
+      {
+        // The effect runs before the durable intent record: a crash after
+        // the effect and a resend run it again.
+        name: "effect-before-accept",
+        negative: true,
+        invariant: "AtMostOnce",
+        ...runtimeServiceEither("Begin", (me) => [
+          pairOf("effects", me, "2", "0"),
+          'intent = (c1 :> "none" @@ c2 :> "none")',
+        ]),
+      },
+      {
+        // A resent intent id is admitted again instead of answered.
+        name: "no-dedupe",
+        negative: true,
+        invariant: "AtMostOnce",
+        ...runtimeServiceEither("Begin", (me) => [
+          pairOf("effects", me, "2", "0"),
+          "oneLease = NoClient",
+        ]),
+      },
+      {
+        // The one-shot fallback while a written frame is still unsure. The
+        // second effect is either the one-shot start or the buffered frame's.
+        name: "fallback-after-send",
+        negative: true,
+        invariant: "AtMostOnce",
+        ...runtimeServiceEither(
+          "OneShotBegin",
+          (me) => [pairOf("effects", me, "2", "0"), "svcLease = 0"],
+          {
+            action: "Begin",
+            fields: (me) => [
+              pairOf("effects", me, "2", "0"),
+              "oneLease = NoClient",
+            ],
+          }
+        ),
+      },
+      {
+        // A service of another build admits a mutation.
+        name: "ignore-skew",
+        negative: true,
+        invariant: "SameBuild",
+        action: "Admit",
+        fields: ["svcLease = 0", "effects = (c1 :> 0 @@ c2 :> 0)"],
+      },
+      {
+        // One-shot inspection while a service process still holds the lock:
+        // after "not done", the service reads the buffered frame and starts it.
+        name: "inspect-while-held",
+        negative: true,
+        invariant: "ReportHonest",
+        ...runtimeServiceEither("Begin", (me) => [
+          pairOf("report", me, '"notdone"', '"none"'),
+          pairOf("world", me, '"started"', '"none"'),
+        ]),
+      },
+      {
+        // Reachability: the "outcome unknown" answer happens.
+        name: "reach-unknown",
+        negative: true,
+        invariant: "NeverUnknown",
+        action: "AnswerUnknown",
+        fields: ["svcLease = 0", "effects = (c1 :> 0 @@ c2 :> 0)"],
+      },
+      {
+        // Reachability: an honest "not done" after inspection happens.
+        name: "reach-not-done",
+        negative: true,
+        invariant: "NeverNotDone",
+        action: "Inspect",
+        fields: ["lock = 0", "effects = (c1 :> 0 @@ c2 :> 0)"],
+      },
+      {
+        // Reachability: a one-shot fallback completes and frees the lease.
+        name: "reach-one-shot",
+        negative: true,
+        invariant: "NeverOneShotDone",
+        action: "OneShotEnd",
+        fields: [
+          "svcLease = 0",
+          "oneLease = NoClient",
+          'intent = (c1 :> "none" @@ c2 :> "none")',
+        ],
+      },
+      {
+        // Reachability: inspection of work that started and did not
+        // complete reports "unknown".
+        name: "reach-inconclusive",
+        negative: true,
+        invariant: "NeverInconclusive",
+        ...runtimeServiceEither("Inspect", (me) => [
+          pairOf("report", me, '"unknown"', '"none"'),
+          pairOf("world", me, '"started"', '"none"'),
+        ]),
       },
     ],
   },

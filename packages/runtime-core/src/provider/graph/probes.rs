@@ -1,5 +1,6 @@
 use super::super::http_probe::{HttpProbe, HttpProbePolicy};
 use super::*;
+use crate::{ProbeFinding, ProbeReason};
 #[cfg(feature = "native-http-probe")]
 use {
     base64::Engine as _,
@@ -17,15 +18,52 @@ pub struct Probe {
     pub exec_id: Option<String>,
     pub started_ms: u64,
     pub phase: String,
+    /// Whether this probe's mounted binary takes the start interval argument (HACK-2443).
+    /// Absent, and so false, in a receipt written by an earlier build: its binary is the
+    /// earlier one, mounted by content address, and every launch of it uses the arguments that
+    /// binary takes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start_interval_argv: bool,
+}
+
+impl Probe {
+    /// The arguments this probe's own binary takes: with the start interval for a binary of
+    /// this build, without it for one an earlier build published.
+    pub(super) fn launch_arguments(&self) -> Result<Vec<String>, CandidateError> {
+        let directory = "/run/hack-http-probe-state";
+        if self.start_interval_argv {
+            return self.config.arguments(directory, &self.generation);
+        }
+        self.config
+            .legacy_arguments(directory, &self.generation)?
+            .ok_or_else(|| {
+                error(
+                    "graph_probe_plan",
+                    "A probe from an earlier build cannot take a start interval.",
+                )
+            })
+    }
 }
 
 /// Only an inferred route's unhealthy observation gets route guidance. Explicit
 /// healthchecks, exits and deaths keep their existing diagnostic semantics.
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn service_failure(
     code: &'static str,
     name: &str,
     observation: Observation,
     probe: Option<&HttpProbe>,
+) -> CandidateError {
+    service_failure_finding(code, name, observation, probe, None)
+}
+
+/// [`service_failure`] with what the probe observed, when known (HACK-2416).
+pub(super) fn service_failure_finding(
+    code: &'static str,
+    name: &str,
+    observation: Observation,
+    probe: Option<&HttpProbe>,
+    found: Option<ProbeFinding>,
 ) -> CandidateError {
     if let Some(probe) = probe.filter(|probe| {
         probe.policy == Some(HttpProbePolicy::Route)
@@ -36,15 +74,18 @@ pub(super) fn service_failure(
                 }
             )
     }) {
-        return error(
+        let failure = error(
             code,
             format!(
                 "Owned graph service {name} is unhealthy on inferred route port {}; no further services will start. Check hack logs {name} in the same project/branch, fix the route port, or declare healthcheck.x-hack-http with a longer start_period_ms and a readiness path, within the 300-second graph budget.",
                 probe.port
             ),
         )
-        .with_service(name)
-        .with_route_probe(probe.port);
+        .with_service(name);
+        return match found {
+            Some(found) => failure.with_route_probe_finding(probe.port, found),
+            None => failure.with_route_probe(probe.port),
+        };
     }
     execution::failed_service_error(code, name, observation)
 }
@@ -134,6 +175,7 @@ pub(super) fn fresh(
                     exec_id: None,
                     started_ms: 0,
                     phase: "reserved".into(),
+                    start_interval_argv: true,
                 },
             ))
         })
@@ -270,13 +312,12 @@ fn exec(
         .id
         .as_ref()
         .ok_or_else(|| error("graph_probe_identity", "Probe lacks a container identity."))?;
+    // The exec must carry exactly the arguments its probe's binary takes (HACK-2443).
+    let arguments = &value["ProcessConfig"]["arguments"];
+    let expected = json!(p.launch_arguments()?);
     if value["ContainerID"] != *container
         || value["ProcessConfig"]["entrypoint"] != "/run/hack-http-probe"
-        || value["ProcessConfig"]["arguments"]
-            != json!(
-                p.config
-                    .arguments("/run/hack-http-probe-state", &p.generation)?
-            )
+        || *arguments != expected
     {
         return Err(error(
             "graph_probe_identity",
@@ -291,6 +332,17 @@ pub(super) fn observe(
     name: &str,
     value: &Value,
 ) -> Result<Observation, CandidateError> {
+    observe_finding(engine, receipt, name, value).map(|(observation, _)| observation)
+}
+
+/// [`observe`] with what an unhealthy probe observed, for the failure's diagnostic
+/// (HACK-2416).
+pub(super) fn observe_finding(
+    engine: &impl super::Inspection,
+    receipt: &Receipt,
+    name: &str,
+    value: &Value,
+) -> Result<(Observation, Option<ProbeFinding>), CandidateError> {
     let observed = observation(value)?;
     if observed == Observation::Restarting
         && !receipt
@@ -304,48 +356,149 @@ pub(super) fn observe(
         ));
     }
     let Some(p) = receipt.probes.get(name) else {
-        return Ok(observed);
+        return Ok((observed, None));
     };
     if !matches!(observed, Observation::Running { .. }) {
-        return Ok(observed);
+        return Ok((observed, None));
     }
-    let healthy = if exec(engine, receipt, name)?.is_some_and(|v| v["Running"] == true) {
+    let exec = exec(engine, receipt, name)?;
+    let (health, finding) = if exec.as_ref().is_some_and(|v| v["Running"] == true) {
         let id = receipt.resources[&format!("container:{name}")]
             .id
             .as_ref()
             .unwrap();
         observe_sample(p, || engine.probe_status(id), now)?
     } else {
-        Health::Unhealthy
+        let since_start_ms = now()?.saturating_sub(p.started_ms);
+        // An exec the engine has not started yet, right after a detached start, is not a
+        // failure inside the startup grace (HACK-2416). One that exited is.
+        let exited = exec.as_ref().is_some_and(|v| v["ExitCode"].is_number());
+        if exec.is_some() && !exited && since_start_ms <= p.config.start_period_ms {
+            (Health::Starting, None)
+        } else {
+            let reason = if exited {
+                ProbeReason::ExecExited
+            } else {
+                ProbeReason::ExecNotRunning
+            };
+            (
+                Health::Unhealthy,
+                Some(finding(reason, None, since_start_ms)),
+            )
+        }
     };
-    Ok(Observation::Running { health: healthy })
+    Ok((Observation::Running { health }, finding))
 }
+
+fn finding(
+    reason: ProbeReason,
+    assessment: Option<&super::super::http_probe::Assessment>,
+    since_start_ms: u64,
+) -> ProbeFinding {
+    ProbeFinding {
+        reason,
+        sequence: assessment.map(|a| a.sequence),
+        failures: assessment.map(|a| a.failures),
+        last_elapsed_ms: assessment.map(|a| a.elapsed_ms),
+        since_start_ms,
+    }
+}
+
 // Read the sample before observing wall time: a slow archive RPC can return a
 // sample newer than its request time. Existing skew/freshness limits remain exact.
+// Inside the startup grace, a sample that cannot be read and a missing one are not failures
+// (HACK-2416); outside it they are.
 fn observe_sample(
     probe: &Probe,
     read: impl FnOnce() -> Result<Option<String>, CandidateError>,
     clock: impl FnOnce() -> Result<u64, CandidateError>,
-) -> Result<Health, CandidateError> {
+) -> Result<(Health, Option<ProbeFinding>), CandidateError> {
     let sample = read()?;
     let now = clock()?;
+    let since_start_ms = now.saturating_sub(probe.started_ms);
+    let starting = since_start_ms <= probe.config.start_period_ms;
     Ok(match sample {
-        Some(raw) => probe
-            .config
-            .health(&raw, &probe.generation, true, now)
-            .unwrap_or(Health::Unhealthy),
-        None if now.saturating_sub(probe.started_ms)
-            <= probe.config.interval_ms + probe.config.timeout_ms + 1000 =>
+        Some(raw) => match probe.config.assess(&raw, &probe.generation, true, now) {
+            // The sample's own timestamp is the guest's; the host decides when "starting"
+            // can no longer be true (see `starting_bound_ms`).
+            Ok(assessment)
+                if assessment.health == Health::Starting
+                    && since_start_ms > probe.config.starting_bound_ms() =>
+            {
+                (
+                    Health::Unhealthy,
+                    Some(finding(
+                        ProbeReason::SampleStale,
+                        Some(&assessment),
+                        since_start_ms,
+                    )),
+                )
+            }
+            Ok(assessment) => (
+                assessment.health,
+                assessment
+                    .reason
+                    .map(|reason| finding(reason, Some(&assessment), since_start_ms)),
+            ),
+            Err(_) if starting => (Health::Starting, None),
+            Err(_) => (
+                Health::Unhealthy,
+                Some(finding(ProbeReason::SampleInvalid, None, since_start_ms)),
+            ),
+        },
+        None if starting
+            || since_start_ms <= probe.config.interval_ms + probe.config.timeout_ms + 1000 =>
         {
-            Health::Starting
+            (Health::Starting, None)
         }
-        None => Health::Unhealthy,
+        None => (
+            Health::Unhealthy,
+            Some(finding(ProbeReason::SampleMissing, None, since_start_ms)),
+        ),
     })
 }
 
 #[cfg(test)]
 mod observation_clock_tests {
     use super::*;
+    /// HACK-2443: a probe from an earlier build's receipt launches its own binary with the
+    /// arguments that binary takes; one created by this build adds the start interval.
+    #[test]
+    fn a_probe_launches_with_the_arguments_its_own_binary_takes() {
+        let mut probe: Probe = serde_json::from_value(serde_json::json!({
+            "config":{"port":8080,"path":"/","interval_ms":30000,"timeout_ms":1000,
+                "retries":3,"start_period_ms":240000,"policy":"route"},
+            "allocation":"a".repeat(32),"generation":"b".repeat(32),
+            "binary":format!("/storage/hack-native-http-probe/{}", "c".repeat(64)),
+            "uid":0,"gid":0,"exec_id":null,"started_ms":0,"phase":"running"
+        }))
+        .unwrap();
+        // A receipt written before the field: the earlier binary's arguments.
+        assert!(!probe.start_interval_argv);
+        let legacy = probe.launch_arguments().unwrap();
+        assert_eq!(legacy.len(), 9);
+        assert_eq!(legacy.last().unwrap(), "route");
+        assert!(
+            serde_json::to_value(&probe)
+                .unwrap()
+                .get("start_interval_argv")
+                .is_none()
+        );
+        // A probe this build created: the start interval before `route`.
+        probe.start_interval_argv = true;
+        let current = probe.launch_arguments().unwrap();
+        assert_eq!(current.len(), 10);
+        assert_eq!(current[8], "250");
+        assert_eq!(current[9], "route");
+        // An earlier binary cannot be given a declared start interval.
+        probe.start_interval_argv = false;
+        probe.config.start_interval_ms = Some(100);
+        assert_eq!(
+            probe.launch_arguments().unwrap_err().code,
+            "graph_probe_plan"
+        );
+    }
+
     #[test]
     fn slow_sample_read_uses_response_time_without_extending_freshness() {
         let probe = Probe {
@@ -356,6 +509,7 @@ mod observation_clock_tests {
                 timeout_ms: 40,
                 retries: 3,
                 start_period_ms: 0,
+                start_interval_ms: None,
                 policy: None,
             },
             allocation: "a".repeat(32),
@@ -366,6 +520,7 @@ mod observation_clock_tests {
             exec_id: None,
             started_ms: 10000,
             phase: "started".into(),
+            start_interval_argv: true,
         };
         let clock = std::cell::Cell::new(10000);
         let raw = format!("v1 {} 5 1 0 12000 2\n", probe.generation);
@@ -385,25 +540,206 @@ mod observation_clock_tests {
                 },
                 || Ok(clock.get())
             )
-            .unwrap(),
+            .unwrap()
+            .0,
             Health::Healthy
         );
+        let (health, found) =
+            observe_sample(&probe, || Ok(Some(raw.clone())), || Ok(13141)).unwrap();
+        assert_eq!(health, Health::Unhealthy);
+        let found = found.unwrap();
+        assert_eq!(found.reason, ProbeReason::SampleStale);
         assert_eq!(
-            observe_sample(&probe, || Ok(Some(raw)), || Ok(13141)).unwrap(),
-            Health::Unhealthy
+            (found.sequence, found.failures, found.last_elapsed_ms),
+            (Some(5), Some(0), Some(2))
         );
-        assert_eq!(
-            observe_sample(
-                &probe,
-                || {
-                    clock.set(12000);
-                    Ok(None)
-                },
-                || Ok(clock.get())
+        assert_eq!(found.since_start_ms, 3141);
+        let (health, found) = observe_sample(
+            &probe,
+            || {
+                clock.set(12000);
+                Ok(None)
+            },
+            || Ok(clock.get()),
+        )
+        .unwrap();
+        assert_eq!(health, Health::Unhealthy);
+        assert_eq!(found.unwrap().reason, ProbeReason::SampleMissing);
+    }
+
+    /// HACK-2416: inside the startup grace, one doubtful observation is not a failure. A
+    /// sample that cannot be read, a missing one, and a starting sample from a guest clock
+    /// ahead of the host's all read as still starting; after the grace they fail, and say why.
+    #[test]
+    /// The host's reading, branch by branch, as `V(read)` in
+    /// tests/models/tla/probe-readiness/ProbeReadiness.tla decides it, with the model's own
+    /// constants at one tick = 1000 ms. If a bound here drifts from the model, this fails.
+    fn the_probe_readiness_model_verdicts_match_observe_sample() {
+        let tick = 1000;
+        let (grace, timeout, interval, retries) = (3, 1, 2, 2u32);
+        let fresh = interval + timeout + 1;
+        let patient_age = grace.max(fresh) + timeout + 1;
+        let limit =
+            grace + timeout + u64::from(retries) * (interval + timeout) + (interval + timeout) + 1;
+        let started = 100_000;
+        let probe: Probe = serde_json::from_value(serde_json::json!({
+            "config":{"port":8080,"path":"/","interval_ms":interval * tick,
+                "timeout_ms":timeout * tick,"retries":retries,"start_period_ms":grace * tick},
+            "allocation":"a".repeat(32),"generation":"b".repeat(32),"binary":"",
+            "uid":0,"gid":0,"exec_id":null,"started_ms":started,"phase":"running",
+            "start_interval_argv":true
+        }))
+        .unwrap();
+        assert_eq!(probe.config.starting_bound_ms(), limit * tick, "Limit");
+        let at = |t: u64| started + t * tick;
+        let sample = |health: u8, published: u64| {
+            let failures = if health == 0 { retries } else { 0 };
+            format!(
+                "v1 {} 5 {health} {failures} {published} 0\n",
+                probe.generation
             )
-            .unwrap(),
-            Health::Unhealthy
-        );
+        };
+        let future = u64::MAX;
+        use Health::{Healthy, Starting, Unhealthy};
+        use ProbeReason::{SampleInvalid, SampleMissing, SampleStale};
+        let rows = [
+            ("none, t <= Grace", None, grace, Starting, None),
+            ("none, Grace < t <= Fresh", None, fresh, Starting, None),
+            (
+                "none, t > Fresh",
+                None,
+                fresh + 1,
+                Unhealthy,
+                Some(SampleMissing),
+            ),
+            (
+                "garbage, t <= Grace",
+                Some("torn".into()),
+                grace,
+                Starting,
+                None,
+            ),
+            (
+                "garbage, t > Grace",
+                Some("torn".into()),
+                grace + 1,
+                Unhealthy,
+                Some(SampleInvalid),
+            ),
+            (
+                "starting, age <= PatientAge",
+                Some(sample(2, at(1))),
+                1 + patient_age,
+                Starting,
+                None,
+            ),
+            (
+                "starting, age > PatientAge",
+                Some(sample(2, at(1))),
+                2 + patient_age,
+                Unhealthy,
+                Some(SampleStale),
+            ),
+            (
+                "skewed starting, t <= Limit",
+                Some(sample(2, future)),
+                limit,
+                Starting,
+                None,
+            ),
+            (
+                "skewed starting, t > Limit",
+                Some(sample(2, future)),
+                limit + 1,
+                Unhealthy,
+                Some(SampleStale),
+            ),
+            (
+                "healthy, age <= Fresh",
+                Some(sample(1, at(5))),
+                5 + fresh,
+                Healthy,
+                None,
+            ),
+            (
+                "healthy, age > Fresh",
+                Some(sample(1, at(5))),
+                6 + fresh,
+                Unhealthy,
+                Some(SampleStale),
+            ),
+            (
+                "unhealthy",
+                Some(sample(0, at(5))),
+                5,
+                Unhealthy,
+                Some(ProbeReason::FailuresExhausted),
+            ),
+        ];
+        for (branch, raw, t, health, reason) in rows {
+            let (observed, found) =
+                observe_sample(&probe, || Ok(raw.clone()), || Ok(at(t))).unwrap();
+            assert_eq!(observed, health, "{branch}");
+            assert_eq!(found.map(|found| found.reason), reason, "{branch}");
+        }
+    }
+    #[test]
+    fn inside_the_startup_grace_a_doubtful_sample_is_not_a_failure() {
+        let mut probe: Probe = serde_json::from_value(serde_json::json!({
+            "config":{"port":8080,"path":"/","interval_ms":30000,"timeout_ms":1000,
+                "retries":3,"start_period_ms":60000},
+            "allocation":"a".repeat(32),"generation":"b".repeat(32),"binary":"",
+            "uid":0,"gid":0,"exec_id":null,"started_ms":10000,"phase":"running",
+            "start_interval_argv":true
+        }))
+        .unwrap();
+        let inside = 10000 + 30_000;
+        let after = 10000 + 61_000;
+        let garbage = "not a sample\n".to_owned();
+        let starting_ahead = format!("v1 {} 0 2 0 {} 0\n", probe.generation, inside + 5_000);
+        for (raw, at, expected, reason) in [
+            (Some(garbage.clone()), inside, Health::Starting, None),
+            (None, inside, Health::Starting, None),
+            (Some(starting_ahead), inside, Health::Starting, None),
+            (
+                Some(garbage),
+                after,
+                Health::Unhealthy,
+                Some(ProbeReason::SampleInvalid),
+            ),
+            (
+                None,
+                after,
+                Health::Unhealthy,
+                Some(ProbeReason::SampleMissing),
+            ),
+        ] {
+            let (health, found) = observe_sample(&probe, || Ok(raw.clone()), || Ok(at)).unwrap();
+            assert_eq!(health, expected, "{raw:?} at {at}");
+            assert_eq!(found.map(|found| found.reason), reason, "{raw:?} at {at}");
+        }
+        // A frozen "starting" sample dated far in the future reads as starting only until
+        // the host-side bound from the probe's start; after it, it is stale.
+        let bound = probe.config.starting_bound_ms();
+        assert_eq!(bound, 60_000 + 1_000 + 3 * 31_000 + 31_000 + 1_000);
+        let frozen = format!("v1 {} 4 2 2 {} 0\n", probe.generation, u64::MAX);
+        let at_bound = 10000 + bound;
+        let (health, _) =
+            observe_sample(&probe, || Ok(Some(frozen.clone())), || Ok(at_bound)).unwrap();
+        assert_eq!(health, Health::Starting);
+        let (health, found) =
+            observe_sample(&probe, || Ok(Some(frozen)), || Ok(at_bound + 1)).unwrap();
+        assert_eq!(health, Health::Unhealthy);
+        let found = found.unwrap();
+        assert_eq!(found.reason, ProbeReason::SampleStale);
+        assert_eq!(found.sequence, Some(4));
+        // A sample that has already been healthy or unhealthy keeps the strict clock check.
+        probe.config.start_period_ms = 0;
+        let healthy_ahead = format!("v1 {} 1 1 0 {} 0\n", probe.generation, inside + 5_000);
+        let (health, found) =
+            observe_sample(&probe, || Ok(Some(healthy_ahead)), || Ok(inside)).unwrap();
+        assert_eq!(health, Health::Unhealthy);
+        assert_eq!(found.unwrap().reason, ProbeReason::SampleClockAhead);
     }
 }
 
@@ -629,10 +965,7 @@ impl Session<'_, '_> {
         self.save()?;
         let p = &self.receipt.probes[name];
         let mut args = vec!["/run/hack-http-probe".to_owned()];
-        args.extend(
-            p.config
-                .arguments("/run/hack-http-probe-state", &p.generation)?,
-        );
+        args.extend(p.launch_arguments()?);
         let value=self.engine.request(Method::POST,&format!("/v1.53/containers/{id}/exec"),Some(&json!({"AttachStdout":false,"AttachStderr":false,"User":format!("{}:{}",p.uid,p.gid),"Cmd":args})))?;
         #[cfg(test)]
         self.fault_pause("probe-after-exec-create")?;
@@ -714,7 +1047,7 @@ const REARM_SAMPLES: &str = include_str!("probe-rearm-samples.sh");
 #[cfg(feature = "native-http-probe")]
 pub(super) fn publish(engine: &Engine<'_>) -> Result<String, CandidateError> {
     let bytes = super::super::http_probe::guest_binary();
-    let hash = format!("{:x}", Sha256::digest(bytes));
+    let hash = format!("{:x}", crate::Hex(Sha256::digest(bytes)));
     use std::io::Write;
     let mut compressed = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     compressed.write_all(bytes).map_err(state::io)?;
@@ -879,11 +1212,7 @@ pub(super) fn rearm_after_inactive(
     fence()?;
     let probe = &receipt.probes[name];
     let mut args = vec!["/run/hack-http-probe".to_owned()];
-    args.extend(
-        probe
-            .config
-            .arguments("/run/hack-http-probe-state", &probe.generation)?,
-    );
+    args.extend(probe.launch_arguments()?);
     let value = request(
         Method::POST,
         &format!("/v1.53/containers/{id}/exec"),

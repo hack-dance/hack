@@ -78,7 +78,7 @@ fn revision_hash(
         _ => return Err(invalid()),
     }
     .map_err(|_| invalid())?;
-    Ok(format!("{:x}", Sha256::digest(encoded)))
+    Ok(format!("{:x}", crate::Hex(Sha256::digest(encoded))))
 }
 
 impl ContentRevision {
@@ -513,7 +513,7 @@ fn capture_after_inventory(
             kind: entry.kind.clone(),
             executable: entry.executable,
             bytes: bytes.len() as u64,
-            sha256: (!directory).then(|| format!("{:x}", Sha256::digest(&bytes))),
+            sha256: (!directory).then(|| format!("{:x}", crate::Hex(Sha256::digest(&bytes)))),
             link_target: None,
         });
         files.push(bytes);

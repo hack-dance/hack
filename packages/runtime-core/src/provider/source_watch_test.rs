@@ -232,7 +232,7 @@ fn owned_source_watch_live() -> Result<(), CandidateError> {
                 drop(file);
                 fs::rename(&temporary, &marker)
                     .map_err(|_| fail("Cannot replace owned marker."))?;
-                format!("{:x}", Sha256::digest(value))
+                format!("{:x}", crate::Hex(Sha256::digest(value)))
             } else {
                 fs::remove_file(&marker).map_err(|_| fail("Cannot delete owned marker."))?;
                 "absent".into()

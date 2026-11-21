@@ -274,7 +274,7 @@ mod tests {
                 "/private/tmp/hkdr-{}",
                 &format!(
                     "{:x}",
-                    Sha256::digest(root.0.as_os_str().as_encoded_bytes())
+                    crate::Hex(Sha256::digest(root.0.as_os_str().as_encoded_bytes()))
                 )[..16]
             ));
             let history = root.0.join("graph");

@@ -664,7 +664,7 @@ fn cleanup(e: &Entry) -> Result<(), CandidateError> {
             return Err(error());
         }
         if bytes.len() > 512 * 1024
-            || (!staging && format!("{:x}", Sha256::digest(bytes)) != e.digest)
+            || (!staging && format!("{:x}", crate::Hex(Sha256::digest(bytes))) != e.digest)
         {
             return Err(error());
         }
@@ -842,7 +842,7 @@ fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
     file.take(512 * 1024 + 1)
         .read_to_end(&mut bytes)
         .map_err(state::io)?;
-    if format!("{:x}", Sha256::digest(bytes)) != e.digest {
+    if format!("{:x}", crate::Hex(Sha256::digest(bytes))) != e.digest {
         return Err(error());
     }
     // A TCP frontend has no filesystem identity. The publisher binds its
@@ -1022,7 +1022,7 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
         hostnames,
         token,
         process,
-        digest: format!("{:x}", Sha256::digest(bytes)),
+        digest: format!("{:x}", crate::Hex(Sha256::digest(bytes))),
         directory: None,
         binary: None,
         reaped: None,
@@ -1181,7 +1181,7 @@ mod tests {
             hostnames: vec![],
             token: "c".repeat(32),
             process,
-            digest: format!("{:x}", Sha256::digest(b"fixture")),
+            digest: format!("{:x}", crate::Hex(Sha256::digest(b"fixture"))),
             directory: None,
             binary: None,
             reaped: None,

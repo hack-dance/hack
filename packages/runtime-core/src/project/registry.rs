@@ -99,7 +99,7 @@ pub fn parse(input: &str) -> Result<RegistryTemplate, CandidateError> {
         .map(|(key, value)| format!("{key}={value}\n"))
         .collect();
     Ok(RegistryTemplate {
-        sha256: format!("{:x}", Sha256::digest(template.as_bytes())),
+        sha256: format!("{:x}", crate::Hex(Sha256::digest(template.as_bytes()))),
         template,
         required_environment,
     })
@@ -350,7 +350,10 @@ mod tests {
         );
         assert_eq!(
             parsed.sha256,
-            format!("{:x}", Sha256::digest(parsed.template.as_bytes()))
+            format!(
+                "{:x}",
+                crate::Hex(Sha256::digest(parsed.template.as_bytes()))
+            )
         );
         assert_eq!(parse(&parsed.template).unwrap(), parsed);
         let reversed = input.lines().rev().collect::<Vec<_>>().join("\n");

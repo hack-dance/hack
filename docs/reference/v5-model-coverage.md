@@ -228,10 +228,10 @@ coverage or protection against arbitrary concurrent filesystem writers.
 
 ### Guest execution recovery
 
-The guest-execution model permits one execution ID per incarnation, two
+The guest-execution model permits two successive execution IDs per incarnation, two
 incarnations, lost or delayed submissions, a half-open connection, host
-restart, inventory and result inspection. Its negative control releases a
-terminal result before durable host observation. The positive run explores
-420 states. Weak fairness for child completion assumes the command eventually
+restart, inventory and result inspection. Three negative controls permit premature release, duplicate execution,
+and saving a running observation as a terminal outcome. Each violates its
+corresponding invariant. The positive run explores 3,900 distinct states. Weak fairness for child completion assumes the command eventually
 terminates. Kernel scheduling, pipe throughput, multi-job capacity and
 provider socket isolation require implementation and VM tests.

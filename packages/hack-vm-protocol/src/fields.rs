@@ -198,3 +198,5 @@ checked!(SignalNumber, I32, |n: &i32| (1..=64).contains(n));
 checked!(Jobs, U16, |n: &u16| (1..=super::MAX_JOBS).contains(n));
 checked!(FrameSize, U32, |n: &u32| (128..=super::MAX_FRAME as u32)
     .contains(n));
+
+checked!(Retention, U32, |n: &u32| (1..=65536).contains(n));

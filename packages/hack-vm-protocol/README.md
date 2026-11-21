@@ -56,12 +56,12 @@ is at most 4096 bytes. Initial stdin is at most 32768 bytes.
 
 | Opcode | Message | Fields in wire order and meaning |
 | --- | --- | --- |
-| 1 | Welcome | selected u16 version, u64 common capabilities, u32 max frame, u16 max jobs, u32 per-stream retention in bytes, boot UUID, agent-incarnation UUID |
+| 1 | Welcome | selected u16 version, u64 common capabilities, u32 max frame, u16 max jobs, u32 per-stream retention (1–65536 bytes), boot UUID, agent-incarnation UUID |
 | 2 | Facts | architecture (64 bytes), kernel release (256), agent version (64), UTC Unix milliseconds (u64), boot UUID, agent-incarnation UUID |
 | 3 | Absent | no current record at inspection time |
 | 4 | Running | child owned, terminal outcome pending |
 | 5 | SpawnFailed | reserved execution failed to spawn |
-| 6 | Released | ID tombstoned after result release |
+| 6 | Released | ID permanently retired; no live record |
 | 7 | Exited | signed 32-bit normal exit code |
 | 8 | Signaled | signed 32-bit terminating Linux signal |
 | 9 | Output | absolute u64 start offset, up to 32768 raw bytes, EOF flag for this offset, truncation flag for this stream |
@@ -94,10 +94,10 @@ defeat this boundary. Any caller that can reach the agent can execute as its UID
 
 A timeout never makes Absent final while a previous submission can still arrive.
 Retry the same immutable command and handle within its incarnation; on Conflict
-inspect the original. The agent never evicts an ID from the current incarnation.
-It refuses new IDs at 256 records including tombstones. List includes every
+inspect the original. One host owns a durable, increasing u128 execution counter for each agent incarnation. Wire IDs are fixed-width lowercase hex, so lexical and numeric order agree. Persist the allocation before sending Start. Submit new IDs in admission order; finish reconciling a timed-out Start before submitting a later ID. After a confirmed Release never resend Start. The guest checks its live table first, then rejects IDs at or below its greatest admitted ID. A missing ID below this mark is permanently retired, including skipped numbers; Released does not establish that a skipped command ever ran. A full live table refuses new work before advancing the mark. Release drops the record and both pipes; the mark never decreases or wraps. Restoring a host without its durable counter requires recovery of that counter or a coordinated new incarnation, never guessing from List.
+List includes every
 unreleased job (maximum advertised in Welcome, at most 16). A terminal Signal
 returns the cached status without signalling a PID. Release discards all bytes
-and retains only the tombstone. Each pipe keeps its newest advertised retention
+while the incarnation watermark fences the ID. Each pipe keeps its newest advertised retention
 bytes and continues draining. A lagging reader resumes at start_offset plus the
 returned byte count. A 1 GiB writer retains only that finite tail.

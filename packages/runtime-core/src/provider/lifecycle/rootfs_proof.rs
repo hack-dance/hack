@@ -8,7 +8,10 @@
 //!
 //! The proof here is read-only and grants nothing by itself. [`prove`] hashes the root
 //! files against the pin in the owner record, bracketed by their metadata digest
-//! (`tree_witness::metadata_digest`), exactly as the proof under the lease does.
+//! (`tree_witness::metadata_digest`), exactly as the proof under the lease does. It is
+//! taken only for a pool whose owner record is a clean stop (`Owner::short_home_releasable`):
+//! any other record (running, interrupted, recovered, stopped without the clean-stop marker)
+//! gets no early proof and takes the proof under the lease, as before this module existed.
 //! [`beside`] runs it on its own thread while the caller proves the provider and engine
 //! trees. A thread the host cannot start, or a proof that panics, is no proof; neither
 //! refuses the start.
@@ -22,9 +25,10 @@
 //!    record, any later owner record update or any provider command. It writes nothing; what
 //!    the start wrote before admission (a repaired HOME alias) is not rolled back. It reads
 //!    the owner record the lease now fences and recomputes only the metadata digest
-//!    ([`Early::holds`]). The early proof stands when all of these are true: the marker
-//!    and the pin are the ones that record names; the root files are on a filesystem
-//!    qualified for the metadata check; and the digest equals what the proof saw. On a changed marker or pin, an unqualified filesystem or any metadata difference,
+//!    ([`Early::holds`]). The early proof stands when all of these are true: the record is
+//!    still a clean stop; the marker and the pin are the ones it names; the root files are
+//!    on a filesystem qualified for the metadata check; and the digest equals what the proof
+//!    saw. On a changed marker or pin, an unqualified filesystem or any metadata difference,
 //!    the root files are proven by content again, there, under the lease, against the
 //!    lease-held pin. A change that kept the bytes therefore continues, and a changed byte
 //!    refuses `artifact_digest_mismatch` before any of those effects; the caller's lease is
@@ -37,10 +41,10 @@
 //!    content proof at that point, which is where it ran before this module existed. The
 //!    digest handed to the boot's tree witness is the one this step computed.
 //!
-//! Without an early proof steps 2 and 3 have nothing to compare: a new home, a missing
-//! owner record or pin, an alias, an unreadable entry, or root files that did not match
-//! their pin before the lease. The same holds when the lease-held owner record cannot be
-//! read or names no pin.
+//! Without an early proof steps 2 and 3 have nothing to compare: a new home, a record that
+//! is not a clean stop, a missing owner record or pin, an alias, an unreadable entry, or
+//! root files that did not match their pin before the lease. The same holds when the
+//! lease-held owner record cannot be read, is no longer a clean stop, or names no pin.
 //! `prepare_rootfs` then copies the root files (a new home) and proves them by content
 //! under the lease, as before. Doubt never accepts and never refuses by itself.
 //!
@@ -105,10 +109,14 @@ pub(super) struct Early {
     metadata: String,
 }
 
-/// Prove an existing pool's root files by content, read-only, without the startup lease.
-/// `None` when there is nothing to prove yet (a new home) or on any doubt.
+/// Prove a cleanly stopped pool's root files by content, read-only, without the startup
+/// lease. `None` when there is nothing to prove yet (a new home), when the owner record is
+/// anything but a clean stop, or on any doubt.
 pub(super) fn prove(candidate: &Candidate) -> Option<Early> {
     let owner = Owner::load(candidate).ok()?;
+    if !owner.short_home_releasable() {
+        return None;
+    }
     let content = owner.rootfs_digest.clone()?;
     let destination = root(candidate).join("rootfs");
     reject_aliased_state(&destination).ok()?;
@@ -138,9 +146,9 @@ pub(super) struct Leased {
 /// Under the startup `lease`, after the leased sample and the tree recheck: make the early
 /// content proof of the root files describe them as they are now, or prove them by content
 /// again.
-/// `Ok(None)` when there is no early proof to recheck or the lease-held owner record does
-/// not name what to prove against; the caller's full content proof then decides
-/// (`prepare_rootfs`). Refuses with the content proof's own error when the root files no
+/// `Ok(None)` when there is no early proof to recheck, or the lease-held owner record is no
+/// longer a clean stop or does not name what to prove against; the caller's full content
+/// proof then decides (`prepare_rootfs`). Refuses with the content proof's own error when the root files no
 /// longer match the pin. Nothing is written here.
 pub(super) fn recheck(
     candidate: &Candidate,
@@ -153,6 +161,10 @@ pub(super) fn recheck(
     let Ok(owner) = Owner::load(candidate) else {
         return Ok(None);
     };
+    if !owner.short_home_releasable() {
+        // Another start booted the pool, or the record moved on: not this module's case.
+        return Ok(None);
+    }
     let (Some(content), Ok(marker)) = (owner.rootfs_digest.clone(), rootfs_marker(&owner)) else {
         return Ok(None);
     };
@@ -695,6 +707,60 @@ mod tests {
         owner.rootfs_digest = None;
         owner.save(candidate).unwrap();
         assert!(pool.recheck(Some(early)).unwrap().is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_pool_that_is_not_cleanly_stopped_gets_no_early_proof_and_no_recheck() {
+        let pool = Pool::new("not-stopped");
+        let candidate = &pool.candidate;
+        let clean = Owner::load(candidate).unwrap();
+        let record = pool.record();
+        let early = || prove(candidate);
+        assert!(early().is_some(), "a clean stop is proven early");
+        let before = tree_witness::content_proofs();
+        // Running, mid-boot, stopped by a failure, recovered, or `stopped` without the
+        // marker a clean `down` writes: none is proven before the lease.
+        let mut cases = Vec::new();
+        for phase in [
+            "running",
+            "booting",
+            "creating",
+            "provisioning",
+            "initializing",
+            "stopped-before-engine",
+            "stopped-after-engine-failure",
+            "recovered-unclean",
+        ] {
+            let mut owner = clean.clone();
+            owner.phase = phase.into();
+            cases.push(owner);
+        }
+        let mut unmarked = clean.clone();
+        unmarked.clean_stop = None;
+        cases.push(unmarked);
+        for owner in cases {
+            owner.save(candidate).unwrap();
+            assert!(early().is_none(), "{}", owner.phase);
+        }
+        assert_eq!(tree_witness::content_proofs(), before, "nothing was hashed");
+        // A pool that stopped being a clean stop between the proof and the lease (another
+        // start booted it) is not rechecked: no walk, no hash, no refusal, also when its
+        // root files changed. The start goes on to what it did before for such a pool.
+        clean.save(candidate).unwrap();
+        assert_eq!(pool.record(), record);
+        let proven = early().unwrap();
+        let mut running = clean.clone();
+        running.phase = "running".into();
+        running.save(candidate).unwrap();
+        fs::write(
+            root(candidate).join("rootfs/usr/bin/agent"),
+            b"agent BINARY",
+        )
+        .unwrap();
+        let before = tree_witness::content_proofs();
+        assert!(pool.recheck(Some(proven)).unwrap().is_none());
+        assert_eq!(tree_witness::content_proofs(), before);
     }
 
     #[cfg(target_os = "macos")]

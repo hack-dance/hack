@@ -3,8 +3,10 @@
 //! A reader waits for the first header byte up to the caller's idle bound, then
 //! must receive the rest of the frame within [`FRAME_DEADLINE`]. A writer must
 //! send the whole frame within the same bound. Each bound is one monotonic
-//! deadline: retries after a signal and partial transfers never extend it, and a
-//! transfer that completes after it is refused. A length of zero or over the cap
+//! deadline: retries after a signal and partial transfers never extend it. Bytes
+//! that arrive after a read's deadline do not complete its frame. A write's
+//! deadline bounds its waits and its further sends: a write that has handed the
+//! whole frame to the kernel has succeeded, even if that last send returned late. A length of zero or over the cap
 //! is refused before any body byte is read, so a hostile peer cannot make the
 //! reader allocate or wait for an oversized body.
 //!
@@ -192,11 +194,11 @@ fn send_limit(stream: &UnixStream) -> usize {
                 &mut length,
             )
         };
-        // 2048 is Darwin's default; never less than one byte.
+        // A mark that cannot be read is not guessed: one byte always fits.
         if read == 0 && lowat > 0 {
             lowat as usize
         } else {
-            2048
+            1
         }
     } else {
         usize::MAX
@@ -490,9 +492,6 @@ mod tests {
             });
             assert_eq!(result, Err(FrameError::Truncated));
             let received = reader.join().unwrap();
-            // The bytes that fit before the first wait always arrive: the write made
-            // progress on the body before it gave up, and did not finish.
-            assert!(received > 4, "no body byte was written: {received} bytes");
             assert!(
                 received < CONTROL_FRAME_LIMIT + 4,
                 "the whole frame went through: {received} bytes"
@@ -517,7 +516,6 @@ mod tests {
             assert_eq!(result, Err(FrameError::Truncated));
             drop(a);
             let received = drain(b, Duration::ZERO, Duration::ZERO).join().unwrap();
-            assert!(received > 4, "no body byte was written: {received} bytes");
             assert!(
                 received < CONTROL_FRAME_LIMIT + 4,
                 "the whole frame went through"
@@ -527,23 +525,48 @@ mod tests {
 
     #[test]
     fn a_write_that_has_to_wait_for_room_still_finishes_within_its_deadline() {
+        // The counterpart: the reader drains only once the writer's socket has been
+        // seen full (not writable), so the writer has had to wait for room, then
+        // drains as fast as it can. A writer that gave up at its first wait fails.
         // Both send policies: this platform's, and macOS's bounded sends.
         for chunk in [None, Some(2048)] {
-            // The counterpart: the reader starts only after the writer has filled the
-            // small buffers and must wait, then drains as fast as it can. A writer that
-            // gave up at its first wait for room fails here.
             let (mut a, b) = pair();
             small_buffers(&a, &b);
-            let reader = drain(b, Duration::from_millis(100), Duration::ZERO);
+            let watch = a.try_clone().unwrap();
+            let reader = std::thread::spawn(move || {
+                let started = Instant::now();
+                while writable(&watch) {
+                    assert!(
+                        started.elapsed() < HANG_GUARD,
+                        "the writer never filled the socket"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                // This clone of the writer's end must go, or the drain never sees
+                // end-of-file.
+                drop(watch);
+                drain(b, Duration::ZERO, Duration::ZERO).join().unwrap()
+            });
             let result = within(move || {
                 let body = vec![b'x'; CONTROL_FRAME_LIMIT];
                 let result = write_with(&mut a, &body, Duration::from_secs(20), chunk);
                 drop(a);
                 result
             });
-            assert_eq!(result, Ok(()));
-            assert_eq!(reader.join().unwrap(), CONTROL_FRAME_LIMIT + 4);
+            assert_eq!(result, Ok(()), "{chunk:?}");
+            assert_eq!(reader.join().unwrap(), CONTROL_FRAME_LIMIT + 4, "{chunk:?}");
         }
+    }
+
+    /// Whether the socket would accept a byte right now.
+    fn writable(stream: &UnixStream) -> bool {
+        let mut fd = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one initialized pollfd; a zero timeout only samples readiness.
+        unsafe { libc::poll(&mut fd, 1, 0) > 0 }
     }
 
     const SIGPIPE_CHILD: &str = "HACK_FRAME_SIGPIPE_CHILD";

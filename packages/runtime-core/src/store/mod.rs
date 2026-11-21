@@ -1,4 +1,11 @@
 //! Per-user step cache. Persisted records are hints for reuse and convey no authority.
+//!
+//! The CLI follows symlinks to resolve the base to its canonical path. The runtime
+//! refuses symlinked ancestors of the path it receives. Each format has its own
+//! subdirectory, currently `hack.store-1/`. Initialization keeps at most the newest
+//! set-aside copy of this format, and removes it too once it is older than seven days.
+//! There is no eviction yet. Garbage collection (P8) will also clean up files that
+//! crashed writers leave in `tmp/`.
 
 mod cas;
 mod disk;
@@ -8,7 +15,7 @@ mod record;
 mod tests;
 
 pub use cas::ValueFree;
-pub use key::{InputDigest, StepClass, StepKey};
+pub use key::{Build, InputDigest, StepClass, StepKey};
 pub use record::{Output, OutputRef, ProducedBy, Record};
 
 use crate::CandidateError;
@@ -27,6 +34,7 @@ type Result<T> = std::result::Result<T, CandidateError>;
 /// An open cache with a shared lock held until the handle is dropped.
 pub struct Store {
     root: PathBuf,
+    directory: File,
     owner: u32,
     key: Zeroizing<[u8; 32]>,
     _lock: File,
@@ -50,9 +58,9 @@ pub enum MissReason {
 }
 
 impl Store {
-    /// Open or initialize a private store, setting aside a root with an incompatible format.
-    pub fn open(root: &Path) -> Result<Self> {
-        disk::open(root)
+    /// Open or initialize this format's private directory inside the per-user base.
+    pub fn open(base: &Path) -> Result<Self> {
+        disk::open(base)
     }
 
     /// Derive an identity from a value without storing the value or its canonical bytes.
@@ -70,39 +78,29 @@ impl Store {
     }
 
     /// Check the record's integrity, then its CAS object or the caller's current observation.
-    pub fn lookup(&self, key: &StepKey, observe: impl FnOnce(&Record) -> bool) -> Result<Lookup> {
-        let (record, file) = match self.read_record(key)? {
+    /// This never errors on store content; a caller treats every miss as run the step.
+    pub fn lookup(&self, key: &StepKey, observe: impl FnOnce(&Record) -> bool) -> Lookup {
+        let (record, file) = match self.read_record(key) {
             Ok(pair) => pair,
-            Err(reason) => return Ok(Lookup::Miss(reason)),
+            Err(reason) => return Lookup::Miss(reason),
         };
         if key.class == StepClass::Cas {
             if record.output.reference != Some(OutputRef::Cas)
-                || !self.has_verified_cas(&record.output.digest)?
+                || self.get_cas(&record.output.digest).is_none()
             {
-                return Ok(Lookup::Miss(MissReason::NoRecord));
+                return Lookup::Miss(MissReason::NoRecord);
             }
         } else if !observe(&record) {
-            return Ok(Lookup::Miss(MissReason::ObservationFailed));
+            return Lookup::Miss(MissReason::ObservationFailed);
         }
         // Use time is advisory (it orders garbage collection); a failed touch
         // never turns a hit into an error.
         let _ = disk::touch(&file);
-        Ok(Lookup::Hit(record))
-    }
-
-    fn read_file(&self, path: &Path) -> Result<Option<File>> {
-        // Check the shard and all its ancestors before opening its leaf.
-        let parent = path
-            .parent()
-            .ok_or_else(|| invalid("Step store file has no parent directory."))?;
-        if !disk::existing_directory(parent, self.owner)? {
-            return Ok(None);
-        }
-        disk::read_owned_file(path, self.owner)
+        Lookup::Hit(record)
     }
 }
 
-/// The store directory the CLI handed over with `--step-store`, once per process.
+/// The store base the CLI handed over with `--step-store`, once per process.
 static CONFIGURED_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 /// Take a leading `--step-store <dir>` from a command's arguments.
@@ -128,7 +126,7 @@ pub fn take_step_store_argument<'a, 'b>(command: &'b [&'a str]) -> Result<&'b [&
     }
 }
 
-/// The store directory passed with `--step-store`, if any.
+/// The store base passed with `--step-store`, if any.
 pub fn configured_root() -> Option<&'static Path> {
     CONFIGURED_ROOT.get().map(PathBuf::as_path)
 }

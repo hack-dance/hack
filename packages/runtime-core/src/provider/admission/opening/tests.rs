@@ -336,11 +336,18 @@ fn a_missing_record_is_the_start_without_one() {
 #[test]
 fn an_unreadable_record_is_the_start_without_one() {
     let home = Home::new();
-    start(&home, |home, _| {
+    let run = start(&home, |home, _| {
         usable(home);
         home.mode(0o000);
-    })
-    .took_the_path_without_a_record();
+    });
+    if effective_user() == 0 {
+        // The superuser opens a mode 000 file, so where the suite runs as root this is
+        // simply a usable private record. The refused open is covered wherever the suite
+        // runs unprivileged.
+        run.reused(COUNT);
+    } else {
+        run.took_the_path_without_a_record();
+    }
 }
 
 #[test]
@@ -1136,6 +1143,8 @@ fn a_record_that_passes_the_bound_while_the_sample_is_taken_does_not_replace_the
     assert_eq!(slept, DEVELOPMENT_WINDOW - LEASE - sampling);
     assert_eq!(leased.samples.len(), 1);
     assert_eq!(leased.samples[0].swapouts, Some(COUNT));
+    // The sample that counts is the fallback one, and it is recorded with its own time.
+    assert_eq!(leased.sampled_at, Some(FIRST + DEVELOPMENT_WINDOW));
     // A host sleep of an hour inside the probe is the same miss, and nothing is left to wait.
     let (leased, asked, slept) =
         start_with_a_slow_sample(Duration::from_secs(10), Duration::from_secs(3600), true);
@@ -1159,4 +1168,39 @@ fn a_clock_that_cannot_be_read_once_the_sample_exists_does_not_replace_the_wait(
     assert_eq!(slept, DEVELOPMENT_WINDOW - LEASE - sampling);
     // No time to record the sample with: the caller writes no record for it.
     assert_eq!(leased.sampled_at, None);
+}
+
+#[test]
+fn a_host_clock_that_went_back_while_the_sample_was_taken_does_not_replace_the_wait() {
+    let home = Home::new();
+    // The window is measured on the process clock; the record's age on the host's.
+    let clock = TestClock::at(FIRST);
+    let host_clock = TestClock::at(FIRST);
+    let host = TestHost::on(&host_clock);
+    // Ten seconds old when the lease is taken: usable when it is read.
+    let taken = FIRST + LEASE - Duration::from_secs(10);
+    home.holds(BOOT, taken, COUNT);
+    let asked = RefCell::new(Vec::new());
+    let window = open(&passing(COUNT), &clock).unwrap();
+    clock.advance(LEASE);
+    host_clock.advance(LEASE);
+    let opening = Opening::new(&home.root, &host, Reuse::parse(None).unwrap());
+    let leased = recheck_after_lease(Profile::Development, Some(window), &clock, &opening, || {
+        asked.borrow_mut().push(clock.now());
+        if asked.borrow().len() == 1 {
+            // The host clock now reads a time before the record was taken.
+            host_clock.now.set(taken - Duration::from_secs(1));
+        }
+        Ok(passing(COUNT))
+    });
+    let leased =
+        leased.unwrap_or_else(|error| panic!("a miss refused the start: {}", error.message));
+    assert_eq!(leased.reused, Some(false));
+    assert_eq!(*asked.borrow(), [FIRST + LEASE, FIRST + DEVELOPMENT_WINDOW]);
+    assert_eq!(
+        clock.slept.borrow().iter().sum::<Duration>(),
+        DEVELOPMENT_WINDOW - LEASE
+    );
+    assert_eq!(leased.samples.len(), 1);
+    assert_eq!(leased.samples[0].swapouts, Some(COUNT));
 }

@@ -29,6 +29,15 @@ Compose checks the image build on every run and reuses unchanged build layers.
 Changing the Dockerfile or tool pins therefore rebuilds through the same command.
 The service is a one-shot task, not an idle development daemon.
 
+After changing the Dockerfile or tool pins, run `sh scripts/check-toolchain-image.sh`.
+It uses Docker to build without cached layers, checks the installed tools and TLC,
+and removes its named container and image. Docker's build cache remains available.
+The `Contributor toolchain image` workflow runs this check only when `mise.toml`,
+the image inputs, the check script, or that workflow changes. Other PRs do not
+spend hosted build minutes on it.
+The service uses Compose `init: true` to reap orphaned process-group descendants;
+direct Docker test invocations must likewise pass `--init`.
+
 The Linux `node_modules`, compiled CLI `dist`, Rust registry, and `/build` outputs
 use separate named volumes. They do not overwrite native build outputs. The build
 task compiles from `/app/dist` so Bun 1.3.9 stages on the output filesystem; a

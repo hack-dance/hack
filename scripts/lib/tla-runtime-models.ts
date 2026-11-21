@@ -2444,6 +2444,52 @@ const contracts: readonly ModelContract[] = [
     fields: ["retired = <<1>>", "alive = 1"],
   },
   {
+    // HACK-2440 (c, d), HACK-2416: a patient first request, no failure on one
+    // doubtful reading, and a host-side bound on "starting". Slow, refusing and
+    // hanging apps; `legacy` runs the steady cadence before the first success.
+    name: "probe-readiness",
+    module: "ProbeReadiness",
+    states: 175_757,
+    invariant: "OneCompile",
+    action: "Begin",
+    fields: ["restarts = 1", 'app = "slow"'],
+    alternativeWitnesses: [
+      { action: "Begin", fields: ["restarts = 1", 'app = "hanging"'] },
+    ],
+    additionalControls: [
+      { name: "legacy", negative: false, states: 132_615 },
+      {
+        name: "no-host-bound",
+        negative: true,
+        invariant: "BoundedStarting",
+        action: "Observe",
+        fields: ['verdict = "starting"', "skewed = TRUE", "vt = 15"],
+      },
+      {
+        name: "no-tolerance",
+        negative: true,
+        invariant: "NoFalseFailure",
+        action: "Observe",
+        fields: ['verdict = "unhealthy"', 'app = "slow"'],
+      },
+      {
+        // Reachability: the positive run does exhaust retries.
+        name: "exhausts",
+        negative: true,
+        invariant: "NeverExhausted",
+        action: "Expire",
+        fields: ['health = "unhealthy"', "failures = 2"],
+      },
+      {
+        name: "tight-bound",
+        negative: true,
+        invariant: "NoPrematureFailure",
+        action: "Observe",
+        fields: ['verdict = "unhealthy"', 'vh = "starting"'],
+      },
+    ],
+  },
+  {
     name: "pool-emulation",
     module: "Emulation",
     states: 13,

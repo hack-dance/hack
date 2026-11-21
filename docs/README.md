@@ -1,13 +1,15 @@
 # Hack documentation
 
-Hack runs your whole project on your own machine, and runs every project, branch
-and git worktree side by side, each at its own HTTPS address. One command
-starts a repo. Nothing is hosted.
+Hack runs your whole project from one folder committed with the code: the
+services, the settings and encrypted secrets, and the helpers around them. Every
+branch and git worktree runs side by side at its own HTTPS address, and the same
+folder starts the project on another machine with Docker. Nothing is hosted.
 
-That one command starts the project's services, loads its settings and secrets,
-and gives it a local web address with working HTTPS. The project's setup lives in
-a `.hack/` folder committed with the code, so teammates, coding agents and other
-worktrees all run it the same way. The public site is [hack.foo](https://hack.foo).
+That folder is `.hack/`. One command, `hack up`, starts the project's services,
+loads its settings and secrets, and gives it a local web address with working
+HTTPS. Teammates, coding agents and other worktrees all run it the same way, and
+each gets its own running copy, which these pages call an instance. The public
+site is [hack.foo](https://hack.foo).
 
 ## Run your first project
 
@@ -27,7 +29,8 @@ Already have a project? Follow [Project setup](guides/init-project.md), or use
 - [Sessions](sessions.md) — persistent terminal workspaces per project.
 - [Worktrees and watchers](guides/development-runtime-safety.md) — run branches side by side.
 - [Side-by-side development](dev.md) — `hack dev` runs a repository's declared dev command.
-- [Managed environments](guides/codex-managed-environments.md) — reuse a project on another machine or in a cloud agent.
+- [Another machine or a cloud agent](versions/v5/guides/cloud-environments.md) — start the project on another machine with Docker; the page says where that has been run.
+- [Managed environments](guides/codex-managed-environments.md) — settings and host commands on another machine, without containers.
 - [Agent integrations](integrations.md) — the optional `hack` plugin and the separate MCP server.
 - [Recipes](recipes/README.md) — step-by-step setups for other tools and everyday workflows, and [copy-paste config examples](recipes/config-examples.md).
 

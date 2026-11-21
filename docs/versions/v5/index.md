@@ -1,19 +1,14 @@
 # Documentation
 
-Hack runs your whole project on your own machine, and runs every project, branch
-and git worktree side by side, each at its own HTTPS address. One command
-starts a repo. Nothing is hosted.
+Hack runs your whole project from one folder committed with the code: the
+services, the settings and encrypted secrets, and the helpers around them. Every
+branch and git worktree runs side by side at its own HTTPS address, and the same
+folder starts the project on another machine with Docker. Nothing is hosted.
 
-A project is its services, settings, secrets, local HTTPS addresses, startup
-helpers and logs, all from a small `.hack/` folder committed with the repository.
-People and coding agents can each run and test their own copy.
-
-v5 is the same CLI and project model as v4, with a new way to run services
-underneath.
-Docker Compose stays the default backend. The native backend (beta, Apple Silicon
-macOS) is opt-in and ships only through the `hack-next` channel, not in the stable
-archives or the Homebrew formula. Read [Upgrade from v4](upgrade.md) for what
-changed and what was retired.
+That folder is `.hack/`. One command, `hack up`, starts the services, loads the
+settings and secrets, gives the project its local HTTPS addresses and starts its
+helpers. People and coding agents can each run and test their own running copy,
+which these pages call an instance.
 
 ## Start here
 
@@ -24,8 +19,16 @@ changed and what was retired.
 
 [Troubleshooting](troubleshooting.md) maps common Doctor findings to their fixes.
 [What's new in 5.0](../guides/v5-release-notes.md) summarizes the release.
-v5 prerelease bundles are Apple Silicon macOS only; see
-[Install](install.md#prerequisites) for platform support.
+
+v5 is the same CLI and project model as v4, with a new way to run services
+underneath.
+Docker Compose stays the default backend. The native backend (beta, Apple Silicon
+macOS) is opt-in and ships only through the `hack-next` channel, not in the stable
+archives or the Homebrew formula. Read [Upgrade from v4](upgrade.md) for what
+changed and what was retired.
+The v5 prerelease installs on Apple Silicon macOS and, with the Compose backend
+only, on Linux x86_64 and arm64; see [Install](install.md#prerequisites) for
+platform support.
 
 ## Understand the project
 
@@ -38,19 +41,19 @@ v5 prerelease bundles are Apple Silicon macOS only; see
 
 ## Do a task
 
-- [Start projects at login](https://github.com/hack-dance/hack/blob/next/docs/always-on-projects.md)
-- [Set up a Linux host](../guides/linux-setup.md): local DNS, trust and the daemon.
-- [Configure Linux certificate trust](../guides/linux-certificate-trust.md): distribution and browser trust stores.
-- [Breaking changes from v4](guides/breaking-changes.md): one list, with the reason for each and how to go back.
-- [Upgrade a v4 machine to v5](guides/upgrade-from-v4.md): preparation, rollback and checks awaiting the dogfood run.
 - [Run and inspect a project](guides/run-project.md)
-- [Choose where a command runs](guides/run-commands.md)
-- [Scripts and JSON output](guides/machine-output.md): what `--json` prints, and where hook output goes.
 - [Run a branch or worktree beside main](guides/parallel-work.md)
 - [Share environment and secrets](guides/share-environment.md)
+- [Choose where a command runs](guides/run-commands.md)
 - [Manage helpers and tunnels](guides/project-helpers.md)
-- [My Mac is slow](guides/slow-mac.md): start from the symptom, then let `hack doctor` name the cause.
+- [Scripts and JSON output](guides/machine-output.md): what `--json` prints, and where hook output goes.
 - [Use a cloud agent or another host](guides/cloud-environments.md)
+- [My Mac is slow](guides/slow-mac.md): start from the symptom, then let `hack doctor` name the cause.
+- [Start projects at login](https://github.com/hack-dance/hack/blob/next/docs/always-on-projects.md)
+- [Breaking changes from v4](guides/breaking-changes.md): one list, with the reason for each and how to go back.
+- [Upgrade a v4 machine to v5](guides/upgrade-from-v4.md): preparation, rollback and checks awaiting the dogfood run.
+- [Set up a Linux host](../guides/linux-setup.md): local DNS, trust and the daemon.
+- [Configure Linux certificate trust](../guides/linux-certificate-trust.md): distribution and browser trust stores.
 - [Desktop app (preview)](guides/desktop-app.md): what the window shows, how it finds the CLI, and what it never does.
 - [Try the native backend (beta)](../guides/native-candidate.md)
 

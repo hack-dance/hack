@@ -12,10 +12,10 @@ already provisioned (an estimate; the first run records real times). Every step 
 [pass criteria](#pass-criteria) say what counts as a pass. Write the results
 into the [result record](#result-record).
 
-It tests the CLI built from an exact commit of the `next` branch. Releases
-through `5.0.0-next.22` have no Linux bundle, so this runbook builds `hack` from
-source. The [first-run check](#first-run-check-without-sudo) can also install a
-Compose-only Linux prerelease through its installer.
+It tests the CLI built from an exact commit of the `next` branch, so it builds
+`hack` from source. Published prereleases carry a Compose-only Linux bundle
+since `5.0.0-next.23`; the [first-run check](#first-run-check-without-sudo) can
+install one through its installer.
 
 ## The host
 

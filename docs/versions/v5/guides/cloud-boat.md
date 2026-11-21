@@ -2,9 +2,12 @@
 
 > **Not run yet.** This page follows the provider's documentation as read on
 > 2026-11-18 ([tools](https://docs.boat.dev/machines/tools.md),
-> [setup](https://docs.boat.dev/setup.md)). v5 has no Linux release yet, so the
-> install line needs a `hack` binary you supply; see
-> [Any Linux machine with Docker](cloud-linux-docker.md#steps).
+> [setup](https://docs.boat.dev/setup.md)). The recipe below was
+> written before v5 published a Linux archive, so its install line uses a
+> `hack` binary you supply. `5.0.0-next.24` publishes Linux x86_64 and arm64
+> archives with the Compose backend: you can install the prerelease as
+> described in [Install](../install.md) instead. Neither way has been run here.
+> See [Any Linux machine with Docker](cloud-linux-docker.md#steps).
 
 boat.dev sandboxes are Ubuntu 24.04 x86_64 VMs with passwordless sudo, systemd,
 and Docker with Compose installed. Environment secrets arrive as ordinary

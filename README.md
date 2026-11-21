@@ -4,14 +4,23 @@
 
 # Hack
 
-Hack runs your whole project on your own machine, and runs every project, branch
-and git worktree side by side, each at its own HTTPS address.
+**Hack on your project, not your setup.**
+
+Hack runs your whole project from one folder committed with the code: the
+services, the settings and encrypted secrets, and the helpers around them. Every
+branch and git worktree runs side by side at its own HTTPS address, and the same
+folder starts the project on another machine with Docker.
 
 - **One command starts a repository.** `hack up` starts the services, loads the
   settings and secrets, and serves the project at `https://myapp.hack.local`.
 - **Every worktree gets its own running copy.** Its own containers, addresses and
   logs, so three branches, or three coding agents, can each run and test the app
   at once.
+- **The parts around the containers are declared too.** A sign-in check or a
+  migration can run as a lifecycle hook. A tunnel or a worker runs as a host
+  process the project declares. `hack down` stops what `hack up` started. A
+  named overlay changes the settings for one command:
+  `hack host exec --env qa --scope api -- bun db:migrate`.
 - **Nothing is hosted.** The setup is a small `.hack/` folder committed with the
   code. There is no account and no service to sign in to.
 
@@ -33,8 +42,9 @@ hack down                         # stop this copy; data is kept
   <img alt="A main checkout and two git worktrees each start their own Hack instance, and each instance has its own HTTPS address" src="./docs/assets/readme/instances.light.svg" />
 </picture>
 
-Each checkout of the repository starts its own instance. Each instance has its own
-containers and its own address, so none of them wait for another to stop.
+Each checkout of the repository starts its own running copy, which Hack calls an
+instance. Each instance has its own containers and its own address, so none of
+them wait for another to stop.
 
 ## Install
 
@@ -73,8 +83,10 @@ its own copy of the files. It does not give it a running app. Copy the same `.en
 into three worktrees and all three want the same ports and the same database, so
 an agent either cannot start the app or tests against another branch's server.
 
-Hack treats these as one problem. It manages the project's whole environment, not
-only its ports. A project has one identity, and Hack uses it to route
+Hack treats these as one problem. It runs the whole project, not only its ports.
+Docker Compose describes your containers. The `.hack/` folder describes your
+project: the Compose file, plus the settings, encrypted secrets, addresses and
+helper processes around it. A project has one identity, and Hack uses it to route
 `api.myapp.hack.local`, decrypt the project's secrets, start its helper processes,
 label its logs, and keep its instances apart.
 
@@ -141,7 +153,7 @@ See [lifecycle](docs/lifecycle.md) and [sessions](docs/sessions.md).
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/readme/project.dark.svg" />
   <source media="(prefers-color-scheme: light)" srcset="./docs/assets/readme/project.light.svg" />
-  <img alt="Your machine, shared local routing, and project services in the selected engine" src="./docs/assets/readme/project.light.svg" />
+  <img alt="Your machine, shared local routing, and project services in the selected backend" src="./docs/assets/readme/project.light.svg" />
 </picture>
 
 The `hack` command reads the project's `.hack/` folder and starts its services
@@ -250,7 +262,7 @@ your commands stay the same. It is opt-in and ships only through `hack-next`.
   every service and `hack open`.
 - It supports part of what Compose supports. When a project needs something
   outside that part, Hack refuses and names the feature.
-- One project runs in a native pool at a time.
+- One project runs in the native VM at a time.
 - A worktree gets its own instance automatically only on Compose. On native,
   pass `--branch <name>`, which needs a prepared source share.
 - Native data does not carry over when you move to a new prerelease, and it does
@@ -267,12 +279,15 @@ is validation of the file. It does not change how existing projects run, and
 projects run from their `.hack/` Compose setup today. See
 [native configuration validation](docs/reference/native-config-compiler.md).
 
-**Managed environments (advanced).** The environment is committed with the repo,
-so another machine or a cloud agent environment can reuse it. That machine still
-needs a compatible container runtime and whatever else the project requires, and
-it gets the secret key from its own secret store. A slim image,
-`hackdance/hack:slim`, is built for this. See
-[managed environments](docs/guides/codex-managed-environments.md).
+**Another machine or a cloud agent.** The same `.hack/` folder starts the
+project on another machine with Docker and Docker Compose. That machine gets the
+project's key as the environment variable `HACK_ENV_SECRET_KEY`, from its own
+secret settings. Hack adds no isolation there: it runs inside whatever machine
+you give it. [Another machine or a cloud agent sandbox](docs/versions/v5/guides/cloud-environments.md)
+lists where this has been run and where it has not. For settings and host
+commands without containers, see
+[managed environments](docs/guides/codex-managed-environments.md); a slim
+image, `hackdance/hack:slim`, is built for that.
 
 ## What Hack is not
 
@@ -300,8 +315,8 @@ Start with [Getting started](docs/guides/getting-started.md) or the
 
 See [AGENTS.md](AGENTS.md) for how to build, test and propose changes.
 
-Contributor notes for the native runtime, including how a provider pin is
-qualified, are in the
+Contributor notes for the native runtime, including how a new version of the
+VM software it pins is qualified, are in the
 [runtime core README](packages/runtime-core/README.md#how-a-provider-pin-bump-is-qualified).
 
 ## License

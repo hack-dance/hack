@@ -6,6 +6,7 @@ pub mod node;
 pub(crate) mod owned_tmp_root;
 pub mod project;
 pub mod provider;
+pub mod service;
 #[cfg(test)]
 mod test_root;
 #[cfg(test)]

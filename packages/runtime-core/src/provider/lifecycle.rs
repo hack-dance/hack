@@ -3895,11 +3895,11 @@ mod tests {
 
     /// Every active line of the executable cache script, in order. None of them runs a file
     /// from the cache or from the share: each command is a shell word or a fixed utility
-    /// (`test`, `cat`, `findmnt`, `stat`, `mountpoint`, `mkdir`, `mount`, `tee`, `sha256sum`,
-    /// `cut`, `chmod`, `printf`). A change to the script must change this list, and whoever
+    /// (`test`, `cat`, `findmnt`, `stat`, `mountpoint`, `mkdir`, `mount`, `sha256sum`, `cut`,
+    /// `chmod`, `printf`). A change to the script must change this list, and whoever
     /// changes it answers for that property. An exact list is used because a reader of shell
     /// words cannot be made tight without parsing quotes, comments and substitutions.
-    const CACHE_SCRIPT_LINES: [&str; 48] = [
+    const CACHE_SCRIPT_LINES: [&str; 49] = [
         "set -eu",
         r#"test "$#" = 4"#,
         r#"for digest in "$3" "$4"; do"#,
@@ -3930,7 +3930,8 @@ mod tests {
         r#"mount -t tmpfs -o size=32m,mode=700,nosuid,nodev tmpfs "$cache""#,
         "for name in runc docker-init; do",
         r#"case "$name" in runc) expected=$3;; docker-init) expected=$4;; esac"#,
-        r#"test "$(tee "$cache/$name" < "/opt/hack-engine/$name" | sha256sum | cut -d ' ' -f 1)" = "$expected""#,
+        r#"cat "/opt/hack-engine/$name" > "$cache/$name""#,
+        r#"test "$(sha256sum "$cache/$name" | cut -d ' ' -f 1)" = "$expected""#,
         r#"chmod 555 "$cache/$name""#,
         r#"test "$(stat -c %u:%g:%a "$cache/$name")" = 0:0:555"#,
         "done",
@@ -3969,20 +3970,168 @@ mod tests {
             assert_eq!(line.matches('\'').count() % 2, 0, "{line}");
         }
         assert!(!script.contains('`'));
-        // The copy is hashed as it is written, and the bound path is hashed after the cache
-        // is read-only and bound: that second hash is the last check before the read-only
-        // checks and the confirmation.
+        // The cache's own copy is hashed after the copy and before it is made executable,
+        // and the bound path is hashed after the cache is read-only and bound: that second
+        // hash is the last check before the read-only checks and the confirmation.
         let position = |needle: &str| {
             let found: Vec<_> = script.match_indices(needle).collect();
             assert_eq!(found.len(), 1, "{needle}");
             found[0].0
         };
-        let copied = position(r#"tee "$cache/$name" < "/opt/hack-engine/$name" | sha256sum"#);
+        let copied = position(r#"cat "/opt/hack-engine/$name" > "$cache/$name""#);
+        let checked =
+            position(r#"test "$(sha256sum "$cache/$name" | cut -d ' ' -f 1)" = "$expected""#);
+        let executable = position(r#"chmod 555 "$cache/$name""#);
+        assert!(copied < checked && checked < executable);
+        // Nothing but that one line writes into the cache. The only pipelines are the two
+        // that cut a digest out of `sha256sum`'s line, where a failed `sha256sum` leaves
+        // nothing to compare: no command whose failure the shell would not see stands
+        // between the copy and its digest.
+        assert_eq!(script.matches(" > ").count(), 1);
+        assert_eq!(script.matches('|').count(), 2);
+        assert_eq!(script.matches("| cut -d ' ' -f 1)").count(), 2);
+        // The loop the other cache tests replay is these lines of the script.
+        let replayed: Vec<&str> = cache_copy_loop().lines().map(str::trim).collect();
+        assert_eq!(replayed, CACHE_SCRIPT_LINES[28..35]);
         let read_only = position(r#"mount -o remount,ro "$cache""#);
         let bound = position(r#"mount --bind "$cache/$name" "$path""#);
         let hashed = position(r#"test "$(sha256sum "$path" | cut -d ' ' -f 1)" = "$expected""#);
         let confirmed = position("printf 'engine-exec-cache-v1");
-        assert!(copied < read_only && read_only < bound && bound < hashed && hashed < confirmed);
+        assert!(executable < read_only && read_only < bound);
+        assert!(bound < hashed && hashed < confirmed);
+    }
+
+    /// The copy-and-check loop of the executable cache script, verbatim: copy one
+    /// executable into `$cache`, compare the digest of that copy with `$3` (`runc`) or `$4`
+    /// (`docker-init`), and only then make it executable.
+    fn cache_copy_loop() -> &'static str {
+        let script = include_str!("guest-runc-cache.sh");
+        let start = script
+            .find("for name in runc docker-init; do\n case \"$name\" in")
+            .unwrap();
+        let end = start + script[start..].find("\ndone\n").unwrap() + "\ndone\n".len();
+        &script[start..end]
+    }
+
+    /// Runs [`cache_copy_loop`] on the host against a fixture share and cache. `cat` is the
+    /// stub at `copier` when one is given; `sha256sum` and `stat` are stand-ins for the
+    /// guest's (the owner the script requires is reported as it is in the guest, root).
+    #[cfg(target_os = "macos")]
+    fn replay_cache_copy(
+        root: &Path,
+        copier: Option<&str>,
+        digests: [&str; 2],
+    ) -> (bool, Vec<(String, u32, Vec<u8>)>) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let stub = |name: &str, body: &str| {
+            fs::write(bin.join(name), format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        stub("sha256sum", "exec /usr/bin/shasum -a 256 \"$@\"");
+        stub(
+            "stat",
+            "printf '0:0:%s\\n' \"$(/usr/bin/stat -f %Lp \"$3\")\"",
+        );
+        stub("cat", copier.unwrap_or("exec /bin/cat \"$@\""));
+        let cache = root.join("cache");
+        let _ = fs::remove_dir_all(&cache);
+        fs::create_dir(&cache).unwrap();
+        let script = format!(
+            "set -eu\ncache=$5\n{}",
+            cache_copy_loop().replace(
+                "/opt/hack-engine/",
+                &format!("{}/", root.join("share").display())
+            )
+        );
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", &script, "cache-copy", "owner", "boot"])
+            .args(digests)
+            .arg(&cache)
+            .env_clear()
+            .env("PATH", format!("{}:/bin:/usr/bin", bin.display()))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        let mut left: Vec<_> = fs::read_dir(&cache)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (
+                    entry.file_name().into_string().unwrap(),
+                    entry.metadata().unwrap().permissions().mode() & 0o777,
+                    fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect();
+        left.sort();
+        (status.success(), left)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn executable_cache_checks_its_own_copy_before_the_copy_is_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-cache-copy-loop",
+        );
+        fs::create_dir_all(root.join("share")).unwrap();
+        for (name, bytes) in [("runc", &b"runc bytes"[..]), ("docker-init", b"init bytes")] {
+            fs::write(root.join("share").join(name), bytes).unwrap();
+            // As on the host share: the source is executable already.
+            fs::set_permissions(
+                root.join("share").join(name),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let digest = |name: &str| artifact::digest(&root.join("share").join(name)).unwrap();
+        let (runc, init) = (digest("runc"), digest("docker-init"));
+        let wrong = "0".repeat(64);
+        // The right digests: both copies are in the cache, executable, byte for byte.
+        let (passed, left) = replay_cache_copy(&root, None, [&runc, &init]);
+        assert!(passed);
+        assert_eq!(
+            left,
+            [
+                ("docker-init".to_owned(), 0o555, b"init bytes".to_vec()),
+                ("runc".to_owned(), 0o555, b"runc bytes".to_vec()),
+            ]
+        );
+        // A wrong digest for either: the script ends at the comparison. The copy it was
+        // made of is there and is not executable, and nothing after it was copied.
+        let (passed, left) = replay_cache_copy(&root, None, [&wrong, &init]);
+        assert!(!passed);
+        assert_eq!(left.len(), 1);
+        assert_eq!((left[0].0.as_str(), left[0].1 & 0o111), ("runc", 0));
+        let (passed, left) = replay_cache_copy(&root, None, [&runc, &wrong]);
+        assert!(!passed);
+        assert_eq!(
+            left.iter()
+                .map(|(name, mode, _)| (name.as_str(), mode & 0o111 != 0))
+                .collect::<Vec<_>>(),
+            [("docker-init", false), ("runc", true)]
+        );
+        // A copy that fails ends the script at that line: no digest is asked for.
+        let (passed, left) =
+            replay_cache_copy(&root, Some("/bin/cat \"$@\"; exit 1"), [&runc, &init]);
+        assert!(!passed);
+        assert_eq!((left.len(), left[0].1 & 0o111), (1, 0));
+        // A copy that reports success but wrote other bytes than it read (what a digest of
+        // the bytes read would accept): the digest is of the cache's copy, so it refuses,
+        // before that copy is executable.
+        let (passed, left) = replay_cache_copy(
+            &root,
+            Some("/bin/cat \"$@\" | /usr/bin/head -c 4"),
+            [&runc, &init],
+        );
+        assert!(!passed);
+        assert_eq!(left, [("runc".to_owned(), left[0].1, b"runc".to_vec())]);
+        assert_eq!(left[0].1 & 0o111, 0);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

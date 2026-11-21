@@ -28,12 +28,14 @@ test ! -e "$cache"
 test ! -L "$cache"
 mkdir -m 700 "$cache"
 mount -t tmpfs -o size=32m,mode=700,nosuid,nodev tmpfs "$cache"
-# One read of each executable over the host share: the bytes are hashed as they are
-# copied, so the digest is of exactly what the cache received. A short or failed read
-# gives another digest. The cached copy is hashed again below, where it is executed.
+# One read of each executable over the host share, by the copy. A copy that fails to read
+# or to write ends the script at that line, and the file it leaves is not executable. The
+# digest is then taken of the cache's own copy, so it is of what the cache holds, before
+# that copy is made executable. It is hashed again below, at the path it is executed from.
 for name in runc docker-init; do
  case "$name" in runc) expected=$3;; docker-init) expected=$4;; esac
- test "$(tee "$cache/$name" < "/opt/hack-engine/$name" | sha256sum | cut -d ' ' -f 1)" = "$expected"
+ cat "/opt/hack-engine/$name" > "$cache/$name"
+ test "$(sha256sum "$cache/$name" | cut -d ' ' -f 1)" = "$expected"
  chmod 555 "$cache/$name"
  test "$(stat -c %u:%g:%a "$cache/$name")" = 0:0:555
 done

@@ -1,4 +1,5 @@
 import { rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   DEFAULT_INGRESS_NETWORK,
@@ -53,11 +54,15 @@ export interface IngressGeneration {
  * tests/models/tla/ingress-address-record): a read that overlapped a
  * Hack change of the stack carries an older token and is ignored, and a
  * change that crashed midway leaves the token unsettled, so every run reads
- * Docker until the next settled change.
+ * Docker until the next settled change. It is also trusted only for the
+ * Docker engine it was read from (`engine`): one Hack home used with another
+ * `DOCKER_HOST` or Docker context reads that engine instead.
  */
 export interface IngressAddressRecord {
   readonly schema: 1;
   readonly generation: string;
+  /** The selected Docker engine when read; see {@link selectedDockerEngine}. */
+  readonly engine: string;
   readonly coreDns: string;
   readonly caddy: string;
   readonly containers: {
@@ -83,6 +88,8 @@ export interface IngressAddressDeps {
     readonly stderr: string;
   }>;
   readonly readGeneration: () => Promise<IngressGeneration>;
+  /** The selected Docker engine, read without a Docker call. */
+  readonly engine: () => Promise<string>;
   readonly readRecord: () => Promise<IngressAddressRecord | null>;
   readonly writeRecord: (record: IngressAddressRecord) => Promise<void>;
   readonly forgetRecord: () => Promise<void>;
@@ -150,12 +157,14 @@ export async function resolveIngressAddresses(
   // Read before the inspect: a change that starts after it replaces the
   // token, so this read's record is never trusted under the new one.
   const generation = await deps.readGeneration();
+  const engine = await deps.engine();
   if (mode === "recorded") {
     const record = await deps.readRecord();
     if (
       record &&
       generation.settled &&
-      record.generation === generation.token
+      record.generation === generation.token &&
+      record.engine === engine
     ) {
       return {
         coreDns: fromEnv.coredns ?? record.coreDns,
@@ -183,6 +192,7 @@ export async function resolveIngressAddresses(
     await deps.writeRecord({
       schema: 1,
       generation: generation.token,
+      engine,
       coreDns: coredns.ip,
       caddy: caddy.ip,
       containers: { coredns: coredns.identity, caddy: caddy.identity },
@@ -280,6 +290,7 @@ export function parseIngressAddressRecord(
     return null;
   }
   const generation = value.generation;
+  const engine = getString(value, "engine");
   const coreDns = getString(value, "coreDns");
   const caddy = getString(value, "caddy");
   const recordedAt = getString(value, "recordedAt");
@@ -287,6 +298,7 @@ export function parseIngressAddressRecord(
   if (
     !(
       typeof generation === "string" &&
+      engine &&
       coreDns &&
       caddy &&
       recordedAt &&
@@ -303,6 +315,7 @@ export function parseIngressAddressRecord(
   return {
     schema: 1,
     generation,
+    engine,
     coreDns,
     caddy,
     containers: { coredns, caddy: caddyIdentity },
@@ -317,6 +330,43 @@ function parseIdentity(value: unknown): IngressContainerIdentity | null {
   const id = getString(value, "id");
   const startedAt = getString(value, "startedAt");
   return id && startedAt ? { id, startedAt } : null;
+}
+
+/**
+ * Which Docker engine `docker` talks to, the way the CLI chooses it, without
+ * a Docker call: `DOCKER_HOST`, else `DOCKER_CONTEXT`, else the
+ * `currentContext` of the Docker config (`DOCKER_CONFIG`, else
+ * `~/.docker`), else the default context. A context whose endpoint is edited
+ * in place keeps its name; a `hack run` that then fails reads Docker again.
+ */
+export async function selectedDockerEngine(
+  env: Readonly<Record<string, string | undefined>>
+): Promise<string> {
+  const host = (env.DOCKER_HOST ?? "").trim();
+  if (host) {
+    return `host:${host}`;
+  }
+  const context = (env.DOCKER_CONTEXT ?? "").trim();
+  if (context) {
+    return `context:${context}`;
+  }
+  const configDir =
+    (env.DOCKER_CONFIG ?? "").trim() || join(homedir(), ".docker");
+  const text = await readTextFile(join(configDir, "config.json"));
+  if (text) {
+    try {
+      const parsed: unknown = JSON.parse(text);
+      const current = isRecord(parsed)
+        ? getString(parsed, "currentContext")
+        : null;
+      if (current) {
+        return `context:${current}`;
+      }
+    } catch {
+      // An unreadable config selects the default context, as for docker.
+    }
+  }
+  return "context:default";
 }
 
 const RECORD_FILENAME = "ingress-addresses.json";
@@ -437,6 +487,7 @@ export function defaultIngressAddressDeps(
       )),
     exec: async (argv) => await exec(argv, { stdin: "ignore" }),
     readGeneration: async () => await readIngressGeneration(hackHome),
+    engine: async () => await selectedDockerEngine(process.env),
     readRecord: async () => await readIngressAddressRecord(hackHome),
     forgetRecord: async () => await forgetIngressAddressRecord(hackHome),
     writeRecord: async (record) => {

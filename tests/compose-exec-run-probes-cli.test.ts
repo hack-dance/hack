@@ -219,6 +219,24 @@ test("run reads Docker once with no record, then never; the override lives in Ha
   expect(second.calls).toEqual(["compose ps", "compose run"]);
 });
 
+test("a run against another Docker engine reads that engine instead of the record", async () => {
+  expect((await cli(["run", "api", "--", "true"])).exitCode).toBe(0);
+  const other = await cli(["run", "api", "--", "true"], {
+    DOCKER_HOST: "tcp://127.0.0.1:2399",
+    STUB_CADDY_IP: "172.30.0.9",
+  });
+  expect(other.exitCode).toBe(0);
+  expect(other.calls).toEqual(["inspect --type", "compose ps", "compose run"]);
+  const record = JSON.parse(await readFile(RECORD(), "utf8"));
+  expect(record).toMatchObject({
+    engine: "host:tcp://127.0.0.1:2399",
+    caddy: "172.30.0.9",
+  });
+  // Back on the first engine: its addresses are read again, not reused.
+  const back = await cli(["run", "api", "--", "true"]);
+  expect(back.calls).toEqual(["inspect --type", "compose ps", "compose run"]);
+});
+
 test("after up, exec and run write nothing inside the project", async () => {
   const up = await cli(["up", "-d"]);
   expect(up.exitCode).toBe(0);

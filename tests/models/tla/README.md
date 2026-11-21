@@ -1571,7 +1571,11 @@ change settles the token while the other is still moving the containers. The sam
 against the real record and token files in `tests/proxy-ingress-addresses.test.ts`.
 Not covered: atomicity of the file writes themselves (each is an atomic rename),
 Docker's own answers, and the stored per-instance override file, which is
-rendered from whatever addresses the command resolved.
+rendered from whatever addresses the command resolved. The model has one
+Docker engine; in the code a record is also trusted only for the engine it
+was read from (`engine`: `DOCKER_HOST`, else the Docker context), which
+`tests/proxy-ingress-addresses.test.ts` and
+`tests/compose-exec-run-probes-cli.test.ts` cover.
 
 ## Runtime service per native home
 

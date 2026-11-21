@@ -10,6 +10,7 @@ import {
   parseIngressAddressRecord,
   readIngressGeneration,
   resolveIngressAddresses,
+  selectedDockerEngine,
   withIngressChange,
 } from "../src/lib/proxy-ingress-addresses.ts";
 
@@ -32,6 +33,7 @@ function line(opts: {
 const RECORD: IngressAddressRecord = {
   schema: 1,
   generation: "g1",
+  engine: "context:default",
   coreDns: "172.30.0.53",
   caddy: "172.30.0.2",
   containers: {
@@ -49,6 +51,7 @@ function deps(opts: {
   readonly installed?: boolean;
   readonly record?: IngressAddressRecord | null;
   readonly generation?: IngressGeneration;
+  readonly engine?: string;
 }): IngressAddressDeps & {
   readonly calls: (readonly string[])[];
   readonly written: IngressAddressRecord[];
@@ -73,6 +76,7 @@ function deps(opts: {
     },
     readGeneration: async () =>
       opts.generation ?? { token: "g1", settled: true },
+    engine: async () => opts.engine ?? "context:default",
     readRecord: async () => opts.record ?? null,
     writeRecord: async (record) => {
       written.push(record);
@@ -89,6 +93,69 @@ const BOTH_RUNNING = [
   line({ service: "caddy", ip: "172.30.0.2" }),
   "",
 ].join("\n");
+
+describe("the record is bound to the selected Docker engine", () => {
+  test("a record read from another engine is not trusted: that engine is read and recorded", async () => {
+    const d = deps({
+      record: RECORD,
+      engine: "host:tcp://other:2375",
+      stdout: [
+        line({ service: "coredns", ip: "10.9.0.53" }),
+        line({ service: "caddy", ip: "10.9.0.2" }),
+        "",
+      ].join("\n"),
+    });
+    const result = await resolveIngressAddresses(d, "recorded");
+    expect(result).toEqual({
+      coreDns: "10.9.0.53",
+      caddy: "10.9.0.2",
+      fromRecord: false,
+    });
+    expect(d.calls).toHaveLength(1);
+    expect(d.written.map((r) => r.engine)).toEqual(["host:tcp://other:2375"]);
+  });
+
+  test("the same engine trusts it with no Docker call", async () => {
+    const d = deps({ record: RECORD });
+    expect((await resolveIngressAddresses(d, "recorded")).fromRecord).toBe(
+      true
+    );
+    expect(d.calls).toEqual([]);
+  });
+
+  test("a record written before engines were recorded is no record", () => {
+    const { engine: _engine, ...withoutEngine } = RECORD;
+    expect(parseIngressAddressRecord(withoutEngine)).toBeNull();
+    expect(parseIngressAddressRecord(RECORD)).toEqual(RECORD);
+  });
+
+  test("the engine is chosen as docker chooses it, without a Docker call", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hack-docker-config-"));
+    try {
+      await writeFile(
+        join(dir, "config.json"),
+        `${JSON.stringify({ currentContext: "colima" })}\n`
+      );
+      expect(
+        await selectedDockerEngine({
+          DOCKER_HOST: "unix:///a.sock",
+          DOCKER_CONTEXT: "x",
+        })
+      ).toBe("host:unix:///a.sock");
+      expect(
+        await selectedDockerEngine({ DOCKER_CONTEXT: "x", DOCKER_CONFIG: dir })
+      ).toBe("context:x");
+      expect(await selectedDockerEngine({ DOCKER_CONFIG: dir })).toBe(
+        "context:colima"
+      );
+      expect(
+        await selectedDockerEngine({ DOCKER_CONFIG: join(dir, "missing") })
+      ).toBe("context:default");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("resolveIngressAddresses", () => {
   test("fresh: one docker inspect of both containers, recorded", async () => {

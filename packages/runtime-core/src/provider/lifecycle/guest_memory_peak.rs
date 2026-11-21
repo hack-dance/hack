@@ -37,7 +37,8 @@ exit 0"#;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reading {
-    /// Highest `MemTotal - MemAvailable` seen, in KiB.
+    /// Highest `MemTotal - MemAvailable` seen, less the memory balloon at that sample, in KiB:
+    /// what the guest itself held, not what the provider had taken back for the host.
     pub peak_kib: u64,
     /// Samples behind the peak, one every five seconds.
     pub samples: u64,

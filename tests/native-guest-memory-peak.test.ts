@@ -147,6 +147,163 @@ test("the peak is the highest sample, and the counters are the latest", async ()
   }
 });
 
+/** `/proc/meminfo` as a guest with the given huge page size reports it. */
+function meminfoWithHuge(
+  totalKib: number,
+  availableKib: number,
+  hugeKib: number
+): string {
+  return `${meminfo(totalKib, availableKib)}Hugepagesize:    ${hugeKib} kB\n`;
+}
+
+test("memory the provider's balloon holds is not counted as in use", async () => {
+  const { root, paths } = await fixture();
+  try {
+    // An idle guest: 230,000 KiB in use. In the second sample the provider's balloon
+    // holds 1,250,000 pages of 4 KiB, so the kernel reports 5,000,000 KiB less available.
+    await writeFile(paths.meminfo, meminfoWithHuge(6_000_000, 5_770_000, 2048));
+    await writeFile(
+      `${paths.meminfo}.1`,
+      meminfoWithHuge(6_000_000, 770_000, 2048)
+    );
+    await writeFile(
+      `${paths.vmstat}.1`,
+      "nr_balloon_pages 1250000\nballoon_inflate 1250000\nballoon_deflate 0\noom_kill 0\npgmajfault 2065\n"
+    );
+    await writeFile(
+      `${paths.meminfo}.2`,
+      meminfoWithHuge(6_000_000, 5_770_000, 2048)
+    );
+    await writeFile(
+      `${paths.vmstat}.2`,
+      "nr_balloon_pages 0\nballoon_inflate 1250000\nballoon_deflate 1250000\noom_kill 0\npgmajfault 2065\n"
+    );
+    await writeFile(
+      paths.between,
+      [
+        'if test -f "$meminfo_file.$rounds"; then cat "$meminfo_file.$rounds" > "$meminfo_file"; fi',
+        'if test -f "$vmstat_file.$rounds"; then cat "$vmstat_file.$rounds" > "$vmstat_file"; fi',
+        "",
+      ].join("\n")
+    );
+    const result = await run({ paths });
+    expect(result.exitCode).toBe(0);
+    expect(await readFile(paths.status, "utf8")).toBe(
+      "memory-peak-v1 peak_kib=230000 samples=3 total_kib=6000000 some_us=1075081 full_us=40211 oom_kill=0 pgmajfault=2065\n"
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("real use under an inflated balloon is still recorded", async () => {
+  const { root, paths } = await fixture();
+  try {
+    // 3,000,000 KiB unavailable, of which the balloon holds 500,000 pages (2,000,000 KiB).
+    await writeFile(paths.meminfo, meminfoWithHuge(6_000_000, 3_000_000, 2048));
+    await writeFile(paths.vmstat, "nr_balloon_pages 500000\noom_kill 0\n");
+    const result = await run({ paths, rounds: 1 });
+    expect(result.exitCode).toBe(0);
+    expect(await readFile(paths.status, "utf8")).toContain(
+      "peak_kib=1000000 samples=1 "
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the balloon is sized in the kernel's base pages", async () => {
+  for (const [hugeKib, pageKib] of [
+    [2048, 4],
+    [32_768, 16],
+    [524_288, 64],
+  ] as const) {
+    const { root, paths } = await fixture();
+    try {
+      // 4,000,000 KiB unavailable; the balloon holds 10,000 base pages.
+      await writeFile(
+        paths.meminfo,
+        meminfoWithHuge(6_000_000, 2_000_000, hugeKib)
+      );
+      await writeFile(paths.vmstat, "nr_balloon_pages 10000\n");
+      const result = await run({ paths, rounds: 1 });
+      expect(result.exitCode, String(hugeKib)).toBe(0);
+      expect(await readFile(paths.status, "utf8"), String(hugeKib)).toContain(
+        `peak_kib=${4_000_000 - 10_000 * pageKib} samples=1 `
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a kernel with only the balloon's event counters is corrected from their difference", async () => {
+  const { root, paths } = await fixture();
+  try {
+    await writeFile(paths.meminfo, meminfoWithHuge(6_000_000, 1_000_000, 2048));
+    await writeFile(
+      paths.vmstat,
+      "balloon_inflate 1300000\nballoon_deflate 100000\noom_kill 0\n"
+    );
+    const result = await run({ paths, rounds: 1 });
+    expect(result.exitCode).toBe(0);
+    // 5,000,000 KiB unavailable less 1,200,000 pages of 4 KiB.
+    expect(await readFile(paths.status, "utf8")).toContain(
+      "peak_kib=200000 samples=1 "
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a balloon reading that cannot be right never makes the figure negative or fails the sample", async () => {
+  const cases: readonly (readonly [string, number])[] = [
+    // Larger than everything unavailable: the sample counts as nothing in use.
+    ["nr_balloon_pages 9000000\n", 0],
+    // Not a number, and no event counters: no correction.
+    ["nr_balloon_pages lots\n", 4_000_000],
+    // Deflated more than inflated: no correction.
+    ["balloon_inflate 5\nballoon_deflate 9\n", 4_000_000],
+    // No balloon in this kernel at all.
+    ["oom_kill 0\n", 4_000_000],
+  ];
+  for (const [vmstat, expected] of cases) {
+    const { root, paths } = await fixture();
+    try {
+      await writeFile(
+        paths.meminfo,
+        meminfoWithHuge(6_000_000, 2_000_000, 2048)
+      );
+      await writeFile(paths.vmstat, vmstat);
+      const result = await run({ paths, rounds: 1 });
+      expect(result.exitCode, vmstat).toBe(0);
+      expect(await readFile(paths.status, "utf8"), vmstat).toContain(
+        `peak_kib=${expected} samples=1 `
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("the balloon is read on both sides of the memory figures and the larger reading is used", async () => {
+  // A balloon that grows or shrinks while one sample is taken must not invent a peak.
+  // The script cannot be paused between its reads from here, so this pins the order.
+  const script = await Bun.file(SCRIPT).text();
+  const loop = script.slice(script.indexOf("while :; do"));
+  const before = loop.indexOf("read_balloon\n  balloon_before=$balloon");
+  const figures = loop.indexOf('done < "$meminfo_file"');
+  const after = loop.indexOf("read_balloon", figures);
+  const larger = loop.indexOf(
+    'if test "$balloon_before" -gt "$balloon"; then\n    balloon=$balloon_before'
+  );
+  expect(before).toBeGreaterThanOrEqual(0);
+  expect(figures).toBeGreaterThan(before);
+  expect(after).toBeGreaterThan(figures);
+  expect(larger).toBeGreaterThan(after);
+  expect(loop.split("read_balloon").length).toBe(3);
+});
+
 test("counters the kernel does not offer are recorded as unavailable", async () => {
   const { root, paths } = await fixture();
   try {
@@ -255,7 +412,7 @@ test("every POSIX shell on this host gives the same status line", async () => {
   }
 });
 
-// Shell syntax, builtins of the guest's shell, the script's own function, and `sleep`.
+// Shell syntax, builtins of the guest's shell, the script's own functions, and `sleep`.
 const ALLOWED_COMMANDS = new Set([
   "while",
   "do",
@@ -271,6 +428,7 @@ const ALLOWED_COMMANDS = new Set([
   "exit",
   "printf",
   "check",
+  "read_balloon",
   "sleep",
   ":",
   "{",
@@ -368,6 +526,22 @@ test("one sample runs shell builtins only, and one sleep", async () => {
   expect(commands.length).toBeGreaterThan(40);
   expect(notAllowed(loop)).toEqual([]);
   expect(commands.filter((word) => word === "sleep").length).toBe(1);
+
+  // The loop calls `read_balloon` twice a sample: the same rules hold inside it.
+  const start = script.indexOf("read_balloon() {");
+  expect(start).toBeGreaterThanOrEqual(0);
+  const body = script.slice(start, script.indexOf("\n}\n", start));
+  const bodyCode = body
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n")
+    .replaceAll("$((", "");
+  expect(bodyCode).not.toContain("$(");
+  expect(bodyCode).not.toContain("`");
+  expect(bodyCode).not.toContain("|");
+  expect(bodyCode.replaceAll("&&", "")).not.toContain("&");
+  expect(notAllowed(body.slice(body.indexOf("\n")))).toEqual([]);
+  expect(commandWords(body).includes("sleep")).toBe(false);
 });
 
 test("the builtins check sees a command behind a prefix, a keyword or a continuation", () => {

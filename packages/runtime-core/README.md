@@ -1724,10 +1724,20 @@ A fresh boot starts a second best-effort guest job
 ([`guest-memory-peak.sh`](src/provider/guest-memory-peak.sh)) at the same point and under
 the same rules: background mode, result ignored, owner token and boot ID checked first, at
 most once per boot, nothing written under `/storage`. Every five seconds it reads memory in
-use (`MemTotal` minus `MemAvailable`) and keeps the highest value for the boot in one line
-at `/run/hack-local/memory-peak.status`, together with counters the kernel keeps since
-boot: memory stall time (`/proc/pressure/memory`), OOM kills and major page faults. A
-sample can miss a short peak; those counters cannot miss a guest that ran short of memory.
+use (`MemTotal` minus `MemAvailable`, minus the memory balloon) and keeps the highest value
+for the boot in one line at `/run/hack-local/memory-peak.status`, together with counters
+the kernel keeps since boot: memory stall time (`/proc/pressure/memory`), OOM kills and
+major page faults. A sample can miss a short peak; those counters cannot miss a guest that
+ran short of memory.
+
+The balloon is subtracted because the provider inflates it to most of the guest once the
+pool has been idle for a while and releases it seconds later. Balloon pages are not
+available to the guest, so an idle guest using 0.2 GiB used to record a peak near its
+whole size. The size comes from `nr_balloon_pages` in `/proc/vmstat` (or, on a kernel
+without it, inflations minus deflations), in base pages whose size follows from the huge
+page size the kernel reports. It is read before and after the memory figures and the
+larger reading is used, so a balloon that moves during a sample can only lower that
+sample. A reading that cannot be right is ignored or capped at the sample.
 A sample is read with shell builtins, so the loop starts one process every five seconds
 (`sleep`).
 

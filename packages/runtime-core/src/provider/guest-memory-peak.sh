@@ -4,10 +4,18 @@
 # recorded as `unavailable`. It must never fail or delay a start, and it writes only to the
 # boot's tmpfs, never under /storage.
 #
-# "In use" is MemTotal minus MemAvailable: memory the kernel cannot get back by dropping
-# cache. A sample every five seconds can miss a short peak, so the line also carries
+# "In use" is MemTotal minus MemAvailable, minus the memory balloon: memory the kernel
+# cannot get back by dropping cache, not counting what the provider has taken back for the
+# host. The provider inflates the balloon to most of the guest when the pool has been idle
+# for a while and lets it go seconds later. Balloon pages are not available to the guest,
+# so without the correction an idle guest that uses 0.2 GiB records a "peak" near its whole
+# size. A sample every five seconds can miss a short peak, so the line also carries
 # counters the kernel keeps since boot (stall time, OOM kills, major faults), which cannot
 # miss a guest that ran short of memory.
+#
+# The balloon is read before and after the memory figures and the larger reading is
+# subtracted: a balloon that grows or shrinks during a sample can then only make the
+# sample smaller, never invent a peak.
 #
 # Every sample is read with shell builtins. The loop starts one process per sample, `sleep`.
 # The host reads the one-line status file; it is rewritten on every sample.
@@ -39,23 +47,68 @@ check() {
   esac
 }
 
+# Sets `balloon` to the pages the balloon holds now, or to 0 when the kernel does not say.
+# `nr_balloon_pages` is the size itself; older kernels offer only the two event counters.
+read_balloon() {
+  balloon_now=
+  balloon_in=
+  balloon_out=
+  if test -r "$vmstat_file"; then
+    while read -r key value rest; do
+      case "$key" in
+        nr_balloon_pages) balloon_now=$value ;;
+        balloon_inflate) balloon_in=$value ;;
+        balloon_deflate) balloon_out=$value ;;
+      esac
+    done < "$vmstat_file"
+  fi
+  check "$balloon_now"
+  balloon=$checked
+  if test "$balloon" = unavailable; then
+    balloon=0
+    check "$balloon_in"
+    balloon_in=$checked
+    check "$balloon_out"
+    balloon_out=$checked
+    if test "$balloon_in" != unavailable && test "$balloon_out" != unavailable &&
+      test "$balloon_in" -ge "$balloon_out"; then
+      balloon=$((balloon_in - balloon_out))
+    fi
+  fi
+}
+
 peak=0
 samples=0
 rounds=0
 while :; do
+  read_balloon
+  balloon_before=$balloon
   total=
   available=
+  huge=
   if test -r "$meminfo_file"; then
     while read -r key value rest; do
       case "$key" in
         MemTotal:) total=$value ;;
-        MemAvailable:)
-          available=$value
+        MemAvailable:) available=$value ;;
+        Hugepagesize:)
+          huge=$value
           break
           ;;
       esac
     done < "$meminfo_file"
   fi
+  read_balloon
+  if test "$balloon_before" -gt "$balloon"; then
+    balloon=$balloon_before
+  fi
+  # The balloon is counted in base pages. Their size follows from the huge page size the
+  # kernel reports; a kernel that reports none of these has 4 KiB pages.
+  case "$huge" in
+    32768) page_kib=16 ;;
+    524288) page_kib=64 ;;
+    *) page_kib=4 ;;
+  esac
   check "$total"
   total=$checked
   check "$available"
@@ -63,6 +116,11 @@ while :; do
   if test "$total" != unavailable && test "$available" != unavailable &&
     test "$total" -ge "$available"; then
     used=$((total - available))
+    held=$((balloon * page_kib))
+    if test "$held" -gt "$used"; then
+      held=$used
+    fi
+    used=$((used - held))
     samples=$((samples + 1))
     if test "$used" -gt "$peak"; then
       peak=$used

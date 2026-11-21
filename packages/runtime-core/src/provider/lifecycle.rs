@@ -1778,6 +1778,9 @@ fn start_pool(
     }
     // The last check before `machine start` releases the VM lock to the provider.
     let permit = boot.release(candidate, &lock)?;
+    // `begin_boot` keeps only one earlier boot id; dead-owner recovery of a run from an
+    // older boot needs its raw id, so record the ids being superseded first.
+    super::boot_history::record(candidate, &owner)?;
     let previous_boot = owner.begin_boot();
     owner.reclamation = Some(boot_reclamation_policy());
     // Chosen from the shares this boot mounts; the `booting` receipt below records it before

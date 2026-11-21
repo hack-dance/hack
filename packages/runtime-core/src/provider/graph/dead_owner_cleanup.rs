@@ -1,5 +1,6 @@
 //! Explicit recovery selects VM stop plus owner death before reboot, or a dead
-//! ready owner (including a journal-bound one-off) from the immediate predecessor boot.
+//! ready owner (including a journal-bound one-off) from an earlier boot of the same
+//! pool: the one boot its receipt's evidence names (`boot_match`), never the current one.
 //! No endpoint-file deletion is treated as a relay retirement acknowledgement.
 use super::*;
 use crate::provider::{identity, lifecycle, state::Owner};
@@ -42,7 +43,7 @@ pub(super) fn current_completion(
 fn refused() -> CandidateError {
     error(
         "graph_dead_owner_recovery",
-        "Dead-owner cleanup requires an exact stopped selection, ready graph, or validated interrupted one-off from the immediate prior boot, an absent foreground owner, and unchanged verified inventories; evidence retained.",
+        "Dead-owner cleanup requires an exact stopped selection, ready graph, or validated interrupted one-off from an earlier boot of the pool, an absent foreground owner, and unchanged verified inventories; evidence retained.",
     )
 }
 fn digest(value: &[u8]) -> String {
@@ -101,7 +102,7 @@ fn exists(path: &std::path::Path) -> Result<bool, CandidateError> {
     }
 }
 
-/// Read-only dispatch hint. Execution re-admits the exact predecessor boot,
+/// Read-only dispatch hint. Execution re-admits the exact earlier boot,
 /// dead process, publication and inventories under their original locks.
 pub(super) fn recovery_hint(
     candidate: &Candidate,
@@ -129,11 +130,14 @@ pub(super) fn recovery_selection(
     owner: &Owner,
     publication_present: bool,
 ) -> Result<Option<String>, CandidateError> {
-    let (Some(current), Some(previous)) = (&owner.guest_boot_id, &owner.previous_guest_boot_id)
-    else {
+    let Some(current) = &owner.guest_boot_id else {
         return Ok(None);
     };
-    if owner.phase != "running" || current == previous {
+    if owner.phase != "running" {
+        return Ok(None);
+    }
+    let earlier = crate::provider::boot_history::earlier_boots(candidate, owner)?;
+    if earlier.is_empty() {
         return Ok(None);
     }
     if exists(&root.join(FILE))? {
@@ -142,7 +146,7 @@ pub(super) fn recovery_selection(
             return Err(refused());
         }
         if immutable(&intent.original)? == immutable(receipt)?
-            && intent.old_boot == *previous
+            && earlier.contains(&intent.old_boot)
             && intent.new_boot.as_ref() == Some(current)
         {
             validate(
@@ -170,16 +174,8 @@ pub(super) fn recovery_selection(
     {
         return Ok(None);
     }
-    let context = host_relay::context(&receipt.owner, previous)?;
-    let marker_matches = receipt.relay_cleanup.as_ref().is_some_and(|marker| {
-        marker.valid() && marker.boot == context.boot && marker.runtime == context.runtime
-    });
-    let root_matches = receipt.relay_startup.as_ref().is_some_and(|startup| {
-        startup::receipt_control_root(&candidate.state_root, receipt, previous)
-            .is_ok_and(|expected| startup.control_root == expected)
-    });
-    (marker_matches || root_matches)
-        .then(|| selected(receipt))
+    super::boot_match::receipt_boot(candidate, root, receipt, &earlier, current)?
+        .map(|_| selected(receipt))
         .transpose()
 }
 fn no_pending(root: &std::path::Path) -> Result<(), CandidateError> {
@@ -376,8 +372,8 @@ pub(super) fn retired_prior_bridges(
     Ok(true)
 }
 /// Normally select while stopped, then call after explicit runtime up. A dead
-/// ready owner with exact previous-boot reservations can be selected on the
-/// immediate successor boot without another restart.
+/// ready owner with exact reservations from an earlier boot of the pool can be
+/// selected on any later boot without another restart.
 /// This operation never starts a VM or deletes retained data.
 pub fn recover_cleanup(
     candidate: &Candidate,
@@ -409,7 +405,7 @@ pub(super) fn current_completed_precedence(
 }
 
 /// Holds the retired publisher and provider cleanup leases while an exact
-/// previous-boot shared HTTPS owner is archived. Neither pathname absence nor
+/// earlier-boot shared HTTPS owner is archived. Neither pathname absence nor
 /// a merely stopped graph grants this authority.
 pub(in crate::provider) struct HttpsArchiveGuard<'a> {
     retired: foreground::transport::Retired,
@@ -479,7 +475,8 @@ impl<'a> HttpsArchiveGuard<'a> {
         if intent.complete_sha256.as_deref() != Some(complete.as_str())
             || intent.old_boot != self.old_boot
             || intent.new_boot.as_deref() != Some(self.engine.guest().boot_id())
-            || pool.previous_guest_boot_id.as_deref() != Some(self.old_boot.as_str())
+            || !crate::provider::boot_history::earlier_boots(candidate, &pool)?
+                .contains(&self.old_boot)
             || pool.guest_boot_id.as_deref() != Some(self.engine.guest().boot_id())
             || pool.token != receipt.owner
             || intent.one_off_sha256.is_some()
@@ -741,6 +738,8 @@ fn prepare(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     {
         return Err(refused());
     }
+    // The last boot that ran, unchanged: a `prepare` intent stays strict at `execute`
+    // (`fresh_boot`), so matching an older boot here could only refuse earlier.
     let old_boot = owner
         .guest_boot_id
         .or(owner.previous_guest_boot_id)
@@ -789,12 +788,24 @@ fn prepare(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     state::write(&path, &intent)?;
     Ok(json!({"run":run,"phase":"awaiting-runtime-start","receipt_sha256":expected}))
 }
+/// An intent selected on a running pool (`new_boot` recorded) may name any earlier
+/// boot of the pool. A stopped-pool `prepare` intent (`new_boot: None`) stays strict:
+/// its old boot must be the immediate predecessor. Boots between `prepare` and
+/// `execute` would have started the engine, whose restart policies may have restarted
+/// the run's containers, and nothing proves they did not. The stopped-pool flow of
+/// `hack up` / `hack down --recover` boots first and selects with `execute`, never
+/// `prepare`.
 fn fresh_boot(
     intent: &Intent,
     previous: Option<&str>,
+    earlier: &[String],
     current: &str,
 ) -> Result<(), CandidateError> {
-    if previous != Some(intent.old_boot.as_str())
+    let admitted = match intent.new_boot {
+        None => previous == Some(intent.old_boot.as_str()),
+        Some(_) => earlier.contains(&intent.old_boot),
+    };
+    if !admitted
         || current == intent.old_boot
         || current.is_empty()
         || intent.new_boot.as_deref().is_some_and(|b| b != current)
@@ -888,10 +899,19 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     let mut intent: Intent = if exists(&root.join(FILE))? {
         state::read(&root.join(FILE))?
     } else {
-        // A dead ready owner may be selected after exactly one already audited
-        // restart. No additional restart is requested or inferred here.
+        // A dead ready owner may be selected on any later audited boot: the run's
+        // boot is the one earlier boot its receipt evidence names. No additional
+        // restart is requested or inferred here.
         let owner = Owner::load(candidate)?;
-        let old_boot = owner.previous_guest_boot_id.ok_or_else(refused)?;
+        let earlier = crate::provider::boot_history::earlier_boots(candidate, &owner)?;
+        let old_boot = super::boot_match::receipt_boot(
+            candidate,
+            &root,
+            &receipt,
+            &earlier,
+            engine.guest().boot_id(),
+        )?
+        .ok_or_else(refused)?;
         let one_off_sha256 = if exists(&root.join("one-off.json"))? {
             Some(one_off::recovery_selection(&root, &receipt, &old_boot)?)
         } else {
@@ -968,7 +988,13 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     }
     let owner = Owner::load(candidate)?;
     let boot = engine.guest().boot_id();
-    fresh_boot(&intent, owner.previous_guest_boot_id.as_deref(), boot)?;
+    let earlier = crate::provider::boot_history::earlier_boots(candidate, &owner)?;
+    fresh_boot(
+        &intent,
+        owner.previous_guest_boot_id.as_deref(),
+        &earlier,
+        boot,
+    )?;
     if let Some(expected_job) = &intent.one_off_sha256 {
         // Cleanup progress may change receipt phases; pin the original admitted
         // parent/job selection and require the published job journal unchanged.
@@ -1429,11 +1455,37 @@ mod tests {
                     .is_none()
             );
         }
+        // Another boot came between the run's boot and this one: the run's boot is
+        // no longer the previous one, and without a boot history it is unknown.
         owner.previous_guest_boot_id = Some("33333333-3333-3333-3333-333333333333".into());
         assert!(
             recovery_selection(&fixture.candidate, &fixture.graph(), &receipt, &owner, true)
                 .unwrap()
                 .is_none()
+        );
+        // The boot history recorded the run's older boot when it was superseded.
+        let mut superseded = owner.clone();
+        superseded.guest_boot_id = Some(previous.clone());
+        superseded.previous_guest_boot_id = None;
+        crate::provider::boot_history::record(&fixture.candidate, &superseded).unwrap();
+        assert_eq!(
+            recovery_selection(&fixture.candidate, &fixture.graph(), &receipt, &owner, true)
+                .unwrap(),
+            Some(expected.clone())
+        );
+        // The current boot is never an earlier boot, even when the evidence names it.
+        let mut current = owner.clone();
+        current.guest_boot_id = Some(previous.clone());
+        assert!(
+            recovery_selection(
+                &fixture.candidate,
+                &fixture.graph(),
+                &receipt,
+                &current,
+                true
+            )
+            .unwrap()
+            .is_none()
         );
         owner.previous_guest_boot_id = Some(previous.clone());
         let mut intent = intent(&receipt);
@@ -1846,17 +1898,26 @@ mod tests {
     #[test]
     fn boot_selection_cannot_roll_over_or_use_same_boot() {
         let mut intent = intent(&partial());
+        let older = ["foreign".to_owned(), "old-boot".to_owned()];
+        // A stopped-pool `prepare` intent stays strict: only the immediate predecessor,
+        // even when the boot history names its old boot.
         for (prior, current) in [
             (None, "next"),
             (Some("foreign"), "next"),
             (Some("old-boot"), "old-boot"),
         ] {
-            assert!(fresh_boot(&intent, prior, current).is_err());
+            assert!(fresh_boot(&intent, prior, &older, current).is_err());
         }
-        assert!(fresh_boot(&intent, Some("old-boot"), "next").is_ok());
+        assert!(fresh_boot(&intent, Some("old-boot"), &[], "next").is_ok());
+        // An intent selected on a running pool accepts any earlier boot of the pool.
         intent.new_boot = Some("next".into());
-        assert!(fresh_boot(&intent, Some("old-boot"), "third").is_err());
-        assert!(fresh_boot(&intent, Some("old-boot"), "next").is_ok());
+        assert!(fresh_boot(&intent, Some("old-boot"), &older, "third").is_err());
+        assert!(fresh_boot(&intent, Some("old-boot"), &older, "next").is_ok());
+        assert!(fresh_boot(&intent, Some("foreign"), &older, "next").is_ok());
+        assert!(fresh_boot(&intent, Some("foreign"), &older[..1], "next").is_err());
+        assert!(fresh_boot(&intent, None, &[], "next").is_err());
+        intent.new_boot = Some("old-boot".into());
+        assert!(fresh_boot(&intent, Some("foreign"), &older, "old-boot").is_err());
     }
     #[test]
     fn stale_pins_and_changed_resource_identity_refuse() {

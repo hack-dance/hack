@@ -391,11 +391,14 @@ impl Shared {
         }
     }
     fn stop(&self, outcome: Outcome) {
+        self.stop_until(outcome, Instant::now() + QUEUED_BUDGET);
+    }
+    /// `stop`, with the instant until which queued connections are refused
+    /// given explicitly (tests set it; the first stop decides it).
+    fn stop_until(&self, outcome: Outcome, refuse_until: Instant) {
         let mut state = self.state();
         state.stopping.get_or_insert(outcome);
-        state
-            .refuse_until
-            .get_or_insert_with(|| Instant::now() + QUEUED_BUDGET);
+        state.refuse_until.get_or_insert(refuse_until);
         drop(state);
         // Unlink at once so the next client starts a fresh process, which waits
         // for this one's lock.

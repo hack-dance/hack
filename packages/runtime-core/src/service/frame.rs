@@ -506,7 +506,13 @@ mod tests {
         let reader = drain(b, Duration::from_millis(100), Duration::ZERO);
         let result = within(move || {
             let body = vec![b'x'; CONTROL_FRAME_LIMIT];
-            let result = write_within(&mut a, &body, CONTROL_FRAME_LIMIT, Duration::from_secs(20));
+            let result = write_within(
+                &mut a,
+                &body,
+                CONTROL_FRAME_LIMIT,
+                Duration::from_secs(20),
+                None,
+            );
             drop(a);
             result
         });
@@ -547,22 +553,29 @@ mod tests {
 
     #[test]
     fn a_partial_header_cannot_stretch_a_whole_frame_deadline() {
+        // The cap is what must end this read: the first byte is already waiting,
+        // the frame's own deadline is a minute away, and the cap is 300 ms. A read
+        // that ignored the cap would hang into the guard. A thread that starts
+        // late finds the cap already passed and still gives Truncated.
         let (mut a, mut b) = pair();
         a.write_all(&[0]).unwrap();
-        let started = Instant::now();
-        let by = started + Duration::from_millis(100);
-        // Without the whole-frame deadline this read would wait for the rest of
-        // the header forever: the hang guard is the proof.
-        let (result, b) = within(move || (read_by(&mut b, by, CONTROL_FRAME_LIMIT), b));
+        let result = within(move || {
+            let cap = Instant::now() + Duration::from_millis(300);
+            let first = Wait::Until(Instant::now() + HANG_GUARD);
+            read_capped(
+                &mut b,
+                first,
+                CONTROL_FRAME_LIMIT,
+                Duration::from_secs(60),
+                Some(cap),
+            )
+        });
         assert_eq!(result, Err(FrameError::Truncated));
-        drop(b);
+        // `read_by` is that call with the frame deadline as its cap; on an empty
+        // socket a passed deadline consumes nothing.
         let (_c, mut d) = pair();
         assert_eq!(
-            read_by(
-                &mut d,
-                Instant::now() + Duration::from_millis(30),
-                CONTROL_FRAME_LIMIT
-            ),
+            read_by(&mut d, Instant::now(), CONTROL_FRAME_LIMIT),
             Err(FrameError::Idle)
         );
         drop(a);

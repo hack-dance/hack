@@ -897,14 +897,16 @@ started and the lease returned. The `root-before-lease` control (73,754 states)
 checks the same invariants for the follow-up ordering, in which the root files
 are proven before the lease and their metadata is rechecked under it.
 
-Ten controls remove one mechanism each and must fail the named invariant: the
+Twelve controls remove one mechanism each and must fail the named invariant: the
 second sample before the lease (`negative`, `SecondSampleUnderLease`), no window
 (`window-not-enforced`), no swapout comparison at the second sample
 (`unchained-recheck`) or at the pre-boot check (`unchained-boot`), two Research
 samples (`research-two-samples`), no root recheck in the follow-up ordering
 (`root-unchecked`), no tree recheck under the lease (`changed-tree-start`,
 `NoStartFromChangedTree`), no predicate check of the first sample
-(`first-sample-unchecked`), and a pre-boot check that admits without its
+(`first-sample-unchecked`), of Development's sample under the lease
+(`second-sample-unchecked`) or of Research's later samples
+(`research-sample-unchecked`), and a pre-boot check that admits without its
 predicate check (`boot-host-unchecked`) or without its swapout comparison
 (`boot-swapouts-unchecked`). Three more show that a Development start, a Research
 start and a start after an alias rewrite are reachable.

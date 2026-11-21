@@ -107,7 +107,9 @@ sample sees: the start is admitted, and the model records it in `acrossDip`. Two
 controls, `development-dip-start-reachable` and `research-dip-start-reachable`,
 require that such a start is reachable. `SamplesTakenOnPassingHost` holds all the
 same: `hostOk` was true at each sample, on the `Open`, `ResearchSample` and
-`Recheck` edges.
+`Recheck` edges. Each of those three guards has a control that removes it and
+must fail that invariant at its edge: `first-sample-unchecked`,
+`research-sample-unchecked` and `second-sample-unchecked`.
 
 The pre-boot observation on the `AdmitBoot` edge is recorded apart from the
 samples. `BootSampleOnPassingHost` says it was taken on a passing host, and

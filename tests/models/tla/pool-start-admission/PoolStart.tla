@@ -11,6 +11,8 @@ CONSTANTS Window,               \* ticks between chained samples
           MaxSwapouts,          \* bound on the host swapout counter
           MaxDips,              \* bound on the host failing and recovering
           EnforceFirstCheck,    \* the first sample must pass every predicate
+          EnforceRecheckHost,   \* ... and Development's sample under the lease
+          EnforceResearchHost,  \* ... and Research's second and third samples
           RootProofBeforeLease, \* FALSE: root files proven under the lease
           SampleUnderLease,     \* Development's second sample needs the lease
           EnforceWindow,        \* ... and the elapsed window
@@ -149,7 +151,8 @@ ResumeRunning == /\ pc = "Idle" /\ alias # "foreign" /\ poolRunning /\ lease = "
                                  proofs, owner, poolRunning, vm>>
 \* sample_checked: Research's second and third samples, before the lease.
 ResearchSample == /\ pc = "Opened" /\ ~Development /\ Len(samples) < ResearchQuota
-                  /\ WindowElapsed /\ hostOk /\ SameSwapouts
+                  /\ WindowElapsed /\ (EnforceResearchHost => hostOk)
+                  /\ SameSwapouts
                   /\ Accept(FALSE)
                   /\ UNCHANGED <<profile, pc, lease, hostOk, swapouts, dips,
                                   boot, proofs, owner, poolRunning, vm>>
@@ -183,7 +186,7 @@ SelectionReadable == selected = 0 \/ alias # "foreign"
 Recheck == /\ Development /\ Len(samples) = 1
            /\ pc \in (IF SampleUnderLease THEN {"Leased"} ELSE {"Proven", "Leased"})
            /\ (EnforceWindow => WindowElapsed)
-           /\ hostOk /\ SelectionReadable
+           /\ (EnforceRecheckHost => hostOk) /\ SelectionReadable
            /\ (EnforceChain => SameSwapouts)
            /\ Accept(lease = "self")
            /\ pc' = IF pc = "Leased" THEN "Qualified" ELSE pc

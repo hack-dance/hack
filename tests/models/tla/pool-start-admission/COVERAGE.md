@@ -58,7 +58,7 @@ Every invariant holds in `positive` and `root-before-lease`.
 | Invariant | In plain words |
 | --- | --- |
 | `DevelopmentTwoSamples`, `SecondSampleUnderLease`, `WindowRespected` | A Development VM starts only on two qualifying samples, the second taken under the startup lease and at least the window after the first. |
-| `SamplesTakenOnPassingHost` | Every sample a start accepted was taken on a passing host: the first sample of either profile, Research's second and third, and Development's sample under the lease. Each recorded sample carries whether the host passed every predicate at the moment it was taken. |
+| `SamplesTakenOnPassingHost` | Every sample a start accepted was taken on a passing host: the first sample of either profile, Research's second and third, and Development's sample under the lease. Each recorded sample carries whether the host passed every predicate at the moment it was taken. Three controls remove the check at one of those samples each. |
 | `ChainUnbroken` | No accepted sample shows a swapout count other than the first sample's. A sample that fails a predicate or shows another count is never appended: the only step from it is a refusal. |
 | `BootChecked` | A pre-boot check ran before every start: its baseline and its observation exist. It says nothing about what the observation showed. |
 | `BootBaselineIsLastSample` | The swapout count the pre-boot check was handed as its baseline is the last qualifying sample's. |
@@ -88,6 +88,8 @@ control stops at its first violation, so it has no state count of its own.
 | `root-unchecked` | follow-up ordering without the recheck under the lease | `StartFromProvenRoot` | `RecheckRoot`, `rootOk = FALSE` |
 | `changed-tree-start` | the trees are not rechecked under the lease | `NoStartFromChangedTree` | `Start`, `treeOk = FALSE` |
 | `first-sample-unchecked` | the first sample is recorded without its predicate check | `SamplesTakenOnPassingHost` | `Open`, `hostOk = FALSE` |
+| `second-sample-unchecked` | Development's sample under the lease is recorded without its predicate check | `SamplesTakenOnPassingHost` | `Recheck`, `profile = "development"`, `hostOk = FALSE` |
+| `research-sample-unchecked` | Research's second and third samples are recorded without their predicate check | `SamplesTakenOnPassingHost` | `ResearchSample`, `profile = "research"`, `hostOk = FALSE` |
 | `boot-host-unchecked` | the pre-boot check admits without its predicate check | `BootSampleOnPassingHost` | `AdmitBoot`, `hostOk = FALSE` |
 | `boot-swapouts-unchecked` | the pre-boot check admits without comparing its swapout count with the baseline | `BootSampleMatchesBaseline` | `AdmitBoot`, `swapouts = 1`, `baseline = <<0>>` |
 
@@ -96,6 +98,22 @@ a proof before the lease relies on". `first-sample-unchecked` removes the check
 that `admission::open` makes. Before the two-sample change the first probe was
 read only for its `admitted` field, and the samples after it carried the
 predicates; now the first probe is itself a qualifying sample.
+
+`second-sample-unchecked` and `research-sample-unchecked` remove the same check
+at the later samples, one profile each (`EnforceRecheckHost`,
+`EnforceResearchHost`), so each fails at the action it names. In both the first
+sample is taken on a passing host, the window elapses and the host fails
+(`Degrade`). Development then proves its trees, takes the lease and records its
+second sample on the failing host at `Recheck`; Research records its second
+sample on it at `ResearchSample`. In the code these are the calls of `check` in
+`recheck_after_lease` and in `sample_checked`'s loop. The first is covered by
+`post_lease_sample_blocks_allocation_when_prelease_admission_goes_stale`. The
+loop runs one `check` for every sample;
+`startup_windows_keep_profile_floors_and_distinguish_warning_from_normal` fails
+a predicate at its first sample for both profiles, and
+`swapouts_must_be_observed_and_unchanged_across_the_full_window` fails its
+second sample on the swapout count. No test fails another predicate at a later
+Research sample.
 
 `boot-host-unchecked` and `boot-swapouts-unchecked` remove one of the two checks
 `admission_pool::admit_boot` makes on its observation. In the first, the host
@@ -194,6 +212,8 @@ violation, and the two passing configurations grew.
 
 Recording the pre-boot observation changed no existing control either. It adds
 two history variables and two guards that are on in every earlier configuration.
+The switches for the host check at the later samples are on everywhere but in
+their own two controls, and add no state: the passing counts did not move.
 `unchained-boot` still fails `BootBaselineIsLastSample` and nothing else: its
 observation matches the baseline it was handed, which is its own count.
 

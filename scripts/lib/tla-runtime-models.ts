@@ -1895,6 +1895,26 @@ const contracts: readonly ModelContract[] = [
         action: "Open",
         fields: ['pc = "Opened"', "hostOk = FALSE"],
       },
+      // The same for Development's sample under the lease ...
+      {
+        name: "second-sample-unchecked",
+        negative: true,
+        invariant: "SamplesTakenOnPassingHost",
+        action: "Recheck",
+        fields: [
+          'pc = "Qualified"',
+          'profile = "development"',
+          "hostOk = FALSE",
+        ],
+      },
+      // ... and for Research's second and third samples.
+      {
+        name: "research-sample-unchecked",
+        negative: true,
+        invariant: "SamplesTakenOnPassingHost",
+        action: "ResearchSample",
+        fields: ['pc = "Opened"', 'profile = "research"', "hostOk = FALSE"],
+      },
       // What few samples do not see, as reachable facts: a start admitted
       // although the host failed between two of its accepted samples.
       {

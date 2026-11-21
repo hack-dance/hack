@@ -47,29 +47,31 @@ export function parseComposePs(stdout: string): GlobalContainerState[] {
       }
     }
   }
-  const containers: GlobalContainerState[] = [];
-  for (const record of records) {
-    if (typeof record !== "object" || record === null) {
-      continue;
-    }
-    const { Name, Service, State, ExitCode, Health } = record as Record<
-      string,
-      unknown
-    >;
-    if (typeof Name !== "string" || typeof State !== "string") {
-      continue;
-    }
-    containers.push({
-      name: Name,
-      service: typeof Service === "string" ? Service : Name,
-      state: State,
-      exitCode: typeof ExitCode === "number" ? ExitCode : null,
-      ...(typeof Health === "string" && Health !== ""
-        ? { health: Health }
-        : {}),
-    });
+  return records.flatMap((record) => {
+    const container = toContainerState(record);
+    return container ? [container] : [];
+  });
+}
+
+/** One `compose ps` record, or `null` when it is not a container record. */
+function toContainerState(record: unknown): GlobalContainerState | null {
+  if (typeof record !== "object" || record === null) {
+    return null;
   }
-  return containers;
+  const { Name, Service, State, ExitCode, Health } = record as Record<
+    string,
+    unknown
+  >;
+  if (typeof Name !== "string" || typeof State !== "string") {
+    return null;
+  }
+  return {
+    name: Name,
+    service: typeof Service === "string" ? Service : Name,
+    state: State,
+    exitCode: typeof ExitCode === "number" ? ExitCode : null,
+    ...(typeof Health === "string" && Health !== "" ? { health: Health } : {}),
+  };
 }
 
 /** The containers Compose does not report as `running`. */

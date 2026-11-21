@@ -2341,37 +2341,55 @@ async function runGlobalUp(): Promise<GlobalUpResult> {
   }
   await reconcileGlobalRoutingBridge({ enabled: !login });
 
-  if (!logging.enabled) {
+  const loggingExit = await settleGlobalLogging({
+    paths,
+    login,
+    enabled: logging.enabled,
+  });
+  if (loggingExit !== 0) {
+    return { exit: loggingExit, failedStage: "logging" };
+  }
+  logger.success({ message: "Global infra is up" });
+  return { exit: 0, failedStage: null };
+}
+
+/**
+ * The logging part of `hack global up`: starts the stack and waits for it
+ * when it is on (not at login), stops what is left of it when it is off.
+ * Returns the exit code; non-zero means only the logging stack failed.
+ */
+async function settleGlobalLogging(opts: {
+  readonly paths: ReturnType<typeof getGlobalPaths>;
+  readonly login: boolean;
+  readonly enabled: boolean;
+}): Promise<number> {
+  const { paths, login } = opts;
+  if (!opts.enabled) {
     await stopDisabledLoggingStack({ paths, login });
-    logger.success({ message: "Global infra is up" });
-    return { exit: 0, failedStage: null };
+    return 0;
   }
   const loggingArguments = globalLoggingUpArguments({
     composeFile: paths.loggingCompose,
     login,
   });
-  if (loggingArguments) {
-    logger.step({ message: "Starting logging stack…" });
-    const logExit = await run(loggingArguments, {
-      cwd: dirname(paths.loggingCompose),
-    });
-    if (logExit !== 0) {
-      return { exit: logExit, failedStage: "logging" };
-    }
-    const stoppedLogging = await globalStackNotReady({
-      composeFile: paths.loggingCompose,
-      stack: "The logging stack (Grafana, Loki, Alloy)",
-      login,
-      timeoutMs: LOGGING_READY_TIMEOUT_MS,
-      legacyWatchMs: LOGGING_LEGACY_WATCH_MS,
-    });
-    if (stoppedLogging) {
-      return { exit: 1, failedStage: "logging" };
-    }
+  if (!loggingArguments) {
+    return 0;
   }
-
-  logger.success({ message: "Global infra is up" });
-  return { exit: 0, failedStage: null };
+  logger.step({ message: "Starting logging stack…" });
+  const logExit = await run(loggingArguments, {
+    cwd: dirname(paths.loggingCompose),
+  });
+  if (logExit !== 0) {
+    return logExit;
+  }
+  const notReady = await globalStackNotReady({
+    composeFile: paths.loggingCompose,
+    stack: "The logging stack (Grafana, Loki, Alloy)",
+    login,
+    timeoutMs: LOGGING_READY_TIMEOUT_MS,
+    legacyWatchMs: LOGGING_LEGACY_WATCH_MS,
+  });
+  return notReady ? 1 : 0;
 }
 
 /**

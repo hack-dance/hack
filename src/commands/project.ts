@@ -11501,6 +11501,31 @@ function resolveLokiQuery(opts: {
   });
 }
 
+/**
+ * Whether `hack logs` can use Loki. The local logging stack is opt-in: with
+ * it off there is nothing to probe, and the logs come from the containers. A
+ * Loki named by `HACK_LOKI_URL` is the user's own, so the setting does not
+ * apply to it.
+ */
+async function resolveLokiAvailability(opts: {
+  readonly shouldTryLoki: boolean;
+  readonly baseUrl: string;
+}): Promise<{ readonly loggingOff: boolean; readonly lokiReachable: boolean }> {
+  if (!opts.shouldTryLoki) {
+    return { loggingOff: false, lokiReachable: false };
+  }
+  if (
+    process.env.HACK_LOKI_URL === undefined &&
+    !(await resolveGlobalLoggingForHome()).enabled
+  ) {
+    return { loggingOff: true, lokiReachable: false };
+  }
+  return {
+    loggingOff: false,
+    lokiReachable: await lokiLogBackend.isAvailable({ baseUrl: opts.baseUrl }),
+  };
+}
+
 async function runLogsWithLoki(opts: {
   readonly baseUrl: string;
   readonly lokiReachable: boolean;
@@ -12017,16 +12042,10 @@ async function handleLogs({
     snapshotBackend,
   });
 
-  // The local stack is opt-in: with it off, skip the probe and read
-  // container logs. A Loki named by HACK_LOKI_URL is the user's own.
-  const loggingOff =
-    shouldTryLoki &&
-    process.env.HACK_LOKI_URL === undefined &&
-    !(await resolveGlobalLoggingForHome()).enabled;
-  const lokiReachable =
-    shouldTryLoki && !loggingOff
-      ? await lokiLogBackend.isAvailable({ baseUrl })
-      : false;
+  const { loggingOff, lokiReachable } = await resolveLokiAvailability({
+    shouldTryLoki,
+    baseUrl,
+  });
 
   const useLoki = resolveUseLoki({
     forceCompose: args.options.compose === true,

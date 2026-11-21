@@ -1108,30 +1108,8 @@ async function runDoctorAudit(
   results.push(oauthDns);
   await appendCustomDomainDnsChecks({ results, progress: s, defaultDomain });
 
-  // Endpoint reachability (best-effort). Skip if DNS isn't set up, and when
-  // the opt-in logging stack is off there is no Grafana to reach.
-  const logging = await resolveGlobalLoggingForHome();
-  if (!logging.enabled) {
-    results.push({
-      name: "grafana",
-      status: "ok",
-      message: `Logging stack off (opt-in); turn it on with: ${LOGGING_ENABLE_COMMAND}`,
-      durationMs: 0,
-    });
-  } else if (dns.status === "ok") {
-    results.push(
-      await runCheck(s, "grafana", () => checkGrafanaReachable(), {
-        timeoutMs: 2000,
-      })
-    );
-  } else {
-    results.push({
-      name: "grafana",
-      status: "warn",
-      message: `Skipped reachability (DNS for ${LEGACY_GRAFANA_HOST} not configured)`,
-      durationMs: 0,
-    });
-  }
+  // Endpoint reachability (best-effort).
+  results.push(await checkGrafanaUnlessOff({ progress: s, dns }));
 
   // Authenticate loopback independently of direct container reachability.
   results.push(
@@ -2719,6 +2697,40 @@ async function checkOauthAliasDns(): Promise<CheckResult> {
       message: `Unable to resolve ${host} (run: hack global install)`,
     };
   }
+}
+
+/**
+ * Grafana reachability, skipped when DNS is not set up, and reported as off
+ * when the opt-in logging stack is off (there is no Grafana to reach).
+ */
+async function checkGrafanaUnlessOff(opts: {
+  readonly progress: Parameters<typeof runCheck>[0];
+  readonly dns: CheckResult;
+}): Promise<TimedCheckResult> {
+  if (!(await resolveGlobalLoggingForHome()).enabled) {
+    return {
+      name: "grafana",
+      status: "ok",
+      message: `Logging stack off (opt-in); turn it on with: ${LOGGING_ENABLE_COMMAND}`,
+      durationMs: 0,
+    };
+  }
+  if (opts.dns.status === "ok") {
+    return await runCheck(
+      opts.progress,
+      "grafana",
+      () => checkGrafanaReachable(),
+      {
+        timeoutMs: 2000,
+      }
+    );
+  }
+  return {
+    name: "grafana",
+    status: "warn",
+    message: `Skipped reachability (DNS for ${LEGACY_GRAFANA_HOST} not configured)`,
+    durationMs: 0,
+  };
 }
 
 async function checkGrafanaReachable(): Promise<CheckResult> {

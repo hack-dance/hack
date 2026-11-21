@@ -1577,6 +1577,31 @@ pending coordinator's directory; it does not acknowledge or roll over that
 coordinator. Directory derivation and a real coordinator start/stop regression
 cover this restored-owner boundary outside the finite publisher model.
 
+## CLI process exit
+
+`cli-process-exit/ProcessExit.tla` checks how the CLI process ends
+(`src/lib/process-exit.ts`, `index.ts`): the command returns, `exitWhenDone`
+waits for registered holds, ends stdout and stderr, then exits. Invariants:
+`NoExitWithPendingHold` (the process never ends while held work runs, including
+a hold registered while waiting) and `NoLostOutput` (everything written before
+the exit was delivered).
+
+| Model operation | Source boundary |
+| --- | --- |
+| `Register` / `Settle` | `holdProcessUntil`: the stdio MCP session and each tool call, the foreground daemon, TUI and remote monitor renderer `closed`, TUI action child plus its stderr drain. |
+| `CommandReturns` / `SnapshotSettled` | `runCli` resolves; `waitForHolds` awaits a snapshot and loops while holds remain. |
+| `EndStreams` / `Exit` | `endStream` on stdout and stderr (`end` callback), then `process.exit`. |
+
+Bounds: three holds. The positive configuration exhausts 298 distinct states at
+depth 11. Controls: `negative` (wait for one snapshot, no re-check) fails
+`NoExitWithPendingHold` at `SnapshotSettled`; `no-end` (exit after
+`write("", cb)` instead of `end`) fails `NoLostOutput` at `Exit`. The second
+matches a measurement: with `write("", cb)` only 950 KB of a 2 MiB pipe write
+arrived. `tests/process-exit.test.ts` walks both against real processes. Not
+covered: whether every command that outlives `runCli` registers a hold (an
+audit, listed in the PR), and a reader that never drains (the exit waits, as
+the event loop did before).
+
 ## Global proxy address record
 
 `ingress-address-record/IngressRecord.tla` checks the record `hack run` trusts

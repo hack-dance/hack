@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import {
   type MuxBackend,
   type MuxBackendName,
+  MuxCommandTimeoutError,
   muxCommandTimeoutMs,
   runMuxCommand,
 } from "../mux/mux-backend.ts";
@@ -1427,15 +1428,64 @@ export const LIFECYCLE_TMUX_INTERRUPT_GRACE_MS = 750;
 /** Poll interval (ms) while waiting for interrupted lifecycle tmux panes to exit. */
 export const LIFECYCLE_TMUX_INTERRUPT_POLL_INTERVAL_MS = 25;
 
+const TMUX_PANE_READ_TIMED_OUT = Symbol("tmux-pane-read-timed-out");
+
+async function readPanesWithinDeadline(opts: {
+  readonly windowNames: readonly string[];
+  readonly readPanes: (
+    windowName: string,
+    readOpts?: { readonly timeoutMs: number }
+  ) => Promise<readonly number[]>;
+  readonly timeoutMs: number;
+}): Promise<readonly (readonly number[])[] | typeof TMUX_PANE_READ_TIMED_OUT> {
+  const boundMs = Math.max(1, Math.ceil(opts.timeoutMs));
+  const readPromise: Promise<
+    readonly (readonly number[])[] | typeof TMUX_PANE_READ_TIMED_OUT
+  > = Promise.all(
+    opts.windowNames.map((windowName) =>
+      opts.readPanes(windowName, { timeoutMs: boundMs })
+    )
+  ).catch((error: unknown): typeof TMUX_PANE_READ_TIMED_OUT => {
+    if (error instanceof MuxCommandTimeoutError) {
+      return TMUX_PANE_READ_TIMED_OUT;
+    }
+    throw error;
+  });
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadlinePromise = new Promise<typeof TMUX_PANE_READ_TIMED_OUT>(
+    (resolveTimeout) => {
+      timer = setTimeout(() => {
+        resolveTimeout(TMUX_PANE_READ_TIMED_OUT);
+      }, boundMs);
+    }
+  );
+  try {
+    const outcome = await Promise.race([readPromise, deadlinePromise]);
+    if (outcome === TMUX_PANE_READ_TIMED_OUT) {
+      // Prevent late rejection on a stalled read after the deadline wins.
+      readPromise.catch(() => undefined);
+    }
+    return outcome;
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 /**
  * Poll tmux panes after `send-keys ... C-c` until every pane exits or the
- * bounded grace period elapses. Replaces the unconditional 750 ms sleep so
- * fast-exiting lifecycle processes stop immediately without waiting out the
- * full grace period.
+ * bounded grace period elapses. Both the sleeps AND each `list-panes` read are
+ * bounded by the remaining grace deadline so a stalling tmux read cannot stretch
+ * the 750 ms grace period to the 15 s mux command timeout.
  */
 export async function waitForInterruptedTmuxPanes(opts: {
   readonly windowNames: readonly string[];
-  readonly readPanes: (windowName: string) => Promise<readonly number[]>;
+  readonly readPanes: (
+    windowName: string,
+    readOpts?: { readonly timeoutMs: number }
+  ) => Promise<readonly number[]>;
   readonly graceMs?: number;
   readonly pollIntervalMs?: number;
   readonly now?: () => number;
@@ -1458,19 +1508,29 @@ export async function waitForInterruptedTmuxPanes(opts: {
   const deadline = now() + graceMs;
 
   let panes: readonly (readonly number[])[] = [];
-  for (;;) {
+  for (let round = 0; ; round += 1) {
     await opts.assertFresh?.();
-    panes = await Promise.all(
-      opts.windowNames.map((windowName) => opts.readPanes(windowName))
-    );
+    const remainingBeforeReadMs = deadline - now();
+    if (round > 0 && remainingBeforeReadMs <= 0) {
+      return panes;
+    }
+    const roundOutcome = await readPanesWithinDeadline({
+      windowNames: opts.windowNames,
+      readPanes: opts.readPanes,
+      timeoutMs: Math.max(1, remainingBeforeReadMs),
+    });
+    if (roundOutcome === TMUX_PANE_READ_TIMED_OUT) {
+      return panes;
+    }
+    panes = roundOutcome;
     if (panes.every((pids) => pids.length === 0)) {
       return panes;
     }
-    const remainingMs = deadline - now();
-    if (remainingMs <= 0) {
+    const remainingAfterReadMs = deadline - now();
+    if (remainingAfterReadMs <= 0) {
       return panes;
     }
-    await sleep(Math.min(pollIntervalMs, remainingMs));
+    await sleep(Math.min(pollIntervalMs, remainingAfterReadMs));
   }
 }
 
@@ -1502,10 +1562,11 @@ async function interruptLifecycleTmuxProcesses(opts: {
 
   const panes = await waitForInterruptedTmuxPanes({
     windowNames: processWindows.map((processInfo) => processInfo.windowName),
-    readPanes: (windowName) =>
+    readPanes: (windowName, readOpts) =>
       readTmuxPanePids({
         sessionName: opts.sessionName,
         windowName,
+        timeoutMs: readOpts?.timeoutMs,
       }),
     assertFresh: opts.assertFresh,
   });
@@ -1628,6 +1689,7 @@ async function readTmuxPanePids(opts: {
   readonly sessionName: string;
   readonly windowName: string;
   readonly strict?: boolean;
+  readonly timeoutMs?: number;
 }): Promise<number[]> {
   const result = await runMuxCommand(
     [
@@ -1638,7 +1700,10 @@ async function readTmuxPanePids(opts: {
       "-F",
       "#{pane_pid}",
     ],
-    { stdin: "ignore" }
+    {
+      stdin: "ignore",
+      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    }
   );
   if (result.exitCode !== 0) {
     if (opts.strict) {

@@ -251,16 +251,37 @@ async function readDockerCalls(
     .map((line) => JSON.parse(line) as string[]);
 }
 
+function makeKillEventJson(opts: {
+  readonly composeProject: string;
+  readonly service: string;
+  readonly signal: string;
+  readonly containerId?: string;
+}): string {
+  return JSON.stringify({
+    Type: "container",
+    Action: "kill",
+    Actor: {
+      ID: opts.containerId ?? `cid-${opts.service}`,
+      Attributes: {
+        "com.docker.compose.project": opts.composeProject,
+        "com.docker.compose.service": opts.service,
+        signal: opts.signal,
+      },
+    },
+  });
+}
+
 function makeDieEventJson(opts: {
   readonly composeProject: string;
   readonly service: string;
   readonly exitCode: string;
+  readonly containerId?: string;
 }): string {
   return JSON.stringify({
     Type: "container",
     Action: "die",
     Actor: {
-      ID: `cid-${opts.service}`,
+      ID: opts.containerId ?? `cid-${opts.service}`,
       Attributes: {
         "com.docker.compose.project": opts.composeProject,
         "com.docker.compose.service": opts.service,
@@ -268,6 +289,18 @@ function makeDieEventJson(opts: {
       },
     },
   });
+}
+
+function makeTimeoutKillEventsJson(opts: {
+  readonly composeProject: string;
+  readonly service: string;
+  readonly containerId?: string;
+}): string {
+  return [
+    makeKillEventJson({ ...opts, signal: "15" }),
+    makeKillEventJson({ ...opts, signal: "9" }),
+    makeDieEventJson({ ...opts, exitCode: "137" }),
+  ].join("\n");
 }
 
 describe("compose down stop timeout validation and cap", () => {
@@ -346,7 +379,7 @@ describe("compose down stop timeout validation and cap", () => {
     expect(cfg.compose?.downTimeoutSeconds).toBe(4);
   });
 
-  test("keeps overall down cap at or above the 90s floor and bounds it at 15 minutes", () => {
+  test("keeps overall down cap at or above the 90s floor, derives it from real Compose stop chains and grace periods, and bounds it at 15 minutes", async () => {
     expect(DEFAULT_COMPOSE_DOWN_CAP_MS).toBe(90_000);
     expect(MAX_COMPOSE_DOWN_CAP_MS).toBe(900_000);
     expect(resolveComposeDownCapMs(undefined)).toBe(90_000);
@@ -356,10 +389,82 @@ describe("compose down stop timeout validation and cap", () => {
       expect(resolveComposeDownCapMs(low)).toBe(90_000);
     }
 
-    // Scales cleanly above 90 s for larger valid timeouts, capped at 900 s (not 3,630 s).
+    // Without a graph, scales cleanly above 90 s and caps at 900 s (not 3,630 s).
     expect(resolveComposeDownCapMs(60)).toBe(150_000);
     expect(resolveComposeDownCapMs(300)).toBe(630_000);
     expect(resolveComposeDownCapMs(600)).toBe(900_000);
+
+    // Real 7-service dependency chain with --timeout 60 needs 420 s + 30 s = 450 s (not 390 s).
+    const chainFixture = await createComposeFixture({
+      composeYaml: [
+        "services:",
+        "  s1:",
+        "    image: alpine",
+        "    depends_on: [s2]",
+        "  s2:",
+        "    image: alpine",
+        "    depends_on:",
+        "      s3:",
+        "        condition: service_started",
+        "  s3:",
+        "    image: alpine",
+        "    depends_on: [s4]",
+        "  s4:",
+        "    image: alpine",
+        "    depends_on: [s5]",
+        "  s5:",
+        "    image: alpine",
+        "    depends_on: [s6]",
+        "  s6:",
+        "    image: alpine",
+        "    depends_on: [s7]",
+        "  s7:",
+        "    image: alpine",
+        "",
+      ].join("\n"),
+    });
+    const chainMeta = await readComposeServiceStopMeta(
+      join(chainFixture.projectDir, "docker-compose.yml")
+    );
+    expect(chainMeta).not.toBeNull();
+    expect(resolveComposeDownCapMs(60, { graph: chainMeta! })).toBe(450_000);
+    // Still bounded by the 15-minute hard ceiling even on deep chains with large timeouts.
+    expect(resolveComposeDownCapMs(300, { graph: chainMeta! })).toBe(900_000);
+
+    // Single service with stop_grace_period: 2m and NO --timeout flag gets 120 s + 30 s = 150 s (not 90 s).
+    const longGraceFixture = await createComposeFixture({
+      composeYaml: [
+        "services:",
+        "  db:",
+        "    image: postgres:17-alpine",
+        "    stop_grace_period: 2m",
+        "  api:",
+        "    image: alpine",
+        "",
+      ].join("\n"),
+    });
+    const longGraceMeta = await readComposeServiceStopMeta(
+      join(longGraceFixture.projectDir, "docker-compose.yml")
+    );
+    expect(resolveComposeDownCapMs(undefined, { graph: longGraceMeta! })).toBe(
+      150_000
+    );
+
+    // Cyclic depends_on never infinite-loops and safely sums service grace periods.
+    const cyclicGraph = {
+      defined: new Set(["a", "b"]),
+      serviceGraceMs: new Map([
+        ["a", 45_000],
+        ["b", 45_000],
+      ]),
+      dependsOn: new Map([
+        ["a", ["b"]],
+        ["b", ["a"]],
+      ]),
+    };
+    expect(resolveComposeDownCapMs(undefined, { graph: cyclicGraph })).toBe(
+      120_000
+    );
 
     expect(() => resolveComposeDownCapMs(-1)).toThrow(HackCliError);
     expect(() => resolveComposeDownCapMs(601)).toThrow(HackCliError);
@@ -495,22 +600,26 @@ describe("compose down stop timeout validation and cap", () => {
     });
     expect(await readDockerCalls(badCfgFixture.dockerLogPath)).toHaveLength(0);
 
-    // 3. Native backend refuses --timeout cleanly without calling Docker.
+    // 3. Native backend refuses --timeout with E_USAGE even without a native runtime binary installed.
     const nativeFixture = await createComposeFixture();
     const nativeRun = await runCli({
-      args: ["down", "--timeout", "2", "--json"],
+      args: ["down", "--timeout", "1", "--json"],
       cwd: nativeFixture.root,
       homeDir: nativeFixture.homeDir,
       binDir: nativeFixture.binDir,
       extraEnv: {
         HACK_RUNTIME_BACKEND: "native",
-        HACK_NATIVE_BINARY: "/nonexistent-native-binary",
       },
     });
     expect(nativeRun.exitCode).toBe(1);
-    const nativeCombined = `${nativeRun.stdout}\n${nativeRun.stderr}`;
-    expect(nativeCombined).toContain("--timeout");
-    expect(nativeCombined).toContain("Native down");
+    const nativeJson = JSON.parse(nativeRun.stdout) as {
+      readonly ok: boolean;
+      readonly error: { readonly code: string; readonly message: string };
+    };
+    expect(nativeJson.ok).toBe(false);
+    expect(nativeJson.error.code).toBe("E_USAGE");
+    expect(nativeJson.error.message).toContain("--timeout");
+    expect(nativeJson.error.message).toContain("Native down");
     expect(await readDockerCalls(nativeFixture.dockerLogPath)).toHaveLength(0);
   }, 60_000);
 });
@@ -587,7 +696,8 @@ describe("lifecycle tmux interrupt bounded poll and forced retirement", () => {
     expect(result).toEqual([[999]]);
     expect(sleeps).toEqual([25, 25, 10]);
     expect(nowMs - 10_000).toBe(60);
-    expect(reads).toBe(4);
+    // Reads at t=0, t=25, t=50; does not launch a new pane read once t=60 reaches the grace deadline.
+    expect(reads).toBe(3);
   });
 
   test("stops immediately if assertFresh throws during polling", async () => {
@@ -612,6 +722,47 @@ describe("lifecycle tmux interrupt bounded poll and forced retirement", () => {
       })
     ).rejects.toThrow("ownership displaced");
     expect(sleeps).toEqual([LIFECYCLE_TMUX_INTERRUPT_POLL_INTERVAL_MS]);
+  });
+
+  test("bounds stalling pane reads to the grace deadline and preserves last known surviving panes", async () => {
+    const seenTimeouts: number[] = [];
+    let calls = 0;
+    const t0 = performance.now();
+    const result = await waitForInterruptedTmuxPanes({
+      windowNames: ["worker"],
+      graceMs: 80,
+      pollIntervalMs: 10,
+      readPanes: async (_windowName, readOpts) => {
+        calls += 1;
+        if (readOpts?.timeoutMs !== undefined) {
+          seenTimeouts.push(readOpts.timeoutMs);
+        }
+        if (calls === 1) {
+          return [4242];
+        }
+        // Simulate a wedged tmux list-panes that stalls far past the grace deadline.
+        await Bun.sleep(5000);
+        return [];
+      },
+    });
+    const elapsedMs = performance.now() - t0;
+    expect(elapsedMs).toBeLessThan(400);
+    expect(result).toEqual([[4242]]);
+    expect(seenTimeouts.length).toBeGreaterThanOrEqual(2);
+    expect(seenTimeouts.every((ms) => ms > 0 && ms <= 80)).toBe(true);
+
+    // Even if the very first read stalls, waitForInterruptedTmuxPanes still settles within graceMs.
+    const tFirst = performance.now();
+    const firstStall = await waitForInterruptedTmuxPanes({
+      windowNames: ["worker"],
+      graceMs: 60,
+      readPanes: async () => {
+        await Bun.sleep(5000);
+        return [9999];
+      },
+    });
+    expect(performance.now() - tFirst).toBeLessThan(350);
+    expect(firstStall).toEqual([]);
   });
 
   test("stopLifecycleProcessController polls tmux grace and passes surviving panes to forced retirement", async () => {
@@ -797,9 +948,18 @@ describe("compose down slow-stop probe, persistence, cap hints, and hack doctor"
       return {
         exitCode: 0,
         stdout: [
-          makeDieEventJson({
+          makeTimeoutKillEventsJson({
             composeProject: "demo",
             service: "slow",
+          }),
+          makeKillEventJson({
+            composeProject: "demo",
+            service: "self-137",
+            signal: "15",
+          }),
+          makeDieEventJson({
+            composeProject: "demo",
+            service: "self-137",
             exitCode: "137",
           }),
           makeDieEventJson({
@@ -807,10 +967,9 @@ describe("compose down slow-stop probe, persistence, cap hints, and hack doctor"
             service: "clean",
             exitCode: "0",
           }),
-          makeDieEventJson({
+          makeTimeoutKillEventsJson({
             composeProject: "other-project",
             service: "ignored",
-            exitCode: "137",
           }),
         ].join("\n"),
         stderr: "",
@@ -844,6 +1003,22 @@ describe("compose down slow-stop probe, persistence, cap hints, and hack doctor"
     expect(cleanTimeout1.probed).toBe(false);
     expect(calls).toHaveLength(0);
 
+    // Short stop_grace_period: 1s with no flag probes and detects SIGKILLed service (not self-137).
+    const slow1s = await observeComposeDownSlowStops({
+      composeProject: "demo",
+      downElapsedMs: 1700,
+      minServiceGraceMs: 1000,
+      cwd: "/tmp",
+      execImpl,
+    });
+    expect(slow1s).toEqual({
+      status: "ok",
+      probed: true,
+      exited137: ["slow"],
+      exitedClean: ["clean", "self-137"],
+    });
+    calls.length = 0;
+
     // 3s stop_grace_period taking 4.1 s with no flag: uses daemon SystemTime (nanosecond --until, skew-free --since).
     const slow3s = await observeComposeDownSlowStops({
       composeProject: "demo",
@@ -856,7 +1031,7 @@ describe("compose down slow-stop probe, persistence, cap hints, and hack doctor"
       status: "ok",
       probed: true,
       exited137: ["slow"],
-      exitedClean: ["clean"],
+      exitedClean: ["clean", "self-137"],
     });
     expect(calls).toHaveLength(2);
     expect(calls[0]?.cmd).toEqual([
@@ -881,6 +1056,8 @@ describe("compose down slow-stop probe, persistence, cap hints, and hack doctor"
       "2030-01-01T12:00:10.462820446Z",
       "--filter",
       "type=container",
+      "--filter",
+      "event=kill",
       "--filter",
       "event=die",
       "--filter",
@@ -909,6 +1086,8 @@ describe("compose down slow-stop probe, persistence, cap hints, and hack doctor"
       "-1s",
       "--filter",
       "type=container",
+      "--filter",
+      "event=kill",
       "--filter",
       "event=die",
       "--filter",
@@ -1049,10 +1228,9 @@ describe("compose down slow-stop probe, persistence, cap hints, and hack doctor"
       nowMs: t0,
       execImpl: async () => ({
         exitCode: 0,
-        stdout: makeDieEventJson({
+        stdout: makeTimeoutKillEventsJson({
           composeProject: "demo",
           service: "traps-term",
-          exitCode: "137",
         }),
         stderr: "",
       }),
@@ -1118,10 +1296,9 @@ describe("compose down slow-stop probe, persistence, cap hints, and hack doctor"
       },
       dockerConfig: {
         downDelayMs: 1050,
-        eventsStdout: `${makeDieEventJson({
+        eventsStdout: `${makeTimeoutKillEventsJson({
           composeProject: "ro-demo",
           service: "api",
-          exitCode: "137",
         })}\n`,
       },
     });
@@ -1168,10 +1345,9 @@ describe("compose down slow-stop probe, persistence, cap hints, and hack doctor"
 
   test("overall cap exit 124 emits slow-stop or cap explanation in both text and JSON modes", async () => {
     const fixture = await createComposeFixture({ name: "cap-demo" });
-    const dieEvent = `${makeDieEventJson({
+    const dieEvent = `${makeTimeoutKillEventsJson({
       composeProject: "cap-demo",
       service: "api",
-      exitCode: "137",
     })}\n`;
 
     // Exit 124 with exit-137 event in --json mode.
@@ -1226,31 +1402,46 @@ describe("compose down slow-stop probe, persistence, cap hints, and hack doctor"
     );
   }, 60_000);
 
-  test("parseComposeDownDieEvents and buildLifecycleJsonData separate exit 137 from clean exits", () => {
+  test("parseComposeDownDieEvents and buildLifecycleJsonData separate SIGKILLed exit 137 from self-exit-137 and clean exits", () => {
     const parsed = parseComposeDownDieEvents({
       composeProject: "demo",
       stdout: [
-        makeDieEventJson({
+        makeTimeoutKillEventsJson({
           composeProject: "demo",
           service: "worker",
-          exitCode: "137",
+          containerId: "cid-worker-1",
         }),
         makeDieEventJson({
           composeProject: "demo",
           service: "api",
           exitCode: "0",
+          containerId: "cid-api-1",
         }),
-        // If a service died 137 AND another replica exited 0, 137 wins.
+        // Self-exiting 137 on SIGTERM without a Docker kill signal=9 is NOT a timeout SIGKILL.
+        makeKillEventJson({
+          composeProject: "demo",
+          service: "self-137",
+          signal: "15",
+          containerId: "cid-self-137",
+        }),
+        makeDieEventJson({
+          composeProject: "demo",
+          service: "self-137",
+          exitCode: "137",
+          containerId: "cid-self-137",
+        }),
+        // If a service died 137 after SIGKILL AND another replica exited 0, 137 wins.
         makeDieEventJson({
           composeProject: "demo",
           service: "worker",
           exitCode: "0",
+          containerId: "cid-worker-2",
         }),
       ].join("\n"),
     });
     expect(parsed).toEqual({
       exited137: ["worker"],
-      exitedClean: ["api"],
+      exitedClean: ["api", "self-137"],
     });
 
     const hints = buildSlowStopHints(parsed.exited137);

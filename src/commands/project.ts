@@ -236,6 +236,7 @@ import {
 } from "../lib/compose-down-confirmation.ts";
 import {
   finalizeComposeDownSlowStops,
+  readComposeServiceStopMeta,
   type SlowStopHint,
 } from "../lib/compose-down-slow-stop.ts";
 import {
@@ -8189,36 +8190,39 @@ async function handleDown(
   input: Parameters<typeof handleDownUnlocked>[0]
 ): Promise<number> {
   parseRequestedTarget({ raw: input.args.options.target });
-  const flagTimeoutSeconds =
-    process.env.HACK_RUNTIME_BACKEND === "native"
-      ? undefined
-      : parseComposeDownTimeoutFlag(input.args.options.timeout);
+  const isNativeBackend =
+    process.env.HACK_RUNTIME_BACKEND?.trim().toLowerCase() === "native";
+  if (isNativeBackend && input.args.options.timeout !== undefined) {
+    refuseNativeDownOptions(input.args.options);
+  }
+  const flagTimeoutSeconds = isNativeBackend
+    ? undefined
+    : parseComposeDownTimeoutFlag(input.args.options.timeout);
   // Publish stop intent before waiting for an earlier start to release its lock.
-  const resolvedDownTarget =
-    process.env.HACK_RUNTIME_BACKEND === "native"
-      ? undefined
-      : await resolveFinalAutostartDownTarget(
-          {
-            cwd: input.ctx.cwd,
-            path: input.args.options.path,
-            project: input.args.options.project,
-            branch: input.args.options.branch,
-            writeNotice: (notice) =>
-              writeDownNotice({
-                json: input.args.options.json === true,
-                ...notice,
-              }),
-          },
-          {
-            isLocalTarget: async (project) =>
-              (
-                await resolveProjectLifecycleTarget({
-                  project,
-                  requestedTarget: input.args.options.target,
-                })
-              ).resolvedTarget === "local",
-          }
-        );
+  const resolvedDownTarget = isNativeBackend
+    ? undefined
+    : await resolveFinalAutostartDownTarget(
+        {
+          cwd: input.ctx.cwd,
+          path: input.args.options.path,
+          project: input.args.options.project,
+          branch: input.args.options.branch,
+          writeNotice: (notice) =>
+            writeDownNotice({
+              json: input.args.options.json === true,
+              ...notice,
+            }),
+        },
+        {
+          isLocalTarget: async (project) =>
+            (
+              await resolveProjectLifecycleTarget({
+                project,
+                requestedTarget: input.args.options.target,
+              })
+            ).resolvedTarget === "local",
+        }
+      );
   const pinned = {
     ...input,
     flagTimeoutSeconds,
@@ -8638,6 +8642,9 @@ async function runDownCommand({
   let helperReleaseFailures: readonly string[] = [];
   let downStartedPerfMs = 0;
   let downElapsedMs = 0;
+  let serviceStopMeta: Awaited<ReturnType<typeof readComposeServiceStopMeta>> =
+    null;
+  let downCapMs: number | undefined;
   try {
     const beforeCode = await runLifecycleCommands({
       title: "Lifecycle (down before)",
@@ -8665,6 +8672,12 @@ async function runDownCommand({
       composeProject: lifecycleComposeProject,
     });
     reportLifecycleProgress({ service: null, phase: "stopping" });
+    serviceStopMeta = await readComposeServiceStopMeta(
+      project.composeFile
+    ).catch(() => null);
+    downCapMs = resolveComposeDownCapMs(downTimeoutSeconds, {
+      graph: serviceStopMeta ?? undefined,
+    });
     downStartedPerfMs = performance.now();
     code = await composeRuntimeBackend.down({
       composeFiles: [project.composeFile],
@@ -8674,6 +8687,7 @@ async function runDownCommand({
       env: lifecycleEnv,
       routeStdoutToStderr: json,
       timeoutSeconds: downTimeoutSeconds,
+      capMs: downCapMs,
     });
     if (code === 0) {
       stopObservation = await finishInstanceStop({
@@ -8702,10 +8716,15 @@ async function runDownCommand({
   if (code !== 0) {
     let capDetail: Record<string, unknown> = {};
     if (code === 124) {
-      const capMs = resolveComposeDownCapMs(downTimeoutSeconds);
+      const capMs =
+        downCapMs ??
+        resolveComposeDownCapMs(downTimeoutSeconds, {
+          graph: serviceStopMeta ?? undefined,
+        });
       const slowStops = await finalizeComposeDownSlowStops({
         projectDir: project.projectDir,
         composeFile: project.composeFile,
+        serviceStopMeta,
         composeProject: effectiveComposeProject,
         downElapsedMs,
         windowLookbackMs: Math.max(
@@ -8804,6 +8823,7 @@ async function runDownCommand({
   const slowStops = await finalizeComposeDownSlowStops({
     projectDir: project.projectDir,
     composeFile: project.composeFile,
+    serviceStopMeta,
     composeProject: effectiveComposeProject,
     downElapsedMs,
     windowLookbackMs: Math.max(

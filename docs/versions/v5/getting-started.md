@@ -165,10 +165,12 @@ HACK_COMPOSE_STARTUP_TIMEOUT_MS=300000 hack up -d
 period passed to `docker compose down --timeout` in both `hack down` and the
 down phase of `hack restart` (invalid values refuse with `E_CONFIG_INVALID`),
 and `hack down --timeout <seconds>` overrides it for one run. Leaving both unset
-keeps Docker Compose's default 10-second grace period. If `hack down` feels slow
-and reports a service exiting `137`, that service ignored `SIGTERM` until Docker
-sent `SIGKILL`; add `init: true` to the service in `.hack/docker-compose.yml` or
-handle `SIGTERM`/`SIGINT` so it stops immediately.
+keeps Docker Compose's default 10-second grace period (`--timeout 0` sends
+immediate `SIGKILL` and skips slow-stop hints and doctor recording). If
+`hack down` feels slow and reports a service killed after the stop grace period
+(exit `137`), that service ignored `SIGTERM` until Docker sent `SIGKILL`; add
+`init: true` to the service in `.hack/docker-compose.yml` or handle
+`SIGTERM`/`SIGINT` so it stops immediately.
 
 If the start stops at the ceiling while a one-shot still runs, the
 `E_STARTUP_TIMEOUT` error names that service. The one-shot keeps running, but

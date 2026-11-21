@@ -450,8 +450,12 @@ from `0` to `600` (no whitespace or leading zeros); invalid values are refused
 (`E_USAGE` for the flag, `E_CONFIG_INVALID` for the config key in both `down`
 and `restart`) and never clamped. Leaving both unset preserves Docker Compose's
 default behaviour (no `--timeout` flag is passed). The overall subprocess cap
-for `docker compose down` stays at least 90 seconds, scales above it for larger
-stop timeouts up to 15 minutes, and is independent of the start-up budget.
+for `docker compose down` stays at least 90 seconds, scales from the project's
+longest `depends_on` stop chain and per-service `stop_grace_period` (or
+explicit `--timeout`) plus 30 seconds of overhead, and is capped at 15 minutes
+(`900` seconds); external Compose `include:` / override files not present in
+`.hack/docker-compose.yml` and chains longer than 15 minutes remain bounded by
+that ceiling.
 
 ### Why is `hack down` slow?
 
@@ -462,20 +466,26 @@ development containers run a shell or runtime as PID 1 that does not handle
 `SIGTERM`, so every dependency level with such a service waits the full grace
 period and exits with code `137` (`128 + 9`).
 
-When `hack down` finishes faster than the smallest effective stop grace period
-(`--timeout`, `compose.downTimeoutSeconds`, or the smallest positive
+When `hack down` finishes faster than the smallest positive effective stop grace
+period (`--timeout`, `compose.downTimeoutSeconds`, or the smallest positive
 `stop_grace_period` in Compose, defaulting to 10 seconds), it makes zero extra
-Docker calls (unless verifying a previously recorded slow stop). Once elapsed
-time reaches that grace period — or if the overall cap ends `down` — it runs
-one bounded `docker events` check (note: Docker Engine keeps a bounded in-memory
-event ring, so very long or noisy teardowns can evict early events). If a
-container exited `137`, `hack down` prints a one-line hint naming the service
-(or reports it in `data.slowStops` and `data.warnings` under `--json`, and in
-`error.detail` when the overall cap fires) and records it for `hack doctor`'s
-`compose slow stops` check (expiring after 7 days or once a subsequent `hack
-down` confirms the service exited cleanly). Fix the root cause by adding
-`init: true` to that service in `.hack/docker-compose.yml` or, if `init: true`
-is already set, handling `SIGTERM`/`SIGINT` in the process or adjusting
+Docker calls (unless verifying a previously recorded slow stop). `--timeout 0`
+(or `stop_grace_period: 0s` on every service) sends immediate `SIGKILL` with no
+grace period and intentionally skips slow-stop probing and doctor recording.
+Once elapsed time reaches a positive grace period — or if the overall cap ends
+`down` — it queries the engine's `SystemTime` and runs one bounded
+`docker events` check for container `kill` (`signal=9`/`SIGKILL`) and `die`
+(`exitCode=137`) events (note: Docker Engine keeps a bounded in-memory event
+ring, so very long or noisy teardowns can evict early events). Requiring the
+engine's `SIGKILL` event prevents misreporting a service that handled `SIGTERM`
+and exited `137` on its own. When a container was killed after its grace period,
+`hack down` prints a one-line hint naming the service (or reports it in
+`data.slowStops` and `data.warnings` under `--json`, and in `error.detail` when
+the overall cap fires) and records it for `hack doctor`'s `compose slow stops`
+check (expiring after 7 days or once a subsequent `hack down` confirms the
+service stopped without `SIGKILL`). Fix the root cause by adding `init: true`
+to that service in `.hack/docker-compose.yml` or, if `init: true` is already
+set, handling `SIGTERM`/`SIGINT` in the process or adjusting
 `stop_signal`/`stop_grace_period`; use `--timeout <seconds>` or
 `compose.downTimeoutSeconds` when you also want a shorter or longer stop grace
 period.

@@ -55,6 +55,10 @@ export type ProjectSlowStopEntry = {
 export type ComposeServiceStopMeta = {
   readonly defined: ReadonlySet<string>;
   readonly withInit: ReadonlySet<string>;
+  /** Effective stop grace period (ms) per service (`stop_grace_period`, defaulting to 10 s). */
+  readonly serviceGraceMs: ReadonlyMap<string, number>;
+  /** Static `depends_on` edges per service (filtered to defined services). */
+  readonly dependsOn: ReadonlyMap<string, readonly string[]>;
   /** Smallest positive effective stop grace period (ms) across defined services, or `null` if all are 0. */
   readonly minPositiveGraceMs: number | null;
 };
@@ -99,7 +103,56 @@ export function parseComposeDurationMs(raw: unknown): number | undefined {
   return Math.round(totalMs);
 }
 
-/** Read Compose service names, `init: true` flags, and smallest positive `stop_grace_period`. */
+function parseComposeDependsOn(raw: unknown): readonly string[] {
+  if (Array.isArray(raw)) {
+    return raw.filter(
+      (entry): entry is string =>
+        typeof entry === "string" && entry.trim().length > 0
+    );
+  }
+  if (isRecord(raw)) {
+    return Object.keys(raw).filter((name) => name.trim().length > 0);
+  }
+  return [];
+}
+
+function parseComposeServiceStopEntry(opts: {
+  readonly rawService: unknown;
+  readonly defaultGraceMs: number;
+}): {
+  readonly hasInit: boolean;
+  readonly effectiveGraceMs: number;
+  readonly dependsOn: readonly string[];
+} {
+  const serviceObj = isRecord(opts.rawService) ? opts.rawService : null;
+  const configuredGraceMs = serviceObj
+    ? parseComposeDurationMs(serviceObj.stop_grace_period)
+    : undefined;
+  return {
+    hasInit: serviceObj?.init === true,
+    effectiveGraceMs: configuredGraceMs ?? opts.defaultGraceMs,
+    dependsOn:
+      serviceObj?.depends_on !== undefined
+        ? parseComposeDependsOn(serviceObj.depends_on)
+        : [],
+  };
+}
+
+function filterKnownDependencies(opts: {
+  readonly rawDependsOn: ReadonlyMap<string, readonly string[]>;
+  readonly defined: ReadonlySet<string>;
+}): Map<string, readonly string[]> {
+  const dependsOn = new Map<string, readonly string[]>();
+  for (const [serviceName, deps] of opts.rawDependsOn) {
+    const known = deps.filter((dep) => opts.defined.has(dep));
+    if (known.length > 0) {
+      dependsOn.set(serviceName, known);
+    }
+  }
+  return dependsOn;
+}
+
+/** Read Compose service names, `init: true` flags, per-service `stop_grace_period`, and `depends_on` graph. */
 export async function readComposeServiceStopMeta(
   composeFile: string
 ): Promise<ComposeServiceStopMeta | null> {
@@ -118,27 +171,35 @@ export async function readComposeServiceStopMeta(
   }
   const defined = new Set<string>();
   const withInit = new Set<string>();
+  const serviceGraceMs = new Map<string, number>();
+  const rawDependsOn = new Map<string, readonly string[]>();
   const defaultGraceMs = DEFAULT_DOCKER_STOP_TIMEOUT_SECONDS * 1000;
   let minPositiveGraceMs: number | null = null;
 
   for (const [serviceName, rawService] of Object.entries(parsed.services)) {
     defined.add(serviceName);
-    const serviceObj = isRecord(rawService) ? rawService : null;
-    if (serviceObj?.init === true) {
+    const entry = parseComposeServiceStopEntry({ rawService, defaultGraceMs });
+    if (entry.hasInit) {
       withInit.add(serviceName);
     }
-    const configuredGraceMs = serviceObj
-      ? parseComposeDurationMs(serviceObj.stop_grace_period)
-      : undefined;
-    const effectiveGraceMs = configuredGraceMs ?? defaultGraceMs;
-    if (
-      effectiveGraceMs > 0 &&
-      (minPositiveGraceMs === null || effectiveGraceMs < minPositiveGraceMs)
-    ) {
-      minPositiveGraceMs = effectiveGraceMs;
+    serviceGraceMs.set(serviceName, entry.effectiveGraceMs);
+    if (entry.dependsOn.length > 0) {
+      rawDependsOn.set(serviceName, entry.dependsOn);
+    }
+    if (entry.effectiveGraceMs > 0) {
+      minPositiveGraceMs =
+        minPositiveGraceMs === null
+          ? entry.effectiveGraceMs
+          : Math.min(minPositiveGraceMs, entry.effectiveGraceMs);
     }
   }
-  return { defined, withInit, minPositiveGraceMs };
+  return {
+    defined,
+    withInit,
+    serviceGraceMs,
+    dependsOn: filterKnownDependencies({ rawDependsOn, defined }),
+    minPositiveGraceMs,
+  };
 }
 
 /**
@@ -196,9 +257,62 @@ export function slowStopProbeThresholdMs(opts?: {
   return DEFAULT_DOCKER_STOP_TIMEOUT_SECONDS * 1000;
 }
 
+function isSigkillSignal(signal: string | undefined): boolean {
+  if (!signal) {
+    return false;
+  }
+  const normalized = signal.trim().toUpperCase();
+  return (
+    normalized === "9" || normalized === "SIGKILL" || normalized === "KILL"
+  );
+}
+
+type ParsedContainerEvent =
+  | { readonly kind: "sigkill"; readonly containerId: string }
+  | {
+      readonly kind: "die";
+      readonly containerId: string;
+      readonly service: string;
+      readonly exitCode: string;
+    };
+
+function parseProjectContainerEventRow(opts: {
+  readonly row: Record<string, unknown>;
+  readonly composeProject: string;
+}): ParsedContainerEvent | null {
+  if (getString(opts.row, "Type") !== "container") {
+    return null;
+  }
+  const action = getString(opts.row, "Action");
+  if (action !== "kill" && action !== "die") {
+    return null;
+  }
+  const actor = isRecord(opts.row.Actor) ? opts.row.Actor : null;
+  const attributes =
+    actor && isRecord(actor.Attributes) ? actor.Attributes : null;
+  if (
+    !attributes ||
+    getString(attributes, "com.docker.compose.project") !== opts.composeProject
+  ) {
+    return null;
+  }
+  const containerId = actor ? (getString(actor, "ID")?.trim() ?? "") : "";
+  if (action === "kill") {
+    return containerId && isSigkillSignal(getString(attributes, "signal"))
+      ? { kind: "sigkill", containerId }
+      : null;
+  }
+  const service = getString(attributes, "com.docker.compose.service")?.trim();
+  const exitCode = getString(attributes, "exitCode")?.trim();
+  return service && exitCode
+    ? { kind: "die", containerId, service, exitCode }
+    : null;
+}
+
 /**
- * Parse `docker events --filter type=container --filter event=die --format '{{json .}}'`
- * into services that died with exit code 137 vs services that exited with any other code.
+ * Parse `docker events --filter type=container --filter event=kill --filter event=die --format '{{json .}}'`
+ * into services killed with SIGKILL (`signal=9`/`SIGKILL`) and exiting 137 vs services that stopped
+ * without a timeout SIGKILL (including services that handled SIGTERM and exited 137 on their own).
  */
 export function parseComposeDownDieEvents(opts: {
   readonly stdout: string;
@@ -207,35 +321,40 @@ export function parseComposeDownDieEvents(opts: {
   readonly exited137: readonly string[];
   readonly exitedClean: readonly string[];
 } {
+  const sigkilledContainers = new Set<string>();
+  const dieEvents: {
+    readonly containerId: string;
+    readonly service: string;
+    readonly exitCode: string;
+  }[] = [];
+
+  for (const row of parseJsonLines(opts.stdout)) {
+    const parsed = parseProjectContainerEventRow({
+      row,
+      composeProject: opts.composeProject,
+    });
+    if (!parsed) {
+      continue;
+    }
+    if (parsed.kind === "sigkill") {
+      sigkilledContainers.add(parsed.containerId);
+    } else {
+      dieEvents.push(parsed);
+    }
+  }
+
   const exited137 = new Set<string>();
   const exitedClean = new Set<string>();
-  for (const row of parseJsonLines(opts.stdout)) {
-    if (getString(row, "Type") !== "container") {
-      continue;
-    }
-    if (getString(row, "Action") !== "die") {
-      continue;
-    }
-    const actor = isRecord(row.Actor) ? row.Actor : null;
-    const attributes =
-      actor && isRecord(actor.Attributes) ? actor.Attributes : null;
-    if (
-      !attributes ||
-      getString(attributes, "com.docker.compose.project") !==
-        opts.composeProject
-    ) {
-      continue;
-    }
-    const service = getString(attributes, "com.docker.compose.service")?.trim();
-    const exitCode = getString(attributes, "exitCode")?.trim();
-    if (!(service && exitCode)) {
-      continue;
-    }
-    if (exitCode === String(COMPOSE_DOWN_SIGKILL_EXIT_CODE)) {
-      exited137.add(service);
-      exitedClean.delete(service);
-    } else if (!exited137.has(service)) {
-      exitedClean.add(service);
+  for (const ev of dieEvents) {
+    const killedAtTimeout =
+      ev.exitCode === String(COMPOSE_DOWN_SIGKILL_EXIT_CODE) &&
+      ev.containerId.length > 0 &&
+      sigkilledContainers.has(ev.containerId);
+    if (killedAtTimeout) {
+      exited137.add(ev.service);
+      exitedClean.delete(ev.service);
+    } else if (!exited137.has(ev.service)) {
+      exitedClean.add(ev.service);
     }
   }
   return {
@@ -295,15 +414,17 @@ async function resolveDockerEventsWindow(opts: {
 }
 
 /**
- * Observe container `die` events for a `docker compose down` window using a bounded
+ * Observe container `kill` + `die` events for a `docker compose down` window using a bounded
  * daemon-clock query (`docker info --format '{{.SystemTime}}'` + `docker events`).
  *
  * Sampling the daemon's own nanosecond `SystemTime` avoids host-vs-engine clock skew,
  * returns without blocking, and avoids Docker's whole-second truncation on `--until 0s`
- * (which otherwise drops `die` events in the final second). Falls back to `--since <N>s --until -1s`
- * if `docker info` is unavailable.
+ * (which otherwise drops `die` events in the final second). Requiring a matching container
+ * `kill` with signal `9`/`SIGKILL` before `die` (`exitCode=137`) prevents misreporting a
+ * container that handled SIGTERM and exited 137 on its own.
+ * Falls back to `--since <N>s --until -1s` if `docker info` is unavailable.
  * Note: Docker Engine keeps a bounded in-memory event ring (e.g. 256 events), so very long
- * or noisy teardowns can evict earlier `die` events before this post-down check runs.
+ * or noisy teardowns can evict earlier events before this post-down check runs.
  */
 export async function observeComposeDownSlowStops(opts: {
   readonly composeProject: string;
@@ -356,6 +477,8 @@ export async function observeComposeDownSlowStops(opts: {
     window.until,
     "--filter",
     "type=container",
+    "--filter",
+    "event=kill",
     "--filter",
     "event=die",
     "--filter",
@@ -547,6 +670,7 @@ async function writeProjectSlowStopsFile(opts: {
 export async function finalizeComposeDownSlowStops(opts: {
   readonly projectDir: string;
   readonly composeFile: string;
+  readonly serviceStopMeta?: ComposeServiceStopMeta | null;
   readonly composeProject: string;
   readonly downElapsedMs: number;
   readonly windowLookbackMs?: number;
@@ -562,7 +686,9 @@ export async function finalizeComposeDownSlowStops(opts: {
 }): Promise<readonly SlowStopHint[]> {
   try {
     const [meta, existingEntries] = await Promise.all([
-      readComposeServiceStopMeta(opts.composeFile).catch(() => null),
+      opts.serviceStopMeta !== undefined
+        ? Promise.resolve(opts.serviceStopMeta)
+        : readComposeServiceStopMeta(opts.composeFile).catch(() => null),
       readProjectSlowStops({
         projectDir: opts.projectDir,
         nowMs: opts.nowMs,

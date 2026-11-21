@@ -137,6 +137,15 @@ fn requests_are_refused_before_admission_for_every_protocol_error() {
             json!({"v": 1, "id": "", "op": "service.status"}),
             "E_BAD_FRAME",
         ),
+        // Presence is what counts: an explicit null is refused too.
+        (
+            json!({"v": 1, "id": "1", "op": "service.status", "private": null}),
+            "E_PRIVATE_REFUSED",
+        ),
+        (
+            json!({"v": 1, "id": "1", "op": "service.status", "intent": null}),
+            "E_BAD_FRAME",
+        ),
     ] {
         assert_eq!(code(&ask(&mut stream, request)), expected);
     }
@@ -277,21 +286,216 @@ fn an_open_session_keeps_the_service_until_it_closes() {
 }
 
 #[test]
-fn after_retire_other_sessions_are_refused_and_never_admitted() {
+fn retire_ends_every_session_before_the_lock_is_released() {
     let root = Root::new();
     let (handle, _) = spawn(&root.0, Duration::from_secs(30));
-    let mut other = connect(&root.0);
-    hello(&mut other);
+    // One session keeps sending requests as fast as it can.
+    let mut busy = connect(&root.0);
+    hello(&mut busy);
+    let hammer = std::thread::spawn(move || {
+        let mut refused = 0;
+        loop {
+            let request = json!({"v": 1, "id": "9", "op": "service.status"});
+            let bytes = serde_json::to_vec(&request).unwrap();
+            if frame::write(&mut busy, &bytes, CONTROL_FRAME_LIMIT).is_err() {
+                return refused;
+            }
+            match frame::read(&mut busy, Duration::from_secs(5), CONTROL_FRAME_LIMIT) {
+                Ok(body) => {
+                    let reply: Value = serde_json::from_slice(&body).unwrap();
+                    if reply["ok"] == false {
+                        assert_eq!(code(&reply), "E_SERVICE_DRAINING");
+                        refused += 1;
+                    }
+                }
+                Err(_) => return refused,
+            }
+        }
+    });
+    // Another holds its session open without sending anything.
+    let mut quiet = connect(&root.0);
+    hello(&mut quiet);
     call(&root.0, "service.retire", json!({})).unwrap();
     assert_eq!(handle.join().unwrap().unwrap(), Outcome::Retired);
-    let refused = ask(
-        &mut other,
-        json!({"v": 1, "id": "9", "op": "service.status"}),
+    // serve has returned: no session thread is left to answer anyone.
+    hammer.join().unwrap();
+    assert_eq!(
+        frame::read(&mut quiet, Duration::from_secs(2), CONTROL_FRAME_LIMIT),
+        Err(frame::FrameError::Closed)
     );
-    assert_eq!(code(&refused), "E_SERVICE_DRAINING");
+    assert!(try_lock(&paths(&root.0).lock).unwrap().is_some());
     // The next start takes the freed lock and binds a fresh socket.
     let (handle, ready) = spawn(&root.0, Duration::from_secs(30));
     assert!(ready["ready"].is_object());
     call(&root.0, "service.retire", json!({})).unwrap();
     handle.join().unwrap().unwrap();
+}
+
+#[test]
+fn connections_queued_at_shutdown_are_refused_and_cannot_hold_it_open() {
+    let root = Root::new();
+    let paths = paths(&root.0);
+    let (listener, lock, id) = start(&paths).unwrap().unwrap();
+    let (shared, _wake) = prepare(
+        &paths,
+        Options {
+            idle: Duration::from_secs(30),
+        },
+        id,
+    )
+    .unwrap();
+    // Two clients connect, the service decides to stop before accepting them,
+    // and one of them asks it to retire.
+    let mut queued: Vec<_> = (0..2).map(|_| connect(&root.0)).collect();
+    shared.stop(Outcome::Idle);
+    let retire = json!({"v": 1, "id": "r", "op": "service.retire"});
+    for stream in &mut queued {
+        let bytes = serde_json::to_vec(&retire).unwrap();
+        frame::write(stream, &bytes, CONTROL_FRAME_LIMIT).unwrap();
+    }
+    let started = Instant::now();
+    assert_eq!(shut_down(&shared, listener), Outcome::Idle);
+    assert!(started.elapsed() < Duration::from_secs(3));
+    for stream in &mut queued {
+        // Either the refusal before admission, or the close that follows it.
+        if let Ok(body) = frame::read(stream, Duration::from_secs(2), CONTROL_FRAME_LIMIT) {
+            assert_eq!(
+                code(&serde_json::from_slice(&body).unwrap()),
+                "E_SERVICE_DRAINING"
+            );
+        }
+        assert_eq!(
+            frame::read(stream, Duration::from_secs(2), CONTROL_FRAME_LIMIT),
+            Err(frame::FrameError::Closed)
+        );
+    }
+    assert!(!paths.socket.exists());
+    drop(lock);
+}
+
+#[test]
+fn a_failure_after_bind_is_refused_and_leaves_no_socket() {
+    let root = Root::new();
+    let paths = paths(&root.0);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&paths.record)
+        .unwrap();
+    let (handle, refused) = spawn(&root.0, Duration::from_secs(30));
+    assert_eq!(refused, json!({"refused": {"code": "service_io"}}));
+    assert!(handle.join().unwrap().is_err());
+    assert!(paths.socket.symlink_metadata().is_err());
+    assert!(try_lock(&paths.lock).unwrap().is_some());
+}
+
+#[test]
+fn a_lock_file_that_is_not_private_or_is_a_symlink_is_refused() {
+    let root = Root::new();
+    let paths = paths(&root.0);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&paths.dir)
+        .unwrap();
+    std::fs::write(&paths.lock, b"").unwrap();
+    std::fs::set_permissions(&paths.lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let (handle, refused) = spawn(&root.0, Duration::from_secs(30));
+    assert_eq!(
+        refused,
+        json!({"refused": {"code": "service_lock_refused"}})
+    );
+    assert!(handle.join().unwrap().is_err());
+    std::fs::remove_file(&paths.lock).unwrap();
+    let target = root.0.join("elsewhere.lock");
+    std::fs::write(&target, b"").unwrap();
+    std::os::unix::fs::symlink(&target, &paths.lock).unwrap();
+    let (handle, refused) = spawn(&root.0, Duration::from_secs(30));
+    assert_eq!(
+        refused,
+        json!({"refused": {"code": "service_lock_refused"}})
+    );
+    assert!(handle.join().unwrap().is_err());
+    assert!(!paths.socket.exists());
+}
+
+#[test]
+fn a_client_never_reaches_another_homes_service_through_a_symlink() {
+    let (a, b) = (Root::new(), Root::new());
+    let (handle, ready) = spawn(&b.0, Duration::from_secs(30));
+    // Home A's service directory is a symlink to home B's.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(a.0.join("run"))
+        .unwrap();
+    std::os::unix::fs::symlink(paths(&b.0).dir, paths(&a.0).dir).unwrap();
+    assert_eq!(
+        call(&a.0, "service.retire", json!({})).unwrap_err().code,
+        "aliased_state"
+    );
+    let status = call(&b.0, "service.status", json!({})).unwrap();
+    assert_eq!(status["service"]["epoch"], ready["ready"]["epoch"]);
+    call(&b.0, "service.retire", json!({})).unwrap();
+    handle.join().unwrap().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_client_gives_up_on_a_full_backlog_within_its_deadline() {
+    use std::os::fd::FromRawFd;
+    let root = Root::new();
+    let paths = paths(&root.0);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&paths.dir)
+        .unwrap();
+    let listener = UnixListener::bind(&paths.socket).unwrap();
+    // A backlog of one (Linux lets listen shrink it), then fill it with
+    // non-blocking connections nobody accepts.
+    // SAFETY: re-listening on our own bound socket.
+    assert_eq!(
+        unsafe { libc::listen(std::os::fd::AsRawFd::as_raw_fd(&listener), 1) },
+        0
+    );
+    let mut pending = Vec::new();
+    for _ in 0..64 {
+        // SAFETY: plain socket creation, owned below.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK, 0) };
+        assert!(fd >= 0);
+        // SAFETY: a fresh descriptor, wrapped once.
+        let stream = unsafe { UnixStream::from_raw_fd(fd) };
+        // SAFETY: an all-zero sockaddr_un is valid; the path fits (checked above).
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (slot, byte) in address
+            .sun_path
+            .iter_mut()
+            .zip(paths.socket.as_os_str().as_encoded_bytes())
+        {
+            *slot = *byte as libc::c_char;
+        }
+        let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        // SAFETY: a valid address and length.
+        if unsafe { libc::connect(fd, (&address as *const libc::sockaddr_un).cast(), length) } != 0
+        {
+            break;
+        }
+        pending.push(stream);
+    }
+    let started = Instant::now();
+    let refused = super::client::call_within(
+        &root.0,
+        "service.status",
+        json!({}),
+        Duration::from_millis(300),
+    );
+    assert_eq!(refused.unwrap_err().code, "service_busy");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(listener);
 }

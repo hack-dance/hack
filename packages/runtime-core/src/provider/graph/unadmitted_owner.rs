@@ -44,7 +44,7 @@ fn verify_receipt(candidate: &Candidate, run: &str, expected: &str) -> Result<()
     let (_, receipt) = retained_startup::checked(candidate, run).map_err(|_| refused())?;
     let root = directory(candidate, run)?;
     let bytes = host_pin_recovery::read_raw(&root.join("state.json"), 1024 * 1024)?;
-    if format!("{:x}", Sha256::digest(&bytes)) != expected
+    if format!("{:x}", crate::Hex(Sha256::digest(&bytes))) != expected
         || receipt.phase != "stopped-data-retained"
         || receipt.normalized_input.is_none()
         || live_owner_cleanup::resumable_selection(candidate, &root, &receipt, true)?.is_some()

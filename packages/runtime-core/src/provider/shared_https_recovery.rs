@@ -30,7 +30,7 @@ fn hex(value: &str, len: usize) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 fn absent(path: &Path) -> Result<bool, CandidateError> {
     match fs::symlink_metadata(path) {

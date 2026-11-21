@@ -161,7 +161,7 @@ fn slot_key(namespace: &str, storage: &str) -> String {
     digest.update(namespace.as_bytes());
     digest.update([0]);
     digest.update(storage.as_bytes());
-    format!("persistent-{:x}", digest.finalize())
+    format!("persistent-{:x}", crate::Hex(digest.finalize()))
 }
 
 struct Guard<'a> {

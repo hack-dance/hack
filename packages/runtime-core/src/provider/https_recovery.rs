@@ -26,7 +26,7 @@ fn refused() -> CandidateError {
     )
 }
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 fn valid_hash(value: &str) -> bool {
     value.len() == 64
@@ -516,7 +516,7 @@ pub(in crate::provider) fn executable_hash(binary: &Path) -> Result<String, Cand
     {
         return Err(refused());
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(format!("{:x}", crate::Hex(hasher.finalize())))
 }
 
 fn socket_absent(socket: &Path) -> Result<(), CandidateError> {

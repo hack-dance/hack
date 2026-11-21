@@ -91,6 +91,8 @@ pub struct RuntimeStatus {
     /// provider (`socket_repairs`); absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repaired_sockets: Option<socket_repairs::RepairedSockets>,
+    /// Whether this process hashes SHA-256 with the CPU's instructions (`sha256_backend`).
+    pub hashing: crate::sha256_backend::Report,
 }
 
 fn boot_reclamation_policy() -> state::ReclamationPolicy {
@@ -975,6 +977,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             pool_idle: Some(false),
             guest_memory_peaks: None,
             repaired_sockets: None,
+            hashing: crate::sha256_backend::report(),
         });
     }
     let owner = Owner::load(candidate)?;
@@ -1046,6 +1049,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         )),
         persistent_disks_identified: owner.storage.is_some(),
         repaired_sockets: socket_repairs::report(&root(candidate), owner.process.as_ref()),
+        hashing: crate::sha256_backend::report(),
         guest_boot_id: owner.guest_boot_id,
         prepared_base: super::prepared_start::status(candidate),
         graph_runs: users.graph_runs,

@@ -77,7 +77,10 @@ pub(super) fn fingerprint(original: &[u8], normalized: &[u8]) -> Option<String> 
     let bytes = zeroize::Zeroizing::new(
         serde_json::to_vec(&("hack-hostname-raw-v1", original, normalized)).ok()?,
     );
-    Some(format!("{:x}", Sha256::digest(bytes.as_slice())))
+    Some(format!(
+        "{:x}",
+        crate::Hex(Sha256::digest(bytes.as_slice()))
+    ))
 }
 
 #[cfg(test)]

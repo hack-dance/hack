@@ -57,7 +57,9 @@ fn read_archive(path: &Path, expected: &str) -> Result<Vec<u8>, CandidateError> 
         .take(2 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)
         .map_err(state::io)?;
-    if bytes.len() as u64 != metadata.len() || format!("{:x}", Sha256::digest(&bytes)) != expected {
+    if bytes.len() as u64 != metadata.len()
+        || format!("{:x}", crate::Hex(Sha256::digest(&bytes))) != expected
+    {
         return Err(error("Networking archive size or pinned digest mismatch."));
     }
     Ok(bytes)
@@ -91,7 +93,9 @@ fn prepare_packages(
         .collect::<Result<Vec<_>, _>>()?;
     let identity = format!(
         "{:x}",
-        Sha256::digest(packages.iter().map(|(_, hash)| *hash).collect::<String>())
+        crate::Hex(Sha256::digest(
+            packages.iter().map(|(_, hash)| *hash).collect::<String>()
+        ))
     );
     let _lock = state::Lock::acquire(&candidate.state_root.join("run/smolvm"))?;
     let providers = candidate.state_root.join("providers");
@@ -158,7 +162,9 @@ pub(super) fn verify(candidate: &Candidate) -> Result<(), CandidateError> {
 pub(super) fn identity() -> String {
     format!(
         "{:x}",
-        Sha256::digest(PACKAGES.iter().map(|(_, hash)| *hash).collect::<String>())
+        crate::Hex(Sha256::digest(
+            PACKAGES.iter().map(|(_, hash)| *hash).collect::<String>()
+        ))
     )
 }
 
@@ -277,7 +283,7 @@ mod tests {
         let fixture = Fixture::new();
         let candidate = fixture.candidate();
         let input = fixture.inputs();
-        let hash = format!("{:x}", Sha256::digest(b"fixture"));
+        let hash = format!("{:x}", crate::Hex(Sha256::digest(b"fixture")));
         let pins = [("first.apk", hash.as_str()), ("second.apk", hash.as_str())];
         fs::remove_file(input.join("second.apk")).unwrap();
         assert!(prepare_packages(&candidate, &input, &pins).is_err());
@@ -299,7 +305,7 @@ mod tests {
         let fixture = Fixture::new();
         let candidate = fixture.candidate();
         let input = fixture.inputs();
-        let hash = format!("{:x}", Sha256::digest(b"fixture"));
+        let hash = format!("{:x}", crate::Hex(Sha256::digest(b"fixture")));
         let pins = [("first.apk", hash.as_str()), ("second.apk", hash.as_str())];
         assert_eq!(
             prepare_packages(&candidate, &input, &pins).unwrap().status,
@@ -328,7 +334,7 @@ mod tests {
         let fixture = Fixture::new();
         let candidate = fixture.candidate();
         let input = fixture.inputs();
-        let hash = format!("{:x}", Sha256::digest(b"fixture"));
+        let hash = format!("{:x}", crate::Hex(Sha256::digest(b"fixture")));
         let pins = [("first.apk", hash.as_str())];
         let providers = candidate.state_root.join("providers");
         let staging = providers.join("network-tools-installing");
@@ -362,7 +368,7 @@ mod tests {
         let path = root.join("archive.apk");
         std::fs::write(&path, b"fixture").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let hash = format!("{:x}", Sha256::digest(b"fixture"));
+        let hash = format!("{:x}", crate::Hex(Sha256::digest(b"fixture")));
         assert_eq!(read_archive(&path, &hash).unwrap(), b"fixture");
         assert!(read_archive(&path, "wrong").is_err());
         let alias = root.join("alias");

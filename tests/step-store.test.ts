@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  createReadStream,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -396,11 +395,14 @@ describe("step store location and switch", () => {
 });
 
 describe("step store build", () => {
-  test("a source run has no build identity", async () => {
-    expect(await stepStoreBuild()).toBeNull();
+  test("a source run has no build identity", () => {
+    expect(stepStoreBuild()).toBeNull();
   });
 
-  test("a compiled CLI identifies itself by version and executable hash", async () => {
+  /** Compile a one-line CLI that prints its build identity, with optional defines. */
+  async function compiledBuild(
+    define?: Record<string, string>
+  ): Promise<string> {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "step-store-build-")));
     try {
       const source = join(root, "build.ts");
@@ -411,28 +413,35 @@ describe("step store build", () => {
       );
       writeFileSync(
         source,
-        `
-        import { stepStoreBuild } from ${JSON.stringify(location)};
-        console.log(await stepStoreBuild());
-      `
+        `import { stepStoreBuild } from ${JSON.stringify(location)};\nconsole.log(String(stepStoreBuild()));\n`
       );
       const build = await Bun.build({
         entrypoints: [source],
         compile: { outfile: executable },
+        ...(define ? { define } : {}),
       });
       expect(build.success).toBe(true);
       const child = Bun.spawnSync([executable]);
       expect(child.exitCode).toBe(0);
-
-      const hash = new Bun.CryptoHasher("sha256");
-      for await (const chunk of createReadStream(executable)) {
-        hash.update(chunk);
-      }
-      expect(child.stdout.toString().trim()).toBe(
-        `${HACK_VERSION}+cli:${hash.digest("hex")}`
-      );
+      return child.stdout.toString().trim();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  }
+
+  test("a compiled CLI with a build id names that id, not its executable file", async () => {
+    expect(
+      await compiledBuild({ __HACK_BUILD_ID__: JSON.stringify("abc123def") })
+    ).toBe(`${HACK_VERSION}+cli:abc123def`);
+  });
+
+  test("a compiled CLI without a build id does not cache", async () => {
+    expect(await compiledBuild()).toBe("null");
+  });
+
+  test("a build id outside the identifier rule does not cache", async () => {
+    expect(
+      await compiledBuild({ __HACK_BUILD_ID__: JSON.stringify("has space") })
+    ).toBe("null");
   });
 });

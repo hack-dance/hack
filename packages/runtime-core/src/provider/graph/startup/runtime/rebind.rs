@@ -93,7 +93,7 @@ impl RefreshPolicy {
             &self.intermediate_executables,
         ))
         .map_err(|_| rejected())?;
-        Ok(format!("{:x}", Sha256::digest(bytes)))
+        Ok(format!("{:x}", crate::Hex(Sha256::digest(bytes))))
     }
 
     fn validate(&self, endpoint: &HostEndpoint) -> Result<(), CandidateError> {

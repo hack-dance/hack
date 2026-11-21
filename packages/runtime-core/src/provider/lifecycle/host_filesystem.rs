@@ -211,7 +211,7 @@ fn selection(
     let mut inspection = Inspection {
         schema: "hack.host-filesystem-recovery/v1",
         selection_sha256: String::new(),
-        owner_sha256: format!("{:x}", Sha256::digest(bytes)),
+        owner_sha256: format!("{:x}", crate::Hex(Sha256::digest(bytes))),
         machine: owner.machine.clone(),
         host_boot_micros: boot,
         provider_start_micros: owner
@@ -229,9 +229,9 @@ fn selection(
     };
     inspection.selection_sha256 = format!(
         "{:x}",
-        Sha256::digest(
+        crate::Hex(Sha256::digest(
             serde_json::to_vec(&inspection).map_err(|_| refused("Cannot encode selection"))?
-        )
+        ))
     );
     Ok((inspection, next))
 }

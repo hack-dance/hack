@@ -2,12 +2,15 @@ flowchart TD
   event{CI event}
   event -->|Main or full dispatch| full[Every test and release host]
   full --> release[Exact-head release-full gate]
-  event -->|Ready PR| guard{Main or protected inputs?}
+  event -->|Ready PR| guard{Main base?}
   guard -->|No| labels{Tier labels}
-  guard -->|Yes or unavailable policy| allpr
+  guard -->|Yes| allpr
   event -->|Draft PR| draft[Draft Linux tier]
   draft --> draftgate[Fan-ins fail: skipped draft]
-  labels -->|Default| light[Linux plus CLI acceptance or Rust legs]
+  labels -->|Default| inputs{Protected or unavailable?}
+  inputs -->|No| light[Linux plus CLI acceptance or Rust legs]
+  inputs -->|Yes| linuxfull[Full Linux Docker builds]
+  linuxfull --> deferred
   light --> deferred[Name deferred macOS files]
   deferred --> prgate[Test fan-in includes compiler acceptance]
   labels -->|ci:mac or ci:e2e| tier[Selected opted-in tier]

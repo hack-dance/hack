@@ -44,9 +44,9 @@ consuming states prevent reuse of an old proof as a new handshake. This protocol
 still requires security review together with its provisioning and transport design
 before production use; handshake success alone does not protect subsequent frames.
 
-The implementation pins RustCrypto `hmac` 0.12.1 for compatibility with the existing
-`sha2` 0.10 stack and uses its constant-time verification API. See
-[HMAC documentation](https://docs.rs/hmac/0.12.1/hmac/) and
+The implementation pins RustCrypto `hmac` 0.13.0 with `sha2` 0.11.1 (both on `digest`
+0.11) and uses its constant-time verification API. See
+[HMAC documentation](https://docs.rs/hmac/0.13.0/hmac/) and
 [zeroize's guarantees and limits](https://docs.rs/zeroize/1.9.0/zeroize/).
 No environment encryption format or global tooling is changed.
 

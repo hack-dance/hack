@@ -660,7 +660,7 @@ mod tests {
     fn an_unclean_stop_after_recovery_leaves_unadopted_disks_unadopted() {
         // The stop must find the disks this test just wrote released. In the shared parallel
         // test process an unrelated test's pre-exec fork (`process::clean_command`) can hold a
-        // copy of such a handle until it execs, which the host-wide `lsof` scan correctly
+        // copy of such a handle until it execs, which the host-wide disk-handle scan correctly
         // reports as `stop_uncertain`. Run the fixture alone in a child test process.
         use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};
         run_isolated(

@@ -169,6 +169,135 @@ fn bridge_endpoint<'s>(snapshot: &'s Snapshot, a: &Assignment) -> Option<&'s Gue
             .get(&port_endpoint_key(&a.service, port.target)),
     }
 }
+/// The bridge fence: the current identity of selected publication targets.
+///
+/// Endpoints are admitted exactly as [`inspect_using`] admits them (a committed
+/// ready graph; route endpoints only while the target's probe is healthy, port
+/// endpoints while it is healthy or has no healthcheck) and carry the same
+/// generation (owned container id and labels, every declared network attachment,
+/// endpoint id, address, start time, guest boot). They are read from one GET per
+/// graph network and, per target container, its GET plus, when probed, its probe
+/// exec and sample: never the rest of the graph. A target that is absent,
+/// stopped, restarting, detached or unhealthy has no endpoint, so every
+/// assignment on it reads as stale.
+pub(super) struct Targets {
+    receipt: Receipt,
+    /// Route endpoints, keyed by service, at the service's probe port.
+    endpoints: BTreeMap<String, GuestEndpoint>,
+    /// Loopback endpoints, keyed by [`port_endpoint_key`].
+    port_endpoints: BTreeMap<String, GuestEndpoint>,
+    /// Container main process, keyed by service.
+    pids: BTreeMap<String, u32>,
+}
+
+impl Targets {
+    fn endpoint(&self, a: &Assignment) -> Option<&GuestEndpoint> {
+        match a.loopback_port {
+            None => self.endpoints.get(&a.service),
+            Some(port) => self
+                .port_endpoints
+                .get(&port_endpoint_key(&a.service, port.target)),
+        }
+    }
+    fn current(&self, a: &Assignment, boot: &str) -> bool {
+        self.endpoint(a)
+            .is_some_and(|e| matches_endpoint(a, e, boot))
+    }
+}
+
+pub(super) fn inspect_targets(
+    candidate: &Candidate,
+    engine: &impl Inspection,
+    run: &str,
+    services: &std::collections::BTreeSet<&str>,
+) -> Result<Targets, CandidateError> {
+    let (receipt, root) = load_at(directory(candidate, run)?, run, engine.incarnation())?;
+    let mut targets = Targets {
+        receipt,
+        endpoints: BTreeMap::new(),
+        port_endpoints: BTreeMap::new(),
+        pids: BTreeMap::new(),
+    };
+    let receipt = &targets.receipt;
+    // Same admission as inspect_using's endpoints: a committed, ready graph.
+    if receipt.phase != "ready-observed"
+        || root.join("state.pending").exists()
+        || root.join("state.pending").is_symlink()
+        || startup::require_dependency_rebind_complete(&root, receipt).is_err()
+    {
+        return Ok(targets);
+    }
+    let mut networks = BTreeMap::new();
+    for (key, resource) in receipt
+        .resources
+        .iter()
+        .filter(|(_, r)| r.kind == Kind::Network)
+    {
+        networks.insert(key.clone(), inspect_resource(engine, receipt, resource)?);
+    }
+    let boot = engine.boot_id()?;
+    let mut endpoints = BTreeMap::new();
+    let mut port_endpoints = BTreeMap::new();
+    let mut pids = BTreeMap::new();
+    for service in services {
+        let Some(resource) = receipt
+            .resources
+            .get(&format!("container:{service}"))
+            .filter(|r| r.kind == Kind::Container && r.key == *service && r.id.is_some())
+        else {
+            continue;
+        };
+        let Some(value) = inspect_resource(engine, receipt, resource)? else {
+            continue;
+        };
+        let observation = probes::observe(engine, receipt, service, &value)?;
+        if !matches!(observation, Observation::Running { .. })
+            || endpoint_network(receipt, &value, &networks)?.is_none()
+        {
+            continue;
+        }
+        let scope = endpoints::EndpointScope {
+            receipt,
+            boot,
+            service,
+        };
+        if observation
+            == (Observation::Running {
+                health: Health::Healthy,
+            })
+            && let Some(probe) = receipt.probes.get(*service)
+        {
+            endpoints.insert(
+                (*service).to_owned(),
+                endpoints::resolve_attached(&value, &networks, probe.config.port, &scope)?,
+            );
+        }
+        if matches!(
+            observation,
+            Observation::Running {
+                health: Health::Healthy | Health::None
+            }
+        ) {
+            for port in &resource.loopback_ports {
+                port_endpoints.insert(
+                    port_endpoint_key(service, port.target),
+                    endpoints::resolve_attached(&value, &networks, port.target, &scope)?,
+                );
+            }
+        }
+        if let Some(pid) = value["State"]["Pid"]
+            .as_u64()
+            .filter(|p| (2..=i32::MAX as u64).contains(p))
+        {
+            pids.insert((*service).to_owned(), pid as u32);
+        }
+    }
+    targets.endpoints = endpoints;
+    targets.port_endpoints = port_endpoints;
+    targets.pids = pids;
+    Ok(targets)
+}
+
 fn matches_endpoint(a: &Assignment, e: &GuestEndpoint, boot: &str) -> bool {
     a.boot_id == boot
         && a.generation == e.generation
@@ -303,7 +432,7 @@ fn select_route_slots(
     Ok(selected)
 }
 
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(test)]
 fn reserve_selected(
     candidate: &Candidate,
     mut store: Store,
@@ -313,7 +442,23 @@ fn reserve_selected(
     boot_id: &str,
     endpoints: &BTreeMap<String, GuestEndpoint>,
 ) -> Result<BTreeMap<String, ReservedRoute>, CandidateError> {
-    let selected = select_route_slots(&store, requested, capacity, run)?;
+    let reserved = add_routes(&mut store, requested, capacity, run, boot_id, endpoints)?;
+    validate(&store, &store.owner, capacity)?;
+    save(candidate, &store)?;
+    Ok(reserved)
+}
+
+/// Adds the complete route set to `store` in memory; the caller validates and saves.
+#[cfg(any(test, target_os = "macos"))]
+fn add_routes(
+    store: &mut Store,
+    requested: &BTreeMap<String, RouteSlot>,
+    capacity: u8,
+    run: &str,
+    boot_id: &str,
+    endpoints: &BTreeMap<String, GuestEndpoint>,
+) -> Result<BTreeMap<String, ReservedRoute>, CandidateError> {
+    let selected = select_route_slots(store, requested, capacity, run)?;
     let mut reserved = BTreeMap::new();
     for (service, slot) in selected {
         let endpoint = endpoints.get(&service).ok_or_else(|| {
@@ -337,21 +482,29 @@ fn reserve_selected(
         store.slots.insert(slot, assignment.clone());
         reserved.insert(service, ReservedRoute { slot, assignment });
     }
-    validate(&store, &store.owner, capacity)?;
-    save(candidate, &store)?;
     Ok(reserved)
 }
 
-/// Reserve the complete route set against one validated graph snapshot. Capacity
-/// refusal writes no assignments and starts no relays; the provider lease covers
-/// the pool-wide selection and single durable registry update.
+/// Reserved bridges of one publication batch: routes by service, loopback
+/// publications by reviewed host port.
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Default)]
+pub(in crate::provider::graph) struct Reserved {
+    pub routes: BTreeMap<String, ReservedRoute>,
+    pub ports: BTreeMap<u16, ReservedRoute>,
+}
+
+/// Reserve the complete route set and one bridge per declared loopback
+/// publication against one validated graph snapshot, in one durable registry
+/// update under the provider lease. Any refusal, including capacity and
+/// `bridge_endpoint_pending`, writes no assignments and starts no relays.
 #[cfg(target_os = "macos")]
-pub(in crate::provider::graph) fn reserve_routes(
+pub(in crate::provider::graph) fn reserve_publications(
     candidate: &Candidate,
     receipt: &Receipt,
     requested: &BTreeMap<String, RouteSlot>,
-) -> Result<BTreeMap<String, ReservedRoute>, CandidateError> {
-    if requested.is_empty() || requested.len() > 32 {
+) -> Result<Reserved, CandidateError> {
+    if requested.len() > 32 {
         return Err(invalid());
     }
     let engine = Engine::connect_cleanup(candidate)?;
@@ -377,56 +530,74 @@ pub(in crate::provider::graph) fn reserve_routes(
         ));
     }
     let store = load_store(candidate, &engine, false)?;
-    reserve_selected(
+    reserve_all(
         candidate,
         store,
         requested,
         capacity,
-        &receipt.run,
-        engine.guest().boot_id(),
-        &snapshot.guest_endpoints,
+        &Observed {
+            receipt: &snapshot.receipt,
+            endpoints: &snapshot.guest_endpoints,
+            port_endpoints: &snapshot.port_endpoints,
+            observations: &snapshot.observations,
+            boot_id: engine.guest().boot_id(),
+        },
     )
 }
-/// Reserve one bridge per declared loopback publication against one validated
-/// graph snapshot, under the provider lease. Refusal writes no assignments.
-/// Keys are reviewed host ports.
-#[cfg(target_os = "macos")]
+
+/// The parts of one validated snapshot that a reservation reads.
+#[cfg(any(test, target_os = "macos"))]
+struct Observed<'a> {
+    receipt: &'a Receipt,
+    endpoints: &'a BTreeMap<String, GuestEndpoint>,
+    port_endpoints: &'a BTreeMap<String, GuestEndpoint>,
+    observations: &'a BTreeMap<String, Value>,
+    boot_id: &'a str,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn reserve_all(
+    candidate: &Candidate,
+    mut store: Store,
+    requested: &BTreeMap<String, RouteSlot>,
+    capacity: u8,
+    observed: &Observed<'_>,
+) -> Result<Reserved, CandidateError> {
+    let mut reserved = Reserved::default();
+    if !requested.is_empty() {
+        reserved.routes = add_routes(
+            &mut store,
+            requested,
+            capacity,
+            &observed.receipt.run,
+            observed.boot_id,
+            observed.endpoints,
+        )?;
+    }
+    reserved.ports = add_loopback_ports(
+        &mut store,
+        capacity,
+        observed.receipt,
+        observed.port_endpoints,
+        observed.observations,
+        observed.boot_id,
+    )?;
+    if reserved.routes.is_empty() && reserved.ports.is_empty() {
+        return Ok(reserved);
+    }
+    validate(&store, &store.owner, capacity)?;
+    save(candidate, &store)?;
+    Ok(reserved)
+}
+
+/// Loopback publications alone; kept for the native fixtures that reserve them. Those fixtures
+/// are built only with the environment launcher feature, so this is too.
+#[cfg(all(test, target_os = "macos", feature = "environment-launcher"))]
 pub(in crate::provider::graph) fn reserve_loopback_ports(
     candidate: &Candidate,
     receipt: &Receipt,
 ) -> Result<BTreeMap<u16, ReservedRoute>, CandidateError> {
-    let engine = Engine::connect_cleanup(candidate)?;
-    let capacity = engine
-        .guest()
-        .bridge_intent()
-        .ok_or_else(|| {
-            error(
-                "bridge_unavailable",
-                "The pool has no application bridge capacity.",
-            )
-        })?
-        .slots;
-    let snapshot = inspect_using(candidate, &engine, &receipt.run)?;
-    if snapshot.receipt.owner != receipt.owner
-        || snapshot.receipt.plan_id != receipt.plan_id
-        || snapshot.receipt.namespace != receipt.namespace
-        || snapshot.receipt.phase != "ready-observed"
-    {
-        return Err(error(
-            "bridge_generation_stale",
-            "The reviewed graph changed before bridge reservation.",
-        ));
-    }
-    let store = load_store(candidate, &engine, false)?;
-    reserve_loopback_selected(
-        candidate,
-        store,
-        capacity,
-        &snapshot.receipt,
-        &snapshot.port_endpoints,
-        &snapshot.observations,
-        engine.guest().boot_id(),
-    )
+    reserve_publications(candidate, receipt, &BTreeMap::new()).map(|reserved| reserved.ports)
 }
 
 /// A container whose own healthcheck is still `starting` has no committed port
@@ -444,10 +615,37 @@ fn loopback_endpoint_pending(observation: Option<&Value>) -> bool {
 /// Keys of `port_endpoints` are [`port_endpoint_key`]s; `observations` are keyed
 /// like `receipt.resources`. Refusal writes no assignments. A missing endpoint
 /// is `bridge_endpoint_pending` only while its container's health is starting.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(test)]
 fn reserve_loopback_selected(
     candidate: &Candidate,
     mut store: Store,
+    capacity: u8,
+    receipt: &Receipt,
+    port_endpoints: &BTreeMap<String, GuestEndpoint>,
+    observations: &BTreeMap<String, Value>,
+    boot_id: &str,
+) -> Result<BTreeMap<u16, ReservedRoute>, CandidateError> {
+    let reserved = add_loopback_ports(
+        &mut store,
+        capacity,
+        receipt,
+        port_endpoints,
+        observations,
+        boot_id,
+    )?;
+    if reserved.is_empty() {
+        return Ok(reserved);
+    }
+    validate(&store, &store.owner, capacity)?;
+    save(candidate, &store)?;
+    Ok(reserved)
+}
+
+/// Adds one bridge per declared loopback publication to `store` in memory; the
+/// caller validates and saves.
+#[cfg(any(test, target_os = "macos"))]
+fn add_loopback_ports(
+    store: &mut Store,
     capacity: u8,
     receipt: &Receipt,
     port_endpoints: &BTreeMap<String, GuestEndpoint>,
@@ -515,11 +713,6 @@ fn reserve_loopback_selected(
             reserved.insert(port.host_port, ReservedRoute { slot, assignment });
         }
     }
-    if reserved.is_empty() {
-        return Ok(reserved);
-    }
-    validate(&store, &store.owner, capacity)?;
-    save(candidate, &store)?;
     Ok(reserved)
 }
 pub fn reserve_bridge(
@@ -598,84 +791,199 @@ pub fn start_bridge(
     slot: u8,
     reservation: &str,
 ) -> Result<Assignment, CandidateError> {
-    if !hex(reservation, 32) {
+    let mut started = start_bridges(candidate, run, &[(slot, reservation)])?;
+    started.pop().map(|(_, a)| a).ok_or_else(invalid)
+}
+
+/// Start the relays of several reserved slots of one run under one provider
+/// lease. See [`start_selected`] for the fences and durable phases.
+pub(in crate::provider::graph) fn start_bridges(
+    candidate: &Candidate,
+    run: &str,
+    selected: &[(u8, &str)],
+) -> Result<Vec<(u8, Assignment)>, CandidateError> {
+    if selected.is_empty()
+        || selected.len() > 32
+        || selected
+            .iter()
+            .any(|(_, reservation)| !hex(reservation, 32))
+    {
         return Err(invalid());
     }
     let (digest, input) = relay::payload()?;
     let engine = Engine::connect(candidate)?;
     let mut store = load_store(candidate, &engine, false)?;
-    let a = store
-        .slots
-        .get(&slot)
-        .filter(|a| a.run == run && a.reservation == reservation && a.phase == "reserved")
-        .ok_or_else(|| {
-            error(
-                "bridge_reservation_changed",
-                "Expected an exact reserved slot; no launch was replayed.",
-            )
-        })?
-        .clone();
-    let snapshot = inspect_using(candidate, &engine, run)?;
-    let endpoint = bridge_endpoint(&snapshot, &a)
-        .filter(|e| matches_endpoint(&a, e, engine.guest().boot_id()))
-        .ok_or_else(|| {
-            error(
-                "bridge_generation_stale",
-                "Endpoint changed before relay startup.",
-            )
-        })?;
-    let container = engine.request(
-        Method::GET,
-        &format!("/containers/{}/json", a.container_id),
-        None,
-    )?;
-    let pid = container["State"]["Pid"]
-        .as_u64()
-        .filter(|p| (2..=i32::MAX as u64).contains(p))
-        .ok_or_else(|| error("bridge_target", "Target has no live process identity."))?
-        as u32;
-    let start = relay::target_start(&engine, pid)?;
-    let checked = inspect_using(candidate, &engine, run)?;
-    if !bridge_endpoint(&checked, &a)
-        .is_some_and(|e| matches_endpoint(&a, e, engine.guest().boot_id()))
-    {
+    start_selected(
+        candidate,
+        &engine,
+        &LeasedRelays {
+            candidate,
+            engine: &engine,
+            input: &input,
+        },
+        &mut store,
+        run,
+        selected,
+        &digest,
+    )
+}
+
+/// Guest effects of a relay batch; the caller holds the provider lease throughout.
+trait RelayGuest {
+    fn boot_id(&self) -> &str;
+    /// Start ticks of each process, in order.
+    fn target_starts(&self, pids: &[u32]) -> Result<Vec<u64>, CandidateError>;
+    /// Start every relay; all must confirm `running`.
+    fn start_relays(&self, selected: &[(u8, &Assignment)]) -> Result<(), CandidateError>;
+    /// The ordinary durable stop of one started slot.
+    fn stop_slot(&self, store: &mut Store, slot: u8) -> Result<(), CandidateError>;
+}
+
+struct LeasedRelays<'a, 'e> {
+    candidate: &'a Candidate,
+    engine: &'a Engine<'e>,
+    input: &'a str,
+}
+
+impl RelayGuest for LeasedRelays<'_, '_> {
+    fn boot_id(&self) -> &str {
+        self.engine.guest().boot_id()
+    }
+    fn target_starts(&self, pids: &[u32]) -> Result<Vec<u64>, CandidateError> {
+        relay::target_starts(self.engine, pids)
+    }
+    fn start_relays(&self, selected: &[(u8, &Assignment)]) -> Result<(), CandidateError> {
+        relay::start_all(self.engine, selected, self.input)
+    }
+    fn stop_slot(&self, store: &mut Store, slot: u8) -> Result<(), CandidateError> {
+        stop_slot(self.candidate, self.engine, store, slot)
+    }
+}
+
+/// The per-slot sequence of the former single start, applied to the whole batch:
+///
+/// 1. fence: every target is current (else refuse; nothing written);
+/// 2. read each target's start ticks (one guest call);
+/// 3. fence again, so each pid belongs to the fenced generation (else refuse);
+/// 4. record every relay intent as `starting` (one journal save) before any effect;
+/// 5. start every relay (one guest call);
+/// 6. fence again: current slots become `running`; a slot whose target changed is
+///    stopped through the ordinary durable stop, and the batch refuses.
+///
+/// A refusal after step 4 leaves every intent recorded for the caller's cleanup,
+/// exactly as a refused single start did.
+fn start_selected(
+    candidate: &Candidate,
+    inspection: &impl Inspection,
+    guest: &impl RelayGuest,
+    store: &mut Store,
+    run: &str,
+    selected: &[(u8, &str)],
+    digest: &str,
+) -> Result<Vec<(u8, Assignment)>, CandidateError> {
+    let mut picked = BTreeMap::new();
+    for (slot, reservation) in selected {
+        let a = store
+            .slots
+            .get(slot)
+            .filter(|a| a.run == run && a.reservation == *reservation && a.phase == "reserved")
+            .ok_or_else(|| {
+                error(
+                    "bridge_reservation_changed",
+                    "Expected an exact reserved slot; no launch was replayed.",
+                )
+            })?;
+        if picked.insert(*slot, a.clone()).is_some() {
+            return Err(invalid());
+        }
+    }
+    let services = picked
+        .values()
+        .map(|a| a.service.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let boot = guest.boot_id();
+    let stale = |targets: &Targets| {
+        picked
+            .iter()
+            .filter(|(_, a)| !targets.current(a, boot))
+            .map(|(slot, _)| *slot)
+            .collect::<Vec<_>>()
+    };
+    let fenced = inspect_targets(candidate, inspection, run, &services)?;
+    if !stale(&fenced).is_empty() {
+        return Err(error(
+            "bridge_generation_stale",
+            "Endpoint changed before relay startup.",
+        ));
+    }
+    let pids = picked
+        .values()
+        .map(|a| fenced.pids.get(&a.service).copied())
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| error("bridge_target", "Target has no live process identity."))?;
+    let starts = guest.target_starts(&pids)?;
+    if starts.len() != pids.len() {
+        return Err(error(
+            "bridge_target",
+            "Cannot establish target process identity.",
+        ));
+    }
+    if !stale(&inspect_targets(candidate, inspection, run, &services)?).is_empty() {
         return Err(error(
             "bridge_generation_stale",
             "Endpoint changed during target verification.",
         ));
     }
-    if store.next_launch_serial == i64::MAX as u64 {
+    if store
+        .next_launch_serial
+        .checked_add(picked.len() as u64)
+        .is_none_or(|last| last > i64::MAX as u64)
+    {
         return Err(error(
             "bridge_serial_exhausted",
             "Bridge launch serials are exhausted; no launch was attempted.",
         ));
     }
-    store.next_launch_serial += 1;
-    let entry = store.slots.get_mut(&slot).expect("checked slot");
-    entry.relay = Some(relay::Relay {
-        transport: relay::Transport::ReservationV1,
-        launch_serial: store.next_launch_serial,
-        binary_sha256: digest,
-        target_pid: pid,
-        target_start: start,
-        port: endpoint.port,
-    });
-    entry.phase = "starting".into();
-    save(candidate, &store)?;
-    relay::operate(&engine, slot, &store.slots[&slot], "start", Some(&input))?;
-    let checked = inspect_using(candidate, &engine, run)?;
-    if !bridge_endpoint(&checked, &a)
-        .is_some_and(|e| matches_endpoint(&a, e, engine.guest().boot_id()))
-    {
-        stop_slot(candidate, &engine, &mut store, slot)?;
+    for ((slot, a), (pid, start)) in picked.iter().zip(pids.into_iter().zip(starts)) {
+        let port = fenced.endpoint(a).expect("fenced endpoint").port;
+        store.next_launch_serial += 1;
+        let entry = store.slots.get_mut(slot).expect("picked slot");
+        entry.relay = Some(relay::Relay {
+            transport: relay::Transport::ReservationV1,
+            launch_serial: store.next_launch_serial,
+            binary_sha256: digest.into(),
+            target_pid: pid,
+            target_start: start,
+            port,
+        });
+        entry.phase = "starting".into();
+    }
+    save(candidate, store)?;
+    let launched = picked
+        .keys()
+        .map(|slot| (*slot, &store.slots[slot]))
+        .collect::<Vec<_>>();
+    guest.start_relays(&launched)?;
+    let changed = stale(&inspect_targets(candidate, inspection, run, &services)?);
+    for slot in picked.keys().filter(|slot| !changed.contains(slot)) {
+        store.slots.get_mut(slot).expect("picked slot").phase = "running".into();
+    }
+    if changed.is_empty() {
+        save(candidate, store)?;
+    } else {
+        // Each stop saves the store, which also commits the running phases above.
+        for slot in &changed {
+            guest.stop_slot(store, *slot)?;
+        }
         return Err(error(
             "bridge_generation_stale",
             "Endpoint changed during startup; relay was stopped.",
         ));
     }
-    store.slots.get_mut(&slot).expect("checked slot").phase = "running".into();
-    save(candidate, &store)?;
-    Ok(store.slots[&slot].clone())
+    Ok(picked
+        .keys()
+        .map(|slot| (*slot, store.slots[slot].clone()))
+        .collect())
 }
 /// A loopback publication bridge authorizes exactly its reviewed host port over
 /// TCP, forwarding to its reviewed target; never hostnames or another port.
@@ -736,6 +1044,27 @@ fn validate_route_publication(
     }
     Ok(())
 }
+/// How long a publisher child waits for the provider lease. A foreground owner
+/// starts every child of a batch at once; they take the lease in turn.
+const PUBLISH_LEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+const PUBLISH_LEASE_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Takes the provider lease, waiting only while another holder has it.
+/// Acquisition admits nothing; every check below runs after it.
+fn connect_waiting(candidate: &Candidate) -> Result<Engine<'_>, CandidateError> {
+    let deadline = std::time::Instant::now() + PUBLISH_LEASE_WAIT;
+    loop {
+        match Engine::connect(candidate) {
+            Err(error) if error.code == "provider_busy" && std::time::Instant::now() < deadline => {
+                std::thread::sleep(PUBLISH_LEASE_POLL);
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+/// Publisher child: under the provider lease, fence the one target, confirm its
+/// relay and launch (exec) the host publication.
 pub fn publish_bridge(
     candidate: &Candidate,
     run: &str,
@@ -744,7 +1073,7 @@ pub fn publish_bridge(
     port: Option<u16>,
     hostnames: &[String],
 ) -> Result<(), CandidateError> {
-    let engine = Engine::connect(candidate)?;
+    let engine = connect_waiting(candidate)?;
     let store = load_store(candidate, &engine, false)?;
     let a = store
         .slots
@@ -758,14 +1087,18 @@ pub fn publish_bridge(
                     .is_some_and(|r| r.transport == relay::Transport::ReservationV1)
         })
         .ok_or_else(invalid)?;
-    let snapshot = inspect_using(candidate, &engine, run)?;
-    if !bridge_endpoint(&snapshot, a)
-        .is_some_and(|e| matches_endpoint(a, e, engine.guest().boot_id()))
+    let targets = inspect_targets(
+        candidate,
+        &engine,
+        run,
+        &std::collections::BTreeSet::from([a.service.as_str()]),
+    )?;
+    if !targets.current(a, engine.guest().boot_id())
         || relay::operate(&engine, slot, a, "inspect", None)? != "running"
     {
         return Err(invalid());
     }
-    let resource = snapshot
+    let resource = targets
         .receipt
         .resources
         .get(&format!("container:{}", a.service))
@@ -912,13 +1245,138 @@ pub(super) fn release_run(
     receipt: &Receipt,
 ) -> Result<(), CandidateError> {
     let mut store = load_store(candidate, engine, false)?;
-    let selected = owned_slots(&store, &receipt.run);
-    for slot in selected {
-        stop_slot(candidate, engine, &mut store, slot)?;
-        store.slots.remove(&slot);
-        save(candidate, &store)?;
+    release_selected(
+        candidate,
+        &LeasedRelease { candidate, engine },
+        &mut store,
+        &receipt.run,
+    )
+}
+
+/// Effects of releasing one run's bridges; the caller holds the provider lease.
+trait ReleaseGuest {
+    fn boot_id(&self) -> &str;
+    /// Retire the host publications of these reservations of `run`.
+    fn release_publications(
+        &self,
+        run: &str,
+        reservations: &std::collections::BTreeSet<&str>,
+    ) -> Result<(), CandidateError>;
+    /// `stop` or `remove` every selected relay; each must confirm.
+    fn relays(&self, action: &str, selected: &[(u8, &Assignment)]) -> Result<(), CandidateError>;
+    /// Test pause point between the guest stop and its durable `stopped` phase.
+    fn after_guest_stop(&self, run: &str) -> Result<(), CandidateError>;
+}
+
+struct LeasedRelease<'a, 'e> {
+    candidate: &'a Candidate,
+    engine: &'a Engine<'e>,
+}
+
+impl ReleaseGuest for LeasedRelease<'_, '_> {
+    fn boot_id(&self) -> &str {
+        self.engine.guest().boot_id()
     }
-    Ok(())
+    fn release_publications(
+        &self,
+        run: &str,
+        reservations: &std::collections::BTreeSet<&str>,
+    ) -> Result<(), CandidateError> {
+        super::super::publication::release_reservations(
+            self.candidate,
+            self.engine.guest().incarnation(),
+            run,
+            reservations,
+        )
+    }
+    fn relays(&self, action: &str, selected: &[(u8, &Assignment)]) -> Result<(), CandidateError> {
+        relay::operate_all(self.engine, selected, action, None)
+    }
+    fn after_guest_stop(&self, _run: &str) -> Result<(), CandidateError> {
+        #[cfg(test)]
+        fault_pause(
+            &directory(self.candidate, _run)?,
+            _run,
+            "bridge-normalization-after-guest-stop",
+        )?;
+        Ok(())
+    }
+}
+
+/// [`stop_slot`] for every slot of one run, phase by phase instead of slot by
+/// slot. Each slot passes through the same durable phases in the same order:
+///
+/// 1. host publications retired (all at once, before any guest effect);
+/// 2. `stopping` recorded for every same-boot relay (one save); a relay from an
+///    earlier guest boot is recorded `stopped`, since boot-local guest state is gone;
+/// 3. every same-boot relay stopped (one guest call), then `stopped` (one save);
+/// 4. every same-boot allocation removed (one guest call);
+/// 5. every slot of the run dropped from the registry (one save).
+///
+/// A refusal leaves each slot at its last recorded phase. Stop and remove are
+/// idempotent per slot, so the next release resumes from there, as before.
+fn release_selected(
+    candidate: &Candidate,
+    guest: &impl ReleaseGuest,
+    store: &mut Store,
+    run: &str,
+) -> Result<(), CandidateError> {
+    let selected = owned_slots(store, run);
+    if selected.is_empty() {
+        return Ok(());
+    }
+    let reservations = selected
+        .iter()
+        .map(|slot| store.slots[slot].reservation.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    guest.release_publications(run, &reservations)?;
+    let boot = guest.boot_id().to_owned();
+    let mut stopping = Vec::new();
+    let mut removing = Vec::new();
+    let mut changed = false;
+    for slot in &selected {
+        let a = store.slots.get_mut(slot).expect("owned slot");
+        if a.relay.is_none() {
+            continue;
+        }
+        if a.boot_id != boot {
+            changed |= a.phase != "stopped";
+            a.phase = "stopped".into();
+            continue;
+        }
+        if a.phase != "stopped" {
+            a.phase = "stopping".into();
+            changed = true;
+            stopping.push(*slot);
+        }
+        removing.push(*slot);
+    }
+    if changed {
+        save(candidate, store)?;
+    }
+    if !stopping.is_empty() {
+        let batch = stopping
+            .iter()
+            .map(|slot| (*slot, &store.slots[slot]))
+            .collect::<Vec<_>>();
+        guest.relays("stop", &batch)?;
+        guest.after_guest_stop(run)?;
+        for slot in &stopping {
+            store.slots.get_mut(slot).expect("owned slot").phase = "stopped".into();
+        }
+        save(candidate, store)?;
+    }
+    if !removing.is_empty() {
+        let batch = removing
+            .iter()
+            .map(|slot| (*slot, &store.slots[slot]))
+            .collect::<Vec<_>>();
+        guest.relays("remove", &batch)?;
+    }
+    for slot in &selected {
+        store.slots.remove(slot);
+    }
+    save(candidate, store)
 }
 
 fn owned_slots(store: &Store, run: &str) -> Vec<u8> {
@@ -1564,3 +2022,7 @@ mod tests {
         validate_route_publication(None, 3000, None, &["legacy.example".into()]).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "bridges/batch_tests.rs"]
+mod batch_tests;

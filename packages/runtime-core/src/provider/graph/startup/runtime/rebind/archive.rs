@@ -59,7 +59,7 @@ fn bytes(path: &Path) -> Result<Option<Vec<u8>>, CandidateError> {
     Ok(Some(value))
 }
 fn digest(value: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(value))
+    format!("{:x}", crate::Hex(Sha256::digest(value)))
 }
 fn sync(root: &Path) -> Result<(), CandidateError> {
     File::open(root)

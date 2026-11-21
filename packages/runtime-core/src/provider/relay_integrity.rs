@@ -2,7 +2,7 @@
 //! Traffic codecs do not authorize effects: use the session's revocation guard at I/O.
 use super::relay_frame::{self, Frame};
 use crate::CandidateError;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 

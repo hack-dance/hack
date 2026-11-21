@@ -312,7 +312,8 @@ fn selected_source_device_rebind_restores_same_run_and_two_ordinary_generations(
             .device,
         old_device
     );
-    let original_history_hash = format!("{:x}", Sha256::digest(&original_stopped_bytes));
+    let original_history_hash =
+        format!("{:x}", crate::Hex(Sha256::digest(&original_stopped_bytes)));
     let witness_path = graph_root.join("source-device-rebind.json");
     let inspect = checked_cli(
         "select-source",

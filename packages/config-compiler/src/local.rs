@@ -557,7 +557,7 @@ pub(crate) fn resolve_document(
         origin,
         auto_branch: plan.worktree.auto_branch,
         inherit_local: plan.worktree.inherit_local,
-        resolution_hash: format!("{:x}", Sha256::digest(encoded)),
+        resolution_hash: format!("{:x}", crate::Hex(Sha256::digest(encoded))),
     };
     Ok(Resolved {
         compiled,

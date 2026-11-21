@@ -1,0 +1,57 @@
+---
+title: PoolStart · pool start admission
+---
+stateDiagram-v2
+  direction TB
+  [*] --> Idle
+  Idle --> Idle : RestoreAliasBeforeUse
+  Idle --> Opened : Open [hostOk]
+  Opened --> Opened : ResearchSample [WindowElapsed]
+  Opened --> Proven : ProveTrees [treeOk]
+  Proven --> Proven : ProveRootEarly
+  Proven --> Leased : AcquireLease [lease = free]
+  Leased --> Qualified : Recheck [WindowElapsed]
+  Leased --> Qualified : Qualify [research]
+  Qualified --> Qualified : RestoreAliasLeased
+  Qualified --> Settled : Settle [SameOwner]
+  Settled --> RootProven : ProveRoot [rootOk]
+  Settled --> RootProven : RecheckRoot [rootOk]
+  RootProven --> BootAdmitted : AdmitBoot [SameSwapouts]
+  BootAdmitted --> Started : Start
+  Idle --> Joined : ResumeRunning [poolRunning]
+  Qualified --> Joined : ObserveRunning [poolRunning]
+  state Exit <<choice>>
+  Idle --> Exit
+  Opened --> Exit
+  Proven --> Exit
+  Leased --> Exit
+  Qualified --> Exit
+  Settled --> Exit
+  RootProven --> Exit
+  BootAdmitted --> Exit
+  Exit --> Refused : Refuse
+  Exit --> Crashed : Crash
+  Started --> [*]
+  note right of Opened
+    Open starts the window
+    Development: one sample here
+    Research: three, before lease
+  end note
+  note right of Qualified
+    INV SecondSampleUnderLease
+    INV WindowRespected
+    INV ChainUnbroken
+  end note
+  note right of BootAdmitted
+    INV BootBaselineIsLastSample
+  end note
+  note right of Refused
+    INV RefusalIsClean
+    no VM, lease returned
+  end note
+  classDef ok stroke-width:1.6px
+  classDef fail stroke-width:1.6px
+  classDef idle stroke-width:1.6px
+  class Started ok
+  class Refused,Crashed fail
+  class Joined idle

@@ -14,11 +14,13 @@ hosts (including Rust checks); macOS stays in the heavy tier. This covers
 non-Markdown inputs under runtime-core/config-compiler (including pins, fixtures
 and generated data), plus all relay-guest inputs. Ready PRs that
 change protected CI inputs (including workflows, selectors, scripts, suite helpers,
-manifests, lockfiles and Rust toolchains) automatically
-run every ordinary PR tier, as `ci:full` would. Ready PRs targeting `main` retain
-the full tier, including the Intel compiler. Missing diffs or an unavailable base
-policy also fall back to full tiers. Linux unit-test preflight
-still prepares its matching compiler. The last Linux shard lists selected macOS
+manifests, lockfiles and Rust toolchains) automatically run the full Linux,
+Docker, state-model and build tiers. They defer macOS to the `next` integration
+run unless labeled `ci:mac` or `ci:full`. This macOS rule applies to every PR
+whose base is not `main`, including missing diffs or unavailable base policy.
+Ready PRs targeting `main` retain the full tier, including the Intel compiler.
+Linux unit-test preflight still prepares its matching compiler. The last Linux
+shard lists selected macOS
 files in its summary as **deferred to the integration run**, before typecheck or
 tests can fail. A green test check qualifies only the tests actually run.
 
@@ -30,7 +32,8 @@ ci:full selects every unit file and ordinary native/Docker tier, state models an
 build smoke. Ordinary `next` pushes and PRs into `next` omit the Intel compiler;
 `main` PRs/pushes and explicit full dispatches retain it. Removing a label restores
 the default tier, including the protected-input and `main` exceptions. A selector
-fallback alone widens files; the independent shell guard also enables full tiers.
+fallback alone widens files; the independent shell guard also enables full
+Linux/Docker/build tiers, with macOS selected separately as described above.
 Adding/removing labels, pushing, changing readiness or retargeting recomputes
 scope; metadata edits can cancel the active run.
 
@@ -86,8 +89,9 @@ successful completed `next` push CI run: missing, running, failed or cancelled
 predecessors and API errors force full, so supersession cannot lose coverage.
 If the base predates the selector, bootstrap selects the full set. The independent
 shell applies PR tiers after either policy path, including old base policies.
-On ready PRs its full guard also enables native hosts, macOS shards, Docker, state
-models and build smoke; draft fan-ins fail and keep heavy tiers disabled.
+On ready PRs its full guard also enables Linux native hosts, Docker, state
+models and build smoke. macOS requires a main base or ci:mac/ci:full label;
+draft fan-ins fail and keep heavy tiers disabled.
 No PR install script executes while computing scope. The base archive supplies
 the working directory, Bun configuration and dependency lockfile for the policy.
 Retargeting (`edited`) recomputes scope; other PR metadata edits also cancel
@@ -99,11 +103,12 @@ An empty or unavailable diff does too. Documentation Markdown still runs the
 always-run set. These rules intentionally sacrifice some savings when a graph
 cannot represent a dependency.
 
-Selected files retain their macOS/Linux pools. Light PRs run only selected Linux
-files; selected macOS paths remain in the plan and deferral summary. Integration
-pushes and opted-in or automatically full-tier PRs admit macOS shards when their selected pool is
-nonempty. Full discovery and independent Git enumeration still agree before
-filtering. Duplicate/unknown selections fail. Every selected file runs exactly
+Selected files retain their macOS/Linux pools. PRs that defer macOS run only
+selected Linux files; selected macOS paths remain in the plan and deferral summary.
+Integration pushes, ready PRs into main and ready PRs labeled ci:mac or ci:full
+admit macOS shards when their selected pool is nonempty. Full discovery and
+independent Git enumeration still agree before filtering. Duplicate/unknown
+selections fail. Every selected file runs exactly
 once per active host pool or is explicitly deferred. `BOTH_POOL_FILES` deliberately
 runs the named daemon files on both hosts so Linux-only cases are exercised too.
 It also runs the portable `open --json` subprocess contract in
@@ -154,8 +159,9 @@ pending runs, so it cannot enforce a completed checkpoint between batches.
 No job-class concurrency split is needed: it would duplicate scheduling and
 could leave acceptance without matching platform evidence.
 
-This preserves all selected macOS coverage without changing runner capacity or
-the PR layout. It does not reserve macOS slots or guarantee a queue wait bound.
+Integration retains all selected macOS coverage. Deferring unlabeled PR macOS
+jobs reduces competition for the same hosted runner pool; it does not reserve
+macOS slots or guarantee a queue wait bound.
 PRs still cancel stale runs for the same PR. `main` pushes retain unique,
 non-cancelling groups. Manual full runs have unique groups and cannot be cancelled
 by a later `next` push.

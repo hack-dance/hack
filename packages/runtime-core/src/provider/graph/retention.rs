@@ -102,7 +102,7 @@ pub fn prune(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> 
     let exports = candidate.state_root.join("exports/graphs");
     state::check_private_directory(&exports)?;
     let bytes = read_private(&exports.join(format!("{run}.tar")), EXPORT_LIMIT)?;
-    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let digest = format!("{:x}", crate::Hex(Sha256::digest(&bytes)));
     let mut expected = BTreeMap::new();
     let mut tar = tar::Archive::new(bytes.as_slice());
     for entry in tar.entries().map_err(state::io)?.take(129) {

@@ -90,7 +90,7 @@ pub fn observe(opts: ObserveOptions<'_>) -> Result<GuestEndpoint, CandidateError
         .collect();
     let binding = format!(
         "{:x}",
-        Sha256::digest(
+        crate::Hex(Sha256::digest(
             serde_json::to_vec(&json!([
                 receipt.review,
                 receipt.readiness,
@@ -102,7 +102,7 @@ pub fn observe(opts: ObserveOptions<'_>) -> Result<GuestEndpoint, CandidateError
                 resources
             ]))
             .map_err(|_| invalid())?
-        )
+        ))
     );
     resolve_owned_attached(
         opts.container,

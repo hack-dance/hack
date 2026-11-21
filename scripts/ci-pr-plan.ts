@@ -137,8 +137,9 @@ export async function planPullRequest(opts: {
   });
   const integration = opts.pullRequest === false;
   const linuxRust =
-    !opts.draft && (opts.changed?.some(touchesRustInput) ?? false);
-  const mac = !opts.draft && (integration || full || opts.mac === true);
+    !opts.draft && (full || opts.changed?.some(touchesRustInput) === true);
+  const mac =
+    !opts.draft && (integration || stablePr || opts.full || opts.mac === true);
   const e2e = !opts.draft && (integration || full || opts.e2e === true);
   const macos = mac && pools.macos.length > 0 ? [1, 2, 3] : [];
   const linux = [4, 5, 6, 7, 8];

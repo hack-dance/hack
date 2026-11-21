@@ -28,7 +28,7 @@ fn refused() -> CandidateError {
 
 pub(super) fn digest<T: Serialize>(value: &T) -> Result<String, CandidateError> {
     let bytes = serde_json::to_vec(value).map_err(|_| refused())?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(format!("{:x}", crate::Hex(Sha256::digest(bytes))))
 }
 
 pub(super) fn hex(value: &str) -> bool {

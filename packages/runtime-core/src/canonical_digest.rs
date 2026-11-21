@@ -90,11 +90,7 @@ pub struct Digest(pub [u8; 32]);
 
 impl fmt::Display for Digest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("sha256:")?;
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
+        write!(f, "sha256:{:x}", crate::Hex(self.0))
     }
 }
 

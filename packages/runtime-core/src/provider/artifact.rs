@@ -755,6 +755,7 @@ pub(super) fn prepare_binary(
     let _lock = state::Lock::acquire(&candidate.state_root.join("run/smolvm"))?;
     let providers = candidate.state_root.join("providers");
     state::private_directory(&providers)?;
+    discard_interrupted_record(&providers.join(pin.record))?;
     if binary_root(candidate, pin).try_exists().map_err(io)? {
         record_interrupted_binary(candidate, pin)?;
         return verify_binary(candidate, pin);
@@ -794,11 +795,20 @@ pub(super) fn prepare_binary(
             Duration::from_secs(10),
         )?;
     }
+    // The record names the tree the pin describes, never what a later read of the staged
+    // file returns: bytes that replace it after the check above cannot enter the record.
+    // The staged tree must already be that tree, or nothing is published.
     let artifact = Artifact {
         version: pin.version.into(),
         archive_sha256: pin.sha256.into(),
-        tree_sha256: tree_digest(&prepared)?,
+        tree_sha256: pinned_tree_digest(pin),
     };
+    if tree_digest(&prepared)? != artifact.tree_sha256 {
+        return Err(binary_mismatch(
+            pin,
+            "file changed during preparation; staging retained.",
+        ));
+    }
     fs::rename(&prepared, binary_root(candidate, pin)).map_err(io)?;
     state::write(&providers.join(pin.record), &artifact)?;
     // Only the now-empty staging directory; never recursive.
@@ -806,12 +816,102 @@ pub(super) fn prepare_binary(
     Ok(artifact)
 }
 
+/// The tree digest of exactly what preparation publishes: one regular file with the
+/// executable's name, mode 0700 and the pinned bytes. It is [`rootfs_digest`] of that
+/// one-entry tree (entry name, mode, kind, content digest), computed from the pin alone.
+/// A record that carries it accepts only that tree, whatever is on disk when it is
+/// written. `the_pinned_tree_digest_is_the_digest_of_a_prepared_tree` keeps the two equal.
+fn pinned_tree_digest(pin: &BinaryPin) -> String {
+    /// A regular file (`S_IFREG`) with owner-only read, write and execute.
+    const EXECUTABLE_MODE: u32 = 0o100_700;
+    let mut hash = Sha256::new();
+    hash.update((pin.executable.len() as u64).to_le_bytes());
+    hash.update(pin.executable.as_bytes());
+    hash.update(EXECUTABLE_MODE.to_le_bytes());
+    hash.update(b"file");
+    hash.update(pin.sha256);
+    format!("{:x}", crate::Hex(hash.finalize()))
+}
+
+/// Whether a prepared directory's own metadata is what preparation publishes: a real
+/// directory, owned by this user, with the private mode 0700.
+fn published_directory(is_directory: bool, owner: u32, mode: u32, user: u32) -> bool {
+    is_directory && owner == user && mode & 0o7777 == 0o700
+}
+
+/// Whether a prepared directory that has no record is exactly what preparation
+/// publishes: a private directory of this user holding only the owned, private, singly
+/// linked executable whose bytes are the pin. Read-only; nothing is changed either way.
+fn unrecorded_binary_is_pinned(root: &Path, pin: &BinaryPin) -> Result<bool, CandidateError> {
+    // SAFETY: geteuid has no preconditions.
+    let user = unsafe { libc::geteuid() };
+    let directory = fs::symlink_metadata(root).map_err(io)?;
+    if !published_directory(directory.is_dir(), directory.uid(), directory.mode(), user) {
+        return Ok(false);
+    }
+    let mut entries = fs::read_dir(root).map_err(io)?;
+    let only = match (entries.next(), entries.next()) {
+        (Some(entry), None) => entry.map_err(io)?,
+        _ => return Ok(false),
+    };
+    let metadata = fs::symlink_metadata(only.path()).map_err(io)?;
+    Ok(only.file_name() == pin.executable
+        && metadata.is_file()
+        && metadata.nlink() == 1
+        && metadata.uid() == user
+        && metadata.mode() & 0o7777 == 0o700
+        && digest(&only.path())? == pin.sha256)
+}
+
+/// Remove the temporary that an interrupted [`state::write`] of this record left. The
+/// caller holds the provider lock, which every writer of the record holds, so no writer
+/// is live. As for the tree witness, a leftover is removed only if its type, owner, mode
+/// and link count are those of our private temporary; anything else is left in place and
+/// refuses preparation. A symlink is never followed.
+fn discard_interrupted_record(record: &Path) -> Result<(), CandidateError> {
+    let pending = record.with_extension("pending");
+    let metadata = match fs::symlink_metadata(&pending) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io(error)),
+    };
+    // SAFETY: geteuid has no preconditions.
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o7777 != 0o600
+    {
+        return Err(CandidateError::new(
+            "foreign_state",
+            "A pending provider record is not our private temporary; it was left in place.",
+        ));
+    }
+    fs::remove_file(&pending).map_err(io)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: runs once between the pin check of an unrecorded directory and the
+    /// write of its record, where another process could replace the executable.
+    static BEFORE_RECORD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn before_record() {
+    if let Some(hook) = BEFORE_RECORD.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+}
+
 /// Finish a preparation that stopped between publishing the prepared directory and
 /// writing its record. The caller holds the provider lock. The record is written only
-/// when the directory is exactly what preparation publishes: the one owned, private,
-/// singly linked executable whose bytes are the pin, which preparation published only
-/// after its signature check. A directory holding anything else was changed and is
-/// refused; it is never repaired or removed here.
+/// when the directory is exactly what preparation publishes (see
+/// [`unrecorded_binary_is_pinned`]), which preparation published only after its
+/// signature check. The record carries the tree digest the pin describes, not a second
+/// read of the directory, so an executable replaced after the check is refused by the
+/// verification that follows and by every later one. A directory holding anything else
+/// was changed and is refused; it is never repaired, re-permissioned or removed here.
 fn record_interrupted_binary(candidate: &Candidate, pin: &BinaryPin) -> Result<(), CandidateError> {
     let providers = candidate.state_root.join("providers");
     let record = providers.join(pin.record);
@@ -820,29 +920,20 @@ fn record_interrupted_binary(candidate: &Candidate, pin: &BinaryPin) -> Result<(
     }
     let root = binary_root(candidate, pin);
     reject_aliased_state(&root)?;
-    let changed = || binary_mismatch(pin, "prepared tree changed; refusing execution.");
-    let mut entries = fs::read_dir(&root).map_err(io)?;
-    let only = match (entries.next(), entries.next()) {
-        (Some(entry), None) => entry.map_err(io)?,
-        _ => return Err(changed()),
-    };
-    let metadata = fs::symlink_metadata(only.path()).map_err(io)?;
-    // SAFETY: geteuid has no preconditions.
-    if only.file_name() != pin.executable
-        || !metadata.is_file()
-        || metadata.nlink() != 1
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o7777 != 0o700
-        || digest(&only.path())? != pin.sha256
-    {
-        return Err(changed());
+    if !unrecorded_binary_is_pinned(&root, pin)? {
+        return Err(binary_mismatch(
+            pin,
+            "prepared tree changed; refusing execution.",
+        ));
     }
+    #[cfg(test)]
+    before_record();
     state::write(
         &record,
         &Artifact {
             version: pin.version.into(),
             archive_sha256: pin.sha256.into(),
-            tree_sha256: tree_digest(&root)?,
+            tree_sha256: pinned_tree_digest(pin),
         },
     )?;
     // Only the interrupted run's now-empty staging directory; never recursive.
@@ -858,9 +949,17 @@ pub(super) fn verify_binary(
     reject_aliased_state(&root)?;
     let record = candidate.state_root.join("providers").join(pin.record);
     // Never prepared, or a preparation that setup can finish: say so and name the fix
-    // instead of reporting the missing file.
-    if !present(&record)? || !present(&root)? {
+    // instead of reporting the missing file. A directory without a record that is not
+    // what preparation publishes was changed: preparing again would refuse it too.
+    if !present(&root)? {
         return Err(CandidateError::new(BUILDER_NOT_PREPARED, pin.not_prepared));
+    }
+    if !present(&record)? {
+        return Err(if unrecorded_binary_is_pinned(&root, pin)? {
+            CandidateError::new(BUILDER_NOT_PREPARED, pin.not_prepared)
+        } else {
+            binary_mismatch(pin, "prepared tree changed; refusing execution.")
+        });
     }
     let artifact: Artifact = state::read(&record)?;
     let executable = match fs::symlink_metadata(root.join(pin.executable)) {
@@ -1425,6 +1524,12 @@ mod tests {
             let error = prepare_binary(&candidate, &source, &pin).unwrap_err();
             assert_eq!(error.code, "artifact_digest_mismatch", "{change}");
             assert!(!record.exists(), "{change}");
+            // A build says the same, so nothing names a remedy that would refuse.
+            assert_eq!(
+                verify_binary(&candidate, &pin).unwrap_err().code,
+                "artifact_digest_mismatch",
+                "{change}"
+            );
         };
         fs::remove_file(&record).unwrap();
         fs::write(tree.join("plugin"), b"extra").unwrap();
@@ -1452,6 +1557,217 @@ mod tests {
             BuilderState::Changed
         );
         fs::remove_dir_all(root).unwrap();
+    }
+    /// A prepared test client, then its record removed: the state an interrupted
+    /// preparation leaves between publishing the directory and writing the record.
+    struct Unrecorded {
+        root: PathBuf,
+        candidate: Candidate,
+        pin: BinaryPin,
+        source: PathBuf,
+        record: PathBuf,
+        tree: PathBuf,
+        executable: PathBuf,
+    }
+    const CLIENT: &[u8] = b"#!/bin/sh\nexit 0\n";
+    const OTHER_CLIENT: &[u8] = b"#!/bin/sh\nexit 1\n";
+    fn unrecorded() -> Unrecorded {
+        let root = fixture();
+        let candidate = Candidate::discover(&root).unwrap();
+        let pin = test_pin(CLIENT);
+        let source = root.join("release-asset");
+        fs::write(&source, CLIENT).unwrap();
+        prepare_binary(&candidate, &source, &pin).unwrap();
+        let record = providers(&candidate).join(pin.record);
+        let tree = binary_root(&candidate, &pin);
+        let executable = tree.join(pin.executable);
+        fs::remove_file(&record).unwrap();
+        Unrecorded {
+            root,
+            candidate,
+            pin,
+            source,
+            record,
+            tree,
+            executable,
+        }
+    }
+    #[test]
+    fn the_pinned_tree_digest_is_the_digest_of_a_prepared_tree() {
+        for bytes in [CLIENT, OTHER_CLIENT, b"x".as_slice()] {
+            let root = fixture();
+            let candidate = Candidate::discover(&root).unwrap();
+            let pin = test_pin(bytes);
+            let source = root.join("release-asset");
+            fs::write(&source, bytes).unwrap();
+            let prepared = prepare_binary(&candidate, &source, &pin).unwrap();
+            // Computed from the pin alone, and equal to what hashing the tree gives.
+            assert_eq!(prepared.tree_sha256, pinned_tree_digest(&pin));
+            assert_eq!(
+                tree_digest(&binary_root(&candidate, &pin)).unwrap(),
+                pinned_tree_digest(&pin)
+            );
+            let recorded: Artifact = state::read(&providers(&candidate).join(pin.record)).unwrap();
+            assert_eq!(recorded.tree_sha256, pinned_tree_digest(&pin));
+            fs::remove_dir_all(root).unwrap();
+        }
+        assert_ne!(
+            pinned_tree_digest(&test_pin(CLIENT)),
+            pinned_tree_digest(&test_pin(OTHER_CLIENT))
+        );
+    }
+    #[test]
+    fn an_executable_replaced_between_the_pin_check_and_the_record_is_refused() {
+        let home = unrecorded();
+        let pinned = pinned_tree_digest(&home.pin);
+        // Another process replaces the executable after it was checked against the pin
+        // and before the record is written: the window the record must not bless.
+        let target = home.executable.clone();
+        BEFORE_RECORD.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::write(&target, OTHER_CLIENT).unwrap();
+                fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+            }));
+        });
+        let error = prepare_binary(&home.candidate, &home.source, &home.pin).unwrap_err();
+        assert!(
+            BEFORE_RECORD.with(|hook| hook.borrow().is_none()),
+            "the replacement window was not reached"
+        );
+        assert_eq!(error.code, "artifact_digest_mismatch");
+        assert_eq!(fs::read(&home.executable).unwrap(), OTHER_CLIENT);
+        // The record that was written describes the pinned tree, not the replacement.
+        let written: Artifact = state::read(&home.record).unwrap();
+        assert_eq!(written.tree_sha256, pinned);
+        assert_ne!(written.tree_sha256, tree_digest(&home.tree).unwrap());
+        // So the replacement is refused by every later verification and preparation,
+        // and it is never repaired.
+        assert_eq!(
+            verify_binary(&home.candidate, &home.pin).unwrap_err().code,
+            "artifact_digest_mismatch"
+        );
+        assert_eq!(
+            prepare_binary(&home.candidate, &home.source, &home.pin)
+                .unwrap_err()
+                .code,
+            "artifact_digest_mismatch"
+        );
+        assert_eq!(fs::read(&home.executable).unwrap(), OTHER_CLIENT);
+        // The same record accepts the pinned bytes again.
+        fs::write(&home.executable, CLIENT).unwrap();
+        verify_binary(&home.candidate, &home.pin).unwrap();
+        fs::remove_dir_all(&home.root).unwrap();
+    }
+    #[test]
+    fn an_unrecorded_directory_is_adopted_only_with_the_metadata_preparation_publishes() {
+        let home = unrecorded();
+        // The pinned executable alone, in a directory other users can enter or write.
+        for mode in [0o777, 0o755, 0o750, 0o710] {
+            fs::set_permissions(&home.tree, fs::Permissions::from_mode(mode)).unwrap();
+            for error in [
+                prepare_binary(&home.candidate, &home.source, &home.pin).unwrap_err(),
+                verify_binary(&home.candidate, &home.pin).unwrap_err(),
+            ] {
+                assert_eq!(error.code, "artifact_digest_mismatch", "{mode:o}");
+            }
+            assert!(!home.record.exists(), "{mode:o}");
+            // Refused as it is: its permissions are never changed.
+            assert_eq!(
+                fs::metadata(&home.tree).unwrap().mode() & 0o7777,
+                mode,
+                "{mode:o}"
+            );
+        }
+        fs::set_permissions(&home.tree, fs::Permissions::from_mode(0o700)).unwrap();
+        prepare_binary(&home.candidate, &home.source, &home.pin).unwrap();
+        verify_binary(&home.candidate, &home.pin).unwrap();
+
+        // Another owner and a non-directory cannot be made on disk by a test.
+        // SAFETY: geteuid has no preconditions.
+        let user = unsafe { libc::geteuid() };
+        assert!(published_directory(true, user, 0o040_700, user));
+        assert!(!published_directory(true, user + 1, 0o040_700, user));
+        assert!(!published_directory(true, 0, 0o040_700, user + 1));
+        assert!(!published_directory(false, user, 0o100_700, user));
+        assert!(!published_directory(true, user, 0o040_777, user));
+        assert!(!published_directory(true, user, 0o041_700, user));
+        fs::remove_dir_all(&home.root).unwrap();
+    }
+    #[test]
+    fn an_interrupted_record_write_is_cleared_and_a_foreign_pending_entry_is_refused() {
+        let home = unrecorded();
+        let pending = home.record.with_extension("pending");
+        let leave_pending = |bytes: &[u8]| {
+            // As `state::write` leaves it when a run stops between creating its
+            // temporary and renaming it over the record.
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&pending)
+                .unwrap();
+            std::io::Write::write_all(&mut file, bytes).unwrap();
+        };
+        let prepare = || prepare_binary(&home.candidate, &home.source, &home.pin);
+
+        // The directory is published and the record write was interrupted.
+        leave_pending(b"{\"version\": \"1.2");
+        assert_eq!(
+            verify_binary(&home.candidate, &home.pin).unwrap_err().code,
+            BUILDER_NOT_PREPARED
+        );
+        let finished = prepare().unwrap();
+        assert_eq!(finished.tree_sha256, pinned_tree_digest(&home.pin));
+        assert!(!pending.exists());
+        verify_binary(&home.candidate, &home.pin).unwrap();
+
+        // The same leftover with nothing else prepared: a new preparation completes.
+        fs::remove_file(&home.record).unwrap();
+        fs::remove_file(&home.executable).unwrap();
+        fs::remove_dir(&home.tree).unwrap();
+        leave_pending(b"");
+        prepare().unwrap();
+        assert!(!pending.exists());
+        verify_binary(&home.candidate, &home.pin).unwrap();
+
+        // Anything that is not our private temporary is left in place and refuses
+        // preparation: a symlink is neither followed nor removed.
+        fs::remove_file(&home.record).unwrap();
+        let elsewhere = home.root.join("elsewhere");
+        fs::write(&elsewhere, b"keep").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &pending).unwrap();
+        assert_eq!(prepare().unwrap_err().code, "foreign_state");
+        assert!(
+            fs::symlink_metadata(&pending)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&elsewhere).unwrap(), b"keep");
+        assert!(!home.record.exists());
+        fs::remove_file(&pending).unwrap();
+
+        fs::create_dir(&pending).unwrap();
+        assert_eq!(prepare().unwrap_err().code, "foreign_state");
+        assert!(pending.is_dir());
+        fs::remove_dir(&pending).unwrap();
+
+        leave_pending(b"partial");
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(prepare().unwrap_err().code, "foreign_state");
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+        let second = home.root.join("second-link");
+        fs::hard_link(&pending, &second).unwrap();
+        assert_eq!(prepare().unwrap_err().code, "foreign_state");
+        assert_eq!(fs::read(&pending).unwrap(), b"partial");
+        assert!(!home.record.exists());
+
+        // Once it is our private temporary again, preparation clears it and completes.
+        fs::remove_file(&second).unwrap();
+        prepare().unwrap();
+        assert!(!pending.exists());
+        verify_binary(&home.candidate, &home.pin).unwrap();
+        fs::remove_dir_all(&home.root).unwrap();
     }
     #[test]
     fn a_builder_binary_that_misses_the_pin_creates_no_state() {

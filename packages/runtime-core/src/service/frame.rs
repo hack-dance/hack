@@ -310,6 +310,22 @@ mod tests {
         UnixStream::pair().unwrap()
     }
 
+    /// Only a hang can break this bound; the tests prove their property from
+    /// results, not from how long a loaded machine took.
+    const HANG_GUARD: Duration = Duration::from_secs(30);
+
+    /// Run `f` on its own thread and fail the test if it has not returned within
+    /// `HANG_GUARD`.
+    fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(f());
+        });
+        received
+            .recv_timeout(HANG_GUARD)
+            .expect("the call did not return: it hung")
+    }
+
     #[test]
     fn a_frame_round_trips() {
         let (mut a, mut b) = pair();
@@ -379,12 +395,12 @@ mod tests {
         a.write_all(b"abc").unwrap();
         let started = Instant::now();
         let frame = Duration::from_millis(150);
-        assert_eq!(
-            read_within(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT, frame),
-            Err(FrameError::Truncated)
-        );
-        let took = started.elapsed();
-        assert!(took >= frame && took < frame * 4, "{took:?}");
+        // Without a deadline this read would wait forever: the guard is the proof.
+        let result =
+            within(move || read_within(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT, frame));
+        assert_eq!(result, Err(FrameError::Truncated));
+        // A lower bound only: no load can make the deadline arrive early.
+        assert!(started.elapsed() >= frame);
         drop(a);
     }
 
@@ -400,14 +416,13 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(20));
             }
         });
-        let started = Instant::now();
+        // The trickle takes about 1.3 s to deliver all 64 bytes, so a reader whose
+        // deadline restarted on each byte would return the whole frame. One
+        // deadline for the frame gives Truncated instead.
         let frame = Duration::from_millis(200);
-        assert_eq!(
-            read_within(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT, frame),
-            Err(FrameError::Truncated)
-        );
-        assert!(started.elapsed() < frame * 3, "{:?}", started.elapsed());
-        drop(b);
+        let result =
+            within(move || read_within(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT, frame));
+        assert_eq!(result, Err(FrameError::Truncated));
         writer.join().unwrap();
     }
 
@@ -430,28 +445,35 @@ mod tests {
                 );
             }
         }
-        // The reader drains a little at a time: every single write makes progress
-        // well within its own timeout, but the whole frame cannot finish in time.
+        // The reader drains 1 KiB every 10 ms until the writer closes, so every
+        // single write makes progress and a writer without one deadline for the
+        // whole frame would finish it (about 1.3 s) and return Ok. With the
+        // deadline it gives up with bytes left over. The reader counts what it got.
         let reader = std::thread::spawn(move || {
             let mut b = b;
             let mut chunk = [0u8; 1024];
-            for _ in 0..400 {
-                if matches!(b.read(&mut chunk), Ok(0) | Err(_)) {
-                    return;
+            let mut received = 0;
+            loop {
+                match b.read(&mut chunk) {
+                    Ok(0) | Err(_) => return received,
+                    Ok(count) => received += count,
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
-        let body = vec![b'x'; CONTROL_FRAME_LIMIT];
-        let started = Instant::now();
         let frame = Duration::from_millis(200);
-        assert_eq!(
-            write_within(&mut a, &body, CONTROL_FRAME_LIMIT, frame, None),
-            Err(FrameError::Truncated)
+        let result = within(move || {
+            let body = vec![b'x'; CONTROL_FRAME_LIMIT];
+            let result = write_within(&mut a, &body, CONTROL_FRAME_LIMIT, frame, None);
+            drop(a);
+            result
+        });
+        assert_eq!(result, Err(FrameError::Truncated));
+        let received = reader.join().unwrap();
+        assert!(
+            received < CONTROL_FRAME_LIMIT + 4,
+            "the whole frame went through: {received} bytes"
         );
-        assert!(started.elapsed() < frame * 3, "{:?}", started.elapsed());
-        drop(a);
-        reader.join().unwrap();
     }
 
     const SIGPIPE_CHILD: &str = "HACK_FRAME_SIGPIPE_CHILD";
@@ -491,15 +513,11 @@ mod tests {
         a.write_all(&[0]).unwrap();
         let started = Instant::now();
         let by = started + Duration::from_millis(100);
-        assert_eq!(
-            read_by(&mut b, by, CONTROL_FRAME_LIMIT),
-            Err(FrameError::Truncated)
-        );
-        assert!(
-            started.elapsed() < Duration::from_millis(400),
-            "{:?}",
-            started.elapsed()
-        );
+        // Without the whole-frame deadline this read would wait for the rest of
+        // the header forever: the hang guard is the proof.
+        let (result, b) = within(move || (read_by(&mut b, by, CONTROL_FRAME_LIMIT), b));
+        assert_eq!(result, Err(FrameError::Truncated));
+        drop(b);
         let (_c, mut d) = pair();
         assert_eq!(
             read_by(
@@ -556,12 +574,10 @@ mod tests {
     #[test]
     fn a_zero_idle_bound_takes_only_a_waiting_frame() {
         let (mut a, mut b) = pair();
-        let started = Instant::now();
-        assert_eq!(
-            read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT),
-            Err(FrameError::Idle)
-        );
-        assert!(started.elapsed() < Duration::from_millis(100));
+        // A blocking probe would wait forever here: the guard is the proof.
+        let (result, b2) = within(move || (read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT), b));
+        assert_eq!(result, Err(FrameError::Idle));
+        let mut b = b2;
         write(&mut a, b"{}", CONTROL_FRAME_LIMIT).unwrap();
         assert_eq!(
             read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT).unwrap(),

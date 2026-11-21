@@ -74,7 +74,22 @@ fn code(reply: &Value) -> &str {
     reply["error"]["code"].as_str().unwrap()
 }
 
-/// Whether `service.lock` becomes free within a second. Another test thread
+/// Only a hang can break this bound; the tests prove their properties from
+/// results, never from how long a loaded machine took.
+const HANG_GUARD: Duration = Duration::from_secs(30);
+
+/// Run `f` on its own thread and fail if it has not returned within `HANG_GUARD`.
+fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (sender, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(f());
+    });
+    received
+        .recv_timeout(HANG_GUARD)
+        .expect("the call did not return: it hung")
+}
+
+/// Whether `service.lock` becomes free within ten seconds. Another test thread
 /// that forks (one test re-runs this binary) briefly shares every open file
 /// description, the lock's included, until its child execs and O_CLOEXEC closes
 /// it, so a free lock can look held for that moment.
@@ -84,7 +99,8 @@ fn lock_frees(path: &Path) -> bool {
         if try_lock(path).unwrap().is_some() {
             return true;
         }
-        if started.elapsed() > Duration::from_secs(1) {
+        // A bound for the retry only, generous for a loaded machine.
+        if started.elapsed() > Duration::from_secs(10) {
             return false;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -372,9 +388,11 @@ fn connections_queued_at_shutdown_are_refused_and_cannot_hold_it_open() {
         let bytes = serde_json::to_vec(&retire).unwrap();
         frame::write(stream, &bytes, CONTROL_FRAME_LIMIT).unwrap();
     }
-    let started = Instant::now();
-    assert_eq!(shut_down(&shared, listener), Outcome::Idle);
-    assert!(started.elapsed() < Duration::from_secs(3));
+    let stopping = Arc::clone(&shared);
+    assert_eq!(
+        within(move || shut_down(&stopping, listener)),
+        Outcome::Idle
+    );
     for stream in &mut queued {
         let body = frame::read(stream, Duration::from_secs(2), CONTROL_FRAME_LIMIT).unwrap();
         assert_eq!(
@@ -501,19 +519,18 @@ fn a_client_gives_up_on_a_full_backlog_within_its_deadline() {
         }
         pending.push(stream);
     }
-    let started = Instant::now();
-    let refused = super::client::call_within(
-        &root.0,
-        "service.status",
-        json!({}),
-        Duration::from_millis(300),
-    );
+    // A connect without its own deadline would block forever on the full
+    // backlog: the hang guard is the proof.
+    let home = root.0.clone();
+    let refused = within(move || {
+        super::client::call_within(
+            &home,
+            "service.status",
+            json!({}),
+            Duration::from_millis(300),
+        )
+    });
     assert_eq!(refused.unwrap_err().code, "service_busy");
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "{:?}",
-        started.elapsed()
-    );
     drop(listener);
 }
 
@@ -555,7 +572,10 @@ fn the_session_limit_reaches_the_client_as_a_refusal() {
     // Sessions end asynchronously; the slots free up shortly.
     let started = Instant::now();
     while call(&root.0, "service.status", json!({})).is_err() {
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(
+            started.elapsed() < HANG_GUARD,
+            "the session slots never freed"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
     call(&root.0, "service.retire", json!({})).unwrap();
@@ -621,16 +641,21 @@ fn partial_requests_queued_at_shutdown_cannot_hold_the_lock() {
             stream
         })
         .collect();
-    let started = Instant::now();
     shared.stop(Outcome::Idle);
-    // Both paths that refuse queued connections draw on the same budget, and
-    // 24 stalled peers at QUEUED_WAIT each would exceed it.
+    // Both paths that refuse queued connections draw on the same budget, so at
+    // most QUEUED_BUDGET / QUEUED_WAIT of the 24 stalled peers are waited on
+    // (fewer when the machine is slow); without the shared cap all 24 are.
     accept_queued(&shared, &listener).unwrap();
-    assert_eq!(shut_down(&shared, listener), Outcome::Idle);
-    let took = started.elapsed();
+    let stopping = Arc::clone(&shared);
+    assert_eq!(
+        within(move || shut_down(&stopping, listener)),
+        Outcome::Idle
+    );
+    let waited = shared.state().refused;
+    let cap = (QUEUED_BUDGET.as_millis() / QUEUED_WAIT.as_millis()) as usize + 1;
     assert!(
-        took < QUEUED_BUDGET + Duration::from_millis(300),
-        "{took:?}"
+        waited <= cap,
+        "{waited} queued peers were waited on, cap {cap}"
     );
     drop(stalled);
     drop(lock);

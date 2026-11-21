@@ -252,7 +252,12 @@ fn send_limit(stream: &UnixStream) -> usize {
                 &mut length,
             )
         };
-        // A mark that cannot be read is not guessed: one byte always fits.
+        // A mark that cannot be read is not guessed: one byte always fits. That
+        // fallback is correct but slow: a 128 KiB frame would take 131,072
+        // sends. Any larger floor (512 bytes, say) would be a guess about how
+        // much room POLLOUT promised, and a wrong guess can block, which is the
+        // bug this function exists to avoid. On a valid socket this getsockopt
+        // does not fail (the macOS mark measured on the lead's Mac is 2048).
         if read == 0 && lowat > 0 {
             lowat as usize
         } else {

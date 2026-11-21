@@ -243,14 +243,17 @@ test("each example Compose file follows the routing, image and deps rules", asyn
   ).toEqual([]);
 });
 
-const PATTERN_EXAMPLES = [
+/** Other example projects held to the same startup and shutdown rules. */
+const TIMING_ONLY_EXAMPLES = [
+  "examples/basic",
+  "examples/next-app",
   "examples/patterns/p01-dependency-bootstrap",
   "examples/patterns/p02-portable-toolchain",
   "examples/patterns/p07-capability-overlays",
 ];
 
 test("each example starts on the first passing health check and stops at once", async () => {
-  for (const dir of [...examples, ...PATTERN_EXAMPLES]) {
+  for (const dir of [...examples, ...TIMING_ONLY_EXAMPLES]) {
     const compose = await readRecord(
       join(REPO_ROOT, dir, ".hack/docker-compose.yml")
     );
@@ -293,6 +296,7 @@ test("negative controls: the startup timing rules reject slow settings", () => {
         stub: { image: "postgres:17.6-alpine", command: ["sleep", "infinity"] },
         deps: { image: "oven/bun:1.4.4-slim", command: ["bun", "install"] },
         proxy: { image: "caddy:2.10-alpine", command: ["caddy", "run"] },
+        vendored: { image: "bitnami/redis:8.2" },
         tool: { image: "oven/bun:1.4.4-slim", profiles: ["tools"] },
       },
     })

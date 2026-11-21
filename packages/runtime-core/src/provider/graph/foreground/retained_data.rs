@@ -83,7 +83,7 @@ fn binding(receipt: &Receipt) -> Result<String, CandidateError> {
             .remove("phase");
     }
     let bytes = serde_json::to_vec(&value).map_err(|_| refused())?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(format!("{:x}", crate::Hex(Sha256::digest(bytes))))
 }
 fn allowed(
     receipt: &Receipt,
@@ -364,7 +364,7 @@ mod tests {
         receipt.relay_cleanup = None;
         let complete = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec_pretty(&receipt).unwrap())
+            crate::Hex(Sha256::digest(serde_json::to_vec_pretty(&receipt).unwrap()))
         );
         let live = json!({"version":1,"boot":"boot","original":receipt,
             "original_sha256":"1".repeat(64),"foreground_sha256":"2".repeat(64),

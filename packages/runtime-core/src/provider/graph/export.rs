@@ -62,7 +62,7 @@ pub fn export(candidate: &Candidate, run: &str) -> Result<Export, CandidateError
     Ok(Export {
         run: run.into(),
         path,
-        sha256: format!("{:x}", Sha256::digest(&bytes)),
+        sha256: format!("{:x}", crate::Hex(Sha256::digest(&bytes))),
         bytes: bytes.len(),
         files,
         original_retained: true,

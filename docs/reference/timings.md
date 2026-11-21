@@ -53,6 +53,13 @@ prefix, and a killed process leaves only complete lines already emitted.
 checks, engine readiness and any existing failed-boot cleanup. A provider start
 failure therefore records an error span. Warm starts use `vm.reattach`.
 
+`vm.ensure` carries `attrs.admission_reused` when a Development pool start's host
+sample under the startup lease was accepted: `true` when a recorded earlier sample
+replaced the admission wait, `false` when the start waited out its window. A start
+that fails later still carries it. It is absent when no such sample was accepted:
+a pool that was already running, a Research pool, or a start refused before or at
+that sample.
+
 This slice implements the Rust contract and transport only. The TypeScript reader,
 public `--timings`/`--json` integration, long-lived child transport wiring and measured
 command coverage follow separately. No CLI join or performance acceptance is claimed.
@@ -76,7 +83,7 @@ created/recreated services use `ok` without `cached`. Dependency-blocked work us
 
 Numeric keys include `service_index`, `attempt`, `engine_requests`, `dropped`,
 `services`, `wave`, `syncs`, `waited_on_index`, and `generation`. Boolean keys include
-`blocked`, `waited_on_cap`, `reason_spec`, `reason_unhealthy`, `reason_exited`,
+`blocked`, `waited_on_cap`, `admission_reused`, `reason_spec`, `reason_unhealthy`, `reason_exited`,
 `reason_dead`, `reason_missing`, `reason_forced`, `reason_migrated`,
 `reason_managed_env`, and the changed-field keys `changed_image`, `changed_command`,
 `changed_env`, `changed_managed_env`, `changed_mounts`, `changed_networks`,

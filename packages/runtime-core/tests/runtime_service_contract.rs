@@ -13,7 +13,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-const WAIT: Duration = Duration::from_secs(10);
+/// A hang guard only: every wait the test makes is bounded by it, and nothing
+/// asserts how fast a loaded machine is.
+const WAIT: Duration = Duration::from_secs(30);
 /// Held around every fork in this test binary and around creating a pipe until
 /// its ends are close-on-exec: without pipe2 (macOS), a fork between `pipe` and
 /// `FD_CLOEXEC` would otherwise let a child inherit a writer across exec.

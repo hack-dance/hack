@@ -250,12 +250,39 @@ const PATTERN_EXAMPLES = [
 ];
 
 test("each example starts on the first passing health check and stops at once", async () => {
-  for (const dir of [...examples, ...PATTERN_EXAMPLES]) {
+  for (const dir of [...examples, ...PATTERN_EXAMPLES, "examples/basic"]) {
     const compose = await readRecord(
       join(REPO_ROOT, dir, ".hack/docker-compose.yml")
     );
     expect(startupTimingIssues(compose), dir).toEqual([]);
   }
+});
+
+test("Postgres health checks in every example wait for TCP readiness", async () => {
+  const composeFiles = new Bun.Glob("**/.hack/docker-compose.yml");
+  const examplesRoot = join(REPO_ROOT, "examples");
+  let checked = 0;
+  for await (const path of composeFiles.scan({
+    cwd: examplesRoot,
+    dot: true,
+  })) {
+    const compose = await readRecord(join(examplesRoot, path));
+    const services = isRecord(compose.services) ? compose.services : {};
+    for (const [name, service] of Object.entries(services)) {
+      if (!(isRecord(service) && isRecord(service.healthcheck))) {
+        continue;
+      }
+      const check = service.healthcheck.test;
+      const command = Array.isArray(check) ? check.join(" ") : check;
+      if (typeof command === "string" && /\bpg_isready\b/.test(command)) {
+        checked++;
+        expect(command, `${path}: ${name}`).toMatch(
+          /(?:^|\s)(?:-h\s+|--host(?:=|\s+))127\.0\.0\.1(?:\s|$)/
+        );
+      }
+    }
+  }
+  expect(checked).toBeGreaterThan(0);
 });
 
 test("negative controls: the startup timing rules reject slow settings", () => {

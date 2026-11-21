@@ -95,6 +95,7 @@ impl Engine<'_> {
                 .ok_or_else(uncertain)?
                 .record_exec(candidate, id)?;
             effect()?;
+            crate::provider::engine_requests::connection();
             let mut stream =
                 crate::provider::agent::connect_until(&self.guest.engine_socket()?, deadline)
                     .map_err(|_| uncertain())?;

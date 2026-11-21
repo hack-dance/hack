@@ -67,6 +67,7 @@ impl RelayExec {
             .ok_or_else(refused)?;
         guest.verify()?;
         guest.before_effect()?;
+        crate::provider::engine_requests::connection();
         let mut stream =
             crate::provider::agent::connect_until(&socket, deadline).map_err(|_| refused())?;
         start(&mut stream, id, deadline)?;
@@ -185,6 +186,7 @@ fn upgrade(
         body.len()
     );
     let mut bytes = request.as_bytes();
+    crate::provider::engine_requests::record("POST", "/v1.53/exec/{id}/start");
     while !bytes.is_empty() {
         match super::exec_io::write(stream, bytes, deadline) {
             Ok(0) => return Err(StartFailure::Closed),

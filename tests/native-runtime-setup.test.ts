@@ -183,6 +183,17 @@ test("noninteractive setup requires consent; accepted JSON passes through and up
   expect(up.stdout + up.stderr).not.toContain("E_NATIVE_SETUP_REQUIRED");
   // No project exists: reaching project resolution proves the install gate passed.
   expect(up.stdout + up.stderr).toContain("E_PROJECT_NOT_FOUND");
+  const calls = (await readFile(f.calls, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line): unknown => JSON.parse(line));
+  expect(calls.at(-1)).toEqual(["runtime", "setup", "inspect", "--json"]);
+  expect(
+    calls.every(
+      (call) =>
+        Array.isArray(call) && call[0] === "runtime" && call[1] === "setup"
+    )
+  ).toBe(true);
 }, 90_000);
 
 test("preflight JSON reports missing runtime as its own blocker", async () => {

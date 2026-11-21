@@ -16,6 +16,17 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+/// Count the raw attachment socket separately from the HTTP create connection,
+/// including a refused connect before any exec-start request can be dispatched.
+pub(super) fn connect(
+    socket: &std::path::Path,
+    deadline: Instant,
+) -> Result<UnixStream, CandidateError> {
+    crate::provider::engine_requests::connection();
+    crate::provider::agent::connect_until(socket, deadline)
+        .map_err(|_| failed(Stage::Connect, past_or(deadline, Reason::Io)))
+}
+
 /// The private exec step that failed. Steps before [`Stage::Release`] cannot have run
 /// the command. Create, connect and start occur only in the macOS engine path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,7 +111,6 @@ fn remaining(deadline: Instant, stage: Stage) -> Result<Duration, CandidateError
         .ok_or_else(|| failed(stage, Reason::Deadline))
 }
 /// `Deadline` once the exec's deadline has passed, otherwise `reason`.
-#[cfg(all(target_os = "macos", feature = "environment-launcher"))]
 fn past_or(deadline: Instant, reason: Reason) -> Reason {
     if Instant::now() >= deadline {
         Reason::Deadline
@@ -390,8 +400,7 @@ impl super::Engine<'_> {
             .ok_or_else(|| failed(Stage::Create, Reason::Protocol))?;
         self.guest.verify()?;
         self.guest.before_effect()?;
-        let mut stream = crate::provider::agent::connect_until(&socket, deadline_for_values)
-            .map_err(|_| failed(Stage::Connect, past_or(deadline_for_values, Reason::Io)))?;
+        let mut stream = connect(&socket, deadline_for_values)?;
         super::relay_exec::start_classified(&mut stream, id, deadline_for_values).map_err(
             |failure| {
                 use super::relay_exec::StartFailure;

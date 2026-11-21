@@ -5,6 +5,7 @@ import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  NATIVE_RUNTIME_ENVIRONMENT,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
@@ -447,7 +448,7 @@ export async function invokeNativeBuild(opts: {
 /** The same minimal process environment ordinary runtime requests receive. */
 function systemEnvironment(): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const key of ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"]) {
+  for (const key of NATIVE_RUNTIME_ENVIRONMENT) {
     const value = process.env[key];
     if (value !== undefined) {
       env[key] = value;

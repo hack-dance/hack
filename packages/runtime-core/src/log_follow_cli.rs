@@ -109,6 +109,7 @@ fn watch_frontend() -> Result<(), CandidateError> {
             use std::io::Read;
             let mut byte = [0];
             let result = std::io::stdin().read(&mut byte);
+            hack_runtime_core::provider::engine_requests::report();
             hack_runtime_core::timings::exit(if matches!(result, Ok(0)) { 0 } else { 1 });
         })
         .map_err(|_| {
@@ -173,6 +174,10 @@ mod tests {
         if std::env::var_os("HACK_TEST_LOG_LIFETIME").is_none() {
             return;
         }
+        let _report = hack_runtime_core::provider::engine_requests::from_environment(&[
+            "graph".into(),
+            "logs-follow".into(),
+        ]);
         println!("lifetime-child-entered");
         watch_frontend().unwrap();
         std::thread::sleep(Duration::from_secs(30));
@@ -181,6 +186,8 @@ mod tests {
 
     #[test]
     fn closed_frontend_pipe_ends_idle_reader_process() {
+        let file =
+            std::env::temp_dir().join(format!("engine-log-exit-{}.jsonl", std::process::id()));
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -194,6 +201,7 @@ mod tests {
             .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
             .env("HACK_NO_INTERACTIVE", "1")
             .env("HACK_TEST_LOG_LIFETIME", "1")
+            .env("HACK_ENGINE_REQUESTS_FILE", &file)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -221,5 +229,10 @@ mod tests {
             .unwrap();
         assert!(output.contains("lifetime-child-entered"));
         assert!(status.success());
+        let record: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(record["schema"], hack_runtime_core::timings::SCHEMA);
+        assert_eq!(record["step"], "engine.connections");
+        std::fs::remove_file(file).unwrap();
     }
 }

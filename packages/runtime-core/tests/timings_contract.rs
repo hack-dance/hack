@@ -85,7 +85,19 @@ fn timing_pipe_preserves_the_exact_stderr_error_parser_contract() {
         assert_eq!(failure["code"], "missing_candidate_root");
         let data = read_records(pipe);
         if enabled {
-            assert_eq!(data.len(), 2);
+            assert_eq!(data.len(), 3);
+            let counters = data
+                .iter()
+                .find(|r| r.step == "engine.connections")
+                .unwrap();
+            assert_eq!(
+                counters.attrs["engine_connections"],
+                timings::Attr::Number(0.into())
+            );
+            let data: Vec<_> = data
+                .into_iter()
+                .filter(|r| r.step != "engine.connections")
+                .collect();
             assert_eq!(data[0].step, "process.startup");
             assert_eq!(data[0].origin_mono_us, start);
             assert_eq!(data[1].step, "runtime.dispatch");
@@ -117,17 +129,31 @@ fn host_children_join_by_anchor_and_identity_in_reverse_arrival_order() {
     while let Some((child, pipe, start)) = children.pop() {
         assert_eq!(child.wait_with_output().unwrap().status.code(), Some(2));
         let end = mono();
-        for record in read_records(pipe) {
+        let records = read_records(pipe);
+        let dispatch = records
+            .iter()
+            .find(|r| r.step == "runtime.dispatch")
+            .unwrap()
+            .span
+            .clone();
+        for record in records {
             assert_eq!(record.origin_mono_us, start);
             assert_eq!(record.trace, "4bf92f3577b34da6a3ce929d0e0e4736");
-            assert_eq!(record.parent.as_deref(), Some("53995c3f42cd8ad8"));
+            assert_eq!(
+                record.parent.as_deref(),
+                Some(if record.step == "engine.connections" {
+                    &dispatch
+                } else {
+                    "53995c3f42cd8ad8"
+                })
+            );
             assert!(spans.insert(record.span.clone()));
             let placed = record.host_start_us(parent_origin).unwrap();
             assert_eq!(placed as u64, start - parent_origin + record.start_us);
             assert!(record.origin_mono_us + record.start_us + record.dur_us <= end);
         }
     }
-    assert_eq!(spans.len(), 4);
+    assert_eq!(spans.len(), 6);
 }
 #[test]
 fn timing_exit_helper() {

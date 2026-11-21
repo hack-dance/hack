@@ -16,6 +16,7 @@ import { nativePublisherExitNotice } from "./native-project-publications.ts";
 import {
   invokeNativeRuntime,
   NATIVE_EXIT_DRAIN_BOUND_MS,
+  NATIVE_RUNTIME_ENVIRONMENT,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
   nativeFailureNote,
@@ -343,7 +344,7 @@ async function serveGraphProcess(
 ): Promise<number> {
   assertProcessSelection(opts);
   const environment: Record<string, string> = {};
-  for (const key of ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"]) {
+  for (const key of NATIVE_RUNTIME_ENVIRONMENT) {
     const value = process.env[key];
     if (value !== undefined) {
       environment[key] = value;

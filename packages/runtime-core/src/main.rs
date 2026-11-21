@@ -140,7 +140,8 @@ Normalized public input for project plan/capture/publish-source/verify-source an
 Build with: ./scripts/build-hack-local.sh
 Native graph commands require native-config-plan and are a bounded image-only prerequisite with an owned outbound project network. Foreground serve/control require macOS; ordinary frontend startup remains a separate gate.
 Runtime commands affect only the candidate pool. Graph commands support a bounded pinned-image subset; full project up/exec/down remains unimplemented.
-The installed hack and its state are never used as a fallback.";
+The installed hack and its state are never used as a fallback.
+Diagnostic setting: HACK_ENGINE_REQUESTS_FILE names an inherited JSONL output file for engine counters; command stdout and stderr are unchanged.";
 
 fn main() {
     if let Some(argument) = std::env::args_os()
@@ -161,6 +162,7 @@ fn main() {
             "{}",
             serde_json::to_string(&error).expect("error is serializable")
         );
+        hack_runtime_core::provider::engine_requests::report();
         hack_runtime_core::timings::exit(2);
     }
 }
@@ -242,6 +244,8 @@ fn run() -> Result<(), CandidateError> {
             })
         })
         .collect::<Result<_, _>>()?;
+    let _engine_requests =
+        hack_runtime_core::provider::engine_requests::from_environment(&arguments);
     if arguments.len() < 2 || arguments[0] != "--candidate-root" {
         return Err(CandidateError::new(
             "missing_candidate_root",
@@ -378,6 +382,7 @@ fn run() -> Result<(), CandidateError> {
             )?;
             print_json(&response)?;
             if response["ok"] == false {
+                hack_runtime_core::provider::engine_requests::report();
                 hack_runtime_core::timings::exit(2);
             }
         }
@@ -407,6 +412,7 @@ fn run() -> Result<(), CandidateError> {
         }
         ["graph", "exec-interactive", arguments @ ..] => {
             let code = interactive_exec_cli::command(&discover_candidate(&requested)?, arguments)?;
+            hack_runtime_core::provider::engine_requests::report();
             hack_runtime_core::timings::exit(code);
         }
         ["graph", "interactive-sessions", arguments @ ..] => {
@@ -424,6 +430,7 @@ fn run() -> Result<(), CandidateError> {
                     CandidateError::new("graph_exec_result", "Missing service command exit status.")
                 })?;
                 if code != 0 {
+                    hack_runtime_core::provider::engine_requests::report();
                     hack_runtime_core::timings::exit(i32::try_from(code).unwrap_or(1));
                 }
             }

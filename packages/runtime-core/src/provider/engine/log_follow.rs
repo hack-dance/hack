@@ -397,6 +397,7 @@ pub(in crate::provider) fn follow_socket(
     output: &mut impl Write,
 ) -> Result<(), CandidateError> {
     let running = check().map_err(|e| e.with_log_phase(LogFailurePhase::Admission))?;
+    crate::provider::engine_requests::connection();
     let mut stream =
         crate::provider::agent::connect_until(path, Instant::now() + Duration::from_secs(5))?;
     stream
@@ -405,6 +406,7 @@ pub(in crate::provider) fn follow_socket(
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|_| failure())?;
+    crate::provider::engine_requests::record("GET", "/v1.53/containers/{id}/logs");
     stream
         .write_all(request(container, &options).as_bytes())
         .map_err(|_| failure())?;

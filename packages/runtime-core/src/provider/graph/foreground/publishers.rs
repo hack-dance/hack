@@ -73,6 +73,7 @@ fn command(
         .args(["graph", "publish-bridge", "--run-id", run, "--slot"])
         .arg(slot.to_string())
         .args(["--expect-reservation", reservation]);
+    crate::provider::engine_requests::inherit(&mut command);
     match frontend {
         Frontend::Hostnames(hostnames) => {
             command.arg("--unix");
@@ -771,7 +772,19 @@ mod tests {
             ]
         );
         assert_eq!(command.get_program(), "/candidate");
-        assert_eq!(command.get_envs().count(), 0);
+        let inherited = command.get_envs().collect::<Vec<_>>();
+        let destination = std::env::var_os(crate::provider::engine_requests::FILE_ENV);
+        let expected = destination
+            .as_ref()
+            .map(|value| {
+                (
+                    std::ffi::OsStr::new(crate::provider::engine_requests::FILE_ENV),
+                    Some(value.as_os_str()),
+                )
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(inherited, expected);
     }
 
     #[test]

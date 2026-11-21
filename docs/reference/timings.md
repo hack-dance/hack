@@ -74,7 +74,7 @@ created/recreated services use `ok` without `cached`. Dependency-blocked work us
 `skipped` with `attrs.blocked:true`. A still-warming service has no completed
 `container.ready` span until readiness is observed; the owner may outlive the CLI.
 
-Numeric keys include `service_index`, `attempt`, `engine_requests`, `dropped`,
+Numeric keys include `service_index`, `attempt`, `engine_requests`, `engine_connections`, `engine_transports`, `engine_method`, `dropped`,
 `services`, `wave`, `syncs`, `waited_on_index`, and `generation`. Boolean keys include
 `blocked`, `waited_on_cap`, `reason_spec`, `reason_unhealthy`, `reason_exited`,
 `reason_dead`, `reason_missing`, `reason_forced`, `reason_migrated`,
@@ -104,3 +104,22 @@ for the full attribute vocabulary there. Linux datagram payload capacity is
 queried from `SO_SNDBUF` minus its 32-byte kernel reservation. No global socket
 settings are changed. Diagnostic writes never wait for the reader; saturation
 can drop records and is reported by the truncation marker when it can be sent.
+
+## Engine counter capture
+
+`HACK_ENGINE_REQUESTS_FILE` selects a private append-only JSONL file using this same
+schema. Runtime children inherit this setting explicitly. An installed dedicated
+timing descriptor takes precedence; a process never exports to both sinks.
+File spans queue within the existing record bound and flush at command completion,
+explicit exits and owner readiness checkpoints. File appenders serialize flushes
+under a lock. A killed process can lose pending records; reject malformed or
+`timings.truncated` captures rather than treating them as complete totals.
+
+Fixed `engine.request.*` steps carry `attrs.engine_requests` and `engine_method`
+(OTHER=0, GET=1, HEAD=2, POST=3, DELETE=4, PUT=5). Route segments use dots and object
+identifiers become `id`; unknown routes use `engine.request.other`.
+`engine.connections` carries `engine_connections` (actual connector/raw socket
+attempts) and `engine_transports` (HTTP client creation attempts). Counters describe
+attempts, including failures; an `ok` snapshot does not assert an engine effect.
+Sum disjoint snapshots across processes. Owners started before capture was enabled
+are excluded. Capture a snapshot when the command returns, before teardown.

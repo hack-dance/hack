@@ -147,6 +147,7 @@ async function fixture() {
   await Bun.write(
     binary,
     `#!${process.execPath}
+if (process.argv.includes("diagnostics-inheritance")) { const fs = await import("node:fs"); fs.appendFileSync(process.env.HACK_ENGINE_REQUESTS_FILE, JSON.stringify({role:"runtime",command:"other",engine_requests:1}) + "\\n"); console.error(JSON.stringify({code:"engine_not_found",message:"synthetic diagnostic"})); process.exit(2); }
 if (process.argv.includes("hang")) await Bun.sleep(60_000);
 if (process.argv.includes("configuration-batch")) { console.error(JSON.stringify({code:"invalid_dependency_cache",message:"synthetic-secret-diagnostic",configuration_refusals:Array.from({length:128},(_,i)=>({text_fixed:true,service:"s"+i,field:"labels.hack.dependencies.lockfiles",message:"The file list is invalid.",fix:"Use relative paths without variables."})),startup_logs:[{service:"web",lines:["synthetic-secret-diagnostic"]}]})); process.exit(2); }
 if (process.argv.includes("old-provider")) { console.error(JSON.stringify({code:"provider_pin_changed",message:"synthetic-secret-diagnostic"})); process.exit(2); }
@@ -1924,5 +1925,33 @@ test("HACK-2418: a failed provider command shows the provider's own last line, v
     expect(await failure("provider-line-unsafe", kind)).toBe(
       "Native runtime request failed (provider_command_failed); inspect owned state before retrying."
     );
+  }
+});
+
+test("inherited diagnostic file leaves structured runtime failure parsing intact", async () => {
+  const runtime = await fixture();
+  const file = join(runtime.home, "engine.jsonl");
+  const previous = process.env.HACK_ENGINE_REQUESTS_FILE;
+  process.env.HACK_ENGINE_REQUESTS_FILE = file;
+  try {
+    await expect(
+      invokeNativeRuntime({
+        runtime,
+        cwd: runtime.home,
+        args: ["diagnostics-inheritance"],
+      })
+    ).rejects.toMatchObject({ nativeCode: "engine_not_found" });
+    const record = JSON.parse((await readFile(file, "utf8")).trim());
+    expect(record).toEqual({
+      role: "runtime",
+      command: "other",
+      engine_requests: 1,
+    });
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_ENGINE_REQUESTS_FILE");
+    } else {
+      process.env.HACK_ENGINE_REQUESTS_FILE = previous;
+    }
   }
 });

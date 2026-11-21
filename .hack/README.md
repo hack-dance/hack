@@ -32,6 +32,9 @@ The service is a one-shot task, not an idle development daemon.
 After changing the Dockerfile or tool pins, run `sh scripts/check-toolchain-image.sh`.
 It uses Docker to build without cached layers, checks the installed tools and TLC,
 and removes its named container and image. Docker's build cache remains available.
+The `Contributor toolchain image` workflow runs this check only when `mise.toml`,
+the image inputs, the check script, or that workflow changes. Other PRs do not
+spend hosted build minutes on it.
 The service uses Compose `init: true` to reap orphaned process-group descendants;
 direct Docker test invocations must likewise pass `--init`.
 

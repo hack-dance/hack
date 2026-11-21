@@ -42,7 +42,7 @@
           },
           {
             "path": "mise.toml",
-            "sha256": "36c23fa9a3377586a9452f36bad382fdb4f26a5f66dc7b41324fe30367a50954"
+            "sha256": "33ae8883000836b1c5a95da1547866a6b6f6eda052fc67117ddfee6c88f1d85c"
           },
           {
             "path": "package.json",
@@ -105,7 +105,7 @@
           },
           {
             "path": "mise.toml",
-            "sha256": "36c23fa9a3377586a9452f36bad382fdb4f26a5f66dc7b41324fe30367a50954"
+            "sha256": "33ae8883000836b1c5a95da1547866a6b6f6eda052fc67117ddfee6c88f1d85c"
           },
           {
             "path": "package.json",
@@ -162,7 +162,7 @@
           },
           {
             "path": "mise.toml",
-            "sha256": "36c23fa9a3377586a9452f36bad382fdb4f26a5f66dc7b41324fe30367a50954"
+            "sha256": "33ae8883000836b1c5a95da1547866a6b6f6eda052fc67117ddfee6c88f1d85c"
           }
         ],
         "review": "HACK-1157"

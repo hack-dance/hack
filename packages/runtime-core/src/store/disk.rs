@@ -22,8 +22,15 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
-const VERSION: &[u8] = b"hack.store/1\n";
-pub(super) const FORMAT_DIRECTORY: &str = "hack.store-1";
+macro_rules! format_v1 {
+    () => {
+        "1"
+    };
+}
+
+const VERSION_1: &[u8] = concat!("hack.store/", format_v1!(), "\n").as_bytes();
+pub(super) const VERSION: &[u8] = VERSION_1;
+pub(super) const FORMAT_DIRECTORY: &str = concat!("hack.store-", format_v1!());
 const DIRECTORIES: [&str; 5] = ["records", "cas", "files", "tags", "tmp"];
 const ARCHIVE_AGE_MILLIS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
@@ -38,11 +45,19 @@ pub(super) fn open(base: &Path) -> Result<Store> {
 ///
 /// Every wait is bounded: no `flock` here blocks. Shared and exclusive locks are
 /// tried without blocking and retried until the deadline, then the open fails
-/// with `step_store_busy`, which a caller treats as "run the step". A lock
-/// problem can therefore slow a command by at most the deadline, never hang it.
+/// with `step_store_busy`, which a caller treats as "run the step". The deadline
+/// bounds lock waits. Cleanup of old copies runs after the store opens, outside
+/// that deadline.
 pub(super) fn open_until(base: &Path, deadline: Instant) -> Result<Store> {
     let base = store_path(base)?;
     create_directory(&base)?;
+    let store = open_locked(&base, deadline)?;
+    cleanup_archives(&base, store.owner);
+    cleanup_legacy_layout(&base, store.owner);
+    Ok(store)
+}
+
+fn open_locked(base: &Path, deadline: Instant) -> Result<Store> {
     let root = base.join(FORMAT_DIRECTORY);
     // Most opens only take a shared lock. Initialization waits for other openers
     // to finish probing, but refuses to rotate a store with live handles.
@@ -112,7 +127,7 @@ pub(super) fn open_until(base: &Path, deadline: Instant) -> Result<Store> {
         if !is_current(&lock, &lock_path)? {
             continue;
         }
-        initialize(&root, owner)?;
+        initialize(base, &root, owner)?;
         // Reopen under a shared lock, possibly on the newly created root.
     }
 }
@@ -146,18 +161,14 @@ fn store_path(root: &Path) -> Result<PathBuf> {
 /// aside. A key that still exists can be repaired or retried. The key and its
 /// directory must be synced before publishing VERSION, including after an
 /// interruption that left a key file in place.
-fn initialize(root: &Path, owner: u32) -> Result<()> {
-    let base = root
-        .parent()
-        .ok_or_else(|| invalid("Invalid step store directory."))?;
-    cleanup_archives(base, owner);
+fn initialize(base: &Path, root: &Path, owner: u32) -> Result<()> {
     let version = read_version(root, owner)?;
     if version == Some(false) {
-        return set_aside(base, root, owner);
+        return set_aside(base, root);
     }
     let file = match probe_key(root, owner)? {
         KeyProbe::Missing if version.is_none() => None,
-        KeyProbe::Missing | KeyProbe::Damaged => return set_aside(base, root, owner),
+        KeyProbe::Missing | KeyProbe::Damaged => return set_aside(base, root),
         KeyProbe::File(metadata) => {
             if !private_file(&metadata, owner) {
                 repair_key_mode(root)?;
@@ -178,16 +189,14 @@ fn initialize(root: &Path, owner: u32) -> Result<()> {
     publish(root, &root.join("VERSION"), VERSION)
 }
 
-fn set_aside(base: &Path, root: &Path, owner: u32) -> Result<()> {
+fn set_aside(base: &Path, root: &Path) -> Result<()> {
     let backup = base.join(format!("{FORMAT_DIRECTORY}.old-{}", unix_millis()?));
     match fs::symlink_metadata(&backup) {
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(io_error(error)),
         Ok(_) => return Err(invalid("Step store archive already exists.")),
     }
-    fs::rename(root, backup).map_err(io_error)?;
-    cleanup_archives(base, owner);
-    Ok(())
+    fs::rename(root, backup).map_err(io_error)
 }
 
 /// Use the timestamp in the archive name. A newly set-aside directory may
@@ -220,20 +229,57 @@ pub(super) fn cleanup_archives(base: &Path, owner: u32) {
                 .as_ref()
                 .is_some_and(|(time, _)| archived_at <= *time)
         {
-            remove_archive(&path, owner);
+            remove_owned_directory(&path, owner);
         } else if let Some((_, previous)) = newest.replace((archived_at, path)) {
-            remove_archive(&previous, owner);
+            remove_owned_directory(&previous, owner);
         }
     }
+}
+
+/// Remove the flat v1 layout and its sibling archives left by the opt-in P1 store.
+fn cleanup_legacy_layout(base: &Path, owner: u32) {
+    let version = base.join("VERSION");
+    if has_legacy_version(&version, owner).unwrap_or(false) {
+        for name in DIRECTORIES {
+            remove_owned_directory(&base.join(name), owner);
+        }
+        for name in ["key", "lock", "VERSION"] {
+            let _ = fs::remove_file(base.join(name));
+        }
+    }
+
+    // A P1 rotation could leave an archive even when the flat store is absent.
+    let Some(entries) = base.parent().and_then(|parent| fs::read_dir(parent).ok()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(suffix) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("store.old-"))
+        else {
+            continue;
+        };
+        let path = entry.path();
+        if path != base && !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            remove_owned_directory(&path, owner);
+        }
+    }
+}
+
+fn has_legacy_version(path: &Path, owner: u32) -> io::Result<bool> {
+    let file = private_options().read(true).open(path)?;
+    let metadata = file.metadata()?;
+    Ok(metadata.is_file() && metadata.uid() == owner && version_matches(file, VERSION_1)?)
 }
 
 fn owned_directory(path: &Path, owner: u32) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir() && metadata.uid() == owner)
 }
 
-fn remove_archive(path: &Path, owner: u32) {
+fn remove_owned_directory(path: &Path, owner: u32) {
     if owned_directory(path, owner) {
-        // Best effort. remove_dir_all does not traverse symlinks inside an archive.
+        // Best effort. remove_dir_all does not traverse symlinks inside the directory.
         let _ = fs::remove_dir_all(path);
     }
 }
@@ -321,11 +367,14 @@ fn read_version(root: &Path, owner: u32) -> Result<Option<bool>> {
     let Some(file) = read_owned_file(&root.join("VERSION"), owner)? else {
         return Ok(None);
     };
+    version_matches(file, VERSION).map(Some).map_err(io_error)
+}
+
+fn version_matches(file: File, version: &[u8]) -> io::Result<bool> {
     let mut bytes = Vec::new();
-    file.take(VERSION.len() as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(io_error)?;
-    Ok(Some(bytes == VERSION))
+    file.take(version.len() as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes == version)
 }
 
 enum KeyProbe {

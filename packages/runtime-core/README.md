@@ -1984,9 +1984,26 @@ the pin. To measure a build, run
 
 The CLI resolves the store base to a canonical path, following symlinks. The
 runtime refuses symlinked ancestors of the path it receives and keeps its
-format in a separate subdirectory, currently `hack.store-1/`. Initialization
-keeps at most the newest `hack.store-1.old-*` directory owned by this user and
-removes it too once it is older than seven days.
+format in a separate subdirectory, currently `hack.store-1/`. After each
+successful open, best-effort cleanup keeps at most the newest
+`hack.store-1.old-*` directory owned by this user and removes it too once the
+timestamp in its name is more than seven days old.
+
+Cleanup also removes the previous flat layout if the base has a regular
+`VERSION` file owned by this user containing exactly `hack.store/1\n`. It
+removes the flat `VERSION`, `key`, and `lock` files and the owned `records`,
+`cas`, `files`, `tags`, and `tmp` directories. It also removes owned
+`store.old-<digits>` directories next to the base. Cleanup leaves the live
+format directory in place and never traverses symlinks.
+
+`record()` and `put_cas()` can fail if a directory sits at the write path or
+a shard has the wrong mode or is a symlink. Writes leave that damage in place.
+Callers must ignore cache write errors and keep the step's result. A CAS lookup
+reads the whole object (up to 16 MiB) to verify it.
+
+Some damage makes every open fail until a person fixes it. This includes a
+damaged top-level layout entry (such as a non-directory `records`), a
+wrong-mode `lock`, a mode-000 `VERSION`, and a foreign-owned or hard-linked key.
 
 The store has no eviction yet. Files left in `tmp/` by a crashed writer stay
 until garbage collection (slice P8).
@@ -1997,7 +2014,9 @@ On macOS, releasing an exclusive `flock` wakes only one blocked waiter and queue
 the others behind it, so a woken waiter that keeps a shared lock strands the rest
 with no bound. The step store (`src/store/`) therefore never blocks in `flock`: it
 tries every lock with `LOCK_NB`, closes and retries 1 to 5 ms later until a time
-deadline, and then reports the store busy. Every other `flock` in this crate is
+deadline, and then reports the store busy. The deadline bounds lock waits.
+Cleanup of old copies runs after the store opens under a shared lock, outside
+that deadline. Every other `flock` in this crate is
 non-blocking too; keep it that way for any lock that several openers may wait for.
 
 ### Extending a stopped pool's approved hosts

@@ -18,6 +18,7 @@ import {
 import { HACK_VERSION } from "../src/lib/hack-version.ts";
 import {
   inputDigest,
+  type StepBuild,
   StepKeyError,
   type StepKeyParts,
   stepKey,
@@ -35,7 +36,11 @@ import {
   newStepRecord,
 } from "../src/lib/step-store/record.ts";
 
-type KeyVector = StepKeyParts & { readonly name: string; readonly key: string };
+type KeyVector = Omit<StepKeyParts, "build"> & {
+  readonly name: string;
+  readonly key: string;
+  readonly build: string;
+};
 type RecordVector = {
   readonly name: string;
   readonly keyIndex: number;
@@ -56,18 +61,19 @@ const vectors = JSON.parse(
 };
 
 const digestOf = (char: string) => inputDigest(`sha256:${char.repeat(64)}`);
+const testBuild = (build: string) => build as StepBuild;
 const base: StepKeyParts = {
   step: "plan.compile",
   stepVersion: 1,
   class: "cas",
   inputs: { compose: digestOf("a"), branch: digestOf("b") },
   epoch: null,
-  build: "runtime-build-1",
+  build: testBuild("runtime-build-1"),
 };
 
 function keyFor(vector: KeyVector) {
   const { name: _name, key: _key, ...parts } = vector;
-  return stepKey(parts);
+  return stepKey({ ...parts, build: testBuild(parts.build) });
 }
 
 describe("step store, shared vectors", () => {
@@ -150,7 +156,7 @@ describe("step keys", () => {
     },
     "epoch null to set": { epoch: "boot-1" },
     "epoch set to another": { epoch: "boot-2" },
-    build: { build: "runtime-build-2" },
+    build: { build: testBuild("runtime-build-2") },
   };
   for (const [field, change] of Object.entries(changes)) {
     test(`changing ${field} changes the key`, () => {
@@ -182,9 +188,9 @@ describe("step keys", () => {
       { epoch: "" },
       { epoch: "has space" },
       { epoch: "a".repeat(129) },
-      { build: "" },
-      { build: "/path/to/build" },
-      { build: "value=secret" },
+      { build: testBuild("") },
+      { build: testBuild("/path/to/build") },
+      { build: testBuild("value=secret") },
     ]) {
       expect(() => stepKey({ ...base, ...change } as StepKeyParts)).toThrow(
         StepKeyError
@@ -223,7 +229,7 @@ describe("step records", () => {
   });
 
   test("a record with a valid check for another key is torn", () => {
-    const other = stepKey({ ...base, build: "runtime-build-2" });
+    const other = stepKey({ ...base, build: testBuild("runtime-build-2") });
     expect(decodeStepRecord(text, other)).toBe("torn-record");
   });
 
@@ -284,7 +290,7 @@ describe("step records", () => {
       class: "file-identity",
       inputs: manyInputs(256),
       epoch: "e".repeat(128),
-      build: "b".repeat(128),
+      build: testBuild("b".repeat(128)),
     });
     const record = newStepRecord({
       key: largestKey,

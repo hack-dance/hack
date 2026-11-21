@@ -2,9 +2,20 @@
 //!
 //! The CLI follows symlinks to resolve the base to its canonical path. The runtime
 //! refuses symlinked ancestors of the path it receives. Each format has its own
-//! subdirectory, currently `hack.store-1/`. Initialization keeps at most the newest
-//! set-aside copy of this format, and removes it too once it is older than seven days.
-//! There is no eviction yet. Garbage collection (P8) will also clean up files that
+//! subdirectory, currently `hack.store-1/`. After a successful open, best-effort
+//! cleanup keeps only the newest owned set-aside copy of this format for up to
+//! seven days and removes remnants of the old flat layout.
+//!
+//! `record()` and `put_cas()` can fail on a directory at the write path or a
+//! wrong-mode or symlinked shard. Writes leave that damage in place. Callers must
+//! ignore a cache write error and keep the step's result. A CAS lookup reads the
+//! whole object (up to 16 MiB) to verify it.
+//!
+//! Some damage makes every open fail until a person fixes it. This includes a
+//! damaged top-level layout entry (such as a non-directory `records`), a wrong-mode
+//! `lock`, a mode-000 `VERSION`, and a foreign-owned or hard-linked key.
+//!
+//! There is no eviction yet. Garbage collection (P8) will clean up files that
 //! crashed writers leave in `tmp/`.
 
 mod cas;

@@ -79,7 +79,7 @@ pub struct Handle {
     pub boot: String,
     /// Lowercase hyphenated UUID minted at agent startup.
     pub incarnation: String,
-    /// Random host execution ID, 32 lowercase hex digits.
+    /// Increasing per-incarnation host counter, 32 lowercase hex digits.
     pub id: String,
 }
 impl std::fmt::Debug for Handle {
@@ -249,14 +249,14 @@ messages!(Request,1;
     5=>Signal{handle:Execution,signal:SignalCode},
     /// Read one stream starting at a byte offset.
     6=>Output{handle:Execution,stream:StreamCode,offset:U64},
-    /// Discard a recorded result and retain an ID tombstone.
+    /// Discard a recorded result and retire the ID under the incarnation watermark.
     7=>Release{handle:Execution},
     /// List all unreleased handles owned by this agent.
     8=>List{}
 );
 messages!(Response,2;
     /// Selected version and identities for this connection.
-    1=>Welcome{version:U16,capabilities:U64,max_frame:FrameSize,max_jobs:Jobs,output_retention:U32,boot:Uuid,incarnation:Uuid},
+    1=>Welcome{version:U16,capabilities:U64,max_frame:FrameSize,max_jobs:Jobs,output_retention:Retention,boot:Uuid,incarnation:Uuid},
     /// Architecture, kernel release, agent package version, UTC milliseconds and identities.
     2=>Facts{arch:Text<64>,kernel:Text<256>,agent_version:Text<64>,unix_ms:U64,boot:Uuid,incarnation:Uuid},
     /// No record in the current incarnation at the moment of inspection.

@@ -225,7 +225,8 @@ import {
   okResult,
 } from "../lib/cli-result.ts";
 import {
-  formatComposeDownCapTimeoutMessage,
+  buildComposeDownFailure,
+  countDistinctRunningServices,
   parseComposeDownTimeoutFlag,
   resolveComposeDownCapMs,
   resolveComposeDownTimeoutSeconds,
@@ -8608,7 +8609,9 @@ async function runDownCommand({
     classifyComposeStartupState(statesBeforeDown).running;
   const downCapMs = resolveComposeDownCapMs({
     timeoutSeconds: downTimeoutSeconds,
-    runningServiceCount: runningServicesBeforeDown.length,
+    runningServiceCount: countDistinctRunningServices(
+      runningServicesBeforeDown
+    ),
   });
 
   // Holders are released only once Compose confirmed the containers
@@ -8630,6 +8633,7 @@ async function runDownCommand({
     },
   });
   let code: number;
+  let downTimedOut = false;
   let stopObservation: DownObservation = { complete: true };
   let helperReleaseFailures: readonly string[] = [];
   try {
@@ -8668,6 +8672,9 @@ async function runDownCommand({
       routeStdoutToStderr: json,
       timeoutSeconds: downTimeoutSeconds,
       capMs: downCapMs,
+      onOutcome: (outcome) => {
+        downTimedOut = outcome.timedOut;
+      },
     });
     if (code === 0) {
       stopObservation = await finishInstanceStop({
@@ -8692,20 +8699,20 @@ async function runDownCommand({
   }
 
   if (code !== 0) {
-    const capMessage =
-      code === 124 ? formatComposeDownCapTimeoutMessage(downCapMs) : null;
-    if (capMessage && !json) {
-      logger.warn({ message: capMessage });
+    const failure = buildComposeDownFailure({
+      exitCode: code,
+      timedOut: downTimedOut,
+      capMs: downCapMs,
+    });
+    if (failure.capWarning && !json) {
+      logger.warn({ message: failure.capWarning });
     }
     if (json) {
       return emitLifecycleResult({
         result: errorResult({
           code: "E_COMPOSE_FAILED",
-          message: capMessage ?? `docker compose down failed (exit ${code})`,
-          detail:
-            code === 124
-              ? { exitCode: code, timedOut: true, capMs: downCapMs }
-              : { exitCode: code },
+          message: failure.message,
+          detail: failure.detail,
         }),
         exitCode: code,
       });
@@ -10432,7 +10439,9 @@ async function finishInstanceStop(opts: {
           INSTANCE_STOP_GRACE_CAP_MS,
           resolveComposeDownCapMs({
             timeoutSeconds: opts.timeoutSeconds,
-            runningServiceCount: owned.length,
+            runningServiceCount: countDistinctRunningServices(
+              owned.map((container) => container.service || container.id)
+            ),
           })
         ),
       });

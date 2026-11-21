@@ -112,6 +112,14 @@ export interface RuntimeDownOptions extends RuntimeBaseOptions {
    * Optional precomputed overall subprocess cap (ms) for `docker compose down`.
    */
   readonly capMs?: number;
+  /**
+   * Optional callback invoked once `docker compose down` exits with its exit
+   * code and whether the subprocess timeout timer actually fired.
+   */
+  readonly onOutcome?: (outcome: {
+    readonly exitCode: number;
+    readonly timedOut: boolean;
+  }) => void;
 }
 
 export interface RuntimePsOptions extends RuntimeBaseOptions {
@@ -692,6 +700,15 @@ export const composeRuntimeBackend: RuntimeBackend = {
       env: opts.env,
       stdout: childStdoutTarget(opts.routeStdoutToStderr),
       timeoutMs,
+      onExit: opts.onOutcome
+        ? (event) => {
+            opts.onOutcome?.({
+              exitCode: event.exitCode,
+              timedOut: event.timedOut,
+            });
+            return Promise.resolve();
+          }
+        : undefined,
     });
   },
   async psJson(opts) {

@@ -167,7 +167,7 @@ refuse with `E_CONFIG_INVALID`), and `hack down --timeout <seconds>` overrides
 it for one run. Leaving both unset keeps Docker Compose's default grace period
 and the 90-second overall cap (which does not inspect per-service
 `stop_grace_period` settings in Compose); setting a timeout scales the cap to
-`max(90s, timeout × running services + 30s)`.
+`max(90s, timeout × distinct running services + 30s)`.
 
 If the start stops at the ceiling while a one-shot still runs, the
 `E_STARTUP_TIMEOUT` error names that service. The one-shot keeps running, but

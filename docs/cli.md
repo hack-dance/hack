@@ -444,21 +444,23 @@ invocation wins over the project setting:
 
 For Compose `hack down`, `compose.downTimeoutSeconds` (or
 `hack down --timeout <seconds>`, which wins over the project setting) sets the
-per-container stop grace period passed to `docker compose down --timeout`. Valid
-values are canonical base-10 integers from `0` to `600` (no whitespace or
-leading zeros); invalid values are refused (`E_USAGE` for the flag,
+per-container stop grace period passed to `docker compose down --timeout`. The
+`--timeout` flag requires a canonical base-10 integer string from `0` to `600`
+(no whitespace or leading zeros), while `compose.downTimeoutSeconds` is a JSON
+integer from `0` to `600`; invalid values are refused (`E_USAGE` for the flag,
 `E_CONFIG_INVALID` for the config key) and never clamped. Leaving both unset
 passes no `--timeout` flag and keeps Docker Compose's default behaviour and the
 90-second overall subprocess cap. When either `--timeout` or
 `compose.downTimeoutSeconds` is set, the overall subprocess cap scales to
-`max(90s, timeout × running services + 30s)` using the running service list
-`down` reads, with no lower ceiling below that allowance. When no timeout is
-given, the cap does not inspect per-service `stop_grace_period` values in
+`max(90s, timeout × distinct running services + 30s)` using the running service
+list `down` reads, with no lower ceiling below that allowance. When no timeout
+is given, the cap does not inspect per-service `stop_grace_period` values in
 Compose; set `--timeout` or `compose.downTimeoutSeconds` if a project needs more
-than 90 seconds to stop. If the cap ends `docker compose down` (exit `124`),
-`hack down` reports the cap message in text output and in `error.message` (with
-`error.detail.timedOut: true` and `error.detail.capMs`) under `--json`. On the
-native backend, `hack down --timeout` is refused with `E_USAGE`.
+than 90 seconds to stop. If Hack's overall cap timer ends `docker compose down`
+(exit `124`), `hack down` reports the cap message in text output and in
+`error.message` (with `error.detail.timedOut: true` and `error.detail.capMs`)
+under `--json`. On the native backend, `hack down --timeout` is refused with
+`E_USAGE`.
 
 If the start is cut short at the ceiling while a one-shot is still running,
 `E_STARTUP_TIMEOUT` names that service and says the start is still in progress

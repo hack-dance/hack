@@ -1,12 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -15,25 +8,15 @@ import {
 } from "../src/backends/runtime-backend.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import {
+  buildComposeDownFailure,
+  countDistinctRunningServices,
   DEFAULT_COMPOSE_DOWN_CAP_MS,
   formatComposeDownCapTimeoutMessage,
   parseComposeDownTimeoutFlag,
   resolveComposeDownCapMs,
   resolveComposeDownTimeoutSeconds,
 } from "../src/lib/compose-down-budget.ts";
-import { upsertLifecycleStateEntry } from "../src/lib/lifecycle-runtime.ts";
-import {
-  LIFECYCLE_TMUX_INTERRUPT_GRACE_MS,
-  LIFECYCLE_TMUX_INTERRUPT_POLL_INTERVAL_MS,
-  resolveLifecycleSessionName,
-  stopLifecycleProcessController,
-  waitForInterruptedTmuxPanes,
-} from "../src/lib/project-lifecycle-controller.ts";
-import {
-  type MuxBackend,
-  MuxCommandTimeoutError,
-} from "../src/mux/mux-backend.ts";
-import type { ResolvedMux } from "../src/mux/mux-resolver.ts";
+import { classifyComposeStartupState } from "../src/lib/compose-startup-state.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
@@ -473,14 +456,61 @@ describe("compose down stop timeout validation, argv, and cap", () => {
     expect(nativeParsed.error.message).toContain("--timeout");
   }, 60_000);
 
-  test("overall cap exit 124 emits one explicit message in text and JSON, and a low cap terminates hung compose down", async () => {
+  test("counts distinct running services rather than container replicas when scaling the cap", () => {
+    const replicaStates = classifyComposeStartupState([
+      { service: "api", state: "running", exitCode: null },
+      { service: "api", state: "running", exitCode: null },
+      { service: "api", state: "running", exitCode: null },
+    ]);
+    // classifyComposeStartupState lists one entry per container; cap must deduplicate.
+    expect(replicaStates.running).toEqual(["api", "api", "api"]);
+    expect(countDistinctRunningServices(replicaStates.running)).toBe(1);
+    expect(
+      resolveComposeDownCapMs({
+        timeoutSeconds: 60,
+        runningServiceCount: countDistinctRunningServices(
+          replicaStates.running
+        ),
+      })
+    ).toBe(90_000);
+
+    const distinctStates = classifyComposeStartupState([
+      { service: "api", state: "running", exitCode: null },
+      { service: "web", state: "running", exitCode: null },
+      { service: "worker", state: "running", exitCode: null },
+    ]);
+    expect(countDistinctRunningServices(distinctStates.running)).toBe(3);
+    expect(
+      resolveComposeDownCapMs({
+        timeoutSeconds: 60,
+        runningServiceCount: countDistinctRunningServices(
+          distinctStates.running
+        ),
+      })
+    ).toBe(210_000);
+
+    // Unreadable or empty service list stays on the 90 s floor.
+    expect(countDistinctRunningServices([])).toBe(0);
+    expect(
+      resolveComposeDownCapMs({
+        timeoutSeconds: 60,
+        runningServiceCount: countDistinctRunningServices([]),
+      })
+    ).toBe(90_000);
+  });
+
+  test("reports cap timeout only when the subprocess timer fires, not when docker exits 124 on its own", async () => {
     const fixture = await createComposeFixture({ name: "cap-demo" });
 
-    // Real low-cap enforcement through composeRuntimeBackend.down.
+    // 1. Real low-cap enforcement through composeRuntimeBackend.down sets timedOut=true.
     await fixture.setDockerConfig({ downDelayMs: 5000, downExitCode: 0 });
     const previousPath = process.env.PATH;
     process.env.PATH = `${fixture.binDir}:${previousPath ?? ""}`;
     let lowCapCode = 0;
+    const lowCapOutcomes: Array<{
+      readonly exitCode: number;
+      readonly timedOut: boolean;
+    }> = [];
     const t0 = performance.now();
     try {
       lowCapCode = await composeRuntimeBackend.down({
@@ -490,16 +520,51 @@ describe("compose down stop timeout validation, argv, and cap", () => {
         cwd: fixture.projectDir,
         timeoutSeconds: 1,
         capMs: 200,
+        onOutcome: (outcome) => {
+          lowCapOutcomes.push(outcome);
+        },
       });
     } finally {
       restoreEnv("PATH", previousPath);
     }
     expect(lowCapCode).toBe(124);
+    expect(lowCapOutcomes).toEqual([{ exitCode: 124, timedOut: true }]);
     expect(performance.now() - t0).toBeLessThan(2000);
-    expect(formatComposeDownCapTimeoutMessage(200)).toContain("200ms cap");
+    expect(
+      buildComposeDownFailure({ exitCode: 124, timedOut: true, capMs: 200 })
+    ).toEqual({
+      message: formatComposeDownCapTimeoutMessage(200),
+      detail: { exitCode: 124, timedOut: true, capMs: 200 },
+      capWarning: formatComposeDownCapTimeoutMessage(200),
+    });
 
-    // CLI text and JSON cap output on exit 124 with --timeout 1.
+    // 2. Child exiting 124 immediately does NOT set timedOut=true.
     await fixture.setDockerConfig({ downDelayMs: 0, downExitCode: 124 });
+    process.env.PATH = `${fixture.binDir}:${previousPath ?? ""}`;
+    let selfExitCode = 0;
+    const selfExitOutcomes: Array<{
+      readonly exitCode: number;
+      readonly timedOut: boolean;
+    }> = [];
+    try {
+      selfExitCode = await composeRuntimeBackend.down({
+        composeFiles: [join(fixture.projectDir, "docker-compose.yml")],
+        composeProject: "cap-demo",
+        profiles: [],
+        cwd: fixture.projectDir,
+        timeoutSeconds: 1,
+        capMs: 5000,
+        onOutcome: (outcome) => {
+          selfExitOutcomes.push(outcome);
+        },
+      });
+    } finally {
+      restoreEnv("PATH", previousPath);
+    }
+    expect(selfExitCode).toBe(124);
+    expect(selfExitOutcomes).toEqual([{ exitCode: 124, timedOut: false }]);
+
+    // 3. CLI text and JSON treat child's own exit 124 as an ordinary failure, not a cap timeout.
     const jsonRun = await runCli({
       args: ["down", "--timeout", "1", "--json"],
       cwd: fixture.root,
@@ -512,23 +577,13 @@ describe("compose down stop timeout validation, argv, and cap", () => {
       readonly error: {
         readonly code: string;
         readonly message: string;
-        readonly detail: {
-          readonly exitCode: number;
-          readonly timedOut?: boolean;
-          readonly capMs?: number;
-        };
+        readonly detail: Record<string, unknown>;
       };
     };
     expect(parsed.ok).toBe(false);
     expect(parsed.error.code).toBe("E_COMPOSE_FAILED");
-    expect(parsed.error.message).toBe(
-      formatComposeDownCapTimeoutMessage(90_000)
-    );
-    expect(parsed.error.detail).toEqual({
-      exitCode: 124,
-      timedOut: true,
-      capMs: 90_000,
-    });
+    expect(parsed.error.message).toBe("docker compose down failed (exit 124)");
+    expect(parsed.error.detail).toEqual({ exitCode: 124 });
 
     const textRun = await runCli({
       args: ["down", "--timeout", "1"],
@@ -537,288 +592,6 @@ describe("compose down stop timeout validation, argv, and cap", () => {
       binDir: fixture.binDir,
     });
     expect(textRun.exitCode).toBe(124);
-    expect(`${textRun.stdout}\n${textRun.stderr}`).toContain(
-      formatComposeDownCapTimeoutMessage(90_000)
-    );
+    expect(`${textRun.stdout}\n${textRun.stderr}`).not.toContain("reached its");
   }, 60_000);
-});
-
-describe("lifecycle tmux interrupt bounded poll and forced retirement", () => {
-  test("returns immediately with zero sleeps when panes have already exited", async () => {
-    let nowMs = 1000;
-    const sleeps: number[] = [];
-    const result = await waitForInterruptedTmuxPanes({
-      windowNames: ["web", "worker"],
-      readPanes: async () => [],
-      now: () => nowMs,
-      sleep: async (ms) => {
-        sleeps.push(ms);
-        nowMs += ms;
-      },
-    });
-    expect(result).toEqual([[], []]);
-    expect(sleeps).toEqual([]);
-  });
-
-  test("stops polling as soon as all panes exit without waiting the full 750 ms grace period", async () => {
-    let nowMs = 5000;
-    const sleeps: number[] = [];
-    let rounds = 0;
-    const result = await waitForInterruptedTmuxPanes({
-      windowNames: ["api"],
-      readPanes: async () => {
-        rounds += 1;
-        return rounds < 3 ? [1234] : [];
-      },
-      now: () => nowMs,
-      sleep: async (ms) => {
-        sleeps.push(ms);
-        nowMs += ms;
-      },
-    });
-    expect(result).toEqual([[]]);
-    expect(rounds).toBe(3);
-    expect(sleeps).toEqual([
-      LIFECYCLE_TMUX_INTERRUPT_POLL_INTERVAL_MS,
-      LIFECYCLE_TMUX_INTERRUPT_POLL_INTERVAL_MS,
-    ]);
-    expect(nowMs - 5000).toBeLessThan(LIFECYCLE_TMUX_INTERRUPT_GRACE_MS);
-  });
-
-  test("bounds polling at the grace deadline and clamps the final sleep when panes survive", async () => {
-    let nowMs = 10_000;
-    const sleeps: number[] = [];
-    let reads = 0;
-    const result = await waitForInterruptedTmuxPanes({
-      windowNames: ["stubborn"],
-      graceMs: 60,
-      pollIntervalMs: 25,
-      readPanes: async () => {
-        reads += 1;
-        if (reads > 10) {
-          throw new Error("poll loop exceeded hang guard");
-        }
-        return [999];
-      },
-      now: () => nowMs,
-      sleep: async (ms) => {
-        sleeps.push(ms);
-        nowMs += ms;
-      },
-    });
-    expect(result).toEqual([[999]]);
-    expect(sleeps).toEqual([25, 25, 10]);
-    expect(nowMs - 10_000).toBe(60);
-    expect(reads).toBe(3);
-  });
-
-  test("stops immediately if assertFresh throws during polling", async () => {
-    let nowMs = 0;
-    let checks = 0;
-    const sleeps: number[] = [];
-    await expect(
-      waitForInterruptedTmuxPanes({
-        windowNames: ["api"],
-        readPanes: async () => [42],
-        assertFresh: async () => {
-          checks += 1;
-          if (checks === 2) {
-            throw new Error("ownership displaced");
-          }
-        },
-        now: () => nowMs,
-        sleep: async (ms) => {
-          sleeps.push(ms);
-          nowMs += ms;
-        },
-      })
-    ).rejects.toThrow("ownership displaced");
-    expect(sleeps).toEqual([LIFECYCLE_TMUX_INTERRUPT_POLL_INTERVAL_MS]);
-  });
-
-  test("two windows with one stalled keeps sibling surviving PIDs and treats timed-out window as unknown/still-present", async () => {
-    // Case 1: Window "web" returns surviving [4242] while sibling "worker" stalls on round 0.
-    const t0 = performance.now();
-    const seenTimeouts: number[] = [];
-    const twoWinStall = await waitForInterruptedTmuxPanes({
-      windowNames: ["web", "worker"],
-      initialPanes: [[], [5353]],
-      graceMs: 80,
-      pollIntervalMs: 10,
-      readPanes: async (windowName, readOpts) => {
-        if (readOpts?.timeoutMs !== undefined) {
-          seenTimeouts.push(readOpts.timeoutMs);
-        }
-        if (windowName === "web") {
-          return [4242];
-        }
-        await Bun.sleep(5000);
-        return [];
-      },
-    });
-    expect(performance.now() - t0).toBeLessThan(400);
-    expect(twoWinStall).toEqual([[4242], [5353]]);
-    expect(seenTimeouts.every((ms) => ms > 0 && ms <= 80)).toBe(true);
-
-    // Case 2: Window "web" exits [] while "worker" throws MuxCommandTimeoutError after returning [7777] on round 0.
-    // Timed-out window is treated as unknown/still-present (not exited), keeps polling until graceMs, and preserves [7777].
-    let nowMs = 0;
-    const sleeps: number[] = [];
-    let webReads = 0;
-    let workerReads = 0;
-    const keepLastOnTimeout = await waitForInterruptedTmuxPanes({
-      windowNames: ["web", "worker"],
-      graceMs: 60,
-      pollIntervalMs: 25,
-      now: () => nowMs,
-      sleep: async (ms) => {
-        sleeps.push(ms);
-        nowMs += ms;
-      },
-      readPanes: async (windowName) => {
-        if (windowName === "web") {
-          webReads += 1;
-          return [];
-        }
-        workerReads += 1;
-        if (workerReads === 1) {
-          return [7777];
-        }
-        throw new MuxCommandTimeoutError(["tmux", "list-panes"]);
-      },
-    });
-    expect(keepLastOnTimeout).toEqual([[], [7777]]);
-    expect(webReads).toBe(1); // Confirmed exited on round 0; not polled again.
-    expect(workerReads).toBe(3); // Kept polling until grace deadline instead of exiting early.
-    expect(sleeps).toEqual([25, 25, 10]);
-  });
-
-  test("stopLifecycleProcessController with two windows and one stalled passes both surviving and recorded PIDs to forced retirement", async () => {
-    const root = await makeTempDir("hack-tmux-retire-");
-    const projectDir = join(root, ".hack");
-    const binDir = join(root, "bin");
-    const tmuxLogPath = join(root, "tmux-calls.jsonl");
-    await mkdir(projectDir, { recursive: true });
-    await mkdir(binDir, { recursive: true });
-
-    // Fake tmux shim: "web" returns process.pid on list-panes, while "worker" stalls for 5 s.
-    const tmuxShim = join(binDir, "tmux");
-    await writeFile(
-      tmuxShim,
-      [
-        `#!${process.execPath}`,
-        'import { appendFileSync } from "node:fs";',
-        `appendFileSync(${JSON.stringify(tmuxLogPath)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
-        "const args = process.argv.slice(2);",
-        'if (args.includes("list-panes")) {',
-        '  const target = args[args.indexOf("-t") + 1] ?? "";',
-        '  if (target.endsWith(":worker")) {',
-        "    await Bun.sleep(5000);",
-        "  }",
-        `  process.stdout.write("${process.pid}\\n");`,
-        "}",
-        "process.exit(0);",
-        "",
-      ].join("\n")
-    );
-    await chmod(tmuxShim, 0o755);
-
-    const projectName = "demo";
-    const composeProject = "demo";
-    const sessionName = resolveLifecycleSessionName({
-      projectName,
-      branch: null,
-    });
-    const ownershipToken = "tok-two-windows-stalled";
-    const recordedWorkerPid = 999_991;
-
-    await upsertLifecycleStateEntry({
-      projectDir,
-      entry: {
-        projectName,
-        composeProject,
-        branch: null,
-        sessionName,
-        backend: "tmux",
-        definitionHash: "def-hash",
-        ownershipToken,
-        updatedAt: new Date().toISOString(),
-        processes: [
-          {
-            name: "web",
-            windowName: "web",
-            logPath: join(projectDir, ".internal", "lifecycle", "web.log"),
-          },
-          {
-            name: "worker",
-            windowName: "worker",
-            logPath: join(projectDir, ".internal", "lifecycle", "worker.log"),
-            panePid: recordedWorkerPid,
-          },
-        ],
-      },
-    });
-
-    const backend: MuxBackend = {
-      name: "tmux",
-      available: true,
-      listSessions: async () => [
-        {
-          name: sessionName,
-          backend: "tmux",
-          attached: false,
-          path: root,
-          windows: 2,
-          createdAt: null,
-        },
-      ],
-      createSession: async () => ({ ok: true, session: null }),
-      killSession: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
-      execInSession: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
-      sendInput: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
-      readLifecycleOwnerToken: async () => ownershipToken,
-      readSessionPresence: async () => "present",
-    };
-    const resolvedMux: ResolvedMux = {
-      mode: "tmux",
-      backends: new Map([["tmux", backend]]),
-    };
-
-    const retiredPids: number[] = [];
-    const previousPath = process.env.PATH;
-    process.env.PATH = `${binDir}:${previousPath ?? ""}`;
-    const t0 = performance.now();
-    try {
-      await stopLifecycleProcessController({
-        project: { projectRoot: root, projectDir },
-        definitionHash: "def-hash",
-        projectName,
-        branch: null,
-        composeProject,
-        mux: async () => resolvedMux,
-        retireSession: async (retireOpts) => {
-          for (const proc of retireOpts.processes) {
-            if (proc.panePid !== undefined) {
-              retiredPids.push(proc.panePid);
-            }
-          }
-          expect(await retireOpts.stopSession()).toBe(true);
-          return true;
-        },
-      });
-    } finally {
-      restoreEnv("PATH", previousPath);
-    }
-
-    // Must settle near the 750 ms grace bound even though worker's list-panes stalls for 5 s.
-    expect(performance.now() - t0).toBeLessThan(3000);
-    const tmuxCalls = (await readFile(tmuxLogPath, "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as string[]);
-    expect(tmuxCalls.some((argv) => argv.includes("send-keys"))).toBe(true);
-    // Both web's live surviving PID and worker's recorded PID must reach forced retirement.
-    expect(retiredPids).toEqual([process.pid, recordedWorkerPid]);
-    expect(LIFECYCLE_TMUX_INTERRUPT_GRACE_MS).toBe(750);
-  }, 15_000);
 });

@@ -106,6 +106,16 @@ export function resolveComposeDownCapMs(opts?: {
   return Math.max(DEFAULT_COMPOSE_DOWN_CAP_MS, scaled);
 }
 
+/**
+ * Count distinct running service names so multi-replica services (e.g. three
+ * containers of `api`) count once rather than multiplying the stop cap.
+ */
+export function countDistinctRunningServices(
+  services: readonly string[]
+): number {
+  return new Set(services).size;
+}
+
 /** Explicit explanation emitted in text and JSON when the overall down cap ends `docker compose down`. */
 export function formatComposeDownCapTimeoutMessage(capMs: number): string {
   const formatted =
@@ -113,4 +123,41 @@ export function formatComposeDownCapTimeoutMessage(capMs: number): string {
       ? `${Math.max(1, Math.round(capMs))}ms`
       : `${Math.round(capMs / 1000)}s`;
   return `docker compose down reached its ${formatted} cap before finishing. Pass --timeout <seconds> or set ${COMPOSE_DOWN_TIMEOUT_CONFIG}, and check services that ignore SIGTERM.`;
+}
+
+/**
+ * Format a non-zero `docker compose down` failure. Reports a cap timeout only
+ * when the subprocess timeout timer actually fired; a child exiting `124` on
+ * its own is reported as an ordinary failure.
+ */
+export function buildComposeDownFailure(opts: {
+  readonly exitCode: number;
+  readonly timedOut: boolean;
+  readonly capMs: number;
+}): {
+  readonly message: string;
+  readonly detail: {
+    readonly exitCode: number;
+    readonly timedOut?: true;
+    readonly capMs?: number;
+  };
+  readonly capWarning: string | null;
+} {
+  if (opts.timedOut) {
+    const capWarning = formatComposeDownCapTimeoutMessage(opts.capMs);
+    return {
+      message: capWarning,
+      detail: {
+        exitCode: opts.exitCode,
+        timedOut: true,
+        capMs: opts.capMs,
+      },
+      capWarning,
+    };
+  }
+  return {
+    message: `docker compose down failed (exit ${opts.exitCode})`,
+    detail: { exitCode: opts.exitCode },
+    capWarning: null,
+  };
 }

@@ -2,9 +2,10 @@
 //!
 //! Every frontend `up` and `restart` calls `runtime up` before it serves the project, and on
 //! a warm machine the pool is usually already running. The general start path samples host
-//! admission before anything else: for Development one probe, a window of three samples one
-//! second apart, the startup lease, then a second three-sample window (four one-second
-//! pauses); for Research one window of three samples fifteen seconds apart (thirty seconds).
+//! admission before anything else: for Development one sample, the startup lease, then a
+//! second sample at least one second after the first (the start's own checks count towards
+//! that second); for Research one window of three samples fifteen seconds apart (thirty
+//! seconds).
 //! Each sample guards an allocation: free memory and memory pressure for the guest's memory,
 //! swapout stability across the window, thermal state, and disk headroom for disks a fresh
 //! pool would create or a stopped pool would reuse. A running pool allocates none of these:

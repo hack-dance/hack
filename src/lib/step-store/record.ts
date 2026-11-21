@@ -14,7 +14,12 @@ import {
   canonicalJson,
   STEP_RECORD_DOMAIN,
 } from "../canonical-digest.ts";
-import type { InputDigest, StepClass, StepKey } from "./key.ts";
+import {
+  type InputDigest,
+  type StepClass,
+  type StepKey,
+  validStepIdentifier,
+} from "./key.ts";
 
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 
@@ -65,6 +70,18 @@ export function newStepRecord(opts: {
   readonly observedAt: number;
   readonly run: string;
 }): StepRecord {
+  if (
+    !(
+      validStepIdentifier(opts.run) &&
+      Number.isSafeInteger(opts.observedAt) &&
+      opts.observedAt >= 0 &&
+      DIGEST.test(opts.output.digest)
+    )
+  ) {
+    throw new CanonicalValueError(
+      "A step record needs a run identifier, a time in milliseconds and an output digest."
+    );
+  }
   if (opts.key.class === "cas" && opts.output.ref !== "cas") {
     throw new CanonicalValueError("A cas step needs a cas output reference.");
   }
@@ -131,6 +148,15 @@ export function decodeStepRecord(
   if (!isRecord(value)) {
     return "torn-record";
   }
+  // Writers emit canonical bytes only; requiring them keeps TypeScript and Rust
+  // accepting exactly the same records (no other number spelling, order or space).
+  try {
+    if (canonicalJson(value) !== text) {
+      return "torn-record";
+    }
+  } catch {
+    return "torn-record";
+  }
   if (value.v !== STEP_RECORD_VERSION) {
     return value.v === undefined ? "torn-record" : "version-changed";
   }
@@ -154,11 +180,13 @@ export function decodeStepRecord(
     rest.epoch !== key.epoch ||
     !sameInputs(rest.inputs, key.inputs) ||
     !sameOutput(rest.output) ||
-    typeof rest.observedAt !== "number" ||
+    !Number.isSafeInteger(rest.observedAt) ||
+    (rest.observedAt as number) < 0 ||
     !isRecord(producedBy) ||
     Object.keys(producedBy).sort().join() !== "build,run" ||
     producedBy.build !== key.build ||
-    typeof producedBy.run !== "string"
+    typeof producedBy.run !== "string" ||
+    !validStepIdentifier(producedBy.run)
   ) {
     return "torn-record";
   }

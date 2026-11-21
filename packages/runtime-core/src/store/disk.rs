@@ -87,8 +87,18 @@ fn initialize(root: &Path, owner: u32) -> Result<()> {
         return fs::rename(root, backup).map_err(io_error);
     }
     create_layout(root)?;
-    if read_key(root, owner)?.is_none() {
-        create_key(root, owner)?;
+    match read_key(root, owner) {
+        Ok(Some(_)) => {}
+        Ok(None) => create_key(root, owner)?,
+        // A key without VERSION is an initialization that never finished (the key
+        // is published before VERSION), so no keyed digest can depend on it yet.
+        // Under the exclusive lock it is replaced. Once VERSION exists, a damaged
+        // key is refused instead: digests already made with it would silently change.
+        Err(_) if version.is_none() => {
+            remove_entry(&root.join("key"))?;
+            create_key(root, owner)?;
+        }
+        Err(error) => return Err(error),
     }
     if version.is_none() {
         publish(root, &root.join("VERSION"), VERSION)?;
@@ -199,24 +209,23 @@ fn random(bytes: &mut [u8]) -> Result<()> {
         .map_err(io_error)
 }
 
+/// Write a new key under the exclusive lock. The bytes go to `tmp/` and are
+/// renamed into place, so a crash leaves either no key or a whole one.
 fn create_key(root: &Path, owner: u32) -> Result<()> {
     let mut key = Zeroizing::new([0; 32]);
     random(&mut key[..])?;
-    let path = root.join("key");
-    let mut file = private_options()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(io_error)?;
-    if !private_file(&file.metadata().map_err(io_error)?, owner) {
-        remove_current(&file, &path)?;
+    publish(root, &root.join("key"), &key[..])?;
+    if read_key(root, owner)?.is_none() {
         return Err(invalid("Invalid step store key file."));
     }
-    if let Err(error) = file.write_all(&key[..]) {
-        remove_current(&file, &path)?;
-        return Err(io_error(error));
-    }
     Ok(())
+}
+
+fn remove_entry(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        result => result.map_err(io_error),
+    }
 }
 
 pub(super) fn publish(root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
@@ -249,6 +258,11 @@ fn is_current(file: &File, path: &Path) -> Result<bool> {
     }
 }
 
+/// Remove `path` if it is still the inode `file` was opened from.
+///
+/// A record published between the check and the unlink can still be removed; no
+/// pathname API offers a conditional unlink. For a cache that costs one spurious
+/// miss, never a wrong hit.
 pub(super) fn remove_current(file: &File, path: &Path) -> Result<()> {
     if is_current(file, path)? {
         match fs::remove_file(path) {

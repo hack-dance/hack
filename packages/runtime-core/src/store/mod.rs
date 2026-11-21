@@ -84,7 +84,9 @@ impl Store {
         } else if !observe(&record) {
             return Ok(Lookup::Miss(MissReason::ObservationFailed));
         }
-        disk::touch(&file)?;
+        // Use time is advisory (it orders garbage collection); a failed touch
+        // never turns a hit into an error.
+        let _ = disk::touch(&file);
         Ok(Lookup::Hit(record))
     }
 

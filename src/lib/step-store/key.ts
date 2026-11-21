@@ -24,6 +24,15 @@ export type InputDigest = string & { readonly __inputDigest: unique symbol };
 
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const NAME = /^[a-z0-9][a-z0-9.-]{0,63}$/;
+const IDENTIFIER = /^[A-Za-z0-9._:+-]{1,128}$/;
+
+/**
+ * A value-free identifier stored in plain text (build, boot epoch, run): 1 to 128
+ * ASCII letters, digits and `.`, `_`, `:`, `+`, `-`. Same rule as `key.rs`.
+ */
+export function validStepIdentifier(text: string): boolean {
+  return IDENTIFIER.test(text);
+}
 
 /** A malformed key part; the message never contains the value. */
 export class StepKeyError extends Error {
@@ -56,6 +65,12 @@ export function stepKey(parts: StepKeyParts): StepKey {
   const names = Object.keys(parts.inputs);
   if (!(NAME.test(parts.step) && names.every((name) => NAME.test(name)))) {
     throw new StepKeyError("Invalid step or input name.");
+  }
+  if (
+    !validStepIdentifier(parts.build) ||
+    (parts.epoch !== null && !validStepIdentifier(parts.epoch))
+  ) {
+    throw new StepKeyError("Invalid step build or epoch identifier.");
   }
   if (!STEP_CLASSES.has(parts.class)) {
     throw new StepKeyError("Invalid step class.");

@@ -742,3 +742,118 @@ fn step_store_argument_is_optional_and_needs_an_absolute_directory() {
     assert_eq!(configured_root(), Some(Path::new("/tmp/hack-store-arg")));
     assert!(take_step_store_argument(&["--step-store", "/tmp/other", "info"]).is_err());
 }
+
+#[test]
+fn a_torn_key_before_version_is_an_aborted_initialization_and_is_replaced() {
+    for size in [0, 7, 31] {
+        let fixture = Fixture::new();
+        drop(fixture.open());
+        // As if the first open died after a partial key and before VERSION.
+        fs::remove_file(fixture.root().join("VERSION")).unwrap();
+        fs::write(fixture.root().join("key"), vec![1; size]).unwrap();
+        fs::set_permissions(
+            fixture.root().join("key"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let store = fixture.open();
+        assert_eq!(fs::metadata(fixture.root().join("key")).unwrap().len(), 32);
+        assert_eq!(
+            fs::read(fixture.root().join("VERSION")).unwrap(),
+            b"hack.store/1\n"
+        );
+        assert!(store.keyed_digest(STEP, &json!("x")).is_ok());
+    }
+}
+
+#[test]
+fn a_key_is_published_whole_and_no_key_file_is_written_in_place() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    let key = fs::read(fixture.root().join("key")).unwrap();
+    assert_eq!(key.len(), 32);
+    // A leftover temporary from a crashed publication never becomes the key.
+    fs::write(fixture.root().join("tmp").join("leftover"), [9; 32]).unwrap();
+    drop(fixture.open());
+    assert_eq!(fs::read(fixture.root().join("key")).unwrap(), key);
+}
+
+#[test]
+fn non_canonical_records_and_missing_fields_are_torn() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let key = example_key(StepClass::Slot);
+    let output = Output {
+        digest: Digest([7; 32]),
+        reference: None,
+    };
+    let written = store.record(&key, output, "run-1").unwrap();
+    let text = String::from_utf8(written.encode().unwrap()).unwrap();
+    let path = record_path(&fixture.root(), &key);
+    let mut without_epoch: serde_json::Value = serde_json::from_str(&text).unwrap();
+    without_epoch.as_object_mut().unwrap().remove("epoch");
+    without_epoch.as_object_mut().unwrap().remove("check");
+    let check = crate::canonical_digest::digest(STEP_RECORD, &without_epoch).unwrap();
+    without_epoch["check"] = json!(check.to_string());
+    for torn in [
+        format!("{text} "),
+        text.replace("\"stepVersion\":1", "\"stepVersion\":1.0"),
+        text.replace("\"v\":1", "\"v\":1.0"),
+        String::from_utf8(crate::canonical_digest::canonical_json(&without_epoch).unwrap())
+            .unwrap(),
+    ] {
+        fs::write(&path, &torn).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            store.lookup(&key, |_| true).unwrap(),
+            Lookup::Miss(MissReason::TornRecord)
+        );
+        assert!(!path.exists());
+    }
+}
+
+#[test]
+fn build_epoch_and_run_are_bounded_identifiers() {
+    for (epoch, build) in [
+        (Some(""), "build-1"),
+        (Some("has space"), "build-1"),
+        (None, ""),
+        (None, "/path/to/build"),
+        (None, "value=secret"),
+    ] {
+        assert!(StepKey::new("example-step", 1, StepClass::Boot, &inputs(), epoch, build).is_err());
+    }
+    let long = "a".repeat(129);
+    assert!(
+        StepKey::new(
+            "example-step",
+            1,
+            StepClass::Boot,
+            &inputs(),
+            Some(&long),
+            "b"
+        )
+        .is_err()
+    );
+    assert!(
+        StepKey::new(
+            "example-step",
+            1,
+            StepClass::Boot,
+            &inputs(),
+            Some("boot:1_a+b.c-d"),
+            "5.0.0+g1"
+        )
+        .is_ok()
+    );
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let key = example_key(StepClass::Slot);
+    for run in ["", "run with space", "run/1"] {
+        let output = Output {
+            digest: Digest([7; 32]),
+            reference: None,
+        };
+        assert!(store.record(&key, output, run).is_err());
+    }
+}

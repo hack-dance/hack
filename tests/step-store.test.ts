@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   canonicalDigest,
+  canonicalJson,
   STEP_RECORD_DOMAIN,
 } from "../src/lib/canonical-digest.ts";
 import {
@@ -109,7 +110,7 @@ describe("step keys", () => {
       },
     },
     "epoch null to set": { epoch: "boot-1" },
-    "epoch null to empty": { epoch: "" },
+    "epoch set to another": { epoch: "boot-2" },
     build: { build: "runtime-build-2" },
   };
   for (const [field, change] of Object.entries(changes)) {
@@ -139,6 +140,12 @@ describe("step keys", () => {
       { stepVersion: 2 ** 32 },
       { inputs: { compose: "sha256:abc" as never } },
       { inputs: { compose: "plain-value" as never } },
+      { epoch: "" },
+      { epoch: "has space" },
+      { epoch: "a".repeat(129) },
+      { build: "" },
+      { build: "/path/to/build" },
+      { build: "value=secret" },
     ]) {
       expect(() => stepKey({ ...base, ...change } as StepKeyParts)).toThrow(
         StepKeyError
@@ -187,11 +194,48 @@ describe("step records", () => {
       unknown
     >;
     const v2 = { ...rest, v: 2 };
-    const reChecked = JSON.stringify({
+    const reChecked = canonicalJson({
       ...v2,
       check: canonicalDigest(STEP_RECORD_DOMAIN, v2),
     });
     expect(decodeStepRecord(reChecked, key)).toBe("version-changed");
+  });
+
+  test("non-canonical text and missing optional fields are torn", () => {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const { check: _c, epoch: _e, ...withoutEpoch } = parsed;
+    for (const torn of [
+      `${text} `,
+      text.replace('"stepVersion":1', '"stepVersion":1.0'),
+      text.replace('"v":1', '"v":1.0'),
+      JSON.stringify({
+        ...withoutEpoch,
+        check: canonicalDigest(STEP_RECORD_DOMAIN, withoutEpoch),
+      }),
+    ]) {
+      expect(decodeStepRecord(torn, key)).toBe("torn-record");
+    }
+  });
+
+  test("a record needs a run identifier, a time and an output digest", () => {
+    for (const change of [
+      { run: "" },
+      { run: "run with space" },
+      { observedAt: -5 },
+      { observedAt: 1.5 },
+      { observedAt: 2 ** 53 },
+      { output: { digest: "not-a-digest", ref: "cas" as const } },
+    ]) {
+      expect(() =>
+        newStepRecord({
+          key,
+          output: { digest: `sha256:${"e".repeat(64)}`, ref: "cas" },
+          observedAt: 1,
+          run: "run-1",
+          ...change,
+        })
+      ).toThrow();
+    }
   });
 
   test("a cas step needs a cas reference", () => {

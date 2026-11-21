@@ -186,6 +186,16 @@ describe("canonical digest, TypeScript-only inputs", () => {
     }
   });
 
+  test("array holes and symbol keys are refused, not skipped", () => {
+    // biome-ignore lint/suspicious/noSparseArray: the hole is the case under test
+    expect(() => canonicalJson([1, , 3])).toThrow(CanonicalValueError);
+    expect(() => canonicalJson(new Array(2))).toThrow(CanonicalValueError);
+    expect(() => canonicalJson({ a: 1, [Symbol("s")]: 2 })).toThrow(
+      CanonicalValueError
+    );
+    expect(canonicalJson([])).toBe("[]");
+  });
+
   test("malformed domains are refused", () => {
     for (const name of [
       "hack.step",

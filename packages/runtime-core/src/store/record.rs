@@ -11,6 +11,26 @@ use std::io::Read;
 use std::path::PathBuf;
 
 const VERSION: u8 = 1;
+const FIELDS: [&str; 11] = [
+    "check",
+    "class",
+    "epoch",
+    "inputs",
+    "key",
+    "observedAt",
+    "output",
+    "producedBy",
+    "step",
+    "stepVersion",
+    "v",
+];
+
+/// True when `value` is an object with exactly these field names.
+fn has_fields(value: &Value, names: &[&str]) -> bool {
+    value.as_object().is_some_and(|fields| {
+        fields.len() == names.len() && names.iter().all(|name| fields.contains_key(*name))
+    })
+}
 
 /// A step's value-free output identity and optional storage reference.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -57,10 +77,24 @@ pub struct Record {
 impl Record {
     pub(super) fn decode(bytes: &[u8], key: &StepKey) -> std::result::Result<Self, MissReason> {
         let mut value: Value = serde_json::from_slice(bytes).map_err(|_| MissReason::TornRecord)?;
+        // Writers in both languages emit canonical bytes only. Requiring them here
+        // makes Rust and TypeScript accept exactly the same records (no other number
+        // spelling, field order or whitespace).
+        if canonical_digest::canonical_json(&value).ok().as_deref() != Some(bytes) {
+            return Err(MissReason::TornRecord);
+        }
         match value.get("v") {
             Some(version) if version.as_u64() == Some(u64::from(VERSION)) => {}
             Some(_) => return Err(MissReason::VersionChanged),
             None => return Err(MissReason::TornRecord),
+        }
+        // Exactly these fields, none missing: a missing optional field is torn in
+        // both languages rather than read as null in one of them.
+        if !has_fields(&value, &FIELDS)
+            || !has_fields(&value["output"], &["digest", "ref"])
+            || !has_fields(&value["producedBy"], &["build", "run"])
+        {
+            return Err(MissReason::TornRecord);
         }
         let check = value
             .as_object_mut()
@@ -100,6 +134,9 @@ impl Store {
     /// For CAS steps, call only after `put_cas` returned the output digest.
     /// The run identifier must be value-free.
     pub fn record(&self, key: &StepKey, output: Output, run: &str) -> Result<Record> {
+        if !super::key::valid_identifier(run) {
+            return Err(invalid("Invalid step run identifier."));
+        }
         if key.class == StepClass::Cas && output.reference != Some(OutputRef::Cas) {
             return Err(invalid("CAS step lacks a CAS output reference."));
         }
@@ -140,7 +177,8 @@ impl Store {
         match Record::decode(&bytes, key) {
             Ok(record) => Ok(Ok((record, file))),
             Err(reason) => {
-                disk::remove_current(&file, &path)?;
+                // Best effort: the record is a miss either way.
+                let _ = disk::remove_current(&file, &path);
                 Ok(Err(reason))
             }
         }

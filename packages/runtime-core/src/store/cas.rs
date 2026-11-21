@@ -28,6 +28,9 @@ impl Store {
     }
 
     /// Read CAS bytes, verifying objects smaller than 1 MiB. Remove a mismatch.
+    ///
+    /// An object of 1 MiB or more is returned unverified: a caller that needs a
+    /// verified output goes through `lookup`, which verifies at any size.
     pub fn get_cas(&self, digest: &Digest) -> Result<Option<Vec<u8>>> {
         let path = self.cas_path(digest);
         let Some(mut file) = self.read_file(&path)? else {
@@ -36,7 +39,8 @@ impl Store {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(io_error)?;
         if (bytes.len() as u64) < VERIFY_BELOW && Digest(Sha256::digest(&bytes).into()) != *digest {
-            disk::remove_current(&file, &path)?;
+            // Best effort: the object is absent either way.
+            let _ = disk::remove_current(&file, &path);
             return Ok(None);
         }
         Ok(Some(bytes))
@@ -59,7 +63,8 @@ impl Store {
             hasher.update(&buffer[..count]);
         }
         if Digest(hasher.finalize().into()) != *digest {
-            disk::remove_current(&file, &path)?;
+            // Best effort: the object is absent either way.
+            let _ = disk::remove_current(&file, &path);
             return Ok(false);
         }
         Ok(true)

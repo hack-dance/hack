@@ -46,6 +46,9 @@ impl StepKey {
         if !valid_name(step) || !inputs.keys().all(|name| valid_name(name)) {
             return Err(invalid("Invalid step or input name."));
         }
+        if !valid_identifier(build) || !epoch.is_none_or(valid_identifier) {
+            return Err(invalid("Invalid step build or epoch identifier."));
+        }
         let identity = json!({
             "step": step,
             "stepVersion": step_version,
@@ -71,6 +74,16 @@ impl StepKey {
     pub fn digest(&self) -> Digest {
         self.digest
     }
+}
+
+/// A value-free identifier stored in plain text (build, boot epoch, run): 1 to 128
+/// bytes of ASCII letters, digits and `.`, `_`, `:`, `+`, `-`. It cannot carry a
+/// path, a space-separated value or arbitrary text.
+pub(super) fn valid_identifier(text: &str) -> bool {
+    (1..=128).contains(&text.len())
+        && text.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'+' | b'-')
+        })
 }
 
 fn valid_name(name: &str) -> bool {

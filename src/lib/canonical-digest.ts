@@ -22,8 +22,9 @@
  *   hold and Rust cannot, is refused), written as UTF-8 with exactly these
  *   escapes: `\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t`, and `\u00xx` (lowercase
  *   hex) for every other code point below U+0020;
- * - only `null`, booleans, numbers, bigints, strings, arrays and plain
- *   objects; anything else (undefined, functions, class instances) is refused.
+ * - only `null`, booleans, numbers, bigints, strings, arrays without holes and
+ *   plain objects with string keys; anything else (undefined, functions, class
+ *   instances, symbol keys) is refused.
  *
  * The encoder is pure: no clock, no environment.
  */
@@ -119,6 +120,9 @@ function compareCodePoints(left: string, right: string): number {
 }
 
 function writeObject(value: Record<string, unknown>, out: string[]): void {
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    throw new CanonicalValueError("Canonical object keys are strings.");
+  }
   const keys = Object.keys(value);
   for (const key of keys) {
     assertWellFormed(key);
@@ -157,12 +161,17 @@ function write(value: unknown, out: string[]): void {
     case "object":
       if (Array.isArray(value)) {
         out.push("[");
-        value.forEach((item, index) => {
+        // An index loop, not forEach: forEach skips a hole, which would encode
+        // [1, , 3] as [1,3]. A hole is refused.
+        for (let index = 0; index < value.length; index++) {
+          if (!Object.hasOwn(value, index)) {
+            throw new CanonicalValueError("Canonical arrays have no holes.");
+          }
           if (index > 0) {
             out.push(",");
           }
-          write(item, out);
-        });
+          write(value[index], out);
+        }
         out.push("]");
         return;
       }

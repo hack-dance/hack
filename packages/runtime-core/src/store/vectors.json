@@ -38,16 +38,16 @@
       "key": "sha256:8ad063ef4d7719699955fd2fbb31f9157a3cb6b591f977e207cc11f37b833b4d"
     },
     {
-      "name": "file-identity, empty epoch string",
+      "name": "file-identity, epoch with identifier punctuation",
       "step": "exec.hash",
       "stepVersion": 1,
       "class": "file-identity",
       "inputs": {
         "stat": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
       },
-      "epoch": "",
-      "build": "runtime-build-2",
-      "key": "sha256:ba81df2ee456bcae1e45fc09cecf9e222f6842db40de90ae0abf64f4903c1f68"
+      "epoch": "boot:2026-11_21+a.b",
+      "build": "5.0.0-next.25+gabc123",
+      "key": "sha256:ad0cfaa14b45f52fa850f8f2dc1d5b1f468d5b68c7abce1e5d6612f94bdcd123"
     },
     {
       "name": "same as first, other build",

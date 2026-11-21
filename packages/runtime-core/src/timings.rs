@@ -107,7 +107,7 @@ macro_rules! attributes {
 attributes! {
     service_index:u64, attempt:u64, engine_requests:u64, dropped:u64,
     services:u64, wave:u64, syncs:u64, waited_on_index:u64, generation:u64,
-    waited_on_cap:bool, blocked:bool, service_index_stable:bool,
+    waited_on_cap:bool, blocked:bool, service_index_stable:bool, anchor_fresh:bool,
     reason_spec:bool, reason_unhealthy:bool, reason_exited:bool, reason_dead:bool,
     reason_missing:bool, reason_forced:bool, reason_migrated:bool, reason_managed_env:bool,
     changed_image:bool, changed_command:bool, changed_env:bool, changed_managed_env:bool,
@@ -239,9 +239,12 @@ impl Record {
             })
     }
     /// Host placement is independent of record arrival, process startup or IDs.
-    /// Guest spans require the parent's observed spawn/exit interval instead.
+    /// Guest and fresh-fallback anchors require the parent's observed spawn/exit interval instead.
     pub fn host_start_us(&self, parent_origin_mono_us: u64) -> Option<i64> {
-        if !self.valid() || self.clock != Clock::Host {
+        if !self.valid()
+            || self.clock != Clock::Host
+            || self.attrs.get("anchor_fresh") == Some(&Attr::Boolean(true))
+        {
             return None;
         }
         let offset = i128::from(self.origin_mono_us) + i128::from(self.start_us)

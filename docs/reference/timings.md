@@ -24,7 +24,11 @@ keeps one anchor pair on every line. Host placement uses
 record arrived. A host child's origin is the parent's observed spawn instant;
 `process.startup` accounts for spawn through initialization when that interval is
 between zero and 60 seconds. A future or older spawn timestamp uses a fresh anchor
-and emits no startup span, while collection continues. The host clock is
+and emits no startup span, while collection continues. Such a process marks its
+root with typed `attrs.anchor_fresh:true` (repeated on child spans and retained by
+per-request trace contexts). Readers must not subtract anchors for that process;
+place its spans within the parent's observed spawn/exit interval instead. The
+host-join helper refuses marked records. The host clock is
 `CLOCK_UPTIME_RAW` on macOS and `CLOCK_MONOTONIC` on Linux. Bun's high-resolution
 timers are relative to VM initialization, so they cannot supply an absolute host
 spawn timestamp. Unix start time is

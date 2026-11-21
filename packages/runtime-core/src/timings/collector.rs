@@ -40,6 +40,7 @@ struct State {
 pub struct Collector {
     config: Config,
     origin: (u64, u64),
+    anchor_fresh: bool,
     time: Arc<dyn TimeSource>,
     sink: Arc<dyn Sink>,
     state: Mutex<State>,
@@ -75,14 +76,16 @@ impl Collector {
         let startup = if config.clock == Clock::Host {
             mono.checked_sub(config.spawn_mono_us.unwrap_or(mono))
                 .filter(|elapsed| *elapsed <= 60_000_000 && *elapsed <= unix)
-                .unwrap_or(0)
         } else {
-            0
+            Some(0)
         };
+        let anchor_fresh = startup.is_none();
+        let startup = startup.unwrap_or(0);
         let origin = (unix.checked_sub(startup)?, mono - startup);
         let collector = Arc::new(Self {
             config,
             origin,
+            anchor_fresh,
             time,
             sink,
             state: Mutex::new(State {
@@ -127,10 +130,13 @@ impl Collector {
             outcome: Outcome::Incomplete,
             cached: None,
             code: None,
-            attrs: if is_root || matches!(step, Step::ProcessStartup) {
+            // Repeat the process marker on children so standalone records also refuse host joins.
+            attrs: if is_root || self.anchor_fresh || matches!(step, Step::ProcessStartup) {
                 serde_json::from_value(
                     serde_json::to_value(Attrs {
-                        service_index_stable: Some(self.config.service_index_stable),
+                        service_index_stable: (is_root || matches!(step, Step::ProcessStartup))
+                            .then_some(self.config.service_index_stable),
+                        anchor_fresh: self.anchor_fresh.then_some(true),
                         ..Attrs::default()
                     })
                     .ok()?,
@@ -173,6 +179,7 @@ impl Collector {
                 service_index_stable: self.config.service_index_stable,
             },
             origin: self.origin,
+            anchor_fresh: self.anchor_fresh,
             time: self.time.clone(),
             sink: self.sink.clone(),
             state: Mutex::new(State {
@@ -209,7 +216,14 @@ impl Collector {
         line.push(b'\n');
         line.len() <= self.sink.atomic_limit() && self.sink.write_line(&line)
     }
-    fn finish(&self, id: &str, outcome: Outcome, cached: bool, code: Option<Code>, attrs: Attrs) {
+    fn finish(
+        &self,
+        id: &str,
+        outcome: Outcome,
+        cached: bool,
+        code: Option<Code>,
+        mut attrs: Attrs,
+    ) {
         let Some(mut record) = self
             .state
             .lock()
@@ -230,6 +244,8 @@ impl Collector {
         record.cached = (cached && outcome == Outcome::Ok).then_some(true);
         record.code =
             code.and_then(|code| serde_json::to_value(code).ok()?.as_str().map(String::from));
+        // Process anchor provenance cannot be cleared by a step's attributes.
+        attrs.anchor_fresh = self.anchor_fresh.then_some(true);
         if let Ok(serde_json::Value::Object(values)) = serde_json::to_value(attrs) {
             record
                 .attrs

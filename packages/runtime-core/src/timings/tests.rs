@@ -298,10 +298,52 @@ fn startup_outside_cap_uses_fresh_anchor_without_disabling_collection() {
         collector
             .start(Step::RuntimeDispatch, None)
             .unwrap()
-            .finish(Outcome::Ok, false, None, Attrs::default());
+            .finish(
+                Outcome::Ok,
+                false,
+                None,
+                Attrs {
+                    anchor_fresh: Some(false),
+                    ..Attrs::default()
+                },
+            );
         let data = records(&sink);
         assert_eq!(data.len(), 1);
         assert_eq!(data[0].origin_mono_us, 12_000_000_000);
         assert_eq!(data[0].start_us, 0);
+        assert_eq!(
+            data[0].attrs.get("anchor_fresh"),
+            Some(&Attr::Boolean(true))
+        );
+        assert_eq!(data[0].host_start_us(12_000_000_000), None);
+        let root = collector.start(Step::RuntimeDispatch, None).unwrap();
+        let context = collector
+            .for_trace("53995c3f42cd8ad84bf92f3577b34da6".into(), None)
+            .unwrap();
+        context.start(Step::ContainerStart, None).unwrap().finish(
+            Outcome::Ok,
+            false,
+            None,
+            Attrs::default(),
+        );
+        collector
+            .start(Step::ContainerStart, root.parent())
+            .unwrap()
+            .finish(Outcome::Ok, false, None, Attrs::default());
+        root.finish(Outcome::Ok, false, None, Attrs::default());
+        assert!(
+            records(&sink)
+                .iter()
+                .all(
+                    |record| record.attrs.get("anchor_fresh") == Some(&Attr::Boolean(true))
+                        && record.host_start_us(12_000_000_000).is_none()
+                )
+        );
     }
+    let (collector, _, sink) = setup();
+    collector
+        .start(Step::RuntimeDispatch, None)
+        .unwrap()
+        .finish(Outcome::Ok, false, None, Attrs::default());
+    assert!(!records(&sink)[0].attrs.contains_key("anchor_fresh"));
 }

@@ -2529,27 +2529,25 @@ function statKeyedHits(opts: {
   readonly fields: readonly string[];
   readonly alternativeWitnesses: readonly ModelWitness[];
 } {
-  const maxT = 4;
-  const witnesses: ModelWitness[] = [];
-  for (const action of ["HashStore", "Write", "SetMtime"]) {
-    for (let mtime = 0; mtime <= maxT; mtime++) {
-      for (const ctime of opts.withCtime ? [0, 1, 2, 3, 4] : [0]) {
-        for (const hash of ["A", "B"]) {
-          witnesses.push({
+  const times = [0, 1, 2, 3, 4];
+  const other = (hash: string): string => (hash === "A" ? "B" : "A");
+  const witnesses = ["HashStore", "Write", "SetMtime"].flatMap((action) =>
+    times.flatMap((mtime) =>
+      (opts.withCtime ? times : [0]).flatMap((ctime) =>
+        ["A", "B"].map(
+          (hash): ModelWitness => ({
             action,
             fields: [
               `entry = [valid |-> TRUE, key |-> <<${mtime}, ${ctime}>>, hash |-> "${hash}"]`,
               `mtime = ${mtime}`,
               ...(opts.withCtime ? [`ctime = ${ctime}`] : []),
-              ...(opts.stale
-                ? [`content = "${hash === "A" ? "B" : "A"}"`]
-                : []),
+              ...(opts.stale ? [`content = "${other(hash)}"`] : []),
             ],
-          });
-        }
-      }
-    }
-  }
+          })
+        )
+      )
+    )
+  );
   const [first, ...rest] = witnesses as [ModelWitness, ...ModelWitness[]];
   return {
     action: first.action,

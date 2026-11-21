@@ -110,7 +110,7 @@ fn watch_frontend() -> Result<(), CandidateError> {
             let mut byte = [0];
             let result = std::io::stdin().read(&mut byte);
             hack_runtime_core::provider::engine_requests::report();
-            std::process::exit(if matches!(result, Ok(0)) { 0 } else { 1 });
+            hack_runtime_core::timings::exit(if matches!(result, Ok(0)) { 0 } else { 1 });
         })
         .map_err(|_| {
             CandidateError::new("native_log_lifetime", "Cannot watch log frontend lifetime.")
@@ -231,7 +231,8 @@ mod tests {
         assert!(status.success());
         let record: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-        assert_eq!(record["command"], "graph.logs");
+        assert_eq!(record["schema"], hack_runtime_core::timings::SCHEMA);
+        assert_eq!(record["step"], "engine.connections");
         std::fs::remove_file(file).unwrap();
     }
 }

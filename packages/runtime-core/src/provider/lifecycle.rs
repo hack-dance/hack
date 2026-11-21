@@ -1314,6 +1314,28 @@ fn start_pool(
     project_share: Option<super::ProjectShareIntent>,
     start: super::prepared_start::Start<'_>,
 ) -> Result<RuntimeStatus, CandidateError> {
+    crate::timings::measure(crate::timings::Step::VmEnsure, None, |_| {
+        start_pool_observed(
+            candidate,
+            profile,
+            bridge_request,
+            network,
+            dependency_request,
+            project_share,
+            start,
+        )
+    })
+}
+
+fn start_pool_observed(
+    candidate: &Candidate,
+    profile: super::Profile,
+    bridge_request: super::bridge::Request,
+    network: Option<super::NetworkIntent>,
+    dependency_request: super::dependency_socket::Request,
+    project_share: Option<super::ProjectShareIntent>,
+    start: super::prepared_start::Start<'_>,
+) -> Result<RuntimeStatus, CandidateError> {
     // A mistyped setting is refused before any effect.
     let hot_reload = super::hot_reload::Setting::from_environment()?;
     // A clean stop whose alias path another entry holds is moved to a fresh alias before
@@ -1410,12 +1432,14 @@ fn start_pool(
     // A pool that is already running and owned by this home allocates nothing, so it takes
     // the named fast path instead of the admission windows below (`running_start`).
     if let Some(running) = running_start::select(candidate, profile)? {
-        return running_start::resume(candidate, running, &request, || {
-            #[cfg(target_os = "macos")]
-            if let Some(guard) = &retained_guard {
-                guard.verify(candidate)?;
-            }
-            Ok(())
+        return crate::timings::measure(crate::timings::Step::VmReattach, None, |_| {
+            running_start::resume(candidate, running, &request, || {
+                #[cfg(target_os = "macos")]
+                if let Some(guard) = &retained_guard {
+                    guard.verify(candidate)?;
+                }
+                Ok(())
+            })
         });
     }
     // Admission before aliases, provider commands, disks or VM effects. Only
@@ -1549,16 +1573,18 @@ fn start_pool(
     // start won the lease first); every other running pool took the fast path. Keep the full
     // re-verification for that race.
     if owner.phase == "running" {
-        if let Some(selected) = settled.selected() {
-            selected.reverify(candidate)?;
-        }
-        #[cfg(target_os = "macos")]
-        if let Some(guard) = &retained_guard {
-            guard.verify(candidate)?;
-        }
-        verify_live(candidate, &owner)?;
-        audit_boot(candidate, &owner)?;
-        return status(candidate);
+        return crate::timings::measure(crate::timings::Step::VmReattach, None, |_| {
+            if let Some(selected) = settled.selected() {
+                selected.reverify(candidate)?;
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(guard) = &retained_guard {
+                guard.verify(candidate)?;
+            }
+            verify_live(candidate, &owner)?;
+            audit_boot(candidate, &owner)?;
+            status(candidate)
+        });
     }
     // Only a clean stopped selection continues, as a restart of its verified retained disks.
     let mut restart = admission_pool::restart_only(candidate, settled, &owner, &lock)?;
@@ -1721,40 +1747,42 @@ fn start_pool(
     // old identity.
     owner.process = None;
     phase(candidate, &mut owner, "booting")?;
-    start_machine(candidate, &owner, permit)?;
-    let observed = recorded_process(candidate, &owner)?;
-    identity::verify(
-        &observed,
-        &identity::observe(observed.pid)?,
-        &binary(candidate),
-        unsafe { libc::geteuid() },
-    )?;
-    owner.process = Some(observed);
-    owner.save(candidate)?;
-    let result = finish_boot(candidate, &mut owner, previous_boot.as_deref(), &lock);
-    // A witness is recorded only where it can be accepted (a qualified filesystem).
-    super::tree_witness::record_boot(
-        candidate,
-        &lock,
-        result.is_ok() && witness_qualified(candidate),
-        owner.process.as_ref(),
-        proven_trees,
-    );
-    if let Err(error) = &result {
-        // Disk rejection must not keep an allocation alive. Process authority is
-        // independent of disk adoption; this is an unclean stop, never reconciliation.
-        let process = owner.process.as_ref().expect("process just recorded");
-        let cleanup = stop_verified_provider(process, &binary(candidate));
-        state::write(
-            &root(candidate).join("failed-boot.json"),
-            &failed_boot_record(error, process, cleanup.is_ok()),
+    crate::timings::measure(crate::timings::Step::VmBoot, None, |_| {
+        start_machine(candidate, &owner, permit)?;
+        let observed = recorded_process(candidate, &owner)?;
+        identity::verify(
+            &observed,
+            &identity::observe(observed.pid)?,
+            &binary(candidate),
+            unsafe { libc::geteuid() },
         )?;
-        if cleanup.is_ok() {
-            phase(candidate, &mut owner, "failed-boot-stopped")?;
+        owner.process = Some(observed);
+        owner.save(candidate)?;
+        let result = finish_boot(candidate, &mut owner, previous_boot.as_deref(), &lock);
+        // A witness is recorded only where it can be accepted (a qualified filesystem).
+        super::tree_witness::record_boot(
+            candidate,
+            &lock,
+            result.is_ok() && witness_qualified(candidate),
+            owner.process.as_ref(),
+            proven_trees,
+        );
+        if let Err(error) = &result {
+            // Disk rejection must not keep an allocation alive. Process authority is
+            // independent of disk adoption; this is an unclean stop, never reconciliation.
+            let process = owner.process.as_ref().expect("process just recorded");
+            let cleanup = stop_verified_provider(process, &binary(candidate));
+            state::write(
+                &root(candidate).join("failed-boot.json"),
+                &failed_boot_record(error, process, cleanup.is_ok()),
+            )?;
+            if cleanup.is_ok() {
+                phase(candidate, &mut owner, "failed-boot-stopped")?;
+            }
+            cleanup.map_err(failed_boot_stop_error)?;
         }
-        cleanup.map_err(failed_boot_stop_error)?;
-    }
-    result
+        result
+    })
 }
 
 /// `machine create` allocates new disks; only a start without a reserve selection may.
@@ -2584,6 +2612,12 @@ fn provider_stopped(phase: &str, process_alive: Option<bool>) -> bool {
 }
 
 pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
+    crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
+        down_observed(candidate)
+    })
+}
+
+fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     // Status is read-only and idempotent down on an uninitialized pool creates nothing.
     let initial = status(candidate)?;
     if initial.phase == "uninitialized" {

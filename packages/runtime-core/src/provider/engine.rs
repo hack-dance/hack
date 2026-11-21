@@ -1450,21 +1450,24 @@ mod tests {
         }
         let records = std::fs::read_to_string(&file).unwrap();
         std::fs::remove_file(file).unwrap();
-        assert_eq!(records.lines().count(), 12);
+        assert_eq!(records.lines().count(), 20);
         let mut requests = 0;
         let mut connections = 0;
         let mut transports = 0;
         for line in records.lines() {
             let record: Value = serde_json::from_str(line).unwrap();
-            assert_eq!(record["role"], "owner");
-            assert_eq!(record["command"], "graph.native.serve");
-            requests += record["engine_requests"].as_u64().unwrap();
-            connections += record["engine_connections"].as_u64().unwrap();
-            transports += record["engine_transports"].as_u64().unwrap();
-            assert_eq!(
-                record["engine_requests"],
-                record["endpoints"]["GET /version"].as_u64().unwrap_or(0)
-            );
+            assert!(crate::timings::Record::parse_line(line).is_some());
+            assert_eq!(record["proc"], "owner");
+            let attrs = &record["attrs"];
+            requests += attrs["engine_requests"].as_u64().unwrap_or(0);
+            connections += attrs["engine_connections"].as_u64().unwrap_or(0);
+            transports += attrs["engine_transports"].as_u64().unwrap_or(0);
+            if attrs["engine_requests"].is_number() {
+                assert_eq!(record["step"], "engine.request.version");
+                assert_eq!(attrs["engine_method"], 1);
+            } else {
+                assert_eq!(record["step"], "engine.connections");
+            }
         }
         assert_eq!((requests, connections, transports), (20, 28, 16));
     }

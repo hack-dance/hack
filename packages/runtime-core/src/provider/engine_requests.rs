@@ -1,10 +1,6 @@
-//! Opt-in engine diagnostics, separate from command stdout and structured errors.
-//! Only fixed command/endpoint names and numeric counters reach the inherited file.
-use serde::Serialize;
+//! Engine counters emitted as shared timing spans, never on command stderr.
+use crate::timings::{self, Attrs, EngineEndpoint, Outcome, Role, Step};
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
 use std::sync::{
     Mutex,
     atomic::{AtomicBool, Ordering},
@@ -12,49 +8,34 @@ use std::sync::{
 
 pub const FILE_ENV: &str = "HACK_ENGINE_REQUESTS_FILE";
 static ENABLED: AtomicBool = AtomicBool::new(false);
-static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+static SESSION: Mutex<Option<Counts>> = Mutex::new(None);
 
-#[derive(Default, Serialize)]
+#[derive(Default)]
 struct Counts {
     engine_requests: u64,
     engine_connections: u64,
     engine_transports: u64,
     endpoints: BTreeMap<String, u64>,
 }
-struct Session {
-    file: File,
-    role: &'static str,
-    command: &'static str,
-    counts: Counts,
-}
 
-/// Install file diagnostics from the explicitly inherited environment setting.
-/// Failure to open/write diagnostics never changes command output or status.
-/// This temporary counter record will join span attrs when timing records land.
+/// Enable numeric span counters on the timing descriptor, or on a private file
+/// using the same schema. The descriptor takes precedence when both are supplied.
 #[must_use]
 pub fn from_environment(args: &[String]) -> ReportOnDrop {
-    if let Some(path) = std::env::var_os(FILE_ENV).filter(|p| std::path::Path::new(p).is_absolute())
-    {
-        if let Ok(file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-            .open(path)
-        {
-            if !file.metadata().is_ok_and(|m| m.is_file()) {
-                return ReportOnDrop;
-            }
-            if let Ok(mut session) = SESSION.lock() {
-                let (role, command) = command_name(args);
-                *session = Some(Session {
-                    file,
-                    role,
-                    command,
-                    counts: Counts::default(),
-                });
-                ENABLED.store(true, Ordering::Relaxed);
-            }
+    if !timings::enabled() {
+        if let Some(path) = std::env::var_os(FILE_ENV) {
+            let role = if command_name(args).0 == "owner" {
+                Role::Owner
+            } else {
+                Role::Runtime
+            };
+            timings::enable_file(std::path::Path::new(&path), role);
+        }
+    }
+    if timings::enabled() {
+        if let Ok(mut session) = SESSION.lock() {
+            *session = Some(Counts::default());
+            ENABLED.store(true, Ordering::Relaxed);
         }
     }
     ReportOnDrop
@@ -75,41 +56,50 @@ impl Drop for ReportOnDrop {
     }
 }
 
-#[derive(Serialize)]
-struct Report<'a> {
-    role: &'static str,
-    command: &'static str,
-    #[serde(flatten)]
-    counts: &'a Counts,
-}
-
-/// Flush a disjoint counter delta while an owner remains alive. Call before its
-/// ready notification; final reporting then contains only subsequent work.
+/// Emit disjoint metric spans before readiness or process replacement. The span
+/// outcome describes the counter snapshot, never the engine effect's success.
 pub fn checkpoint() {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
-    if let Ok(mut session) = SESSION.lock() {
-        if let Some(session) = session.as_mut() {
-            let record = Report {
-                role: session.role,
-                command: session.command,
-                counts: &session.counts,
+    let counts = SESSION
+        .lock()
+        .ok()
+        .and_then(|mut session| session.as_mut().map(std::mem::take));
+    if let Some(counts) = counts {
+        for (key, count) in counts.endpoints {
+            let Some((method, endpoint)) = key.split_once(' ') else {
+                continue;
             };
-            if let Ok(mut bytes) = serde_json::to_vec(&record) {
-                bytes.push(b'\n');
-                // SAFETY: the live owned file descriptor is retained throughout.
-                // Serialize appenders across processes without touching runtime locks.
-                if unsafe { libc::flock(session.file.as_raw_fd(), libc::LOCK_EX) } == 0 {
-                    let written = session.file.write_all(&bytes).is_ok();
-                    // SAFETY: unlock the same live descriptor locked above.
-                    unsafe { libc::flock(session.file.as_raw_fd(), libc::LOCK_UN) };
-                    if written {
-                        session.counts = Counts::default();
-                    }
-                }
+            if let Some(span) = timings::start(
+                Step::EngineRequest(EngineEndpoint::from_path(endpoint)),
+                None,
+            ) {
+                span.finish(
+                    Outcome::Ok,
+                    false,
+                    None,
+                    Attrs {
+                        engine_requests: Some(count.min(timings::MAX_NUMBER)),
+                        engine_method: Some(method_code(method)),
+                        ..Attrs::default()
+                    },
+                );
             }
         }
+        if let Some(span) = timings::start(Step::EngineConnections, None) {
+            span.finish(
+                Outcome::Ok,
+                false,
+                None,
+                Attrs {
+                    engine_connections: Some(counts.engine_connections.min(timings::MAX_NUMBER)),
+                    engine_transports: Some(counts.engine_transports.min(timings::MAX_NUMBER)),
+                    ..Attrs::default()
+                },
+            );
+        }
+        timings::flush();
     }
 }
 
@@ -119,11 +109,22 @@ pub fn report() {
     ENABLED.store(false, Ordering::Relaxed);
 }
 
+fn method_code(method: &str) -> u64 {
+    match method {
+        "GET" => 1,
+        "HEAD" => 2,
+        "POST" => 3,
+        "DELETE" => 4,
+        "PUT" => 5,
+        _ => 0,
+    }
+}
+
 fn count(update: impl FnOnce(&mut Counts)) {
     if ENABLED.load(Ordering::Relaxed) {
         if let Ok(mut session) = SESSION.lock() {
             if let Some(session) = session.as_mut() {
-                update(&mut session.counts);
+                update(session);
             }
         }
     }

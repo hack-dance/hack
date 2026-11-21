@@ -169,11 +169,13 @@ impl Engine<'_> {
     ) -> Result<(), StopBatchFailure> {
         validate(stops).map_err(StopBatchFailure::plain)?;
         self.guest.verify().map_err(StopBatchFailure::plain)?;
-        let result = batch(
-            &self.transport.client,
-            stops,
-            Instant::now() + stop_budget(stops),
-        );
+        let result = crate::timings::measure(crate::timings::Step::ContainerStop, None, |_| {
+            batch(
+                &self.transport.client,
+                stops,
+                Instant::now() + stop_budget(stops),
+            )
+        });
         self.guest.verify().map_err(StopBatchFailure::plain)?;
         result
     }

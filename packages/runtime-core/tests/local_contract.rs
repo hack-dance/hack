@@ -26,8 +26,9 @@ fn file_diagnostics_preserve_failure_json_and_command_status() {
     assert_eq!(records.lines().count(), 2);
     for line in records.lines() {
         let record: Value = serde_json::from_str(line).unwrap();
-        assert_eq!(record["role"], "runtime");
-        assert_eq!(record["command"], "runtime");
+        assert!(hack_runtime_core::timings::Record::parse_line(line).is_some());
+        assert_eq!(record["proc"], "runtime");
+        assert_eq!(record["step"], "engine.connections");
         assert!(!line.contains("alpine"));
         assert!(!line.contains("Reference"));
     }

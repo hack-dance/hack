@@ -211,6 +211,7 @@ fn prepare(
             stopping: None,
             refuse_until: None,
             refused: 0,
+            queued_wait: QUEUED_WAIT,
             last_activity: Instant::now(),
             streams: HashMap::new(),
             next_session: 0,
@@ -360,6 +361,9 @@ struct State {
     refuse_until: Option<Instant>,
     /// Queued connections given a chance to be refused since stopping began.
     refused: usize,
+    /// How long one queued connection may take to deliver its first request
+    /// (`QUEUED_WAIT`; tests set it).
+    queued_wait: Duration,
     last_activity: Instant,
     /// A handle to every live session's socket, to shut it down at exit.
     streams: HashMap<u64, UnixStream>,
@@ -479,7 +483,8 @@ fn refuse_queued(shared: &Shared, listener: &UnixListener, budget: Instant) {
             Err(e) if e.kind() == ErrorKind::ConnectionAborted => continue,
             Err(_) => return,
         };
-        refuse(shared, stream, (Instant::now() + QUEUED_WAIT).min(budget));
+        let wait = shared.state().queued_wait;
+        refuse(shared, stream, (Instant::now() + wait).min(budget));
     }
 }
 
@@ -526,7 +531,8 @@ fn accept_queued(shared: &Arc<Shared>, listener: &UnixListener) -> Result<(), ()
                     // Out of budget: close it and leave the rest to shut_down.
                     return Ok(());
                 }
-                refuse(shared, stream, (Instant::now() + QUEUED_WAIT).min(budget));
+                let wait = shared.state().queued_wait;
+                refuse(shared, stream, (Instant::now() + wait).min(budget));
                 continue;
             }
             if state.sessions >= MAX_SESSIONS {

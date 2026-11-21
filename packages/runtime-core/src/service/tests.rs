@@ -382,7 +382,9 @@ fn connections_queued_at_shutdown_are_refused_and_cannot_hold_it_open() {
     // Two clients connect, the service decides to stop before accepting them,
     // and one of them asks it to retire.
     let mut queued: Vec<_> = (0..2).map(|_| connect(&root.0)).collect();
-    // A budget no scheduling delay can exhaust: refusal must happen.
+    // A budget and a per-connection wait no scheduling delay can exhaust:
+    // refusal must happen.
+    shared.state().queued_wait = HANG_GUARD;
     shared.stop_until(Outcome::Idle, Instant::now() + HANG_GUARD);
     let retire = json!({"v": 1, "id": "r", "op": "service.retire"});
     for stream in &mut queued {
@@ -597,6 +599,7 @@ fn a_request_queued_before_idle_expiry_gets_a_refusal_not_silence() {
     let hello = json!({"v": 1, "id": "h", "op": "hello", "args": {"client": {"kind": "cli"}}});
     let bytes = serde_json::to_vec(&hello).unwrap();
     frame::write(&mut queued, &bytes, CONTROL_FRAME_LIMIT).unwrap();
+    shared.state().queued_wait = HANG_GUARD;
     shared.stop_until(Outcome::Idle, Instant::now() + HANG_GUARD);
     let stopping = Arc::clone(&shared);
     assert_eq!(
@@ -686,6 +689,7 @@ fn a_connection_accepted_after_stop_is_refused_not_handed_to_a_worker() {
     let hello = json!({"v": 1, "id": "q", "op": "hello", "args": {"client": {"kind": "cli"}}});
     let bytes = serde_json::to_vec(&hello).unwrap();
     frame::write(&mut queued, &bytes, CONTROL_FRAME_LIMIT).unwrap();
+    shared.state().queued_wait = HANG_GUARD;
     shared.stop_until(Outcome::Retired, Instant::now() + HANG_GUARD);
     accept_queued(&shared, &listener).unwrap();
     assert_eq!(shared.state().sessions, 0, "no worker was started");

@@ -139,6 +139,7 @@ mod environment_crash_test;
 mod launcher;
 mod probes;
 mod process_refusals;
+mod spec;
 #[cfg(all(test, feature = "environment-launcher"))]
 mod startup_test;
 pub use environment::stage_environment;
@@ -1121,6 +1122,28 @@ impl Driver for Session<'_, '_> {
                 "Fresh graph cannot adopt an existing container.",
             ));
         }
+        // Identity of the compiled config before any per-run attachment.
+        let span = crate::timings::start(crate::timings::Step::SpecDigest, None);
+        let spec = spec::of(
+            &self.configs[service],
+            &spec::Context {
+                resources: &self.receipt.resources,
+                probe: self.receipt.probes.get(service),
+                managed: self.environments.contains_key(service),
+                relay: self
+                    .receipt
+                    .relay_startup
+                    .as_ref()
+                    .and_then(|startup| startup.services.get(service))
+                    .map(|selected| selected.bindings.keys().cloned().collect())
+                    .unwrap_or_default(),
+                amd64_emulation: resource.amd64_emulation,
+            },
+        );
+        if let Some(span) = span {
+            spec::finish_span(span, &spec, &resource.name);
+        }
+        let spec = spec?;
         self.prepare_probe(service)?;
         if let Some(pending) = self.environments.remove(service) {
             self.receipt.environment_attached = true;
@@ -1160,11 +1183,11 @@ impl Driver for Session<'_, '_> {
             }
         }
         self.check_cancelled()?;
-        let config = &self.configs[service];
+        let body = spec::stamped(&self.configs[service], &spec);
         let value = self.engine.request(
             Method::POST,
             &format!("/v1.53/containers/create?name={}", resource.name),
-            Some(config),
+            Some(&body),
         )?;
         #[cfg(test)]
         self.fault_pause("after-create")?;
@@ -1183,6 +1206,7 @@ impl Driver for Session<'_, '_> {
         let inspected =
             inspect_resource(&self.engine, &self.receipt, &self.receipt.resources[&key])?
                 .ok_or_else(|| error("graph_resource_missing", "Created container is missing."))?;
+        spec::verify_label(&inspected, &spec)?;
         Self::verify_config(
             &self.receipt,
             service,

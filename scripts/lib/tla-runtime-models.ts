@@ -2391,7 +2391,11 @@ const contracts: readonly ModelContract[] = [
     // HACK-2461: when a stored step result may replace the work, when garbage
     // collection may delete it, and which digest a command uses for a tag.
     // `positive` is the boot class with drift; the slot and cas classes are
-    // the two other positives. Each control removes one guard.
+    // the two other positives. Each control removes one guard, except
+    // `no-epoch`, which removes the boot id together with the observation (the
+    // observation alone keeps boot skips sound). A `bad` flag is set only by the
+    // action that breaks its invariant, so the flag and the action pin the
+    // failure; `no-epoch` also pins the second boot to tell it from no-verify.
     name: "step-store",
     module: "StepStore",
     states: 1_082_240,
@@ -2400,7 +2404,6 @@ const contracts: readonly ModelContract[] = [
     fields: [
       "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
       "done = TRUE",
-      "world = {}",
     ],
     additionalControls: [
       { name: "positive-slot", negative: false, states: 284_160 },
@@ -2419,7 +2422,6 @@ const contracts: readonly ModelContract[] = [
         fields: [
           "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
           "done = TRUE",
-          "world = {}",
         ],
       },
       {
@@ -2446,7 +2448,6 @@ const contracts: readonly ModelContract[] = [
         action: "PruneFinish",
         fields: [
           "bad = [pull |-> FALSE, skip |-> FALSE, use |-> TRUE, mixed |-> FALSE, stale |-> FALSE]",
-          "store = {}",
           "pruning = <<0, 0>>",
         ],
       },
@@ -2456,7 +2457,6 @@ const contracts: readonly ModelContract[] = [
         fields: [
           "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
           "done = TRUE",
-          "world = {}",
         ],
       },
       {
@@ -2477,47 +2477,86 @@ const contracts: readonly ModelContract[] = [
         action: "UseTag",
         fields: [
           "bad = [pull |-> FALSE, skip |-> FALSE, use |-> FALSE, mixed |-> TRUE, stale |-> FALSE]",
-          "resolved = TRUE",
+          'cmd = "running"',
         ],
       },
     ],
   },
   {
-    // HACK-2461: a file hash reused by stat key (dev, ino, size, mtime, ctime)
-    // under the racy rule. `negative` drops the racy check; `reachability`
-    // proves a reused hash is reachable at all.
+    // HACK-2461: a file hash reused by stat key under the racy rule. `negative`
+    // drops the racy check; `reachability` shows a reused hash is reachable.
+    // Witnesses are the violating states themselves (see statKeyedHits).
     name: "stat-keyed-hash",
     module: "StatKeyedHash",
     states: 108_942,
     invariant: "HitIsFresh",
-    action: "HashStore",
-    fields: ['content = "B"', 'readv = "A"'],
-    // The same counterexample is found either at the store of a racy hash or at
-    // the same-tick write that follows it; the stat key is unchanged in both.
-    alternativeWitnesses: [
-      { action: "Write", fields: ['content = "B"', 'readv = "A"'] },
-    ],
+    ...statKeyedHits({ withCtime: true, stale: true }),
     additionalControls: [
       {
         name: "mtime-only",
         negative: true,
-        action: "SetMtime",
-        fields: ['content = "B"', 'readv = "A"'],
+        ...statKeyedHits({ withCtime: false, stale: true }),
       },
       {
         name: "racy-at-store",
         negative: true,
-        fields: ['content = "B"', 'readv = "A"'],
+        ...statKeyedHits({ withCtime: true, stale: true }),
       },
       {
         name: "reachability",
         negative: true,
         invariant: "NeverHits",
-        fields: ['content = "A"', 'readv = "A"'],
+        ...statKeyedHits({ withCtime: true, stale: false }),
       },
     ],
   },
 ];
+
+/**
+ * StatKeyedHash witnesses: every state in which a lookup would hit, written out
+ * over the controls' finite bounds (times 0..4, contents "A"/"B"). A hit is a
+ * valid entry whose key equals the current stat key; with `stale` its hash also
+ * differs from the content, which is exactly a `HitIsFresh` violation. Only
+ * `HashStore`, `Write` and `SetMtime` change the entry, the content or the times,
+ * so the first violating state follows one of them. Matching the violating state
+ * itself keeps the check independent of which content TLC's search reaches first.
+ */
+function statKeyedHits(opts: {
+  readonly withCtime: boolean;
+  readonly stale: boolean;
+}): {
+  readonly action: string;
+  readonly fields: readonly string[];
+  readonly alternativeWitnesses: readonly ModelWitness[];
+} {
+  const maxT = 4;
+  const witnesses: ModelWitness[] = [];
+  for (const action of ["HashStore", "Write", "SetMtime"]) {
+    for (let mtime = 0; mtime <= maxT; mtime++) {
+      for (const ctime of opts.withCtime ? [0, 1, 2, 3, 4] : [0]) {
+        for (const hash of ["A", "B"]) {
+          witnesses.push({
+            action,
+            fields: [
+              `entry = [valid |-> TRUE, key |-> <<${mtime}, ${ctime}>>, hash |-> "${hash}"]`,
+              `mtime = ${mtime}`,
+              ...(opts.withCtime ? [`ctime = ${ctime}`] : []),
+              ...(opts.stale
+                ? [`content = "${hash === "A" ? "B" : "A"}"`]
+                : []),
+            ],
+          });
+        }
+      }
+    }
+  }
+  const [first, ...rest] = witnesses as [ModelWitness, ...ModelWitness[]];
+  return {
+    action: first.action,
+    fields: first.fields,
+    alternativeWitnesses: rest,
+  };
+}
 
 export const runtimeModels = contracts.map((contract) => ({
   ...contract,

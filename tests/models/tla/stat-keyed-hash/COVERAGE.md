@@ -15,15 +15,21 @@ content.
 | Configuration | Constants | Result |
 | --- | --- | --- |
 | `positive` | key with ctime, racy check at the first stat, `MaxT = 5` | no error, 108,942 distinct states |
-| `negative` | no racy check | `HitIsFresh` at `HashStore` |
+| `negative` | no racy check | `HitIsFresh` at `HashStore`, or at the same-tick `Write` that follows the store |
 | `mtime-only` | key without ctime (size and mtime, as fsutil's receiver compares) | `HitIsFresh` at `SetMtime` |
 | `racy-at-store` | racy check against the clock at store time | `HitIsFresh` at `HashStore` |
-| `reachability` | positive constants, invariant `NeverHits` | `NeverHits` at `HashStore`: a reused hash is reachable at all |
+| `reachability` | positive constants with `MaxT = 4`, invariant `NeverHits` | `NeverHits` at `HashStore`: a reused hash is reachable at all |
 
 The rule it supports: read the clock before the first stat, and store the hash
-only if mtime and ctime are strictly older than that reading minus the
-filesystem's timestamp granularity. Comparing with the clock at store time is the
-bug `racy-at-store` finds.
+only if mtime and ctime are strictly older than that reading. Comparing with the
+clock at store time is the bug `racy-at-store` finds. The model's clock tick
+stands for the filesystem's timestamp granularity, and its key is only
+`<<mtime, ctime>>`; device, inode, size and mode are not modelled.
+
+Each control is checked by the violating state itself: a valid entry whose key
+equals the current stat key and whose hash differs from the content (for
+`reachability`, any valid entry with a matching key), listed over the controls'
+bounds in `scripts/lib/tla-runtime-models.ts`.
 
 Not covered: inode reuse after delete and recreate, filesystems with coarse
 ctime, a same-user adversary who knows the scheme, and more than one file.

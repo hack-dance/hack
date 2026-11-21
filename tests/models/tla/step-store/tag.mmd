@@ -6,10 +6,18 @@ stateDiagram-v2
   [*] --> absent : Init
   absent --> fresh : Resolve
   fresh --> fresh : UseTag
+  fresh --> fresh : Tick [age within TTL]
   fresh --> fresh : Resolve [hack pull]
   fresh --> expired : Tick [age over TTL]
   expired --> fresh : Resolve
   expired --> expired : UseTag [offline, stale]
+  note left of absent
+    tag = [d, age] has many
+    values; states group them:
+    absent d = 0, fresh
+    age within TTL, expired
+    age over TTL
+  end note
   note right of fresh
     A command resolves at most
     once; every use repeats

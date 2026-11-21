@@ -7,13 +7,17 @@ record, and which digest one command uses for a mutable image tag.
 for executables, archives and source files.
 
 This is a design model. No store code is on this branch yet. The tie table below
-names the code and the test that each slice must add; a row is covered only
-when its test exists.
+names the code and the test that each later slice of HACK-2461 must add (P1 store
+and keys, P2 file hashes, P4 image tags, P5 guest uploads, P8 garbage collection);
+a row is covered only when its test exists.
 
 ## Charts
 
 Rendered with Pele 1.9.0 and the house theme, one chart per control variable.
-Sources: [states.mmd](states.mmd), [gc.mmd](gc.mmd), [tag.mmd](tag.mmd).
+Sources: [states.mmd](states.mmd), [gc.mmd](gc.mmd), [tag.mmd](tag.mmd). `pc` and
+`pruning` use one state per value; `tag` (`[d, age]`) groups its values into
+absent, fresh and expired, as the chart's note says. The label checker and the 2x
+PNG have not been run on these renders yet.
 
 ![One step and its record](states.svg)
 
@@ -31,8 +35,16 @@ One step of one class (constant `Class`):
 | `slot` | one path that a later run may overwrite (the Compose override) | the record exists and the slot holds this input's output |
 | `boot` | lives in the VM; the key carries the boot id | the record for this boot exists and one observation finds the output |
 
-The world may change the input at any time, reboot the VM, remove outputs
-(`Drift`) and kill the process between the effect and its record (`Crash`).
+The world may change the input at any time, reboot the VM, remove slot and
+boot outputs (`Drift`) and kill the process between the effect and its record
+(`Crash`).
+
+**Assumption for the cas class:** cas objects are removed only by garbage
+collection (`positive-cas` runs with `Drifts = FALSE`). A cas record alone
+replaces the work, so an object deleted or corrupted by anything else would make
+a skip unsound in this model. The store must hold that line in code: objects live
+in the store's own private directory, and a read verifies small objects' content
+(the step-store design's crash-safety rule).
 Garbage collection deletes a record first and its cas object second, and only
 while no command holds the key. One tag has a stored resolution with an age; the
 registry may move the tag; a resolve may fail (offline).
@@ -45,7 +57,23 @@ registry may move the tag; a resolve may fail (offline).
 | `NoPruneInUse` | Garbage collection never deletes an output that a running command took from a skip or a record. |
 | `OneDigestPerCommand` | One command uses one digest for each tag. |
 | `NoSilentStaleTag` | A tag record older than the time limit is used only after a failed resolve in the same command (offline, shown as stale). |
-| `PullResolves` | `hack pull` always resolves in its own command. |
+| `PullResolves` | The digest `hack pull` reports was resolved in its own command. (A safety property: the model does not check that a pull finishes.) |
+
+### Which configuration exercises each invariant
+
+Three of the invariants are written into the guards of the positive configs, so a
+positive cannot break them by construction; the controls carry that check.
+
+| Invariant | Exercised by the positives | Carried by the controls |
+| --- | --- | --- |
+| `NoUnsoundSkip` | `positive-cas` (a cas record is trusted without an observation). In slot and boot `Usable` already requires the output to be present | record-first, no-verify (slot, boot), no-epoch, late-key, object-first |
+| `NoPruneInUse` | `positive-cas` only: slot and boot records have no store object to delete | no-pin |
+| `OneDigestPerCommand` | none: the mixed flag is set only on the `ResolvePerUse` branch | resolve-per-use |
+| `NoSilentStaleTag` | none: `UseTag`'s guard already excludes the stale case | ignore-ttl |
+| `PullResolves` | all three | none (no control) |
+
+`NoVerify` removes the observation at three places at once: the skip
+(`Usable`), the record (`Record`) and the lost-effect check (`RecordLost`).
 
 ## Checked bounds
 
@@ -60,7 +88,7 @@ TLC 1.7.4, Java 17, the runner's settings (two workers, 512 MiB heap). Two input
 | `negative` (`RecordFirst`) | cas, `MaxBoot = 1` | `NoUnsoundSkip` at `Skip` |
 | `no-verify-slot` | slot, no drift, `MaxBoot = 1` | `NoUnsoundSkip` at `Skip` (inputs A, B, A in one slot) |
 | `no-verify-boot` | boot, drift, `MaxBoot = 2` | `NoUnsoundSkip` at `Skip` |
-| `no-epoch` (with `NoVerify`) | boot, no drift, `MaxBoot = 2` | `NoUnsoundSkip` at `Skip` |
+| `no-epoch` (with `NoVerify`) | boot, no drift, `MaxBoot = 2`, one input | `NoUnsoundSkip` at `Skip` on the second boot |
 | `late-key` | cas, `MaxBoot = 1` | `NoUnsoundSkip` at `Skip` |
 | `no-pin` | cas, `MaxBoot = 1` | `NoPruneInUse` at `PruneFinish` |
 | `object-first` | cas, `MaxBoot = 1` | `NoUnsoundSkip` at `Skip` (a record names a deleted object) |
@@ -68,12 +96,15 @@ TLC 1.7.4, Java 17, the runner's settings (two workers, 512 MiB heap). Two input
 | `resolve-per-use` | cas, `MaxBoot = 1` | `OneDigestPerCommand` at `UseTag` |
 
 The positive state counts are pinned in `scripts/lib/tla-runtime-models.ts`. A
-control is checked by its invariant, its action and a few fields of the violating
-state; its state count varies with the two-worker search and is not pinned.
+control is checked by its invariant, its action and its `bad` flag, which only
+that action can set; its state count varies with the two-worker search and is not
+pinned.
 
 `NoEpoch` runs together with `NoVerify`: in this model the observation alone keeps
 boot skips sound, and the boot id in the key makes a stale record miss without an
-engine call.
+engine call. The control has one input, so no input change can make a no-verify
+skip unsound in one boot: the failure needs the second boot. The same
+configuration without `NoEpoch` passes.
 
 ## What TLC found in the first draft (both changed the design)
 
@@ -115,6 +146,8 @@ engine call.
 - The offline fallback's presence check (the image must be present); `hack pull`
   failing offline is not a modelled action.
 - Liveness, the size budget, and time other than the tag's age.
-- `PullResolves` has no negative control.
+- `PullResolves` has no negative control, and no liveness: a pull that never
+  reports is not a violation.
+- Outputs of the cas class removed by anything other than garbage collection.
 - A pass checks the design at these bounds. It does not prove the
   implementation, durability, engine behaviour or performance.

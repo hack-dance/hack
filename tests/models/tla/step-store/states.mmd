@@ -11,6 +11,7 @@ stateDiagram-v2
   effected --> idle : Crash or Reboot
   idle --> recorded : Execute [RecordFirst]
   recorded --> idle : EffectAfterRecord
+  recorded --> idle : Crash or Reboot
   note right of idle
     Usable: a record for the
     current input and boot, and

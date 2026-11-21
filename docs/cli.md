@@ -442,29 +442,43 @@ invocation wins over the project setting:
 }
 ```
 
-For Compose `hack down`, `compose.downTimeoutSeconds` (or `--timeout <seconds>`
-on the command line, which wins over the project setting) sets the per-container
-stop grace period passed to `docker compose down --timeout`. Valid values are
-whole integers from `0` to `600`; invalid values are refused (`E_USAGE` for the
-flag, `E_CONFIG_INVALID` for the config key) and never clamped. Leaving both
-unset preserves Docker Compose's default behaviour (no `--timeout` flag is
-passed). The overall subprocess cap for `docker compose down` is derived from
-this stop timeout rather than the start-up budget.
+For Compose `hack down` and the down phase of `hack restart`,
+`compose.downTimeoutSeconds` (or `hack down --timeout <seconds>`, which wins
+over the project setting) sets the per-container stop grace period passed to
+`docker compose down --timeout`. Valid values are canonical base-10 integers
+from `0` to `600` (no whitespace or leading zeros); invalid values are refused
+(`E_USAGE` for the flag, `E_CONFIG_INVALID` for the config key in both `down`
+and `restart`) and never clamped. Leaving both unset preserves Docker Compose's
+default behaviour (no `--timeout` flag is passed). The overall subprocess cap
+for `docker compose down` stays at least 90 seconds, scales above it for larger
+stop timeouts up to 15 minutes, and is independent of the start-up budget.
 
 ### Why is `hack down` slow?
 
 Docker Compose stops services in reverse `depends_on` order and waits up to the
-per-container stop timeout (10 seconds by default) at each dependency level
-before sending `SIGKILL`. Many development containers run a shell or runtime as
-PID 1 that does not handle `SIGTERM`, so every dependency level with such a
-service waits the full 10 seconds and exits with code `137` (`128 + 9`). When
-`hack down` observes a container exiting `137` after the stop grace period, it
-prints a one-line hint naming the service (or reports it in `data.slowStops` and
-`data.warnings` under `--json`) and records it for `hack doctor`'s
-`compose slow stops` check. Fix the root cause by adding `init: true` to that
-service in `.hack/docker-compose.yml` or handling `SIGTERM`/`SIGINT` in the
-container entrypoint; use `--timeout <seconds>` or `compose.downTimeoutSeconds`
-when you also want a shorter or longer stop grace period.
+per-container stop timeout (10 seconds by default, or the service's
+`stop_grace_period`) at each dependency level before sending `SIGKILL`. Many
+development containers run a shell or runtime as PID 1 that does not handle
+`SIGTERM`, so every dependency level with such a service waits the full grace
+period and exits with code `137` (`128 + 9`).
+
+When `hack down` finishes faster than the smallest effective stop grace period
+(`--timeout`, `compose.downTimeoutSeconds`, or the smallest positive
+`stop_grace_period` in Compose, defaulting to 10 seconds), it makes zero extra
+Docker calls (unless verifying a previously recorded slow stop). Once elapsed
+time reaches that grace period — or if the overall cap ends `down` — it runs
+one bounded `docker events` check (note: Docker Engine keeps a bounded in-memory
+event ring, so very long or noisy teardowns can evict early events). If a
+container exited `137`, `hack down` prints a one-line hint naming the service
+(or reports it in `data.slowStops` and `data.warnings` under `--json`, and in
+`error.detail` when the overall cap fires) and records it for `hack doctor`'s
+`compose slow stops` check (expiring after 7 days or once a subsequent `hack
+down` confirms the service exited cleanly). Fix the root cause by adding
+`init: true` to that service in `.hack/docker-compose.yml` or, if `init: true`
+is already set, handling `SIGTERM`/`SIGINT` in the process or adjusting
+`stop_signal`/`stop_grace_period`; use `--timeout <seconds>` or
+`compose.downTimeoutSeconds` when you also want a shorter or longer stop grace
+period.
 
 If the start is cut short at the ceiling while a one-shot is still running,
 `E_STARTUP_TIMEOUT` names that service and says the start is still in progress

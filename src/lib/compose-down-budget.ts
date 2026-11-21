@@ -9,36 +9,22 @@ export const MAX_COMPOSE_DOWN_TIMEOUT_SECONDS = 600;
 /** Project config key in `.hack/hack.config.json` for the Compose `down` stop timeout. */
 export const COMPOSE_DOWN_TIMEOUT_CONFIG = "compose.downTimeoutSeconds";
 
-/** Docker Engine's default stop grace period when `docker compose down --timeout` is omitted. */
+/** Docker Engine's default stop grace period when neither `--timeout` nor `stop_grace_period` is set. */
 export const DEFAULT_DOCKER_STOP_TIMEOUT_SECONDS = 10;
 
-/**
- * Number of reverse-dependency stop levels budgeted into the overall `docker compose down`
- * subprocess cap. Docker Compose stops services in reverse dependency order, so a service
- * that ignores SIGTERM can wait out the full per-container stop timeout once per level.
- */
-export const COMPOSE_DOWN_DEPENDENCY_LEVELS = 6;
+/** Floor for the overall `docker compose down` subprocess cap (matches the previous 90 s bound). */
+export const DEFAULT_COMPOSE_DOWN_CAP_MS = 90_000;
 
-/**
- * Fixed overhead allowance (ms) on top of per-level stop grace periods for Docker client
- * startup, container removal, and network teardown.
- */
+/** Hard upper bound (ms) for the overall `docker compose down` subprocess cap even at `--timeout 600`. */
+export const MAX_COMPOSE_DOWN_CAP_MS = 900_000;
+
+/** Fixed overhead (ms) added above per-wave stop grace periods when scaling the down cap. */
 export const COMPOSE_DOWN_OVERHEAD_MS = 30_000;
 
-/**
- * Overall subprocess cap (ms) for `docker compose down` when no stop timeout is configured.
- *
- * Derived from {@link DEFAULT_DOCKER_STOP_TIMEOUT_SECONDS} across
- * {@link COMPOSE_DOWN_DEPENDENCY_LEVELS} reverse-dependency stop waves plus
- * {@link COMPOSE_DOWN_OVERHEAD_MS} of teardown overhead (= 90 s). Kept independent of
- * `DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS` so stop budgets scale with the stop timeout rather
- * than start-up settings.
- */
-export const DEFAULT_COMPOSE_DOWN_CAP_MS =
-  DEFAULT_DOCKER_STOP_TIMEOUT_SECONDS * COMPOSE_DOWN_DEPENDENCY_LEVELS * 1000 +
-  COMPOSE_DOWN_OVERHEAD_MS;
+/** Reverse-dependency stop waves scaled when `--timeout` exceeds the 90 s floor. */
+export const COMPOSE_DOWN_CAP_WAVES = 2;
 
-const INTEGER_TEXT = /^[0-9]+$/;
+const CANONICAL_NON_NEGATIVE_INT = /^(?:0|[1-9][0-9]*)$/;
 
 function isValidComposeDownTimeoutSeconds(value: number): boolean {
   return (
@@ -50,8 +36,8 @@ function isValidComposeDownTimeoutSeconds(value: number): boolean {
 
 /**
  * Parse and validate `--timeout <seconds>` for Compose `hack down`.
- * Unset returns `undefined` (so `docker compose down` is called without `--timeout`).
- * Non-integer or out-of-range values are refused with `E_USAGE`, never clamped.
+ * Accepts only canonical base-10 integers `0`..`600` (no whitespace or leading zeros).
+ * Unset returns `undefined` so `docker compose down` runs without `--timeout`.
  */
 export function parseComposeDownTimeoutFlag(
   raw: string | undefined
@@ -59,9 +45,8 @@ export function parseComposeDownTimeoutFlag(
   if (raw === undefined) {
     return undefined;
   }
-  const trimmed = raw.trim();
-  if (INTEGER_TEXT.test(trimmed)) {
-    const parsed = Number(trimmed);
+  if (CANONICAL_NON_NEGATIVE_INT.test(raw)) {
+    const parsed = Number(raw);
     if (isValidComposeDownTimeoutSeconds(parsed)) {
       return parsed;
     }
@@ -73,16 +58,17 @@ export function parseComposeDownTimeoutFlag(
 }
 
 /**
- * Resolve the effective stop timeout (in seconds) for Compose `hack down`.
- * Precedence: `--timeout` CLI flag > `compose.downTimeoutSeconds` in `.hack/hack.config.json` > unset.
- * Invalid flag values refuse with `E_USAGE`; invalid project config values refuse with
- * `E_CONFIG_INVALID`. Values are never clamped.
+ * Resolve the effective stop timeout (in seconds) for Compose `hack down` / `hack restart`.
+ * Precedence: CLI `--timeout` > `compose.downTimeoutSeconds` in `.hack/hack.config.json` > unset.
+ * Never clamps out-of-range values.
  */
 export function resolveComposeDownTimeoutSeconds(opts: {
   readonly flagValue?: string;
+  readonly flagTimeoutSeconds?: number;
   readonly projectValue?: number;
 }): number | undefined {
-  const fromFlag = parseComposeDownTimeoutFlag(opts.flagValue);
+  const fromFlag =
+    opts.flagTimeoutSeconds ?? parseComposeDownTimeoutFlag(opts.flagValue);
   if (fromFlag !== undefined) {
     return fromFlag;
   }
@@ -99,13 +85,9 @@ export function resolveComposeDownTimeoutSeconds(opts: {
 }
 
 /**
- * Overall subprocess cap (ms) for `docker compose down`, derived from the stop timeout.
- *
- * Compose stops services in reverse dependency order, so a stack with services that ignore
- * SIGTERM can wait out `stopTimeoutSeconds` once per dependency level before teardown
- * removes containers and networks. Scaling the cap from the configured stop timeout keeps
- * low timeouts bounded tightly while preventing a higher valid `--timeout` (up to 600 s)
- * from being killed prematurely by a fixed 90 s start-up constant.
+ * Overall subprocess cap (ms) for `docker compose down`.
+ * Never drops below the existing 90 s floor, scales above it for larger valid `--timeout`
+ * values, and caps at 15 minutes (`MAX_COMPOSE_DOWN_CAP_MS`).
  */
 export function resolveComposeDownCapMs(timeoutSeconds?: number): number {
   if (timeoutSeconds === undefined) {
@@ -117,8 +99,10 @@ export function resolveComposeDownCapMs(timeoutSeconds?: number): number {
       message: `Invalid Compose down timeout: must be an integer from ${MIN_COMPOSE_DOWN_TIMEOUT_SECONDS} to ${MAX_COMPOSE_DOWN_TIMEOUT_SECONDS} seconds.`,
     });
   }
-  return (
-    timeoutSeconds * COMPOSE_DOWN_DEPENDENCY_LEVELS * 1000 +
-    COMPOSE_DOWN_OVERHEAD_MS
+  const scaled =
+    timeoutSeconds * COMPOSE_DOWN_CAP_WAVES * 1000 + COMPOSE_DOWN_OVERHEAD_MS;
+  return Math.min(
+    MAX_COMPOSE_DOWN_CAP_MS,
+    Math.max(DEFAULT_COMPOSE_DOWN_CAP_MS, scaled)
   );
 }

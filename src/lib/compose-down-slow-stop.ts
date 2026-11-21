@@ -1,6 +1,13 @@
 import { dirname, resolve } from "node:path";
-import { dockerHelperEnvironment } from "./docker-helper-environment.ts";
-import { ensureDir, pathExists, readTextFile, writeTextFile } from "./fs.ts";
+import { YAML } from "bun";
+import { DEFAULT_DOCKER_STOP_TIMEOUT_SECONDS } from "./compose-down-budget.ts";
+import { dockerHelperRunEnvironment } from "./docker-helper-environment.ts";
+import {
+  ensureDir,
+  pathExists,
+  readTextFile,
+  writeTextFileAtomicIfChanged,
+} from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
 import { parseJsonLines } from "./json-lines.ts";
 import { type ExecOptions, type ExecResult, exec } from "./shell.ts";
@@ -8,22 +15,30 @@ import { type ExecOptions, type ExecResult, exec } from "./shell.ts";
 /** Exit code Docker reports when a container is killed with SIGKILL after its stop grace period. */
 export const COMPOSE_DOWN_SIGKILL_EXIT_CODE = 137 as const;
 
-/**
- * Unset-timeout elapsed threshold (ms) before probing Docker events for exit-137 containers.
- * Clean stops finish well below 5 s and make zero extra Docker calls; stops waiting out Docker's
- * default 10 s grace period (or a 5 s+ service `stop_grace_period`) cross this threshold and run
- * one bounded `docker events` query.
- */
-export const DEFAULT_SLOW_STOP_PROBE_THRESHOLD_MS = 5000;
-
-/** Bound on the single slow-path `docker events` inspection call. */
+/** Bound (ms) on the single slow-path `docker events` inspection call. */
 export const SLOW_STOP_EVENTS_TIMEOUT_MS = 5000;
+
+/** Extra lookback slack (ms) added to `--since` for the daemon-relative `docker events` window. */
+export const SLOW_STOP_WINDOW_SKEW_MS = 1000;
+
+/** Maximum age (ms) for persisted `.hack/.internal/slow-stops.json` entries (7 days). */
+export const SLOW_STOP_RECORD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 const SLOW_STOP_EVENTS_MAX_STDOUT_BYTES = 256 * 1024;
 const SLOW_STOP_EVENTS_MAX_STDERR_BYTES = 16 * 1024;
-const SLOW_STOP_WINDOW_SKEW_MS = 1000;
-const SLOW_STOP_EVENT_FLOOR_SKEW_MS = 500;
 const PROJECT_SLOW_STOPS_FILENAME = "slow-stops.json" as const;
+const COMPOSE_DURATION_FULL = /^(?:(?:\d+(?:\.\d+)?)(?:ns|us|µs|ms|s|m|h))+$/;
+const COMPOSE_DURATION_PART = /(\d+(?:\.\d+)?)(ns|us|µs|ms|s|m|h)/g;
+
+const DURATION_UNIT_MS: Readonly<Record<string, number>> = {
+  ns: 1e-6,
+  us: 1e-3,
+  µs: 1e-3,
+  ms: 1,
+  s: 1000,
+  m: 60_000,
+  h: 3_600_000,
+};
 
 export type SlowStopHint = {
   readonly service: string;
@@ -37,14 +52,20 @@ export type ProjectSlowStopEntry = {
   readonly observedAt: string;
 };
 
-type ProjectSlowStopsFile = {
-  readonly entries: readonly ProjectSlowStopEntry[];
+export type ComposeServiceStopMeta = {
+  readonly defined: ReadonlySet<string>;
+  readonly withInit: ReadonlySet<string>;
+  /** Smallest positive effective stop grace period (ms) across defined services, or `null` if all are 0. */
+  readonly minPositiveGraceMs: number | null;
 };
 
+export type SlowStopObservationStatus = "fast" | "skipped" | "ok" | "failed";
+
 export type SlowStopObservation = {
-  /** True when the slow-path `docker events` call ran (1 extra Docker call); false on the fast path (0 extra calls). */
+  readonly status: SlowStopObservationStatus;
   readonly probed: boolean;
-  readonly services: readonly string[];
+  readonly exited137: readonly string[];
+  readonly exitedClean: readonly string[];
 };
 
 export type SlowStopExec = (
@@ -52,160 +73,287 @@ export type SlowStopExec = (
   opts?: ExecOptions
 ) => Promise<ExecResult>;
 
+/** Parse a Compose `stop_grace_period` duration (`3s`, `1m30s`, `500ms`, or numeric seconds) to ms. */
+export function parseComposeDurationMs(raw: unknown): number | undefined {
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) && raw >= 0
+      ? Math.round(raw * 1000)
+      : undefined;
+  }
+  if (typeof raw !== "string") {
+    return undefined;
+  }
+  const text = raw.trim();
+  if (!COMPOSE_DURATION_FULL.test(text)) {
+    return undefined;
+  }
+  let totalMs = 0;
+  for (const match of text.matchAll(COMPOSE_DURATION_PART)) {
+    const amount = Number(match[1]);
+    const unitMs = DURATION_UNIT_MS[match[2] ?? ""];
+    if (!(Number.isFinite(amount) && unitMs !== undefined)) {
+      return undefined;
+    }
+    totalMs += amount * unitMs;
+  }
+  return Math.round(totalMs);
+}
+
+/** Read Compose service names, `init: true` flags, and smallest positive `stop_grace_period`. */
+export async function readComposeServiceStopMeta(
+  composeFile: string
+): Promise<ComposeServiceStopMeta | null> {
+  const text = await readTextFile(composeFile);
+  if (!text) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(text);
+  } catch {
+    return null;
+  }
+  if (!(isRecord(parsed) && isRecord(parsed.services))) {
+    return null;
+  }
+  const defined = new Set<string>();
+  const withInit = new Set<string>();
+  const defaultGraceMs = DEFAULT_DOCKER_STOP_TIMEOUT_SECONDS * 1000;
+  let minPositiveGraceMs: number | null = null;
+
+  for (const [serviceName, rawService] of Object.entries(parsed.services)) {
+    defined.add(serviceName);
+    const serviceObj = isRecord(rawService) ? rawService : null;
+    if (serviceObj?.init === true) {
+      withInit.add(serviceName);
+    }
+    const configuredGraceMs = serviceObj
+      ? parseComposeDurationMs(serviceObj.stop_grace_period)
+      : undefined;
+    const effectiveGraceMs = configuredGraceMs ?? defaultGraceMs;
+    if (
+      effectiveGraceMs > 0 &&
+      (minPositiveGraceMs === null || effectiveGraceMs < minPositiveGraceMs)
+    ) {
+      minPositiveGraceMs = effectiveGraceMs;
+    }
+  }
+  return { defined, withInit, minPositiveGraceMs };
+}
+
 /**
- * Single-line explanation printed by `hack down` (and reused by `hack doctor`) when a Compose
- * service container exited 137 (killed after its stop grace period).
+ * Single-line explanation shared by `hack down` and `hack doctor` when a service exited 137.
+ * Tailors advice when the service already sets `init: true` so both commands stay consistent.
  */
-export function formatSlowStopHint(service: string): string {
-  return `Slow stop: service ${service} exited ${COMPOSE_DOWN_SIGKILL_EXIT_CODE} (killed after the stop grace period). Add init: true to the service in Compose or handle SIGTERM/SIGINT so it exits cleanly.`;
+export function formatSlowStopHint(
+  service: string,
+  opts?: { readonly hasInit?: boolean }
+): string {
+  const action = opts?.hasInit
+    ? "It already sets init: true, so handle SIGTERM/SIGINT in the process or set stop_signal/stop_grace_period."
+    : "Add init: true to the service in Compose or handle SIGTERM/SIGINT so it exits cleanly.";
+  return `Slow stop: service ${service} exited ${COMPOSE_DOWN_SIGKILL_EXIT_CODE} (killed after the stop grace period). ${action}`;
 }
 
 export function buildSlowStopHints(
-  services: readonly string[]
+  services: readonly string[],
+  opts?: { readonly withInit?: ReadonlySet<string> }
 ): readonly SlowStopHint[] {
   return [...new Set(services)]
     .sort((a, b) => a.localeCompare(b))
     .map((service) => ({
       service,
       exitCode: COMPOSE_DOWN_SIGKILL_EXIT_CODE,
-      hint: formatSlowStopHint(service),
+      hint: formatSlowStopHint(service, {
+        hasInit: opts?.withInit?.has(service) === true,
+      }),
     }));
 }
 
 /**
- * Elapsed duration (ms) that separates a fast `hack down` (0 extra Docker calls) from a slow stop
- * that warrants 1 bounded `docker events` check for exit-137 containers.
+ * Elapsed threshold (ms) before probing `docker events` for exit-137 containers.
  *
- * Returns `null` when `timeoutSeconds === 0` because an explicit zero grace period requests
- * immediate SIGKILL rather than a grace-period timeout.
+ * Uses the effective stop grace period: `--timeout` / `compose.downTimeoutSeconds` when set,
+ * otherwise the smallest positive `stop_grace_period` in Compose (defaulting to Docker's 10 s).
+ * Returns `null` when `--timeout 0` (immediate SIGKILL) or every service sets `stop_grace_period: 0s`.
  */
-export function slowStopProbeThresholdMs(
-  timeoutSeconds?: number
-): number | null {
-  if (timeoutSeconds === 0) {
+export function slowStopProbeThresholdMs(opts?: {
+  readonly timeoutSeconds?: number;
+  readonly minServiceGraceMs?: number | null;
+}): number | null {
+  if (opts?.timeoutSeconds === 0) {
     return null;
   }
-  if (timeoutSeconds !== undefined && timeoutSeconds > 0) {
-    return Math.max(500, timeoutSeconds * 1000 - 250);
+  if (opts?.timeoutSeconds !== undefined && opts.timeoutSeconds > 0) {
+    return opts.timeoutSeconds * 1000;
   }
-  return DEFAULT_SLOW_STOP_PROBE_THRESHOLD_MS;
-}
-
-function extractExit137ServiceFromEvent(opts: {
-  readonly row: Record<string, unknown>;
-  readonly composeProject: string;
-  readonly windowStartMs?: number;
-}): string | null {
-  const type = getString(opts.row, "Type");
-  if (type !== undefined && type !== "container") {
+  if (opts?.minServiceGraceMs === null) {
     return null;
   }
-  const action = getString(opts.row, "Action") ?? getString(opts.row, "status");
-  if (action !== "die") {
-    return null;
+  if (opts?.minServiceGraceMs !== undefined && opts.minServiceGraceMs > 0) {
+    return opts.minServiceGraceMs;
   }
-  if (opts.windowStartMs !== undefined) {
-    const eventMs = readDockerEventTimestampMs(opts.row);
-    if (
-      eventMs !== undefined &&
-      eventMs < opts.windowStartMs - SLOW_STOP_EVENT_FLOOR_SKEW_MS
-    ) {
-      return null;
-    }
-  }
-  const actor = isRecord(opts.row.Actor) ? opts.row.Actor : null;
-  const attributes =
-    actor && isRecord(actor.Attributes) ? actor.Attributes : null;
-  if (!attributes) {
-    return null;
-  }
-  if (
-    getString(attributes, "com.docker.compose.project") !== opts.composeProject
-  ) {
-    return null;
-  }
-  const exitCode = attributes.exitCode;
-  if (
-    exitCode !== String(COMPOSE_DOWN_SIGKILL_EXIT_CODE) &&
-    exitCode !== COMPOSE_DOWN_SIGKILL_EXIT_CODE
-  ) {
-    return null;
-  }
-  const service = getString(attributes, "com.docker.compose.service")?.trim();
-  return service && service.length > 0 ? service : null;
+  return DEFAULT_DOCKER_STOP_TIMEOUT_SECONDS * 1000;
 }
 
 /**
- * Extract sorted unique Compose service names whose containers died with exit code 137 from
- * `docker events --format '{{json .}}'` output.
+ * Parse `docker events --filter type=container --filter event=die --format '{{json .}}'`
+ * into services that died with exit code 137 vs services that exited with any other code.
  */
-export function parseComposeDownExit137Services(opts: {
+export function parseComposeDownDieEvents(opts: {
   readonly stdout: string;
   readonly composeProject: string;
-  readonly windowStartMs?: number;
-}): readonly string[] {
-  const services = new Set<string>();
+}): {
+  readonly exited137: readonly string[];
+  readonly exitedClean: readonly string[];
+} {
+  const exited137 = new Set<string>();
+  const exitedClean = new Set<string>();
   for (const row of parseJsonLines(opts.stdout)) {
-    const service = extractExit137ServiceFromEvent({
-      row,
-      composeProject: opts.composeProject,
-      windowStartMs: opts.windowStartMs,
-    });
-    if (service) {
-      services.add(service);
+    if (getString(row, "Type") !== "container") {
+      continue;
+    }
+    if (getString(row, "Action") !== "die") {
+      continue;
+    }
+    const actor = isRecord(row.Actor) ? row.Actor : null;
+    const attributes =
+      actor && isRecord(actor.Attributes) ? actor.Attributes : null;
+    if (
+      !attributes ||
+      getString(attributes, "com.docker.compose.project") !==
+        opts.composeProject
+    ) {
+      continue;
+    }
+    const service = getString(attributes, "com.docker.compose.service")?.trim();
+    const exitCode = getString(attributes, "exitCode")?.trim();
+    if (!(service && exitCode)) {
+      continue;
+    }
+    if (exitCode === String(COMPOSE_DOWN_SIGKILL_EXIT_CODE)) {
+      exited137.add(service);
+      exitedClean.delete(service);
+    } else if (!exited137.has(service)) {
+      exitedClean.add(service);
     }
   }
-  return [...services].sort((a, b) => a.localeCompare(b));
+  return {
+    exited137: [...exited137].sort((a, b) => a.localeCompare(b)),
+    exitedClean: [...exitedClean].sort((a, b) => a.localeCompare(b)),
+  };
 }
 
-function readDockerEventTimestampMs(
-  row: Record<string, unknown>
-): number | undefined {
-  const timeNano = row.timeNano;
-  if (typeof timeNano === "number" && Number.isFinite(timeNano)) {
-    return timeNano / 1_000_000;
+const SLOW_STOP_DAEMON_TIME_TIMEOUT_MS = 2000;
+
+async function resolveDockerEventsWindow(opts: {
+  readonly lookbackMs: number;
+  readonly cwd: string;
+  readonly helperEnv: ReturnType<typeof dockerHelperRunEnvironment>;
+  readonly runExec: SlowStopExec;
+}): Promise<{
+  readonly since: string;
+  readonly until: string;
+}> {
+  try {
+    const info = await opts.runExec(
+      ["docker", "info", "--format", "{{.SystemTime}}"],
+      {
+        cwd: opts.cwd,
+        ...opts.helperEnv,
+        stdin: "ignore",
+        timeoutMs: SLOW_STOP_DAEMON_TIME_TIMEOUT_MS,
+        maxStdoutBytes: 4096,
+        maxStderrBytes: 4096,
+      }
+    );
+    const daemonNowIso = info.exitCode === 0 ? info.stdout.trim() : "";
+    const daemonNowMs = daemonNowIso ? Date.parse(daemonNowIso) : Number.NaN;
+    if (Number.isFinite(daemonNowMs)) {
+      const sinceMs = Math.max(
+        0,
+        daemonNowMs - opts.lookbackMs - SLOW_STOP_WINDOW_SKEW_MS
+      );
+      return {
+        since: new Date(sinceMs).toISOString(),
+        until: daemonNowIso,
+      };
+    }
+  } catch {
+    // Fall back to daemon-relative durations below.
   }
-  const timeSec = row.time;
-  if (typeof timeSec === "number" && Number.isFinite(timeSec)) {
-    return timeSec * 1000;
-  }
-  return undefined;
+  const sinceSeconds = Math.max(
+    1,
+    Math.ceil((opts.lookbackMs + SLOW_STOP_WINDOW_SKEW_MS) / 1000)
+  );
+  // Docker truncates relative `--until` durations to whole seconds, so `0s` drops
+  // events in the current second; `-1s` advances to the next whole-second boundary.
+  return {
+    since: `${sinceSeconds}s`,
+    until: "-1s",
+  };
 }
 
 /**
- * Observe which Compose services exited 137 during a completed `docker compose down`.
+ * Observe container `die` events for a `docker compose down` window using a bounded
+ * daemon-clock query (`docker info --format '{{.SystemTime}}'` + `docker events`).
  *
- * - Fast path (down elapsed below {@link slowStopProbeThresholdMs} or `--timeout 0`):
- *   0 extra Docker calls.
- * - Slow path: exactly 1 bounded `docker events` call (`--since`/`--until` capped to the down
- *   window so the command exits immediately without streaming).
- *
- * Best-effort: a Docker events failure or timeout never fails `hack down`.
+ * Sampling the daemon's own nanosecond `SystemTime` avoids host-vs-engine clock skew,
+ * returns without blocking, and avoids Docker's whole-second truncation on `--until 0s`
+ * (which otherwise drops `die` events in the final second). Falls back to `--since <N>s --until -1s`
+ * if `docker info` is unavailable.
+ * Note: Docker Engine keeps a bounded in-memory event ring (e.g. 256 events), so very long
+ * or noisy teardowns can evict earlier `die` events before this post-down check runs.
  */
 export async function observeComposeDownSlowStops(opts: {
   readonly composeProject: string;
   readonly downElapsedMs: number;
-  readonly downStartedAtMs: number;
-  readonly downEndedAtMs: number;
+  readonly windowLookbackMs?: number;
   readonly timeoutSeconds?: number;
+  readonly minServiceGraceMs?: number | null;
+  readonly forceProbe?: boolean;
   readonly cwd: string;
   readonly env?: Readonly<Record<string, string>>;
   readonly execImpl?: SlowStopExec;
 }): Promise<SlowStopObservation> {
-  const thresholdMs = slowStopProbeThresholdMs(opts.timeoutSeconds);
-  if (thresholdMs === null || opts.downElapsedMs < thresholdMs) {
-    return { probed: false, services: [] };
+  if (!opts.forceProbe) {
+    const thresholdMs = slowStopProbeThresholdMs({
+      timeoutSeconds: opts.timeoutSeconds,
+      minServiceGraceMs: opts.minServiceGraceMs,
+    });
+    if (thresholdMs === null) {
+      return {
+        status: "skipped",
+        probed: false,
+        exited137: [],
+        exitedClean: [],
+      };
+    }
+    if (opts.downElapsedMs < thresholdMs) {
+      return { status: "fast", probed: false, exited137: [], exitedClean: [] };
+    }
   }
 
-  const sinceMs = Math.max(0, opts.downStartedAtMs - SLOW_STOP_WINDOW_SKEW_MS);
-  const untilMs = Math.max(opts.downEndedAtMs, opts.downStartedAtMs);
+  const runExec = opts.execImpl ?? exec;
+  const helperEnv = dockerHelperRunEnvironment(opts.env);
+  const probeStartedMs = performance.now();
+  const lookbackMs = Math.max(
+    opts.downElapsedMs,
+    opts.windowLookbackMs ?? opts.downElapsedMs
+  );
+  const window = await resolveDockerEventsWindow({
+    lookbackMs,
+    cwd: opts.cwd,
+    helperEnv,
+    runExec,
+  });
   const cmd = [
     "docker",
     "events",
     "--since",
-    new Date(sinceMs).toISOString(),
+    window.since,
     "--until",
-    new Date(untilMs).toISOString(),
+    window.until,
     "--filter",
     "type=container",
     "--filter",
@@ -216,34 +364,44 @@ export async function observeComposeDownSlowStops(opts: {
     "{{json .}}",
   ] as const;
 
-  const helperEnv = dockerHelperEnvironment(opts.env);
-  const unsetEnvKeys = Object.keys(process.env).filter(
-    (key) => !Object.hasOwn(helperEnv, key)
+  const elapsedProbeMs = Math.max(
+    0,
+    Math.round(performance.now() - probeStartedMs)
   );
-  const runExec = opts.execImpl ?? exec;
+  const eventsTimeoutMs = Math.max(
+    1000,
+    SLOW_STOP_EVENTS_TIMEOUT_MS - elapsedProbeMs
+  );
+
   try {
     const res = await runExec(cmd, {
       cwd: opts.cwd,
-      env: helperEnv,
-      unsetEnvKeys,
+      ...helperEnv,
       stdin: "ignore",
-      timeoutMs: SLOW_STOP_EVENTS_TIMEOUT_MS,
+      timeoutMs: eventsTimeoutMs,
       maxStdoutBytes: SLOW_STOP_EVENTS_MAX_STDOUT_BYTES,
       maxStderrBytes: SLOW_STOP_EVENTS_MAX_STDERR_BYTES,
     });
     if (res.exitCode !== 0) {
-      return { probed: true, services: [] };
+      return {
+        status: "failed",
+        probed: true,
+        exited137: [],
+        exitedClean: [],
+      };
     }
+    const parsed = parseComposeDownDieEvents({
+      stdout: res.stdout,
+      composeProject: opts.composeProject,
+    });
     return {
+      status: "ok",
       probed: true,
-      services: parseComposeDownExit137Services({
-        stdout: res.stdout,
-        composeProject: opts.composeProject,
-        windowStartMs: opts.downStartedAtMs,
-      }),
+      exited137: parsed.exited137,
+      exitedClean: parsed.exitedClean,
     };
   } catch {
-    return { probed: true, services: [] };
+    return { status: "failed", probed: true, exited137: [], exitedClean: [] };
   }
 }
 
@@ -254,11 +412,12 @@ export function resolveProjectSlowStopsPath(opts: {
 }
 
 /**
- * Read value-free slow-stop records persisted under `.hack/.internal/slow-stops.json`
- * so `hack doctor` can surface exit-137 findings after `hack down` removed the containers.
+ * Read unexpired slow-stop records persisted under `.hack/.internal/slow-stops.json`.
+ * Entries older than {@link SLOW_STOP_RECORD_TTL_MS} or with malformed timestamps are dropped.
  */
 export async function readProjectSlowStops(opts: {
   readonly projectDir: string;
+  readonly nowMs?: number;
 }): Promise<readonly ProjectSlowStopEntry[]> {
   const path = resolveProjectSlowStopsPath({ projectDir: opts.projectDir });
   if (!(await pathExists(path))) {
@@ -277,6 +436,7 @@ export async function readProjectSlowStops(opts: {
   if (!(isRecord(parsed) && Array.isArray(parsed.entries))) {
     return [];
   }
+  const nowMs = opts.nowMs ?? Date.now();
   const entries: ProjectSlowStopEntry[] = [];
   for (const raw of parsed.entries) {
     if (!isRecord(raw)) {
@@ -284,8 +444,17 @@ export async function readProjectSlowStops(opts: {
     }
     const composeProject = getString(raw, "composeProject");
     const observedAt = getString(raw, "observedAt");
+    const observedAtMs = observedAt ? Date.parse(observedAt) : Number.NaN;
     const servicesRaw = raw.services;
-    if (!(composeProject && observedAt && Array.isArray(servicesRaw))) {
+    if (
+      !(
+        composeProject &&
+        observedAt &&
+        Number.isFinite(observedAtMs) &&
+        nowMs - observedAtMs <= SLOW_STOP_RECORD_TTL_MS &&
+        Array.isArray(servicesRaw)
+      )
+    ) {
       continue;
     }
     const services = [
@@ -296,10 +465,9 @@ export async function readProjectSlowStops(opts: {
           .filter((item) => item.length > 0)
       ),
     ].sort((a, b) => a.localeCompare(b));
-    if (services.length === 0) {
-      continue;
+    if (services.length > 0) {
+      entries.push({ composeProject, services, observedAt });
     }
-    entries.push({ composeProject, services, observedAt });
   }
   return entries;
 }
@@ -309,6 +477,7 @@ export async function recordProjectSlowStops(opts: {
   readonly composeProject: string;
   readonly services: readonly string[];
   readonly observedAt?: string;
+  readonly nowMs?: number;
 }): Promise<void> {
   const uniqueServices = [
     ...new Set(
@@ -317,54 +486,142 @@ export async function recordProjectSlowStops(opts: {
         .filter((service) => service.length > 0)
     ),
   ].sort((a, b) => a.localeCompare(b));
+  const current = await readProjectSlowStops({
+    projectDir: opts.projectDir,
+    nowMs: opts.nowMs,
+  });
+  const otherEntries = current.filter(
+    (entry) => entry.composeProject !== opts.composeProject
+  );
   if (uniqueServices.length === 0) {
-    await clearProjectSlowStops({
+    if (otherEntries.length === current.length) {
+      return;
+    }
+    await writeProjectSlowStopsFile({
       projectDir: opts.projectDir,
-      composeProject: opts.composeProject,
+      entries: otherEntries,
     });
     return;
   }
-  const current = await readProjectSlowStops({ projectDir: opts.projectDir });
-  const next: ProjectSlowStopsFile = {
-    entries: [
-      ...current.filter(
-        (entry) => entry.composeProject !== opts.composeProject
-      ),
-      {
-        composeProject: opts.composeProject,
-        services: uniqueServices,
-        observedAt: opts.observedAt ?? new Date().toISOString(),
-      },
-    ].sort((a, b) => a.composeProject.localeCompare(b.composeProject)),
-  };
+  const observedAt =
+    opts.observedAt ?? new Date(opts.nowMs ?? Date.now()).toISOString();
+  const nextEntries = [
+    ...otherEntries,
+    {
+      composeProject: opts.composeProject,
+      services: uniqueServices,
+      observedAt,
+    },
+  ].sort((a, b) => a.composeProject.localeCompare(b.composeProject));
   await writeProjectSlowStopsFile({
     projectDir: opts.projectDir,
-    state: next,
-  });
-}
-
-export async function clearProjectSlowStops(opts: {
-  readonly projectDir: string;
-  readonly composeProject: string;
-}): Promise<void> {
-  const current = await readProjectSlowStops({ projectDir: opts.projectDir });
-  const nextEntries = current.filter(
-    (entry) => entry.composeProject !== opts.composeProject
-  );
-  if (nextEntries.length === current.length) {
-    return;
-  }
-  await writeProjectSlowStopsFile({
-    projectDir: opts.projectDir,
-    state: { entries: nextEntries },
+    entries: nextEntries,
   });
 }
 
 async function writeProjectSlowStopsFile(opts: {
   readonly projectDir: string;
-  readonly state: ProjectSlowStopsFile;
+  readonly entries: readonly ProjectSlowStopEntry[];
 }): Promise<void> {
   const path = resolveProjectSlowStopsPath({ projectDir: opts.projectDir });
   await ensureDir(dirname(path));
-  await writeTextFile(path, `${JSON.stringify(opts.state, null, 2)}\n`);
+  await writeTextFileAtomicIfChanged(
+    path,
+    `${JSON.stringify({ entries: opts.entries }, null, 2)}\n`,
+    {
+      createMode: 0o600,
+      tightenExisting: true,
+      noFollowTarget: true,
+    }
+  );
+}
+
+/**
+ * Advisory post-down slow-stop observation and state persistence.
+ *
+ * Never throws and never changes `hack down`'s exit code or lifecycle hooks.
+ * Only clears previously recorded services when a `docker events` probe succeeds and
+ * confirms those services exited cleanly; failed probes, `--timeout 0`, or no-op downs
+ * on already-stopped projects leave existing records intact.
+ */
+export async function finalizeComposeDownSlowStops(opts: {
+  readonly projectDir: string;
+  readonly composeFile: string;
+  readonly composeProject: string;
+  readonly downElapsedMs: number;
+  readonly windowLookbackMs?: number;
+  readonly timeoutSeconds?: number;
+  readonly forceProbe?: boolean;
+  readonly allowClear?: boolean;
+  /** Known pre-down running services when available (e.g. `--json`); empty skips clearing probe. */
+  readonly runningBeforeDown?: readonly string[];
+  readonly cwd: string;
+  readonly env?: Readonly<Record<string, string>>;
+  readonly nowMs?: number;
+  readonly execImpl?: SlowStopExec;
+}): Promise<readonly SlowStopHint[]> {
+  try {
+    const [meta, existingEntries] = await Promise.all([
+      readComposeServiceStopMeta(opts.composeFile).catch(() => null),
+      readProjectSlowStops({
+        projectDir: opts.projectDir,
+        nowMs: opts.nowMs,
+      }).catch(() => [] as readonly ProjectSlowStopEntry[]),
+    ]);
+    const existingForProject = existingEntries.find(
+      (entry) => entry.composeProject === opts.composeProject
+    );
+    const allowClear = opts.allowClear !== false;
+    const knownStoppedBeforeDown =
+      opts.runningBeforeDown !== undefined &&
+      opts.runningBeforeDown.length === 0;
+    const shouldVerifyExistingRecord =
+      Boolean(existingForProject) &&
+      allowClear &&
+      opts.timeoutSeconds !== 0 &&
+      !knownStoppedBeforeDown;
+
+    const observation = await observeComposeDownSlowStops({
+      composeProject: opts.composeProject,
+      downElapsedMs: opts.downElapsedMs,
+      windowLookbackMs: opts.windowLookbackMs,
+      timeoutSeconds: opts.timeoutSeconds,
+      minServiceGraceMs: meta?.minPositiveGraceMs,
+      forceProbe: opts.forceProbe || shouldVerifyExistingRecord,
+      cwd: opts.cwd,
+      env: opts.env,
+      execImpl: opts.execImpl,
+    });
+
+    if (observation.status === "ok") {
+      const nextServices = new Set(existingForProject?.services ?? []);
+      if (allowClear) {
+        for (const cleanService of observation.exitedClean) {
+          nextServices.delete(cleanService);
+        }
+      }
+      for (const slowService of observation.exited137) {
+        nextServices.add(slowService);
+      }
+      const changed =
+        observation.exited137.length > 0 ||
+        (allowClear &&
+          existingForProject !== undefined &&
+          observation.exitedClean.length > 0);
+      if (changed) {
+        await recordProjectSlowStops({
+          projectDir: opts.projectDir,
+          composeProject: opts.composeProject,
+          services: [...nextServices],
+          nowMs: opts.nowMs,
+        }).catch(() => undefined);
+      }
+    }
+
+    return buildSlowStopHints(observation.exited137, {
+      withInit: meta?.withInit,
+    });
+  } catch {
+    return [];
+  }
 }

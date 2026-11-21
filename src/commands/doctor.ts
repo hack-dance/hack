@@ -3924,7 +3924,7 @@ async function runProjectChecks(opts: {
   );
   results.push(
     await runCheck(s, COMPOSE_SLOW_STOPS_CHECK, () =>
-      checkComposeSlowStops({ startDir, dockerOk })
+      checkComposeSlowStops({ startDir })
     )
   );
   results.push(

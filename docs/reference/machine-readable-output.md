@@ -184,4 +184,6 @@ Additive fields keep a command's row and shape above; consumers ignore keys they
   (`services`, `exitCode: 137`, `hints`) when exit-137 services are found.
 - Compose `hack down --json`: when a container exited `137` after the stop grace period,
   `data` adds `slowStops` (`[{ service, exitCode: 137, hint }]`) and includes each hint in
-  `data.warnings`; stdout remains a single valid JSON envelope.
+  `data.warnings`; stdout remains a single valid JSON envelope. When the overall down cap
+  ends `docker compose down` (exit `124`), `error.detail` adds `timedOut: true`, `capMs`,
+  `slowStops`, and `warnings`.

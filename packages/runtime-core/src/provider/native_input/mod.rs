@@ -90,7 +90,7 @@ fn identity(provenance: &Provenance) -> Result<String, CandidateError> {
     let mut hash = Sha256::new();
     hash.update(IDENTITY_DOMAIN);
     hash.update(bytes);
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(format!("{:x}", crate::Hex(hash.finalize())))
 }
 impl Review {
     pub(crate) fn new(scope: Scope<'_>, input: ReviewIdentity) -> Result<Self, CandidateError> {

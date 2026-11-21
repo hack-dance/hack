@@ -578,27 +578,37 @@ describe("PR matrix policy", () => {
       });
     }
   });
-  test("protected inputs and main PRs automatically run full tiers", async () => {
+  test("protected inputs retain Linux tiers while main and labels admit macOS", async () => {
     for (const input of [
       { changed: [".github/workflows/ci.yml"] },
       { changed: ["scripts/ci-test-selection.ts"] },
+      { changed: [".github/workflows/ci.yml"], mac: true },
+      { changed: [".github/workflows/ci.yml"], full: true },
       { changed: ["docs/a.md"], baseRef: "main" },
     ]) {
+      const mac =
+        input.baseRef === "main" || input.mac === true || input.full === true;
       const plan = await planPullRequest({
         repoRoot,
-        ...input,
         draft: false,
         full: false,
+        ...input,
       });
       expect(plan).toMatchObject({
         selection_mode: "full",
         runtime_core: true,
-        test_shards: "[1,2,3,4,5,6,7,8]",
+        test_shards: mac ? "[1,2,3,4,5,6,7,8]" : "[4,5,6,7,8]",
         docker_suite: true,
-        defer_macos: false,
+        defer_macos: !mac,
         build_smoke: true,
-        compiler_hosts: fullPushPlan({ releaseHosts: input.baseRef === "main" })
-          .compiler_hosts,
+        compiler_hosts: JSON.stringify(
+          JSON.parse(
+            fullPushPlan({ releaseHosts: input.baseRef === "main" })
+              .compiler_hosts
+          ).filter(
+            (host: { platform: string }) => mac || host.platform === "linux"
+          )
+        ),
       });
     }
   });
@@ -675,7 +685,7 @@ describe("PR matrix policy", () => {
       COMPILER_HOSTS.filter((host) => host.os !== "macos-15-intel")
     );
   });
-  test("empty PR diffs fail safe to full tiers", async () => {
+  test("empty PR diffs retain full Linux tiers and defer macOS", async () => {
     const plan = await planPullRequest({
       repoRoot,
       changed: [],
@@ -684,10 +694,12 @@ describe("PR matrix policy", () => {
       selection: { mode: "full", reason: "empty diff", files: [] },
     });
     expect(plan.runtime_core).toBe(true);
-    expect(plan.compiler_hosts).toBe(
-      fullPushPlan({ releaseHosts: false }).compiler_hosts
+    expect(JSON.parse(plan.compiler_hosts)).toEqual(
+      JSON.parse(fullPushPlan({ releaseHosts: false }).compiler_hosts).filter(
+        (host: { platform: string }) => host.platform === "linux"
+      )
     );
-    expect(plan.defer_macos).toBe(false);
+    expect(plan.defer_macos).toBe(true);
     expect(plan.docker_suite).toBe(true);
   });
   test("candidate inputs include the compiler consumer dependency", () => {

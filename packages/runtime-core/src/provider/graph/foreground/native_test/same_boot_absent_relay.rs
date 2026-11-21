@@ -19,7 +19,7 @@ fn run() -> String {
     std::env::var("HACK_LOCAL_GRAPH_RUN").unwrap()
 }
 fn sha(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 fn options(project: &Path) -> project::PlanOptions<'_> {
     project::PlanOptions {

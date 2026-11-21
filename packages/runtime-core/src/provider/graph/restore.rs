@@ -196,10 +196,10 @@ pub(super) fn observed_volumes_with(
         // inspection digest. Legacy timestamp selections deliberately mismatch.
         let fingerprint = format!(
             "{:x}",
-            Sha256::digest(
+            crate::Hex(Sha256::digest(
                 serde_json::to_vec(&projection["inspected"])
                     .map_err(|_| error("graph_receipt", "Volume identity unavailable."))?
-            )
+            ))
         );
         volumes.insert(
             key.clone(),
@@ -217,7 +217,7 @@ pub(super) fn restore_generation(
     let volumes = observed_volumes(engine, receipt)?;
     let bytes = serde_json::to_vec(&(receipt, engine.guest().boot_id(), &volumes))
         .map_err(|_| error("graph_receipt", "Restore selection unavailable."))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(format!("{:x}", crate::Hex(Sha256::digest(bytes))))
 }
 
 #[cfg(target_os = "macos")]
@@ -237,7 +237,7 @@ pub(super) fn restore_generation_with_source_rebind(
         selected.raw_sha256(),
     ))
     .map_err(|_| error("graph_receipt", "Restore selection unavailable."))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(format!("{:x}", crate::Hex(Sha256::digest(bytes))))
 }
 fn restore_inputs(
     candidate: &Candidate,
@@ -835,7 +835,7 @@ mod tests {
         assert!(verify_fresh(&receipt, &changed, &fresh, &generation).is_err());
         receipt.source = Some(serde_json::from_value(json!({
             "shared": {
-                "project":"/tmp/fixture","guest_path":format!("/mnt/hack-projects/{:x}", sha2::Sha256::digest(b"/tmp/fixture")),
+                "project":"/tmp/fixture","guest_path":format!("/mnt/hack-projects/{:x}", crate::Hex(sha2::Sha256::digest(b"/tmp/fixture"))),
                 "device":1,"inode":1,"unfiltered_source":true
             },
             "shared_contract": {

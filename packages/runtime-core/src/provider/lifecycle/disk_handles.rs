@@ -164,6 +164,9 @@ pub(super) mod tests {
         fn expire(&mut self) -> CandidateError {
             self.running.expire()
         }
+        fn wait(&mut self, limit: Duration, clock: &dyn Clock) {
+            self.running.wait(limit, clock)
+        }
     }
 
     /// A clock that moves only when the code under test sleeps. It refuses to pass an hour,

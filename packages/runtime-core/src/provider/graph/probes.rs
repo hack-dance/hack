@@ -1047,7 +1047,7 @@ const REARM_SAMPLES: &str = include_str!("probe-rearm-samples.sh");
 #[cfg(feature = "native-http-probe")]
 pub(super) fn publish(engine: &Engine<'_>) -> Result<String, CandidateError> {
     let bytes = super::super::http_probe::guest_binary();
-    let hash = format!("{:x}", Sha256::digest(bytes));
+    let hash = format!("{:x}", crate::Hex(Sha256::digest(bytes)));
     use std::io::Write;
     let mut compressed = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     compressed.write_all(bytes).map_err(state::io)?;

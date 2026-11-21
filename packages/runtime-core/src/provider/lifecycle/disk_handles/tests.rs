@@ -702,7 +702,8 @@ fn a_scan_leaves_the_pool_directory_as_it_found_it() {
 #[test]
 fn status_reports_the_method_a_scan_would_use_now() {
     let json = |report: MethodReport| serde_json::to_string(&report).unwrap();
-    let now = method_now();
+    // Bounded for a loaded host: the answer is what the self-test says, not a timeout.
+    let now = method_within(LOADED_HOST_SCAN_WAIT);
     assert_eq!(now, method().into());
     if cfg!(target_os = "macos") {
         // Fails with the self-test on a kernel that no longer passes it; see the macOS
@@ -730,6 +731,52 @@ fn status_reports_the_method_a_scan_would_use_now() {
         );
     }
     assert_eq!(json(Method::InProcess.into()), r#"{"method":"in-process"}"#);
+    // A self-test that answers is reported as itself, whatever it says.
+    let answered = answer_within(
+        || Method::Lsof(Fallback::SelfTestFailed),
+        LOADED_HOST_SCAN_WAIT,
+    );
+    assert_eq!(
+        json(answered),
+        r#"{"method":"lsof","reason":"self_test_failed"}"#
+    );
+}
+
+/// `runtime status` does not wait for a self-test that stalls (a stuck filesystem behind
+/// the temporary directory): after its bound it reports the method as unknown and
+/// returns, and the stalled test is left to finish by itself. A self-test that panics is
+/// reported the same way, at once.
+#[test]
+fn status_reports_unknown_when_the_self_test_does_not_answer_in_time() {
+    let unknown = r#"{"method":"unknown","reason":"self_test_timed_out"}"#;
+    let json = |report: MethodReport| serde_json::to_string(&report).unwrap();
+    let (release, released) = mpsc::channel::<()>();
+    let (finished, was_finished) = mpsc::channel();
+    let stalled = move || {
+        // Stalls until the test has seen status return.
+        let _ = released.recv();
+        finished.send(()).unwrap();
+        Method::InProcess
+    };
+    let started = std::time::Instant::now();
+    let report = answer_within(stalled, STATUS_METHOD_WAIT);
+    let waited = started.elapsed();
+    assert_eq!(json(report), unknown);
+    // The bound, with room for a loaded host's scheduling; not the stall.
+    assert!(waited >= STATUS_METHOD_WAIT, "returned after {waited:?}");
+    assert!(waited < STATUS_METHOD_WAIT + Duration::from_secs(20));
+    // The test was still stalled when status returned, and ends once released.
+    assert!(was_finished.try_recv().is_err());
+    release.send(()).unwrap();
+    assert_eq!(was_finished.recv_timeout(Duration::from_secs(30)), Ok(()));
+
+    let began = std::time::Instant::now();
+    let panicked = answer_within(
+        || panic!("the self-test panics on purpose"),
+        Duration::from_secs(600),
+    );
+    assert_eq!(json(panicked), unknown);
+    assert!(began.elapsed() < Duration::from_secs(60));
 }
 
 /// A host scan that must be left to `lsof` is: the `lsof` child answers, and what it
@@ -855,6 +902,10 @@ fn an_lsof_child_running_at_the_bound_is_killed_and_reaped() {
 /// left behind by it: the scan's thread sends its answer last, after the `lsof` child that
 /// produced it has exited and been reaped. No cancellation is needed on that path because
 /// nothing is running any more.
+///
+/// The test waits until the answer is in the caller's hands, so what it then sees is the
+/// late answer being refused and not an ordinary expiry: the two have the same code and
+/// different messages, and only expiry stops the scan.
 #[test]
 fn a_late_answer_leaves_nothing_running() {
     let directory = Scratch::new();
@@ -862,19 +913,29 @@ fn a_late_answer_leaves_nothing_running() {
     let (script, child_started) = standing_in_for_lsof(directory.path(), "exit 1");
     let probe = host_scan_with(left_to_lsof, move || Ok(Lsof::at(&script)));
     let mut scan = probe.start(&disks(Path::new("/pool"))).unwrap();
-    // A caller that oversleeps past its bound: the answer is there before it looks.
-    let child = started_child(&child_started);
-    let begun = std::time::Instant::now();
-    while exists(child) {
-        assert!(begun.elapsed() < ISOLATED_HANG_GUARD, "lsof never ended");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    std::thread::sleep(Duration::from_millis(100));
     let clock = process::MonotonicClock::new();
-    let late = process::wait_within(scan.as_mut(), Duration::ZERO, &clock);
-    assert_eq!(late.err().unwrap().code, "provider_timeout_uncertain");
+    // Blocks until the thread has sent its answer, and keeps it for the next poll.
+    scan.wait(ISOLATED_HANG_GUARD, &clock);
+    // The answer was sent after the child was reaped: the child is gone already, before
+    // the caller has polled, expired or dropped anything.
+    let child = started_child(&child_started);
+    assert!(
+        !exists(child),
+        "the answer was sent before the child was reaped"
+    );
+    // A caller past its bound finds the answer and refuses it as late.
+    let late = process::wait_within(scan.as_mut(), Duration::ZERO, &clock)
+        .err()
+        .unwrap();
+    assert_eq!(late.code, "provider_timeout_uncertain");
+    assert!(
+        late.message.contains("finished only after its time bound"),
+        "refused by expiry, not as a late answer: {}",
+        late.message
+    );
+    assert_ne!(late.message, scan.expire().message);
     drop(scan);
-    assert!(!exists(child), "the child was not reaped");
+    assert!(!exists(child));
 }
 
 /// A scan whose thread dies without an answer is refused, never read as "no holder".

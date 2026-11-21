@@ -78,10 +78,12 @@ pub struct RuntimeStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guest_memory_peaks: Option<Vec<guest_memory_peak::Boot>>,
     /// How a disk-holder scan started now would read the host (`disk_handles`): in this
-    /// process, or through `lsof` with the reason. Computed when status runs, by the
-    /// self-test a scan runs first, so it describes this host and build and no pool or
-    /// earlier scan. On macOS that test makes and removes a private file in the process's
-    /// temporary directory; failing to make it is reported as a reason, never an error.
+    /// process, or through `lsof` with the reason; or unknown when the self-test did not
+    /// answer in time. Computed when status runs, by the self-test a scan runs first, so
+    /// it describes this host and build and no pool or earlier scan. On macOS that test
+    /// makes and removes a private file in the process's temporary directory; status
+    /// waits at most 100 ms for it, and failing to make the file is reported as a
+    /// reason, never an error.
     pub disk_handle_scan: disk_handles::MethodReport,
     /// Provider sockets native found world-accessible and made private for the running
     /// provider (`socket_repairs`); absent when there were none.
@@ -1054,7 +1056,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             graph_runs: users.graph_runs,
             pool_idle: Some(false),
             guest_memory_peaks: None,
-            disk_handle_scan: disk_handles::method_now(),
+            disk_handle_scan: disk_handles::method_within(disk_handles::STATUS_METHOD_WAIT),
             repaired_sockets: None,
             hashing: crate::sha256_backend::report(),
         });
@@ -1134,7 +1136,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         graph_runs: users.graph_runs,
         pool_idle,
         guest_memory_peaks: guest_memory_peak::history(&root(candidate)),
-        disk_handle_scan: disk_handles::method_now(),
+        disk_handle_scan: disk_handles::method_within(disk_handles::STATUS_METHOD_WAIT),
     })
 }
 

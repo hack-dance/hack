@@ -2295,18 +2295,23 @@ scan's thread instead of the caller, `/usr/bin/lsof` is tried when `/usr/sbin/ls
 absent, and a scan whose wait expires while it runs reports `provider_timeout_uncertain`
 with the scan's own message, whatever the child was doing.
 
-A scan writes nothing into the pool's directory, or anywhere else, so the directory can
-be removed or set aside the moment a scan returns. `runtime status --json` reports the
-method as `disk_handle_scan`, computed when status runs: it runs the scan's own
-self-test and says what a scan started now would use, `{"method": "in-process"}`, or
-`{"method": "lsof", "reason": ...}` with a reason of `not_built_for_this_platform`,
-`query_unanswered`, `self_test_failed` or `self_test_unavailable`. It describes the host
-and the build, so it is the same for every pool, initialized or not. On macOS the
-self-test makes and removes a private file in the process's temporary directory, the one
-thing an otherwise read-only status writes; a file that cannot be made is reported as
-`self_test_unavailable` and never fails status. Status shows what a scan would use now: a
-scan that fell back for a reason of its own moment, something it could not read, is not
-recorded anywhere.
+A scan writes nothing into the pool's directory, so the directory can be removed or set
+aside the moment a scan returns. On macOS its self-test creates a private temporary file
+in the process's temporary directory and removes it; removal errors are ignored, so that
+cleanup is best-effort.
+
+`runtime status --json` reports the method as `disk_handle_scan`, computed when status
+runs: it runs the scan's own self-test and says what a scan started now would use,
+`{"method": "in-process"}`, or `{"method": "lsof", "reason": ...}` with a reason of
+`not_built_for_this_platform`, `query_unanswered`, `self_test_failed` or
+`self_test_unavailable`. It describes the host and the build, so it is the same for every
+pool, initialized or not. The self-test's temporary file is the one thing an otherwise
+read-only status writes, and status waits at most 100 ms for the test: when it has not
+answered by then (a stalled filesystem behind the temporary directory), status reports
+`{"method": "unknown", "reason": "self_test_timed_out"}` and returns. A file that cannot
+be made is reported as `self_test_unavailable`. Neither fails status. Status shows what a
+scan would use now: a scan that fell back for a reason of its own moment, something it
+could not read, is not recorded anywhere.
 
 Scanning every process to learn whether a VM disk is held is a consequence of not owning
 the VM process: a launcher of our own would hold an exclusive lock on each disk, and the

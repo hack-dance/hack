@@ -51,9 +51,9 @@
 //!
 //! A scan writes nothing: not into the pool's directory, and nowhere else but the
 //! self-test's own temporary file, which is gone before the scan starts. Which method a
-//! scan would use is reported live by `runtime status` ([`method_now`]), which runs the
-//! same self-test. A scan that fell back for a reason of its own moment (something it could
-//! not read) is not recorded anywhere.
+//! scan would use is reported live by `runtime status` ([`method_within`]), which runs the
+//! same self-test under a bound of its own. A scan that fell back for a reason of its own
+//! moment (something it could not read) is not recorded anywhere.
 //!
 //! # What refuses
 //!
@@ -210,14 +210,15 @@ fn method() -> Method {
     Method::Lsof(Fallback::NotBuiltForThisPlatform)
 }
 
-/// What `runtime status` says of the disk-holder scan: `{"method": "in-process"}`, or
+/// What `runtime status` says of the disk-holder scan: `{"method": "in-process"}`,
 /// `{"method": "lsof", "reason": ...}` with the reason one of `not_built_for_this_platform`,
-/// `query_unanswered`, `self_test_failed` and `self_test_unavailable`.
+/// `query_unanswered`, `self_test_failed` and `self_test_unavailable`, or
+/// `{"method": "unknown", "reason": "self_test_timed_out"}`.
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub struct MethodReport {
     method: MethodName,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<Fallback>,
+    reason: Option<Reason>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -225,28 +226,80 @@ pub struct MethodReport {
 enum MethodName {
     InProcess,
     Lsof,
+    Unknown,
+}
+
+/// Why the method is not the scan in this process: a scan's own reason for `lsof`, or
+/// status's reason for not knowing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(untagged)]
+enum Reason {
+    Lsof(Fallback),
+    Unknown(Unanswered),
+}
+
+/// Why status could not say which method a scan would use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Unanswered {
+    /// The self-test did not answer within status's wait, or could not be run at all.
+    SelfTestTimedOut,
 }
 
 impl From<Method> for MethodReport {
     fn from(method: Method) -> Self {
         let (method, reason) = match method {
             Method::InProcess => (MethodName::InProcess, None),
-            Method::Lsof(reason) => (MethodName::Lsof, Some(reason)),
+            Method::Lsof(reason) => (MethodName::Lsof, Some(Reason::Lsof(reason))),
         };
         Self { method, reason }
     }
 }
 
-/// The method a disk-holder scan started now would use, for `runtime status`.
+/// How long `runtime status` waits for the self-test before it reports the method as
+/// unknown. The test takes a fraction of a millisecond unless the filesystem behind the
+/// temporary directory stalls.
+pub(super) const STATUS_METHOD_WAIT: Duration = Duration::from_millis(100);
+
+/// The method a disk-holder scan started now would use, or unknown when the self-test did
+/// not answer within `limit`, for `runtime status`.
 ///
 /// It is computed, not remembered: it runs the self-test a scan runs first, on this host
 /// with this build, so it says nothing about any pool or any scan that already ran. On
 /// macOS the self-test makes a private file in this process's temporary directory, maps
-/// one page of it and removes it again, in a fraction of a millisecond. That is the one
-/// thing an otherwise read-only status writes. If the file cannot be made, the answer is
-/// `lsof` with `self_test_unavailable`; this never fails.
-pub(super) fn method_now() -> MethodReport {
-    method().into()
+/// one page of it and removes it again. That is the one thing an otherwise read-only
+/// status writes, and the one thing in it that a stalled filesystem can hold up. So the
+/// test runs on a thread of its own and this waits at most `limit` for its answer; status
+/// is never held longer, and this never fails. If the file cannot be made, the answer is
+/// `lsof` with `self_test_unavailable`.
+///
+/// A test that has not answered is left to finish by itself. Its answer is then dropped,
+/// and its file and mapping are removed by the test's own guards when it resumes, as on
+/// every other path. A process that exits while the test is still stalled can leave that
+/// one private file in the temporary directory.
+///
+/// A scan does not use this: it runs the self-test inside its own bounded work.
+pub(super) fn method_within(limit: Duration) -> MethodReport {
+    answer_within(method, limit)
+}
+
+/// [`method_within`] with the self-test given, so a test can put a stalled one in its place.
+fn answer_within(test: impl FnOnce() -> Method + Send + 'static, limit: Duration) -> MethodReport {
+    let (answer, answered) = mpsc::channel();
+    // A send fails only when this call has stopped waiting; the answer is then late.
+    let started = std::thread::Builder::new()
+        .name("disk-handle-self-test".into())
+        .spawn(move || {
+            let _ = answer.send(test());
+        });
+    // No thread, a test that panicked and a test that is too slow all leave no answer.
+    match started.map(|_| answered.recv_timeout(limit)) {
+        Ok(Ok(method)) => method.into(),
+        _ => MethodReport {
+            method: MethodName::Unknown,
+            reason: Some(Reason::Unknown(Unanswered::SelfTestTimedOut)),
+        },
+    }
 }
 
 /// The scan in this process, or the reason the `lsof` child must scan instead. `stop` ends

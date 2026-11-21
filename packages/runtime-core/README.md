@@ -1948,7 +1948,8 @@ kernel's `boot_id` on Linux), a time on a clock that keeps counting while the ma
 sleeps (`CLOCK_MONOTONIC` on macOS, `CLOCK_BOOTTIME` on Linux), and the sample's swapout
 count. It is written atomically, under the provider lease, readable and writable by the
 user only. Two things write it: every Development start records its own passing sample
-under the lease, after the tree and root files comparisons, and `runtime down` of a
+under the lease, after the tree comparison and the root files comparison that follows it
+(and before the last root files comparison, in `prepare_rootfs`), and `runtime down` of a
 Development pool records one sample it takes at the start of the stop, if that sample
 passes.
 

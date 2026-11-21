@@ -28,6 +28,7 @@ type Paths = {
   readonly meminfo: string;
   readonly pressure: string;
   readonly vmstat: string;
+  readonly page: string;
   readonly status: string;
   readonly marker: string;
   readonly owner: string;
@@ -55,6 +56,7 @@ async function run(opts: {
       `pressure_file=${opts.paths.pressure}`,
     ],
     ["vmstat_file=/proc/vmstat", `vmstat_file=${opts.paths.vmstat}`],
+    ["page_file=/proc/self/smaps", `page_file=${opts.paths.page}`],
     [
       "status_file=/run/hack-local/memory-peak.status",
       `status_file=${opts.paths.status}`,
@@ -92,6 +94,7 @@ async function fixture(): Promise<{ root: string; paths: Paths }> {
     meminfo: join(root, "meminfo"),
     pressure: join(root, "pressure"),
     vmstat: join(root, "vmstat"),
+    page: join(root, "smaps"),
     status: join(root, "status"),
     marker: join(root, "started"),
     owner: join(root, "owner"),
@@ -103,6 +106,7 @@ async function fixture(): Promise<{ root: string; paths: Paths }> {
   await writeFile(paths.meminfo, meminfo(6_087_220, 2_743_404));
   await writeFile(paths.pressure, PRESSURE);
   await writeFile(paths.vmstat, VMSTAT);
+  await writeFile(paths.page, smaps(4));
   await writeFile(paths.between, ":\n");
   return { root, paths };
 }
@@ -147,45 +151,40 @@ test("the peak is the highest sample, and the counters are the latest", async ()
   }
 });
 
-/** `/proc/meminfo` as a guest with the given huge page size reports it. */
-function meminfoWithHuge(
-  totalKib: number,
-  availableKib: number,
-  hugeKib: number
-): string {
-  return `${meminfo(totalKib, availableKib)}Hugepagesize:    ${hugeKib} kB\n`;
+/** The start of `/proc/self/smaps` on a kernel with the given base page size. */
+function smaps(pageKib: number | null): string {
+  return [
+    "aaaab0000000-aaaab00f0000 r-xp 00000000 fe:00 1234    /bin/busybox",
+    "Size:                960 kB",
+    ...(pageKib === null ? [] : [`KernelPageSize:       ${pageKib} kB`]),
+    "MMUPageSize:           4 kB",
+    "",
+  ].join("\n");
 }
+
+const STEP_STAND_INS = [
+  'if test -f "$meminfo_file.$rounds"; then cat "$meminfo_file.$rounds" > "$meminfo_file"; fi',
+  'if test -f "$vmstat_file.$rounds"; then cat "$vmstat_file.$rounds" > "$vmstat_file"; fi',
+  "",
+].join("\n");
 
 test("memory the provider's balloon holds is not counted as in use", async () => {
   const { root, paths } = await fixture();
   try {
     // An idle guest: 230,000 KiB in use. In the second sample the provider's balloon
     // holds 1,250,000 pages of 4 KiB, so the kernel reports 5,000,000 KiB less available.
-    await writeFile(paths.meminfo, meminfoWithHuge(6_000_000, 5_770_000, 2048));
-    await writeFile(
-      `${paths.meminfo}.1`,
-      meminfoWithHuge(6_000_000, 770_000, 2048)
-    );
+    await writeFile(paths.meminfo, meminfo(6_000_000, 5_770_000));
+    await writeFile(`${paths.meminfo}.1`, meminfo(6_000_000, 770_000));
     await writeFile(
       `${paths.vmstat}.1`,
       "nr_balloon_pages 1250000\nballoon_inflate 1250000\nballoon_deflate 0\noom_kill 0\npgmajfault 2065\n"
     );
-    await writeFile(
-      `${paths.meminfo}.2`,
-      meminfoWithHuge(6_000_000, 5_770_000, 2048)
-    );
+    await writeFile(`${paths.meminfo}.2`, meminfo(6_000_000, 5_770_000));
     await writeFile(
       `${paths.vmstat}.2`,
       "nr_balloon_pages 0\nballoon_inflate 1250000\nballoon_deflate 1250000\noom_kill 0\npgmajfault 2065\n"
     );
-    await writeFile(
-      paths.between,
-      [
-        'if test -f "$meminfo_file.$rounds"; then cat "$meminfo_file.$rounds" > "$meminfo_file"; fi',
-        'if test -f "$vmstat_file.$rounds"; then cat "$vmstat_file.$rounds" > "$vmstat_file"; fi',
-        "",
-      ].join("\n")
-    );
+    await writeFile(paths.between, STEP_STAND_INS);
     const result = await run({ paths });
     expect(result.exitCode).toBe(0);
     expect(await readFile(paths.status, "utf8")).toBe(
@@ -200,7 +199,7 @@ test("real use under an inflated balloon is still recorded", async () => {
   const { root, paths } = await fixture();
   try {
     // 3,000,000 KiB unavailable, of which the balloon holds 500,000 pages (2,000,000 KiB).
-    await writeFile(paths.meminfo, meminfoWithHuge(6_000_000, 3_000_000, 2048));
+    await writeFile(paths.meminfo, meminfo(6_000_000, 3_000_000));
     await writeFile(paths.vmstat, "nr_balloon_pages 500000\noom_kill 0\n");
     const result = await run({ paths, rounds: 1 });
     expect(result.exitCode).toBe(0);
@@ -212,24 +211,47 @@ test("real use under an inflated balloon is still recorded", async () => {
   }
 });
 
-test("the balloon is sized in the kernel's base pages", async () => {
-  for (const [hugeKib, pageKib] of [
-    [2048, 4],
-    [32_768, 16],
-    [524_288, 64],
-  ] as const) {
+test("the balloon is sized in the base pages the kernel itself reports", async () => {
+  for (const pageKib of [4, 16, 64]) {
     const { root, paths } = await fixture();
     try {
       // 4,000,000 KiB unavailable; the balloon holds 10,000 base pages.
-      await writeFile(
-        paths.meminfo,
-        meminfoWithHuge(6_000_000, 2_000_000, hugeKib)
-      );
+      await writeFile(paths.page, smaps(pageKib));
+      await writeFile(paths.meminfo, meminfo(6_000_000, 2_000_000));
       await writeFile(paths.vmstat, "nr_balloon_pages 10000\n");
       const result = await run({ paths, rounds: 1 });
-      expect(result.exitCode, String(hugeKib)).toBe(0);
-      expect(await readFile(paths.status, "utf8"), String(hugeKib)).toContain(
+      expect(result.exitCode, String(pageKib)).toBe(0);
+      expect(await readFile(paths.status, "utf8"), String(pageKib)).toContain(
         `peak_kib=${4_000_000 - 10_000 * pageKib} samples=1 `
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("on a kernel that does not report its page size, a sample under a balloon is not used", async () => {
+  for (const page of [smaps(null), smaps(8), null]) {
+    const { root, paths } = await fixture();
+    try {
+      if (page === null) {
+        await rm(paths.page);
+      } else {
+        await writeFile(paths.page, page);
+      }
+      // Sample 1: no balloon, 230,000 KiB in use. Sample 2: a balloon of unknown page size.
+      // Sample 3: the balloon is gone again, 240,000 KiB in use.
+      await writeFile(paths.meminfo, meminfo(6_000_000, 5_770_000));
+      await writeFile(paths.vmstat, "nr_balloon_pages 0\noom_kill 0\n");
+      await writeFile(`${paths.meminfo}.1`, meminfo(6_000_000, 770_000));
+      await writeFile(`${paths.vmstat}.1`, "nr_balloon_pages 1250000\n");
+      await writeFile(`${paths.meminfo}.2`, meminfo(6_000_000, 5_760_000));
+      await writeFile(`${paths.vmstat}.2`, "nr_balloon_pages 0\n");
+      await writeFile(paths.between, STEP_STAND_INS);
+      const result = await run({ paths });
+      expect(result.exitCode).toBe(0);
+      expect(await readFile(paths.status, "utf8")).toContain(
+        "peak_kib=240000 samples=2 "
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -240,7 +262,7 @@ test("the balloon is sized in the kernel's base pages", async () => {
 test("a kernel with only the balloon's event counters is corrected from their difference", async () => {
   const { root, paths } = await fixture();
   try {
-    await writeFile(paths.meminfo, meminfoWithHuge(6_000_000, 1_000_000, 2048));
+    await writeFile(paths.meminfo, meminfo(6_000_000, 1_000_000));
     await writeFile(
       paths.vmstat,
       "balloon_inflate 1300000\nballoon_deflate 100000\noom_kill 0\n"
@@ -256,7 +278,7 @@ test("a kernel with only the balloon's event counters is corrected from their di
   }
 });
 
-test("a balloon reading that cannot be right never makes the figure negative or fails the sample", async () => {
+test("a balloon reading that cannot be right never breaks the figure or the sampler", async () => {
   const cases: readonly (readonly [string, number])[] = [
     // Larger than everything unavailable: the sample counts as nothing in use.
     ["nr_balloon_pages 9000000\n", 0],
@@ -266,19 +288,70 @@ test("a balloon reading that cannot be right never makes the figure negative or 
     ["balloon_inflate 5\nballoon_deflate 9\n", 4_000_000],
     // No balloon in this kernel at all.
     ["oom_kill 0\n", 4_000_000],
+    // Leading zeros, which shell arithmetic would read as octal: 8 pages of 4 KiB.
+    ["nr_balloon_pages 08\n", 3_999_968],
+    ["nr_balloon_pages 000\n", 4_000_000],
+    // A count that would overflow when multiplied: refused, no correction.
+    ["nr_balloon_pages 4611686018427387903\n", 4_000_000],
+    ["balloon_inflate 4611686018427387903\nballoon_deflate 0\n", 4_000_000],
   ];
-  for (const [vmstat, expected] of cases) {
+  for (const shell of ["sh", "dash", "bash"].filter(
+    (name) => Bun.which(name) !== null
+  )) {
+    for (const [vmstat, expected] of cases) {
+      const { root, paths } = await fixture();
+      try {
+        await writeFile(paths.meminfo, meminfo(6_000_000, 2_000_000));
+        await writeFile(paths.vmstat, vmstat);
+        const result = await run({ paths, rounds: 2, shell });
+        expect(result.exitCode, `${shell} ${vmstat}`).toBe(0);
+        // Two samples: a sampler that died on the first would have written one or none.
+        expect(
+          await readFile(paths.status, "utf8"),
+          `${shell} ${vmstat}`
+        ).toContain(`peak_kib=${expected} samples=2 `);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+test("a balloon that moves during one sample is subtracted at its larger reading", async () => {
+  // The balloon is read before and after the memory figures. A named pipe stands in for
+  // /proc/vmstat so each of the sample's three reads can be given different contents:
+  // before the memory figures, after them, and the read for the other counters.
+  const growing = ["nr_balloon_pages 0\n", "nr_balloon_pages 1000000\n"];
+  const shrinking = ["nr_balloon_pages 1000000\n", "nr_balloon_pages 0\n"];
+  for (const [before, after] of [growing, shrinking]) {
     const { root, paths } = await fixture();
+    const feeds = [before, after, "oom_kill 0\npgmajfault 7\n"];
     try {
-      await writeFile(
-        paths.meminfo,
-        meminfoWithHuge(6_000_000, 2_000_000, 2048)
+      await rm(paths.vmstat);
+      expect(spawnSyncBounded(["mkfifo", paths.vmstat]).exitCode).toBe(0);
+      for (const [index, text] of feeds.entries()) {
+        await writeFile(join(root, `feed.${index}`), text);
+      }
+      // Each write blocks until the script opens the pipe; the pause lets the script
+      // close it before the next contents are offered.
+      const writer = Bun.spawn(
+        [
+          "sh",
+          "-c",
+          'for n in 0 1 2; do cat "$1/feed.$n" > "$2"; sleep 0.3; done',
+          "feed",
+          root,
+          paths.vmstat,
+        ],
+        { stdout: "ignore", stderr: "ignore" }
       );
-      await writeFile(paths.vmstat, vmstat);
+      // 5,000,000 KiB unavailable; at its larger reading the balloon holds 4,000,000 KiB.
+      await writeFile(paths.meminfo, meminfo(6_000_000, 1_000_000));
       const result = await run({ paths, rounds: 1 });
-      expect(result.exitCode, vmstat).toBe(0);
-      expect(await readFile(paths.status, "utf8"), vmstat).toContain(
-        `peak_kib=${expected} samples=1 `
+      await writer.exited;
+      expect(result.exitCode, before).toBe(0);
+      expect(await readFile(paths.status, "utf8"), before).toBe(
+        "memory-peak-v1 peak_kib=1000000 samples=1 total_kib=6000000 some_us=1075081 full_us=40211 oom_kill=0 pgmajfault=7\n"
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -286,21 +359,17 @@ test("a balloon reading that cannot be right never makes the figure negative or 
   }
 });
 
-test("the balloon is read on both sides of the memory figures and the larger reading is used", async () => {
-  // A balloon that grows or shrinks while one sample is taken must not invent a peak.
-  // The script cannot be paused between its reads from here, so this pins the order.
+test("the first balloon reading is taken before the memory figures are opened", async () => {
   const script = await Bun.file(SCRIPT).text();
   const loop = script.slice(script.indexOf("while :; do"));
   const before = loop.indexOf("read_balloon\n  balloon_before=$balloon");
-  const figures = loop.indexOf('done < "$meminfo_file"');
-  const after = loop.indexOf("read_balloon", figures);
-  const larger = loop.indexOf(
-    'if test "$balloon_before" -gt "$balloon"; then\n    balloon=$balloon_before'
-  );
-  expect(before).toBeGreaterThanOrEqual(0);
-  expect(figures).toBeGreaterThan(before);
-  expect(after).toBeGreaterThan(figures);
-  expect(larger).toBeGreaterThan(after);
+  const opened = loop.indexOf('if test -r "$meminfo_file"; then');
+  const closed = loop.indexOf('done < "$meminfo_file"');
+  const after = loop.indexOf("read_balloon", closed);
+  expect(before).toBe(loop.indexOf("\n") + 3);
+  expect(opened).toBeGreaterThan(before);
+  expect(closed).toBeGreaterThan(opened);
+  expect(after).toBeGreaterThan(closed);
   expect(loop.split("read_balloon").length).toBe(3);
 });
 
@@ -428,6 +497,7 @@ const ALLOWED_COMMANDS = new Set([
   "exit",
   "printf",
   "check",
+  "count",
   "read_balloon",
   "sleep",
   ":",

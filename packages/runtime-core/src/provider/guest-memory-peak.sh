@@ -15,7 +15,9 @@
 #
 # The balloon is read before and after the memory figures and the larger reading is
 # subtracted: a balloon that grows or shrinks during a sample can then only make the
-# sample smaller, never invent a peak.
+# sample smaller, never invent a peak. The balloon is counted in the kernel's base pages;
+# their size is read once from the sampler's own memory map. On a kernel that does not say,
+# a sample taken while the balloon holds anything is not used at all.
 #
 # Every sample is read with shell builtins. The loop starts one process per sample, `sleep`.
 # The host reads the one-line status file; it is rewritten on every sample.
@@ -27,6 +29,7 @@ test "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" = "${2-}" || exit 0
 meminfo_file=/proc/meminfo
 pressure_file=/proc/pressure/memory
 vmstat_file=/proc/vmstat
+page_file=/proc/self/smaps
 status_file=/run/hack-local/memory-peak.status
 # At most one sampler per boot: /run/hack-local is a tmpfs made at boot.
 marker_file=/run/hack-local/memory-peak.started
@@ -47,6 +50,22 @@ check() {
   esac
 }
 
+# Sets `counted` to the page count given, or to `unavailable`. Unlike `check` the result is
+# safe in shell arithmetic: leading zeros are dropped (a shell reads `08` as bad octal) and
+# a count of more than twelve digits, which no guest can hold, is refused before it can
+# overflow a multiplication.
+count() {
+  check "${1-}"
+  counted=$checked
+  if test "$counted" != unavailable; then
+    counted=${counted#"${counted%%[!0]*}"}
+    case "$counted" in
+      '') counted=0 ;;
+      ?????????????*) counted=unavailable ;;
+    esac
+  fi
+}
+
 # Sets `balloon` to the pages the balloon holds now, or to 0 when the kernel does not say.
 # `nr_balloon_pages` is the size itself; older kernels offer only the two event counters.
 read_balloon() {
@@ -62,20 +81,36 @@ read_balloon() {
       esac
     done < "$vmstat_file"
   fi
-  check "$balloon_now"
-  balloon=$checked
+  count "$balloon_now"
+  balloon=$counted
   if test "$balloon" = unavailable; then
     balloon=0
-    check "$balloon_in"
-    balloon_in=$checked
-    check "$balloon_out"
-    balloon_out=$checked
+    count "$balloon_in"
+    balloon_in=$counted
+    count "$balloon_out"
+    balloon_out=$counted
     if test "$balloon_in" != unavailable && test "$balloon_out" != unavailable &&
       test "$balloon_in" -ge "$balloon_out"; then
       balloon=$((balloon_in - balloon_out))
     fi
   fi
 }
+
+# The kernel's base page size in KiB, from the first mapping of this shell: 4, 16 or 64,
+# or `unknown`. Read once; it cannot change while the guest runs.
+page_kib=unknown
+if test -r "$page_file"; then
+  while read -r key value rest; do
+    case "$key" in
+      KernelPageSize:)
+        case "$value" in
+          4 | 16 | 64) page_kib=$value ;;
+        esac
+        break
+        ;;
+    esac
+  done < "$page_file"
+fi
 
 peak=0
 samples=0
@@ -85,14 +120,12 @@ while :; do
   balloon_before=$balloon
   total=
   available=
-  huge=
   if test -r "$meminfo_file"; then
     while read -r key value rest; do
       case "$key" in
         MemTotal:) total=$value ;;
-        MemAvailable:) available=$value ;;
-        Hugepagesize:)
-          huge=$value
+        MemAvailable:)
+          available=$value
           break
           ;;
       esac
@@ -102,21 +135,22 @@ while :; do
   if test "$balloon_before" -gt "$balloon"; then
     balloon=$balloon_before
   fi
-  # The balloon is counted in base pages. Their size follows from the huge page size the
-  # kernel reports; a kernel that reports none of these has 4 KiB pages.
-  case "$huge" in
-    32768) page_kib=16 ;;
-    524288) page_kib=64 ;;
-    *) page_kib=4 ;;
-  esac
   check "$total"
   total=$checked
   check "$available"
   available=$checked
-  if test "$total" != unavailable && test "$available" != unavailable &&
-    test "$total" -ge "$available"; then
+  # A balloon of unknown page size cannot be subtracted; such a sample says nothing.
+  usable=yes
+  if test "$balloon" -gt 0 && test "$page_kib" = unknown; then
+    usable=no
+  fi
+  if test "$usable" = yes && test "$total" != unavailable &&
+    test "$available" != unavailable && test "$total" -ge "$available"; then
     used=$((total - available))
-    held=$((balloon * page_kib))
+    held=0
+    if test "$balloon" -gt 0; then
+      held=$((balloon * page_kib))
+    fi
     if test "$held" -gt "$used"; then
       held=$used
     fi

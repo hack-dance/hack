@@ -23,41 +23,28 @@ impl Store {
             return Err(invalid("CAS output exceeds the step store limit."));
         }
         let digest = Digest(Sha256::digest(&bytes).into());
-        let shard = self.cas_shard(&digest);
+        let shard = self.root.join(cas_shard(&digest));
         disk::create_directory(&shard)?;
         let path = shard.join(format!("{:x}", crate::Hex(digest.0)));
         disk::publish(&self.root, &path, &bytes)?;
         Ok(digest)
     }
 
-    /// Read and verify CAS bytes. An object that does not hash to its name, or is
-    /// larger than `MAX_CAS_BYTES`, is absent and is removed.
-    pub fn get_cas(&self, digest: &Digest) -> Result<Option<Vec<u8>>> {
-        let path = self.cas_path(digest);
-        let Some(mut file) = self.read_file(&path)? else {
-            return Ok(None);
-        };
-        let verified = disk::read_limited(&mut file, MAX_CAS_BYTES)?
+    /// Read and verify CAS bytes. Unreadable or invalid objects are treated as absent.
+    pub fn get_cas(&self, digest: &Digest) -> Option<Vec<u8>> {
+        let path = cas_shard(digest).join(format!("{:x}", crate::Hex(digest.0)));
+        let mut entry = disk::read_cache_file(&self.directory, &path, self.owner).ok()?;
+        let verified = disk::read_limited(&mut entry.file, MAX_CAS_BYTES)
+            .ok()?
             .filter(|bytes| Digest(Sha256::digest(bytes).into()) == *digest);
         if verified.is_none() {
             // Best effort: the object is absent either way.
-            let _ = disk::remove_current(&file, &path);
+            entry.discard();
         }
-        Ok(verified)
+        verified
     }
+}
 
-    pub(super) fn has_verified_cas(&self, digest: &Digest) -> Result<bool> {
-        Ok(self.get_cas(digest)?.is_some())
-    }
-
-    fn cas_path(&self, digest: &Digest) -> PathBuf {
-        self.cas_shard(digest)
-            .join(format!("{:x}", crate::Hex(digest.0)))
-    }
-
-    fn cas_shard(&self, digest: &Digest) -> PathBuf {
-        self.root
-            .join("cas")
-            .join(format!("{:x}", crate::Hex(&digest.0[..1])))
-    }
+fn cas_shard(digest: &Digest) -> PathBuf {
+    PathBuf::from("cas").join(format!("{:x}", crate::Hex(&digest.0[..1])))
 }

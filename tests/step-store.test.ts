@@ -35,6 +35,7 @@ import {
   encodeStepRecord,
   newStepRecord,
 } from "../src/lib/step-store/record.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 
 type KeyVector = Omit<StepKeyParts, "build"> & {
   readonly name: string;
@@ -427,7 +428,7 @@ describe("step store build", () => {
         ...(define ? { define } : {}),
       });
       expect(build.success).toBe(true);
-      const child = Bun.spawnSync([executable]);
+      const child = spawnSyncBounded([executable], { timeout: 30_000 });
       expect(child.exitCode).toBe(0);
       return child.stdout.toString().trim();
     } finally {

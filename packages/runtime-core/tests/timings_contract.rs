@@ -199,12 +199,12 @@ fn cold_boot_observation_includes_provider_start_and_its_early_errors() {
         .split("phase(candidate, &mut owner, \"booting\")?;")
         .nth(1)
         .unwrap();
-    let cold = cold.split("/// `machine create`").next().unwrap();
+    let cold = cold.split("\nfn pool_spec(").next().unwrap();
     let span = cold
         .find("crate::timings::measure(crate::timings::Step::VmBoot")
         .unwrap();
     let provider = cold
-        .find("start_machine(candidate, &owner, permit)?;")
+        .find("start_machine(&SmolvmCli::new(candidate, &owner), permit)?;")
         .unwrap();
     let readiness = cold.find("finish_boot(candidate, &mut owner").unwrap();
     let cleanup = cold

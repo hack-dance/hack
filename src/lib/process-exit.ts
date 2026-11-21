@@ -28,6 +28,37 @@ export function holdProcessUntil(work: Promise<unknown>): void {
   void settled.then(() => holds.delete(settled));
 }
 
+/**
+ * Cleanup a signal handler started: the process is held until it settles,
+ * whether or not the command returned first. Then `reraise` (when given)
+ * re-raises the signal with its default action restored, and the hold lasts
+ * `settleMs` more, so the process ends by that signal, as it did before Hack
+ * exited explicitly, instead of by `exitWhenDone` with the command's code.
+ * If the signal does not end it, the bound lets the normal exit run.
+ */
+export function holdSignalCleanup(opts: {
+  readonly cleanup: Promise<unknown>;
+  readonly reraise?: (() => void) | null;
+  readonly settleMs?: number;
+}): void {
+  holdProcessUntil(
+    opts.cleanup
+      .then(
+        () => undefined,
+        () => undefined
+      )
+      .then(async () => {
+        if (!opts.reraise) {
+          return;
+        }
+        opts.reraise();
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, opts.settleMs ?? 1000);
+        });
+      })
+  );
+}
+
 /** Resolves once every hold, including ones added while waiting, settled. */
 async function waitForHolds(): Promise<void> {
   while (holds.size > 0) {

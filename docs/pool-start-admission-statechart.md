@@ -5,8 +5,8 @@
   [COVERAGE.md](../tests/models/tla/pool-start-admission/COVERAGE.md).
 - Source: `start_pool_observed` and `startup_admission_lease` in
   `packages/runtime-core/src/provider/lifecycle.rs`, `provider/admission.rs`,
-  `provider/lifecycle/leased_trees.rs`, `provider/lifecycle/rootfs_proof.rs` and
-  `provider/lifecycle/admission_pool.rs`.
+  `provider/admission/opening.rs`, `provider/lifecycle/leased_trees.rs`,
+  `provider/lifecycle/rootfs_proof.rs` and `provider/lifecycle/admission_pool.rs`.
 - Boundary: one `runtime up` of a pool that is not running, from its first host
   sample to `machine start`. A pool that already runs takes
   `lifecycle::running_start` and samples nothing.
@@ -27,9 +27,9 @@ Each state is one value of the model's `pc`.
 | `Idle` | Nothing sampled yet. A squatted clean-stop alias is moved here. | Not held |
 | `Opened` | The first sample qualified and the window clock started. Research takes its second and third samples here. | Not held |
 | `Proven` | The provider and engine trees were proven by content, and a cleanly stopped pool's root files beside them. Nothing fences them until the lease is taken. | Not held |
-| `Leased` | The startup lease is held. Development sleeps the rest of the window here. | Held |
+| `Leased` | The startup lease is held. Development sleeps the rest of the window here, or skips it when this home's record of an earlier passing sample is usable. | Held |
 | `Qualified` | Every qualifying sample exists: two for Development, three for Research. The trees are rechecked against their proof here. | Held |
-| `Settled` | The trees are still what their proof saw, the reserve selection, if any, still names the owner record, and the pool is not running. | Held |
+| `Settled` | The trees are still what their proof saw, the reserve selection, if any, still names the owner record, and the pool is not running. A Development start has recorded its sample under the lease. | Held |
 | `RootProven` | The guest root files were proven, or rechecked against their earlier proof. | Held |
 | `BootAdmitted` | The pre-boot observation was admitted: taken on a passing host, showing the last qualifying sample's swapout count. | Held |
 | `Started` | `machine start` ran. The lease stays held for the rest of the boot. | Held |
@@ -49,10 +49,11 @@ Each state is one value of the model's `pc`.
 | `ProveRootEarly` | `RootProofBeforeLease`; `rootOk` | root files proven in the window | `rootfs_proof::prove`, on a thread beside `ProveTrees` (`rootfs_proof::early_beside`); a clean stop on a qualified filesystem only |
 | `AcquireLease` | `lease = free` | lease held | `startup_lease` |
 | `Recheck` | Development; `WindowElapsed`; `hostOk`; `SameSwapouts` | second sample recorded under the lease | `admission::recheck_after_lease` |
+| `Reuse` | Development; a wait is due; `RecordUsable`; `hostOk`; `SameSwapouts` | second sample recorded under the lease at once; the record it used is kept in `reusedBoot`, `reusedAge`, `reusedSwap`, `reusedDip` | `admission::recheck_after_lease`, `admission::opening` |
 | `Qualify` | Research (all samples already taken) | none | `admission::recheck_after_lease` returns no sample |
 | `RestoreAliasLeased` | alias path held by another entry | owner record names a fresh alias | `restore_released_short_home` |
-| `Settle` | `TreesStillProven`; `SameOwner`; pool not running | selection settled | `leased_trees::recheck`; `admission_pool::settle` and the owner checks after it |
-| `ObserveRunning` | `TreesStillProven`; `poolRunning`; no selection | report the running pool | `leased_trees::recheck`; the `owner.phase == "running"` branch of `start_pool_observed` |
+| `Settle` | `TreesStillProven`; `SameOwner`; pool not running | selection settled; a Development start's sample under the lease becomes the home's record (`RecordOpening`) | `leased_trees::recheck`; `admission::opening::record`; `admission_pool::settle` and the owner checks after it |
+| `ObserveRunning` | `TreesStillProven`; `poolRunning`; no selection | report the running pool; `RecordOpening` as in `Settle` | `leased_trees::recheck`; `admission::opening::record`; the `owner.phase == "running"` branch of `start_pool_observed` |
 | `ProveRoot` | `rootOk`; no root proof before the lease | root files proven by content | `prepare_rootfs`, `prove_rootfs` |
 | `RecheckRoot` | `RootProofBeforeLease`; `rootOk` | the earlier proof still describes the root files, or they passed a second content proof | `rootfs_proof::recheck` straight after the tree recheck, then `Leased::stands` in `prepare_rootfs` |
 | `AdmitBoot` | `hostOk`; `SameSwapouts` | baseline is the last sample's swapout count; the observation is recorded with the host as it was | `admission_pool::admit_boot` |
@@ -63,6 +64,14 @@ fifteen seconds for Research, on a monotonic clock, since the previous sample.
 `SameSwapouts` is `swapouts = Last.swap`: the host's swapout count equals the
 last recorded sample's. `SameOwner` is `selected \in {0, OwnerVersion}`: there is
 no reserve selection, or it was taken from the owner record as it is now.
+`RecordUsable` is the reuse condition of `admission::opening`: this home has a
+record of an earlier passing sample (`recBoot` is not `none`), it is from this OS
+boot (`recBoot = "this"`), it is at least one window and at most one bound old
+(`recAge = "ok"`), and its swapout count is the host's now (`recSwap = swapouts`).
+`Reuse` also needs a wait to be due (`elapsed < Window`); a start whose window has
+already elapsed takes `Recheck` and reads no record. A record that is not usable
+enables nothing: the start goes on to `Recheck` after the window, exactly as a
+start without a record. The record replaces the wait, never the sample.
 `TreesStillProven` is `treeOk` (drawn as `treeOk` on the `Settle` edge): under
 the lease, each tree's metadata digest and content anchor equal what its proof
 returned, or the tree passed a second content proof. The code runs this recheck
@@ -149,6 +158,21 @@ against; `BootChecked` says only that it exists before a start. A dip between
 the last sample and that observation is unseen in the same way
 (`bootAcrossDip`, control `boot-dip-start-reachable`).
 
+A start that takes the `Reuse` edge skipped its wait on a record. Four invariants
+say what that record was, and each has a control that removes one condition and
+must fail at `Reuse`: from this OS boot (`ReusedRecordSameBoot`,
+`reuse-other-boot`), at least one window old (`WindowRespected`,
+`reuse-too-young`), at most one bound old (`ReusedRecordWithinBound`,
+`reuse-too-old`) and showing the swapout count of the sample under the lease
+(`ReusedRecordSameSwapouts`, `reuse-changed-count`). `RecordsFromPassingSamples`
+says every record written came from a passing host (`record-unchecked`). Three
+more controls require that a start on a reused record is reachable
+(`reuse-start-reachable`), that a start which found an unusable record and waited
+is (`reuse-miss-start-reachable`), and that a host which failed and passed again
+between the recorded sample and the sample under the lease is admitted on reuse
+(`reuse-dip-start-reachable`): the same unseen dip, over a stretch as long as the
+bound.
+
 | Action | Meaning |
 | --- | --- |
 | `Tick` | the monotonic clock advances, up to the window |
@@ -157,5 +181,7 @@ the last sample and that observation is unseen in the same way
 | `Swapout` | the host's swapout count grows |
 | `OtherAcquire`, `OtherRelease` | another lifecycle operation of this home takes or returns the lease |
 | `OtherStart` | a concurrent start, holding the lease, boots the pool |
+| `OtherRecords` | another operation holding the lease (a stop, or another start) records a passing host sample for this Development home |
+| `AgeRecord` | the record grows older: under one window, then usable, then past the bound |
 | `ChangeTree`, `ChangeRoot` | a prepared tree or the root files change while this start does not hold the lease |
 | `SquatAlias` | another entry takes the path of a clean stop's HOME alias |

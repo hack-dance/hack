@@ -4,7 +4,8 @@ Question: when a Development pool start admits on two host samples instead of tw
 three-sample windows, can a VM start without a second qualifying sample taken under
 the startup lease, at least the window after the first, with one unbroken swapout
 count from the first sample to the pre-boot check? And what does a start on two
-samples no longer see?
+samples no longer see? And when a start skips the wait between its two samples
+because an earlier passing sample is on record, what did that record have to be?
 
 ![PoolStart: pool start admission](../../../../docs/diagrams/pool-start-admission.svg)
 
@@ -16,14 +17,17 @@ diagram is a review aid, not an additional checked model.
 `PoolStart.tla` enumerates one `runtime up` of a pool that is not running, for both
 profiles, against a host that changes underneath it. The starting process samples
 the host, proves the provider and engine trees and, for a pool that already has
-root files, those too, takes the startup lease, samples again (Development only),
-rechecks the trees and the root files against their proofs, settles its reserve
+root files, those too, takes the startup lease, samples again (Development only;
+after the rest of the window, or at once when this home's record of an earlier
+passing sample is usable), rechecks the trees and the root files against their
+proofs, records its sample under the lease, settles its reserve
 selection, proves the root files if no earlier proof exists, runs the pre-boot
 check and starts the VM. The environment advances a monotonic clock, fails the
 host's predicates and lets them pass again once, grows the swapout count, takes
 and returns the lease, boots the pool from a concurrent start, changes a tree or
-the root files while the lease is not held, and squats the clean-stop HOME alias.
-The process can refuse or crash at every step.
+the root files while the lease is not held, squats the clean-stop HOME alias,
+and, through another operation that holds the lease, records a host sample. The
+process can refuse or crash at every step.
 
 `stopped-pool-startup/Resume.tla` covers the same start's retained selection and
 receipt evidence, with no host admission, clock or content proof. The two questions
@@ -57,8 +61,8 @@ same invariants.
 
 | Configuration | Kind | Distinct states | Result |
 | --- | --- | ---: | --- |
-| `positive` | the implementation, no early root files proof | 58,022 | no error |
-| `root-before-lease` | the implementation, root files proven before the lease | 73,754 | no error |
+| `positive` | the implementation, no early root files proof | 220,686 | no error |
+| `root-before-lease` | the implementation, root files proven before the lease | 277,194 | no error |
 
 Earlier revisions of this model: `positive` had no tree recheck (21,400 states)
 and the recheck was a hypothetical third configuration, `tree-recheck`, until it
@@ -66,7 +70,10 @@ became code (`lifecycle/leased_trees.rs`). Then the host could only fail, never
 pass again, and a sample did not record the host it was taken on (21,028 and
 27,004 states). Every behaviour of that revision is a behaviour of this one, in
 which the host never recovers. Then the pre-boot check recorded only the count
-it compared against, not what it observed (56,252 and 71,588 states).
+it compared against, not what it observed (56,252 and 71,588 states). Then no
+record of an earlier sample existed and every Development start waited out its
+window (58,022 and 73,754 states); every behaviour of that revision is a
+behaviour of this one in which no record is ever written.
 
 ## Invariants
 
@@ -74,7 +81,10 @@ Every invariant holds in `positive` and `root-before-lease`.
 
 | Invariant | In plain words |
 | --- | --- |
-| `DevelopmentTwoSamples`, `SecondSampleUnderLease`, `WindowRespected` | A Development VM starts only on two qualifying samples, the second taken under the startup lease and at least the window after the first. |
+| `DevelopmentTwoSamples`, `SecondSampleUnderLease`, `WindowRespected` | A Development VM starts only on two qualifying samples of its own, the second taken under the startup lease and at least the window after the first, or, when a record replaced the wait, at least the window after the recorded sample. |
+| `ReusedRecordSameBoot`, `ReusedRecordWithinBound`, `ReusedRecordSameSwapouts` | With `WindowRespected`: a Development start that skipped the wait had a record from this OS boot, at least one window and at most one bound old, whose swapout count equals its sample's under the lease. |
+| `RecordsFromPassingSamples` | Every record written while the start ran came from a sample taken on a passing host. A reader cannot check that, so the writers must. |
+| `ResearchNeverReuses` | A Research start reuses nothing, and no record is written for a Research home. Only `Reuse` marks a reuse and only the writers write a record, and all three require Development, so this has no control: it guards against a later edit that drops one of those conditions. |
 | `SamplesTakenOnPassingHost` | Every sample a start accepted was taken on a passing host: the first sample of either profile, Research's second and third, and Development's sample under the lease. Each recorded sample carries whether the host passed every predicate at the moment it was taken. Three controls remove the check at one of those samples each. |
 | `ChainUnbroken` | No accepted sample shows a swapout count other than the first sample's. A sample that fails a predicate or shows another count is never appended: the only step from it is a refusal. |
 | `BootChecked` | A pre-boot check ran before every start: its baseline and its observation exist. It says nothing about what the observation showed. |
@@ -109,6 +119,11 @@ control stops at its first violation, so it has no state count of its own.
 | `research-sample-unchecked` | Research's second and third samples are recorded without their predicate check | `SamplesTakenOnPassingHost` | `ResearchSample`, `profile = "research"`, `hostOk = FALSE` |
 | `boot-host-unchecked` | the pre-boot check admits without its predicate check | `BootSampleOnPassingHost` | `AdmitBoot`, `hostOk = FALSE` |
 | `boot-swapouts-unchecked` | the pre-boot check admits without comparing its swapout count with the baseline | `BootSampleMatchesBaseline` | `AdmitBoot`, `swapouts = 1`, `baseline = <<0>>` |
+| `reuse-other-boot` | a record from another OS boot may replace the wait | `ReusedRecordSameBoot` | `Reuse`, `reusedBoot = "other"` |
+| `reuse-too-young` | a record younger than the window may replace the wait | `WindowRespected` | `Reuse`, `reusedAge = "young"` |
+| `reuse-too-old` | a record older than the bound may replace the wait | `ReusedRecordWithinBound` | `Reuse`, `reusedAge = "old"` |
+| `reuse-changed-count` | the sample under the lease is not compared with the record's swapout count | `ReusedRecordSameSwapouts` | `Reuse`, `reusedSwap = 0`, `swapouts = 1` |
+| `record-unchecked` | a sample is recorded without its predicate check | `RecordsFromPassingSamples` | `OtherRecords`, `hostOk = FALSE` |
 
 `changed-tree-start` is the implementation as it was before the recheck; see "What
 a proof before the lease relies on". `first-sample-unchecked` removes the check
@@ -141,12 +156,14 @@ and `AdmitBoot` with `hostOk = FALSE`. The second has `Swapout` in the place of
 `unchained-boot` is a different fault: there the check is handed its own count as
 the baseline, so the observation matches the baseline and the baseline is wrong.
 
-Six reachability controls state that something never happens and must be
+Nine reachability controls state that something never happens and must be
 violated at `Start`. Three show that the invariants are not vacuous:
 `development-start-reachable`, `research-start-reachable` and
 `moved-alias-start-reachable` (a start whose alias moved before its first sample,
 on a reserve selection bound to the rewritten owner record). Three show what the
-observations do not see; the next section describes them.
+observations do not see; the next section describes them. Three belong to the
+record of an earlier sample and are described in "The record that replaces the
+wait".
 
 ## What the samples do not see
 
@@ -234,6 +251,113 @@ their own two controls, and add no state: the passing counts did not move.
 `unchained-boot` still fails `BootBaselineIsLastSample` and nothing else: its
 observation matches the baseline it was handed, which is its own count.
 
+## The record that replaces the wait
+
+A home keeps a record of one earlier host sample that passed every Development
+predicate on its own (`admission/opening.rs`): the OS boot session, a time on a
+clock that counts through sleep, and the swapout count. Under the startup lease,
+when part of the window is still to be slept, a Development start reads it. If
+the record is usable, the start takes its sample under the lease at once
+(`Reuse`) instead of after the wait (`Tick`, then `Recheck`).
+
+In the model the record is `recBoot` (`none`, `this` or `other`), `recAge`
+(`young`: under one window; `ok`; `old`: over the bound), `recSwap`, `recOk` and
+`recDip`. Its writers are `OtherRecords`, another operation of this home that
+holds the lease (a stop, or another start), and the start itself, after its
+rechecks (`RecordOpening`, folded into `Settle` and `ObserveRunning`). `AgeRecord`
+moves a record from `young` to `ok` to `old`. `Reuse` copies the record it used
+into `reusedBoot`, `reusedAge`, `reusedSwap` and `reusedDip`, because the start
+overwrites the record afterwards.
+
+The property, in one sentence: a Development start that skipped the wait had a
+record from this OS boot, at least one window and at most one bound old, whose
+swapout count equals its sample's under the lease. It is four invariants, so
+that each control names the condition it removes: `WindowRespected` (at least
+one window: the window is now measured from the start's own first sample or
+from the recorded one), `ReusedRecordSameBoot`, `ReusedRecordWithinBound` and
+`ReusedRecordSameSwapouts`. Every other invariant holds unchanged. In
+particular a reused start still has two samples of its own, the second under
+the lease, each taken on a passing host and both with the first one's swapout
+count (`DevelopmentTwoSamples`, `SecondSampleUnderLease`,
+`SamplesTakenOnPassingHost`, `ChainUnbroken`): `Reuse` keeps every guard of
+`Recheck` except the elapsed window.
+
+The four `reuse-*` controls each turn one condition off and must fail at
+`Reuse`. In `reuse-other-boot` the record was left by another boot. In
+`reuse-too-young` and `reuse-too-old` another operation records a sample while
+this start is before its lease, and the record is read before it is a window
+old, or after it has aged past the bound. In `reuse-changed-count` the record
+is written at no swapouts, the host swaps out once before the start's first
+sample, and both of the start's samples show one swapout: they agree with each
+other and not with the record. `record-unchecked` removes the writers' check:
+another operation records a sample on a failing host.
+
+A miss is not a step of its own. A record that is not usable leaves `Reuse`
+disabled, and the only way on is the one a start without a record takes: `Tick`
+to the end of the window, then `Recheck`, chained to the start's own first
+sample. No refusing action reads the record, so no refusal depends on it.
+`Recheck` notes in `missed` that a record was present and not usable.
+
+| Control | States that this never happens | Violated at |
+| --- | --- | --- |
+| `reuse-start-reachable` | a VM starts after a record replaced its wait (`NeverStartsOnReuse`) | `Start`, `reusedBoot = "this"`, `reusedAge = "ok"` |
+| `reuse-miss-start-reachable` | a VM starts after finding an unusable record and waiting out its own window (`NeverStartsPastAnUnusableRecord`) | `Start`, `missed = TRUE`, `reusedBoot = "none"` |
+| `reuse-dip-start-reachable` | a VM starts on a reused record although the host failed between the recorded sample and the sample under the lease (`NeverStartsOnReuseAcrossADip`) | `Start`, `reusedDip = TRUE`, `dips = 1` |
+
+The third is the weakening reuse adds, as a checked fact. One trace:
+
+1. `OtherAcquire`, `OtherRecords`: another operation of this home holds the
+   lease and records a sample taken on a passing host, as a stop does.
+2. `Degrade`, `Recover`: the host fails and passes again (`recDip = TRUE`,
+   `dips = 1`).
+3. `OtherRelease`.
+4. `Open`: this start's first sample, on a passing host.
+5. `ProveTrees`, then `AcquireLease`.
+6. `AgeRecord`: the record is now at least a window old.
+7. `Reuse`: with part of the window still to wait, the sample under the lease
+   is taken at once, on a passing host, with the first sample's swapout count
+   and the record's (`reusedDip = TRUE`).
+8. `Settle`, `ProveRoot`, `AdmitBoot` and `Start`: `vm = TRUE`.
+
+Without a record the start's two samples are a window apart. With one they can
+be as close as the start's own checks, and the evidence that the host held for
+a window is the recorded sample, up to the bound old. A host that failed and
+passed again anywhere between that sample and the one under the lease is
+admitted. A swapout in that stretch still refuses the reuse
+(`ReusedRecordSameSwapouts`), and the start then waits as before. The bound
+limits how long the unseen stretch is; the model has one age class for it and
+does not measure it.
+
+What the model leaves out about the record:
+
+- The file. Whether the record is a private regular file of this user (not a
+  link, one name, mode 0600), whether it parses as exactly three fields, and the
+  pending file of an interrupted write are checks of
+  `admission/opening.rs::read` and `discard_pending`. In the model a record that
+  fails them is `recBoot = "none"`. Their evidence is `admission/opening/tests.rs`.
+- The clocks. The model has three age classes. That the age is taken on a clock
+  that counts through sleep, that an unreadable clock or boot session is a miss,
+  and the bound's setting are code and its tests.
+- A sample taken early for a reuse and then discarded, when its count differs
+  from the record's or it fails a predicate. The model has no such step: it
+  takes `Reuse` only when the sample fits. The discarded sample costs time, not
+  a state.
+- The order of the start's own write. The code writes the record after the tree
+  and root files rechecks and before the alias restore; the model folds it into
+  `Settle` and `ObserveRunning`, so a start refused between those steps has
+  written a record in the code and not in the model. No invariant reads the
+  record after the start's sample under the lease.
+- A later start that reads what this start wrote. The model has one start; a
+  record another start or a stop wrote is `OtherRecords`.
+- `runtime down` itself. Its writer is `OtherRecords`: an operation holding the
+  lease records a passing sample. Where in the stop the sample is taken, and
+  that a failing sample never fails the stop, are
+  `a_stop_records_a_passing_sample_and_a_failing_one_changes_nothing` and
+  `down_samples_the_host_under_its_lease_before_it_stops_anything`.
+- When a record ages. Only the read under the lease looks at the age, so
+  `AgeRecord` runs there and nowhere earlier; aging before the lease would reach
+  the same states.
+
 ## Source and regression mapping
 
 Rust paths are relative to `packages/runtime-core/src/provider/`. Tests are unit
@@ -245,6 +369,10 @@ tests of the named module unless marked.
 | `ResumeRunning` | `lifecycle/running_start.rs::select`, `resume` | `lifecycle/running_start/tests.rs`: `only_a_running_created_pool_of_the_requested_profile_takes_the_fast_path`, `a_live_owned_running_pool_takes_the_fast_path` |
 | `Open`, `RefuseFirst`; `SamplesTakenOnPassingHost` at the first sample | `lifecycle/admission_pool.rs::select`, `probe`; `admission.rs::open`, `check` | `admission/pressure_tests.rs`: `the_first_development_sample_must_pass_every_predicate_to_open_the_window` |
 | `Degrade` then `Recover` between two accepted samples (`acrossDip`) | `admission.rs::recheck_after_lease` (Development) and `sample_checked` (Research): nothing reads the host between two samples | `a_dip_between_the_two_development_samples_is_not_seen`: the sampler is asked twice, at the first sample and no sooner than one second later, and a host failing at every moment in between is admitted. Research's pause has no such test. |
+| `Reuse`, and no step for a miss | `admission.rs::recheck_after_lease`; `admission/opening.rs::Opening::judge`, `read` | `admission/opening/tests.rs`: `a_same_boot_record_between_one_window_and_the_bound_old_replaces_the_wait`, `a_reused_start_still_takes_both_of_its_own_samples_and_each_must_pass`, and one test for each miss, each asserting that the start is not refused, sleeps the rest of its own window and takes the sample a home without a record takes: `a_missing_record_is_the_start_without_one`, `an_unreadable_record_is_the_start_without_one`, `an_unparsable_record_is_the_start_without_one`, `a_record_with_unknown_missing_or_mistyped_fields_is_the_start_without_one`, `a_record_that_is_not_a_regular_file_is_the_start_without_one`, `a_record_not_owned_by_this_user_is_the_start_without_one`, `a_group_or_world_accessible_record_is_the_start_without_one`, `a_record_from_another_boot_session_is_the_start_without_one`, `a_boot_session_that_cannot_be_read_is_the_start_without_a_record`, `a_record_younger_than_the_window_is_the_start_without_one`, `a_record_older_than_the_bound_is_the_start_without_one`, `a_clock_that_cannot_be_read_is_the_start_without_a_record`, `a_swapout_count_that_differs_from_the_record_is_the_start_without_one`, `a_sample_that_cannot_be_taken_early_is_taken_after_the_wait`, `reuse_turned_off_reads_no_record`, `a_start_with_no_wait_left_does_not_ask_for_the_record`; `lifecycle/pressure_tests.rs`: `a_start_that_reuses_a_recorded_sample_still_takes_and_records_two_samples` |
+| `reusedDip` (a dip between the recorded sample and the sample under the lease) | the same: nothing reads the host between the record and the start | `admission/opening/tests.rs`: `a_dip_between_the_record_and_the_leased_sample_is_not_seen` |
+| `OtherRecords`, `RecordOpening`; `RecordsFromPassingSamples` | `admission/opening.rs::record`, `record_at_stop`; `lifecycle.rs::start_pool_observed`, `down_observed` | `admission/opening/tests.rs`: `the_record_holds_exactly_three_fields_and_only_this_user_can_read_it`, `only_a_sample_that_passes_every_predicate_on_its_own_is_recorded`, `an_interrupted_write_does_not_block_the_next_record`, `a_stop_records_a_passing_sample_and_a_failing_one_changes_nothing`; `lifecycle/pressure_tests.rs`: `down_samples_the_host_under_its_lease_before_it_stops_anything` |
+| `ResearchNeverReuses` | `admission.rs::recheck_after_lease` returns before it asks for the record; `admission/opening.rs::record`, `record_at_stop` | `admission/opening/tests.rs`: `research_neither_reads_nor_writes_a_record` |
 | `ResearchSample`, `RefuseSample` | `admission.rs::sample_with`, `sample_checked` | `startup_windows_keep_profile_floors_and_distinguish_warning_from_normal`, `incomplete_or_unsafe_samples_cannot_be_authorized_by_admitted_or_legacy_booleans`, `swapouts_must_be_observed_and_unchanged_across_the_full_window` |
 | `ProveTrees`, `RefuseTree` | `artifact.rs::verify_witnessed`, `verify_tree` | `artifact.rs`: `a_tree_pruned_of_empty_directories_is_repaired_from_its_retained_archive`; `lifecycle/running_start/tests.rs`: `a_changed_tree_file_is_caught_by_the_cheap_check_and_proven_by_content` |
 | `AcquireLease`, `LeaseTimeout`, `OtherAcquire`, `OtherRelease` | `lifecycle.rs::startup_lease`, `operation_lease` | `lifecycle.rs`: `startup_lease_waits_out_a_brief_holder_and_refuses_a_lasting_one` |
@@ -258,7 +386,7 @@ tests of the named module unless marked.
 | `Settle`, `RefuseSelection` | `lifecycle/admission_pool.rs::settle`, `Selection::reverify` | `lifecycle/admission_pool/tests.rs`: `selected_owner_or_provider_changes_refuse_reverification`, `selected_stopped_owner_drift_refuses_reverification`, `a_start_with_fresh_headroom_drops_the_reserve_and_runs_no_release_check` |
 | `AdmitBoot`, `RefuseBoot`; `BootSampleOnPassingHost`, `BootSampleMatchesBaseline` | `lifecycle/admission_pool.rs::admit_boot`, `admit_boot_with` (the `admitted` check, then the swapout comparison) | `the_boot_gate_samples_the_qualifying_basis_and_its_swapouts`, `the_boot_gate_rechecks_the_selection_around_its_sample` |
 | `Start` | `BootAdmission::release`, `lifecycle.rs::start_machine` | `machine_start_needs_a_final_leased_recheck_of_the_selection` |
-| Order of the steps, one clock for the window, the baseline handed to `admit_boot`, the tree recheck as the first step after the leased sample (before the start's next write, provider command or tree read), the root files recheck as the step after it, the root files compared again in `prepare_rootfs` after the provider command a start can run before it, the rechecked proofs and the root files digest of that last comparison handed to the boot's witness | `lifecycle.rs::start_pool_observed` | `lifecycle/pressure_tests.rs`: `start_pool_takes_its_admission_steps_in_the_modelled_order`. It reads source order only. |
+| Order of the steps, one clock for the window, the baseline handed to `admit_boot`, the tree recheck as the first step after the leased sample (before the start's next write, provider command or tree read), the root files recheck as the step after it, the record of the start's sample as its first write under the lease and after both rechecks, the record read only inside the leased sample's call, the bound's setting refused before the first effect, the root files compared again in `prepare_rootfs` after the provider command a start can run before it, the rechecked proofs and the root files digest of that last comparison handed to the boot's witness | `lifecycle.rs::start_pool_observed` | `lifecycle/pressure_tests.rs`: `start_pool_takes_its_admission_steps_in_the_modelled_order`. It reads source order only. |
 
 Not covered by an executable test:
 
@@ -466,7 +594,9 @@ one it continues: nothing was bound to the old record.
 `Window = 2` ticks, `MaxSwapouts = 1`, `MaxDips = 1` (the host fails, passes
 again once, and may fail again for good), one tree change, one root change, one
 alias squat before the settle step, one concurrent start, any number of lease
-acquisitions by others. One start; a retry is a new behaviour from `Idle`.
+acquisitions by others, any number of records written by them, and at most one
+record left by another OS boot. One start; a retry is a new behaviour from
+`Idle`.
 
 - A sample is one atomic observation. The real probe runs four host tools over
   about 50 ms.

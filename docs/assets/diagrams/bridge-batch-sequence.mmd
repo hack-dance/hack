@@ -1,0 +1,28 @@
+---
+title: Bridge batch · request path
+---
+sequenceDiagram
+  participant O as Owner
+  participant L as Provider lease
+  participant E as Engine
+  participant G as Guest
+  participant C as Children
+  O->>L: acquire (reserve)
+  O->>E: one snapshot
+  O->>L: one registry save, release
+  O->>L: acquire (start batch)
+  O->>E: fence: targets only
+  O->>G: start ticks, all pids
+  O->>E: fence again
+  O->>L: save every intent
+  O->>G: start every relay
+  O->>E: fence again
+  O->>L: save running, release
+  O->>C: spawn every child
+  Note over C,L: each child, in turn
+  C->>L: wait, acquire
+  C->>E: fence: its target
+  C->>G: relay inspect
+  C->>C: journal, exec publisher
+  C->>L: release
+  O->>C: await all published

@@ -575,10 +575,42 @@ test(
 test(
   "native-project-start: an unconfirmed dependency plan is one closed integrity line",
   async () => {
-    const f = await fixture();
+    const f = await fixture(
+      JSON.stringify({
+        services: {
+          web: {
+            image: `sha256:${"e".repeat(64)}`,
+            extra_hosts: ["search.example.com:host-gateway"],
+          },
+        },
+      })
+    );
     await scriptUpThroughReview(f);
+    // Only a graph with a host dependency asks the runtime for this plan.
+    const dependencies = join(f.scope.projectRoot, "host-dependencies.json");
+    await writeFile(
+      dependencies,
+      JSON.stringify({
+        version: 1,
+        dependencies: [
+          {
+            service: "web",
+            binding: "search",
+            guest_port: 443,
+            host_pid: 999,
+            host_port: 8443,
+            aliases: ["search.example.com"],
+          },
+        ],
+      })
+    );
+    await f.reply("graph dependency-check", { listener_confirmed: true });
     await f.reply("graph dependency-plan", { dependency_plan_id: "x" });
-    const result = await cli({ fixture: f, args: ["up"], env: SHARED });
+    const result = await cli({
+      fixture: f,
+      args: ["up"],
+      env: { ...SHARED, HACK_NATIVE_DEPENDENCIES: dependencies },
+    });
     expectOneClosedLine(
       result,
       "Native foreground up could not confirm the host dependency plan; inspect owned state before retrying."

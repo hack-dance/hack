@@ -1,0 +1,28 @@
+---
+title: ProcessExit · how the CLI ends
+---
+stateDiagram-v2
+  direction TB
+  [*] --> running
+  running --> waiting : CommandReturns
+  waiting --> waiting : Register or Settle
+  waiting --> waiting : SnapshotSettled [holds left]
+  waiting --> flushing : SnapshotSettled [none left]
+  flushing --> ended : EndStreams
+  ended --> exited : Exit
+  exited --> [*]
+  note right of waiting
+    INV NoExitWithPendingHold:
+    no exit while held work
+    (MCP, daemon, TUI) runs.
+  end note
+  note right of ended
+    INV NoLostOutput: end() has
+    delivered all written output.
+  end note
+  classDef live stroke-width:1.6px
+  classDef wait stroke-width:1.6px
+  classDef ok stroke-width:1.6px
+  class running live
+  class waiting,flushing wait
+  class exited ok

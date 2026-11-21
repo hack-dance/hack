@@ -51,7 +51,7 @@
           },
           {
             "path": "scripts/check-tla-models.ts",
-            "sha256": "e162839a788a69c6c42adcfb28f12aa91943a5f43b2de43c445ea96e88b5cc81"
+            "sha256": "886bef91724c7aca3006b35872c2ebf06ba5b463583dd83a551f73410cfbb61f"
           }
         ],
         "review": "HACK-1157"

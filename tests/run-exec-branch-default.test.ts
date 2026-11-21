@@ -196,14 +196,15 @@ test("hack exec in a linked worktree targets the branch compose project by defau
     "hi",
   ]);
 
-  // The stub docker reports no running containers, so exec fails its
-  // readiness check — the worktree branch resolution (and its stderr notice)
-  // is what matters here.
+  // Whatever the stub docker answers, the worktree branch resolution (and its
+  // stderr notice) is what matters here.
   const log = await readFile(fixture.dockerLogPath, "utf8").catch(() => "");
   const combined = `${log}\n${result.stdout}\n${result.stderr}`;
   expect(combined).toContain('branch instance "feature-run-default"');
-  expect(log).toContain("compose.feature-run-default.override.yml");
-  expect(log).toContain("compose.feature-run-default.runtime.override.yml");
+  expect(log).toContain("-p runbranch--feature-run-default");
+  // No branch `up` ran in this fixture, so exec has no generated branch file
+  // to pass and renders none (it reuses what `up` left).
+  expect(log).not.toContain("compose.feature-run-default.override.yml");
 });
 
 test("hack run in a detached linked worktree refuses to target the base compose project", async () => {

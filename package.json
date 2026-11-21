@@ -71,6 +71,7 @@
     "test": "bun run check:bun-version && bun run turbo:test",
     "test:preflight": "bun --no-env-file scripts/check-test-config-compiler.ts",
     "test:models": "bun run scripts/check-tla-models.ts",
+    "test:models:concurrent": "bun run scripts/check-tla-models-concurrent.ts",
     "test:e2e:local": "bun tests/e2e/run.ts",
     "test:e2e:local:docker": "HACK_E2E_DOCKER=1 bun tests/e2e/run.ts",
     "test:e2e:gateway": "bun run scripts/gateway-e2e.ts",

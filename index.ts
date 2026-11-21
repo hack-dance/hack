@@ -96,11 +96,9 @@ try {
     typeof process.exitCode === "number" ? process.exitCode : undefined
   );
 }
-// A keychain call that missed its deadline cannot be canceled and would keep
-// the process alive after its refusal was reported; exit explicitly instead.
-const { hasAbandonedNativeKeychainCall } = await import(
-  "./src/lib/native-keychain.ts"
-);
-if (hasAbandonedNativeKeychainCall()) {
-  process.exit(typeof process.exitCode === "number" ? process.exitCode : 1);
-}
+// The command is done: exit once registered holds settle and output is
+// flushed, instead of waiting for the event loop to empty. A forgotten timer
+// or handle, or a keychain call that missed its deadline and cannot be
+// canceled, would otherwise keep the prompt (see src/lib/process-exit.ts).
+const { exitWhenDone } = await import("./src/lib/process-exit.ts");
+await exitWhenDone(typeof process.exitCode === "number" ? process.exitCode : 1);

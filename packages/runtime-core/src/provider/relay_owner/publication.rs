@@ -216,7 +216,7 @@ impl PinnedEndpoint {
     }
     pub(crate) fn legacy_summary(&self) -> LegacyControl {
         LegacyControl {
-            receipt_sha256: format!("{:x}", Sha256::digest(&self.bytes)),
+            receipt_sha256: format!("{:x}", crate::Hex(Sha256::digest(&self.bytes))),
             receipt_id: self.receipt_id,
             parent: self.receipt.parent,
             endpoint: self.receipt.endpoint,

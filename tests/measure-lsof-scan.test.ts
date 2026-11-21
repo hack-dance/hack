@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   type MeasureOptions,
   measure,
+  SCAN_FIXTURE,
   type Spawn,
 } from "../scripts/measure-lsof-scan.ts";
 
@@ -64,6 +65,54 @@ const base: MeasureOptions = {
 };
 
 describe("measure-lsof-scan", () => {
+  test("times the runtime's scan from the fixture's own report", async () => {
+    const { spawn, started } = recordingSpawn();
+    const binary = await fakeLsof(
+      'echo "test one_timed_host_scan ... disk_handle_scan_seconds=1.250000"'
+    );
+    const report = await measure({
+      ...base,
+      runs: 2,
+      scanTimeoutMs: 10_000,
+      scanBinary: binary,
+      spawn,
+    });
+    expect(report.scanner).toBe("in-process");
+    // The fixture's scan time is reported, not the time to launch the binary.
+    expect(report.sequential).toMatchObject({
+      scans: 2,
+      unclean: 0,
+      timedOut: 0,
+      min: 1.25,
+      max: 1.25,
+    });
+    expect(started[0]?.command).toEqual([
+      binary,
+      "--exact",
+      SCAN_FIXTURE,
+      "--ignored",
+      "--nocapture",
+    ]);
+    expect(started.filter((child) => alive(child.pid))).toEqual([]);
+  });
+
+  test("a fixture that fails or reports no time is not a clean scan", async () => {
+    const failed = await measure({
+      ...base,
+      scanTimeoutMs: 10_000,
+      scanBinary: await fakeLsof(
+        'echo "disk_handle_scan_seconds=0.020000"\nexit 101'
+      ),
+    });
+    expect(failed.sequential).toMatchObject({ unclean: 1, timedOut: 0 });
+    const silent = await measure({
+      ...base,
+      scanTimeoutMs: 10_000,
+      scanBinary: await fakeLsof("exit 0"),
+    });
+    expect(silent.sequential).toMatchObject({ unclean: 1, timedOut: 0 });
+  });
+
   test("reports a clean no-holder scan and leaves no child running", async () => {
     const { spawn, started } = recordingSpawn();
     const report = await measure({
@@ -75,6 +124,7 @@ describe("measure-lsof-scan", () => {
       lsof: await fakeLsof("exit 1"),
       spawn,
     });
+    expect(report.scanner).toBe("lsof");
     expect(report.sequential).toMatchObject({
       scans: 2,
       unclean: 0,

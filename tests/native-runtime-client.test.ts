@@ -1113,6 +1113,54 @@ test("structured failures expose only a bounded code, never their message", asyn
   );
 });
 
+test("a version 2 route probe failure says what the probe observed (HACK-2416)", () => {
+  const reply = {
+    code: "graph_service_failed",
+    service: "web",
+    route_probe: {
+      version: 2,
+      port: 3000,
+      reason: "failures_exhausted",
+      sequence: 31,
+      failures: 3,
+      last_elapsed_ms: 1000,
+      since_start_ms: 271_400,
+    },
+    message: "synthetic-private-response",
+  };
+  const detail = nativeFailureDetail(reply);
+  expect(detail.message).toBe(
+    "Inferred route probe on port 3000 is unhealthy. The probe observed that the route answered no request in time, retries exhausted after 31 requests (3 failed in a row, the last took 1000 ms), 271 s after it started. Check hack logs web in the same project/branch, fix the route port, or declare healthcheck.x-hack-http with a longer start_period_ms and a readiness path, within the 300-second graph budget."
+  );
+  expect(detail.message).not.toContain("synthetic-private-response");
+  const exec = nativeFailureDetail({
+    ...reply,
+    route_probe: {
+      version: 2,
+      port: 3000,
+      reason: "exec_exited",
+      since_start_ms: 900,
+    },
+  });
+  expect(exec.message).toContain(
+    "The probe observed that the probe process inside the container exited, 1 s after it started."
+  );
+  // Unknown reasons, extra fields or bad counts render nothing of the probe.
+  for (const route_probe of [
+    { ...reply.route_probe, reason: "anything" },
+    { ...reply.route_probe, reason: "toString" },
+    { ...reply.route_probe, reason: "constructor" },
+    { ...reply.route_probe, reason: "__proto__" },
+    { ...reply.route_probe, response: "text" },
+    { ...reply.route_probe, sequence: -1 },
+    { ...reply.route_probe, since_start_ms: "1" },
+  ]) {
+    expect(
+      nativeFailureDetail({ ...reply, route_probe }).message ?? ""
+    ).not.toContain("Inferred route probe");
+  }
+});
+
 test("inferred route failures render only validated service and port guidance", async () => {
   const reply = {
     code: "graph_service_failed",

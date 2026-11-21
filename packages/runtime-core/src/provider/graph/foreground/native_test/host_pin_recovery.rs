@@ -260,7 +260,9 @@ fn explicit_host_pin_witness_recovers_only_selected_previous_boot_run() {
     assert_eq!(original.phase, "ready-observed");
     let expected_receipt = format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec_pretty(&original).unwrap())
+        crate::Hex(Sha256::digest(
+            serde_json::to_vec_pretty(&original).unwrap()
+        ))
     );
     let old_boot = crate::provider::lifecycle::status(&candidate)
         .unwrap()

@@ -21,6 +21,8 @@ const execCalls: Array<{
 }> = [];
 const psJsonByComposeProject = new Map<string, string>();
 const psEnvs: Array<Record<string, string> | undefined> = [];
+/** The exit code the mocked `compose exec` returns (1: Compose refused). */
+let execExitCode = 0;
 const tempDirs = new Set<string>();
 const originalHackHome = process.env.HACK_HOME;
 const originalLogger = process.env.HACK_LOGGER;
@@ -58,7 +60,7 @@ const runtimeBackendMock = await registerScopedModuleMock({
           workdir: opts.workdir,
           cmdArgs: [...opts.cmdArgs],
         });
-        return 0;
+        return execExitCode;
       },
     },
   },
@@ -79,6 +81,7 @@ beforeAll(() => {
 afterEach(async () => {
   execCalls.length = 0;
   psEnvs.length = 0;
+  execExitCode = 0;
   psJsonByComposeProject.clear();
   for (const tempDir of tempDirs) {
     await rm(tempDir, { recursive: true, force: true });
@@ -180,12 +183,13 @@ test("exec reaches the running service while registry registration is locked", a
     "SERVICE_TOKEN=overlay-secret",
     "SHARED_KEY=base",
   ]);
-  // The readiness `compose ps` reads the same override, so it gets the same
-  // env; without it Compose warns once per unset reference.
-  expect(psEnvs).toEqual([execCalls[0]?.env]);
+  // A foreground exec into a running service makes no readiness `compose ps`.
+  expect(psEnvs).toEqual([]);
   expect(execCalls[0]?.workdir).toBe("/app");
   expect(execCalls[0]?.cmdArgs).toEqual(["bun", "test"]);
-  expect(execCalls[0]?.composeFiles.length).toBeGreaterThanOrEqual(2);
+  // Nothing was started here, so there is no generated file to pass: exec
+  // uses the files `up` left and generates none.
+  expect(execCalls[0]?.composeFiles).toHaveLength(1);
 });
 
 test("exec rejects env mismatch against the running stack", async () => {
@@ -295,10 +299,13 @@ test("exec rejects services that are not running", async () => {
     },
   } as unknown as Parameters<typeof execCommand.handler>[0];
 
+  // Compose itself refuses the stopped service; Hack then explains why.
+  execExitCode = 1;
   await expect(execCommand.handler(input)).rejects.toThrow(
     'Service "api" is not running.'
   );
-  expect(execCalls).toHaveLength(0);
+  expect(execCalls).toHaveLength(1);
+  expect(psEnvs).toHaveLength(1);
 });
 
 test("exec warns value-free on stderr only after the service env changed since start", async () => {

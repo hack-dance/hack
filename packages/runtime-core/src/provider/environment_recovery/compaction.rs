@@ -143,7 +143,7 @@ fn boot_of(slot: &str) -> &str {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 
 fn present(path: &Path) -> Result<bool, CandidateError> {
@@ -468,7 +468,7 @@ pub(super) fn compact_with(
             retired.clone(),
             Sealed {
                 slots: u32::try_from(slots.len()).map_err(|_| error())?,
-                sha256: format!("{:x}", summary.finalize()),
+                sha256: format!("{:x}", crate::Hex(summary.finalize())),
             },
         );
     }

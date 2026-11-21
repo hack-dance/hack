@@ -7,7 +7,7 @@ use super::{
     inspect_resource, load, startup, state,
 };
 use crate::provider::{
-    ProjectShareIntent, artifact, host_pin::DeviceRebind, identity, lifecycle, state::Owner,
+    ProjectShareIntent, host_pin::DeviceRebind, identity, lifecycle, state::Owner,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -32,7 +32,7 @@ fn refused() -> CandidateError {
     )
 }
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 fn absent(path: &Path) -> Result<bool, CandidateError> {
     match fs::symlink_metadata(path) {
@@ -291,7 +291,7 @@ fn current_owner(
     identity::verify(
         old_process,
         old_process,
-        &artifact::root(candidate).join("smolvm-bin"),
+        &lifecycle::provider_binary(candidate),
         unsafe { libc::geteuid() },
     )
     .map_err(|_| refused())?;

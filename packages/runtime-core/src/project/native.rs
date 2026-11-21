@@ -98,7 +98,7 @@ fn policy_hash(plan: &Plan, bindings: &EnvironmentPlan) -> Result<String, Candid
     let mut hash = Sha256::new();
     hash.update(b"hack.native-environment-policy/v1\0");
     hash.update(bytes);
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(format!("{:x}", crate::Hex(hash.finalize())))
 }
 
 /// Authored process and public environment, not a provider create request or durable plan.
@@ -308,12 +308,14 @@ fn workload(value: Workload, kind: WorkloadKind) -> Result<WorkloadInputs, Candi
 /// plan are sent through the compiler. Errors never disclose authored or private text.
 /// Provider entry points do not consume this result; execution/replay remain later gates.
 pub fn compile(options: CompileOptions<'_>) -> Result<NativeInputs, CandidateError> {
-    compile_inputs(
-        options.request,
-        options.profiles,
-        Some(options.managed_values),
-        None,
-    )
+    crate::timings::measure(crate::timings::Step::PlanCompile, None, |_| {
+        compile_inputs(
+            options.request,
+            options.profiles,
+            Some(options.managed_values),
+            None,
+        )
+    })
 }
 
 /// Review the same supported typed subset without acquiring private values.

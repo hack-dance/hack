@@ -592,7 +592,7 @@ fn compile_inner(
     )?;
     let original = source::read_compose(&path)?;
     if normalized.is_some_and(|input| {
-        format!("{:x}", Sha256::digest(&original)) != input.expected_compose_sha256
+        format!("{:x}", crate::Hex(Sha256::digest(&original))) != input.expected_compose_sha256
     }) {
         return Err(error(
             "execution_plan_changed",
@@ -600,7 +600,7 @@ fn compile_inner(
         ));
     }
     let bytes = normalized.map_or(original.as_slice(), |input| input.compose_bytes);
-    if format!("{:x}", Sha256::digest(bytes)) != review.plan.compose_sha256 {
+    if format!("{:x}", crate::Hex(Sha256::digest(bytes))) != review.plan.compose_sha256 {
         return Err(error(
             "execution_plan_changed",
             "Compose bytes changed after review.",

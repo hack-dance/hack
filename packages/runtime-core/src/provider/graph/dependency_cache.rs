@@ -27,7 +27,10 @@ fn hex(v: &str) -> bool {
 }
 fn hash(value: &impl Serialize) -> Result<String, CandidateError> {
     let bytes = zeroize::Zeroizing::new(serde_json::to_vec(value).map_err(|_| refused())?);
-    Ok(format!("{:x}", Sha256::digest(bytes.as_slice())))
+    Ok(format!(
+        "{:x}",
+        crate::Hex(Sha256::digest(bytes.as_slice()))
+    ))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

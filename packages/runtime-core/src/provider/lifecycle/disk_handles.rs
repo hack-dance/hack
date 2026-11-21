@@ -43,17 +43,17 @@
 //! and by an inode that overlay filesystems report differently from `stat`. Telling
 //! whether a mapping is the disk needs `/proc/<pid>/map_files`, whose links an unprivileged
 //! process may not follow. Do not bring an in-process Linux scan back without it. The
-//! `lsof` scan there differs from the one before this module scanned in process in four
-//! ways: `lsof` is started by the scan's thread, not by the caller; the method is recorded
-//! ([`last_scan`]); `/usr/bin/lsof` is tried when `/usr/sbin/lsof` is absent; and a scan
-//! whose bound expires while it runs reports `provider_timeout_uncertain` with this
-//! module's message, whatever the child was doing.
+//! `lsof` scan there differs from the one before this module scanned in process in three
+//! ways: `lsof` is started by the scan's thread, not by the caller; `/usr/bin/lsof` is
+//! tried when `/usr/sbin/lsof` is absent; and a scan whose bound expires while it runs
+//! reports `provider_timeout_uncertain` with this module's message, whatever the child
+//! was doing.
 //!
-//! [`last_scan`] records which method a recently finished scan of the pool used, and why
-//! when it was `lsof`, in `disk-handle-scan.json` beside the owner record. The record
-//! never decides anything: the answer is handed over first, the caller waits at most
-//! [`RECORD_GRACE`] for the record, and nothing is written into the pool's directory once
-//! the caller has returned.
+//! A scan writes nothing: not into the pool's directory, and nowhere else but the
+//! self-test's own temporary file, which is gone before the scan starts. Which method a
+//! scan would use is reported live by `runtime status` ([`method_now`]), which runs the
+//! same self-test. A scan that fell back for a reason of its own moment (something it could
+//! not read) is not recorded anywhere.
 //!
 //! # What refuses
 //!
@@ -97,7 +97,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::Duration;
 
-pub(super) mod last_scan;
 #[cfg(target_os = "macos")]
 mod macos;
 
@@ -135,11 +134,13 @@ pub(super) enum Method {
 }
 
 /// Why a scan was left to `lsof`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) enum Fallback {
-    /// This platform has no scan in this process (see the module header).
+    /// This platform has no scan in this process (see the module header). Never the
+    /// reason on macOS, which builds one.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     NotBuiltForThisPlatform,
     /// The kernel did not answer the mapping query at all.
     QueryUnanswered,
@@ -197,6 +198,57 @@ pub(super) trait HandleProbe {
     fn start(&self, disks: &[PathBuf]) -> Result<Box<dyn Pending<Found>>, CandidateError>;
 }
 
+/// The method a scan started now would use: the scan in this process when the self-test
+/// passes, `lsof` otherwise or where no scan in this process is built.
+#[cfg(target_os = "macos")]
+fn method() -> Method {
+    macos::method()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn method() -> Method {
+    Method::Lsof(Fallback::NotBuiltForThisPlatform)
+}
+
+/// What `runtime status` says of the disk-holder scan: `{"method": "in-process"}`, or
+/// `{"method": "lsof", "reason": ...}` with the reason one of `not_built_for_this_platform`,
+/// `query_unanswered`, `self_test_failed` and `self_test_unavailable`.
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+pub struct MethodReport {
+    method: MethodName,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<Fallback>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum MethodName {
+    InProcess,
+    Lsof,
+}
+
+impl From<Method> for MethodReport {
+    fn from(method: Method) -> Self {
+        let (method, reason) = match method {
+            Method::InProcess => (MethodName::InProcess, None),
+            Method::Lsof(reason) => (MethodName::Lsof, Some(reason)),
+        };
+        Self { method, reason }
+    }
+}
+
+/// The method a disk-holder scan started now would use, for `runtime status`.
+///
+/// It is computed, not remembered: it runs the self-test a scan runs first, on this host
+/// with this build, so it says nothing about any pool or any scan that already ran. On
+/// macOS the self-test makes a private file in this process's temporary directory, maps
+/// one page of it and removes it again, in a fraction of a millisecond. That is the one
+/// thing an otherwise read-only status writes. If the file cannot be made, the answer is
+/// `lsof` with `self_test_unavailable`; this never fails.
+pub(super) fn method_now() -> MethodReport {
+    method().into()
+}
+
 /// The scan in this process, or the reason the `lsof` child must scan instead. `stop` ends
 /// it early, as unknown.
 type Decide = fn(&[PathBuf], &AtomicBool) -> Result<Found, Fallback>;
@@ -204,7 +256,7 @@ type Decide = fn(&[PathBuf], &AtomicBool) -> Result<Found, Fallback>;
 /// The scan this platform builds: the self-test, then the scan it allows.
 #[cfg(target_os = "macos")]
 fn decide(disks: &[PathBuf], stop: &AtomicBool) -> Result<Found, Fallback> {
-    match macos::method() {
+    match method() {
         Method::InProcess => macos::scan(disks, stop),
         Method::Lsof(why) => Err(why),
     }
@@ -219,16 +271,6 @@ fn decide(_disks: &[PathBuf], _stop: &AtomicBool) -> Result<Found, Fallback> {
 /// Finds the `lsof` to run. A test puts another in its place.
 type Locate = Arc<dyn Fn() -> Result<Lsof, CandidateError> + Send + Sync>;
 
-/// Writes the record of what a scan ran, unless the flag says the caller has returned. A
-/// test puts another in its place.
-type Recorder = Arc<dyn Fn(&Path, last_scan::Turn, Method, &AtomicBool) + Send + Sync>;
-
-/// How long a caller that has its answer waits for the scan's thread to finish recording
-/// before it returns and the thread may no longer write. This is the most a record can
-/// add to a stop, and it adds nothing when the record is up to date or written at once,
-/// which ends the wait. A stop never waits longer and never fails for it.
-const RECORD_GRACE: Duration = Duration::from_millis(100);
-
 /// How long a caller whose bound expired waits for the scan's thread to stop. It bounds
 /// the caller's extra wait, not the reaping: it is long enough for the thread to kill and
 /// reap an `lsof` child in the ordinary case, and a child that takes longer to die (stuck
@@ -239,43 +281,33 @@ const REAP_GRACE: Duration = Duration::from_millis(250);
 const STOP_CHECK: Duration = Duration::from_millis(20);
 
 /// The scan of this host: in this process when this scan may trust it, else through
-/// `lsof` (see the module header).
-pub(super) struct HostScan<'a> {
-    /// The pool's state directory, where the method each scan used is recorded.
-    record: Option<&'a Path>,
+/// `lsof` (see the module header). It knows nothing of the pool but the disks it is
+/// asked about, and writes nothing.
+pub(super) struct HostScan {
     decide: Decide,
     locate: Locate,
-    recorder: Recorder,
 }
 
-impl<'a> HostScan<'a> {
-    /// A scan that records its method in `pool`, the directory of the pool's owner record.
-    pub(super) fn recording(pool: &'a Path) -> Self {
+impl HostScan {
+    pub(super) fn host() -> Self {
         Self {
-            record: Some(pool),
             decide,
             locate: Arc::new(Lsof::host),
-            recorder: Arc::new(last_scan::record),
         }
     }
 }
 
-impl HandleProbe for HostScan<'_> {
+impl HandleProbe for HostScan {
     /// Nothing that can block runs here: the caller's bound starts only once this returns,
     /// so the whole scan is left to its thread.
     fn start(&self, disks: &[PathBuf]) -> Result<Box<dyn Pending<Found>>, CandidateError> {
         let stop = Arc::new(AtomicBool::new(false));
-        let gone = Arc::new(AtomicBool::new(false));
         let (answer, answered) = mpsc::channel();
         let work = Work {
             disks: disks.to_vec(),
-            pool: self.record.map(Path::to_owned),
-            turn: last_scan::Turn::next(),
             decide: self.decide,
             locate: self.locate.clone(),
-            recorder: self.recorder.clone(),
             stop: stop.clone(),
-            gone: gone.clone(),
             answer,
         };
         std::thread::Builder::new()
@@ -287,7 +319,6 @@ impl HandleProbe for HostScan<'_> {
             early: None,
             finished: false,
             stop,
-            gone,
         }))
     }
 }
@@ -295,15 +326,10 @@ impl HandleProbe for HostScan<'_> {
 /// One host scan as its thread runs it.
 struct Work {
     disks: Vec<PathBuf>,
-    pool: Option<PathBuf>,
-    turn: last_scan::Turn,
     decide: Decide,
     locate: Locate,
-    recorder: Recorder,
     /// Set once the caller gave up: start nothing more, and stop what runs.
     stop: Arc<AtomicBool>,
-    /// Set once the caller has returned: write nothing more into the pool's directory.
-    gone: Arc<AtomicBool>,
     answer: Sender<Result<Found, CandidateError>>,
 }
 
@@ -312,30 +338,23 @@ impl Work {
         self.stop.load(Ordering::Relaxed)
     }
 
+    /// Answer the caller, and end. Nothing runs and nothing is owned once the answer is
+    /// sent: the scan in this process has returned, and an `lsof` child has answered and
+    /// been reaped, or has been stopped and reaped. So a caller that takes the answer, in
+    /// time or too late to use it, leaves nothing behind.
     fn run(self) {
-        // What actually ran, and what it answered. Nothing ran when `lsof` was needed and
-        // could not be started.
-        let (ran, result) = match (self.decide)(&self.disks, &self.stop) {
-            Ok(found) => (Some(Method::InProcess), Ok(found)),
-            Err(why) => match self.listed() {
-                Listed::Answered(result) => (Some(Method::Lsof(why)), result),
-                Listed::NotStarted(why_not) => (None, Err(why_not)),
-                // There is nobody to answer and nothing to record.
+        let result = match (self.decide)(&self.disks, &self.stop) {
+            Ok(found) => Ok(found),
+            Err(_left_to_lsof) => match self.listed() {
+                Listed::Answered(result) => result,
+                Listed::NotStarted(why_not) => Err(why_not),
+                // There is nobody to answer.
                 Listed::GivenUp => return,
             },
         };
-        // The caller gets the answer first: the record never decides a stop. "Delivered"
-        // means queued for a caller that is still there; it may yet refuse the answer as
-        // late. The caller then waits a moment for this thread to end ([`RECORD_GRACE`]),
-        // which it does when `self`, and with it the sending end, is dropped below; after
-        // that the recorder finds the caller gone and writes nothing.
-        let delivered = self.answer.send(result).is_ok();
-        if let (Some(pool), Some(method)) = (&self.pool, ran)
-            && delivered
-            && !self.stopped()
-        {
-            (self.recorder)(pool, self.turn, method, &self.gone);
-        }
+        // The receiver is gone once the wait expired or failed; the answer is then late
+        // and nobody may use it.
+        let _ = self.answer.send(result);
     }
 
     /// Run the whole scan through the `lsof` child.
@@ -396,8 +415,6 @@ struct Scanning {
     /// The caller has its answer or has given up.
     finished: bool,
     stop: Arc<AtomicBool>,
-    /// Set when this value is dropped: the caller is returning.
-    gone: Arc<AtomicBool>,
 }
 
 impl Pending<Found> for Scanning {
@@ -418,7 +435,6 @@ impl Pending<Found> for Scanning {
     fn expire(&mut self) -> CandidateError {
         self.finished = true;
         self.stop.store(true, Ordering::Relaxed);
-        self.gone.store(true, Ordering::Relaxed);
         // Give the thread a moment to kill and reap an `lsof` child before this returns.
         // It ends by answering or by dropping its end; neither is used.
         let _ = self.answered.recv_timeout(REAP_GRACE);
@@ -451,20 +467,12 @@ impl Pending<Found> for Scanning {
 }
 
 impl Drop for Scanning {
-    /// The caller is returning. One that leaves without its answer stops the scan. One
-    /// that has its answer lets the thread finish recording what ran, for at most
-    /// [`RECORD_GRACE`]: the thread ends, and drops its end of the channel, as soon as it
-    /// has recorded or has nothing to record. Either way the thread is then told the caller
-    /// is gone, and it writes nothing into the pool's directory after that. So a pool
-    /// directory that is removed or set aside right after a scan does not get a late file.
+    /// A caller that leaves without its answer stops the scan. One that has its answer
+    /// has nothing to stop: the thread ended when it answered.
     fn drop(&mut self) {
         if !self.finished {
             self.stop.store(true, Ordering::Relaxed);
-        } else if !self.gone.load(Ordering::Relaxed) {
-            // The answer was taken, so the only thing left to arrive is the thread's end.
-            let _ = self.answered.recv_timeout(RECORD_GRACE);
         }
-        self.gone.store(true, Ordering::Relaxed);
     }
 }
 

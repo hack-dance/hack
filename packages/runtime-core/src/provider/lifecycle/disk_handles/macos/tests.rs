@@ -1,4 +1,4 @@
-use super::super::tests::{Scratch, host_lsof, isolated, recorded, sparse_disks};
+use super::super::tests::{Scratch, host_lsof, isolated, sparse_disks};
 use super::super::{HandleProbe, HostScan, Lsof};
 use super::*;
 use crate::provider::process;
@@ -223,8 +223,9 @@ fn this_kernel_passes_the_mapping_self_test() {
         "this kernel does not pass the disk-holder scan's self-test ({method:?}): the \
          undeclared region query PROC_PIDREGIONPATHINFO2 no longer reports what the scan \
          relies on. Production is unaffected in correctness: every scan on such a kernel \
-         falls back to the lsof child and records that reason in disk-handle-scan.json. \
-         This test fails so that the change is seen; it is not a product failure"
+         falls back to the lsof child, and runtime status reports the reason as \
+         disk_handle_scan. This test fails so that the change is seen; it is not a \
+         product failure"
     );
 }
 
@@ -272,7 +273,15 @@ fn a_query_that_does_not_report_the_test_mapping_is_not_trusted() {
     );
     drop(other_device);
 
-    assert!(Probe::map(&directory.path().join("missing")).is_none());
+    // A directory the test's file cannot be made in is a reason, never an error, for a
+    // scan and for the status that reports the method.
+    let missing = directory.path().join("missing");
+    assert!(Probe::map(&missing).is_none());
+    assert_eq!(
+        method_in(&missing),
+        Method::Lsof(Fallback::SelfTestUnavailable)
+    );
+    assert_eq!(method_in(directory.path()), Method::InProcess);
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
 }
 
@@ -308,16 +317,14 @@ fn host_scan_shows_closed_disks_closed() {
 fn host_scan_closed_disks_child() {
     let directory = Scratch::new();
     let disks = sparse_disks(directory.path());
-    let pool = Scratch::new();
     assert!(host_scan(&disks).holders.is_empty());
     let result = super::super::disks_closed(
-        &HostScan::recording(pool.path()),
+        &HostScan::host(),
         &process::MonotonicClock::new(),
         &disks,
         super::super::STOP_HANDLE_WAIT,
     );
     assert!(result.is_ok(), "{:?}", result.err());
-    assert_eq!(recorded(pool.path()), Some(Method::InProcess));
 }
 
 /// A child that holds whatever it was given as standard input, killed and reaped on drop.
@@ -453,18 +460,13 @@ fn a_disk_that_cannot_be_identified_is_left_to_lsof() {
     disks.push(directory.path().join("missing.raw"));
     let left = scan(&disks, &AtomicBool::new(false));
     assert_eq!(left.err(), Some(Fallback::ScanIncomplete));
-    let pool = Scratch::new();
     let result = super::super::disks_closed(
-        &HostScan::recording(pool.path()),
+        &HostScan::host(),
         &process::MonotonicClock::new(),
         &disks,
         LOADED_HOST_SCAN_WAIT,
     );
     assert_eq!(result.err().map(|error| error.code), Some("stop_uncertain"));
-    assert_eq!(
-        recorded(pool.path()),
-        Some(Method::Lsof(Fallback::ScanIncomplete))
-    );
 }
 
 /// A scan told to stop reports that it did not finish; it never reports "no holder".
@@ -786,7 +788,6 @@ fn timed(runs: usize, mut scan: impl FnMut()) -> Vec<Duration> {
 fn host_scan_timing_against_lsof() {
     let directory = Scratch::new();
     let paths = sparse_disks(directory.path());
-    let pool = Scratch::new();
     println!(
         "disk-handle scan timing on a host with {} processes",
         processes().unwrap().len()
@@ -797,11 +798,10 @@ fn host_scan_timing_against_lsof() {
     println!("  scan in this process:     {}", spread(scans));
     let bounded = timed(20, || {
         let clock = process::MonotonicClock::new();
-        let probe = HostScan::recording(pool.path());
+        let probe = HostScan::host();
         super::super::disks_closed(&probe, &clock, &paths, super::super::STOP_HANDLE_WAIT).unwrap();
     });
     println!("  through disks_closed:     {}", spread(bounded));
-    assert_eq!(recorded(pool.path()), Some(Method::InProcess));
     let lsof = host_lsof().expect("macOS installs lsof");
     let children = timed(5, || {
         let listed = process::capture(

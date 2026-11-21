@@ -77,13 +77,12 @@ pub struct RuntimeStatus {
     /// first (see `guest_memory_peak`). A record only; absent when there is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guest_memory_peaks: Option<Vec<guest_memory_peak::Boot>>,
-    /// How a recently finished disk-holder scan of this pool read the host
-    /// (`disk_handles`): in this process, or through `lsof` with the reason. A record only.
-    /// It can be missing or old: a scan that timed out, or whose record took longer to
-    /// write than its caller waits (100 ms), leaves the earlier one. Absent before a scan
-    /// has recorded.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub disk_handle_scan: Option<disk_handles::last_scan::Report>,
+    /// How a disk-holder scan started now would read the host (`disk_handles`): in this
+    /// process, or through `lsof` with the reason. Computed when status runs, by the
+    /// self-test a scan runs first, so it describes this host and build and no pool or
+    /// earlier scan. On macOS that test makes and removes a private file in the process's
+    /// temporary directory; failing to make it is reported as a reason, never an error.
+    pub disk_handle_scan: disk_handles::MethodReport,
     /// Provider sockets native found world-accessible and made private for the running
     /// provider (`socket_repairs`); absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1055,7 +1054,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             graph_runs: users.graph_runs,
             pool_idle: Some(false),
             guest_memory_peaks: None,
-            disk_handle_scan: None,
+            disk_handle_scan: disk_handles::method_now(),
             repaired_sockets: None,
             hashing: crate::sha256_backend::report(),
         });
@@ -1135,7 +1134,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         graph_runs: users.graph_runs,
         pool_idle,
         guest_memory_peaks: guest_memory_peak::history(&root(candidate)),
-        disk_handle_scan: disk_handles::last_scan::report(&root(candidate)),
+        disk_handle_scan: disk_handles::method_now(),
     })
 }
 
@@ -3063,7 +3062,7 @@ fn lock_disks_closed(
     }
     let vm_lock = VmLock(vm_lock);
     disk_handles::disks_closed(
-        &disk_handles::HostScan::recording(&root(candidate)),
+        &disk_handles::HostScan::host(),
         &process::MonotonicClock::new(),
         disks,
         handle_wait,

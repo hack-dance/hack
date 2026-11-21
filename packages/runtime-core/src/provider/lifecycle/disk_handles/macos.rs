@@ -344,7 +344,13 @@ fn hold(
 /// every kind of mapping: XNU skips submaps (the shared library cache) in this query, for
 /// this scan as for `lsof`, and regions backed by other pagers are not tested here.
 pub(super) fn method() -> Method {
-    let tested = Probe::map(&std::env::temp_dir())
+    method_in(&std::env::temp_dir())
+}
+
+/// [`method`] with the self-test's file made in `directory`. A directory the file cannot
+/// be made in is a reason to use `lsof`, not an error.
+fn method_in(directory: &Path) -> Method {
+    let tested = Probe::map(directory)
         .ok_or(Fallback::SelfTestUnavailable)
         .and_then(|probe| probe.found_by(PROC_PIDREGIONPATHINFO2));
     match tested {

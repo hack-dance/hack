@@ -2290,26 +2290,23 @@ On every other platform the scan is still the `lsof` child. A Linux scan of `/pr
 written and removed: `/proc/<pid>/maps` names a mapped file by a path that may no longer
 lead to it and by an inode that overlay filesystems report differently from `stat`, and
 the `map_files` links that would settle it cannot be followed without privilege. The
-`lsof` scan there differs from the earlier one in four ways: `lsof` is started by the
-scan's thread instead of the caller, the method is recorded, `/usr/bin/lsof` is tried
-when `/usr/sbin/lsof` is absent, and a scan whose wait expires while it runs reports
-`provider_timeout_uncertain` with the scan's own message, whatever the child was doing.
+`lsof` scan there differs from the earlier one in three ways: `lsof` is started by the
+scan's thread instead of the caller, `/usr/bin/lsof` is tried when `/usr/sbin/lsof` is
+absent, and a scan whose wait expires while it runs reports `provider_timeout_uncertain`
+with the scan's own message, whatever the child was doing.
 
-A scan records what ran beside the owner record, in `disk-handle-scan.json`:
-`{"version": 1, "method": "in-process"}`, or `"method": "lsof"` with a `reason` of
-`not_built_for_this_platform`, `query_unanswered`, `self_test_failed`,
-`self_test_unavailable` or `scan_incomplete`. The record is a report only and decides
-nothing. It is the method of a recently finished scan of this pool. The scan answers its
-caller first; the caller then waits at most 100 ms for the record, which costs nothing
-when the record is up to date or written at once, and returns either way. Nothing is
-written into the pool's directory after the caller has returned, apart from the instant
-between the writer's look at whether the caller is gone and the file operation after it,
-so the directory can be removed or set aside right after a scan. The record can be
-missing or old: after a scan that timed out, after a failed write, and after a write
-that took longer than the caller waited. Within one process an earlier scan never
-overwrites a later one.
-`runtime status --json` shows it without the version as `disk_handle_scan`, and leaves
-the field out for a pool no scan has recorded.
+A scan writes nothing into the pool's directory, or anywhere else, so the directory can
+be removed or set aside the moment a scan returns. `runtime status --json` reports the
+method as `disk_handle_scan`, computed when status runs: it runs the scan's own
+self-test and says what a scan started now would use, `{"method": "in-process"}`, or
+`{"method": "lsof", "reason": ...}` with a reason of `not_built_for_this_platform`,
+`query_unanswered`, `self_test_failed` or `self_test_unavailable`. It describes the host
+and the build, so it is the same for every pool, initialized or not. On macOS the
+self-test makes and removes a private file in the process's temporary directory, the one
+thing an otherwise read-only status writes; a file that cannot be made is reported as
+`self_test_unavailable` and never fails status. Status shows what a scan would use now: a
+scan that fell back for a reason of its own moment, something it could not read, is not
+recorded anywhere.
 
 Scanning every process to learn whether a VM disk is held is a consequence of not owning
 the VM process: a launcher of our own would hold an exclusive lock on each disk, and the
@@ -2323,8 +2320,7 @@ when it is needed. A scan whose wait expires while it runs ends the stop as
 reported as itself, and both refuse. The 30 s limit the wait, not the work. An `lsof`
 child that is running, or that is started after the caller gave up, is stopped and
 reaped by the scan's thread; the caller waits up to 250 ms more for that, which bounds
-its extra wait and not the reaping. A scan that answered in time can add up to 100 ms
-for its record, as above. A scan thread blocked in a system call can outlive
+its extra wait and not the reaping. A scan thread blocked in a system call can outlive
 the timeout, and whatever it answers later is discarded.
 `scripts/measure-lsof-scan.ts` re-measures a host: the runtime's scan with `--scan-binary`
 (macOS), the `lsof` child without.

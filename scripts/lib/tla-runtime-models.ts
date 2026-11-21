@@ -2444,6 +2444,84 @@ const contracts: readonly ModelContract[] = [
     fields: ["retired = <<1>>", "alive = 1"],
   },
   {
+    // HACK-2456: a pool that stops or dies under a live run. Positive: this
+    // change with nothing else booting the pool and no fault between its boot
+    // and its recovery; `any-boot` is recovery from any earlier boot (follow-up)
+    // with every fault. `negative` is `next` before the change, `by-hand` adds an
+    // unnamed `runtime up`, `strict` keeps predecessor-only recovery while
+    // something else boots the pool, `crash-in-recovery` lets the pool stop between
+    // the recovery's boot and its graph recovery: each reaches a dead end.
+    name: "native-pool-stop",
+    module: "PoolStop",
+    states: 81,
+    invariant: "NoDeadEnd",
+    action: "OwnerCrash",
+    fields: [
+      'pool = "stopped"',
+      'run = "ready"',
+      'owner = "dead"',
+      "pub = TRUE",
+    ],
+    alternativeWitnesses: [
+      {
+        action: "OwnerNotices",
+        fields: [
+          'pool = "stopped"',
+          'run = "ready"',
+          'owner = "dead"',
+          "pub = TRUE",
+        ],
+      },
+    ],
+    additionalControls: [
+      { name: "any-boot", negative: false, states: 113 },
+      {
+        name: "by-hand",
+        negative: true,
+        action: "RuntimeUp",
+        fields: [
+          'pool = "running"',
+          "runBoot = 1",
+          "boot = 3",
+          'owner = "dead"',
+        ],
+      },
+      {
+        name: "strict",
+        negative: true,
+        action: "RecoverStopped",
+        fields: [
+          'pool = "running"',
+          "runBoot = 1",
+          "boot = 3",
+          'owner = "dead"',
+        ],
+        alternativeWitnesses: [
+          {
+            action: "RuntimeUp",
+            fields: [
+              'pool = "running"',
+              "runBoot = 1",
+              "boot = 3",
+              'owner = "dead"',
+            ],
+          },
+        ],
+      },
+      {
+        name: "crash-in-recovery",
+        negative: true,
+        action: "RecoverStopped",
+        fields: [
+          'pool = "running"',
+          "runBoot = 1",
+          "boot = 3",
+          "recovering = TRUE",
+        ],
+      },
+    ],
+  },
+  {
     // HACK-2440 (c, d), HACK-2416: a patient first request, no failure on one
     // doubtful reading, and a host-side bound on "starting". Slow, refusing and
     // hanging apps; `legacy` runs the steady cadence before the first success.

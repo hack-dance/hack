@@ -1,0 +1,46 @@
+---
+title: PoolStop · run and pool stop
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> none
+    none --> ready : hack up
+    retained --> ready : hack up
+    ready --> retained : hack down
+    ready --> orphaned : runtime down, owner dies
+    ready --> crashed : VM or provider dies
+    crashed --> orphaned : hack native recover
+    orphaned --> recover : hack up, down --recover
+    state recover <<choice>>
+    recover --> retained : [same or previous boot]
+    recover --> stranded : [older boot]
+
+    note left of orphaned
+        Receipt still ready-observed,
+        owner dead, publication left.
+        Pool stopped or in a new boot.
+    end note
+    note right of recover
+        runtime up first, then the
+        existing recovery as its own
+        request, data kept.
+    end note
+    note right of stranded
+        Known gap: another boot, or a
+        stop mid-recovery, came first.
+        Follow-up: any-boot.
+    end note
+    note left of retained
+        INV NoDeadEnd: some named
+        command always acts.
+        PROP Recovers.
+    end note
+
+    class ready ok
+    class orphaned wait
+    class crashed wait
+    class stranded fail

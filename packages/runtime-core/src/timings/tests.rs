@@ -230,6 +230,60 @@ fn host_anchor_joins_startup_and_guest_clock_is_not_subtracted() {
     assert_eq!(child.host_start_us(1000), None);
 }
 
+/// `vm.ensure` says whether a recorded earlier sample replaced the admission wait. The
+/// attribute rides on the span the work already has, on either outcome, and a start whose
+/// sample under the lease was not accepted leaves it out.
+#[test]
+fn work_sets_reviewed_attributes_on_its_own_span() {
+    let (collector, _, sink) = setup();
+    for (reused, outcome) in [(Some(true), Ok(())), (Some(false), Err(7)), (None, Ok(()))] {
+        assert_eq!(
+            collector::observe_attributed(
+                Some(&collector),
+                Step::VmEnsure,
+                None,
+                |parent, attrs| {
+                    assert!(parent.is_some());
+                    attrs.admission_reused = reused;
+                    outcome
+                },
+                |_| None,
+            ),
+            outcome
+        );
+    }
+    let records = records(&sink);
+    assert_eq!(records.len(), 3);
+    assert!(records.iter().all(|record| record.step == "vm.ensure"));
+    assert_eq!(
+        records[0].attrs.get("admission_reused"),
+        Some(&Attr::Boolean(true))
+    );
+    assert_eq!(records[0].outcome, Outcome::Ok);
+    assert_eq!(
+        records[1].attrs.get("admission_reused"),
+        Some(&Attr::Boolean(false))
+    );
+    assert_eq!(records[1].outcome, Outcome::Error);
+    assert_eq!(records[2].attrs.get("admission_reused"), None);
+    // Without a collector the work runs unchanged, and what it sets goes nowhere.
+    assert_eq!(
+        collector::observe_attributed(
+            None,
+            Step::VmEnsure,
+            None,
+            |parent, attrs| {
+                assert!(parent.is_none());
+                attrs.admission_reused = Some(true);
+                Ok::<_, ()>(5)
+            },
+            |_| None,
+        ),
+        Ok(5)
+    );
+    assert!(valid_name("admission_reused"));
+}
+
 #[test]
 fn unknown_values_keep_the_span_and_unsafe_names_do_not_enter_stores() {
     let (collector, _, sink) = setup();

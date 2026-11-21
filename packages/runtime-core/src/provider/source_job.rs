@@ -167,7 +167,7 @@ test "$(sha256sum "$1/busybox" | cut -d ' ' -f 1)" = "$(sha256sum /bin/busybox |
 test "$(sha256sum "$1/ld-musl-aarch64.so.1" | cut -d ' ' -f 1)" = "$(sha256sum /lib/ld-musl-aarch64.so.1 | cut -d ' ' -f 1)"
 test "$(readlink "$1/libc.musl-aarch64.so.1")" = ld-musl-aarch64.so.1
 test "$(sha256sum "$1/launch.sh" | cut -d ' ' -f 1)" = "$2"
-"#, &[&path, &format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(LAUNCH_SCRIPT.as_bytes()))], Some(LAUNCH_SCRIPT))?;
+"#, &[&path, &format!("{:x}", crate::Hex(<sha2::Sha256 as sha2::Digest>::digest(LAUNCH_SCRIPT.as_bytes())))], Some(LAUNCH_SCRIPT))?;
     Ok(path)
 }
 

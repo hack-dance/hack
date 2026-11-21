@@ -1811,7 +1811,7 @@ fn owned_driver_live() -> Result<(), CandidateError> {
             let export_path = Path::new(exported["path"].as_str().expect("export path"));
             let payload = fs::read(export_path).map_err(state::io)?;
             use sha2::Digest;
-            if exported["sha256"] != format!("{:x}", sha2::Sha256::digest(&payload))
+            if exported["sha256"] != format!("{:x}", crate::Hex(sha2::Sha256::digest(&payload)))
                 || exported["original_retained"] != true
             {
                 return Err(error(

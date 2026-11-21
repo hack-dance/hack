@@ -664,7 +664,7 @@ fn cleanup(e: &Entry) -> Result<(), CandidateError> {
             return Err(error());
         }
         if bytes.len() > 512 * 1024
-            || (!staging && format!("{:x}", Sha256::digest(bytes)) != e.digest)
+            || (!staging && format!("{:x}", crate::Hex(Sha256::digest(bytes))) != e.digest)
         {
             return Err(error());
         }
@@ -751,12 +751,82 @@ pub(super) fn release(
         .filter(|(_, e)| selected.is_none_or(|(run, res)| e.run == run && e.reservation == res))
         .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
-    for key in keys {
-        cleanup(&entries[&key])?;
-        entries.remove(&key);
-        save(c, &entries)?;
+    release_entries(c, &mut entries, &keys, cleanup)
+}
+
+/// Caller holds the provider operation lock. Stops every publisher of `run`
+/// whose reservation is selected, before any guest resource of theirs.
+pub(super) fn release_reservations(
+    c: &Candidate,
+    owner: &str,
+    run: &str,
+    reservations: &std::collections::BTreeSet<&str>,
+) -> Result<(), CandidateError> {
+    recover_pending(c, owner)?;
+    let mut entries = load(c, owner)?;
+    if reservations
+        .iter()
+        .any(|res| entries.get(*res).is_some_and(|e| e.run != run))
+    {
+        return Err(error());
     }
-    Ok(())
+    let keys = reservations
+        .iter()
+        .filter(|res| entries.contains_key(**res))
+        .map(|res| (*res).to_owned())
+        .collect::<Vec<_>>();
+    release_entries(c, &mut entries, &keys, cleanup)
+}
+
+/// Retires the selected entries' publishers concurrently (each touches only its
+/// own process, directory and sockets), then drops each retired entry with its
+/// own journal save. One removal per save keeps every interrupted save a single
+/// step that `recover_pending` accepts; a multi-entry pending journal would be
+/// refused. A failed entry stays recorded with its files.
+fn release_entries(
+    c: &Candidate,
+    entries: &mut BTreeMap<String, Entry>,
+    keys: &[String],
+    retire: impl Fn(&Entry) -> Result<(), CandidateError> + Sync,
+) -> Result<(), CandidateError> {
+    release_entries_with(c, entries, keys, retire, save)
+}
+
+fn release_entries_with(
+    c: &Candidate,
+    entries: &mut BTreeMap<String, Entry>,
+    keys: &[String],
+    retire: impl Fn(&Entry) -> Result<(), CandidateError> + Sync,
+    mut commit: impl FnMut(&Candidate, &BTreeMap<String, Entry>) -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    let outcomes = std::thread::scope(|scope| {
+        let retire = &retire;
+        let workers = keys
+            .iter()
+            .map(|key| {
+                let entry = &entries[key];
+                scope.spawn(move || retire(entry))
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap_or_else(|_| Err(error())))
+            .collect::<Vec<_>>()
+    });
+    let mut first = None;
+    for (key, outcome) in keys.iter().zip(outcomes) {
+        match outcome {
+            Ok(()) => {
+                if entries.remove(key).is_some() {
+                    commit(c, entries)?;
+                }
+            }
+            Err(failure) => {
+                first.get_or_insert(failure);
+            }
+        }
+    }
+    first.map_or(Ok(()), Err)
 }
 pub fn unpublish(c: &Candidate, run: &str, reservation: &str) -> Result<(), CandidateError> {
     if !hex(run, 32) || !hex(reservation, 32) {
@@ -842,7 +912,7 @@ fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
     file.take(512 * 1024 + 1)
         .read_to_end(&mut bytes)
         .map_err(state::io)?;
-    if format!("{:x}", Sha256::digest(bytes)) != e.digest {
+    if format!("{:x}", crate::Hex(Sha256::digest(bytes))) != e.digest {
         return Err(error());
     }
     // A TCP frontend has no filesystem identity. The publisher binds its
@@ -1022,7 +1092,7 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
         hostnames,
         token,
         process,
-        digest: format!("{:x}", Sha256::digest(bytes)),
+        digest: format!("{:x}", crate::Hex(Sha256::digest(bytes))),
         directory: None,
         binary: None,
         reaped: None,
@@ -1132,6 +1202,96 @@ mod port_probe_tests {
     }
 }
 
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+    use std::sync::{Barrier, Mutex};
+
+    fn entry(reservation: char) -> Entry {
+        let mut e = Entry {
+            owner: "a".repeat(32),
+            run: "b".repeat(32),
+            reservation: reservation.to_string().repeat(32),
+            slot: reservation.to_digit(16).unwrap() as u8,
+            port: 0,
+            unix: true,
+            hostnames: vec![format!("r{reservation}.example.test")],
+            token: "c".repeat(32),
+            process: identity::ProcessIdentity {
+                pid: 4242,
+                start_micros: 1,
+                uid: unsafe { libc::geteuid() },
+                executable: PathBuf::new(),
+            },
+            digest: "d".repeat(64),
+            directory: None,
+            binary: None,
+            reaped: None,
+        };
+        e.process.executable = directory(&e).join("publisher");
+        e
+    }
+
+    /// Every selected publisher is retired at once; exactly the retired entries
+    /// leave the journal, one per save, and a failed one stays recorded.
+    #[test]
+    fn release_retires_selected_entries_concurrently_and_keeps_failures() {
+        let fixture = crate::unique_test_root(&std::env::temp_dir(), "hack-publication-release");
+        std::fs::create_dir_all(&fixture).unwrap();
+        let candidate = Candidate::discover(&fixture).unwrap();
+        let mut entries = ['1', '2', '3', '4']
+            .into_iter()
+            .map(|r| {
+                let e = entry(r);
+                (e.reservation.clone(), e)
+            })
+            .collect::<BTreeMap<_, _>>();
+        save(&candidate, &entries).unwrap();
+        let keys = ['1', '2', '3'].map(|r| r.to_string().repeat(32)).to_vec();
+        // All three retirements must be in flight together to pass the barrier.
+        let barrier = Barrier::new(3);
+        let retired = Mutex::new(Vec::new());
+        let mut commits = Vec::new();
+        let failure = release_entries_with(
+            &candidate,
+            &mut entries,
+            &keys,
+            |e| {
+                barrier.wait();
+                retired.lock().unwrap().push(e.reservation.clone());
+                if e.reservation.starts_with('2') {
+                    Err(error())
+                } else {
+                    Ok(())
+                }
+            },
+            |c, journal| {
+                commits.push(
+                    journal
+                        .keys()
+                        .map(|k| k[..1].to_owned())
+                        .collect::<Vec<_>>(),
+                );
+                save(c, journal)
+            },
+        )
+        .unwrap_err();
+        // One removal per save: an interrupted save is always the single-step
+        // change that pending-journal recovery accepts.
+        assert_eq!(commits, [vec!["2", "3", "4"], vec!["2", "4"]]);
+        assert_eq!(failure.code, "publisher_intent");
+        assert_eq!(retired.lock().unwrap().len(), 3);
+        let kept = state::read_bounded::<BTreeMap<String, Entry>>(
+            &root(&candidate).join("state.json"),
+            65536,
+        )
+        .unwrap();
+        assert_eq!(kept.keys().map(|k| &k[..1]).collect::<Vec<_>>(), ["2", "4"]);
+        assert!(kept == entries);
+        std::fs::remove_dir_all(&fixture).unwrap();
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
@@ -1181,7 +1341,7 @@ mod tests {
             hostnames: vec![],
             token: "c".repeat(32),
             process,
-            digest: format!("{:x}", Sha256::digest(b"fixture")),
+            digest: format!("{:x}", crate::Hex(Sha256::digest(b"fixture"))),
             directory: None,
             binary: None,
             reaped: None,

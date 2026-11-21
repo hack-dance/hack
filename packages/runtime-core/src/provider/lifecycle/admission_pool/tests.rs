@@ -294,9 +294,10 @@ fn selected_owner_or_provider_changes_refuse_reverification() {
     assert!(selection.reverify(&pool.candidate).is_err());
 }
 
-/// Tests that run the release probes (`lsof` over the owned disks) run one at a time:
-/// concurrent whole-host `lsof` scans on a loaded machine can exceed the probe's bounded
-/// wait, which correctly refuses as possibly active but is not what these tests examine.
+/// Tests that run the release probes (the whole-host scan for holders of the owned disks)
+/// run one at a time: concurrent whole-host scans on a loaded machine can exceed the
+/// probe's bounded wait, which correctly refuses as possibly active but is not what these
+/// tests examine.
 fn serial() -> std::sync::MutexGuard<'static, ()> {
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
     SERIAL
@@ -309,7 +310,7 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 /// A release check must not see this test's provider resources after it let them go. In the
 /// shared parallel test process, an unrelated test's pre-exec fork (`process::clean_command`)
 /// holds a copy of every descriptor open at the fork until it execs: a disk the fixture just
-/// wrote or a handle the test just dropped then shows up in the host-wide `lsof` scan, which
+/// wrote or a handle the test just dropped then shows up in the host-wide disk-handle scan, which
 /// correctly refuses as `retained_reserve_active_owner` before the result under test. So every
 /// test that expects a release check to pass, or to refuse for another reason, runs isolated.
 /// Holding `serial` here keeps the module's whole-host scans one at a time.

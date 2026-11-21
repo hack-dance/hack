@@ -272,8 +272,8 @@ fn private_owner_restore_preserves_data_and_retires_values() {
         .read_exact(&mut random)
         .unwrap();
     let run: String = random.iter().map(|b| format!("{b:02x}")).collect();
-    let first_hash = format!("{:x}", Sha256::digest(FIRST.as_bytes()));
-    let second_hash = format!("{:x}", Sha256::digest(SECOND.as_bytes()));
+    let first_hash = format!("{:x}", crate::Hex(Sha256::digest(FIRST.as_bytes())));
+    let second_hash = format!("{:x}", crate::Hex(Sha256::digest(SECOND.as_bytes())));
     let script = format!(
         "hash=$$(printf '%s' \"$$TOKEN\" | sha256sum); case \"$$hash\" in {first_hash}*) test ! -e /data/sentinel; printf owned-sentinel > /data/sentinel; printf 'delivery-one\\n';; {second_hash}*) test \"$$(cat /data/sentinel)\" = owned-sentinel; printf 'delivery-two\\n';; *) exit 71;; esac; exec sleep 300"
     );

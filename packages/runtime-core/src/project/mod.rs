@@ -491,7 +491,7 @@ pub(crate) fn identity(plan: &PlanData) -> Result<String, CandidateError> {
     if bytes.len() > 3 * 1024 * 1024 {
         return Err(problem("plan_budget", "Review plan exceeds 3 MiB."));
     }
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(format!("{:x}", crate::Hex(Sha256::digest(bytes))))
 }
 
 pub fn plan(candidate: &Candidate, options: PlanOptions<'_>) -> Result<PlanReport, CandidateError> {
@@ -553,7 +553,7 @@ fn plan_input(
         .flat_map(|service| service.environment_files.iter().cloned())
         .collect::<std::collections::BTreeSet<_>>();
     if bytes != original.as_slice() {
-        data.original_compose_sha256 = Some(format!("{:x}", Sha256::digest(&original)));
+        data.original_compose_sha256 = Some(format!("{:x}", crate::Hex(Sha256::digest(&original))));
         data.original_environment_files = compose::original_environment_files(
             source,
             path.parent().expect("compose parent"),

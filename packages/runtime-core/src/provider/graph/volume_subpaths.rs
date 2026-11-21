@@ -125,7 +125,10 @@ fn journal_path(candidate: &Candidate, name: &str, fresh: bool) -> Result<PathBu
             return Err(refused());
         }
     }
-    Ok(parent.join(format!("{:x}.json", Sha256::digest(name.as_bytes()))))
+    Ok(parent.join(format!(
+        "{:x}.json",
+        crate::Hex(Sha256::digest(name.as_bytes()))
+    )))
 }
 fn write_preparation(path: &Path, record: &Preparation) -> Result<(), CandidateError> {
     // JSON escaping and inspect metadata also count toward the durable read cap.

@@ -10,8 +10,9 @@
 //!   including the read-only `runtime probe`: the `down`-completed clean-stop marker of the
 //!   last boot, its quiescence receipt, creation, rootfs pin, disk identities and sizes,
 //!   the recorded executable and user, and a dead recorded provider.
-//! * Release checks ([`released`]) take the provider's VM lock, run `lsof` on the owned
-//!   disks, probe the owned sockets and audit the provider configuration. They need the
+//! * Release checks ([`released`]) take the provider's VM lock, scan the host's processes
+//!   for holders of the owned disks, probe the owned sockets and audit the provider
+//!   configuration. They need the
 //!   startup lease, so they never contend with another lifecycle operation that may be
 //!   handing the VM lock to a provider; they run once the lease is held, before any restart
 //!   effect, and immediately before `machine start`.
@@ -106,7 +107,8 @@ impl StoppedRefusal {
 
     /// Classify a lifecycle verification failure into a closed refusal. Missing, replaced
     /// or mis-sized state is stale; any other failure, including an absence probe that
-    /// could not complete (for example a slow `lsof`), leaves the provider possibly active.
+    /// could not complete (for example a slow disk-handle scan), leaves the provider
+    /// possibly active.
     fn from_check(error: &CandidateError) -> Self {
         match error.code {
             "foreign_state" | "unaudited_provider_config" => Self::Foreign,

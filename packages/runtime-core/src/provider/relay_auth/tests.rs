@@ -28,6 +28,50 @@ fn independent_python_hmac_transcript_vector() {
         "fae96a72c8b7f5084f3391ce8cb57cb7d7d2bd2c7cf8b2e4b05e7560bb4f9a43"
     );
 }
+/// RFC 4231 test cases 1, 2 and 6 for HMAC-SHA-256, on the raw MAC without this module's
+/// domain prefix: a short key, a text key and a key longer than one block. A release of
+/// `hmac` or `sha2` that changed the bytes, or that accepted a tag of another length or with
+/// one changed bit, fails here.
+#[test]
+fn hmac_sha256_matches_the_rfc_4231_vectors_and_refuses_any_other_tag() {
+    let cases: [(&[u8], &[u8], &str); 3] = [
+        (
+            &[0x0b; 20],
+            b"Hi There",
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+        ),
+        (
+            b"Jefe",
+            b"what do ya want for nothing?",
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+        ),
+        (
+            &[0xaa; 131],
+            b"Test Using Larger Than Block-Size Key - Hash Key First",
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
+        ),
+    ];
+    for (key, data, expected) in cases {
+        let mut mac = HmacSha256::new_from_slice(key).unwrap();
+        mac.update(data);
+        let value = tag(mac.clone());
+        let hex: String = value.iter().map(|v| format!("{v:02x}")).collect();
+        assert_eq!(hex, expected);
+        mac.clone().verify_slice(&value).unwrap();
+        assert!(mac.clone().verify_slice(&value[..31]).is_err());
+        assert!(
+            mac.clone()
+                .verify_slice(&[&value[..], &[0]].concat())
+                .is_err()
+        );
+        assert!(mac.clone().verify_slice(&[]).is_err());
+        for bit in 0..256 {
+            let mut changed = value;
+            changed[bit / 8] ^= 1 << (bit % 8);
+            assert!(mac.clone().verify_slice(&changed).is_err());
+        }
+    }
+}
 #[test]
 fn mutual_proof_admits_only_until_revocation() {
     let credential = credential();

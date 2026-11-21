@@ -1367,7 +1367,7 @@ fn start_pool(
     project_share: Option<super::ProjectShareIntent>,
     start: super::prepared_start::Start<'_>,
 ) -> Result<RuntimeStatus, CandidateError> {
-    crate::timings::measure(crate::timings::Step::VmBoot, Some(1), |_| {
+    crate::timings::measure(crate::timings::Step::VmEnsure, None, |_| {
         start_pool_observed(
             candidate,
             profile,
@@ -1485,12 +1485,14 @@ fn start_pool_observed(
     // A pool that is already running and owned by this home allocates nothing, so it takes
     // the named fast path instead of the admission windows below (`running_start`).
     if let Some(running) = running_start::select(candidate, profile)? {
-        return running_start::resume(candidate, running, &request, || {
-            #[cfg(target_os = "macos")]
-            if let Some(guard) = &retained_guard {
-                guard.verify(candidate)?;
-            }
-            Ok(())
+        return crate::timings::measure(crate::timings::Step::VmReattach, None, |_| {
+            running_start::resume(candidate, running, &request, || {
+                #[cfg(target_os = "macos")]
+                if let Some(guard) = &retained_guard {
+                    guard.verify(candidate)?;
+                }
+                Ok(())
+            })
         });
     }
     // Admission before aliases, provider commands, disks or VM effects. Only
@@ -1622,16 +1624,18 @@ fn start_pool_observed(
     // start won the lease first); every other running pool took the fast path. Keep the full
     // re-verification for that race.
     if owner.phase == "running" {
-        if let Some(selected) = settled.selected() {
-            selected.reverify(candidate)?;
-        }
-        #[cfg(target_os = "macos")]
-        if let Some(guard) = &retained_guard {
-            guard.verify(candidate)?;
-        }
-        verify_live(candidate, &owner)?;
-        audit_boot(candidate, &owner)?;
-        return status(candidate);
+        return crate::timings::measure(crate::timings::Step::VmReattach, None, |_| {
+            if let Some(selected) = settled.selected() {
+                selected.reverify(candidate)?;
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(guard) = &retained_guard {
+                guard.verify(candidate)?;
+            }
+            verify_live(candidate, &owner)?;
+            audit_boot(candidate, &owner)?;
+            status(candidate)
+        });
     }
     // Only a clean stopped selection continues, as a restart of its verified retained disks.
     let mut restart = admission_pool::restart_only(candidate, settled, &owner, &lock)?;
@@ -1804,7 +1808,9 @@ fn start_pool_observed(
     )?;
     owner.process = Some(observed);
     owner.save(candidate)?;
-    let result = finish_boot(candidate, &mut owner, previous_boot.as_deref(), &lock);
+    let result = crate::timings::measure(crate::timings::Step::VmBoot, None, |_| {
+        finish_boot(candidate, &mut owner, previous_boot.as_deref(), &lock)
+    });
     // A witness is recorded only where it can be accepted (a qualified filesystem).
     super::tree_witness::record_boot(
         candidate,
@@ -2535,7 +2541,7 @@ fn provider_stopped(phase: &str, process_alive: Option<bool>) -> bool {
 }
 
 pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
-    crate::timings::measure(crate::timings::Step::VmStop, Some(1), |_| {
+    crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
         down_observed(candidate)
     })
 }

@@ -143,27 +143,25 @@ Runtime commands affect only the candidate pool. Graph commands support a bounde
 The installed hack and its state are never used as a fallback.";
 
 fn main() {
-    // Reserved leading argument belongs to the parent transport, never a guest argv.
-    if std::env::args_os().nth(1).as_deref()
-        == Some(std::ffi::OsStr::new(
-            hack_runtime_core::timings::REQUEST_ARGUMENT,
-        ))
+    if let Some(argument) = std::env::args_os()
+        .nth(1)
+        .and_then(|value| value.into_string().ok())
     {
-        hack_runtime_core::timings::enable();
+        hack_runtime_core::timings::enable_argument(&argument);
     }
     let result = hack_runtime_core::timings::measure(
         hack_runtime_core::timings::Step::RuntimeDispatch,
         None,
         |_| run(),
     );
-    hack_runtime_core::timings::emit();
+    hack_runtime_core::timings::shutdown();
     if let Err(error) = result {
         // Keep errors structured even before a connection to a runtime exists.
         eprintln!(
             "{}",
             serde_json::to_string(&error).expect("error is serializable")
         );
-        std::process::exit(2);
+        hack_runtime_core::timings::exit(2);
     }
 }
 
@@ -233,7 +231,11 @@ fn resolve_candidate_root(root: &Path) -> Result<std::path::PathBuf, CandidateEr
 fn run() -> Result<(), CandidateError> {
     let arguments: Vec<String> = std::env::args_os()
         .skip(1)
-        .skip_while(|argument| argument == hack_runtime_core::timings::REQUEST_ARGUMENT)
+        .skip_while(|argument| {
+            argument
+                .to_str()
+                .is_some_and(|value| value.starts_with(hack_runtime_core::timings::REQUEST_PREFIX))
+        })
         .map(|argument| {
             argument.into_string().map_err(|_| {
                 CandidateError::new("unsupported_path", "Arguments must be valid UTF-8.")
@@ -376,7 +378,7 @@ fn run() -> Result<(), CandidateError> {
             )?;
             print_json(&response)?;
             if response["ok"] == false {
-                std::process::exit(2);
+                hack_runtime_core::timings::exit(2);
             }
         }
         ["__job_supervisor", state, id] => {
@@ -405,7 +407,7 @@ fn run() -> Result<(), CandidateError> {
         }
         ["graph", "exec-interactive", arguments @ ..] => {
             let code = interactive_exec_cli::command(&discover_candidate(&requested)?, arguments)?;
-            std::process::exit(code);
+            hack_runtime_core::timings::exit(code);
         }
         ["graph", "interactive-sessions", arguments @ ..] => {
             interactive_exec_cli::sessions(&discover_candidate(&requested)?, arguments)?;
@@ -422,7 +424,7 @@ fn run() -> Result<(), CandidateError> {
                     CandidateError::new("graph_exec_result", "Missing service command exit status.")
                 })?;
                 if code != 0 {
-                    std::process::exit(i32::try_from(code).unwrap_or(1));
+                    hack_runtime_core::timings::exit(i32::try_from(code).unwrap_or(1));
                 }
             }
         }

@@ -308,7 +308,7 @@ fn workload(value: Workload, kind: WorkloadKind) -> Result<WorkloadInputs, Candi
 /// plan are sent through the compiler. Errors never disclose authored or private text.
 /// Provider entry points do not consume this result; execution/replay remain later gates.
 pub fn compile(options: CompileOptions<'_>) -> Result<NativeInputs, CandidateError> {
-    crate::timings::measure(crate::timings::Step::PlanCompile, Some(1), |_| {
+    crate::timings::measure(crate::timings::Step::PlanCompile, None, |_| {
         compile_inputs(
             options.request,
             options.profiles,

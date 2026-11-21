@@ -38,7 +38,7 @@ impl Engine<'_> {
         deadline: Instant,
         fresh: &dyn Fn() -> Result<(), CandidateError>,
     ) -> Result<ExecOutput, CandidateError> {
-        crate::timings::measure(crate::timings::Step::ContainerExec, Some(1), |_| {
+        crate::timings::measure(crate::timings::Step::ContainerExec, None, |_| {
             self.service_exec_observed(container, argv, workdir, deadline, fresh)
         })
     }
@@ -103,7 +103,7 @@ impl Engine<'_> {
         deadline: Instant,
         fresh: &dyn Fn() -> Result<(), CandidateError>,
     ) -> Result<OneOffOutput, CandidateError> {
-        crate::timings::measure(crate::timings::Step::ContainerRun, Some(1), |_| {
+        crate::timings::measure(crate::timings::Step::ContainerRun, None, |_| {
             self.service_one_off_observed(name, config, deadline, fresh)
         })
     }

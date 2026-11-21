@@ -879,8 +879,7 @@ Native recovery investigations can use the explicit, value-free
 
 ## Built-in timing contract
 
-The CLI and Rust runtime share [versioned timing records](reference/timings.md).
-The initial runtime integration is opt-in through its internal parent transport;
-it adds observation wrappers without changing lifecycle state machines. Child
-records use relative monotonic offsets so the CLI can join repeated runtime
-requests without relying on synchronized process clocks.
+The Rust runtime emits opt-in [versioned timing spans](reference/timings.md) on a
+dedicated inherited pipe. The TypeScript reader and public CLI timing flags are not
+implemented yet. Current wrappers add observations without changing lifecycle state
+machines; local format tests do not establish command coverage or low overhead.

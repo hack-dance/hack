@@ -1098,7 +1098,7 @@ impl Driver for Session<'_, '_> {
                     "Restart requires a confirmed immutable container ID.",
                 )
             })?;
-            crate::timings::measure(crate::timings::Step::ContainerStart, Some(1), |_| {
+            crate::timings::measure(crate::timings::Step::ContainerStart, None, |_| {
                 self.engine
                     .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)
             })?;
@@ -1194,7 +1194,7 @@ impl Driver for Session<'_, '_> {
             startup.verify(&self.engine, &mut self.receipt, &self.root)?;
         }
         self.check_cancelled()?;
-        crate::timings::measure(crate::timings::Step::ContainerStart, Some(1), |_| {
+        crate::timings::measure(crate::timings::Step::ContainerStart, None, |_| {
             self.engine
                 .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)
         })?;

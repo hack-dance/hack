@@ -932,7 +932,7 @@ impl<B: Backend> Driver for Session<'_, B> {
         self.check_cancelled()?;
         self.backend.verify_private(service)?;
         project_networks(&self.backend, &self.receipt, None)?;
-        crate::timings::measure(crate::timings::Step::ContainerStart, Some(1), |_| {
+        crate::timings::measure(crate::timings::Step::ContainerStart, None, |_| {
             self.backend
                 .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)
         })?;
@@ -1413,7 +1413,7 @@ fn service_observations(
 /// by locked inspection and mutation, never inferred from service health here.
 #[cfg(target_os = "macos")]
 pub(super) fn status(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
-    crate::timings::measure(crate::timings::Step::ContainerInspect, Some(1), |_| {
+    crate::timings::measure(crate::timings::Step::ProjectStatus, None, |_| {
         status_observed(candidate, run)
     })
 }

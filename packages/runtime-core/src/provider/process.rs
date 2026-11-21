@@ -658,7 +658,8 @@ mod tests {
             assert!(
                 control
                     .split_whitespace()
-                    .any(|fd| fd == format!("/dev/fd/{extra}"))
+                    .any(|fd| fd == format!("/dev/fd/{extra}")),
+                "deliberately inherited descriptor {extra} missing: {control:?}"
             );
             assert_ne!(
                 control, alone,

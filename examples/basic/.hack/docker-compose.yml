@@ -3,6 +3,8 @@ services:
   example-basic:
     image: imbios/bun-node:latest
     working_dir: /app
+    init: true
+    stop_grace_period: 2s
     volumes:
       - ..:/app
     command: bun run dev -- --port 3000 --host 0.0.0.0

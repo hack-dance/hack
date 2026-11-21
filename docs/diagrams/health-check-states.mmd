@@ -1,0 +1,21 @@
+stateDiagram-v2
+    direction TB
+    [*] --> starting: container starts
+    starting --> healthy: check passes
+    starting --> unhealthy: retries fails after period
+    healthy --> unhealthy: retries fails in a row
+    unhealthy --> healthy: check passes
+    note right of starting
+        In start_period: a check
+        every start_interval,
+        failures not counted.
+        After: every interval.
+    end note
+    note right of healthy
+        service_healthy
+        dependents start.
+        A check every interval.
+    end note
+    class starting wait
+    class healthy ok
+    class unhealthy fail

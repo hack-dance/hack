@@ -15,7 +15,7 @@ run it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -30,7 +30,8 @@ virtual machine, or change DNS or certificate trust. Newer prereleases are on th
 ## 2. Prepare the runtime
 
 The native backend needs its virtual machine software set up once per installed
-version. In next.17, use the same frontend for setup and project commands:
+version. Use the same frontend for setup and project commands (next.17 or
+later):
 
 ```sh
 "$HOME/.hack-next/bin/hack-next" native setup
@@ -40,11 +41,12 @@ Noninteractive `up` refuses until setup is complete. Interactive `up` can offer
 setup, ask for download consent, and continue after success. See the
 [first-use guide](../versions/v5/native/setup.md) for default homes and scripts.
 
-Installed next.16 needs the older command below. A `hack-next` install keeps each
-version in its own folder; these paths also support the manual alternatives:
+A `hack-next` install keeps each version in its own folder. The paths below
+support the manual alternatives. Set `V` to your installed version; an installed
+next.16 needs this older command:
 
 ```sh
-V=5.0.0-next.16   # the version you installed; `hack-next --manager status` shows it
+V=5.0.0-next.22   # the version you installed; `hack-next --manager status` shows it
 NATIVE="$HOME/.hack-next/versions/$V/bundle/hack-native"
 NATIVE_HOME="$HOME/.hack-next/versions/$V/native-home"
 ```
@@ -60,7 +62,7 @@ profile probe. It needs no administrator password or keychain access. Rerun afte
 an interrupted download to resume or restart safely. A complete matching install
 is verified before consent and reused without prompting, downloading or preparing again.
 
-For next.17 scripts, use `hack-next native setup --accept-downloads`; with the
+For scripts, use `hack-next native setup --accept-downloads`; with the
 older executor, use `runtime setup --no-interactive --accept-downloads`. Without
 `--accept-downloads`, a noninteractive run needing preparation fails with
 `E_INTERACTIVE_REQUIRED`. Complete matching installs need no flag.
@@ -154,7 +156,7 @@ Native `up` runs in the foreground and holds the project until you stop it. Add
 ```
 
 Stop the project with `hack down` from another terminal, as above. The native
-publisher-shutdown fix (HACK-2087, #719) already shipped in next.16. Next.17 adds
+publisher-shutdown fix (HACK-2087, #719) already shipped in next.16. Next.17 added
 lifecycle-command retirement fixes (HACK-2184): transient reads retry and a second
 Ctrl-C can request the forced command-group stop. If cleanup is uncertain, run
 `hack down`, then `hack down --recover` if it reports that the owner is gone.

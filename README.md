@@ -233,7 +233,7 @@ Homebrew or the release installer above.
 
 **v5 is in prerelease.** It keeps the same commands and the same `.hack/` folder
 and replaces the runtime layer underneath. Docker Compose stays the default. The
-current prerelease is `5.0.0-next.22`. Prerelease builds install beside stable
+current prerelease is `5.0.0-next.24`. Prerelease builds install beside stable
 Hack through the separate `hack-next` channel and do not change the stable
 install. Read
 [what's new in v5](docs/guides/v5-release-notes.md),

@@ -321,12 +321,30 @@ preflight. Raw runtime stderr and startup output are not configuration findings.
   `extra_hosts_without_dependencies`, `unsupported_logging`, `invalid_restart`,
   `unsupported_label`, `invalid_http_probe`, `managed_env_unreadable`,
   `environment_delivery`, `native_runtime_setup`, `shared_source_grant_required`,
-  `route_probe_required`, `too_many_bridges`, `gcloud_adc_grant_required` (consent)
-  and `gcloud_adc_mount_refused`. Runtime findings use the
+  `route_probe_required`, `too_many_bridges`, `gcloud_adc_grant_required` (consent),
+  `gcloud_adc_mount_refused`, `native_source_over_limit` and
+  `native_source_unmeasured`. Runtime findings use the
   review's own diagnostic codes, for example `privileged_service` or
   `invalid_mount`, and `review_incompatible` when the review does not admit the
   project and gives no finding this version can show. A code this version has
   no sentence for is still listed, by its code and field.
+- With native setup ready, the preflight runs the source content check `hack up`
+  runs (128 MiB by default, `native.sourceLimitMiB` up to 512): only when a
+  selected service bind-mounts project source or declares a dependency cache, as
+  on `up`. Source over the limit is the blocker `native_source_over_limit` with
+  `up`'s own refusal text; a measurement that fails is `native_source_unmeasured`,
+  because `up` refuses then too. An image-only project is not measured.
+- With the native HTTPS frontend selected, the preflight asks this machine's resolver
+  (hosts file and local DNS included) for each active routed hostname. A hostname
+  that resolves to a non-loopback address is the warning
+  `route_host_resolves_elsewhere`: it names the service and the answering address
+  (Hack's Compose proxy is `172.30.0.2`), says native listens on `127.0.0.1:<port>`,
+  and shows how to reach it (`curl --resolve HOST:<port>:127.0.0.1`). A hostname
+  that resolves only to loopback while another listener, such as Hack's Compose
+  proxy, answers on port 443 and native's port is not 443 is the warning
+  `route_default_port_elsewhere`: a URL without a port reaches that other listener;
+  `hack open` adds native's port. Hostnames are never printed, and an unknown
+  lookup reports nothing.
 - The runtime notes `route_binding_required` for every routed service. Preflight
   lists it only when no native HTTPS frontend is selected (machine `https` setting
   or the `HACK_NATIVE_CADDY_*` variables), because the route is then not served.
@@ -752,12 +770,20 @@ local user can take its name while the pool is stopped. It removes only the prov
 socket files the stop proved closed, through the real data directory.
 
 On a fresh pool boot or a boot after stopping the pool, native waits up to 10 seconds
-for every declared bridge socket to appear with the required private ownership and mode.
+plus 1 second per bridge slot (20 seconds for 10 slots, at most 42) for every declared
+bridge socket to appear with the required private ownership and mode.
 The provider's guest-ready signal can arrive before its bridge threads bind. Native
-rechecks the same provider identity around each observation; it never accepts an unsafe
-socket, changes its permissions or removes it to make startup pass. Existing running-pool
+rechecks the same provider identity around each observation; it never accepts a socket of
+another type, user or link count, or removes one, to make startup pass. A socket of this user
+that the provider left world-accessible has its group and other access removed, inside the
+private socket directory. The agent and engine sockets, and the provider's other sockets in
+that directory (`port-forward.sock`, `control.sock` and the rest), are treated the same way.
+`runtime up --json` and `runtime status --json` list what was repaired for the running provider
+as `repaired_sockets` (`count` and `names`), so a repair is visible without inspecting the
+directory. Existing running-pool
 audits do not wait. A socket timeout or identity refusal takes the verified failed-boot
-stop path and names the recovery command. Use the same selected executor and identical
+stop path and names the recovery command. A timeout also says how many sockets were
+still missing and how many were not yet private at the deadline (counts only). Use the same selected executor and identical
 `--candidate-root` argument as the failed start, followed by `runtime recover --json`.
 If you explicitly selected an installed executor with `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME`, use those same non-empty values:
@@ -774,6 +800,11 @@ home or `.hack-local` directory; from that checkout run `./hack-local runtime re
 Provider-verification failures during the wait carry this guidance too; recovery still
 independently proves ownership before stopping anything. Then retry. This preserves
 retained disks and records an unclean stop; it does not claim the guest shut down cleanly.
+One exception: if the failed start was the pool's first and the disk templates it used do
+not verify (`disk_template_untrusted`, for example after a first start ended in
+`provider_timeout_uncertain`), recovery moves the never-adopted disks and the failed
+templates into an `untrusted-first-boot-<n>` directory instead and returns the pool to
+`stopped-before-engine`. The next start formats new disks. Those disks never held project data, and nothing is deleted.
 `hack down` may say the project was not started because no project mapping was published.
 
 Host cleanup or a reboot can still remove the alias. For a clean stop, observation
@@ -1121,8 +1152,8 @@ profile unless you pass `--profile development`; the research profile can report
 hashes are listed in `provider-pins.json` and under
 [network tool packages](#network-tool-packages).
 
-The current SmolVM pin is 1.34.1 (`smolvm-1.34.1-darwin-arm64.tar.gz`, SHA-256
-`8ebda502e332c739fdfc13b059be982cca66da9253c5229b4586af02c92781d9`, the value
+The current SmolVM pin is 1.35.4 (`smolvm-1.35.4-darwin-arm64.tar.gz`, SHA-256
+`4ad2b02be848219a9d88632ca9e6dc881d6e97343626aab9c11ac4a184929d9e`, the value
 upstream publishes in the release's `checksums.sha256`). `provider-pins.json` is the
 source of truth; the executor refuses any other archive.
 
@@ -1140,7 +1171,24 @@ its retained data, then prepare a fresh home for the new build.
 
 A failed `up` can leave the native VM pool running, and the failure message says how to
 stop it: once no other native project uses the pool, run `runtime down --json` on the
-native home (`runtime status --json` shows whether it runs). An `invalid_state` failure
+native home. `runtime status --json` shows whether it runs. Its `graph_runs` field counts
+the graphs the home records, Compose and native-authored, running or retained after `down`;
+fully removed native-authored journals are excluded only after strict same-owner
+retirement validation. The count is `null` when the inventory cannot be read.
+Its `pool_idle` field is `true` only when the
+pool runs with a live provider and records no graph, environment allocation or exec
+session, and `null` when that cannot be established. The `native pool idle` machine
+check warns about an idle pool only for `pool_idle: true`, and gives the stop command.
+Unavailable runtime status or unknown pool state produces an observation warning,
+with `nativePool.state: "unknown"`, instead of an all-clear or a stop suggestion;
+it never stops the pool itself, and `--fix` does not either.
+
+Historical native environment-lease records are conservatively counted as pool users,
+even after their native-authored graph is fully removed. Such a home can report
+`graph_runs: 0` and `pool_idle: false`, so doctor may omit the idle warning. The check
+does not classify or delete those allocation records.
+
+An `invalid_state` failure
 names the state path that exists but is not a directory, relative to the native home
 (for example `.hack-local/run/graphs`), when that path lies in one of the home's own
 state directories. Inspect that path; do not delete it to retry.
@@ -1358,7 +1406,19 @@ code. Retained exec output is limited to 1 MiB per stream.
 Exec is noninteractive: stdin is closed, no TTY is allocated, and arguments are passed
 literally without an implicit shell. The default wait is 30 seconds, configurable up
 to 120 with `--timeout-seconds`. Timeout or transport failure means completion is
-uncertain: the command may still run, and Hack does not replay it. Exec inherits the container's static environment. When the selected service has a
+uncertain: the command may still run, and Hack does not replay it. An exec that delivers
+fresh per-command values names the step that failed (`create`, `connect`, `start`, `hello`,
+`deliver`, `release`, `output` or `inspect`) and why (`deadline`, `closed`, `io` or
+`protocol`). A failure before the last value byte is sent cannot have run the command: it
+reports `graph_service_exec_not_run` and is safe to retry. From `release` on, the command may
+have run, and the error stays `graph_service_exec_uncertain`. The per-command values'
+lifetime bounds only their delivery; the exec's own wait bounds the command. Output that is
+still arriving when that wait ends is read to the end, allowing 5 seconds between bytes and
+at most 20 seconds past the wait, so a command that finished on a slow or busy host is reported
+with its exit code rather than as uncertain. Output already queued when a stalled host resumes,
+even after that limit, is still read. Output that stays silent for 5 seconds without ending,
+keeps going past that limit, or an exec whose exit cannot be read within 5 seconds of its
+output ending is still uncertain. Exec inherits the container's static environment. When the selected service has a
 committed private environment attachment on the current boot, it reuses that
 service's exact read-only launcher mounts and original expiry. No values are copied
 into engine metadata, and exec never renews credentials. With the current launcher,
@@ -1407,6 +1467,16 @@ resolved again for those services. Missing images still refuse native admission;
 this selection never replaces generation, source or resource checks. Changing the
 original Compose file uses normal image resolution and the existing compatibility
 rules, rather than silently adopting an old image for a new declaration.
+
+A retained run stays startable after a later runtime boot fails before the runtime
+recorded the guest's boot, for example `bridge_socket_timeout` or a provider that
+exits during boot. After such a failure the runtime reads `failed-boot-stopped`. Run
+the runtime's `runtime recover --json` once, then `hack up` restores the retained run
+as usual. The VM may have started in that boot, but the container engine starts only
+after the boot is recorded, so no container, network or volume of the run was touched.
+Restore still checks the volumes' recorded identities. A failed boot that had
+recorded its guest boot, and so may have started the engine, still refuses retained
+startup.
 
 Editing the Compose file of a stopped graph and running `hack up` again reconciles
 the same run, as `docker compose up` does. Every container and network is
@@ -2067,6 +2137,9 @@ owner could not be authenticated, while `runtime_degraded` means its runtime che
 failed. A stopped candidate runtime is an ordinary state for `ps`: with a mapping
 present it exits 0 and reports `runtime_not_running` (no phase, no service rows),
 and text output prints "Native runtime is not running; no services are running."
+That includes a pool left stopped by a failed or recovered boot (`failed-boot-stopped`,
+`recovered-unclean`, `stopped-before-engine`) whose provider is not alive; before, `ps`
+failed there with `runtime_changed`.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,
@@ -3088,20 +3161,34 @@ first success, then every 30 seconds for the rest of that probe generation.
 This allows slow first-page compilation, including a server first answering after
 120 seconds. With a full timeout on each request, the grace plus three failed
 startup samples takes at most about 246 seconds of probe time, leaving about
-54 seconds of the usual 300-second graph budget for earlier startup work.
+54 seconds of the default 300-second graph budget for earlier startup work.
 An inferred probe observed unhealthy names its service and route port. For a
 missing listener or HTTP 5xx during boot, check `hack logs <service>` in the same
 project/branch, fix the route
 port, or declare `healthcheck.x-hack-http` with a longer `start_period_ms` and a
 readiness path that answers 2xx.
 
-The 300-second deadline belongs to the whole graph; it is not renewed when a
-service starts. Slow earlier services or `service_healthy` dependencies consume
-it too. A routed service started after a dependency taking 240 seconds can reach
-the graph deadline before its own probe finishes. That path still returns the
-generic `graph_timeout`, without naming the waiting services. Use `hack logs`
-and inspect the dependencies as well as the route. An explicit probe with a longer
-grace does not extend the whole-graph deadline.
+The graph start deadline (300 seconds by default) belongs to the whole graph; it
+is not renewed when a service starts. Slow earlier services or `service_healthy`
+dependencies consume it too. A routed service started after a dependency taking
+240 seconds can reach the graph deadline before its own probe finishes. An
+explicit probe with a longer grace does not extend the whole-graph deadline.
+For a graph that legitimately needs longer (many services, slow first starts, a
+loaded host), set `native.startTimeoutSeconds` in `.hack/hack.config.json` or
+`HACK_NATIVE_START_TIMEOUT_SECONDS` (whole seconds, 60 to 600, the runtime's
+own bound; the variable wins). The budget is configurable rather than progress-aware because the runtime
+owns the deadline and reports nothing per service before the graph is ready.
+When it runs out, `graph_timeout` names each service that had not reached its
+readiness goal, what it was doing and how long it was waited on. The runtime
+removes a failed start's containers before it reports, so these states come from
+the graph's status as read while the start waited (every 5 seconds, startup views
+only); the message says how old that read was, and without one from the last 30
+seconds it keeps the runtime's generic `graph_timeout` message. For example
+`Not ready after 300 s of the 300 s graph start budget: api (wanted healthy;
+running, starting)`. Use `hack logs` and inspect the dependencies as well as the
+route. A guest that is too small can page heavily and miss this budget; the
+error does not yet report guest memory pressure (`hack doctor` shows the
+memory the pool reserves for its guest).
 A successful TCP connection and complete HTTP/1.0 or HTTP/1.1 response headers are
 required. HTTP 200–499, including `/` returning 404, is ready; 5xx, EOF, non-HTTP
 bytes, a timeout or partial headers are not. Redirects are not followed. At most
@@ -3256,8 +3343,8 @@ still resolve arm64 images. Without Rosetta 2 the start refuses with
 
 Every boot audits translation against the pool's recorded intent: the provider's
 stored machine setting, its running configuration, and the guest's `binfmt_misc`
-`rosetta` registration (the x86_64 ELF match with the fixed `rosetta-wrapper`
-interpreter). A pool without translation must have no such registration. The image
+`rosetta` registration (the x86_64 ELF match with the Rosetta translator at
+`/mnt/rosetta/rosetta` as the fixed interpreter). A pool without translation must have no such registration. The image
 cache keeps amd64 archives separate from arm64 ones. Under `prefer-native`, a cached
 amd64 archive is reused only after the pinned image is confirmed not to publish arm64.
 The runtime admits an amd64 image only for an opted-in service
@@ -4329,7 +4416,9 @@ the current owned project/branch mapping, preserves binary stdout/stderr and the
 command exit code, and never falls back to Compose. With piped input/output or
 `HACK_NO_INTERACTIVE=1`, it uses finite exec with a 30-second observation budget;
 a timeout may leave the command running and is not
-retried. `--env` and `--profile` changes are refused. A command name such as `bun`
+retried. When fresh values are delivered through private stdin, output that is still arriving
+or already queued when that budget ends is read to the end, so a command that finished on a
+busy host returns its exit code (see below). `--env` and `--profile` changes are refused. A command name such as `bun`
 uses the selected container's PATH; no host PATH or implicit shell is used. For
 adopted Compose services, `hack exec` resolves the saved startup overlay and AWS profile again, and delivers
 fresh selected-service managed, allowed caller-shell and env-file values through
@@ -4550,7 +4639,10 @@ listener is never classified as a conflict because another publisher exited.
 
 New macOS frontend finalization records include the process birth time. Retaining
 recovery can distinguish a reused PID without signalling its replacement. A
-matching zombie also counts as exited. Unreadable identities refuse; records
+matching zombie also counts as exited. When `hack down` has just seen the frontend exit
+without finishing its cleanup, an unreadable identity row (for example, `ps` timing out
+under load) is read again, up to five reads 0.5 s apart, before down refuses. A readable
+row that shows the frontend still running refuses at once. Unreadable identities still refuse; records
 without a birth retain their PID-only behavior. Linux does not compare `ps`
 births because clock corrections can change that observation. Failure to capture
 the frontend's own birth falls back to the legacy behavior instead of failing up.

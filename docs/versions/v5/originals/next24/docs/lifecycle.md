@@ -111,7 +111,9 @@ keeps the record even after its wrapper exits. Matching wrapper identity plus
 descendant lineage also keeps the record. Older records without that identity do not
 grant signal authority or make an unrelated live group count as retained work.
 
-Zellij does not await process-group retirement; it is scheduled for removal in v5.0.0.
+Zellij is removed in v5. If a project has lifecycle state saved by a zellij session,
+v5 `up`, `restart` and `down` refuse. Stop the project with the v4 CLI first; see
+[the zellij stop procedure](versions/v5/guides/upgrade-from-v4.md#breaking-change-zellij-workspaces-removed).
 
 If the launch missed a pane start time, foreground cleanup re-reads the current
 pane in the recorded window while checking the session's ownership token before
@@ -365,14 +367,11 @@ Behavior:
   containers that may still be running are kept instead (see below).
 - A disabled helper (`enabled: false`) needs none of its `env` or `upstreamEnv` values.
 - A project with `sharedHelpers` and a lifecycle session (lifecycle processes or a
-  persistent `up.before` hook) needs tmux for that session. With zellij selected,
-  `hack up` and `hack restart` fail with `E_LIFECYCLE_FAILED` before any hook,
-  helper or process runs: zellij records the session's ownership after creating
-  it, so an interrupted start could leave a session `hack down` cannot reclaim.
-  Install tmux or set `sessions.mux` to `tmux`. If the selection changes to zellij
-  while hooks run, the start fails when it chooses the session's backend, before
-  creating the session, and rolls back the helper holders it added. zellij
-  support is tracked in HACK-1849.
+  persistent `up.before` hook) needs tmux for that session. tmux creates the
+  session with its ownership token in one step, so an interrupted start cannot
+  leave a session that `hack down` cannot reclaim. If no tmux is available when
+  the start chooses the session, it fails before creating one and rolls back the
+  helper holders it added.
 - `hack down` releases the instance's holder. A helper still used by another branch keeps
   running; the last release stops a helper Hack started and never signals an adopted one.
   Down releases every helper the instance acquired, recorded at start, so removing or
@@ -635,11 +634,11 @@ who asked. See the [activity log reference](./reference/activity-log.md).
 
 ## Sessions backend
 
-Lifecycle processes run inside the configured mux backend (tmux or zellij), using the same selection rules as `hack session`.
+Lifecycle processes run in a tmux session, using the same selection rules as `hack session`. tmux is the only multiplexer in v5; `zellij` is refused with a message that says to install tmux.
 
 Config:
-- Project: `.hack/hack.config.json` → `sessions.mux = auto|tmux|zellij|none`
-- Env override: `HACK_SESSIONS_MUX=auto|tmux|zellij|none`
+- Project: `.hack/hack.config.json` → `sessions.mux = auto|tmux|none` (`auto` detects tmux only)
+- Env override: `HACK_SESSIONS_MUX=auto|tmux|none`
 
 Lifecycle session name:
 - No branch: `<project>--lifecycle`

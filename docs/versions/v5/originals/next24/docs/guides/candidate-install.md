@@ -5,7 +5,11 @@ The native backend is a beta for Apple Silicon macOS. It is not part of stable
 nor the Homebrew formula contain it. Its current limits are listed under
 [candidate capability limits](prereleases.md#candidate-capability-limits).
 
-v5 prereleases are opt-in Apple Silicon macOS bundles identified by `5.0.0-next.N`,
+On Linux the candidate runs the Compose backend only; see
+[Linux: the Compose-only candidate](#linux-the-compose-only-candidate). The rest
+of this guide describes the macOS bundle unless it says otherwise.
+
+v5 prereleases are opt-in bundles identified by `5.0.0-next.N`,
 with a positive number and no leading zero. After a stable v5 release, candidates
 move to the next line, such as `5.1.0-next.N`; see
 [versions and artifacts](prereleases.md#versions-and-artifacts). Each release ships
@@ -15,7 +19,7 @@ exact release tag over HTTPS, review it, then run it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -58,6 +62,69 @@ signature verification checks all bundled macOS binaries. Download and archive c
 loads only when installing software. Concurrent observation and stop commands can
 accompany a foreground candidate command; selecting another bundle refuses while
 any launcher is active.
+
+## Linux: the Compose-only candidate
+
+Starting with the first release that ships Linux assets (`SHA256SUMS-linux` is in
+its asset list; `5.0.0-next.22` and earlier have none), a release also carries a
+bundle for Linux on x86_64 and arm64 with glibc. It runs the Compose backend only. The native backend is Apple Silicon
+macOS only. musl-based systems such as Alpine and other architectures are not
+supported; the installer refuses there and names the supported platforms.
+
+Install with the same commands as above, using the tag of a release that has
+Linux assets (`SHA256SUMS-linux` is in its asset list; the `5.0.0-next.22`
+installer stops on Linux). The same `hack-next-install.sh` picks the Linux manager
+from `uname`. It needs `curl`, `sha256sum` (or `shasum`), `mktemp`, `chmod`, `rm`
+and `date`. It runs without `sudo` and needs no compiler, Python or Bun, so it
+works in a dev container or an agent sandbox. It checks the manager against the
+digest it carries for your architecture, installs under `~/.hack-next`, does not
+edit PATH, and ends with:
+
+```text
+Installed the Compose backend. The native backend is Apple Silicon macOS only.
+```
+
+Running projects needs a Docker-compatible engine and Docker Compose, as on any
+Compose install. Then continue with
+[Select v5 on Compose](../versions/v5/install.md#select-v5-on-compose).
+
+What differs from the macOS bundle:
+
+- `hack-next` runs Compose when `HACK_RUNTIME_BACKEND` is unset. With
+  `HACK_RUNTIME_BACKEND=native` it refuses before the candidate starts.
+  `hack-next native setup` reports `E_UNSUPPORTED_PLATFORM`.
+- The bundle holds the CLI, the launcher, the config compiler and its schemas, the
+  lifecycle supervisor, this guide, checksums and provenance. It has no native
+  executor, guest relay, storage witness, provider pins or MCP bundle.
+- Linux executables are not code signed. The installer checks the manager against
+  its embedded SHA-256, the manager checks the archive against
+  `SHA256SUMS-linux`, and every launch re-verifies each bundle file against the
+  installation receipt.
+- A version directory holds only the bundle and its receipt. There are no private
+  `native-home` or `cli-home` directories: Compose runs use your own Hack home
+  (`HACK_HOME`, default `~/.hack`), as described under
+  [Test both backends](#test-both-backends).
+- `uninstall` does not stop the global proxy and logging containers either: run
+  `hack-next global down` before `hack-next --manager uninstall --apply`.
+- Selection changes (`upgrade`, `select`, `rollback`, `stable`, `uninstall`) do
+  not stop or inspect your Compose projects. They take the channel lock, which
+  refuses while a `hack-next` command is running.
+
+Trust model, the same on macOS and Linux: the installer pins only the manager's
+SHA-256, and the manager then accepts the archive digest listed in the release's
+checksum file (`SHA256SUMS-linux` on Linux, `SHA256SUMS` on macOS), which it
+downloads over HTTPS from the same GitHub release as the archive, so an archive is
+only as trustworthy as that release's assets.
+
+`--manager status`, `upgrade`, `select`, `rollback`, `stable` and `uninstall` work
+as described under
+[upgrade, roll back and return to stable](#upgrade-roll-back-and-return-to-stable).
+To check the standalone Linux manager yourself, download
+`hack-next-manager-linux-x86_64` (or `-arm64`) and `SHA256SUMS-linux` from the
+release and compare with `sha256sum --check --ignore-missing SHA256SUMS-linux`;
+there is no `codesign` step. To install from files you already downloaded, pass
+the installer `--manager /absolute/manager` (still checked against its embedded
+digest) and `--archive /absolute/archive --sha256 DIGEST`.
 
 ## Test both backends
 
@@ -295,7 +362,7 @@ lifecycle supervisor that `5.0.0-next.18` added. The installed manager cannot fe
 a newer one: `upgrade-manager` installs the executable it is run from. Download the
 standalone manager from the release you are upgrading to, verify it against that
 release's `INSTALLER-SHA256SUMS`, then run that file against your channel root.
-The example names `v5.0.0-next.16`; use the release you are upgrading to in both
+The example names `v5.0.0-next.22`; use the release you are upgrading to in both
 URLs and replace `NEWER` with its number. For a channel that a compiled manager
 installed (`5.0.0-next.6` to `next.17`) that is `5.0.0-next.19` or later: the
 `5.0.0-next.18` manager does not recognize earlier managers. The takeover works only
@@ -305,10 +372,10 @@ on a channel the newer manager can validate. A channel from the `5.0.0-next.1` t
 ```sh
 dir=$(mktemp -d) && cd "$dir" &&
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/hack-next-manager-darwin-arm64 \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/hack-next-manager-darwin-arm64 \
   --output hack-next-manager-darwin-arm64 &&
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/INSTALLER-SHA256SUMS \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/INSTALLER-SHA256SUMS \
   --output INSTALLER-SHA256SUMS &&
 grep '[ *]hack-next-manager-darwin-arm64$' INSTALLER-SHA256SUMS > manager.sha256 &&
 shasum -a 256 --check manager.sha256 &&

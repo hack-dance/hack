@@ -1705,7 +1705,7 @@ fn start_pool(
     result
 }
 
-fn pool_spec(candidate: &Candidate, owner: &Owner, profile: Profile) -> MachineSpec {
+fn pool_spec(candidate: &Candidate, owner: &Owner, profile: super::Profile) -> MachineSpec {
     MachineSpec {
         cpus: profile.cpus(),
         memory_mib: profile.memory_mib(),

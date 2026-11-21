@@ -8,7 +8,10 @@ fn entry(path: &str, content: &str) -> ContentEntry {
         kind: "file".into(),
         executable: false,
         bytes: content.len() as u64,
-        sha256: Some(format!("{:x}", Sha256::digest(content.as_bytes()))),
+        sha256: Some(format!(
+            "{:x}",
+            crate::Hex(Sha256::digest(content.as_bytes()))
+        )),
         link_target: None,
     }
 }

@@ -230,7 +230,9 @@ mod tests {
         legacy.schema_version = 1;
         legacy.revision = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(&(1_u32, &legacy.entries)).unwrap())
+            crate::Hex(Sha256::digest(
+                serde_json::to_vec(&(1_u32, &legacy.entries)).unwrap()
+            ))
         );
         legacy.validate().unwrap();
         assert_ne!(legacy.revision, before.receipt().revision);

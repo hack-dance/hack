@@ -89,7 +89,7 @@ impl Record {
             self.attempt,
         ))
         .map_err(|_| refused())?;
-        Ok(format!("{:x}", Sha256::digest(bytes)))
+        Ok(format!("{:x}", crate::Hex(Sha256::digest(bytes))))
     }
     fn validate(&self, parent: (u64, u64)) -> Result<(), CandidateError> {
         if ![1, 2].contains(&self.version)

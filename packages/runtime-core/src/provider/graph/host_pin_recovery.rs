@@ -35,7 +35,7 @@ fn refused() -> CandidateError {
     )
 }
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 
 /// Guest::boot_id is sourced from the host Owner receipt. Execute a read-only

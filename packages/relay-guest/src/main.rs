@@ -21,6 +21,9 @@ pub mod relay_client;
 pub mod relay_frame;
 #[path = "../../runtime-core/src/provider/relay_integrity.rs"]
 pub mod relay_integrity;
+// Build guard only: this binary runs in the guest, where no test of it runs.
+#[path = "../../runtime-core/src/sha256_guard.rs"]
+mod sha256_guard;
 
 mod barrier;
 mod server;

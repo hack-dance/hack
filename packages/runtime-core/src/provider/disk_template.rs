@@ -286,7 +286,7 @@ pub(super) fn content_digest(
         offset = next_block.saturating_mul(BLOCK);
     }
     Ok(Some(ContentDigest {
-        sha256: format!("{:x}", hasher.finalize()),
+        sha256: format!("{:x}", crate::Hex(hasher.finalize())),
         read,
     }))
 }
@@ -381,7 +381,7 @@ mod tests {
                 hasher.update(chunk);
             }
         }
-        format!("{:x}", hasher.finalize())
+        format!("{:x}", crate::Hex(hasher.finalize()))
     }
 
     fn digest_of(path: &Path) -> String {

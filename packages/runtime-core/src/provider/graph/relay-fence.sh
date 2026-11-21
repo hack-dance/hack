@@ -7,7 +7,8 @@ fence_write() {
 if test "$serial" -ne 0; then
  controls=/run/hack-local/relay-slots
  test ! -L "$controls"
- if test ! -e "$controls"; then mkdir -m 700 "$controls"; fi
+ # Concurrent starts of other slots may create it first; private_dir decides.
+ test -e "$controls" || mkdir -m 700 "$controls" 2>/dev/null || test -d "$controls"
  private_dir "$controls"
  control="$controls/slot-$slot"
  test ! -L "$control"

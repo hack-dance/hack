@@ -3,7 +3,9 @@ import {
   COMPILER_HOSTS,
   planScope,
   scopeOutputs,
+  touchesDockerSuite,
   touchesRelocatedCli,
+  touchesStateModels,
 } from "./ci-change-scope.ts";
 import { selectTests, type TestSelection } from "./ci-test-selection.ts";
 import { requiresWorkflowFull } from "./ci-workflow-guard.ts";
@@ -19,6 +21,7 @@ export type PullRequestPlan = ReturnType<typeof scopeOutputs> & {
   readonly docker_suite: boolean;
   readonly defer_macos: boolean;
   readonly build_smoke: boolean;
+  readonly state_models: boolean;
 };
 
 function compilerHosts(
@@ -67,6 +70,7 @@ export function fullPushPlan(
     docker_suite: true,
     defer_macos: false,
     build_smoke: true,
+    state_models: true,
   };
 }
 
@@ -140,7 +144,12 @@ export async function planPullRequest(opts: {
     !opts.draft && (full || opts.changed?.some(touchesRustInput) === true);
   const mac =
     !opts.draft && (integration || stablePr || opts.full || opts.mac === true);
-  const e2e = !opts.draft && (integration || full || opts.e2e === true);
+  const e2e =
+    !opts.draft &&
+    (integration ||
+      full ||
+      opts.e2e === true ||
+      opts.changed?.some(touchesDockerSuite) === true);
   const macos = mac && pools.macos.length > 0 ? [1, 2, 3] : [];
   const linux = [4, 5, 6, 7, 8];
   const allJobs = full;
@@ -172,7 +181,10 @@ export async function planPullRequest(opts: {
     test_files: JSON.stringify(selection.files),
     test_shards: JSON.stringify([...macos, ...linux]),
     selection_mode: selection.mode,
-    docker_suite: e2e && coarse.suite,
+    docker_suite: e2e,
+    state_models:
+      !opts.draft &&
+      (integration || full || opts.changed?.some(touchesStateModels) === true),
     defer_macos: !mac,
     build_smoke: !opts.draft && (integration || full),
   };

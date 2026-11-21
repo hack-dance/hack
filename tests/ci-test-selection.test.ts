@@ -100,7 +100,6 @@ describe("conservative dependency selection", () => {
     ["scripts/helper.ts"],
     ["tests/fixtures/input.ts"],
     ["tests/e2e/run.ts"],
-    ["tests/models/input.ts"],
     ["tests/__fixtures__/input.ts"],
     ["packages/config-compiler/src/lib.rs"],
     ["src/deleted.ts"],
@@ -516,7 +515,7 @@ describe("PR matrix policy", () => {
       defer_macos: true,
     });
   });
-  test("a PR changing refused lifecycle HOME writes gets relocated acceptance on Linux", async () => {
+  test("shared CLI source keeps relocated acceptance and Docker coverage on Linux", async () => {
     for (const path of [
       "src/lib/activity-log.ts",
       "src/commands/project.ts",
@@ -544,7 +543,7 @@ describe("PR matrix policy", () => {
         compiler_rust: false,
         runtime_core: false,
         defer_macos: true,
-        docker_suite: false,
+        docker_suite: true,
         build_smoke: false,
       });
       expect(
@@ -829,4 +828,185 @@ test("draft fan-ins fail explicitly even when the light set passes or scope is c
       expect(result.stdout.toString()).toContain("skipped: draft");
     }
   }
+});
+
+describe("CI tier table (HACK-2493)", () => {
+  const rows = [
+    {
+      name: "ordinary test",
+      paths: ["tests/a.test.ts"],
+      docker: false,
+      models: false,
+      full: false,
+    },
+    {
+      name: "docs",
+      paths: ["docs/a.md"],
+      docker: false,
+      models: false,
+      full: false,
+    },
+    {
+      name: "model registry",
+      paths: ["scripts/lib/tla-runtime-models.ts"],
+      docker: false,
+      models: true,
+      full: false,
+    },
+    {
+      name: "model artifact",
+      paths: ["tests/models/tla/example/Spec.tla"],
+      docker: false,
+      models: true,
+      full: false,
+    },
+    {
+      name: "model and Rust",
+      paths: [
+        "scripts/lib/tla-runtime-models.ts",
+        "packages/runtime-core/src/main.rs",
+      ],
+      docker: false,
+      models: true,
+      full: false,
+    },
+    {
+      name: "Rust",
+      paths: ["packages/runtime-core/src/main.rs"],
+      docker: false,
+      models: false,
+      full: false,
+    },
+    {
+      name: "Compose backend",
+      paths: ["src/backends/runtime-backend.ts"],
+      docker: true,
+      models: false,
+      full: false,
+    },
+    {
+      name: "Compose template",
+      paths: ["templates/compose.yml"],
+      docker: true,
+      models: false,
+      full: false,
+    },
+    {
+      name: "E2E harness",
+      paths: ["tests/e2e/harness.ts"],
+      docker: true,
+      models: false,
+      full: false,
+    },
+    {
+      name: "shared helper",
+      paths: ["tests/helpers/private-cli-env.ts"],
+      docker: true,
+      models: true,
+      full: true,
+    },
+    {
+      name: "lockfile",
+      paths: ["bun.lock"],
+      docker: true,
+      models: true,
+      full: true,
+    },
+    {
+      name: "workflow",
+      paths: [".github/workflows/ci.yml"],
+      docker: true,
+      models: true,
+      full: true,
+    },
+    {
+      name: "selector",
+      paths: ["scripts/ci-test-selection.ts"],
+      docker: true,
+      models: true,
+      full: true,
+    },
+    {
+      name: "unknown script",
+      paths: ["scripts/unknown.ts"],
+      docker: true,
+      models: true,
+      full: true,
+    },
+  ];
+  for (const row of rows) {
+    test(row.name, async () => {
+      expect(requiresWorkflowFull(row.paths)).toBe(row.full);
+      const plan = await planPullRequest({
+        repoRoot,
+        changed: row.paths,
+        draft: false,
+        full: false,
+        selection: {
+          mode: row.full ? "full" : "selected",
+          reason: "fixture",
+          files: [],
+        },
+      });
+      expect(plan.docker_suite).toBe(row.docker);
+      expect(plan.state_models).toBe(row.models);
+    });
+  }
+  test.each([
+    "docker/node-runtime/Dockerfile",
+    ".dockerignore",
+    "examples/app/compose.yml",
+    "assets/compose.yml",
+    "docs/recipes/example.md",
+    "packages/lifecycle-supervisor/src/main.rs",
+  ])("Docker image/harness input: %s", async (path) => {
+    const plan = await planPullRequest({
+      repoRoot,
+      changed: [path],
+      draft: false,
+      full: false,
+      selection: { mode: "selected", reason: "fixture", files: [] },
+    });
+    expect(plan.docker_suite).toBe(true);
+  });
+  test.each([
+    ".ai/skills/hack-repo-tla/scripts/tla_agent_checks.py",
+    "tests/python/test_prepared_base_benchmark.py",
+    "tests/python/test_native_compose_benchmark.py",
+    "tests/python/test_native_frontend_acceptance.py",
+    "tests/python/test_application_benchmark_protocol.py",
+  ])("bundled model-job input: %s", async (path) => {
+    const plan = await planPullRequest({
+      repoRoot,
+      changed: [path],
+      draft: false,
+      full: false,
+      selection: { mode: "selected", reason: "fixture", files: [] },
+    });
+    expect(plan.state_models).toBe(true);
+    expect(plan.docker_suite).toBe(false);
+  });
+  for (const extra of [{ e2e: true }, { full: true }, { pullRequest: false }]) {
+    test(`Docker opt-in ${JSON.stringify(extra)}`, async () => {
+      const plan = await planPullRequest({
+        repoRoot,
+        changed: ["docs/a.md"],
+        draft: false,
+        full: false,
+        selection: { mode: "selected", reason: "fixture", files: [] },
+        ...extra,
+      });
+      expect(plan.docker_suite).toBe(true);
+      expect(plan.state_models).toBe(!("e2e" in extra));
+    });
+  }
+  test("model-only inputs do not force the full unit inventory", () => {
+    expect(
+      selectTests({
+        repoRoot,
+        changed: ["scripts/lib/tla-runtime-models.ts"],
+        graph: repoGraph,
+      }).mode
+    ).toBe("selected");
+  });
 });

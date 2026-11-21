@@ -1,10 +1,14 @@
 /** Replay/policy mirror of the independent shell guard in ci.yml; parity is tested against the shell. */
+import { touchesStateModels } from "./ci-change-scope.ts";
+
+/** Unknown scripts and shared setup stay full until their consumers are bounded. */
 export function requiresWorkflowFull(paths: readonly string[] | null): boolean {
   return (
     !paths?.length ||
     paths.some(
       (path) =>
-        /^(?:scripts\/|\.github\/|tests\/helpers\/)/.test(path) ||
+        (!touchesStateModels(path) && /^scripts\//.test(path)) ||
+        /^(?:\.github\/|tests\/helpers\/)/.test(path) ||
         [
           "tests/preload.ts",
           "src/lib/guards.ts",

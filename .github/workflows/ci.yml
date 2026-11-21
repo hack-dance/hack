@@ -61,6 +61,7 @@ jobs:
       docker_suite: ${{ steps.scope.outputs.docker_suite }}
       defer_macos: ${{ steps.scope.outputs.defer_macos }}
       build_smoke: ${{ steps.scope.outputs.build_smoke }}
+      state_models: ${{ steps.scope.outputs.state_models }}
     steps:
       # A pull-request checkout is GitHub's merge commit; its first parent is
       # the base tip, so HEAD^1..HEAD is exactly the pull request's change.
@@ -93,6 +94,8 @@ jobs:
           full=false
           linux_rust=false
           relocated_cli=false
+          docker_inputs=false
+          model_inputs=false
           base=""
           if [ "$EVENT_NAME" = "pull_request" ]; then
             parents=$(git rev-list --parents -n 1 HEAD) || parents=""
@@ -127,6 +130,14 @@ jobs:
                     linux_rust=true ;;
                 esac
                 case "$path" in
+                  src/*|index.ts|packages/cli/*|packages/lifecycle-supervisor/*|templates/*|docker/*|examples/*|assets/*|docs/recipes/*|.dockerignore|tests/e2e/*|tests/helpers/*|.hack/*|Dockerfile|Dockerfile.*|docker-compose|docker-compose.*)
+                    docker_inputs=true ;;
+                esac
+                case "$path" in
+                  scripts/lib/tla-runtime-models.ts|tests/models/*|.ai/skills/hack-repo-tla/*|tests/python/test_prepared_base_benchmark.py|tests/python/test_native_compose_benchmark.py|tests/python/test_native_frontend_acceptance.py|tests/python/test_application_benchmark_protocol.py) model_inputs=true ;;
+                esac
+                case "$path" in
+                  scripts/lib/tla-runtime-models.ts) ;;
                   scripts/*|.github/*|tests/preload.ts|tests/helpers/*|src/lib/guards.ts|src/lib/cli-result.ts|\
                   package.json|*/package.json|bun.lock|*/bun.lock|bun.lockb|*/bun.lockb|Cargo.toml|*/Cargo.toml|Cargo.lock|*/Cargo.lock|\
                   rust-toolchain|*/rust-toolchain|rust-toolchain.toml|*/rust-toolchain.toml|\
@@ -180,6 +191,7 @@ jobs:
           docker_suite=true
           defer_macos=false
           build_smoke=true
+          state_models=true
           EOF
             echo 'Full selection: main, explicit dispatch, protected input, unavailable diff, or policy bootstrap. Intel runs for main and explicit dispatch.' >> "$GITHUB_STEP_SUMMARY"
           else
@@ -198,7 +210,7 @@ jobs:
             mac=false; e2e=false; builds=false
             if [ "$PR_DRAFT" != "true" ]; then
               if [ "$PR_BASE_REF" = "main" ] || [ "$PR_FULL" = "true" ] || [ "$PR_MAC" = "true" ]; then mac=true; fi
-              if [ "$full" = "true" ] || [ "$PR_E2E" = "true" ]; then e2e=true; fi
+              if [ "$full" = "true" ] || [ "$PR_E2E" = "true" ] || [ "$docker_inputs" = "true" ]; then e2e=true; fi
               if [ "$full" = "true" ]; then builds=true; fi
             fi
             if [ "$mac" != "true" ]; then
@@ -223,11 +235,14 @@ jobs:
                 printf 'compiler_hosts=%s\n' "$compiler" >> "$GITHUB_OUTPUT"
               fi
             fi
-            if [ "$e2e" != "true" ]; then echo 'docker_suite=false' >> "$GITHUB_OUTPUT"; fi
+            printf 'docker_suite=%s\n' "$e2e" >> "$GITHUB_OUTPUT"
+            models=false
+            if [ "$PR_DRAFT" != "true" ] && { [ "$full" = "true" ] || [ "$model_inputs" = "true" ]; }; then models=true; fi
+            printf 'state_models=%s\n' "$models" >> "$GITHUB_OUTPUT"
             printf 'build_smoke=%s\n' "$builds" >> "$GITHUB_OUTPUT"
             echo 'Ready PRs defer macOS to integration unless targeting main or labeled ci:mac or ci:full. Protected inputs and unavailable policy/diff retain full Linux, Docker and build tiers. Light PRs retain selected Linux checks; labels opt into heavy tiers. Drafts stay light.' >> "$GITHUB_STEP_SUMMARY"
           else
-            printf 'defer_macos=false\nbuild_smoke=true\n' >> "$GITHUB_OUTPUT"
+            printf 'defer_macos=false\nbuild_smoke=true\ndocker_suite=true\nstate_models=true\n' >> "$GITHUB_OUTPUT"
           fi
 
   config-compiler:
@@ -341,7 +356,7 @@ jobs:
   state-models:
     name: Runtime state models
     needs: changes
-    if: ${{ needs.changes.outputs.build_smoke == 'true' }}
+    if: ${{ needs.changes.outputs.state_models == 'true' }}
     runs-on: ubuntu-latest
     # About 3x the p95 (298s) of the last 10 completed runs (HACK-2309); the
     # old 5-minute limit cancelled full release runs at their normal length.

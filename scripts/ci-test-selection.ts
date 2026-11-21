@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import ts from "typescript";
 import { isRecord } from "../src/lib/guards.ts";
+import { touchesStateModels } from "./ci-change-scope.ts";
 import { discoverTestFiles, TEST_SUITES } from "./test-shard-plan.ts";
 
 export type TestSelection = {
@@ -511,7 +512,7 @@ export function selectTests(opts: SelectionInputs): TestSelection {
     return full("changed paths unavailable or empty");
   }
   for (const path of opts.changed) {
-    if (DOC_PATH.test(path)) {
+    if (DOC_PATH.test(path) || touchesStateModels(path)) {
       continue;
     }
     if (

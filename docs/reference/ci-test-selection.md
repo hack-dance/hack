@@ -2,22 +2,29 @@
 
 A PR uses a light tier by default: typecheck, lint/privacy, secret scan, docs
 checks when relevant, and selected Linux unit files on five Linux shards. It runs
-no macOS jobs, Docker E2E shards or state-model job. Ready PRs changing CLI
-source (`src/`, `index.ts`, `packages/cli/`) retain the existing Linux x64
-Config compiler job, including its release build and relocated CLI acceptance.
-This deliberately covers activity recording, HOME writes, output envelopes and
-refusals through any shared CLI source, rather than maintaining a fragile list
-of lifecycle helpers. Changes to acceptance scripts retain that job through the
-protected-script full-tier rule. Unrelated test/docs PRs retain the lighter tier.
-Ready Rust-input PRs retain the Linux Candidate core leg and both Linux compiler
-hosts (including Rust checks); macOS stays in the heavy tier. This covers
-non-Markdown inputs under runtime-core/config-compiler (including pins, fixtures
-and generated data), plus all relay-guest inputs. Ready PRs that
-change protected CI inputs (including workflows, selectors, scripts, suite helpers,
-manifests, lockfiles and Rust toolchains) automatically run the full Linux,
-Docker, state-model and build tiers. They defer macOS to the `next` integration
-run unless labeled `ci:mac` or `ci:full`. This macOS rule applies to every PR
-whose base is not `main`, including missing diffs or unavailable base policy.
+no macOS jobs by default. Ready CLI-source PRs retain Linux x64 relocated CLI
+acceptance; Rust-input PRs retain Linux Candidate core and both Linux compiler
+hosts. Model changes now enable the state-model job independently of build smoke.
+
+| Change kind (ready PR to `next`) | Tiers selected in addition to selected Linux units and required checks |
+| --- | --- |
+| Ordinary test or documentation | No Docker or model tier; docs site when relevant |
+| `scripts/lib/tla-runtime-models.ts` or `tests/models/**` | State models; no Docker or build smoke |
+| TLA helper skill or the four Python controls bundled with the model job | State models; no Docker or build smoke |
+| Runtime Rust source, including a model registry edit | Linux candidate/compiler checks; models when changed; no Docker |
+| Compose backend, templates, E2E harness (`tests/e2e/**`) | Docker E2E, runtime images and Linux process lifetime |
+| Shared CLI source (`src/**`, `index.ts`, `packages/cli/**`), `.hack/**`, Docker definitions, lifecycle supervisor, examples/assets and recipe snippets | Docker tier conservatively; CLI source also retains relocated acceptance |
+| Shared test helpers/preloads, other scripts, manifests, lockfiles, toolchain/config pins, workflows or selectors | Full Linux, Docker, state-model and build tiers |
+| `ci:e2e` label | Docker tier, independently of model/build tiers |
+| `ci:full` label | Full ordinary tiers and selected macOS/native hosts |
+| `next` integration push | Docker, models and build smoke, selected Linux/macOS pools and native checks |
+
+Unknown scripts and shared helpers remain full-tier inputs until their consumers
+are audited. In particular, this change exempts only the known model registry from
+`scripts/**`; model runner/check scripts themselves stay full. Shared CLI source
+is kept on the Docker side because a shared helper can affect Compose indirectly.
+These conservative choices are explicit review points, not claims of minimal scope.
+Changes to the workflow or selection policy cannot narrow their own qualification.
 Ready PRs targeting `main` retain the full tier, including the Intel compiler.
 Linux unit-test preflight still prepares its matching compiler. The last Linux
 shard lists selected macOS
@@ -31,9 +38,9 @@ Docker/runtime-image/lifetime tier under its usual gates. The labels combine.
 ci:full selects every unit file and ordinary native/Docker tier, state models and
 build smoke. Ordinary `next` pushes and PRs into `next` omit the Intel compiler;
 `main` PRs/pushes and explicit full dispatches retain it. Removing a label restores
-the default tier, including the protected-input and `main` exceptions. A selector
-fallback alone widens files; the independent shell guard also enables full
-Linux/Docker/build tiers, with macOS selected separately as described above.
+the default tier, including the input-tier and `main` exceptions. A selector
+fallback alone widens files; the independent shell guard enables full
+Linux/Docker/build tiers for protected inputs, with macOS selected separately as described above.
 Adding/removing labels, pushing, changing readiness or retargeting recomputes
 scope; metadata edits can cancel the active run.
 
@@ -258,3 +265,19 @@ green Linux jobs. Pending macOS/Docker jobs are listed, not awaited. The lead te
 combined heads on a Mac, merges batches, and the next push qualifies their selected
 platform/Docker integration evidence. Problems found there become follow-up PRs.
 Nothing merges between a prerelease dispatch and publish.
+
+
+## Local scope dry runs
+
+Use `bun scripts/ci-change-scope.ts --event=pull_request --dry-run
+--changed-paths='["scripts/lib/tla-runtime-models.ts"]'` (one shell command).
+This reads the current tree as data, prints job switches and selected tests, and
+does not write GitHub output/summary files. The policy tests cover every row of
+the tier table and exercise the independent workflow shell against fixture diffs.
+
+On #1045 the synchronous-spawn guard was selected, but its introductory comment
+mentions “macOS”. The broad platform-source classifier therefore assigned it to
+the macOS pool, which light PRs defer; the changed `tests/` file did not cause a
+Linux guard run. The follow-up to HACK-2493 (which absorbs HACK-2491) will explicitly
+select the tree-wide guards and retain their Linux coverage. This tier-only change
+does not claim to close that gap.

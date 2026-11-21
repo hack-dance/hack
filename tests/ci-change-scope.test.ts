@@ -394,7 +394,7 @@ describe("CI workflow wiring", () => {
       "${{ needs.changes.outputs.suite == 'true' }}"
     );
     expect(jobs["state-models"]?.if).toBe(
-      "${{ needs.changes.outputs.build_smoke == 'true' }}"
+      "${{ needs.changes.outputs.state_models == 'true' }}"
     );
     for (const name of ["secret-scan"]) {
       expect(jobs[name]?.needs, name).toBeUndefined();
@@ -402,3 +402,35 @@ describe("CI workflow wiring", () => {
     }
   });
 });
+
+test("dry-run paths replay policy without writing GitHub output files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ci-dry-run-"));
+  owned.push(root);
+  const output = join(root, "output");
+  const result = Bun.spawnSync(
+    [
+      process.execPath,
+      resolve(repoRoot, "scripts/ci-change-scope.ts"),
+      "--event=pull_request",
+      "--dry-run",
+      '--changed-paths=["scripts/lib/tla-runtime-models.ts"]',
+    ],
+    {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: output,
+        GITHUB_STEP_SUMMARY: output,
+        PR_FULL: "false",
+        PR_DRAFT: "false",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 30_000,
+    }
+  );
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
+  expect(result.stdout.toString()).toContain("state_models=true\n");
+  expect(result.stdout.toString()).toContain("docker_suite=false\n");
+  expect(await Bun.file(output).exists()).toBe(false);
+}, 35_000);

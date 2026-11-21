@@ -187,7 +187,8 @@ test("trusted base policy executes against merge-tree data, not merge-tree code"
     runtime_core: "false",
     test_shards: "[4,5,6,7,8]",
     defer_macos: "true",
-    docker_suite: "false",
+    docker_suite: "true",
+    state_models: "false",
     build_smoke: "false",
   });
 });
@@ -396,7 +397,7 @@ test.each([
     runtime_core: "false",
     test_shards: "[4,5,6,7,8]",
     defer_macos: "true",
-    docker_suite: "false",
+    docker_suite: "true",
   });
 });
 test("the inline boundary retains the HOME-write acceptance leg with ci:mac", async () => {
@@ -442,6 +443,8 @@ test("next push runs trusted before policy only after a successful predecessor",
     ci_evidence: "scoped",
     defer_macos: "false",
     build_smoke: "true",
+    docker_suite: "true",
+    state_models: "true",
   });
 });
 
@@ -502,9 +505,13 @@ test("manual qualification refuses full=false before launching a suite", async (
 });
 
 test("PR labels opt into independent tiers without widening the other tier", async () => {
-  const input = { path: "src/value.ts", tierPlan: true };
+  const input = { path: "tests/example.test.ts", tierPlan: true };
   const mac = await scope({ ...input, mac: true });
-  expect(JSON.parse(mac.compiler_hosts ?? "null")).toEqual(
+  expect(
+    JSON.parse(mac.compiler_hosts ?? "null").sort(
+      (a: { os: string }, b: { os: string }) => a.os.localeCompare(b.os)
+    )
+  ).toEqual(
     JSON.parse(fullPushPlan({ releaseHosts: false }).compiler_hosts).sort(
       (a: { os: string }, b: { os: string }) => a.os.localeCompare(b.os)
     )
@@ -517,7 +524,7 @@ test("PR labels opt into independent tiers without widening the other tier", asy
     build_smoke: "false",
   });
   expect(await scope({ ...input, e2e: true })).toMatchObject({
-    compiler_hosts: '[{"os":"ubuntu-latest","platform":"linux","arch":"x64"}]',
+    compiler_hosts: "[]",
     runtime_core: "false",
     test_shards: "[4,5,6,7,8]",
     docker_suite: "true",
@@ -542,4 +549,22 @@ test("PR labels opt into independent tiers without widening the other tier", asy
     defer_macos: "true",
     build_smoke: "false",
   });
+});
+
+test.each([
+  ["scripts/lib/tla-runtime-models.ts", "false", "true"],
+  ["tests/models/tla/example/Spec.tla", "false", "true"],
+  ["src/backends/runtime-backend.ts", "true", "false"],
+  ["docker/node-runtime/Dockerfile", "true", "false"],
+  ["docker/slim-runtime/Dockerfile", "true", "false"],
+  ["examples/app/.hack/docker-compose.yml", "true", "false"],
+  [".ai/skills/hack-repo-tla/scripts/tla_agent_checks.py", "false", "true"],
+  ["tests/python/test_prepared_base_benchmark.py", "false", "true"],
+  ["tests/e2e/harness.ts", "true", "false"],
+  ["tests/example.test.ts", "false", "false"],
+])("independent shell selects Docker/model tiers for %s", async (path, docker, models) => {
+  const outputs = await scope({ path });
+  expect(outputs.selection_mode).not.toBe("full");
+  expect(outputs.docker_suite).toBe(docker);
+  expect(outputs.state_models).toBe(models);
 });

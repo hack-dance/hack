@@ -621,10 +621,16 @@ fn open_removes_the_legacy_flat_layout_and_its_sibling_archives() {
     assert!(empty_suffix.is_dir());
     assert_eq!(reopened.lookup(&key, |_| true), Lookup::Hit(record));
 
-    // A P1 rotation can leave an archive without a flat VERSION file.
+    // A P1 rotation leaves an archive even when no flat store remains: it is
+    // removed when its VERSION holds the P1 format, and a directory that only has
+    // the name (no P1 VERSION inside) is left alone.
     fs::create_dir(&archive).unwrap();
+    fs::write(archive.join("VERSION"), b"hack.store/1\n").unwrap();
     drop(fixture.open());
     assert!(!archive.exists());
+    fs::create_dir(&archive).unwrap();
+    drop(fixture.open());
+    assert!(archive.is_dir());
 }
 
 #[test]

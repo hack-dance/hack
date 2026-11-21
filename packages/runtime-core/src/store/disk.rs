@@ -261,7 +261,14 @@ fn cleanup_legacy_layout(base: &Path, owner: u32) {
             continue;
         };
         let path = entry.path();
-        if path != base && !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        // These archives sit in the user's global Hack directory, beside other
+        // state: remove one only if it is recognisably a P1 store (its VERSION
+        // holds the P1 format), never on the name alone.
+        if path != base
+            && !suffix.is_empty()
+            && suffix.bytes().all(|byte| byte.is_ascii_digit())
+            && has_legacy_version(&path.join("VERSION"), owner).unwrap_or(false)
+        {
             remove_owned_directory(&path, owner);
         }
     }

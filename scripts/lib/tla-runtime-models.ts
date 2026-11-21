@@ -2518,6 +2518,10 @@ const contracts: readonly ModelContract[] = [
           "boot = 3",
           "recovering = TRUE",
         ],
+      },
+    ],
+  },
+  {
     // HACK-2440 (c, d), HACK-2416: a patient first request, no failure on one
     // doubtful reading, and a host-side bound on "starting". Slow, refusing and
     // hanging apps; `legacy` runs the steady cadence before the first success.

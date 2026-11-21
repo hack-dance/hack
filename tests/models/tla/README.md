@@ -735,6 +735,14 @@ follow-up.
 | `Start` / `Stop` | ordinary `hack up` (fresh or retained) and `hack down` |
 | `PoolRecover` | `hack native recover` (`lifecycle::recover`) |
 
+The model does not represent bridges. On a real VM, the run that recovery met had been
+stopped in one boot and restored in a later one. The first boot's bridge sidecar was still in
+its directory, two boots back. Recovery accepts a completed earlier generation with routes
+from any boot but the live one, because what proves it complete does not depend on its boot.
+That proof is the restore history's stopped receipt, plus every current route having
+launched after it (`graph/bridges/cleanup.rs` `prior_generation`). An empty sidecar keeps
+the previous boot.
+
 The CLI tests in `tests/native-project-down.test.ts`, `tests/native-project-start.test.ts`
 and `tests/native-refusal-cli.test.ts` walk these transitions against a fake runtime.
 The model does not represent concurrent starts of the same instance, the startup

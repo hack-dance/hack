@@ -1397,6 +1397,23 @@ mod tests {
             }
             server.join().unwrap();
             std::fs::remove_file(socket).unwrap();
+            // Managed-value exec attaches through a separate raw socket. Both
+            // a successful connect and a failed one count, without an HTTP start.
+            let socket = std::env::temp_dir().join(format!(
+                "engine-private-connect-{}.sock",
+                std::process::id()
+            ));
+            let listener = UnixListener::bind(&socket).unwrap();
+            let stream =
+                private_service_exec::connect(&socket, Instant::now() + Duration::from_secs(1))
+                    .unwrap();
+            let peer = listener.accept().unwrap();
+            drop((stream, peer, listener));
+            std::fs::remove_file(&socket).unwrap();
+            assert!(
+                private_service_exec::connect(&socket, Instant::now() + Duration::from_secs(1))
+                    .is_err()
+            );
             crate::provider::engine_requests::report();
             crate::provider::engine_requests::report();
             return;
@@ -1434,7 +1451,7 @@ mod tests {
                 record["endpoints"]["GET /version"]
             );
         }
-        assert_eq!((requests, connections, transports), (20, 16, 16));
+        assert_eq!((requests, connections, transports), (20, 24, 16));
     }
 }
 

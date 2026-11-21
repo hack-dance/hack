@@ -1986,9 +1986,10 @@ a sample up to a minute old. A host that failed and recovered in between is not 
 unless it swapped out, which the count catches. That is the same kind of gap two samples
 already leave, stretched to the bound.
 
-`HACK_NATIVE_ADMISSION_REUSE_SECONDS` sets the bound in whole seconds; `0` turns reuse
-off (records are still written). A value that is not one to six decimal digits refuses
-`runtime up` with `admission_reuse_setting` before anything else happens. The runtime
+`HACK_NATIVE_ADMISSION_REUSE_SECONDS` sets the bound in whole seconds, from 0 to 600;
+the default is 60 and `0` turns reuse off (records are still written). Any other value,
+including one above 600, refuses `runtime up` with `admission_reuse_setting` before
+anything else happens; a larger value is not reduced to 600. The runtime
 reads it from its own environment. The CLI gives the runtime a closed environment and
 does not pass this variable yet, so a start through the CLI uses the default.
 

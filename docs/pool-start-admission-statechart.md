@@ -182,6 +182,6 @@ bound.
 | `OtherAcquire`, `OtherRelease` | another lifecycle operation of this home takes or returns the lease |
 | `OtherStart` | a concurrent start, holding the lease, boots the pool |
 | `OtherRecords` | another operation holding the lease (a stop, or another start) records a passing host sample for this Development home |
-| `AgeRecord` | the record grows older: under one window, then usable, then past the bound |
+| `AgeRecord` | the record grows older: under one window, then usable, then past the bound (60 s by default, at most 600 s) |
 | `ChangeTree`, `ChangeRoot` | a prepared tree or the root files change while this start does not hold the lease |
 | `SquatAlias` | another entry takes the path of a clean stop's HOME alias |

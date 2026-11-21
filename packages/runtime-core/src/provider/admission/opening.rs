@@ -52,6 +52,10 @@ pub const SETTING: &str = "HACK_NATIVE_ADMISSION_REUSE_SECONDS";
 /// The bound when [`SETTING`] is unset.
 const DEFAULT_BOUND: Duration = Duration::from_secs(60);
 
+/// The largest bound [`SETTING`] may select, in seconds. Between the recorded sample and the
+/// sample under the lease only the swapout count is known, so the gap stays short.
+const MAX_BOUND_SECONDS: u64 = 600;
+
 /// The record, beside the pool's owner record under the provider root.
 const FILE: &str = "admission-opening.json";
 
@@ -64,20 +68,28 @@ const LIMIT: u64 = 1024;
 pub struct Reuse(Duration);
 
 impl Reuse {
-    /// `None` and the empty string select the default. Anything else must be one to six
-    /// decimal digits, so a mistyped value never silently selects a bound.
+    /// `None` and the empty string select the default. Anything else must be decimal digits
+    /// naming a whole number of seconds from 0 to [`MAX_BOUND_SECONDS`]. A mistyped value
+    /// never silently selects a bound, and a value above the maximum is refused, not
+    /// reduced to it.
     pub fn parse(value: Option<&str>) -> Result<Self, CandidateError> {
+        let refused = || {
+            CandidateError::new(
+                "admission_reuse_setting",
+                "HACK_NATIVE_ADMISSION_REUSE_SECONDS must be a whole number of seconds from 0 to 600; 0 turns reuse off. A larger value is refused, not reduced to 600.",
+            )
+        };
         match value {
             None | Some("") => Ok(Self(DEFAULT_BOUND)),
+            // Six digits bound the parse; the range check below decides.
             Some(text) if text.len() <= 6 && text.bytes().all(|byte| byte.is_ascii_digit()) => {
-                Ok(Self(Duration::from_secs(
-                    text.parse().expect("one to six decimal digits"),
-                )))
+                let seconds: u64 = text.parse().map_err(|_| refused())?;
+                if seconds > MAX_BOUND_SECONDS {
+                    return Err(refused());
+                }
+                Ok(Self(Duration::from_secs(seconds)))
             }
-            Some(_) => Err(CandidateError::new(
-                "admission_reuse_setting",
-                "HACK_NATIVE_ADMISSION_REUSE_SECONDS must be a whole number of seconds from 0 to 999999; 0 turns reuse off.",
-            )),
+            Some(_) => Err(refused()),
         }
     }
 

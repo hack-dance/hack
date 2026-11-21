@@ -328,6 +328,13 @@ admitted. A swapout in that stretch still refuses the reuse
 limits how long the unseen stretch is; the model has one age class for it and
 does not measure it.
 
+Assumption about the bound: in the code it is a setting of whole seconds from 0
+to 600 (default 60). Zero turns reuse off, and a value above 600 refuses the
+start instead of being reduced. The model assumes a bound exists and is at least
+one window; it does not check the setting's range, which
+`admission/opening/tests.rs::the_bound_setting_is_whole_seconds_up_to_ten_minutes_and_anything_else_is_refused`
+pins.
+
 What the model leaves out about the record:
 
 - The file. Whether the record is a private regular file of this user (not a

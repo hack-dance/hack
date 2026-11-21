@@ -942,7 +942,7 @@ fn a_stop_records_a_passing_sample_and_a_failing_one_changes_nothing() {
 }
 
 #[test]
-fn the_bound_setting_is_whole_seconds_and_a_mistyped_value_is_refused() {
+fn the_bound_setting_is_whole_seconds_up_to_ten_minutes_and_anything_else_is_refused() {
     assert_eq!(Reuse::parse(None).unwrap(), Reuse(Duration::from_secs(60)));
     assert_eq!(
         Reuse::parse(Some("")).unwrap(),
@@ -953,7 +953,9 @@ fn the_bound_setting_is_whole_seconds_and_a_mistyped_value_is_refused() {
         ("1", 1),
         ("60", 60),
         ("0060", 60),
-        ("999999", 999_999),
+        ("599", 599),
+        ("600", 600),
+        ("000600", 600),
     ] {
         assert_eq!(
             Reuse::parse(Some(text)).unwrap(),
@@ -961,13 +963,15 @@ fn the_bound_setting_is_whole_seconds_and_a_mistyped_value_is_refused() {
             "{text}"
         );
     }
+    // A value above the maximum is refused with the range in the message, never clamped.
     for text in [
-        "on", "off", "auto", "60s", "1.5", "-1", "+1", " 60", "60 ", "1e3", "0x10", "1000000",
-        "\u{fffd}", "٦٠",
+        "on", "off", "auto", "60s", "1.5", "-1", "+1", " 60", "60 ", "1e3", "0x10", "601", "3600",
+        "999999", "1000000", "\u{fffd}", "٦٠",
     ] {
         let error = Reuse::parse(Some(text)).unwrap_err();
         assert_eq!(error.code, "admission_reuse_setting", "{text:?}");
         assert!(error.message.contains(SETTING), "{text:?}");
+        assert!(error.message.contains("from 0 to 600"), "{text:?}");
     }
 }
 

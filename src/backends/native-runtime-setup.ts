@@ -9,6 +9,7 @@ import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { canPrompt, confirmSafe } from "../lib/interactivity.ts";
+import { isNativeDetachedOwnerProcess } from "../lib/native-detached-up.ts";
 import { subprocessSignalExitStatus } from "../lib/subprocess-signal.ts";
 import {
   invokeNativeRuntime,
@@ -292,15 +293,30 @@ export async function runNativeSetupChild(opts: {
   }
 }
 
-/** Before any startup effect, offer one consent and re-inspect after setup. */
+/**
+ * Before any startup effect, offer one consent and re-inspect after setup.
+ *
+ * The detached owner skips the inspection: its launcher ran this check for
+ * the same native home just before starting it, and it cannot prompt. A setup
+ * that changes in between still fails closed at the owner's first runtime
+ * request.
+ */
 export async function requireNativeSetup(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly cwd: string;
   readonly json: boolean;
+  /** Test seam; defaults to whether this process is the detached owner. */
+  readonly detachedOwner?: boolean;
+  /** Test seam for the inspection request. */
+  readonly inspect?: typeof inspectNativeSetup;
 }): Promise<number> {
+  if (opts.detachedOwner ?? isNativeDetachedOwnerProcess()) {
+    return 0;
+  }
+  const inspect = opts.inspect ?? inspectNativeSetup;
   let inspection: NativeSetupInspection;
   try {
-    inspection = await inspectNativeSetup(opts);
+    inspection = await inspect(opts);
   } catch {
     refuse({ state: "unavailable" });
   }
@@ -330,7 +346,7 @@ export async function requireNativeSetup(opts: {
     );
     return exit;
   }
-  const installed = await inspectNativeSetup(opts);
+  const installed = await inspect(opts);
   if (installed.state !== "ready") {
     refuse(installed);
   }

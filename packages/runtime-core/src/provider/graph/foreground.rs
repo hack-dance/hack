@@ -323,6 +323,7 @@ fn serve_input<'a>(
         }
         publishers.start(candidate, &receipt, &signals, deadline, route_slots)?;
         signals.watch_read(runtime.dependency_notification_fd())?;
+        crate::provider::engine_requests::checkpoint();
         let ready =
             json!({"kind":"graph_foreground_ready","run":receipt.run,"phase":receipt.phase});
         let mut stdout = std::io::stdout().lock();

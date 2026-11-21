@@ -396,6 +396,7 @@ pub fn serve_with_storage_tool(
     }
     publication.verify()?;
     {
+        crate::provider::engine_requests::checkpoint();
         let ready = json!({"version":2,"kind":"native-graph-foreground-ready","run":run,"review":review.review_id(),"receipt":receipt});
         let mut stdout = std::io::stdout().lock();
         serde_json::to_writer(&mut stdout, &ready).map_err(|_| refused())?;

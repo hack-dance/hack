@@ -7,6 +7,7 @@ import { openTerminalControl } from "../lib/tty-process-group.ts";
 import { withPinnedRuntimeBinary } from "./native-authored-runtime-binary.ts";
 import {
   invokeNativeRuntime,
+  NATIVE_RUNTIME_ENVIRONMENT,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
@@ -173,7 +174,7 @@ function spawnInteractiveChild(
   session: string
 ): ChildProcess {
   const env: Record<string, string> = {};
-  for (const key of ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"]) {
+  for (const key of NATIVE_RUNTIME_ENVIRONMENT) {
     const value = process.env[key];
     if (value !== undefined) {
       env[key] = value;

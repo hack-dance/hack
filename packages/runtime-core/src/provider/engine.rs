@@ -47,7 +47,8 @@ struct Transport {
 
 impl Transport {
     fn new(socket: &Path, timeout: Duration) -> Result<Self, CandidateError> {
-        let client = Client::builder()
+        super::engine_requests::transport();
+        let client = super::engine_requests::instrument(Client::builder())
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
@@ -103,6 +104,7 @@ impl Transport {
         }
         require_owned_network(&method, path, body)?;
         let requires_admission = ![Method::GET, Method::HEAD, Method::DELETE].contains(&method);
+        let request_method = method.clone();
         let mut request = self
             .client
             .request(method, format!("http://hack-local{path}"));
@@ -130,6 +132,7 @@ impl Transport {
                 (a, b) => a.or(b),
             },
         )?);
+        super::engine_requests::record(request_method.as_str(), path);
         let response = request.send().map_err(|_| failure("Engine request failed or timed out; its effect may be uncertain. No request was replayed."))?;
         response_bytes(response)
     }
@@ -332,6 +335,7 @@ impl<'a> Engine<'a> {
         }
         self.guest.verify()?;
         self.guest.before_effect()?;
+        super::engine_requests::record("POST", "/v1.53/images/load");
         let response = self
             .transport
             .client
@@ -1334,6 +1338,138 @@ mod tests {
         );
         assert!(exchange(b"HTTP/1.1 200 OK\r\nContent-Length: 4194305\r\n\r\n").is_err());
         assert!(exchange(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n{\"x\":").is_err());
+    }
+
+    #[test]
+    fn request_counts_include_failed_dispatches_but_not_local_refusals() {
+        // A separate test process keeps command-wide counters isolated from the
+        // parallel suite, just as each real runtime command owns its counters.
+        const CHILD: &str = "HACK_ENGINE_COUNT_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            // Disabled requests must not become part of a later debug record.
+            exchange(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap();
+            let _report = crate::provider::engine_requests::from_environment(&[
+                "graph".into(),
+                "native".into(),
+                "serve".into(),
+            ]);
+            exchange(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap();
+            assert!(exchange(b"HTTP/1.1 500 Error\r\nContent-Length: 0\r\n\r\n").is_err());
+            let socket =
+                std::env::temp_dir().join(format!("engine-missing-{}.sock", std::process::id()));
+            let transport = Transport::new(&socket, Duration::from_millis(100)).unwrap();
+            assert!(transport.request(Method::GET, "/version", None).is_err());
+            assert!(
+                transport
+                    .request(Method::GET, "//private-value", None)
+                    .is_err()
+            );
+            assert!(
+                transport
+                    .request(Method::POST, "/v1.53/containers/create", None)
+                    .is_err()
+            );
+            crate::provider::engine_requests::checkpoint();
+            // Two requests on one keep-alive socket must count one connection.
+            let socket =
+                std::env::temp_dir().join(format!("engine-keepalive-{}.sock", std::process::id()));
+            let listener = UnixListener::bind(&socket).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                for _ in 0..2 {
+                    let mut header = Vec::new();
+                    while !header.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).unwrap();
+                        header.push(byte[0]);
+                    }
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                        .unwrap();
+                }
+            });
+            let transport = Transport::new(&socket, Duration::from_secs(2)).unwrap();
+            for _ in 0..2 {
+                transport.request(Method::GET, "/version", None).unwrap();
+            }
+            server.join().unwrap();
+            std::fs::remove_file(socket).unwrap();
+            // Managed-value exec attaches through a separate raw socket. Both
+            // a successful connect and a failed one count, without an HTTP start.
+            let socket = std::env::temp_dir().join(format!(
+                "engine-private-connect-{}.sock",
+                std::process::id()
+            ));
+            let listener = UnixListener::bind(&socket).unwrap();
+            let stream =
+                private_service_exec::connect(&socket, Instant::now() + Duration::from_secs(1))
+                    .unwrap();
+            let peer = listener.accept().unwrap();
+            drop((stream, peer, listener));
+            std::fs::remove_file(&socket).unwrap();
+            assert!(
+                private_service_exec::connect(&socket, Instant::now() + Duration::from_secs(1))
+                    .is_err()
+            );
+            // A failed exec must flush but keep counting subsequent cleanup.
+            let _failed =
+                crate::provider::publication::exec_publisher(std::process::Command::new(""));
+            assert!(
+                private_service_exec::connect(&socket, Instant::now() + Duration::from_secs(1))
+                    .is_err()
+            );
+            // A publisher's closed environment must retain diagnostics, and
+            // exec must flush before replacing the runtime (no guard can drop).
+            let mut replacement = std::process::Command::new("/bin/sh");
+            replacement
+                .env_clear()
+                .args(["-c", "test -n \"$HACK_ENGINE_REQUESTS_FILE\""]);
+            crate::provider::engine_requests::inherit(&mut replacement);
+            panic!(
+                "replacement exec failed: {}",
+                crate::provider::publication::exec_publisher(replacement)
+            );
+        }
+        let file = std::env::temp_dir().join(format!("engine-counts-{}.jsonl", std::process::id()));
+        let children: Vec<_> = (0..4).map(|_| std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "provider::engine::tests::request_counts_include_failed_dispatches_but_not_local_refusals", "--nocapture"])
+            .env(CHILD, "1").env(crate::provider::engine_requests::FILE_ENV, &file)
+            .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap()).collect();
+        for child in children {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.stderr.is_empty());
+        }
+        let records = std::fs::read_to_string(&file).unwrap();
+        std::fs::remove_file(file).unwrap();
+        assert_eq!(records.lines().count(), 20);
+        let mut requests = 0;
+        let mut connections = 0;
+        let mut transports = 0;
+        for line in records.lines() {
+            let record: Value = serde_json::from_str(line).unwrap();
+            assert!(crate::timings::Record::parse_line(line).is_some());
+            assert_eq!(record["proc"], "owner");
+            let attrs = &record["attrs"];
+            requests += attrs["engine_requests"].as_u64().unwrap_or(0);
+            connections += attrs["engine_connections"].as_u64().unwrap_or(0);
+            transports += attrs["engine_transports"].as_u64().unwrap_or(0);
+            if attrs["engine_requests"].is_number() {
+                assert_eq!(record["step"], "engine.request.version");
+                assert_eq!(attrs["engine_method"], 1);
+            } else {
+                assert_eq!(record["step"], "engine.connections");
+            }
+        }
+        assert_eq!((requests, connections, transports), (20, 28, 16));
     }
 }
 

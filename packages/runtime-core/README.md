@@ -3009,3 +3009,47 @@ mismatch reports `provider_pin_changed`, rather than interpreting that path as a
 changed PID file. This diagnostic grants no cross-version recovery authority;
 use the release that started the pool for recovery and stop, then prepare a fresh
 home for the current pin.
+
+## Engine request diagnostics
+
+Set an absolute `HACK_ENGINE_REQUESTS_FILE` path before a public native command.
+The frontend explicitly passes this setting through its closed runtime environment;
+runtime children and foreground owners append counter deltas to the same JSONL file.
+Command stdout, structured error stderr and exit status are unchanged. For example,
+with an already prepared isolated fixture and its runtime selected:
+
+```sh
+umask 077
+HACK_ENGINE_REQUESTS_FILE=/absolute/private/engine.jsonl ./dist/hack up -d --path /absolute/fixture --json
+```
+
+Lines use the shared [`hack.timings/1`](../../docs/reference/timings.md) span
+schema. Fixed `engine.request.*` steps identify sanitized endpoint templates
+(`id` stands for `{id}`); their numeric `attrs.engine_requests` counts dispatches.
+`attrs.engine_method` uses OTHER=0, GET=1, HEAD=2, POST=3, DELETE=4, PUT=5.
+`engine.connections` spans carry numeric `attrs.engine_connections` and
+`attrs.engine_transports`. Sum these attributes across processes and snapshots.
+The inherited timing descriptor takes precedence over the file when both are
+supplied. Other timing spans can appear in the same capture. Reject captures
+containing `timings.truncated` or malformed records when measuring totals.
+Object identities, query values, payloads and arbitrary command arguments are
+omitted. Unknown routes use `engine.request.other`. Requests count dispatch attempts,
+including connection and HTTP failures; local refusals before dispatch are excluded.
+Connections count HTTP connector invocations and raw exec/log socket attempts,
+including failures, rather than assuming every request opens a connection.
+Transports count HTTP client construction attempts. A keep-alive connection used
+by two requests therefore contributes two requests, one connection and one transport.
+
+Owners flush a disjoint delta before publishing readiness and continue counting.
+Normal returns, explicit exec exits, publisher process replacement and log
+frontend-lifetime exits flush the rest. Publisher children inherit the destination
+and flush before exec, so their startup work precedes the owner's ready message.
+Sum the lines present when `up -d` returns and save that snapshot before `down`;
+otherwise an owner's later shutdown delta would be included in startup totals.
+Abruptly killed processes can lose their unflushed counts. File appenders serialize
+complete lines; diagnostic output failures never replace command failures. Guest
+commands and external container clients are outside these host-runtime counts.
+An owner started without the setting cannot be instrumented retroactively.
+
+No timing saving is claimed. Measure wall time separately with diagnostics disabled
+as well, because enabled file output adds measurement overhead.

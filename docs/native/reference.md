@@ -50,3 +50,11 @@ are its main sections:
   explains ownership, startup and cleanup with state charts.
 - [Model coverage](../reference/v5-model-coverage.md) lists what the formal models
   check and what they do not.
+
+## Contributor diagnostics
+
+Set `HACK_ENGINE_REQUESTS_FILE` to an absolute private JSONL file before a
+native command to aggregate engine requests, connection attempts and transport
+construction across its runtime children and owners. Command output and errors
+are unchanged. See [engine request diagnostics](../../packages/runtime-core/README.md#engine-request-diagnostics)
+for capture boundaries and limits.

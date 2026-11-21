@@ -7,6 +7,34 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn file_diagnostics_preserve_failure_json_and_command_status() {
+    let fixture = Fixture::new();
+    let file = fixture.0.join("engine.jsonl");
+    for reference in ["alpine:3.21", "Invalid-Reference"] {
+        let arguments = ["runtime", "admit-image", "--reference", reference, "--json"];
+        let baseline = invoke(&fixture, &arguments);
+        let measured = invoke_recorded(&fixture, &arguments, Some(&file));
+        assert_eq!(measured.status.code(), baseline.status.code());
+        assert_eq!(measured.stdout, baseline.stdout);
+        assert_eq!(measured.stderr, baseline.stderr);
+        if !measured.status.success() {
+            let error: Value = serde_json::from_slice(&measured.stderr).unwrap();
+            assert_eq!(error["code"], "registry_image");
+        }
+    }
+    let records = std::fs::read_to_string(file).unwrap();
+    assert_eq!(records.lines().count(), 2);
+    for line in records.lines() {
+        let record: Value = serde_json::from_str(line).unwrap();
+        assert!(hack_runtime_core::timings::Record::parse_line(line).is_some());
+        assert_eq!(record["proc"], "runtime");
+        assert_eq!(record["step"], "engine.connections");
+        assert!(!line.contains("alpine"));
+        assert!(!line.contains("Reference"));
+    }
+}
+
+#[test]
 fn json_image_fetch_still_refuses_unpinned_input_before_network_or_output() {
     let fixture = Fixture::new();
     let archive = fixture.0.join("must-not-exist.tar");
@@ -128,7 +156,12 @@ fn checkout() -> PathBuf {
 }
 
 fn invoke(fixture: &Fixture, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_hack-runtime-candidate"))
+    invoke_recorded(fixture, arguments, None)
+}
+
+fn invoke_recorded(fixture: &Fixture, arguments: &[&str], diagnostics: Option<&Path>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hack-runtime-candidate"));
+    command
         .arg("--candidate-root")
         .arg(checkout())
         .args(arguments)
@@ -138,9 +171,12 @@ fn invoke(fixture: &Fixture, arguments: &[&str]) -> Output {
         .env("DOCKER_HOST", "unix:///must-not-be-contacted/docker.sock")
         .env("HACK_HOME", "/must-not-be-used")
         .env("HACK_DAEMON_URL", "http://127.0.0.1:1")
-        .env("PATH", fixture.directory("empty-path"))
-        .output()
-        .unwrap()
+        .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+        .env("PATH", fixture.directory("empty-path"));
+    if let Some(file) = diagnostics {
+        command.env("HACK_ENGINE_REQUESTS_FILE", file);
+    }
+    command.output().unwrap()
 }
 
 #[cfg(target_os = "macos")]

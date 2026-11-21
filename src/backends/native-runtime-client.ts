@@ -704,7 +704,15 @@ const MAX_NATIVE_FAILURE_BYTES = 1024 * 1024;
 export const NATIVE_EXIT_DRAIN_BOUND_MS = 5000;
 const REQUEST_BUDGET_REFUSAL =
   "Native runtime request exceeds its input or time budget.";
-const SYSTEM_ENVIRONMENT = ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"];
+/** Closed runtime environment plus the explicitly requested diagnostic destination. */
+export const NATIVE_RUNTIME_ENVIRONMENT = [
+  "PATH",
+  "HOME",
+  "TMPDIR",
+  "USER",
+  "LOGNAME",
+  "HACK_ENGINE_REQUESTS_FILE",
+];
 
 /** Explicit candidate selection never redirects installed v4 or starts Docker. */
 export function resolveNativeRuntimeSelection(
@@ -845,7 +853,7 @@ export async function invokeNativeRuntime(opts: {
     });
   }
   const env: Record<string, string> = {};
-  for (const key of SYSTEM_ENVIRONMENT) {
+  for (const key of NATIVE_RUNTIME_ENVIRONMENT) {
     const value = process.env[key];
     if (value !== undefined) {
       env[key] = value;

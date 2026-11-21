@@ -241,6 +241,42 @@ pub fn enable_argument(argument: &str) -> bool {
     };
     INSTALLED.set(collector).is_ok()
 }
+/// Whether a validated shared timing sink is installed.
+pub fn enabled() -> bool {
+    installed().is_some()
+}
+/// Flush diagnostic snapshots without closing live spans.
+pub fn flush() {
+    if let Some(collector) = installed() {
+        collector.flush();
+    }
+}
+/// Install private file capture only when no descriptor was handed over.
+pub fn enable_file(path: &std::path::Path, role: Role) {
+    if enabled() {
+        return;
+    }
+    let Some(sink) = super::file::FileSink::open(path) else {
+        return;
+    };
+    let Some(first) = collector::random_id() else {
+        return;
+    };
+    let Some(second) = collector::random_id() else {
+        return;
+    };
+    let config = Config {
+        trace: format!("{first}{second}"),
+        parent: None,
+        role,
+        clock: Clock::Host,
+        spawn_mono_us: None,
+        service_index_stable: false,
+    };
+    if let Some(collector) = Collector::new(config, Arc::new(HostTime), Arc::new(sink)) {
+        let _ = INSTALLED.set(collector);
+    }
+}
 pub fn shutdown() {
     if let Some(collector) = installed() {
         collector.shutdown(None);

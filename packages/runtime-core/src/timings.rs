@@ -1,10 +1,11 @@
 //! Opt-in span observations. Writers use reviewed constants; readers are additive.
 mod collector;
+mod file;
 mod transport;
 pub use collector::{Collector, Config, Parent, Sink, Span, TimeSource, observe};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-pub use transport::{REQUEST_PREFIX, enable_argument, exit, shutdown};
+pub use transport::{REQUEST_PREFIX, enable_argument, enable_file, enabled, exit, flush, shutdown};
 
 pub const SCHEMA: &str = "hack.timings/1";
 pub const RECORD_LIMIT: usize = 2048;
@@ -14,8 +15,8 @@ pub const LINE_LIMIT: usize = 16 * 1024;
 macro_rules! steps {
     ($($variant:ident => $name:literal),* $(,)?) => {
         #[derive(Clone, Copy, Debug)]
-        pub enum Step { $($variant),* }
-        impl Step { pub const fn name(self) -> &'static str { match self { $(Self::$variant => $name),* } } }
+        pub enum Step { $($variant),*, EngineRequest(EngineEndpoint) }
+        impl Step { pub const fn name(self) -> &'static str { match self { $(Self::$variant => $name),*, Self::EngineRequest(endpoint) => endpoint.name() } } }
     };
 }
 steps! {
@@ -28,6 +29,7 @@ steps! {
     ContainerReady => "container.ready", ContainerPublish => "container.publish", SpecDigest => "spec.digest",
     ContainerStart => "container.start", ContainerStop => "container.stop",
     ContainerExec => "container.exec", ContainerRun => "container.run", ContainerInspect => "container.inspect",
+    EngineConnections => "engine.connections",
     Truncated => "timings.truncated",
 }
 
@@ -105,7 +107,7 @@ macro_rules! attributes {
     };
 }
 attributes! {
-    service_index:u64, attempt:u64, engine_requests:u64, dropped:u64,
+    service_index:u64, attempt:u64, engine_requests:u64, engine_connections:u64, engine_transports:u64, engine_method:u64, dropped:u64,
     services:u64, wave:u64, syncs:u64, waited_on_index:u64, generation:u64,
     waited_on_cap:bool, blocked:bool, service_index_stable:bool, anchor_fresh:bool,
     admission_reused:bool,
@@ -338,3 +340,59 @@ pub fn start(step: Step, parent: Option<Parent>) -> Option<Span> {
 
 #[cfg(test)]
 mod tests;
+
+/// Fixed engine route vocabulary; callers cannot serialize identifiers.
+macro_rules! engine_endpoints {
+    ($($variant:ident => ($path:literal, $name:literal)),* $(,)?) => {
+        #[derive(Clone, Copy, Debug)]
+        pub enum EngineEndpoint { $($variant),*, Other }
+        impl EngineEndpoint {
+            pub fn from_path(path: &str) -> Self {
+                match path { $($path => Self::$variant),*, _ => Self::Other }
+            }
+            pub const fn name(self) -> &'static str {
+                match self { $(Self::$variant => $name),*, Self::Other => "engine.request.other" }
+            }
+        }
+    };
+}
+engine_endpoints! {
+    Ping => ("/_ping", "engine.request._ping"),
+    BuildPrune => ("/build/prune", "engine.request.build.prune"),
+    ContainersCreate => ("/containers/create", "engine.request.containers.create"),
+    ContainersJson => ("/containers/json", "engine.request.containers.json"),
+    ContainersPrune => ("/containers/prune", "engine.request.containers.prune"),
+    ContainersId => ("/containers/{id}", "engine.request.containers.id"),
+    ContainersIdArchive => ("/containers/{id}/archive", "engine.request.containers.id.archive"),
+    ContainersIdExec => ("/containers/{id}/exec", "engine.request.containers.id.exec"),
+    ContainersIdJson => ("/containers/{id}/json", "engine.request.containers.id.json"),
+    ContainersIdKill => ("/containers/{id}/kill", "engine.request.containers.id.kill"),
+    ContainersIdLogs => ("/containers/{id}/logs", "engine.request.containers.id.logs"),
+    ContainersIdStart => ("/containers/{id}/start", "engine.request.containers.id.start"),
+    ContainersIdStop => ("/containers/{id}/stop", "engine.request.containers.id.stop"),
+    ContainersIdUpdate => ("/containers/{id}/update", "engine.request.containers.id.update"),
+    ContainersIdWait => ("/containers/{id}/wait", "engine.request.containers.id.wait"),
+    Events => ("/events", "engine.request.events"),
+    ExecIdJson => ("/exec/{id}/json", "engine.request.exec.id.json"),
+    ExecIdResize => ("/exec/{id}/resize", "engine.request.exec.id.resize"),
+    ExecIdStart => ("/exec/{id}/start", "engine.request.exec.id.start"),
+    ImagesCreate => ("/images/create", "engine.request.images.create"),
+    ImagesJson => ("/images/json", "engine.request.images.json"),
+    ImagesLoad => ("/images/load", "engine.request.images.load"),
+    ImagesPrune => ("/images/prune", "engine.request.images.prune"),
+    ImagesId => ("/images/{id}", "engine.request.images.id"),
+    ImagesIdJson => ("/images/{id}/json", "engine.request.images.id.json"),
+    Info => ("/info", "engine.request.info"),
+    Networks => ("/networks", "engine.request.networks"),
+    NetworksCreate => ("/networks/create", "engine.request.networks.create"),
+    NetworksPrune => ("/networks/prune", "engine.request.networks.prune"),
+    NetworksId => ("/networks/{id}", "engine.request.networks.id"),
+    NetworksIdConnect => ("/networks/{id}/connect", "engine.request.networks.id.connect"),
+    NetworksIdDisconnect => ("/networks/{id}/disconnect", "engine.request.networks.id.disconnect"),
+    SystemDf => ("/system/df", "engine.request.system.df"),
+    Version => ("/version", "engine.request.version"),
+    Volumes => ("/volumes", "engine.request.volumes"),
+    VolumesCreate => ("/volumes/create", "engine.request.volumes.create"),
+    VolumesPrune => ("/volumes/prune", "engine.request.volumes.prune"),
+    VolumesId => ("/volumes/{id}", "engine.request.volumes.id"),
+}

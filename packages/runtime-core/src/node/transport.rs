@@ -287,6 +287,7 @@ fn schedule(
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        crate::provider::engine_requests::inherit(&mut command);
         // SAFETY: setsid is async-signal-safe and touches no Rust state in the child.
         unsafe {
             command.pre_exec(|| {

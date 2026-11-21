@@ -13,6 +13,7 @@ import { isNativeDetachedOwnerProcess } from "../lib/native-detached-up.ts";
 import { subprocessSignalExitStatus } from "../lib/subprocess-signal.ts";
 import {
   invokeNativeRuntime,
+  NATIVE_RUNTIME_ENVIRONMENT,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
@@ -240,7 +241,7 @@ export async function runNativeSetupChild(opts: {
   readonly offline?: readonly string[];
 }): Promise<number> {
   const env: Record<string, string | undefined> = {};
-  for (const key of ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"]) {
+  for (const key of NATIVE_RUNTIME_ENVIRONMENT) {
     env[key] = process.env[key];
   }
   env.HACK_NO_INTERACTIVE = "1";

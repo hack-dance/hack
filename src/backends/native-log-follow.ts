@@ -414,6 +414,7 @@ function runtimeEnvironment(): Record<string, string> {
     "TMPDIR",
     "USER",
     "LOGNAME",
+    "HACK_ENGINE_REQUESTS_FILE",
     "XDG_CONFIG_HOME",
     "XDG_STATE_HOME",
     "XDG_CACHE_HOME",

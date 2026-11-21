@@ -1152,8 +1152,15 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
             dir.join("frontend").display()
         );
     }
-    let failure = publication_command(&e, options.upstream)?.exec();
+    let failure = exec_publisher(publication_command(&e, options.upstream)?);
     Err(state::io(failure))
+}
+
+/// A successful exec replaces this runtime and cannot run its report guard.
+pub(crate) fn exec_publisher(mut command: Command) -> std::io::Error {
+    // An exec failure returns for cleanup, whose engine work must still count.
+    super::engine_requests::checkpoint();
+    command.exec()
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ pub trait TimeSource: Send + Sync {
 /// A dedicated, nonblocking sink: each write accepts a whole line or no bytes.
 pub trait Sink: Send + Sync {
     fn write_line(&self, line: &[u8]) -> bool;
+    fn flush(&self) {}
     fn atomic_limit(&self) -> usize {
         4096
     }
@@ -278,6 +279,10 @@ impl Collector {
             };
             self.finish(&id, outcome, false, None, Attrs::default());
         }
+        self.flush();
+    }
+    pub fn flush(&self) {
+        self.sink.flush();
         let dropped = self
             .state
             .lock()
@@ -297,6 +302,7 @@ impl Collector {
                 state.dropped = state.dropped.saturating_add(dropped);
             }
         }
+        self.sink.flush();
     }
 }
 /// Finishing emits once; dropping unfinished work records elapsed time as incomplete.
@@ -380,7 +386,7 @@ pub(crate) fn observe_attributed<T, E>(
     }
     result
 }
-fn random_id() -> Option<String> {
+pub(super) fn random_id() -> Option<String> {
     let mut bytes = [0_u8; 8];
     #[cfg(target_os = "macos")]
     // SAFETY: the fixed output buffer is writable for its full length; getentropy retains no pointer.

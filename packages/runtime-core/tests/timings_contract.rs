@@ -189,3 +189,27 @@ fn runtime_explicit_exit_sites_use_the_timing_boundary() {
         assert!(source.contains("hack_runtime_core::timings::exit("));
     }
 }
+
+#[test]
+fn cold_boot_observation_includes_provider_start_and_its_early_errors() {
+    // Tie the observer's tested early-error behavior to the cold-start call-site boundary.
+    // This source check does not qualify a real provider boot.
+    let source = include_str!("../src/provider/lifecycle.rs");
+    let cold = source
+        .split("phase(candidate, &mut owner, \"booting\")?;")
+        .nth(1)
+        .unwrap();
+    let cold = cold.split("/// `machine create`").next().unwrap();
+    let span = cold
+        .find("crate::timings::measure(crate::timings::Step::VmBoot")
+        .unwrap();
+    let provider = cold
+        .find("start_machine(candidate, &owner, permit)?;")
+        .unwrap();
+    let readiness = cold.find("finish_boot(candidate, &mut owner").unwrap();
+    let cleanup = cold
+        .find("cleanup.map_err(failed_boot_stop_error)?;")
+        .unwrap();
+    assert!(span < provider && provider < readiness && readiness < cleanup);
+    assert!(cold.trim_end().ends_with("})\n}"));
+}

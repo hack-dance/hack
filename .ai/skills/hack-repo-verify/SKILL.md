@@ -71,6 +71,13 @@ compiler/linker for cross-target C dependencies. Linux checks do not replace the
 actual candidate bundle build. List target/feature commands and results in the
 ready note; do not infer guest compilation from host tests or green hosted jobs.
 
+After merging runtime changes, run the whole `bun run test:local` suite on the
+merged tree, not only the previously touched test filters. A clean text merge can
+break source-order/model-binding tests when an entry point becomes a wrapper.
+Audit those readers after a wrap or rename: inspect the function holding the
+steps, retain every step assertion, and assert that the entry point delegates to
+it. Report the whole-suite result separately from focused tests.
+
 Rust default gates are `bun run check:local` and `bun run test:local`. Add `--all-features` to equivalent Cargo commands for feature
 changes; the toolchain Rust tasks already enable all features. Keep default coverage.
 

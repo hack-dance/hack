@@ -1747,42 +1747,42 @@ fn start_pool_observed(
     // old identity.
     owner.process = None;
     phase(candidate, &mut owner, "booting")?;
-    start_machine(candidate, &owner, permit)?;
-    let observed = recorded_process(candidate, &owner)?;
-    identity::verify(
-        &observed,
-        &identity::observe(observed.pid)?,
-        &binary(candidate),
-        unsafe { libc::geteuid() },
-    )?;
-    owner.process = Some(observed);
-    owner.save(candidate)?;
-    let result = crate::timings::measure(crate::timings::Step::VmBoot, None, |_| {
-        finish_boot(candidate, &mut owner, previous_boot.as_deref(), &lock)
-    });
-    // A witness is recorded only where it can be accepted (a qualified filesystem).
-    super::tree_witness::record_boot(
-        candidate,
-        &lock,
-        result.is_ok() && witness_qualified(candidate),
-        owner.process.as_ref(),
-        proven_trees,
-    );
-    if let Err(error) = &result {
-        // Disk rejection must not keep an allocation alive. Process authority is
-        // independent of disk adoption; this is an unclean stop, never reconciliation.
-        let process = owner.process.as_ref().expect("process just recorded");
-        let cleanup = stop_verified_provider(process, &binary(candidate));
-        state::write(
-            &root(candidate).join("failed-boot.json"),
-            &failed_boot_record(error, process, cleanup.is_ok()),
+    crate::timings::measure(crate::timings::Step::VmBoot, None, |_| {
+        start_machine(candidate, &owner, permit)?;
+        let observed = recorded_process(candidate, &owner)?;
+        identity::verify(
+            &observed,
+            &identity::observe(observed.pid)?,
+            &binary(candidate),
+            unsafe { libc::geteuid() },
         )?;
-        if cleanup.is_ok() {
-            phase(candidate, &mut owner, "failed-boot-stopped")?;
+        owner.process = Some(observed);
+        owner.save(candidate)?;
+        let result = finish_boot(candidate, &mut owner, previous_boot.as_deref(), &lock);
+        // A witness is recorded only where it can be accepted (a qualified filesystem).
+        super::tree_witness::record_boot(
+            candidate,
+            &lock,
+            result.is_ok() && witness_qualified(candidate),
+            owner.process.as_ref(),
+            proven_trees,
+        );
+        if let Err(error) = &result {
+            // Disk rejection must not keep an allocation alive. Process authority is
+            // independent of disk adoption; this is an unclean stop, never reconciliation.
+            let process = owner.process.as_ref().expect("process just recorded");
+            let cleanup = stop_verified_provider(process, &binary(candidate));
+            state::write(
+                &root(candidate).join("failed-boot.json"),
+                &failed_boot_record(error, process, cleanup.is_ok()),
+            )?;
+            if cleanup.is_ok() {
+                phase(candidate, &mut owner, "failed-boot-stopped")?;
+            }
+            cleanup.map_err(failed_boot_stop_error)?;
         }
-        cleanup.map_err(failed_boot_stop_error)?;
-    }
-    result
+        result
+    })
 }
 
 /// `machine create` allocates new disks; only a start without a reserve selection may.

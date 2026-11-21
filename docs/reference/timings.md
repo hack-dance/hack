@@ -49,6 +49,10 @@ At most 2,047 ordinary records are retained for emission; a final
 `timings.truncated` line reports `attrs.dropped`. Capacity preserves the completed
 prefix, and a killed process leaves only complete lines already emitted.
 
+`vm.boot` starts before the provider start command and includes provider identity
+checks, engine readiness and any existing failed-boot cleanup. A provider start
+failure therefore records an error span. Warm starts use `vm.reattach`.
+
 This slice implements the Rust contract and transport only. The TypeScript reader,
 public `--timings`/`--json` integration, long-lived child transport wiring and measured
 command coverage follow separately. No CLI join or performance acceptance is claimed.

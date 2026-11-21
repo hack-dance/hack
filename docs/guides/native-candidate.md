@@ -562,12 +562,32 @@ bridge to the container's target port, after the graph is ready. The rules:
 - A connection is forwarded only to the container incarnation the bridge was
   started for. A replaced container does not receive traffic from an older
   publication.
-- Stopping the foreground owner (Ctrl-C) closes each host listener before its
-  bridge and the containers stop, then retires the publication. Dead-owner
+- Routes and published ports start as one batch: one reservation, one provider
+  lease that starts every bridge together, then every host listener launched at
+  once. Before and after the bridges start, and again before each listener
+  launches, each target container's identity (ID, network attachment, start
+  time, VM boot) and health are checked again; a bridge whose container changed
+  or became unhealthy is stopped and `up` refuses with `bridge_generation_stale`.
+- Stopping the foreground owner (Ctrl-C) closes every host listener of the
+  graph (together) before its bridges stop, all in one guest call, and before
+  the containers stop, then retires the publication. Dead-owner
   cleanup retires a publication only after proving its owner is gone. A
   retaining restart publishes the same ports again.
 - `graph run` and other non-foreground paths do not publish ports and keep
   refusing them with `graph_subset`.
+
+How one batch of bridges starts and how a run's bridges are released is
+modeled in [bridge-batch](../../tests/models/tla/bridge-batch/COVERAGE.md):
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/diagrams/bridge-batch-start.dark.svg">
+  <img alt="State chart: reserve, three fences around one relay batch, then every publisher child, ready or failed" src="../assets/diagrams/bridge-batch-start.light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/diagrams/bridge-batch-release.dark.svg">
+  <img alt="State chart: release every listener, then stopping, stop, stopped, remove and drop for the whole run; a crash resumes" src="../assets/diagrams/bridge-batch-release.light.svg">
+</picture>
 
 The loopback check is point-in-time. A process that binds the same port on all
 interfaces between the check and native's own bind can still share loopback

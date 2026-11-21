@@ -97,12 +97,23 @@ export async function verifyNativeRetainedMapping(opts: {
   }
 }
 
+/** A graph snapshot and the run it was read for. */
+export interface NativeRetainedGraphObservation {
+  readonly run: string;
+  readonly snapshot: unknown;
+}
+
+/**
+ * After runtime up, confirm the resumed retained graph. Returns the confirmed
+ * snapshot so the retained image selection that follows (with no runtime
+ * effect in between) reads it instead of inspecting the graph again.
+ */
 export async function verifyNativeResumedRetainedGraph(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   readonly run: NativeProjectRun | null | undefined;
   readonly invoke: typeof invokeNativeRuntime;
-}): Promise<void> {
+}): Promise<NativeRetainedGraphObservation | undefined> {
   if (!opts.run) {
     return;
   }
@@ -115,4 +126,5 @@ export async function verifyNativeResumedRetainedGraph(opts: {
       "Native resumed retained graph differs; no graph restore was requested."
     );
   }
+  return { run: opts.run.run, snapshot: observed };
 }

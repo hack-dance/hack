@@ -1,0 +1,45 @@
+---
+title: RuntimeService · client
+---
+stateDiagram-v2
+    direction TB
+    [*] --> idle
+    idle --> hello : Connect
+    hello --> sent : Send
+    hello --> idle : Retire or Disconnect
+    hello --> idle : Crash or ExitDrained
+    hello --> oneshot : Fallback
+    sent --> idle : Disconnect, Crash, ExitDrained
+    sent --> idle : RefuseDraining
+    sent --> replied : Finish or AnswerDone
+    sent --> unknown : AnswerUnknown
+    idle --> oneshot : Fallback
+    oneshot --> oneshotRunning : OneShotBegin
+    oneshotRunning --> finished : OneShotEnd
+    idle --> inspect : InspectWithoutService
+    unknown --> inspect : StartInspect
+    inspect --> finished : Inspect
+    replied --> finished : Report
+    finished --> [*]
+    note right of hello
+        Retire only for another build.
+        Send only to the same build.
+        Fallback only when unsure = 0.
+    end note
+    note right of sent
+        INV AtMostOnce. A resend keeps
+        the intent id, on a new
+        connection; a reply comes
+        only on its own connection.
+        A dropped frame stays unsure;
+        RefuseDraining clears it.
+    end note
+    note right of inspect
+        Entry from idle needs unsure > 0
+        and service.lock free at entry.
+        Started, not complete: unknown.
+    end note
+    class sent live
+    class unknown wait
+    class inspect wait
+    class finished ok

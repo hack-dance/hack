@@ -85,6 +85,8 @@ export async function readFileOutcome(
 
 export type ComposeObservation = {
   readonly ok: Tri;
+  /** `false` only for the logging stack while it is turned off (opt-in). */
+  readonly enabled?: false;
   readonly error: string | null;
   readonly services: readonly {
     readonly service: string;

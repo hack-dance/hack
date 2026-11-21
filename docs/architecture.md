@@ -1185,6 +1185,8 @@ qualify the installed binary, real filesystems or an application.
   - `daemon/hackd.sock`, `daemon/hackd.pid`, `daemon/hackd.log` (capped at 5 MiB)
   - `caddy/docker-compose.yml`, `caddy/Corefile`
   - `logging/docker-compose.yml`, `logging/alloy.alloy`, `logging/loki.yaml`, `logging/grafana/`
+    (written only while the opt-in logging stack is on; an existing
+    `logging/docker-compose.yml` keeps the stack on while `logging.enabled` is unset)
   - `schemas/hack.config.schema.json`, `schemas/hack.branches.schema.json`
   - `certs/` (mkcert output for non-Caddy services)
 - `<repo>/.hack/`

@@ -313,6 +313,10 @@ import {
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { ensureHackGitInfoExclude } from "../lib/git-info-exclude.ts";
+import {
+  renderLoggingOffMessage,
+  resolveGlobalLoggingForHome,
+} from "../lib/global-logging.ts";
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -11500,6 +11504,8 @@ function resolveLokiQuery(opts: {
 async function runLogsWithLoki(opts: {
   readonly baseUrl: string;
   readonly lokiReachable: boolean;
+  /** The global logging stack is turned off (it is opt-in). */
+  readonly loggingOff: boolean;
   readonly projectNameForPrefix: string;
   readonly branch: string | null;
   readonly json: boolean;
@@ -11534,6 +11540,12 @@ async function runLogsWithLoki(opts: {
     return 1;
   }
 
+  if (opts.loggingOff) {
+    process.stderr.write(
+      `${renderLoggingOffMessage({ feature: "Loki-backed logs (--loki, --query)" })}\nPlain \`hack logs\` (or \`hack logs --compose\`) reads container logs without it.\n`
+    );
+    return 1;
+  }
   if (!opts.lokiReachable) {
     process.stderr.write(`Loki is not reachable at ${opts.baseUrl}.\n`);
     process.stderr.write(
@@ -12005,9 +12017,16 @@ async function handleLogs({
     snapshotBackend,
   });
 
-  const lokiReachable = shouldTryLoki
-    ? await lokiLogBackend.isAvailable({ baseUrl })
-    : false;
+  // The local stack is opt-in: with it off, skip the probe and read
+  // container logs. A Loki named by HACK_LOKI_URL is the user's own.
+  const loggingOff =
+    shouldTryLoki &&
+    process.env.HACK_LOKI_URL === undefined &&
+    !(await resolveGlobalLoggingForHome()).enabled;
+  const lokiReachable =
+    shouldTryLoki && !loggingOff
+      ? await lokiLogBackend.isAvailable({ baseUrl })
+      : false;
 
   const useLoki = resolveUseLoki({
     forceCompose: args.options.compose === true,
@@ -12037,6 +12056,7 @@ async function handleLogs({
     return await runLogsWithLoki({
       baseUrl,
       lokiReachable,
+      loggingOff,
       projectNameForPrefix,
       branch,
       json,

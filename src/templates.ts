@@ -27,6 +27,26 @@ import {
 import { parseDefaultDomain } from "./lib/default-domain.ts";
 import { PROXY_PORTS, renderProxyPortMapping } from "./lib/proxy-bind.ts";
 
+/**
+ * A Compose `healthcheck` block for a global stack service. `hack global up`
+ * waits for `healthy` instead of a fixed time. `start_interval` (Docker 25+)
+ * probes every half second while the service starts; an older engine ignores
+ * it and probes at `interval`, so readiness is then seen up to 10 s later.
+ * Failures during `start_period` do not count, so a slow first start (Grafana
+ * migrates its database) is not reported unhealthy.
+ */
+function renderGlobalHealthcheck(test: readonly string[]): string[] {
+  return [
+    "    healthcheck:",
+    `      test: ${JSON.stringify(test)}`,
+    "      interval: 10s",
+    "      timeout: 3s",
+    "      retries: 3",
+    "      start_period: 120s",
+    "      start_interval: 500ms",
+  ];
+}
+
 export function renderGlobalCaddyCompose(opts?: {
   readonly useStaticCoreDnsIp?: boolean;
   readonly useStaticCaddyIp?: boolean;
@@ -62,6 +82,15 @@ export function renderGlobalCaddyCompose(opts?: {
     "      caddy.tls: internal",
     "    environment:",
     `      CADDY_INGRESS_NETWORKS: ${DEFAULT_INGRESS_NETWORK}`,
+    // Caddy's admin API answers once its first configuration is loaded.
+    ...renderGlobalHealthcheck([
+      "CMD",
+      "wget",
+      "-q",
+      "-O",
+      "/dev/null",
+      "http://127.0.0.1:2019/config/",
+    ]),
     ...(useStaticCaddyIp
       ? [
           "    networks:",
@@ -147,6 +176,14 @@ export function renderGlobalLoggingCompose(): string {
     "    volumes:",
     "      - loki-data:/loki",
     `      - ./${GLOBAL_LOKI_CONFIG_FILENAME}:/etc/loki/config.yaml:ro`,
+    ...renderGlobalHealthcheck([
+      "CMD",
+      "wget",
+      "-q",
+      "-O",
+      "/dev/null",
+      "http://127.0.0.1:3100/ready",
+    ]),
     "    labels:",
     `      caddy: ${DEFAULT_LOKI_HOST}, ${LEGACY_LOKI_HOST}`,
     '      caddy.reverse_proxy: "{{upstreams 3100}}"',
@@ -162,6 +199,13 @@ export function renderGlobalLoggingCompose(): string {
     `      - ${GLOBAL_ALLOY_DATA_VOLUME}:${GLOBAL_ALLOY_STORAGE_PATH}`,
     `      - ./${GLOBAL_ALLOY_FILENAME}:/etc/alloy/config.alloy:ro`,
     `    command: run --storage.path=${GLOBAL_ALLOY_STORAGE_PATH} /etc/alloy/config.alloy`,
+    // The image has bash but neither wget nor curl.
+    ...renderGlobalHealthcheck([
+      "CMD",
+      "bash",
+      "-c",
+      'exec 3<>/dev/tcp/127.0.0.1/12345 && printf "GET /-/ready HTTP/1.0\\r\\n\\r\\n" >&3 && head -1 <&3 | grep -q " 200 "',
+    ]),
     "    networks:",
     `      - ${DEFAULT_LOGGING_NETWORK}`,
     "",
@@ -174,6 +218,14 @@ export function renderGlobalLoggingCompose(): string {
     `      - ./${GLOBAL_GRAFANA_DATASOURCE_FILENAME}:/etc/grafana/provisioning/datasources/hack-datasources.yaml:ro`,
     `      - ./${GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME}:/etc/grafana/provisioning/dashboards/hack-dashboards.yaml:ro`,
     `      - ./${GLOBAL_GRAFANA_DASHBOARDS_DIR}:/var/lib/grafana/dashboards:ro`,
+    ...renderGlobalHealthcheck([
+      "CMD",
+      "wget",
+      "-q",
+      "-O",
+      "/dev/null",
+      "http://127.0.0.1:3000/api/health",
+    ]),
     "    labels:",
     `      caddy: ${DEFAULT_GRAFANA_HOST}, ${LEGACY_GRAFANA_HOST}`,
     '      caddy.reverse_proxy: "{{upstreams 3000}}"',
@@ -1254,6 +1306,13 @@ export function renderGlobalLokiConfigYaml(): string {
     "  ring:",
     "    kvstore:",
     "      store: inmemory",
+    "",
+    // One local instance with an in-memory ring: nothing to stagger, so the
+    // default 15 s wait before /ready (meant for cluster rollouts) only
+    // delays `hack global up`.
+    "ingester:",
+    "  lifecycler:",
+    "    min_ready_duration: 0s",
     "",
     "query_range:",
     "  results_cache:",

@@ -274,10 +274,3 @@ Use `bun scripts/ci-change-scope.ts --event=pull_request --dry-run
 This reads the current tree as data, prints job switches and selected tests, and
 does not write GitHub output/summary files. The policy tests cover every row of
 the tier table and exercise the independent workflow shell against fixture diffs.
-
-On #1045 the synchronous-spawn guard was selected, but its introductory comment
-mentions “macOS”. The broad platform-source classifier therefore assigned it to
-the macOS pool, which light PRs defer; the changed `tests/` file did not cause a
-Linux guard run. The follow-up to HACK-2493 (which absorbs HACK-2491) will explicitly
-select the tree-wide guards and retain their Linux coverage. This tier-only change
-does not claim to close that gap.

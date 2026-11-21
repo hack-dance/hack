@@ -1184,6 +1184,18 @@ qualify the installed binary, real filesystems or an application.
   - `projects.json` (project registry; `hack projects prune` removes stale entries)
   - `daemon/hackd.sock`, `daemon/hackd.pid`, `daemon/hackd.log` (capped at 5 MiB)
   - `caddy/docker-compose.yml`, `caddy/Corefile`
+  - `caddy/ingress-addresses.json` (the proxy and DNS addresses and container ids
+    Hack last read, with the generation token read before that read and the
+    Docker engine it came from, so another `DOCKER_HOST` or context reads its own) and
+    `caddy/ingress-generation.json` (the token `hack global up`/`down` and the
+    doctor proxy repair replace, unsettled during the change and settled after;
+    one change runs at a time under `caddy/ingress-change.lock`, reclaimed only
+    from a dead owner; a record is trusted only under the current settled token; see
+    [the record chart](./diagrams/ingress-address-record.svg) and the model in
+    `tests/models/tla/ingress-address-record`)
+  - `compose-overrides/<project>-<digest>/<instance>.yml` (the generated internal
+    Compose override: DNS, `*.hack` host entries, local CA trust; `@base` or the
+    branch slug)
   - `logging/docker-compose.yml`, `logging/alloy.alloy`, `logging/loki.yaml`, `logging/grafana/`
     (written only while the opt-in logging stack is on; an existing
     `logging/docker-compose.yml` keeps the stack on while `logging.enabled` is unset)
@@ -1195,7 +1207,10 @@ qualify the installed binary, real filesystems or an application.
   - `hack.env.default.yaml` and optional `hack.env.<overlay>.yaml` (committed env)
   - `hack.env.local.yaml` and `hack.env.<overlay>.local.yaml` (worktree-local)
   - `.env` (only when explicitly materialized) and `.env.state.json`
-  - `.internal/compose.override.yml`, `compose.env.override.yml`, `compose.runtime.override.yml`
+  - `.internal/compose.env.override.yml`, `compose.runtime.override.yml`
+    (`.internal/compose.override.yml` is no longer written; one written by an
+    older Hack is passed to `exec` until this version renders the instance's
+    override in `up`, `restart` or `run`, which removes it)
   - `.internal/extra-hosts.json`, `.internal/branch-usage.json`
   - `.internal/lifecycle/state.json` and `.internal/lifecycle/*.log`
   - `.branch/compose.<branch>.override.yml` and `.branch/compose.<branch>.runtime.override.yml`

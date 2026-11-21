@@ -1,0 +1,27 @@
+---
+title: DigestCache · one path in one process
+---
+stateDiagram-v2
+  direction TB
+  [*] --> Empty
+  Empty --> Reading : BeginRead
+  Cached --> Cached : CacheHit [stat equals key]
+  Cached --> Reading : BeginRead [stat differs]
+  Reading --> check : after-stat
+  state check <<choice>>
+  check --> Cached : FinishRead [ctime older]
+  check --> Empty : FinishRead [ctime recent]
+  check --> Empty : RefuseRead [stat changed]
+  note right of Cached
+    INV CacheNeverStale: a hit
+    returns the current content's
+    digest. WriteInPlace and
+    Replace change the stat
+    unless the write lands in the
+    tick the read began, which is
+    never cached.
+  end note
+  classDef ok stroke-width:1.6px
+  classDef live stroke-width:1.6px
+  class Cached ok
+  class Reading live

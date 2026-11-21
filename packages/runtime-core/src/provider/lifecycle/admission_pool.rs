@@ -27,8 +27,9 @@
 //! [`Settled`] basis that only [`settle`] returns, and both `machine create` and the
 //! pre-boot admission need the [`Restart`] that only [`restart_only`] returns. `machine
 //! create` also needs a [`FreshCreate`], which no selection can obtain, and `machine start`
-//! needs a [`StartPermit`], which only the pre-boot admission ([`admit_boot`]) followed by
-//! the final leased recheck ([`BootAdmission::release`]) issues.
+//! needs a [`StartPermit`], issued for pools by pre-boot admission ([`admit_boot`]) followed
+//! by the final leased recheck ([`BootAdmission::release`]). Disposable prepared-base
+//! verification has its own admitted, locked work root and uses [`verifier_permits`].
 use super::{
     Owner, admission, binary, disk_handles, io, lock_absent_disks_within, root, sockets_absent,
     verify_disk_allocation, verify_disks, verify_live,
@@ -499,8 +500,18 @@ pub(super) struct BootAdmission<'a> {
     selection: Option<&'a Selection>,
 }
 
-/// Authority to run `machine start`, issued only by [`BootAdmission::release`].
+/// Authority to run `machine start`, issued by [`BootAdmission::release`] for pools
+/// or the separately admitted disposable verifier path.
 pub(super) struct StartPermit(());
+
+/// The verifier has its own fresh work root and admission, rather than a reserve
+/// selection. Its private proof is minted only after admission and template activation
+/// under its retained locks. These consumed tokens do not introduce a second probe.
+pub(super) fn verifier_permits(
+    _proof: super::prepared_boot::VerifierAdmission<'_>,
+) -> (FreshCreate, StartPermit) {
+    (FreshCreate(()), StartPermit(()))
+}
 
 /// The pre-boot admission's outcome. A refusal leaves the provider untouched; the caller
 /// records the stop before returning it.

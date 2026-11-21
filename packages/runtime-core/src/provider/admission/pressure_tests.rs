@@ -341,6 +341,76 @@ fn a_swapout_change_between_the_chained_samples_refuses_whatever_the_wait() {
     }
 }
 
+/// The documented weakening of admitting Development on two samples: a host that fails and
+/// recovers between them is admitted. Here the host fails at every moment strictly between
+/// the sample that opens the window and the one under the lease, and passes again when that
+/// second sample is taken. The earlier code took five more samples around four fixed
+/// one-second pauses and refused when any one of them failed.
+///
+/// What still refuses such a stretch is a swapout in it, because that count is cumulative:
+/// `a_swapout_change_between_the_chained_samples_refuses_whatever_the_wait`. Two starts that
+/// pass together on a host with room for one are not a sampling question; their guard is a
+/// host-wide admission reservation, tracked separately, not more samples.
+///
+/// Every sampler call and its clock time is asserted. A sample added inside the window, or
+/// a window shorter than one second, would read the failing host and fail this test.
+#[test]
+fn a_dip_between_the_two_development_samples_is_not_seen() {
+    // When the lease is held and when the second sample is due, both after the first sample.
+    for (lease_ms, second_ms) in [
+        (0, 1000),
+        (100, 1000),
+        (999, 1000),
+        (1000, 1000),
+        (4000, 4000),
+    ] {
+        let clock = TestClock::at(START);
+        let second_at = START + Duration::from_millis(second_ms);
+        // What a sampler would return if it were asked at `at`.
+        let host = |at: Duration| {
+            let failing = START < at && at < second_at;
+            observation(
+                Profile::Development,
+                Some(if failing { 4 } else { 1 }),
+                10 * GIB,
+            )
+        };
+        for inside in [
+            START + Duration::from_millis(1),
+            START + Duration::from_millis(second_ms / 2),
+            second_at - Duration::from_millis(1),
+        ] {
+            assert!(
+                matches!(
+                    check(Profile::Development, &host(inside), Some(42)),
+                    Err(error) if error.code == "admission_rejected"
+                ),
+                "a sample at {inside:?} would refuse ({lease_ms})"
+            );
+        }
+        let asked = RefCell::new(Vec::new());
+        let sample = || {
+            asked.borrow_mut().push(clock.now());
+            host(clock.now())
+        };
+        let window = open(&sample(), &clock).unwrap();
+        clock.advance(Duration::from_millis(lease_ms));
+        let samples =
+            recheck_after_lease(Profile::Development, Some(window), &clock, || Ok(sample()))
+                .unwrap_or_else(|error| panic!("{lease_ms}: {}", error.message));
+        assert_eq!(samples.len(), 1, "{lease_ms}");
+        // Exactly two readings: the one that opened the window, and one no sooner than a
+        // second later. Nothing asked the host in between.
+        assert_eq!(*asked.borrow(), [START, second_at], "{lease_ms}");
+        assert!(second_at - START >= Duration::from_secs(1));
+        assert_eq!(
+            clock.slept.borrow().iter().sum::<Duration>(),
+            Duration::from_millis(second_ms - lease_ms),
+            "{lease_ms}"
+        );
+    }
+}
+
 #[test]
 fn healthy_post_lease_warning_is_resampled_before_allocation() {
     let clock = TestClock::at(START);

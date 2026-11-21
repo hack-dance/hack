@@ -1868,7 +1868,7 @@ by those pauses.
 | --- | --- | --- |
 | First admission sample | 50 ms | host memory, pressure, swapouts, thermal state, disk |
 | Provider and engine trees proven by content | 940 ms | fills the one-second admission window |
-| Startup lease, rest of the window, second sample | 115 ms | only the rest of the window is slept |
+| Startup lease, rest of the window, second sample, then both trees compared with their proof | 115 ms | only the rest of the window is slept; measured before the tree comparison was added |
 | Root files proven by content | 180 ms | under the lease |
 | Pre-boot sample, configuration audit, template check | 75 ms | |
 | `machine start` | 210 ms | the provider starts the VM |
@@ -1884,6 +1884,23 @@ apart, and finished inside that second. Only the rest of the window is slept, so
 or a lease wait that takes longer than the window lengthens the start by the excess. A brand-new
 home adds `machine create`, the provider's first-start disk template copy and the root
 files copy, about 5 s in the same measurement.
+
+The trees are proven before the lease, and only the lease keeps another `runtime` command
+from rewriting them. So the first thing the start does with the lease, after the second
+sample, is compare each tree with its proof: if the tree's metadata digest and its
+record's content digest are what the proof saw, on a filesystem where metadata is trusted
+(APFS), the proof stands; otherwise the tree is proven by content again under the lease,
+and a tree that no longer matches refuses the start with `artifact_digest_mismatch`.
+The recheck itself writes nothing, and a refusal comes before the admission record, any
+later owner record update, a HOME alias repair under the lease and any provider command.
+What the start did earlier stays: a HOME alias it repaired before admission, and the
+lease file's own bookkeeping. The comparison is one metadata walk per tree and reads no
+file content. It is not part of the boot measurement above. A unit bench
+(`bench_one_metadata_walk_of_a_prepared_tree`, an unoptimized test build on a busy Apple
+Silicon host, not a boot) timed one walk at 11 to 20 ms for a tree with the 936 entries
+of the pinned provider tree and under 1 ms for the engine tree's 8 entries. On any other
+filesystem both trees are hashed a second time under the lease, which the table does not
+show either.
 
 The order of the admission steps, and what can change between them, is modelled in
 [`pool-start-admission`](../../tests/models/tla/pool-start-admission/COVERAGE.md);
@@ -1962,6 +1979,15 @@ instructions and the build would not use them. Both rest on how `sha2` 0.11.1 se
 backend, so the dependency is pinned exactly; read its `src/sha256.rs` again before moving
 the pin. To measure a build, run
 `cargo test --release --lib sha256_rate_of_this_build -- --ignored --nocapture`.
+
+### Never wait in a blocking `flock`
+
+On macOS, releasing an exclusive `flock` wakes only one blocked waiter and queues
+the others behind it, so a woken waiter that keeps a shared lock strands the rest
+with no bound. The step store (`src/store/`) therefore never blocks in `flock`: it
+tries every lock with `LOCK_NB`, closes and retries 1 to 5 ms later until a time
+deadline, and then reports the store busy. Every other `flock` in this crate is
+non-blocking too; keep it that way for any lock that several openers may wait for.
 
 ### Extending a stopped pool's approved hosts
 

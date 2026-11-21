@@ -33,7 +33,7 @@ export function wrapLifecyclePersistentCommand(
   return wrapSharedLifecyclePersistentCommand(opts);
 }
 
-import { realpath } from "node:fs/promises";
+import { realpath, rm } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import {
   autocompleteMultiselect,
@@ -160,7 +160,6 @@ import {
   DEFAULT_NEW_PROJECT_TLD,
   DEFAULT_OAUTH_ALIAS_TLD,
   DEFAULT_PROJECT_TLD,
-  GLOBAL_CADDY_COMPOSE_FILENAME,
   GLOBAL_CADDY_DIR_NAME,
   HACK_PROJECT_DIR_PRIMARY,
   PROJECT_COMPOSE_FILENAME,
@@ -236,6 +235,7 @@ import {
   preflightSharedNetworks,
 } from "../lib/compose-engine-preflight.ts";
 import {
+  composeEnvOverridePath,
   inspectComposeEnvOverrideAtRest,
   removePlaintextComposeEnvOverride,
   writeComposeEnvOverride,
@@ -251,6 +251,11 @@ import {
   selectOwnedInstanceContainers,
   unionProfiles,
 } from "../lib/compose-instance-stop.ts";
+import {
+  existingInternalOverride,
+  internalOverrideStorePath,
+  legacyInternalOverridePath,
+} from "../lib/compose-internal-override-store.ts";
 import { renderComposeEnvReferenceOverride } from "../lib/compose-managed-env.ts";
 import {
   effectiveComposeProfiles,
@@ -457,6 +462,11 @@ import {
   setProjectAutostartPaused,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
+import {
+  defaultIngressAddressDeps,
+  type IngressAddressResult,
+  resolveIngressAddresses,
+} from "../lib/proxy-ingress-addresses.ts";
 import {
   openProxyLoopbackWarning,
   openUnresolvedHostWarning,
@@ -1773,6 +1783,39 @@ async function scrubPlaintextComposeEnvOverride(opts: {
  * its path. A literal file that a saved adoption pins is left as the scrub
  * left it.
  */
+/**
+ * Writes the env override and returns its path, or with `persist: false`
+ * returns the path `up` left (nothing when absent) without writing.
+ */
+async function settleComposeEnvOverride(opts: {
+  readonly projectDir: string;
+  readonly text: string;
+  readonly persist: boolean | undefined;
+  /** The Compose file's services; a stored file naming others is left out. */
+  readonly serviceNames: readonly string[];
+}): Promise<readonly string[]> {
+  if (opts.persist === false) {
+    // The stored file `up` left. One that still declares a service the
+    // Compose file dropped would make Compose reject the model; exec does not
+    // need it then, since a running container already has its environment.
+    const path = composeEnvOverridePath({ projectDir: opts.projectDir });
+    const usable =
+      (await pathExists(path)) &&
+      (await generatedFilesMatchServices({
+        files: [path],
+        serviceNames: opts.serviceNames,
+      }));
+    return usable ? [path] : [];
+  }
+  await ensureHackGitInfoExclude({ projectDir: opts.projectDir });
+  return [
+    await writeComposeEnvOverride({
+      projectDir: opts.projectDir,
+      text: opts.text,
+    }),
+  ];
+}
+
 async function clearComposeEnvOverride(opts: {
   readonly projectDir: string;
 }): Promise<void> {
@@ -1883,6 +1926,8 @@ export async function resolveModernComposeEnvOverrides(opts: {
   readonly targetServices: readonly string[];
   readonly allServiceNames: readonly string[];
   readonly envName?: string | null;
+  /** See resolveComposeEnvOverrides. */
+  readonly persist?: boolean;
 }): Promise<{
   readonly composeFiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
@@ -1949,9 +1994,11 @@ export async function resolveModernComposeEnvOverrides(opts: {
   // Fail closed before any write or spawn when Compose could not start.
   assertComposeSpawnEnvFits({ env: composeEnv });
   if (override === null) {
-    await clearComposeEnvOverride({
-      projectDir: opts.project.projectDir,
-    });
+    if (opts.persist !== false) {
+      await clearComposeEnvOverride({
+        projectDir: opts.project.projectDir,
+      });
+    }
     return {
       composeFiles: [],
       env: modern.globalEnv,
@@ -1961,13 +2008,13 @@ export async function resolveModernComposeEnvOverrides(opts: {
     };
   }
 
-  await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
-  const overridePath = await writeComposeEnvOverride({
-    projectDir: opts.project.projectDir,
-    text: override.text,
-  });
   return {
-    composeFiles: [overridePath],
+    composeFiles: await settleComposeEnvOverride({
+      projectDir: opts.project.projectDir,
+      text: override.text,
+      persist: opts.persist,
+      serviceNames: opts.allServiceNames,
+    }),
     env: composeEnv,
     lifecycleEnv,
     preflightEnvByService,
@@ -2023,6 +2070,12 @@ async function resolveComposeEnvOverrides(opts: {
   readonly targetServices: readonly string[];
   readonly allServiceNames: readonly string[];
   readonly envName?: string | null;
+  /**
+   * False for `exec`: resolve the values but neither write nor clear the
+   * generated env override; pass the file `up` left, if any. The container
+   * already exists, so its environment came from that file.
+   */
+  readonly persist?: boolean;
 }): Promise<{
   readonly composeFiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
@@ -2070,9 +2123,11 @@ async function resolveComposeEnvOverrides(opts: {
   );
 
   if (resolved.contract.vars.length === 0) {
-    await clearComposeEnvOverride({
-      projectDir: opts.project.projectDir,
-    });
+    if (opts.persist !== false) {
+      await clearComposeEnvOverride({
+        projectDir: opts.project.projectDir,
+      });
+    }
     return {
       composeFiles: [],
       env: {},
@@ -2116,9 +2171,11 @@ async function resolveComposeEnvOverrides(opts: {
 
   assertComposeSpawnEnvFits({ env: resolved.envForCompose });
   if (Object.keys(overrideServices).length === 0) {
-    await clearComposeEnvOverride({
-      projectDir: opts.project.projectDir,
-    });
+    if (opts.persist !== false) {
+      await clearComposeEnvOverride({
+        projectDir: opts.project.projectDir,
+      });
+    }
     return {
       composeFiles: [],
       env: resolved.envForCompose,
@@ -2131,14 +2188,13 @@ async function resolveComposeEnvOverrides(opts: {
   const override = { services: overrideServices };
   const yaml = YAML.stringify(override, null, 2);
   const text = ensureTrailingNewline(cleanupYaml(yaml));
-  await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
-  const overridePath = await writeComposeEnvOverride({
-    projectDir: opts.project.projectDir,
-    text,
-  });
-
   return {
-    composeFiles: [overridePath],
+    composeFiles: await settleComposeEnvOverride({
+      projectDir: opts.project.projectDir,
+      text,
+      persist: opts.persist,
+      serviceNames: opts.allServiceNames,
+    }),
     env: resolved.envForCompose,
     lifecycleEnv: selectHackEnvValues({ resolved }),
     preflightEnvByService,
@@ -3506,12 +3562,47 @@ const INTERNAL_CA_CONTAINER_DIR = "/etc/hack/ca";
 const INTERNAL_CA_CONTAINER_PATH = `${INTERNAL_CA_CONTAINER_DIR}/caddy-local-authority.crt`;
 const INTERNAL_TRUST_BUNDLE_CONTAINER_PATH = `${INTERNAL_CA_CONTAINER_DIR}/trust-bundle.pem`;
 
-async function resolveInternalComposeOverride(opts: {
+type InternalOverrideOptions = Parameters<
+  typeof renderInternalComposeOverrideText
+>[0];
+
+/**
+ * Renders the instance's internal override and stores it in Hack's home,
+ * returning its path; when the instance needs none, removes a stored one, so
+ * neither `exec` nor a later `run` passes stale addresses.
+ */
+async function resolveInternalComposeOverride(
+  opts: InternalOverrideOptions
+): Promise<string | null> {
+  const path = internalOverrideStorePath({
+    hackHome: resolveGlobalHackDir(),
+    projectDir: opts.project.projectDir,
+    branch: opts.branch ?? null,
+  });
+  const text = await renderInternalComposeOverrideText(opts);
+  // The store now decides for this project: an in-project file an older Hack
+  // wrote would otherwise come back for `exec` once the stored one is gone.
+  await rm(legacyInternalOverridePath(opts.project.projectDir), {
+    force: true,
+  });
+  if (text === null) {
+    await rm(path, { force: true });
+    return null;
+  }
+  return await writeInternalComposeOverride({ path, text });
+}
+
+async function renderInternalComposeOverrideText(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly branch?: string | null;
   readonly devHost?: string | null;
   readonly aliasHost?: string | null;
+  /**
+   * `fresh` (up, restart) reads Docker once; `recorded` (run) uses Hack's
+   * record of the global stack with no Docker call when there is one.
+   */
+  readonly addresses: "recorded" | "fresh";
 }): Promise<string | null> {
   const internal = resolveInternalSettings(opts.cfg);
 
@@ -3529,7 +3620,6 @@ async function resolveInternalComposeOverride(opts: {
   if (services.length === 0) {
     return null;
   }
-
   const dns = await resolveInternalDnsSettings({
     project: opts.project,
     composeFile: opts.project.composeFile,
@@ -3537,6 +3627,7 @@ async function resolveInternalComposeOverride(opts: {
     branch: opts.branch ?? null,
     devHost: opts.devHost ?? null,
     aliasHost: opts.aliasHost ?? null,
+    addresses: opts.addresses,
   });
   const tls = await resolveInternalTlsPaths({ enabled: internal.tls });
   const extraHosts = buildInternalExtraHosts({
@@ -3555,10 +3646,7 @@ async function resolveInternalComposeOverride(opts: {
     trustBundlePath: tls.bundlePath,
   });
 
-  return await writeInternalComposeOverride({
-    projectDir: opts.project.projectDir,
-    text,
-  });
+  return text;
 }
 
 function shouldBuildInternalOverride(opts: {
@@ -3586,13 +3674,16 @@ async function resolveInternalDnsSettings(opts: {
   readonly branch: string | null;
   readonly devHost: string | null;
   readonly aliasHost: string | null;
+  readonly addresses: "recorded" | "fresh";
 }): Promise<InternalDnsSettings> {
   if (!opts.enabled) {
     return { dnsServer: null, caddyIp: null, caddyHosts: [] };
   }
 
-  const dnsServer = await resolveCoreDnsServerWithWarning();
-  const caddyIp = await resolveCaddyServerWithWarning();
+  const addresses = await resolveGlobalIngressAddresses(opts.addresses);
+  warnUnreachableIngress(addresses);
+  const dnsServer = addresses.coreDns;
+  const caddyIp = addresses.caddy;
   const caddyHosts = await resolveCaddyHostsForBranch({
     project: opts.project,
     composeFile: opts.composeFile,
@@ -3604,26 +3695,19 @@ async function resolveInternalDnsSettings(opts: {
   return { dnsServer, caddyIp, caddyHosts };
 }
 
-async function resolveCoreDnsServerWithWarning(): Promise<string | null> {
-  const dnsServer = await resolveCoreDnsServer();
-  if (!dnsServer) {
+function warnUnreachableIngress(addresses: IngressAddressResult): void {
+  if (!addresses.coreDns) {
     logger.warn({
       message:
         "CoreDNS is not reachable; internal DNS for *.hack is disabled. Run `hack global install` (or `hack global up`).",
     });
   }
-  return dnsServer;
-}
-
-async function resolveCaddyServerWithWarning(): Promise<string | null> {
-  const caddyIp = await resolveCaddyServer();
-  if (!caddyIp) {
+  if (!addresses.caddy) {
     logger.warn({
       message:
         "Caddy is not reachable; internal *.hack host mappings are disabled. Run `hack global install` (or `hack global up`).",
     });
   }
-  return caddyIp;
 }
 
 async function resolveCaddyHostsForBranch(opts: {
@@ -3787,16 +3871,14 @@ export function buildInternalTlsEnvironment(opts: {
   };
 }
 
+/** Writes the override into Hack's home (atomically: a concurrent run reads a whole file). */
 async function writeInternalComposeOverride(opts: {
-  readonly projectDir: string;
+  readonly path: string;
   readonly text: string;
 }): Promise<string> {
-  await ensureHackGitInfoExclude({ projectDir: opts.projectDir });
-  const overrideDir = resolve(opts.projectDir, ".internal");
-  await ensureDir(overrideDir);
-  const overridePath = resolve(overrideDir, "compose.override.yml");
-  await writeTextFileIfChanged(overridePath, opts.text);
-  return overridePath;
+  await ensureDir(dirname(opts.path));
+  await writeTextFileAtomicIfChanged(opts.path, opts.text);
+  return opts.path;
 }
 
 function resolveInternalSettings(
@@ -4013,116 +4095,36 @@ function buildExtraHostsMap(opts: {
   return out;
 }
 
-async function resolveCoreDnsServer(): Promise<string | null> {
-  const env = (process.env.HACK_COREDNS_IP ?? "").trim();
-  if (env.length > 0) {
-    return env;
-  }
+const globalIngressReads = new Map<
+  "recorded" | "fresh",
+  Promise<IngressAddressResult>
+>();
 
-  const composePath = resolve(
-    resolveGlobalHackDir(),
-    GLOBAL_CADDY_DIR_NAME,
-    GLOBAL_CADDY_COMPOSE_FILENAME
+/**
+ * The global CoreDNS and Caddy addresses, once per process and mode (see
+ * resolveIngressAddresses): `recorded` costs no Docker call when Hack has a
+ * record, `fresh` one `docker inspect`. A fresh read this process also
+ * answers `recorded`. No docker CLI means no answer, not a spawn failure:
+ * `up` reports the missing engine itself (HACK-2356).
+ */
+async function resolveGlobalIngressAddresses(
+  mode: "recorded" | "fresh"
+): Promise<IngressAddressResult> {
+  const cached =
+    globalIngressReads.get("fresh") ?? globalIngressReads.get(mode);
+  if (cached) {
+    return await cached;
+  }
+  const read = resolveIngressAddresses(
+    defaultIngressAddressDeps(resolveGlobalHackDir()),
+    mode
   );
-  // No docker CLI means no answer, not a spawn failure: `up` reports the
-  // missing engine itself (HACK-2356), like resolveGlobalCaddyIp.
-  if (!((await pathExists(composePath)) && findExecutableInPath("docker"))) {
-    return null;
-  }
-
-  const ps = await exec(
-    ["docker", "compose", "-f", composePath, "ps", "-q", "coredns"],
-    {
-      cwd: dirname(composePath),
-      stdin: "ignore",
-    }
-  );
-  const id = ps.exitCode === 0 ? ps.stdout.trim() : "";
-  if (!id) {
-    return null;
-  }
-
-  const inspect = await exec(
-    ["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", id],
-    {
-      stdin: "ignore",
-    }
-  );
-  if (inspect.exitCode !== 0) {
-    return null;
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(inspect.stdout);
-  } catch {
-    return null;
-  }
-  if (!isRecord(parsed)) {
-    return null;
-  }
-
-  const network = parsed[DEFAULT_INGRESS_NETWORK];
-  if (!isRecord(network)) {
-    return null;
-  }
-  const ip = network.IPAddress;
-  return typeof ip === "string" && ip.length > 0 ? ip : null;
+  globalIngressReads.set(mode, read);
+  return await read;
 }
 
-async function resolveCaddyServer(): Promise<string | null> {
-  const env = (process.env.HACK_CADDY_IP ?? "").trim();
-  if (env.length > 0) {
-    return env;
-  }
-
-  const composePath = resolve(
-    resolveGlobalHackDir(),
-    GLOBAL_CADDY_DIR_NAME,
-    GLOBAL_CADDY_COMPOSE_FILENAME
-  );
-  if (!(await pathExists(composePath))) {
-    return null;
-  }
-
-  const ps = await exec(
-    ["docker", "compose", "-f", composePath, "ps", "-q", "caddy"],
-    {
-      cwd: dirname(composePath),
-      stdin: "ignore",
-    }
-  );
-  const id = ps.exitCode === 0 ? ps.stdout.trim() : "";
-  if (!id) {
-    return null;
-  }
-
-  const inspect = await exec(
-    ["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", id],
-    {
-      stdin: "ignore",
-    }
-  );
-  if (inspect.exitCode !== 0) {
-    return null;
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(inspect.stdout);
-  } catch {
-    return null;
-  }
-  if (!isRecord(parsed)) {
-    return null;
-  }
-
-  const network = parsed[DEFAULT_INGRESS_NETWORK];
-  if (!isRecord(network)) {
-    return null;
-  }
-  const ip = network.IPAddress;
-  return typeof ip === "string" && ip.length > 0 ? ip : null;
+async function resolveCoreDnsServer(): Promise<string | null> {
+  return (await resolveGlobalIngressAddresses("fresh")).coreDns;
 }
 
 async function resolveCaddyLocalCaPath(): Promise<string | null> {
@@ -7726,6 +7728,7 @@ async function runUpCommand({
       branch,
       devHost,
       aliasHost,
+      addresses: "fresh",
     });
     const composeFiles =
       branch && devHost
@@ -8097,6 +8100,8 @@ async function maybePromptToStartGlobal(opts: {
   }
 
   const exitCode = await globalUp();
+  // The stack just started: its addresses are new.
+  globalIngressReads.clear();
   if (exitCode !== 0) {
     logger.warn({
       message:
@@ -9244,6 +9249,7 @@ async function runRestartUpPhase(opts: {
       branch: opts.branch,
       devHost,
       aliasHost,
+      addresses: "fresh",
     });
     const composeFiles =
       opts.branch && devHost
@@ -9451,6 +9457,7 @@ async function runTargetedServiceRestart(opts: {
     branch: opts.branch,
     devHost,
     aliasHost,
+    addresses: "fresh",
   });
   const composeFiles =
     opts.branch && devHost
@@ -10781,6 +10788,8 @@ async function handleRun({
     branch,
     devHost,
     aliasHost,
+    // A background run cannot retry, so it reads Docker once up front.
+    addresses: runAddressMode(background),
   });
   const composeFiles = branch
     ? await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })
@@ -10890,14 +10899,85 @@ async function handleRun({
     cwd: dirname(project.composeFile),
     env: envOverrides.env,
   };
-  return await runOrStartComposeCommand({
+  const dispatch = async (): Promise<number> =>
+    await runOrStartComposeCommand({
+      background,
+      project,
+      branch,
+      compose: { operation: "run", options: runOptions },
+      callerOptions: args.options,
+      envOverrides,
+    });
+  return await runAndRefreshStaleAddresses({
+    dispatch,
     background,
-    project,
-    branch,
-    compose: { operation: "run", options: runOptions },
-    callerOptions: args.options,
-    envOverrides,
+    internalOverride,
+    rebuild: async () =>
+      await resolveInternalComposeOverride({
+        project,
+        cfg,
+        branch,
+        devHost,
+        aliasHost,
+        addresses: "fresh",
+      }),
   });
+}
+
+function runAddressMode(background: unknown): "recorded" | "fresh" {
+  return background ? "fresh" : "recorded";
+}
+
+/**
+ * Runs a foreground one-off. When it fails, checks the recorded global
+ * addresses it used against Docker once (see
+ * {@link refreshStaleInternalOverride}). The command is never run again:
+ * a changed address does not show that it never started, and a one-off can
+ * have side effects (a migration) before it fails.
+ */
+async function runAndRefreshStaleAddresses(opts: {
+  readonly dispatch: () => Promise<number>;
+  readonly background: unknown;
+  readonly internalOverride: string | null;
+  readonly rebuild: () => Promise<string | null>;
+}): Promise<number> {
+  const exitCode = await opts.dispatch();
+  if (exitCode === 0 || opts.background || opts.internalOverride === null) {
+    return exitCode;
+  }
+  try {
+    await refreshStaleInternalOverride(opts.rebuild);
+  } catch (error) {
+    // The command's own result stands; the refresh is only for the next one.
+    // stderr: a run's stdout is the command's own output.
+    process.stderr.write(
+      `Hack: could not check the recorded proxy and DNS addresses after the command failed: ${error instanceof Error ? error.message : String(error)}\n`
+    );
+  }
+  return exitCode;
+}
+
+/**
+ * Reads the global addresses once from Docker when the failed run used
+ * recorded ones. When they differ (the proxy or DNS container came back with
+ * new addresses outside Hack), rewrites (or removes) the stored override and
+ * says so on stderr, so the next command gets the current addresses.
+ */
+async function refreshStaleInternalOverride(
+  rebuild: () => Promise<string | null>
+): Promise<void> {
+  const used = await resolveGlobalIngressAddresses("recorded");
+  if (!used.fromRecord) {
+    return;
+  }
+  const current = await resolveGlobalIngressAddresses("fresh");
+  if (current.coreDns === used.coreDns && current.caddy === used.caddy) {
+    return;
+  }
+  await rebuild();
+  process.stderr.write(
+    "Hack: the global proxy or DNS address changed since Hack recorded it, so this run may have used the old one. The internal override is updated; run the command again if the failure was a name or connection error.\n"
+  );
 }
 
 /**
@@ -11015,29 +11095,26 @@ async function handleExec({
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
-  const devHost = await resolveRuntimeDevHost({ project, branch });
-  const aliasHost = resolveBranchAliasHost({ devHost, cfg });
-  const internalOverride = await resolveInternalComposeOverride({
-    project,
-    cfg,
-    branch,
-    devHost,
-    aliasHost,
-  });
-  const composeFiles = branch
-    ? await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })
-    : [project.composeFile];
-  const composeFilesWithInternal = internalOverride
-    ? [...composeFiles, internalOverride]
-    : composeFiles;
-  const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
-    project,
-    composeFiles: composeFilesWithInternal,
-    branch,
-    devHost,
-    aliasHost,
-    composeProject: composeProjectName ?? baseProjectName,
-  });
+  // The container already exists: DNS, host entries, trust and runtime
+  // labels were applied when it was created, and Compose only needs the
+  // service in its file list to find it. Pass the generated files `up` left
+  // on disk; generate nothing and read no global address. A stored file that
+  // still names a service the Compose file no longer has would make Compose
+  // reject the whole model, so then regenerate them as before.
+  const allServiceNames = await readComposeServiceNames(project.composeFile);
+  const stored = await existingExecComposeFiles({ project, branch });
+  const { composeFilesWithInternal, runtimeMetadataOverride } =
+    (await generatedFilesMatchServices({
+      files: stored.generated,
+      serviceNames: allServiceNames,
+    }))
+      ? stored
+      : await generateExecComposeFiles({
+          project,
+          cfg,
+          branch,
+          composeProject: composeProjectName ?? baseProjectName,
+        });
 
   const projectName = sanitizeProjectSlug(baseProjectName);
   const lifecycleComposeProject = resolveLifecycleComposeProjectName({
@@ -11051,20 +11128,20 @@ async function handleExec({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
   });
-  const allServiceNames = await readComposeServiceNames(project.composeFile);
   const envOverrides = await resolveComposeEnvOverrides({
     project,
     projectName,
     targetServices: [service],
     allServiceNames,
     envName,
+    persist: false,
   });
   const composeFilesWithEnv = [
     ...composeFilesWithInternal,
     ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
     ...envOverrides.composeFiles,
   ];
-  const execReady = await resolveExecTargetReady({
+  const readiness = {
     composeFiles: composeFilesWithEnv,
     composeProjectKey: lifecycleComposeProject,
     composeProject: composeProjectName,
@@ -11074,10 +11151,8 @@ async function handleExec({
     branchOption: args.options.branch,
     service,
     env: envOverrides.env,
-  });
-  if (!execReady.ok) {
-    throw new CliUsageError(execReady.message);
-  }
+  };
+  await requireExecTargetReady({ readiness, background: background !== null });
   // exec stdout is the target command's output; keep the warning on stderr.
   const staleEnvWarning = await resolveComposeExecStaleEnvWarning({
     projectDir: project.projectDir,
@@ -11099,7 +11174,7 @@ async function handleExec({
     cwd: dirname(project.composeFile),
     env: envOverrides.env,
   };
-  return await runOrStartComposeCommand({
+  const exitCode = await runOrStartComposeCommand({
     background,
     project,
     branch,
@@ -11107,6 +11182,12 @@ async function handleExec({
     callerOptions: args.options,
     envOverrides,
   });
+  await explainRefusedForegroundExec({
+    exitCode,
+    readiness,
+    background: background !== null,
+  });
+  return exitCode;
 }
 
 async function answerExistingBackgroundRequest(opts: {
@@ -11290,7 +11371,105 @@ async function resolveCanSkipRunDependencies(opts: {
   );
 }
 
-async function resolveExecTargetReady(opts: {
+/**
+ * The generated Compose files an instance's `up` wrote, as far as they exist,
+ * in `up`'s order: the branch override, the internal override (stored, else
+ * the in-project file of an older Hack), the runtime metadata override.
+ */
+async function existingExecComposeFiles(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly branch: string | null;
+}): Promise<ExecComposeFiles & { readonly generated: readonly string[] }> {
+  const { project, branch } = opts;
+  const branchOverride = branch
+    ? resolve(project.projectDir, ".branch", `compose.${branch}.override.yml`)
+    : null;
+  const runtimeOverride = branch
+    ? resolve(
+        project.projectDir,
+        ".branch",
+        `compose.${branch}.runtime.override.yml`
+      )
+    : resolve(project.projectDir, ".internal", "compose.runtime.override.yml");
+  const [hasBranchOverride, internalOverride, hasRuntimeOverride] =
+    await Promise.all([
+      branchOverride ? pathExists(branchOverride) : false,
+      existingInternalOverride({
+        hackHome: resolveGlobalHackDir(),
+        projectDir: project.projectDir,
+        branch,
+      }),
+      pathExists(runtimeOverride),
+    ]);
+  const generated = [
+    ...(hasBranchOverride && branchOverride ? [branchOverride] : []),
+    ...(internalOverride ? [internalOverride] : []),
+  ];
+  return {
+    composeFilesWithInternal: [project.composeFile, ...generated],
+    runtimeMetadataOverride: hasRuntimeOverride ? runtimeOverride : null,
+    generated: [...generated, ...(hasRuntimeOverride ? [runtimeOverride] : [])],
+  };
+}
+
+interface ExecComposeFiles {
+  readonly composeFilesWithInternal: readonly string[];
+  readonly runtimeMetadataOverride: string | null;
+}
+
+/**
+ * True when every service the generated `files` declare is still in
+ * `serviceNames` (the Compose file's). A local YAML read, no Docker call.
+ */
+async function generatedFilesMatchServices(opts: {
+  readonly files: readonly string[];
+  readonly serviceNames: readonly string[];
+}): Promise<boolean> {
+  const known = new Set(opts.serviceNames);
+  const declared = await Promise.all(opts.files.map(readComposeServiceNames));
+  return declared.every((names) => names.every((name) => known.has(name)));
+}
+
+/** Renders the generated Compose files against the current graph, as `up` does. */
+async function generateExecComposeFiles(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly branch: string | null;
+  readonly composeProject: string;
+}): Promise<ExecComposeFiles> {
+  const { project, cfg, branch } = opts;
+  const devHost = await resolveRuntimeDevHost({ project, branch });
+  const aliasHost = resolveBranchAliasHost({ devHost, cfg });
+  const internalOverride = await resolveInternalComposeOverride({
+    project,
+    cfg,
+    branch,
+    devHost,
+    aliasHost,
+    // The container exists; its addresses were applied when it was created.
+    addresses: "recorded",
+  });
+  const composeFiles = branch
+    ? await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })
+    : [project.composeFile];
+  const composeFilesWithInternal = internalOverride
+    ? [...composeFiles, internalOverride]
+    : composeFiles;
+  const runtimeMetadataOverride = await resolveRuntimeHostMetadataOverride({
+    project,
+    composeFiles: composeFilesWithInternal,
+    branch,
+    devHost,
+    aliasHost,
+    composeProject: opts.composeProject,
+  });
+  return { composeFilesWithInternal, runtimeMetadataOverride };
+}
+
+/** Exit code of `docker compose exec` when the service is not running. */
+const COMPOSE_EXEC_REFUSED_EXIT_CODE = 1;
+
+interface ExecReadinessOptions {
   readonly composeFiles: readonly string[];
   readonly composeProjectKey: string;
   readonly composeProject: string | null;
@@ -11305,9 +11484,51 @@ async function resolveExecTargetReady(opts: {
    * per unset reference.
    */
   readonly env?: Record<string, string>;
-}): Promise<
-  { readonly ok: true } | { readonly ok: false; readonly message: string }
-> {
+}
+
+/**
+ * A background exec refuses before its supervisor starts. A foreground exec
+ * checks only the env overlay (a state file read) up front: Compose itself
+ * refuses a stopped service, and {@link explainRefusedForegroundExec} adds
+ * the hint after that exit, so a ready service costs no `compose ps`.
+ */
+async function requireExecTargetReady(opts: {
+  readonly readiness: ExecReadinessOptions;
+  readonly background: boolean;
+}): Promise<void> {
+  const message = await resolveExecEnvMismatch(opts.readiness);
+  if (message !== null) {
+    throw new CliUsageError(message);
+  }
+  if (opts.background) {
+    await requireExecTargetRunning(opts.readiness);
+  }
+}
+
+/**
+ * After a foreground `compose exec` exits with Compose's refusal code, throws
+ * the usage error naming `hack up -d` and `hack run` when the service is not
+ * running, or the read's coded error (an unreachable engine, a failed
+ * Compose) when the listing cannot be read. A command that itself exited 1 in
+ * a running service gets nothing added.
+ */
+async function explainRefusedForegroundExec(opts: {
+  readonly exitCode: number;
+  readonly readiness: ExecReadinessOptions;
+  readonly background: boolean;
+}): Promise<void> {
+  if (opts.background || opts.exitCode !== COMPOSE_EXEC_REFUSED_EXIT_CODE) {
+    return;
+  }
+  // A stopped service gets the `hack up -d` / `hack run` hint; an engine that
+  // cannot be reached gets its coded cause, as `hack ps` reports it.
+  await requireExecTargetRunning(opts.readiness);
+}
+
+/** The refusal when the instance runs another env overlay; no Docker read. */
+async function resolveExecEnvMismatch(
+  opts: ExecReadinessOptions
+): Promise<string | null> {
   const runtimeState = await readProjectRuntimeStateEntry({
     projectDir: opts.project.projectDir,
     composeProject: opts.composeProjectKey,
@@ -11315,17 +11536,23 @@ async function resolveExecTargetReady(opts: {
   // Reached only with an explicit --env: an omitted one already resolved to
   // the running selection.
   if (runtimeState && runtimeState.envName !== opts.effectiveEnvName) {
-    return {
-      ok: false,
-      message: buildRunningEnvMismatchMessage({
-        command: "exec",
-        runningEnvName: runtimeState.envName,
-        requestedEnvName: opts.effectiveEnvName,
-        branchOption: opts.branchOption,
-      }),
-    };
+    return buildRunningEnvMismatchMessage({
+      command: "exec",
+      runningEnvName: runtimeState.envName,
+      requestedEnvName: opts.effectiveEnvName,
+      branchOption: opts.branchOption,
+    });
   }
+  return null;
+}
 
+/**
+ * Throws a usage error naming `hack up -d` and `hack run` when the target
+ * service is not running; an engine or Compose failure keeps its own code.
+ */
+async function requireExecTargetRunning(
+  opts: ExecReadinessOptions
+): Promise<void> {
   const read = await readComposePs({
     run: () =>
       composeRuntimeBackend.psJson({
@@ -11338,24 +11565,19 @@ async function resolveExecTargetReady(opts: {
     redactValues: composeEnvValuesToRedact({ env: opts.env }),
   });
   if (!read.ok) {
-    // An engine or Compose failure, not a usage problem: keep its code and cause.
     throw read.error;
   }
 
-  const runningServices = read.entries;
-  const targetIsRunning = runningServices.some((entry) => {
+  const targetIsRunning = read.entries.some((entry) => {
     const service = getString(entry, "Service")?.trim();
     const state = getString(entry, "State")?.trim().toLowerCase();
     return service === opts.service && state === "running";
   });
   if (!targetIsRunning) {
-    return {
-      ok: false,
-      message: `Service "${opts.service}" is not running. Start the stack with \`hack up -d\` or use \`hack run ${opts.service} ...\` for a one-off container.`,
-    };
+    throw new CliUsageError(
+      `Service "${opts.service}" is not running. Start the stack with \`hack up -d\` or use \`hack run ${opts.service} ...\` for a one-off container.`
+    );
   }
-
-  return { ok: true };
 }
 
 function computeWantsLokiExplicit(opts: {

@@ -319,3 +319,22 @@ fn only_the_create_body_carries_the_label_and_the_inspect_must_echo_it() {
         );
     }
 }
+
+#[test]
+fn engine_nanosecond_values_beyond_double_precision_are_identified() {
+    // Compose accepts `interval: 3000h`; it compiles to nanoseconds above 2^53.
+    let resources = resources(RUN);
+    let mut long = config(RUN, "o1", "p1");
+    long["Healthcheck"]["Interval"] = json!(10_800_000_000_000_000_u64);
+    let mut longer = long.clone();
+    longer["Healthcheck"]["Interval"] = json!(10_800_000_000_000_001_u64);
+    let first = of(&long, &context(&resources)).unwrap();
+    assert_ne!(
+        first.digest,
+        of(&longer, &context(&resources)).unwrap().digest
+    );
+    assert_eq!(
+        stamped(&long, &first)["Healthcheck"]["Interval"],
+        json!(10_800_000_000_000_000_u64)
+    );
+}

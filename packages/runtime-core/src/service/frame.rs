@@ -558,15 +558,33 @@ mod tests {
         }
     }
 
-    /// Whether the socket would accept a byte right now.
+    /// Whether the socket would accept a byte right now: a successful zero-timeout
+    /// poll says so. A signal retries; any other poll failure fails the test.
     fn writable(stream: &UnixStream) -> bool {
-        let mut fd = libc::pollfd {
-            fd: stream.as_raw_fd(),
-            events: libc::POLLOUT,
-            revents: 0,
-        };
-        // SAFETY: one initialized pollfd; a zero timeout only samples readiness.
-        unsafe { libc::poll(&mut fd, 1, 0) > 0 }
+        loop {
+            let mut fd = libc::pollfd {
+                fd: stream.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            // SAFETY: one initialized pollfd; a zero timeout only samples readiness.
+            match unsafe { libc::poll(&mut fd, 1, 0) } {
+                0 => return false,
+                n if n > 0 => {
+                    assert_eq!(
+                        fd.revents & !libc::POLLOUT,
+                        0,
+                        "unexpected revents {}",
+                        fd.revents
+                    );
+                    return fd.revents & libc::POLLOUT != 0;
+                }
+                _ => {
+                    let e = std::io::Error::last_os_error();
+                    assert_eq!(e.kind(), ErrorKind::Interrupted, "poll: {e}");
+                }
+            }
+        }
     }
 
     const SIGPIPE_CHILD: &str = "HACK_FRAME_SIGPIPE_CHILD";

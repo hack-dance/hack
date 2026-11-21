@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::sync::Barrier;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -141,7 +141,37 @@ fn an_open_behind_a_held_lock_fails_busy_at_its_deadline() {
     assert!(fixture.open().keyed_digest(STEP, &json!(1)).is_ok());
 }
 
-/// Run as a separate process by `separate_processes_open_alongside_a_long_lived_holder`
+/// Initialization that holds the exclusive lock for 400 ms does not make a waiting
+/// opener report busy: its time deadline decides, not a count of tries (a 32-try
+/// loop 5 ms apart gave up after about 160 ms).
+#[test]
+fn a_slow_initialization_is_waited_for_until_the_time_deadline() {
+    let fixture = Fixture::new();
+    let root = fixture.root();
+    // The state an initializer is in: the directory and lock exist, nothing else.
+    fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.join("lock"))
+        .unwrap();
+    flock(&lock, libc::LOCK_EX).unwrap();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        drop(lock);
+    });
+    let started = Instant::now();
+    let store = disk::open_until(&root, started + Duration::from_secs(3));
+    let elapsed = started.elapsed();
+    releaser.join().unwrap();
+    assert!(store.is_ok(), "{:?}", store.err());
+    assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+}
+
+/// Run as a separate process by the multi-process store tests
 /// (ignored in a normal run). Opens the store named by the environment, prints its
 /// key's digest of a fixed value, and keeps the store open for the requested time.
 #[test]
@@ -225,10 +255,11 @@ fn separate_processes_open_alongside_a_long_lived_holder() {
     processes_open_the_same_store(&[3_000, 0, 0, 0, 0, 0, 0], true);
 }
 
-/// Seven processes open a fresh store at once; three keep it open for 2 s.
+/// Seven processes race to open a fresh store, and every one keeps its handle for
+/// 1.5 s: the first-open race that stranded blocked openers on macOS.
 #[test]
-fn separate_processes_race_to_open_a_fresh_store() {
-    processes_open_the_same_store(&[2_000, 2_000, 2_000, 0, 0, 0, 0], false);
+fn separate_processes_race_to_open_a_fresh_store_and_keep_it() {
+    processes_open_the_same_store(&[1_500; 7], false);
 }
 
 #[test]

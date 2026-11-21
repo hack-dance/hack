@@ -1,4 +1,13 @@
 //! Private layout, generation locking and atomic cache file publication.
+//!
+//! The store lock is never waited for in a blocking `flock`. On macOS, releasing an
+//! exclusive `flock` wakes only one blocked waiter and queues the rest behind it, so
+//! a woken opener that keeps its shared lock (as a store handle does) would strand
+//! every other blocked opener with no bound. Every lock attempt here is therefore
+//! non-blocking: a failed one closes its descriptor, sleeps 1 to 5 ms and retries
+//! until a time deadline, then `open` reports the store busy. Initialization, key
+//! repair and set-aside run only while exclusive, and no waiter is ever blocked
+//! behind that exclusive lock.
 
 use super::{Result, Store, invalid, io_error};
 use crate::CandidateError;
@@ -37,10 +46,22 @@ pub(super) fn open_until(root: &Path, deadline: Instant) -> Result<Store> {
         let owner = create_directory(&root)?;
         let lock_path = root.join("lock");
         let lock = match open_lock(&lock_path, owner) {
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            // The store was just set aside or not yet created: retry shortly.
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                pause();
+                continue;
+            }
             result => result.map_err(io_error)?,
         };
-        lock_shared(&lock, deadline)?;
+        match flock(&lock, libc::LOCK_SH | libc::LOCK_NB) {
+            Ok(()) => {}
+            Err(error) if retryable(&error) => {
+                drop(lock);
+                pause();
+                continue;
+            }
+            Err(error) => return Err(io_error(error)),
+        }
         if !is_current(&lock, &lock_path)? {
             continue;
         }
@@ -59,13 +80,14 @@ pub(super) fn open_until(root: &Path, deadline: Instant) -> Result<Store> {
 
         // Upgrade to exclusive without blocking. Linux may release the shared lock
         // during the conversion; macOS keeps it when the upgrade fails. Either way a
-        // failed upgrade drops this handle and retries until the deadline, 5 ms
-        // apart, and both the inode and the contents are checked again once exclusive.
+        // failed upgrade closes this descriptor and retries until the deadline, and
+        // both the inode and the contents are checked again once exclusive. After
+        // initializing, the descriptor is closed and the loop opens the store afresh.
         match flock(&lock, libc::LOCK_EX | libc::LOCK_NB) {
             Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+            Err(error) if retryable(&error) => {
                 drop(lock);
-                std::thread::sleep(Duration::from_millis(5));
+                pause();
                 continue;
             }
             Err(error) => return Err(io_error(error)),
@@ -140,22 +162,19 @@ fn set_aside(root: &Path) -> Result<()> {
     fs::rename(root, backup).map_err(io_error)
 }
 
-/// A shared lock, tried without blocking every 2 ms until `deadline`.
-fn lock_shared(lock: &File, deadline: Instant) -> Result<()> {
-    loop {
-        match flock(lock, libc::LOCK_SH | libc::LOCK_NB) {
-            Ok(()) => return Ok(()),
-            Err(error)
-                if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) =>
-            {
-                if Instant::now() >= deadline {
-                    return Err(busy());
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            Err(error) => return Err(io_error(error)),
-        }
-    }
+/// A lock attempt that another holder refused, or a signal interrupted.
+fn retryable(error: &io::Error) -> bool {
+    matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted)
+}
+
+/// Sleep 1 to 5 ms before the next lock attempt. The jitter keeps racing openers
+/// from retrying in step.
+fn pause() {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_nanos())
+        .unwrap_or(0);
+    std::thread::sleep(Duration::from_micros(1_000 + u64::from(nanos % 4_000)));
 }
 
 fn create_layout(root: &Path) -> Result<()> {

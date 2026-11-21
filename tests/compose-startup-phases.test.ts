@@ -143,8 +143,8 @@ test("a first-time build longer than the startup budget still starts", async () 
   expect(result.code).toBe(0);
   expect(result.phases).toEqual(["images", "start"]);
   expect(result.calls).toEqual([
-    "compose -p phases -f compose.yml up --no-start",
-    "compose -p phases -f compose.yml up -d --no-build",
+    "compose -p phases --project-directory . -f compose.yml up --no-start",
+    "compose -p phases --project-directory . -f compose.yml up -d --no-build",
   ]);
 }, 15_000);
 
@@ -190,7 +190,7 @@ test("a hung image build times out in the named image phase without starting", a
   expect(result.code).toBe(124);
   expect(result.phases).toEqual(["images"]);
   expect(result.calls).toEqual([
-    "compose -p phases -f compose.yml up --no-start",
+    "compose -p phases --project-directory . -f compose.yml up --no-start",
   ]);
   expect(result.elapsedMs).toBeLessThan(5000);
   const hangPid = Number(await readFile(join(stub.dir, "hang.pid"), "utf8"));

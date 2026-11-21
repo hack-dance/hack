@@ -156,7 +156,9 @@ fn private(path: &Path, pin: &Pin) -> Result<(Document, String), CandidateError>
         || snapshot.content.identity.inode != pin.ino
         || format!(
             "{:x}",
-            Sha256::digest(text.as_ref().ok_or_else(refused)?.as_bytes())
+            crate::Hex(Sha256::digest(
+                text.as_ref().ok_or_else(refused)?.as_bytes()
+            ))
         ) != pin.sha256
     {
         return Err(refused());
@@ -206,7 +208,7 @@ impl Permit {
         let (pin_snapshot, text) = private(&pin.path, &pin)?;
         let input: Input = serde_json::from_str(&text).map_err(|_| refused())?;
         let branch = serde_json::to_vec(&source_input.branch).map_err(|_| refused())?;
-        let key = format!("{:x}", Sha256::digest(&branch));
+        let key = format!("{:x}", crate::Hex(Sha256::digest(&branch)));
         let persistent = source_input.version == 5;
         if input.version != 1
             || input.kind

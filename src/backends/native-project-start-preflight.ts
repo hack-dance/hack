@@ -5,7 +5,11 @@ import {
   requireNativeShellDeliveryFits,
   selectActiveNativeProjectInput,
 } from "./native-project-input.ts";
-import { withNativeProjectReview } from "./native-project-review.ts";
+import {
+  type NativeProjectReviewSelection,
+  selectNativeProjectReviewSelection,
+  withNativeProjectReview,
+} from "./native-project-review.ts";
 import {
   invokeNativeRuntime,
   NativeRuntimeRequestError,
@@ -18,6 +22,8 @@ import { readNativeStartRefusals } from "./native-start-refusals.ts";
  * Judge the adapted Compose input before hooks, image acquisition or VM boot.
  * This review grants no runtime or retained-run authority. Startup repeats its
  * review after pinning images; neither review substitutes for effect-time checks.
+ * Returns the original-input identity it selected when that later review may
+ * reuse it (same project, file, branch, profiles and original input).
  */
 export async function requireNativeStaticStartReview(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -31,7 +37,7 @@ export async function requireNativeStaticStartReview(opts: {
   readonly buildServices: ReadonlySet<string>;
   readonly invoke?: typeof invokeNativeRuntime;
   readonly signal?: AbortSignal;
-}): Promise<void> {
+}): Promise<NativeProjectReviewSelection | undefined> {
   const invoke = opts.invoke ?? invokeNativeRuntime;
   const compose: unknown = JSON.parse(opts.input.normalizedComposeJson);
   if (!(isRecord(compose) && isRecord(compose.services))) {
@@ -46,11 +52,20 @@ export async function requireNativeStaticStartReview(opts: {
       Reflect.deleteProperty(spec, "build");
     }
   }
+  const branch = opts.deferredRestore ? undefined : opts.branch;
+  const signaled: typeof invokeNativeRuntime = (request) =>
+    invoke({ ...request, signal: opts.signal });
+  const { selection } = await selectNativeProjectReviewSelection({
+    ...opts,
+    branch,
+    invoke: signaled,
+  });
   await withNativeProjectReview({
     ...opts,
-    branch: opts.deferredRestore ? undefined : opts.branch,
+    branch,
     input: { ...opts.input, normalizedComposeJson: JSON.stringify(compose) },
-    invoke: (request) => invoke({ ...request, signal: opts.signal }),
+    invoke: signaled,
+    selectedIdentity: selection,
     run: ({ report }) => {
       const plan = report.plan;
       if (!(isRecord(plan) && isRecord(plan.services))) {
@@ -87,4 +102,5 @@ export async function requireNativeStaticStartReview(opts: {
       return Promise.resolve();
     },
   });
+  return selection;
 }

@@ -120,7 +120,7 @@ fn inspect_listener_inner(
             first.reuse_port
         ]))
         .map_err(|_| refused())?;
-        let fingerprint = format!("{:x}", Sha256::digest(bytes));
+        let fingerprint = format!("{:x}", crate::Hex(Sha256::digest(bytes)));
         Ok(HostListenerIdentity {
             pid: process.pid,
             start_micros: process.start_micros,

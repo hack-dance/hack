@@ -109,10 +109,13 @@ fn build_runtime_identity() {
         hash.update((value.len() as u64).to_le_bytes());
         hash.update(value.as_bytes());
     }
-    println!(
-        "cargo:rustc-env=HACK_RUNTIME_BUILD_ID={:x}",
-        hash.finalize()
-    );
+    // The digest type of `sha2 0.11` has no `LowerHex`; the library's `Hex` is not built yet.
+    let id: String = hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    println!("cargo:rustc-env=HACK_RUNTIME_BUILD_ID={id}");
 }
 
 fn build_stream_relay() {

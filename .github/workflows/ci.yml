@@ -192,18 +192,18 @@ jobs:
             bun --no-env-file "$policy/scripts/ci-change-scope.ts" --event="$EVENT_NAME" --repo-root="$GITHUB_WORKSPACE" --ref="$CI_REF" --base-revision="$base"
             echo 'ci_evidence=scoped' >> "$GITHUB_OUTPUT"
           fi
-          # The independent full guard must also qualify the heavy tiers on ready
-          # PRs, including policy changes and stable-line PRs. Drafts stay light.
+          # Protected inputs retain full Linux/Docker/build coverage. Ready PRs
+          # defer macOS unless targeting main or explicitly labeled. Drafts stay light.
           if [ "$EVENT_NAME" = "pull_request" ]; then
             mac=false; e2e=false; builds=false
             if [ "$PR_DRAFT" != "true" ]; then
-              if [ "$full" = "true" ] || [ "$PR_MAC" = "true" ]; then mac=true; fi
+              if [ "$PR_BASE_REF" = "main" ] || [ "$PR_FULL" = "true" ] || [ "$PR_MAC" = "true" ]; then mac=true; fi
               if [ "$full" = "true" ] || [ "$PR_E2E" = "true" ]; then e2e=true; fi
               if [ "$full" = "true" ]; then builds=true; fi
             fi
             if [ "$mac" != "true" ]; then
               compiler='[]'; native=false
-              if [ "$PR_DRAFT" != "true" ] && [ "$linux_rust" = "true" ]; then
+              if [ "$PR_DRAFT" != "true" ] && { [ "$full" = "true" ] || [ "$linux_rust" = "true" ]; }; then
                 compiler='[{"os":"ubuntu-latest","platform":"linux","arch":"x64"},{"os":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"}]'
                 native=true
                 echo 'compiler_rust=true' >> "$GITHUB_OUTPUT"
@@ -225,7 +225,7 @@ jobs:
             fi
             if [ "$e2e" != "true" ]; then echo 'docker_suite=false' >> "$GITHUB_OUTPUT"; fi
             printf 'build_smoke=%s\n' "$builds" >> "$GITHUB_OUTPUT"
-            echo 'Light PRs defer macOS, Docker and build smoke to integration; CLI inputs keep Linux relocated acceptance, and Rust crate inputs keep Linux candidate/compiler checks. Labels opt in; protected inputs, unavailable policy/diff and ready PRs into main automatically run full tiers.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Ready PRs defer macOS to integration unless targeting main or labeled ci:mac or ci:full. Protected inputs and unavailable policy/diff retain full Linux, Docker and build tiers. Light PRs retain selected Linux checks; labels opt into heavy tiers. Drafts stay light.' >> "$GITHUB_STEP_SUMMARY"
           else
             printf 'defer_macos=false\nbuild_smoke=true\n' >> "$GITHUB_OUTPUT"
           fi

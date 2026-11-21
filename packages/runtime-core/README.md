@@ -6,7 +6,8 @@ planning request to dependency IR and ephemeral
 workload inputs. It calls the compiler in-process and performs no filesystem,
 provider, image acquisition or receipt effects. This feature's compiler path
 dependency requires the repository's pinned Rust 1.97.1. The default runtime
-package keeps its declared Rust 1.85 minimum; enabling the adapter requires Rust 1.97.1.
+package declares Rust 1.88 as its minimum, the minimum of its `sha2` release; enabling the
+adapter requires Rust 1.97.1.
 
 The adapter accepts at most 32 selected pinned-image services/jobs, exec readiness,
 explicit exec/shell commands, entrypoint clearing, init, exact shutdown intent and
@@ -647,6 +648,27 @@ it moved files between, and the intent is removed only after the owner records
 The same applies when the failed boot's provider was recorded and is proven dead
 (`failed-boot-stopped` after a template refusal): recovery sets those disks aside instead of
 adopting them on the stopped path. Repeating recovery on the resulting pool changes nothing.
+
+A boot that fails after its provider process was recorded writes `failed-boot.json` beside
+the owner record: the failure's code and message, the recorded process, and
+`process_absent`, which says that the cleanup after the failure confirmed the provider
+stopped (not that the provider had exited by itself). A command prints most failures by
+code alone, because a message can name a path; the record keeps the message so that a code
+many causes share, such as `provider_state` for any I/O error, can be told apart afterwards
+without reproducing the failure. The file is private to the home.
+
+While a boot is adopted, after the engine has answered inside the guest and before the pool
+is recorded as running, the engine is checked once more from the host: `GET /_ping` through
+the provider's forwarded engine socket. That forward can lag behind the provider's ready
+signal, and a connection it accepts in that window is never answered. So the check makes up
+to three attempts, each on a fresh connection to a socket path that is validated again for
+that attempt. The boot fails when all of them failed, with the last attempt's error, or at
+once when the path is refused as unsafe (not this user's socket, a symlink on the way, or an
+ancestor that is not a directory); a socket file that is not there yet is tried again
+(HACK-2475: a single unanswered connection used to fail the boot after three seconds). Each
+attempt has three seconds for its whole reply. A forward that never answers fails the boot
+after about 9.2 s. The check does not identify which process answers on that
+socket; it checks that the path is this user's own socket in the pool's directory.
 
 Guest control readiness does not mean exposed bridge sockets have bound. The pinned
 [SmolVM 1.35.4 guest](https://github.com/smol-machines/smolvm/blob/v1.35.4/crates/smolvm-agent/src/main.rs#L664)
@@ -1881,6 +1903,29 @@ same-user adversary who knows the scheme: the content anchors and the witness ar
 by the same user. `tree_witness` lists what the metadata check gives up relative to the
 content proof (writes that keep size and ctime, such as raw device writes, clock changes,
 shared-mapping stores not yet reflected in ctime, and filesystems without fine ctime).
+
+### SHA-256 with the CPU's instructions
+
+The content proofs above hash a few hundred megabytes at every cold start and stop. The
+runtime, the guest relay and the configuration compiler use `sha2` 0.11.1, which hashes
+SHA-256 with the CPU's instructions where the CPU has them and in software otherwise; the
+digests are the same either way.
+
+| Target | How the instructions are found | Without them |
+|---|---|---|
+| macOS on Apple Silicon | always present; no check at run time | not applicable |
+| Linux on arm64, including the guest | `AT_HWCAP` once per process | software |
+| Linux and macOS on x86_64 | CPUID (`sha` and `sse4.1`) once per process | software |
+
+`runtime status` reports the choice of the process that answered as
+`hashing: {"sha256": "hardware"}` or `"software"`. Two checks keep software hashing from
+coming back unnoticed. `src/sha256_guard.rs` stops a build for arm64 or x86_64 that sets
+`sha2`'s configuration flag for its software backend; the guest relay and the configuration
+compiler carry the same guard. A unit test (`sha256_backend`) fails when the CPU has the
+instructions and the build would not use them. Both rest on how `sha2` 0.11.1 selects its
+backend, so the dependency is pinned exactly; read its `src/sha256.rs` again before moving
+the pin. To measure a build, run
+`cargo test --release --lib sha256_rate_of_this_build -- --ignored --nocapture`.
 
 ### Extending a stopped pool's approved hosts
 

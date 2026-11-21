@@ -14,9 +14,10 @@
  * that `hack native setup --accept-downloads` gives.
  *
  * The check's message is also doctor's JSON `detail`, which is stored and
- * passed on. It names the setup command by the launcher's base name, never by
- * its path: a candidate launcher's path is under the user's home by default.
- * The builder's own paths in it are relative to the native home.
+ * passed on. It names the setup command as every builder message does: `hack`
+ * for a stable install, `~/<path>` for a candidate launcher under the user's
+ * home. That command runs as pasted and shows no home directory. The
+ * builder's own paths in it are relative to the native home.
  *
  * The inspection is record-level: it does not hash the builder. A builder
  * whose bytes changed under an intact record reads as installed here; the
@@ -74,6 +75,8 @@ export function nativeBuilderCheckResult(opts: {
   readonly paths?: NativeBuilderPaths;
   /** Names the setup command for this install kind (default: this process). */
   readonly launcher?: CandidateLauncher;
+  /** The user's home directory (default: `os.homedir()`). */
+  readonly homeDir?: string;
 }): {
   readonly name: string;
   readonly status: "ok" | "warn";
@@ -110,14 +113,14 @@ export function nativeBuilderCheckResult(opts: {
       return {
         name,
         status: "warn",
-        message: `${scope}, but ${NATIVE_BUILDER_MISSING}, so native up cannot build ${one ? "it" : "them"}. ${nativeBuilderRemedy(opts.launcher, "name")}`,
+        message: `${scope}, but ${NATIVE_BUILDER_MISSING}, so native up cannot build ${one ? "it" : "them"}. ${nativeBuilderRemedy(opts)}`,
         nativeBuilder,
       };
     case "changed":
       return {
         name,
         status: "warn",
-        message: `${scope}, but ${NATIVE_BUILDER_CHANGED}, so native up refuses to build with it. ${nativeBuilderChangedRemedy({ paths: opts.paths, launcher: opts.launcher, style: "name" })}`,
+        message: `${scope}, but ${NATIVE_BUILDER_CHANGED}, so native up refuses to build with it. ${nativeBuilderChangedRemedy(opts)}`,
         nativeBuilder,
       };
     default:
@@ -143,6 +146,7 @@ export async function checkNativeImageBuilder(opts: {
   readonly compose: unknown;
   readonly invoke?: typeof invokeNativeRuntime;
   readonly launcher?: CandidateLauncher;
+  readonly homeDir?: string;
 }): Promise<ReturnType<typeof nativeBuilderCheckResult>> {
   const buildServices = countNativeBuildServices(opts.compose);
   if (buildServices === 0) {
@@ -161,5 +165,6 @@ export async function checkNativeImageBuilder(opts: {
     builder: reported?.state ?? "unknown",
     paths: reported?.paths,
     launcher: opts.launcher,
+    homeDir: opts.homeDir,
   });
 }

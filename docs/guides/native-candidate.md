@@ -1327,10 +1327,17 @@ read as `prepared` there; setup and builds verify the bytes. `hack doctor` on
 the native backend adds a `native image builder` check: a warning with the same
 remedy when the project has a `build:` service and the home has no image builder,
 or one whose record does not match the pinned release.
-Doctor never installs or downloads it, with `--fix` either. Its message, which is
-also the JSON `detail`, names the setup command by the launcher's name only
-(`hack-next native setup --accept-downloads`), not by the launcher's full path as
-terminal lines do, so a saved doctor report carries no home directory.
+Doctor never installs or downloads it, with `--fix` either.
+
+Every message about the image builder names one setup command: the `hack up`
+refusal, the `hack native setup` hint and warning, and doctor's message with its
+JSON `detail`. A stable install prints `hack native setup --accept-downloads`. A
+candidate launcher under your home prints its path from the home,
+`~/.hack-next/bin/hack-next native setup --accept-downloads`, which runs as pasted
+and shows no home directory, so a saved doctor report carries none. A launcher
+outside the home, or one whose path needs shell quoting, keeps its full quoted
+path. Other printed commands are unchanged and name a candidate launcher by its
+full path ([printed commands](candidate-install.md#printed-commands-name-your-launcher)).
 
 `runtime build-image --request <file> --json` builds one image in the running
 runtime's engine with that client. Native `up` calls it for `build:` services when

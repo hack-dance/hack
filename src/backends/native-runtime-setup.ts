@@ -12,6 +12,7 @@ import { canPrompt, confirmSafe } from "../lib/interactivity.ts";
 import { isNativeDetachedOwnerProcess } from "../lib/native-detached-up.ts";
 import {
   NATIVE_BUILDER_CHANGED,
+  type NativeBuilderCommandOptions,
   type NativeBuilderPaths,
   nativeBuilderChangedRemedy,
   nativeBuilderRemedy,
@@ -356,21 +357,22 @@ export function nativeSetupBuilderOutcome(
  * line when the home was left without it, one warning when what is there does
  * not match the pinned release. Setup succeeded in both cases.
  */
-export function nativeSetupBuilderNotice(opts: {
-  readonly outcome: NativeSetupBuilderOutcome | undefined;
-  readonly paths?: NativeBuilderPaths;
-  readonly launcher?: CandidateLauncher;
-}): { readonly stream: "stdout" | "stderr"; readonly text: string } | null {
+export function nativeSetupBuilderNotice(
+  opts: NativeBuilderCommandOptions & {
+    readonly outcome: NativeSetupBuilderOutcome | undefined;
+    readonly paths?: NativeBuilderPaths;
+  }
+): { readonly stream: "stdout" | "stderr"; readonly text: string } | null {
   if (opts.outcome === "not_prepared") {
     return {
       stream: "stdout",
-      text: `The image builder is not installed, so native up cannot build images yet. ${nativeBuilderRemedy(opts.launcher)}\n`,
+      text: `The image builder is not installed, so native up cannot build images yet. ${nativeBuilderRemedy(opts)}\n`,
     };
   }
   if (opts.outcome === "changed") {
     return {
       stream: "stderr",
-      text: `WARN: Setup found that ${NATIVE_BUILDER_CHANGED}, so image builds are refused until it is replaced. Setup left it as it is. ${nativeBuilderChangedRemedy({ paths: opts.paths, launcher: opts.launcher })}\n`,
+      text: `WARN: Setup found that ${NATIVE_BUILDER_CHANGED}, so image builds are refused until it is replaced. Setup left it as it is. ${nativeBuilderChangedRemedy(opts)}\n`,
     };
   }
   return null;

@@ -1,8 +1,7 @@
-import { basename } from "node:path";
 import {
   type CandidateLauncher,
   currentCandidateLauncher,
-  launcherCommand,
+  homeRelativeLauncherCommand,
 } from "./candidate-launcher.ts";
 
 /**
@@ -10,6 +9,13 @@ import {
  * Compose `build:` services. `hack native setup` installs it with the rest of
  * the runtime. A home set up by a build that did not yet install it is still
  * ready for everything except image builds.
+ *
+ * Every message about it names the setup command the same way
+ * (`homeRelativeLauncherCommand`): `hack` for a stable install, and for a
+ * candidate launcher under the user's home `~/<path>`, which a shell runs as
+ * pasted and which shows neither the home directory nor the user name. So
+ * the `hack up` refusal, the `hack native setup` hint and warning, and
+ * doctor's check message and JSON `detail` all print one command.
  */
 
 /** The runtime's refusal code for a native home that has no image builder. */
@@ -23,48 +29,39 @@ export const NATIVE_BUILDER_MISSING =
 export const NATIVE_BUILDER_CHANGED =
   "the image builder in this native home does not match the pinned release";
 
-/**
- * How a printed command names the launcher.
- *
- * - `path`: as every other printed command does (`launcherCommand`): `hack`
- *   for a stable install, the launcher's full path for a candidate install,
- *   because that launcher is not on PATH. By default that path is under the
- *   user's home, so it shows the home directory.
- * - `name`: the launcher's base name only (`hack`, `hack-next`, `hack-v5`).
- *   For text that is stored or passed on, such as doctor's check detail and
- *   its JSON, which must not carry a home path or a user name.
- */
-export type NativeBuilderCommandStyle = "path" | "name";
-
 /** The image builder's prepared directory and record, as paths under the native home. */
 export type NativeBuilderPaths = {
   readonly directory: string;
   readonly record: string;
 };
 
+/** Who runs the command, and from which home; both default to this process. */
+export type NativeBuilderCommandOptions = {
+  readonly launcher?: CandidateLauncher;
+  /** The user's home directory (default: `os.homedir()`). */
+  readonly homeDir?: string;
+};
+
 /** `native setup --accept-downloads`, the one command that downloads the builder. */
-function setupWithConsent(
-  launcher: CandidateLauncher,
-  style: NativeBuilderCommandStyle
+export function nativeBuilderSetupCommand(
+  opts: NativeBuilderCommandOptions = {}
 ): string {
-  return launcherCommand(
-    style === "name"
-      ? { kind: "bundle", command: basename(launcher.command) }
-      : launcher,
-    ["native", "setup", "--accept-downloads"]
-  );
+  return homeRelativeLauncherCommand({
+    launcher: opts.launcher ?? currentCandidateLauncher(),
+    args: ["native", "setup", "--accept-downloads"],
+    homeDir: opts.homeDir,
+  });
 }
 
 /**
- * How to add the image builder to a native home that is already set up, naming
- * the command for this install kind. The same sentence in `hack up`, `hack
- * native setup` and `hack doctor`. Nothing downloads without this consent.
+ * How to add the image builder to a native home that is already set up. The
+ * same sentence in `hack up`, `hack native setup` and `hack doctor`. Nothing
+ * downloads without this consent.
  */
 export function nativeBuilderRemedy(
-  launcher: CandidateLauncher = currentCandidateLauncher(),
-  style: NativeBuilderCommandStyle = "path"
+  opts: NativeBuilderCommandOptions = {}
 ): string {
-  return `Run ${setupWithConsent(launcher, style)} to add it; offline, add --builder <pinned builder file> to the offline setup inputs.`;
+  return `Run ${nativeBuilderSetupCommand(opts)} to add it; offline, add --builder <pinned builder file> to the offline setup inputs.`;
 }
 
 /**
@@ -74,13 +71,11 @@ export function nativeBuilderRemedy(
  * with download consent. Without the paths (a runtime that did not report
  * them) the sentence names where they are.
  */
-export function nativeBuilderChangedRemedy(opts: {
-  readonly paths?: NativeBuilderPaths;
-  readonly launcher?: CandidateLauncher;
-  readonly style?: NativeBuilderCommandStyle;
-}): string {
+export function nativeBuilderChangedRemedy(
+  opts: NativeBuilderCommandOptions & { readonly paths?: NativeBuilderPaths }
+): string {
   const remove = opts.paths
     ? `Remove ${opts.paths.directory} and ${opts.paths.record} from the native home`
     : "Remove the image builder's directory and record from .hack-local/providers in the native home";
-  return `${remove}, then run ${setupWithConsent(opts.launcher ?? currentCandidateLauncher(), opts.style ?? "path")}.`;
+  return `${remove}, then run ${nativeBuilderSetupCommand(opts)}.`;
 }

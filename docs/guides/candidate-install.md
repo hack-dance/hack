@@ -328,6 +328,11 @@ A Compose run also prints `HACK_RUNTIME_BACKEND=compose` in front. A custom
 `HACK_NATIVE_HOME` is the one exception: `hack-next` refuses it, so that fix
 names the selected bundle's `hack-v5` instead.
 
+Messages about the native image builder (from `up`, `native setup` and
+`doctor`) print a launcher under your home from the home, as
+`~/.hack-next/bin/hack-next native setup --accept-downloads`. It is the same
+launcher, runs as pasted, and keeps the home directory out of saved reports.
+
 ## Upgrade, roll back and return to stable
 
 The standalone manager runs through the launcher:

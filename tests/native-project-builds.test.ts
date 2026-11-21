@@ -588,7 +588,9 @@ test("a native home without the image builder says so and how to add it", async 
     "Run hack native setup --accept-downloads to add it; offline, add --builder <pinned builder file> to the offline setup inputs."
   );
   expect(
-    nativeBuilderRemedy({ kind: "bundle", command: "/opt/bundle/hack-v5" })
+    nativeBuilderRemedy({
+      launcher: { kind: "bundle", command: "/opt/bundle/hack-v5" },
+    })
   ).toStartWith("Run /opt/bundle/hack-v5 native setup --accept-downloads ");
   // Neither the missing file's OS error nor a build-failure wording reaches the user.
   expect(message).not.toContain("os error");

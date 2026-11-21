@@ -7,6 +7,7 @@ import { isRecord } from "../lib/guards.ts";
 import {
   NATIVE_BUILDER_MISSING,
   NATIVE_BUILDER_NOT_PREPARED,
+  type NativeBuilderCommandOptions,
   nativeBuilderRemedy,
 } from "../lib/native-image-builder.ts";
 import {
@@ -710,7 +711,7 @@ function nameBuildFailure(
       : undefined;
   let message: string;
   if (code === NATIVE_BUILDER_NOT_PREPARED) {
-    message = `Native foreground up cannot build ${which}: ${NATIVE_BUILDER_MISSING}. ${nativeBuilderRemedy()} No image was built.`;
+    message = nativeBuilderMissingRefusal({ services });
   } else if (change === undefined) {
     message = `Native foreground up could not build ${which}: ${error.message}`;
   } else {
@@ -722,6 +723,17 @@ function nameBuildFailure(
     nativeCauseCode: error.nativeCauseCode,
     nativeStopFailures: error.nativeStopFailures,
   });
+}
+
+/**
+ * The `hack up` refusal for a native home that has no image builder: what is
+ * wrong and the one setup command that adds it, as every builder message
+ * names it.
+ */
+export function nativeBuilderMissingRefusal(
+  opts: NativeBuilderCommandOptions & { readonly services: readonly string[] }
+): string {
+  return `Native foreground up cannot build ${serviceList(opts.services)}: ${NATIVE_BUILDER_MISSING}. ${nativeBuilderRemedy(opts)} No image was built.`;
 }
 
 function pin(spec: Record<string, unknown>, image: string): void {

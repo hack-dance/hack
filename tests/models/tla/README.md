@@ -735,12 +735,6 @@ follow-up.
 | `Start` / `Stop` | ordinary `hack up` (fresh or retained) and `hack down` |
 | `PoolRecover` | `hack native recover` (`lifecycle::recover`) |
 
-The model does not represent bridges. On a real VM, a run whose owner's own cleanup
-was cut off when the pool stopped under it left its bridge slots `stopping`. Recovery from an
-earlier boot accepts a slot of that boot in any recorded phase, because its guest side ended
-with the boot (`graph/bridges/cleanup.rs` `selected_phase_admitted`). A slot of the live boot
-must still be running.
-
 The CLI tests in `tests/native-project-down.test.ts`, `tests/native-project-start.test.ts`
 and `tests/native-refusal-cli.test.ts` walk these transitions against a fake runtime.
 The model does not represent concurrent starts of the same instance, the startup

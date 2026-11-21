@@ -133,23 +133,6 @@ fn validate_selection_with_absence(
     Ok(())
 }
 
-/// Every phase a slot of the bridge registry may record.
-const SLOT_PHASES: [&str; 5] = ["reserved", "starting", "running", "stopping", "stopped"];
-
-/// Whether a selected slot may be in `phase`. A slot of the live boot must be running:
-/// the cleanup stops its guest relay. A slot of an earlier boot may be in any recorded
-/// phase: its guest side ended with that boot, and the release records it `stopped` with
-/// no guest call (`bridges::release_selected`). An owner whose own cleanup was cut off
-/// when the pool stopped under it leaves its slots `stopping` (HACK-2456, seen on a real
-/// VM with a published loopback port and several routes).
-fn selected_phase_admitted(selection: &Selection, phase: &str) -> bool {
-    if selection.previous_boot.is_some() {
-        SLOT_PHASES.contains(&phase)
-    } else {
-        phase == "running"
-    }
-}
-
 fn validate_bindings(
     receipt: &Receipt,
     selection: &Selection,
@@ -205,7 +188,7 @@ fn validate_bindings(
         let a = &selected.assignment;
         if a.run != receipt.run
             || a.boot_id != *selection.previous_boot.as_ref().unwrap_or(&selection.boot)
-            || !selected_phase_admitted(selection, &a.phase)
+            || a.phase != "running"
             || match (&selection.previous_boot, &selected.helper) {
                 (None, Some(helper)) => !helper.valid(),
                 (Some(_), None) => false,
@@ -671,14 +654,7 @@ fn remaining_matches(
         if assignment.run == receipt.run || selection.selected.contains_key(slot) {
             let expected = selection.selected.get(slot).ok_or_else(invalid)?;
             let mut observed = assignment.clone();
-            // An earlier boot's slot keeps whatever phase it had (see
-            // `selected_phase_admitted`); a live slot is running until its release stops it.
-            let admitted = if selection.previous_boot.is_some() {
-                SLOT_PHASES.contains(&observed.phase.as_str())
-            } else {
-                ["running", "stopped"].contains(&observed.phase.as_str())
-            };
-            if !admitted {
+            if !["running", "stopped"].contains(&observed.phase.as_str()) {
                 return Err(invalid());
             }
             observed.phase = expected.assignment.phase.clone();
@@ -1269,77 +1245,6 @@ mod tests {
         assert!(live_remaining_matches(&store, &selected).is_err());
     }
 
-    /// HACK-2456, as seen on a real VM: a project with a route and a published loopback
-    /// port whose owner's own cleanup was cut off by `runtime down`. Both of its slots are
-    /// left `stopping` from the earlier boot. Recovery after the next boot must accept them
-    /// (their guest side is gone) instead of refusing with `bridge_assignment`.
-    #[test]
-    fn prior_boot_recovery_accepts_a_route_and_a_loopback_port_left_stopping() {
-        let mut selection = selection(1);
-        selection.boot = "22222222-2222-2222-2222-222222222222".into();
-        let previous = "11111111-1111-1111-1111-111111111111";
-        selection.previous_boot = Some(previous.into());
-        selection.capacity = 2;
-        selection.serial = 2;
-        let slot =
-            |service: &str, reservation: char, container: char, serial: u64, loopback| Assignment {
-                loopback_port: loopback,
-                reservation: reservation.to_string().repeat(32),
-                run: selection.run.clone(),
-                service: service.into(),
-                generation: "e".repeat(64),
-                container_id: container.to_string().repeat(64),
-                network_id: "1".repeat(64),
-                boot_id: previous.into(),
-                phase: "stopping".into(),
-                relay: Some(relay::Relay {
-                    transport: relay::Transport::ReservationV1,
-                    launch_serial: serial,
-                    binary_sha256: "2".repeat(64),
-                    target_pid: 10,
-                    target_start: 10,
-                    port: 8080,
-                }),
-            };
-        let route = slot("web", 'd', 'f', 1, None);
-        let port = slot(
-            "db",
-            'a',
-            'b',
-            2,
-            Some(super::super::LoopbackPort {
-                host_port: 6335,
-                target: 6333,
-            }),
-        );
-        for (index, assignment) in [&route, &port].into_iter().enumerate() {
-            selection.selected.insert(
-                index as u8,
-                Selected {
-                    assignment: assignment.clone(),
-                    helper: None,
-                },
-            );
-        }
-        let receipt: Receipt = serde_json::from_value(json!({"version":1,"run":selection.run,"owner":selection.owner,"namespace":"3".repeat(64),"plan_id":selection.plan,"phase":"ready-observed","readiness":{"web":"healthy","db":"healthy"},"resources":{
-            "container:web":{"kind":"container","key":"web","name":"owned-web","id":route.container_id,"image":null,"phase":"started"},
-            "container:db":{"kind":"container","key":"db","name":"owned-db","id":port.container_id,"image":null,"phase":"started"},
-            "network:default":{"kind":"network","key":"default","name":"owned","id":route.network_id,"image":null,"phase":"created"}
-        }})).unwrap();
-        assert!(validate_bindings(&receipt, &selection, Some(previous)).is_ok());
-        let store = Store {
-            version: 1,
-            owner: selection.owner.clone(),
-            next_launch_serial: 2,
-            slots: BTreeMap::from([(0, route.clone()), (1, port.clone())]),
-        };
-        assert!(remaining_matches(&store, &receipt, &selection).is_ok());
-        // The same registry under a live boot is not admitted: its relays must be stopped.
-        let mut live = selection.clone();
-        live.previous_boot = None;
-        assert!(remaining_matches(&store, &receipt, &live).is_err());
-    }
-
     #[test]
     fn prior_boot_selection_refuses_mixed_current_foreign_and_replaced_reservations() {
         let mut selection = selection(1);
@@ -1378,28 +1283,6 @@ mod tests {
             "network:default":{"kind":"network","key":"default","name":"owned","id":assignment.network_id,"image":null,"phase":"created"}
         }})).unwrap();
         assert!(validate_bindings(&receipt, &selection, Some(previous)).is_ok());
-        // An earlier boot's slot is admitted in every recorded phase: an owner whose own
-        // cleanup was cut off by the pool stopping leaves it `stopping` (HACK-2456).
-        for phase in SLOT_PHASES {
-            let mut left = selection.clone();
-            let slot = &mut left.selected.get_mut(&0).unwrap().assignment;
-            slot.phase = phase.into();
-            if phase == "reserved" {
-                slot.relay = None;
-            }
-            assert!(
-                validate_bindings(&receipt, &left, Some(previous)).is_ok(),
-                "previous-boot slot in {phase}"
-            );
-            // A slot of the live boot is admitted only while running.
-            let mut live = left.clone();
-            live.previous_boot = None;
-            assert_eq!(
-                selected_phase_admitted(&live, phase),
-                phase == "running",
-                "live slot in {phase}"
-            );
-        }
         for boot in [
             selection.boot.as_str(),
             "33333333-3333-3333-3333-333333333333",
@@ -1442,12 +1325,6 @@ mod tests {
             slots: BTreeMap::from([(0, assignment)]),
         };
         assert!(remaining_matches(&store, &receipt, &selection).is_ok());
-        store.slots.get_mut(&0).unwrap().phase = "stopping".into();
-        assert!(remaining_matches(&store, &receipt, &selection).is_ok());
-        let mut live = selection.clone();
-        live.previous_boot = None;
-        assert!(remaining_matches(&store, &receipt, &live).is_err());
-        store.slots.get_mut(&0).unwrap().phase = "running".into();
         store.slots.get_mut(&0).unwrap().reservation = "8".repeat(32);
         assert!(remaining_matches(&store, &receipt, &selection).is_err());
         store.slots.clear();

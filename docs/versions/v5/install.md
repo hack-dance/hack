@@ -136,7 +136,8 @@ it beside `libexec/hack`. Source installs prepare it with
 `bun run build:lifecycle-supervisor` (Rust 1.97.1, locked dependencies).
 The slim runtime image includes the same sibling executable.
 
-Stable archives build it for macOS arm64/x86_64 and Linux arm64/x86_64. The macOS
+Stable archives (v4.3.1) build it for macOS arm64/x86_64 and Linux x86_64; the
+v5 prerelease adds Linux arm64 from `5.0.0-next.23`. The macOS
 prerelease bundle's supervisor is ad-hoc signed and covered by the bundle
 checksums. The Compose-only Linux prerelease bundles carry it unsigned, covered by
 the bundle checksums. Retained managers accept older bundles without this helper. Packaging does not change the lifecycle runner default.

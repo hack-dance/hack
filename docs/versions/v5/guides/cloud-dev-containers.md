@@ -45,6 +45,10 @@ after a stop.
 `.devcontainer/install-hack.sh` installs `hack`. `5.0.0-next.24` publishes
 Linux archives, so the script can install the prerelease as described in
 [Install](../install.md); that variant has not been run in a dev container.
+The installer puts the launcher at `$HOME/.hack-next/bin/hack-next` and does not
+change `PATH`, and each lifecycle command runs in a new shell. With that
+variant, call the launcher by that path in place of each `hack` in
+`postStartCommand`.
 The script from the verified run is shown here. It
 copies a `hack` binary you built (see
 [Any Linux machine with Docker](cloud-linux-docker.md#steps)) and committed as a
@@ -85,7 +89,7 @@ codespace created from a pull request branch in a fork (see GitHub's
 Locally (verified):
 
 ```sh
-devcontainer up --workspace-folder . --secrets-file ~/secrets/project.json
+devcontainer up --workspace-folder . --secrets-file <secrets-file>
 ```
 
 In Codespaces (not run yet): create a codespace on the branch;

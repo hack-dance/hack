@@ -6,6 +6,9 @@
 > install line uses a `hack` binary you supply. `5.0.0-next.24` publishes Linux x86_64 and arm64
 > archives with the Compose backend: you can install the prerelease as
 > described in [Install](../install.md) instead. Neither way has been run here.
+> The installer puts the launcher at `$HOME/.hack-next/bin/hack-next` and
+> does not change `PATH`, so a new shell has no `hack` command. If you install
+> the prerelease, call the launcher by that path wherever the recipe below writes `hack`.
 > See [Any Linux machine with Docker](cloud-linux-docker.md#steps).
 
 Each cloud session is an Ubuntu 24.04 x86_64 VM that runs as root, with

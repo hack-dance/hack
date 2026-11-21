@@ -19,9 +19,12 @@ page stay off until `COMPARISONS_MEASURED` in that file is set.
 The rest of this section is about the root `README.md` and the documentation
 pages. They share the home page's headline and open with one sentence: "Hack
 runs your whole project from one folder committed with the code: the services,
-the settings and encrypted secrets, and the helpers around them. Every branch
-and git worktree runs side by side at its own HTTPS address, and the same folder
-starts the project on another machine with Docker." The README puts the headline
+the settings and encrypted secrets, and the helpers around them. Branches run
+side by side, each at its own HTTPS address, and a git worktree on a branch gets
+its own running copy by default. The same folder starts the project on another
+machine with Docker." The sentence says "on a branch" and "by default" because a
+detached worktree needs `--branch`, and `worktree.auto_branch=false` turns the
+automatic copy off. The README puts the headline
 on the first line under its title, then that sentence. The documentation indexes
 (`docs/versions/v5/index.md` and `docs/README.md`) open with the sentence, then
 "Nothing is hosted." The README carries the story in full; the indexes repeat it
@@ -47,8 +50,10 @@ mention may say "running copy" and then name the instance; the glossary in
 "Isolated" is always qualified: say what a branch instance gets of its own
 (containers, addresses, logs) and what it still shares.
 
-v5 is the same CLI and project model as v4 with a new way to run services. Docker Compose
-stays the default backend; the native backend is beta: opt-in, Apple Silicon macOS, `hack-next` channel only. Pages
+v5 is the same CLI and project model as v4 with a new way to run services. Stable Hack
+runs Docker Compose. The native backend is beta: Apple Silicon macOS, `hack-next` channel only, where the launcher
+selects it on a Mac unless Compose is selected (Linux prereleases run Compose). Name the channel when a page says
+which backend is the default. Pages
 write `hack` for the v5 CLI and tell prerelease users once, on Install, how to map
 that to `hack-next`.
 

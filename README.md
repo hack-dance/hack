@@ -7,19 +7,21 @@
 **Hack on your project, not your setup.**
 
 Hack runs your whole project from one folder committed with the code: the
-services, the settings and encrypted secrets, and the helpers around them. Every
-branch and git worktree runs side by side at its own HTTPS address, and the same
-folder starts the project on another machine with Docker.
+services, the settings and encrypted secrets, and the helpers around them.
+Branches run side by side, each at its own HTTPS address, and a git worktree on
+a branch gets its own running copy by default. The same folder starts the
+project on another machine with Docker.
 
 - **One command starts a repository.** `hack up` starts the services, loads the
   settings and secrets, and serves the project at `https://myapp.hack.local`.
-- **Every worktree gets its own running copy.** Its own containers, addresses and
-  logs, so three branches, or three coding agents, can each run and test the app
-  at once.
+- **A worktree on a branch gets its own running copy.** Its own containers,
+  addresses and logs, so three branches, or three coding agents, can each run
+  and test the app at once. A detached worktree needs `--branch <name>`.
 - **The parts around the containers are declared too.** A sign-in check or a
   migration can run as a lifecycle hook. A tunnel or a worker runs as a host
-  process the project declares. `hack down` stops what `hack up` started. A
-  named overlay changes the settings for one command:
+  process the project declares. `hack down` stops what this copy started and
+  nothing another copy still uses. A named overlay changes the settings for one
+  command:
   `hack host exec --env qa --scope api -- bun db:migrate`.
 - **Nothing is hosted.** The setup is a small `.hack/` folder committed with the
   code. There is no account and no service to sign in to.
@@ -160,8 +162,8 @@ The `hack` command reads the project's `.hack/` folder and starts its services
 through Docker Compose. One shared local proxy gives every instance its names and
 HTTPS, with local DNS helpers for the names and Caddy for the certificates. An
 optional daemon, `hackd`, caches project state so status commands answer quickly.
-Compose is the default way to run services; the native VM is an opt-in beta,
-described under [versions and backends](#versions-and-backends).
+Stable Hack runs services with Compose; the native VM is a beta in the
+`hack-next` prerelease, described under [versions and backends](#versions-and-backends).
 
 ## First run
 
@@ -256,15 +258,20 @@ v5 work; `main` holds the stable line.
 **Native backend (beta, Apple Silicon macOS).** A second way to run the same
 project. Hack runs the project's containers in a Linux VM, without Docker Desktop
 or OrbStack. Preparing that VM is a separate step today. Your `.hack/` folder and
-your commands stay the same. It is opt-in and ships only through `hack-next`.
+your commands stay the same. It ships only through the `hack-next` prerelease.
+There it is what runs on an Apple Silicon Mac unless you select Compose with
+`HACK_RUNTIME_BACKEND=compose`; stable Hack runs Compose.
 
 - It runs a whole multi-service Compose project: start, stop, restart, logs for
   every service and `hack open`.
 - It supports part of what Compose supports. When a project needs something
   outside that part, Hack refuses and names the feature.
-- One project runs in the native VM at a time.
-- A worktree gets its own instance automatically only on Compose. On native,
-  pass `--branch <name>`, which needs a prepared source share.
+- One VM can run several projects and worktrees at once. A running VM cannot
+  add a project folder it was not started with: `hack up` there refuses and
+  says what to stop, and the folder joins when the VM next starts. See
+  [one VM, several project folders](docs/guides/native-candidate.md#explicit-writable-development-source).
+- A linked worktree starts under its branch name, as on Compose. A detached
+  worktree needs `--branch <name>`.
 - Native data does not carry over when you move to a new prerelease, and it does
   not move between backends.
 - We have published no speed, memory or battery comparison with Compose. Do not
@@ -280,7 +287,9 @@ projects run from their `.hack/` Compose setup today. See
 [native configuration validation](docs/reference/native-config-compiler.md).
 
 **Another machine or a cloud agent.** The same `.hack/` folder starts the
-project on another machine with Docker and Docker Compose. That machine gets the
+project on another machine with Docker and Docker Compose. That machine also
+needs whatever the project's host hooks and host processes call, such as a cloud
+CLI or a language runtime; Docker and Compose do not supply those. It gets the
 project's key as the environment variable `HACK_ENV_SECRET_KEY`, from its own
 secret settings. Hack adds no isolation there: it runs inside whatever machine
 you give it. [Another machine or a cloud agent sandbox](docs/versions/v5/guides/cloud-environments.md)

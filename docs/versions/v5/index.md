@@ -1,9 +1,10 @@
 # Documentation
 
 Hack runs your whole project from one folder committed with the code: the
-services, the settings and encrypted secrets, and the helpers around them. Every
-branch and git worktree runs side by side at its own HTTPS address, and the same
-folder starts the project on another machine with Docker. Nothing is hosted.
+services, the settings and encrypted secrets, and the helpers around them.
+Branches run side by side, each at its own HTTPS address, and a git worktree on
+a branch gets its own running copy by default. The same folder starts the
+project on another machine with Docker. Nothing is hosted.
 
 That folder is `.hack/`. One command, `hack up`, starts the services, loads the
 settings and secrets, gives the project its local HTTPS addresses and starts its
@@ -22,9 +23,12 @@ which these pages call an instance.
 
 v5 is the same CLI and project model as v4, with a new way to run services
 underneath.
-Docker Compose stays the default backend. The native backend (beta, Apple Silicon
-macOS) is opt-in and ships only through the `hack-next` channel, not in the stable
-archives or the Homebrew formula. Read [Upgrade from v4](upgrade.md) for what
+Which backend runs depends on the channel. Stable Hack runs Docker Compose. In
+the `hack-next` prerelease, with no backend selected, the launcher picks the
+native backend (beta) on Apple Silicon macOS and Compose on Linux;
+`HACK_RUNTIME_BACKEND=compose` selects Compose on a Mac. The native backend ships
+only through the `hack-next` channel, not in the stable archives or the Homebrew
+formula. Read [Upgrade from v4](upgrade.md) for what
 changed and what was retired.
 The v5 prerelease installs on Apple Silicon macOS and, with the Compose backend
 only, on Linux x86_64 and arm64; see [Install](install.md#prerequisites) for
@@ -69,8 +73,9 @@ each page distinguishes the compatibility audit from its original execution note
 
 A second backend for the same project on an Apple Silicon Mac. It runs the same
 Compose file in a lightweight Linux VM that Hack manages, without a Docker app.
-It is opt-in through `hack-next`, and Compose stays the default. It is not a
-sandbox, and we make no speed, memory or battery claim for it.
+It ships only through `hack-next`, where it is what runs on a Mac unless you
+select Compose. It is not a sandbox, and we make no speed, memory or battery
+claim for it.
 
 - [Overview](native/overview.md): what it is, what it is not, and why to try it.
 - [Try it](native/try-it.md): install, run one project on native, switch back.

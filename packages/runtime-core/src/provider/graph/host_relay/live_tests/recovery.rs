@@ -338,7 +338,7 @@ pub(super) fn exercise(
     assert!(exported.bytes > 0);
     let exported_bytes = fs::read(&exported.path).map_err(state::io)?;
     assert_eq!(
-        format!("{:x}", Sha256::digest(&exported_bytes)),
+        format!("{:x}", crate::Hex(Sha256::digest(&exported_bytes))),
         exported.sha256
     );
     let pruned = prune(candidate, run)?;

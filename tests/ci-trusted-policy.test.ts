@@ -7,15 +7,23 @@ import { requiresWorkflowFull } from "../scripts/ci-workflow-guard.ts";
 import { fixtureGitEnv, runFixtureGitSync } from "./helpers/fixture-git.ts";
 
 const repository = resolve(import.meta.dir, "..");
+const linuxCompilerHosts = JSON.stringify(
+  JSON.parse(fullPushPlan({ releaseHosts: false }).compiler_hosts).filter(
+    (host: { platform: string }) => host.platform === "linux"
+  )
+);
 const workflow = Bun.YAML.parse(
   await Bun.file(join(repository, ".github/workflows/ci.yml")).text()
 ) as {
   concurrency: { group: string; "cancel-in-progress": string };
   on: { pull_request: { types: string[] } };
-  jobs: { changes: { steps: { id?: string; run?: string }[] } };
+  jobs: Record<
+    string,
+    { steps: { id?: string; name?: string; run?: string }[] }
+  >;
 };
 const script =
-  workflow.jobs.changes.steps.find((step) => step.id === "scope")?.run ?? "";
+  workflow.jobs.changes?.steps.find((step) => step.id === "scope")?.run ?? "";
 if (!script) {
   throw new Error("missing scope boundary");
 }
@@ -206,28 +214,24 @@ for (const path of [
   "packages/config-compiler/rust-toolchain.toml",
   "packages/runtime-core/Cargo.lock",
 ]) {
-  test(`protected input ${path} automatically qualifies every ordinary PR tier`, async () => {
+  test(`protected input ${path} retains full Linux/Docker/build tiers and defers macOS`, async () => {
     const outputs = await scope({ path });
     expect(requiresWorkflowFull([path])).toBe(true);
     expect(outputs.selection_mode).toBe("full");
     expect(outputs.test_files).toBe("");
-    expect(outputs.compiler_hosts).toBe(
-      fullPushPlan({ releaseHosts: false }).compiler_hosts
-    );
+    expect(outputs.compiler_hosts).toBe(linuxCompilerHosts);
     expect(outputs.runtime_core).toBe("true");
-    expect(outputs.test_shards).toBe("[1,2,3,4,5,6,7,8]");
+    expect(outputs.test_shards).toBe("[4,5,6,7,8]");
     expect(outputs.docker_suite).toBe("true");
-    expect(outputs.defer_macos).toBe("false");
+    expect(outputs.defer_macos).toBe("true");
     expect(outputs.build_smoke).toBe("true");
     expect(outputs.ci_evidence).toBe("scoped");
   });
 }
-test("bootstrap, pushes and ci:full never execute a PR selector", async () => {
+test("bootstrap and unavailable diffs retain full Linux tiers without executing a PR selector", async () => {
   for (const options of [
     { bootstrap: true },
     { legacy: true },
-    { event: "push" },
-    { full: true },
     { noMerge: true },
     { emptyDiff: true },
   ]) {
@@ -235,10 +239,74 @@ test("bootstrap, pushes and ci:full never execute a PR selector", async () => {
       Object.fromEntries(
         Object.entries({
           ...fullPushPlan({ releaseHosts: false }),
+          compiler_hosts: linuxCompilerHosts,
+          test_shards: "[4,5,6,7,8]",
+          defer_macos: true,
           ci_evidence: "scoped",
         }).map(([key, value]) => [key, String(value)])
       )
     );
+  }
+});
+test.each([
+  { mac: true },
+  { full: true },
+  { baseRef: "main" },
+])("protected-input PR opts into macOS with %j", async (options) => {
+  expect(await scope({ path: ".github/workflows/ci.yml", ...options })).toEqual(
+    Object.fromEntries(
+      Object.entries({
+        ...fullPushPlan({ releaseHosts: options.baseRef === "main" }),
+        ci_evidence: "scoped",
+      }).map(([key, value]) => [key, String(value)])
+    )
+  );
+});
+test("protected next push retains the pooled macOS and Linux integration layout", async () => {
+  expect(
+    await scope({
+      path: ".github/workflows/ci.yml",
+      event: "push",
+      ref: "refs/heads/next",
+    })
+  ).toEqual(
+    Object.fromEntries(
+      Object.entries({
+        ...fullPushPlan({ releaseHosts: false }),
+        ci_evidence: "scoped",
+      }).map(([key, value]) => [key, String(value)])
+    )
+  );
+});
+test("protected PR deferral passes the required fan-in only with successful selected jobs", async () => {
+  const outputs = await scope({ path: ".github/workflows/ci.yml" });
+  const gate = workflow.jobs.test?.steps.find(
+    (step) => step.name === "Reject failed or skipped test shards"
+  )?.run;
+  if (!gate) {
+    throw new Error("missing test fan-in");
+  }
+  expect(outputs.defer_macos).toBe("true");
+  for (const result of ["success", "failure", "cancelled", "skipped"]) {
+    const checked = Bun.spawnSync(["bash", "-eu", "-c", gate], {
+      env: {
+        PR_DRAFT: outputs.draft,
+        CHANGES_RESULT: "success",
+        SCOPE: outputs.scope,
+        SUITE: outputs.suite,
+        TEST_FOCUS: outputs.test_focus,
+        SHARD_RESULT: result,
+        FOCUS_RESULT: "success",
+        COMPILER_ENABLED: String(outputs.compiler_hosts !== "[]"),
+        COMPILER_RESULT: "success",
+        LIFETIME_ENABLED: outputs.docker_suite,
+        LIFETIME_RESULT: "success",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 5000,
+    });
+    expect(checked.exitCode).toBe(result === "success" ? 0 : 1);
   }
 });
 test("independent full guard preserves the non-mergeable draft tier", async () => {

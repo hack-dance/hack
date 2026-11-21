@@ -97,7 +97,7 @@ fn abandoned_publisher() -> (
     record.process.pid = 2_000_000;
     let bytes = serde_json::to_vec(&record).unwrap();
     fs::write(root.join("owner.json"), &bytes).unwrap();
-    let owner = format!("{:x}", Sha256::digest(&bytes));
+    let owner = format!("{:x}", crate::Hex(Sha256::digest(&bytes)));
     (fixture, candidate, run, owner, root)
 }
 
@@ -459,7 +459,7 @@ fn legacy_device_socket_move_child() {
     record.socket.0 = rebind.old;
     let bytes = serde_json::to_vec(&record).unwrap();
     fs::write(root.join("owner.json"), &bytes).unwrap();
-    let owner = format!("{:x}", Sha256::digest(&bytes));
+    let owner = format!("{:x}", crate::Hex(Sha256::digest(&bytes)));
     assert!(Pin::read(&candidate, &run).is_err());
     let lock = state::Lock::acquire_existing(&root).unwrap();
     let pin = Pin::read_with_rebind(&candidate, &run, Some(rebind)).unwrap();
@@ -542,7 +542,7 @@ fn replaced_socket_or_inherited_listener_refuses_retirement() {
     record.socket = id(&fs::symlink_metadata(&socket).unwrap());
     let bytes = serde_json::to_vec(&record).unwrap();
     fs::write(root.join("owner.json"), &bytes).unwrap();
-    let owner = format!("{:x}", Sha256::digest(&bytes));
+    let owner = format!("{:x}", crate::Hex(Sha256::digest(&bytes)));
     assert!(retire_recovered_publisher(&candidate, &run, &owner, &"f".repeat(64)).is_err());
     assert!(socket.exists());
     drop(inherited);

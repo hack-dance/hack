@@ -98,7 +98,7 @@ fn policy_hash(plan: &Plan, bindings: &EnvironmentPlan) -> Result<String, Candid
     let mut hash = Sha256::new();
     hash.update(b"hack.native-environment-policy/v1\0");
     hash.update(bytes);
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(format!("{:x}", crate::Hex(hash.finalize())))
 }
 
 /// Authored process and public environment, not a provider create request or durable plan.

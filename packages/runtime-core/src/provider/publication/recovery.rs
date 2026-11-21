@@ -12,7 +12,7 @@ struct Evidence<'a> {
     pending_base64: String,
 }
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 fn read(path: &Path, limit: u64) -> Result<Vec<u8>, CandidateError> {
     let mut file = OpenOptions::new()

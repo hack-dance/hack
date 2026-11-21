@@ -46,7 +46,7 @@ pub(super) fn payload() -> Result<(String, String), CandidateError> {
     use sha2::{Digest, Sha256};
     use std::io::Write;
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/stream-relay"));
-    let hash = format!("{:x}", Sha256::digest(bytes));
+    let hash = format!("{:x}", crate::Hex(Sha256::digest(bytes)));
     let mut zip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     zip.write_all(bytes).map_err(state::io)?;
     let input = base64::engine::general_purpose::STANDARD.encode(zip.finish().map_err(state::io)?);

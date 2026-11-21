@@ -25,7 +25,7 @@ fn refused() -> CandidateError {
     )
 }
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 fn absent(path: &Path) -> Result<bool, CandidateError> {
     match fs::symlink_metadata(path) {

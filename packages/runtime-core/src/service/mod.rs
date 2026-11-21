@@ -210,6 +210,7 @@ fn prepare(
             busy: 0,
             stopping: None,
             refuse_until: None,
+            refused: 0,
             last_activity: Instant::now(),
             streams: HashMap::new(),
             next_session: 0,
@@ -357,6 +358,8 @@ struct State {
     /// When stopping began plus `QUEUED_BUDGET`: queued connections are refused
     /// only until then, on every path, and closed after.
     refuse_until: Option<Instant>,
+    /// Queued connections given a chance to be refused since stopping began.
+    refused: usize,
     last_activity: Instant,
     /// A handle to every live session's socket, to shut it down at exit.
     streams: HashMap<u64, UnixStream>,
@@ -449,7 +452,7 @@ fn run(shared: &Arc<Shared>, listener: UnixListener, wake: &UnixStream) -> Outco
 /// `IdleExit` and `ExitDrained`, one path for both.
 fn shut_down(shared: &Arc<Shared>, listener: UnixListener) -> Outcome {
     let budget = shared.state().refuse_until.unwrap_or_else(Instant::now);
-    refuse_queued(&listener, budget);
+    refuse_queued(shared, &listener, budget);
     drop(listener);
     shared.wait_until(|s| s.busy == 0);
     // A session whose next request was not read yet sees a close; nothing it
@@ -465,7 +468,7 @@ fn shut_down(shared: &Arc<Shared>, listener: UnixListener) -> Outcome {
 /// first request arrives in time gets `E_SERVICE_DRAINING` before admission. Each
 /// gets at most `QUEUED_WAIT`, and all of them together end at `budget`; after
 /// it, closing the listener resets whatever is still queued.
-fn refuse_queued(listener: &UnixListener, budget: Instant) {
+fn refuse_queued(shared: &Shared, listener: &UnixListener, budget: Instant) {
     while Instant::now() < budget {
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
@@ -473,13 +476,14 @@ fn refuse_queued(listener: &UnixListener, budget: Instant) {
             Err(e) if e.kind() == ErrorKind::ConnectionAborted => continue,
             Err(_) => return,
         };
-        refuse(stream, (Instant::now() + QUEUED_WAIT).min(budget));
+        refuse(shared, stream, (Instant::now() + QUEUED_WAIT).min(budget));
     }
 }
 
 /// Answer one connection's first request, if it arrives by `by`, with
 /// `E_SERVICE_DRAINING`, then close it. Nothing is admitted.
-fn refuse(mut stream: UnixStream, by: Instant) {
+fn refuse(shared: &Shared, mut stream: UnixStream, by: Instant) {
+    shared.state().refused += 1;
     if stream.set_nonblocking(false).is_err() || crate::node::peer_uid(&stream).ok() != Some(euid())
     {
         return;
@@ -519,7 +523,7 @@ fn accept_queued(shared: &Arc<Shared>, listener: &UnixListener) -> Result<(), ()
                     // Out of budget: close it and leave the rest to shut_down.
                     return Ok(());
                 }
-                refuse(stream, (Instant::now() + QUEUED_WAIT).min(budget));
+                refuse(shared, stream, (Instant::now() + QUEUED_WAIT).min(budget));
                 continue;
             }
             if state.sessions >= MAX_SESSIONS {

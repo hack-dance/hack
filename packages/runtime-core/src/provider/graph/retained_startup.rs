@@ -170,7 +170,7 @@ fn after_guestless_boot(owner: &Owner) -> bool {
 fn selection(owner: &Owner, receipt: &Receipt) -> Result<String, CandidateError> {
     let bytes =
         serde_json::to_vec(&("hack-retained-startup-v1", owner, receipt)).map_err(|_| refused())?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(format!("{:x}", crate::Hex(Sha256::digest(bytes))))
 }
 
 /// Holds publication retirement across the provider's boot-effect boundary.
@@ -331,7 +331,7 @@ pub(in crate::provider::graph) mod tests {
             // Unique token for the fixture avoids aliasing any global/runtime state.
             let unique = format!(
                 "{:x}",
-                Sha256::digest(self.root.0.as_os_str().as_encoded_bytes())
+                crate::Hex(Sha256::digest(self.root.0.as_os_str().as_encoded_bytes()))
             );
             owner.token = unique[..32].into();
             owner.machine = format!("hack-{}", &owner.token[..12]);

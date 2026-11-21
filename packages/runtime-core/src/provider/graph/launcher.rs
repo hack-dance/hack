@@ -12,13 +12,13 @@ pub(super) fn current_source() -> String {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/environment-launcher"));
     format!(
         "/storage/hack-environment-launcher/{:x}",
-        Sha256::digest(bytes)
+        crate::Hex(Sha256::digest(bytes))
     )
 }
 #[cfg(feature = "environment-launcher")]
 pub(super) fn publish(engine: &Engine<'_>) -> Result<String, CandidateError> {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/environment-launcher"));
-    let hash = format!("{:x}", Sha256::digest(bytes));
+    let hash = format!("{:x}", crate::Hex(Sha256::digest(bytes)));
     let input = transport(bytes)?;
     let output = engine.guest().execute(PUBLISH, &[&hash], Some(&input))?;
     if output != "launcher-ready-v1\n" {

@@ -21,7 +21,9 @@ struct Journal {
 fn hash(value: &impl Serialize) -> Result<String, CandidateError> {
     Ok(format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec_pretty(value).map_err(|_| invalid())?)
+        crate::Hex(Sha256::digest(
+            serde_json::to_vec_pretty(value).map_err(|_| invalid())?
+        ))
     ))
 }
 fn exists(path: &Path) -> Result<bool, CandidateError> {

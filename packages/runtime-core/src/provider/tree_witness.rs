@@ -303,7 +303,7 @@ fn metadata_with(
         device,
     };
     visit(root, root, &mut hash, marker, &mut walk)?;
-    Ok((format!("{:x}", hash.finalize()), walk.qualified))
+    Ok((format!("{:x}", crate::Hex(hash.finalize())), walk.qualified))
 }
 
 /// What the boot of exactly `process` witnessed for `tree`, if anything was recorded.
@@ -421,6 +421,110 @@ pub(super) fn record(
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    /// The digest is the same whichever SHA-256 backend the build selected: the FIPS 180-4
+    /// vectors for the empty input, "abc", the two-block message and one million "a".
+    #[test]
+    fn sha256_backend_matches_the_standard_vectors() {
+        let hex = |bytes: &[u8]| format!("{:x}", crate::Hex(Sha256::digest(bytes)));
+        assert_eq!(
+            hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        assert_eq!(
+            hex(&vec![b'a'; 1_000_000]),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+        // One-shot and incremental hashing agree across uneven update boundaries.
+        let bytes = fixture_bytes(200_000, 31, 7);
+        let mut hash = Sha256::new();
+        for chunk in bytes.chunks(4099) {
+            hash.update(chunk);
+        }
+        assert_eq!(format!("{:x}", crate::Hex(hash.finalize())), hex(&bytes));
+    }
+
+    /// `(index * multiplier + offset) % 251` as bytes: fixture content that any tool can
+    /// regenerate.
+    fn fixture_bytes(length: usize, multiplier: usize, offset: usize) -> Vec<u8> {
+        (0..length)
+            .map(|index| ((index * multiplier + offset) % 251) as u8)
+            .collect()
+    }
+
+    /// Records and pins written by earlier builds stay valid: the file digest and the tree
+    /// digest of a fixed fixture equal values computed outside this code. The file digest is
+    /// `/usr/bin/shasum -a 256` of the same bytes; the tree digest was built from the format in
+    /// `artifact::rootfs_digest` with Python's `hashlib` over `shasum` file digests. Both
+    /// matched this test on the `sha2 0.10.9` build before the dependency moved.
+    #[test]
+    fn file_and_tree_digests_match_values_pinned_from_the_previous_build() {
+        use crate::provider::artifact;
+        let tree = Tree(crate::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-sha256-pinned",
+        ));
+        // 200,000 bytes: more than three of the 64 KiB reads, and not a whole number of blocks.
+        let fixed = tree.0.join("fixed.bin");
+        fs::write(&fixed, fixture_bytes(200_000, 31, 7)).unwrap();
+        assert_eq!(
+            artifact::digest(&fixed).unwrap(),
+            "3d46a15a54cf33991f077e628582a654e184f139cf03fcbcd7c89fb4213e1023"
+        );
+
+        // Explicit modes: the tree digest covers each entry's mode, and the umask must not.
+        // No symlink: its mode differs between macOS and Linux.
+        let root = tree.0.join("tree");
+        let entry = |name: &str, mode: u32, content: Option<&[u8]>| {
+            let path = root.join(name);
+            match content {
+                Some(bytes) => fs::write(&path, bytes).unwrap(),
+                None => fs::create_dir(&path).unwrap(),
+            }
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        };
+        fs::create_dir(&root).unwrap();
+        entry("a.txt", 0o644, Some(b"alpha\n"));
+        entry("bin", 0o755, None);
+        entry("bin/tool", 0o755, Some(&fixture_bytes(70_000, 17, 3)));
+        entry("empty", 0o700, None);
+        entry("z-last", 0o600, Some(b""));
+        assert_eq!(
+            artifact::digest(&root.join("bin/tool")).unwrap(),
+            "cf7eefd3f527f190312ad269f30ec5c241e6fc431a90fda414fe4953601cd7a5"
+        );
+        assert_eq!(
+            artifact::rootfs_digest(&root, None).unwrap(),
+            "c3c45c2af7cbe575c10547066025415644dd9f51c960a1fa7ea0e0a9a833b7f0"
+        );
+    }
+
+    /// Prints the SHA-256 rate of this build, to compare builds on one host. `black_box`
+    /// keeps the input opaque and the digest used, so the timed work cannot be removed. Run
+    /// with `cargo test --release --lib sha256_rate_of_this_build -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "prints a rate; run by hand in a release build"]
+    fn sha256_rate_of_this_build() {
+        const MIB: usize = 64;
+        let buffer = vec![0x5a_u8; MIB * 1024 * 1024];
+        let mut rates = (0..5)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                std::hint::black_box(Sha256::digest(std::hint::black_box(buffer.as_slice())));
+                MIB as f64 / started.elapsed().as_secs_f64()
+            })
+            .collect::<Vec<_>>();
+        rates.sort_by(f64::total_cmp);
+        println!("sha256: {:.0} MiB/s (median of 5, {MIB} MiB)", rates[2]);
+    }
 
     struct Tree(PathBuf);
     impl Drop for Tree {

@@ -64,7 +64,7 @@ impl ProjectShareIntent {
         if !meta.is_dir() || meta.uid() != current_uid() || meta.mode() & 0o022 != 0 {
             return Err(refused());
         }
-        let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+        let digest = format!("{:x}", crate::Hex(Sha256::digest(text.as_bytes())));
         Ok(Self {
             project: project.into(),
             guest_path: format!("/mnt/hack-projects/{digest}"),
@@ -77,7 +77,7 @@ impl ProjectShareIntent {
     /// Stop and cleanup must remain possible after a project is moved or deleted.
     pub(super) fn validate_receipt(&self) -> Result<(), CandidateError> {
         let text = self.project.to_str().ok_or_else(refused)?;
-        let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+        let digest = format!("{:x}", crate::Hex(Sha256::digest(text.as_bytes())));
         if !self.unfiltered_source
             || !self.project.is_absolute()
             || self

@@ -104,7 +104,9 @@ impl JobIntent {
             container_name: container_name.into(),
             config_sha256: format!(
                 "{:x}",
-                Sha256::digest(serde_json::to_vec(config).map_err(|_| refused())?)
+                crate::Hex(Sha256::digest(
+                    serde_json::to_vec(config).map_err(|_| refused())?
+                ))
             ),
             original_environment_attached: receipt.environment_attached,
             phase: JobPhase::Reserved,
@@ -248,7 +250,9 @@ pub(super) fn recovery_selection(
     }
     Ok(format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(&intent).map_err(|_| refused())?)
+        crate::Hex(Sha256::digest(
+            serde_json::to_vec(&intent).map_err(|_| refused())?
+        ))
     ))
 }
 

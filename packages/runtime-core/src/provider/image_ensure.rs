@@ -32,7 +32,7 @@ fn hex(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 fn key(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
+    format!("{:x}", crate::Hex(Sha256::digest(value.as_bytes())))
 }
 /// Cache address of one pinned reference for one platform. An arm64 entry keeps its original
 /// address; an emulated platform of the same index is a separate entry, never a reuse.

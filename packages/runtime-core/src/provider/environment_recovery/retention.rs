@@ -165,7 +165,7 @@ pub fn export_retired(candidate: &Candidate, slot: &str) -> Result<RetiredExport
     Ok(RetiredExport {
         slot: slot.into(),
         path: target,
-        sha256: format!("{:x}", Sha256::digest(&retained)),
+        sha256: format!("{:x}", crate::Hex(Sha256::digest(&retained))),
         source_absent: true,
     })
 }

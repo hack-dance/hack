@@ -80,7 +80,7 @@ fn unobserved() -> CandidateError {
     )
 }
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 
 /// One explicit target. `volume` is the logical Compose volume name and `path`

@@ -151,7 +151,7 @@ pub(super) fn inspect_legacy(
             .map_err(|_| refused())?;
     }
     Ok(Some(LegacyReservation {
-        record_sha256: format!("{:x}", Sha256::digest(bytes)),
+        record_sha256: format!("{:x}", crate::Hex(Sha256::digest(bytes))),
         sockets: record.sockets.clone(),
         process: record.process.clone(),
     }))
@@ -187,7 +187,7 @@ pub(super) fn verify_legacy_remaining(
         .ok_or_else(refused)?;
     let (same, bytes) = read_with_bytes(&path)?;
     if &same != record
-        || selected.record_sha256 != format!("{:x}", Sha256::digest(bytes))
+        || selected.record_sha256 != format!("{:x}", crate::Hex(Sha256::digest(bytes)))
         || selected.sockets != record.sockets
         || selected.process != record.process
     {
@@ -496,7 +496,9 @@ impl Drop for Reservation {
 fn fingerprint(record: &Record) -> Result<String, CandidateError> {
     Ok(format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(record).map_err(|_| refused())?)
+        crate::Hex(Sha256::digest(
+            serde_json::to_vec(record).map_err(|_| refused())?
+        ))
     ))
 }
 
@@ -719,7 +721,7 @@ fn recover_cleaned_selected(
     if let Some((_, selected)) = rebind {
         let (again, bytes) = read_with_bytes(&directory.join(format!("{}.json", receipt.run)))?;
         if &again != record
-            || selected.record_sha256 != format!("{:x}", Sha256::digest(bytes))
+            || selected.record_sha256 != format!("{:x}", crate::Hex(Sha256::digest(bytes)))
             || selected.sockets != record.sockets
             || selected.process != record.process
         {

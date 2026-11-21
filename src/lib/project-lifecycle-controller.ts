@@ -29,6 +29,7 @@ import {
   stopLifecycleSupervisor,
   withLifecycleSupervisorControllerLock,
 } from "./lifecycle-supervisor.ts";
+import { holdSignalCleanup } from "./process-exit.ts";
 import { readProcessIdentities } from "./process-tree.ts";
 import {
   type ProjectLifecycleCommand,
@@ -132,9 +133,18 @@ export function installLifecycleSignalCleanup(opts: {
         return;
       }
       handlingSignal = true;
-      void opts.cleanup?.({ force: force.signal }).finally(() => {
-        dispose();
-        process.kill(process.pid, signal);
+      const cleanup = opts.cleanup;
+      if (!cleanup) {
+        return;
+      }
+      // Held: the CLI exits explicitly once the command returns, which must
+      // not cut this cleanup short or replace death by the signal.
+      holdSignalCleanup({
+        cleanup: cleanup({ force: force.signal }),
+        reraise: () => {
+          dispose();
+          process.kill(process.pid, signal);
+        },
       });
     };
     handlers.set(signal, handler);

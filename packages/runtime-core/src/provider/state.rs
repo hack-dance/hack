@@ -170,13 +170,23 @@ impl Lock {
                 "Unsafe operation lock.",
             ));
         }
-        // SAFETY: file is a live owned descriptor; flock does not retain pointers.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        if flock(&file, libc::LOCK_EX | libc::LOCK_NB).is_err() {
             return Err(CandidateError::new("provider_busy", holder_message(&file)));
         }
         Ok(Self(file, false))
     }
 }
+
+/// Apply a flock operation to a borrowed descriptor. Closing it releases the lock.
+pub(crate) fn flock(file: &File, operation: libc::c_int) -> std::io::Result<()> {
+    // SAFETY: file is a live owned descriptor; flock does not retain pointers.
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 impl Drop for Lock {
     fn drop(&mut self) {
         if self.1 {

@@ -599,6 +599,30 @@ fn left_to_lsof(_: &[PathBuf], _: &AtomicBool) -> Result<Found, Fallback> {
     Err(Fallback::ScanIncomplete)
 }
 
+/// Run the production worker and pending scan, retaining its join handle so absence
+/// assertions happen after all work has ended, rather than after a guessed sleep.
+fn joined_scan(probe: HostScan) -> (Scanning, std::thread::JoinHandle<()>) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (answer, answered) = mpsc::channel();
+    let work = Work {
+        disks: disks(Path::new("/pool")).to_vec(),
+        decide: probe.decide,
+        locate: probe.locate,
+        stop: stop.clone(),
+        answer,
+    };
+    let worker = std::thread::spawn(move || work.run());
+    (
+        Scanning {
+            answered,
+            early: None,
+            finished: false,
+            stop,
+        },
+        worker,
+    )
+}
+
 /// Gives the scan to `lsof` only once the caller has given up.
 fn left_to_lsof_too_late(_: &[PathBuf], stop: &AtomicBool) -> Result<Found, Fallback> {
     while !stop.load(Ordering::Relaxed) {
@@ -892,16 +916,12 @@ fn a_fallback_due_after_the_bound_starts_no_lsof() {
         seen.store(true, Ordering::Relaxed);
         Lsof::host()
     });
-    let started = std::time::Instant::now();
-    let result = disks_closed(
-        &probe,
-        &process::MonotonicClock::new(),
-        &disks(Path::new("/pool")),
-        Duration::from_millis(200),
-    );
+    let (mut scan, worker) = joined_scan(probe);
+    let clock = FakeClock::default();
+    let result = process::wait_within(&mut scan, Duration::from_millis(200), &clock).map(|_| ());
     assert_eq!(code(&result), "provider_timeout_uncertain");
-    assert!(started.elapsed() < Duration::from_secs(20));
-    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(clock.now(), Duration::from_millis(200));
+    worker.join().unwrap();
     assert!(!looked.load(Ordering::Relaxed), "lsof was looked for");
 }
 
@@ -911,21 +931,29 @@ fn a_fallback_due_after_the_bound_starts_no_lsof() {
 fn an_lsof_lookup_that_outlasts_the_bound_starts_no_child() {
     let directory = Scratch::new();
     let (script, child_started) = standing_in_for_lsof(directory.path(), "exec /bin/sleep 600");
+    let (entered, lookup_entered) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let released = std::sync::Mutex::new(released);
     let probe = host_scan_with(left_to_lsof, move || {
-        std::thread::sleep(Duration::from_millis(600));
+        entered.send(()).unwrap();
+        // Only the caller releases this lookup, after its bounded wait returns.
+        // The timeout is a hang guard, not the ordering mechanism.
+        released
+            .lock()
+            .unwrap()
+            .recv_timeout(ISOLATED_HANG_GUARD)
+            .unwrap();
         Ok(Lsof::at(&script))
     });
-    let started = std::time::Instant::now();
-    let result = disks_closed(
-        &probe,
-        &process::MonotonicClock::new(),
-        &disks(Path::new("/pool")),
-        Duration::from_millis(100),
-    );
+    let (mut scan, worker) = joined_scan(probe);
+    lookup_entered.recv_timeout(ISOLATED_HANG_GUARD).unwrap();
+    let clock = FakeClock::default();
+    let result = process::wait_within(&mut scan, Duration::from_millis(100), &clock).map(|_| ());
     assert_eq!(code(&result), "provider_timeout_uncertain");
-    // The bound, then the moment the caller gives the thread to stop; not the lookup.
-    assert!(started.elapsed() < Duration::from_millis(100) + REAP_GRACE * 2);
-    std::thread::sleep(Duration::from_millis(900));
+    assert_eq!(clock.now(), Duration::from_millis(100));
+    assert!(!worker.is_finished(), "lookup was released before expiry");
+    release.send(()).unwrap();
+    worker.join().unwrap();
     assert!(!child_started.exists(), "a child was started for nobody");
 }
 

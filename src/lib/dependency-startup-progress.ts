@@ -1,6 +1,7 @@
 import { childEnvironment } from "./child-environment.ts";
 import { dockerHelperEnvironment } from "./docker-helper-environment.ts";
 import { isRecord } from "./guards.ts";
+import { holdSignalCleanup } from "./process-exit.ts";
 import {
   type ProcessIdentityRow,
   readProcessIdentities,
@@ -379,11 +380,16 @@ export async function withDependencyStartupProgress<T>(opts: {
       const hasOtherHandlers = process
         .listeners(signal)
         .some((listener) => listener !== handler);
-      void cleanup().then(() => {
-        if (!hasOtherHandlers) {
-          process.removeListener(signal, handler);
-          process.kill(process.pid, signal);
-        }
+      // Held: the explicit exit must not cut the cleanup short. Another
+      // handler (the lifecycle cleanup) re-raises the signal itself.
+      holdSignalCleanup({
+        cleanup: cleanup(),
+        reraise: hasOtherHandlers
+          ? null
+          : () => {
+              process.removeListener(signal, handler);
+              process.kill(process.pid, signal);
+            },
       });
     };
     handlers.set(signal, handler);

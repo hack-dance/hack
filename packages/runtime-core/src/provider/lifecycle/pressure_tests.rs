@@ -103,10 +103,13 @@ fn lease_wait_pressure_change_refuses_owner_commit_and_releases_the_mutation_lea
 fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
     let source = include_str!("../lifecycle.rs");
     let start = source.find("\nfn start_pool(").unwrap();
+    let wrapper = &source[start..start + source[start..].find("\n}\n").unwrap()];
+    assert!(wrapper.contains("start_pool_observed("));
+    let start = source.find("\nfn start_pool_observed(").unwrap();
     let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
     let at = |step: &str| {
         body.find(step)
-            .unwrap_or_else(|| panic!("start_pool no longer contains `{step}`"))
+            .unwrap_or_else(|| panic!("start_pool_observed no longer contains `{step}`"))
     };
     // Model action, then the call that performs it.
     let steps = [

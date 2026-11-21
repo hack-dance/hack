@@ -44,12 +44,34 @@ fn verifier_creation_preserves_the_command_without_engine_or_shares() {
 fn pool_creation_preserves_flag_order_and_socket_directions() {
     let mut candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
     candidate.state_root = "/fixture/state".into();
+    // Canonicalize the temporary root before approving a share (notably /var on macOS).
+    let project = std::fs::canonicalize(std::env::temp_dir())
+        .unwrap()
+        .join(format!(
+            "backend-share-{}-{}",
+            std::process::id(),
+            crate::next_test_scratch(),
+        ));
+    struct Remove(std::path::PathBuf);
+    impl Drop for Remove {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    state::private_directory(&project).unwrap();
+    let _remove = Remove(project.clone());
+    let share = crate::provider::ProjectShareIntent::approve(&project, true).unwrap();
+    let project_volume = format!("{}:{}:rw", project.display(), share.guest_path);
+    let engine_volume = format!(
+        "{}:/opt/hack-engine:ro",
+        artifact::engine_root(&candidate).display()
+    );
     let owner: Owner = serde_json::from_value(json!({
         "version":1, "checkout":"/fixture", "token":"owner", "machine":"fixture",
         "short_home":"/fixture/sockets", "created":false, "phase":"creating", "process":null,
         "storage":null, "overlay":null, "guest_boot_id":null,
         "daemon_pid":null, "daemon_start":null, "rootfs_digest":null,
-        "amd64_emulation":true, "network":"internet",
+        "amd64_emulation":true, "network":"internet", "project_share":share,
         "application_bridge":{"slots":1}, "dependency_sockets":{"slots":1}
     }))
     .unwrap();
@@ -77,8 +99,10 @@ fn pool_creation_preserves_flag_order_and_socket_directions() {
             "4",
             "--docker-socket",
             "--volume",
-            "/fixture/state/providers/docker-29.5.2-linux-arm64:/opt/hack-engine:ro",
+            &engine_volume,
             "--rosetta",
+            "--volume",
+            &project_volume,
             "--net",
             "--net-backend",
             "virtio-net",

@@ -176,7 +176,10 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
         ),
         ("AdmitBoot", "admission_pool::admit_boot("),
         ("Start: final recheck", "boot.release(candidate, &lock)?"),
-        ("Start", "start_machine(candidate, &owner, permit)?"),
+        (
+            "Start",
+            "start_machine(&SmolvmCli::new(candidate, &owner), permit)?",
+        ),
     ];
     for pair in steps.windows(2) {
         assert!(
@@ -218,7 +221,7 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
         "state::write(&root(candidate).join(\"admission.json\")",
         "if owner.phase == \"running\" {",
         "agent::require_engine_names_unshadowed(",
-        "create_machine(candidate",
+        "create_machine(&SmolvmCli::new(candidate, &owner), &spec, fresh)?;",
     ] {
         assert!(
             recheck < at(later),
@@ -242,7 +245,7 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
         "state::write(&root(candidate).join(\"admission.json\")",
         "if owner.phase == \"running\" {",
         "enable_amd64_emulation(",
-        "create_machine(candidate",
+        "create_machine(&SmolvmCli::new(candidate, &owner), &spec, fresh)?;",
     ] {
         assert!(
             root_recheck < at(later),
@@ -256,12 +259,14 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
     // reaches. Inside `prepare_rootfs` the walk decides before the content proof it falls
     // back to, which is the function's last expression.
     let used = at("let rootfs_metadata = prepare_rootfs(");
-    let started = at("start_machine(candidate, &owner, permit)?");
+    let started = at("start_machine(&SmolvmCli::new(candidate, &owner), permit)?");
     assert!(at("enable_amd64_emulation(") < used);
     assert_eq!(body.matches("enable_amd64_emulation(").count(), 1);
+    // Provider commands go through the typed backend (`SmolvmCli`); none is invoked directly.
     assert!(!body[used..started].contains("invoke("));
+    assert_eq!(body[used..started].matches("SmolvmCli::new(").count(), 1);
     assert_eq!(body.matches("create_machine(").count(), 1);
-    let create = at("create_machine(candidate");
+    let create = at("create_machine(&SmolvmCli::new(candidate, &owner), &spec, fresh)?;");
     assert!(used < at("if !owner.created {") && at("if !owner.created {") < create);
     assert!(create < started);
     let prepare = source.find("\nfn prepare_rootfs(").unwrap();

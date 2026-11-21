@@ -2011,6 +2011,15 @@ backend, so the dependency is pinned exactly; read its `src/sha256.rs` again bef
 the pin. To measure a build, run
 `cargo test --release --lib sha256_rate_of_this_build -- --ignored --nocapture`.
 
+### Never wait in a blocking `flock`
+
+On macOS, releasing an exclusive `flock` wakes only one blocked waiter and queues
+the others behind it, so a woken waiter that keeps a shared lock strands the rest
+with no bound. The step store (`src/store/`) therefore never blocks in `flock`: it
+tries every lock with `LOCK_NB`, closes and retries 1 to 5 ms later until a time
+deadline, and then reports the store busy. Every other `flock` in this crate is
+non-blocking too; keep it that way for any lock that several openers may wait for.
+
 ### Extending a stopped pool's approved hosts
 
 `runtime network extend --allow-host pkg-npm.githubusercontent.com --json` adds

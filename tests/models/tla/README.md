@@ -51,8 +51,17 @@ https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
 `JAVA_BIN` may select an explicit Java executable. The runner does not install tools
 or change global Java settings. CI's Runtime state models job supplies Java and the
 pinned artifact. Each check has a 120-second timeout, 512 MiB Java heap, two workers
-and bounded output; temporary TLC metadata is removed after success or failure.
+and bounded output. Every gate owns a private directory for TLC metadata, copied
+models, and Java standard-module extraction (`java.io.tmpdir`). The runner waits
+for Java to exit before removing that directory after success, failure, SIGINT,
+or SIGTERM. Concurrent worktrees therefore do not share unpacked standard modules.
 No credentials or running VM are needed.
+
+Run `bun run test:models:concurrent <other-worktree>` to check failure and
+signal cleanup, then run three pairs of complete gates. The other checkout must
+contain the same runner revision; omit it to run both gates in this checkout.
+The check verifies separate Java temp roots, marker isolation, and removal of
+each run's scratch. It uses the same Java and pinned jar as `test:models`.
 
 ## Native foreground recovery lease takeover
 
@@ -1572,6 +1581,64 @@ original deterministic path. This avoids admitting a new owner into an old
 pending coordinator's directory; it does not acknowledge or roll over that
 coordinator. Directory derivation and a real coordinator start/stop regression
 cover this restored-owner boundary outside the finite publisher model.
+
+## CLI process exit
+
+`cli-process-exit/ProcessExit.tla` checks how the CLI process ends
+(`src/lib/process-exit.ts`, `index.ts`): the command returns, `exitWhenDone`
+waits for registered holds, ends stdout and stderr, then exits. Invariants:
+`NoExitWithPendingHold` (the process never ends while held work runs, including
+a hold registered while waiting) and `NoLostOutput` (everything written before
+the exit was delivered).
+
+| Model operation | Source boundary |
+| --- | --- |
+| `Register` / `Settle` | `holdProcessUntil`: the stdio MCP session and each tool call, the foreground daemon, TUI and remote monitor renderer `closed`, TUI action child plus its stderr drain. |
+| `CommandReturns` / `SnapshotSettled` | `runCli` resolves; `waitForHolds` awaits a snapshot and loops while holds remain. |
+| `EndStreams` / `Exit` | `endStream` on stdout and stderr (`end` callback), then `process.exit`. |
+
+Bounds: three holds. The positive configuration exhausts 298 distinct states at
+depth 11. Controls: `negative` (wait for one snapshot, no re-check) fails
+`NoExitWithPendingHold` at `SnapshotSettled`; `no-end` (exit after
+`write("", cb)` instead of `end`) fails `NoLostOutput` at `Exit`. The second
+matches a measurement: with `write("", cb)` only 950 KB of a 2 MiB pipe write
+arrived. `tests/process-exit.test.ts` walks both against real processes. Not
+covered: whether every command that outlives `runCli` registers a hold (an
+audit, listed in the PR), and a reader that never drains (the exit waits, as
+the event loop did before).
+
+## Global proxy address record
+
+`ingress-address-record/IngressRecord.tla` checks the record `hack run` trusts
+instead of asking Docker for the global proxy and DNS addresses
+(`src/lib/proxy-ingress-addresses.ts`). Invariant `TrustedRecordIsCurrent`: a
+record a run would trust names the running address, unless a change made
+outside Hack followed the observation it came from.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `HackBegin` / `HackApply` / `HackEnd` | `withIngressChange` around `hack global up` (`runGlobalUpChange`), the proxy `down` in `hack global down`, and the doctor proxy repair: under the `ingress-change.lock` cross-process lock, an unsettled new token, the Compose effect, a settled new token (also after a failure). |
+| `Crash` | The changer's process dies: the lock is reclaimed from a dead owner only, and the token stays unsettled until the next change settles it. |
+| `ReadToken` / `Inspect` / `Write` | `resolveIngressAddresses(..., "fresh")`: the token is read before the one `docker inspect`; a read that finds both containers writes the record with that token; one that reaches the engine and finds a container gone removes it. |
+| `Valid` | `resolveIngressAddresses(..., "recorded")`: trusted only when the record's token is the current one and settled. |
+| `External` | A container recreated outside Hack. Not detected; a failed `hack run` checks once and refreshes. |
+
+Bounds: two concurrent readers, two changers that each run once and may
+crash at any step, addresses {stopped, 1, 2}, `MaxGen = 4`. The positive
+configuration exhausts 922,875 distinct states at depth 19 (about 12 s with
+two workers). Negative controls, all failing `TrustedRecordIsCurrent` at
+`Write`: `negative` (no generation check) and `unsettled` (validity ignores the
+settled flag), where a reader inspects while a change is in progress and the
+change stops the stack; and `unlocked` (changes not serialized), where one
+change settles the token while the other is still moving the containers. The same interleavings are walked
+against the real record and token files in `tests/proxy-ingress-addresses.test.ts`.
+Not covered: atomicity of the file writes themselves (each is an atomic rename),
+Docker's own answers, and the stored per-instance override file, which is
+rendered from whatever addresses the command resolved. The model has one
+Docker engine; in the code a record is also trusted only for the engine it
+was read from (`engine`: `DOCKER_HOST`, else the Docker context), which
+`tests/proxy-ingress-addresses.test.ts` and
+`tests/compose-exec-run-probes-cli.test.ts` cover.
 
 ## Runtime service per native home
 

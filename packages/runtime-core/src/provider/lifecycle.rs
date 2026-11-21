@@ -1,4 +1,5 @@
-use backend::smolvm_cli::{binary, invoke, root};
+use backend::smolvm_cli::{SmolvmCli, binary, root};
+use backend::{MachineSpec, VmBackend};
 mod admission_pool;
 mod backend;
 mod disk_handles;
@@ -800,11 +801,7 @@ fn enable_amd64_emulation(
     if owner.amd64_emulation {
         require_host_translation()?;
         if owner.created && !super::config_audit::recorded_amd64_emulation(candidate, owner)? {
-            invoke(
-                candidate,
-                owner,
-                &["machine", "update", "--name", &owner.machine, "--rosetta"],
-            )?;
+            SmolvmCli::new(candidate, owner).enable_translation()?;
         }
     }
     if enabled {
@@ -1664,57 +1661,8 @@ fn start_pool_observed(
         // around that start.
         super::prepared_start::before_create(candidate, &owner, &lock, start.prepared)?;
         phase(candidate, &mut owner, "creating")?;
-        let mount = format!(
-            "{}:/opt/hack-engine:ro",
-            artifact::engine_root(candidate).display()
-        );
-        let mut arguments = vec![
-            "machine".to_owned(),
-            "create".into(),
-            "--name".into(),
-            owner.machine.clone(),
-            "--label".into(),
-            format!("hack-local.owner={}", owner.token),
-            "--cpus".into(),
-            profile.cpus().to_string(),
-            "--mem".into(),
-            profile.memory_mib().to_string(),
-            "--storage".into(),
-            profile.storage_gib().to_string(),
-            "--overlay".into(),
-            profile.overlay_gib().to_string(),
-            "--docker-socket".into(),
-            "--volume".into(),
-            mount,
-        ];
-        if owner.amd64_emulation {
-            arguments.push("--rosetta".into());
-        }
-        for share in owner.project_shares() {
-            share.validate()?;
-            arguments.extend(["--volume".into(), share.argument()]);
-        }
-        arguments.extend(
-            owner
-                .network
-                .arguments()
-                .iter()
-                .map(|value| (*value).to_owned()),
-        );
-        if let Some(bridge) = owner.application_bridge {
-            for path in bridge.guest_paths() {
-                arguments.extend(["--expose-socket".into(), path]);
-            }
-        }
-        if let Some(intent) = owner.dependency_sockets {
-            for path in intent.paths(&owner.short_home) {
-                arguments.extend([
-                    "--mount-socket".into(),
-                    format!("{}:{}", path.host_path.display(), path.guest_path),
-                ]);
-            }
-        }
-        create_machine(candidate, &owner, &arguments, fresh)?;
+        let spec = pool_spec(candidate, &owner, profile);
+        create_machine(&SmolvmCli::new(candidate, &owner), &spec, fresh)?;
         super::config_audit::pin_created_network(candidate, &mut owner)?;
         owner.created = true;
         owner.save(candidate)?;
@@ -1768,7 +1716,7 @@ fn start_pool_observed(
     owner.process = None;
     phase(candidate, &mut owner, "booting")?;
     crate::timings::measure(crate::timings::Step::VmBoot, None, |_| {
-        start_machine(candidate, &owner, permit)?;
+        start_machine(&SmolvmCli::new(candidate, &owner), permit)?;
         let observed = recorded_process(candidate, &owner)?;
         identity::verify(
             &observed,
@@ -1805,34 +1753,48 @@ fn start_pool_observed(
     })
 }
 
-/// `machine create` allocates new disks; only a start without a reserve selection may.
+fn pool_spec(candidate: &Candidate, owner: &Owner, profile: super::Profile) -> MachineSpec {
+    MachineSpec {
+        cpus: profile.cpus(),
+        memory_mib: profile.memory_mib(),
+        storage_gib: profile.storage_gib(),
+        overlay_gib: profile.overlay_gib(),
+        engine_share: Some(artifact::engine_root(candidate)),
+        amd64_translation: owner.amd64_emulation,
+        project_shares: owner.project_shares().into_iter().cloned().collect(),
+        network: owner.network.clone(),
+        exposed_sockets: owner
+            .application_bridge
+            .map(|bridge| bridge.guest_paths())
+            .unwrap_or_default(),
+        mounted_sockets: owner
+            .dependency_sockets
+            .map(|intent| {
+                intent
+                    .paths(&owner.short_home)
+                    .into_iter()
+                    .map(|path| (path.host_path, path.guest_path))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// Define a machine whose first boot can allocate disks; reserve selections cannot create.
 fn create_machine(
-    candidate: &Candidate,
-    owner: &Owner,
-    arguments: &[String],
-    _fresh: admission_pool::FreshCreate,
+    backend: &impl VmBackend,
+    spec: &MachineSpec,
+    fresh: admission_pool::FreshCreate,
 ) -> Result<(), CandidateError> {
-    invoke(
-        candidate,
-        owner,
-        &arguments.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
-    .map(drop)
+    backend.create(spec, fresh)
 }
 
 /// `machine start` hands the VM lock to the provider; only a released boot admission may.
 fn start_machine(
-    candidate: &Candidate,
-    owner: &Owner,
-    _permit: admission_pool::StartPermit,
+    backend: &impl VmBackend,
+    permit: admission_pool::StartPermit,
 ) -> Result<(), CandidateError> {
-    invoke(
-        candidate,
-        owner,
-        &["machine", "start", "--name", &owner.machine],
-    )
-    .map(drop)
-    .map_err(stalled_boot)
+    backend.start(permit).map_err(stalled_boot)
 }
 
 /// The pinned provider's words when it ends a start whose VM showed no boot progress for its

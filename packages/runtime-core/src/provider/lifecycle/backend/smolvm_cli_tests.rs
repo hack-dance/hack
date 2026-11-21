@@ -2,6 +2,119 @@ use super::*;
 use crate::provider::state;
 use serde_json::json;
 
+fn verifier_spec() -> MachineSpec {
+    MachineSpec {
+        cpus: 1,
+        memory_mib: 1024,
+        storage_gib: 4,
+        overlay_gib: 4,
+        engine_share: None,
+        amd64_translation: false,
+        project_shares: Vec::new(),
+        network: crate::provider::NetworkIntent::Isolated,
+        exposed_sockets: Vec::new(),
+        mounted_sockets: Vec::new(),
+    }
+}
+
+#[test]
+fn verifier_creation_preserves_the_command_without_engine_or_shares() {
+    assert_eq!(
+        create_arguments("fixture", "owner", &verifier_spec()).unwrap(),
+        [
+            "machine",
+            "create",
+            "--name",
+            "fixture",
+            "--label",
+            "hack-local.owner=owner",
+            "--cpus",
+            "1",
+            "--mem",
+            "1024",
+            "--storage",
+            "4",
+            "--overlay",
+            "4"
+        ]
+    );
+}
+
+#[test]
+fn pool_creation_preserves_flag_order_and_socket_directions() {
+    let mut candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    candidate.state_root = "/fixture/state".into();
+    // Canonicalize the temporary root before approving a share (notably /var on macOS).
+    let project = std::fs::canonicalize(std::env::temp_dir())
+        .unwrap()
+        .join(format!(
+            "backend-share-{}-{}",
+            std::process::id(),
+            crate::next_test_scratch(),
+        ));
+    struct Remove(std::path::PathBuf);
+    impl Drop for Remove {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    state::private_directory(&project).unwrap();
+    let _remove = Remove(project.clone());
+    std::fs::write(project.join("package.json"), "{}").unwrap();
+    let share = crate::provider::ProjectShareIntent::approve(&project, true).unwrap();
+    let project_volume = format!("{}:{}:rw", project.display(), share.guest_path);
+    let engine_volume = format!(
+        "{}:/opt/hack-engine:ro",
+        artifact::engine_root(&candidate).display()
+    );
+    let owner: Owner = serde_json::from_value(json!({
+        "version":1, "checkout":"/fixture", "token":"owner", "machine":"fixture",
+        "short_home":"/fixture/sockets", "created":false, "phase":"creating", "process":null,
+        "storage":null, "overlay":null, "guest_boot_id":null,
+        "daemon_pid":null, "daemon_start":null, "rootfs_digest":null,
+        "amd64_emulation":true, "network":"internet", "project_share":share,
+        "application_bridge":{"slots":1}, "dependency_sockets":{"slots":1}
+    }))
+    .unwrap();
+    let spec = crate::provider::lifecycle::pool_spec(
+        &candidate,
+        &owner,
+        crate::provider::Profile::Research,
+    );
+    assert_eq!(
+        create_arguments("fixture", "owner", &spec).unwrap(),
+        [
+            "machine",
+            "create",
+            "--name",
+            "fixture",
+            "--label",
+            "hack-local.owner=owner",
+            "--cpus",
+            "2",
+            "--mem",
+            "2048",
+            "--storage",
+            "4",
+            "--overlay",
+            "4",
+            "--docker-socket",
+            "--volume",
+            &engine_volume,
+            "--rosetta",
+            "--volume",
+            &project_volume,
+            "--net",
+            "--net-backend",
+            "virtio-net",
+            "--expose-socket",
+            "/run/hack-local/bridge-00.sock",
+            "--mount-socket",
+            "/fixture/sockets/dependency-00.sock:/run/hack-dependencies/dependency-00.sock"
+        ]
+    );
+}
+
 #[test]
 fn provider_command_enforces_strict_floor_for_public_egress_modes() {
     let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
@@ -166,4 +279,23 @@ fn provider_command_turns_notifications_off_only_for_a_recorded_choice() {
         let saved = serde_json::to_value(&owner).unwrap();
         assert_eq!(serde_json::from_value::<Owner>(saved).unwrap(), owner);
     }
+}
+
+/// These assignments type-check the actual trait and implementation, without forging
+/// tokens or invoking a provider. Removing either token makes this regression fail to
+/// compile: Rust has no optional method arguments or arity overloads.
+#[test]
+fn backend_effects_require_consumed_admission_tokens() {
+    fn trait_signatures<B: VmBackend>() {
+        let _: fn(&B, &MachineSpec, FreshCreate) -> Result<(), CandidateError> = B::create;
+        let _: fn(&B, StartPermit) -> Result<(), CandidateError> = B::start;
+    }
+    trait_signatures::<SmolvmCli<'_>>();
+    fn implementation_signatures<'a>()
+    -> fn(&SmolvmCli<'a>, StartPermit) -> Result<(), CandidateError> {
+        let _: fn(&SmolvmCli<'a>, &MachineSpec, FreshCreate) -> Result<(), CandidateError> =
+            SmolvmCli::<'a>::create;
+        SmolvmCli::<'a>::start
+    }
+    let _ = implementation_signatures();
 }

@@ -1,7 +1,9 @@
 //! Typed private relay delivery. Dropping a transport is not proof of guest exit.
+#[cfg(target_os = "macos")]
+use super::OwnedGuest;
 use super::RelayProcess;
 #[cfg(target_os = "macos")]
-use super::{OwnedGuest, command};
+use super::backend::smolvm_cli;
 use crate::CandidateError;
 #[cfg(target_os = "macos")]
 use crate::provider::relay_auth::PrivateInput;
@@ -11,7 +13,7 @@ use std::{
     io::{self, Read},
     net::Ipv4Addr,
     os::fd::AsRawFd,
-    process::{Child, ChildStderr, ChildStdout, ExitStatus, Stdio},
+    process::{Child, ChildStderr, ChildStdout, ExitStatus},
 };
 
 fn refused() -> CandidateError {
@@ -351,13 +353,10 @@ impl OwnedGuest<'_> {
         let guarded = format!(
             "set -eu\ntest \"$(cat /proc/sys/kernel/random/boot_id)\" = \"$1\"\ntest \"$(cat /storage/.hack-local-owner)\" = \"$2\"\nshift 2\n{script}"
         );
-        let stop = command(self.candidate, &self.owner)
-            .args([
-                "machine",
-                "exec",
-                "--name",
-                &self.owner.machine,
-                "--",
+        let stop = smolvm_cli::spawn_exec(
+            self.candidate,
+            &self.owner,
+            &[
                 "/bin/sh",
                 "-c",
                 &guarded,
@@ -371,12 +370,9 @@ impl OwnedGuest<'_> {
                 &process.address.to_string(),
                 &process.port.to_string(),
                 &child.stop_user(),
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|_| refused())?;
+            ],
+        )
+        .map_err(|_| refused())?;
         let mut stop = RelayChild::from_child(
             stop,
             RelayLaunch {
@@ -510,6 +506,7 @@ printf 'relay-guest-absent-v1\n'
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Stdio;
     /// Hang guard for a fixture shell to exit or print its marker, not a correctness bound:
     /// on a loaded host spawning `/bin/sh` alone took longer than the former 2 s (HACK-1457,
     /// load average ~230). Only a fixture that never exits or never prints should reach it.

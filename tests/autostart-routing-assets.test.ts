@@ -444,6 +444,57 @@ test("a home without the opt-in logging stack authenticates its routing assets; 
   await expect(secure()).rejects.toMatchObject({ code: "E_PERMISSION" });
 });
 
+test("an existing home with logging turned off authenticates its routing assets despite outdated logging files", async () => {
+  // HACK-2468: install no longer rewrites the logging files while logging
+  // is off, so they can lag the current templates; login never starts the
+  // logging stack and must not refuse over them.
+  const saved = process.env.HACK_GLOBAL_CONFIG_PATH;
+  process.env.HACK_GLOBAL_CONFIG_PATH = join(root, "hack.config.json");
+  try {
+    await writeFile(
+      join(root, "hack.config.json"),
+      `${JSON.stringify({ logging: { enabled: false } })}\n`
+    );
+    const compose = join(
+      root,
+      GLOBAL_LOGGING_DIR_NAME,
+      GLOBAL_LOGGING_COMPOSE_FILENAME
+    );
+    await writeFile(compose, "services: {} # written by an older Hack\n");
+    await secure();
+    expect(await readFile(compose, "utf8")).toBe(
+      "services: {} # written by an older Hack\n"
+    );
+    // With logging on, the same outdated file is still refused.
+    await writeFile(
+      join(root, "hack.config.json"),
+      `${JSON.stringify({ logging: { enabled: true } })}\n`
+    );
+    await expect(secure()).rejects.toMatchObject({ code: "E_PERMISSION" });
+  } finally {
+    if (saved === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
+    } else {
+      process.env.HACK_GLOBAL_CONFIG_PATH = saved;
+    }
+  }
+});
+
+test("either healthcheck variant of the proxy and logging files authenticates", async () => {
+  // Install renders start_interval only for Docker Engine 25+.
+  for (const startInterval of [false, true]) {
+    await writeFile(
+      caddyCompose(),
+      renderGlobalCaddyCompose({ bindAddress, startInterval })
+    );
+    await writeFile(
+      join(root, GLOBAL_LOGGING_DIR_NAME, GLOBAL_LOGGING_COMPOSE_FILENAME),
+      renderGlobalLoggingCompose({ startInterval })
+    );
+    await secure();
+  }
+});
+
 test("login plans routing without starting default-credential logging services", () => {
   const composeFile = "/example/logging/compose.yml";
   expect(globalLoggingUpArguments({ composeFile, login: true })).toBeNull();

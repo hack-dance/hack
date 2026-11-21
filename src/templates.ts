@@ -19,6 +19,7 @@ import {
   GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
   GLOBAL_GRAFANA_DATASOURCE_FILENAME,
   GLOBAL_LOGGING_COMPOSE_FILENAME,
+  GLOBAL_LOGGING_PROJECT_NAME,
   GLOBAL_LOKI_CONFIG_FILENAME,
   LEGACY_GRAFANA_HOST,
   LEGACY_LOKI_HOST,
@@ -29,21 +30,28 @@ import { PROXY_PORTS, renderProxyPortMapping } from "./lib/proxy-bind.ts";
 
 /**
  * A Compose `healthcheck` block for a global stack service. `hack global up`
- * waits for `healthy` instead of a fixed time. `start_interval` (Docker 25+)
- * probes every half second while the service starts; an older engine ignores
- * it and probes at `interval`, so readiness is then seen up to 10 s later.
- * Failures during `start_period` do not count, so a slow first start (Grafana
- * migrates its database) is not reported unhealthy.
+ * waits for `healthy` instead of a fixed time.
+ *
+ * `startInterval` (Docker Engine 25+ only): probe every half second while the
+ * service starts and every 10 s after. Compose refuses the key on an older
+ * engine ("feature require Docker Engine v25 or later"), so there the block
+ * leaves it out and probes every 2 s instead, which keeps readiness within
+ * about 2 s. `dockerEngineSupportsStartInterval` decides which one is
+ * written. Failures during `start_period` do not count, so a slow first start
+ * (Grafana migrates its database) is not reported unhealthy.
  */
-function renderGlobalHealthcheck(test: readonly string[]): string[] {
+function renderGlobalHealthcheck(
+  test: readonly string[],
+  startInterval: boolean
+): string[] {
   return [
     "    healthcheck:",
     `      test: ${JSON.stringify(test)}`,
-    "      interval: 10s",
+    `      interval: ${startInterval ? "10s" : "2s"}`,
     "      timeout: 3s",
     "      retries: 3",
     "      start_period: 120s",
-    "      start_interval: 500ms",
+    ...(startInterval ? ["      start_interval: 500ms"] : []),
   ];
 }
 
@@ -52,7 +60,10 @@ export function renderGlobalCaddyCompose(opts?: {
   readonly useStaticCaddyIp?: boolean;
   /** Host address for ports 80/443; `null` or absent publishes on all interfaces. */
   readonly bindAddress?: string | null;
+  /** Healthchecks use `start_interval` (Docker Engine 25+); default off. */
+  readonly startInterval?: boolean;
 }): string {
+  const startInterval = opts?.startInterval === true;
   const useStaticCoreDnsIp = opts?.useStaticCoreDnsIp === true;
   const useStaticCaddyIp = opts?.useStaticCaddyIp === true;
   const bindAddress = opts?.bindAddress ?? null;
@@ -83,14 +94,10 @@ export function renderGlobalCaddyCompose(opts?: {
     "    environment:",
     `      CADDY_INGRESS_NETWORKS: ${DEFAULT_INGRESS_NETWORK}`,
     // Caddy's admin API answers once its first configuration is loaded.
-    ...renderGlobalHealthcheck([
-      "CMD",
-      "wget",
-      "-q",
-      "-O",
-      "/dev/null",
-      "http://127.0.0.1:2019/config/",
-    ]),
+    ...renderGlobalHealthcheck(
+      ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"],
+      startInterval
+    ),
     ...(useStaticCaddyIp
       ? [
           "    networks:",
@@ -164,9 +171,13 @@ export function renderGlobalCoreDnsConfig(opts?: {
   ].join("\n");
 }
 
-export function renderGlobalLoggingCompose(): string {
+export function renderGlobalLoggingCompose(opts?: {
+  /** Healthchecks use `start_interval` (Docker Engine 25+); default off. */
+  readonly startInterval?: boolean;
+}): string {
+  const startInterval = opts?.startInterval === true;
   return [
-    "name: hack-logging",
+    `name: ${GLOBAL_LOGGING_PROJECT_NAME}`,
     "services:",
     "  loki:",
     "    image: grafana/loki:2.9.4",
@@ -176,14 +187,10 @@ export function renderGlobalLoggingCompose(): string {
     "    volumes:",
     "      - loki-data:/loki",
     `      - ./${GLOBAL_LOKI_CONFIG_FILENAME}:/etc/loki/config.yaml:ro`,
-    ...renderGlobalHealthcheck([
-      "CMD",
-      "wget",
-      "-q",
-      "-O",
-      "/dev/null",
-      "http://127.0.0.1:3100/ready",
-    ]),
+    ...renderGlobalHealthcheck(
+      ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3100/ready"],
+      startInterval
+    ),
     "    labels:",
     `      caddy: ${DEFAULT_LOKI_HOST}, ${LEGACY_LOKI_HOST}`,
     '      caddy.reverse_proxy: "{{upstreams 3100}}"',
@@ -200,12 +207,15 @@ export function renderGlobalLoggingCompose(): string {
     `      - ./${GLOBAL_ALLOY_FILENAME}:/etc/alloy/config.alloy:ro`,
     `    command: run --storage.path=${GLOBAL_ALLOY_STORAGE_PATH} /etc/alloy/config.alloy`,
     // The image has bash but neither wget nor curl.
-    ...renderGlobalHealthcheck([
-      "CMD",
-      "bash",
-      "-c",
-      'exec 3<>/dev/tcp/127.0.0.1/12345 && printf "GET /-/ready HTTP/1.0\\r\\n\\r\\n" >&3 && head -1 <&3 | grep -q " 200 "',
-    ]),
+    ...renderGlobalHealthcheck(
+      [
+        "CMD",
+        "bash",
+        "-c",
+        'exec 3<>/dev/tcp/127.0.0.1/12345 && printf "GET /-/ready HTTP/1.0\\r\\n\\r\\n" >&3 && head -1 <&3 | grep -q " 200 "',
+      ],
+      startInterval
+    ),
     "    networks:",
     `      - ${DEFAULT_LOGGING_NETWORK}`,
     "",
@@ -218,14 +228,17 @@ export function renderGlobalLoggingCompose(): string {
     `      - ./${GLOBAL_GRAFANA_DATASOURCE_FILENAME}:/etc/grafana/provisioning/datasources/hack-datasources.yaml:ro`,
     `      - ./${GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME}:/etc/grafana/provisioning/dashboards/hack-dashboards.yaml:ro`,
     `      - ./${GLOBAL_GRAFANA_DASHBOARDS_DIR}:/var/lib/grafana/dashboards:ro`,
-    ...renderGlobalHealthcheck([
-      "CMD",
-      "wget",
-      "-q",
-      "-O",
-      "/dev/null",
-      "http://127.0.0.1:3000/api/health",
-    ]),
+    ...renderGlobalHealthcheck(
+      [
+        "CMD",
+        "wget",
+        "-q",
+        "-O",
+        "/dev/null",
+        "http://127.0.0.1:3000/api/health",
+      ],
+      startInterval
+    ),
     "    labels:",
     `      caddy: ${DEFAULT_GRAFANA_HOST}, ${LEGACY_GRAFANA_HOST}`,
     '      caddy.reverse_proxy: "{{upstreams 3000}}"',

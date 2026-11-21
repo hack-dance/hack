@@ -45,6 +45,9 @@ export interface DockerComposeLogsParams {
   readonly projectName?: string;
   readonly composeProject?: string;
   readonly profiles?: readonly string[];
+  /** `docker compose logs --since/--until` (a duration such as 10m, or a time). */
+  readonly since?: string;
+  readonly until?: string;
   readonly streamContext?: LogStreamContext;
   readonly lifecycle?: LifecycleCompanionOptions;
 }
@@ -60,6 +63,8 @@ export async function dockerComposeLogsPlain(
     services: opts.services,
     composeProject: opts.composeProject,
     profiles: opts.profiles,
+    since: opts.since,
+    until: opts.until,
     composeDisabled: opts.lifecycle?.composeDisabled === true,
   });
 
@@ -141,6 +146,8 @@ export async function dockerComposeLogsPretty(
     services: opts.services,
     composeProject: opts.composeProject,
     profiles: opts.profiles,
+    since: opts.since,
+    until: opts.until,
     composeDisabled: opts.lifecycle?.composeDisabled === true,
   });
 
@@ -255,6 +262,8 @@ export async function dockerComposeLogsJson(
     services: opts.services,
     composeProject: opts.composeProject,
     profiles: opts.profiles,
+    since: opts.since,
+    until: opts.until,
     composeDisabled: opts.lifecycle?.composeDisabled === true,
   });
 
@@ -395,6 +404,8 @@ function spawnComposeLogs(opts: {
   readonly services?: readonly string[];
   readonly composeProject?: string;
   readonly profiles?: readonly string[];
+  readonly since?: string;
+  readonly until?: string;
   readonly composeDisabled: boolean;
 }): ReturnType<typeof Bun.spawn> | null {
   if (opts.composeDisabled) {
@@ -417,6 +428,8 @@ function buildComposeLogsCommand(opts: {
   readonly services?: readonly string[];
   readonly composeProject?: string;
   readonly profiles?: readonly string[];
+  readonly since?: string;
+  readonly until?: string;
 }): string[] {
   return [
     "docker",
@@ -433,6 +446,8 @@ function buildComposeLogsCommand(opts: {
     String(opts.tail),
     "--timestamps",
     "--no-color",
+    ...(opts.since ? ["--since", opts.since] : []),
+    ...(opts.until ? ["--until", opts.until] : []),
     ...(opts.services ?? []),
   ];
 }

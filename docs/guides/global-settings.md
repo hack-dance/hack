@@ -22,15 +22,22 @@ Common settings:
 - `controlPlane.usage.watchIntervalMs` (default `2000`) — sample interval for `hack usage --watch`.
 - `controlPlane.usage.historySize` (default `24`) — sample history for `hack usage --watch`.
 - `logging.enabled` (`true|false`; default unset) — whether Hack runs the
-  global logging stack (Loki, Alloy and Grafana). It is opt-in: unset is off
-  for a home without `~/.hack/logging/docker-compose.yml`, and on for a home
-  that has it, so a home that ran the stack before keeps it until you change
-  this. `hack global up --logging` saves `true`, writes the stack's files if
-  needed and starts it; `hack global up --no-logging` saves `false` and stops
-  its containers. Turning it off keeps the stack's volumes (logs, Grafana
-  state); `hack global logs-reset` removes them. With it off, plain
-  `hack logs` reads container logs and `hack logs --loki` says how to turn
-  the stack on. A Loki named by `HACK_LOKI_URL` is used whatever this says.
+  global logging stack (Loki, Alloy and Grafana). It is opt-in. While it is
+  unset, a home without `~/.hack/logging/` has it off, and a home that has that
+  directory (every earlier `hack global install` created it) keeps it. The
+  first `hack global install` or `hack global up` in such a home saves
+  `true`, so moving files aside later does not turn it off.
+  `hack global up --logging` saves `true`, writes the stack's files if needed
+  and starts it. `hack global up --no-logging` saves `false` and stops its
+  containers, found by their Compose project label, so even a stack whose
+  files are gone is stopped. Turning it off keeps the stack's volumes (logs,
+  Grafana state); `hack global logs-reset` removes them. With it off, plain
+  `hack logs` and `hack logs --since/--until` read container logs, and
+  `hack logs --loki`/`--query` and `hack open logs` fail with `E_LOGGING_OFF`,
+  naming the command that turns the stack on. `hack global status` still asks
+  Docker and reports containers that run while the setting says off. A Loki
+  named by `HACK_LOKI_URL` is used whatever this says. `hack config set`
+  accepts only `true` or `false` here.
   See [the opt-in state chart](../diagrams/global-logging-optin.svg) and the
   model in `tests/models/tla/global-logging-optin`.
 - `proxy.bind_address` (default unset: Docker's default, every IPv4 and IPv6

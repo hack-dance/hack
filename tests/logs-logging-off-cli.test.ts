@@ -67,7 +67,11 @@ afterEach(async () => {
 });
 
 async function runLogs(args: readonly string[]) {
-  const child = Bun.spawn([process.execPath, CLI, "logs", ...args], {
+  return await runHack(["logs", ...args]);
+}
+
+async function runHack(args: readonly string[]) {
+  const child = Bun.spawn([process.execPath, CLI, ...args], {
     cwd: projectRoot,
     // No HACK_LOKI_URL: the local stack's setting decides.
     env: privateCliEnv({
@@ -105,19 +109,34 @@ test("with the stack off, plain hack logs reads container logs and never mention
   expect(await composeLogsCalls()).toHaveLength(1);
 }, 60_000);
 
-test("with the stack off, --loki and --query say how to turn it on and read nothing", async () => {
+test("with the stack off, --since alone reads container logs with that range", async () => {
+  const result = await runLogs(["--no-follow", "--since", "10m", "web"]);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("listening (from compose)");
+  const calls = await composeLogsCalls();
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toContain("--since 10m");
+}, 60_000);
+
+test("with the stack off, --loki and --query fail with E_LOGGING_OFF and read nothing", async () => {
   for (const args of [
     ["--loki", "--no-follow"],
     ["--query", '{project="offhome"}', "--no-follow"],
   ]) {
     const result = await runLogs(args);
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain(
+    expect(`${result.stdout}${result.stderr}`).toContain("E_LOGGING_OFF");
+    expect(`${result.stdout}${result.stderr}`).toContain(
       "need the global logging stack (Loki, Alloy, Grafana), which is off. Turn it on with: hack global up --logging"
     );
-    expect(result.stderr).toContain("Plain `hack logs`");
-    expect(result.stderr).not.toContain("not reachable");
   }
+  const json = await runLogs(["--loki", "--no-follow", "--json"]);
+  expect(json.exitCode).toBe(1);
+  const envelope = JSON.parse(json.stdout);
+  expect(envelope).toMatchObject({
+    ok: false,
+    error: { code: "E_LOGGING_OFF" },
+  });
   expect(await composeLogsCalls()).toEqual([]);
 }, 60_000);
 
@@ -129,5 +148,46 @@ test("a home that turned the stack on gets the reachability answer instead", asy
     `${JSON.stringify({ logging: { enabled: true } })}\n`
   );
   const result = await runLogs(["--loki", "--no-follow"]);
-  expect(result.stderr).not.toContain("which is off");
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain(
+    "Loki is not reachable at http://127.0.0.1:3100."
+  );
+  expect(`${result.stdout}${result.stderr}`).not.toContain("E_LOGGING_OFF");
 }, 60_000);
+
+type DoctorCheck = {
+  readonly id: string;
+  readonly status: string;
+  readonly detail: string;
+};
+
+async function doctorChecks(): Promise<readonly DoctorCheck[]> {
+  const result = await runHack(["doctor", "--json"]);
+  const report = JSON.parse(result.stdout) as {
+    readonly data?: { readonly checks?: readonly DoctorCheck[] };
+  };
+  return report.data?.checks ?? [];
+}
+
+test("doctor reports the stack as off, and a bad logging.enabled value as a finding, not a crash", async () => {
+  const grafana = (checks: readonly DoctorCheck[]) =>
+    checks.find((check) => check.id === "grafana");
+  const off = await doctorChecks();
+  expect(grafana(off)).toMatchObject({ status: "ok" });
+  expect(grafana(off)?.detail).toContain(
+    "Logging stack off (opt-in); turn it on with: hack global up --logging"
+  );
+
+  const home = join(privateCliHome(root), ".hack");
+  await mkdir(home, { recursive: true });
+  await writeFile(
+    join(home, "hack.config.json"),
+    `${JSON.stringify({ logging: { enabled: "yes" } })}\n`
+  );
+  const bad = await doctorChecks();
+  expect(bad.length).toBeGreaterThan(1);
+  expect(grafana(bad)).toMatchObject({ status: "warn" });
+  expect(grafana(bad)?.detail).toContain(
+    "logging.enabled must be true or false"
+  );
+}, 120_000);

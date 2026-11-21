@@ -75,6 +75,11 @@ const shellMock = await registerScopedModuleMock({
       if (custom) {
         return custom;
       }
+      // The route probe's HTTPS request through the proxy: any status
+      // means the route answered (src/lib/global-route-probe.ts).
+      if (cmd.includes("--resolve")) {
+        return { exitCode: 0, stdout: "404", stderr: "" };
+      }
       return { exitCode: 0, stdout: "", stderr: "" };
     },
     execOrThrow: async (cmd: readonly string[]) => {
@@ -1825,13 +1830,29 @@ describe("the opt-in logging stack (HACK-2468)", () => {
     expect(await loggingSetting()).toBeUndefined();
   });
 
-  test("an existing home keeps its logging stack while logging.enabled is unset", async () => {
+  test("an existing home keeps its logging stack and its first start saves that choice", async () => {
     await writeComposeFile(globalCaddyComposePath());
     await writeComposeFile(loggingCompose());
     const { runCli } = await import("../src/cli/run.ts");
     expect(await runCli(["global", "up"])).toBe(0);
     expect(loggingCalls(runCalls, "up")).toHaveLength(1);
-    expect(await loggingSetting()).toBeUndefined();
+    // Saved, so the choice no longer hangs on the compose file.
+    expect(await loggingSetting()).toBe(true);
+  });
+
+  test("an existing home whose compose file was moved aside keeps the stack: the file is written again", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    await writeFile(
+      join(home(), GLOBAL_CADDY_DIR_NAME, "Corefile"),
+      ".:53 {}\n"
+    );
+    // The logging directory is the marker; only its compose file is gone.
+    await mkdir(join(home(), GLOBAL_LOGGING_DIR_NAME), { recursive: true });
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "up"])).toBe(0);
+    expect(await loggingSetting()).toBe(true);
+    expect(await Bun.file(loggingCompose()).exists()).toBe(true);
+    expect(loggingCalls(runCalls, "up")).toHaveLength(1);
   });
 
   test("global up --logging turns it on in a fresh home: saves the setting, writes the files, starts it", async () => {
@@ -1855,13 +1876,19 @@ describe("the opt-in logging stack (HACK-2468)", () => {
   test("global up --no-logging saves false and stops the stack, keeping its volumes", async () => {
     await writeComposeFile(globalCaddyComposePath());
     await writeComposeFile(loggingCompose());
+    execMockResponder = (cmd) =>
+      cmd[1] === "ps" &&
+      cmd.includes("label=com.docker.compose.project=hack-logging")
+        ? { exitCode: 0, stdout: "aaa111\nbbb222\n", stderr: "" }
+        : null;
     const { runCli } = await import("../src/cli/run.ts");
     expect(await runCli(["global", "up", "--no-logging"])).toBe(0);
     expect(await loggingSetting()).toBe(false);
     expect(loggingCalls(runCalls, "up")).toEqual([]);
-    const stops = loggingCalls(execCalls, "stop");
-    expect(stops).toEqual([
-      ["docker", "compose", "-f", loggingCompose(), "stop"],
+    // Found by the stack's Compose project label, so even a home whose
+    // logging files are gone has its containers stopped.
+    expect(execCalls.filter((call) => call[1] === "stop")).toEqual([
+      ["docker", "stop", "aaa111", "bbb222"],
     ]);
     for (const call of [...execCalls, ...runCalls]) {
       if (call.includes(loggingCompose())) {
@@ -1876,14 +1903,21 @@ describe("the opt-in logging stack (HACK-2468)", () => {
   test("a failed stop of the disabled stack fails global up and says the containers may still run", async () => {
     await writeComposeFile(globalCaddyComposePath());
     await writeComposeFile(loggingCompose());
-    execMockResponder = (cmd) =>
-      cmd.includes(loggingCompose()) && cmd.includes("stop")
+    execMockResponder = (cmd) => {
+      if (
+        cmd[1] === "ps" &&
+        cmd.includes("label=com.docker.compose.project=hack-logging")
+      ) {
+        return { exitCode: 0, stdout: "aaa111\n", stderr: "" };
+      }
+      return cmd[1] === "stop"
         ? {
             exitCode: 1,
             stdout: "",
             stderr: "Cannot connect to the Docker daemon\nsecond line\n",
           }
         : null;
+    };
     const errors: string[] = [];
     const capture = (chunk: string | Uint8Array) => {
       errors.push(String(chunk));
@@ -1903,21 +1937,91 @@ describe("the opt-in logging stack (HACK-2468)", () => {
     expect(await loggingSetting()).toBe(false);
     const message = errors.join("\n");
     expect(message).toContain(
-      "its containers could not be stopped (docker compose stop exited 1): Cannot connect to the Docker daemon"
+      "its containers could not be stopped (docker stop exited 1): Cannot connect to the Docker daemon"
     );
     expect(message).toContain("They may still be running.");
     expect(message).not.toContain("second line");
   });
 
-  test("a fresh home's global up makes no logging Docker call", async () => {
+  async function statusJson(): Promise<{
+    readonly logging: {
+      readonly ok: unknown;
+      readonly enabled?: boolean;
+      readonly error: string | null;
+    };
+  }> {
+    let output = "";
+    const write = spyOn(process.stdout, "write").mockImplementation(
+      (chunk: string | Uint8Array) => {
+        output += String(chunk);
+        return true;
+      }
+    );
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      await runCli(["global", "status", "--json"]);
+    } finally {
+      write.mockRestore();
+    }
+    return JSON.parse(output.trim());
+  }
+
+  test("status with logging off still asks Docker: running containers are not reported as off", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    await enableLogging();
+    await writeFile(
+      join(home(), "hack.config.json"),
+      `${JSON.stringify({ logging: { enabled: false } })}\n`
+    );
+    let running = "aaa111\n";
+    execMockResponder = (cmd) =>
+      cmd[1] === "ps" &&
+      cmd.includes("label=com.docker.compose.project=hack-logging")
+        ? { exitCode: 0, stdout: running, stderr: "" }
+        : null;
+    const busy = await statusJson();
+    expect(busy.logging).toMatchObject({ ok: false, enabled: false });
+    expect(busy.logging.error).toContain("1 of its container is still running");
+    expect(busy.logging.error).toContain("hack global up");
+    running = "";
+    expect((await statusJson()).logging).toMatchObject({
+      ok: true,
+      enabled: false,
+      error: null,
+    });
+  });
+
+  test("logs-reset in a home that never turned logging on says there is nothing to reset", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "logs-reset"])).toBe(0);
+    expect(
+      [...runCalls, ...execCalls].filter((call) => call.includes("down"))
+    ).toEqual([]);
+  });
+
+  test("a fresh home's global up only looks for stray logging containers: no files, no start, no stop", async () => {
     await writeComposeFile(globalCaddyComposePath());
     const { runCli } = await import("../src/cli/run.ts");
     expect(await runCli(["global", "up"])).toBe(0);
-    expect(
-      [...execCalls, ...runCalls].filter((call) =>
-        call.some((arg) => arg.includes(join(home(), GLOBAL_LOGGING_DIR_NAME)))
+    const logging = [...execCalls, ...runCalls].filter((call) =>
+      call.some(
+        (arg) =>
+          arg.includes(join(home(), GLOBAL_LOGGING_DIR_NAME)) ||
+          arg.includes("hack-logging")
       )
-    ).toEqual([]);
+    );
+    // One read by Compose project label; nothing is written, started or stopped.
+    expect(logging).toEqual([
+      [
+        "docker",
+        "ps",
+        "-q",
+        "--filter",
+        "label=com.docker.compose.project=hack-logging",
+      ],
+    ]);
+    expect(await Bun.file(loggingCompose()).exists()).toBe(false);
   });
 
   test("--logging and --no-logging together are refused and change nothing", async () => {

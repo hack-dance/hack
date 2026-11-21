@@ -96,6 +96,7 @@ import {
 } from "../lib/config-paths.ts";
 import { resolveDefaultDomain } from "../lib/default-domain.ts";
 import { queryDnsARecord } from "../lib/dns-query.ts";
+import { dockerEngineSupportsStartInterval } from "../lib/docker-engine-features.ts";
 import {
   adoptedProjectCheckResult,
   adoptedProjectNotApplicableResults,
@@ -2708,7 +2709,19 @@ async function checkGrafanaUnlessOff(opts: {
   readonly progress: Parameters<typeof runCheck>[0];
   readonly dns: CheckResult;
 }): Promise<TimedCheckResult> {
-  if (!(await resolveGlobalLoggingForHome()).enabled) {
+  // A bad logging.enabled value is a finding, not a reason to stop doctor.
+  let enabled: boolean;
+  try {
+    enabled = (await resolveGlobalLoggingForHome()).enabled;
+  } catch (error) {
+    return {
+      name: "grafana",
+      status: "warn",
+      message: error instanceof Error ? error.message : String(error),
+      durationMs: 0,
+    };
+  }
+  if (!enabled) {
     return {
       name: "grafana",
       status: "ok",
@@ -4417,6 +4430,7 @@ async function runDoctorFix(opts: {
         useStaticCoreDnsIp: useStaticIps,
         useStaticCaddyIp: useStaticIps,
         bindAddress: bind.bindAddress,
+        startInterval: await dockerEngineSupportsStartInterval(),
       }),
     });
     if (proxyCompose.kind === "replaced-hand-edit") {

@@ -38,6 +38,7 @@ import {
 import { assertAutostartPathAclsTrusted } from "./autostart-path-acl.ts";
 import { HackCliError } from "./cli-result.ts";
 import { parseDefaultDomain } from "./default-domain.ts";
+import { resolveGlobalLogging } from "./global-logging.ts";
 import { checkReplaceableChain } from "./path-trust.ts";
 import { parseProxyBindAddress } from "./proxy-bind.ts";
 
@@ -80,7 +81,12 @@ export async function secureAutostartRoutingAssets(
       throw new Error("Unavailable owner");
     }
     const uid = process.getuid();
-    const logging = await loggingDirectoryPresent(opts.root);
+    // Login never starts the logging stack: its files are checked only when
+    // it is on, so an existing home with logging off is not refused over
+    // files install no longer rewrites.
+    const logging =
+      (await loggingDirectoryPresent(opts.root)) &&
+      (await loggingOnForLogin(opts.root));
     const assets = routingAssets({ ...opts, logging });
     for (const asset of assets) {
       await assertSafeAssetParent({ root: opts.root, path: asset.path, uid });
@@ -130,6 +136,23 @@ export async function secureAutostartRoutingAssets(
   }
 }
 
+/** The logging setting for the home at `root`; an unreadable one is off here. */
+async function loggingOnForLogin(root: string): Promise<boolean> {
+  try {
+    return (
+      await resolveGlobalLogging({
+        loggingCompose: resolve(
+          root,
+          GLOBAL_LOGGING_DIR_NAME,
+          GLOBAL_LOGGING_COMPOSE_FILENAME
+        ),
+      })
+    ).enabled;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Whether `<root>/logging` exists at all. Only a missing path (`ENOENT`) means
  * "no logging stack"; anything else there, a file or a link included, is
@@ -159,13 +182,17 @@ function routingAssets(
   const compose: string[] = [];
   for (const useStaticCoreDnsIp of [false, true]) {
     for (const useStaticCaddyIp of [false, true]) {
-      compose.push(
-        renderGlobalCaddyCompose({
-          useStaticCoreDnsIp,
-          useStaticCaddyIp,
-          bindAddress,
-        })
-      );
+      // Either healthcheck variant: install renders the one its engine takes.
+      for (const startInterval of [false, true]) {
+        compose.push(
+          renderGlobalCaddyCompose({
+            useStaticCoreDnsIp,
+            useStaticCaddyIp,
+            bindAddress,
+            startInterval,
+          })
+        );
+      }
     }
   }
   return [
@@ -178,26 +205,31 @@ function routingAssets(
     },
     ...(opts.logging
       ? ([
-          [GLOBAL_LOGGING_COMPOSE_FILENAME, renderGlobalLoggingCompose()],
-          [GLOBAL_ALLOY_FILENAME, renderGlobalAlloyConfig()],
-          [GLOBAL_LOKI_CONFIG_FILENAME, renderGlobalLokiConfigYaml()],
+          [
+            GLOBAL_LOGGING_COMPOSE_FILENAME,
+            [false, true].map((startInterval) =>
+              renderGlobalLoggingCompose({ startInterval })
+            ),
+          ],
+          [GLOBAL_ALLOY_FILENAME, [renderGlobalAlloyConfig()]],
+          [GLOBAL_LOKI_CONFIG_FILENAME, [renderGlobalLokiConfigYaml()]],
           [
             GLOBAL_GRAFANA_DATASOURCE_FILENAME,
-            renderGlobalGrafanaDatasourceYaml(),
+            [renderGlobalGrafanaDatasourceYaml()],
           ],
           [
             GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
-            renderGlobalGrafanaDashboardsProvisioningYaml(),
+            [renderGlobalGrafanaDashboardsProvisioningYaml()],
           ],
           [
             GLOBAL_GRAFANA_DASHBOARD_FILENAME,
-            renderGlobalGrafanaLogsDashboardJson(),
+            [renderGlobalGrafanaLogsDashboardJson()],
           ],
         ] as const)
       : []
-    ).map(([name, text]) => ({
+    ).map(([name, accepted]) => ({
       path: resolve(logging, name),
-      accepted: [text],
+      accepted,
     })),
     ...(
       [

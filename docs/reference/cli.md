@@ -1380,7 +1380,7 @@ hack global <subcommand> [options]
 
 | Command | Summary |
 | --- | --- |
-| `hack global install` | Bootstrap ~/.hack and start Caddy + Grafana/Loki/Alloy |
+| `hack global install` | Bootstrap ~/.hack and start Caddy and CoreDNS (Grafana/Loki/Alloy only when logging is on) |
 | `hack global dns` | Manage scoped native custom-domain DNS |
 | `hack global up` | Start global infra containers |
 | `hack global down` | Stop global infra containers |
@@ -1402,7 +1402,7 @@ hack global <subcommand> [options]
 
 ## `hack global install`
 
-Bootstrap ~/.hack and start Caddy + Grafana/Loki/Alloy
+Bootstrap ~/.hack and start Caddy and CoreDNS (Grafana/Loki/Alloy only when logging is on)
 
 ### Usage
 

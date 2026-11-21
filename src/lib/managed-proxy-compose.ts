@@ -34,13 +34,17 @@ export function isHackRenderedProxyCompose(text: string): boolean {
   const bindAddress = readProxyBindFromCompose(text);
   for (const useStaticCoreDnsIp of [false, true]) {
     for (const useStaticCaddyIp of [false, true]) {
-      const rendered = renderGlobalCaddyCompose({
-        useStaticCoreDnsIp,
-        useStaticCaddyIp,
-        bindAddress,
-      });
-      if (rendered === text) {
-        return true;
+      // Either healthcheck variant: the file is rendered for its engine.
+      for (const startInterval of [false, true]) {
+        const rendered = renderGlobalCaddyCompose({
+          useStaticCoreDnsIp,
+          useStaticCaddyIp,
+          bindAddress,
+          startInterval,
+        });
+        if (rendered === text) {
+          return true;
+        }
       }
     }
   }

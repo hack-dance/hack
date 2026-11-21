@@ -319,6 +319,7 @@ import {
 } from "../lib/fs.ts";
 import { ensureHackGitInfoExclude } from "../lib/git-info-exclude.ts";
 import {
+  LOGGING_OFF_CODE,
   renderLoggingOffMessage,
   resolveGlobalLoggingForHome,
 } from "../lib/global-logging.ts";
@@ -11729,6 +11730,29 @@ function resolveLokiQuery(opts: {
  * Loki named by `HACK_LOKI_URL` is the user's own, so the setting does not
  * apply to it.
  */
+/**
+ * The backend for `hack logs`. With the opt-in logging stack off, a request
+ * that only asks for a time range (`--since`/`--until`) reads container logs,
+ * which take both; `--loki` and `--query` still need Loki and say so.
+ */
+async function decideLogsBackend(opts: {
+  readonly shouldTryLoki: boolean;
+  readonly baseUrl: string;
+  readonly forceCompose: boolean;
+  readonly wantsLokiExplicit: boolean;
+  readonly onlyTimeRange: boolean;
+}): Promise<{
+  readonly loggingOff: boolean;
+  readonly lokiReachable: boolean;
+  readonly useLoki: boolean;
+}> {
+  const availability = await resolveLokiAvailability(opts);
+  const useLoki =
+    resolveUseLoki({ ...opts, lokiReachable: availability.lokiReachable }) &&
+    !(availability.loggingOff && opts.onlyTimeRange);
+  return { ...availability, useLoki };
+}
+
 async function resolveLokiAvailability(opts: {
   readonly shouldTryLoki: boolean;
   readonly baseUrl: string;
@@ -11788,10 +11812,11 @@ async function runLogsWithLoki(opts: {
   }
 
   if (opts.loggingOff) {
-    process.stderr.write(
-      `${renderLoggingOffMessage({ feature: "Loki-backed logs (--loki, --query)" })}\nPlain \`hack logs\` (or \`hack logs --compose\`) reads container logs without it.\n`
-    );
-    return 1;
+    // Thrown so that `--json` gets the `{ ok: false }` envelope.
+    throw new HackCliError({
+      code: LOGGING_OFF_CODE,
+      message: `${renderLoggingOffMessage({ feature: "Loki-backed logs (--loki, --query)" })}. Plain \`hack logs\` (with or without --since/--until) reads container logs without it.`,
+    });
   }
   if (!opts.lokiReachable) {
     process.stderr.write(`Loki is not reachable at ${opts.baseUrl}.\n`);
@@ -11927,6 +11952,8 @@ async function runLogsWithCompose(opts: {
         : undefined,
     composeProject: opts.composeProject,
     profiles: opts.profiles,
+    since: opts.since,
+    until: opts.until,
     format: opts.format,
     streamContext,
     lifecycle: selection.lifecycle,
@@ -12264,16 +12291,14 @@ async function handleLogs({
     snapshotBackend,
   });
 
-  const { loggingOff, lokiReachable } = await resolveLokiAvailability({
+  const { loggingOff, lokiReachable, useLoki } = await decideLogsBackend({
     shouldTryLoki,
     baseUrl,
-  });
-
-  const useLoki = resolveUseLoki({
     forceCompose: args.options.compose === true,
     wantsLokiExplicit,
-    shouldTryLoki,
-    lokiReachable,
+    // --since/--until alone can be served from container logs.
+    onlyTimeRange:
+      args.options.loki !== true && args.options.query === undefined,
   });
 
   const runCompose = async (): Promise<number> =>
@@ -12649,6 +12674,12 @@ async function resolveOpenGrafanaHost(
 ): Promise<string | undefined> {
   if (target !== "logs") {
     return undefined;
+  }
+  if (!(await resolveGlobalLoggingForHome()).enabled) {
+    throw new HackCliError({
+      code: LOGGING_OFF_CODE,
+      message: renderLoggingOffMessage({ feature: "Grafana (hack open logs)" }),
+    });
   }
   const host = await resolveInstalledGrafanaHost();
   if (!host) {

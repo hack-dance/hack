@@ -2,7 +2,7 @@
  * Whether Hack runs the global logging stack (Loki, Alloy, Grafana).
  *
  * The stack is opt-in. `logging.enabled` in the global config decides; when
- * it is unset, a home that already has the stack's compose file keeps it on
+ * it is unset, a home that already has the stack's directory keeps it on
  * (every `hack global install` before opt-in wrote that file and started
  * the stack), and any other home has it off. So an upgrade never stops a
  * stack someone uses, and a new home never starts one nobody asked for.
@@ -11,7 +11,7 @@
  * Grafana state and Alloy's read positions stay until `hack global
  * logs-reset`. Plain `hack logs` reads container logs either way.
  */
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import {
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
@@ -22,6 +22,9 @@ import { pathExists } from "./fs.ts";
 
 export const LOGGING_ENABLED_CONFIG_KEY = "logging.enabled" as const;
 
+/** Stable error code when a command needs the stack while it is off. */
+export const LOGGING_OFF_CODE = "E_LOGGING_OFF" as const;
+
 /** The command that turns the stack on; named in every "off" message. */
 export const LOGGING_ENABLE_COMMAND = "hack global up --logging" as const;
 
@@ -29,7 +32,8 @@ export type GlobalLoggingSetting = {
   readonly enabled: boolean;
   /**
    * `config`: `logging.enabled` is set; `existing-home`: unset, and the
-   * home has the stack's compose file; `default`: unset, no compose file.
+   * home has the stack's directory (`logging/`, which every install before
+   * opt-in wrote); `default`: unset, no such directory.
    */
   readonly source: "config" | "existing-home" | "default";
 };
@@ -60,9 +64,30 @@ export async function resolveGlobalLogging(opts: {
   if (configured !== undefined) {
     return { enabled: parseLoggingEnabled(configured), source: "config" };
   }
-  return (await pathExists(opts.loggingCompose))
+  // The directory, not the compose file in it: a compose file moved aside
+  // (as the login refusal suggests for unexpected files) is not an opt-out.
+  return (await pathExists(dirname(opts.loggingCompose)))
     ? { enabled: true, source: "existing-home" }
     : { enabled: false, source: "default" };
+}
+
+/**
+ * Resolves the setting and, for a home that kept the stack because it had
+ * the compose file (`existing-home`), saves `logging.enabled: true`, so the
+ * choice no longer depends on that file: a missing or moved compose file
+ * then means "write it again", not "logging is off" while its containers
+ * still run. Returns the setting as saved, and whether it was just saved.
+ */
+export async function resolveAndSaveGlobalLogging(opts: {
+  readonly loggingCompose: string;
+  readonly save: (value: boolean) => Promise<unknown>;
+}): Promise<GlobalLoggingSetting & { readonly saved: boolean }> {
+  const setting = await resolveGlobalLogging(opts);
+  if (setting.source !== "existing-home") {
+    return { ...setting, saved: false };
+  }
+  await opts.save(true);
+  return { enabled: true, source: "config", saved: true };
 }
 
 /**

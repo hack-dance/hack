@@ -6,7 +6,7 @@ stateDiagram-v2
   [*] --> NewHome
   [*] --> ExistingHome
   NewHome --> Off : install / up [unset]
-  ExistingHome --> On : install / up [unset]
+  ExistingHome --> On : first start saves on
   Off --> On : up --logging
   Off --> On : config true, then up
   On --> Stopped : up --no-logging
@@ -18,15 +18,16 @@ stateDiagram-v2
   Down --> Wiped : logs-reset
   Wiped --> On : up --logging
   note right of Off
-    No logging files, no logging
-    Docker call. hack logs reads
-    container logs; --loki says
-    how to turn it on.
+    No logging files written.
+    hack logs reads container
+    logs; --loki says how to
+    turn it on.
   end note
   note right of Stopped
     INV NoSurpriseDataLoss: off
-    stops the containers and
-    keeps their volumes.
+    stops the containers (found
+    by project label) and keeps
+    their volumes.
   end note
   note left of NewHome
     INV FreshNeverStartsUnasked:

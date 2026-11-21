@@ -2070,7 +2070,7 @@ const contracts: readonly ModelContract[] = [
     // it unasked, and turning it off never removes its logs.
     name: "global-logging-optin",
     module: "LoggingOptIn",
-    states: 121,
+    states: 542,
     invariant: "FreshNeverStartsUnasked",
     action: "Install",
     fields: [
@@ -2099,6 +2099,31 @@ const contracts: readonly ModelContract[] = [
         invariant: "NoSurpriseDataLoss",
         action: "UpFlag",
         fields: ["prevData = TRUE", "data = FALSE", 'setting = "off"'],
+      },
+      {
+        // The first start does not save an existing home's choice: with its
+        // logging directory moved aside, the next start turns it off.
+        name: "decision-not-saved",
+        negative: true,
+        invariant: "ExistingHomeKept",
+        action: "Install",
+        fields: [
+          "existing = TRUE",
+          'setting = "unset"',
+          "dir = FALSE",
+          "running = FALSE",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Up",
+            fields: [
+              "existing = TRUE",
+              'setting = "unset"',
+              "dir = FALSE",
+              "running = FALSE",
+            ],
+          },
+        ],
       },
     ],
   },

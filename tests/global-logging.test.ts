@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   parseLoggingEnabled,
+  resolveAndSaveGlobalLogging,
   resolveGlobalLogging,
   resolveLoggingFlag,
 } from "../src/lib/global-logging.ts";
@@ -83,4 +84,32 @@ test("--logging and --no-logging map to the setting; both together conflict", ()
   expect(resolveLoggingFlag({ logging: true, noLogging: true })).toBe(
     "conflict"
   );
+});
+
+test("the marker is the logging directory: a compose file moved aside does not turn a home off", async () => {
+  await mkdir(dirname(compose()), { recursive: true });
+  expect(await resolveGlobalLogging({ loggingCompose: compose() })).toEqual({
+    enabled: true,
+    source: "existing-home",
+  });
+});
+
+test("an existing home's choice is saved once; a new or decided home saves nothing", async () => {
+  const saved: boolean[] = [];
+  const save = (value: boolean) => {
+    saved.push(value);
+    return Promise.resolve();
+  };
+  expect(
+    await resolveAndSaveGlobalLogging({ loggingCompose: compose(), save })
+  ).toEqual({ enabled: false, source: "default", saved: false });
+  await writeCompose();
+  expect(
+    await resolveAndSaveGlobalLogging({ loggingCompose: compose(), save })
+  ).toEqual({ enabled: true, source: "config", saved: true });
+  await setConfig(false);
+  expect(
+    await resolveAndSaveGlobalLogging({ loggingCompose: compose(), save })
+  ).toEqual({ enabled: false, source: "config", saved: false });
+  expect(saved).toEqual([true]);
 });

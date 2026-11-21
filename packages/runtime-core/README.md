@@ -2779,7 +2779,9 @@ Transports count HTTP client construction attempts. A keep-alive connection used
 by two requests therefore contributes two requests, one connection and one transport.
 
 Owners flush a disjoint delta before publishing readiness and continue counting.
-Normal returns, explicit exec exits and log frontend-lifetime exits flush the rest.
+Normal returns, explicit exec exits, publisher process replacement and log
+frontend-lifetime exits flush the rest. Publisher children inherit the destination
+and flush before exec, so their startup work precedes the owner's ready message.
 Sum the lines present when `up -d` returns and save that snapshot before `down`;
 otherwise an owner's later shutdown delta would be included in startup totals.
 Abruptly killed processes can lose their unflushed counts. File appenders serialize

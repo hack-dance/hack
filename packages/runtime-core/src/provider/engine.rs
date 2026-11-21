@@ -1414,9 +1414,24 @@ mod tests {
                 private_service_exec::connect(&socket, Instant::now() + Duration::from_secs(1))
                     .is_err()
             );
-            crate::provider::engine_requests::report();
-            crate::provider::engine_requests::report();
-            return;
+            // A failed exec must flush but keep counting subsequent cleanup.
+            let _failed =
+                crate::provider::publication::exec_publisher(std::process::Command::new(""));
+            assert!(
+                private_service_exec::connect(&socket, Instant::now() + Duration::from_secs(1))
+                    .is_err()
+            );
+            // A publisher's closed environment must retain diagnostics, and
+            // exec must flush before replacing the runtime (no guard can drop).
+            let mut replacement = std::process::Command::new("/bin/sh");
+            replacement
+                .env_clear()
+                .args(["-c", "test -n \"$HACK_ENGINE_REQUESTS_FILE\""]);
+            crate::provider::engine_requests::inherit(&mut replacement);
+            panic!(
+                "replacement exec failed: {}",
+                crate::provider::publication::exec_publisher(replacement)
+            );
         }
         let file = std::env::temp_dir().join(format!("engine-counts-{}.jsonl", std::process::id()));
         let children: Vec<_> = (0..4).map(|_| std::process::Command::new(std::env::current_exe().unwrap())
@@ -1435,7 +1450,7 @@ mod tests {
         }
         let records = std::fs::read_to_string(&file).unwrap();
         std::fs::remove_file(file).unwrap();
-        assert_eq!(records.lines().count(), 8);
+        assert_eq!(records.lines().count(), 12);
         let mut requests = 0;
         let mut connections = 0;
         let mut transports = 0;
@@ -1448,10 +1463,10 @@ mod tests {
             transports += record["engine_transports"].as_u64().unwrap();
             assert_eq!(
                 record["engine_requests"],
-                record["endpoints"]["GET /version"]
+                record["endpoints"]["GET /version"].as_u64().unwrap_or(0)
             );
         }
-        assert_eq!((requests, connections, transports), (20, 24, 16));
+        assert_eq!((requests, connections, transports), (20, 28, 16));
     }
 }
 

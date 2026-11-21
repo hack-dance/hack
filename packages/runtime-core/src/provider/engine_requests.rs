@@ -161,6 +161,7 @@ fn command_name(args: &[String]) -> (&'static str, &'static str) {
     match args {
         ["graph", "native", "serve", ..] => ("owner", "graph.native.serve"),
         ["graph", "serve" | "serve-restore", ..] => ("owner", "graph.serve"),
+        ["graph", "publish-bridge", ..] => ("owner", "graph.publish-bridge"),
         ["node", "serve", ..] => ("owner", "node.serve"),
         ["__job_supervisor", ..] => ("owner", "job.supervisor"),
         ["graph", "native", ..] => ("runtime", "graph.native"),

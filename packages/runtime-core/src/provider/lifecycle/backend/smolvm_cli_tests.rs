@@ -42,17 +42,22 @@ fn verifier_creation_preserves_the_command_without_engine_or_shares() {
 
 #[test]
 fn pool_creation_preserves_flag_order_and_socket_directions() {
-    let mut spec = verifier_spec();
-    spec.cpus = 2;
-    spec.memory_mib = 2048;
-    spec.engine_share = Some("/fixture/engine".into());
-    spec.amd64_translation = true;
-    spec.network = crate::provider::NetworkIntent::Internet;
-    spec.exposed_sockets = vec!["/run/fixture.sock".into()];
-    spec.mounted_sockets = vec![(
-        "/fixture/dependency.sock".into(),
-        "/run/dependency.sock".into(),
-    )];
+    let mut candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    candidate.state_root = "/fixture/state".into();
+    let owner: Owner = serde_json::from_value(json!({
+        "version":1, "checkout":"/fixture", "token":"owner", "machine":"fixture",
+        "short_home":"/fixture/sockets", "created":false, "phase":"creating", "process":null,
+        "storage":null, "overlay":null, "guest_boot_id":null,
+        "daemon_pid":null, "daemon_start":null, "rootfs_digest":null,
+        "amd64_emulation":true, "network":"internet",
+        "application_bridge":{"slots":1}, "dependency_sockets":{"slots":1}
+    }))
+    .unwrap();
+    let spec = crate::provider::lifecycle::pool_spec(
+        &candidate,
+        &owner,
+        crate::provider::Profile::Research,
+    );
     assert_eq!(
         create_arguments("fixture", "owner", &spec).unwrap(),
         [
@@ -72,15 +77,15 @@ fn pool_creation_preserves_flag_order_and_socket_directions() {
             "4",
             "--docker-socket",
             "--volume",
-            "/fixture/engine:/opt/hack-engine:ro",
+            "/fixture/state/providers/docker-29.5.2-linux-arm64:/opt/hack-engine:ro",
             "--rosetta",
             "--net",
             "--net-backend",
             "virtio-net",
             "--expose-socket",
-            "/run/fixture.sock",
+            "/run/hack-local/bridge-00.sock",
             "--mount-socket",
-            "/fixture/dependency.sock:/run/dependency.sock"
+            "/fixture/sockets/dependency-00.sock:/run/hack-dependencies/dependency-00.sock"
         ]
     );
 }
@@ -249,4 +254,19 @@ fn provider_command_turns_notifications_off_only_for_a_recorded_choice() {
         let saved = serde_json::to_value(&owner).unwrap();
         assert_eq!(serde_json::from_value::<Owner>(saved).unwrap(), owner);
     }
+}
+
+/// These assignments type-check the actual trait and implementation, without forging
+/// tokens or invoking a provider. Removing either token makes this regression fail to
+/// compile: Rust has no optional method arguments or arity overloads.
+#[test]
+fn backend_effects_require_consumed_admission_tokens() {
+    fn trait_signatures<B: VmBackend>() {
+        let _: fn(&B, &MachineSpec, FreshCreate) -> Result<(), CandidateError> = B::create;
+        let _: fn(&B, StartPermit) -> Result<(), CandidateError> = B::start;
+    }
+    trait_signatures::<SmolvmCli<'_>>();
+    let _: fn(&SmolvmCli<'_>, &MachineSpec, FreshCreate) -> Result<(), CandidateError> =
+        SmolvmCli::create;
+    let _: fn(&SmolvmCli<'_>, StartPermit) -> Result<(), CandidateError> = SmolvmCli::start;
 }

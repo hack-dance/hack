@@ -455,7 +455,7 @@ pub fn verify_prepared_base(
     base.bind(&current_pins(candidate, profile)?)?;
     let recovered_work = abandoned_work(store, true)?;
     let work = Work::create(candidate, store)?;
-    let outcome = inspect(&work.candidate, store, &base, profile);
+    let outcome = inspect(&work, store, &base, profile);
     let (inventory, _) = work.finish(outcome)?;
     let verification = Verification {
         schema: prepared_store::VERIFICATION_SCHEMA.into(),
@@ -490,12 +490,20 @@ pub fn verify_prepared_base(
     })
 }
 
+/// Proof issued only after this module admits a locked disposable verification root
+/// and activates its verified templates. No other lifecycle caller can construct it.
+pub(super) struct VerifierAdmission<'a> {
+    _work: &'a Work,
+    _pool_lock: &'a state::Lock,
+}
+
 fn inspect(
-    verifier: &Candidate,
+    work: &Work,
     store: &Path,
     base: &prepared_base::PublishedBase,
     profile: Profile,
 ) -> Result<prepared_store::Inventory, CandidateError> {
+    let verifier = &work.candidate;
     let admission = super::super::admission::probe_for(&verifier.checkout, profile)?;
     if !admission.admitted {
         return Err(error("admission_rejected", admission.reasons.join(" ")));
@@ -525,24 +533,31 @@ fn inspect(
         // Re-proves every template's content digest on this verifier's own clone.
         prepared_base::activate(base, &pins, &target)?;
     }
+    let (fresh, permit) = super::admission_pool::verifier_permits(VerifierAdmission {
+        _work: work,
+        _pool_lock: &lock,
+    });
     owner.phase = "creating".into();
     owner.save(verifier)?;
-    SmolvmCli::new(verifier, &owner).create(&MachineSpec {
-        cpus: 1,
-        memory_mib: 1024,
-        storage_gib: profile.storage_gib(),
-        overlay_gib: profile.overlay_gib(),
-        engine_share: None,
-        amd64_translation: false,
-        project_shares: Vec::new(),
-        network: owner.network.clone(),
-        exposed_sockets: Vec::new(),
-        mounted_sockets: Vec::new(),
-    })?;
+    SmolvmCli::new(verifier, &owner).create(
+        &MachineSpec {
+            cpus: 1,
+            memory_mib: 1024,
+            storage_gib: profile.storage_gib(),
+            overlay_gib: profile.overlay_gib(),
+            engine_share: None,
+            amd64_translation: false,
+            project_shares: Vec::new(),
+            network: owner.network.clone(),
+            exposed_sockets: Vec::new(),
+            mounted_sockets: Vec::new(),
+        },
+        fresh,
+    )?;
     owner.created = true;
     owner.phase = "verifying".into();
     owner.save(verifier)?;
-    SmolvmCli::new(verifier, &owner).start()?;
+    SmolvmCli::new(verifier, &owner).start(permit)?;
     let observed = recorded_process(verifier, &owner)?;
     // SAFETY: geteuid has no preconditions and cannot fail.
     identity::verify(

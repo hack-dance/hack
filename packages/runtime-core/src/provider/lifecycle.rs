@@ -1615,30 +1615,7 @@ fn start_pool(
         // around that start.
         super::prepared_start::before_create(candidate, &owner, &lock, start.prepared)?;
         phase(candidate, &mut owner, "creating")?;
-        let spec = MachineSpec {
-            cpus: profile.cpus(),
-            memory_mib: profile.memory_mib(),
-            storage_gib: profile.storage_gib(),
-            overlay_gib: profile.overlay_gib(),
-            engine_share: Some(artifact::engine_root(candidate)),
-            amd64_translation: owner.amd64_emulation,
-            project_shares: owner.project_shares().into_iter().cloned().collect(),
-            network: owner.network.clone(),
-            exposed_sockets: owner
-                .application_bridge
-                .map(|bridge| bridge.guest_paths())
-                .unwrap_or_default(),
-            mounted_sockets: owner
-                .dependency_sockets
-                .map(|intent| {
-                    intent
-                        .paths(&owner.short_home)
-                        .into_iter()
-                        .map(|path| (path.host_path, path.guest_path))
-                        .collect()
-                })
-                .unwrap_or_default(),
-        };
+        let spec = pool_spec(candidate, &owner, profile);
         create_machine(&SmolvmCli::new(candidate, &owner), &spec, fresh)?;
         super::config_audit::pin_created_network(candidate, &mut owner)?;
         owner.created = true;
@@ -1728,21 +1705,48 @@ fn start_pool(
     result
 }
 
+fn pool_spec(candidate: &Candidate, owner: &Owner, profile: Profile) -> MachineSpec {
+    MachineSpec {
+        cpus: profile.cpus(),
+        memory_mib: profile.memory_mib(),
+        storage_gib: profile.storage_gib(),
+        overlay_gib: profile.overlay_gib(),
+        engine_share: Some(artifact::engine_root(candidate)),
+        amd64_translation: owner.amd64_emulation,
+        project_shares: owner.project_shares().into_iter().cloned().collect(),
+        network: owner.network.clone(),
+        exposed_sockets: owner
+            .application_bridge
+            .map(|bridge| bridge.guest_paths())
+            .unwrap_or_default(),
+        mounted_sockets: owner
+            .dependency_sockets
+            .map(|intent| {
+                intent
+                    .paths(&owner.short_home)
+                    .into_iter()
+                    .map(|path| (path.host_path, path.guest_path))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
 /// Define a machine whose first boot can allocate disks; reserve selections cannot create.
 fn create_machine(
     backend: &impl VmBackend,
     spec: &MachineSpec,
-    _fresh: admission_pool::FreshCreate,
+    fresh: admission_pool::FreshCreate,
 ) -> Result<(), CandidateError> {
-    backend.create(spec)
+    backend.create(spec, fresh)
 }
 
 /// `machine start` hands the VM lock to the provider; only a released boot admission may.
 fn start_machine(
     backend: &impl VmBackend,
-    _permit: admission_pool::StartPermit,
+    permit: admission_pool::StartPermit,
 ) -> Result<(), CandidateError> {
-    backend.start().map_err(stalled_boot)
+    backend.start(permit).map_err(stalled_boot)
 }
 
 /// The pinned provider's words when it ends a start whose VM showed no boot progress for its

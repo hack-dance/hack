@@ -1,5 +1,5 @@
 //! Released provider command transport. Lifecycle policy stays with the caller.
-use super::{MachineSpec, VmBackend};
+use super::{FreshCreate, MachineSpec, StartPermit, VmBackend};
 use crate::provider::{artifact, process, state::Owner};
 use crate::{Candidate, CandidateError};
 use std::{path::Path, time::Duration};
@@ -22,12 +22,12 @@ impl<'a> SmolvmCli<'a> {
 }
 
 impl VmBackend for SmolvmCli<'_> {
-    fn create(&self, spec: &MachineSpec) -> Result<(), CandidateError> {
+    fn create(&self, spec: &MachineSpec, _fresh: FreshCreate) -> Result<(), CandidateError> {
         let arguments = create_arguments(&self.owner.machine, &self.owner.token, spec)?;
         self.invoke(&arguments.iter().map(String::as_str).collect::<Vec<_>>())
     }
 
-    fn start(&self) -> Result<(), CandidateError> {
+    fn start(&self, _permit: StartPermit) -> Result<(), CandidateError> {
         self.invoke(&["machine", "start", "--name", &self.owner.machine])
     }
 

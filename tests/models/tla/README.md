@@ -1577,6 +1577,39 @@ pending coordinator's directory; it does not acknowledge or roll over that
 coordinator. Directory derivation and a real coordinator start/stop regression
 cover this restored-owner boundary outside the finite publisher model.
 
+## Global proxy address record
+
+`ingress-address-record/IngressRecord.tla` checks the record `hack run` trusts
+instead of asking Docker for the global proxy and DNS addresses
+(`src/lib/proxy-ingress-addresses.ts`). Invariant `TrustedRecordIsCurrent`: a
+record a run would trust names the running address, unless a change made
+outside Hack followed the observation it came from.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `HackBegin` / `HackApply` / `HackEnd` | `withIngressChange` around `hack global up` (`runGlobalUpChange`), the proxy `down` in `hack global down`, and the doctor proxy repair: under the `ingress-change.lock` cross-process lock, an unsettled new token, the Compose effect, a settled new token (also after a failure). |
+| `Crash` | The changer's process dies: the lock is reclaimed from a dead owner only, and the token stays unsettled until the next change settles it. |
+| `ReadToken` / `Inspect` / `Write` | `resolveIngressAddresses(..., "fresh")`: the token is read before the one `docker inspect`; a read that finds both containers writes the record with that token; one that reaches the engine and finds a container gone removes it. |
+| `Valid` | `resolveIngressAddresses(..., "recorded")`: trusted only when the record's token is the current one and settled. |
+| `External` | A container recreated outside Hack. Not detected; a failed `hack run` checks once and refreshes. |
+
+Bounds: two concurrent readers, two changers that each run once and may
+crash at any step, addresses {stopped, 1, 2}, `MaxGen = 4`. The positive
+configuration exhausts 922,875 distinct states at depth 19 (about 12 s with
+two workers). Negative controls, all failing `TrustedRecordIsCurrent` at
+`Write`: `negative` (no generation check) and `unsettled` (validity ignores the
+settled flag), where a reader inspects while a change is in progress and the
+change stops the stack; and `unlocked` (changes not serialized), where one
+change settles the token while the other is still moving the containers. The same interleavings are walked
+against the real record and token files in `tests/proxy-ingress-addresses.test.ts`.
+Not covered: atomicity of the file writes themselves (each is an atomic rename),
+Docker's own answers, and the stored per-instance override file, which is
+rendered from whatever addresses the command resolved. The model has one
+Docker engine; in the code a record is also trusted only for the engine it
+was read from (`engine`: `DOCKER_HOST`, else the Docker context), which
+`tests/proxy-ingress-addresses.test.ts` and
+`tests/compose-exec-run-probes-cli.test.ts` cover.
+
 ## Runtime service per native home
 
 `runtime-service/RuntimeService.tla` is the design model for HACK-2460: one

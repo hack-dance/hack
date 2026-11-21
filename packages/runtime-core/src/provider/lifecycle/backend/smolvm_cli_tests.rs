@@ -60,6 +60,7 @@ fn pool_creation_preserves_flag_order_and_socket_directions() {
     }
     state::private_directory(&project).unwrap();
     let _remove = Remove(project.clone());
+    std::fs::write(project.join("package.json"), "{}").unwrap();
     let share = crate::provider::ProjectShareIntent::approve(&project, true).unwrap();
     let project_volume = format!("{}:{}:rw", project.display(), share.guest_path);
     let engine_volume = format!(

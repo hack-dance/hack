@@ -65,56 +65,40 @@ pub(super) fn payload() -> Result<(String, String), CandidateError> {
         "Relay startup requires a native-stream-relay build.",
     ))
 }
-pub(super) fn target_start(engine: &Engine<'_>, pid: u32) -> Result<u64, CandidateError> {
-    let value = engine.guest().execute_cleanup(
-        "test -r /proc/$1/stat; sed 's/.*) //' /proc/$1/stat | awk '{print $20}'",
-        &[&pid.to_string()],
+/// Start ticks of each target process, in order, from one guest call.
+pub(super) fn target_starts(engine: &Engine<'_>, pids: &[u32]) -> Result<Vec<u64>, CandidateError> {
+    let arguments = pids.iter().map(u32::to_string).collect::<Vec<_>>();
+    let output = engine.guest().execute_cleanup(
+        "for pid do test -r /proc/$pid/stat; sed 's/.*) //' /proc/$pid/stat | awk '{print $20}'; done",
+        &arguments.iter().map(String::as_str).collect::<Vec<_>>(),
     )?;
-    value
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .filter(|v| *v > 0 && *v <= i64::MAX as u64)
-        .ok_or_else(|| error("bridge_target", "Cannot establish target process identity."))
+    parse_target_starts(&output, pids.len())
 }
-pub(super) fn operate(
-    engine: &Engine<'_>,
-    slot: u8,
-    assignment: &bridges::Assignment,
-    action: &str,
-    input: Option<&str>,
-) -> Result<String, CandidateError> {
-    let relay = assignment
-        .relay
-        .as_ref()
-        .ok_or_else(|| error("bridge_relay", "Missing relay intent."))?;
-    let marker = format!(
-        "{}:{}:{}:{}",
-        engine.guest().incarnation(),
-        assignment.run,
-        assignment.reservation,
-        assignment.boot_id
-    );
-    let args = [
-        action.to_owned(),
-        assignment.reservation.clone(),
-        marker,
-        format!("/run/hack-local/bridge-{slot:02}.sock"),
-        relay.binary_sha256.clone(),
-        relay.target_pid.to_string(),
-        relay.target_start.to_string(),
-        relay.port.to_string(),
-        relay.launch_serial.to_string(),
-        slot.to_string(),
-        relay.transport.argument().to_owned(),
-    ];
-    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+
+fn parse_target_starts(output: &str, expected: usize) -> Result<Vec<u64>, CandidateError> {
+    let refused = || error("bridge_target", "Cannot establish target process identity.");
+    let starts = output
+        .lines()
+        .map(|line| {
+            line.parse::<u64>()
+                .ok()
+                .filter(|v| *v > 0 && *v <= i64::MAX as u64 && v.to_string() == line)
+                .ok_or_else(refused)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if expected == 0 || starts.len() != expected || !output.ends_with('\n') {
+        return Err(refused());
+    }
+    Ok(starts)
+}
+
+fn script(_run: &str, _action: &str) -> String {
     let script = include_str!("relay.sh").replace("# RELAY_FENCE", include_str!("relay-fence.sh"));
     #[cfg(test)]
     let script = {
-        if std::env::var("HACK_LOCAL_GRAPH_RUN").ok().as_deref() == Some(assignment.run.as_str()) {
+        if std::env::var("HACK_LOCAL_GRAPH_RUN").ok().as_deref() == Some(_run) {
             match (
-                action,
+                _action,
                 std::env::var("HACK_LOCAL_GRAPH_FAULT").ok().as_deref(),
             ) {
                 ("stop", Some("bridge-normalization-closing-pending")) => script.replace(
@@ -139,6 +123,127 @@ pub(super) fn operate(
             script
         }
     };
+    script
+}
+
+fn arguments(
+    engine: &Engine<'_>,
+    slot: u8,
+    assignment: &bridges::Assignment,
+    action: &str,
+) -> Result<Vec<String>, CandidateError> {
+    let relay = assignment
+        .relay
+        .as_ref()
+        .ok_or_else(|| error("bridge_relay", "Missing relay intent."))?;
+    let marker = format!(
+        "{}:{}:{}:{}",
+        engine.guest().incarnation(),
+        assignment.run,
+        assignment.reservation,
+        assignment.boot_id
+    );
+    Ok(vec![
+        action.to_owned(),
+        assignment.reservation.clone(),
+        marker,
+        format!("/run/hack-local/bridge-{slot:02}.sock"),
+        relay.binary_sha256.clone(),
+        relay.target_pid.to_string(),
+        relay.target_start.to_string(),
+        relay.port.to_string(),
+        relay.launch_serial.to_string(),
+        slot.to_string(),
+        relay.transport.argument().to_owned(),
+    ])
+}
+
+/// Starts every selected relay from one guest call. Each start is the unchanged
+/// per-slot `relay.sh start` (own slot fence, own allocation) run concurrently, so
+/// their socket waits overlap. Every slot must confirm `running`; any other result
+/// refuses with all launch intents retained for cleanup.
+pub(super) fn start_all(
+    engine: &Engine<'_>,
+    selected: &[(u8, &bridges::Assignment)],
+    input: &str,
+) -> Result<(), CandidateError> {
+    operate_all(engine, selected, "start", Some(input))
+}
+
+/// The batch counterpart of [`operate`] for `start`, `stop` and `remove`: one
+/// guest call runs the unchanged per-slot script for every selected slot
+/// concurrently, and every slot must confirm the action's own result. Stop and
+/// remove keep cleanup admission (no allocation), as [`operate`] does.
+pub(super) fn operate_all(
+    engine: &Engine<'_>,
+    selected: &[(u8, &bridges::Assignment)],
+    action: &str,
+    input: Option<&str>,
+) -> Result<(), CandidateError> {
+    let confirmed = match action {
+        "start" => "running",
+        "stop" => "stopped",
+        "remove" => "removed",
+        _ => return Err(error("bridge_relay", "Unsupported batch relay action.")),
+    };
+    if selected.is_empty() || (action == "start") != input.is_some() {
+        return Err(error("bridge_relay", "Unsupported batch relay action."));
+    }
+    let mut args = Vec::with_capacity(2 + selected.len() * 11);
+    // Every slot in a batch shares one run; tests select fault scripts by run.
+    args.push(script(&selected[0].1.run, action));
+    args.push(if input.is_some() { "stdin" } else { "none" }.to_owned());
+    for (slot, assignment) in selected {
+        args.extend(arguments(engine, *slot, assignment, action)?);
+    }
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = match input {
+        Some(input) => {
+            engine
+                .guest()
+                .execute(include_str!("relay-batch.sh"), &args, Some(input))?
+        }
+        None => engine
+            .guest()
+            .execute_cleanup(include_str!("relay-batch.sh"), &args)?,
+    };
+    confirm_batch(&output, selected.len(), confirmed)
+}
+
+/// Exactly one `<index> <confirmed>` line per selected slot, in any order.
+fn confirm_batch(output: &str, expected: usize, confirmed: &str) -> Result<(), CandidateError> {
+    let mut seen = std::collections::BTreeSet::new();
+    let suffix = format!(" {confirmed}");
+    let well_formed = output.ends_with('\n')
+        && output.lines().all(|line| {
+            line.strip_suffix(suffix.as_str())
+                .and_then(|index| {
+                    index
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|i| i.to_string() == index)
+                })
+                .is_some_and(|index| index < expected && seen.insert(index))
+        });
+    if expected == 0 || !well_formed || seen.len() != expected {
+        return Err(error(
+            "bridge_relay",
+            "Unconfirmed relay operation; retain intent before recovery.",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn operate(
+    engine: &Engine<'_>,
+    slot: u8,
+    assignment: &bridges::Assignment,
+    action: &str,
+    input: Option<&str>,
+) -> Result<String, CandidateError> {
+    let args = arguments(engine, slot, assignment, action)?;
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let script = script(&assignment.run, action);
     let result = if action == "start" {
         engine.guest().execute(&script, &args, input)?
     } else {
@@ -714,6 +819,167 @@ mod tests {
         );
         invalid["unknown"] = json!(true);
         assert!(serde_json::from_value::<CleanupEvidence>(invalid).is_err());
+    }
+
+    #[test]
+    fn batch_confirms_only_exactly_one_running_line_per_slot() {
+        confirm_batch("1 running\n0 running\n", 2, "running").unwrap();
+        confirm_batch("0 stopped\n", 1, "stopped").unwrap();
+        assert!(confirm_batch("0 running\n", 1, "stopped").is_err());
+        for output in [
+            "",
+            "0 running\n",
+            "0 running\n0 running\n",
+            "0 running\n1 failed\n",
+            "0 running\n2 running\n",
+            "0 running\n01 running\n",
+            "0 running\n1 running",
+            "0 running\n1 running\nextra\n",
+        ] {
+            assert!(
+                confirm_batch(output, 2, "running").is_err(),
+                "accepted {output:?}"
+            );
+        }
+        assert!(confirm_batch("", 0, "running").is_err());
+    }
+
+    #[test]
+    fn target_starts_require_one_canonical_positive_value_per_pid() {
+        assert_eq!(parse_target_starts("7\n9\n", 2).unwrap(), [7, 9]);
+        for output in [
+            "7\n",
+            "7\n9",
+            "7\n0\n",
+            "7\n09\n",
+            "7\n-9\n",
+            "7\n9\n1\n",
+            "",
+        ] {
+            assert!(
+                parse_target_starts(output, 2).is_err(),
+                "accepted {output:?}"
+            );
+        }
+        assert!(
+            parse_target_starts(&format!("{}\n", u64::MAX), 1).is_err(),
+            "start ticks stay within the journal's signed range"
+        );
+    }
+
+    /// Runs the production batch wrapper under /bin/sh with a stand-in per-slot
+    /// script: every slot gets its own arguments and the whole payload, slots run
+    /// concurrently, and a failed slot reports itself without hiding the others.
+    #[test]
+    fn batch_wrapper_runs_each_slot_with_its_arguments_and_the_payload() {
+        let directory = crate::unique_test_root(&std::env::temp_dir(), "hack-relay-batch");
+        struct Remove(std::path::PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        std::fs::create_dir_all(&directory).unwrap();
+        let _remove = Remove(directory.clone());
+        // Stand-in for relay.sh: record arguments and stdin; slot "2" fails;
+        // every slot waits for all three to have started (proves concurrency).
+        let slot_script = format!(
+            "set -eu\nprintf '%s\\n' \"$*\" > {dir}/args-${{10}}\ncat > {dir}/input-${{10}}\n: > {dir}/began-${{10}}\nfor i in $(seq 1 500); do test -e {dir}/began-0 && test -e {dir}/began-1 && test -e {dir}/began-2 && break; sleep .01; done\ntest -e {dir}/began-2\ntest \"${{10}}\" != 2\nprintf 'running\\n'\n",
+            dir = directory.display()
+        );
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args(["-c", include_str!("relay-batch.sh"), "relay-batch"])
+            .arg(&slot_script)
+            .arg("stdin");
+        for slot in 0..3 {
+            command.args([
+                "start",
+                "r",
+                "m",
+                "s",
+                "d",
+                "1",
+                "2",
+                "3",
+                "4",
+                &slot.to_string(),
+                "reservation-v1",
+            ]);
+        }
+        let mut child = command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"cGF5bG9hZA==")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let mut lines = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        lines.sort();
+        assert_eq!(lines, ["0 running", "1 running", "2 failed"]);
+        assert!(confirm_batch("0 running\n1 running\n2 failed\n", 3, "running").is_err());
+        for slot in 0..3 {
+            assert_eq!(
+                std::fs::read_to_string(directory.join(format!("args-{slot}"))).unwrap(),
+                format!("start r m s d 1 2 3 4 {slot} reservation-v1\n")
+            );
+            assert_eq!(
+                std::fs::read_to_string(directory.join(format!("input-{slot}"))).unwrap(),
+                "cGF5bG9hZA==\n"
+            );
+        }
+    }
+
+    /// Stop and remove pass no input: each slot reads an empty stdin, never the
+    /// caller's stream, and reports its own result word.
+    #[test]
+    fn batch_wrapper_without_input_gives_each_slot_an_empty_stdin() {
+        let slot_script = "set -eu\ntest -z \"$(cat)\"\nprintf 'stopped\\n'\n";
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args(["-c", include_str!("relay-batch.sh"), "relay-batch"])
+            .args([slot_script, "none"]);
+        for slot in 0..2 {
+            command.args([
+                "stop",
+                "r",
+                "m",
+                "s",
+                "d",
+                "1",
+                "2",
+                "3",
+                "4",
+                &slot.to_string(),
+                "reservation-v1",
+            ]);
+        }
+        let output = command.stdin(std::process::Stdio::null()).output().unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        confirm_batch(&text, 2, "stopped").unwrap();
+        let bad = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                include_str!("relay-batch.sh"),
+                "relay-batch",
+                slot_script,
+                "other",
+            ])
+            .output()
+            .unwrap();
+        assert!(!bad.status.success());
     }
 
     #[test]

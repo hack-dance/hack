@@ -1802,7 +1802,7 @@ waits for the scan and hot reload works; above it the boot does not wait and hot
 - **The setting.** `HACK_NATIVE_HOT_RELOAD` is `auto` (the default), `on` or `off`, read by
   `runtime up`; any other value is refused before any effect. `on` keeps the notifications
   whatever the size; `off` drops them whatever the size. The CLI gives runtime subprocesses
-  a closed environment, so it hands this one setting to `runtime up` explicitly and refuses
+  a closed environment, so it hands this setting to `runtime up` explicitly and refuses
   a mistyped value itself, before the runtime starts.
 - **The record.** The choice is made at every boot and written to the owner receipt
   (`hot_reload`) only when it is not the plain default: off, or forced on over a large share.
@@ -2014,8 +2014,12 @@ already leave, stretched to the bound.
 the default is 60 and `0` turns reuse off (records are still written). Any other value,
 including one above 600, refuses `runtime up` with `admission_reuse_setting` before
 anything else happens; a larger value is not reduced to 600. The runtime
-reads it from its own environment. The CLI gives the runtime a closed environment and
-does not pass this variable yet, so a start through the CLI uses the default.
+reads it from its own environment. The CLI gives runtime subprocesses a closed
+environment, so it hands this setting to `runtime up` explicitly, `0` included, and to no
+other command. It applies the same rule itself: a value the runtime would refuse is
+refused by the CLI with `E_CONFIG_INVALID`, before the runtime starts and before a
+restart stops anything. Unset or empty in the CLI's environment hands over nothing, so
+the default applies.
 
 Research is unchanged. It keeps its three samples fifteen seconds apart before the
 lease, never reads the record, and neither its start nor its stop writes one.

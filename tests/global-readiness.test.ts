@@ -8,6 +8,7 @@ import {
   classifyNslookup,
   ROUTE_PROBE_NAME,
   routeProbeAddress,
+  routeProbeName,
   type StepLook,
   waitForRoutes,
 } from "../src/lib/global-route-probe.ts";
@@ -238,4 +239,18 @@ test("the HTTPS address follows the engine: local uses doctor's choice, TCP its 
       publishesAllInterfaces: true,
     })
   ).toBeNull();
+});
+
+test("the probe asks for the schemas name the proxy file routes, so an older file is probed by its own name", () => {
+  // v4 proxy files route only schemas.hack.
+  expect(routeProbeName("    labels:\n      caddy: schemas.hack\n")).toBe(
+    "schemas.hack"
+  );
+  expect(
+    routeProbeName(
+      "    labels:\n      caddy: schemas.hack.local, schemas.hack\n"
+    )
+  ).toBe("schemas.hack.local");
+  expect(routeProbeName(renderGlobalCaddyCompose())).toBe(ROUTE_PROBE_NAME);
+  expect(routeProbeName("")).toBe(ROUTE_PROBE_NAME);
 });

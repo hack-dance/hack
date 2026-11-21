@@ -110,6 +110,7 @@ import {
   classifyCurl,
   classifyNslookup,
   routeProbeAddress,
+  routeProbeName,
   waitForRoutes,
 } from "../lib/global-route-probe.ts";
 import {
@@ -2327,9 +2328,8 @@ async function globalRoutesNotReady(opts: {
   readonly login: boolean;
 }): Promise<HackCliError | null> {
   const { paths, login } = opts;
-  const scope = readProxyBindScope(
-    (await readTextFile(paths.caddyCompose)) ?? ""
-  );
+  const proxyCompose = (await readTextFile(paths.caddyCompose)) ?? "";
+  const scope = readProxyBindScope(proxyCompose);
   const address = routeProbeAddress({
     engine: `host:${await dockerEngineEndpoint()}`,
     localAddress: proxyConnectAddress(scope),
@@ -2341,6 +2341,7 @@ async function globalRoutesNotReady(opts: {
   const curl = findExecutableInPath("curl");
   const result = await waitForRoutes(
     {
+      name: routeProbeName(proxyCompose),
       resolveName: async (name) => {
         const answer = await exec(
           [

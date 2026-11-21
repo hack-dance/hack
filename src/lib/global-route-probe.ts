@@ -32,6 +32,8 @@ export type StepLook =
     };
 
 export interface RouteProbeDeps {
+  /** The name to resolve and request; defaults to {@link ROUTE_PROBE_NAME}. */
+  readonly name?: string;
   readonly resolveName: (name: string) => Promise<StepLook>;
   /** Null when the HTTPS step cannot be run; `httpsSkipped` says why. */
   readonly requestHttps: ((name: string) => Promise<StepLook>) | null;
@@ -52,14 +54,25 @@ export type StepResult =
 
 export type RouteProbeResult = Readonly<Record<RouteProbeStep, StepResult>>;
 
-/** The name probed: Caddy routes it to its own file server from its labels. */
+/** The default name probed: Caddy routes it to its own file server. */
 export const ROUTE_PROBE_NAME = DEFAULT_SCHEMAS_HOST;
+
+const SCHEMAS_ROUTE_LABEL = /^\s*caddy:\s*["']?(schemas\.[^\s,"']+)/m;
+
+/**
+ * The schemas route the proxy file itself declares (its first name), so a
+ * file from an older Hack that routes only `schemas.hack` is probed by the
+ * name it serves. Falls back to {@link ROUTE_PROBE_NAME}.
+ */
+export function routeProbeName(proxyCompose: string): string {
+  return SCHEMAS_ROUTE_LABEL.exec(proxyCompose)?.[1] ?? ROUTE_PROBE_NAME;
+}
 
 type Look = readonly [RouteProbeStep, (name: string) => Promise<StepLook>];
 
 /** One look at a step; a thrown look is unknown and retried. */
-async function lookAt(look: Look[1]): Promise<StepLook> {
-  return await look(ROUTE_PROBE_NAME).catch(
+async function lookAt(look: Look[1], name: string): Promise<StepLook> {
+  return await look(name).catch(
     (error: unknown): StepLook => ({
       kind: "unknown",
       detail: error instanceof Error ? error.message : String(error),
@@ -138,7 +151,7 @@ export async function waitForRoutes(
     looks.map(([step]) => step).filter((step) => !done.has(step));
   for (;;) {
     for (const [step, look] of looks.filter(([step]) => !done.has(step))) {
-      const result = await lookAt(look);
+      const result = await lookAt(look, deps.name ?? ROUTE_PROBE_NAME);
       last.set(step, result);
       const settled = settledBy(result);
       if (settled) {

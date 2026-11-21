@@ -204,7 +204,7 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
         "state::write(&root(candidate).join(\"admission.json\")",
         "if owner.phase == \"running\" {",
         "agent::require_engine_names_unshadowed(",
-        "create_machine(candidate",
+        "create_machine(&SmolvmCli::new(candidate, &owner), &spec, fresh)?;",
     ] {
         assert!(
             recheck < at(later),

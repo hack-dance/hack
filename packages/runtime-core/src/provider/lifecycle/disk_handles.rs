@@ -277,29 +277,62 @@ pub(super) const STATUS_METHOD_WAIT: Duration = Duration::from_millis(100);
 /// and its file and mapping are removed by the test's own guards when it resumes, as on
 /// every other path. A process that exits while the test is still stalled can leave that
 /// one private file in the temporary directory.
+/// While it is still running, later calls in this process report unknown at once and start
+/// no second test ([`STATUS_TEST_RUNNING`]).
 ///
 /// A scan does not use this: it runs the self-test inside its own bounded work.
 pub(super) fn method_within(limit: Duration) -> MethodReport {
-    answer_within(method, limit)
+    answer_within(method, limit, &STATUS_TEST_RUNNING)
 }
 
-/// [`method_within`] with the self-test given, so a test can put a stalled one in its place.
-fn answer_within(test: impl FnOnce() -> Method + Send + 'static, limit: Duration) -> MethodReport {
+/// Whether a self-test started for `runtime status` is still running in this process.
+///
+/// At most one runs at a time. A test that stalls is left behind by its caller, and without
+/// this every later status call in the same process would start another beside it: threads,
+/// descriptors and mappings would pile up for as long as the stall lasts. A call that finds
+/// one running reports unknown at once and starts nothing. The flag clears when that test
+/// returns or unwinds. Separate commands are separate processes and never met this; a
+/// long-lived process that answers status repeatedly would.
+static STATUS_TEST_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// [`method_within`] with the self-test and its in-flight flag given, so a test can put a
+/// stalled self-test in its place.
+fn answer_within(
+    test: impl FnOnce() -> Method + Send + 'static,
+    limit: Duration,
+    running: &'static AtomicBool,
+) -> MethodReport {
+    /// Clears the in-flight flag when the self-test's thread ends, however it ends.
+    struct Running(&'static AtomicBool);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let unknown = MethodReport {
+        method: MethodName::Unknown,
+        reason: Some(Reason::Unknown(Unanswered::SelfTestTimedOut)),
+    };
+    // One already in flight: its answer, if it ever comes, belongs to the call that started
+    // it. Start nothing beside it.
+    if running.swap(true, Ordering::SeqCst) {
+        return unknown;
+    }
     let (answer, answered) = mpsc::channel();
     // A send fails only when this call has stopped waiting; the answer is then late.
     let started = std::thread::Builder::new()
         .name("disk-handle-self-test".into())
         .spawn(move || {
+            let _running = Running(running);
             let _ = answer.send(test());
         });
-    // No thread, a test that panicked and a test that is too slow all leave no answer.
-    match started.map(|_| answered.recv_timeout(limit)) {
-        Ok(Ok(method)) => method.into(),
-        _ => MethodReport {
-            method: MethodName::Unknown,
-            reason: Some(Reason::Unknown(Unanswered::SelfTestTimedOut)),
-        },
+    if started.is_err() {
+        // No thread took the flag over.
+        running.store(false, Ordering::SeqCst);
+        return unknown;
     }
+    // A test that panicked and a test that is too slow both leave no answer.
+    answered.recv_timeout(limit).map_or(unknown, Into::into)
 }
 
 /// The scan in this process, or the reason the `lsof` child must scan instead. `stop` ends

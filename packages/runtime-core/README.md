@@ -2308,7 +2308,9 @@ runs: it runs the scan's own self-test and says what a scan started now would us
 pool, initialized or not. The self-test's temporary file is the one thing an otherwise
 read-only status writes, and status waits at most 100 ms for the test: when it has not
 answered by then (a stalled filesystem behind the temporary directory), status reports
-`{"method": "unknown", "reason": "self_test_timed_out"}` and returns. A file that cannot
+`{"method": "unknown", "reason": "self_test_timed_out"}` and returns. While such a test is
+still running, later status calls in the same process report the same and start no second
+test, so stalled tests cannot pile up in a long-lived process. A file that cannot
 be made is reported as `self_test_unavailable`. Neither fails status. Status shows what a
 scan would use now: a scan that fell back for a reason of its own moment, something it
 could not read, is not recorded anywhere.

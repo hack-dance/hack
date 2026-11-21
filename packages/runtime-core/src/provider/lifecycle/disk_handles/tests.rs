@@ -703,8 +703,17 @@ fn a_scan_leaves_the_pool_directory_as_it_found_it() {
 fn status_reports_the_method_a_scan_would_use_now() {
     let json = |report: MethodReport| serde_json::to_string(&report).unwrap();
     // Bounded for a loaded host: the answer is what the self-test says, not a timeout.
-    let now = method_within(LOADED_HOST_SCAN_WAIT);
+    // With a flag of its own, because other tests in this process read status too.
+    let now = answer_within(method, LOADED_HOST_SCAN_WAIT, own_flag());
     assert_eq!(now, method().into());
+    // Through the process-wide flag the answer is the same, or unknown at a moment when
+    // another test's status call has a self-test in flight.
+    let shared = method_within(LOADED_HOST_SCAN_WAIT);
+    assert!(
+        shared == now
+            || serde_json::to_string(&shared).unwrap()
+                == r#"{"method":"unknown","reason":"self_test_timed_out"}"#
+    );
     if cfg!(target_os = "macos") {
         // Fails with the self-test on a kernel that no longer passes it; see the macOS
         // test `this_kernel_passes_the_mapping_self_test` for what that means.
@@ -735,11 +744,17 @@ fn status_reports_the_method_a_scan_would_use_now() {
     let answered = answer_within(
         || Method::Lsof(Fallback::SelfTestFailed),
         LOADED_HOST_SCAN_WAIT,
+        own_flag(),
     );
     assert_eq!(
         json(answered),
         r#"{"method":"lsof","reason":"self_test_failed"}"#
     );
+}
+
+/// An in-flight flag of a test's own, so tests do not share the process-wide one.
+fn own_flag() -> &'static AtomicBool {
+    Box::leak(Box::new(AtomicBool::new(false)))
 }
 
 /// `runtime status` does not wait for a self-test that stalls (a stuck filesystem behind
@@ -759,24 +774,65 @@ fn status_reports_unknown_when_the_self_test_does_not_answer_in_time() {
         Method::InProcess
     };
     let started = std::time::Instant::now();
-    let report = answer_within(stalled, STATUS_METHOD_WAIT);
+    let running = own_flag();
+    let report = answer_within(stalled, STATUS_METHOD_WAIT, running);
     let waited = started.elapsed();
     assert_eq!(json(report), unknown);
     // The bound, with room for a loaded host's scheduling; not the stall.
     assert!(waited >= STATUS_METHOD_WAIT, "returned after {waited:?}");
     assert!(waited < STATUS_METHOD_WAIT + Duration::from_secs(20));
-    // The test was still stalled when status returned, and ends once released.
+    // The test was still stalled when status returned.
     assert!(was_finished.try_recv().is_err());
+    // While it is, further calls start no second self-test: each answers unknown at once,
+    // without waiting out its bound, and its own test never runs.
+    let ran = Arc::new(AtomicBool::new(false));
+    for _ in 0..20 {
+        let ran = Arc::clone(&ran);
+        let began = std::time::Instant::now();
+        let again = answer_within(
+            move || {
+                ran.store(true, Ordering::SeqCst);
+                Method::InProcess
+            },
+            Duration::from_secs(600),
+            running,
+        );
+        assert_eq!(json(again), unknown);
+        assert!(began.elapsed() < Duration::from_secs(60));
+    }
+    assert!(!ran.load(Ordering::SeqCst));
+    // The stalled test ends once released, and the next call runs a test again.
     release.send(()).unwrap();
     assert_eq!(was_finished.recv_timeout(Duration::from_secs(30)), Ok(()));
+    let cleared = std::time::Instant::now();
+    while running.load(Ordering::SeqCst) {
+        assert!(
+            cleared.elapsed() < Duration::from_secs(30),
+            "flag never cleared"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let after = answer_within(|| Method::InProcess, LOADED_HOST_SCAN_WAIT, running);
+    assert_eq!(json(after), r#"{"method":"in-process"}"#);
 
     let began = std::time::Instant::now();
+    let flag = own_flag();
     let panicked = answer_within(
         || panic!("the self-test panics on purpose"),
         Duration::from_secs(600),
+        flag,
     );
     assert_eq!(json(panicked), unknown);
     assert!(began.elapsed() < Duration::from_secs(60));
+    // A test that unwinds clears the flag too.
+    let cleared = std::time::Instant::now();
+    while flag.load(Ordering::SeqCst) {
+        assert!(
+            cleared.elapsed() < Duration::from_secs(30),
+            "flag never cleared"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// A host scan that must be left to `lsof` is: the `lsof` child answers, and what it

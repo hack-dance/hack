@@ -378,12 +378,15 @@ fn frontend_hook_permit_is_versioned_scoped_and_rechecked_without_normal_graph_b
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let run = "b".repeat(32);
     let branch = Some("feature-one");
-    let key = format!("{:x}", Sha256::digest(serde_json::to_vec(&branch).unwrap()));
+    let key = format!(
+        "{:x}",
+        crate::Hex(Sha256::digest(serde_json::to_vec(&branch).unwrap()))
+    );
     let private = |path: &Path, value: Value| {
         fs::write(path, value.to_string()).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
         let meta = fs::symlink_metadata(path).unwrap();
-        json!({"path":path,"dev":meta.dev(),"ino":meta.ino(),"sha256":format!("{:x}",Sha256::digest(value.to_string().as_bytes()))})
+        json!({"path":path,"dev":meta.dev(),"ino":meta.ino(),"sha256":format!("{:x}",crate::Hex(Sha256::digest(value.to_string().as_bytes())))})
     };
     let owner = private(
         &root.join(format!("{key}.hooks.json")),
@@ -464,12 +467,15 @@ fn frontend_process_source5_binds_owner_ready_and_rechecks_replacement_without_s
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let run = "b".repeat(32);
     let branch = Some("feature-one");
-    let key = format!("{:x}", Sha256::digest(serde_json::to_vec(&branch).unwrap()));
+    let key = format!(
+        "{:x}",
+        crate::Hex(Sha256::digest(serde_json::to_vec(&branch).unwrap()))
+    );
     let private = |path: &Path, value: Value| {
         fs::write(path, value.to_string()).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
         let meta = fs::symlink_metadata(path).unwrap();
-        json!({"path":path,"dev":meta.dev(),"ino":meta.ino(),"sha256":format!("{:x}",Sha256::digest(value.to_string().as_bytes()))})
+        json!({"path":path,"dev":meta.dev(),"ino":meta.ino(),"sha256":format!("{:x}",crate::Hex(Sha256::digest(value.to_string().as_bytes())))})
     };
     // SAFETY: these pointer-free kernel identity queries do not mutate process state.
     let (pid, uid) = unsafe { (libc::getppid(), libc::getuid()) };

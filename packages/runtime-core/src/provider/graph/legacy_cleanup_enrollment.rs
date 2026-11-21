@@ -109,7 +109,7 @@ fn raw_digest(original: &Receipt) -> Result<String, CandidateError> {
         &marker.control_root.join("relay-lifecycle/state.json"),
         128 * 1024,
     )?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(format!("{:x}", crate::Hex(Sha256::digest(bytes))))
 }
 fn bind(
     original: &Receipt,

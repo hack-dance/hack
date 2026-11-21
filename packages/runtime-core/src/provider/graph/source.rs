@@ -278,7 +278,7 @@ pub(super) fn prepare_mode(
         let snapshot = project::snapshot::capture_plan(plan)?;
         (
             snapshot.receipt().clone(),
-            format!("{:x}", Sha256::digest(snapshot.archive()?)),
+            format!("{:x}", crate::Hex(Sha256::digest(snapshot.archive()?))),
         )
     };
     Ok(Some(Inputs {

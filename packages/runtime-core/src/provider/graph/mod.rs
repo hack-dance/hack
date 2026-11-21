@@ -1776,7 +1776,7 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         "run": receipt.run,
         "owner": receipt.owner,
         "phase": receipt.phase,
-        "receipt_sha256": format!("{:x}", Sha256::digest(&bytes)),
+        "receipt_sha256": format!("{:x}", crate::Hex(Sha256::digest(&bytes))),
         "foreground": publication.word(),
         "live_owner_recovery": resumable,
         "failed_start_recoverable": !running && live_owner_cleanup::failed_start_recoverable(&root, &receipt),

@@ -22,7 +22,7 @@ fn file_hash(path: &Path) -> String {
         }
         digest.update(&bytes[..count]);
     }
-    format!("{:x}", digest.finalize())
+    format!("{:x}", crate::Hex(digest.finalize()))
 }
 
 fn selection(

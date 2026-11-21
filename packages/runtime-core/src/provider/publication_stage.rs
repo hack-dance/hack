@@ -18,7 +18,7 @@ pub(super) fn prepare(
     let bytes = serde_json::to_vec(publication).map_err(|_| {
         CandidateError::new("source_publication", "Cannot encode publication intent.")
     })?;
-    let owner = format!("{:x}", Sha256::digest(&bytes));
+    let owner = format!("{:x}", crate::Hex(Sha256::digest(&bytes)));
     if path.try_exists().map_err(state::io)? {
         let previous: Publication = state::read_bounded(&path, 16 * 1024 * 1024)?;
         let previous = serde_json::to_vec(&previous).map_err(|_| {

@@ -57,7 +57,8 @@ check_staging() {
 # RELAY_FENCE
 if test "$action" = start; then
  test ! -L "$base"
- if test ! -e "$base"; then mkdir -m 700 "$base"; fi
+ # Concurrent starts of other slots may create it first; private_dir decides.
+ test -e "$base" || mkdir -m 700 "$base" 2>/dev/null || test -d "$base"
  private_dir "$base"
  test ! -L "$socket"; test ! -e "$socket"
  mkdir -m 700 "$root"
@@ -77,9 +78,10 @@ if test "$action" = start; then
  fi
  exec "$1/relay" "$2" 127.0.0.1 "$3" 10000 --netns "$4" "$5"
  ' relay-child "$root" "$socket" "$port" "$target" "$ticks" "$transport" "$allocation" </dev/null >/dev/null 2>&1 &
- for i in $(seq 1 100); do
+ # Same 5 s bound as before, in 10 ms steps: the relay usually binds within a few.
+ for i in $(seq 1 500); do
   if test -S "$socket" && test -f "$root/process"; then break; fi
-  sleep .05
+  sleep .01
  done
  read_process
  alive

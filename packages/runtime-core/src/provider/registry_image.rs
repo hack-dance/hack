@@ -88,7 +88,7 @@ fn error(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("registry_image", message)
 }
 fn digest(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
+    format!("sha256:{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 fn valid_digest(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|v| {
@@ -1313,7 +1313,7 @@ impl<'a> Fetch<'a> {
         if total < d.size {
             return Err(LayerAttempt::Failed(NetworkFailureReason::ShortRead, None));
         }
-        if format!("sha256:{:x}", digest.finalize()) != d.digest {
+        if format!("sha256:{:x}", crate::Hex(digest.finalize())) != d.digest {
             return Err(LayerAttempt::Failed(
                 NetworkFailureReason::DigestMismatch,
                 None,
@@ -1476,7 +1476,10 @@ impl<R: Read> Read for Verified<R> {
             return Err(std::io::Error::other("blob exceeds its descriptor size"));
         }
         if n == 0 {
-            let actual = format!("sha256:{:x}", std::mem::take(&mut self.digest).finalize());
+            let actual = format!(
+                "sha256:{:x}",
+                crate::Hex(std::mem::take(&mut self.digest).finalize())
+            );
             if self.total != self.size || actual != self.expected {
                 return Err(std::io::Error::other("blob digest or size mismatch"));
             }
@@ -2001,7 +2004,10 @@ pub fn acquire_with(
                 )
                 .map_err(|_| assemble())?;
             let writer = builder.into_inner().map_err(|_| assemble())?;
-            Ok((format!("{:x}", writer.digest.finalize()), writer.total))
+            Ok((
+                format!("{:x}", crate::Hex(writer.digest.finalize())),
+                writer.total,
+            ))
         },
         |temporary, (sha, total)| {
             if Instant::now() >= deadline {

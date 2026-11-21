@@ -66,7 +66,7 @@ fn run_options<'a>(
 fn sha(receipt: &graph::Receipt) -> String {
     format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec_pretty(receipt).unwrap())
+        crate::Hex(Sha256::digest(serde_json::to_vec_pretty(receipt).unwrap()))
     )
 }
 

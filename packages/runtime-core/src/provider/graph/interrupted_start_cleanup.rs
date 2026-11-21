@@ -25,7 +25,7 @@ fn refused() -> CandidateError {
     )
 }
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 fn no_pending(root: &Path) -> Result<(), CandidateError> {
     state::check_private_directory(root)?;

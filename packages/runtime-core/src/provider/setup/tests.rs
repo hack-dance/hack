@@ -56,7 +56,7 @@ fn scripted_server(
     listener.set_nonblocking(true).unwrap();
     let pin = FilePin {
         url: format!("http://{}/archive.tgz", listener.local_addr().unwrap()),
-        archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
+        archive_sha256: format!("{:x}", crate::Hex(Sha256::digest(b"hello"))),
         max_bytes: 16,
         size_bytes: 5,
         redirect_hosts: vec![],
@@ -297,7 +297,7 @@ fn unsafe_partial_and_offline_digest_are_not_trusted() {
     let root = Fixture::new();
     let pin = FilePin {
         url: "https://example.test/archive.tgz".into(),
-        archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
+        archive_sha256: format!("{:x}", crate::Hex(Sha256::digest(b"hello"))),
         max_bytes: 16,
         size_bytes: 5,
         redirect_hosts: vec![],
@@ -460,7 +460,7 @@ fn offline_setup_and_partial_manual_install_preservation() {
     }
     let pin = FilePin {
         url: "https://unused.example/archive.tgz".into(),
-        archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
+        archive_sha256: format!("{:x}", crate::Hex(Sha256::digest(b"hello"))),
         max_bytes: 16,
         size_bytes: 5,
         redirect_hosts: vec![],
@@ -649,7 +649,7 @@ fn per_read_timeout_and_overall_deadline_bound_a_slow_body() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let pin = FilePin {
             url: format!("http://{}/archive.tgz", listener.local_addr().unwrap()),
-            archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
+            archive_sha256: format!("{:x}", crate::Hex(Sha256::digest(b"hello"))),
             max_bytes: 16,
             size_bytes: 5,
             redirect_hosts: vec![],
@@ -818,7 +818,7 @@ fn setup_interruption_helper() {
     let candidate = Candidate::discover(&root).unwrap();
     let pin = FilePin {
         url: std::env::var("SETUP_TEST_URL").unwrap(),
-        archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
+        archive_sha256: format!("{:x}", crate::Hex(Sha256::digest(b"hello"))),
         size_bytes: 5,
         max_bytes: 16,
         redirect_hosts: vec![],
@@ -946,7 +946,7 @@ fn retry_preheader_failure(close: bool) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let pin = FilePin {
         url: format!("http://{}/archive.tgz", listener.local_addr().unwrap()),
-        archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
+        archive_sha256: format!("{:x}", crate::Hex(Sha256::digest(b"hello"))),
         size_bytes: 5,
         max_bytes: 16,
         redirect_hosts: vec![],
@@ -982,7 +982,7 @@ fn retry_permanent_connection_failure_is_bounded_and_names_host_and_attempts() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let pin = FilePin {
         url: format!("http://{}/archive.tgz", listener.local_addr().unwrap()),
-        archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
+        archive_sha256: format!("{:x}", crate::Hex(Sha256::digest(b"hello"))),
         size_bytes: 5,
         max_bytes: 16,
         redirect_hosts: vec![],
@@ -1003,7 +1003,7 @@ fn retry_header_stall_never_renews_the_file_deadline() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let pin = FilePin {
         url: format!("http://{}/archive.tgz", listener.local_addr().unwrap()),
-        archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
+        archive_sha256: format!("{:x}", crate::Hex(Sha256::digest(b"hello"))),
         size_bytes: 5,
         max_bytes: 16,
         redirect_hosts: vec![],
@@ -1040,7 +1040,7 @@ impl ObservedServer {
         listener.set_nonblocking(true).unwrap();
         let pin = FilePin {
             url: format!("http://{}/archive.tgz", listener.local_addr().unwrap()),
-            archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
+            archive_sha256: format!("{:x}", crate::Hex(Sha256::digest(b"hello"))),
             size_bytes: 5,
             max_bytes: 16,
             redirect_hosts: vec![],

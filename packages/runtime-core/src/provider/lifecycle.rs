@@ -91,6 +91,8 @@ pub struct RuntimeStatus {
     pub interrupted_runs: Option<Vec<String>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub interrupted_runs_unknown: bool,
+    /// Whether this process hashes SHA-256 with the CPU's instructions (`sha256_backend`).
+    pub hashing: crate::sha256_backend::Report,
 }
 
 fn root(candidate: &Candidate) -> std::path::PathBuf {
@@ -1061,6 +1063,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             repaired_sockets: None,
             interrupted_runs: None,
             interrupted_runs_unknown: false,
+            hashing: crate::sha256_backend::report(),
         });
     }
     let owner = Owner::load(candidate)?;
@@ -1134,6 +1137,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         repaired_sockets: socket_repairs::report(&root(candidate), owner.process.as_ref()),
         interrupted_runs: None,
         interrupted_runs_unknown: false,
+        hashing: crate::sha256_backend::report(),
         guest_boot_id: owner.guest_boot_id,
         prepared_base: super::prepared_start::status(candidate),
         graph_runs: users.graph_runs,

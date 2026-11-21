@@ -105,7 +105,7 @@ fn eligible(
 fn exact_receipt(root: &Path, expected: &str) -> Result<(), CandidateError> {
     no_pending(root)?;
     let bytes = host_pin_recovery::read_raw(&root.join("state.json"), LIMIT)?;
-    if format!("{:x}", Sha256::digest(bytes)) != expected {
+    if format!("{:x}", crate::Hex(Sha256::digest(bytes))) != expected {
         return Err(refused());
     }
     Ok(())
@@ -172,7 +172,7 @@ pub(super) fn confirm_retired(
     let retired = foreground::transport::Retired::acquire(candidate, run)?.ok_or_else(refused)?;
     let engine = Engine::connect_cleanup_wait(candidate)?;
     let bytes = serde_json::to_vec_pretty(&receipt).map_err(|_| refused())?;
-    let receipt_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let receipt_sha256 = format!("{:x}", crate::Hex(Sha256::digest(&bytes)));
     let selected = CleanupSelection {
         run,
         owner,
@@ -451,7 +451,7 @@ mod tests {
         let value = receipt();
         state::write(&fixture.0.join("state.json"), &value).unwrap();
         let before = fs::read(fixture.0.join("state.json")).unwrap();
-        let selected = format!("{:x}", Sha256::digest(&before));
+        let selected = format!("{:x}", crate::Hex(Sha256::digest(&before)));
         exact_receipt(&fixture.0, &selected).unwrap();
         assert!(exact_receipt(&fixture.0, &"0".repeat(64)).is_err());
         for name in [

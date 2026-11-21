@@ -2,7 +2,7 @@
 //! Callers own private provisioning, socket admission, lifecycle registration and transport integration.
 use super::relay_integrity::Traffic;
 use crate::CandidateError;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::{
     fs::File,

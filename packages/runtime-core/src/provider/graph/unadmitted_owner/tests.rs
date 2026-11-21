@@ -16,7 +16,9 @@ const READY: &str = "unadmitted-owner-ready";
 fn receipt_sha(fixture: &Fixture) -> String {
     format!(
         "{:x}",
-        Sha256::digest(fs::read(fixture.graph().join("state.json")).unwrap())
+        crate::Hex(Sha256::digest(
+            fs::read(fixture.graph().join("state.json")).unwrap()
+        ))
     )
 }
 fn publication(fixture: &Fixture) -> PathBuf {

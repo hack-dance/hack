@@ -30,7 +30,7 @@ fn refused() -> CandidateError {
 }
 
 fn sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 
 fn absent(path: &Path) -> Result<bool, CandidateError> {

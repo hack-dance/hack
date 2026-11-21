@@ -709,6 +709,61 @@ The model omits image selection, the registry and Docker's own platform handling
 those are covered by `registry_image`, `image_ensure` and graph admission unit tests.
 Actual Rosetta execution in the guest needs host evidence.
 
+## Native probe readiness
+
+`probe-readiness/ProbeReadiness.tla` checks how the host reads one native HTTP probe
+before a start counts its service ready (HACK-2440 c and d, HACK-2416). It models the
+probe loop in `guest/http-probe.c`: the patient first attempt, failures counted only
+after the first success or once the grace has passed, and the start interval. The app
+is chosen at the start: `slow` (its first answer takes 1..`MaxCompile` ticks, and an
+abandoned request restarts its compile), `refusing` (every request fails at once) or
+`hanging` (accepts, never answers). It also models the host's reading in `assess`,
+`observe_finding` and `observe_sample`. Faults are an exec that exits or never starts,
+a probe that stops publishing, a frozen status dated in the future, and a missing or
+torn read. Bounds, in ticks: grace 3, timeout 1, start interval 1 (2 with `Legacy`),
+interval 2, two retries, `MaxCompile` 2, `Limit` 14 and a horizon of 15.
+
+The positive control explores 175,757 distinct states to depth 52; `legacy` (the
+steady cadence before the first success, as a probe launched with an earlier build's
+arguments) explores 132,615. Both check:
+
+- `NoFalseFailure`: an app that answers within its grace is never failed without a
+  probe fault.
+- `NoPrematureFailure`: without a probe fault, the host fails a start only once the
+  probe itself has reached unhealthy, so its bounds never cut a working probe short.
+- `BoundedStarting`: no reading says starting later than `Limit`, counted on the host.
+- `NoReadyWithoutSuccess`, and `OneCompile`: inside the grace the probe never makes
+  the app start its compile again.
+
+Controls, each required to fail in the named state:
+
+- `negative` (`Patient = FALSE`): `OneCompile` in a `Begin` state with `restarts = 1`.
+- `no-host-bound` (`HostBound = FALSE`): `BoundedStarting` in an `Observe` state with
+  `verdict = "starting"`, `skewed = TRUE` and `vt = 15`.
+- `no-tolerance` (`Tolerate = FALSE`): `NoFalseFailure` in an `Observe` state with
+  `verdict = "unhealthy"` and `app = "slow"`.
+- `exhausts`: `NeverExhausted` in an `Expire` state with `health = "unhealthy"` and
+  `failures = 2`. It shows the positive run reaches exhausted retries.
+- `tight-bound` (`TightBound = TRUE`, a bound without the failed attempts after the
+  grace): `NoPrematureFailure` in an `Observe` state with `verdict = "unhealthy"`.
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `ExecStart` | `start_probe` creates and starts the exec; the probe publishes sequence 0, health 2 |
+| `Begin` / `Answer` / `Expire` | `request` with `attempt_timeout`, then `sample_health` and `publish` in `guest/http-probe.c` |
+| `Observe` / `V` | `graph/probes.rs::observe_finding` and `observe_sample`, `HttpProbe::assess` and `starting_bound_ms` in `http_probe.rs` |
+| `ExecExit` / `Wedge` / `Skew` | An exited exec, a probe that stops publishing, a guest clock ahead of the host's |
+
+`graph/probes.rs` `the_probe_readiness_model_verdicts_match_observe_sample` walks each
+branch of `V` through `observe_sample` with the model's constants (one tick = 1000 ms).
+It fails if the code's bounds drift from the model. `http_probe.rs`
+`inside_the_start_period_one_slow_first_answer_is_waited_for` runs the compiled probe
+against a server that answers in 300 ms with a 40 ms timeout. The model assumes
+`MaxCompile < Grace` (an app answering exactly at the end of its grace races the
+attempt's own deadline) and an exec that starts within one tick of its recorded start.
+It does not model HTTP parsing, several probes, the whole-graph deadline or arbitrary
+engine scheduling delays.
+
 ## Stopped retained-pool startup
 
 `native-startup-owner/Owner.tla` checks project ownership after a foreground
@@ -815,6 +870,44 @@ volume integrity and live application behavior remain separate tests. `Cancel`
 represents an observed abort check, not arbitrary OS signal delivery; cancellation
 does not reverse an already-admitted boot. There is no fairness or eventual-start
 claim, and a model pass is not native startup qualification.
+
+## Pool start admission
+
+`pool-start-admission/PoolStart.tla` checks the host admission of one `runtime up`
+of a pool that is not running. A Development start takes one sample before the
+startup lease and one under it, at least the admission window after the first; a
+Research start keeps three samples before the lease. The positive control explores
+21,400 states for both profiles, with the root files proven under the lease.
+The clock, host pressure, the swapout count, another lease holder, a concurrent
+start, a changed tree or root file, a squatted HOME alias and a crash interleave
+with every step. See its [coverage](pool-start-admission/COVERAGE.md) and
+[statechart](../../../docs/pool-start-admission-statechart.md).
+
+A VM starts only on the qualifying samples of its profile, with one unbroken
+swapout count from the first sample to the pre-boot check, and the pre-boot check
+compares against the last qualifying sample. A refusal, a crash or a pool that a
+concurrent start already booted leaves no VM started and the lease returned. The
+`root-before-lease` control (27,304 states) checks the same invariants for the
+follow-up ordering, in which the root files are proven before the lease and their
+metadata is rechecked under it.
+
+Six controls remove one mechanism each and must fail the named invariant: the
+second sample before the lease (`negative`, `SecondSampleUnderLease`), no window
+(`window-not-enforced`), no swapout comparison at the second sample
+(`unchained-recheck`) or at the pre-boot check (`unchained-boot`), two Research
+samples (`research-two-samples`) and no root recheck in the follow-up ordering
+(`root-unchecked`). Three more show that a Development start, a Research start and
+a start after an alias rewrite are reachable.
+
+`changed-tree-start` keeps one gap explicit. The provider and engine trees are
+proven by content before the lease and not rechecked under it, so a tree that
+changes between its proof and the lease is booted once; the boot's tree witness
+makes the next command prove it by content again. `tree-recheck` (21,076 states)
+models a recheck under the lease that no code performs and holds
+`NoStartFromChangedTree`. A sample is one atomic observation, pressure that comes
+and goes between samples is invisible, tree and root changes are assumed absent
+while the lease is held, and nothing after `machine start` is modelled. There is no
+fairness or eventual-start claim, and a model pass is not a measured boot.
 
 ## Retained-data handoff across plan changes
 
@@ -1004,6 +1097,7 @@ have canonical copies and were not duplicated.
 | authority-lifetime | 9 | Authority cannot outlive completed runtime shutdown; removing the startup lease permits a late bind | `hostname_authority.rs` startup lock and shutdown |
 | publication-journal | 50 | Recovery cannot adopt a live writer's pending entry; unsafe recovery violates that condition | `publication.rs` journal recovery |
 | publication | 16 | A live native publication retains its intent, directory and guest; early retirement breaks ownership | `publication.rs`, `publication_stage.rs` |
+| bridge-batch | 14674 | One provider lease starts a batch of route and port bridges and a cleanup releases them: no relay without its durable intent, no listener launched without its own fence admitting the reserved, healthy target, no relay stopped under a live listener, a finished release leaves nothing, `ready` means everything is published. Negative controls: relays before intent (`negative`), child without fence (`child-fence`), relays stopped before listeners (`release-order`); reachability of ready, release, release after ready and a mid-batch stale stop. See [COVERAGE.md](bridge-batch/COVERAGE.md) | `graph/bridges.rs` (`reserve_publications`, `start_selected`, `publish_bridge`, `release_selected`), `graph/relay.rs`, `publication.rs`, `graph/foreground/publishers.rs` |
 | loopback-port-publication | 1008 | One listener per published host port, forwarding only to the pinned container incarnation, recovery only for a dead owner, and no listener after acknowledged stop. Negative controls: recovery without the dead-owner check (`negative`), no loopback probe (`no-probe`), no endpoint identity check (`stale-target`), acknowledging stop before closing the listener (`ack-before-close`) | `publication.rs` (`require_loopback_port_free`, `release`), `graph/bridges.rs` loopback bridges, `graph/foreground/publishers.rs` |
 | fence-first | 24 | First recovery needs terminal prior state, no occupied slot, and complete evidence; ignoring occupancy fails | `graph/relay-fence.sh` initial recovery |
 | fence-pending | 7 | Recover only permitted pending transitions; accepting launching-to-stopped leaves a live process | `graph/relay-fence.sh` pending recovery |

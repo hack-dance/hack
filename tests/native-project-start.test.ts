@@ -91,6 +91,8 @@ async function fixture(withEnvironment = true) {
     "synthetic public test artifact"
   );
   const events: string[] = [];
+  // Set once a serve request starts: later inspections describe that run.
+  const state = { serving: false };
   let run = "";
   let ready = false;
   // A retained-data removal request makes later inspections report removal.
@@ -105,7 +107,7 @@ async function fixture(withEnvironment = true) {
   const dependencies: NonNullable<
     Parameters<typeof startNativeProject>[0]["dependencies"]
   > = {
-    staticReview: async () => {},
+    staticReview: async () => undefined,
     prepareStorage: async () => {},
     retainedImages: async () => new Map(),
     load: async () => null,
@@ -199,6 +201,7 @@ async function fixture(withEnvironment = true) {
       return {};
     },
     serve: async (opts) => {
+      state.serving = true;
       run = opts.run;
       ready = true;
       if (withEnvironment) {
@@ -241,7 +244,7 @@ async function fixture(withEnvironment = true) {
     },
     dependencies,
   };
-  return { opts, events };
+  return { opts, events, state };
 }
 function stoppedGraph(run: NativeProjectRun) {
   return {
@@ -285,7 +288,7 @@ async function acknowledgeRetainedFrontend(
   return lifetime;
 }
 async function retainedFinalizationFixture() {
-  const { opts, events } = await fixture(false);
+  const { opts, events, state } = await fixture(false);
   const saved: NativeProjectRun = {
     run: "1".repeat(32),
     owner: "c".repeat(32),
@@ -302,10 +305,7 @@ async function retainedFinalizationFixture() {
       events.push("graph retained-preflight");
       return retainedPreflight(saved);
     }
-    if (
-      request.args[1] === "inspect" &&
-      !events.includes("graph dependency-plan")
-    ) {
+    if (request.args[1] === "inspect" && !state.serving) {
       events.push("graph inspect");
       return stoppedGraph(saved);
     }
@@ -321,7 +321,7 @@ async function retainedFinalizationFixture() {
     events.push("prepare");
     return await prepare(request);
   };
-  return { opts, events, saved };
+  return { opts, events, saved, state };
 }
 test("source pool mismatch refuses before hooks and storage preparation", async () => {
   const { opts, events } = await fixture();
@@ -414,10 +414,10 @@ test("an image-only graph starts above the source limit without measuring source
 test("foreground saves after readiness and retains mapping after confirmed stop", async () => {
   const { opts, events } = await fixture();
   expect(await startNativeProject(opts)).toBe(0);
+  // No host dependency: the plan ID is computed without a runtime call.
   expect(events).toEqual([
     "before",
     "runtime up",
-    "graph dependency-plan",
     "graph inspect",
     "save",
     "ready",
@@ -758,19 +758,17 @@ test("a post-start failure with an unauthenticated receipt records no owner", as
 });
 
 test("a retained run's post-start failure keeps its existing mapping unchanged", async () => {
-  const { opts, events, saved } = await retainedFinalizationFixture();
+  const { opts, events, saved, state } = await retainedFinalizationFixture();
   await acknowledgeRetainedFrontend(opts.scope, saved);
   const invoke = opts.dependencies.invoke!;
   opts.dependencies.serve = async () => {
+    state.serving = true;
     throw new Error(
       "Native graph startup failed (engine_rejected); inspect owned state before retrying."
     );
   };
   opts.dependencies.invoke = async (request) => {
-    if (
-      request.args[1] === "inspect" &&
-      events.includes("graph dependency-plan")
-    ) {
+    if (request.args[1] === "inspect" && state.serving) {
       return {
         ...stoppedGraph(saved),
         observations: { "container:web": { state: "running" } },
@@ -1195,8 +1193,52 @@ test("an unconfirmed image selection reply is an integrity refusal, not a config
   );
 });
 
-test("an invalid host dependency plan reply is an integrity refusal", async () => {
+/** One pinned host listener binding for `web`, selected after hooks. */
+function withHostDependency(
+  opts: Awaited<ReturnType<typeof fixture>>["opts"]
+): Awaited<ReturnType<typeof fixture>>["opts"] &
+  Pick<Parameters<typeof startNativeProject>[0], "dependencyFile"> {
+  const path = join(opts.scope.projectRoot, "host-selection.json");
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    const compose = JSON.parse(input.normalizedComposeJson);
+    compose.services.web.extra_hosts = ["search.example.com:host-gateway"];
+    return { ...input, normalizedComposeJson: JSON.stringify(compose) };
+  };
+  const before = opts.before;
+  opts.before = async () => {
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        dependencies: [
+          {
+            service: "web",
+            binding: "search",
+            guest_port: 443,
+            host_pid: 999,
+            host_port: 8443,
+            aliases: ["search.example.com"],
+          },
+        ],
+      })
+    );
+    return await before();
+  };
+  return { ...opts, dependencyFile: path };
+}
+
+test("a graph with a host dependency asks the runtime for its dependency plan", async () => {
   const { opts, events } = await fixture();
+  expect(await startNativeProject(withHostDependency(opts))).toBe(0);
+  expect(events).toContain("graph dependency-plan");
+});
+
+test("an invalid host dependency plan reply is an integrity refusal", async () => {
+  const fixed = await fixture();
+  const events = fixed.events;
+  const opts = withHostDependency(fixed.opts);
   const invoke = opts.dependencies.invoke!;
   opts.dependencies.invoke = async (request) =>
     request.args[1] === "dependency-plan"
@@ -1692,6 +1734,7 @@ test("gcloud ADC delivery follows hooks, sends file members privately and persis
   opts.dependencies.staticReview = async ({ input }) => {
     events.push("static review");
     reviewed.normalizedComposeJson = input.normalizedComposeJson;
+    return undefined;
   };
   // The only bind is the ADC file, which delivery replaces: no project source
   // is captured, so the source-size check never runs.
@@ -3984,7 +4027,7 @@ test("retained acknowledgement cannot authorize a newer or concurrently changed 
 });
 
 test("ordinary up reuses a stopped owned run and publishes its mapping by comparison", async () => {
-  const { opts, events } = await fixture();
+  const { opts, events, state } = await fixture();
   const saved: NativeProjectRun = {
     run: "1".repeat(32),
     owner: "c".repeat(32),
@@ -4002,10 +4045,7 @@ test("ordinary up reuses a stopped owned run and publishes its mapping by compar
       events.push("graph retained-preflight");
       return retainedPreflight(saved);
     }
-    if (
-      request.args[1] === "inspect" &&
-      !events.includes("graph dependency-plan")
-    ) {
+    if (request.args[1] === "inspect" && !state.serving) {
       events.push("graph inspect");
       return stoppedGraph(saved);
     }

@@ -61,7 +61,8 @@ pub fn read_by(stream: &mut UnixStream, by: Instant, limit: usize) -> Result<Vec
 enum Wait {
     /// Take a byte only if one is already waiting.
     Probe,
-    /// Wait until this instant; at or after it, nothing is consumed.
+    /// Wait for readiness until this instant; `Idle` (deadline passed before the
+    /// socket was readable) consumes nothing.
     Until(Instant),
     Forever,
 }

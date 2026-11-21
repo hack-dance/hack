@@ -1,9 +1,9 @@
 // biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: The unsupported experimental gateway server keeps auth and route fan-out inline for traceability.
+
 import { Buffer } from "node:buffer";
 import { userInfo } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
-
 import {
   DAEMON_PROCESS_TITLE,
   GLOBAL_CONFIG_FILENAME,
@@ -28,6 +28,7 @@ import {
 } from "../control-plane/sdk/config.ts";
 import { ensureDir } from "../lib/fs.ts";
 import { HACK_VERSION } from "../lib/hack-version.ts";
+import { holdProcessUntil } from "../lib/process-exit.ts";
 import { resolveRegisteredProjectById } from "../lib/projects-registry.ts";
 import { runAutostartAtLogin } from "./autostart.ts";
 import {
@@ -430,6 +431,9 @@ export async function runDaemon({
     message: `hackd started (pid ${process.pid}, version ${HACK_VERSION})`,
   });
   loginAutostart.start();
+  // The daemon serves until `shutdown` exits the process; the command that
+  // started it returns now, so hold the CLI's explicit exit open forever.
+  holdProcessUntil(new Promise<never>(() => undefined));
 }
 
 async function handleRequest({

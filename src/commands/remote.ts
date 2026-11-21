@@ -31,6 +31,7 @@ import {
 import { pathExists, readTextFile } from "../lib/fs.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
+import { holdProcessUntil } from "../lib/process-exit.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import {
   defaultProjectSlugFromPath,
@@ -1005,6 +1006,8 @@ async function runRemoteMonitor(opts: {
     }
     activeRenderer.stop();
     activeRenderer.destroy();
+    // Terminal restore finishes asynchronously; the CLI exits after it.
+    holdProcessUntil(activeRenderer.closed);
     process.off("SIGINT", handleSignal);
     process.off("SIGTERM", handleSignal);
   };

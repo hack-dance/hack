@@ -28,7 +28,10 @@ test("the benchmark fixture runs the same health checks on both lanes", async ()
     startInterval: "250ms",
   };
   const onCompose = laneHealthChecks({ compose, lane: "compose" });
-  expect(onCompose.db).toMatchObject(engine);
+  expect(onCompose.db).toMatchObject({
+    ...engine,
+    test: "CMD-SHELL pg_isready -h 127.0.0.1 -U bench -d bench",
+  });
   expect(onCompose.cache).toMatchObject(engine);
   // No test: the engine would use the image's own check. The fixture's images
   // define none (checked with docker image inspect), but the helper cannot know.

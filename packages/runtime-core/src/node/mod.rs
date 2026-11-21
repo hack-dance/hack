@@ -9,6 +9,7 @@ mod transport;
 pub use journal::{Mutation, Receipt, Request, Store};
 pub use ownership::ProcessIdentity;
 pub use supervisor::{fixture, supervise};
+pub(crate) use transport::peer_uid;
 pub use transport::{call, serve};
 
 use crate::{Candidate, CandidateError};

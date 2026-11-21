@@ -11,7 +11,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bench -d bench"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U bench -d bench"]
       start_period: 30s
       start_interval: 250ms
       interval: 10s

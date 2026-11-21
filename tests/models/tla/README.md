@@ -51,8 +51,19 @@ https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
 `JAVA_BIN` may select an explicit Java executable. The runner does not install tools
 or change global Java settings. CI's Runtime state models job supplies Java and the
 pinned artifact. Each check has a 120-second timeout, 512 MiB Java heap, two workers
-and bounded output; temporary TLC metadata is removed after success or failure.
+and bounded output. Every gate owns a private directory for TLC metadata, copied
+models, and Java standard-module extraction (`java.io.tmpdir`). The runner waits
+for Java to exit before removing that directory after success, failure, SIGINT,
+or SIGTERM. Concurrent worktrees therefore do not share unpacked standard modules.
 No credentials or running VM are needed.
+
+Run `bun run test:models:concurrent <other-worktree>` to check failure and
+signal cleanup, then run three pairs of complete gates. The other checkout must
+contain the same runner revision; omit it to run both gates in this checkout.
+The check verifies separate Java temp roots, marker isolation, and removal of
+each run's scratch. It uses the same Java and pinned jar as `test:models`.
+This check runs on demand, outside `bun test` and CI; each TLC invocation retains
+the 120-second timeout.
 
 ## Native foreground recovery lease takeover
 
@@ -875,13 +886,15 @@ claim, and a model pass is not native startup qualification.
 
 `pool-start-admission/PoolStart.tla` checks the host admission of one `runtime up`
 of a pool that is not running. A Development start takes one sample before the
-startup lease and one under it, at least the admission window after the first; a
-Research start keeps three samples before the lease. The positive control explores
-58,022 states for both profiles, with the provider and engine trees rechecked and
-the root files proven under the lease.
+startup lease and one under it, at least the admission window after the first, or
+at least the window after a recorded earlier sample of the same home; a Research
+start keeps three samples before the lease. The positive control explores
+220,686 states for both profiles, with the provider and engine trees rechecked and
+the root files proven under the lease: a start without an early root files proof,
+such as the first boot of a new home.
 The clock, a host that fails and passes again once, the swapout count, another
-lease holder, a concurrent start, a changed tree or root file, a squatted HOME
-alias and a crash interleave with every step. See its
+lease holder that may record a host sample, a concurrent start, a changed tree or
+root file, a squatted HOME alias and a crash interleave with every step. See its
 [coverage](pool-start-admission/COVERAGE.md) and
 [statechart](../../../docs/pool-start-admission-statechart.md).
 
@@ -893,16 +906,17 @@ samples: it was taken on a passing host (`BootSampleOnPassingHost`) and showed
 the count it was compared against (`BootSampleMatchesBaseline`). No VM starts from a provider or
 engine tree that changed after its content proof (`NoStartFromChangedTree`). A
 refusal, a crash or a pool that a concurrent start already booted leaves no VM
-started and the lease returned. The `root-before-lease` control (73,754 states)
-checks the same invariants for the follow-up ordering, in which the root files
-are proven before the lease and their metadata is rechecked under it.
+started and the lease returned. The `root-before-lease` control (277,194 states)
+checks the same invariants for the other path of the implementation, a cleanly
+stopped pool's start, in which the root files are proven before the lease and
+rechecked under it.
 
 Twelve controls remove one mechanism each and must fail the named invariant: the
 second sample before the lease (`negative`, `SecondSampleUnderLease`), no window
 (`window-not-enforced`), no swapout comparison at the second sample
 (`unchained-recheck`) or at the pre-boot check (`unchained-boot`), two Research
-samples (`research-two-samples`), no root recheck in the follow-up ordering
-(`root-unchecked`), no tree recheck under the lease (`changed-tree-start`,
+samples (`research-two-samples`), no root files recheck after a proof before the
+lease (`root-unchecked`), no tree recheck under the lease (`changed-tree-start`,
 `NoStartFromChangedTree`), no predicate check of the first sample
 (`first-sample-unchecked`), of Development's sample under the lease
 (`second-sample-unchecked`) or of Research's later samples
@@ -920,6 +934,23 @@ host between observations except the cumulative swapout count, so such a dip
 passes; with two Development samples instead of seven it has fewer samples to
 miss. The model shows that the gap exists, not how wide it is.
 
+A home's record of an earlier passing sample (`admission/opening.rs`) may replace
+the wait between a Development start's two samples, never a sample. A start that
+skipped the wait had a record from this OS boot, at least one window and at most
+one bound old, whose swapout count equals its sample's under the lease
+(`ReusedRecordSameBoot`, `WindowRespected`, `ReusedRecordWithinBound`,
+`ReusedRecordSameSwapouts`); every record written came from a passing host
+(`RecordsFromPassingSamples`); Research reuses nothing (`ResearchNeverReuses`).
+Five more controls remove one of these each: `reuse-other-boot`,
+`reuse-too-young`, `reuse-too-old`, `reuse-changed-count` and `record-unchecked`.
+Three reachability controls require a start on a reused record
+(`reuse-start-reachable`), a start that found an unusable record and waited out
+its own window (`reuse-miss-start-reachable`), and the weakening of reuse: a host
+that failed and passed again between the recorded sample and the sample under the
+lease is admitted (`reuse-dip-start-reachable`). The record's file checks, its
+parsing and its clock are not modelled; their tests are in
+`provider/admission/opening/tests.rs`.
+
 The provider and engine trees are proven by content before the lease, inside the
 admission window, and rechecked first under it (`lifecycle/leased_trees.rs`): a
 tree whose metadata digest and content anchor equal its proof's keeps the proof,
@@ -927,7 +958,10 @@ any other tree is proven by content again, and a changed tree refuses the start.
 `changed-tree-start` is the start without that recheck: a tree that changes
 between its proof and the lease is booted once, and only the next command's
 witness check refuses it. The model keeps one bit for the trees, so the metadata
-comparison and the second proof are one guard in it. A sample is one atomic
+comparison and the second proof are one guard in it. A cleanly stopped pool's
+root files are held to the same rule (`lifecycle/rootfs_proof.rs`): proven in the
+window, rechecked as the step after the tree recheck and compared once more where
+their digest is used, with one bit and one recheck action in the model. A sample is one atomic
 observation, pressure that comes and goes between samples is invisible, tree and
 root changes are assumed absent while the lease is held, and nothing after
 `machine start` is modelled. There is no fairness or eventual-start claim, and a
@@ -1567,6 +1601,31 @@ original deterministic path. This avoids admitting a new owner into an old
 pending coordinator's directory; it does not acknowledge or roll over that
 coordinator. Directory derivation and a real coordinator start/stop regression
 cover this restored-owner boundary outside the finite publisher model.
+
+## CLI process exit
+
+`cli-process-exit/ProcessExit.tla` checks how the CLI process ends
+(`src/lib/process-exit.ts`, `index.ts`): the command returns, `exitWhenDone`
+waits for registered holds, ends stdout and stderr, then exits. Invariants:
+`NoExitWithPendingHold` (the process never ends while held work runs, including
+a hold registered while waiting) and `NoLostOutput` (everything written before
+the exit was delivered).
+
+| Model operation | Source boundary |
+| --- | --- |
+| `Register` / `Settle` | `holdProcessUntil`: the stdio MCP session and each tool call, the foreground daemon, TUI and remote monitor renderer `closed`, TUI action child plus its stderr drain. |
+| `CommandReturns` / `SnapshotSettled` | `runCli` resolves; `waitForHolds` awaits a snapshot and loops while holds remain. |
+| `EndStreams` / `Exit` | `endStream` on stdout and stderr (`end` callback), then `process.exit`. |
+
+Bounds: three holds. The positive configuration exhausts 298 distinct states at
+depth 11. Controls: `negative` (wait for one snapshot, no re-check) fails
+`NoExitWithPendingHold` at `SnapshotSettled`; `no-end` (exit after
+`write("", cb)` instead of `end`) fails `NoLostOutput` at `Exit`. The second
+matches a measurement: with `write("", cb)` only 950 KB of a 2 MiB pipe write
+arrived. `tests/process-exit.test.ts` walks both against real processes. Not
+covered: whether every command that outlives `runCli` registers a hold (an
+audit, listed in the PR), and a reader that never drains (the exit waits, as
+the event loop did before).
 
 ## Global proxy address record
 

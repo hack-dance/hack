@@ -16,8 +16,10 @@ a measurement workload, not an example of how to set up a project.
 - `api/`: one Postgres table and one Redis counter.
 - Health checks are the same on both backends. Postgres and Redis use
   `start_interval: 250ms` and a 10 s steady interval; the routed `web` and `api` have
-  no command check, since native probes routes itself. Both dev servers run with
-  `init: true` and a 2 s stop grace period.
+  no command check, since native probes routes itself. The Postgres check uses TCP
+  so a fresh volume waits for the final server. Use Docker Engine 25 or later for
+  the Compose lane so both lanes can use the same startup cadence. Both dev servers
+  run with `init: true` and a 2 s stop grace period.
 - `legacy/docker-compose.v1.yml`: the fixture before Nov 2026, only for reproducing
   earlier results (with `--legacy-readiness`). See the benchmark's notes in
   [Runtime performance diagnostics](../../../docs/performance.md#runtime-footprint-benchmark).

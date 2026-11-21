@@ -98,7 +98,7 @@ impl Request {
         }
         Ok(format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(&value).map_err(error)?)
+            crate::Hex(Sha256::digest(serde_json::to_vec(&value).map_err(error)?))
         ))
     }
     pub fn seal(mut self) -> Result<Self> {
@@ -243,7 +243,7 @@ impl Store {
             let mut hasher = Sha256::new();
             hasher.update(root.as_os_str().as_encoded_bytes());
             hasher.update(nonce);
-            let identity = format!("{:x}", hasher.finalize());
+            let identity = format!("{:x}", crate::Hex(hasher.finalize()));
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(sqlite_error)?;
@@ -495,7 +495,10 @@ impl Store {
                         error("Source execution requires a bound candidate context.")
                     })?)?);
                 }
-                let id = format!("{:x}", Sha256::digest(m.operation_id.as_bytes()));
+                let id = format!(
+                    "{:x}",
+                    crate::Hex(Sha256::digest(m.operation_id.as_bytes()))
+                );
                 let receipt = Receipt {
                     job_id: id.clone(),
                     fixture: fixture.into(),

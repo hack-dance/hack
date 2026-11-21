@@ -114,7 +114,7 @@ fn resolve_identity(
     }
     let generation = format!(
         "{:x}",
-        Sha256::digest(
+        crate::Hex(Sha256::digest(
             serde_json::to_vec(&json!([
                 identity.domain,
                 identity.owner,
@@ -130,7 +130,7 @@ fn resolve_identity(
                 started
             ]))
             .map_err(|_| invalid())?
-        )
+        ))
     );
     Ok(GuestEndpoint {
         generation,
@@ -282,14 +282,14 @@ pub(super) fn resolve_owned_attached(
     if identities.len() > 1 {
         endpoint.generation = format!(
             "{:x}",
-            Sha256::digest(
+            crate::Hex(Sha256::digest(
                 serde_json::to_vec(&json!([
                     "hack-endpoint-attachments-v2",
                     endpoint.generation,
                     identities
                 ]))
                 .map_err(|_| invalid())?
-            )
+            ))
         );
     }
     Ok(endpoint)

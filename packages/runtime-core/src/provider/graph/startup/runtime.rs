@@ -388,7 +388,7 @@ pub(in crate::provider::graph) fn process_control_generation(
         ))
         .map_err(|_| refused())?,
     );
-    Ok(format!("{digest:x}")[..32].to_owned())
+    Ok(format!("{:x}", crate::Hex(digest))[..32].to_owned())
 }
 
 pub(in crate::provider::graph) fn process_control_root(
@@ -430,7 +430,9 @@ fn control_root_generation(
     };
     let digest = format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(&identity).map_err(|_| refused())?)
+        crate::Hex(Sha256::digest(
+            serde_json::to_vec(&identity).map_err(|_| refused())?
+        ))
     );
     Ok(PathBuf::from(format!(
         "/private/tmp/hkro-{}",
@@ -1920,9 +1922,9 @@ mod owner_scope_tests {
         let state = Path::new("/candidate/.hack-local");
         let digest = format!(
             "{:x}",
-            Sha256::digest(
+            crate::Hex(Sha256::digest(
                 serde_json::to_vec(&json!(["hack-graph-owner-v1", state, "owner", null])).unwrap()
-            )
+            ))
         );
         // owner-root: path-only
         assert_eq!(
@@ -1941,10 +1943,10 @@ mod owner_scope_tests {
         let state = Path::new("/candidate/.hack-local");
         let digest = format!(
             "{:x}",
-            Sha256::digest(
+            crate::Hex(Sha256::digest(
                 serde_json::to_vec(&json!(["hack-graph-owner-v1", state, "owner", "boot"]))
                     .unwrap()
-            )
+            ))
         );
         // owner-root: path-only
         assert_eq!(

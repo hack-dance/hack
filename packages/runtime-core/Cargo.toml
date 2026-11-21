@@ -2,7 +2,7 @@
 name = "hack-runtime-core"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 publish = false
 description = "Private Hack v5 candidate runtime contracts and local planning"
 
@@ -18,6 +18,13 @@ shared-mcp = []
 # Test-only supervisor pause points for the real SIGKILL harness. Refused in
 # optimized builds; never listed by a release build script.
 node-kill-harness = []
+
+# `sha2` 0.11.1 raised the declared minimum from Rust 1.85 to 1.88. From 1.87 Clippy asks
+# for let-chains and `is_multiple_of` in about fifty places that the upgrade does not touch.
+# Rewrite those in their own change and remove these two lines with it.
+[lints.clippy]
+collapsible_if = "allow"
+manual_is_multiple_of = "allow"
 
 [lib]
 name = "hack_runtime_core"
@@ -40,8 +47,10 @@ required-features = ["shared-mcp"]
 hack-config-compiler = { path = "../config-compiler", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
-hmac = "=0.12.1"
+# Exact: the build guard in src/sha256_guard.rs rests on how this release selects its
+# SHA-256 backend, and 0.11.0 still has the unsound aarch64 constant load fixed in 0.11.1.
+sha2 = "=0.11.1"
+hmac = "=0.13.0"
 zeroize = "=1.9.0"
 libc = "0.2"
 base64 = "0.22"
@@ -57,8 +66,12 @@ flate2 = { version = "=1.1.10", default-features = false, features = ["rust_back
 ruzstd = "=0.8.2"
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time"] }
 
+# The detection `sha2` itself uses, to report which SHA-256 backend a process runs.
+[target.'cfg(any(target_arch = "aarch64", target_arch = "x86_64"))'.dependencies]
+cpufeatures = "0.3"
+
 [build-dependencies]
-sha2 = "0.10"
+sha2 = "=0.11.1"
 
 [profile.release]
 lto = "thin"

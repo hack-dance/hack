@@ -107,7 +107,9 @@ fn refused() -> CandidateError {
 fn digest(value: &impl Serialize) -> Result<String, CandidateError> {
     Ok(format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec_pretty(value).map_err(|_| refused())?)
+        crate::Hex(Sha256::digest(
+            serde_json::to_vec_pretty(value).map_err(|_| refused())?
+        ))
     ))
 }
 fn exists(path: &Path) -> Result<bool, CandidateError> {

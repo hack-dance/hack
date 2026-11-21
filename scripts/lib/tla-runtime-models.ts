@@ -1808,10 +1808,11 @@ const contracts: readonly ModelContract[] = [
   {
     // One start of a pool that is not running: two chained Development samples
     // (the second under the startup lease, a window after the first), Research's
-    // three pre-lease samples, the content proofs and the pre-boot check.
+    // three pre-lease samples, the content proofs, the tree recheck under the
+    // lease and the pre-boot check, on a host that can fail and recover once.
     name: "pool-start-admission",
     module: "PoolStart",
-    states: 21_400,
+    states: 58_022,
     // Development's second sample taken before the startup lease.
     invariant: "SecondSampleUnderLease",
     action: "Recheck",
@@ -1819,9 +1820,7 @@ const contracts: readonly ModelContract[] = [
     additionalControls: [
       // The follow-up ordering: root files proven in the window, rechecked
       // under the lease.
-      { name: "root-before-lease", negative: false, states: 27_304 },
-      // Hypothetical: a tree recheck under the lease, which no code performs.
-      { name: "tree-recheck", negative: false, states: 21_076 },
+      { name: "root-before-lease", negative: false, states: 73_754 },
       {
         name: "window-not-enforced",
         negative: true,
@@ -1857,8 +1856,8 @@ const contracts: readonly ModelContract[] = [
         action: "RecheckRoot",
         fields: ['pc = "RootProven"', "rootOk = FALSE", "rootProved = TRUE"],
       },
-      // The remaining gap, kept explicit: the trees are proven before the
-      // lease and not rechecked under it.
+      // Without the tree recheck under the lease, a tree that changed after
+      // its proof before the lease is booted from.
       {
         name: "changed-tree-start",
         negative: true,
@@ -1891,6 +1890,84 @@ const contracts: readonly ModelContract[] = [
         invariant: "NeverStartsOnMovedAlias",
         action: "Start",
         fields: ['alias = "moved"', "selected = 2", "vm = TRUE"],
+      },
+      // The first sample recorded without its predicate check.
+      {
+        name: "first-sample-unchecked",
+        negative: true,
+        invariant: "SamplesTakenOnPassingHost",
+        action: "Open",
+        fields: ['pc = "Opened"', "hostOk = FALSE"],
+      },
+      // The same for Development's sample under the lease ...
+      {
+        name: "second-sample-unchecked",
+        negative: true,
+        invariant: "SamplesTakenOnPassingHost",
+        action: "Recheck",
+        fields: [
+          'pc = "Qualified"',
+          'profile = "development"',
+          "hostOk = FALSE",
+        ],
+      },
+      // ... and for Research's second and third samples.
+      {
+        name: "research-sample-unchecked",
+        negative: true,
+        invariant: "SamplesTakenOnPassingHost",
+        action: "ResearchSample",
+        fields: ['pc = "Opened"', 'profile = "research"', "hostOk = FALSE"],
+      },
+      // What few samples do not see, as reachable facts: a start admitted
+      // although the host failed between two of its accepted samples.
+      {
+        name: "development-dip-start-reachable",
+        negative: true,
+        invariant: "NeverStartsDevelopmentAcrossADip",
+        action: "Start",
+        fields: [
+          'profile = "development"',
+          "acrossDip = TRUE",
+          "dips = 1",
+          "vm = TRUE",
+        ],
+      },
+      {
+        name: "research-dip-start-reachable",
+        negative: true,
+        invariant: "NeverStartsResearchAcrossADip",
+        action: "Start",
+        fields: [
+          'profile = "research"',
+          "acrossDip = TRUE",
+          "dips = 1",
+          "vm = TRUE",
+        ],
+      },
+      // The same between the last sample and the pre-boot observation.
+      {
+        name: "boot-dip-start-reachable",
+        negative: true,
+        invariant: "NeverStartsAcrossADipBeforeBoot",
+        action: "Start",
+        fields: ["bootAcrossDip = TRUE", "dips = 1", "vm = TRUE"],
+      },
+      // The pre-boot observation admitted without its predicate check ...
+      {
+        name: "boot-host-unchecked",
+        negative: true,
+        invariant: "BootSampleOnPassingHost",
+        action: "AdmitBoot",
+        fields: ['pc = "BootAdmitted"', "hostOk = FALSE"],
+      },
+      // ... or without comparing its swapout count with the baseline.
+      {
+        name: "boot-swapouts-unchecked",
+        negative: true,
+        invariant: "BootSampleMatchesBaseline",
+        action: "AdmitBoot",
+        fields: ['pc = "BootAdmitted"', "baseline = <<0>>", "swapouts = 1"],
       },
     ],
   },

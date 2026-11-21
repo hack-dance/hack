@@ -98,7 +98,8 @@ fn record_at(state_root: &Path, owner: &Owner) -> Result<(), CandidateError> {
     if (boots.is_empty() && !present) || known.as_ref().is_ok_and(|known| *known == boots) {
         return Ok(());
     }
-    // The caller holds the VM lock, so a leftover pending file is an interrupted
+    // The caller (`start_pool`, just before `begin_boot`) holds the pool's startup
+    // lease, which serializes boots, so a leftover pending file is an interrupted
     // write of this sidecar, not a concurrent one.
     match std::fs::remove_file(path(state_root).with_extension("pending")) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => {

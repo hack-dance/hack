@@ -1213,13 +1213,10 @@ const contracts: readonly ModelContract[] = [
     states: 1943,
     invariant: "CacheNeverStale",
     action: "CacheHit",
-    fields: [
-      "staleHit = TRUE",
-      "cache = <<1, 1, 1>>",
-      "content = 2",
-      "ctime = 1",
-      "clock = 1",
-    ],
+    // Only CacheHit sets staleHit, and only from phase "idle", so these two
+    // fields hold in every first violation, whichever tick the two-worker search
+    // reaches first (it found the same stale hit at tick 1 and at tick 2).
+    fields: ["staleHit = TRUE", 'phase = "idle"'],
   },
   {
     name: "native-status-start",
@@ -1811,10 +1808,11 @@ const contracts: readonly ModelContract[] = [
   {
     // One start of a pool that is not running: two chained Development samples
     // (the second under the startup lease, a window after the first), Research's
-    // three pre-lease samples, the content proofs and the pre-boot check.
+    // three pre-lease samples, the content proofs, the tree recheck under the
+    // lease and the pre-boot check, on a host that can fail and recover once.
     name: "pool-start-admission",
     module: "PoolStart",
-    states: 21_400,
+    states: 58_022,
     // Development's second sample taken before the startup lease.
     invariant: "SecondSampleUnderLease",
     action: "Recheck",
@@ -1822,9 +1820,7 @@ const contracts: readonly ModelContract[] = [
     additionalControls: [
       // The follow-up ordering: root files proven in the window, rechecked
       // under the lease.
-      { name: "root-before-lease", negative: false, states: 27_304 },
-      // Hypothetical: a tree recheck under the lease, which no code performs.
-      { name: "tree-recheck", negative: false, states: 21_076 },
+      { name: "root-before-lease", negative: false, states: 73_754 },
       {
         name: "window-not-enforced",
         negative: true,
@@ -1860,8 +1856,8 @@ const contracts: readonly ModelContract[] = [
         action: "RecheckRoot",
         fields: ['pc = "RootProven"', "rootOk = FALSE", "rootProved = TRUE"],
       },
-      // The remaining gap, kept explicit: the trees are proven before the
-      // lease and not rechecked under it.
+      // Without the tree recheck under the lease, a tree that changed after
+      // its proof before the lease is booted from.
       {
         name: "changed-tree-start",
         negative: true,
@@ -1894,6 +1890,84 @@ const contracts: readonly ModelContract[] = [
         invariant: "NeverStartsOnMovedAlias",
         action: "Start",
         fields: ['alias = "moved"', "selected = 2", "vm = TRUE"],
+      },
+      // The first sample recorded without its predicate check.
+      {
+        name: "first-sample-unchecked",
+        negative: true,
+        invariant: "SamplesTakenOnPassingHost",
+        action: "Open",
+        fields: ['pc = "Opened"', "hostOk = FALSE"],
+      },
+      // The same for Development's sample under the lease ...
+      {
+        name: "second-sample-unchecked",
+        negative: true,
+        invariant: "SamplesTakenOnPassingHost",
+        action: "Recheck",
+        fields: [
+          'pc = "Qualified"',
+          'profile = "development"',
+          "hostOk = FALSE",
+        ],
+      },
+      // ... and for Research's second and third samples.
+      {
+        name: "research-sample-unchecked",
+        negative: true,
+        invariant: "SamplesTakenOnPassingHost",
+        action: "ResearchSample",
+        fields: ['pc = "Opened"', 'profile = "research"', "hostOk = FALSE"],
+      },
+      // What few samples do not see, as reachable facts: a start admitted
+      // although the host failed between two of its accepted samples.
+      {
+        name: "development-dip-start-reachable",
+        negative: true,
+        invariant: "NeverStartsDevelopmentAcrossADip",
+        action: "Start",
+        fields: [
+          'profile = "development"',
+          "acrossDip = TRUE",
+          "dips = 1",
+          "vm = TRUE",
+        ],
+      },
+      {
+        name: "research-dip-start-reachable",
+        negative: true,
+        invariant: "NeverStartsResearchAcrossADip",
+        action: "Start",
+        fields: [
+          'profile = "research"',
+          "acrossDip = TRUE",
+          "dips = 1",
+          "vm = TRUE",
+        ],
+      },
+      // The same between the last sample and the pre-boot observation.
+      {
+        name: "boot-dip-start-reachable",
+        negative: true,
+        invariant: "NeverStartsAcrossADipBeforeBoot",
+        action: "Start",
+        fields: ["bootAcrossDip = TRUE", "dips = 1", "vm = TRUE"],
+      },
+      // The pre-boot observation admitted without its predicate check ...
+      {
+        name: "boot-host-unchecked",
+        negative: true,
+        invariant: "BootSampleOnPassingHost",
+        action: "AdmitBoot",
+        fields: ['pc = "BootAdmitted"', "hostOk = FALSE"],
+      },
+      // ... or without comparing its swapout count with the baseline.
+      {
+        name: "boot-swapouts-unchecked",
+        negative: true,
+        invariant: "BootSampleMatchesBaseline",
+        action: "AdmitBoot",
+        fields: ['pc = "BootAdmitted"', "baseline = <<0>>", "swapouts = 1"],
       },
     ],
   },
@@ -2722,6 +2796,129 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // HACK-2461: when a stored step result may replace the work, when garbage
+    // collection may delete it, and which digest a command uses for a tag.
+    // `positive` is the boot class with drift; the slot and cas classes are
+    // the two other positives. Each control removes one guard, except
+    // `no-epoch`, which removes the boot id together with the observation (the
+    // observation alone keeps boot skips sound). A `bad` flag is set only by the
+    // action that breaks its invariant, so the flag and the action pin the
+    // failure; `no-epoch` also pins the second boot to tell it from no-verify.
+    name: "step-store",
+    module: "StepStore",
+    states: 1_082_240,
+    invariant: "NoUnsoundSkip",
+    action: "Skip",
+    fields: [
+      "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+      "done = TRUE",
+    ],
+    additionalControls: [
+      { name: "positive-slot", negative: false, states: 284_160 },
+      { name: "positive-cas", negative: false, states: 184_320 },
+      {
+        name: "no-verify-slot",
+        negative: true,
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+          "done = TRUE",
+        ],
+      },
+      {
+        name: "no-verify-boot",
+        negative: true,
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+          "done = TRUE",
+        ],
+      },
+      {
+        name: "no-epoch",
+        negative: true,
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+          "boot = 2",
+          "world = {}",
+        ],
+      },
+      {
+        name: "late-key",
+        negative: true,
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+          "done = TRUE",
+        ],
+      },
+      {
+        name: "no-pin",
+        negative: true,
+        invariant: "NoPruneInUse",
+        action: "PruneFinish",
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> FALSE, use |-> TRUE, mixed |-> FALSE, stale |-> FALSE]",
+          "pruning = <<0, 0>>",
+        ],
+      },
+      {
+        name: "object-first",
+        negative: true,
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+          "done = TRUE",
+        ],
+      },
+      {
+        name: "ignore-ttl",
+        negative: true,
+        invariant: "NoSilentStaleTag",
+        action: "UseTag",
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> FALSE, use |-> FALSE, mixed |-> FALSE, stale |-> TRUE]",
+          "resolved = FALSE",
+          "offline = FALSE",
+        ],
+      },
+      {
+        name: "resolve-per-use",
+        negative: true,
+        invariant: "OneDigestPerCommand",
+        action: "UseTag",
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> FALSE, use |-> FALSE, mixed |-> TRUE, stale |-> FALSE]",
+          'cmd = "running"',
+        ],
+      },
+    ],
+  },
+  {
+    // HACK-2461: a file hash reused by stat key under the racy rule. `negative`
+    // drops the racy check; `reachability` shows a reused hash is reachable.
+    // Witnesses are the violating states themselves (see statKeyedHits).
+    name: "stat-keyed-hash",
+    module: "StatKeyedHash",
+    states: 108_942,
+    invariant: "HitIsFresh",
+    ...statKeyedHits({ withCtime: true, stale: true }),
+    additionalControls: [
+      {
+        name: "mtime-only",
+        negative: true,
+        ...statKeyedHits({ withCtime: false, stale: true }),
+      },
+      {
+        name: "racy-at-store",
+        negative: true,
+        ...statKeyedHits({ withCtime: true, stale: true }),
+      },
+      {
+        name: "reachability",
+        negative: true,
+        invariant: "NeverHits",
+        ...statKeyedHits({ withCtime: true, stale: false }),
+      },
+    ],
+  },
+  {
     // HACK-2460. One runtime service per native home. The negative control
     // binds the socket without holding service.lock.
     name: "runtime-service",
@@ -2835,6 +3032,50 @@ const contracts: readonly ModelContract[] = [
     ],
   },
 ];
+
+/**
+ * StatKeyedHash witnesses: every state in which a lookup would hit, written out
+ * over the controls' finite bounds (times 0..4, contents "A"/"B"). A hit is a
+ * valid entry whose key equals the current stat key; with `stale` its hash also
+ * differs from the content, which is exactly a `HitIsFresh` violation. Only
+ * `HashStore`, `Write` and `SetMtime` change the entry, the content or the times,
+ * so the first violating state follows one of them. Matching the violating state
+ * itself keeps the check independent of which content TLC's search reaches first.
+ */
+function statKeyedHits(opts: {
+  readonly withCtime: boolean;
+  readonly stale: boolean;
+}): {
+  readonly action: string;
+  readonly fields: readonly string[];
+  readonly alternativeWitnesses: readonly ModelWitness[];
+} {
+  const times = [0, 1, 2, 3, 4];
+  const other = (hash: string): string => (hash === "A" ? "B" : "A");
+  const witnesses = ["HashStore", "Write", "SetMtime"].flatMap((action) =>
+    times.flatMap((mtime) =>
+      (opts.withCtime ? times : [0]).flatMap((ctime) =>
+        ["A", "B"].map(
+          (hash): ModelWitness => ({
+            action,
+            fields: [
+              `entry = [valid |-> TRUE, key |-> <<${mtime}, ${ctime}>>, hash |-> "${hash}"]`,
+              `mtime = ${mtime}`,
+              ...(opts.withCtime ? [`ctime = ${ctime}`] : []),
+              ...(opts.stale ? [`content = "${other(hash)}"`] : []),
+            ],
+          })
+        )
+      )
+    )
+  );
+  const [first, ...rest] = witnesses as [ModelWitness, ...ModelWitness[]];
+  return {
+    action: first.action,
+    fields: first.fields,
+    alternativeWitnesses: rest,
+  };
+}
 
 export const runtimeModels = contracts.map((contract) => ({
   ...contract,

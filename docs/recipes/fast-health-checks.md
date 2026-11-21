@@ -8,8 +8,9 @@ and how long `hack down` waits for a dev server to stop. Every project in
 
 `start_interval` needs Docker Engine 25.0 or later and Docker Compose 2.20.2 or
 later. Hack's Compose backend uses your own engine and Compose; check them with
-`docker version` and `docker compose version`. An older engine does not use
-`start_interval`, so it checks at the steady `interval` from the start.
+`docker version` and `docker compose version`. Docker Compose refuses `start_interval` on Docker Engine versions below 25.
+On an older engine, remove `start_interval` and keep the health check. The
+engine will check at `interval` from the start.
 
 The native backend's engine is pinned to a newer version and passes these
 settings through for services without a route. When a health check sets no

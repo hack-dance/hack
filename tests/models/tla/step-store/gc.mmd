@@ -1,0 +1,20 @@
+---
+title: StepStore · pruning
+---
+stateDiagram-v2
+  direction TB
+  [*] --> None : Init
+  None --> k : PruneStart [k not pinned]
+  k --> None : PruneFinish
+  note right of k
+    pruning = k, a record key.
+    PruneStart deletes the record.
+    PruneFinish deletes the cas
+    object only if no record or
+    pin names it again.
+    INV NoPruneInUse
+  end note
+  classDef live stroke-width:1.6px
+  classDef idle stroke-width:1.6px
+  class k live
+  class None idle

@@ -22,6 +22,37 @@ Hack options go before the command tail. After the service name or `--`, everyth
 is passed through unchanged, so a child's `--json` or `--help` is never read as a
 Hack flag.
 
+On the Compose backend, `hack exec` starts `docker compose exec` with no other
+Docker call first. If the service is not running, Compose refuses, and Hack then
+adds a hint to start the stack with `hack up -d` or use `hack run`.
+
+`hack run` gives its new container the proxy and DNS addresses that `hack up` or
+`hack global up` recorded, with no Docker call for them. If the command fails,
+Hack checks those addresses with one `docker inspect`. If they changed (the proxy
+or DNS container was recreated outside Hack), Hack updates the setting and says
+so on stderr. It does not run your command again, because the command may have
+done some of its work before it failed. Run it again yourself if the failure
+was a name or connection error.
+
+```mermaid
+---
+title: hack exec and hack run · Docker reads before the command
+---
+flowchart TD
+  E[hack exec] --> F[files up left on disk]
+  F --> X[docker compose exec]
+  R[hack run] --> Q{trusted record?}
+  Q -- yes --> O[render override in memory]
+  Q -- no --> I[one docker inspect]
+  I --> O
+  O --> RUN[docker compose run]
+  RUN -- exit 0 --> D[return exit code]
+  RUN -- fails --> C[one docker inspect]
+  C -- addresses same --> D
+  C -- addresses changed --> U[refresh override, tell user]
+  U --> D
+```
+
 ## Overlay and scope
 
 These two words answer two different questions.

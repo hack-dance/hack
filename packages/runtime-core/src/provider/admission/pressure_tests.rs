@@ -1,9 +1,9 @@
 use super::*;
 use std::cell::{Cell, RefCell};
 
-const GIB: u64 = 1024 * 1024 * 1024;
+pub(super) const GIB: u64 = 1024 * 1024 * 1024;
 
-fn observation(profile: Profile, level: Option<u32>, headroom: u64) -> Admission {
+pub(super) fn observation(profile: Profile, level: Option<u32>, headroom: u64) -> Admission {
     let pressure = MemoryPressure::from_level(level);
     Admission {
         profile,
@@ -156,14 +156,14 @@ fn swapouts_must_be_observed_and_unchanged_across_the_full_window() {
 
 /// A clock tests move by hand. `sleep` advances it by the full request, except that the
 /// first `early_wakes` sleeps return after half of it.
-struct TestClock {
-    now: Cell<Duration>,
-    slept: RefCell<Vec<Duration>>,
+pub(super) struct TestClock {
+    pub(super) now: Cell<Duration>,
+    pub(super) slept: RefCell<Vec<Duration>>,
     early_wakes: Cell<u32>,
 }
 
 impl TestClock {
-    fn at(now: Duration) -> Self {
+    pub(super) fn at(now: Duration) -> Self {
         Self {
             now: Cell::new(now),
             slept: RefCell::new(Vec::new()),
@@ -171,7 +171,7 @@ impl TestClock {
         }
     }
 
-    fn advance(&self, by: Duration) {
+    pub(super) fn advance(&self, by: Duration) {
         self.now.set(self.now.get() + by);
     }
 }
@@ -196,6 +196,41 @@ const START: Duration = Duration::from_secs(5);
 
 fn opened(clock: &TestClock, level: Option<u32>) -> Opened {
     open(&observation(Profile::Development, level, 10 * GIB), clock).unwrap()
+}
+
+/// A home with no recorded earlier sample.
+struct NoRecord;
+
+impl Earlier for NoRecord {
+    fn usable(&self) -> Option<Recorded> {
+        None
+    }
+
+    fn now(&self) -> Option<Duration> {
+        None
+    }
+
+    fn in_age(&self, _: &Recorded, _: Duration) -> bool {
+        false
+    }
+
+    fn forget(&self) {}
+}
+
+/// The sample under the lease on a home with no record: the path every start took before
+/// records existed, and the one every miss still takes (`opening::tests`).
+fn recheck_without_record(
+    profile: Profile,
+    opened: Option<Opened>,
+    clock: &TestClock,
+    observe: impl FnMut() -> Result<Admission, CandidateError>,
+) -> Result<Vec<Admission>, CandidateError> {
+    let leased = recheck_after_lease(profile, opened, clock, &NoRecord, observe)?;
+    assert_eq!(
+        leased.reused,
+        (profile == Profile::Development).then_some(false)
+    );
+    Ok(leased.samples)
 }
 
 #[test]
@@ -242,7 +277,7 @@ fn a_fast_start_still_waits_out_the_admission_window_and_a_slow_one_does_not_pau
         let clock = TestClock::at(START);
         let window = opened(&clock, Some(1));
         clock.advance(Duration::from_millis(elapsed_ms));
-        let samples = recheck_after_lease(Profile::Development, Some(window), &clock, || {
+        let samples = recheck_without_record(Profile::Development, Some(window), &clock, || {
             // The sample under the lease never starts inside the window.
             assert!(clock.now() - START >= DEVELOPMENT_WINDOW, "{elapsed_ms}");
             Ok(observation(Profile::Development, Some(1), 10 * GIB))
@@ -258,7 +293,7 @@ fn an_early_wake_does_not_shorten_the_admission_window() {
     let clock = TestClock::at(START);
     let window = opened(&clock, Some(1));
     clock.early_wakes.set(2);
-    recheck_after_lease(Profile::Development, Some(window), &clock, || {
+    recheck_without_record(Profile::Development, Some(window), &clock, || {
         assert!(clock.now() - START >= DEVELOPMENT_WINDOW);
         Ok(observation(Profile::Development, Some(1), 10 * GIB))
     })
@@ -282,7 +317,7 @@ fn post_lease_sample_blocks_allocation_when_prelease_admission_goes_stale() {
         clock.advance(Duration::from_secs(2));
         let allocated = Cell::new(false);
         let calls = Cell::new(0);
-        let checked = recheck_after_lease(Profile::Development, Some(window), &clock, || {
+        let checked = recheck_without_record(Profile::Development, Some(window), &clock, || {
             calls.set(calls.get() + 1);
             let mut sample = observation(Profile::Development, Some(2), 10 * GIB);
             match defect {
@@ -307,13 +342,13 @@ fn post_lease_sample_blocks_allocation_when_prelease_admission_goes_stale() {
     }
     let clock = TestClock::at(START);
     assert!(
-        recheck_after_lease(Profile::Development, None, &clock, || panic!(
+        recheck_without_record(Profile::Development, None, &clock, || panic!(
             "missing baseline"
         ))
         .is_err()
     );
     assert!(
-        recheck_after_lease(Profile::Research, None, &clock, || panic!(
+        recheck_without_record(Profile::Research, None, &clock, || panic!(
             "research timing unchanged"
         ))
         .unwrap()
@@ -329,7 +364,7 @@ fn a_swapout_change_between_the_chained_samples_refuses_whatever_the_wait() {
             let clock = TestClock::at(START);
             let window = opened(&clock, Some(1));
             clock.advance(Duration::from_millis(elapsed_ms));
-            let error = recheck_after_lease(Profile::Development, Some(window), &clock, || {
+            let error = recheck_without_record(Profile::Development, Some(window), &clock, || {
                 let mut sample = observation(Profile::Development, Some(1), 10 * GIB);
                 sample.swapouts = Some(swaps);
                 Ok(sample)
@@ -341,12 +376,82 @@ fn a_swapout_change_between_the_chained_samples_refuses_whatever_the_wait() {
     }
 }
 
+/// The documented weakening of admitting Development on two samples: a host that fails and
+/// recovers between them is admitted. Here the host fails at every moment strictly between
+/// the sample that opens the window and the one under the lease, and passes again when that
+/// second sample is taken. The earlier code took five more samples around four fixed
+/// one-second pauses and refused when any one of them failed.
+///
+/// What still refuses such a stretch is a swapout in it, because that count is cumulative:
+/// `a_swapout_change_between_the_chained_samples_refuses_whatever_the_wait`. Two starts that
+/// pass together on a host with room for one are not a sampling question; their guard is a
+/// host-wide admission reservation, tracked separately, not more samples.
+///
+/// Every sampler call and its clock time is asserted. A sample added inside the window, or
+/// a window shorter than one second, would read the failing host and fail this test.
+#[test]
+fn a_dip_between_the_two_development_samples_is_not_seen() {
+    // When the lease is held and when the second sample is due, both after the first sample.
+    for (lease_ms, second_ms) in [
+        (0, 1000),
+        (100, 1000),
+        (999, 1000),
+        (1000, 1000),
+        (4000, 4000),
+    ] {
+        let clock = TestClock::at(START);
+        let second_at = START + Duration::from_millis(second_ms);
+        // What a sampler would return if it were asked at `at`.
+        let host = |at: Duration| {
+            let failing = START < at && at < second_at;
+            observation(
+                Profile::Development,
+                Some(if failing { 4 } else { 1 }),
+                10 * GIB,
+            )
+        };
+        for inside in [
+            START + Duration::from_millis(1),
+            START + Duration::from_millis(second_ms / 2),
+            second_at - Duration::from_millis(1),
+        ] {
+            assert!(
+                matches!(
+                    check(Profile::Development, &host(inside), Some(42)),
+                    Err(error) if error.code == "admission_rejected"
+                ),
+                "a sample at {inside:?} would refuse ({lease_ms})"
+            );
+        }
+        let asked = RefCell::new(Vec::new());
+        let sample = || {
+            asked.borrow_mut().push(clock.now());
+            host(clock.now())
+        };
+        let window = open(&sample(), &clock).unwrap();
+        clock.advance(Duration::from_millis(lease_ms));
+        let samples =
+            recheck_without_record(Profile::Development, Some(window), &clock, || Ok(sample()))
+                .unwrap_or_else(|error| panic!("{lease_ms}: {}", error.message));
+        assert_eq!(samples.len(), 1, "{lease_ms}");
+        // Exactly two readings: the one that opened the window, and one no sooner than a
+        // second later. Nothing asked the host in between.
+        assert_eq!(*asked.borrow(), [START, second_at], "{lease_ms}");
+        assert!(second_at - START >= Duration::from_secs(1));
+        assert_eq!(
+            clock.slept.borrow().iter().sum::<Duration>(),
+            Duration::from_millis(second_ms - lease_ms),
+            "{lease_ms}"
+        );
+    }
+}
+
 #[test]
 fn healthy_post_lease_warning_is_resampled_before_allocation() {
     let clock = TestClock::at(START);
     let window = opened(&clock, Some(1));
     let calls = Cell::new(0);
-    let samples = recheck_after_lease(Profile::Development, Some(window), &clock, || {
+    let samples = recheck_without_record(Profile::Development, Some(window), &clock, || {
         calls.set(calls.get() + 1);
         Ok(observation(Profile::Development, Some(2), 10 * GIB))
     })

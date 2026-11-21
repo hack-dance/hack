@@ -11,9 +11,10 @@ stateDiagram-v2
   Proven --> Proven : ProveRootEarly
   Proven --> Leased : AcquireLease [lease = free]
   Leased --> Qualified : Recheck [WindowElapsed]
+  Leased --> Qualified : Reuse [RecordUsable]
   Leased --> Qualified : Qualify [research]
   Qualified --> Qualified : RestoreAliasLeased
-  Qualified --> Settled : Settle [SameOwner]
+  Qualified --> Settled : Settle [SameOwner, treeOk]
   Settled --> RootProven : ProveRoot [rootOk]
   Settled --> RootProven : RecheckRoot [rootOk]
   RootProven --> BootAdmitted : AdmitBoot [SameSwapouts]
@@ -37,10 +38,21 @@ stateDiagram-v2
     Development: one sample here
     Research: three, before lease
   end note
+  note right of Leased
+    Reuse replaces the wait
+    never a sample
+    INV ReusedRecordSameBoot
+    INV ReusedRecordWithinBound
+    INV ReusedRecordSameSwapouts
+  end note
   note right of Qualified
     INV SecondSampleUnderLease
     INV WindowRespected
     INV ChainUnbroken
+  end note
+  note right of Settled
+    INV NoStartFromChangedTree
+    trees rechecked under lease
   end note
   note right of BootAdmitted
     INV BootBaselineIsLastSample

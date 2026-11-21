@@ -34,6 +34,8 @@ flowchart LR
      web:
        image: oven/bun:1.4.4-slim
        working_dir: /app
+       init: true
+       stop_grace_period: 2s
        command: ["bun", "src/server.ts"]
        volumes:
          - ..:/app:ro

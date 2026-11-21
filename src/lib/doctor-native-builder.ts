@@ -12,6 +12,10 @@
  * for its read-only setup inspection. It never installs or downloads anything,
  * and `--fix` does not either: adding the builder needs the download consent
  * that `hack native setup --accept-downloads` gives.
+ *
+ * The check's message is also doctor's JSON `detail`, which is stored and
+ * passed on. It names the setup command by the launcher's base name, never by
+ * its path: a candidate launcher's path is under the user's home by default.
  */
 
 import type {
@@ -96,7 +100,7 @@ export function nativeBuilderCheckResult(opts: {
       return {
         name,
         status: "warn",
-        message: `${scope}, but ${NATIVE_BUILDER_MISSING}, so native up cannot build ${one ? "it" : "them"}. ${nativeBuilderRemedy(opts.launcher)}`,
+        message: `${scope}, but ${NATIVE_BUILDER_MISSING}, so native up cannot build ${one ? "it" : "them"}. ${nativeBuilderRemedy(opts.launcher, "name")}`,
         nativeBuilder,
       };
     case "changed":

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { nativeSetupGuidance } from "../src/backends/native-runtime-setup.ts";
 import { buildDoctorJsonData } from "../src/commands/doctor.ts";
 import { doctorMetadata } from "../src/lib/doctor-metadata.ts";
 import {
@@ -15,6 +16,13 @@ const runtime = {
   home: "/opt/hack/native-home",
 };
 const launcher = { kind: "stable", command: "hack" } as const;
+/** A managed candidate install: its launcher is not on PATH and lives under the home. */
+const HOME = "/home-fixture";
+const managed = {
+  kind: "hack-next",
+  command: `${HOME}/.hack-next/bin/hack-next`,
+  bundle: `${HOME}/.hack-next/versions/5.0.0-next.1/bundle/hack-v5`,
+} as const;
 const REMEDY =
   "Run hack native setup --accept-downloads to add it; offline, add --builder <pinned builder file> to the offline setup inputs.";
 
@@ -67,7 +75,7 @@ test("a project that builds images on a home without the builder is a warning wi
     nativeBuilder: { buildServices: 2, builder: "not_prepared" },
   });
   // The same remedy the build-time refusal gives.
-  expect(check.message).toEndWith(nativeBuilderRemedy(launcher));
+  expect(check.message).toEndWith(nativeBuilderRemedy(launcher, "name"));
   // The one request is the read-only inspection: nothing is set up or downloaded.
   expect(requests).toEqual([["runtime", "setup", "inspect", "--json"]]);
 
@@ -76,8 +84,9 @@ test("a project that builds images on a home without the builder is a warning wi
     builder: "not_prepared",
     launcher: { kind: "bundle", command: "/opt/bundle/hack-v5" },
   });
+  // By the launcher's name, not its path: this text is also the JSON `detail`.
   expect(one.message).toBe(
-    "1 service builds an image, but the image builder is not installed in this native home, so native up cannot build it. Run /opt/bundle/hack-v5 native setup --accept-downloads to add it; offline, add --builder <pinned builder file> to the offline setup inputs."
+    "1 service builds an image, but the image builder is not installed in this native home, so native up cannot build it. Run hack-v5 native setup --accept-downloads to add it; offline, add --builder <pinned builder file> to the offline setup inputs."
   );
 });
 
@@ -187,4 +196,33 @@ test("doctor has no path to setup: neither it nor this check can start a downloa
   }
   // The check's own signature has no fix switch to forward.
   expect(checkNativeImageBuilder.length).toBe(1);
+});
+
+test("doctor names the setup command without the launcher's path under the home", async () => {
+  // Terminal lines name a candidate launcher by its full path, as every printed
+  // command does: it is not on PATH.
+  expect(nativeBuilderRemedy(managed)).toStartWith(
+    `Run ${HOME}/.hack-next/bin/hack-next native setup --accept-downloads `
+  );
+  expect(nativeSetupGuidance({ state: "not_set_up" }, managed)).toContain(
+    `${HOME}/.hack-next/bin/hack-next native setup`
+  );
+  // Doctor's message is also its JSON `detail`, which is stored and passed on:
+  // it names the launcher only, so it carries no home path and no user name.
+  const check = await checkNativeImageBuilder({
+    runtime,
+    cwd: "/project",
+    compose: built,
+    invoke: inspecting("not_prepared").invoke,
+    launcher: managed,
+  });
+  expect(check.status).toBe("warn");
+  expect(check.message).toContain("hack-next native setup --accept-downloads");
+  expect(check.message).not.toContain(HOME);
+  expect(check.message).not.toContain("/.hack-next/");
+  const data = buildDoctorJsonData({
+    results: [{ ...check, durationMs: 1 }],
+  });
+  expect(JSON.stringify(data)).not.toContain(HOME);
+  expect(data.checks[0]?.detail).toBe(check.message);
 });

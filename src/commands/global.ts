@@ -2365,8 +2365,7 @@ async function settleGlobalLogging(opts: {
 }): Promise<number> {
   const { paths, login } = opts;
   if (!opts.enabled) {
-    await stopDisabledLoggingStack({ paths, login });
-    return 0;
+    return await stopDisabledLoggingStack({ paths, login });
   }
   const loggingArguments = globalLoggingUpArguments({
     composeFile: paths.loggingCompose,
@@ -2395,21 +2394,33 @@ async function settleGlobalLogging(opts: {
 /**
  * With logging off: stops the stack's containers if a home still has them
  * (it was on before), keeping its volumes, and says how to turn it on. A
- * home that never had the stack makes no Docker call here.
+ * home that never had the stack makes no Docker call here. Returns the exit
+ * code: a failed stop is reported, since the containers may still run.
  */
 async function stopDisabledLoggingStack(opts: {
   readonly paths: ReturnType<typeof getGlobalPaths>;
   readonly login: boolean;
-}): Promise<void> {
+}): Promise<number> {
   if (!opts.login && (await pathExists(opts.paths.loggingCompose))) {
-    await exec(["docker", "compose", "-f", opts.paths.loggingCompose, "stop"], {
-      cwd: dirname(opts.paths.loggingCompose),
-      stdin: "ignore",
-    });
+    const stop = await exec(
+      ["docker", "compose", "-f", opts.paths.loggingCompose, "stop"],
+      { cwd: dirname(opts.paths.loggingCompose), stdin: "ignore" }
+    );
+    if (stop.exitCode !== 0) {
+      const cause = stop.stderr.trim().split("\n")[0] ?? "";
+      logger.error({
+        message: [
+          `Logging is off, but its containers could not be stopped (docker compose stop exited ${stop.exitCode})${cause ? `: ${cause}` : "."}`,
+          `They may still be running. Retry: hack global up --no-logging, or run: docker compose -f ${opts.paths.loggingCompose} stop`,
+        ].join("\n"),
+      });
+      return stop.exitCode;
+    }
   }
   logger.info({
     message: `Logging stack (Loki, Alloy, Grafana) is off; \`hack logs\` reads container logs. Turn it on with: ${LOGGING_ENABLE_COMMAND}`,
   });
+  return 0;
 }
 
 type IngressIpConflict = {

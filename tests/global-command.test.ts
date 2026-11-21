@@ -1873,6 +1873,42 @@ describe("the opt-in logging stack (HACK-2468)", () => {
     expect(await Bun.file(loggingCompose()).exists()).toBe(true);
   });
 
+  test("a failed stop of the disabled stack fails global up and says the containers may still run", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    await writeComposeFile(loggingCompose());
+    execMockResponder = (cmd) =>
+      cmd.includes(loggingCompose()) && cmd.includes("stop")
+        ? {
+            exitCode: 1,
+            stdout: "",
+            stderr: "Cannot connect to the Docker daemon\nsecond line\n",
+          }
+        : null;
+    const errors: string[] = [];
+    const capture = (chunk: string | Uint8Array) => {
+      errors.push(String(chunk));
+      return true;
+    };
+    const out = spyOn(process.stdout, "write").mockImplementation(capture);
+    const err = spyOn(process.stderr, "write").mockImplementation(capture);
+    let code: number;
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      code = await runCli(["global", "up", "--no-logging"]);
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
+    }
+    expect(code).toBe(1);
+    expect(await loggingSetting()).toBe(false);
+    const message = errors.join("\n");
+    expect(message).toContain(
+      "its containers could not be stopped (docker compose stop exited 1): Cannot connect to the Docker daemon"
+    );
+    expect(message).toContain("They may still be running.");
+    expect(message).not.toContain("second line");
+  });
+
   test("a fresh home's global up makes no logging Docker call", async () => {
     await writeComposeFile(globalCaddyComposePath());
     const { runCli } = await import("../src/cli/run.ts");

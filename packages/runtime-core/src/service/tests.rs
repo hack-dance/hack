@@ -595,15 +595,18 @@ fn partial_requests_queued_at_shutdown_cannot_hold_the_lock() {
     };
     let (shared, _wake) = prepare(&paths, options, id).unwrap();
     // Each queued peer sends one header byte and then nothing, keeping its end open.
-    let stalled: Vec<_> = (0..8)
+    let stalled: Vec<_> = (0..24)
         .map(|_| {
             let mut stream = connect(&root.0);
             stream.write_all(&[0]).unwrap();
             stream
         })
         .collect();
-    shared.stop(Outcome::Idle);
     let started = Instant::now();
+    shared.stop(Outcome::Idle);
+    // Both paths that refuse queued connections draw on the same budget, and
+    // 24 stalled peers at QUEUED_WAIT each would exceed it.
+    accept_queued(&shared, &listener).unwrap();
     assert_eq!(shut_down(&shared, listener), Outcome::Idle);
     let took = started.elapsed();
     assert!(

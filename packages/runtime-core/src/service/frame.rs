@@ -53,11 +53,28 @@ pub fn write(stream: &mut UnixStream, bytes: &[u8], limit: usize) -> Result<(), 
 /// Read one whole frame by `by`: the wait for its first byte and the rest of the
 /// frame both end there (and the rest within [`FRAME_DEADLINE`] at most).
 pub fn read_by(stream: &mut UnixStream, by: Instant, limit: usize) -> Result<Vec<u8>, FrameError> {
-    let idle = by.saturating_duration_since(Instant::now());
-    if idle.is_zero() {
-        return Err(FrameError::Idle);
+    read_capped(stream, Wait::Until(by), limit, FRAME_DEADLINE, Some(by))
+}
+
+/// How long to wait for the first byte of a frame.
+#[derive(Clone, Copy)]
+enum Wait {
+    /// Take a byte only if one is already waiting.
+    Probe,
+    /// Wait until this instant; at or after it, nothing is consumed.
+    Until(Instant),
+    Forever,
+}
+
+impl Wait {
+    fn after(idle: Duration) -> Self {
+        if idle.is_zero() {
+            return Self::Probe;
+        }
+        Instant::now()
+            .checked_add(idle)
+            .map_or(Self::Forever, Self::Until)
     }
-    read_capped(stream, idle, limit, FRAME_DEADLINE, Some(by))
 }
 
 /// Write one whole frame by `by` (and within [`FRAME_DEADLINE`] at most).
@@ -88,18 +105,18 @@ fn read_within(
     limit: usize,
     frame: Duration,
 ) -> Result<Vec<u8>, FrameError> {
-    read_capped(stream, idle, limit, frame, None)
+    read_capped(stream, Wait::after(idle), limit, frame, None)
 }
 
 fn read_capped(
     stream: &mut UnixStream,
-    idle: Duration,
+    first: Wait,
     limit: usize,
     frame: Duration,
     cap: Option<Instant>,
 ) -> Result<Vec<u8>, FrameError> {
     let mut header = [0u8; 4];
-    first_byte(stream, &mut header[..1], idle)?;
+    first_byte(stream, &mut header[..1], first)?;
     let deadline = deadline_for(frame, cap);
     read_exact_by(stream, &mut header[1..], deadline)?;
     let size = u32::from_be_bytes(header) as usize;
@@ -113,11 +130,11 @@ fn read_capped(
 
 /// Take the first byte of a frame once the socket is readable by the idle
 /// deadline. `Idle` consumes nothing.
-fn first_byte(stream: &UnixStream, byte: &mut [u8], idle: Duration) -> Result<(), FrameError> {
-    let deadline = if idle.is_zero() {
-        None
-    } else {
-        Some(Instant::now().checked_add(idle))
+fn first_byte(stream: &UnixStream, byte: &mut [u8], first: Wait) -> Result<(), FrameError> {
+    let deadline = match first {
+        Wait::Probe => None,
+        Wait::Until(by) => Some(Some(by)),
+        Wait::Forever => Some(None),
     };
     loop {
         if let Some(deadline) = deadline {
@@ -173,6 +190,11 @@ fn write_within(
     let deadline = deadline_for(frame, cap);
     for mut part in [&length.to_be_bytes()[..], bytes] {
         while !part.is_empty() {
+            // Never start a send after the deadline: a late header would leave
+            // the peer a partial frame.
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(FrameError::Truncated);
+            }
             match send_now(stream, part) {
                 Ok(0) => return Err(FrameError::Truncated),
                 Ok(count) => part = &part[count..],
@@ -487,6 +509,32 @@ mod tests {
             Err(FrameError::Idle)
         );
         drop(a);
+    }
+
+    #[test]
+    fn an_expired_deadline_sends_nothing_and_consumes_nothing() {
+        let (mut a, mut b) = pair();
+        let past = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(
+            write_by(&mut a, b"{}", CONTROL_FRAME_LIMIT, past),
+            Err(FrameError::Truncated)
+        );
+        // The peer received no byte at all.
+        assert_eq!(
+            read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT),
+            Err(FrameError::Idle)
+        );
+        // A waiting frame is not consumed by a read whose deadline has passed.
+        write(&mut a, b"{}", CONTROL_FRAME_LIMIT).unwrap();
+        assert_eq!(
+            read_by(&mut b, past, CONTROL_FRAME_LIMIT),
+            Err(FrameError::Idle)
+        );
+        assert_eq!(
+            read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT).unwrap(),
+            b"{}"
+        );
     }
 
     #[test]

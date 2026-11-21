@@ -205,6 +205,7 @@ fn prepare(
             sessions: 0,
             busy: 0,
             stopping: None,
+            refuse_until: None,
             last_activity: Instant::now(),
             streams: HashMap::new(),
             next_session: 0,
@@ -349,6 +350,9 @@ struct State {
     busy: usize,
     /// Set once, by idle expiry or retire; every later request is refused.
     stopping: Option<Outcome>,
+    /// When stopping began plus `QUEUED_BUDGET`: queued connections are refused
+    /// only until then, on every path, and closed after.
+    refuse_until: Option<Instant>,
     last_activity: Instant,
     /// A handle to every live session's socket, to shut it down at exit.
     streams: HashMap<u64, UnixStream>,
@@ -382,6 +386,9 @@ impl Shared {
     fn stop(&self, outcome: Outcome) {
         let mut state = self.state();
         state.stopping.get_or_insert(outcome);
+        state
+            .refuse_until
+            .get_or_insert_with(|| Instant::now() + QUEUED_BUDGET);
         drop(state);
         // Unlink at once so the next client starts a fresh process, which waits
         // for this one's lock.
@@ -437,7 +444,8 @@ fn run(shared: &Arc<Shared>, listener: UnixListener, wake: &UnixStream) -> Outco
 
 /// `IdleExit` and `ExitDrained`, one path for both.
 fn shut_down(shared: &Arc<Shared>, listener: UnixListener) -> Outcome {
-    refuse_queued(&listener);
+    let budget = shared.state().refuse_until.unwrap_or_else(Instant::now);
+    refuse_queued(&listener, budget);
     drop(listener);
     shared.wait_until(|s| s.busy == 0);
     // A session whose next request was not read yet sees a close; nothing it
@@ -450,21 +458,18 @@ fn shut_down(shared: &Arc<Shared>, listener: UnixListener) -> Outcome {
 }
 
 /// Connections queued when the service stops are never served. One whose whole
-/// first request arrives in time gets `E_SERVICE_DRAINING` before admission; the
-/// rest are closed. Each gets at most `QUEUED_WAIT`, all of them `QUEUED_BUDGET`.
-fn refuse_queued(listener: &UnixListener) {
-    let budget = Instant::now() + QUEUED_BUDGET;
-    loop {
+/// first request arrives in time gets `E_SERVICE_DRAINING` before admission. Each
+/// gets at most `QUEUED_WAIT`, and all of them together end at `budget`; after
+/// it, closing the listener resets whatever is still queued.
+fn refuse_queued(listener: &UnixListener, budget: Instant) {
+    while Instant::now() < budget {
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
             Err(e) if e.kind() == ErrorKind::Interrupted => continue,
             Err(e) if e.kind() == ErrorKind::ConnectionAborted => continue,
-            // Closing the listener resets anything still queued.
             Err(_) => return,
         };
-        if Instant::now() < budget {
-            refuse(stream, (Instant::now() + QUEUED_WAIT).min(budget));
-        }
+        refuse(stream, (Instant::now() + QUEUED_WAIT).min(budget));
     }
 }
 
@@ -503,10 +508,14 @@ fn accept_queued(shared: &Arc<Shared>, listener: &UnixListener) -> Result<(), ()
         };
         let id = {
             let mut state = shared.state();
-            if state.stopping.is_some() {
+            if let Some(budget) = state.refuse_until {
                 // Stopped while this connection waited: never hand it to a worker.
                 drop(state);
-                refuse(stream, Instant::now() + QUEUED_WAIT);
+                if Instant::now() >= budget {
+                    // Out of budget: close it and leave the rest to shut_down.
+                    return Ok(());
+                }
+                refuse(stream, (Instant::now() + QUEUED_WAIT).min(budget));
                 continue;
             }
             if state.sessions >= MAX_SESSIONS {

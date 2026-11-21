@@ -365,9 +365,31 @@ pub(crate) fn observe_with_code<T, E>(
 }
 fn random_id() -> Option<String> {
     let mut bytes = [0_u8; 8];
+    #[cfg(target_os = "macos")]
     // SAFETY: the fixed output buffer is writable for its full length; getentropy retains no pointer.
     if unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) } != 0 {
         return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut filled = 0;
+        while filled < bytes.len() {
+            // SAFETY: the remaining slice is writable for the supplied length; no pointer is retained.
+            // getrandom is exposed on both GNU and musl targets in the locked libc version.
+            let count = unsafe {
+                libc::getrandom(bytes[filled..].as_mut_ptr().cast(), bytes.len() - filled, 0)
+            };
+            if count < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return None;
+            }
+            if count == 0 {
+                return None;
+            }
+            filled += count as usize;
+        }
     }
     let id = bytes
         .iter()

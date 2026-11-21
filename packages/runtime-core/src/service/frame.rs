@@ -257,7 +257,7 @@ fn send_limit(stream: &UnixStream) -> usize {
         // sends. Any larger floor (512 bytes, say) would be a guess about how
         // much room POLLOUT promised, and a wrong guess can block, which is the
         // bug this function exists to avoid. On a valid socket this getsockopt
-        // does not fail (the macOS mark measured on the lead's Mac is 2048).
+        // does not fail (on macOS 26, arm64, the mark is 2048).
         if read == 0 && lowat > 0 {
             lowat as usize
         } else {
@@ -371,113 +371,134 @@ mod tests {
     /// `HANG_GUARD`.
     fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
         let (sender, received) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             let _ = sender.send(f());
         });
-        received
-            .recv_timeout(HANG_GUARD)
-            .expect("the call did not return: it hung")
+        match received.recv_timeout(HANG_GUARD) {
+            Ok(value) => value,
+            // The call panicked: report its own failure, not a hang.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                std::panic::resume_unwind(worker.join().unwrap_err())
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("the call did not return within {HANG_GUARD:?}: it hung")
+            }
+        }
     }
 
     #[test]
     fn a_frame_round_trips() {
-        let (mut a, mut b) = pair();
-        write(&mut a, b"{\"v\":1}", CONTROL_FRAME_LIMIT).unwrap();
-        let body = read(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT).unwrap();
-        assert_eq!(body, b"{\"v\":1}");
+        within(move || {
+            let (mut a, mut b) = pair();
+            write(&mut a, b"{\"v\":1}", CONTROL_FRAME_LIMIT).unwrap();
+            let body = read(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT).unwrap();
+            assert_eq!(body, b"{\"v\":1}");
+        });
     }
 
     #[test]
     fn an_oversized_or_empty_length_is_refused_before_the_body() {
-        for size in [0u32, (CONTROL_FRAME_LIMIT + 1) as u32, u32::MAX] {
-            let (mut a, mut b) = pair();
-            a.write_all(&size.to_be_bytes()).unwrap();
+        within(move || {
+            for size in [0u32, (CONTROL_FRAME_LIMIT + 1) as u32, u32::MAX] {
+                let (mut a, mut b) = pair();
+                a.write_all(&size.to_be_bytes()).unwrap();
+                assert_eq!(
+                    read(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT),
+                    Err(FrameError::TooLarge(size as usize))
+                );
+            }
+            let (mut a, _b) = pair();
+            let big = vec![b'x'; CONTROL_FRAME_LIMIT + 1];
+            assert!(matches!(
+                write(&mut a, &big, CONTROL_FRAME_LIMIT),
+                Err(FrameError::TooLarge(_))
+            ));
             assert_eq!(
-                read(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT),
-                Err(FrameError::TooLarge(size as usize))
+                write(&mut a, b"", CONTROL_FRAME_LIMIT),
+                Err(FrameError::TooLarge(0))
             );
-        }
-        let (mut a, _b) = pair();
-        let big = vec![b'x'; CONTROL_FRAME_LIMIT + 1];
-        assert!(matches!(
-            write(&mut a, &big, CONTROL_FRAME_LIMIT),
-            Err(FrameError::TooLarge(_))
-        ));
-        assert_eq!(
-            write(&mut a, b"", CONTROL_FRAME_LIMIT),
-            Err(FrameError::TooLarge(0))
-        );
+        });
     }
 
     #[test]
     fn a_length_the_prefix_cannot_carry_is_refused_even_under_a_larger_limit() {
-        // Checked before anything is allocated or written; no multi-gigabyte body.
-        let len = u32::MAX as usize + 1;
-        assert_eq!(
-            frame_length(len, usize::MAX),
-            Err(FrameError::TooLarge(len))
-        );
-        assert_eq!(frame_length(u32::MAX as usize, usize::MAX), Ok(u32::MAX));
-        assert_eq!(frame_length(0, usize::MAX), Err(FrameError::TooLarge(0)));
-        assert_eq!(frame_length(11, 10), Err(FrameError::TooLarge(11)));
+        within(move || {
+            // Checked before anything is allocated or written; no multi-gigabyte body.
+            let len = u32::MAX as usize + 1;
+            assert_eq!(
+                frame_length(len, usize::MAX),
+                Err(FrameError::TooLarge(len))
+            );
+            assert_eq!(frame_length(u32::MAX as usize, usize::MAX), Ok(u32::MAX));
+            assert_eq!(frame_length(0, usize::MAX), Err(FrameError::TooLarge(0)));
+            assert_eq!(frame_length(11, 10), Err(FrameError::TooLarge(11)));
+        });
     }
 
     #[test]
     fn a_truncated_frame_or_header_is_refused() {
-        let (mut a, mut b) = pair();
-        a.write_all(&10u32.to_be_bytes()).unwrap();
-        a.write_all(b"abc").unwrap();
-        drop(a);
-        assert_eq!(
-            read(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT),
-            Err(FrameError::Truncated)
-        );
-        let (mut a, mut b) = pair();
-        a.write_all(&[0, 0]).unwrap();
-        drop(a);
-        assert_eq!(
-            read(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT),
-            Err(FrameError::Truncated)
-        );
+        within(move || {
+            let (mut a, mut b) = pair();
+            a.write_all(&10u32.to_be_bytes()).unwrap();
+            a.write_all(b"abc").unwrap();
+            drop(a);
+            assert_eq!(
+                read(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT),
+                Err(FrameError::Truncated)
+            );
+            let (mut a, mut b) = pair();
+            a.write_all(&[0, 0]).unwrap();
+            drop(a);
+            assert_eq!(
+                read(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT),
+                Err(FrameError::Truncated)
+            );
+        });
     }
 
     #[test]
     fn a_peer_that_stalls_mid_frame_with_the_socket_open_is_cut_off_at_the_deadline() {
-        let (mut a, mut b) = pair();
-        a.write_all(&10u32.to_be_bytes()).unwrap();
-        a.write_all(b"abc").unwrap();
-        let started = Instant::now();
-        let frame = Duration::from_millis(150);
-        // Without a deadline this read would wait forever: the guard is the proof.
-        let result =
-            within(move || read_within(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT, frame));
-        assert_eq!(result, Err(FrameError::Truncated));
-        // A lower bound only: no load can make the deadline arrive early.
-        assert!(started.elapsed() >= frame);
-        drop(a);
+        within(move || {
+            let (mut a, mut b) = pair();
+            a.write_all(&10u32.to_be_bytes()).unwrap();
+            a.write_all(b"abc").unwrap();
+            let started = Instant::now();
+            let frame = Duration::from_millis(150);
+            // Without a deadline this read would wait forever: the guard is the proof.
+            let result = within(move || {
+                read_within(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT, frame)
+            });
+            assert_eq!(result, Err(FrameError::Truncated));
+            // A lower bound only: no load can make the deadline arrive early.
+            assert!(started.elapsed() >= frame);
+            drop(a);
+        });
     }
 
     #[test]
     fn a_slow_trickle_cannot_stretch_the_read_deadline() {
-        let (mut a, mut b) = pair();
-        // The frame is far longer than the trickle could deliver in any test run
-        // (one byte every 20 ms for 128 KiB is about 45 minutes), so a reader whose
-        // deadline restarted on each byte would never return and the hang guard
-        // fails the test. However late the reader starts, only a few bytes have
-        // been buffered, so a correct reader gives Truncated at its frame deadline.
-        a.write_all(&(CONTROL_FRAME_LIMIT as u32).to_be_bytes())
-            .unwrap();
-        let writer = std::thread::spawn(move || {
-            while a.write_all(b"x").is_ok() {
-                std::thread::sleep(Duration::from_millis(20));
-            }
+        within(move || {
+            let (mut a, mut b) = pair();
+            // The frame is far longer than the trickle could deliver in any test run
+            // (one byte every 20 ms for 128 KiB is about 45 minutes), so a reader whose
+            // deadline restarted on each byte would never return and the hang guard
+            // fails the test. However late the reader starts, only a few bytes have
+            // been buffered, so a correct reader gives Truncated at its frame deadline.
+            a.write_all(&(CONTROL_FRAME_LIMIT as u32).to_be_bytes())
+                .unwrap();
+            let writer = std::thread::spawn(move || {
+                while a.write_all(b"x").is_ok() {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            });
+            let frame = Duration::from_millis(200);
+            let result = within(move || {
+                read_within(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT, frame)
+            });
+            assert_eq!(result, Err(FrameError::Truncated));
+            // The reader end is gone, so the writer's next write fails and it stops.
+            writer.join().unwrap();
         });
-        let frame = Duration::from_millis(200);
-        let result =
-            within(move || read_within(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT, frame));
-        assert_eq!(result, Err(FrameError::Truncated));
-        // The reader end is gone, so the writer's next write fails and it stops.
-        writer.join().unwrap();
     }
 
     /// `write_within`, or the bounded-send writer with `chunk` bytes per send.
@@ -537,88 +558,94 @@ mod tests {
 
     #[test]
     fn partial_writes_under_backpressure_cannot_stretch_the_write_deadline() {
-        // Both send policies: this platform's, and macOS's bounded sends.
-        for chunk in [None, Some(2048)] {
-            let (mut a, b) = pair();
-            small_buffers(&a, &b);
-            // The reader drains 1 KiB every 10 ms until the writer closes, so every
-            // single write makes progress and a writer without one deadline for the
-            // whole frame would finish it (about 1.3 s) and return Ok. With the
-            // deadline it gives up with bytes left over.
-            let reader = drain(b, Duration::ZERO, Duration::from_millis(10));
-            let frame = Duration::from_millis(200);
-            let result = within(move || {
-                let body = vec![b'x'; CONTROL_FRAME_LIMIT];
-                let result = write_with(&mut a, &body, frame, chunk);
-                drop(a);
-                result
-            });
-            assert_eq!(result, Err(FrameError::Truncated));
-            let received = reader.join().unwrap();
-            assert!(
-                received < CONTROL_FRAME_LIMIT + 4,
-                "the whole frame went through: {received} bytes"
-            );
-        }
+        within(move || {
+            // Both send policies: this platform's, and macOS's bounded sends.
+            for chunk in [None, Some(2048)] {
+                let (mut a, b) = pair();
+                small_buffers(&a, &b);
+                // The reader drains 1 KiB every 10 ms until the writer closes, so every
+                // single write makes progress and a writer without one deadline for the
+                // whole frame would finish it (about 1.3 s) and return Ok. With the
+                // deadline it gives up with bytes left over.
+                let reader = drain(b, Duration::ZERO, Duration::from_millis(10));
+                let frame = Duration::from_millis(200);
+                let result = within(move || {
+                    let body = vec![b'x'; CONTROL_FRAME_LIMIT];
+                    let result = write_with(&mut a, &body, frame, chunk);
+                    drop(a);
+                    result
+                });
+                assert_eq!(result, Err(FrameError::Truncated));
+                let received = reader.join().unwrap();
+                assert!(
+                    received < CONTROL_FRAME_LIMIT + 4,
+                    "the whole frame went through: {received} bytes"
+                );
+            }
+        });
     }
 
     #[test]
     fn a_write_to_a_peer_that_stops_reading_returns_at_its_deadline_with_bytes_left() {
-        // Both send policies: this platform's, and macOS's bounded sends.
-        for chunk in [None, Some(2048)] {
-            // The peer never reads while the write runs. A send that blocked until
-            // the whole frame was written (macOS with only MSG_DONTWAIT) would never
-            // return and hang into the guard.
-            let (mut a, b) = pair();
-            small_buffers(&a, &b);
-            let frame = Duration::from_millis(200);
-            let (result, a) = within(move || {
-                let body = vec![b'x'; CONTROL_FRAME_LIMIT];
-                (write_with(&mut a, &body, frame, chunk), a)
-            });
-            assert_eq!(result, Err(FrameError::Truncated));
-            drop(a);
-            let received = drain(b, Duration::ZERO, Duration::ZERO).join().unwrap();
-            assert!(
-                received < CONTROL_FRAME_LIMIT + 4,
-                "the whole frame went through"
-            );
-        }
+        within(move || {
+            // Both send policies: this platform's, and macOS's bounded sends.
+            for chunk in [None, Some(2048)] {
+                // The peer never reads while the write runs. A send that blocked until
+                // the whole frame was written (macOS with only MSG_DONTWAIT) would never
+                // return and hang into the guard.
+                let (mut a, b) = pair();
+                small_buffers(&a, &b);
+                let frame = Duration::from_millis(200);
+                let (result, a) = within(move || {
+                    let body = vec![b'x'; CONTROL_FRAME_LIMIT];
+                    (write_with(&mut a, &body, frame, chunk), a)
+                });
+                assert_eq!(result, Err(FrameError::Truncated));
+                drop(a);
+                let received = drain(b, Duration::ZERO, Duration::ZERO).join().unwrap();
+                assert!(
+                    received < CONTROL_FRAME_LIMIT + 4,
+                    "the whole frame went through"
+                );
+            }
+        });
     }
 
     #[test]
     fn a_write_that_has_to_wait_for_room_still_finishes_within_its_deadline() {
-        // The counterpart: the reader drains only once the writer's socket has been
-        // seen full (not writable), so the writer has had to wait for room, then
-        // drains as fast as it can. A writer that gave up at its first wait fails.
-        // Both send policies: this platform's, and macOS's bounded sends.
-        for chunk in [None, Some(2048)] {
-            let (mut a, b) = pair();
-            small_buffers(&a, &b);
-            let watch = a.try_clone().unwrap();
-            let reader = std::thread::spawn(move || {
-                let started = Instant::now();
-                while writable(&watch) {
-                    assert!(
-                        started.elapsed() < HANG_GUARD,
-                        "the writer never filled the socket"
-                    );
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                // This clone of the writer's end must go, or the drain never sees
-                // end-of-file.
-                drop(watch);
-                drain(b, Duration::ZERO, Duration::ZERO).join().unwrap()
-            });
-            let result = within(move || {
-                let body = vec![b'x'; CONTROL_FRAME_LIMIT];
-                let result = write_with(&mut a, &body, Duration::from_secs(20), chunk);
-                drop(a);
-                result
-            });
-            assert_eq!(result, Ok(()), "{chunk:?}");
-            assert_eq!(reader.join().unwrap(), CONTROL_FRAME_LIMIT + 4, "{chunk:?}");
-        }
+        within(move || {
+            // The counterpart: the reader drains only once the writer's socket has been
+            // seen full (not writable), so the writer has had to wait for room, then
+            // drains as fast as it can. A writer that gave up at its first wait fails.
+            // Both send policies: this platform's, and macOS's bounded sends.
+            for chunk in [None, Some(2048)] {
+                let (mut a, b) = pair();
+                small_buffers(&a, &b);
+                let watch = a.try_clone().unwrap();
+                let reader = std::thread::spawn(move || {
+                    let started = Instant::now();
+                    while writable(&watch) {
+                        assert!(
+                            started.elapsed() < HANG_GUARD,
+                            "the writer never filled the socket"
+                        );
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    // This clone of the writer's end must go, or the drain never sees
+                    // end-of-file.
+                    drop(watch);
+                    drain(b, Duration::ZERO, Duration::ZERO).join().unwrap()
+                });
+                let result = within(move || {
+                    let body = vec![b'x'; CONTROL_FRAME_LIMIT];
+                    let result = write_with(&mut a, &body, Duration::from_secs(20), chunk);
+                    drop(a);
+                    result
+                });
+                assert_eq!(result, Ok(()), "{chunk:?}");
+                assert_eq!(reader.join().unwrap(), CONTROL_FRAME_LIMIT + 4, "{chunk:?}");
+            }
+        });
     }
 
     /// Whether the socket would accept a byte right now: a successful zero-timeout
@@ -654,19 +681,20 @@ mod tests {
 
     #[test]
     fn writing_to_a_closed_peer_is_an_error_even_with_the_default_sigpipe_action() {
-        if std::env::var_os(SIGPIPE_CHILD).is_some() {
-            // In a child process only: restore the default action, which kills.
-            // SAFETY: resetting one signal's disposition in a single-purpose child.
-            unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
-            let (mut a, b) = pair();
-            drop(b);
-            assert_eq!(
-                write(&mut a, b"{}", CONTROL_FRAME_LIMIT),
-                Err(FrameError::Io(ErrorKind::BrokenPipe))
-            );
-            return;
-        }
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        within(move || {
+            if std::env::var_os(SIGPIPE_CHILD).is_some() {
+                // In a child process only: restore the default action, which kills.
+                // SAFETY: resetting one signal's disposition in a single-purpose child.
+                unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+                let (mut a, b) = pair();
+                drop(b);
+                assert_eq!(
+                    write(&mut a, b"{}", CONTROL_FRAME_LIMIT),
+                    Err(FrameError::Io(ErrorKind::BrokenPipe))
+                );
+                return;
+            }
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "service::frame::tests::writing_to_a_closed_peer_is_an_error_even_with_the_default_sigpipe_action",
@@ -678,107 +706,119 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .status()
             .unwrap();
-        assert!(status.success(), "child ended with {status:?}");
+            assert!(status.success(), "child ended with {status:?}");
+        });
     }
 
     #[test]
     fn a_partial_header_cannot_stretch_a_whole_frame_deadline() {
-        // The cap is what must end this read: the first byte is already waiting,
-        // the frame's own deadline is a minute away, and the cap is 300 ms. A read
-        // that ignored the cap would hang into the guard. A thread that starts
-        // late finds the cap already passed and still gives Truncated.
-        let (mut a, mut b) = pair();
-        a.write_all(&[0]).unwrap();
-        let result = within(move || {
-            let cap = Instant::now() + Duration::from_millis(300);
-            let first = Wait::Until(Instant::now() + HANG_GUARD);
-            read_capped(
-                &mut b,
-                first,
-                CONTROL_FRAME_LIMIT,
-                Duration::from_secs(60),
-                Some(cap),
-            )
+        within(move || {
+            // The cap is what must end this read: the first byte is already waiting,
+            // the frame's own deadline is a minute away, and the cap is 300 ms. A read
+            // that ignored the cap would hang into the guard. A thread that starts
+            // late finds the cap already passed and still gives Truncated.
+            let (mut a, mut b) = pair();
+            a.write_all(&[0]).unwrap();
+            let result = within(move || {
+                let cap = Instant::now() + Duration::from_millis(300);
+                let first = Wait::Until(Instant::now() + HANG_GUARD);
+                read_capped(
+                    &mut b,
+                    first,
+                    CONTROL_FRAME_LIMIT,
+                    Duration::from_secs(60),
+                    Some(cap),
+                )
+            });
+            assert_eq!(result, Err(FrameError::Truncated));
+            // `read_by` is that call with the frame deadline as its cap; on an empty
+            // socket a passed deadline consumes nothing.
+            let (_c, mut d) = pair();
+            assert_eq!(
+                read_by(&mut d, Instant::now(), CONTROL_FRAME_LIMIT),
+                Err(FrameError::Idle)
+            );
+            drop(a);
         });
-        assert_eq!(result, Err(FrameError::Truncated));
-        // `read_by` is that call with the frame deadline as its cap; on an empty
-        // socket a passed deadline consumes nothing.
-        let (_c, mut d) = pair();
-        assert_eq!(
-            read_by(&mut d, Instant::now(), CONTROL_FRAME_LIMIT),
-            Err(FrameError::Idle)
-        );
-        drop(a);
     }
 
     #[test]
     fn an_expired_deadline_sends_nothing_and_consumes_nothing() {
-        let (mut a, mut b) = pair();
-        let past = Instant::now();
-        std::thread::sleep(Duration::from_millis(2));
-        assert_eq!(
-            write_by(&mut a, b"{}", CONTROL_FRAME_LIMIT, past),
-            Err(FrameError::Truncated)
-        );
-        // The peer received no byte at all.
-        assert_eq!(
-            read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT),
-            Err(FrameError::Idle)
-        );
-        // A waiting frame is not consumed by a read whose deadline has passed.
-        write(&mut a, b"{}", CONTROL_FRAME_LIMIT).unwrap();
-        assert_eq!(
-            read_by(&mut b, past, CONTROL_FRAME_LIMIT),
-            Err(FrameError::Idle)
-        );
-        assert_eq!(
-            read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT).unwrap(),
-            b"{}"
-        );
+        within(move || {
+            let (mut a, mut b) = pair();
+            let past = Instant::now();
+            std::thread::sleep(Duration::from_millis(2));
+            assert_eq!(
+                write_by(&mut a, b"{}", CONTROL_FRAME_LIMIT, past),
+                Err(FrameError::Truncated)
+            );
+            // The peer received no byte at all.
+            assert_eq!(
+                read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT),
+                Err(FrameError::Idle)
+            );
+            // A waiting frame is not consumed by a read whose deadline has passed.
+            write(&mut a, b"{}", CONTROL_FRAME_LIMIT).unwrap();
+            assert_eq!(
+                read_by(&mut b, past, CONTROL_FRAME_LIMIT),
+                Err(FrameError::Idle)
+            );
+            assert_eq!(
+                read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT).unwrap(),
+                b"{}"
+            );
+        });
     }
 
     #[test]
     fn closed_and_idle_peers_are_told_apart() {
-        let (a, mut b) = pair();
-        drop(a);
-        assert_eq!(
-            read(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT),
-            Err(FrameError::Closed)
-        );
-        let (_a, mut b) = pair();
-        assert_eq!(
-            read(&mut b, Duration::from_millis(20), CONTROL_FRAME_LIMIT),
-            Err(FrameError::Idle)
-        );
+        within(move || {
+            let (a, mut b) = pair();
+            drop(a);
+            assert_eq!(
+                read(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT),
+                Err(FrameError::Closed)
+            );
+            let (_a, mut b) = pair();
+            assert_eq!(
+                read(&mut b, Duration::from_millis(20), CONTROL_FRAME_LIMIT),
+                Err(FrameError::Idle)
+            );
+        });
     }
 
     #[test]
     fn a_zero_idle_bound_takes_only_a_waiting_frame() {
-        let (mut a, mut b) = pair();
-        // A blocking probe would wait forever here: the guard is the proof.
-        let (result, b2) = within(move || (read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT), b));
-        assert_eq!(result, Err(FrameError::Idle));
-        let mut b = b2;
-        write(&mut a, b"{}", CONTROL_FRAME_LIMIT).unwrap();
-        assert_eq!(
-            read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT).unwrap(),
-            b"{}"
-        );
+        within(move || {
+            let (mut a, mut b) = pair();
+            // A blocking probe would wait forever here: the guard is the proof.
+            let (result, b2) =
+                within(move || (read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT), b));
+            assert_eq!(result, Err(FrameError::Idle));
+            let mut b = b2;
+            write(&mut a, b"{}", CONTROL_FRAME_LIMIT).unwrap();
+            assert_eq!(
+                read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT).unwrap(),
+                b"{}"
+            );
+        });
     }
 
     #[test]
     fn an_unrepresentable_idle_bound_means_no_bound_and_never_panics() {
-        let (mut a, mut b) = pair();
-        write(&mut a, b"{}", CONTROL_FRAME_LIMIT).unwrap();
-        assert_eq!(
-            read(&mut b, Duration::MAX, CONTROL_FRAME_LIMIT).unwrap(),
-            b"{}"
-        );
-        drop(a);
-        assert_eq!(
-            read(&mut b, Duration::MAX, CONTROL_FRAME_LIMIT),
-            Err(FrameError::Closed)
-        );
+        within(move || {
+            let (mut a, mut b) = pair();
+            write(&mut a, b"{}", CONTROL_FRAME_LIMIT).unwrap();
+            assert_eq!(
+                read(&mut b, Duration::MAX, CONTROL_FRAME_LIMIT).unwrap(),
+                b"{}"
+            );
+            drop(a);
+            assert_eq!(
+                read(&mut b, Duration::MAX, CONTROL_FRAME_LIMIT),
+                Err(FrameError::Closed)
+            );
+        });
     }
 
     fn nonblocking(stream: &UnixStream) -> bool {
@@ -788,27 +828,29 @@ mod tests {
 
     #[test]
     fn reads_and_writes_never_change_the_sockets_mode() {
-        for start_nonblocking in [false, true] {
-            let (mut a, mut b) = pair();
-            a.set_nonblocking(start_nonblocking).unwrap();
-            b.set_nonblocking(start_nonblocking).unwrap();
-            let clone = b.try_clone().unwrap();
-            write(&mut a, b"{}", CONTROL_FRAME_LIMIT).unwrap();
-            assert_eq!(
-                read(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT).unwrap(),
-                b"{}"
-            );
-            assert_eq!(
-                read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT),
-                Err(FrameError::Idle)
-            );
-            assert_eq!(
-                read(&mut b, Duration::from_millis(20), CONTROL_FRAME_LIMIT),
-                Err(FrameError::Idle)
-            );
-            for stream in [&a, &b, &clone] {
-                assert_eq!(nonblocking(stream), start_nonblocking);
+        within(move || {
+            for start_nonblocking in [false, true] {
+                let (mut a, mut b) = pair();
+                a.set_nonblocking(start_nonblocking).unwrap();
+                b.set_nonblocking(start_nonblocking).unwrap();
+                let clone = b.try_clone().unwrap();
+                write(&mut a, b"{}", CONTROL_FRAME_LIMIT).unwrap();
+                assert_eq!(
+                    read(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT).unwrap(),
+                    b"{}"
+                );
+                assert_eq!(
+                    read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT),
+                    Err(FrameError::Idle)
+                );
+                assert_eq!(
+                    read(&mut b, Duration::from_millis(20), CONTROL_FRAME_LIMIT),
+                    Err(FrameError::Idle)
+                );
+                for stream in [&a, &b, &clone] {
+                    assert_eq!(nonblocking(stream), start_nonblocking);
+                }
             }
-        }
+        });
     }
 }

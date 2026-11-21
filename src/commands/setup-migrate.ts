@@ -26,7 +26,7 @@ import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { readHomeEnv } from "../lib/home-dir.ts";
 import { findRepoRootForInit } from "../lib/project.ts";
 import { type DisplayStatusItem, display } from "../ui/display.ts";
-import { logger } from "../ui/logger.ts";
+import { createTextOutput } from "../ui/text-output.ts";
 
 /**
  * `hack setup migrate`: preview (default, read-only), `--apply`, or
@@ -394,11 +394,11 @@ async function reportPreview(opts: {
     title: "Plugin migration preview (nothing changed)",
     items: planItems(opts.plan),
   });
-  logger.info({
-    message: blocked
-      ? "Install the hack plugin for the blocked clients and verify it loads in a fresh session (or pass --skip-plugin-check after checking it yourself), then rerun with --apply."
-      : "Rerun with --apply to back up and remove the files marked 'would remove'.",
-  });
+  createTextOutput().hint(
+    blocked
+      ? "install the hack plugin for blocked clients and verify it loads in a fresh session (or pass --skip-plugin-check after checking it yourself). run: hack setup migrate --apply"
+      : "back up and remove the marked files. run: hack setup migrate --apply"
+  );
   return exitCode;
 }
 
@@ -420,6 +420,16 @@ const REFUSAL_MESSAGES: Readonly<
   "backup-failed":
     "Migration refused; nothing was changed. A file could not be read for backup.",
 };
+
+function writeMigrationError(message: string): void {
+  const output = createTextOutput({
+    tty: process.stderr.isTTY === true,
+    color: false,
+    write: (line) => process.stderr.write(line),
+  });
+  const name = "plugin migration";
+  output.stepRows([{ name }])({ name, status: "error", result: message });
+}
 
 async function reportApply(opts: {
   readonly result: PluginMigrationApplyResult;
@@ -450,7 +460,7 @@ async function reportApply(opts: {
       title: "Plugin migration refused",
       items: planItems(result.plan),
     });
-    logger.error({ message: REFUSAL_MESSAGES[result.reason] });
+    writeMigrationError(REFUSAL_MESSAGES[result.reason]);
     return exitCode;
   }
   if (result.status === "nothing-to-migrate") {
@@ -472,10 +482,9 @@ async function reportApply(opts: {
       },
     ],
   });
-  logger.info({ message: `Backup manifest: ${result.manifestPath}` });
-  logger.info({
-    message: `Undo with: hack setup migrate --rollback-manifest ${result.manifestPath}`,
-  });
+  createTextOutput().hint(
+    `undo with: hack setup migrate --rollback-manifest ${result.manifestPath}`
+  );
   return exitCode;
 }
 
@@ -507,7 +516,7 @@ async function reportRollback(opts: {
     return exitCode;
   }
   if (result.status === "invalid-manifest") {
-    logger.error({ message: result.message });
+    writeMigrationError(result.message);
     return exitCode;
   }
   const counts = countBy(result.results.map((entry) => entry.status));

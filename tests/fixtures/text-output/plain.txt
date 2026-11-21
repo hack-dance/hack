@@ -1,0 +1,10 @@
+✓ services  db よ    up · 2.1s
+× after     migrate  failed
+SERVICE  ADDRESS                 STATE
+web      https://app.hack.local  healthy
+jobs     no address              -
+
+2 services · 1 up
+! cloud  sign-in expired (example-dev)
+  db needs it. run: aws sso login --profile example-dev
+nothing running. try: hack up

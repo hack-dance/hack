@@ -1,0 +1,11 @@
+[36m✓[0m services  [2mdb よ[0m    [2;90mup · 2.1s[0m
+[33m×[0m after     [2mmigrate[0m  [2;90mfailed[0m
+[2;90mSERVICE[0m  [2;90mADDRESS[0m                 [2;90mSTATE[0m
+web      [36mhttps://app.hack.local[0m  healthy
+jobs     [2;90mno address[0m              -
+
+[2;90m2 services · 1 up[0m
+[33m![0m cloud  sign-in expired (example-dev)
+  db needs it. run: aws sso login --profile example-dev
+[2;90m  press enter to continue[0m
+[2;90mnothing running. try: hack up[0m

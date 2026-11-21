@@ -1,9 +1,15 @@
 import { expect, test } from "bun:test";
 
-import { buildPanelLines, buildStatusListLines } from "../src/ui/display.ts";
+import { buildPanelLines, renderStatusList } from "../src/ui/display.ts";
+import { createTextOutput } from "../src/ui/text-output.ts";
 
 test("status list aligns rows and wraps diagnostic detail", () => {
-  const lines = buildStatusListLines({
+  const lines: string[] = [];
+  renderStatusList({
+    output: createTextOutput({
+      tty: false,
+      write: (text) => lines.push(text.slice(0, -1)),
+    }),
     width: 44,
     items: [
       { label: "Runtime", status: "ok", meta: "12 checks" },
@@ -18,6 +24,7 @@ test("status list aligns rows and wraps diagnostic detail", () => {
   });
 
   expect(lines).toEqual([
+    "",
     "✓  Runtime        12 checks",
     "!  Project & env  2 warnings",
     "   Three projects have services stuck in",

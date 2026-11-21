@@ -1472,24 +1472,19 @@ fn start_pool_observed(
     // The content proofs, taken inside the admission window and rechecked under the lease
     // (`leased_trees`). A boot records them in its tree witness (`tree_witness`). A cleanly
     // stopped pool's root files are proven beside them, read-only, on a thread of their own
-    // (`rootfs_proof`): both fill the window instead of adding to the start after it. No
-    // thread, or a proof that fails or panics, is no early proof, never a refusal.
-    let (proven_trees, early_rootfs) = rootfs_proof::beside(
-        || rootfs_proof::prove(candidate),
-        || -> Result<_, CandidateError> {
+    // (`rootfs_proof`): both fill the window instead of adding to the start after it. Root
+    // files on a filesystem where that proof could not be accepted get none, and no thread.
+    // No thread, or a proof that fails or panics, is no early proof, never a refusal.
+    let (proven_trees, early_rootfs) =
+        rootfs_proof::early_beside(candidate, || -> Result<_, CandidateError> {
             let smolvm = artifact::verify_witnessed(candidate, &artifact::SMOLVM)?;
             let engine = artifact::verify_witnessed(candidate, &artifact::ENGINE)?;
             Ok(std::collections::BTreeMap::from([
                 (super::tree_witness::SMOLVM.to_owned(), smolvm),
                 (super::tree_witness::ENGINE.to_owned(), engine),
             ]))
-        },
-    );
+        });
     let mut proven_trees = proven_trees?;
-    if early_rootfs.is_some() {
-        // The proof ran on its own thread; count it where tests look.
-        super::tree_witness::note_content_proof();
-    }
     super::network_tools::verify(candidate)?;
     let (lock, fresh_samples) = startup_admission_lease(
         &root(candidate),

@@ -12,9 +12,13 @@
 //! taken only for a pool whose owner record is a clean stop (`Owner::short_home_releasable`):
 //! any other record (running, interrupted, recovered, stopped without the clean-stop marker)
 //! gets no early proof and takes the proof under the lease, as before this module existed.
-//! [`beside`] runs it on its own thread while the caller proves the provider and engine
-//! trees. A thread the host cannot start, or a proof that panics, is no proof; neither
-//! refuses the start.
+//! Neither does a pool whose root files are not on a filesystem qualified for the metadata
+//! check (`tree_witness::qualified`): no later step could accept an early proof there, so
+//! none is taken, no thread is started and nothing is rechecked; the start hashes the root
+//! files once, in `prepare_rootfs`, as before. [`early_beside`] decides that with one
+//! metadata walk and then runs the proof on its own thread while the caller proves the
+//! provider and engine trees. A qualification that cannot be read, a thread the host
+//! cannot start and a proof that panics are all no proof; none refuses the start.
 //!
 //! What is compared, and when:
 //!
@@ -28,9 +32,10 @@
 //!    ([`Early::holds`]). The early proof stands when all of these are true: the record is
 //!    still a clean stop; the marker and the pin are the ones it names; the root files are
 //!    on a filesystem qualified for the metadata check; and the digest equals what the proof
-//!    saw. On a changed marker or pin, an unqualified filesystem or any metadata difference,
-//!    the root files are proven by content again, there, under the lease, against the
-//!    lease-held pin. A change that kept the bytes therefore continues, and a changed byte
+//!    saw. On a changed marker or pin or any metadata difference, the root files are
+//!    proven by content again, there, under the lease, against the lease-held pin. (Root
+//!    files that are no longer on a qualified filesystem are left to step 3's content
+//!    proof instead: nothing here could stand for them.) A change that kept the bytes therefore continues, and a changed byte
 //!    refuses `artifact_digest_mismatch` before any of those effects; the caller's lease is
 //!    returned as it unwinds.
 //! 3. Under the lease, where the digest is used, [`Leased::stands`] in `prepare_rootfs`:
@@ -42,8 +47,8 @@
 //!    digest handed to the boot's tree witness is the one this step computed.
 //!
 //! Without an early proof steps 2 and 3 have nothing to compare: a new home, a record that
-//! is not a clean stop, a missing owner record or pin, an alias, an unreadable entry, or
-//! root files that did not match their pin before the lease. The same holds when the
+//! is not a clean stop, an unqualified filesystem, a missing owner record or pin, an alias,
+//! an unreadable entry, or root files that did not match their pin before the lease. The same holds when the
 //! lease-held owner record cannot be read, is no longer a clean stop, or names no pin.
 //! `prepare_rootfs` then copies the root files (a new home) and proves them by content
 //! under the lease, as before. Doubt never accepts and never refuses by itself.
@@ -52,30 +57,73 @@
 //! the interval the content proof under the lease left too. What changed is the strength
 //! of the look: a content change that keeps size, times, inode, link count, mode and owner
 //! (what `tree_witness` lists) between step 1 and step 3 is not seen, where a content proof
-//! at step 3 would see it. Off a qualified filesystem no metadata comparison is trusted, so
-//! a start of a cleanly stopped pool hashes the root files at each of the three steps,
-//! where it hashed them once before. A writer that ignores the lease after step 3 is not
-//! stopped, as before.
+//! at step 3 would see it. Off a qualified filesystem none of this applies and the start is
+//! what it was: one content proof, at step 3's place. On a qualified one, the decision to
+//! take the early proof costs one more metadata walk before the tree proofs begin. A writer
+//! that ignores the lease after step 3 is not stopped, as before.
 use super::{prove_rootfs, root, rootfs_marker};
 use crate::provider::state::{Lock, Owner};
 use crate::provider::tree_witness;
 use crate::{Candidate, CandidateError, reject_aliased_state};
 use std::path::Path;
 
+/// Run `trees` (the provider and engine tree proofs) and, on a thread beside it, the early
+/// proof of the root files, when one could be accepted under the lease. Whether it could is
+/// decided first, on this thread ([`acceptable`]): where it could not, no thread is started
+/// and nothing is hashed here.
+pub(super) fn early_beside<T>(
+    candidate: &Candidate,
+    trees: impl FnOnce() -> T,
+) -> (T, Option<Early>) {
+    early_beside_with(Spawner::Host, candidate, trees)
+}
+
+fn early_beside_with<T>(
+    spawner: Spawner,
+    candidate: &Candidate,
+    trees: impl FnOnce() -> T,
+) -> (T, Option<Early>) {
+    if !acceptable(candidate) {
+        return (trees(), None);
+    }
+    let (result, early) = beside_with(spawner, || prove(candidate), trees);
+    if early.is_some() {
+        // The proof ran on its own thread; count it where tests look.
+        tree_witness::note_content_proof();
+    }
+    (result, early)
+}
+
+/// Whether an early proof of these root files could ever be accepted: only where the
+/// metadata comparison under the lease is trusted, which is the walk `Early::holds` and
+/// `Leased::stands` make (`tree_witness`). One metadata walk, no file content read. An
+/// alias, a missing or unreadable tree or an unknown filesystem is no.
+fn acceptable(candidate: &Candidate) -> bool {
+    let destination = root(candidate).join("rootfs");
+    reject_aliased_state(&destination).is_ok() && tree_witness::qualified(&[&destination])
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Proof threads asked for on this thread (tests only).
+    static THREADS_ASKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Run `proof` on its own thread while `main` runs on this one, and wait for both. The
 /// proof's result is `None` when its thread could not be started or panicked: it is an
 /// optimisation whose absence sends the caller to the proof under the lease, so it never
 /// turns into a refusal. `main`'s result is returned as it is, after the proof thread has
 /// ended.
-pub(super) fn beside<P: Send, T>(
+#[cfg(test)]
+fn beside<P: Send, T>(
     proof: impl FnOnce() -> Option<P> + Send,
     main: impl FnOnce() -> T,
 ) -> (T, Option<P>) {
     beside_with(Spawner::Host, proof, main)
 }
 
-/// How [`beside`] gets its thread; tests refuse it to stand in for a host that cannot make
-/// one.
+/// How [`beside_with`] gets its thread; tests refuse it to stand in for a host that cannot
+/// make one.
 enum Spawner {
     Host,
     #[cfg(test)]
@@ -87,6 +135,8 @@ fn beside_with<P: Send, T>(
     proof: impl FnOnce() -> Option<P> + Send,
     main: impl FnOnce() -> T,
 ) -> (T, Option<P>) {
+    #[cfg(test)]
+    THREADS_ASKED.with(|asked| asked.set(asked.get() + 1));
     std::thread::scope(|scope| {
         let thread = match spawner {
             Spawner::Host => std::thread::Builder::new()
@@ -114,7 +164,7 @@ pub(super) struct Early {
 /// Prove a cleanly stopped pool's root files by content, read-only, without the startup
 /// lease. `None` when there is nothing to prove yet (a new home), when the owner record is
 /// anything but a clean stop, or on any doubt.
-pub(super) fn prove(candidate: &Candidate) -> Option<Early> {
+fn prove(candidate: &Candidate) -> Option<Early> {
     let owner = Owner::load(candidate).ok()?;
     if !owner.short_home_releasable() {
         return None;
@@ -148,9 +198,10 @@ pub(super) struct Leased {
 /// Under the startup `lease`, after the leased sample and the tree recheck: make the early
 /// content proof of the root files describe them as they are now, or prove them by content
 /// again.
-/// `Ok(None)` when there is no early proof to recheck, or the lease-held owner record is no
-/// longer a clean stop or does not name what to prove against; the caller's full content
-/// proof then decides (`prepare_rootfs`). Refuses with the content proof's own error when the root files no
+/// `Ok(None)` when there is no early proof to recheck, the lease-held owner record is no
+/// longer a clean stop or does not name what to prove against, or the root files are no
+/// longer on a qualified filesystem; the caller's full content proof then decides
+/// (`prepare_rootfs`). Refuses with the content proof's own error when the root files no
 /// longer match the pin. Nothing is written here.
 pub(super) fn recheck(
     candidate: &Candidate,
@@ -174,7 +225,7 @@ pub(super) fn recheck(
     if reject_aliased_state(&destination).is_err() {
         return Ok(None);
     }
-    recheck_at(&destination, &early, marker, content).map(Some)
+    recheck_at(&destination, &early, marker, content)
 }
 
 fn recheck_at(
@@ -182,16 +233,27 @@ fn recheck_at(
     early: &Early,
     marker: String,
     content: String,
-) -> Result<Leased, CandidateError> {
+) -> Result<Option<Leased>, CandidateError> {
     let metadata = match early.holds(destination, &marker, Some(&content)) {
         Some(metadata) => metadata,
-        None => prove_rootfs(destination, &marker, Some(&content))?,
+        None => {
+            // Root files that have left the qualified filesystem since the early proof:
+            // nothing proven here could stand where the digest is used, so nothing is
+            // hashed here and `prepare_rootfs` proves them once.
+            if matches!(
+                tree_witness::qualified_digest(destination, Some(&marker)),
+                Ok(None)
+            ) {
+                return Ok(None);
+            }
+            prove_rootfs(destination, &marker, Some(&content))?
+        }
     };
-    Ok(Leased {
+    Ok(Some(Leased {
         marker,
         content,
         metadata,
-    })
+    }))
 }
 
 impl Leased {
@@ -281,6 +343,7 @@ mod tests {
         /// The recheck under the lease, with the owner record's marker and pin unchanged.
         fn rechecked(&self, early: &Early) -> Result<Leased, CandidateError> {
             recheck_at(&self.0, early, MARKER.into(), early.content.clone())
+                .map(|leased| leased.expect("a qualified filesystem is rechecked"))
         }
     }
 
@@ -427,14 +490,28 @@ mod tests {
     }
 
     #[test]
-    fn off_a_qualified_filesystem_the_root_files_are_proven_again_under_the_lease() {
+    fn off_a_qualified_filesystem_no_earlier_digest_is_accepted_and_nothing_is_rechecked() {
+        // An early proof and a recheck result made while the filesystem was qualified,
+        // handed to the two comparisons after it stopped being one.
         let tree = Tree::new("recheck-unqualified");
         let early = tree.proven();
+        let leased = tree.rechecked(&early).unwrap();
         tree_witness::fake_filesystem_type(Some("msdos"));
         let before = tree_witness::content_proofs();
-        let leased = tree.rechecked(&early).unwrap();
+        // Neither comparison accepts the earlier digest, although nothing changed.
+        assert_eq!(tree.held(&early), None);
+        assert_eq!(leased.stands(&tree.0, MARKER, Some(&early.content)), None);
+        // And the recheck hashes nothing: it leaves the root files to the one content
+        // proof where the digest is used, instead of proving them twice.
+        let rechecked = recheck_at(&tree.0, &early, MARKER.into(), early.content.clone()).unwrap();
+        assert!(rechecked.is_none());
+        assert_eq!(tree_witness::content_proofs(), before);
+        // That one proof is the start's, as it was before the early proof existed.
+        assert_eq!(
+            prove_rootfs(&tree.0, MARKER, Some(&early.content)).unwrap(),
+            early.metadata
+        );
         assert_eq!(tree_witness::content_proofs() - before, 1);
-        assert_eq!(leased.metadata, early.metadata);
     }
 
     #[test]
@@ -448,7 +525,9 @@ mod tests {
         assert_eq!(refused.code, "artifact_digest_mismatch");
         // Another marker: proven again, and the result is bound to that marker.
         let other = ".smolvm-ready.other";
-        let leased = recheck_at(&tree.0, &early, other.into(), pin.clone()).unwrap();
+        let leased = recheck_at(&tree.0, &early, other.into(), pin.clone())
+            .unwrap()
+            .unwrap();
         assert_eq!(tree_witness::content_proofs() - before, 2);
         assert!(leased.stands(&tree.0, other, Some(&pin)).is_some());
         // What the recheck established stands for nothing else.
@@ -818,5 +897,61 @@ mod tests {
         let refused =
             super::super::prepare_rootfs(candidate, &mut owner, Some(&leased)).unwrap_err();
         assert_eq!(refused.code, "artifact_digest_mismatch");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unqualified_filesystem_gets_no_early_proof_no_thread_and_one_content_proof() {
+        let pool = Pool::new("unqualified");
+        let candidate = &pool.candidate;
+        fs::create_dir_all(artifact::root(candidate)).unwrap();
+        for name in ["storage-template.ext4.zst", "overlay-template.ext4.zst"] {
+            fs::write(artifact::root(candidate).join(name), name).unwrap();
+        }
+        let asked = || THREADS_ASKED.with(std::cell::Cell::get);
+        // `start_pool` for the root files of a cleanly stopped pool: the early proof beside
+        // the tree proofs, the recheck under the lease, then `prepare_rootfs`. Returns the
+        // proof threads asked for and the content proofs run in the window, at the recheck
+        // and where the digest is used.
+        let start = |owner: &mut Owner| {
+            let (threads, proofs) = (asked(), tree_witness::content_proofs());
+            let ((), early) = early_beside(candidate, || ());
+            let window = tree_witness::content_proofs() - proofs;
+            let early_proof = early.is_some();
+            let lease =
+                super::super::startup_lease(&root(candidate), std::time::Duration::from_secs(2))
+                    .unwrap();
+            let leased = recheck(candidate, &lease, early).unwrap();
+            let rechecked = tree_witness::content_proofs() - proofs - window;
+            super::super::prepare_rootfs(candidate, owner, leased.as_ref()).unwrap();
+            let used = tree_witness::content_proofs() - proofs - window - rechecked;
+            (
+                early_proof,
+                leased.is_some(),
+                asked() - threads,
+                [window, rechecked, used],
+            )
+        };
+        let mut owner = Owner::load(candidate).unwrap();
+        // A qualified filesystem is unchanged: one thread, one content proof, in the
+        // window; the two comparisons under the lease hash nothing.
+        assert_eq!(start(&mut owner), (true, true, 1, [1, 0, 0]));
+        // An unqualified one: no early proof, no thread, no recheck, and exactly one
+        // content proof, where the start has always run it.
+        tree_witness::fake_filesystem_type(Some("msdos"));
+        assert!(!acceptable(candidate));
+        assert_eq!(start(&mut owner), (false, false, 0, [0, 0, 1]));
+        // A qualification that cannot be read is no early proof either: root files that
+        // are not there, or are an alias, start no thread.
+        tree_witness::fake_filesystem_type(Some("apfs"));
+        let rootfs = root(candidate).join("rootfs");
+        fs::rename(&rootfs, root(candidate).join("rootfs-aside")).unwrap();
+        assert!(!acceptable(candidate));
+        std::os::unix::fs::symlink(root(candidate).join("rootfs-aside"), &rootfs).unwrap();
+        assert!(!acceptable(candidate));
+        let threads = asked();
+        let ((), early) = early_beside(candidate, || ());
+        assert!(early.is_none());
+        assert_eq!(asked(), threads);
     }
 }

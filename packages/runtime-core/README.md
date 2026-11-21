@@ -1919,12 +1919,13 @@ result is used, after the owner record updates and after `machine update --roset
 translation is being enabled: one more metadata walk, no file content read, and the
 content proof at that point if anything differs. The digest of that last comparison is
 the one the boot's witness records. From there to `machine start` nothing looks at the
-root files again, as before. On a filesystem where metadata is not trusted each of the
-three comparisons is a content proof, so such a start hashes the root files three times. A start with no earlier proof is unchanged: the first boot
-of a new home copies the root files and proves them by content under the lease, and so
-does any start whose earlier proof could not be made (an owner record that is not a clean
-stop or has no pin, an alias, an unreadable entry, or root files that did not match
-before the lease). The table's 180 ms
+root files again, as before. On a filesystem where metadata is not trusted no earlier
+proof could be accepted, so none is taken, no thread is started and nothing is rechecked:
+such a start hashes the root files once, where it always did. A start with no earlier
+proof is unchanged: the first boot of a new home copies the root files and proves them by
+content under the lease, and so does any start whose earlier proof could not be made (an
+owner record that is not a clean stop or has no pin, an alias, an unreadable entry, or
+root files that did not match before the lease). The table's 180 ms
 was measured before this change and the root files comparison was not timed on its own.
 
 The order of the admission steps, and what can change between them, is modelled in

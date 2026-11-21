@@ -46,7 +46,7 @@ Each state is one value of the model's `pc`.
 | `Open` | `hostOk` | first sample recorded; `elapsed` reset; reserve selection bound to the owner record | `admission_pool::select`, `probe`; `admission::open` |
 | `ResearchSample` | Research; `WindowElapsed`; `hostOk`; `SameSwapouts` | next pre-lease sample recorded | `admission::sample_with` |
 | `ProveTrees` | `treeOk`; Research has all its samples | trees proven by content | `artifact::verify_witnessed` |
-| `ProveRootEarly` | `RootProofBeforeLease`; `rootOk` | root files proven in the window | `rootfs_proof::prove`, on a thread beside `ProveTrees` (`rootfs_proof::beside`); a clean stop only |
+| `ProveRootEarly` | `RootProofBeforeLease`; `rootOk` | root files proven in the window | `rootfs_proof::prove`, on a thread beside `ProveTrees` (`rootfs_proof::early_beside`); a clean stop on a qualified filesystem only |
 | `AcquireLease` | `lease = free` | lease held | `startup_lease` |
 | `Recheck` | Development; `WindowElapsed`; `hostOk`; `SameSwapouts` | second sample recorded under the lease | `admission::recheck_after_lease` |
 | `Qualify` | Research (all samples already taken) | none | `admission::recheck_after_lease` returns no sample |
@@ -76,9 +76,10 @@ proof of the root files it is true: `ProveRootEarly` and `RecheckRoot` fire and
 `stopped` phase with the marker a completed `down` writes) whose owner record
 names a root files pin that the root files matched before the lease. Without one
 it is false: the root files are proven under the lease by `ProveRoot`. That is
-the first boot of a new home, a pool whose record is not a clean stop, and any
-start whose early proof gave nothing, including one whose proof thread the host
-could not start. The model checks each path as its own configuration
+the first boot of a new home, a pool whose record is not a clean stop, root
+files that are not on a qualified filesystem (no early proof is taken there), and
+any start whose early proof gave nothing, including one whose proof thread the
+host could not start. The model checks each path as its own configuration
 (`root-before-lease`, `positive`).
 
 `RecheckRoot` is drawn once, after `Settle`. The code compares the root files

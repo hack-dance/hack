@@ -139,7 +139,7 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
         ("ResearchSample", "admission::sample_with(profile, ||"),
         (
             "ProveRootEarly, on a thread beside ProveTrees",
-            "rootfs_proof::beside(\n        || rootfs_proof::prove(candidate),",
+            "rootfs_proof::early_beside(candidate, ||",
         ),
         (
             "ProveTrees",

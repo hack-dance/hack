@@ -1,39 +1,42 @@
 name: hack-cli
 services:
   docs:
-    profiles: [docs]
     pull_policy: build
     build:
-      context: ./docs
+      context: ../site
+      dockerfile: ../.hack/docs/Dockerfile
     init: true
     working_dir: /app
     cpus: 2
     mem_limit: 6g
     volumes:
-      - ..:/app
+      - ../docs:/app/docs:ro
+      - ../scripts/docs:/app/scripts/docs:ro
+      - ../site/app:/app/site/app:ro
+      - ../site/components:/app/site/components:ro
+      - ../site/lib:/app/site/lib:ro
+      - ./docs/dev.sh:/app/dev.sh:ro
       - docs_dependencies:/app/site/node_modules
       - docs_build:/app/site/.next
-    command:
-      - /bin/sh
-      - -ec
-      - cd site && bun install --frozen-lockfile && cd .. && bun run docs:build && cd site && bun run start -- --hostname 0.0.0.0
+    command: [bash, /app/dev.sh]
     environment:
       NEXT_TELEMETRY_DISABLED: "1"
       NODE_OPTIONS: --max-old-space-size=3072
     labels:
-      caddy: docs.hack-cli.hack
+      caddy: docs.hack-cli.hack.local
       caddy.reverse_proxy: "{{upstreams 3000}}"
       caddy.tls: internal
     networks:
       - hack-dev
       - default
   deps:
-    image: imbios/bun-node:latest
+    profiles: [deps]
+    image: oven/bun:1.4.4
     working_dir: /app
     volumes:
       - ..:/app
       - node_modules:/app/node_modules
-    command: bun install
+    command: bun install --frozen-lockfile
     networks:
       - default
 
@@ -65,6 +68,8 @@ networks:
 
 volumes:
   docs_dependencies:
+    labels:
+      hack.cache.disposable: "true"
   docs_build:
   node_modules:
   toolchain_dependencies:

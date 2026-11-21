@@ -13,7 +13,12 @@ committed SVGs for GitHub; after changing their adjacent `.mmd` sources or the
 house theme, run `bun run docs:readme-diagrams`. `docs:check` re-renders and rejects
 stale pictures in either theme.
 
-Use the repository's pinned Bun. Site dependencies and `site/bun.lock` are
+From the repository root, run `hack up` and open
+[the local docs site](https://docs.hack-cli.hack.local). Edit site components or
+editorial pages under `docs/versions/` to reload the preview. Run `hack down` to
+stop it. See [the contributor runtime](../.hack/README.md) for other entry points.
+
+For standalone verification, use the repository's pinned Bun. Site dependencies and `site/bun.lock` are
 independent of the CLI workspace; Next.js also needs Node.js 20.9 or newer.
 
 From the repository root:
@@ -24,7 +29,6 @@ bun run docs:prepare      # stage the versioned corpus into site/content and sit
 bun run docs:check        # corpus, link-boundary and framing checks
 bun run docs:typecheck
 bun run docs:build
-bun run docs:dev          # http://127.0.0.1:3000
 ```
 
 With a production build served by `bun run --cwd site start`, run the HTTP smoke
@@ -36,10 +40,6 @@ bun run docs:smoke http://127.0.0.1:3000
 
 It checks every versioned route, canonical URLs, search isolation, the LLM
 exports, legacy redirects and unknown-version handling.
-
-For a Hack-routed preview, `hack up docs --profile docs --branch docs-preview
---detach` builds and serves the site in a container at a local HTTPS URL; stop it
-with `hack down --profile docs --branch docs-preview`.
 
 ## Content model
 

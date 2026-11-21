@@ -1,5 +1,27 @@
 # Develop Hack using Hack
 
+Run `hack up` from the repository root and open
+[the local docs site](https://docs.hack-cli.hack.local). The Compose backend needs
+the usual Hack local routing setup. Next.js reloads site changes, and the docs
+service restages edits under `docs/versions/`. After changing site dependencies
+or top-level site configuration, run `hack up` again to rebuild the image.
+Stop it with `hack down`, or use `hack down --prune-caches --yes` to also remove
+the docs dependency and build volumes.
+
+| Development entry point | What it starts | Where to run it |
+| --- | --- | --- |
+| `hack up` | Docs development server with local HTTPS and reload | Repository root |
+| `bun run docs:dev` | Alias for the routed docs server | Calls `hack up` |
+| Site package `dev` | Standalone loopback Next.js server | Use `hack up` for site development |
+| `bun run dev`, CLI package `dev` | Branch CLI from source with the supplied arguments | Host for host runtime operations, or `hack run --profile toolchain toolchain -- exec bun index.ts --help` for portable commands |
+| `bun run turbo:dev` | Runs workspace `dev` scripts in parallel, currently the CLI | Same paths as the CLI. The site has its own lockfile outside the workspace. |
+| `bun run macos:dev` | Generates the native project and opens Xcode | macOS host with Xcode |
+| `bun run install:dev` | Installs the development CLI on the host | Host whose CLI installation should change |
+| `deps` service | Installs the workspace dependencies in a named volume | `hack run --profile deps deps` |
+| `dev` in `examples/basic`, `next-app`, `configs/web-postgres`, `configs/monorepo/apps/{api,web}` and `recipes/deps-service` | Sample Bun servers or Next.js | `hack up` from the example project root |
+| `configs/host-dev-server` package `dev` | Host Bun server managed by a lifecycle hook | `hack up` from the example root |
+| `configs/api-worker-queue` package `api` and `worker`, `configs/static-site` package `watch` | Sample API and worker, or watched static-site build | `hack up` from the example root |
+
 Run portable checks in the opt-in `toolchain` service. The host needs Hack and a
 working container runtime; Bun, Rust, Java and TLC are installed inside the image.
 `mise.toml` pins the language tools and also supports an optional native mise setup.

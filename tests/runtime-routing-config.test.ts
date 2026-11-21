@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { YAML } from "bun";
 
 type ComposeService = {
+  readonly image?: string;
   readonly command?: string | readonly string[];
   readonly build?: { readonly context?: string };
   readonly cpus?: number;
@@ -37,7 +38,9 @@ test("repo runtime keeps local dependencies and an opt-in isolated toolchain", a
   ]);
 
   const deps = compose.services?.deps;
-  expect(deps?.command).toBe("bun install");
+  expect(deps?.command).toBe("bun install --frozen-lockfile");
+  expect(deps?.image).toBe("oven/bun:1.4.4");
+  expect(deps?.profiles).toEqual(["deps"]);
   expect(deps?.networks).toEqual(["default"]);
   expect(deps?.labels).toBeUndefined();
   const toolchain = compose.services?.toolchain;
@@ -53,23 +56,29 @@ test("repo runtime keeps local dependencies and an opt-in isolated toolchain", a
   ).toBe(false);
 });
 
-test("repo docs preview is opt-in, bounded and routed without host ports", async () => {
+test("repo docs preview starts by default, bounded and routed without host ports", async () => {
   const docs = (await readComposeConfig()).services?.docs;
 
-  expect(docs?.profiles).toEqual(["docs"]);
-  expect(docs?.build?.context).toBe("./docs");
+  expect(docs?.profiles).toBeUndefined();
+  expect(docs?.command).toEqual(["bash", "/app/dev.sh"]);
+  expect(docs?.build?.context).toBe("../site");
   expect(docs?.cpus).toBe(2);
   expect(docs?.mem_limit).toBe("6g");
   expect(docs?.ports).toBeUndefined();
   expect(docs?.privileged).toBeUndefined();
   expect(docs?.networks).toEqual(["hack-dev", "default"]);
   expect(docs?.labels).toEqual({
-    caddy: "docs.hack-cli.hack",
+    caddy: "docs.hack-cli.hack.local",
     "caddy.reverse_proxy": "{{upstreams 3000}}",
     "caddy.tls": "internal",
   });
   expect(docs?.volumes).toEqual([
-    "..:/app",
+    "../docs:/app/docs:ro",
+    "../scripts/docs:/app/scripts/docs:ro",
+    "../site/app:/app/site/app:ro",
+    "../site/components:/app/site/components:ro",
+    "../site/lib:/app/site/lib:ro",
+    "./docs/dev.sh:/app/dev.sh:ro",
     "docs_dependencies:/app/site/node_modules",
     "docs_build:/app/site/.next",
   ]);

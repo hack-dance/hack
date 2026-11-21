@@ -7,7 +7,7 @@ use super::{
     inspect_resource, load, startup, state,
 };
 use crate::provider::{
-    ProjectShareIntent, artifact, host_pin::DeviceRebind, identity, lifecycle, state::Owner,
+    ProjectShareIntent, host_pin::DeviceRebind, identity, lifecycle, state::Owner,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -291,7 +291,7 @@ fn current_owner(
     identity::verify(
         old_process,
         old_process,
-        &artifact::root(candidate).join("smolvm-bin"),
+        &lifecycle::provider_binary(candidate),
         unsafe { libc::geteuid() },
     )
     .map_err(|_| refused())?;

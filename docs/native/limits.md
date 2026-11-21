@@ -112,6 +112,14 @@ Details and the exact checks:
   installed copy lives on the virtual machine's disk) to bring hot reload back,
   or set `HACK_NATIVE_HOT_RELOAD=on` to force it on and accept a slower start
   that may fail; `off` turns it off for any size.
+- **The wait before the virtual machine starts.** Before native starts the
+  virtual machine it checks the Mac's resources twice, at least one second
+  apart. When a check that passed is on record from the last 60 seconds (a
+  recent start or stop of the virtual machine leaves one), the start skips
+  that wait. `HACK_NATIVE_ADMISSION_REUSE_SECONDS` sets how old the record may
+  be, in whole seconds from 0 to 600. The default is 60, and `0` turns reuse
+  off, so every start waits. Any other value, including one above 600, is
+  refused before anything starts or stops.
 - **Images.** Images need a Linux arm64 variant. Local registries need an explicit
   opt-in. Registries signed by a private certificate authority are not supported.
 - **Data.** Data does not move between backends, or between prerelease versions.

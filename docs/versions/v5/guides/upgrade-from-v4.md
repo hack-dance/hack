@@ -3,7 +3,7 @@
 This is a working upgrade checklist with a limited real-project trial record. It was
 audited against `next` at `26a142921c` and the v4.3.0 reference on `main` at
 `b36275575c`, with the merged Linux daemon service update at `5e017fddd3`.
-The site is pinned to **next.22**. The trials recorded below ran on next.16. The first reported trials used three existing
+The site is pinned to **next.24**. The trials recorded below ran on next.16. The first reported trials used three existing
 Compose projects on macOS, previously running v4.3.0. Start, restart, stop and
 lifecycle hooks worked without changes to their `.hack/` configuration, after
 one project's own cloud credentials were refreshed and with the reruns noted

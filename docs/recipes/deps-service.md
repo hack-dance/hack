@@ -67,6 +67,8 @@ flowchart LR
      app:
        image: oven/bun:1.4.4-slim
        working_dir: /app
+       init: true
+       stop_grace_period: 2s
        command: ["bun", "run", "dev"]
        volumes:
          - ..:/app

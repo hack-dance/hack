@@ -793,3 +793,29 @@ test("HACK-2409: a mistyped HACK_NATIVE_HOT_RELOAD is refused with the other set
     ).resolves.toBeDefined();
   }
 });
+
+test("a bad HACK_NATIVE_ADMISSION_REUSE_SECONDS is refused with the other settings, before anything starts or stops", async () => {
+  const f = await fixture();
+  for (const value of [
+    "-1",
+    "601",
+    "1.5",
+    "60s",
+    " 60",
+    "1000000",
+    "\u0666\u0660",
+  ]) {
+    await expect(
+      f.host({ HACK_NATIVE_ADMISSION_REUSE_SECONDS: value })
+    ).rejects.toMatchObject({
+      code: "E_CONFIG_INVALID",
+      message:
+        "HACK_NATIVE_ADMISSION_REUSE_SECONDS must be a whole number of seconds from 0 to 600; 0 turns reuse off. A larger value is refused, not reduced to 600.",
+    });
+  }
+  for (const value of ["0", "60", "600", ""]) {
+    await expect(
+      f.host({ HACK_NATIVE_ADMISSION_REUSE_SECONDS: value })
+    ).resolves.toBeDefined();
+  }
+});

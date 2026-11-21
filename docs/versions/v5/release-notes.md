@@ -4,7 +4,7 @@
 > `5.0.0-next.N` prereleases through `hack-next`, a separate channel that
 > installs beside stable. Stable is still v4. See [Install v5](install.md).
 >
-> Everything on this page is in `5.0.0-next.22`. The migration wait, overlay
+> Everything on this page is in `5.0.0-next.24`. The migration wait, overlay
 > reuse, the slow-project checks, `hack env overlay` and the `--json` stdout rule
 > arrived in next.21; an installed next.20 or earlier does not have them.
 

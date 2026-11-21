@@ -329,19 +329,22 @@ pub(super) fn startup_lease(root: &Path, wait: Duration) -> Result<state::Lock, 
 }
 
 /// Returning the mutation lease requires a fresh Development admission sample under it,
-/// taken no sooner than the admission window after the start's first sample.
-/// On failure RAII drops the lease, without granting owner/allocation authority.
+/// taken no sooner than the admission window after the start's first sample, or after an
+/// earlier recorded sample of this home that `earlier` finds usable (`admission::opening`).
+/// The record is read under the lease. On failure RAII drops the lease, without granting
+/// owner/allocation authority.
 fn startup_admission_lease(
     root: &Path,
     wait: Duration,
     profile: super::Profile,
     opened: Option<admission::Opened>,
     clock: &impl process::Clock,
-    observe: impl FnOnce() -> Result<admission::Admission, CandidateError>,
-) -> Result<(state::Lock, Vec<admission::Admission>), CandidateError> {
+    earlier: &impl admission::Earlier,
+    observe: impl FnMut() -> Result<admission::Admission, CandidateError>,
+) -> Result<(state::Lock, admission::Leased), CandidateError> {
     let lock = startup_lease(root, wait)?;
-    let fresh = admission::recheck_after_lease(profile, opened, clock, observe)?;
-    Ok((lock, fresh))
+    let leased = admission::recheck_after_lease(profile, opened, clock, earlier, observe)?;
+    Ok((lock, leased))
 }
 
 /// Read-only observation takes no mutation lease and detects lifecycle changes around each read.
@@ -1329,7 +1332,9 @@ fn start_pool(
     project_share: Option<super::ProjectShareIntent>,
     start: super::prepared_start::Start<'_>,
 ) -> Result<RuntimeStatus, CandidateError> {
-    crate::timings::measure(crate::timings::Step::VmEnsure, None, |_| {
+    // `admission_reused` on this span says whether a recorded earlier sample replaced the
+    // admission wait; a start whose sample under the lease was not accepted leaves it out.
+    crate::timings::measure_attributed(crate::timings::Step::VmEnsure, None, |_, attributes| {
         start_pool_observed(
             candidate,
             profile,
@@ -1338,10 +1343,13 @@ fn start_pool(
             dependency_request,
             project_share,
             start,
+            &mut attributes.admission_reused,
         )
     })
 }
 
+// The last argument reports on the caller's timing span, on either outcome.
+#[allow(clippy::too_many_arguments)]
 fn start_pool_observed(
     candidate: &Candidate,
     profile: super::Profile,
@@ -1350,9 +1358,11 @@ fn start_pool_observed(
     dependency_request: super::dependency_socket::Request,
     project_share: Option<super::ProjectShareIntent>,
     start: super::prepared_start::Start<'_>,
+    admission_reused: &mut Option<bool>,
 ) -> Result<RuntimeStatus, CandidateError> {
     // A mistyped setting is refused before any effect.
     let hot_reload = super::hot_reload::Setting::from_environment()?;
+    let admission_reuse = admission::opening::Reuse::from_environment()?;
     // A clean stop whose alias path another entry holds is moved to a fresh alias before
     // any strict owner read below refuses it.
     restore_released_short_home_before_use(candidate)?;
@@ -1461,8 +1471,17 @@ fn start_pool_observed(
     // independently verified ownership of existing disks (a live pool, or an exactly
     // clean stopped pool this start reuses) avoids charging a second VM's disks.
     let mut admission_owner = admission_pool::select(candidate, profile)?;
-    let admission = admission_pool::probe(candidate, profile, &admission_owner)?;
+    // A host this start sees failing, or cannot observe, before it holds the lease is not
+    // one an earlier record may vouch for: the record is removed if the lease is free.
+    let forget_record = || {
+        if profile == super::Profile::Development {
+            admission::opening::forget_unleased(&root(candidate));
+        }
+    };
+    let admission = admission_pool::probe(candidate, profile, &admission_owner)
+        .inspect_err(|_| forget_record())?;
     if !admission.admitted {
+        forget_record();
         return Err(CandidateError::new(
             "admission_rejected",
             admission.reasons.join(" "),
@@ -1473,7 +1492,8 @@ fn start_pool_observed(
     // so only the remainder of it is ever slept.
     let admission_clock = process::MonotonicClock::new();
     let (mut samples, opened) = if profile == super::Profile::Development {
-        let opened = admission::open(&admission, &admission_clock)?;
+        let opened =
+            admission::open(&admission, &admission_clock).inspect_err(|_| forget_record())?;
         (vec![admission], Some(opened))
     } else {
         // Retain the frozen Research window and baseline semantics.
@@ -1499,14 +1519,26 @@ fn start_pool_observed(
         });
     let mut proven_trees = proven_trees?;
     super::network_tools::verify(candidate)?;
-    let (lock, fresh_samples) = startup_admission_lease(
-        &root(candidate),
+    // A recorded earlier sample of this home may replace the rest of the window, never a
+    // sample: the start takes its sample under the lease either way (`admission::opening`).
+    let pool_root = root(candidate);
+    let opening_host = admission::opening::System;
+    let opening = admission::opening::Opening::new(&pool_root, &opening_host, admission_reuse);
+    let (lock, leased) = startup_admission_lease(
+        &pool_root,
         STARTUP_LEASE_WAIT,
         profile,
         opened,
         &admission_clock,
+        &opening,
         || admission_pool::probe(candidate, profile, &admission_owner),
     )?;
+    let admission::Leased {
+        samples: fresh_samples,
+        reused,
+        sampled_at,
+    } = leased;
+    *admission_reused = reused;
     samples.extend(fresh_samples);
     // The trees were proven before the lease, which is what fences their writers. Before
     // anything below reads or executes them, each must still be what its proof saw, or be
@@ -1558,6 +1590,14 @@ fn start_pool_observed(
         existing_dependencies,
         existing_share.clone(),
     )?;
+    // This start's passing sample under the lease becomes the home's recorded earlier
+    // sample, also when the start reused one. It is written only now that the pool has its
+    // owner record: an unowned pool root may hold nothing but the operation lock
+    // (`require_fresh_source_pool` above), and both rechecks have passed. A record that
+    // cannot be written costs the next start its wait and nothing else.
+    if let (Some(_), Some(sample)) = (reused, samples.last()) {
+        admission::opening::record(&pool_root, &lock, &opening_host, sample, sampled_at);
+    }
     // These leased checks must stay a superset of `running_start::StartRequest::check`, which
     // the fast path runs under its lease; network is bound to the pre-lease receipt here.
     super::project_share::check_request(&owner.project_shares(), project_share.as_ref())?;
@@ -1685,14 +1725,24 @@ fn start_pool_observed(
     }
     // A fresh admission immediately before boot, on the qualification's basis, closes
     // installation/lock delays. `machine start` needs the permit it leads to.
+    // The check before boot is a host sample too: one that fails or cannot be taken removes
+    // the record this start wrote above, so a retry waits its window again.
+    let forget_leased = || {
+        if profile == super::Profile::Development {
+            admission::opening::forget(&pool_root, &lock);
+        }
+    };
     let boot = match admission_pool::admit_boot(
         candidate,
         profile,
         &restart,
         samples.last().and_then(|sample| sample.swapouts),
-    )? {
+    )
+    .inspect_err(|_| forget_leased())?
+    {
         admission_pool::BootGate::Admitted(boot) => boot,
         admission_pool::BootGate::Refused(error) => {
+            forget_leased();
             // Nothing booted: a clean stop stays clean, an unclean one stays unclean.
             phase(candidate, &mut owner, "stopped")?;
             return Err(error);
@@ -2634,11 +2684,26 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
     if initial.phase == "uninitialized" {
         return Ok(initial);
     }
-    let _lock = state::Lock::acquire(&root(candidate))?;
+    let lock = state::Lock::acquire(&root(candidate))?;
     // Builds take their shared fence only under this lease, so none can start after this.
     super::image_build::require_no_active_build(candidate)?;
     let mut owner = Owner::load(candidate)?;
     let stopped = provider_stopped(&owner.phase, initial.process_alive);
+    // When there is a pool to stop, one host sample is taken beside the stop, on its own
+    // thread, so a start that follows soon need not wait out its admission window
+    // (`admission::opening`). It is taken on the unowned basis, which claims nothing about
+    // this pool. The stop never waits for it and cannot fail on it: it is settled after the
+    // stop, under this lease, if it is back by then.
+    let stop_sample = if stopped {
+        admission::opening::StopSample::NotTaken
+    } else {
+        let checkout = candidate.checkout.clone();
+        admission::opening::StopSample::beside(
+            owner.profile,
+            move || admission::probe_for(&checkout, super::Profile::Development),
+            || admission::opening::Host::now(&admission::opening::System),
+        )
+    };
     // Only stopping a provider reaches the prepared tree. A stopped pool's down executes
     // nothing from it, so a tree changed outside Hack cannot block quiescence; any later
     // start still verifies the tree (see `repair_provider_trees`).
@@ -2682,6 +2747,7 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
         status.interrupted_runs_unknown = live.is_none();
         status.interrupted_runs = live;
     }
+    stop_sample.settle(&root(candidate), &lock, &admission::opening::System);
     result
 }
 

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathExists } from "./fs.ts";
@@ -9,7 +10,9 @@ import { pathExists } from "./fs.ts";
  *
  * Layout: `<hack home>/compose-overrides/<project key>/<instance>.yml`, where
  * the project key is the project folder name plus a digest of the project's
- * `.hack` path, and the instance is the branch slug or `@base`.
+ * `.hack` path, and the instance is the branch slug or `@base`. The path is
+ * the real one (symlinks resolved): a project reached through a symlinked
+ * `--path` and through its real path is one project, with one override.
  *
  * Compose resolves relative paths against the project directory (the first
  * `-f` file's folder), never against an override's own folder, and the file
@@ -30,13 +33,22 @@ function projectStoreDir(opts: {
   readonly hackHome: string;
   readonly projectDir: string;
 }): string {
-  const projectDir = resolve(opts.projectDir);
+  const projectDir = realProjectDir(opts.projectDir);
   const digest = createHash("sha256")
     .update(projectDir)
     .digest("hex")
     .slice(0, 16);
   const name = basename(dirname(projectDir)).replace(/[^A-Za-z0-9._-]/g, "_");
   return join(opts.hackHome, STORE_DIR_NAME, `${name}-${digest}`);
+}
+
+/** The project's `.hack` path with symlinks resolved; as given if it is gone. */
+function realProjectDir(projectDir: string): string {
+  try {
+    return realpathSync.native(projectDir);
+  } catch {
+    return resolve(projectDir);
+  }
 }
 
 export function internalOverrideStorePath(opts: {

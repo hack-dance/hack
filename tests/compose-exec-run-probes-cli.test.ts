@@ -5,8 +5,10 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -57,7 +59,9 @@ let bin = "";
 let hackHome = "";
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "hack-exec-run-probes-"));
+  // Resolved once: on macOS the temp directory is behind a symlink
+  // (/var -> /private/var), and the CLI passes real paths.
+  root = await realpath(await mkdtemp(join(tmpdir(), "hack-exec-run-probes-")));
   project = join(root, "project");
   bin = join(root, "bin");
   hackHome = join(root, "hack-home");
@@ -303,6 +307,26 @@ test("exec regenerates the overrides when they name a service the Compose file d
   const again = await cli(["exec", "api", "--", "true"]);
   expect(again.exitCode).toBe(0);
   expect(again.raw[0] ?? "").toContain(envOverride);
+});
+
+test("one project reached through a symlink and through its real path keeps one override", async () => {
+  const link = join(root, "link-to-project");
+  await symlink(project, link);
+
+  // Started through the symlinked path, used from the real path.
+  expect((await cli(["up", "-d", "--path", link])).exitCode).toBe(0);
+  const afterUp = await storedOverrides();
+  expect(afterUp).toHaveLength(1);
+  const exec = await cli(["exec", "api", "--", "true"]);
+  expect(exec.exitCode).toBe(0);
+  expect(exec.raw[0] ?? "").toContain(afterUp[0] ?? "<none>");
+
+  // And the other way round: a run from the real path, an exec through the link.
+  expect((await cli(["run", "api", "--", "true"])).exitCode).toBe(0);
+  const viaLink = await cli(["exec", "--path", link, "api", "--", "true"]);
+  expect(viaLink.exitCode).toBe(0);
+  expect(await storedOverrides()).toEqual(afterUp);
+  expect(viaLink.raw[0] ?? "").toContain(afterUp[0] ?? "<none>");
 });
 
 test("exec with nothing generated yet reads and writes no override", async () => {

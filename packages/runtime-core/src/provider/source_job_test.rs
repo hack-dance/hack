@@ -341,12 +341,18 @@ fn owned_immutable_source_job_live() -> Result<(), CandidateError> {
         let engine = Engine::connect(&candidate)?;
         let positive_events = engine.job_events(&job, since, now())?;
         let stale_events = engine.job_events(
-            &format!("{:x}", Sha256::digest(stale_operation.as_bytes())),
+            &format!(
+                "{:x}",
+                crate::Hex(Sha256::digest(stale_operation.as_bytes()))
+            ),
             since,
             now(),
         )?;
         let unpublished_events = engine.job_events(
-            &format!("{:x}", Sha256::digest(unpublished_operation.as_bytes())),
+            &format!(
+                "{:x}",
+                crate::Hex(Sha256::digest(unpublished_operation.as_bytes()))
+            ),
             since,
             now(),
         )?;

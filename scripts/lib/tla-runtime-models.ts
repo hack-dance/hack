@@ -30,6 +30,38 @@ type ModelContract = {
   }[];
 };
 
+// The two runtime-service clients are symmetric, so a control may show either
+// one as the client that breaks the invariant.
+type Client = "c1" | "c2";
+type ClientFields = (me: Client) => readonly string[];
+function pairOf(
+  variable: string,
+  me: Client,
+  mine: string,
+  theirs: string
+): string {
+  const [first, second] = me === "c1" ? [mine, theirs] : [theirs, mine];
+  return `${variable} = (c1 :> ${first} @@ c2 :> ${second})`;
+}
+function runtimeServiceEither(
+  action: string,
+  fields: ClientFields,
+  also?: { readonly action: string; readonly fields: ClientFields }
+) {
+  const witnesses = [
+    { action, fields: fields("c1") },
+    { action, fields: fields("c2") },
+    ...(also
+      ? [
+          { action: also.action, fields: also.fields("c1") },
+          { action: also.action, fields: also.fields("c2") },
+        ]
+      : []),
+  ];
+  const [first, ...alternativeWitnesses] = witnesses;
+  return { ...first, alternativeWitnesses };
+}
+
 // Bounds and witnesses are reviewed contracts, not learned from each run.
 const laterIncompleteMissingLockStages = [
   "temp",
@@ -2507,6 +2539,119 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NeverHits",
         ...statKeyedHits({ withCtime: true, stale: false }),
+      },
+    ],
+  },
+  {
+    // HACK-2460. One runtime service per native home. The negative control
+    // binds the socket without holding service.lock.
+    name: "runtime-service",
+    module: "RuntimeService",
+    states: 1_006_849,
+    invariant: "LockedOwner",
+    action: "Bind",
+    fields: ["lock = 0", "svcLease = 0"],
+    alternativeWitnesses: ["lock = 1", "lock = 2"].map((lock) => ({
+      action: "Bind",
+      fields: [lock, "svcLease = 0"],
+    })),
+    additionalControls: [
+      {
+        // The effect runs before the durable intent record: a crash after
+        // the effect and a resend run it again.
+        name: "effect-before-accept",
+        negative: true,
+        invariant: "AtMostOnce",
+        ...runtimeServiceEither("Begin", (me) => [
+          pairOf("effects", me, "2", "0"),
+          'intent = (c1 :> "none" @@ c2 :> "none")',
+        ]),
+      },
+      {
+        // A resent intent id is admitted again instead of answered.
+        name: "no-dedupe",
+        negative: true,
+        invariant: "AtMostOnce",
+        ...runtimeServiceEither("Begin", (me) => [
+          pairOf("effects", me, "2", "0"),
+          "oneLease = NoClient",
+        ]),
+      },
+      {
+        // The one-shot fallback while a written frame is still unsure. The
+        // second effect is either the one-shot start or the buffered frame's.
+        name: "fallback-after-send",
+        negative: true,
+        invariant: "AtMostOnce",
+        ...runtimeServiceEither(
+          "OneShotBegin",
+          (me) => [pairOf("effects", me, "2", "0"), "svcLease = 0"],
+          {
+            action: "Begin",
+            fields: (me) => [
+              pairOf("effects", me, "2", "0"),
+              "oneLease = NoClient",
+            ],
+          }
+        ),
+      },
+      {
+        // A service of another build admits a mutation.
+        name: "ignore-skew",
+        negative: true,
+        invariant: "SameBuild",
+        action: "Admit",
+        fields: ["svcLease = 0", "effects = (c1 :> 0 @@ c2 :> 0)"],
+      },
+      {
+        // One-shot inspection while a service process still holds the lock:
+        // after "not done", the service reads the buffered frame and starts it.
+        name: "inspect-while-held",
+        negative: true,
+        invariant: "ReportHonest",
+        ...runtimeServiceEither("Begin", (me) => [
+          pairOf("report", me, '"notdone"', '"none"'),
+          pairOf("world", me, '"started"', '"none"'),
+        ]),
+      },
+      {
+        // Reachability: the "outcome unknown" answer happens.
+        name: "reach-unknown",
+        negative: true,
+        invariant: "NeverUnknown",
+        action: "AnswerUnknown",
+        fields: ["svcLease = 0", "effects = (c1 :> 0 @@ c2 :> 0)"],
+      },
+      {
+        // Reachability: an honest "not done" after inspection happens.
+        name: "reach-not-done",
+        negative: true,
+        invariant: "NeverNotDone",
+        action: "Inspect",
+        fields: ["lock = 0", "effects = (c1 :> 0 @@ c2 :> 0)"],
+      },
+      {
+        // Reachability: a one-shot fallback completes and frees the lease.
+        name: "reach-one-shot",
+        negative: true,
+        invariant: "NeverOneShotDone",
+        action: "OneShotEnd",
+        fields: [
+          "svcLease = 0",
+          "oneLease = NoClient",
+          'intent = (c1 :> "none" @@ c2 :> "none")',
+        ],
+      },
+      {
+        // Reachability: inspection of work that started and did not
+        // complete reports "unknown".
+        name: "reach-inconclusive",
+        negative: true,
+        invariant: "NeverInconclusive",
+        ...runtimeServiceEither("Inspect", (me) => [
+          pairOf("report", me, '"unknown"', '"none"'),
+          pairOf("world", me, '"started"', '"none"'),
+        ]),
       },
     ],
   },

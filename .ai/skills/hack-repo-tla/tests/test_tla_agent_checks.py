@@ -36,7 +36,7 @@ class TlaAgentChecksTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(home.exists())
             self.assertNotIn("mise use", result.stdout)
-            self.assertIn("mise install java@temurin-17.0.20+101", result.stdout)
+            self.assertIn("mise install java@temurin-17.0.20.1+1", result.stdout)
             self.assertIn("-Xmx512m", result.stdout)
             self.assertIn("-workers 2", result.stdout)
             self.assertNotIn("Downloading https://github.com/apalache", result.stdout)

@@ -1,0 +1,35 @@
+name: Contributor toolchain image
+
+on:
+  pull_request:
+    paths:
+      - mise.toml
+      - .hack/toolchain/**
+      - scripts/check-toolchain-image.sh
+      - .github/workflows/toolchain-image.yml
+  push:
+    branches: [main, next]
+    paths:
+      - mise.toml
+      - .hack/toolchain/**
+      - scripts/check-toolchain-image.sh
+      - .github/workflows/toolchain-image.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  clean-build:
+    name: Clean contributor image build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build without cached layers and check the pinned tools
+        run: sh scripts/check-toolchain-image.sh

@@ -97,8 +97,9 @@ fn lease_wait_pressure_change_refuses_owner_commit_and_releases_the_mutation_lea
 }
 
 /// Ties `start_pool` to the step order of `tests/models/tla/pool-start-admission/PoolStart.tla`
-/// in its `positive` configuration (root files proven under the lease). It reads source
-/// order only; what each step does is covered by the tests that model's `COVERAGE.md` names.
+/// in its `positive` configuration (trees rechecked and root files proven under the lease).
+/// It reads source order only; what each step does is covered by the tests that model's
+/// `COVERAGE.md` names.
 #[test]
 fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
     let source = include_str!("../lifecycle.rs");
@@ -144,6 +145,10 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
         ),
         ("AcquireLease, Recheck, Qualify", "startup_admission_lease("),
         (
+            "RefuseTreeRecheck, the tree guard of Settle and ObserveRunning",
+            "leased_trees::recheck(candidate, &lock, &mut proven_trees)?;",
+        ),
+        (
             "RestoreAliasLeased",
             "restore_released_short_home(candidate)?;",
         ),
@@ -180,4 +185,34 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
     );
     assert_eq!(body.matches("samples.extend(").count(), 1);
     assert_eq!(body.matches("samples.push(").count(), 0);
+    // The tree recheck is the first use of the lease after the sample: between recording
+    // the leased sample and the recheck the source holds comments only, so nothing is
+    // written and no provider command runs there. The model's `ObserveRunning` branch and
+    // every read of a tree come after it.
+    let recheck = at("leased_trees::recheck(candidate, &lock, &mut proven_trees)?;");
+    let sampled = "samples.extend(fresh_samples);";
+    let between = &body[at(sampled) + sampled.len()..recheck];
+    for line in between.lines().map(str::trim) {
+        assert!(
+            line.is_empty() || line.starts_with("//"),
+            "only comments may sit between the leased sample and the tree recheck, found `{line}`"
+        );
+    }
+    for later in [
+        "interrupted::before_boot(",
+        "Owner::create_with_project_share(",
+        "state::write(&root(candidate).join(\"admission.json\")",
+        "if owner.phase == \"running\" {",
+        "agent::require_engine_names_unshadowed(",
+        "create_machine(candidate",
+    ] {
+        assert!(
+            recheck < at(later),
+            "the tree recheck must come before `{later}`"
+        );
+    }
+    // The boot's witness is the rechecked proofs, with the root files proof added to them.
+    let witness = &body[at("tree_witness::record_boot(")..];
+    assert!(witness[..witness.find(");").unwrap()].contains("proven_trees,"));
+    assert_eq!(body.matches("let mut proven_trees").count(), 1);
 }

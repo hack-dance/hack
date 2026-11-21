@@ -6,6 +6,7 @@ mod disk_handles;
 mod guest_memory_peak;
 pub mod host_filesystem;
 mod interrupted;
+mod leased_trees;
 mod operating_guard;
 mod pool_users;
 mod prepared_boot;
@@ -1464,7 +1465,8 @@ fn start_pool_observed(
         })?;
         (samples, None)
     };
-    // The content proof a boot records in its tree witness (`tree_witness`).
+    // The content proofs, taken inside the admission window and rechecked under the lease
+    // (`leased_trees`). A boot records them in its tree witness (`tree_witness`).
     let mut proven_trees = std::collections::BTreeMap::from([
         (
             super::tree_witness::SMOLVM.to_owned(),
@@ -1485,6 +1487,10 @@ fn start_pool_observed(
         || admission_pool::probe(candidate, profile, &admission_owner),
     )?;
     samples.extend(fresh_samples);
+    // The trees were proven before the lease, which is what fences their writers. Before
+    // anything below reads or executes them, each must still be what its proof saw, or be
+    // proven again; the witness this boot records names these proofs (`leased_trees`).
+    leased_trees::recheck(candidate, &lock, &mut proven_trees)?;
     // Recheck a clean stop's alias under the lease before the release checks probe its
     // sockets or the provider runs with it as HOME.
     restore_released_short_home(candidate)?;

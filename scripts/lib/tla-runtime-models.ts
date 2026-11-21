@@ -1805,10 +1805,10 @@ const contracts: readonly ModelContract[] = [
     // One start of a pool that is not running: two chained Development samples
     // (the second under the startup lease, a window after the first), Research's
     // three pre-lease samples, the content proofs, the tree recheck under the
-    // lease and the pre-boot check.
+    // lease and the pre-boot check, on a host that can fail and recover once.
     name: "pool-start-admission",
     module: "PoolStart",
-    states: 21_028,
+    states: 56_252,
     // Development's second sample taken before the startup lease.
     invariant: "SecondSampleUnderLease",
     action: "Recheck",
@@ -1816,7 +1816,7 @@ const contracts: readonly ModelContract[] = [
     additionalControls: [
       // The follow-up ordering: root files proven in the window, rechecked
       // under the lease.
-      { name: "root-before-lease", negative: false, states: 27_004 },
+      { name: "root-before-lease", negative: false, states: 71_588 },
       {
         name: "window-not-enforced",
         negative: true,
@@ -1886,6 +1886,40 @@ const contracts: readonly ModelContract[] = [
         invariant: "NeverStartsOnMovedAlias",
         action: "Start",
         fields: ['alias = "moved"', "selected = 2", "vm = TRUE"],
+      },
+      // The first sample recorded without its predicate check.
+      {
+        name: "first-sample-unchecked",
+        negative: true,
+        invariant: "SamplesTakenOnPassingHost",
+        action: "Open",
+        fields: ['pc = "Opened"', "hostOk = FALSE"],
+      },
+      // What few samples do not see, as reachable facts: a start admitted
+      // although the host failed between two of its accepted samples.
+      {
+        name: "development-dip-start-reachable",
+        negative: true,
+        invariant: "NeverStartsDevelopmentAcrossADip",
+        action: "Start",
+        fields: [
+          'profile = "development"',
+          "acrossDip = TRUE",
+          "dips = 1",
+          "vm = TRUE",
+        ],
+      },
+      {
+        name: "research-dip-start-reachable",
+        negative: true,
+        invariant: "NeverStartsResearchAcrossADip",
+        action: "Start",
+        fields: [
+          'profile = "research"',
+          "acrossDip = TRUE",
+          "dips = 1",
+          "vm = TRUE",
+        ],
       },
     ],
   },

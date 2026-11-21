@@ -102,11 +102,18 @@ reaches `Started` with a changed tree.
 ## Environment
 
 These actions belong to the host and to other processes. None is drawn.
+`Degrade` followed by `Recover` between two accepted samples is a dip that no
+sample sees: the start is admitted, and the model records it in `acrossDip`. Two
+controls, `development-dip-start-reachable` and `research-dip-start-reachable`,
+require that such a start is reachable. `SamplesTakenOnPassingHost` holds all the
+same: `hostOk` was true at each sample, on the `Open`, `ResearchSample` and
+`Recheck` edges.
 
 | Action | Meaning |
 | --- | --- |
 | `Tick` | the monotonic clock advances, up to the window |
 | `Degrade` | memory, pressure, thermal state or disk headroom stops qualifying |
+| `Recover` | the host qualifies again, at most once |
 | `Swapout` | the host's swapout count grows |
 | `OtherAcquire`, `OtherRelease` | another lifecycle operation of this home takes or returns the lease |
 | `OtherStart` | a concurrent start, holding the lease, boots the pool |

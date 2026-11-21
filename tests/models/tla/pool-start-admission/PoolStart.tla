@@ -9,6 +9,8 @@ EXTENDS Naturals, Sequences
 CONSTANTS Window,               \* ticks between chained samples
           ResearchQuota,        \* Research samples before the lease
           MaxSwapouts,          \* bound on the host swapout counter
+          MaxDips,              \* bound on the host failing and recovering
+          EnforceFirstCheck,    \* the first sample must pass every predicate
           RootProofBeforeLease, \* FALSE: root files proven under the lease
           SampleUnderLease,     \* Development's second sample needs the lease
           EnforceWindow,        \* ... and the elapsed window
@@ -16,10 +18,13 @@ CONSTANTS Window,               \* ticks between chained samples
           ChainToBoot,          \* pre-boot check uses the last sample's count
           EnforceRootRecheck,   \* root metadata recheck under the lease
           EnforceTreeRecheck    \* trees rechecked under the lease
-VARIABLES profile, pc, lease, elapsed, hostOk, swapouts, samples, baseline,
-          treeOk, treeProved, rootOk, rootProved, alias, selected,
-          poolRunning, vm
-host == <<hostOk, swapouts>>
+VARIABLES profile, pc, lease, elapsed, hostOk, swapouts, dips, failedSince,
+          acrossDip, samples, baseline, treeOk, treeProved, rootOk, rootProved,
+          alias, selected, poolRunning, vm
+\* What the host is now, and what the samples did not see of it: failedSince, the
+\* host failed at some moment since the last accepted sample; acrossDip, some
+\* accepted sample came after such a moment.
+host == <<hostOk, swapouts, dips, failedSince, acrossDip>>
 proofs == <<treeOk, treeProved, rootOk, rootProved>>
 owner == <<alias, selected>>
 vars == <<profile, pc, lease, elapsed, host, samples, baseline, proofs, owner,
@@ -39,30 +44,47 @@ WindowElapsed == elapsed = Window
 SameSwapouts == swapouts = Last.swap
 SameOwner == selected \in {0, OwnerVersion}
 \* One host observation. hostOk stands for every predicate of admission::check
-\* except the swapout chain; `gap` is the time since the previous sample.
-Observe(leased) == [swap |-> swapouts, gap |-> elapsed, leased |-> leased]
+\* except the swapout chain; `gap` is the time since the previous sample and `ok`
+\* is whether the host passed those predicates when the sample was taken.
+Observe(leased) ==
+    [swap |-> swapouts, gap |-> elapsed, leased |-> leased, ok |-> hostOk]
+\* A sample is still due after one already taken: the stretch a dip can hide in.
+SampleDue == samples # <<>> /\ Len(samples) < Quota
+\* An accepted sample starts the next window and ends the stretch before it.
+Accept(leased) == /\ samples' = Append(samples, Observe(leased)) /\ elapsed' = 0
+                  /\ acrossDip' = (acrossDip \/ failedSince) /\ failedSince' = FALSE
 Released == IF lease = "self" THEN "free" ELSE lease
 Init == /\ profile \in {"development", "research"}
         /\ pc = "Idle" /\ lease = "free" /\ elapsed = 0
-        /\ hostOk = TRUE /\ swapouts = 0 /\ samples = <<>> /\ baseline = <<>>
+        /\ hostOk = TRUE /\ swapouts = 0 /\ dips = 0
+        /\ failedSince = FALSE /\ acrossDip = FALSE
+        /\ samples = <<>> /\ baseline = <<>>
         /\ treeOk = TRUE /\ treeProved = FALSE /\ rootOk = TRUE /\ rootProved = FALSE
         /\ alias = "owned" /\ selected = 0 /\ poolRunning = FALSE /\ vm = FALSE
 
 \* ---- Environment ----
 \* A monotonic clock, saturating at the window: only "at least Window" matters,
 \* and only while a later sample is still due.
-Tick == /\ pc \notin Terminal /\ samples # <<>> /\ Len(samples) < Quota
+Tick == /\ pc \notin Terminal /\ SampleDue
         /\ elapsed < Window /\ elapsed' = elapsed + 1
         /\ UNCHANGED <<profile, pc, lease, host, samples, baseline, proofs, owner,
                         poolRunning, vm>>
-\* Memory, pressure, thermal or disk headroom stops qualifying.
+\* Memory, pressure, thermal or disk headroom stops qualifying ...
 Degrade == /\ pc \notin Terminal /\ hostOk /\ hostOk' = FALSE
-           /\ UNCHANGED <<profile, pc, lease, elapsed, swapouts, samples, baseline,
-                           proofs, owner, poolRunning, vm>>
+           /\ failedSince' = (failedSince \/ SampleDue)
+           /\ UNCHANGED <<profile, pc, lease, elapsed, swapouts, dips, acrossDip,
+                           samples, baseline, proofs, owner, poolRunning, vm>>
+\* ... and qualifies again. Nothing but a sample taken in between sees the dip.
+Recover == /\ pc \notin Terminal /\ ~hostOk /\ dips < MaxDips
+           /\ hostOk' = TRUE /\ dips' = dips + 1
+           /\ UNCHANGED <<profile, pc, lease, elapsed, swapouts, failedSince,
+                           acrossDip, samples, baseline, proofs, owner, poolRunning,
+                           vm>>
 Swapout == /\ pc \notin Terminal /\ swapouts < MaxSwapouts
            /\ swapouts' = swapouts + 1
-           /\ UNCHANGED <<profile, pc, lease, elapsed, hostOk, samples, baseline,
-                           proofs, owner, poolRunning, vm>>
+           /\ UNCHANGED <<profile, pc, lease, elapsed, hostOk, dips, failedSince,
+                           acrossDip, samples, baseline, proofs, owner, poolRunning,
+                           vm>>
 \* Another lifecycle operation of this home takes or returns the lease.
 OtherAcquire == /\ pc \notin Terminal /\ lease = "free" /\ lease' = "other"
                 /\ UNCHANGED <<profile, pc, elapsed, host, samples, baseline, proofs,
@@ -104,10 +126,12 @@ RestoreAliasBeforeUse == /\ pc = "Idle" /\ alias = "foreign" /\ lease = "free"
 \* dependency socket paths).
 RefuseAlias == pc \in {"Idle", "Qualified"} /\ alias = "foreign" /\ Refuse
 \* admission_pool::select and probe, then admission::open: first sample.
-Open == /\ pc = "Idle" /\ alias # "foreign" /\ ~poolRunning /\ hostOk
-        /\ pc' = "Opened" /\ samples' = <<Observe(FALSE)>> /\ elapsed' = 0
+Open == /\ pc = "Idle" /\ alias # "foreign" /\ ~poolRunning
+        /\ (EnforceFirstCheck => hostOk)
+        /\ pc' = "Opened" /\ Accept(FALSE)
         /\ selected' \in (IF Development THEN {0, OwnerVersion} ELSE {0})
-        /\ UNCHANGED <<profile, lease, host, baseline, proofs, alias, poolRunning, vm>>
+        /\ UNCHANGED <<profile, lease, hostOk, swapouts, dips, baseline, proofs,
+                        alias, poolRunning, vm>>
 RefuseFirst == pc = "Idle" /\ alias # "foreign" /\ ~poolRunning /\ ~hostOk /\ Refuse
 \* running_start: a pool that already runs is rechecked under the lease and
 \* reported. It takes no admission sample.
@@ -118,9 +142,9 @@ ResumeRunning == /\ pc = "Idle" /\ alias # "foreign" /\ poolRunning /\ lease = "
 \* sample_checked: Research's second and third samples, before the lease.
 ResearchSample == /\ pc = "Opened" /\ ~Development /\ Len(samples) < ResearchQuota
                   /\ WindowElapsed /\ hostOk /\ SameSwapouts
-                  /\ samples' = Append(samples, Observe(FALSE)) /\ elapsed' = 0
-                  /\ UNCHANGED <<profile, pc, lease, host, baseline, proofs, owner,
-                                  poolRunning, vm>>
+                  /\ Accept(FALSE)
+                  /\ UNCHANGED <<profile, pc, lease, hostOk, swapouts, dips,
+                                  baseline, proofs, owner, poolRunning, vm>>
 RefuseSample == /\ pc = "Opened" /\ ~Development /\ Len(samples) < ResearchQuota
                 /\ WindowElapsed /\ ~(hostOk /\ SameSwapouts) /\ Refuse
 PreLeaseSampled == Development \/ Len(samples) = ResearchQuota
@@ -153,9 +177,10 @@ Recheck == /\ Development /\ Len(samples) = 1
            /\ (EnforceWindow => WindowElapsed)
            /\ hostOk /\ SelectionReadable
            /\ (EnforceChain => SameSwapouts)
-           /\ samples' = Append(samples, Observe(lease = "self")) /\ elapsed' = 0
+           /\ Accept(lease = "self")
            /\ pc' = IF pc = "Leased" THEN "Qualified" ELSE pc
-           /\ UNCHANGED <<profile, lease, host, baseline, proofs, owner, poolRunning, vm>>
+           /\ UNCHANGED <<profile, lease, hostOk, swapouts, dips, baseline, proofs,
+                           owner, poolRunning, vm>>
 RefuseRecheck == /\ pc = "Leased" /\ Development /\ Len(samples) = 1
                  /\ WindowElapsed
                  /\ ~(hostOk /\ SelectionReadable /\ SameSwapouts)
@@ -223,7 +248,8 @@ RefuseOther == pc \notin Terminal /\ Refuse
 Crash == /\ pc \notin Terminal /\ pc' = "Crashed" /\ lease' = Released
          /\ UNCHANGED <<profile, elapsed, host, samples, baseline, proofs, owner,
                          poolRunning, vm>>
-Next == \/ Tick \/ Degrade \/ Swapout \/ OtherAcquire \/ OtherRelease \/ OtherStart
+Next == \/ Tick \/ Degrade \/ Recover \/ Swapout
+        \/ OtherAcquire \/ OtherRelease \/ OtherStart
         \/ ChangeTree \/ ChangeRoot \/ SquatAlias
         \/ RestoreAliasBeforeUse \/ RefuseAlias \/ Open \/ RefuseFirst
         \/ ResumeRunning
@@ -239,10 +265,12 @@ TypeOK == /\ profile \in {"development", "research"}
           /\ pc \in BeforeLease \cup LeasedSteps \cup Terminal
           /\ lease \in {"free", "self", "other"} /\ elapsed \in 0..Window
           /\ hostOk \in BOOLEAN /\ swapouts \in 0..MaxSwapouts
+          /\ dips \in 0..MaxDips /\ failedSince \in BOOLEAN
+          /\ acrossDip \in BOOLEAN
           /\ Len(samples) \in 0..3
           /\ \A i \in 1..Len(samples) :
                /\ samples[i].swap \in 0..MaxSwapouts /\ samples[i].gap \in 0..Window
-               /\ samples[i].leased \in BOOLEAN
+               /\ samples[i].leased \in BOOLEAN /\ samples[i].ok \in BOOLEAN
           /\ Len(baseline) \in 0..1
           /\ treeOk \in BOOLEAN /\ treeProved \in BOOLEAN
           /\ rootOk \in BOOLEAN /\ rootProved \in BOOLEAN
@@ -254,6 +282,8 @@ DevelopmentTwoSamples == (vm /\ Development) => Len(samples) = 2
 SecondSampleUnderLease == (Development /\ Len(samples) >= 2) => samples[2].leased
 \* ... and every later sample at least the window after the one before it.
 WindowRespected == \A i \in 2..Len(samples) : samples[i].gap >= Window
+\* Every sample a start accepted was taken on a passing host.
+SamplesTakenOnPassingHost == \A i \in 1..Len(samples) : samples[i].ok
 \* No accepted sample shows a swapout count other than the first one's.
 ChainUnbroken == \A i \in 1..Len(samples) : samples[i].swap = samples[1].swap
 \* The pre-boot check compares against the last qualifying sample.
@@ -284,4 +314,8 @@ VmOnlyWhenStarted == vm <=> pc = "Started"
 NeverStartsDevelopment == ~(vm /\ Development)
 NeverStartsResearch == ~(vm /\ ~Development)
 NeverStartsOnMovedAlias == ~(vm /\ alias = "moved" /\ selected = 2)
+\* The weakening of admitting on few samples, as a checked fact: a VM starts
+\* although the host failed at some moment between two of its accepted samples.
+NeverStartsDevelopmentAcrossADip == ~(vm /\ Development /\ acrossDip)
+NeverStartsResearchAcrossADip == ~(vm /\ ~Development /\ acrossDip)
 =============================================================================

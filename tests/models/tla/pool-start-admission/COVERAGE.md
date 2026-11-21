@@ -3,7 +3,8 @@
 Question: when a Development pool start admits on two host samples instead of two
 three-sample windows, can a VM start without a second qualifying sample taken under
 the startup lease, at least the window after the first, with one unbroken swapout
-count from the first sample to the pre-boot check?
+count from the first sample to the pre-boot check? And what does a start on two
+samples no longer see?
 
 ![PoolStart: pool start admission](../../../../docs/diagrams/pool-start-admission.svg)
 
@@ -17,10 +18,11 @@ profiles, against a host that changes underneath it. The starting process sample
 the host, proves the provider and engine trees, takes the startup lease, samples
 again (Development only), rechecks the trees against their proof, settles its
 reserve selection, proves the root files, runs the pre-boot check and starts the
-VM. The environment advances a monotonic clock, degrades the host, grows the
-swapout count, takes and returns the lease, boots the pool from a concurrent
-start, changes a tree or the root files while the lease is not held, and squats
-the clean-stop HOME alias. The process can refuse or crash at every step.
+VM. The environment advances a monotonic clock, fails the host's predicates and
+lets them pass again once, grows the swapout count, takes and returns the lease,
+boots the pool from a concurrent start, changes a tree or the root files while
+the lease is not held, and squats the clean-stop HOME alias. The process can
+refuse or crash at every step.
 
 `stopped-pool-startup/Resume.tla` covers the same start's retained selection and
 receipt evidence, with no host admission, clock or content proof. The two questions
@@ -38,13 +40,15 @@ Both check the same invariants.
 
 | Configuration | Kind | Distinct states | Result |
 | --- | --- | ---: | --- |
-| `positive` | the implementation | 21,028 | no error |
-| `root-before-lease` | follow-up ordering | 27,004 | no error |
+| `positive` | the implementation | 56,252 | no error |
+| `root-before-lease` | follow-up ordering | 71,588 | no error |
 
-An earlier revision of this model had no tree recheck in `positive` (21,400
-states) and kept the recheck as a hypothetical third configuration,
-`tree-recheck`. The recheck is now code (`lifecycle/leased_trees.rs`), so that
-configuration became `positive` and was removed.
+Earlier revisions of this model: `positive` had no tree recheck (21,400 states)
+and the recheck was a hypothetical third configuration, `tree-recheck`, until it
+became code (`lifecycle/leased_trees.rs`). Then the host could only fail, never
+pass again, and a sample did not record the host it was taken on (21,028 and
+27,004 states). Every behaviour of that revision is a behaviour of this one, in
+which the host never recovers.
 
 ## Invariants
 
@@ -53,6 +57,7 @@ Every invariant holds in `positive` and `root-before-lease`.
 | Invariant | In plain words |
 | --- | --- |
 | `DevelopmentTwoSamples`, `SecondSampleUnderLease`, `WindowRespected` | A Development VM starts only on two qualifying samples, the second taken under the startup lease and at least the window after the first. |
+| `SamplesTakenOnPassingHost` | Every sample a start accepted was taken on a passing host: the first sample of either profile, Research's second and third, and Development's sample under the lease. Each recorded sample carries whether the host passed every predicate at the moment it was taken. |
 | `ChainUnbroken` | No accepted sample shows a swapout count other than the first sample's. A sample that fails a predicate or shows another count is never appended: the only step from it is a refusal. |
 | `BootBaselineIsLastSample`, `BootChecked` | The pre-boot check ran before every start and compared against the last qualifying sample's swapout count. |
 | `ResearchThreeSamples` | A Research VM starts only on three samples, each at least the window after the one before, and none under the lease. |
@@ -66,7 +71,8 @@ Every invariant holds in `positive` and `root-before-lease`.
 ## Controls that must fail
 
 Each control keeps every invariant and changes one constant. The registry requires
-TLC exit 12, the named invariant, the named action and the same-state fields.
+TLC exit 12, the named invariant, the named action and the same-state fields. A
+control stops at its first violation, so it has no state count of its own.
 
 | Control | Change | Violated invariant | At |
 | --- | --- | --- | --- |
@@ -77,15 +83,88 @@ TLC exit 12, the named invariant, the named action and the same-state fields.
 | `research-two-samples` | Research takes two samples | `ResearchThreeSamples` | `Start` |
 | `root-unchecked` | follow-up ordering without the recheck under the lease | `StartFromProvenRoot` | `RecheckRoot`, `rootOk = FALSE` |
 | `changed-tree-start` | the trees are not rechecked under the lease | `NoStartFromChangedTree` | `Start`, `treeOk = FALSE` |
+| `first-sample-unchecked` | the first sample is recorded without its predicate check | `SamplesTakenOnPassingHost` | `Open`, `hostOk = FALSE` |
 
 `changed-tree-start` is the implementation as it was before the recheck; see "What
-a proof before the lease relies on".
+a proof before the lease relies on". `first-sample-unchecked` removes the check
+that `admission::open` makes. Before the two-sample change the first probe was
+read only for its `admitted` field, and the samples after it carried the
+predicates; now the first probe is itself a qualifying sample.
 
-Three reachability controls show that the invariants are not vacuous. Each states
-that a start never happens and must be violated at `Start`:
+Five reachability controls state that something never happens and must be
+violated at `Start`. Three show that the invariants are not vacuous:
 `development-start-reachable`, `research-start-reachable` and
 `moved-alias-start-reachable` (a start whose alias moved before its first sample,
-on a reserve selection bound to the rewritten owner record).
+on a reserve selection bound to the rewritten owner record). Two show what the
+samples do not see; the next section describes them.
+
+## What the samples do not see
+
+A sample is one moment, and between two accepted samples nothing reads the
+host. Only the swapout count carries over, because it is cumulative: the next
+sample sees a swapout that happened in between. So a start is admitted although
+the host failed a predicate at some moment between two of its samples, when the
+host passes again by the time of the next one. Both profiles have this gap in
+the code: `recheck_after_lease` sleeps the rest of the window and then observes
+once, and `sample_checked` observes three times with a pause between, and
+neither reads the host while it waits. The model checks it as a reachable fact:
+
+| Control | States that this never happens | Violated at |
+| --- | --- | --- |
+| `development-dip-start-reachable` | a Development VM starts although the host failed between its two samples (`NeverStartsDevelopmentAcrossADip`) | `Start`, `acrossDip = TRUE`, `dips = 1` |
+| `research-dip-start-reachable` | a Research VM starts although the host failed between two of its three samples (`NeverStartsResearchAcrossADip`) | `Start`, `acrossDip = TRUE`, `dips = 1` |
+
+One Development trace that TLC reports:
+
+1. `Open`: the first sample, on a passing host. The window clock starts.
+2. `Tick`, `Tick`: the window elapses.
+3. `Degrade`: the host stops qualifying (`failedSince = TRUE`).
+4. `Recover`: it qualifies again (`dips = 1`).
+5. `ProveTrees`, then `AcquireLease`.
+6. `Recheck`: the second sample, under the lease, on a passing host that shows
+   the first sample's swapout count. It is accepted, and `acrossDip` becomes
+   true.
+7. `Settle`, `ProveRoot`, `AdmitBoot` and `Start`: `vm = TRUE`.
+
+The Research trace has the same `Degrade` and `Recover` between its first and
+second samples, then the third sample, `Qualify` and the same last four steps.
+With two workers TLC does not always report the same interleaving; the dip can
+sit anywhere after one accepted sample and before the next.
+
+`failedSince` is set when the host fails while a later sample is still due, and
+cleared by the next accepted sample, which copies it into `acrossDip`. A sample
+is accepted only on a passing host, so `acrossDip` means a failure that began
+after one accepted sample and ended before the next.
+
+This is the weakening of the two-sample change, and its size is not something
+the model measures. The earlier code took seven samples around four fixed
+one-second pauses; a dip had to miss all of them. Now it has to miss two, at
+least one second apart. Research is unchanged by that change and has the same
+gap between its three samples, fifteen seconds wide; the model has one `Window`
+for both and does not compare them.
+
+What still holds across a dip, in `positive` and `root-before-lease`:
+
+- `ChainUnbroken`: a swapout during the dip refuses the next sample
+  (`RefuseRecheck`, `RefuseSample`) or the pre-boot check (`RefuseBoot`).
+- `SamplesTakenOnPassingHost`: the host passed every predicate at each sample.
+- `BootChecked`: the pre-boot check passed on its own after the last sample.
+
+Two starts that pass together on a host with room for one are outside this
+model: it has one start, and each home samples the host by itself. More samples
+would not close that either; a host-wide admission reservation would.
+
+### Existing controls after this change
+
+No existing control changed its expected invariant, action or witness fields.
+Each removes one guard (`SampleUnderLease`, `EnforceWindow`, `EnforceChain`,
+`ChainToBoot`, `ResearchQuota`, `EnforceRootRecheck`, `EnforceTreeRecheck`) and
+none of those guards reads whether the host passes. The refusals on a failing
+host (`RefuseFirst`, `RefuseSample`, `RefuseRecheck`, `RefuseBoot`) are enabled
+exactly as before: `Recover` adds the behaviours in which the host passes again
+before the check and removes none, so every earlier counterexample is still a
+behaviour. Each control now searches a larger state space for the same first
+violation, and the two passing configurations grew to the counts above.
 
 ## Source and regression mapping
 
@@ -96,7 +175,8 @@ tests of the named module unless marked.
 | --- | --- | --- |
 | `RestoreAliasBeforeUse`, `RefuseAlias` | `lifecycle.rs::restore_released_short_home_before_use`, `state.rs::Owner::restore_released_short_home` | `lifecycle/short_home/tests.rs`: `a_squatted_alias_is_moved_before_start_reads_the_owner`, `public_up_moves_a_squatted_alias_before_its_profile_lookup`, `a_squatted_alias_of_a_pool_with_pinned_dependency_sockets_is_refused_unchanged` |
 | `ResumeRunning` | `lifecycle/running_start.rs::select`, `resume` | `lifecycle/running_start/tests.rs`: `only_a_running_created_pool_of_the_requested_profile_takes_the_fast_path`, `a_live_owned_running_pool_takes_the_fast_path` |
-| `Open`, `RefuseFirst` | `lifecycle/admission_pool.rs::select`, `probe`; `admission.rs::open`, `check` | `admission/pressure_tests.rs`: `the_first_development_sample_must_pass_every_predicate_to_open_the_window` |
+| `Open`, `RefuseFirst`; `SamplesTakenOnPassingHost` at the first sample | `lifecycle/admission_pool.rs::select`, `probe`; `admission.rs::open`, `check` | `admission/pressure_tests.rs`: `the_first_development_sample_must_pass_every_predicate_to_open_the_window` |
+| `Degrade` then `Recover` between two accepted samples (`acrossDip`) | `admission.rs::recheck_after_lease` (Development) and `sample_checked` (Research): nothing reads the host between two samples | `a_dip_between_the_two_development_samples_is_not_seen`: the sampler is asked twice, at the first sample and no sooner than one second later, and a host failing at every moment in between is admitted. Research's pause has no such test. |
 | `ResearchSample`, `RefuseSample` | `admission.rs::sample_with`, `sample_checked` | `startup_windows_keep_profile_floors_and_distinguish_warning_from_normal`, `incomplete_or_unsafe_samples_cannot_be_authorized_by_admitted_or_legacy_booleans`, `swapouts_must_be_observed_and_unchanged_across_the_full_window` |
 | `ProveTrees`, `RefuseTree` | `artifact.rs::verify_witnessed`, `verify_tree` | `artifact.rs`: `a_tree_pruned_of_empty_directories_is_repaired_from_its_retained_archive`; `lifecycle/running_start/tests.rs`: `a_changed_tree_file_is_caught_by_the_cheap_check_and_proven_by_content` |
 | `AcquireLease`, `LeaseTimeout`, `OtherAcquire`, `OtherRelease` | `lifecycle.rs::startup_lease`, `operation_lease` | `lifecycle.rs`: `startup_lease_waits_out_a_brief_holder_and_refuses_a_lasting_one` |
@@ -125,6 +205,51 @@ Not covered by an executable test:
   holder dies; no test kills a start.
 - `ProveRootEarly` and `RecheckRoot`. They describe the follow-up change, which is
   not in this tree. When it lands, the source order test must change with it.
+
+Not modelled, although `start_pool` does it between its first line and
+`machine start`:
+
+- The HOME alias beyond a squat. The model's alias is owned, held by another
+  entry, or moved to a fresh name, and the move is one step. It has no absent
+  alias (host cleanup removed the link; `restore_released_short_home` creates it
+  again under the lease and leaves the record as it is) and no state between
+  `move_to_fresh_short_home`'s save of the record and its creation of the link.
+  A crash there leaves a clean stop whose recorded alias is absent, which the
+  next restore creates. The unit tests of `lifecycle/short_home/tests.rs` cover
+  the absent and the squatted alias one call at a time
+  (`a_clean_stop_whose_alias_host_cleanup_removed_is_restored_exactly`,
+  `a_squatted_alias_is_never_used_and_the_receipt_moves_to_a_fresh_alias`); no
+  test interrupts a restore between the save and the link.
+  These states are about the alias, not about admission, and no admission guard
+  reads them, so they are not added here: they would multiply every state before
+  `Settled`, and one start cannot state their property. A model of the alias
+  repair needs the recorded alias name and the state of its path as separate
+  variables (absent, this pool's link, another entry); the clean-stop marker that
+  alone permits an absent or moved alias, and the phase writes that clear it; the
+  pending owner update and the dependency-socket pin that refuse a repair; the
+  save and the link as two steps with a crash between them; a cleanup or a squat
+  at any moment, because no lease fences the path; the three callers (before the
+  first owner read, under the startup lease, and `runtime recover`); and more
+  than one start. Its properties: every state a start or a crash leaves is one
+  from which a later start completes or refuses by name (`foreign_state`,
+  `provider_home_missing`, `socket_alias_collision`); no provider command runs
+  with an alias that is not this pool's link to its own home; and another entry
+  is never followed, replaced or removed.
+- `interrupted::before_boot`. Under the lease, after the alias repair and before
+  `settle`, the start removes the intent of a set-aside that the owner record
+  committed, or refuses `recovery_required` while one is unfinished. In this
+  model the refusal is one of `RefuseOther`'s, so `RefusalIsClean` covers it: no
+  VM, lease returned. The removal and the property it protects (a boot's new
+  disks never meet an unfinished set-aside) are not modelled, because the model
+  has neither the owner phase nor `runtime recover`. A model of the set-aside
+  needs the intent's states (absent, written, files moved, committed by the
+  owner's `stopped-before-engine`, removed) with a crash between each; the owner
+  phase and the steps of a start that rewrite it; `before_boot` as the first
+  read of that phase under the lease; and a recovery that takes the same lease.
+  Its unit test is one block of
+  `unverified_templates_never_move_adopted_or_foreign_files` in
+  `lifecycle/interrupted.rs`, and the source order test above requires only that
+  the call comes after the tree recheck.
 
 ## What a proof before the lease relies on
 
@@ -200,16 +325,21 @@ one it continues: nothing was bound to the old record.
 
 ## Bounds and proof limits
 
-`Window = 2` ticks, `MaxSwapouts = 1`, one tree change, one root change, one alias
-squat before the settle step, one concurrent start, any number of lease
+`Window = 2` ticks, `MaxSwapouts = 1`, `MaxDips = 1` (the host fails, passes
+again once, and may fail again for good), one tree change, one root change, one
+alias squat before the settle step, one concurrent start, any number of lease
 acquisitions by others. One start; a retry is a new behaviour from `Idle`.
 
 - A sample is one atomic observation. The real probe runs four host tools over
   about 50 ms.
 - `hostOk` stands for every predicate of `admission::check` except the swapout
-  chain. The host degrades once and does not recover: pressure that comes and goes
-  between two samples is invisible to the code and to the model. The swapout count
-  is the only cumulative signal.
+  chain, as one bit: which predicate failed, and by how much, is not modelled.
+  The host recovers at most once. Pressure that comes and goes between two
+  samples is invisible to the code; the model records it (`failedSince`,
+  `acrossDip`) so that the two dip controls can show it. `failedSince` is tracked
+  only while a later sample is due: a dip between the last sample and the
+  pre-boot check is equally unseen and is not given a control of its own. The
+  swapout count is the only cumulative signal.
 - The pre-boot check is modelled with the same predicate as a sample. The code
   uses the probe's `admitted` field there, which the probe computes from the same
   observations.

@@ -877,30 +877,41 @@ claim, and a model pass is not native startup qualification.
 of a pool that is not running. A Development start takes one sample before the
 startup lease and one under it, at least the admission window after the first; a
 Research start keeps three samples before the lease. The positive control explores
-21,028 states for both profiles, with the provider and engine trees rechecked and
+56,252 states for both profiles, with the provider and engine trees rechecked and
 the root files proven under the lease.
-The clock, host pressure, the swapout count, another lease holder, a concurrent
-start, a changed tree or root file, a squatted HOME alias and a crash interleave
-with every step. See its [coverage](pool-start-admission/COVERAGE.md) and
+The clock, a host that fails and passes again once, the swapout count, another
+lease holder, a concurrent start, a changed tree or root file, a squatted HOME
+alias and a crash interleave with every step. See its
+[coverage](pool-start-admission/COVERAGE.md) and
 [statechart](../../../docs/pool-start-admission-statechart.md).
 
-A VM starts only on the qualifying samples of its profile, with one unbroken
-swapout count from the first sample to the pre-boot check, and the pre-boot check
-compares against the last qualifying sample. No VM starts from a provider or
+A VM starts only on the qualifying samples of its profile, each taken on a
+passing host (`SamplesTakenOnPassingHost`), with one unbroken swapout count from
+the first sample to the pre-boot check, and the pre-boot check compares against
+the last qualifying sample. No VM starts from a provider or
 engine tree that changed after its content proof (`NoStartFromChangedTree`). A
 refusal, a crash or a pool that a concurrent start already booted leaves no VM
-started and the lease returned. The `root-before-lease` control (27,004 states)
+started and the lease returned. The `root-before-lease` control (71,588 states)
 checks the same invariants for the follow-up ordering, in which the root files
 are proven before the lease and their metadata is rechecked under it.
 
-Seven controls remove one mechanism each and must fail the named invariant: the
+Eight controls remove one mechanism each and must fail the named invariant: the
 second sample before the lease (`negative`, `SecondSampleUnderLease`), no window
 (`window-not-enforced`), no swapout comparison at the second sample
 (`unchained-recheck`) or at the pre-boot check (`unchained-boot`), two Research
 samples (`research-two-samples`), no root recheck in the follow-up ordering
-(`root-unchecked`) and no tree recheck under the lease (`changed-tree-start`,
-`NoStartFromChangedTree`). Three more show that a Development start, a Research
+(`root-unchecked`), no tree recheck under the lease (`changed-tree-start`,
+`NoStartFromChangedTree`) and no predicate check of the first sample
+(`first-sample-unchecked`). Three more show that a Development start, a Research
 start and a start after an alias rewrite are reachable.
+
+Two reachability controls state what the samples do not see:
+`development-dip-start-reachable` and `research-dip-start-reachable` require a
+start that is admitted although the host failed at some moment between two of its
+accepted samples. Nothing reads the host between samples except the cumulative
+swapout count, so such a dip passes; with two Development samples instead of
+seven it has fewer samples to miss. The model shows that the gap exists, not how
+wide it is.
 
 The provider and engine trees are proven by content before the lease, inside the
 admission window, and rechecked first under it (`lifecycle/leased_trees.rs`): a

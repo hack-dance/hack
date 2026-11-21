@@ -74,6 +74,23 @@ fn code(reply: &Value) -> &str {
     reply["error"]["code"].as_str().unwrap()
 }
 
+/// Whether `service.lock` becomes free within a second. Another test thread
+/// that forks (one test re-runs this binary) briefly shares every open file
+/// description, the lock's included, until its child execs and O_CLOEXEC closes
+/// it, so a free lock can look held for that moment.
+fn lock_frees(path: &Path) -> bool {
+    let started = Instant::now();
+    loop {
+        if try_lock(path).unwrap().is_some() {
+            return true;
+        }
+        if started.elapsed() > Duration::from_secs(1) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn hello_and_status_name_this_build_and_process() {
     let root = Root::new();
@@ -269,8 +286,10 @@ fn idle_exit_stops_listening_and_frees_the_lock() {
         call(&root.0, "service.status", json!({})).unwrap_err().code,
         "service_absent"
     );
-    let lock = try_lock(&paths(&root.0).lock).unwrap();
-    assert!(lock.is_some(), "the lock is free after exit");
+    assert!(
+        lock_frees(&paths(&root.0).lock),
+        "the lock is free after exit"
+    );
 }
 
 #[test]
@@ -323,7 +342,7 @@ fn retire_ends_every_session_before_the_lock_is_released() {
         frame::read(&mut quiet, Duration::from_secs(2), CONTROL_FRAME_LIMIT),
         Err(frame::FrameError::Closed)
     );
-    assert!(try_lock(&paths(&root.0).lock).unwrap().is_some());
+    assert!(lock_frees(&paths(&root.0).lock));
     // The next start takes the freed lock and binds a fresh socket.
     let (handle, ready) = spawn(&root.0, Duration::from_secs(30));
     assert!(ready["ready"].is_object());
@@ -384,7 +403,7 @@ fn a_failure_after_bind_is_refused_and_leaves_no_socket() {
     assert_eq!(refused, json!({"refused": {"code": "service_io"}}));
     assert!(handle.join().unwrap().is_err());
     assert!(paths.socket.symlink_metadata().is_err());
-    assert!(try_lock(&paths.lock).unwrap().is_some());
+    assert!(lock_frees(&paths.lock));
 }
 
 #[test]

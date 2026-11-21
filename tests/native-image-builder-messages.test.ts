@@ -12,6 +12,7 @@ import {
 import { nativeBuilderCheckResult } from "../src/lib/doctor-native-builder.ts";
 import {
   nativeBuilderChangedRemedy,
+  nativeBuilderMissingDetachedRefusal,
   nativeBuilderRemedy,
   nativeBuilderSetupCommand,
 } from "../src/lib/native-image-builder.ts";
@@ -174,4 +175,20 @@ test("without a usable home the launcher keeps its path, and other messages are 
   expect(nativeBuilderChangedRemedy({ launcher: managed, homeDir: HOME })).toBe(
     "Remove the image builder's directory and record from .hack-local/providers in the native home, then run ~/.hack-next/bin/hack-next native setup --accept-downloads."
   );
+});
+
+test("the detached refusal names the same command and no home path", () => {
+  // `hack up -d` gets only the failure's code from its owner process, so this
+  // sentence is all the user sees there.
+  const text = nativeBuilderMissingDetachedRefusal({
+    launcher: managed,
+    homeDir: HOME,
+  });
+  expect(text).toBe(
+    "Native detached startup refused (builder_not_prepared): the image builder is not installed in this native home, so no image was built and no service was started. Run ~/.hack-next/bin/hack-next native setup --accept-downloads to add it; offline, add --builder <pinned builder file> to the offline setup inputs."
+  );
+  expect(text).not.toContain(HOME);
+  expect(
+    nativeBuilderMissingDetachedRefusal({ launcher: stable, homeDir: HOME })
+  ).toContain("Run hack native setup --accept-downloads to add it;");
 });

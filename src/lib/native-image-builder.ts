@@ -65,6 +65,18 @@ export function nativeBuilderRemedy(
 }
 
 /**
+ * The `hack up -d` refusal for a native home that has no image builder. A
+ * detached start reports its failure by code only, so the sentence is built
+ * here, with the same remedy as the foreground refusal. The build runs before
+ * any service starts, so nothing of the project is running.
+ */
+export function nativeBuilderMissingDetachedRefusal(
+  opts: NativeBuilderCommandOptions = {}
+): string {
+  return `Native detached startup refused (${NATIVE_BUILDER_NOT_PREPARED}): ${NATIVE_BUILDER_MISSING}, so no image was built and no service was started. ${nativeBuilderRemedy(opts)}`;
+}
+
+/**
  * How to replace an image builder that does not match the pinned release.
  * Setup never deletes or overwrites it, so the user removes its directory and
  * record, named by their paths under the native home, and then runs setup

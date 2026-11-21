@@ -308,17 +308,19 @@ pub(super) fn startup_lease(root: &Path, wait: Duration) -> Result<state::Lock, 
     operation_lease(root, Some(Instant::now() + wait), || Ok(())).map(|(lock, ())| lock)
 }
 
-/// Returning the mutation lease requires a fresh Development admission window.
+/// Returning the mutation lease requires a fresh Development admission sample under it,
+/// taken no sooner than the admission window after the start's first sample.
 /// On failure RAII drops the lease, without granting owner/allocation authority.
 fn startup_admission_lease(
     root: &Path,
     wait: Duration,
     profile: super::Profile,
-    samples: &[admission::Admission],
-    observe: impl FnMut() -> Result<admission::Admission, CandidateError>,
+    opened: Option<admission::Opened>,
+    clock: &impl process::Clock,
+    observe: impl FnOnce() -> Result<admission::Admission, CandidateError>,
 ) -> Result<(state::Lock, Vec<admission::Admission>), CandidateError> {
     let lock = startup_lease(root, wait)?;
-    let fresh = admission::recheck_after_lease(profile, samples, observe)?;
+    let fresh = admission::recheck_after_lease(profile, opened, clock, observe)?;
     Ok((lock, fresh))
 }
 
@@ -1424,18 +1426,19 @@ fn start_pool(
             admission.reasons.join(" "),
         ));
     }
-    let mut samples = if profile == super::Profile::Development {
-        let baseline_swapouts = admission.swapouts;
-        let mut samples = vec![admission];
-        samples.extend(admission::sample_after(profile, baseline_swapouts, || {
-            admission_pool::probe(candidate, profile, &admission_owner)
-        })?);
-        samples
+    // Development qualifies on two chained samples at least the admission window apart:
+    // this one, and one under the startup lease. The checks between them fill the window,
+    // so only the remainder of it is ever slept.
+    let admission_clock = process::MonotonicClock::new();
+    let (mut samples, opened) = if profile == super::Profile::Development {
+        let opened = admission::open(&admission, &admission_clock)?;
+        (vec![admission], Some(opened))
     } else {
         // Retain the frozen Research window and baseline semantics.
-        admission::sample_with(profile, || {
+        let samples = admission::sample_with(profile, || {
             admission_pool::probe(candidate, profile, &admission_owner)
-        })?
+        })?;
+        (samples, None)
     };
     // The content proof a boot records in its tree witness (`tree_witness`).
     let mut proven_trees = std::collections::BTreeMap::from([
@@ -1453,7 +1456,8 @@ fn start_pool(
         &root(candidate),
         STARTUP_LEASE_WAIT,
         profile,
-        &samples,
+        opened,
+        &admission_clock,
         || admission_pool::probe(candidate, profile, &admission_owner),
     )?;
     samples.extend(fresh_samples);

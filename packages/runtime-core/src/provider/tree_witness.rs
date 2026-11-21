@@ -44,6 +44,12 @@
 //! guest were started from the proven bytes, the witness is bound to that provider's PID,
 //! start time, executable and user, and the next boot proves the trees by content again. It is
 //! not a substitute for the content proof before a boot.
+//!
+//! A boot applies the same comparison to its own proof. `start_pool` proves the SmolVM and
+//! engine trees before it takes the startup lease, and under the lease compares each tree's
+//! metadata digest with the one that proof returned (`lifecycle::leased_trees`): equal on a
+//! qualified filesystem, the proof stands; otherwise the tree is proven by content again
+//! before anything boots. The witness records the proofs that comparison left.
 use super::{identity::ProcessIdentity, state};
 use crate::{Candidate, CandidateError};
 use serde::{Deserialize, Serialize};

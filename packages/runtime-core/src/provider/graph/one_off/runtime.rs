@@ -104,6 +104,7 @@ pub fn begin(
         cache_initializers: BTreeMap::new(),
         environments,
         leases: BTreeMap::new(),
+        probe_findings: BTreeMap::new(),
         launcher,
     };
     session.record(Event::StartIntent { service: &service })?;

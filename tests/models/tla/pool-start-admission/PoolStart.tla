@@ -1,7 +1,7 @@
 ----------------------------- MODULE PoolStart -----------------------------
 \* One `runtime up` of a pool that is not running: host admission samples, the
 \* content proofs, the startup lease and the first `machine start`.
-\* Source: packages/runtime-core/src/provider/lifecycle.rs (start_pool,
+\* Source: packages/runtime-core/src/provider/lifecycle.rs (start_pool_observed,
 \* startup_admission_lease), provider/admission.rs (open, recheck_after_lease,
 \* check, sample_checked), lifecycle/leased_trees.rs (recheck),
 \* lifecycle/rootfs_proof.rs (prove, recheck) and

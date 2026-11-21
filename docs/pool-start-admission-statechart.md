@@ -3,7 +3,7 @@
 - Model: [PoolStart.tla](../tests/models/tla/pool-start-admission/PoolStart.tla).
   Checked properties, bounds and limits:
   [COVERAGE.md](../tests/models/tla/pool-start-admission/COVERAGE.md).
-- Source: `start_pool` and `startup_admission_lease` in
+- Source: `start_pool_observed` and `startup_admission_lease` in
   `packages/runtime-core/src/provider/lifecycle.rs`, `provider/admission.rs`,
   `provider/lifecycle/leased_trees.rs`, `provider/lifecycle/rootfs_proof.rs` and
   `provider/lifecycle/admission_pool.rs`.
@@ -52,7 +52,7 @@ Each state is one value of the model's `pc`.
 | `Qualify` | Research (all samples already taken) | none | `admission::recheck_after_lease` returns no sample |
 | `RestoreAliasLeased` | alias path held by another entry | owner record names a fresh alias | `restore_released_short_home` |
 | `Settle` | `TreesStillProven`; `SameOwner`; pool not running | selection settled | `leased_trees::recheck`; `admission_pool::settle` and the owner checks after it |
-| `ObserveRunning` | `TreesStillProven`; `poolRunning`; no selection | report the running pool | `leased_trees::recheck`; the `owner.phase == "running"` branch of `start_pool` |
+| `ObserveRunning` | `TreesStillProven`; `poolRunning`; no selection | report the running pool | `leased_trees::recheck`; the `owner.phase == "running"` branch of `start_pool_observed` |
 | `ProveRoot` | `rootOk`; no root proof before the lease | root files proven by content | `prepare_rootfs`, `prove_rootfs` |
 | `RecheckRoot` | `RootProofBeforeLease`; `rootOk` | the earlier proof still describes the root files, or they passed a second content proof | `rootfs_proof::recheck`; `prepare_rootfs` takes its digest |
 | `AdmitBoot` | `hostOk`; `SameSwapouts` | baseline is the last sample's swapout count; the observation is recorded with the host as it was | `admission_pool::admit_boot` |

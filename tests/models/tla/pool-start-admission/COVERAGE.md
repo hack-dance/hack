@@ -183,7 +183,7 @@ due, and cleared by the next accepted one. An accepted sample copies it into
 failure that began after one accepted sample and ended before the next.
 
 The pre-boot observation leaves the same gap after the last sample, and it is
-not part of the two-sample change: nothing in `start_pool` reads the host
+not part of the two-sample change: nothing in `start_pool_observed` reads the host
 between its last sample and `admit_boot`. `AdmitBoot` copies `failedSince` into
 `bootAcrossDip`. The trace of `boot-dip-start-reachable` is a start whose two
 samples are taken with no dip, then `Degrade` and `Recover` under the lease,
@@ -253,22 +253,22 @@ tests of the named module unless marked.
 | `Settle`, `RefuseSelection` | `lifecycle/admission_pool.rs::settle`, `Selection::reverify` | `lifecycle/admission_pool/tests.rs`: `selected_owner_or_provider_changes_refuse_reverification`, `selected_stopped_owner_drift_refuses_reverification`, `a_start_with_fresh_headroom_drops_the_reserve_and_runs_no_release_check` |
 | `AdmitBoot`, `RefuseBoot`; `BootSampleOnPassingHost`, `BootSampleMatchesBaseline` | `lifecycle/admission_pool.rs::admit_boot`, `admit_boot_with` (the `admitted` check, then the swapout comparison) | `the_boot_gate_samples_the_qualifying_basis_and_its_swapouts`, `the_boot_gate_rechecks_the_selection_around_its_sample` |
 | `Start` | `BootAdmission::release`, `lifecycle.rs::start_machine` | `machine_start_needs_a_final_leased_recheck_of_the_selection` |
-| Order of the steps, one clock for the window, the baseline handed to `admit_boot`, the tree recheck as the first step after the leased sample (before the start's next write, provider command or tree read), the root files recheck as the step after it, the rechecked proofs and the root files digest taken under the lease handed to the boot's witness | `lifecycle.rs::start_pool` | `lifecycle/pressure_tests.rs`: `start_pool_takes_its_admission_steps_in_the_modelled_order`. It reads source order only. |
+| Order of the steps, one clock for the window, the baseline handed to `admit_boot`, the tree recheck as the first step after the leased sample (before the start's next write, provider command or tree read), the root files recheck as the step after it, the rechecked proofs and the root files digest taken under the lease handed to the boot's witness | `lifecycle.rs::start_pool_observed` | `lifecycle/pressure_tests.rs`: `start_pool_takes_its_admission_steps_in_the_modelled_order`. It reads source order only. |
 
 Not covered by an executable test:
 
-- `start_pool` as a whole. Its steps are tested one function at a time; the source
+- `start_pool_observed` as a whole. Its steps are tested one function at a time; the source
   order test above is the only link between them. Running the sequence needs a VM.
 - `ObserveRunning`: the `owner.phase == "running"` branch after a concurrent start
   won the lease.
 - The tree recheck inside a real start. Its tests call `leased_trees::recheck`
-  under a real lease on fixture trees; that `start_pool` calls it first under the
+  under a real lease on fixture trees; that `start_pool_observed` calls it first under the
   lease is the source order test's claim. A tree changed between the proof and the
   lease of a real `runtime up` was not exercised.
 - `ProveRoot` and `RefuseRoot` in a cold start (`prepare_rootfs`, `prove_rootfs`).
 - The root files recheck inside a real start. Its tests call
   `rootfs_proof::recheck` under a real lease on a fixture pool, and the function
-  it wraps on fixture trees; that `start_pool` calls it straight after the tree
+  it wraps on fixture trees; that `start_pool_observed` calls it straight after the tree
   recheck, and hands its digest to the boot's witness, is the source order test's
   claim. A root file changed between the proof and the lease of a real
   `runtime up` was not exercised.
@@ -279,7 +279,7 @@ Not covered by an executable test:
   there: it takes the lease without an early proof and `prepare_rootfs` refuses the
   same root files under it, which is `positive`'s `RefuseRoot` from `Settled`.
 
-Not modelled, although `start_pool` does it between its first line and
+Not modelled, although `start_pool_observed` does it between its first line and
 `machine start`:
 
 - The HOME alias beyond a squat. The model's alias is owned, held by another
@@ -398,7 +398,7 @@ record the lease now fences and recomputes the root files' metadata digest:
 
 `prepare_rootfs` then takes the digest the recheck computed under the lease, for
 the marker and pin the recheck used, instead of a second content proof, and
-`start_pool` hands it to the boot's tree witness with the rechecked tree proofs.
+`start_pool_observed` hands it to the boot's tree witness with the rechecked tree proofs.
 
 Without an early proof nothing is rechecked and `prepare_rootfs` proves the root
 files by content under the lease (`ProveRoot`), which is `positive`. Doubt before

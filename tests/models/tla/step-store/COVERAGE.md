@@ -16,8 +16,10 @@ a row is covered only when its test exists.
 Rendered with Pele 1.9.0 and the house theme, one chart per control variable.
 Sources: [states.mmd](states.mmd), [gc.mmd](gc.mmd), [tag.mmd](tag.mmd). `pc` uses
 one state per value; `pruning` shows `None` and one schematic key `k`; `tag` (`[d, age]`) groups its values into
-absent, fresh and expired, as the chart's note says. The label checker and the 2x
-PNG have not been run on these renders yet.
+absent, fresh and expired, as the chart's note says. Each SVG has light and dark
+2x PNGs beside it (`*@2x.png`, `*.dark@2x.png`), made with Chromium and the Geist
+font. The label checker passes on all six SVGs with Geist installed; without
+Geist a fallback font draws edge labels up to 7 px wider than their boxes.
 
 ![One step and its record](states.svg)
 

@@ -113,11 +113,6 @@ import {
   composeBackendCheckResult,
 } from "../lib/doctor-compose-backend.ts";
 import {
-  COMPOSE_SLOW_STOPS_CHECK,
-  type ComposeSlowStopsReport,
-  checkComposeSlowStops,
-} from "../lib/doctor-compose-slow-stops.ts";
-import {
   buildDoctorDaemonCheck,
   CANDIDATE_DAEMON_GUIDANCE,
 } from "../lib/doctor-daemon.ts";
@@ -388,8 +383,6 @@ interface CheckResult {
   readonly nativeProcess?: NativeProcessReport;
   /** HACK-2323 dev performance findings: services, files, lines, architectures. */
   readonly devPerformance?: DevPerformanceReport;
-  /** Compose services observed exiting 137 after the stop grace period. */
-  readonly composeSlowStops?: ComposeSlowStopsReport;
   /** Native pool idleness: state, graph count and memory; no paths. */
   readonly nativePool?: NativePoolReport;
 }
@@ -1938,8 +1931,6 @@ export type DoctorJsonCheck = DoctorMetadata & {
   readonly nativeSource?: NativeSourceReport;
   /** Present only on the four dev performance checks (HACK-2323). */
   readonly devPerformance?: DevPerformanceReport;
-  /** Present only on the compose slow stops check when exit-137 services were found. */
-  readonly composeSlowStops?: ComposeSlowStopsReport;
   /** Present only on the native pool idle machine check. */
   readonly nativePool?: NativePoolReport;
 };
@@ -1972,7 +1963,6 @@ const DOCTOR_REPORT_FIELDS = [
   "nativeProcess",
   "nativeSource",
   "devPerformance",
-  "composeSlowStops",
   "nativePool",
 ] as const satisfies readonly (keyof CheckResult)[];
 
@@ -3920,11 +3910,6 @@ async function runProjectChecks(opts: {
   results.push(
     await runCheck(s, COMPOSE_BACKEND_CHECK, () =>
       checkComposeBackendFeatures({ startDir, backend: "compose" })
-    )
-  );
-  results.push(
-    await runCheck(s, COMPOSE_SLOW_STOPS_CHECK, () =>
-      checkComposeSlowStops({ startDir })
     )
   );
   results.push(

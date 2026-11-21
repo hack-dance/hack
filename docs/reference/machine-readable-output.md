@@ -180,10 +180,7 @@ Additive fields keep a command's row and shape above; consumers ignore keys they
   architectures` and `dev image tags` checks add a `devPerformance` object with a `kind`, the
   services, project-relative files and lines, and architectures. `hack doctor --fix --only
   'polling watchers' --json` adds `data.fix` with `id`, `applied`, `changed`, `confirmed`,
-  `removed` and `diff`. The `compose slow stops` check adds a `composeSlowStops` object
-  (`services`, `exitCode: 137`, `hints`) when exit-137 services are found.
-- Compose `hack down --json`: when a container exited `137` after the stop grace period,
-  `data` adds `slowStops` (`[{ service, exitCode: 137, hint }]`) and includes each hint in
-  `data.warnings`; stdout remains a single valid JSON envelope. When the overall down cap
-  ends `docker compose down` (exit `124`), `error.detail` adds `timedOut: true`, `capMs`,
-  `slowStops`, and `warnings`.
+  `removed` and `diff`.
+- Compose `hack down --json`: when the overall down cap ends `docker compose down`
+  (exit `124`), `error.message` explains the cap and `error.detail` adds `timedOut: true`
+  and `capMs`.

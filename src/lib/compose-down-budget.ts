@@ -1,4 +1,5 @@
 import { HackCliError } from "./cli-result.ts";
+import { DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS } from "./compose-startup-budget.ts";
 
 /** Minimum allowed stop timeout in seconds for `hack down` on the Compose backend. */
 export const MIN_COMPOSE_DOWN_TIMEOUT_SECONDS = 0;
@@ -9,20 +10,11 @@ export const MAX_COMPOSE_DOWN_TIMEOUT_SECONDS = 600;
 /** Project config key in `.hack/hack.config.json` for the Compose `down` stop timeout. */
 export const COMPOSE_DOWN_TIMEOUT_CONFIG = "compose.downTimeoutSeconds";
 
-/** Docker Engine's default stop grace period when neither `--timeout` nor `stop_grace_period` is set. */
-export const DEFAULT_DOCKER_STOP_TIMEOUT_SECONDS = 10;
+/** Overall `docker compose down` subprocess cap (ms) when neither flag nor config key is set. */
+export const DEFAULT_COMPOSE_DOWN_CAP_MS = DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
 
-/** Floor for the overall `docker compose down` subprocess cap (matches the previous 90 s bound). */
-export const DEFAULT_COMPOSE_DOWN_CAP_MS = 90_000;
-
-/** Hard upper bound (ms) for the overall `docker compose down` subprocess cap even at `--timeout 600`. */
-export const MAX_COMPOSE_DOWN_CAP_MS = 900_000;
-
-/** Fixed overhead (ms) added above per-wave stop grace periods when scaling the down cap. */
+/** Fixed overhead (ms) added above `timeout * runningServices` when scaling the down cap. */
 export const COMPOSE_DOWN_OVERHEAD_MS = 30_000;
-
-/** Reverse-dependency stop waves scaled when `--timeout` exceeds the 90 s floor. */
-export const COMPOSE_DOWN_CAP_WAVES = 2;
 
 const CANONICAL_NON_NEGATIVE_INT = /^(?:0|[1-9][0-9]*)$/;
 
@@ -58,7 +50,7 @@ export function parseComposeDownTimeoutFlag(
 }
 
 /**
- * Resolve the effective stop timeout (in seconds) for Compose `hack down` / `hack restart`.
+ * Resolve the effective stop timeout (in seconds) for Compose `hack down`.
  * Precedence: CLI `--timeout` > `compose.downTimeoutSeconds` in `.hack/hack.config.json` > unset.
  * Never clamps out-of-range values.
  */
@@ -85,115 +77,40 @@ export function resolveComposeDownTimeoutSeconds(opts: {
 }
 
 /**
- * Static service stop graph parsed from `.hack/docker-compose.yml` for sizing
- * the overall `docker compose down` subprocess cap.
- */
-export type ComposeStopGraph = {
-  readonly defined: ReadonlySet<string>;
-  readonly serviceGraceMs: ReadonlyMap<string, number>;
-  readonly dependsOn: ReadonlyMap<string, readonly string[]>;
-};
-
-/**
- * Compute the longest sequential stop-grace chain (ms) across a Compose dependency graph.
- * Compose stops dependents before their dependencies and stops independent siblings in parallel.
- * When `--timeout` (`timeoutSeconds`) is set, it overrides every service's `stop_grace_period`.
- * Falls back to summing all service grace periods if a dependency cycle is present.
- */
-export function computeComposeDownCriticalPathMs(opts: {
-  readonly graph: ComposeStopGraph;
-  readonly timeoutSeconds?: number;
-}): number {
-  const { graph, timeoutSeconds } = opts;
-  if (graph.defined.size === 0) {
-    return (timeoutSeconds ?? DEFAULT_DOCKER_STOP_TIMEOUT_SECONDS) * 1000;
-  }
-  const graceFor = (service: string): number =>
-    timeoutSeconds !== undefined
-      ? timeoutSeconds * 1000
-      : (graph.serviceGraceMs.get(service) ??
-        DEFAULT_DOCKER_STOP_TIMEOUT_SECONDS * 1000);
-
-  const memo = new Map<string, number>();
-  const visiting = new Set<string>();
-  let sawCycle = false;
-
-  const visit = (service: string): number => {
-    const cached = memo.get(service);
-    if (cached !== undefined) {
-      return cached;
-    }
-    if (visiting.has(service)) {
-      sawCycle = true;
-      return 0;
-    }
-    visiting.add(service);
-    let deepestDep = 0;
-    for (const dep of graph.dependsOn.get(service) ?? []) {
-      if (!graph.defined.has(dep)) {
-        continue;
-      }
-      deepestDep = Math.max(deepestDep, visit(dep));
-    }
-    visiting.delete(service);
-    const total = graceFor(service) + deepestDep;
-    memo.set(service, total);
-    return total;
-  };
-
-  let criticalMs = 0;
-  for (const service of graph.defined) {
-    criticalMs = Math.max(criticalMs, visit(service));
-  }
-  if (sawCycle) {
-    let sumMs = 0;
-    for (const service of graph.defined) {
-      sumMs += graceFor(service);
-    }
-    return sumMs;
-  }
-  return criticalMs;
-}
-
-/**
  * Overall subprocess cap (ms) for `docker compose down`.
  *
- * Keeps the 90 s floor (`DEFAULT_COMPOSE_DOWN_CAP_MS`), derives required wait time from
- * the project's actual Compose dependency stop chain and per-service `stop_grace_period`
- * (or explicit `--timeout` override) plus 30 s overhead when the Compose graph is available,
- * and bounds the total cap at 15 minutes (`MAX_COMPOSE_DOWN_CAP_MS`).
+ * - When neither `--timeout` nor `compose.downTimeoutSeconds` is set: exact default cap (90 s).
+ * - When one is set: `max(90 s, timeout * runningServiceCount + 30 s)`, with no ceiling below
+ *   `timeout * runningServiceCount + 30 s`.
  */
-export function resolveComposeDownCapMs(
-  timeoutSeconds?: number,
-  opts?: { readonly graph?: ComposeStopGraph }
-): number {
-  if (
-    timeoutSeconds !== undefined &&
-    !isValidComposeDownTimeoutSeconds(timeoutSeconds)
-  ) {
+export function resolveComposeDownCapMs(opts?: {
+  readonly timeoutSeconds?: number;
+  readonly runningServiceCount?: number;
+}): number {
+  const timeoutSeconds = opts?.timeoutSeconds;
+  if (timeoutSeconds === undefined) {
+    return DEFAULT_COMPOSE_DOWN_CAP_MS;
+  }
+  if (!isValidComposeDownTimeoutSeconds(timeoutSeconds)) {
     throw new HackCliError({
       code: "E_CONFIG_INVALID",
       message: `Invalid Compose down timeout: must be an integer from ${MIN_COMPOSE_DOWN_TIMEOUT_SECONDS} to ${MAX_COMPOSE_DOWN_TIMEOUT_SECONDS} seconds.`,
     });
   }
-  if (opts?.graph && opts.graph.defined.size > 0) {
-    const criticalMs = computeComposeDownCriticalPathMs({
-      graph: opts.graph,
-      timeoutSeconds,
-    });
-    const required = criticalMs + COMPOSE_DOWN_OVERHEAD_MS;
-    return Math.min(
-      MAX_COMPOSE_DOWN_CAP_MS,
-      Math.max(DEFAULT_COMPOSE_DOWN_CAP_MS, required)
-    );
-  }
-  if (timeoutSeconds === undefined) {
-    return DEFAULT_COMPOSE_DOWN_CAP_MS;
-  }
-  const scaled =
-    timeoutSeconds * COMPOSE_DOWN_CAP_WAVES * 1000 + COMPOSE_DOWN_OVERHEAD_MS;
-  return Math.min(
-    MAX_COMPOSE_DOWN_CAP_MS,
-    Math.max(DEFAULT_COMPOSE_DOWN_CAP_MS, scaled)
+  const runningServices = Math.max(
+    0,
+    Math.trunc(opts?.runningServiceCount ?? 1)
   );
+  const scaled =
+    timeoutSeconds * runningServices * 1000 + COMPOSE_DOWN_OVERHEAD_MS;
+  return Math.max(DEFAULT_COMPOSE_DOWN_CAP_MS, scaled);
+}
+
+/** Explicit explanation emitted in text and JSON when the overall down cap ends `docker compose down`. */
+export function formatComposeDownCapTimeoutMessage(capMs: number): string {
+  const formatted =
+    capMs < 1000
+      ? `${Math.max(1, Math.round(capMs))}ms`
+      : `${Math.round(capMs / 1000)}s`;
+  return `docker compose down reached its ${formatted} cap before finishing. Pass --timeout <seconds> or set ${COMPOSE_DOWN_TIMEOUT_CONFIG}, and check services that ignore SIGTERM.`;
 }

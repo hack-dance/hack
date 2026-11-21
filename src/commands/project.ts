@@ -225,6 +225,7 @@ import {
   okResult,
 } from "../lib/cli-result.ts";
 import {
+  formatComposeDownCapTimeoutMessage,
   parseComposeDownTimeoutFlag,
   resolveComposeDownCapMs,
   resolveComposeDownTimeoutSeconds,
@@ -234,11 +235,6 @@ import {
   describeUnconfirmedComposeDown,
   listComposeProjectContainers,
 } from "../lib/compose-down-confirmation.ts";
-import {
-  finalizeComposeDownSlowStops,
-  readComposeServiceStopMeta,
-  type SlowStopHint,
-} from "../lib/compose-down-slow-stop.ts";
 import {
   type ComposeEnginePreflightDeps,
   preflightComposeEngine,
@@ -1175,8 +1171,6 @@ export type LifecycleJsonData = {
   readonly cacheVolumesRemoved?: readonly string[];
   /** One-shot dependencies this command stopped mid-run (HACK-2310). */
   readonly interrupted?: readonly string[];
-  /** Compose services killed with exit 137 after the stop grace period during `down`. */
-  readonly slowStops?: readonly SlowStopHint[];
   readonly warnings?: readonly string[];
   readonly durationMs: number;
 };
@@ -1287,18 +1281,8 @@ export function buildLifecycleJsonData(opts: {
   readonly failed?: readonly string[];
   readonly cacheVolumesRemoved?: readonly string[];
   readonly interruption?: OneShotInterruption;
-  readonly slowStops?: readonly SlowStopHint[];
   readonly durationMs: number;
 }): LifecycleJsonData {
-  const warnings: string[] = [];
-  if (opts.interruption && opts.interruption.services.length > 0) {
-    warnings.push(opts.interruption.warning);
-  }
-  const slowStops =
-    opts.slowStops && opts.slowStops.length > 0 ? [...opts.slowStops] : [];
-  for (const entry of slowStops) {
-    warnings.push(entry.hint);
-  }
   return {
     action: opts.action,
     project: opts.project,
@@ -1314,10 +1298,11 @@ export function buildLifecycleJsonData(opts: {
       ? { cacheVolumesRemoved: [...opts.cacheVolumesRemoved].sort() }
       : {}),
     ...(opts.interruption && opts.interruption.services.length > 0
-      ? { interrupted: [...opts.interruption.services] }
+      ? {
+          interrupted: [...opts.interruption.services],
+          warnings: [opts.interruption.warning],
+        }
       : {}),
-    ...(slowStops.length > 0 ? { slowStops } : {}),
-    ...(warnings.length > 0 ? { warnings } : {}),
     durationMs: opts.durationMs,
   };
 }
@@ -8610,14 +8595,21 @@ async function runDownCommand({
     cliProfiles: profiles,
     composeEnv: lifecycleEnv,
   });
-  const statesBeforeDown = json
-    ? await readComposeServiceStates({
-        project,
-        composeProjectName,
-        profiles: stopSelection.profiles,
-        env: lifecycleEnv,
-      })
-    : [];
+  const statesBeforeDown =
+    json || (downTimeoutSeconds !== undefined && downTimeoutSeconds > 0)
+      ? await readComposeServiceStates({
+          project,
+          composeProjectName,
+          profiles: stopSelection.profiles,
+          env: lifecycleEnv,
+        })
+      : [];
+  const runningServicesBeforeDown =
+    classifyComposeStartupState(statesBeforeDown).running;
+  const downCapMs = resolveComposeDownCapMs({
+    timeoutSeconds: downTimeoutSeconds,
+    runningServiceCount: runningServicesBeforeDown.length,
+  });
 
   // Holders are released only once Compose confirmed the containers
   // stopped; an interrupted or failed shutdown keeps them for the next down.
@@ -8640,11 +8632,6 @@ async function runDownCommand({
   let code: number;
   let stopObservation: DownObservation = { complete: true };
   let helperReleaseFailures: readonly string[] = [];
-  let downStartedPerfMs = 0;
-  let downElapsedMs = 0;
-  let serviceStopMeta: Awaited<ReturnType<typeof readComposeServiceStopMeta>> =
-    null;
-  let downCapMs: number | undefined;
   try {
     const beforeCode = await runLifecycleCommands({
       title: "Lifecycle (down before)",
@@ -8672,13 +8659,6 @@ async function runDownCommand({
       composeProject: lifecycleComposeProject,
     });
     reportLifecycleProgress({ service: null, phase: "stopping" });
-    serviceStopMeta = await readComposeServiceStopMeta(
-      project.composeFile
-    ).catch(() => null);
-    downCapMs = resolveComposeDownCapMs(downTimeoutSeconds, {
-      graph: serviceStopMeta ?? undefined,
-    });
-    downStartedPerfMs = performance.now();
     code = await composeRuntimeBackend.down({
       composeFiles: [project.composeFile],
       composeProject: composeProjectName,
@@ -8699,7 +8679,6 @@ async function runDownCommand({
         timeoutSeconds: downTimeoutSeconds,
       });
     }
-    downElapsedMs = Math.max(0, performance.now() - downStartedPerfMs);
     helperReleaseFailures = await lifecycleDownCleanup(
       await confirmComposeDownForHelpers({
         cfg,
@@ -8712,47 +8691,21 @@ async function runDownCommand({
     signalCleanup.dispose();
   }
 
-  const effectiveComposeProject = composeProjectName ?? baseProjectName;
   if (code !== 0) {
-    let capDetail: Record<string, unknown> = {};
-    if (code === 124) {
-      const capMs =
-        downCapMs ??
-        resolveComposeDownCapMs(downTimeoutSeconds, {
-          graph: serviceStopMeta ?? undefined,
-        });
-      const slowStops = await finalizeComposeDownSlowStops({
-        projectDir: project.projectDir,
-        composeFile: project.composeFile,
-        serviceStopMeta,
-        composeProject: effectiveComposeProject,
-        downElapsedMs,
-        windowLookbackMs: Math.max(
-          downElapsedMs,
-          performance.now() - downStartedPerfMs
-        ),
-        timeoutSeconds: downTimeoutSeconds,
-        forceProbe: true,
-        allowClear: false,
-        cwd: dirname(project.composeFile),
-        env: lifecycleEnv,
-      });
-      const capHint = `Slow stop: docker compose down reached its ${Math.round(capMs / 1000)}s cap before finishing. Pass --timeout <seconds> or set compose.downTimeoutSeconds, and check services that ignore SIGTERM.`;
-      const warnings =
-        slowStops.length > 0 ? slowStops.map((entry) => entry.hint) : [capHint];
-      if (!json) {
-        for (const warning of warnings) {
-          logger.warn({ message: warning });
-        }
-      }
-      capDetail = { timedOut: true, capMs, slowStops, warnings };
+    const capMessage =
+      code === 124 ? formatComposeDownCapTimeoutMessage(downCapMs) : null;
+    if (capMessage && !json) {
+      logger.warn({ message: capMessage });
     }
     if (json) {
       return emitLifecycleResult({
         result: errorResult({
           code: "E_COMPOSE_FAILED",
-          message: `docker compose down failed (exit ${code})`,
-          detail: { exitCode: code, ...capDetail },
+          message: capMessage ?? `docker compose down failed (exit ${code})`,
+          detail:
+            code === 124
+              ? { exitCode: code, timedOut: true, capMs: downCapMs }
+              : { exitCode: code },
         }),
         exitCode: code,
       });
@@ -8819,27 +8772,7 @@ async function runDownCommand({
     composeProject: lifecycleComposeProject,
   });
 
-  const stoppedServices = classifyComposeStartupState(statesBeforeDown).running;
-  const slowStops = await finalizeComposeDownSlowStops({
-    projectDir: project.projectDir,
-    composeFile: project.composeFile,
-    serviceStopMeta,
-    composeProject: effectiveComposeProject,
-    downElapsedMs,
-    windowLookbackMs: Math.max(
-      downElapsedMs,
-      performance.now() - downStartedPerfMs
-    ),
-    timeoutSeconds: downTimeoutSeconds,
-    runningBeforeDown: json ? stoppedServices : undefined,
-    cwd: dirname(project.composeFile),
-    env: lifecycleEnv,
-  });
-
   if (!json) {
-    for (const slowStop of slowStops) {
-      logger.warn({ message: slowStop.hint });
-    }
     if (cacheRemoval.removed.length > 0) {
       logger.success({
         message: `Removed disposable cache volumes: ${cacheRemoval.removed.join(", ")}`,
@@ -8884,11 +8817,10 @@ async function runDownCommand({
         action: "down",
         project: baseProjectName,
         branch,
-        composeProject: effectiveComposeProject,
-        stopped: stoppedServices,
+        composeProject: composeProjectName ?? baseProjectName,
+        stopped: runningServicesBeforeDown,
         cacheVolumesRemoved: cacheRemoval.removed,
         interruption: interruptionCheck.interruption,
-        slowStops,
         durationMs: Date.now() - (startedAtMs ?? Date.now()),
       }),
     }),
@@ -8914,11 +8846,6 @@ async function runRestartDownPhase(opts: {
   /** Helpers whose release failed; the restart must stop. */
   readonly sharedHelperFailures?: readonly string[];
 }> {
-  const downTimeoutSeconds = opts.preserveComposeRuntime
-    ? undefined
-    : resolveComposeDownTimeoutSeconds({
-        projectValue: opts.cfg.compose?.downTimeoutSeconds,
-      });
   // As in hack down: holders are released only once the containers are
   // confirmed stopped. A restart that preserves the Compose runtime keeps
   // the containers running, so it keeps their holders (not a failure); the
@@ -8966,7 +8893,6 @@ async function runRestartDownPhase(opts: {
           profiles: opts.profiles,
           cwd: dirname(opts.project.composeFile),
           routeStdoutToStderr: opts.routeStdoutToStderr === true,
-          timeoutSeconds: downTimeoutSeconds,
         });
     // A preserved Compose runtime was never shut down: its containers are
     // kept, so their helpers stay held.
@@ -10504,7 +10430,10 @@ async function finishInstanceStop(opts: {
         env: { ...opts.env },
         timeoutMs: Math.max(
           INSTANCE_STOP_GRACE_CAP_MS,
-          resolveComposeDownCapMs(opts.timeoutSeconds)
+          resolveComposeDownCapMs({
+            timeoutSeconds: opts.timeoutSeconds,
+            runningServiceCount: owned.length,
+          })
         ),
       });
       await exec(["docker", "rm", ...ids], {

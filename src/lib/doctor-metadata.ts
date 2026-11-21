@@ -64,7 +64,6 @@ const PROJECT_AREAS: Readonly<Record<string, DoctorArea>> = {
   "emulated services": "engine",
   "polling watchers": "engine",
   "shared volume architectures": "engine",
-  "compose slow stops": "engine",
   "dev image tags": "project_files",
   "shared source installs": "project_files",
 };

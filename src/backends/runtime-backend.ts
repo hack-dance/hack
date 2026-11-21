@@ -2,7 +2,6 @@ import { dirname } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { resolveComposeDownCapMs } from "../lib/compose-down-budget.ts";
-import { readComposeServiceStopMeta } from "../lib/compose-down-slow-stop.ts";
 import {
   effectiveComposeProfiles,
   readComposeInterpolationEnv,
@@ -110,8 +109,7 @@ export interface RuntimeDownOptions extends RuntimeBaseOptions {
    */
   readonly timeoutSeconds?: number;
   /**
-   * Optional precomputed overall subprocess cap (ms) derived from the Compose
-   * dependency stop graph and per-service `stop_grace_period`.
+   * Optional precomputed overall subprocess cap (ms) for `docker compose down`.
    */
   readonly capMs?: number;
 }
@@ -688,13 +686,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
     const cmd = buildComposeDownCommand(opts);
     const timeoutMs =
       opts.capMs ??
-      resolveComposeDownCapMs(opts.timeoutSeconds, {
-        graph: opts.composeFiles[0]
-          ? ((await readComposeServiceStopMeta(opts.composeFiles[0]).catch(
-              () => null
-            )) ?? undefined)
-          : undefined,
-      });
+      resolveComposeDownCapMs({ timeoutSeconds: opts.timeoutSeconds });
     return await run(cmd, {
       cwd: opts.cwd,
       env: opts.env,

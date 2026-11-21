@@ -311,3 +311,25 @@ fn invalid_nested_fields_are_refused_on_decode() {
         assert_eq!(write_frame(Vec::new(), 1, true, &r), Err(Error::Invalid));
     }
 }
+
+#[test]
+fn welcome_retention_is_bounded_on_both_sides_of_the_wire() {
+    for n in [0, 1, 65536, 65537, u32::MAX] {
+        let welcome = |output_retention| Response::Welcome {
+            version: 1,
+            capabilities: 0,
+            max_frame: 65536,
+            max_jobs: 16,
+            output_retention,
+            boot: UUID.into(),
+            incarnation: UUID.into(),
+        };
+        let valid = (1..=65536).contains(&n);
+        assert_eq!(write_frame(Vec::new(), 0, true, &welcome(n)).is_ok(), valid);
+        let mut frame = encoded(&welcome(1));
+        // Prefix, routed header, version, capability mask, frame limit, job limit.
+        let offset = 4 + 7 + 2 + 8 + 4 + 2;
+        frame[offset..offset + 4].copy_from_slice(&n.to_be_bytes());
+        assert_eq!(read_frame::<Response>(&frame[..]).is_ok(), valid);
+    }
+}

@@ -5,9 +5,6 @@ on:
       defer_macos:
         type: boolean
         required: true
-concurrency:
-  group: guest-protocol-${{ github.ref }}
-  cancel-in-progress: true
 permissions:
   contents: read
 jobs:

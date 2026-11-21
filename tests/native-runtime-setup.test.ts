@@ -19,6 +19,13 @@ import { privateCliEnv } from "./helpers/private-cli-env.ts";
 const roots: string[] = [];
 const entrypoint = resolve("index.ts");
 const SENTINEL = "synthetic-setup-project-value-must-not-be-in-child";
+const BUILDER_PIN = {
+  url: "https://example.invalid/builder.bin",
+  size_bytes: 7,
+  archive_sha256: "b".repeat(64),
+};
+const BUILDER_HINT =
+  "The image builder is not installed, so native up cannot build images yet. Run hack native setup --accept-downloads to add it; offline, add --builder <pinned builder file> to the offline setup inputs.\n";
 afterEach(async () => {
   for (const root of roots.splice(0)) {
     await rm(root, { recursive: true, force: true });
@@ -46,10 +53,15 @@ if (args.includes("inspect")) {
   const reply = ${JSON.stringify(nativeSetupInspection())};
   reply.state = reply.installation_state = existsSync(join(home, "installed")) ? "ready" : existsSync(home) ? "partial_resumable" : "not_set_up";
   reply.code = reply.state === "ready" ? "native_setup_ready" : "E_NATIVE_SETUP_REQUIRED";
+  if (existsSync(${JSON.stringify(join(root, "report-builder"))})) {
+    reply.pins.push(${JSON.stringify(BUILDER_PIN)});
+    reply.builder = { state: existsSync(join(home, "builder")) ? "prepared" : "not_prepared", file: "builder.bin" };
+  }
   console.log(JSON.stringify(reply));
 } else if (args[2] === "runtime" && args[3] === "setup") {
   if (process.env.SETUP_PROJECT_SENTINEL || process.env.HACK_ENV_SECRET_KEY) process.exit(91);
   mkdirSync(home, { mode: 0o700, recursive: true });
+  if (args.includes("--accept-downloads") || args.includes("--builder")) writeFileSync(join(home, "builder"), "fixture");
   if (existsSync(${JSON.stringify(join(root, "interrupt-setup"))})) {
     mkdirSync(join(home, ".hack-local/setup/downloads"), { mode: 0o700, recursive: true });
     writeFileSync(join(home, ".hack-local/setup/downloads/provider.part"), "prefix");
@@ -134,6 +146,38 @@ test("setup inspection rejects old, unknown or contradictory readiness replies",
     },
   ]) {
     expect(() => parseNativeSetupInspection(value)).toThrow();
+  }
+});
+
+test("setup inspection reports the image builder apart from readiness", () => {
+  const reply = (builder: unknown) => ({
+    ...nativeSetupInspection(),
+    pins: [...nativeSetupInspection().pins, BUILDER_PIN],
+    builder,
+  });
+  // A runtime that does not report the builder is still a ready runtime.
+  expect(
+    parseNativeSetupInspection(nativeSetupInspection()).builder
+  ).toBeUndefined();
+  for (const state of ["prepared", "not_prepared", "changed"] as const) {
+    const inspection = parseNativeSetupInspection(
+      reply({ state, file: "builder.bin" })
+    );
+    // The builder never changes readiness, and its pin is one of the listed pins.
+    expect(inspection.state).toBe("ready");
+    expect(inspection.pins).toHaveLength(2);
+    expect(inspection.builder).toEqual({ state, pin: BUILDER_PIN });
+  }
+  for (const builder of [
+    null,
+    "prepared",
+    { state: "future", file: "builder.bin" },
+    { state: "prepared" },
+    { state: "prepared", file: "not-a-listed-pin" },
+  ]) {
+    expect(() => parseNativeSetupInspection(reply(builder))).toThrow(
+      "Invalid native setup builder."
+    );
   }
 });
 
@@ -296,3 +340,120 @@ test("a signaled setup child propagates its signal status", async () => {
   expect(result.exitCode).toBe(143);
   expect(existsSync(join(f.home, "installed"))).toBe(false);
 }, 30_000);
+
+test("a set-up home without the image builder gains it only with consent", async () => {
+  const f = await fixture();
+  await writeFile(join(f.root, "report-builder"), "the runtime reports it");
+  // A home an older build set up: ready, and no image builder.
+  await mkdir(f.home, { mode: 0o700 });
+  await writeFile(join(f.home, "installed"), "fixture");
+
+  // Without consent setup succeeds as before, downloads nothing and says in
+  // one line how to add the builder.
+  const plain = await f.cli(["native", "setup"]);
+  expect(plain.exitCode).toBe(0);
+  expect(plain.stdout).toBe(`Native runtime is set up.\n${BUILDER_HINT}`);
+  expect(plain.stderr).not.toContain("Pinned downloads");
+  expect(existsSync(join(f.home, "builder"))).toBe(false);
+  // JSON stays the runtime's result alone; its `builder` field carries the state.
+  const json = await f.cli(["native", "setup", "--json"]);
+  expect(json.exitCode).toBe(0);
+  expect(json.stdout).toBe(f.result);
+  expect(json.stderr).toBe("");
+  expect(existsSync(join(f.home, "builder"))).toBe(false);
+
+  // With consent the preview lists the builder alone: nothing else downloads.
+  const accepted = await f.cli(["native", "setup", "--accept-downloads"]);
+  expect(accepted.exitCode).toBe(0);
+  expect(accepted.stdout).toBe("Native runtime is set up.\n");
+  expect(accepted.stderr).toContain("Pinned downloads");
+  expect(accepted.stderr).toContain(
+    `builder.bin: 7 bytes; source example.invalid; SHA-256 ${"b".repeat(64)}`
+  );
+  expect(accepted.stderr).not.toContain("provider.tgz");
+  expect(existsSync(join(f.home, "builder"))).toBe(true);
+
+  // A home that has everything is shown and told nothing more.
+  const complete = await f.cli(["native", "setup", "--accept-downloads"]);
+  expect(complete.exitCode).toBe(0);
+  expect(complete.stdout).toBe("Native runtime is set up.\n");
+  expect(complete.stderr).not.toContain("Pinned downloads");
+  const calls = (await readFile(f.calls, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const inspect = ["runtime", "setup", "inspect", "--json"];
+  expect(calls).toEqual([
+    inspect,
+    ["runtime", "setup", "--no-interactive"],
+    inspect,
+    ["runtime", "setup", "--no-interactive", "--json"],
+    inspect,
+    ["runtime", "setup", "--no-interactive", "--accept-downloads"],
+    inspect,
+    ["runtime", "setup", "--no-interactive", "--accept-downloads"],
+  ]);
+}, 60_000);
+
+test("a fresh home is shown the image builder with the other pinned downloads", async () => {
+  const f = await fixture();
+  await writeFile(join(f.root, "report-builder"), "the runtime reports it");
+  const installed = await f.cli(["native", "setup", "--accept-downloads"]);
+  expect(installed.exitCode).toBe(0);
+  expect(installed.stderr).toContain("provider.tgz: 5 bytes");
+  expect(installed.stderr).toContain("builder.bin: 7 bytes");
+  // Setup installed the builder with the rest: no hint.
+  expect(installed.stdout).toBe("Native runtime is set up.\n");
+}, 30_000);
+
+test("the offline builder file joins the offline inputs and is refused alone", async () => {
+  const f = await fixture();
+  const alone = await f.cli(["native", "setup", "--builder", "/input/builder"]);
+  expect(alone.exitCode).toBe(1);
+  expect(alone.stdout + alone.stderr).toContain(
+    "--builder adds the pinned image builder file to them"
+  );
+  expect(existsSync(f.calls)).toBe(false);
+  const offline = [
+    "--archive",
+    "/input/provider",
+    "--engine-archive",
+    "/input/engine",
+    "--network-tools-directory",
+    "/input/packages",
+  ];
+  await writeFile(join(f.root, "report-builder"), "the runtime reports it");
+  // Without the builder file the request is the one offline setup always sent,
+  // and the summary says that the home has no image builder.
+  const without = await f.cli(["native", "setup", ...offline]);
+  expect(without.exitCode).toBe(0);
+  expect(without.stdout).toBe(`Native runtime is set up.\n${BUILDER_HINT}`);
+  expect(existsSync(join(f.home, "builder"))).toBe(false);
+  // The same inputs with the builder file add it to the home that is now set up.
+  const withBuilder = await f.cli([
+    "native",
+    "setup",
+    ...offline,
+    "--builder",
+    "/input/builder",
+  ]);
+  expect(withBuilder.exitCode).toBe(0);
+  expect(withBuilder.stdout).toBe("Native runtime is set up.\n");
+  expect(withBuilder.stderr).not.toContain("Pinned downloads");
+  expect(existsSync(join(f.home, "builder"))).toBe(true);
+  const calls = (await readFile(f.calls, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(calls.filter((call) => !call.includes("inspect"))).toEqual([
+    ["runtime", "setup", "--no-interactive", ...offline],
+    [
+      "runtime",
+      "setup",
+      "--no-interactive",
+      ...offline,
+      "--builder",
+      "/input/builder",
+    ],
+  ]);
+}, 60_000);

@@ -682,6 +682,48 @@ pub const BUILDER_NOT_PREPARED: &str = "builder_not_prepared";
 /// Fixed text: the frontend shows it to the user as written, so it names the remedy.
 const BUILDER_NOT_PREPARED_MESSAGE: &str = "The image builder is not installed in this native home, so no image was built. Run hack native setup --accept-downloads to add it (runtime setup --accept-downloads with the executor). Offline, add --builder <pinned builder file> to the offline setup inputs, or run runtime prepare-builder --archive <pinned builder file>.";
 
+/// What a record-level look at the image builder found. It hashes nothing and takes no
+/// lock, so it guides setup and diagnostics only; every build still verifies the tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuilderState {
+    /// The record names this executor's pin and the prepared executable is present.
+    Prepared,
+    /// The record or the prepared directory is absent; setup can add the builder.
+    NotPrepared,
+    /// Something is there that the record and this executor's pin do not describe.
+    Changed,
+}
+
+/// The record-level state of the pinned BuildKit client in this home.
+pub fn builder_state(candidate: &Candidate) -> Result<BuilderState, CandidateError> {
+    binary_state(candidate, &BUILDER)
+}
+
+fn binary_state(candidate: &Candidate, pin: &BinaryPin) -> Result<BuilderState, CandidateError> {
+    let root = binary_root(candidate, pin);
+    reject_aliased_state(&root)?;
+    let record = candidate.state_root.join("providers").join(pin.record);
+    if !present(&record)? || !present(&root)? {
+        return Ok(BuilderState::NotPrepared);
+    }
+    let Ok(artifact) = state::read::<Artifact>(&record) else {
+        return Ok(BuilderState::Changed);
+    };
+    let executable = match fs::symlink_metadata(root.join(pin.executable)) {
+        Ok(metadata) => metadata.is_file(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(io(error)),
+    };
+    Ok(
+        if executable && artifact.version == pin.version && artifact.archive_sha256 == pin.sha256 {
+            BuilderState::Prepared
+        } else {
+            BuilderState::Changed
+        },
+    )
+}
+
 /// Whether anything, a dangling symlink included, has this name.
 fn present(path: &Path) -> Result<bool, CandidateError> {
     match fs::symlink_metadata(path) {
@@ -856,6 +898,21 @@ pub(super) fn test_binary_pin(bytes: &[u8]) -> BinaryPin {
         verify_signature: false,
         not_prepared: "Test client is not prepared.",
     }
+}
+
+/// The image builder's directory and record under the real pin, with placeholder bytes:
+/// enough for the record-level [`builder_state`], never for [`verify_builder`].
+#[cfg(test)]
+pub(super) fn recorded_builder_fixture(candidate: &Candidate) {
+    let providers = candidate.state_root.join("providers");
+    state::private_directory(&binary_root(candidate, &BUILDER)).unwrap();
+    fs::write(builder_executable(candidate), b"placeholder").unwrap();
+    let artifact = Artifact {
+        version: BUILDER.version.into(),
+        archive_sha256: BUILDER.sha256.into(),
+        tree_sha256: "a".repeat(64),
+    };
+    state::write(&providers.join(BUILDER.record), &artifact).unwrap();
 }
 
 /// Prepared-tree fixtures with nested empty directories, laid out exactly as preparation
@@ -1274,6 +1331,10 @@ mod tests {
             assert!(error.message_fixed);
             assert_eq!(error.message, BUILDER_NOT_PREPARED_MESSAGE);
             assert!(!error.message.contains("os error"));
+            assert_eq!(
+                builder_state(&candidate).unwrap(),
+                BuilderState::NotPrepared
+            );
             // The preflight reports the same home as lacking the builder, not as failed.
             assert!(!builder_prepared(&candidate).unwrap());
         }
@@ -1297,6 +1358,18 @@ mod tests {
         assert!(!candidate.state_root.join("run").exists());
         assert!(!candidate.state_root.join("setup").exists());
         assert_eq!(fs::read_dir(providers(&candidate)).unwrap().count(), 0);
+
+        // A builder that is there but is not the recorded bytes keeps its own refusal,
+        // in the build and in the preflight; only its record-level state calls it prepared.
+        recorded_builder_fixture(&candidate);
+        assert_eq!(builder_state(&candidate).unwrap(), BuilderState::Prepared);
+        for error in [
+            verify_builder(&candidate).unwrap_err(),
+            builder_prepared(&candidate).unwrap_err(),
+        ] {
+            assert_eq!(error.code, "artifact_digest_mismatch");
+            assert!(error.message.contains("prepared tree changed"));
+        }
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -1316,6 +1389,10 @@ mod tests {
             assert_eq!(error.code, BUILDER_NOT_PREPARED);
             assert_eq!(error.message, pin.not_prepared);
             assert!(error.message_fixed);
+            assert_eq!(
+                binary_state(candidate, &pin).unwrap(),
+                BuilderState::NotPrepared
+            );
         };
 
         // A record without its directory: preparing again installs the directory.
@@ -1324,6 +1401,10 @@ mod tests {
         let again = prepare_binary(&candidate, &source, &pin).unwrap();
         assert_eq!(again.tree_sha256, prepared.tree_sha256);
         verify_binary(&candidate, &pin).unwrap();
+        assert_eq!(
+            binary_state(&candidate, &pin).unwrap(),
+            BuilderState::Prepared
+        );
 
         // A directory without its record, as a preparation interrupted between publishing
         // the directory and writing the record leaves it: preparing again writes the record
@@ -1365,6 +1446,10 @@ mod tests {
         assert_eq!(
             verify_binary(&candidate, &pin).unwrap_err().code,
             "artifact_digest_mismatch"
+        );
+        assert_eq!(
+            binary_state(&candidate, &pin).unwrap(),
+            BuilderState::Changed
         );
         fs::remove_dir_all(root).unwrap();
     }

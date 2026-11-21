@@ -19,10 +19,12 @@ test("setup acquisition stays behind the explicit native command", async () => {
     if (!file.endsWith(".rs") || file === "runtime_setup_cli.rs") {
       continue;
     }
-    expect(await Bun.file(join(runtime, file)).text()).not.toContain(
-      "setup::run("
-    );
+    const text = await Bun.file(join(runtime, file)).text();
+    expect(text).not.toContain("setup::run(");
+    // Reusing a complete home can add the image builder, so it is setup's alone too.
+    expect(text).not.toContain("setup::reuse_existing");
   }
+  expect(cli).toContain("setup::reuse_existing");
 });
 
 test("download manifest and user docs retain the manual trust pins", async () => {
@@ -32,7 +34,12 @@ test("download manifest and user docs retain the manual trust pins", async () =>
   ).text();
   const guide = await Bun.file("docs/guides/native-candidate.md").text();
   const tryIt = await Bun.file("docs/native/try-it.md").text();
-  for (const pin of [pins.smolvm, pins.docker, ...pins.network_tools]) {
+  for (const pin of [
+    pins.smolvm,
+    pins.docker,
+    ...pins.network_tools,
+    pins.buildx,
+  ]) {
     expect(pin.url).toStartWith("https://");
     expect(pin.archive_sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(pin.max_bytes).toBeGreaterThan(0);

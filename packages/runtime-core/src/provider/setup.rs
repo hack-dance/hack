@@ -1,6 +1,8 @@
 //! Explicit provider acquisition. Pinned bytes are the authority; URLs only locate them.
 //! Preparation uses the manual entrypoints in an isolated staging home. A single rename
 //! publishes the complete provider set; interrupted staging can be discarded and rebuilt.
+//! The image builder is added afterwards by its own manual entrypoint, so a home that is
+//! already complete gains it without its published provider set being touched.
 mod download;
 mod inspection;
 pub use inspection::{
@@ -53,15 +55,32 @@ struct Pins {
     smolvm: FilePin,
     docker: FilePin,
     network_tools: Vec<FilePin>,
+    buildx: FilePin,
+}
+
+/// Every pinned file setup may download, in the order it is displayed for consent: the
+/// provider set, then the image builder.
+pub fn pins() -> Result<Vec<FilePin>, CandidateError> {
+    let (mut files, builder) = pin_set()?;
+    files.push(builder);
+    Ok(files)
+}
+
+/// The image builder's pin: a single executable, not an archive.
+pub fn builder_pin() -> Result<FilePin, CandidateError> {
+    Ok(pin_set()?.1)
 }
 
 /// Compile the repository's manifest into the executable; never trust a mutable bundle
 /// manifest to grant network access or change the hashes accepted by manual preparation.
-pub fn pins() -> Result<Vec<FilePin>, CandidateError> {
+/// Returns the provider set that is published as one tree (provider, engine, then the
+/// guest packages) and, apart from it, the image builder.
+fn pin_set() -> Result<(Vec<FilePin>, FilePin), CandidateError> {
     let pins: Pins = serde_json::from_str(include_str!("../../provider-pins.json"))
         .map_err(|_| CandidateError::new("setup_pin_invalid", "Invalid compiled provider pins."))?;
     if pins.smolvm.archive_sha256 != artifact::ARCHIVE_SHA256
         || pins.docker.archive_sha256 != artifact::ENGINE_SHA256
+        || pins.buildx.archive_sha256 != artifact::BUILDER_SHA256
         || pins.network_tools.len() != network_tools::PACKAGES.len()
     {
         return Err(CandidateError::new(
@@ -81,10 +100,10 @@ pub fn pins() -> Result<Vec<FilePin>, CandidateError> {
         .into_iter()
         .chain(pins.network_tools)
         .collect();
-    for pin in &files {
+    for pin in files.iter().chain([&pins.buildx]) {
         download::validate_pin(pin)?;
     }
-    Ok(files)
+    Ok((files, pins.buildx))
 }
 
 #[derive(Clone, Copy)]
@@ -92,6 +111,43 @@ pub struct OfflineInputs<'a> {
     pub archive: &'a Path,
     pub engine_archive: &'a Path,
     pub network_tools: &'a Path,
+    /// The pinned image builder file. Optional: offline setup without it leaves the
+    /// builder unprepared.
+    pub builder: Option<&'a Path>,
+}
+
+/// Where setup may take the pinned image builder from.
+#[derive(Clone, Copy, Debug)]
+pub enum BuilderSource<'a> {
+    /// Neither download consent nor an offline file: observe only, change nothing.
+    Absent,
+    /// The caller consented to the displayed pinned downloads.
+    Download,
+    /// The pinned release file, supplied offline.
+    File(&'a Path),
+}
+
+impl<'a> BuilderSource<'a> {
+    /// Offline inputs never reach the network, with or without a builder file.
+    pub fn select(inputs: Option<OfflineInputs<'a>>, accepted: bool) -> Self {
+        match inputs {
+            Some(inputs) => inputs.builder.map_or(Self::Absent, Self::File),
+            None if accepted => Self::Download,
+            None => Self::Absent,
+        }
+    }
+}
+
+/// What setup did about the image builder.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Builder {
+    /// This invocation prepared it.
+    Installed,
+    /// It was already prepared and verified.
+    Reused,
+    /// It is absent and no source was given; nothing was changed.
+    NotPrepared,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -126,21 +182,35 @@ impl FileResult {
     }
 }
 
+/// `status` and `files` describe the provider set; `builder` the image builder, whose
+/// own file joins `files` when this invocation read it.
 #[derive(Debug, Serialize)]
 struct Installation {
     status: &'static str,
     files: Vec<FileResult>,
+    builder: Builder,
 }
 impl Installation {
-    fn reused() -> Self {
+    fn new(status: &'static str, files: Vec<FileResult>) -> Self {
         Self {
-            status: "reused",
-            files: Vec::new(),
+            status,
+            files,
+            builder: Builder::NotPrepared,
         }
     }
 
+    fn reused() -> Self {
+        Self::new("reused", Vec::new())
+    }
+
+    fn with_builder(mut self, (builder, file): (Builder, Option<FileResult>)) -> Self {
+        self.builder = builder;
+        self.files.extend(file);
+        self
+    }
+
     fn with_probe(self, probe: impl Serialize) -> serde_json::Value {
-        serde_json::json!({"status": self.status, "files": self.files, "probe": probe})
+        serde_json::json!({"status": self.status, "builder": self.builder, "files": self.files, "probe": probe})
     }
 }
 
@@ -200,15 +270,23 @@ fn observe_existing(
     reuse(candidate, &target, verify)
 }
 
-/// Verify a complete installation before asking for download consent. Read-only:
-/// an absent home creates nothing; an existing home uses its retained lock.
-pub fn reuse_existing(candidate: &Candidate) -> Result<Option<serde_json::Value>, CandidateError> {
+/// Verify a complete installation before asking for download consent. An absent home
+/// creates nothing; an existing home uses its retained lock. The provider set is only
+/// read. With [`BuilderSource::Absent`] the image builder is only read too; with a
+/// source, a complete home that lacks the builder gains it and nothing else changes.
+pub fn reuse_existing(
+    candidate: &Candidate,
+    builder: BuilderSource<'_>,
+) -> Result<Option<serde_json::Value>, CandidateError> {
     if !observe_existing(candidate, &verified_install)? {
         return Ok(None);
     }
-    Ok(Some(Installation::reused().with_probe(
-        super::probe_with_profile(candidate, super::Profile::Development)?,
-    )))
+    let installation =
+        Installation::reused().with_builder(ensure_pinned_builder(candidate, builder)?);
+    Ok(Some(installation.with_probe(super::probe_with_profile(
+        candidate,
+        super::Profile::Development,
+    )?)))
 }
 
 /// Must be called only by the explicit setup command after consent (or with all offline
@@ -218,7 +296,8 @@ pub fn run(
     inputs: Option<OfflineInputs<'_>>,
     accepted: bool,
 ) -> Result<serde_json::Value, CandidateError> {
-    if let Some(result) = reuse_existing(candidate)? {
+    let builder = BuilderSource::select(inputs, accepted);
+    if let Some(result) = reuse_existing(candidate, builder)? {
         return Ok(result);
     }
     if inputs.is_none() {
@@ -233,15 +312,76 @@ pub fn run(
     let installation = install(
         candidate,
         inputs,
-        &pins()?,
+        &pin_set()?.0,
         prepare_all,
         verified_install,
         download::client,
-    )?;
+    )?
+    .with_builder(ensure_pinned_builder(candidate, builder)?);
     Ok(installation.with_probe(super::probe_with_profile(
         candidate,
         super::Profile::Development,
     )?))
+}
+
+fn ensure_pinned_builder(
+    candidate: &Candidate,
+    source: BuilderSource<'_>,
+) -> Result<(Builder, Option<FileResult>), CandidateError> {
+    ensure_builder(
+        candidate,
+        source,
+        &pin_set()?.1,
+        |candidate, file| artifact::prepare_builder(candidate, file).map(drop),
+        |candidate| artifact::verify_builder(candidate).map(drop),
+        download::client,
+    )
+}
+
+/// Add the image builder to a home whose provider set is published, or report it.
+///
+/// Additive by construction: it reads and writes only the builder's own directory and
+/// record (through the manual preparation entrypoint, under the provider lock that
+/// entrypoint takes) and the private download cache. It never stages, publishes or
+/// re-prepares the provider set, which a running pool may be executing from. A builder
+/// that is already prepared is verified and left alone, and without a source nothing is
+/// written at all. A prepared builder that changed keeps its refusal.
+fn ensure_builder(
+    candidate: &Candidate,
+    source: BuilderSource<'_>,
+    pin: &FilePin,
+    prepare: impl FnOnce(&Candidate, &Path) -> Result<(), CandidateError>,
+    verify: impl Fn(&Candidate) -> Result<(), CandidateError>,
+    client: impl FnOnce() -> Result<download::Client, CandidateError>,
+) -> Result<(Builder, Option<FileResult>), CandidateError> {
+    match verify(candidate) {
+        Ok(()) => return Ok((Builder::Reused, None)),
+        Err(error) if error.code == artifact::BUILDER_NOT_PREPARED => {}
+        Err(error) => return Err(error),
+    }
+    let offline = match source {
+        BuilderSource::Absent => return Ok((Builder::NotPrepared, None)),
+        BuilderSource::File(file) => Some(file),
+        BuilderSource::Download => None,
+    };
+    // Serialize with other setups: the download cache belongs to the setup lock holder.
+    let _setup_lock = state::Lock::acquire(&candidate.state_root.join("setup"))?;
+    let (file, result) = if let Some(file) = offline {
+        download::verify_input(file, pin)?;
+        (
+            file.to_path_buf(),
+            FileResult::new(pin, Outcome::Offline, 0)?,
+        )
+    } else {
+        let downloads = download_directory(candidate);
+        state::private_directory(&downloads)?;
+        let result = download::acquire(&client()?, &downloads, pin)?;
+        (downloads.join(pin.name()?), result)
+    };
+    // The file passed its pinned hash and length; preparation hashes its own copy again.
+    prepare(candidate, &file)?;
+    verify(candidate)?;
+    Ok((Builder::Installed, Some(result)))
 }
 
 fn prepare_all(candidate: &Candidate, inputs: OfflineInputs<'_>) -> Result<(), CandidateError> {
@@ -304,10 +444,7 @@ fn install(
     if reuse(candidate, &target, &verify)? {
         // A manual prepare may have finished while inputs were acquired. Keep
         // the actual transfer accounting even though publication is now a no-op.
-        return Ok(Installation {
-            status: "reused",
-            files: results,
-        });
+        return Ok(Installation::new("reused", results));
     }
     publish(candidate, &setup, &target, |staged| {
         prepare(
@@ -316,14 +453,12 @@ fn install(
                 archive: &archive,
                 engine_archive: &engine,
                 network_tools: &packages,
+                builder: None,
             },
         )?;
         verify(staged)
     })?;
-    Ok(Installation {
-        status: "installed",
-        files: results,
-    })
+    Ok(Installation::new("installed", results))
 }
 
 fn reuse(

@@ -10,6 +10,7 @@ import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { canPrompt, confirmSafe } from "../lib/interactivity.ts";
 import { isNativeDetachedOwnerProcess } from "../lib/native-detached-up.ts";
+import { nativeBuilderRemedy } from "../lib/native-image-builder.ts";
 import { subprocessSignalExitStatus } from "../lib/subprocess-signal.ts";
 import {
   invokeNativeRuntime,
@@ -32,6 +33,17 @@ export type NativeSetupPin = {
   readonly size_bytes: number;
   readonly archive_sha256: string;
 };
+const BUILDER_STATES = ["prepared", "not_prepared", "changed"] as const;
+export type NativeSetupBuilderState = (typeof BUILDER_STATES)[number];
+/**
+ * The image builder, reported apart from `state`: a home is ready without it
+ * and only image builds need it. A record-level observation, like `state`.
+ */
+export type NativeSetupBuilder = {
+  readonly state: NativeSetupBuilderState;
+  /** The builder's own entry in `pins`. */
+  readonly pin: NativeSetupPin;
+};
 export type NativeSetupInspection = {
   readonly protocol_version: 1;
   readonly state: NativeSetupState;
@@ -40,6 +52,8 @@ export type NativeSetupInspection = {
   readonly supported_host: boolean;
   readonly setup_only: boolean;
   readonly pins: readonly NativeSetupPin[];
+  /** Absent when the runtime could not observe it or does not report it. */
+  readonly builder?: NativeSetupBuilder;
 };
 
 const HASH = /^[a-f0-9]{64}$/;
@@ -89,6 +103,28 @@ function state(value: unknown): NativeSetupState | undefined {
   return STATES.find((candidate) => candidate === value);
 }
 
+/** The builder names its pin by file name; anything else is not this protocol. */
+function parseBuilder(
+  value: unknown,
+  pins: readonly NativeSetupPin[]
+): NativeSetupBuilder | undefined {
+  if (value === undefined) {
+    return;
+  }
+  const builderState = isRecord(value)
+    ? BUILDER_STATES.find((candidate) => candidate === value.state)
+    : undefined;
+  const pin = isRecord(value)
+    ? pins.find(
+        (candidate) => basename(new URL(candidate.url).pathname) === value.file
+      )
+    : undefined;
+  if (!(builderState && pin)) {
+    throw new Error("Invalid native setup builder.");
+  }
+  return { state: builderState, pin };
+}
+
 /** Reject incompatible runtimes without exposing unvalidated subprocess text. */
 export function parseNativeSetupInspection(
   value: unknown
@@ -135,6 +171,7 @@ export function parseNativeSetupInspection(
       archive_sha256: pin.archive_sha256,
     });
   }
+  const builder = parseBuilder(value.builder, pins);
   const effectiveState = state(value.state);
   const installationState = state(value.installation_state);
   if (
@@ -160,6 +197,7 @@ export function parseNativeSetupInspection(
     supported_host: value.supported_host,
     setup_only: value.setup_only,
     pins,
+    ...(builder ? { builder } : {}),
   };
 }
 
@@ -208,15 +246,20 @@ function refuse(inspection: Pick<NativeSetupInspection, "state">): never {
   });
 }
 
-/** Pin previews contain compiled public metadata only; no project env is read. */
+/**
+ * Pin previews contain compiled public metadata only; no project env is read.
+ * `pins` narrows the list to what this run can download: the image builder
+ * alone for a home that is already set up.
+ */
 export function previewNativeSetup(opts: {
   readonly inspection: NativeSetupInspection;
   readonly runtime: NativeRuntimeSelection;
+  readonly pins?: readonly NativeSetupPin[];
 }): void {
   process.stderr.write(
     `Native runtime home: ${opts.runtime.home}\nPinned downloads (verified before preparation):\n`
   );
-  for (const pin of opts.inspection.pins) {
+  for (const pin of opts.pins ?? opts.inspection.pins) {
     const url = new URL(pin.url);
     process.stderr.write(
       `  ${basename(url.pathname)}: ${pin.size_bytes} bytes; source ${url.hostname}; SHA-256 ${pin.archive_sha256}\n`
@@ -227,10 +270,23 @@ export function previewNativeSetup(opts: {
   );
 }
 
+/**
+ * A set-up home that has no image builder, as a home set up before setup
+ * installed one. Setup adds it only with download consent or the offline file.
+ */
+export function nativeSetupLacksBuilder(
+  inspection: Pick<NativeSetupInspection, "state" | "builder">
+): boolean {
+  return (
+    inspection.state === "ready" && inspection.builder?.state === "not_prepared"
+  );
+}
+
 /** No request timeout: acquisition is resumable and may take longer than startup.
  * The owned child shares the foreground group and receives forwarded signals;
  * JSON stdout and stderr are inherited; text mode ignores the JSON body and
- * renders a fixed summary only after successful completion.
+ * renders a fixed summary only after successful completion. `builderHint` adds
+ * one line to that summary for a home this run left without the image builder.
  */
 export async function runNativeSetupChild(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -238,6 +294,7 @@ export async function runNativeSetupChild(opts: {
   readonly json: boolean;
   readonly acceptDownloads: boolean;
   readonly offline?: readonly string[];
+  readonly builderHint?: boolean;
 }): Promise<number> {
   const env: Record<string, string | undefined> = {};
   for (const key of ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"]) {
@@ -284,6 +341,11 @@ export async function runNativeSetupChild(opts: {
         : exit);
     if (result === 0 && !opts.json) {
       process.stdout.write("Native runtime is set up.\n");
+      if (opts.builderHint) {
+        process.stdout.write(
+          `The image builder is not installed, so native up cannot build images yet. ${nativeBuilderRemedy()}\n`
+        );
+      }
     }
     return result;
   } finally {

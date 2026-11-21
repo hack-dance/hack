@@ -1,12 +1,12 @@
 //! Content-addressed canonical JSON for value-free step outputs.
 
-use super::{Result, Store, disk, invalid, io_error};
+use super::{Result, Store, disk, invalid};
 use crate::canonical_digest::{self, Digest};
 use sha2::{Digest as _, Sha256};
-use std::io::Read;
 use std::path::PathBuf;
 
-const VERIFY_BELOW: u64 = 1024 * 1024;
+/// The largest CAS object the store writes or reads (plan outputs are far smaller).
+pub(super) const MAX_CAS_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Implement only for a type with no field that can hold an env value, managed
 /// file content, credential, token, execution input or normalized Compose text.
@@ -19,6 +19,9 @@ impl Store {
             serde_json::to_value(value).map_err(|_| invalid("Cannot encode CAS output."))?;
         let bytes = canonical_digest::canonical_json(&value)
             .map_err(|_| invalid("Cannot encode CAS output."))?;
+        if bytes.len() as u64 > MAX_CAS_BYTES {
+            return Err(invalid("CAS output exceeds the step store limit."));
+        }
         let digest = Digest(Sha256::digest(&bytes).into());
         let shard = self.cas_shard(&digest);
         disk::create_directory(&shard)?;
@@ -27,47 +30,24 @@ impl Store {
         Ok(digest)
     }
 
-    /// Read CAS bytes, verifying objects smaller than 1 MiB. Remove a mismatch.
-    ///
-    /// An object of 1 MiB or more is returned unverified: a caller that needs a
-    /// verified output goes through `lookup`, which verifies at any size.
+    /// Read and verify CAS bytes. An object that does not hash to its name, or is
+    /// larger than `MAX_CAS_BYTES`, is absent and is removed.
     pub fn get_cas(&self, digest: &Digest) -> Result<Option<Vec<u8>>> {
         let path = self.cas_path(digest);
         let Some(mut file) = self.read_file(&path)? else {
             return Ok(None);
         };
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(io_error)?;
-        if (bytes.len() as u64) < VERIFY_BELOW && Digest(Sha256::digest(&bytes).into()) != *digest {
+        let verified = disk::read_limited(&mut file, MAX_CAS_BYTES)?
+            .filter(|bytes| Digest(Sha256::digest(bytes).into()) == *digest);
+        if verified.is_none() {
             // Best effort: the object is absent either way.
             let _ = disk::remove_current(&file, &path);
-            return Ok(None);
         }
-        Ok(Some(bytes))
+        Ok(verified)
     }
 
     pub(super) fn has_verified_cas(&self, digest: &Digest) -> Result<bool> {
-        let path = self.cas_path(digest);
-        let Some(mut file) = self.read_file(&path)? else {
-            return Ok(false);
-        };
-        // A cache hit requires verification at any size. Stream the hash so the
-        // observation does not have to retain the output in memory.
-        let mut hasher = Sha256::new();
-        let mut buffer = [0; 16 * 1024];
-        loop {
-            let count = file.read(&mut buffer).map_err(io_error)?;
-            if count == 0 {
-                break;
-            }
-            hasher.update(&buffer[..count]);
-        }
-        if Digest(hasher.finalize().into()) != *digest {
-            // Best effort: the object is absent either way.
-            let _ = disk::remove_current(&file, &path);
-            return Ok(false);
-        }
-        Ok(true)
+        Ok(self.get_cas(digest)?.is_some())
     }
 
     fn cas_path(&self, digest: &Digest) -> PathBuf {

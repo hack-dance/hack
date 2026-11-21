@@ -23,12 +23,13 @@ pub(super) fn open(root: &Path) -> Result<Store> {
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             result => result.map_err(io_error)?,
         };
-        flock(&lock, libc::LOCK_SH).map_err(io_error)?;
+        lock_shared(&lock)?;
         if !is_current(&lock, &lock_path)? {
             continue;
         }
         if read_version(&root, owner)? == Some(true) {
-            if let Some(key) = read_key(&root, owner)? {
+            // A key that cannot be read is repaired under the exclusive lock below.
+            if let Ok(Some(key)) = read_key(&root, owner) {
                 create_layout(&root)?;
                 return Ok(Store {
                     root,
@@ -39,8 +40,10 @@ pub(super) fn open(root: &Path) -> Result<Store> {
             }
         }
 
-        // A flock conversion can release the shared lock before trying exclusive.
-        // Recheck both the inode and contents after acquiring the exclusive lock.
+        // Upgrade to exclusive without blocking. Linux may release the shared lock
+        // during the conversion; macOS keeps it when the upgrade fails. Either way a
+        // failed upgrade drops this handle and retries (up to 32 times, 5 ms apart),
+        // and both the inode and the contents are checked again once exclusive.
         match flock(&lock, libc::LOCK_EX | libc::LOCK_NB) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
@@ -75,35 +78,53 @@ fn store_path(root: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Bring the store to a usable state under the exclusive lock.
+///
+/// - Another `VERSION`: the whole store is set aside (no migrations).
+/// - `VERSION` present but the key missing or unreadable: the store is set aside
+///   too. Keyed digests made with the lost key can never be reproduced, so its
+///   records are useless; a cache rebuilds rather than refusing every open.
+/// - No `VERSION`: an initialization that never finished. A missing or torn key
+///   is replaced. The key is written, synced, and its directory synced before
+///   `VERSION` is published, so a durable `VERSION` always has a whole key.
 fn initialize(root: &Path, owner: u32) -> Result<()> {
     let version = read_version(root, owner)?;
-    if version == Some(false) {
-        let backup = root.with_file_name(format!("store.old-{}", unix_millis()?));
-        match fs::symlink_metadata(&backup) {
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error(error)),
-            Ok(_) => return Err(invalid("Step store archive already exists.")),
-        }
-        return fs::rename(root, backup).map_err(io_error);
+    let key = read_key(root, owner);
+    match (version, &key) {
+        (Some(false), _) | (Some(true), Ok(None) | Err(_)) => return set_aside(root),
+        (Some(true), Ok(Some(_))) => return Ok(()),
+        (None, _) => {}
     }
     create_layout(root)?;
-    match read_key(root, owner) {
+    match key {
         Ok(Some(_)) => {}
         Ok(None) => create_key(root, owner)?,
-        // A key without VERSION is an initialization that never finished (the key
-        // is published before VERSION), so no keyed digest can depend on it yet.
-        // Under the exclusive lock it is replaced. Once VERSION exists, a damaged
-        // key is refused instead: digests already made with it would silently change.
-        Err(_) if version.is_none() => {
+        Err(_) => {
             remove_entry(&root.join("key"))?;
             create_key(root, owner)?;
         }
-        Err(error) => return Err(error),
     }
-    if version.is_none() {
-        publish(root, &root.join("VERSION"), VERSION)?;
+    publish(root, &root.join("VERSION"), VERSION)
+}
+
+fn set_aside(root: &Path) -> Result<()> {
+    let backup = root.with_file_name(format!("store.old-{}", unix_millis()?));
+    match fs::symlink_metadata(&backup) {
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error(error)),
+        Ok(_) => return Err(invalid("Step store archive already exists.")),
     }
-    Ok(())
+    fs::rename(root, backup).map_err(io_error)
+}
+
+/// A blocking shared lock, retried when a signal interrupts the wait.
+fn lock_shared(lock: &File) -> Result<()> {
+    loop {
+        match flock(lock, libc::LOCK_SH) {
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            result => return result.map_err(io_error),
+        }
+    }
 }
 
 fn create_layout(root: &Path) -> Result<()> {
@@ -214,9 +235,32 @@ fn random(bytes: &mut [u8]) -> Result<()> {
 fn create_key(root: &Path, owner: u32) -> Result<()> {
     let mut key = Zeroizing::new([0; 32]);
     random(&mut key[..])?;
-    publish(root, &root.join("key"), &key[..])?;
+    publish_synced(root, &root.join("key"), &key[..])?;
     if read_key(root, owner)?.is_none() {
         return Err(invalid("Invalid step store key file."));
+    }
+    Ok(())
+}
+
+/// `publish`, made durable: the file is synced before the rename and the store
+/// directory after it. Only the key needs this; everything else is a cache entry.
+fn publish_synced(root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut suffix = [0; 16];
+    random(&mut suffix)?;
+    let temporary = root.join("tmp").join(format!("{:x}", crate::Hex(suffix)));
+    let mut file = private_options()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(io_error)?;
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| fs::rename(&temporary, path))
+        .and_then(|()| File::open(root)?.sync_all());
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temporary);
+        return Err(io_error(error));
     }
     Ok(())
 }
@@ -271,6 +315,17 @@ pub(super) fn remove_current(file: &File, path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Read at most `limit` bytes; `None` when the file holds more (the caller treats
+/// it as torn or absent), so a huge or growing file is never read into memory.
+pub(super) fn read_limited(file: &mut File, limit: u64) -> Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    Read::by_ref(file)
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
+    Ok((bytes.len() as u64 <= limit).then_some(bytes))
 }
 
 pub(super) fn unix_millis() -> Result<u64> {

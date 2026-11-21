@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   canonicalDigest,
@@ -13,6 +21,7 @@ import {
   stepKey,
 } from "../src/lib/step-store/key.ts";
 import {
+  canonicalPath,
   stepStoreDirectory,
   stepStoreEnabled,
   stepStoreRuntimeArgs,
@@ -86,6 +95,33 @@ describe("step store, shared vectors", () => {
       });
       expect(encodeStepRecord(record)).toBe(vector.text);
       expect(decodeStepRecord(vector.text, key)).toEqual(record);
+    });
+  }
+});
+
+describe("step store, shared refused records", () => {
+  const refused = (
+    vectors as unknown as {
+      readonly refused: readonly {
+        readonly name: string;
+        readonly keyIndex: number;
+        readonly expect: string;
+        readonly text: string;
+      }[];
+    }
+  ).refused;
+  test("the file lists records both readers must refuse", () => {
+    expect(refused.length).toBeGreaterThan(0);
+  });
+  for (const vector of refused) {
+    test(`refused: ${vector.name}`, () => {
+      const keyVector = vectors.keys[vector.keyIndex];
+      if (!keyVector) {
+        throw new Error("vector names a missing key");
+      }
+      expect(decodeStepRecord(vector.text, keyFor(keyVector))).toBe(
+        vector.expect as "torn-record"
+      );
     });
   }
 });
@@ -259,23 +295,37 @@ describe("step store location and switch", () => {
     }
   });
 
-  test("on passes the per-user store under the global Hack directory", () => {
+  test("on passes the per-user store under the global Hack directory, canonical", () => {
+    const root = realpathSync(
+      mkdtempSync(join(tmpdir(), "step-store-location-"))
+    );
     const previous = process.env.HACK_HOME;
-    process.env.HACK_HOME = "/tmp/hack-home-for-step-store-test";
     try {
-      expect(stepStoreDirectory()).toBe(
-        join("/tmp/hack-home-for-step-store-test", "store")
-      );
+      // An unresolved Hack home: its parent is a symlink and the home itself does
+      // not exist yet (as under the macOS temporary directory).
+      mkdirSync(join(root, "real"));
+      symlinkSync(join(root, "real"), join(root, "alias"));
+      process.env.HACK_HOME = join(root, "alias", "hack-home");
+      const expected = join(root, "real", "hack-home", "store");
+      expect(stepStoreDirectory()).toBe(expected);
       expect(stepStoreRuntimeArgs({ HACK_STEP_STORE: "on" })).toEqual([
         "--step-store",
-        join("/tmp/hack-home-for-step-store-test", "store"),
+        expected,
       ]);
+      // An existing home behind the symlink resolves the same way.
+      mkdirSync(join(root, "real", "hack-home"));
+      expect(stepStoreDirectory()).toBe(expected);
     } finally {
       if (previous === undefined) {
         Reflect.deleteProperty(process.env, "HACK_HOME");
       } else {
         process.env.HACK_HOME = previous;
       }
+      rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test("canonicalPath keeps an unresolvable path as it is", () => {
+    expect(canonicalPath("/")).toBe("/");
   });
 });

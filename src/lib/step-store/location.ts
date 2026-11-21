@@ -7,7 +7,8 @@
  * off by default and on only with `HACK_STEP_STORE=on`; with it off nothing
  * is passed and no step reads or writes a record.
  */
-import { join } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 import { resolveGlobalHackDir } from "../config-paths.ts";
 
@@ -18,9 +19,37 @@ export function stepStoreEnabled(
   return env.HACK_STEP_STORE === "on";
 }
 
-/** The per-user step store directory. Selecting it never creates it. */
+/**
+ * The canonical form of an absolute path whose tail may not exist yet: the
+ * deepest existing ancestor is resolved (symlinks followed), the rest appended.
+ *
+ * The runtime refuses a store with a symlinked ancestor, and macOS puts the
+ * temporary directory and `/var` behind symlinks, so the path is resolved once
+ * here rather than refused there.
+ */
+export function canonicalPath(path: string): string {
+  const missing: string[] = [];
+  let current = path;
+  for (;;) {
+    try {
+      return join(realpathSync(current), ...missing.reverse());
+    } catch (error) {
+      const parent = dirname(current);
+      if (
+        parent === current ||
+        (error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT"
+      ) {
+        return path;
+      }
+      missing.push(basename(current));
+      current = parent;
+    }
+  }
+}
+
+/** The per-user step store directory, canonical. Selecting it never creates it. */
 export function stepStoreDirectory(): string {
-  return join(resolveGlobalHackDir(), "store");
+  return canonicalPath(join(resolveGlobalHackDir(), "store"));
 }
 
 /** The runtime arguments that hand the store to a runtime request, if enabled. */

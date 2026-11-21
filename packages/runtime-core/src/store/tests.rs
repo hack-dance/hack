@@ -156,41 +156,53 @@ fn incompatible_version_sets_aside_entire_store_and_starts_fresh() {
     );
 }
 
+/// A damaged key in a store that has VERSION sets the whole store aside: keyed
+/// digests made with the lost key can never be reproduced, so its records are
+/// useless, and a cache rebuilds rather than refusing every later open.
 #[test]
-fn wrong_key_mode_is_refused() {
-    let fixture = Fixture::new();
-    drop(fixture.open());
-    fs::set_permissions(
-        fixture.root().join("key"),
-        fs::Permissions::from_mode(0o644),
-    )
-    .unwrap();
-    assert_open_refused(&fixture.root());
-}
-
-#[test]
-fn wrong_key_sizes_are_refused() {
-    let fixture = Fixture::new();
-    drop(fixture.open());
-    for size in [31, 33] {
-        fs::write(fixture.root().join("key"), vec![0; size]).unwrap();
-        assert_open_refused(&fixture.root());
+fn a_damaged_key_in_a_versioned_store_sets_the_store_aside() {
+    type Damage = fn(&Path, &Path);
+    let cases: [(&str, Damage); 6] = [
+        ("mode 0644", |key, _| {
+            fs::set_permissions(key, fs::Permissions::from_mode(0o644)).unwrap()
+        }),
+        ("empty", |key, _| fs::write(key, []).unwrap()),
+        ("31 bytes", |key, _| fs::write(key, [0; 31]).unwrap()),
+        ("33 bytes", |key, _| fs::write(key, [0; 33]).unwrap()),
+        ("symlink", |key, other| {
+            fs::remove_file(key).unwrap();
+            symlink(other, key).unwrap();
+        }),
+        ("directory", |key, _| {
+            fs::remove_file(key).unwrap();
+            fs::create_dir(key).unwrap();
+        }),
+    ];
+    for (name, damage) in cases {
+        let fixture = Fixture::new();
+        let other = Fixture::new();
+        drop(other.open());
+        let original = {
+            let store = fixture.open();
+            store.keyed_digest(STEP, &json!("x")).unwrap()
+        };
+        let key = fixture.root().join("key");
+        damage(&key, &other.root().join("key"));
+        let store = Store::open(&fixture.root()).unwrap_or_else(|_| panic!("{name}: open"));
+        assert_eq!(fs::metadata(&key).unwrap().len(), 32, "{name}");
+        assert_eq!(mode(&key), 0o600, "{name}");
+        assert_ne!(
+            store.keyed_digest(STEP, &json!("x")).unwrap(),
+            original,
+            "{name}"
+        );
+        let archived: Vec<_> = fs::read_dir(&fixture.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|entry| entry.starts_with("store.old-"))
+            .collect();
+        assert_eq!(archived.len(), 1, "{name}: {archived:?}");
     }
-}
-
-#[test]
-fn symlink_and_directory_keys_are_refused() {
-    let fixture = Fixture::new();
-    let other = Fixture::new();
-    drop(fixture.open());
-    drop(other.open());
-    let path = fixture.root().join("key");
-    fs::remove_file(&path).unwrap();
-    symlink(other.root().join("key"), &path).unwrap();
-    assert_open_refused(&fixture.root());
-    fs::remove_file(&path).unwrap();
-    fs::create_dir(&path).unwrap();
-    assert_open_refused(&fixture.root());
 }
 
 #[test]
@@ -631,8 +643,48 @@ fn only_a_hit_touches_an_hour_old_record() {
     assert_eq!(mtime(), touched);
 }
 
+/// True if any file under `path` contains `needle`.
+fn store_contains(path: &Path, needle: &[u8]) -> bool {
+    fs::read_dir(path).unwrap().any(|entry| {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_dir() {
+            store_contains(&entry.path(), needle)
+        } else {
+            fs::read(entry.path())
+                .unwrap()
+                .windows(needle.len())
+                .any(|window| window == needle)
+        }
+    })
+}
+
+/// The scan the end-to-end secret test will use (it lands with the first step that
+/// stores a result, P2 on: a fixture whose env, managed env and files hold one
+/// sentinel, then this scan). Here it is shown to find a value that does reach the
+/// store, so a passing scan means something.
 #[test]
-fn no_store_bytes_contain_the_keyed_input_value() {
+fn the_store_scan_finds_a_value_that_was_written_into_it() {
+    #[derive(Serialize)]
+    struct Leaky {
+        text: String,
+    }
+    impl ValueFree for Leaky {}
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let sentinel = "synthetic-sentinel-written-on-purpose";
+    assert!(!store_contains(&fixture.root(), sentinel.as_bytes()));
+    store
+        .put_cas(&Leaky {
+            text: sentinel.into(),
+        })
+        .unwrap();
+    assert!(store_contains(&fixture.root(), sentinel.as_bytes()));
+}
+
+/// No store API writes a raw input: keyed digests, keys and records made from a
+/// sentinel never contain it (inputs are digests by type).
+#[test]
+fn keys_records_and_keyed_digests_never_carry_the_raw_input() {
     let fixture = Fixture::new();
     let store = fixture.open();
     let sentinel = "synthetic-sentinel-for-step-store-non-persistence";
@@ -640,33 +692,62 @@ fn no_store_bytes_contain_the_keyed_input_value() {
     let inputs = BTreeMap::from([("identity".into(), identity)]);
     let key = StepKey::new("example", 1, StepClass::Cas, &inputs, None, "build-1").unwrap();
     let digest = store.put_cas(&CasFixture { count: 2, identity }).unwrap();
-    store
-        .record(
-            &key,
-            Output {
-                digest,
-                reference: Some(OutputRef::Cas),
-            },
-            "run-1",
-        )
-        .unwrap();
+    let output = Output {
+        digest,
+        reference: Some(OutputRef::Cas),
+    };
+    store.record(&key, output, "run-1").unwrap();
+    assert!(!store_contains(&fixture.root(), sentinel.as_bytes()));
+}
 
-    fn scan(path: &Path, sentinel: &[u8]) {
-        for entry in fs::read_dir(path).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_type().unwrap().is_dir() {
-                scan(&entry.path(), sentinel);
-            } else {
-                let bytes = fs::read(entry.path()).unwrap();
-                assert!(
-                    !bytes
-                        .windows(sentinel.len())
-                        .any(|window| window == sentinel)
-                );
-            }
-        }
+#[test]
+fn an_oversized_record_is_torn_and_an_oversized_cas_object_is_absent() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let key = example_key(StepClass::Slot);
+    store.record(&key, output(None), "run-1").unwrap();
+    let path = record_path(&fixture.root(), &key);
+    let limit = usize::try_from(record::MAX_RECORD_BYTES).unwrap();
+    fs::write(&path, vec![b' '; limit + 1]).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        store.lookup(&key, |_| true).unwrap(),
+        Lookup::Miss(MissReason::TornRecord)
+    );
+    assert!(!path.exists());
+
+    let digest = Digest([3; 32]);
+    let object = cas_path(&fixture.root(), digest);
+    fs::create_dir_all(object.parent().unwrap()).unwrap();
+    fs::set_permissions(object.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+    let file = File::create(&object).unwrap();
+    file.set_len(cas::MAX_CAS_BYTES + 1).unwrap();
+    fs::set_permissions(&object, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(store.get_cas(&digest).unwrap().is_none());
+    assert!(!object.exists());
+}
+
+#[test]
+fn get_cas_verifies_objects_of_any_size() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    #[derive(Clone, Serialize)]
+    enum Marker {
+        Present,
     }
-    scan(&fixture.root(), sentinel.as_bytes());
+    #[derive(Serialize)]
+    struct Markers(Vec<Marker>);
+    impl ValueFree for Markers {}
+    let digest = store
+        .put_cas(&Markers(vec![Marker::Present; 120_000]))
+        .unwrap();
+    let path = cas_path(&fixture.root(), digest);
+    let mut bytes = fs::read(&path).unwrap();
+    assert!(bytes.len() > 1024 * 1024);
+    bytes[1] = b' ';
+    fs::write(&path, bytes).unwrap();
+    assert!(store.get_cas(&digest).unwrap().is_none());
+    assert!(!path.exists());
 }
 
 // Shared with the TypeScript twin (src/lib/step-store/, tests/step-store.test.ts).
@@ -893,6 +974,28 @@ fn a_rechecked_record_with_an_invalid_run_or_unsafe_time_is_torn() {
         assert_eq!(
             store.lookup(&key, |_| true).unwrap(),
             Lookup::Miss(MissReason::TornRecord)
+        );
+    }
+}
+
+#[test]
+fn shared_refused_record_vectors_are_refused_with_their_reason() {
+    let vectors: serde_json::Value = serde_json::from_str(VECTORS).unwrap();
+    let refused = vectors["refused"].as_array().unwrap();
+    assert!(!refused.is_empty());
+    for vector in refused {
+        let index = usize::try_from(vector["keyIndex"].as_u64().unwrap()).unwrap();
+        let key = vector_key(&vectors["keys"][index]);
+        let expected = match vector["expect"].as_str().unwrap() {
+            "torn-record" => MissReason::TornRecord,
+            "version-changed" => MissReason::VersionChanged,
+            other => panic!("unknown reason {other}"),
+        };
+        assert_eq!(
+            Record::decode(vector["text"].as_str().unwrap().as_bytes(), &key),
+            Err(expected),
+            "{}",
+            vector["name"]
         );
     }
 }

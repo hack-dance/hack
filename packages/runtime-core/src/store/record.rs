@@ -1,16 +1,17 @@
 //! Canonical records and checksums for detecting incomplete or misplaced writes.
 
 use super::key::digest_text;
-use super::{InputDigest, MissReason, Result, StepClass, StepKey, Store, disk, invalid, io_error};
+use super::{InputDigest, MissReason, Result, StepClass, StepKey, Store, disk, invalid};
 use crate::canonical_digest::{self, Digest, STEP_RECORD};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::Read;
 use std::path::PathBuf;
 
 const VERSION: u8 = 1;
+/// A record holds a handful of digests and identifiers; anything larger is torn.
+pub(super) const MAX_RECORD_BYTES: u64 = 64 * 1024;
 /// The largest time a record may carry: 2^53 - 1, the TypeScript safe integer.
 const MAX_SAFE_MILLIS: u64 = (1 << 53) - 1;
 const FIELDS: [&str; 11] = [
@@ -178,9 +179,11 @@ impl Store {
         let Some(mut file) = self.read_file(&path)? else {
             return Ok(Err(MissReason::NoRecord));
         };
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(io_error)?;
-        match Record::decode(&bytes, key) {
+        let decoded = match disk::read_limited(&mut file, MAX_RECORD_BYTES)? {
+            Some(bytes) => Record::decode(&bytes, key),
+            None => Err(MissReason::TornRecord),
+        };
+        match decoded {
             Ok(record) => Ok(Ok((record, file))),
             Err(reason) => {
                 // Best effort: the record is a miss either way.

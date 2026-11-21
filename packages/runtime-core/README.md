@@ -1910,22 +1910,27 @@ fails in any way, the start has no early proof and proves the root files under t
 it is never refused for that. The step after the tree comparison is the same comparison
 for the root files, against the owner record the lease now fences: if the readiness
 marker and the pin are the ones that record names, the metadata digest is what the proof
-saw and the filesystem is one where metadata is trusted, the proof stands; otherwise the
-root files are proven by content again under the lease, and root files that no longer
-match their pin refuse the start with `artifact_digest_mismatch`. This recheck writes
-nothing either, and such a refusal comes before the admission record, any later owner
-record update and any provider command. The root files are compared once more where the
-result is used, after the owner record updates and after `machine update --rosetta` when
+saw and the filesystem is one where metadata is trusted, the proof stands. On another
+marker or pin, or a metadata difference, on such a filesystem the root files are proven
+by content again at this step, and root files that no longer match their pin refuse the
+start with `artifact_digest_mismatch` there: before the admission record, any later owner
+record update and any provider command. If the root files are no longer on such a
+filesystem, this step hashes nothing and refuses nothing: their content proof, and any
+refusal, are where the result is used. The recheck itself writes nothing either way. The
+root files are compared once more where the result is used (`prepare_rootfs`), after the
+admission record, the owner record updates and `machine update --rosetta` when
 translation is being enabled: one more metadata walk, no file content read, and the
-content proof at that point if anything differs. The digest of that last comparison is
-the one the boot's witness records. From there to `machine start` nothing looks at the
+content proof at that point if anything differs, or if this step left it to that point.
+Root files that changed after the recheck are refused there, after those effects. The
+digest of that last comparison is the one the boot's witness records. From there to `machine start` nothing looks at the
 root files again, as before. On a filesystem where metadata is not trusted no earlier
 proof could be accepted, so none is taken, no thread is started and nothing is rechecked:
 such a start hashes the root files once, where it always did. A start with no earlier
 proof is unchanged: the first boot of a new home copies the root files and proves them by
-content under the lease, and so does any start whose earlier proof could not be made (an
-owner record that is not a clean stop or has no pin, an alias, an unreadable entry, or
-root files that did not match before the lease). The table's 180 ms
+content in `prepare_rootfs`, and so does any start whose earlier proof could not be made
+(an owner record that is not a clean stop or has no pin, an alias, an unreadable entry,
+or root files that did not match before the lease). Its refusal, if any, is at that point
+too, after the admission record, as it was before the early proof existed. The table's 180 ms
 was measured before this change and the root files comparison was not timed on its own.
 
 The order of the admission steps, and what can change between them, is modelled in

@@ -954,4 +954,53 @@ mod tests {
         assert!(early.is_none());
         assert_eq!(asked(), threads);
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn root_files_that_lose_their_qualification_before_the_lease_are_proven_once_where_used() {
+        // The whole path of a start whose early proof was taken on a qualified filesystem
+        // that is no longer one under the lease: the recheck returns nothing, hashes
+        // nothing and refuses nothing, and `prepare_rootfs` proves the root files by
+        // content exactly once, accepting them unchanged and refusing them changed.
+        let pool = Pool::new("qualification-lost");
+        let candidate = &pool.candidate;
+        fs::create_dir_all(artifact::root(candidate)).unwrap();
+        for name in ["storage-template.ext4.zst", "overlay-template.ext4.zst"] {
+            fs::write(artifact::root(candidate).join(name), name).unwrap();
+        }
+        let mut owner = Owner::load(candidate).unwrap();
+        let marker = rootfs_marker(&owner).unwrap();
+        let rootfs = root(candidate).join("rootfs");
+        for changed in [false, true] {
+            tree_witness::fake_filesystem_type(Some("apfs"));
+            let window = tree_witness::content_proofs();
+            let ((), early) = early_beside(candidate, || ());
+            assert!(early.is_some(), "proven early while qualified");
+            assert_eq!(tree_witness::content_proofs() - window, 1);
+            // Before the lease: the filesystem stops being a qualified one and, in the
+            // second pass, a root file is rewritten with other bytes.
+            tree_witness::fake_filesystem_type(Some("msdos"));
+            if changed {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                fs::write(rootfs.join("usr/bin/agent"), b"agent BINARY").unwrap();
+            }
+            let lease =
+                super::super::startup_lease(&root(candidate), std::time::Duration::from_secs(2))
+                    .unwrap();
+            let leased_at = tree_witness::content_proofs();
+            let leased = recheck(candidate, &lease, early).unwrap();
+            assert!(leased.is_none(), "changed: {changed}");
+            assert_eq!(tree_witness::content_proofs(), leased_at);
+            let prepared = super::super::prepare_rootfs(candidate, &mut owner, leased.as_ref());
+            assert_eq!(tree_witness::content_proofs() - leased_at, 1);
+            if changed {
+                assert_eq!(prepared.unwrap_err().code, "artifact_digest_mismatch");
+            } else {
+                assert_eq!(
+                    prepared.unwrap(),
+                    tree_witness::metadata_digest(&rootfs, Some(&marker)).unwrap()
+                );
+            }
+        }
+    }
 }

@@ -120,10 +120,14 @@ lease before the guard. The `changed-tree-start` control removes the recheck and
 reaches `Started` with a changed tree.
 
 The root files recheck is the code's next step after the tree recheck and writes
-nothing either, so a `RefuseRoot` for root files that changed between their
-proof and the lease also comes before the admission record and any provider
-command. A `RefuseRoot` for root files that changed after that recheck, or
-without an early proof, comes from `prepare_rootfs`, after them. The `root-unchecked` control
+nothing either. A `RefuseRoot` at that step also comes before the admission
+record and any provider command, and it is only this one: the root files are on a
+qualified filesystem, their marker, pin or metadata differs from the early proof,
+and the content proof run there finds they no longer match the pin. Every other
+`RefuseRoot` comes from `prepare_rootfs`, after the admission record and after
+`machine update --rosetta`: root files that changed after the recheck, root files
+that are no longer on a qualified filesystem at the recheck (nothing is hashed
+there), and a start without an early proof. The `root-unchecked` control
 removes the recheck and reaches `RootProven` with changed root files.
 
 ## Environment

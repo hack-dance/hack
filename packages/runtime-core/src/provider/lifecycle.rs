@@ -1501,8 +1501,9 @@ fn start_pool_observed(
     leased_trees::recheck(candidate, &lock, &mut proven_trees)?;
     // The same for the root files proven beside them: still what that proof saw, or proven
     // again here, before the admission record, any later owner record update or any
-    // provider command (`rootfs_proof`). The recheck writes nothing; an alias repaired
-    // before admission stays repaired.
+    // provider command (`rootfs_proof`). Without an early proof, or once the root files are
+    // not on a qualified filesystem, nothing is proven here and `prepare_rootfs` decides.
+    // The recheck writes nothing; an alias repaired before admission stays repaired.
     let leased_rootfs = rootfs_proof::recheck(candidate, &lock, early_rootfs)?;
     // Recheck a clean stop's alias under the lease before the release checks probe its
     // sockets or the provider runs with it as HOME.

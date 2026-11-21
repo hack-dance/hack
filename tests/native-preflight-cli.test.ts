@@ -313,11 +313,9 @@ test("preflight and start share env-file admission and never publish file values
     expect(up.code).toBe(1);
     expect(up.output).not.toContain(PRIVATE);
     expect(report.output).not.toContain(PRIVATE);
-    // Detached up inspects setup in the parent and the foreground child.
-    expect((await f.calls()).slice(before.length)).toEqual([
-      "runtime setup",
-      "runtime setup",
-    ]);
+    // Detached up inspects setup once, in the launcher; the detached owner
+    // trusts that inspection (HACK-2445).
+    expect((await f.calls()).slice(before.length)).toEqual(["runtime setup"]);
   }
 }, 30_000);
 
@@ -430,8 +428,8 @@ test(
     const detached = await cli(f, ["up", "--json"], env);
     expect(detached.code).toBe(1);
     expect(detached.output).not.toContain(PRIVATE);
+    // The launcher inspects setup; the detached owner does not again.
     expect((await f.calls()).slice(beforeDetached.length)).toEqual([
-      "runtime setup",
       "runtime setup",
     ]);
   },
@@ -629,11 +627,8 @@ test("preflight and start refuse ignored root dotenv in a native build before ef
       expect(started.output).toContain("overlap an environment source");
     }
     expect(started.output).not.toContain(PRIVATE);
-    expect((await f.calls()).slice(before.length)).toEqual(
-      args.includes("--json")
-        ? ["runtime setup", "runtime setup"]
-        : ["runtime setup"]
-    );
+    // Foreground or detached, setup is inspected once per up.
+    expect((await f.calls()).slice(before.length)).toEqual(["runtime setup"]);
   }
 });
 

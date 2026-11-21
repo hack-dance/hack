@@ -13,7 +13,7 @@ stateDiagram-v2
   Leased --> Qualified : Recheck [WindowElapsed]
   Leased --> Qualified : Qualify [research]
   Qualified --> Qualified : RestoreAliasLeased
-  Qualified --> Settled : Settle [SameOwner]
+  Qualified --> Settled : Settle [SameOwner, treeOk]
   Settled --> RootProven : ProveRoot [rootOk]
   Settled --> RootProven : RecheckRoot [rootOk]
   RootProven --> BootAdmitted : AdmitBoot [SameSwapouts]
@@ -41,6 +41,10 @@ stateDiagram-v2
     INV SecondSampleUnderLease
     INV WindowRespected
     INV ChainUnbroken
+  end note
+  note right of Settled
+    INV NoStartFromChangedTree
+    trees rechecked under lease
   end note
   note right of BootAdmitted
     INV BootBaselineIsLastSample

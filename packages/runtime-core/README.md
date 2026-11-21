@@ -1868,13 +1868,13 @@ by those pauses.
 | --- | --- | --- |
 | First admission sample | 50 ms | host memory, pressure, swapouts, thermal state, disk |
 | Provider and engine trees proven by content | 940 ms | fills the one-second admission window |
-| Startup lease, rest of the window, second sample | 115 ms | only the rest of the window is slept |
-| Root files proven by content | 180 ms | under the lease |
+| Startup lease, rest of the window, second sample, then both trees compared with their proof | 115 ms | only the rest of the window is slept; measured before the tree comparison was added |
+| Root files proven by content | 180 ms | measured under the lease; the proof now runs in the admission window beside the tree proofs, and only a metadata comparison is left here (below) |
 | Pre-boot sample, configuration audit, template check | 75 ms | |
 | `machine start` | 210 ms | the provider starts the VM |
 | Guest setup | 680 ms | about 430 ms is the guest hashing the engine binary over the share |
 | Network tools in the guest | 100 ms | |
-| Executable cache (`runc`, `docker-init`) | 300 ms | |
+| Executable cache (`runc`, `docker-init`) | 300 ms | measured when each binary was read over the share twice; it is now read over the share once, by the copy, and the cache's own copy is hashed before it is made executable and again where it is executed |
 | Engine start | 390 ms | until the engine answers |
 | Everything else | 60 ms | identity checks, disk adoption, pings |
 
@@ -1884,6 +1884,54 @@ apart, and finished inside that second. Only the rest of the window is slept, so
 or a lease wait that takes longer than the window lengthens the start by the excess. A brand-new
 home adds `machine create`, the provider's first-start disk template copy and the root
 files copy, about 5 s in the same measurement.
+
+The trees are proven before the lease, and only the lease keeps another `runtime` command
+from rewriting them. So the first thing the start does with the lease, after the second
+sample, is compare each tree with its proof: if the tree's metadata digest and its
+record's content digest are what the proof saw, on a filesystem where metadata is trusted
+(APFS), the proof stands; otherwise the tree is proven by content again under the lease,
+and a tree that no longer matches refuses the start with `artifact_digest_mismatch`.
+The recheck itself writes nothing, and a refusal comes before the admission record, any
+later owner record update, a HOME alias repair under the lease and any provider command.
+What the start did earlier stays: a HOME alias it repaired before admission, and the
+lease file's own bookkeeping. The comparison is one metadata walk per tree and reads no
+file content. It is not part of the boot measurement above. A unit bench
+(`bench_one_metadata_walk_of_a_prepared_tree`, an unoptimized test build on a busy Apple
+Silicon host, not a boot) timed one walk at 11 to 20 ms for a tree with the 936 entries
+of the pinned provider tree and under 1 ms for the engine tree's 8 entries. On any other
+filesystem both trees are hashed a second time under the lease, which the table does not
+show either.
+
+A cleanly stopped pool's root files are held to the same rule (`lifecycle::rootfs_proof`):
+a pool whose owner record is the `stopped` phase with the marker a completed `down` writes.
+Their content proof runs before the lease, read-only, on a thread beside the tree proofs,
+so it fills the admission window too. If the host cannot start that thread, or the proof
+fails in any way, the start has no early proof and proves the root files under the lease;
+it is never refused for that. The step after the tree comparison is the same comparison
+for the root files, against the owner record the lease now fences: if the readiness
+marker and the pin are the ones that record names, the metadata digest is what the proof
+saw and the filesystem is one where metadata is trusted, the proof stands. On another
+marker or pin, or a metadata difference, on such a filesystem the root files are proven
+by content again at this step, and root files that no longer match their pin refuse the
+start with `artifact_digest_mismatch` there: before the admission record, any later owner
+record update and any provider command. If the root files are no longer on such a
+filesystem, this step hashes nothing and refuses nothing: their content proof, and any
+refusal, are where the result is used. The recheck itself writes nothing either way. The
+root files are compared once more where the result is used (`prepare_rootfs`), after the
+admission record, the owner record updates and `machine update --rosetta` when
+translation is being enabled: one more metadata walk, no file content read, and the
+content proof at that point if anything differs, or if this step left it to that point.
+Root files that changed after the recheck are refused there, after those effects. The
+digest of that last comparison is the one the boot's witness records. From there to `machine start` nothing looks at the
+root files again, as before. On a filesystem where metadata is not trusted no earlier
+proof could be accepted, so none is taken, no thread is started and nothing is rechecked:
+such a start hashes the root files once, where it always did. A start with no earlier
+proof is unchanged: the first boot of a new home copies the root files and proves them by
+content in `prepare_rootfs`, and so does any start whose earlier proof could not be made
+(an owner record that is not a clean stop or has no pin, an alias, an unreadable entry,
+or root files that did not match before the lease). Its refusal, if any, is at that point
+too, after the admission record, as it was before the early proof existed. The table's 180 ms
+was measured before this change and the root files comparison was not timed on its own.
 
 The order of the admission steps, and what can change between them, is modelled in
 [`pool-start-admission`](../../tests/models/tla/pool-start-admission/COVERAGE.md);
@@ -1962,6 +2010,15 @@ instructions and the build would not use them. Both rest on how `sha2` 0.11.1 se
 backend, so the dependency is pinned exactly; read its `src/sha256.rs` again before moving
 the pin. To measure a build, run
 `cargo test --release --lib sha256_rate_of_this_build -- --ignored --nocapture`.
+
+### Never wait in a blocking `flock`
+
+On macOS, releasing an exclusive `flock` wakes only one blocked waiter and queues
+the others behind it, so a woken waiter that keeps a shared lock strands the rest
+with no bound. The step store (`src/store/`) therefore never blocks in `flock`: it
+tries every lock with `LOCK_NB`, closes and retries 1 to 5 ms later until a time
+deadline, and then reports the store busy. Every other `flock` in this crate is
+non-blocking too; keep it that way for any lock that several openers may wait for.
 
 ### Extending a stopped pool's approved hosts
 

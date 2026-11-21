@@ -125,6 +125,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "6dafad529aaf5b1b8b31496e", // HACK-2167: accurate env/output security guidance
     "37aa309a4918e62e24e397d8", // HACK-2167: accurate env/output security guidance
     "d36febde4c0ef56eb4f46ff3", // HACK-2166: value-free env listing guidance
+    "884c592f76a62574ceb34914", // HACK-2468: opt-in logging stack guidance
   ]),
   "hack-init-skill": new Set([
     "cd15fb6d8ed8e25071d05e75", // v3.1.0..v4.0.3

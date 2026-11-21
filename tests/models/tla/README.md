@@ -51,8 +51,17 @@ https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
 `JAVA_BIN` may select an explicit Java executable. The runner does not install tools
 or change global Java settings. CI's Runtime state models job supplies Java and the
 pinned artifact. Each check has a 120-second timeout, 512 MiB Java heap, two workers
-and bounded output; temporary TLC metadata is removed after success or failure.
+and bounded output. Every gate owns a private directory for TLC metadata, copied
+models, and Java standard-module extraction (`java.io.tmpdir`). The runner waits
+for Java to exit before removing that directory after success, failure, SIGINT,
+or SIGTERM. Concurrent worktrees therefore do not share unpacked standard modules.
 No credentials or running VM are needed.
+
+Run `bun run test:models:concurrent <other-worktree>` to check failure and
+signal cleanup, then run three pairs of complete gates. The other checkout must
+contain the same runner revision; omit it to run both gates in this checkout.
+The check verifies separate Java temp roots, marker isolation, and removal of
+each run's scratch. It uses the same Java and pinned jar as `test:models`.
 
 ## Native foreground recovery lease takeover
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
-import { spawnSync } from "node:child_process";
-import { cp, mkdtemp, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import {
@@ -48,7 +48,28 @@ const models = [
   },
 ];
 const scratch = await mkdtemp(resolve(tmpdir(), "hack-tla-"));
+const controller = new AbortController();
+const javaTmp = resolve(scratch, "java");
+const onInterrupt = () => {
+  process.exitCode = 130;
+  controller.abort();
+};
+const onTerminate = () => {
+  process.exitCode = 143;
+  controller.abort();
+};
+process.once("SIGINT", onInterrupt);
+process.once("SIGTERM", onTerminate);
 try {
+  await mkdir(javaTmp, { mode: 0o700 });
+  await runModels();
+} finally {
+  await rm(scratch, { recursive: true, force: true });
+  process.removeListener("SIGINT", onInterrupt);
+  process.removeListener("SIGTERM", onTerminate);
+}
+
+async function runModels() {
   for (const model of models) {
     const source = resolve(import.meta.dir, "../tests/models/tla", model.name);
     const directory = resolve(scratch, model.name, "source");
@@ -61,6 +82,9 @@ try {
         : []),
     ];
     for (const control of controls) {
+      if (controller.signal.aborted) {
+        return;
+      }
       const { negative, name } = control;
       const module =
         "module" in control && typeof control.module === "string"
@@ -68,10 +92,11 @@ try {
           : negative && "negativeModule" in model
             ? (model.negativeModule ?? model.module)
             : model.module;
-      const result = spawnSync(
+      const result = await runJava(
         process.env.JAVA_BIN ?? "java",
         [
           "-Xmx512m",
+          `-Djava.io.tmpdir=${javaTmp}`,
           "-cp",
           jar,
           "tlc2.TLC",
@@ -88,8 +113,13 @@ try {
           encoding: "utf8",
           timeout: 120_000,
           maxBuffer: 1024 * 1024,
+          signal: controller.signal,
+          killSignal: "SIGKILL",
         }
       );
+      if (controller.signal.aborted) {
+        return;
+      }
       const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
       if (
         result.error ||
@@ -103,6 +133,44 @@ try {
       process.stdout.write(`${model.name} ${name}: verified\n`);
     }
   }
-} finally {
-  await rm(scratch, { recursive: true, force: true });
+}
+
+type JavaResult = {
+  readonly status: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly error?: Error;
+};
+
+/** Wait for Java to close before removing its private standard modules. */
+function runJava(
+  command: string,
+  args: string[],
+  options: Parameters<typeof execFile>[2]
+): Promise<JavaResult> {
+  return new Promise((resolveResult) => {
+    let result: JavaResult | undefined;
+    const child = execFile(command, args, options, (error, stdout, stderr) => {
+      result = {
+        status: error
+          ? typeof error.code === "number"
+            ? error.code
+            : null
+          : 0,
+        stdout: String(stdout),
+        stderr: String(stderr),
+        error: error && typeof error.code !== "number" ? error : undefined,
+      };
+    });
+    child.once("close", () =>
+      resolveResult(
+        result ?? {
+          status: null,
+          stdout: "",
+          stderr: "",
+          error: new Error("Java closed without a result"),
+        }
+      )
+    );
+  });
 }

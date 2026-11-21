@@ -490,11 +490,24 @@ pub(super) fn open(first: &Admission, clock: &impl Clock) -> Result<Opened, Cand
 /// What the sample under the lease may use in place of waiting out the window: an earlier
 /// sample of this home that passed every predicate on its own ([`opening`]).
 pub(super) trait Earlier {
-    /// The swapout count of a recorded earlier sample that may replace the wait now. Asked
-    /// under the startup lease, at most once, and only when a wait is due.
-    fn usable(&self) -> Option<u64>;
+    /// A recorded earlier sample that may replace the wait now. Asked under the startup
+    /// lease, at most once, and only when a wait is due.
+    fn usable(&self) -> Option<Recorded>;
     /// The time a sample taken now is recorded with, or `None` when it cannot be read.
     fn now(&self) -> Option<Duration>;
+    /// Whether `recorded` is still at least one window and at most the bound old at `at`,
+    /// a time [`Earlier::now`] returned. Asked once the sample under the lease exists: the
+    /// age that counts is the one at that sample, not the one when the record was read.
+    fn in_age(&self, recorded: &Recorded, at: Duration) -> bool;
+}
+
+/// A recorded earlier sample as [`Earlier::usable`] found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Recorded {
+    /// The swapout count the recorded sample showed.
+    pub(super) swapouts: u64,
+    /// When the recorded sample was taken, on the clock of [`Earlier::now`].
+    pub(super) taken: Duration,
 }
 
 /// The outcome of [`recheck_after_lease`].
@@ -518,8 +531,10 @@ pub(super) struct Leased {
 /// never asks `earlier`.
 ///
 /// When a wait is due and `earlier` holds a usable recorded sample, the sample is taken at
-/// once instead. It replaces the wait only if it passes every predicate and shows both the
-/// first sample's swapout count and the recorded one's. Otherwise it is discarded, and the
+/// once instead. It replaces the wait only if it passes every predicate, shows both the
+/// first sample's swapout count and the recorded one's, and the record is still within its
+/// age range once the sample exists (a delay or a host sleep between reading the record
+/// and taking the sample must not stretch the bound). Otherwise it is discarded, and the
 /// start waits and samples exactly as it does without a record: a record never refuses a
 /// start and never stands in for a sample.
 pub(super) fn recheck_after_lease(
@@ -550,12 +565,16 @@ pub(super) fn recheck_after_lease(
     if due().is_some()
         && let Some(recorded) = earlier.usable()
         && let Ok(sample) = observe()
-        && check(profile, &sample, Some(opened.swapouts)).is_ok_and(|count| count == recorded)
+        // Judged again now that the sample exists; an unreadable clock is a miss.
+        && let Some(sampled_at) = earlier.now()
+        && earlier.in_age(&recorded, sampled_at)
+        && check(profile, &sample, Some(opened.swapouts))
+            .is_ok_and(|count| count == recorded.swapouts)
     {
         return Ok(Leased {
             samples: vec![sample],
             reused: Some(true),
-            sampled_at: earlier.now(),
+            sampled_at: Some(sampled_at),
         });
     }
     // Judge by the clock, not by having asked to sleep: an early wake sleeps again.

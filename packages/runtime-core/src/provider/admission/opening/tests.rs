@@ -622,11 +622,14 @@ fn a_start_with_no_wait_left_does_not_ask_for_the_record() {
 fn research_neither_reads_nor_writes_a_record() {
     struct Untouched;
     impl Earlier for Untouched {
-        fn usable(&self) -> Option<u64> {
+        fn usable(&self) -> Option<Recorded> {
             panic!("Research asked for the record")
         }
         fn now(&self) -> Option<Duration> {
             panic!("Research asked for the record's clock")
+        }
+        fn in_age(&self, _: &Recorded, _: Duration) -> bool {
+            panic!("Research asked for the record's age")
         }
     }
     let clock = TestClock::at(FIRST);
@@ -1042,4 +1045,118 @@ fn bench_the_sample_and_record_of_a_stop() {
             || super::super::probe_for(&checkout, Profile::Development),
         ));
     });
+}
+
+#[test]
+fn a_record_written_as_a_list_of_its_three_values_is_a_miss() {
+    // The derived decoder would read these positions as the three fields.
+    for bytes in [
+        format!(
+            r#"["{BOOT}",{},{COUNT}]"#,
+            (FIRST - Duration::from_secs(10)).as_nanos()
+        ),
+        format!(
+            "  \n[\"{BOOT}\", {}, {COUNT}]\n",
+            (FIRST - Duration::from_secs(10)).as_nanos()
+        ),
+    ] {
+        let home = Home::new();
+        let run = start(&home, |home, _| home.holds_bytes(bytes.as_bytes()));
+        run.took_the_path_without_a_record();
+    }
+    // The same values as an object are a record: the list is what is refused.
+    let home = Home::new();
+    let run = start(&home, |home, _| {
+        home.holds_bytes(
+            format!(
+                r#"{{"boot_session":"{BOOT}","monotonic_nanos":{},"swapouts":{COUNT}}}"#,
+                (FIRST - Duration::from_secs(10)).as_nanos()
+            )
+            .as_bytes(),
+        );
+    });
+    run.reused(COUNT);
+}
+
+/// A start whose sample under the lease takes `sampling` to come back, on a home whose
+/// record is `age` old when the lease is taken. Returns the start's outcome, the times
+/// it asked the host for a sample, and how long it slept.
+fn start_with_a_slow_sample(
+    age: Duration,
+    sampling: Duration,
+    clock_readable_after: bool,
+) -> (Result<Leased, CandidateError>, Vec<Duration>, Duration) {
+    let home = Home::new();
+    let clock = TestClock::at(FIRST);
+    let host = TestHost::on(&clock);
+    home.holds(BOOT, FIRST + LEASE - age, COUNT);
+    let asked = RefCell::new(Vec::new());
+    let window = open(&passing(COUNT), &clock).unwrap();
+    clock.advance(LEASE);
+    let opening = Opening::new(&home.root, &host, Reuse::parse(None).unwrap());
+    let leased = recheck_after_lease(Profile::Development, Some(window), &clock, &opening, || {
+        asked.borrow_mut().push(clock.now());
+        if asked.borrow().len() == 1 {
+            // The first sample under the lease is the one taken for a reuse.
+            clock.advance(sampling);
+            host.clock_readable.set(clock_readable_after);
+        }
+        Ok(passing(COUNT))
+    });
+    (leased, asked.take(), clock.slept.borrow().iter().sum())
+}
+
+#[test]
+fn a_record_that_passes_the_bound_while_the_sample_is_taken_does_not_replace_the_wait() {
+    let bound = Duration::from_secs(60);
+    // Inside the bound when it was read and when the sample came back: reused.
+    let (leased, asked, slept) = start_with_a_slow_sample(
+        bound - Duration::from_millis(300),
+        Duration::from_millis(200),
+        true,
+    );
+    let leased = leased.unwrap();
+    assert_eq!(leased.reused, Some(true));
+    assert_eq!(asked, [FIRST + LEASE]);
+    assert_eq!(slept, Duration::ZERO);
+    assert_eq!(
+        leased.sampled_at,
+        Some(FIRST + LEASE + Duration::from_millis(200))
+    );
+    // Inside the bound when it was read, past it when the sample came back (a slow probe
+    // or a host that slept): the early sample is discarded and the start takes the path
+    // without a record. It is not refused.
+    let sampling = Duration::from_millis(200);
+    let (leased, asked, slept) =
+        start_with_a_slow_sample(bound - Duration::from_millis(100), sampling, true);
+    let leased =
+        leased.unwrap_or_else(|error| panic!("a miss refused the start: {}", error.message));
+    assert_eq!(leased.reused, Some(false));
+    assert_eq!(asked, [FIRST + LEASE, FIRST + DEVELOPMENT_WINDOW]);
+    assert_eq!(slept, DEVELOPMENT_WINDOW - LEASE - sampling);
+    assert_eq!(leased.samples.len(), 1);
+    assert_eq!(leased.samples[0].swapouts, Some(COUNT));
+    // A host sleep of an hour inside the probe is the same miss, and nothing is left to wait.
+    let (leased, asked, slept) =
+        start_with_a_slow_sample(Duration::from_secs(10), Duration::from_secs(3600), true);
+    let leased = leased.unwrap();
+    assert_eq!(leased.reused, Some(false));
+    assert_eq!(
+        asked,
+        [FIRST + LEASE, FIRST + LEASE + Duration::from_secs(3600)]
+    );
+    assert_eq!(slept, Duration::ZERO);
+}
+
+#[test]
+fn a_clock_that_cannot_be_read_once_the_sample_exists_does_not_replace_the_wait() {
+    let sampling = Duration::from_millis(50);
+    let (leased, asked, slept) = start_with_a_slow_sample(Duration::from_secs(10), sampling, false);
+    let leased =
+        leased.unwrap_or_else(|error| panic!("a miss refused the start: {}", error.message));
+    assert_eq!(leased.reused, Some(false));
+    assert_eq!(asked, [FIRST + LEASE, FIRST + DEVELOPMENT_WINDOW]);
+    assert_eq!(slept, DEVELOPMENT_WINDOW - LEASE - sampling);
+    // No time to record the sample with: the caller writes no record for it.
+    assert_eq!(leased.sampled_at, None);
 }

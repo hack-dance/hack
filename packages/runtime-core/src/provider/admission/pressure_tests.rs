@@ -202,12 +202,16 @@ fn opened(clock: &TestClock, level: Option<u32>) -> Opened {
 struct NoRecord;
 
 impl Earlier for NoRecord {
-    fn usable(&self) -> Option<u64> {
+    fn usable(&self) -> Option<Recorded> {
         None
     }
 
     fn now(&self) -> Option<Duration> {
         None
+    }
+
+    fn in_age(&self, _: &Recorded, _: Duration) -> bool {
+        false
     }
 }
 

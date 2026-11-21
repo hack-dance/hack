@@ -36,7 +36,7 @@
 //!
 //! Research keeps its frozen three-sample window before the lease. It never reads this
 //! record, and neither a Research start nor the stop of a Research pool writes it.
-use super::{Admission, DEVELOPMENT_WINDOW, Earlier, check};
+use super::{Admission, DEVELOPMENT_WINDOW, Earlier, Recorded, check};
 use crate::CandidateError;
 use crate::provider::{Profile, state};
 use serde::{Deserialize, Serialize};
@@ -283,6 +283,11 @@ fn read(path: &Path, user: u32) -> Result<Record, Miss> {
     if bytes.len() as u64 > LIMIT {
         return Err(Miss::Unsafe);
     }
+    // The derived decoder also accepts a positional array of the three values. Only an
+    // object with the three named fields is a record.
+    if bytes.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{') {
+        return Err(Miss::Unparsable);
+    }
     let record: Record = serde_json::from_slice(&bytes).map_err(|_| Miss::Unparsable)?;
     if !canonical_session(&record.boot_session) {
         return Err(Miss::Unparsable);
@@ -309,8 +314,21 @@ impl<'a, H: Host> Opening<'a, H> {
         }
     }
 
-    /// The record's swapout count when the record may replace the wait now.
-    fn judge(&self) -> Result<u64, Miss> {
+    /// Whether a sample taken at `taken` is at least one window and at most the bound old
+    /// at `now`. A record from after `now` (a clock that went back) is too young.
+    fn age(&self, taken: Duration, now: Duration) -> Result<(), Miss> {
+        let age = now.checked_sub(taken).ok_or(Miss::TooYoung)?;
+        if age < DEVELOPMENT_WINDOW {
+            return Err(Miss::TooYoung);
+        }
+        if age > self.reuse.0 {
+            return Err(Miss::TooOld);
+        }
+        Ok(())
+    }
+
+    /// The record when it may replace the wait now.
+    fn judge(&self) -> Result<Recorded, Miss> {
         let bound = self.reuse.0;
         if bound.is_zero() {
             return Err(Miss::Off);
@@ -324,26 +342,26 @@ impl<'a, H: Host> Opening<'a, H> {
             return Err(Miss::OtherBoot);
         }
         let now = self.host.now().ok_or(Miss::ClockUnreadable)?;
-        let age = now
-            .checked_sub(Duration::from_nanos(record.monotonic_nanos))
-            .ok_or(Miss::TooYoung)?;
-        if age < DEVELOPMENT_WINDOW {
-            return Err(Miss::TooYoung);
-        }
-        if age > bound {
-            return Err(Miss::TooOld);
-        }
-        Ok(record.swapouts)
+        let taken = Duration::from_nanos(record.monotonic_nanos);
+        self.age(taken, now)?;
+        Ok(Recorded {
+            swapouts: record.swapouts,
+            taken,
+        })
     }
 }
 
 impl<H: Host> Earlier for Opening<'_, H> {
-    fn usable(&self) -> Option<u64> {
+    fn usable(&self) -> Option<Recorded> {
         self.judge().ok()
     }
 
     fn now(&self) -> Option<Duration> {
         self.host.now()
+    }
+
+    fn in_age(&self, recorded: &Recorded, at: Duration) -> bool {
+        !self.reuse.0.is_zero() && self.age(recorded.taken, at).is_ok()
     }
 }
 

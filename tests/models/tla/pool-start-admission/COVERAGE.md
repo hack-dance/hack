@@ -328,6 +328,15 @@ admitted. A swapout in that stretch still refuses the reuse
 limits how long the unseen stretch is; the model has one age class for it and
 does not measure it.
 
+When the age counts: `Reuse` judges the record and accepts the sample in one
+step, so in the model the record's age is its age at the sample. The code reads
+and judges the record first, takes the sample, and then judges the age again on
+the same clock (`Earlier::in_age`) before the sample may replace the wait, so a
+record that passes the bound during the probe is a miss. The tests
+`a_record_that_passes_the_bound_while_the_sample_is_taken_does_not_replace_the_wait`
+and `a_clock_that_cannot_be_read_once_the_sample_exists_does_not_replace_the_wait`
+in `admission/opening/tests.rs` pin that.
+
 Assumption about the bound: in the code it is a setting of whole seconds from 0
 to 600 (default 60). Zero turns reuse off, and a value above 600 refuses the
 start instead of being reduced. The model assumes a bound exists and is at least
@@ -338,7 +347,8 @@ pins.
 What the model leaves out about the record:
 
 - The file. Whether the record is a private regular file of this user (not a
-  link, one name, mode 0600), whether it parses as exactly three fields, and the
+  link, one name, mode 0600), whether it parses as an object of exactly three
+  named fields (a list of the three values is a miss), and the
   pending file of an interrupted write are checks of
   `admission/opening.rs::read` and `discard_pending`. In the model a record that
   fails them is `recBoot = "none"`. Their evidence is `admission/opening/tests.rs`.

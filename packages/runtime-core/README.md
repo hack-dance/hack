@@ -1957,7 +1957,9 @@ Under the startup lease, when part of the window is still to be slept, the start
 the record. It skips the sleep only when all of this holds:
 
 - the record is from this OS boot;
-- it is at least one window (one second) and at most the bound (60 seconds) old;
+- it is at least one window (one second) and at most the bound (60 seconds) old, both
+  when it is read and again once the sample under the lease exists, on the same clock: a
+  slow probe or a host that slept in between cannot stretch the bound;
 - the sample the start now takes under the lease passes every predicate, as it always
   must, and shows the record's swapout count and the count of the start's own first
   sample.
@@ -1965,10 +1967,11 @@ the record. It skips the sleep only when all of this holds:
 The record replaces the wait and nothing else. The start still takes both of its own
 samples, `admission.json` still records the two, and the pre-boot check is unchanged.
 Anything else is a miss: no file, a file that is not a private regular file of this user
-(a link, a second name, another owner, group or world access), contents that are not
-exactly the three fields, another boot session, a record too young or too old, a clock or
-boot session that cannot be read, a swapout count that differs, or a sample under the
-lease that does not pass. A miss costs the wait the start had before, and nothing more
+(a link, a second name, another owner, group or world access), contents that are not an
+object of exactly the three named fields (a list of the three values is not a record),
+another boot session, a record too young or too old at either judgement, a clock or boot
+session that cannot be read, a swapout count that differs, or a sample under the lease
+that does not pass. A miss costs the wait the start had before, and nothing more
 than one discarded sample when the miss is only found after sampling: the start sleeps
 the rest of the window measured from its own first sample and takes its sample then,
 chained to that first sample. A record never refuses a start and never stands in for a

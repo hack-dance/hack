@@ -74,11 +74,14 @@ impl process::Clock for Skipping {
 struct NoRecord;
 
 impl admission::Earlier for NoRecord {
-    fn usable(&self) -> Option<u64> {
+    fn usable(&self) -> Option<admission::Recorded> {
         None
     }
     fn now(&self) -> Option<Duration> {
         None
+    }
+    fn in_age(&self, _: &admission::Recorded, _: Duration) -> bool {
+        false
     }
 }
 

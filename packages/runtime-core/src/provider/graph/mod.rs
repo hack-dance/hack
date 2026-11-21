@@ -1123,7 +1123,7 @@ impl Driver for Session<'_, '_> {
             ));
         }
         // Identity of the compiled config before any per-run attachment.
-        // hack.timings/1 hook (HACK-2458): step "spec.digest" for this service.
+        let span = crate::timings::start(crate::timings::Step::SpecDigest, None);
         let spec = spec::of(
             &self.configs[service],
             &spec::Context {
@@ -1139,7 +1139,11 @@ impl Driver for Session<'_, '_> {
                     .unwrap_or_default(),
                 amd64_emulation: resource.amd64_emulation,
             },
-        )?;
+        );
+        if let Some(span) = span {
+            spec::finish_span(span, &spec, &resource.name);
+        }
+        let spec = spec?;
         self.prepare_probe(service)?;
         if let Some(pending) = self.environments.remove(service) {
             self.receipt.environment_attached = true;

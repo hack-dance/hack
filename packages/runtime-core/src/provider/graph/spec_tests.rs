@@ -338,3 +338,61 @@ fn engine_nanosecond_values_beyond_double_precision_are_identified() {
         json!(10_800_000_000_000_000_u64)
     );
 }
+
+#[test]
+fn the_digest_span_names_the_step_and_index_and_never_the_digest() {
+    use crate::timings::{Clock, Collector, Config, Role, Sink, Step, TimeSource};
+    use std::sync::{Arc, Mutex};
+    #[derive(Default)]
+    struct Memory(Mutex<Vec<String>>);
+    impl Sink for Memory {
+        fn write_line(&self, line: &[u8]) -> bool {
+            self.0
+                .lock()
+                .unwrap()
+                .push(String::from_utf8(line.to_vec()).unwrap());
+            true
+        }
+    }
+    struct Fixed;
+    impl TimeSource for Fixed {
+        fn sample(&self) -> Option<(u64, u64)> {
+            Some((1_000_000, 1_000))
+        }
+    }
+    let sink = Arc::new(Memory::default());
+    let collector = Collector::new(
+        Config {
+            trace: "4bf92f3577b34da6a3ce929d0e0e4736".into(),
+            parent: None,
+            role: Role::Owner,
+            clock: Clock::Host,
+            spawn_mono_us: None,
+            service_index_stable: false,
+        },
+        Arc::new(Fixed),
+        sink.clone(),
+    )
+    .unwrap();
+    let resources = resources(RUN);
+    let spec = of(&config(RUN, "o1", "p1"), &context(&resources));
+    let digest = spec.as_ref().unwrap().digest.to_string();
+    finish_span(
+        collector.start(Step::SpecDigest, None).unwrap(),
+        &spec,
+        &format!("hkg-{RUN}-container-3"),
+    );
+    let failed = Err(CandidateError::new("canonical_value", "refused"));
+    finish_span(
+        collector.start(Step::SpecDigest, None).unwrap(),
+        &failed,
+        "x",
+    );
+    let lines = sink.0.lock().unwrap().clone();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].contains(r#""step":"spec.digest""#), "{}", lines[0]);
+    assert!(lines[0].contains(r#""outcome":"ok""#));
+    assert!(lines[0].contains(r#""service_index":3"#));
+    assert!(lines[1].contains(r#""outcome":"error""#));
+    assert!(!lines.iter().any(|line| line.contains(&digest[7..])));
+}

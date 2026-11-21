@@ -151,6 +151,26 @@ pub(super) fn verify_label(inspected: &Value, spec: &Spec) -> Result<(), Candida
     ))
 }
 
+/// One `spec.digest` timing span. Until stable slots exist (S7), the service
+/// index is the position in the container name, which shifts when the plan
+/// adds or deactivates a service; `service_index_stable` says so.
+pub(super) fn finish_span(
+    span: crate::timings::Span,
+    spec: &Result<Spec, CandidateError>,
+    container: &str,
+) {
+    use crate::timings::{Attrs, Code, Outcome};
+    let attrs = Attrs {
+        service_index: container.rsplit('-').next().and_then(|i| i.parse().ok()),
+        service_index_stable: Some(false),
+        ..Attrs::default()
+    };
+    match spec {
+        Ok(_) => span.finish(Outcome::Ok, false, None, attrs),
+        Err(error) => span.finish(Outcome::Error, false, Code::from_error(error), attrs),
+    }
+}
+
 /// Run-scoped engine names of owned resources of one kind. Cache volumes have
 /// content-derived names that are already stable and stay as they are.
 fn names(resources: &BTreeMap<String, Resource>, kind: Kind) -> BTreeMap<&str, &str> {

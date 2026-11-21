@@ -7,7 +7,13 @@
 //! transfer that completes after it is refused. A length of zero or over the cap
 //! is refused before any body byte is read, so a hostile peer cannot make the
 //! reader allocate or wait for an oversized body.
-use std::io::{ErrorKind, Read, Write};
+//!
+//! Waiting is done with `poll`, and each transfer is one non-blocking `recv` or
+//! `send` (`MSG_DONTWAIT`). The socket's own mode and timeouts are never changed,
+//! so handles cloned from it are unaffected. A blocking write is not used because
+//! it can keep going past `SO_SNDTIMEO` while a peer drains slowly (measured on
+//! Linux: 1.3 s against a 200 ms bound).
+use std::io::ErrorKind;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
@@ -22,19 +28,19 @@ pub const FRAME_DEADLINE: Duration = Duration::from_secs(2);
 pub enum FrameError {
     /// The peer closed before sending any byte of a frame.
     Closed,
-    /// No frame began within the idle bound.
+    /// No frame began within the idle bound; nothing was consumed.
     Idle,
     /// The length is zero, above the cap or above `u32::MAX`; no body byte was
     /// read or written.
     TooLarge(usize),
     /// The peer closed or stalled in the middle of a frame, or the frame did not
-    /// finish within its deadline.
+    /// finish within its deadline. The stream must be discarded.
     Truncated,
     Io(ErrorKind),
 }
 
-/// Read one frame. `idle` bounds the wait for its first byte; zero means "only
-/// if a byte is already available".
+/// Read one frame. `idle` bounds the wait for its first byte: zero means "only if
+/// a byte is already waiting", and a bound too large to represent means no bound.
 pub fn read(stream: &mut UnixStream, idle: Duration, limit: usize) -> Result<Vec<u8>, FrameError> {
     read_within(stream, idle, limit, FRAME_DEADLINE)
 }
@@ -48,10 +54,6 @@ fn io(error: std::io::Error) -> FrameError {
     FrameError::Io(error.kind())
 }
 
-fn timed_out(kind: ErrorKind) -> bool {
-    matches!(kind, ErrorKind::WouldBlock | ErrorKind::TimedOut)
-}
-
 fn read_within(
     stream: &mut UnixStream,
     idle: Duration,
@@ -59,8 +61,8 @@ fn read_within(
     frame: Duration,
 ) -> Result<Vec<u8>, FrameError> {
     let mut header = [0u8; 4];
-    first_byte(stream, &mut header[..1], Instant::now() + idle)?;
-    let deadline = Instant::now() + frame;
+    first_byte(stream, &mut header[..1], idle)?;
+    let deadline = Instant::now().checked_add(frame);
     read_exact_by(stream, &mut header[1..], deadline)?;
     let size = u32::from_be_bytes(header) as usize;
     if size == 0 || size > limit {
@@ -71,29 +73,25 @@ fn read_within(
     Ok(body)
 }
 
-fn first_byte(
-    stream: &mut UnixStream,
-    byte: &mut [u8],
-    deadline: Instant,
-) -> Result<(), FrameError> {
+/// Take the first byte of a frame. Never consumes a byte after the idle deadline.
+fn first_byte(stream: &UnixStream, byte: &mut [u8], idle: Duration) -> Result<(), FrameError> {
+    let deadline = if idle.is_zero() {
+        None
+    } else {
+        Some(Instant::now().checked_add(idle))
+    };
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        let outcome = if left.is_zero() {
-            // No time left (or none given): take a byte only if one is waiting.
-            stream.set_nonblocking(true).map_err(io)?;
-            let outcome = stream.read(byte);
-            stream.set_nonblocking(false).map_err(io)?;
-            outcome
-        } else {
-            stream.set_read_timeout(Some(left)).map_err(io)?;
-            stream.read(byte)
-        };
-        match outcome {
+        if let Some(deadline) = deadline {
+            if !wait(stream, libc::POLLIN, deadline)? {
+                return Err(FrameError::Idle);
+            }
+        }
+        match recv_now(stream, byte) {
             Ok(0) => return Err(FrameError::Closed),
             Ok(_) => return Ok(()),
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(e) if timed_out(e.kind()) => {
-                if Instant::now() >= deadline {
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                if deadline.is_none() {
                     return Err(FrameError::Idle);
                 }
             }
@@ -103,25 +101,22 @@ fn first_byte(
 }
 
 fn read_exact_by(
-    stream: &mut UnixStream,
+    stream: &UnixStream,
     mut bytes: &mut [u8],
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<(), FrameError> {
     while !bytes.is_empty() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        if !wait(stream, libc::POLLIN, deadline)? {
             return Err(FrameError::Truncated);
         }
-        stream.set_read_timeout(Some(left)).map_err(io)?;
-        match stream.read(bytes) {
+        match recv_now(stream, bytes) {
             Ok(0) => return Err(FrameError::Truncated),
             Ok(count) => bytes = &mut bytes[count..],
-            Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(e) if timed_out(e.kind()) => return Err(FrameError::Truncated),
+            Err(e) if matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) => {}
             Err(e) => return Err(io(e)),
         }
         // Bytes that arrive after the deadline do not complete the frame.
-        if Instant::now() > deadline {
+        if deadline.is_some_and(|deadline| Instant::now() > deadline) {
             return Err(FrameError::Truncated);
         }
     }
@@ -135,32 +130,21 @@ fn write_within(
     frame: Duration,
 ) -> Result<(), FrameError> {
     let length = frame_length(bytes.len(), limit)?;
-    let deadline = Instant::now() + frame;
-    // A blocking write to a Unix socket can keep going past SO_SNDTIMEO while the
-    // peer drains slowly (measured on Linux). Write without blocking and wait for
-    // room with poll, so the deadline bounds the whole frame.
-    stream.set_nonblocking(true).map_err(io)?;
-    let outcome = write_nonblocking(stream, &length.to_be_bytes(), bytes, deadline);
-    let restored = stream.set_nonblocking(false).map_err(io);
-    outcome.and(restored)
-}
-
-fn write_nonblocking(
-    stream: &mut UnixStream,
-    header: &[u8],
-    body: &[u8],
-    deadline: Instant,
-) -> Result<(), FrameError> {
-    for mut part in [header, body] {
+    let deadline = Instant::now().checked_add(frame);
+    for mut part in [&length.to_be_bytes()[..], bytes] {
         while !part.is_empty() {
-            match stream.write(part) {
+            match send_now(stream, part) {
                 Ok(0) => return Err(FrameError::Truncated),
                 Ok(count) => part = &part[count..],
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                Err(e) if e.kind() == ErrorKind::WouldBlock => wait_writable(stream, deadline)?,
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    if !wait(stream, libc::POLLOUT, deadline)? {
+                        return Err(FrameError::Truncated);
+                    }
+                }
                 Err(e) => return Err(io(e)),
             }
-            if Instant::now() > deadline {
+            if deadline.is_some_and(|deadline| Instant::now() > deadline) {
                 return Err(FrameError::Truncated);
             }
         }
@@ -168,22 +152,35 @@ fn write_nonblocking(
     Ok(())
 }
 
-/// Wait until the socket accepts more bytes, at most until `deadline`.
-fn wait_writable(stream: &UnixStream, deadline: Instant) -> Result<(), FrameError> {
+/// Wait until the socket is ready for `events` (or has hung up), at most until
+/// `deadline` (`None`: no bound). `Ok(false)` means the deadline passed first.
+fn wait(
+    stream: &UnixStream,
+    events: libc::c_short,
+    deadline: Option<Instant>,
+) -> Result<bool, FrameError> {
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(FrameError::Truncated);
-        }
+        let millis = match deadline {
+            None => -1,
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Ok(false);
+                }
+                // Round up so a sub-millisecond remainder still waits.
+                left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32
+            }
+        };
         let mut fd = libc::pollfd {
             fd: stream.as_raw_fd(),
-            events: libc::POLLOUT,
+            events,
             revents: 0,
         };
-        let millis = left.as_millis().clamp(1, i32::MAX as u128) as i32;
         // SAFETY: one initialized pollfd that outlives the call.
         match unsafe { libc::poll(&mut fd, 1, millis) } {
-            n if n > 0 => return Ok(()),
+            n if n > 0 => {
+                return Ok(deadline.is_none_or(|deadline| Instant::now() <= deadline));
+            }
             0 => {}
             _ => {
                 let e = std::io::Error::last_os_error();
@@ -192,6 +189,46 @@ fn wait_writable(stream: &UnixStream, deadline: Instant) -> Result<(), FrameErro
                 }
             }
         }
+    }
+}
+
+fn recv_now(stream: &UnixStream, bytes: &mut [u8]) -> std::io::Result<usize> {
+    // SAFETY: a valid descriptor and a writable buffer of the given length.
+    let n = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            bytes.as_mut_ptr().cast(),
+            bytes.len(),
+            libc::MSG_DONTWAIT,
+        )
+    };
+    if n < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(n as usize)
+    }
+}
+
+#[cfg(target_os = "linux")]
+const SEND_FLAGS: libc::c_int = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
+// macOS has no MSG_NOSIGNAL; Rust programs already ignore SIGPIPE.
+#[cfg(not(target_os = "linux"))]
+const SEND_FLAGS: libc::c_int = libc::MSG_DONTWAIT;
+
+fn send_now(stream: &UnixStream, bytes: &[u8]) -> std::io::Result<usize> {
+    // SAFETY: a valid descriptor and a readable buffer of the given length.
+    let n = unsafe {
+        libc::send(
+            stream.as_raw_fd(),
+            bytes.as_ptr().cast(),
+            bytes.len(),
+            SEND_FLAGS,
+        )
+    };
+    if n < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(n as usize)
     }
 }
 
@@ -206,7 +243,7 @@ fn frame_length(len: usize, limit: usize) -> Result<u32, FrameError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::AsRawFd;
+    use std::io::{Read, Write};
 
     fn pair() -> (UnixStream, UnixStream) {
         UnixStream::pair().unwrap()
@@ -372,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_idle_bound_takes_only_a_waiting_frame_and_leaves_the_socket_blocking() {
+    fn a_zero_idle_bound_takes_only_a_waiting_frame() {
         let (mut a, mut b) = pair();
         let started = Instant::now();
         assert_eq!(
@@ -385,10 +422,51 @@ mod tests {
             read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT).unwrap(),
             b"{}"
         );
-        // Blocking mode is restored: the next wait honours its own bound.
+    }
+
+    #[test]
+    fn an_unrepresentable_idle_bound_means_no_bound_and_never_panics() {
+        let (mut a, mut b) = pair();
+        write(&mut a, b"{}", CONTROL_FRAME_LIMIT).unwrap();
         assert_eq!(
-            read(&mut b, Duration::from_millis(30), CONTROL_FRAME_LIMIT),
-            Err(FrameError::Idle)
+            read(&mut b, Duration::MAX, CONTROL_FRAME_LIMIT).unwrap(),
+            b"{}"
         );
+        drop(a);
+        assert_eq!(
+            read(&mut b, Duration::MAX, CONTROL_FRAME_LIMIT),
+            Err(FrameError::Closed)
+        );
+    }
+
+    fn nonblocking(stream: &UnixStream) -> bool {
+        // SAFETY: F_GETFL only reads the descriptor's status flags.
+        unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) & libc::O_NONBLOCK != 0 }
+    }
+
+    #[test]
+    fn reads_and_writes_never_change_the_sockets_mode() {
+        for start_nonblocking in [false, true] {
+            let (mut a, mut b) = pair();
+            a.set_nonblocking(start_nonblocking).unwrap();
+            b.set_nonblocking(start_nonblocking).unwrap();
+            let clone = b.try_clone().unwrap();
+            write(&mut a, b"{}", CONTROL_FRAME_LIMIT).unwrap();
+            assert_eq!(
+                read(&mut b, Duration::from_secs(1), CONTROL_FRAME_LIMIT).unwrap(),
+                b"{}"
+            );
+            assert_eq!(
+                read(&mut b, Duration::ZERO, CONTROL_FRAME_LIMIT),
+                Err(FrameError::Idle)
+            );
+            assert_eq!(
+                read(&mut b, Duration::from_millis(20), CONTROL_FRAME_LIMIT),
+                Err(FrameError::Idle)
+            );
+            for stream in [&a, &b, &clone] {
+                assert_eq!(nonblocking(stream), start_nonblocking);
+            }
+        }
     }
 }

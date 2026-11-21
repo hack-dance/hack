@@ -40,7 +40,10 @@ impl Fixture {
             project,
             normalized,
             namespace,
-            hash: format!("{:x}", Sha256::digest(ORIGINAL.as_bytes())),
+            hash: format!(
+                "{:x}",
+                hack_runtime_core::Hex(Sha256::digest(ORIGINAL.as_bytes()))
+            ),
         }
     }
     fn invoke(&self, prefix: &[&str], suffix: &[&str]) -> Output {
@@ -250,7 +253,10 @@ fn normalized_capture_keeps_removed_original_credential_files_excluded() {
         "    env_file: [./config/private-vars.txt]\n    image:",
     );
     fs::write(fixture.project.join("compose.yml"), &original).unwrap();
-    fixture.hash = format!("{:x}", Sha256::digest(original.as_bytes()));
+    fixture.hash = format!(
+        "{:x}",
+        hack_runtime_core::Hex(Sha256::digest(original.as_bytes()))
+    );
     let plan = fixture.invoke(&["project", "plan"], &["--json"]);
     assert!(plan.status.success(), "{plan:?}");
     let plan: Value = serde_json::from_slice(&plan.stdout).unwrap();
@@ -286,7 +292,10 @@ fn optional_raw_and_repeated_env_files_keep_future_secret_paths_excluded() {
     let mut fixture = Fixture::new();
     let original = ORIGINAL.replace("    image:", "    env_file:\n      - {path: future/private.txt, required: false, format: raw}\n      - {path: future/private.txt, required: false}\n    image:");
     fs::write(fixture.project.join("compose.yml"), &original).unwrap();
-    fixture.hash = format!("{:x}", Sha256::digest(original.as_bytes()));
+    fixture.hash = format!(
+        "{:x}",
+        hack_runtime_core::Hex(Sha256::digest(original.as_bytes()))
+    );
     for exists in [false, true] {
         if exists {
             fs::create_dir(fixture.project.join("future")).unwrap();
@@ -339,7 +348,10 @@ fn environment_file_ignore_rule_aliases_refuse_without_reading_values() {
             &format!("    env_file: [{{path: {path}, required: false}}]\n    image:"),
         );
         fs::write(fixture.project.join("compose.yml"), &original).unwrap();
-        fixture.hash = format!("{:x}", Sha256::digest(original.as_bytes()));
+        fixture.hash = format!(
+            "{:x}",
+            hack_runtime_core::Hex(Sha256::digest(original.as_bytes()))
+        );
         let output = fixture.invoke(&["project", "plan"], &["--json"]);
         assert!(!String::from_utf8_lossy(&output.stdout).contains("PRIVATE_CANARY"));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("PRIVATE_CANARY"));
@@ -360,7 +372,10 @@ fn removed_inactive_required_env_file_retains_ownership_while_absent() {
         original.replace("    env_file: future/inactive.txt\n", ""),
     )
     .unwrap();
-    fixture.hash = format!("{:x}", Sha256::digest(original.as_bytes()));
+    fixture.hash = format!(
+        "{:x}",
+        hack_runtime_core::Hex(Sha256::digest(original.as_bytes()))
+    );
     let output = fixture.invoke(&["project", "plan"], &["--json"]);
     assert!(output.status.success(), "{output:?}");
     let plan: Value = serde_json::from_slice(&output.stdout).unwrap();

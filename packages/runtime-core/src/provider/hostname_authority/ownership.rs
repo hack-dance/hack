@@ -101,7 +101,7 @@ impl Owner {
             .map_err(state::io)?
             .sync_all()
             .map_err(state::io)?;
-        Ok(format!("{:x}", Sha256::digest(&bytes)))
+        Ok(format!("{:x}", crate::Hex(Sha256::digest(&bytes))))
     }
 }
 impl Drop for Owner {
@@ -194,7 +194,7 @@ pub fn inspect(c: &Candidate, socket: &Path) -> Result<serde_json::Value, Candid
     }
     let read = read(c, socket)?;
     Ok(
-        serde_json::json!({"present":true,"sha256":format!("{:x}",Sha256::digest(&read.bytes)),"process_present":identity::alive(read.value.process.pid)?,"socket_present":present(socket)}),
+        serde_json::json!({"present":true,"sha256":format!("{:x}",crate::Hex(Sha256::digest(&read.bytes))),"process_present":identity::alive(read.value.process.pid)?,"socket_present":present(socket)}),
     )
 }
 pub fn recover(
@@ -220,7 +220,7 @@ pub fn recover(
     if unsafe { libc::flock(original.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(error());
     }
-    if format!("{:x}", Sha256::digest(&original.bytes)) != expected
+    if format!("{:x}", crate::Hex(Sha256::digest(&original.bytes))) != expected
         || identity::alive(original.value.process.pid)?
     {
         return Err(error());
@@ -259,7 +259,7 @@ pub fn stop(
     expected: &str,
 ) -> Result<serde_json::Value, CandidateError> {
     let original = read(c, socket)?;
-    if format!("{:x}", Sha256::digest(&original.bytes)) != expected {
+    if format!("{:x}", crate::Hex(Sha256::digest(&original.bytes))) != expected {
         return Err(error());
     }
     if !identity::alive(original.value.process.pid)? {

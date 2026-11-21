@@ -46,7 +46,7 @@ fn refused() -> CandidateError {
     )
 }
 fn digest(value: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(value))
+    format!("{:x}", crate::Hex(Sha256::digest(value)))
 }
 /// Digest of the canonical pretty-encoded state.json written by state::write.
 fn selected(receipt: &Receipt) -> Result<String, CandidateError> {

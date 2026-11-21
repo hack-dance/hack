@@ -867,7 +867,7 @@ impl Owner {
     }
     pub fn data_dir(&self) -> PathBuf {
         use sha2::{Digest, Sha256};
-        let hash = format!("{:x}", Sha256::digest(self.machine.as_bytes()));
+        let hash = format!("{:x}", crate::Hex(Sha256::digest(self.machine.as_bytes())));
         self.short_home
             .join("Library/Caches/smolvm/vms")
             .join(&hash[..16])

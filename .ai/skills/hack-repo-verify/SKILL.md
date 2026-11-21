@@ -180,9 +180,10 @@ Config compiler and relocated acceptance, including refusal HOME/output contract
 The required test fan-in rejects selected compiler failures, cancellations and
 unexpected skips. This adds no default Mac minutes; the existing Linux lane also
 builds the release bundle. Ready Rust-input PRs retain Linux
-candidate/compiler checks while deferring macOS. Full tiers run automatically on
-ready PRs changing protected CI inputs or targeting
-`main`; the latter retains Intel. Light PRs skip build smoke, macOS and Docker;
+candidate/compiler checks while deferring macOS. Protected CI inputs retain full
+Linux/Docker/build tiers. Ready PRs defer macOS unless labeled `ci:mac` or
+`ci:full`, or targeting `main`; the latter retains Intel. Light PRs skip build smoke,
+macOS and Docker;
 ordinary `next` integrations defer Intel to explicit release qualification. Deferred
 platform/Docker evidence comes from next pushes. Lead readiness requires green Linux jobs,
 clean persistent review and handled bot findings; list pending Mac/Docker jobs.

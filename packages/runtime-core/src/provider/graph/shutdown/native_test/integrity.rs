@@ -86,14 +86,14 @@ fn expected_manifest(atomic_seed: u32) -> Manifest {
                     mixed ^= mixed >> 16;
                     *byte = mixed as u8;
                 }
-                blocks.push(format!("{:x}", Sha256::digest(&bytes)));
+                blocks.push(format!("{:x}", crate::Hex(Sha256::digest(&bytes))));
                 whole.update(&bytes);
             }
             FileHashes {
                 name: (*name).into(),
                 bytes: FILE_BYTES,
                 blocks,
-                whole: format!("{:x}", whole.finalize()),
+                whole: format!("{:x}", crate::Hex(whole.finalize())),
             }
         })
         .collect();

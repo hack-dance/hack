@@ -57,7 +57,7 @@ impl Artifact {
             .read_to_end(&mut bytes)
             .map_err(|_| refused())?;
         if bytes.len() as u64 != m.len()
-            || format!("{:x}", Sha256::digest(&bytes)) != digest
+            || format!("{:x}", crate::Hex(Sha256::digest(&bytes))) != digest
             || bytes.get(..6) != Some(b"\x7fELF\x02\x01")
             || bytes.get(18..20) != Some(&[183, 0])
         {
@@ -109,7 +109,8 @@ impl Artifact {
         file.take(2 * 1024 * 1024 + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| refused())?;
-        if bytes != self.bytes || format!("{:x}", Sha256::digest(&bytes)) != self.digest {
+        if bytes != self.bytes || format!("{:x}", crate::Hex(Sha256::digest(&bytes))) != self.digest
+        {
             return Err(refused());
         }
         let after = self.file.metadata().map_err(|_| refused())?;
@@ -212,7 +213,7 @@ mod tests {
         bytes[18..20].copy_from_slice(&[183, 0]);
         fs::write(&path, &bytes).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let digest = format!("{:x}", crate::Hex(Sha256::digest(&bytes)));
         let artifact = Artifact::read(&path, &digest).unwrap();
         assert!(artifact.verify().is_ok());
         for mode in [0o620, 0o602, 0o666] {

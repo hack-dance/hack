@@ -302,7 +302,11 @@ test("the plan lists the Linux assets apart from the unchanged macOS set", () =>
     "hack-next-manager-linux-arm64",
     "SHA256SUMS-linux",
   ]);
-  expect(releaseAssets(plan)).toEqual([...plan.assets, ...plan.linuxAssets]);
+  expect(releaseAssets(plan)).toEqual([
+    ...plan.assets,
+    ...plan.linuxAssets,
+    "prerelease-platforms.json",
+  ]);
   expect(linuxSumsNames(VERSION)).toEqual(plan.linuxAssets.slice(0, 4));
   // The release-level metadata keeps the platform published managers require.
   expect(

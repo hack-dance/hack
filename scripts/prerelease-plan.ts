@@ -29,9 +29,11 @@ import {
 import { extractArchive } from "./installer/bundle.ts";
 import { LINUX_SUMS, linuxSumsNames } from "./installer/download.ts";
 import {
+  archiveEntries,
   BUNDLE_PLATFORMS,
   type BundlePlatform,
   bundleArchiveName,
+  metadata as bundleMetadata,
   COMPOSE_PAYLOAD,
   composeOnly,
   digest,
@@ -40,6 +42,11 @@ import {
   managerAssetName,
   VERSION,
 } from "./installer/integrity.ts";
+import {
+  PLATFORMS_ASSET,
+  renderReleasePlatforms,
+  requireReleasePlatforms,
+} from "./installer/release-platforms.ts";
 
 export const PRERELEASE_ENVIRONMENT = "v5-prerelease";
 /**
@@ -77,8 +84,12 @@ export const PAYLOAD_MODES: Readonly<Record<string, number>> = {
 };
 /**
  * The native candidate platform, and the platform the release-level
- * `prerelease.json` records. Published macOS managers require exactly this
- * value there, so it does not change when Linux bundles are added.
+ * `prerelease.json` records. There it means "the native bundle's platform,
+ * kept for published managers", not "the only platform in the release":
+ * every published manager, macOS and Linux, requires exactly this value and
+ * exactly five keys in that file, so it does not change when other platforms
+ * are added. `prerelease-platforms.json` names every platform in a release
+ * (see `scripts/installer/release-platforms.ts`, HACK-2419).
  */
 export const PRERELEASE_PLATFORM = "darwin-arm64";
 /** The Compose-only Linux bundle platforms a release also ships. */
@@ -178,6 +189,8 @@ export function createPrereleasePlan({
     // Linux assets are listed apart: `assets` stays exactly the set every
     // published macOS manager and installer was written against.
     linuxAssets: [...linuxSumsNames(version), LINUX_SUMS],
+    // Names every platform in the set. Present whenever the Linux assets are.
+    platformsAsset: PLATFORMS_ASSET,
   };
 }
 
@@ -902,6 +915,13 @@ export async function packagePrerelease({
   await buildManager(join(output, MANAGER_ASSET));
   if (linux !== undefined) {
     await addLinuxAssets({ plan, linux, output });
+    await Bun.write(
+      join(output, PLATFORMS_ASSET),
+      renderReleasePlatforms({
+        version: plan.version,
+        sourceRevision: plan.source_revision,
+      })
+    );
   }
   await Bun.write(
     join(output, BOOTSTRAP_ASSET),
@@ -918,6 +938,10 @@ export async function packagePrerelease({
       names: [MANAGER_ASSET, BOOTSTRAP_ASSET],
     })
   );
+  if (linux !== undefined) {
+    // The finished set must be the one the platforms metadata describes.
+    await requireReleasePlatformMetadata({ plan, output });
+  }
 }
 
 /** The digests the installer embeds for the Linux managers in `output`. */
@@ -1282,9 +1306,49 @@ export async function renderChecksums({
   return `${lines.join("\n")}\n`;
 }
 
-/** Every asset a release uploads: the macOS set, then the Linux set. */
+/**
+ * Every asset a release uploads: the macOS set, the Linux set, then the
+ * metadata that names every platform in both.
+ */
 export function releaseAssets(plan: PrereleasePlan): string[] {
-  return [...plan.assets, ...plan.linuxAssets];
+  return [...plan.assets, ...plan.linuxAssets, plan.platformsAsset];
+}
+
+/**
+ * The release must say which platforms it holds, and say it truthfully:
+ * `prerelease-platforms.json` must list exactly the platforms that have an
+ * archive or a manager in `output`, with their asset names, and each
+ * archive's own `prerelease.json` must name that platform, the planned
+ * version and the planned source revision. The Linux archives are opened by
+ * `requireLinuxAssets`; the native archive is opened here.
+ */
+async function requireReleasePlatformMetadata({
+  plan,
+  output,
+}: {
+  readonly plan: PrereleasePlan;
+  readonly output: string;
+}) {
+  requireReleasePlatforms({
+    raw: await Bun.file(join(output, PLATFORMS_ASSET)).bytes(),
+    version: plan.version,
+    sourceRevision: plan.source_revision,
+    assetNames: await readdir(output),
+  });
+  const native = archiveEntries(
+    await Bun.file(join(output, plan.archive)).bytes(),
+    PRERELEASE_PLATFORM
+  );
+  const identity = bundleMetadata(
+    native.get("prerelease.json") ?? new Uint8Array(),
+    plan.version,
+    PRERELEASE_PLATFORM
+  );
+  if (identity.source_revision !== plan.source_revision) {
+    throw new Error(
+      `Native archive for ${PRERELEASE_PLATFORM} was built from another source revision`
+    );
+  }
 }
 
 export async function verifyReleaseAssets({
@@ -1360,6 +1424,10 @@ export async function verifyReleaseAssets({
     (await renderChecksums({ root: output, names: [plan.archive] }))
   ) {
     throw new Error("Release archive does not match its outer checksum");
+  }
+  if (linux) {
+    // Last, once every file is known to be the planned one.
+    await requireReleasePlatformMetadata({ plan, output });
   }
 }
 

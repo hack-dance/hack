@@ -1,0 +1,32 @@
+---
+title: BridgeBatch · release a run
+---
+stateDiagram-v2
+  direction TB
+  [*] --> idle
+  idle --> pubs : CleanAcquire [lease free]
+  pubs --> stopping : CleanPubs (all listeners)
+  stopping --> stop : CleanStopping (one save)
+  stop --> stopped : CleanStop (one guest call)
+  stopped --> remove : CleanStopped (one save)
+  remove --> drop : CleanRemove (one guest call)
+  drop --> done : CleanDrop (one save)
+  pubs --> idle : CleanCrash
+  stop --> idle : CleanCrash
+  remove --> idle : CleanCrash
+  done --> [*]
+  note right of pubs
+    INV: every listener closes
+    before any relay stops
+  end note
+  note right of done
+    INV ReleaseComplete: no relay,
+    no live listener
+  end note
+  note left of idle
+    A crash resumes from the
+    durable phases; every step
+    is idempotent per slot.
+  end note
+  class stop,remove live
+  class done ok

@@ -11,6 +11,8 @@ use std::io::Read;
 use std::path::PathBuf;
 
 const VERSION: u8 = 1;
+/// The largest time a record may carry: 2^53 - 1, the TypeScript safe integer.
+const MAX_SAFE_MILLIS: u64 = (1 << 53) - 1;
 const FIELDS: [&str; 11] = [
     "check",
     "class",
@@ -112,6 +114,10 @@ impl Record {
             || record.inputs != key.inputs
             || record.epoch != key.epoch
             || record.produced_by.build != key.build
+            || !super::key::valid_identifier(&record.produced_by.run)
+            // The TypeScript twin reads numbers as doubles: a time above 2^53 - 1
+            // is torn in both languages rather than accepted in one of them.
+            || record.observed_at > MAX_SAFE_MILLIS
         {
             return Err(MissReason::TornRecord);
         }

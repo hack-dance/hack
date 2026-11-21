@@ -857,3 +857,42 @@ fn build_epoch_and_run_are_bounded_identifiers() {
         assert!(store.record(&key, output, run).is_err());
     }
 }
+
+#[test]
+fn a_rechecked_record_with_an_invalid_run_or_unsafe_time_is_torn() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let key = example_key(StepClass::Slot);
+    let output = Output {
+        digest: Digest([7; 32]),
+        reference: None,
+    };
+    let written = store.record(&key, output, "run-1").unwrap();
+    let path = record_path(&fixture.root(), &key);
+    let base: serde_json::Value = serde_json::from_slice(&written.encode().unwrap()).unwrap();
+    for (field, value) in [
+        ("run", json!("run with space")),
+        ("run", json!("")),
+        ("observedAt", json!(9_007_199_254_740_993_u64)),
+    ] {
+        let mut record = base.clone();
+        record.as_object_mut().unwrap().remove("check");
+        if field == "run" {
+            record["producedBy"]["run"] = value;
+        } else {
+            record[field] = value;
+        }
+        let check = crate::canonical_digest::digest(STEP_RECORD, &record).unwrap();
+        record["check"] = json!(check.to_string());
+        fs::write(
+            &path,
+            crate::canonical_digest::canonical_json(&record).unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            store.lookup(&key, |_| true).unwrap(),
+            Lookup::Miss(MissReason::TornRecord)
+        );
+    }
+}

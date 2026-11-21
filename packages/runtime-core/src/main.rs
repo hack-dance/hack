@@ -1767,7 +1767,7 @@ fn service_serve_arguments(
                 // Open, and open for writing: the one line must be deliverable.
                 // SAFETY: F_GETFL only queries the descriptor's status flags.
                 let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-                if flags < 0 || flags & libc::O_ACCMODE == libc::O_RDONLY {
+                if flags < 0 || !matches!(flags & libc::O_ACCMODE, libc::O_WRONLY | libc::O_RDWR) {
                     return Err(invalid());
                 }
                 // Never inherited by anything the service starts later.

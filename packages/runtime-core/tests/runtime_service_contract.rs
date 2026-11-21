@@ -86,9 +86,32 @@ fn command(home: &Home, args: &[&str]) -> Command {
     command
 }
 
+/// Run a one-shot command, at most `WAIT`; the spawn lock is held only for the
+/// spawn, and the child is killed and reaped if it overruns.
 fn run(home: &Home, args: &[&str]) -> Output {
-    let _spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
-    command(home, args).stdin(Stdio::null()).output().unwrap()
+    let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+    let mut child = command(home, args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(spawning);
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    };
+    let stdout = drain(Box::new(child.stdout.take().unwrap()));
+    let stderr = drain(Box::new(child.stderr.take().unwrap()));
+    let status = Service(child).exit();
+    Output {
+        status,
+        stdout: stdout.join().unwrap(),
+        stderr: stderr.join().unwrap(),
+    }
 }
 
 fn json(output: &Output) -> Value {
@@ -249,6 +272,8 @@ fn serve_refuses_bad_arguments_and_an_unusable_notify_descriptor() {
     // A descriptor that is closed in the child, and one open only for reading.
     let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
     let (reader, _writer) = pipe();
+    // Both ends are close-on-exec now: other forks can no longer keep them.
+    drop(spawning);
     for (fd, close_77) in [(None, true), (Some(reader.as_raw_fd()), false)] {
         let mut command = command(&home, &["service", "serve", "--notify-fd", "77"]);
         command
@@ -281,6 +306,47 @@ fn serve_refuses_bad_arguments_and_an_unusable_notify_descriptor() {
             .unwrap();
         assert!(stderr.contains("invalid_arguments"), "{fd:?}: {stderr}");
     }
+    assert!(home.socket().symlink_metadata().is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn serve_refuses_a_notify_descriptor_open_for_neither_reading_nor_writing() {
+    let home = Home::new();
+    let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+    // Access mode 3: Linux opens it for ioctl only, no read and no write.
+    let path = std::ffi::CString::new("/dev/null").unwrap();
+    // SAFETY: a valid C string; the descriptor is owned below.
+    let fd = unsafe { libc::open(path.as_ptr(), 3 | libc::O_CLOEXEC) };
+    assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+    // SAFETY: a fresh descriptor, wrapped once.
+    let neither = unsafe { File::from_raw_fd(fd) };
+    let raw = neither.as_raw_fd();
+    let mut command = command(&home, &["service", "serve", "--notify-fd", "77"]);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(raw, 77) < 0 || libc::fcntl(77, libc::F_SETFD, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut service = Service(command.spawn().unwrap());
     drop(spawning);
+    assert!(!service.exit().success());
+    let mut stderr = String::new();
+    service
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(stderr.contains("invalid_arguments"), "{stderr}");
     assert!(home.socket().symlink_metadata().is_err());
 }

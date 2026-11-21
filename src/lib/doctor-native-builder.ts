@@ -16,6 +16,11 @@
  * The check's message is also doctor's JSON `detail`, which is stored and
  * passed on. It names the setup command by the launcher's base name, never by
  * its path: a candidate launcher's path is under the user's home by default.
+ * The builder's own paths in it are relative to the native home.
+ *
+ * The inspection is record-level: it does not hash the builder. A builder
+ * whose bytes changed under an intact record reads as installed here; the
+ * build and `hack native setup` verify the bytes and say so.
  */
 
 import type {
@@ -29,7 +34,10 @@ import {
 import type { CandidateLauncher } from "./candidate-launcher.ts";
 import { isRecord } from "./guards.ts";
 import {
+  NATIVE_BUILDER_CHANGED,
   NATIVE_BUILDER_MISSING,
+  type NativeBuilderPaths,
+  nativeBuilderChangedRemedy,
   nativeBuilderRemedy,
 } from "./native-image-builder.ts";
 
@@ -62,6 +70,8 @@ export function countNativeBuildServices(compose: unknown): number {
 export function nativeBuilderCheckResult(opts: {
   readonly buildServices: number;
   readonly builder: NativeBuilderReport["builder"];
+  /** The builder's paths under the native home, for the changed remedy. */
+  readonly paths?: NativeBuilderPaths;
   /** Names the setup command for this install kind (default: this process). */
   readonly launcher?: CandidateLauncher;
 }): {
@@ -107,7 +117,7 @@ export function nativeBuilderCheckResult(opts: {
       return {
         name,
         status: "warn",
-        message: `${scope}, but the image builder in this native home is not the one its record describes, so native up refuses to build with it.`,
+        message: `${scope}, but ${NATIVE_BUILDER_CHANGED}, so native up refuses to build with it. ${nativeBuilderChangedRemedy({ paths: opts.paths, launcher: opts.launcher, style: "name" })}`,
         nativeBuilder,
       };
     default:
@@ -138,17 +148,18 @@ export async function checkNativeImageBuilder(opts: {
   if (buildServices === 0) {
     return nativeBuilderCheckResult({ buildServices, builder: "not_checked" });
   }
-  const builder = await inspectNativeSetup({
+  const reported = await inspectNativeSetup({
     runtime: opts.runtime,
     cwd: opts.cwd,
     invoke: opts.invoke,
   }).then(
-    (inspection) => inspection.builder?.state ?? "unknown",
-    () => "unknown" as const
+    (inspection) => inspection.builder,
+    () => undefined
   );
   return nativeBuilderCheckResult({
     buildServices,
-    builder,
+    builder: reported?.state ?? "unknown",
+    paths: reported,
     launcher: opts.launcher,
   });
 }

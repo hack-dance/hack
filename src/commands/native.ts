@@ -173,11 +173,9 @@ const setup = withHandler(setupSpec, async ({ ctx, args }) => {
     json: args.options.json === true,
     acceptDownloads: accepted,
     offline,
-    // Neither consent nor the offline file: the home stays without the builder.
-    builderHint:
-      inspection.builder?.state === "not_prepared" &&
-      !accepted &&
-      builder === undefined,
+    // For the summary's notice when the run leaves the home without the image
+    // builder, or with one that does not match the pinned release.
+    builder: inspection.builder,
   });
 });
 

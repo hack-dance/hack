@@ -24,6 +24,10 @@ const BUILDER_PIN = {
   size_bytes: 7,
   archive_sha256: "b".repeat(64),
 };
+const BUILDER_PATHS = {
+  directory: ".hack-local/providers/builder-1.0.0",
+  record: ".hack-local/providers/builder.json",
+};
 const BUILDER_HINT =
   "The image builder is not installed, so native up cannot build images yet. Run hack native setup --accept-downloads to add it; offline, add --builder <pinned builder file> to the offline setup inputs.\n";
 afterEach(async () => {
@@ -55,13 +59,19 @@ if (args.includes("inspect")) {
   reply.code = reply.state === "ready" ? "native_setup_ready" : "E_NATIVE_SETUP_REQUIRED";
   if (existsSync(${JSON.stringify(join(root, "report-builder"))})) {
     reply.pins.push(${JSON.stringify(BUILDER_PIN)});
-    reply.builder = { state: existsSync(join(home, "builder")) ? "prepared" : "not_prepared", file: "builder.bin" };
+    // Record-level, as the runtime's inspection is: a builder whose bytes changed
+    // still reads as prepared here.
+    reply.builder = { state: existsSync(join(home, "builder")) ? "prepared" : "not_prepared", file: "builder.bin", ...${JSON.stringify(BUILDER_PATHS)} };
   }
   console.log(JSON.stringify(reply));
 } else if (args[2] === "runtime" && args[3] === "setup") {
   if (process.env.SETUP_PROJECT_SENTINEL || process.env.HACK_ENV_SECRET_KEY) process.exit(91);
   mkdirSync(home, { mode: 0o700, recursive: true });
-  if (args.includes("--accept-downloads") || args.includes("--builder")) writeFileSync(join(home, "builder"), "fixture");
+  // What the run does about the builder: a changed one is reported and never replaced.
+  const changed = existsSync(${JSON.stringify(join(root, "builder-changed"))});
+  const had = existsSync(join(home, "builder"));
+  const adds = !changed && !had && (args.includes("--accept-downloads") || args.includes("--builder"));
+  if (adds) writeFileSync(join(home, "builder"), "fixture");
   if (existsSync(${JSON.stringify(join(root, "interrupt-setup"))})) {
     mkdirSync(join(home, ".hack-local/setup/downloads"), { mode: 0o700, recursive: true });
     writeFileSync(join(home, ".hack-local/setup/downloads/provider.part"), "prefix");
@@ -71,7 +81,11 @@ if (args.includes("inspect")) {
   }
   if (existsSync(${JSON.stringify(join(root, "child-signal"))})) { process.kill(process.pid, "SIGTERM"); await Bun.sleep(60_000); }
   writeFileSync(join(home, "installed"), "fixture");
-  process.stdout.write(${JSON.stringify(result)});
+  const result = JSON.parse(${JSON.stringify(result)});
+  if (existsSync(${JSON.stringify(join(root, "report-builder"))})) {
+    result.builder = changed ? "changed" : adds ? "installed" : had ? "reused" : "not_prepared";
+  }
+  process.stdout.write(JSON.stringify(result) + "\\n");
 } else { process.exit(92); }
 `
   );
@@ -155,25 +169,34 @@ test("setup inspection reports the image builder apart from readiness", () => {
     pins: [...nativeSetupInspection().pins, BUILDER_PIN],
     builder,
   });
+  const named = { file: "builder.bin", ...BUILDER_PATHS };
   // A runtime that does not report the builder is still a ready runtime.
   expect(
     parseNativeSetupInspection(nativeSetupInspection()).builder
   ).toBeUndefined();
   for (const state of ["prepared", "not_prepared", "changed"] as const) {
-    const inspection = parseNativeSetupInspection(
-      reply({ state, file: "builder.bin" })
-    );
+    const inspection = parseNativeSetupInspection(reply({ state, ...named }));
     // The builder never changes readiness, and its pin is one of the listed pins.
     expect(inspection.state).toBe("ready");
     expect(inspection.pins).toHaveLength(2);
-    expect(inspection.builder).toEqual({ state, pin: BUILDER_PIN });
+    expect(inspection.builder).toEqual({
+      state,
+      pin: BUILDER_PIN,
+      ...BUILDER_PATHS,
+    });
   }
   for (const builder of [
     null,
     "prepared",
-    { state: "future", file: "builder.bin" },
+    { ...named, state: "future" },
     { state: "prepared" },
-    { state: "prepared", file: "not-a-listed-pin" },
+    { ...named, state: "prepared", file: "not-a-listed-pin" },
+    // Its paths are one name under the runtime's providers directory, nothing else.
+    { state: "prepared", file: "builder.bin", record: BUILDER_PATHS.record },
+    { ...named, state: "prepared", directory: "/absolute/builder-1.0.0" },
+    { ...named, state: "prepared", record: ".hack-local/providers/../x" },
+    { ...named, state: "prepared", record: ".hack-local/providers/a/b" },
+    { ...named, state: "prepared", directory: "builder-1.0.0" },
   ]) {
     expect(() => parseNativeSetupInspection(reply(builder))).toThrow(
       "Invalid native setup builder."
@@ -358,7 +381,9 @@ test("a set-up home without the image builder gains it only with consent", async
   // JSON stays the runtime's result alone; its `builder` field carries the state.
   const json = await f.cli(["native", "setup", "--json"]);
   expect(json.exitCode).toBe(0);
-  expect(json.stdout).toBe(f.result);
+  expect(json.stdout).toBe(
+    '{"status":"installed","files":[],"builder":"not_prepared"}\n'
+  );
   expect(json.stderr).toBe("");
   expect(existsSync(join(f.home, "builder"))).toBe(false);
 
@@ -456,4 +481,51 @@ test("the offline builder file joins the offline inputs and is refused alone", a
       "/input/builder",
     ],
   ]);
+}, 60_000);
+
+test("a builder that does not match the pin is a warning, never a failed setup", async () => {
+  const f = await fixture();
+  await writeFile(join(f.root, "report-builder"), "the runtime reports it");
+  // A complete home whose builder's bytes changed: the record-level inspection
+  // still reads it as prepared, and only the setup run finds out.
+  await mkdir(f.home, { mode: 0o700 });
+  await writeFile(join(f.home, "installed"), "fixture");
+  await writeFile(join(f.home, "builder"), "changed bytes");
+  await writeFile(join(f.root, "builder-changed"), "the run reports it");
+  const warning =
+    "WARN: Setup found that the image builder in this native home does not match the pinned release, so image builds are refused until it is replaced. Setup left it as it is. Remove .hack-local/providers/builder-1.0.0 and .hack-local/providers/builder.json from the native home, then run hack native setup --accept-downloads.\n";
+
+  // With and without consent, and offline with the builder file: setup succeeds,
+  // says what to do in one line, and never replaces the builder.
+  for (const flags of [
+    [],
+    ["--accept-downloads"],
+    [
+      "--archive",
+      "/input/provider",
+      "--engine-archive",
+      "/input/engine",
+      "--network-tools-directory",
+      "/input/packages",
+      "--builder",
+      "/input/builder",
+    ],
+  ]) {
+    const run = await f.cli(["native", "setup", ...flags]);
+    expect(run.exitCode).toBe(0);
+    expect(run.stdout).toBe("Native runtime is set up.\n");
+    expect(run.stderr).toContain(warning);
+    expect(run.stderr.split("WARN:")).toHaveLength(2);
+    expect(run.stderr).not.toContain("Pinned downloads");
+    expect(await readFile(join(f.home, "builder"), "utf8")).toBe(
+      "changed bytes"
+    );
+  }
+  // JSON stays the runtime's result alone.
+  const json = await f.cli(["native", "setup", "--json"]);
+  expect(json.exitCode).toBe(0);
+  expect(json.stdout).toBe(
+    '{"status":"installed","files":[],"builder":"changed"}\n'
+  );
+  expect(json.stderr).toBe("");
 }, 60_000);

@@ -16,6 +16,10 @@ const runtime = {
   home: "/opt/hack/native-home",
 };
 const launcher = { kind: "stable", command: "hack" } as const;
+const PATHS = {
+  directory: ".hack-local/providers/builder-1.0.0",
+  record: ".hack-local/providers/builder.json",
+};
 /** A managed candidate install: its launcher is not on PATH and lives under the home. */
 const HOME = "/home-fixture";
 const managed = {
@@ -52,7 +56,7 @@ function inspecting(state: string | undefined) {
       ],
       ...(state === undefined
         ? {}
-        : { builder: { state, file: "builder.bin" } }),
+        : { builder: { state, file: "builder.bin", ...PATHS } }),
     });
   };
   return { requests, invoke: invoke as never };
@@ -139,12 +143,14 @@ test("a changed builder, a silent runtime and a failed inspection warn without c
     compose: built,
     invoke: inspecting("changed").invoke,
   });
-  expect(changed).toMatchObject({
+  // The same words and the same remedy `hack native setup` prints for it.
+  expect(changed).toEqual({
+    name: NATIVE_BUILDER_CHECK,
     status: "warn",
+    message:
+      "2 services build an image, but the image builder in this native home does not match the pinned release, so native up refuses to build with it. Remove .hack-local/providers/builder-1.0.0 and .hack-local/providers/builder.json from the native home, then run hack native setup --accept-downloads.",
     nativeBuilder: { buildServices: 2, builder: "changed" },
   });
-  expect(changed.message).toContain("is not the one its record describes");
-  expect(changed.message).not.toContain("--accept-downloads");
   // An older runtime does not report the builder; a failing one reports nothing.
   const failing = () => Promise.reject(new Error("runtime unavailable"));
   for (const invoke of [inspecting(undefined).invoke, failing as never]) {
@@ -209,20 +215,33 @@ test("doctor names the setup command without the launcher's path under the home"
   );
   // Doctor's message is also its JSON `detail`, which is stored and passed on:
   // it names the launcher only, so it carries no home path and no user name.
-  const check = await checkNativeImageBuilder({
-    runtime,
-    cwd: "/project",
-    compose: built,
-    invoke: inspecting("not_prepared").invoke,
-    launcher: managed,
-  });
-  expect(check.status).toBe("warn");
-  expect(check.message).toContain("hack-next native setup --accept-downloads");
-  expect(check.message).not.toContain(HOME);
-  expect(check.message).not.toContain("/.hack-next/");
-  const data = buildDoctorJsonData({
-    results: [{ ...check, durationMs: 1 }],
-  });
-  expect(JSON.stringify(data)).not.toContain(HOME);
-  expect(data.checks[0]?.detail).toBe(check.message);
+  for (const state of ["not_prepared", "changed"]) {
+    const check = await checkNativeImageBuilder({
+      runtime,
+      cwd: "/project",
+      compose: built,
+      invoke: inspecting(state).invoke,
+      launcher: managed,
+    });
+    expect(check.status).toBe("warn");
+    expect(check.message).toContain(
+      "hack-next native setup --accept-downloads"
+    );
+    expect(check.message).not.toContain(HOME);
+    expect(check.message).not.toContain("/.hack-next/");
+    const data = buildDoctorJsonData({
+      results: [{ ...check, durationMs: 1 }],
+    });
+    expect(JSON.stringify(data)).not.toContain(HOME);
+    expect(data.checks[0]?.detail).toBe(check.message);
+  }
+  expect(
+    nativeBuilderCheckResult({
+      buildServices: 1,
+      builder: "not_prepared",
+      launcher: { kind: "bundle", command: `${HOME}/bundle/hack-v5` },
+    }).message
+  ).toBe(
+    "1 service builds an image, but the image builder is not installed in this native home, so native up cannot build it. Run hack-v5 native setup --accept-downloads to add it; offline, add --builder <pinned builder file> to the offline setup inputs."
+  );
 });

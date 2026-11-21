@@ -1325,20 +1325,119 @@ fn setup_with_downloads_installs_the_builder_and_a_build_time_verify_passes() {
     assert_eq!(reused["status"], "reused");
     assert_eq!(reused["builder"], "reused");
     assert_eq!(reused["files"], serde_json::json!([]));
+}
 
-    // A prepared builder that changed keeps its refusal: setup neither reports it as
-    // absent nor downloads over it.
-    fs::write(&executable, b"other").unwrap();
-    let changed = ensure_builder(
+#[test]
+fn a_changed_builder_is_reported_and_left_alone_and_replacing_it_by_hand_works() {
+    let root = Fixture::new();
+    let candidate = Candidate::discover(&root.0).unwrap();
+    let (pin, server) = server(vec![
+        ("get /provider.tgz", SERVED),
+        ("get /engine.tgz", SERVED),
+        ("get /guest.apk", SERVED),
+        ("get /builder.bin", SERVED),
+    ]);
+    let builder = builder_file_pin(&pin);
+    install(
         &candidate,
-        BuilderSource::Download,
-        &builder,
-        |_, _| panic!("a changed builder was prepared over"),
-        build_time_verify,
-        || panic!("a changed builder was downloaded again"),
+        None,
+        &fixture_pins(&pin),
+        fixture_prepare,
+        fixture_verify,
     )
-    .unwrap_err();
-    assert_eq!(changed.code, "artifact_digest_mismatch");
+    .unwrap();
+    ensure(&candidate, BuilderSource::Download, &builder).unwrap();
+    server.join().unwrap(); // gone: any later request would fail
+    let providers = candidate.state_root.join("providers");
+    let tree = providers.join("test-client-1.2.3");
+    let executable = tree.join("test-client");
+    let record = providers.join("test-client.json");
+    let offline_file = root.0.join("builder-file");
+    fs::write(&offline_file, BUILDER_BYTES).unwrap();
+
+    // Setup reports a builder that does not verify and changes nothing: with no source,
+    // with download consent and with the offline file alike. It does not fail the home.
+    let untouched = |source: BuilderSource<'_>| {
+        let before = snapshot(&providers);
+        let outcome = ensure_builder(
+            &candidate,
+            source,
+            &builder,
+            |_, _| panic!("a changed builder was prepared over"),
+            build_time_verify,
+            || panic!("a changed builder was downloaded again"),
+        )
+        .unwrap();
+        assert_eq!(outcome.0, Builder::Changed);
+        assert!(outcome.1.is_none());
+        assert_eq!(snapshot(&providers), before);
+        let reported = Installation::reused()
+            .with_builder(outcome)
+            .with_probe(serde_json::json!({"supported": true}));
+        assert_eq!(reported["status"], "reused");
+        assert_eq!(reported["builder"], "changed");
+        assert_eq!(reported["files"], serde_json::json!([]));
+        // The build keeps its own refusal.
+        assert_eq!(
+            build_time_verify(&candidate).unwrap_err().code,
+            "artifact_digest_mismatch"
+        );
+    };
+    let every_source = |state: &str| {
+        for source in [
+            BuilderSource::Absent,
+            BuilderSource::Download,
+            BuilderSource::File(&offline_file),
+        ] {
+            untouched(source);
+        }
+        fixture_verify(&candidate).expect(state);
+    };
+    // Other bytes under an intact record.
+    fs::write(&executable, b"other").unwrap();
+    every_source("changed bytes");
+    // The record removed while the changed directory stays: still changed, not absent,
+    // so setup is never told to prepare over it.
+    fs::remove_file(&record).unwrap();
+    every_source("changed bytes without a record");
+
+    // The remedy setup prints: remove the directory and the record by hand, then run
+    // setup with consent. The verified download is still cached, so nothing is requested.
+    fs::remove_file(&executable).unwrap();
+    fs::remove_dir(&tree).unwrap();
+    assert_eq!(
+        build_time_verify(&candidate).unwrap_err().code,
+        "builder_not_prepared"
+    );
+    let replaced = ensure(&candidate, BuilderSource::Download, &builder).unwrap();
+    assert_eq!(replaced.0, Builder::Installed);
+    assert_eq!(replaced.1.as_ref().unwrap().outcome, Outcome::Reused);
+    build_time_verify(&candidate).unwrap();
+    assert_eq!(fs::read(&executable).unwrap(), BUILDER_BYTES);
+
+    // The same remedy with only the directory removed (a stale record stays), and with
+    // an interrupted record write left behind: setup with consent still completes.
+    fs::write(&executable, b"other").unwrap();
+    assert_eq!(
+        ensure(&candidate, BuilderSource::Absent, &builder)
+            .unwrap()
+            .0,
+        Builder::Changed
+    );
+    fs::remove_file(&executable).unwrap();
+    fs::remove_dir(&tree).unwrap();
+    let pending = record.with_extension("pending");
+    fs::write(&pending, b"partial").unwrap();
+    fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        ensure(&candidate, BuilderSource::Download, &builder)
+            .unwrap()
+            .0,
+        Builder::Installed
+    );
+    assert!(!pending.exists());
+    build_time_verify(&candidate).unwrap();
+    fixture_verify(&candidate).unwrap();
 }
 
 #[test]

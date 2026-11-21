@@ -66,7 +66,12 @@ async function doctor(opts: {
         archive_sha256: "b".repeat(64),
       },
     ],
-    builder: { state: opts.builder, file: "builder.bin" },
+    builder: {
+      state: opts.builder,
+      file: "builder.bin",
+      directory: ".hack-local/providers/builder-1.0.0",
+      record: ".hack-local/providers/builder.json",
+    },
   };
   const binary = join(runtimeDir, "native-runtime");
   await writeFile(

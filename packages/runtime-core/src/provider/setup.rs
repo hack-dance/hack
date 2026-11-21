@@ -148,6 +148,9 @@ enum Builder {
     Reused,
     /// It is absent and no source was given; nothing was changed.
     NotPrepared,
+    /// Something is there that does not verify against the pinned release. It was left
+    /// exactly as it is, with or without a source; builds refuse it until it is replaced.
+    Changed,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -345,7 +348,11 @@ fn ensure_pinned_builder(
 /// entrypoint takes) and the private download cache. It never stages, publishes or
 /// re-prepares the provider set, which a running pool may be executing from. A builder
 /// that is already prepared is verified and left alone, and without a source nothing is
-/// written at all. A prepared builder that changed keeps its refusal.
+/// written at all.
+///
+/// A builder that is there but does not verify is reported as changed and never
+/// touched: setup does not fail a complete home for it, and does not delete or
+/// overwrite it either, with or without a source. Builds keep refusing it.
 fn ensure_builder(
     candidate: &Candidate,
     source: BuilderSource<'_>,
@@ -357,7 +364,7 @@ fn ensure_builder(
     match verify(candidate) {
         Ok(()) => return Ok((Builder::Reused, None)),
         Err(error) if error.code == artifact::BUILDER_NOT_PREPARED => {}
-        Err(error) => return Err(error),
+        Err(_) => return Ok((Builder::Changed, None)),
     }
     let offline = match source {
         BuilderSource::Absent => return Ok((Builder::NotPrepared, None)),

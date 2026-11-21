@@ -62,6 +62,10 @@ pub struct BuilderInspection {
     pub state: artifact::BuilderState,
     /// The file name of the builder's entry in `pins`.
     pub file: String,
+    /// The builder's prepared directory, as a path under the native home.
+    pub directory: String,
+    /// The builder's record, as a path under the native home.
+    pub record: String,
 }
 
 /// A home that does not exist yet has no builder; an existing one is looked at.
@@ -75,7 +79,13 @@ fn observe_builder(
         (_, None) => return None,
     };
     let file = super::builder_pin().ok()?.name().ok()?.to_owned();
-    Some(BuilderInspection { state, file })
+    let [directory, record] = artifact::builder_paths();
+    Some(BuilderInspection {
+        state,
+        file,
+        directory,
+        record,
+    })
 }
 
 /// Validate a possibly absent selected home without creating or resolving it.
@@ -431,7 +441,15 @@ pub(super) mod tests {
             assert_eq!(inspection.pins[6].name().unwrap(), builder_file);
             assert_eq!(
                 serde_json::to_value(&inspection).unwrap()["builder"],
-                serde_json::json!({"state": expected, "file": builder_file})
+                serde_json::json!({
+                    "state": expected,
+                    "file": builder_file,
+                    "directory": format!(
+                        ".hack-local/providers/buildx-{}-darwin-arm64",
+                        artifact::BUILDER_VERSION
+                    ),
+                    "record": ".hack-local/providers/buildx.json"
+                })
             );
         };
         // A home set up before setup installed the builder.

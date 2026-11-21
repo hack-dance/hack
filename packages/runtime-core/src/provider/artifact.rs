@@ -700,6 +700,13 @@ pub fn builder_state(candidate: &Candidate) -> Result<BuilderState, CandidateErr
     binary_state(candidate, &BUILDER)
 }
 
+/// The image builder's prepared directory and its record, as paths under the native
+/// home. They are what a user removes to replace a builder that changed; setup never
+/// removes them itself.
+pub fn builder_paths() -> [String; 2] {
+    [BUILDER.directory, BUILDER.record].map(|name| format!(".hack-local/providers/{name}"))
+}
+
 fn binary_state(candidate: &Candidate, pin: &BinaryPin) -> Result<BuilderState, CandidateError> {
     let root = binary_root(candidate, pin);
     reject_aliased_state(&root)?;

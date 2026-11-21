@@ -95,7 +95,7 @@ fn lock_frees(path: &Path) -> bool {
 fn hello_and_status_name_this_build_and_process() {
     let root = Root::new();
     let (handle, ready) = spawn(&root.0, Duration::from_secs(30));
-    let service = &ready["ready"];
+    let service = &ready["listening"];
     assert_eq!(service["build_id"], env!("HACK_RUNTIME_BUILD_ID"));
     assert_eq!(service["pid"], std::process::id());
     assert_eq!(service["epoch"].as_str().unwrap().len(), 32);
@@ -229,7 +229,7 @@ fn a_loser_announces_lost_and_never_touches_the_winners_socket() {
     let (_second, lost) = spawn(&root.0, Duration::from_secs(30));
     assert_eq!(lost, json!({"lost": true}));
     let status = call(&root.0, "service.status", json!({})).unwrap();
-    assert_eq!(status["service"]["epoch"], ready["ready"]["epoch"]);
+    assert_eq!(status["service"]["epoch"], ready["listening"]["epoch"]);
     call(&root.0, "service.retire", json!({})).unwrap();
     handle.join().unwrap().unwrap();
 }
@@ -246,7 +246,7 @@ fn a_stale_socket_is_replaced_and_a_planted_file_is_refused() {
     drop(UnixListener::bind(&socket).unwrap());
     assert!(socket.symlink_metadata().unwrap().file_type().is_socket());
     let (handle, ready) = spawn(&root.0, Duration::from_secs(30));
-    assert!(ready["ready"].is_object(), "{ready}");
+    assert!(ready["listening"].is_object(), "{ready}");
     call(&root.0, "service.retire", json!({})).unwrap();
     handle.join().unwrap().unwrap();
 
@@ -345,7 +345,7 @@ fn retire_ends_every_session_before_the_lock_is_released() {
     assert!(lock_frees(&paths(&root.0).lock));
     // The next start takes the freed lock and binds a fresh socket.
     let (handle, ready) = spawn(&root.0, Duration::from_secs(30));
-    assert!(ready["ready"].is_object());
+    assert!(ready["listening"].is_object());
     call(&root.0, "service.retire", json!({})).unwrap();
     handle.join().unwrap().unwrap();
 }
@@ -452,7 +452,7 @@ fn a_client_never_reaches_another_homes_service_through_a_symlink() {
         "aliased_state"
     );
     let status = call(&b.0, "service.status", json!({})).unwrap();
-    assert_eq!(status["service"]["epoch"], ready["ready"]["epoch"]);
+    assert_eq!(status["service"]["epoch"], ready["listening"]["epoch"]);
     call(&b.0, "service.retire", json!({})).unwrap();
     handle.join().unwrap().unwrap();
 }

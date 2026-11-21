@@ -93,9 +93,13 @@ fn euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-/// Serve until idle or retired. `ready` receives exactly one JSON line:
-/// `{"ready":{…}}` once the service can answer, `{"lost":true}`, or
-/// `{"refused":{"code":…}}` for any failure before that.
+/// Serve until idle or retired. `ready` (the starter's descriptor) receives
+/// exactly one JSON line: `{"listening":{…}}` once the socket is bound and every
+/// startup step worked, `{"lost":true}`, or `{"refused":{"code":…}}` for any
+/// failure before that. "Listening" is not "ready": a client treats the service
+/// as ready only when a `hello` over the socket has succeeded (an end-to-end
+/// request on the path it will use), never because the socket exists or the
+/// process is up.
 pub fn serve(
     state_root: &Path,
     options: Options,
@@ -129,7 +133,7 @@ pub fn serve(
             return Err(error);
         }
     };
-    announce(json!({"ready": shared.identity.public()}));
+    announce(json!({"listening": shared.identity.public()}));
     let outcome = run(&shared, listener, &wake);
     remove_own_record(&paths.record, &shared.identity.epoch);
     drop(lock);
@@ -181,7 +185,7 @@ fn start(paths: &Paths) -> Result<Option<Bound>, CandidateError> {
     Ok(Some((listener, lock, id)))
 }
 
-/// Everything fallible after bind, so "ready" is announced only once it all worked.
+/// Everything fallible after bind, so "listening" is announced only once it all worked.
 fn prepare(
     paths: &Paths,
     options: Options,

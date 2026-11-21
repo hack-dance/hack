@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 
 static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 const WAIT: Duration = Duration::from_secs(10);
-/// Held from creating a pipe until the child that should get it has been
-/// spawned: without pipe2 (macOS), a fork in another test thread between
-/// `pipe` and `FD_CLOEXEC` would otherwise inherit the writer across exec.
+/// Held around every fork in this test binary and around creating a pipe until
+/// its ends are close-on-exec: without pipe2 (macOS), a fork between `pipe` and
+/// `FD_CLOEXEC` would otherwise let a child inherit a writer across exec.
 static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// A private native home short enough for the service socket path.
@@ -90,12 +90,14 @@ fn command(home: &Home, args: &[&str]) -> Command {
 /// spawn, and the child is killed and reaped if it overruns.
 fn run(home: &Home, args: &[&str]) -> Output {
     let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
-    let mut child = command(home, args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = Service(
+        command(home, args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
     drop(spawning);
     let drain = |mut pipe: Box<dyn Read + Send>| {
         std::thread::spawn(move || {
@@ -104,9 +106,9 @@ fn run(home: &Home, args: &[&str]) -> Output {
             bytes
         })
     };
-    let stdout = drain(Box::new(child.stdout.take().unwrap()));
-    let stderr = drain(Box::new(child.stderr.take().unwrap()));
-    let status = Service(child).exit();
+    let stdout = drain(Box::new(child.0.stdout.take().unwrap()));
+    let stderr = drain(Box::new(child.0.stderr.take().unwrap()));
+    let status = child.exit();
     Output {
         status,
         stdout: stdout.join().unwrap(),
@@ -272,7 +274,6 @@ fn serve_refuses_bad_arguments_and_an_unusable_notify_descriptor() {
     // A descriptor that is closed in the child, and one open only for reading.
     let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
     let (reader, _writer) = pipe();
-    // Both ends are close-on-exec now: other forks can no longer keep them.
     drop(spawning);
     for (fd, close_77) in [(None, true), (Some(reader.as_raw_fd()), false)] {
         let mut command = command(&home, &["service", "serve", "--notify-fd", "77"]);
@@ -294,7 +295,9 @@ fn serve_refuses_bad_arguments_and_an_unusable_notify_descriptor() {
                 Ok(())
             });
         }
+        let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
         let mut service = Service(command.spawn().unwrap());
+        drop(spawning);
         assert!(!service.exit().success(), "{fd:?}");
         let mut stderr = String::new();
         service

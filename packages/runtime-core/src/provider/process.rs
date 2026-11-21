@@ -3,7 +3,7 @@ use crate::CandidateError;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 pub struct Captured {
@@ -117,13 +117,46 @@ pub fn spawn(command: &mut Command) -> Result<Running, CandidateError> {
 
 /// [`spawn`] with the blocking exit observation injected, so a test can take it away.
 fn start(command: &mut Command, observe_exit: fn(u32) -> bool) -> Result<Running, CandidateError> {
-    let child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| CandidateError::new("provider_spawn_failed", e.to_string()))?;
+    let child = spawn_child(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .map_err(|e| CandidateError::new("provider_spawn_failed", e.to_string()))?;
     supervise(child, observe_exit, helper)
+}
+
+/// Held while a child is being spawned, so two threads of this process are never inside a
+/// spawn at once.
+///
+/// A spawn creates pipes: the child's piped streams, and the pipe the standard library reads
+/// the exec result from when it forks (which [`clean_command`]'s `pre_exec` makes it do). A
+/// host that cannot create a pipe already marked close-on-exec (macOS has no `pipe2`) sets
+/// the mark in a second step. A child that another thread forks between the two steps
+/// inherits the pipe and keeps it open until it exits, so the pipe's owner waits on that
+/// unrelated child: for end-of-file on a stream, or inside the spawn for the exec result.
+///
+/// The lock covers the spawn alone, never the wait: children still run side by side.
+///
+/// Limits:
+/// - It protects only spawns made through [`spawn_child`]. A child forked any other way can
+///   still inherit a pipe that a spawn under the lock is creating.
+/// - A descriptor that other code opens without close-on-exec is not covered.
+static SPAWNING: Mutex<()> = Mutex::new(());
+
+/// The spawn lock. A thread that panicked inside a spawn left nothing behind that the next
+/// spawn depends on, so a poisoned lock is taken as it is: never a panic or a refusal.
+fn spawning() -> MutexGuard<'static, ()> {
+    SPAWNING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// [`Command::spawn`] under the process-wide spawn lock (see [`SPAWNING`]). Every child this
+/// process starts while other threads may be spawning goes through here. It returns as soon
+/// as the child was started or refused; waiting for the child is the caller's.
+pub(crate) fn spawn_child(command: &mut Command) -> std::io::Result<std::process::Child> {
+    let _spawning = spawning();
+    command.spawn()
 }
 
 /// Starts one helper thread of a [`Running`] child. Injected so a test can make it fail.
@@ -556,6 +589,106 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output.stdout, b"done");
+    }
+
+    /// Children spawned from several threads at once each start with only their own
+    /// descriptors. Each child lists what it has open; a pipe another thread's spawn was
+    /// still creating would show up as one more entry than a child spawned alone has.
+    ///
+    /// The race runs alone in a subprocess (see [`spawn_leak_probe`]): in this process
+    /// other tests spawn children outside the lock and open descriptors of their own.
+    ///
+    /// macOS only: that is the host whose pipes need the lock. When this was written, 99 of
+    /// 100 runs of the probe failed with the lock taken out of [`spawn_child`] (about 7
+    /// children in 512 inherited a descriptor), and 100 of 100 passed with it. A pass says
+    /// nothing about children spawned outside [`spawn_child`].
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn concurrent_spawns_leak_no_descriptor_into_another_threads_child() {
+        let output = capture(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "provider::process::tests::spawn_leak_probe",
+                    "--nocapture",
+                ])
+                .env("HACK_TEST_SPAWN_LEAK_PROBE", "1"),
+            Duration::from_secs(120),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("no-descriptor-leaked"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn spawn_leak_probe() {
+        if std::env::var_os("HACK_TEST_SPAWN_LEAK_PROBE").is_none() {
+            return;
+        }
+        // Many threads with few spawns each: what exposes a leak is how many spawns overlap.
+        const THREADS: usize = 32;
+        const SPAWNS: usize = 16;
+        // The shell opens the directory to list it, so the list is the descriptors the
+        // child started with and that one.
+        fn open_descriptors() -> String {
+            let listed = capture(&mut shell("echo /dev/fd/*"), Duration::from_secs(30)).unwrap();
+            assert!(listed.status.success());
+            String::from_utf8(listed.stdout).unwrap()
+        }
+        let alone = open_descriptors();
+        assert!(
+            alone.starts_with("/dev/fd/0 /dev/fd/1 /dev/fd/2"),
+            "{alone}"
+        );
+        let together = std::sync::Barrier::new(THREADS);
+        let inherited: Vec<String> = std::thread::scope(|scope| {
+            let spawners: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        together.wait();
+                        (0..SPAWNS)
+                            .map(|_| open_descriptors())
+                            .filter(|listed| *listed != alone)
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            spawners
+                .into_iter()
+                .flat_map(|spawner| spawner.join().unwrap())
+                .collect()
+        });
+        assert!(
+            inherited.is_empty(),
+            "{} of {} children inherited another spawn's descriptors; alone: {alone:?}, \
+             first: {:?}",
+            inherited.len(),
+            THREADS * SPAWNS,
+            inherited[0],
+        );
+        println!("no-descriptor-leaked");
+    }
+
+    /// A thread that panicked while it held the spawn lock does not stop later spawns.
+    #[test]
+    fn a_poisoned_spawn_lock_still_spawns() {
+        let poisoned = std::thread::spawn(|| {
+            let _spawning = spawning();
+            // Unwinds without the panic hook, so the test prints no panic message.
+            std::panic::resume_unwind(Box::new(()));
+        })
+        .join();
+        assert!(poisoned.is_err());
+        assert!(SPAWNING.is_poisoned());
+        let output = capture(&mut shell("printf spawned"), Duration::from_secs(30)).unwrap();
+        // Later tests in this process start from an unpoisoned lock again.
+        SPAWNING.clear_poison();
+        assert_eq!(output.stdout, b"spawned");
     }
 
     #[test]

@@ -213,15 +213,14 @@ impl Publishers {
                 Frontend::Hostnames(names) => (names.to_vec(), None),
                 Frontend::Port(port) => (Vec::new(), Some(*port)),
             };
-            let child = command(
+            let child = crate::provider::process::spawn_child(&mut command(
                 &executable,
                 &candidate.checkout,
                 &receipt.run,
                 selected.slot,
                 &assignment.reservation,
                 frontend,
-            )
-            .spawn()
+            ))
             .map_err(|_| refused())?;
             self.children.push(Owned {
                 child,
@@ -469,7 +468,7 @@ impl Publishers {
             let executable = std::env::current_exe().map_err(|_| refused())?;
             let frontend = self.frontend_for(candidate, run, &assignment)?;
             let reservation = assignment.reservation.clone();
-            let child = command(
+            let child = crate::provider::process::spawn_child(&mut command(
                 &executable,
                 &candidate.checkout,
                 run,
@@ -479,8 +478,7 @@ impl Publishers {
                     Some(port) => Frontend::Port(port),
                     None => Frontend::Hostnames(&frontend.1),
                 },
-            )
-            .spawn()
+            ))
             .map_err(|_| refused())?;
             let replacement = self.children.len();
             self.children.push(Owned {

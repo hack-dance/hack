@@ -62,6 +62,8 @@ signal cleanup, then run three pairs of complete gates. The other checkout must
 contain the same runner revision; omit it to run both gates in this checkout.
 The check verifies separate Java temp roots, marker isolation, and removal of
 each run's scratch. It uses the same Java and pinned jar as `test:models`.
+This check runs on demand, outside `bun test` and CI; each TLC invocation retains
+the 120-second timeout.
 
 ## Native foreground recovery lease takeover
 

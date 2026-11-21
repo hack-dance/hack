@@ -21,7 +21,8 @@ mod client;
 pub mod frame;
 
 use crate::CandidateError;
-use serde_json::{Map, Value, json};
+use serde::{Deserialize, Deserializer};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
@@ -43,8 +44,9 @@ pub const SOCKET_PATH_LIMIT: usize = 103;
 const SESSION_IDLE: Duration = Duration::from_secs(30);
 /// Pause before accepting again after the process ran out of descriptors or memory.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
+/// How long a connection queued at shutdown may take to deliver its first request.
+const QUEUED_WAIT: Duration = Duration::from_millis(50);
 const OPS: [&str; 3] = ["hello", "service.status", "service.retire"];
-const FIELDS: [&str; 7] = ["v", "id", "op", "args", "session", "intent", "private"];
 
 /// Files of the service under a home's state root, all inside one 0700 directory.
 pub struct Paths {
@@ -367,7 +369,12 @@ impl Shared {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
     fn wake(&self) {
-        let _ = (&self.wake).write(&[1]);
+        // WouldBlock is fine: unread bytes already wake the loop. EINTR is not.
+        while let Err(e) = (&self.wake).write(&[1]) {
+            if e.kind() != ErrorKind::Interrupted {
+                return;
+            }
+        }
     }
     fn stop(&self, outcome: Outcome) {
         let mut state = self.state();
@@ -427,17 +434,43 @@ fn run(shared: &Arc<Shared>, listener: UnixListener, wake: &UnixStream) -> Outco
 
 /// `IdleExit` and `ExitDrained`, one path for both.
 fn shut_down(shared: &Arc<Shared>, listener: UnixListener) -> Outcome {
-    // Connections already queued get a refusal before admission rather than a
-    // reset. If accepting fails here, closing the listener resets them instead;
-    // they never had a request admitted either way.
-    let _ = accept_queued(shared, &listener);
+    refuse_queued(&listener);
     drop(listener);
     shared.wait_until(|s| s.busy == 0);
+    // A session whose next request was not read yet sees a close; nothing it
+    // sent was admitted.
     for stream in shared.state().streams.values() {
         let _ = stream.shutdown(Shutdown::Both);
     }
     shared.wait_until(|s| s.sessions == 0);
     shared.state().stopping.unwrap_or(Outcome::Idle)
+}
+
+/// Connections queued when the service stops are never served. One whose first
+/// request already arrived gets `E_SERVICE_DRAINING` before admission; the rest
+/// are closed. At most `MAX_SESSIONS` get the refusal, each within a short wait.
+fn refuse_queued(listener: &UnixListener) {
+    for refused in 0.. {
+        let mut stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == ErrorKind::ConnectionAborted => continue,
+            // Closing the listener resets anything still queued.
+            Err(_) => return,
+        };
+        if refused >= MAX_SESSIONS || crate::node::peer_uid(&stream).ok() != Some(euid()) {
+            continue;
+        }
+        let Ok(body) = frame::read(&mut stream, QUEUED_WAIT, CONTROL_FRAME_LIMIT) else {
+            continue;
+        };
+        let id = parse(&body).map_or(Value::Null, |request| json!(request.id));
+        let _ = reply(
+            &mut stream,
+            &id,
+            Err(("E_SERVICE_DRAINING", "The service is stopping.")),
+        );
+    }
 }
 
 /// Accept every queued connection. `Err` only when the process is out of
@@ -504,39 +537,31 @@ fn end_session(shared: &Shared, id: u64) {
     shared.wake();
 }
 
+/// Unknown and duplicate fields are refused by the derive.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Request {
     v: u64,
     id: String,
     op: String,
+    #[serde(default)]
     args: Value,
+    #[serde(default)]
     session: Option<String>,
     /// Field presence, whatever the value, including `null`.
+    #[serde(default, rename = "intent", deserialize_with = "present")]
     has_intent: bool,
+    #[serde(default, rename = "private", deserialize_with = "present")]
     has_private: bool,
 }
 
+fn present<'de, D: Deserializer<'de>>(value: D) -> Result<bool, D::Error> {
+    serde::de::IgnoredAny::deserialize(value)?;
+    Ok(true)
+}
+
 fn parse(body: &[u8]) -> Option<Request> {
-    let Value::Object(map) = serde_json::from_slice::<Value>(body).ok()? else {
-        return None;
-    };
-    if map.keys().any(|key| !FIELDS.contains(&key.as_str())) {
-        return None;
-    }
-    let text = |map: &Map<String, Value>, key: &str| map.get(key)?.as_str().map(str::to_owned);
-    let session = match map.get("session") {
-        None => None,
-        Some(Value::String(session)) => Some(session.clone()),
-        Some(_) => return None,
-    };
-    Some(Request {
-        v: map.get("v")?.as_u64()?,
-        id: text(&map, "id")?,
-        op: text(&map, "op")?,
-        args: map.get("args").cloned().unwrap_or(Value::Null),
-        session,
-        has_intent: map.contains_key("intent"),
-        has_private: map.contains_key("private"),
-    })
+    serde_json::from_slice(body).ok()
 }
 
 type Refusal = (&'static str, &'static str);

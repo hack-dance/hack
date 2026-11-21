@@ -17,6 +17,8 @@ const CLIENT_DEADLINE: Duration = Duration::from_secs(5);
 /// Linux refuses a non-blocking connect with EAGAIN while the listener's backlog
 /// is full; retry at this interval until the deadline.
 const BACKLOG_RETRY: Duration = Duration::from_millis(10);
+/// How long to wait for a connection-level refusal after a failed write.
+const REFUSAL_WAIT: Duration = Duration::from_millis(200);
 
 pub fn call(state_root: &Path, op: &str, args: Value) -> Result<Value, CandidateError> {
     call_within(state_root, op, args, CLIENT_DEADLINE)
@@ -57,10 +59,18 @@ pub(super) fn call_within(
     let mut ask = |id: &str, op: &str, args: Value| -> Result<Value, CandidateError> {
         let request = json!({"v": FRAME_VERSION, "id": id, "op": op, "args": args});
         let bytes = serde_json::to_vec(&request).map_err(|e| failure("service_io", e))?;
-        frame::write(&mut stream, &bytes, frame::CONTROL_FRAME_LIMIT)
-            .map_err(|e| failure("service_io", format!("{e:?}")))?;
-        let body = frame::read(&mut stream, deadline, frame::CONTROL_FRAME_LIMIT)
-            .map_err(|e| failure("service_io", format!("{e:?}")))?;
+        let written = frame::write(&mut stream, &bytes, frame::CONTROL_FRAME_LIMIT);
+        // A server that refused the whole connection (for example the session
+        // limit) may already have replied and closed; read that reply first.
+        let wait = if written.is_ok() {
+            deadline
+        } else {
+            REFUSAL_WAIT
+        };
+        let body = frame::read(&mut stream, wait, frame::CONTROL_FRAME_LIMIT).map_err(|e| {
+            let error = written.as_ref().err().unwrap_or(&e);
+            failure("service_io", format!("{error:?}"))
+        })?;
         let value: Value = serde_json::from_slice(&body).map_err(|e| failure("service_io", e))?;
         answer_for(id, value)
     };
@@ -68,13 +78,20 @@ pub(super) fn call_within(
     ask("2", op, args)
 }
 
-/// Accept a reply only for the request it names, with a complete envelope.
+/// Accept a reply only for the request it names, with a complete envelope. A
+/// refusal with a null id refuses the whole connection, before any request.
 fn answer_for(id: &str, mut value: Value) -> Result<Value, CandidateError> {
     let malformed = || failure("service_protocol", "The service sent a malformed reply.");
-    if value.get("id").and_then(Value::as_str) != Some(id) {
+    let ok = value.get("ok").and_then(Value::as_bool);
+    let named = match value.get("id") {
+        Some(Value::String(reply)) => reply == id,
+        Some(Value::Null) => ok == Some(false),
+        _ => false,
+    };
+    if !named {
         return Err(malformed());
     }
-    match value.get("ok").and_then(Value::as_bool) {
+    match ok {
         Some(true) => value
             .as_object_mut()
             .and_then(|reply| reply.remove("result"))
@@ -138,16 +155,16 @@ fn connect(path: &Path, deadline: Instant) -> Result<UnixStream, CandidateError>
         }
         let error = std::io::Error::last_os_error();
         match error.raw_os_error() {
-            Some(libc::EINTR) => continue,
+            // An interrupted connect continues in the background, like EINPROGRESS.
+            Some(libc::EINTR | libc::EINPROGRESS) => {
+                wait_connected(&stream, deadline)?;
+                break;
+            }
             Some(libc::EAGAIN) => {
                 if Instant::now() + BACKLOG_RETRY >= deadline {
                     return Err(busy());
                 }
                 std::thread::sleep(BACKLOG_RETRY);
-            }
-            Some(libc::EINPROGRESS) => {
-                wait_connected(&stream, deadline)?;
-                break;
             }
             Some(libc::ENOENT | libc::ECONNREFUSED) => {
                 return Err(failure(
@@ -171,16 +188,28 @@ fn busy() -> CandidateError {
 
 fn wait_connected(stream: &UnixStream, deadline: Instant) -> Result<(), CandidateError> {
     use std::os::fd::AsRawFd;
-    let left = deadline.saturating_duration_since(Instant::now());
-    let mut fd = libc::pollfd {
-        fd: stream.as_raw_fd(),
-        events: libc::POLLOUT,
-        revents: 0,
-    };
-    let millis = left.as_millis().clamp(1, i32::MAX as u128) as i32;
-    // SAFETY: one initialized pollfd that outlives the call.
-    if unsafe { libc::poll(&mut fd, 1, millis) } <= 0 {
-        return Err(busy());
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(busy());
+        }
+        let mut fd = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let millis = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+        // SAFETY: one initialized pollfd that outlives the call.
+        match unsafe { libc::poll(&mut fd, 1, millis) } {
+            n if n > 0 => break,
+            0 => return Err(busy()),
+            _ => {
+                let e = std::io::Error::last_os_error();
+                if e.kind() != ErrorKind::Interrupted {
+                    return Err(failure("service_io", e));
+                }
+            }
+        }
     }
     match stream.take_error() {
         Ok(None) => Ok(()),
@@ -209,6 +238,14 @@ mod tests {
         ] {
             assert_eq!(answer_for("2", wrong).unwrap_err().code, "service_protocol");
         }
+        // A null id is accepted only for a refusal of the whole connection.
+        let null_ok = answer_for("1", json!({"id": null, "ok": true, "result": {}}));
+        assert_eq!(null_ok.unwrap_err().code, "service_protocol");
+        let whole = answer_for(
+            "1",
+            json!({"id": null, "ok": false, "error": {"code": "E_SESSION_LIMIT"}}),
+        );
+        assert!(whole.unwrap_err().message.contains("E_SESSION_LIMIT"));
         let refused = answer_for(
             "2",
             json!({"id": "2", "ok": false, "error": {"code": "E_X"}}),

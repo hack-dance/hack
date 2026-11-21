@@ -357,13 +357,11 @@ fn connections_queued_at_shutdown_are_refused_and_cannot_hold_it_open() {
     assert_eq!(shut_down(&shared, listener), Outcome::Idle);
     assert!(started.elapsed() < Duration::from_secs(3));
     for stream in &mut queued {
-        // Either the refusal before admission, or the close that follows it.
-        if let Ok(body) = frame::read(stream, Duration::from_secs(2), CONTROL_FRAME_LIMIT) {
-            assert_eq!(
-                code(&serde_json::from_slice(&body).unwrap()),
-                "E_SERVICE_DRAINING"
-            );
-        }
+        let body = frame::read(stream, Duration::from_secs(2), CONTROL_FRAME_LIMIT).unwrap();
+        assert_eq!(
+            code(&serde_json::from_slice(&body).unwrap()),
+            "E_SERVICE_DRAINING"
+        );
         assert_eq!(
             frame::read(stream, Duration::from_secs(2), CONTROL_FRAME_LIMIT),
             Err(frame::FrameError::Closed)
@@ -498,4 +496,71 @@ fn a_client_gives_up_on_a_full_backlog_within_its_deadline() {
         started.elapsed()
     );
     drop(listener);
+}
+
+#[test]
+fn a_duplicate_field_is_refused_and_never_acted_on() {
+    let root = Root::new();
+    let (handle, _) = spawn(&root.0, Duration::from_secs(30));
+    let mut stream = connect(&root.0);
+    hello(&mut stream);
+    let raw = br#"{"v":1,"id":"1","op":"service.status","op":"service.retire"}"#;
+    frame::write(&mut stream, raw, CONTROL_FRAME_LIMIT).unwrap();
+    let body = frame::read(&mut stream, Duration::from_secs(2), CONTROL_FRAME_LIMIT).unwrap();
+    assert_eq!(code(&serde_json::from_slice(&body).unwrap()), "E_BAD_FRAME");
+    // Still serving: nothing retired it.
+    assert!(call(&root.0, "service.status", json!({})).is_ok());
+    call(&root.0, "service.retire", json!({})).unwrap();
+    handle.join().unwrap().unwrap();
+}
+
+#[test]
+fn the_session_limit_reaches_the_client_as_a_refusal() {
+    let root = Root::new();
+    let (handle, _) = spawn(&root.0, Duration::from_secs(30));
+    let open: Vec<_> = (0..MAX_SESSIONS)
+        .map(|_| {
+            let mut stream = connect(&root.0);
+            hello(&mut stream);
+            stream
+        })
+        .collect();
+    let refused = call(&root.0, "service.status", json!({})).unwrap_err();
+    assert_eq!(refused.code, "service_refused");
+    assert!(
+        refused.message.contains("E_SESSION_LIMIT"),
+        "{}",
+        refused.message
+    );
+    drop(open);
+    // Sessions end asynchronously; the slots free up shortly.
+    let started = Instant::now();
+    while call(&root.0, "service.status", json!({})).is_err() {
+        assert!(started.elapsed() < Duration::from_secs(3));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    call(&root.0, "service.retire", json!({})).unwrap();
+    handle.join().unwrap().unwrap();
+}
+
+#[test]
+fn a_request_queued_before_idle_expiry_gets_a_refusal_not_silence() {
+    let root = Root::new();
+    let paths = paths(&root.0);
+    let (listener, lock, id) = start(&paths).unwrap().unwrap();
+    let options = Options {
+        idle: Duration::from_secs(30),
+    };
+    let (shared, _wake) = prepare(&paths, options, id).unwrap();
+    let mut queued = connect(&root.0);
+    let hello = json!({"v": 1, "id": "h", "op": "hello", "args": {"client": {"kind": "cli"}}});
+    let bytes = serde_json::to_vec(&hello).unwrap();
+    frame::write(&mut queued, &bytes, CONTROL_FRAME_LIMIT).unwrap();
+    shared.stop(Outcome::Idle);
+    assert_eq!(shut_down(&shared, listener), Outcome::Idle);
+    let body = frame::read(&mut queued, Duration::from_secs(2), CONTROL_FRAME_LIMIT).unwrap();
+    let reply: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(reply["id"], "h");
+    assert_eq!(code(&reply), "E_SERVICE_DRAINING");
+    drop(lock);
 }

@@ -73,7 +73,8 @@ fn read_within(
     Ok(body)
 }
 
-/// Take the first byte of a frame. Never consumes a byte after the idle deadline.
+/// Take the first byte of a frame once the socket is readable by the idle
+/// deadline. `Idle` consumes nothing.
 fn first_byte(stream: &UnixStream, byte: &mut [u8], idle: Duration) -> Result<(), FrameError> {
     let deadline = if idle.is_zero() {
         None
@@ -209,11 +210,9 @@ fn recv_now(stream: &UnixStream, bytes: &mut [u8]) -> std::io::Result<usize> {
     }
 }
 
-#[cfg(target_os = "linux")]
+/// `MSG_NOSIGNAL` on both Linux and macOS, so a closed peer is an error and
+/// never a `SIGPIPE`, whatever the process's signal disposition.
 const SEND_FLAGS: libc::c_int = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
-// macOS has no MSG_NOSIGNAL; Rust programs already ignore SIGPIPE.
-#[cfg(not(target_os = "linux"))]
-const SEND_FLAGS: libc::c_int = libc::MSG_DONTWAIT;
 
 fn send_now(stream: &UnixStream, bytes: &[u8]) -> std::io::Result<usize> {
     // SAFETY: a valid descriptor and a readable buffer of the given length.
@@ -391,6 +390,37 @@ mod tests {
         assert!(started.elapsed() < frame * 3, "{:?}", started.elapsed());
         drop(a);
         reader.join().unwrap();
+    }
+
+    const SIGPIPE_CHILD: &str = "HACK_FRAME_SIGPIPE_CHILD";
+
+    #[test]
+    fn writing_to_a_closed_peer_is_an_error_even_with_the_default_sigpipe_action() {
+        if std::env::var_os(SIGPIPE_CHILD).is_some() {
+            // In a child process only: restore the default action, which kills.
+            // SAFETY: resetting one signal's disposition in a single-purpose child.
+            unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+            let (mut a, b) = pair();
+            drop(b);
+            assert_eq!(
+                write(&mut a, b"{}", CONTROL_FRAME_LIMIT),
+                Err(FrameError::Io(ErrorKind::BrokenPipe))
+            );
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "service::frame::tests::writing_to_a_closed_peer_is_an_error_even_with_the_default_sigpipe_action",
+                "--test-threads",
+                "1",
+            ])
+            .env(SIGPIPE_CHILD, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "child ended with {status:?}");
     }
 
     #[test]

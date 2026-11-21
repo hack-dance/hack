@@ -5,16 +5,21 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 
+#[cfg(target_os = "macos")]
+fn host_clock() -> libc::clockid_t {
+    libc::CLOCK_UPTIME_RAW
+}
+#[cfg(not(target_os = "macos"))]
+fn host_clock() -> libc::clockid_t {
+    libc::CLOCK_MONOTONIC
+}
 fn mono() -> u64 {
     let mut t = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
     // SAFETY: the writable timespec lives through the call and no pointer is retained.
-    assert_eq!(
-        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) },
-        0
-    );
+    assert_eq!(unsafe { libc::clock_gettime(host_clock(), &mut t) }, 0);
     t.tv_sec as u64 * 1_000_000 + t.tv_nsec as u64 / 1000
 }
 fn spawn(mut command: Command, enabled: bool, helper: bool) -> (Child, std::fs::File, u64) {
@@ -85,6 +90,7 @@ fn timing_pipe_preserves_the_exact_stderr_error_parser_contract() {
             assert_eq!(data[0].origin_mono_us, start);
             assert_eq!(data[1].step, "runtime.dispatch");
             assert_eq!(data[1].outcome, Outcome::Error);
+            assert_eq!(data[1].code.as_deref(), Some("missing_candidate_root"));
             assert!(
                 data.iter()
                     .all(|r| r.parent.as_deref() == Some("53995c3f42cd8ad8"))

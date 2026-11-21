@@ -61,7 +61,10 @@ impl Collector {
         time: Arc<dyn TimeSource>,
         sink: Arc<dyn Sink>,
     ) -> Option<Arc<Self>> {
-        if !valid_id(&config.trace, 32) || config.parent.as_ref().is_some_and(|p| !valid_id(p, 16))
+        if config.role == Role::Unknown
+            || config.clock == Clock::Unknown
+            || !valid_id(&config.trace, 32)
+            || config.parent.as_ref().is_some_and(|p| !valid_id(p, 16))
         {
             return None;
         }
@@ -70,7 +73,9 @@ impl Collector {
             return None;
         }
         let startup = if config.clock == Clock::Host {
-            mono.checked_sub(config.spawn_mono_us.unwrap_or(mono))?
+            mono.checked_sub(config.spawn_mono_us.unwrap_or(mono))
+                .filter(|elapsed| *elapsed <= 60_000_000 && *elapsed <= unix)
+                .unwrap_or(0)
         } else {
             0
         };
@@ -123,10 +128,14 @@ impl Collector {
             cached: None,
             code: None,
             attrs: if is_root || matches!(step, Step::ProcessStartup) {
-                BTreeMap::from([(
-                    "service_index_stable".into(),
-                    Attr::Boolean(self.config.service_index_stable),
-                )])
+                serde_json::from_value(
+                    serde_json::to_value(Attrs {
+                        service_index_stable: Some(self.config.service_index_stable),
+                        ..Attrs::default()
+                    })
+                    .ok()?,
+                )
+                .ok()?
             } else {
                 BTreeMap::new()
             },
@@ -214,6 +223,9 @@ impl Collector {
             .sample()
             .and_then(|(_, mono)| mono.checked_sub(self.origin.1 + record.start_us))
             .unwrap_or(0);
+        if outcome == Outcome::Unknown {
+            return;
+        }
         record.outcome = outcome;
         record.cached = (cached && outcome == Outcome::Ok).then_some(true);
         record.code =
@@ -305,6 +317,15 @@ pub fn observe<T, E>(
     parent: Option<Parent>,
     action: impl FnOnce(Option<Parent>) -> Result<T, E>,
 ) -> Result<T, E> {
+    observe_with_code(collector, step, parent, action, |_| None)
+}
+pub(crate) fn observe_with_code<T, E>(
+    collector: Option<&Arc<Collector>>,
+    step: Step,
+    parent: Option<Parent>,
+    action: impl FnOnce(Option<Parent>) -> Result<T, E>,
+    error_code: impl FnOnce(&E) -> Option<Code>,
+) -> Result<T, E> {
     let Some(collector) = collector else {
         return action(None);
     };
@@ -320,7 +341,7 @@ pub fn observe<T, E>(
                 Outcome::Error
             },
             false,
-            None,
+            result.as_ref().err().and_then(error_code),
             Attrs::default(),
         );
     }

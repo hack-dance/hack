@@ -19,9 +19,8 @@ macro_rules! steps {
     };
 }
 steps! {
-    CommandTotal => "command.total", CliDispatch => "cli.dispatch",
-    ProcessStartup => "process.startup", ProjectDiscover => "project.discover",
-    ProjectStatus => "project.status", PlanCompile => "plan.compile", EnvResolve => "env.resolve",
+    ProcessStartup => "process.startup",
+    ProjectStatus => "project.status", PlanCompile => "plan.compile",
     RuntimeRequest => "runtime.request", RuntimeDispatch => "runtime.dispatch",
     VmEnsure => "vm.ensure", VmReattach => "vm.reattach", VmBoot => "vm.boot", VmStop => "vm.stop",
     StartObserve => "start.observe", StartDecide => "start.decide", StartWaveRecord => "start.wave.record",
@@ -29,8 +28,6 @@ steps! {
     ContainerReady => "container.ready", ContainerPublish => "container.publish", SpecDigest => "spec.digest",
     ContainerStart => "container.start", ContainerStop => "container.stop",
     ContainerExec => "container.exec", ContainerRun => "container.run", ContainerInspect => "container.inspect",
-    ComposeUp => "compose.up", ComposeDown => "compose.down", ComposeRestart => "compose.restart",
-    ComposeExec => "compose.exec", ComposeRun => "compose.run", ComposePs => "compose.ps",
     Truncated => "timings.truncated",
 }
 
@@ -42,6 +39,8 @@ pub enum Outcome {
     Cancelled,
     Incomplete,
     Skipped,
+    #[serde(other)]
+    Unknown,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -50,21 +49,26 @@ pub enum Role {
     Runtime,
     Owner,
     Guest,
+    #[serde(other)]
+    Unknown,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Clock {
     Host,
     Guest,
+    #[serde(other)]
+    Unknown,
 }
 
-/// Writer error vocabulary; never accepts a message or arbitrary string.
+/// Existing runtime error code, never an error message.
 #[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Code {
-    EngineRejected,
-    EngineNotFound,
-    InvalidArguments,
+#[serde(transparent)]
+pub struct Code(&'static str);
+impl Code {
+    pub fn from_error(error: &crate::error::CandidateError) -> Option<Self> {
+        valid_name(error.code).then_some(Self(error.code))
+    }
 }
 
 /// Stable stored-result miss codes. A hit omits miss_reason.
@@ -103,7 +107,7 @@ macro_rules! attributes {
 attributes! {
     service_index:u64, attempt:u64, engine_requests:u64, dropped:u64,
     services:u64, wave:u64, syncs:u64, waited_on_index:u64, generation:u64,
-    waited_on_cap:bool, blocked:bool,
+    waited_on_cap:bool, blocked:bool, service_index_stable:bool,
     reason_spec:bool, reason_unhealthy:bool, reason_exited:bool, reason_dead:bool,
     reason_missing:bool, reason_forced:bool, reason_migrated:bool, reason_managed_env:bool,
     changed_image:bool, changed_command:bool, changed_env:bool, changed_managed_env:bool,
@@ -119,7 +123,7 @@ pub enum Attr {
 }
 
 /// Additive reader contract. Unknown fields are ignored, step names stay opaque.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct Record {
     pub schema: String,
     pub trace: String,
@@ -140,9 +144,80 @@ pub struct Record {
     #[serde(default)]
     pub attrs: BTreeMap<String, Attr>,
 }
+#[derive(Deserialize)]
+#[serde(remote = "Record")]
+struct RecordRead {
+    schema: String,
+    trace: String,
+    span: String,
+    parent: Option<String>,
+    proc: Role,
+    clock: Clock,
+    origin_unix_us: u64,
+    origin_mono_us: u64,
+    step: String,
+    start_us: u64,
+    dur_us: u64,
+    outcome: Outcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+    #[serde(default)]
+    attrs: BTreeMap<String, Attr>,
+}
+impl<'de> Deserialize<'de> for Record {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| serde::de::Error::custom("expected timing object"))?;
+        if !object
+            .get("step")
+            .ok_or_else(|| serde::de::Error::custom("missing timing step"))?
+            .as_str()
+            .is_some_and(valid_name)
+        {
+            return Err(serde::de::Error::custom("invalid timing step"));
+        }
+        if object
+            .get("code")
+            .is_some_and(|v| !v.as_str().is_some_and(valid_name))
+        {
+            object.remove("code");
+        }
+        if let Some(attrs) = object
+            .get_mut("attrs")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            attrs.retain(|key, value| {
+                valid_name(key)
+                    && match value {
+                        serde_json::Value::Bool(_) => true,
+                        serde_json::Value::Number(n) => n
+                            .as_f64()
+                            .is_some_and(|n| n.is_finite() && n.abs() <= MAX_NUMBER as f64),
+                        _ => false,
+                    }
+            });
+        }
+        if object.get("outcome").and_then(serde_json::Value::as_str) != Some("ok") {
+            object.remove("cached");
+        }
+        let record = RecordRead::deserialize(value).map_err(serde::de::Error::custom)?;
+        if !record.valid() {
+            return Err(serde::de::Error::custom("invalid timing record"));
+        }
+        Ok(record)
+    }
+}
+
 impl Record {
     pub fn valid(&self) -> bool {
         self.schema == SCHEMA
+            && valid_name(&self.step)
+            && self.code.as_ref().is_none_or(|code| valid_name(code))
+            && self.attrs.keys().all(|key| valid_name(key))
             && valid_id(&self.trace, 32)
             && valid_id(&self.span, 16)
             && self
@@ -177,9 +252,23 @@ impl Record {
         if line.len() > LINE_LIMIT {
             return None;
         }
-        let record: Self = serde_json::from_str(line).ok()?;
-        record.valid().then_some(record)
+        serde_json::from_str(line).ok()
     }
+}
+/// Bounded safe identifiers: unknown names remain opaque, never paths or messages.
+pub fn valid_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 128 {
+        return false;
+    }
+    let mut parts = name.split('.');
+    let first = parts.next().unwrap_or_default();
+    first.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        && std::iter::once(first).chain(parts).all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+        })
 }
 pub(crate) fn valid_id(id: &str, len: usize) -> bool {
     id.len() == len
@@ -201,6 +290,20 @@ pub fn measure<T, E>(
         .map(|p| p.collector.clone())
         .or_else(|| transport::installed().cloned());
     observe(collector.as_ref(), step, parent, action)
+}
+
+/// Dispatch observation includes the runtime's existing fixed error code.
+pub fn measure_candidate<T>(
+    step: Step,
+    parent: Option<Parent>,
+    action: impl FnOnce(Option<Parent>) -> Result<T, crate::error::CandidateError>,
+) -> Result<T, crate::error::CandidateError> {
+    let context = parent.clone().or_else(collector::current);
+    let collector = context
+        .as_ref()
+        .map(|p| p.collector.clone())
+        .or_else(|| transport::installed().cloned());
+    collector::observe_with_code(collector.as_ref(), step, parent, action, Code::from_error)
 }
 
 /// Manual/async observation: capture `Span::parent` for nested work and finish

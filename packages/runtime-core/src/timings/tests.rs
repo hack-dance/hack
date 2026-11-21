@@ -186,7 +186,11 @@ fn cached_success_incomplete_elapsed_and_prefix_preserving_truncation() {
     let data = records(&sink);
     assert_eq!(data[0].cached, Some(true));
     assert_eq!(
-        serde_json::to_value(Code::EngineRejected).unwrap(),
+        serde_json::to_value(Code::from_error(&crate::error::CandidateError::new(
+            "engine_rejected",
+            "fixed"
+        )))
+        .unwrap(),
         "engine_rejected"
     );
     assert_eq!(data[1].outcome, Outcome::Incomplete);
@@ -224,4 +228,80 @@ fn host_anchor_joins_startup_and_guest_clock_is_not_subtracted() {
     assert_eq!(child.host_start_us(1000), Some(700));
     child.clock = Clock::Guest;
     assert_eq!(child.host_start_us(1000), None);
+}
+
+#[test]
+fn unknown_values_keep_the_span_and_unsafe_names_do_not_enter_stores() {
+    let (collector, _, sink) = setup();
+    collector.start(Step::VmEnsure, None).unwrap().finish(
+        Outcome::Ok,
+        true,
+        None,
+        Attrs::default(),
+    );
+    let mut value = serde_json::to_value(&records(&sink)[0]).unwrap();
+    value["proc"] = "future_role".into();
+    value["clock"] = "future_clock".into();
+    value["outcome"] = "future_outcome".into();
+    value["step"] = "future.step".into();
+    value["code"] = "../unsafe".into();
+    value["attrs"]["future.count"] = 4.into();
+    value["attrs"]["future_text"] = "ignored".into();
+    value["attrs"]["../unsafe"] = true.into();
+    let record = Record::parse_line(&value.to_string()).unwrap();
+    assert_eq!(
+        serde_json::from_value::<Record>(value.clone()).unwrap(),
+        record
+    );
+    assert_eq!(record.proc, Role::Unknown);
+    assert_eq!(record.clock, Clock::Unknown);
+    assert_eq!(record.outcome, Outcome::Unknown);
+    assert_eq!(record.cached, None);
+    assert_eq!(record.code, None);
+    assert_eq!(
+        record.attrs.get("future.count"),
+        Some(&Attr::Number(4.into()))
+    );
+    assert!(!record.attrs.contains_key("future_text"));
+    assert!(!record.attrs.contains_key("../unsafe"));
+    for name in ["/unsafe", "Upper", "a..b", "a/b", "a b", "a."] {
+        value["step"] = name.into();
+        assert!(Record::parse_line(&value.to_string()).is_none());
+    }
+    assert!(!valid_name(&"a".repeat(129)));
+    assert!(valid_name("a.1_b"));
+}
+
+#[test]
+fn startup_outside_cap_uses_fresh_anchor_without_disabling_collection() {
+    struct Fixed;
+    impl TimeSource for Fixed {
+        fn sample(&self) -> Option<(u64, u64)> {
+            Some((20_000_000_000, 12_000_000_000))
+        }
+    }
+    for spawn in [12_000_000_001, 1_200_000_000, 11_939_999_999] {
+        let sink = Arc::new(Memory::default());
+        let collector = Collector::new(
+            Config {
+                trace: "4bf92f3577b34da6a3ce929d0e0e4736".into(),
+                parent: None,
+                role: Role::Runtime,
+                clock: Clock::Host,
+                spawn_mono_us: Some(spawn),
+                service_index_stable: false,
+            },
+            Arc::new(Fixed),
+            sink.clone(),
+        )
+        .unwrap();
+        collector
+            .start(Step::RuntimeDispatch, None)
+            .unwrap()
+            .finish(Outcome::Ok, false, None, Attrs::default());
+        let data = records(&sink);
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].origin_mono_us, 12_000_000_000);
+        assert_eq!(data[0].start_us, 0);
+    }
 }

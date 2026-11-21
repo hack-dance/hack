@@ -149,7 +149,7 @@ fn main() {
     {
         hack_runtime_core::timings::enable_argument(&argument);
     }
-    let result = hack_runtime_core::timings::measure(
+    let result = hack_runtime_core::timings::measure_candidate(
         hack_runtime_core::timings::Step::RuntimeDispatch,
         None,
         |_| run(),

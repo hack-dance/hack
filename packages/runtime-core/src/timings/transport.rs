@@ -9,6 +9,78 @@ static INSTALLED: OnceLock<Arc<Collector>> = OnceLock::new();
 pub(crate) fn installed() -> Option<&'static Arc<Collector>> {
     INSTALLED.get()
 }
+#[cfg(target_os = "macos")]
+fn host_clock() -> libc::clockid_t {
+    libc::CLOCK_UPTIME_RAW
+}
+#[cfg(not(target_os = "macos"))]
+fn host_clock() -> libc::clockid_t {
+    libc::CLOCK_MONOTONIC
+}
+
+// Seal before any context/type validation. Never touch the standard streams.
+fn seal(fd: i32) -> bool {
+    if fd < 3 {
+        return false;
+    }
+    // SAFETY: scalar descriptor operations; no ownership is claimed here.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags >= 0 && libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) >= 0 {
+            true
+        } else {
+            libc::close(fd);
+            false
+        }
+    }
+}
+
+fn datagram_limit(fd: i32) -> Option<usize> {
+    let mut size: libc::c_int = 0;
+    let mut len = std::mem::size_of_val(&size) as libc::socklen_t;
+    // SAFETY: writable scalar output with its exact size.
+    if unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            (&mut size as *mut libc::c_int).cast(),
+            &mut len,
+        )
+    } != 0
+    {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut maximum: libc::c_int = 0;
+        let mut len = std::mem::size_of_val(&maximum);
+        // SAFETY: constant NUL-terminated name, writable scalar output, no new value.
+        if unsafe {
+            libc::sysctlbyname(
+                c"net.local.dgram.maxdgram".as_ptr(),
+                (&mut maximum as *mut libc::c_int).cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        } != 0
+        {
+            return None;
+        }
+        usize::try_from(size.min(maximum))
+            .ok()
+            .map(|n| n.min(LINE_LIMIT))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        usize::try_from(size)
+            .ok()?
+            .checked_sub(32)
+            .map(|n| n.min(LINE_LIMIT))
+    }
+}
+
 struct HostTime;
 impl TimeSource for HostTime {
     fn sample(&self) -> Option<(u64, u64)> {
@@ -17,7 +89,7 @@ impl TimeSource for HostTime {
             tv_nsec: 0,
         };
         // SAFETY: clock_gettime writes exactly one live timespec and retains no pointer.
-        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) } != 0 {
+        if unsafe { libc::clock_gettime(host_clock(), &mut time) } != 0 {
             return None;
         }
         let mono = u64::try_from(time.tv_sec)
@@ -40,9 +112,12 @@ struct FdSink {
 }
 impl FdSink {
     fn take(fd: i32) -> Option<Self> {
-        if !(3..=255).contains(&fd) {
+        if !seal(fd) {
             return None;
         }
+        // SAFETY: the internal argument transfers this extra descriptor exactly once.
+        // Owning it now closes it on every subsequent rejection path.
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
         // SAFETY: stat is writable, fstat initializes it only on success; fd is not consumed here.
         if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
@@ -74,7 +149,7 @@ impl FdSink {
             {
                 return None;
             }
-            4096
+            datagram_limit(fd)?
         } else {
             return None;
         };
@@ -91,10 +166,7 @@ impl FdSink {
         }
         // SAFETY: the internal argument transfers this exact descriptor to the collector once.
         // CLOEXEC prevents accidental inheritance; explicitly launched children get their own pipe.
-        Some(Self {
-            fd: unsafe { OwnedFd::from_raw_fd(fd) },
-            limit,
-        })
+        Some(Self { fd: owned, limit })
     }
 }
 impl Sink for FdSink {
@@ -117,17 +189,27 @@ impl Sink for FdSink {
 /// Invalid/unavailable diagnostics never change the product command's result.
 /// Only a reserved leading argument is consumed; stderr remains untouched.
 pub fn enable_argument(argument: &str) -> bool {
-    if installed().is_some() {
-        return false;
-    }
     let Some(value) = argument.strip_prefix(REQUEST_PREFIX) else {
         return false;
     };
     let parts: Vec<_> = value.split(':').collect();
+    let Some(fd) = parts.first().and_then(|value| value.parse::<i32>().ok()) else {
+        return false;
+    };
+    if !seal(fd) {
+        return false;
+    }
+    // An already-installed sink may own this same number: do not claim it twice.
+    if installed().is_some() {
+        return false;
+    }
+    let Some(sink) = FdSink::take(fd) else {
+        return false;
+    };
     if !(5..=6).contains(&parts.len()) || !valid_id(parts[1], 32) || !valid_id(parts[2], 16) {
         return false;
     }
-    let (Ok(fd), Ok(spawn)) = (parts[0].parse::<i32>(), parts[3].parse::<u64>()) else {
+    let Ok(spawn) = parts[3].parse::<u64>() else {
         return false;
     };
     let role = match parts[4] {
@@ -141,9 +223,6 @@ pub fn enable_argument(argument: &str) -> bool {
         None | Some("positions") => false,
         Some("slots") => true,
         _ => return false,
-    };
-    let Some(sink) = FdSink::take(fd) else {
-        return false;
     };
     let config = Config {
         trace: parts[1].into(),
@@ -180,12 +259,69 @@ mod tests {
     use super::*;
     use std::os::fd::IntoRawFd;
     #[test]
+    fn rejected_context_and_descriptor_types_close_the_transferred_fd() {
+        let (sender, _receiver) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        let fd = sender.into_raw_fd();
+        // SAFETY: scalar operation on this test's owned descriptor.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }, 0);
+        assert!(!enable_argument(&format!("{REQUEST_PREFIX}{fd}:invalid")));
+        // SAFETY: read-only query; rejection must have closed our transferred descriptor.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let fd = stream.into_raw_fd();
+        assert!(FdSink::take(fd).is_none());
+        // SAFETY: read-only query of the rejected descriptor.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+        assert!(!seal(2));
+    }
+    #[test]
     fn datagram_keeps_the_full_approved_attribute_set_atomic() {
         let (sender, receiver) = std::os::unix::net::UnixDatagram::pair().unwrap();
         receiver
             .set_read_timeout(Some(std::time::Duration::from_secs(1)))
             .unwrap();
+        let requested: libc::c_int = 256 * 1024;
+        // SAFETY: the option points to a live scalar of the declared size on our socket.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    receiver.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    (&requested as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&requested) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let mut actual: libc::c_int = 0;
+        let mut len = std::mem::size_of_val(&actual) as libc::socklen_t;
+        // SAFETY: writable scalar output of the declared size on our socket.
+        assert_eq!(
+            unsafe {
+                libc::getsockopt(
+                    receiver.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    (&mut actual as *mut libc::c_int).cast(),
+                    &mut len,
+                )
+            },
+            0
+        );
+        assert!(actual >= 64 * 1024);
+        let expected_limit = datagram_limit(sender.as_raw_fd()).unwrap();
         let sink = FdSink::take(sender.into_raw_fd()).unwrap();
+        assert_eq!(sink.atomic_limit(), expected_limit);
+        let (send, receive) = std::sync::mpsc::channel();
+        // Drain throughout production, not after child exit. ACKs bound scheduler pressure.
+        let drain = std::thread::spawn(move || {
+            for _ in 0..257 {
+                let mut packet = [0_u8; LINE_LIMIT];
+                let count = receiver.recv(&mut packet).unwrap();
+                send.send(packet[..count].to_vec()).unwrap();
+            }
+        });
         let collector = Collector::new(
             Config {
                 trace: "4bf92f3577b34da6a3ce929d0e0e4736".into(),
@@ -200,64 +336,75 @@ mod tests {
         )
         .unwrap();
         let root = collector.start(Step::RuntimeDispatch, None).unwrap();
-        collector
-            .start(Step::StartDecide, root.parent())
-            .unwrap()
-            .finish(
-                Outcome::Ok,
-                false,
-                None,
-                Attrs {
-                    service_index: Some(3),
-                    wave: Some(2),
-                    services: Some(4),
-                    syncs: Some(1),
-                    waited_on_index: Some(0),
-                    waited_on_cap: Some(true),
-                    generation: Some(7),
-                    reason_spec: Some(true),
-                    reason_unhealthy: Some(true),
-                    reason_exited: Some(true),
-                    reason_dead: Some(true),
-                    reason_missing: Some(true),
-                    reason_forced: Some(true),
-                    reason_migrated: Some(true),
-                    reason_managed_env: Some(true),
-                    changed_image: Some(true),
-                    changed_command: Some(true),
-                    changed_env: Some(true),
-                    changed_managed_env: Some(true),
-                    changed_mounts: Some(true),
-                    changed_networks: Some(true),
-                    changed_limits: Some(true),
-                    changed_healthcheck: Some(true),
-                    changed_probe: Some(true),
-                    changed_ports: Some(true),
-                    changed_labels: Some(true),
-                    changed_platform: Some(true),
-                    changed_other: Some(true),
-                    miss_reason: Some(MissReason::InputsChanged),
-                    inputs_changed_mask: InputsChangedMask::new(MAX_NUMBER),
-                    ..Attrs::default()
-                },
+        for _ in 0..256 {
+            collector
+                .start(Step::StartDecide, root.parent())
+                .unwrap()
+                .finish(
+                    Outcome::Ok,
+                    false,
+                    None,
+                    Attrs {
+                        service_index: Some(3),
+                        wave: Some(2),
+                        services: Some(4),
+                        syncs: Some(1),
+                        waited_on_index: Some(0),
+                        waited_on_cap: Some(true),
+                        generation: Some(7),
+                        reason_spec: Some(true),
+                        reason_unhealthy: Some(true),
+                        reason_exited: Some(true),
+                        reason_dead: Some(true),
+                        reason_missing: Some(true),
+                        reason_forced: Some(true),
+                        reason_migrated: Some(true),
+                        reason_managed_env: Some(true),
+                        changed_image: Some(true),
+                        changed_command: Some(true),
+                        changed_env: Some(true),
+                        changed_managed_env: Some(true),
+                        changed_mounts: Some(true),
+                        changed_networks: Some(true),
+                        changed_limits: Some(true),
+                        changed_healthcheck: Some(true),
+                        changed_probe: Some(true),
+                        changed_ports: Some(true),
+                        changed_labels: Some(true),
+                        changed_platform: Some(true),
+                        changed_other: Some(true),
+                        miss_reason: Some(MissReason::InputsChanged),
+                        inputs_changed_mask: InputsChangedMask::new(MAX_NUMBER),
+                        ..Attrs::default()
+                    },
+                );
+            let packet = receive
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            let count = packet.len();
+            assert!(count > 512);
+            assert_eq!(packet[count - 1], b'\n');
+            let child = Record::parse_line(std::str::from_utf8(&packet[..count]).unwrap()).unwrap();
+            assert_eq!(child.cached, None);
+            assert_eq!(child.attrs["changed_managed_env"], Attr::Boolean(true));
+            assert_eq!(child.attrs["miss_reason"], Attr::Number(2.into()));
+            assert_eq!(
+                child.attrs["inputs_changed_mask"],
+                Attr::Number(MAX_NUMBER.into())
             );
-        let mut packet = [0_u8; 4096];
-        let count = receiver.recv(&mut packet).unwrap();
-        assert!(count > 512);
-        assert_eq!(packet[count - 1], b'\n');
-        let child = Record::parse_line(std::str::from_utf8(&packet[..count]).unwrap()).unwrap();
-        assert_eq!(child.cached, None);
-        assert_eq!(child.attrs["changed_managed_env"], Attr::Boolean(true));
-        assert_eq!(child.attrs["miss_reason"], Attr::Number(2.into()));
-        assert_eq!(
-            child.attrs["inputs_changed_mask"],
-            Attr::Number(MAX_NUMBER.into())
-        );
+            assert_eq!(
+                child.parent.as_ref(),
+                root.parent().as_ref().map(|p| &p.span)
+            );
+        }
         root.finish(Outcome::Ok, false, None, Attrs::default());
-        let count = receiver.recv(&mut packet).unwrap();
+        let packet = receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let count = packet.len();
         let root = Record::parse_line(std::str::from_utf8(&packet[..count]).unwrap()).unwrap();
         assert_eq!(root.attrs["service_index_stable"], Attr::Boolean(true));
-        assert_eq!(child.parent.as_ref(), Some(&root.span));
+        drain.join().unwrap();
         assert!(InputsChangedMask::new(MAX_NUMBER + 1).is_none());
     }
 }

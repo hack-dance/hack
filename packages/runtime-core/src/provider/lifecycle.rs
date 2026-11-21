@@ -77,6 +77,14 @@ pub struct RuntimeStatus {
     /// first (see `guest_memory_peak`). A record only; absent when there is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guest_memory_peaks: Option<Vec<guest_memory_peak::Boot>>,
+    /// How a disk-holder scan started now would read the host (`disk_handles`): in this
+    /// process, or through `lsof` with the reason; or unknown when the self-test did not
+    /// answer in time. Computed when status runs, by the self-test a scan runs first, so
+    /// it describes this host and build and no pool or earlier scan. On macOS that test
+    /// makes and removes a private file in the process's temporary directory; status
+    /// waits at most 100 ms for it, and failing to make the file is reported as a
+    /// reason, never an error.
+    pub disk_handle_scan: disk_handles::MethodReport,
     /// Provider sockets native found world-accessible and made private for the running
     /// provider (`socket_repairs`); absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -368,17 +376,19 @@ pub(super) fn startup_lease(root: &Path, wait: Duration) -> Result<state::Lock, 
     operation_lease(root, Some(Instant::now() + wait), || Ok(())).map(|(lock, ())| lock)
 }
 
-/// Returning the mutation lease requires a fresh Development admission window.
+/// Returning the mutation lease requires a fresh Development admission sample under it,
+/// taken no sooner than the admission window after the start's first sample.
 /// On failure RAII drops the lease, without granting owner/allocation authority.
 fn startup_admission_lease(
     root: &Path,
     wait: Duration,
     profile: super::Profile,
-    samples: &[admission::Admission],
-    observe: impl FnMut() -> Result<admission::Admission, CandidateError>,
+    opened: Option<admission::Opened>,
+    clock: &impl process::Clock,
+    observe: impl FnOnce() -> Result<admission::Admission, CandidateError>,
 ) -> Result<(state::Lock, Vec<admission::Admission>), CandidateError> {
     let lock = startup_lease(root, wait)?;
-    let fresh = admission::recheck_after_lease(profile, samples, observe)?;
+    let fresh = admission::recheck_after_lease(profile, opened, clock, observe)?;
     Ok((lock, fresh))
 }
 
@@ -1048,6 +1058,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             graph_runs: users.graph_runs,
             pool_idle: Some(false),
             guest_memory_peaks: None,
+            disk_handle_scan: disk_handles::method_within(disk_handles::STATUS_METHOD_WAIT),
             repaired_sockets: None,
             hashing: crate::sha256_backend::report(),
         });
@@ -1127,6 +1138,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         graph_runs: users.graph_runs,
         pool_idle,
         guest_memory_peaks: guest_memory_peak::history(&root(candidate)),
+        disk_handle_scan: disk_handles::method_within(disk_handles::STATUS_METHOD_WAIT),
     })
 }
 
@@ -1486,18 +1498,19 @@ fn start_pool(
             admission.reasons.join(" "),
         ));
     }
-    let mut samples = if profile == super::Profile::Development {
-        let baseline_swapouts = admission.swapouts;
-        let mut samples = vec![admission];
-        samples.extend(admission::sample_after(profile, baseline_swapouts, || {
-            admission_pool::probe(candidate, profile, &admission_owner)
-        })?);
-        samples
+    // Development qualifies on two chained samples at least the admission window apart:
+    // this one, and one under the startup lease. The checks between them fill the window,
+    // so only the remainder of it is ever slept.
+    let admission_clock = process::MonotonicClock::new();
+    let (mut samples, opened) = if profile == super::Profile::Development {
+        let opened = admission::open(&admission, &admission_clock)?;
+        (vec![admission], Some(opened))
     } else {
         // Retain the frozen Research window and baseline semantics.
-        admission::sample_with(profile, || {
+        let samples = admission::sample_with(profile, || {
             admission_pool::probe(candidate, profile, &admission_owner)
-        })?
+        })?;
+        (samples, None)
     };
     // The content proof a boot records in its tree witness (`tree_witness`).
     let mut proven_trees = std::collections::BTreeMap::from([
@@ -1515,7 +1528,8 @@ fn start_pool(
         &root(candidate),
         STARTUP_LEASE_WAIT,
         profile,
-        &samples,
+        opened,
+        &admission_clock,
         || admission_pool::probe(candidate, profile, &admission_owner),
     )?;
     samples.extend(fresh_samples);
@@ -3078,9 +3092,11 @@ fn finish_stopped(
     finish_absent(candidate, owner, value, true)
 }
 
-/// Record `value` once the provider's VM lock is free, no handle remains on the owned disks and
-/// no owned socket accepts connections. The caller has established that no provider process
-/// remains; this proves the machine it launched released everything before the receipt changes.
+/// Record `value` once the provider's VM lock is free, the disk-holder scan names no process
+/// on the owned disks and no owned socket accepts connections. The caller has established that
+/// no provider process remains; these checks look for anything the machine it launched left
+/// behind before the receipt changes. The scan inspects what `lsof` inspects and does not
+/// prove that nothing maps a disk (`disk_handles`).
 /// With `record_disks`, unadopted disks are identified now; without it they stay unadopted, so
 /// the next boot's size, format-marker and template checks decide whether to adopt them.
 fn finish_absent(
@@ -3115,7 +3131,7 @@ impl Drop for VmLock {
 #[cfg(not(test))]
 const STOP_SCAN_WAIT: Duration = disk_handles::STOP_HANDLE_WAIT;
 /// The unit-test build of [`STOP_SCAN_WAIT`]. Release-check fixtures prove what the scan
-/// reports (status 1, no output), not how fast it reports it, and they run beside other
+/// reports (no holder, nothing unknown), not how fast it reports it, and they run beside other
 /// tests' work; on a loaded host one scan took longer than 5 s and the fixture failed as
 /// `provider_timeout_uncertain` before its result under test (HACK-1457). The production
 /// bounds themselves are tested on a fake clock in [`disk_handles`].
@@ -3174,7 +3190,7 @@ fn lock_disks_closed(
     }
     let vm_lock = VmLock(vm_lock);
     disk_handles::disks_closed(
-        &disk_handles::Lsof::host(),
+        &disk_handles::HostScan::host(),
         &process::MonotonicClock::new(),
         disks,
         handle_wait,

@@ -1281,8 +1281,8 @@ mod tests {
         selection.previous_boot = Some(previous.into());
         selection.capacity = 2;
         selection.serial = 2;
-        let slot = |service: &str, reservation: char, container: char, serial: u64, loopback| {
-            Assignment {
+        let slot =
+            |service: &str, reservation: char, container: char, serial: u64, loopback| Assignment {
                 loopback_port: loopback,
                 reservation: reservation.to_string().repeat(32),
                 run: selection.run.clone(),
@@ -1300,8 +1300,7 @@ mod tests {
                     target_start: 10,
                     port: 8080,
                 }),
-            }
-        };
+            };
         let route = slot("web", 'd', 'f', 1, None);
         let port = slot(
             "db",

@@ -109,7 +109,7 @@ fn watch_frontend() -> Result<(), CandidateError> {
             use std::io::Read;
             let mut byte = [0];
             let result = std::io::stdin().read(&mut byte);
-            std::process::exit(if matches!(result, Ok(0)) { 0 } else { 1 });
+            hack_runtime_core::timings::exit(if matches!(result, Ok(0)) { 0 } else { 1 });
         })
         .map_err(|_| {
             CandidateError::new("native_log_lifetime", "Cannot watch log frontend lifetime.")

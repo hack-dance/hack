@@ -18,7 +18,7 @@
 //!
 //! The choice is made once per boot, immediately before `machine start`, recorded in the owner
 //! receipt only when it is not the plain default, and applied to every provider invocation for
-//! that pool (see `lifecycle::command`).
+//! that pool (see `lifecycle::backend`).
 
 use crate::CandidateError;
 use serde::{Deserialize, Serialize};

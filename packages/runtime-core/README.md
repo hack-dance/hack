@@ -1854,12 +1854,47 @@ does not see a file that a root process inside the guest writes into a search di
 while the VM runs; only the guest's root can do that, and the order change is not a
 defence against it.
 
+### Starting a stopped pool: the steps and their size
+
+`runtime up` on a Development pool whose disks exist but whose VM is not running (after a
+host reboot or a `runtime down`) runs these steps in this order. The times are one
+measurement, three boots of about 3.1 s each on an Apple Silicon host under moderate load,
+pool only, with a scratch build that timed each step. They show the order and relative
+size of the steps, not a guarantee. A Research pool admits differently: three qualifying
+samples fifteen seconds apart before the lease and none under it, so its start is longer
+by those pauses.
+
+| Step | About | Note |
+| --- | --- | --- |
+| First admission sample | 50 ms | host memory, pressure, swapouts, thermal state, disk |
+| Provider and engine trees proven by content | 940 ms | fills the one-second admission window |
+| Startup lease, rest of the window, second sample | 115 ms | only the rest of the window is slept |
+| Root files proven by content | 180 ms | under the lease |
+| Pre-boot sample, configuration audit, template check | 75 ms | |
+| `machine start` | 210 ms | the provider starts the VM |
+| Guest setup | 680 ms | about 430 ms is the guest hashing the engine binary over the share |
+| Network tools in the guest | 100 ms | |
+| Executable cache (`runc`, `docker-init`) | 300 ms | |
+| Engine start | 390 ms | until the engine answers |
+| Everything else | 60 ms | identity checks, disk adoption, pings |
+
+In this measurement the content proof of the provider and engine trees added nothing to
+the start: it ran between the two admission samples, which must be at least one second
+apart, and finished inside that second. Only the rest of the window is slept, so a proof
+or a lease wait that takes longer than the window lengthens the start by the excess. A brand-new
+home adds `machine create`, the provider's first-start disk template copy and the root
+files copy, about 5 s in the same measurement.
+
+The order of the admission steps, and what can change between them, is modelled in
+[`pool-start-admission`](../../tests/models/tla/pool-start-admission/COVERAGE.md);
+[its statechart](../../docs/pool-start-admission-statechart.md) names each step.
+
 ### Starting a pool that is already running
 
 `runtime up` on a pool that is already running and owned by this home (every warm frontend
 `up` and `restart`) takes a named fast path, `lifecycle::running_start`. It allocates
 nothing, so it skips the host admission windows, which guard memory, swapout, thermal and
-disk headroom for a VM allocation (four one-second sampling pauses for Development, two
+disk headroom for a VM allocation (a one-second window for Development, two
 fifteen-second pauses for Research). Under the startup lease it re-checks the receipt, the
 provider identity, disk identity and size, the request (bridges, dependency sockets,
 network, project share and translation), the owner registry, dependency sockets, network
@@ -1992,12 +2027,17 @@ The development profile's guest allocation is 6 GiB; guest allocation plus
 Startup requires the unchanged 10 GiB free-plus-file-cache estimate: 6 GiB guest,
 2 GiB provisional provider overhead and 2 GiB host reserve. Development admits
 observed normal or warning macOS memory pressure only with that headroom, normal
-thermal/performance status, and unchanged swapouts. It samples before acquiring
-the startup lease, then samples a fresh three-observation window under the lease
-before creating ownership, aliases, disks or provider capacity. Swapouts must
-remain at the pre-lease baseline; a stale or incomplete observation refuses.
-The final pre-boot check remains in place. Research keeps its normal-only pressure
-policy, 16 GiB raw-free-memory floor and three samples 15 seconds apart.
+thermal/performance status, and unchanged swapouts. It samples once before
+acquiring the startup lease and once under the lease, before creating ownership,
+aliases, disks or provider capacity. The sample under the lease starts at least
+one second, on a monotonic clock, after the first one finished. The start's own
+checks and any lease wait count towards that second, so only the remainder is
+slept and a start that already took that long does not pause. Each sample must
+pass every check on its own, and swapouts must stay at the first sample's count
+through the sample under the lease and the final pre-boot check, which remains
+in place; a stale or incomplete observation refuses. Research keeps its
+normal-only pressure policy, 16 GiB raw-free-memory floor and three samples
+15 seconds apart.
 
 Before new live Development effects, normal pressure requires at least 2 GiB of
 estimated host headroom; warning requires 4 GiB, retaining both provisional

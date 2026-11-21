@@ -231,7 +231,9 @@ fn run() -> Result<(), CandidateError> {
             "Supply --candidate-root explicitly, or use the matching candidate launcher.",
         ));
     }
-    let command: Vec<&str> = arguments[2..].iter().map(String::as_str).collect();
+    let all: Vec<&str> = arguments[2..].iter().map(String::as_str).collect();
+    // HACK-2461: an optional `--step-store <dir>` follows the candidate root.
+    let command: Vec<&str> = hack_runtime_core::store::take_step_store_argument(&all)?.to_vec();
     // First-use observation/setup must work before installed-home discovery:
     // an absent home is an ordinary installation state, not provider_state.
     if installed_entrypoint() {

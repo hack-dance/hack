@@ -45,6 +45,8 @@ export function digestDomain(name: string): DigestDomain {
 export const CONTAINER_SPEC_DOMAIN = digestDomain("hack.container-spec/1");
 /** Stored step keys. */
 export const STEP_DOMAIN = digestDomain("hack.step/1");
+/** Integrity checks for stored step records. */
+export const STEP_RECORD_DOMAIN = digestDomain("hack.step-record/1");
 
 /** A value the encoder refuses; the message never contains the value. */
 export class CanonicalValueError extends Error {

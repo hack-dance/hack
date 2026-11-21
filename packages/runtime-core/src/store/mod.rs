@@ -19,6 +19,7 @@ use sha2::Sha256;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use zeroize::Zeroizing;
 
 type Result<T> = std::result::Result<T, CandidateError>;
@@ -97,6 +98,37 @@ impl Store {
         }
         disk::read_owned_file(path, self.owner)
     }
+}
+
+/// The store directory the CLI handed over with `--step-store`, once per process.
+static CONFIGURED_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Take a leading `--step-store <dir>` from a command's arguments.
+///
+/// The runtime runs with a closed environment, so the CLI passes the per-user store
+/// explicitly, right after `--candidate-root <dir>`, and only when the store is
+/// switched on. The directory must be absolute. Recording it opens nothing: a step
+/// that uses the store opens it then (HACK-2461 slices P2 on).
+pub fn take_step_store_argument<'a, 'b>(command: &'b [&'a str]) -> Result<&'b [&'a str]> {
+    match command {
+        ["--step-store", root, rest @ ..] => {
+            let root = Path::new(root);
+            if !root.is_absolute() {
+                return Err(invalid("The step store directory must be absolute."));
+            }
+            CONFIGURED_ROOT
+                .set(root.to_owned())
+                .map_err(|_| invalid("The step store is already configured."))?;
+            Ok(rest)
+        }
+        ["--step-store"] => Err(invalid("Supply a directory after --step-store.")),
+        _ => Ok(command),
+    }
+}
+
+/// The store directory passed with `--step-store`, if any.
+pub fn configured_root() -> Option<&'static Path> {
+    CONFIGURED_ROOT.get().map(PathBuf::as_path)
 }
 
 fn invalid(message: &'static str) -> CandidateError {

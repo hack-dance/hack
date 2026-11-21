@@ -668,3 +668,77 @@ fn no_store_bytes_contain_the_keyed_input_value() {
     }
     scan(&fixture.root(), sentinel.as_bytes());
 }
+
+// Shared with the TypeScript twin (src/lib/step-store/, tests/step-store.test.ts).
+const VECTORS: &str = include_str!("vectors.json");
+
+fn vector_key(vector: &serde_json::Value) -> StepKey {
+    let class: StepClass = serde_json::from_value(vector["class"].clone()).unwrap();
+    let inputs: BTreeMap<String, InputDigest> =
+        serde_json::from_value(vector["inputs"].clone()).unwrap();
+    StepKey::new(
+        vector["step"].as_str().unwrap(),
+        u32::try_from(vector["stepVersion"].as_u64().unwrap()).unwrap(),
+        class,
+        &inputs,
+        vector["epoch"].as_str(),
+        vector["build"].as_str().unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn shared_key_vectors_match() {
+    let vectors: serde_json::Value = serde_json::from_str(VECTORS).unwrap();
+    assert_eq!(vectors["schema"], "hack.step-store-vectors/1");
+    let keys = vectors["keys"].as_array().unwrap();
+    assert!(!keys.is_empty());
+    for vector in keys {
+        assert_eq!(
+            vector_key(vector).digest().to_string(),
+            vector["key"].as_str().unwrap(),
+            "{}",
+            vector["name"]
+        );
+    }
+}
+
+#[test]
+fn shared_record_vectors_decode_and_reencode_byte_for_byte() {
+    let vectors: serde_json::Value = serde_json::from_str(VECTORS).unwrap();
+    let records = vectors["records"].as_array().unwrap();
+    assert!(!records.is_empty());
+    for vector in records {
+        let index = usize::try_from(vector["keyIndex"].as_u64().unwrap()).unwrap();
+        let key = vector_key(&vectors["keys"][index]);
+        let text = vector["text"].as_str().unwrap();
+        let record = Record::decode(text.as_bytes(), &key).unwrap();
+        assert_eq!(record.observed_at, vector["observedAt"].as_u64().unwrap());
+        assert_eq!(record.produced_by.run, vector["run"].as_str().unwrap());
+        assert_eq!(
+            serde_json::to_value(&record.output).unwrap(),
+            vector["output"],
+            "{}",
+            vector["name"]
+        );
+        assert_eq!(
+            String::from_utf8(record.encode().unwrap()).unwrap(),
+            text,
+            "{}",
+            vector["name"]
+        );
+    }
+}
+
+#[test]
+fn step_store_argument_is_optional_and_needs_an_absolute_directory() {
+    let plain = ["runtime", "up"];
+    assert_eq!(take_step_store_argument(&plain).unwrap(), plain);
+    assert!(take_step_store_argument(&["--step-store"]).is_err());
+    assert!(take_step_store_argument(&["--step-store", "relative/store", "info"]).is_err());
+    // The only call that records a directory (it is process-wide, set once).
+    let rest = take_step_store_argument(&["--step-store", "/tmp/hack-store-arg", "info"]).unwrap();
+    assert_eq!(rest, ["info"]);
+    assert_eq!(configured_root(), Some(Path::new("/tmp/hack-store-arg")));
+    assert!(take_step_store_argument(&["--step-store", "/tmp/other", "info"]).is_err());
+}

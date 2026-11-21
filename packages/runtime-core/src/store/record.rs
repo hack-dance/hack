@@ -55,7 +55,7 @@ pub struct Record {
 }
 
 impl Record {
-    fn decode(bytes: &[u8], key: &StepKey) -> std::result::Result<Self, MissReason> {
+    pub(super) fn decode(bytes: &[u8], key: &StepKey) -> std::result::Result<Self, MissReason> {
         let mut value: Value = serde_json::from_slice(bytes).map_err(|_| MissReason::TornRecord)?;
         match value.get("v") {
             Some(version) if version.as_u64() == Some(u64::from(VERSION)) => {}
@@ -84,7 +84,7 @@ impl Record {
         Ok(record)
     }
 
-    fn encode(&self) -> Result<Vec<u8>> {
+    pub(super) fn encode(&self) -> Result<Vec<u8>> {
         let failure = |_| invalid("Cannot encode the step record.");
         let mut value = serde_json::to_value(self).map_err(failure)?;
         let check = canonical_digest::digest(STEP_RECORD, &value)

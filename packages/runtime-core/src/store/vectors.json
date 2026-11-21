@@ -1,0 +1,90 @@
+{
+  "schema": "hack.step-store-vectors/1",
+  "note": "Shared by the Rust store (src/store/) and its TypeScript twin (src/lib/step-store/). `key` is the canonical digest of the parts under hack.step/1. `text` is the exact canonical record a writer produces for that key, output, time and run, with its check under hack.step-record/1.",
+  "keys": [
+    {
+      "name": "cas, two inputs, no epoch",
+      "step": "plan.compile",
+      "stepVersion": 1,
+      "class": "cas",
+      "inputs": {
+        "compose": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "branch": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "epoch": null,
+      "build": "runtime-build-1",
+      "key": "sha256:7d7989f84ca5b3187b254bfb352a74f1d6e52b6cc8c63d44baba7be91b2c3610"
+    },
+    {
+      "name": "boot, epoch set",
+      "step": "guest.upload",
+      "stepVersion": 2,
+      "class": "boot",
+      "inputs": {
+        "payload": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "epoch": "boot-7f3a",
+      "build": "runtime-build-1",
+      "key": "sha256:65b98ddd54955d748c5c70421e9b3e8b7f8eaf9a973ad5184733b2ec8c096a5c"
+    },
+    {
+      "name": "slot, no inputs",
+      "step": "compose.override",
+      "stepVersion": 1,
+      "class": "slot",
+      "inputs": {},
+      "epoch": null,
+      "build": "runtime-build-1",
+      "key": "sha256:8ad063ef4d7719699955fd2fbb31f9157a3cb6b591f977e207cc11f37b833b4d"
+    },
+    {
+      "name": "file-identity, empty epoch string",
+      "step": "exec.hash",
+      "stepVersion": 1,
+      "class": "file-identity",
+      "inputs": {
+        "stat": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "epoch": "",
+      "build": "runtime-build-2",
+      "key": "sha256:ba81df2ee456bcae1e45fc09cecf9e222f6842db40de90ae0abf64f4903c1f68"
+    },
+    {
+      "name": "same as first, other build",
+      "step": "plan.compile",
+      "stepVersion": 1,
+      "class": "cas",
+      "inputs": {
+        "branch": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "compose": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "epoch": null,
+      "build": "runtime-build-2",
+      "key": "sha256:256fd7d74301eaa663616e2da9921a1276be09fdff50c14d0b6649319c89cf53"
+    }
+  ],
+  "records": [
+    {
+      "name": "cas record",
+      "keyIndex": 0,
+      "output": {
+        "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "ref": "cas"
+      },
+      "observedAt": 1763650000000,
+      "run": "run-0001",
+      "text": "{\"check\":\"sha256:af13fdfaba13af2e1b0ff645dfe633acee289b8e78d3ee9aa4d78125480cbec7\",\"class\":\"cas\",\"epoch\":null,\"inputs\":{\"branch\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"compose\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"key\":\"sha256:7d7989f84ca5b3187b254bfb352a74f1d6e52b6cc8c63d44baba7be91b2c3610\",\"observedAt\":1763650000000,\"output\":{\"digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"ref\":\"cas\"},\"producedBy\":{\"build\":\"runtime-build-1\",\"run\":\"run-0001\"},\"step\":\"plan.compile\",\"stepVersion\":1,\"v\":1}"
+    },
+    {
+      "name": "boot record, no cas reference",
+      "keyIndex": 1,
+      "output": {
+        "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "ref": null
+      },
+      "observedAt": 1763650000001,
+      "run": "run-0002",
+      "text": "{\"check\":\"sha256:5b5613f7ffc97c1ea6aac65b8a81c68d368bab3e6dd86d7066bcd56a66183711\",\"class\":\"boot\",\"epoch\":\"boot-7f3a\",\"inputs\":{\"payload\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"key\":\"sha256:65b98ddd54955d748c5c70421e9b3e8b7f8eaf9a973ad5184733b2ec8c096a5c\",\"observedAt\":1763650000001,\"output\":{\"digest\":\"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"ref\":null},\"producedBy\":{\"build\":\"runtime-build-1\",\"run\":\"run-0002\"},\"step\":\"guest.upload\",\"stepVersion\":2,\"v\":1}"
+    }
+  ]
+}

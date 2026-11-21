@@ -117,7 +117,7 @@ fn answer_for(id: &str, mut value: Value) -> Result<Value, CandidateError> {
 }
 
 /// Connect without blocking past `deadline`, then return a blocking stream.
-fn connect(path: &Path, deadline: Instant) -> Result<UnixStream, CandidateError> {
+pub(super) fn connect(path: &Path, deadline: Instant) -> Result<UnixStream, CandidateError> {
     let io = |e: std::io::Error| failure("service_io", e);
     let bytes = path.as_os_str().as_encoded_bytes();
     // SAFETY: an all-zero sockaddr_un is a valid empty address.

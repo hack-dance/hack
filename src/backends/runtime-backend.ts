@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import {
@@ -126,11 +127,19 @@ function shouldDisableExecTty(): boolean {
   return !(process.stdin.isTTY === true && process.stdout.isTTY === true);
 }
 
+/**
+ * `docker compose` with the project, files and profiles. `--project-directory`
+ * names the first file's folder, which Compose would choose anyway; it is
+ * explicit because Hack's generated overrides live outside the project (in
+ * Hack's home) and must never become the base for relative paths.
+ */
 export function buildComposeArgs(opts: RuntimeBaseOptions): string[] {
+  const first = opts.composeFiles[0];
   return [
     "docker",
     "compose",
     ...(opts.composeProject ? ["-p", opts.composeProject] : []),
+    ...(first ? ["--project-directory", dirname(first)] : []),
     ...opts.composeFiles.flatMap((file) => ["-f", file] as const),
     ...(opts.profiles
       ? opts.profiles.flatMap((profile) => ["--profile", profile] as const)
@@ -380,6 +389,31 @@ async function pollComposePs(input: {
   }
 }
 
+/**
+ * Waits `ms` or until `finished` settles, whichever comes first. The timer is
+ * cleared either way, so a start that ends mid-wait leaves nothing that
+ * holds the process open (a losing `Bun.sleep` kept it alive for up to 1 s).
+ */
+export async function waitOrFinish(
+  ms: number,
+  finished: Promise<unknown>
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      finished.then(
+        () => undefined,
+        () => undefined
+      ),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Poll one-shot progress until the start ends or the watchdog decides to stop. */
 async function watchStartProgress(input: {
   readonly options: RuntimeUpOptions;
@@ -396,7 +430,7 @@ async function watchStartProgress(input: {
   let lastProgressAt = startedAt;
   let lastSeen: readonly string[] = [];
   for (;;) {
-    await Promise.race([input.finished, Bun.sleep(START_WATCH_POLL_MS)]);
+    await waitOrFinish(START_WATCH_POLL_MS, input.finished);
     if (input.isDone()) {
       return { stopped: false, lastSeen };
     }

@@ -8,6 +8,7 @@ pub(crate) mod owned_tmp_root;
 pub mod project;
 pub mod provider;
 pub mod service;
+pub mod store;
 #[cfg(test)]
 mod test_root;
 pub mod timings;

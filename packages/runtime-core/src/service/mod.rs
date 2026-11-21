@@ -42,6 +42,13 @@ pub const MAX_SESSIONS: usize = 32;
 /// macOS `sun_path` holds 104 bytes including the terminating NUL; one rule everywhere.
 pub const SOCKET_PATH_LIMIT: usize = 103;
 const SESSION_IDLE: Duration = Duration::from_secs(30);
+/// The most shutdown waits for requests in progress and for session threads.
+/// Past it the process exits anyway: the lock is released by the kernel.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
+/// How long a starter probes an existing socket for a live listener.
+const LIVE_PROBE: Duration = Duration::from_millis(200);
+/// Attempts to lock a `service.lock` that someone keeps replacing.
+const LOCK_ATTEMPTS: usize = 8;
 /// Pause before accepting again after the process ran out of descriptors or memory.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 /// How long one connection queued at shutdown may take to deliver its whole
@@ -72,6 +79,10 @@ pub fn paths(state_root: &Path) -> Paths {
 pub struct Options {
     /// Exit after this long with no session and no request in progress.
     pub idle: Duration,
+    /// Tests only: while this is set, the idle timer never fires, so a test can
+    /// arrange its sessions without racing it.
+    #[cfg(test)]
+    pub(crate) hold_idle: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,15 +145,44 @@ pub fn serve(
         }
     };
     announce(json!({"listening": shared.identity.public()}));
-    let outcome = run(&shared, listener, &wake);
+    let (outcome, drained) = run(&shared, listener, &wake);
     remove_own_record(&paths.record, &shared.identity.epoch);
-    drop(lock);
+    settle(lock, drained)?;
     Ok(outcome)
 }
 
+/// Release the lock after a complete drain. After a drain that ran out of time
+/// a worker may still run, so the lock stays held until this process exits.
+fn settle(lock: Ownership, drained: bool) -> Result<(), CandidateError> {
+    if drained {
+        drop(lock);
+        return Ok(());
+    }
+    std::mem::forget(lock);
+    Err(failure(
+        "service_drain_timeout",
+        "A request or session did not finish in time; the lock is held until this process exits.",
+    ))
+}
+
 /// `TakeLock` then `Bind`, or `LoseRace`. Returns `None` when the lock is held.
-/// The bound listener, the held lock, and the `(dev, ino)` of the socket it bound.
-type Bound = (UnixListener, File, (u64, u64));
+/// The bound listener, the held locks, and the `(dev, ino)` of the socket it bound.
+type Bound = (UnixListener, Ownership, (u64, u64));
+
+/// What a serving process holds for its whole life, drain included: the lock
+/// on the private directory and the lock on `service.lock`. Dropping it ends
+/// ownership.
+///
+/// The directory lock is what makes ownership survive a removed or replaced
+/// `service.lock`: a starter finds the directory locked and loses, even while
+/// this process drains with its socket already unlinked. The directory itself
+/// is assumed stable: replacing the directory itself is not defended against,
+/// since later pathname operations resolve through whatever directory is then
+/// at the path.
+pub(super) struct Ownership {
+    _dir: File,
+    _lock: File,
+}
 
 fn start(paths: &Paths) -> Result<Option<Bound>, CandidateError> {
     private_directory(&paths.dir)?;
@@ -152,12 +192,38 @@ fn start(paths: &Paths) -> Result<Option<Bound>, CandidateError> {
             format!("The service socket path is longer than {SOCKET_PATH_LIMIT} bytes."),
         ));
     }
+    // The directory lock first, held as long as the lock file: see `Ownership`.
+    let Some(dir) = lock_directory(&paths.dir)? else {
+        return Ok(None);
+    };
     let Some(lock) = try_lock(&paths.lock)? else {
         return Ok(None);
     };
     match paths.socket.symlink_metadata() {
         Ok(m) if m.file_type().is_socket() && m.uid() == euid() => {
-            std::fs::remove_file(&paths.socket).map_err(|e| failure("service_io", e))?
+            // Holding the lock normally proves the socket is stale. It does not
+            // when the lock file was removed while another service held it: that
+            // service still listens. Never unlink a socket something answers on.
+            match client::connect(&paths.socket, Instant::now() + LIVE_PROBE) {
+                Err(e) if e.code == "service_absent" => {}
+                Ok(_) => return Err(live()),
+                Err(e) if e.code == "service_busy" => return Err(live()),
+                // Neither live nor stale is proven (EACCES, say): keep the socket
+                // and say what the probe saw.
+                Err(e) => {
+                    return Err(failure(
+                        "service_socket_unverified",
+                        format!(
+                            "The existing service socket could not be probed: {}",
+                            e.message
+                        ),
+                    ));
+                }
+            }
+            match std::fs::remove_file(&paths.socket) {
+                Err(e) if e.kind() != ErrorKind::NotFound => return Err(failure("service_io", e)),
+                _ => {}
+            }
         }
         Ok(_) => {
             return Err(failure(
@@ -182,7 +248,14 @@ fn start(paths: &Paths) -> Result<Option<Bound>, CandidateError> {
         unlink_if(&paths.socket, id);
         return Err(failure("service_io", e));
     }
-    Ok(Some((listener, lock, id)))
+    Ok(Some((
+        listener,
+        Ownership {
+            _dir: dir,
+            _lock: lock,
+        },
+        id,
+    )))
 }
 
 /// Everything fallible after bind, so "listening" is announced only once it all worked.
@@ -203,6 +276,8 @@ fn prepare(
     let shared = Arc::new(Shared {
         identity,
         idle: options.idle,
+        #[cfg(test)]
+        hold_idle: options.hold_idle.clone(),
         socket: paths.socket.clone(),
         socket_id,
         state: Mutex::new(State {
@@ -212,6 +287,7 @@ fn prepare(
             refuse_until: None,
             refused: 0,
             queued_wait: QUEUED_WAIT,
+            shutdown_wait: SHUTDOWN_WAIT,
             last_activity: Instant::now(),
             streams: HashMap::new(),
             next_session: 0,
@@ -245,7 +321,69 @@ fn check_private_directory(dir: &Path) -> Result<(), CandidateError> {
     Ok(())
 }
 
+fn live() -> CandidateError {
+    failure(
+        "service_socket_live",
+        "Another runtime service still listens on this home's socket.",
+    )
+}
+
+/// Take the startup lock on the private directory, or `None` while another
+/// starter holds it. The lock counts only on the directory still at `dir`.
+fn lock_directory(dir: &Path) -> Result<Option<File>, CandidateError> {
+    let io = |e: std::io::Error| failure("service_io", e);
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir)
+        .map_err(io)?;
+    // SAFETY: a valid owned descriptor; the lock is released when `file` closes.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return match std::io::Error::last_os_error() {
+            e if e.kind() == ErrorKind::WouldBlock => Ok(None),
+            e => Err(io(e)),
+        };
+    }
+    let (held, now) = (
+        file.metadata().map_err(io)?,
+        dir.symlink_metadata().map_err(io)?,
+    );
+    if (held.dev(), held.ino()) != (now.dev(), now.ino()) {
+        return Err(failure(
+            "service_dir_replaced",
+            "The service directory was replaced while this service started.",
+        ));
+    }
+    Ok(Some(file))
+}
+
 fn try_lock(path: &Path) -> Result<Option<File>, CandidateError> {
+    for _ in 0..LOCK_ATTEMPTS {
+        let file = open_lock(path)?;
+        // SAFETY: a valid owned descriptor; the lock is released when `file` closes.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return match std::io::Error::last_os_error() {
+                e if e.kind() == ErrorKind::WouldBlock => Ok(None),
+                e => Err(failure("service_io", e)),
+            };
+        }
+        // The lock counts only while the file it is on is still `service.lock`:
+        // one replaced between the open and the flock is retried.
+        let held = file.metadata().map_err(|e| failure("service_io", e))?;
+        match path.symlink_metadata() {
+            Ok(now) if (now.dev(), now.ino()) == (held.dev(), held.ino()) => return Ok(Some(file)),
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(failure("service_io", e)),
+        }
+    }
+    Err(failure(
+        "service_lock_unstable",
+        "service.lock kept changing while this service tried to take it.",
+    ))
+}
+
+fn open_lock(path: &Path) -> Result<File, CandidateError> {
     let refused = || {
         failure(
             "service_lock_refused",
@@ -269,14 +407,7 @@ fn try_lock(path: &Path) -> Result<Option<File>, CandidateError> {
     if !m.is_file() || m.uid() != euid() || m.mode() & 0o077 != 0 {
         return Err(refused());
     }
-    // SAFETY: a valid owned descriptor; the lock is released when `file` closes.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-        return Ok(Some(file));
-    }
-    match std::io::Error::last_os_error() {
-        e if e.kind() == ErrorKind::WouldBlock => Ok(None),
-        e => Err(failure("service_io", e)),
-    }
+    Ok(file)
 }
 
 fn unlink_if(path: &Path, id: (u64, u64)) {
@@ -364,6 +495,8 @@ struct State {
     /// How long one queued connection may take to deliver its first request
     /// (`QUEUED_WAIT`; tests set it).
     queued_wait: Duration,
+    /// The bound on shutdown's waits; `SHUTDOWN_WAIT`, shorter in tests.
+    shutdown_wait: Duration,
     last_activity: Instant,
     /// A handle to every live session's socket, to shut it down at exit.
     streams: HashMap<u64, UnixStream>,
@@ -373,6 +506,8 @@ struct State {
 struct Shared {
     identity: Identity,
     idle: Duration,
+    #[cfg(test)]
+    hold_idle: Option<Arc<std::sync::atomic::AtomicBool>>,
     socket: PathBuf,
     socket_id: (u64, u64),
     state: Mutex<State>,
@@ -381,6 +516,14 @@ struct Shared {
 }
 
 impl Shared {
+    /// Whether a test holds the idle timer. Always false outside tests.
+    fn idle_held(&self) -> bool {
+        #[cfg(test)]
+        if let Some(hold) = &self.hold_idle {
+            return hold.load(std::sync::atomic::Ordering::SeqCst);
+        }
+        false
+    }
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.state
             .lock()
@@ -404,20 +547,37 @@ impl Shared {
         state.stopping.get_or_insert(outcome);
         state.refuse_until.get_or_insert(refuse_until);
         drop(state);
-        // Unlink at once so the next client starts a fresh process, which waits
-        // for this one's lock.
+        // Unlink at once so no new client reaches this process. A client that
+        // starts a service meanwhile finds the lock still held: that starter
+        // reports "lost" and exits, and there is no socket to connect to until
+        // this process has exited. Such a client must not wait for a drain. A
+        // request it never sent, or one refused before admission, runs on the
+        // one-shot path, and its next command starts a fresh service. A request
+        // whose frame it may already have written is not known to be refused:
+        // it keeps its intent id and follows recovery, never the one-shot path.
         unlink_if(&self.socket, self.socket_id);
         self.wake();
     }
-    fn wait_until(&self, done: impl Fn(&State) -> bool) {
+    /// Wait until `done` holds, giving up at `deadline`. Returns whether it holds.
+    fn wait_until_by(&self, done: impl Fn(&State) -> bool, deadline: Instant) -> bool {
         let mut state = self.state();
         while !done(&state) {
-            state = self.changed.wait(state).unwrap_or_else(|p| p.into_inner());
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            state = self
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
         }
+        true
     }
 }
 
-fn run(shared: &Arc<Shared>, listener: UnixListener, wake: &UnixStream) -> Outcome {
+/// The outcome, and whether every request and session finished before exit.
+fn run(shared: &Arc<Shared>, listener: UnixListener, wake: &UnixStream) -> (Outcome, bool) {
     loop {
         let timeout = {
             let state = shared.state();
@@ -427,7 +587,7 @@ fn run(shared: &Arc<Shared>, listener: UnixListener, wake: &UnixStream) -> Outco
             (state.sessions == 0 && state.busy == 0)
                 .then(|| shared.idle.saturating_sub(state.last_activity.elapsed()))
         };
-        if timeout == Some(Duration::ZERO) {
+        if timeout == Some(Duration::ZERO) && !shared.idle_held() {
             shared.stop(Outcome::Idle);
             break;
         }
@@ -444,6 +604,13 @@ fn run(shared: &Arc<Shared>, listener: UnixListener, wake: &UnixStream) -> Outco
             },
         ];
         let millis = timeout.map_or(-1, |t| t.as_millis().clamp(1, i32::MAX as u128) as i32);
+        // While a test holds the idle timer, poll in short steps to see it released.
+        #[cfg(test)]
+        let millis = if timeout.is_some() && shared.idle_held() {
+            5
+        } else {
+            millis
+        };
         // SAFETY: two initialized pollfd entries that outlive the call. An error
         // (EINTR) simply re-runs the loop.
         unsafe { libc::poll(fds.as_mut_ptr(), 2, millis) };
@@ -457,18 +624,25 @@ fn run(shared: &Arc<Shared>, listener: UnixListener, wake: &UnixStream) -> Outco
 }
 
 /// `IdleExit` and `ExitDrained`, one path for both.
-fn shut_down(shared: &Arc<Shared>, listener: UnixListener) -> Outcome {
+/// The outcome, and whether every request and session finished in time.
+fn shut_down(shared: &Arc<Shared>, listener: UnixListener) -> (Outcome, bool) {
     let budget = shared.state().refuse_until.unwrap_or_else(Instant::now);
     refuse_queued(shared, &listener, budget);
     drop(listener);
-    shared.wait_until(|s| s.busy == 0);
+    // Both waits are bounded: a request or a session thread that never finishes
+    // cannot keep the lock. Past the bound the process exits regardless.
+    let deadline = Instant::now() + shared.state().shutdown_wait;
+    let idle = shared.wait_until_by(|s| s.busy == 0, deadline);
     // A session whose next request was not read yet sees a close; nothing it
     // sent was admitted.
     for stream in shared.state().streams.values() {
         let _ = stream.shutdown(Shutdown::Both);
     }
-    shared.wait_until(|s| s.sessions == 0);
-    shared.state().stopping.unwrap_or(Outcome::Idle)
+    let closed = shared.wait_until_by(|s| s.sessions == 0, deadline);
+    (
+        shared.state().stopping.unwrap_or(Outcome::Idle),
+        idle && closed,
+    )
 }
 
 /// Connections queued when the service stops are never served. One whose whole
@@ -558,14 +732,43 @@ fn accept_queued(shared: &Arc<Shared>, listener: &UnixListener) -> Result<(), ()
         let spawned = std::thread::Builder::new()
             .name("hack-service-session".into())
             .spawn(move || {
+                // Released however the session ends, a panic included.
+                let _slot = SessionSlot {
+                    shared: &worker,
+                    id,
+                };
                 session(&worker, stream);
-                end_session(&worker, id);
             });
         if spawned.is_err() {
             // The stream moved into the failed closure and is closed with it.
             end_session(shared, id);
             return Err(());
         }
+    }
+}
+
+/// A session's slot, given back when the session thread ends for any reason.
+struct SessionSlot<'a> {
+    shared: &'a Shared,
+    id: u64,
+}
+
+impl Drop for SessionSlot<'_> {
+    fn drop(&mut self) {
+        end_session(self.shared, self.id);
+    }
+}
+
+/// One request in progress, counted until it ends for any reason.
+struct Busy<'a>(&'a Shared);
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        let mut state = self.0.state();
+        state.busy -= 1;
+        state.last_activity = Instant::now();
+        drop(state);
+        self.0.changed.notify_all();
     }
 }
 
@@ -658,16 +861,13 @@ fn session(shared: &Shared, mut stream: UnixStream) {
             state.busy += 1;
             state.last_activity = Instant::now();
         }
+        let busy = Busy(shared);
         // TIMINGS HOOK (hack.timings/1, HACK-2458): one span per request, step
         // `service.request`, parented on the trace and span ids the client sends.
         // Emits nothing until the HACK-2458 record types land; no local type.
         let result = answer(shared, &mut greeted, &request);
         let written = reply(&mut stream, &id, result);
-        let mut state = shared.state();
-        state.busy -= 1;
-        state.last_activity = Instant::now();
-        drop(state);
-        shared.changed.notify_all();
+        drop(busy);
         if written.is_err() {
             return;
         }

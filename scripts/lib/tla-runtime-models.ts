@@ -1810,6 +1810,8 @@ const contracts: readonly ModelContract[] = [
     // (the second under the startup lease, a window after the first), Research's
     // three pre-lease samples, the content proofs, the tree recheck under the
     // lease and the pre-boot check, on a host that can fail and recover once.
+    // This configuration proves the root files under the lease: a start
+    // without an early root files proof.
     name: "pool-start-admission",
     module: "PoolStart",
     states: 58_022,
@@ -1818,8 +1820,8 @@ const contracts: readonly ModelContract[] = [
     action: "Recheck",
     fields: ['pc = "Proven"', 'profile = "development"'],
     additionalControls: [
-      // The follow-up ordering: root files proven in the window, rechecked
-      // under the lease.
+      // The implementation's other path, a cleanly stopped pool's start: root files
+      // proven in the window, rechecked under the lease.
       { name: "root-before-lease", negative: false, states: 73_754 },
       {
         name: "window-not-enforced",
@@ -2059,6 +2061,50 @@ const contracts: readonly ModelContract[] = [
           "reviewed = TRUE",
           "admitted = FALSE",
         ],
+      },
+    ],
+  },
+  {
+    // src/lib/process-exit.ts: the CLI never exits while held work runs or
+    // before its output is flushed.
+    name: "cli-process-exit",
+    module: "ProcessExit",
+    states: 298,
+    invariant: "NoExitWithPendingHold",
+    action: "SnapshotSettled",
+    fields: ['phase = "flushing"', "snap = {}", "buffered = FALSE"],
+    additionalControls: [
+      {
+        name: "no-end",
+        negative: true,
+        invariant: "NoLostOutput",
+        action: "Exit",
+        fields: ['phase = "exited"', "buffered = TRUE"],
+      },
+    ],
+  },
+  {
+    // src/lib/proxy-ingress-addresses.ts: a record `hack run` trusts names
+    // the running address unless an outside change followed its read.
+    name: "ingress-address-record",
+    module: "IngressRecord",
+    states: 922_875,
+    invariant: "TrustedRecordIsCurrent",
+    action: "Write",
+    // Addresses and changers are symmetric, so a two-worker search may end
+    // on either; the pinned fields are the ones every first witness shares.
+    fields: ["gen = 1", "settled = FALSE", "extSinceWrite = FALSE"],
+    additionalControls: [
+      {
+        name: "unsettled",
+        negative: true,
+      },
+      {
+        // Overlapping changes: one settles while the other still moves the
+        // containers, and a read in between is trusted.
+        name: "unlocked",
+        negative: true,
+        fields: ["gen = 3", "settled = TRUE", "extSinceWrite = FALSE"],
       },
     ],
   },

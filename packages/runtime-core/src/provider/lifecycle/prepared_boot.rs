@@ -518,7 +518,7 @@ fn inspect(
         None,
     )?;
     let lock = state::Lock::acquire(&root(verifier))?;
-    prepare_rootfs(verifier, &mut owner)?;
+    prepare_rootfs(verifier, &mut owner, None)?;
     let rootfs = owner
         .rootfs_digest
         .clone()

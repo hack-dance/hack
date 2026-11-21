@@ -39,7 +39,12 @@ fn accept(listener: &UnixListener) -> std::os::unix::net::UnixStream {
     let limit = Instant::now() + Duration::from_secs(3);
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return stream,
+            Ok((stream, _)) => {
+                // Darwin inherits the listener's nonblocking flag. The fake server
+                // reads complete request lines, so it must wait for the writer.
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < limit => {
                 std::thread::sleep(Duration::from_millis(5));
             }
@@ -73,6 +78,23 @@ fn headers(stream: &mut std::os::unix::net::UnixStream) {
 fn frame(stream: &mut std::os::unix::net::UnixStream, received: &mpsc::Receiver<()>) {
     stream.write_all(b"\x01\0\0\0\0\0\0\x02x\n").unwrap();
     received.recv_timeout(Duration::from_secs(3)).unwrap();
+}
+
+#[test]
+fn fake_engine_accepts_a_blocking_stream_before_the_request_arrives() {
+    use std::os::fd::AsRawFd;
+
+    let fixture = Fixture::new();
+    let socket = fixture.0.join("engine.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let _client = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+    let engine = accept(&listener);
+    // No request bytes exist yet. Check the mode directly, without racing a read
+    // against a scheduled writer (Linux does not inherit the listener's flag).
+    // SAFETY: engine owns a live descriptor; F_GETFL only reads its status flags.
+    let flags = unsafe { libc::fcntl(engine.as_raw_fd(), libc::F_GETFL) };
+    assert_ne!(flags, -1);
+    assert_eq!(flags & libc::O_NONBLOCK, 0);
 }
 
 #[test]

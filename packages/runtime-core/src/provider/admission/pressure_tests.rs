@@ -213,6 +213,8 @@ impl Earlier for NoRecord {
     fn in_age(&self, _: &Recorded, _: Duration) -> bool {
         false
     }
+
+    fn forget(&self) {}
 }
 
 /// The sample under the lease on a home with no record: the path every start took before

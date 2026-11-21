@@ -83,6 +83,7 @@ impl admission::Earlier for NoRecord {
     fn in_age(&self, _: &admission::Recorded, _: Duration) -> bool {
         false
     }
+    fn forget(&self) {}
 }
 
 #[test]
@@ -147,9 +148,11 @@ fn a_start_that_reuses_a_recorded_sample_still_takes_and_records_two_samples() {
     };
     let clock = Skipping(std::cell::Cell::new(Duration::from_secs(100)));
     let host = Host(&clock);
-    // An earlier operation of this home recorded a passing sample, under its lease.
+    // An earlier operation of this home recorded a passing sample, under its lease. The
+    // pool has its owner record: a record is never written into an unowned pool.
     {
         let lease = state::Lock::acquire(&path).unwrap();
+        fs::write(path.join("owner.json"), b"{}").unwrap();
         assert!(opening::record(
             &path,
             &lease,
@@ -276,16 +279,16 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
             "rootfs_proof::recheck(candidate, &lock, early_rootfs)?;",
         ),
         (
-            "RecordOpening, which the model folds into Settle and ObserveRunning",
-            "admission::opening::record(&pool_root, &lock, &opening_host, sample, sampled_at);",
-        ),
-        (
             "RestoreAliasLeased",
             "restore_released_short_home(candidate)?;",
         ),
         (
             "Settle",
             "admission_pool::settle(candidate, &mut admission_owner, &lock, &mut samples)?",
+        ),
+        (
+            "RecordOpening, which the model folds into Settle and ObserveRunning",
+            "admission::opening::record(&pool_root, &lock, &opening_host, sample, sampled_at);",
         ),
         (
             "ProveRoot, or the digest RecheckRoot took under the lease",
@@ -365,11 +368,23 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
             .all(|line| line.trim().is_empty() || line.trim().starts_with("//")),
         "nothing runs between the tree recheck and the root files recheck"
     );
-    // The record of this start's sample is the first write under the lease, and it is the
-    // only place `start_pool_observed` writes that record.
+    // The record of this start's sample is written only once the pool has its owner record
+    // (an unowned pool root may hold nothing but the operation lock, which the source
+    // admission of a first project start checks), and it is the only place
+    // `start_pool_observed` writes that record.
     assert_eq!(body.matches("admission::opening::record(").count(), 1);
+    let recorded = at("admission::opening::record(");
+    for earlier in [
+        "require_fresh_source_pool(candidate)?;",
+        "let mut owner = Owner::create_with_project_share(",
+    ] {
+        assert!(
+            at(earlier) < recorded,
+            "`{earlier}` must come before the admission record is written"
+        );
+    }
+    assert!(recorded < at("state::write(&root(candidate).join(\"admission.json\")"));
     for later in [
-        "admission::opening::record(",
         "restore_released_short_home(candidate)?;",
         "interrupted::before_boot(",
         "Owner::create_with_project_share(",
@@ -418,11 +433,11 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
     assert_eq!(body.matches("let mut proven_trees").count(), 1);
 }
 
-/// `runtime down` takes its one host sample for the record under its lease, as soon as it
-/// knows the pool's profile and before it stops anything, and its outcome is not read: the
-/// stop does not depend on it.
+/// `runtime down` takes its one host sample for the record beside the stop, only when there
+/// is a pool to stop, and settles it under its lease after the stop. The sample's outcome is
+/// never read and nothing waits for it: the stop does not depend on it.
 #[test]
-fn down_samples_the_host_under_its_lease_before_it_stops_anything() {
+fn down_samples_the_host_beside_the_stop_and_settles_it_after() {
     let source = include_str!("../lifecycle.rs");
     let start = source.find("\nfn down_observed(").unwrap();
     let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
@@ -433,11 +448,13 @@ fn down_samples_the_host_under_its_lease_before_it_stops_anything() {
     let steps = [
         "let lock = state::Lock::acquire(&root(candidate))?;",
         "let mut owner = Owner::load(candidate)?;",
-        "admission::opening::record_at_stop(",
+        "let stopped = provider_stopped(&owner.phase, initial.process_alive);",
+        "admission::opening::StopSample::beside(",
         "artifact::verify(candidate)?;",
         "super::hostname_authority::managed::stop(candidate, &owner)?;",
         "super::publication::release(",
         "guest_stop(candidate, &mut owner)",
+        "stop_sample.settle(&root(candidate), &lock, &admission::opening::System);",
     ];
     for pair in steps.windows(2) {
         assert!(
@@ -447,16 +464,27 @@ fn down_samples_the_host_under_its_lease_before_it_stops_anything() {
             pair[1]
         );
     }
+    // One sample, taken only when the pool is not already stopped, for the owner's profile.
     assert_eq!(
-        body.matches("admission::opening::record_at_stop(").count(),
+        body.matches("admission::opening::StopSample::beside(")
+            .count(),
         1
     );
-    let call = &body[at("admission::opening::record_at_stop(")..];
-    let call = &call[..call.find("\n    );\n").unwrap()];
-    assert!(call.contains("&lock,") && call.contains("owner.profile,"));
-    assert!(!call.contains('?'), "the stop must not fail on its sample");
+    assert!(body.contains(
+        "let stop_sample = if stopped {\n        admission::opening::StopSample::NotTaken\n    } else {"
+    ));
+    let taken = &body[at("admission::opening::StopSample::beside(")..];
+    let taken = &taken[..taken.find("\n        )\n").unwrap()];
+    assert!(taken.contains("owner.profile,"));
+    assert!(!taken.contains('?'), "the stop must not fail on its sample");
+    // Settled once, as a statement whose result is not bound, returned or propagated, and
+    // without the in-line writer, which would wait for the host.
+    assert_eq!(body.matches("stop_sample.settle(").count(), 1);
     assert!(
-        body.contains("\n    admission::opening::record_at_stop(\n"),
+        body.contains(
+            "\n    stop_sample.settle(&root(candidate), &lock, &admission::opening::System);\n"
+        ),
         "the sample's outcome must not be bound or returned"
     );
+    assert!(!body.contains("record_at_stop("));
 }

@@ -499,6 +499,10 @@ pub(super) trait Earlier {
     /// a time [`Earlier::now`] returned. Asked once the sample under the lease exists: the
     /// age that counts is the one at that sample, not the one when the record was read.
     fn in_age(&self, recorded: &Recorded, at: Duration) -> bool;
+    /// Remove the recorded earlier sample. Called under the startup lease when a sample this
+    /// start took failed, was refused, or showed another swapout count than the record: a
+    /// retry right after must qualify on its own two samples, a window apart.
+    fn forget(&self);
 }
 
 /// A recorded earlier sample as [`Earlier::usable`] found it.
@@ -564,25 +568,43 @@ pub(super) fn recheck_after_lease(
     };
     if due().is_some()
         && let Some(recorded) = earlier.usable()
-        && let Ok(sample) = observe()
-        // Judged again now that the sample exists; an unreadable clock is a miss.
-        && let Some(sampled_at) = earlier.now()
-        && earlier.in_age(&recorded, sampled_at)
-        && check(profile, &sample, Some(opened.swapouts))
-            .is_ok_and(|count| count == recorded.swapouts)
     {
-        return Ok(Leased {
-            samples: vec![sample],
-            reused: Some(true),
-            sampled_at: Some(sampled_at),
-        });
+        match observe() {
+            Ok(sample) => {
+                let same_host = check(profile, &sample, Some(opened.swapouts))
+                    .is_ok_and(|count| count == recorded.swapouts);
+                // The age is judged again now that the sample exists; an unreadable clock
+                // is a miss.
+                if same_host
+                    && let Some(sampled_at) = earlier.now()
+                    && earlier.in_age(&recorded, sampled_at)
+                {
+                    return Ok(Leased {
+                        samples: vec![sample],
+                        reused: Some(true),
+                        sampled_at: Some(sampled_at),
+                    });
+                }
+                // A sample that fails a predicate, or shows another swapout count, is a
+                // host the record no longer describes.
+                if !same_host {
+                    earlier.forget();
+                }
+            }
+            Err(_) => earlier.forget(),
+        }
     }
     // Judge by the clock, not by having asked to sleep: an early wake sleeps again.
     while let Some(rest) = due() {
         clock.sleep(rest);
     }
-    let sample = observe()?;
-    check(profile, &sample, Some(opened.swapouts))?;
+    // A refused or failed sample also removes the record, so the retry waits its window.
+    let refused = |error: CandidateError| {
+        earlier.forget();
+        error
+    };
+    let sample = observe().map_err(refused)?;
+    check(profile, &sample, Some(opened.swapouts)).map_err(refused)?;
     Ok(Leased {
         samples: vec![sample],
         reused: Some(false),

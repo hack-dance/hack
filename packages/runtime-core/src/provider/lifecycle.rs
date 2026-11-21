@@ -1457,6 +1457,10 @@ fn start_pool_observed(
     let mut admission_owner = admission_pool::select(candidate, profile)?;
     let admission = admission_pool::probe(candidate, profile, &admission_owner)?;
     if !admission.admitted {
+        // A host this start just saw failing is not one an earlier record may vouch for.
+        if profile == super::Profile::Development {
+            admission::opening::forget_unleased(&root(candidate));
+        }
         return Err(CandidateError::new(
             "admission_rejected",
             admission.reasons.join(" "),
@@ -1524,13 +1528,6 @@ fn start_pool_observed(
     // not on a qualified filesystem, nothing is proven here and `prepare_rootfs` decides.
     // The recheck writes nothing; an alias repaired before admission stays repaired.
     let leased_rootfs = rootfs_proof::recheck(candidate, &lock, early_rootfs)?;
-    // The start's first write under the lease: its passing sample becomes this home's
-    // recorded earlier sample, also when this start reused one. It comes after both
-    // rechecks, so a start they refuse has written nothing. A record that cannot be written
-    // costs the next start its wait and nothing else.
-    if let (Some(_), Some(sample)) = (reused, samples.last()) {
-        admission::opening::record(&pool_root, &lock, &opening_host, sample, sampled_at);
-    }
     // Recheck a clean stop's alias under the lease before the release checks probe its
     // sockets or the provider runs with it as HOME.
     restore_released_short_home(candidate)?;
@@ -1571,6 +1568,14 @@ fn start_pool_observed(
         existing_dependencies,
         existing_share.clone(),
     )?;
+    // This start's passing sample under the lease becomes the home's recorded earlier
+    // sample, also when the start reused one. It is written only now that the pool has its
+    // owner record: an unowned pool root may hold nothing but the operation lock
+    // (`require_fresh_source_pool` above), and both rechecks have passed. A record that
+    // cannot be written costs the next start its wait and nothing else.
+    if let (Some(_), Some(sample)) = (reused, samples.last()) {
+        admission::opening::record(&pool_root, &lock, &opening_host, sample, sampled_at);
+    }
     // These leased checks must stay a superset of `running_start::StartRequest::check`, which
     // the fast path runs under its lease; network is bound to the pre-lease receipt here.
     super::project_share::check_request(&owner.project_shares(), project_share.as_ref())?;
@@ -2651,19 +2656,22 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
     // Builds take their shared fence only under this lease, so none can start after this.
     super::image_build::require_no_active_build(candidate)?;
     let mut owner = Owner::load(candidate)?;
-    // One host sample at the start of the stop, recorded when it passes every Development
-    // predicate on its own, so a start that follows soon need not wait out its admission
-    // window (`admission::opening`). It is taken on the unowned basis, which claims nothing
-    // about this pool. A sample that fails or cannot be taken writes nothing and changes
-    // nothing below.
-    admission::opening::record_at_stop(
-        &root(candidate),
-        &lock,
-        &admission::opening::System,
-        owner.profile,
-        || admission::probe_for(&candidate.checkout, super::Profile::Development),
-    );
     let stopped = provider_stopped(&owner.phase, initial.process_alive);
+    // When there is a pool to stop, one host sample is taken beside the stop, on its own
+    // thread, so a start that follows soon need not wait out its admission window
+    // (`admission::opening`). It is taken on the unowned basis, which claims nothing about
+    // this pool. The stop never waits for it and cannot fail on it: it is settled after the
+    // stop, under this lease, if it is back by then.
+    let stop_sample = if stopped {
+        admission::opening::StopSample::NotTaken
+    } else {
+        let checkout = candidate.checkout.clone();
+        admission::opening::StopSample::beside(
+            owner.profile,
+            move || admission::probe_for(&checkout, super::Profile::Development),
+            || admission::opening::Host::now(&admission::opening::System),
+        )
+    };
     // Only stopping a provider reaches the prepared tree. A stopped pool's down executes
     // nothing from it, so a tree changed outside Hack cannot block quiescence; any later
     // start still verifies the tree (see `repair_provider_trees`).
@@ -2699,6 +2707,7 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
         Err(error) => Err(error),
     };
     keep_memory_peak(&root(candidate), peak, &mut result);
+    stop_sample.settle(&root(candidate), &lock, &admission::opening::System);
     result
 }
 

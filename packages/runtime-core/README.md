@@ -1947,11 +1947,32 @@ three fields and nothing else: the OS boot session (`kern.bootsessionuuid` on ma
 kernel's `boot_id` on Linux), a time on a clock that keeps counting while the machine
 sleeps (`CLOCK_MONOTONIC` on macOS, `CLOCK_BOOTTIME` on Linux), and the sample's swapout
 count. It is written atomically, under the provider lease, readable and writable by the
-user only. Two things write it: every Development start records its own passing sample
-under the lease, after the tree comparison and the root files comparison that follows it
-(and before the last root files comparison, in `prepare_rootfs`), and `runtime down` of a
-Development pool records one sample it takes at the start of the stop, if that sample
-passes.
+user only.
+
+Not every passing sample is recorded. Exactly two things write the record, both under the
+provider lease and only into a pool that already has its owner record (an unowned pool
+root holds nothing but the operation lock, which the source admission of a first project
+start checks):
+
+- a Development start records its own passing sample under the lease, once both
+  comparisons under the lease have passed and the pool's owner record exists (before the
+  last root files comparison, in `prepare_rootfs`);
+- `runtime down` of a running Development pool takes one sample beside the stop, on its
+  own thread, and records it after the stop if it is back and passes. A pool that is
+  already stopped takes no sample. The stop never waits for the sample and cannot fail on
+  it.
+
+A sample that Hack itself sees failing removes the record: a sample under the lease that
+fails a predicate, cannot be taken or shows another swapout count, a first sample refused
+before the lease (if the lease is free), and a stop sample that fails or is not back when
+the stop is done. A retry right after a refusal therefore waits its window and qualifies
+on its own two samples.
+
+The record does not carry the disk basis a sample was judged on (a stop samples on the
+basis of a pool that owns no disks yet; a start on the basis it selected). That is
+acceptable because the record never stands in for a judgement about this start's
+resources: the start's own two samples are each judged on the start's own basis, and the
+record contributes only "the host passed at that time and has not swapped out since".
 
 Under the startup lease, when part of the window is still to be slept, the start reads
 the record. It skips the sleep only when all of this holds:

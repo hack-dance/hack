@@ -366,11 +366,21 @@ What the model leaves out about the record:
   record after the start's sample under the lease.
 - A later start that reads what this start wrote. The model has one start; a
   record another start or a stop wrote is `OtherRecords`.
+- Removing the record. The code unlinks it when a sample Hack took fails, is
+  refused or shows another swapout count (`Earlier::forget`,
+  `opening::forget_unleased`, `StopSample::settle`), and never writes it into a
+  pool without its owner record. A removed record is `recBoot = "none"`, a miss,
+  so the model's safety properties do not depend on the removal; its evidence is
+  `a_sample_that_fails_under_the_lease_removes_the_record`,
+  `a_refusal_before_the_lease_removes_the_record_only_if_the_lease_is_free`,
+  `the_stop_never_waits_for_its_sample` and
+  `a_pool_without_its_owner_record_gets_no_record_and_its_root_stays_as_it_was`
+  in `admission/opening/tests.rs`.
 - `runtime down` itself. Its writer is `OtherRecords`: an operation holding the
   lease records a passing sample. Where in the stop the sample is taken, and
   that a failing sample never fails the stop, are
-  `a_stop_records_a_passing_sample_and_a_failing_one_changes_nothing` and
-  `down_samples_the_host_under_its_lease_before_it_stops_anything`.
+  `a_stop_records_a_passing_sample_and_a_failing_one_removes_the_record` and
+  `down_samples_the_host_beside_the_stop_and_settles_it_after`.
 - When a record ages. Only the read under the lease looks at the age, so
   `AgeRecord` runs there and nowhere earlier; aging before the lease would reach
   the same states.
@@ -388,8 +398,8 @@ tests of the named module unless marked.
 | `Degrade` then `Recover` between two accepted samples (`acrossDip`) | `admission.rs::recheck_after_lease` (Development) and `sample_checked` (Research): nothing reads the host between two samples | `a_dip_between_the_two_development_samples_is_not_seen`: the sampler is asked twice, at the first sample and no sooner than one second later, and a host failing at every moment in between is admitted. Research's pause has no such test. |
 | `Reuse`, and no step for a miss | `admission.rs::recheck_after_lease`; `admission/opening.rs::Opening::judge`, `read` | `admission/opening/tests.rs`: `a_same_boot_record_between_one_window_and_the_bound_old_replaces_the_wait`, `a_reused_start_still_takes_both_of_its_own_samples_and_each_must_pass`, and one test for each miss, each asserting that the start is not refused, sleeps the rest of its own window and takes the sample a home without a record takes: `a_missing_record_is_the_start_without_one`, `an_unreadable_record_is_the_start_without_one`, `an_unparsable_record_is_the_start_without_one`, `a_record_with_unknown_missing_or_mistyped_fields_is_the_start_without_one`, `a_record_that_is_not_a_regular_file_is_the_start_without_one`, `a_record_not_owned_by_this_user_is_the_start_without_one`, `a_group_or_world_accessible_record_is_the_start_without_one`, `a_record_from_another_boot_session_is_the_start_without_one`, `a_boot_session_that_cannot_be_read_is_the_start_without_a_record`, `a_record_younger_than_the_window_is_the_start_without_one`, `a_record_older_than_the_bound_is_the_start_without_one`, `a_clock_that_cannot_be_read_is_the_start_without_a_record`, `a_swapout_count_that_differs_from_the_record_is_the_start_without_one`, `a_sample_that_cannot_be_taken_early_is_taken_after_the_wait`, `reuse_turned_off_reads_no_record`, `a_start_with_no_wait_left_does_not_ask_for_the_record`; `lifecycle/pressure_tests.rs`: `a_start_that_reuses_a_recorded_sample_still_takes_and_records_two_samples` |
 | `reusedDip` (a dip between the recorded sample and the sample under the lease) | the same: nothing reads the host between the record and the start | `admission/opening/tests.rs`: `a_dip_between_the_record_and_the_leased_sample_is_not_seen` |
-| `OtherRecords`, `RecordOpening`; `RecordsFromPassingSamples` | `admission/opening.rs::record`, `record_at_stop`; `lifecycle.rs::start_pool_observed`, `down_observed` | `admission/opening/tests.rs`: `the_record_holds_exactly_three_fields_and_only_this_user_can_read_it`, `only_a_sample_that_passes_every_predicate_on_its_own_is_recorded`, `an_interrupted_write_does_not_block_the_next_record`, `a_stop_records_a_passing_sample_and_a_failing_one_changes_nothing`; `lifecycle/pressure_tests.rs`: `down_samples_the_host_under_its_lease_before_it_stops_anything` |
-| `ResearchNeverReuses` | `admission.rs::recheck_after_lease` returns before it asks for the record; `admission/opening.rs::record`, `record_at_stop` | `admission/opening/tests.rs`: `research_neither_reads_nor_writes_a_record` |
+| `OtherRecords`, `RecordOpening`; `RecordsFromPassingSamples` | `admission/opening.rs::record`, `StopSample`; `lifecycle.rs::start_pool_observed`, `down_observed` | `admission/opening/tests.rs`: `the_record_holds_exactly_three_fields_and_only_this_user_can_read_it`, `only_a_sample_that_passes_every_predicate_on_its_own_is_recorded`, `an_interrupted_write_does_not_block_the_next_record`, `a_stop_records_a_passing_sample_and_a_failing_one_removes_the_record`; `lifecycle/pressure_tests.rs`: `down_samples_the_host_beside_the_stop_and_settles_it_after` |
+| `ResearchNeverReuses` | `admission.rs::recheck_after_lease` returns before it asks for the record; `admission/opening.rs::record`, `StopSample::beside` | `admission/opening/tests.rs`: `research_neither_reads_nor_writes_a_record` |
 | `ResearchSample`, `RefuseSample` | `admission.rs::sample_with`, `sample_checked` | `startup_windows_keep_profile_floors_and_distinguish_warning_from_normal`, `incomplete_or_unsafe_samples_cannot_be_authorized_by_admitted_or_legacy_booleans`, `swapouts_must_be_observed_and_unchanged_across_the_full_window` |
 | `ProveTrees`, `RefuseTree` | `artifact.rs::verify_witnessed`, `verify_tree` | `artifact.rs`: `a_tree_pruned_of_empty_directories_is_repaired_from_its_retained_archive`; `lifecycle/running_start/tests.rs`: `a_changed_tree_file_is_caught_by_the_cheap_check_and_proven_by_content` |
 | `AcquireLease`, `LeaseTimeout`, `OtherAcquire`, `OtherRelease` | `lifecycle.rs::startup_lease`, `operation_lease` | `lifecycle.rs`: `startup_lease_waits_out_a_brief_holder_and_refuses_a_lasting_one` |

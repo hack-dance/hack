@@ -41,7 +41,26 @@ impl Home {
             ));
         state::private_directory(&root).unwrap();
         let lease = state::Lock::acquire(&root).unwrap();
+        // The pool has its owner record: a record is never written into an unowned pool.
+        fs::write(root.join("owner.json"), b"{}").unwrap();
+        fs::set_permissions(root.join("owner.json"), fs::Permissions::from_mode(0o600)).unwrap();
         Self { root, lease }
+    }
+
+    /// A pool root that has only its operation lock: no start has created its owner yet.
+    fn unowned() -> Self {
+        let home = Self::new();
+        fs::remove_file(home.root.join("owner.json")).unwrap();
+        home
+    }
+
+    fn entries(&self) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(&self.root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
     }
 
     fn file(&self) -> PathBuf {
@@ -638,6 +657,9 @@ fn research_neither_reads_nor_writes_a_record() {
         fn in_age(&self, _: &Recorded, _: Duration) -> bool {
             panic!("Research asked for the record's age")
         }
+        fn forget(&self) {
+            panic!("Research asked to remove the record")
+        }
     }
     let clock = TestClock::at(FIRST);
     let leased = recheck_after_lease(Profile::Research, None, &clock, &Untouched, || {
@@ -882,7 +904,7 @@ fn an_interrupted_write_does_not_block_the_next_record() {
 }
 
 #[test]
-fn a_stop_records_a_passing_sample_and_a_failing_one_changes_nothing() {
+fn a_stop_records_a_passing_sample_and_a_failing_one_removes_the_record() {
     let home = Home::new();
     let clock = TestClock::at(FIRST);
     let host = TestHost::on(&clock);
@@ -897,7 +919,8 @@ fn a_stop_records_a_passing_sample_and_a_failing_one_changes_nothing() {
     let written = home.record().unwrap();
     assert_eq!(written["swapouts"], COUNT);
     assert_eq!(written["monotonic_nanos"], 1_000_000_000_000_u64);
-    // Fails a predicate: nothing is written, and the earlier record stays.
+    // Fails a predicate: nothing is written, and the earlier record is removed. A host
+    // Hack just saw failing is not one an earlier record may vouch for.
     clock.advance(Duration::from_secs(5));
     let mut failing = passing(COUNT + 1);
     failing.memory_pressure = MemoryPressure::from_level(Some(4));
@@ -908,8 +931,9 @@ fn a_stop_records_a_passing_sample_and_a_failing_one_changes_nothing() {
         Profile::Development,
         || Ok(failing)
     ));
-    assert_eq!(home.record().unwrap(), written);
-    // Cannot be taken: nothing is written, and the stop is told nothing went wrong.
+    assert_eq!(home.record(), None);
+    // Cannot be taken: the same, and the stop is told nothing went wrong.
+    home.holds(BOOT, FIRST, COUNT);
     assert!(!record_at_stop(
         &home.root,
         &home.lease,
@@ -917,7 +941,17 @@ fn a_stop_records_a_passing_sample_and_a_failing_one_changes_nothing() {
         Profile::Development,
         || Err(CandidateError::new("admission_unavailable", "fixture"))
     ));
-    assert_eq!(home.record().unwrap(), written);
+    assert_eq!(home.record(), None);
+    // A Research pool takes no sample and leaves a record alone.
+    home.holds(BOOT, FIRST, COUNT);
+    assert!(!record_at_stop(
+        &home.root,
+        &home.lease,
+        &host,
+        Profile::Research,
+        || panic!("Research took a stop sample")
+    ));
+    assert!(home.record().is_some());
     // On a home with no record, a failing stop sample leaves none.
     let empty = Home::new();
     assert!(!record_at_stop(
@@ -1203,4 +1237,222 @@ fn a_host_clock_that_went_back_while_the_sample_was_taken_does_not_replace_the_w
     );
     assert_eq!(leased.samples.len(), 1);
     assert_eq!(leased.samples[0].swapouts, Some(COUNT));
+}
+
+#[test]
+fn a_pool_without_its_owner_record_gets_no_record_and_its_root_stays_as_it_was() {
+    // The source admission of a first project start allows nothing but the operation lock
+    // in an unowned pool root. Neither writer may put a record there, on the first attempt
+    // or on a retry.
+    let home = Home::unowned();
+    let clock = TestClock::at(FIRST);
+    let host = TestHost::on(&clock);
+    for _ in 0..2 {
+        assert!(!record(
+            &home.root,
+            &home.lease,
+            &host,
+            &passing(COUNT),
+            host.now()
+        ));
+        assert!(!record_at_stop(
+            &home.root,
+            &home.lease,
+            &host,
+            Profile::Development,
+            || Ok(passing(COUNT))
+        ));
+        assert_eq!(home.entries(), ["operation.lock"]);
+    }
+    // Once the pool has its owner record the same sample is recorded.
+    fs::write(home.root.join("owner.json"), b"{}").unwrap();
+    assert!(record(
+        &home.root,
+        &home.lease,
+        &host,
+        &passing(COUNT),
+        host.now()
+    ));
+    assert_eq!(
+        home.entries(),
+        ["admission-opening.json", "operation.lock", "owner.json"]
+    );
+}
+
+#[test]
+fn a_sample_that_fails_under_the_lease_removes_the_record() {
+    let failing = || {
+        let mut sample = passing(COUNT);
+        sample.memory_pressure = MemoryPressure::from_level(Some(4));
+        sample
+    };
+    // The sample taken early for a reuse fails a predicate: the record is removed, and the
+    // start waits its window and qualifies on its own two samples.
+    let home = Home::new();
+    let run = start_with(
+        &home,
+        Reuse::parse(None).unwrap(),
+        LEASE,
+        |home, _| usable(home),
+        |_| {},
+        |n| Ok(if n == 1 { failing() } else { passing(COUNT) }),
+    );
+    run.discarded_an_early_sample_and_waited();
+    assert_eq!(home.record(), None);
+    // The early sample cannot be taken at all: the same.
+    let home = Home::new();
+    let run = start_with(
+        &home,
+        Reuse::parse(None).unwrap(),
+        LEASE,
+        |home, _| usable(home),
+        |_| {},
+        |n| {
+            if n == 1 {
+                Err(CandidateError::new("admission_unavailable", "fixture"))
+            } else {
+                Ok(passing(COUNT))
+            }
+        },
+    );
+    run.discarded_an_early_sample_and_waited();
+    assert_eq!(home.record(), None);
+    // The early sample shows another swapout count than the record: the same.
+    let home = Home::new();
+    let run = start_with(
+        &home,
+        Reuse::parse(None).unwrap(),
+        LEASE,
+        |home, _| home.holds(BOOT, FIRST - Duration::from_secs(10), COUNT + 1),
+        |_| {},
+        |_| Ok(passing(COUNT)),
+    );
+    run.discarded_an_early_sample_and_waited();
+    assert_eq!(home.record(), None);
+    // A record too old to use, and a start whose sample after the window is refused: the
+    // start is refused exactly as without a record, and the record is gone, so a retry
+    // right after cannot qualify on two samples a moment apart.
+    let home = Home::new();
+    let run = start_with(
+        &home,
+        Reuse::parse(None).unwrap(),
+        LEASE,
+        |home, _| home.holds(BOOT, FIRST - Duration::from_secs(600), COUNT),
+        |_| {},
+        |n| Ok(if n == 1 { failing() } else { passing(COUNT) }),
+    );
+    assert_eq!(run.leased.unwrap_err().code, "admission_rejected");
+    assert_eq!(run.asked, [FIRST, FIRST + DEVELOPMENT_WINDOW]);
+    assert_eq!(home.record(), None);
+    // A usable record whose reuse is taken leaves the record in place for the writer.
+    let home = Home::new();
+    start(&home, |home, _| usable(home)).reused(COUNT);
+    assert!(home.record().is_some());
+}
+
+#[test]
+fn a_refusal_before_the_lease_removes_the_record_only_if_the_lease_is_free() {
+    // Another operation of this home holds the lease: the record is left as that
+    // operation has it.
+    let home = Home::new();
+    usable(&home);
+    forget_unleased(&home.root);
+    assert!(home.record().is_some());
+    // The lease is free: the record is removed and nothing else changes.
+    let root = fs::canonicalize(std::env::temp_dir())
+        .unwrap()
+        .join(format!(
+            "hkl-opening-free-{}-{}",
+            std::process::id(),
+            crate::next_test_scratch()
+        ));
+    state::private_directory(&root).unwrap();
+    {
+        let lease = state::Lock::acquire(&root).unwrap();
+        fs::write(root.join("owner.json"), b"{}").unwrap();
+        let host_clock = TestClock::at(FIRST);
+        assert!(record(
+            &root,
+            &lease,
+            &TestHost::on(&host_clock),
+            &passing(COUNT),
+            Some(FIRST)
+        ));
+    }
+    assert!(path(&root).exists());
+    forget_unleased(&root);
+    assert!(!path(&root).exists());
+    assert!(root.join("operation.lock").exists() && root.join("owner.json").exists());
+    // A home without a record, or without a pool root at all, is not touched or created.
+    forget_unleased(&root);
+    let absent = root.join("absent");
+    forget_unleased(&absent);
+    assert!(!absent.exists());
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn the_stop_never_waits_for_its_sample() {
+    use std::sync::mpsc;
+    let home = Home::new();
+    let clock = TestClock::at(FIRST);
+    let host = TestHost::on(&clock);
+    // A Research pool takes no sample and leaves the record alone.
+    usable(&home);
+    let sample = StopSample::beside(
+        Profile::Research,
+        || panic!("Research took a stop sample"),
+        || panic!("Research read the clock"),
+    );
+    assert!(matches!(sample, StopSample::NotTaken));
+    assert!(!sample.settle(&home.root, &home.lease, &host));
+    assert!(home.record().is_some());
+    // A sample that is back when the stop is done is recorded with the time it was taken.
+    let (taken, back) = mpsc::channel();
+    let sample = StopSample::beside(
+        Profile::Development,
+        || Ok(passing(COUNT + 7)),
+        move || {
+            taken.send(()).unwrap();
+            Some(FIRST + Duration::from_secs(3))
+        },
+    );
+    back.recv().unwrap();
+    // The thread sends its result right after reading the time.
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(sample.settle(&home.root, &home.lease, &host));
+    let written = home.record().unwrap();
+    assert_eq!(written["swapouts"], COUNT + 7);
+    assert_eq!(written["monotonic_nanos"], 1_003_000_000_000_u64);
+    // A sample that is not back (a slow or hung host command) is not waited for: settling
+    // returns at once and removes the record.
+    let (release, held) = mpsc::channel::<()>();
+    let sample = StopSample::beside(
+        Profile::Development,
+        move || {
+            let _ = held.recv();
+            Ok(passing(COUNT))
+        },
+        || Some(FIRST),
+    );
+    let before = std::time::Instant::now();
+    assert!(!sample.settle(&home.root, &home.lease, &host));
+    assert!(before.elapsed() < Duration::from_secs(1));
+    assert_eq!(home.record(), None);
+    release.send(()).unwrap();
+    // A sample that is back and failed removes the record too.
+    usable(&home);
+    let (taken, back) = mpsc::channel();
+    let sample = StopSample::beside(
+        Profile::Development,
+        || Err(CandidateError::new("admission_unavailable", "fixture")),
+        move || {
+            taken.send(()).unwrap();
+            Some(FIRST)
+        },
+    );
+    back.recv().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!sample.settle(&home.root, &home.lease, &host));
+    assert_eq!(home.record(), None);
 }

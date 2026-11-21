@@ -151,7 +151,10 @@ fn start_pool_takes_its_admission_steps_in_the_modelled_order() {
         ("ProveRoot", "prepare_rootfs(candidate, &mut owner)?"),
         ("AdmitBoot", "admission_pool::admit_boot("),
         ("Start: final recheck", "boot.release(candidate, &lock)?"),
-        ("Start", "start_machine(candidate, &owner, permit)?"),
+        (
+            "Start",
+            "start_machine(&SmolvmCli::new(candidate, &owner), permit)?",
+        ),
     ];
     for pair in steps.windows(2) {
         assert!(

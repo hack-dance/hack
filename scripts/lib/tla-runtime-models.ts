@@ -172,6 +172,13 @@ const restartPolicyStaleUses = [
   { engine: "restarting", bound: 3 },
   { engine: "exited", bound: 3 },
 ] as const;
+// StartGraph's ghost flags: the whole record names every unsafe step taken,
+// so a control cannot pass on a violation its guard removal did not cause.
+type StartGraphFlag = "start" | "publish" | "replace" | "return";
+const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
+  `bad = [${(["start", "publish", "replace", "return"] as const)
+    .map((key) => `${key} |-> ${flags.includes(key) ? "TRUE" : "FALSE"}`)
+    .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
     name: "autostart-start-stop",
@@ -2694,6 +2701,100 @@ const contracts: readonly ModelContract[] = [
           "config = FALSE",
           "engine = TRUE",
         ],
+      },
+    ],
+  },
+  // The CI tier bounds one VM boot with two specs; positive-reboot covers two
+  // boots with one spec. Witnesses omit `cur` and `intents`: the initial spec
+  // value is free and two-worker TLC reports either one.
+  {
+    name: "start-graph",
+    module: "StartGraph",
+    states: 1_656_372,
+    invariant: "NoEffectWithoutIntent",
+    action: "Create",
+    fields: ["intents = {}", "acted = TRUE", 'up = "running"'],
+    additionalControls: [
+      { name: "positive-reboot", negative: false, states: 81_534 },
+      {
+        name: "ignore-deps",
+        negative: true,
+        invariant: "DepsBeforeStart",
+        action: "Start",
+        fields: [
+          startGraphBad("start"),
+          "rgen = [a |-> 0, b |-> 1]",
+          'up = "running"',
+        ],
+      },
+      {
+        name: "no-publish-fence",
+        negative: true,
+        invariant: "NoPublishToReplaced",
+        action: "Publish",
+        fields: [startGraphBad("publish"), "route = [a |-> 1, b |-> 0]"],
+      },
+      {
+        name: "reuse-by-name",
+        negative: true,
+        invariant: "ReturnIsCurrent",
+        action: "Return",
+        fields: [startGraphBad("return"), "boot = 1", 'up = "returned"'],
+      },
+      {
+        name: "no-unpublish",
+        negative: true,
+        invariant: "NoReplaceWhileRouted",
+        action: "RemoveOld",
+        fields: [
+          startGraphBad("replace"),
+          "route = [a |-> 1, b |-> 0]",
+          "nextGen = [a |-> 3, b |-> 1]",
+        ],
+      },
+      {
+        name: "keep-across-boot",
+        negative: true,
+        invariant: "ReturnIsCurrent",
+        action: "Return",
+        // Without the boot fence a dependent may also start on a stale
+        // dependency, so both flags are set.
+        fields: [
+          startGraphBad("start", "return"),
+          "boot = 2",
+          'up = "returned"',
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Return",
+            fields: [startGraphBad("return"), "boot = 2", 'up = "returned"'],
+          },
+        ],
+      },
+      {
+        name: "blind-retry",
+        negative: true,
+        invariant: "OneContainerPerService",
+        action: "Create",
+        fields: ["rgen = [a |-> 2, b |-> 0]", "nextGen = [a |-> 3, b |-> 1]"],
+        alternativeWitnesses: [
+          {
+            action: "Create",
+            fields: [
+              "rgen = [a |-> 0, b |-> 2]",
+              "nextGen = [a |-> 1, b |-> 3]",
+            ],
+          },
+        ],
+      },
+      {
+        // Reachability: an `up` that began on a current, ready and routed
+        // project (`base`) returns without planning anything.
+        name: "reachable-noop",
+        negative: true,
+        invariant: "NeverNoOpUp",
+        action: "Return",
+        fields: ["base = TRUE", "acted = FALSE", 'up = "returned"'],
       },
     ],
   },

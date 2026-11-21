@@ -564,3 +564,78 @@ fn a_request_queued_before_idle_expiry_gets_a_refusal_not_silence() {
     assert_eq!(code(&reply), "E_SERVICE_DRAINING");
     drop(lock);
 }
+
+#[test]
+fn a_positional_array_or_a_null_session_is_refused_and_never_acted_on() {
+    let root = Root::new();
+    let (handle, _) = spawn(&root.0, Duration::from_secs(30));
+    for raw in [
+        &br#"[1,"r","service.retire"]"#[..],
+        br#"{"v":1,"id":"1","op":"service.retire","session":null}"#,
+        br#"{"v":1,"id":"1","op":"service.retire","session":7}"#,
+    ] {
+        let mut stream = connect(&root.0);
+        hello(&mut stream);
+        frame::write(&mut stream, raw, CONTROL_FRAME_LIMIT).unwrap();
+        let body = frame::read(&mut stream, Duration::from_secs(2), CONTROL_FRAME_LIMIT).unwrap();
+        assert_eq!(code(&serde_json::from_slice(&body).unwrap()), "E_BAD_FRAME");
+        assert!(call(&root.0, "service.status", json!({})).is_ok());
+    }
+    call(&root.0, "service.retire", json!({})).unwrap();
+    handle.join().unwrap().unwrap();
+}
+
+#[test]
+fn partial_requests_queued_at_shutdown_cannot_hold_the_lock() {
+    let root = Root::new();
+    let paths = paths(&root.0);
+    let (listener, lock, id) = start(&paths).unwrap().unwrap();
+    let options = Options {
+        idle: Duration::from_secs(30),
+    };
+    let (shared, _wake) = prepare(&paths, options, id).unwrap();
+    // Each queued peer sends one header byte and then nothing, keeping its end open.
+    let stalled: Vec<_> = (0..8)
+        .map(|_| {
+            let mut stream = connect(&root.0);
+            stream.write_all(&[0]).unwrap();
+            stream
+        })
+        .collect();
+    shared.stop(Outcome::Idle);
+    let started = Instant::now();
+    assert_eq!(shut_down(&shared, listener), Outcome::Idle);
+    let took = started.elapsed();
+    assert!(
+        took < QUEUED_BUDGET + Duration::from_millis(300),
+        "{took:?}"
+    );
+    drop(stalled);
+    drop(lock);
+}
+
+#[test]
+fn a_connection_accepted_after_stop_is_refused_not_handed_to_a_worker() {
+    // The interleaving where a retire wakes the accept loop while a client is
+    // queued: stopping is already set when accept_queued takes the connection.
+    let root = Root::new();
+    let paths = paths(&root.0);
+    let (listener, lock, id) = start(&paths).unwrap().unwrap();
+    let options = Options {
+        idle: Duration::from_secs(30),
+    };
+    let (shared, _wake) = prepare(&paths, options, id).unwrap();
+    let mut queued = connect(&root.0);
+    let hello = json!({"v": 1, "id": "q", "op": "hello", "args": {"client": {"kind": "cli"}}});
+    let bytes = serde_json::to_vec(&hello).unwrap();
+    frame::write(&mut queued, &bytes, CONTROL_FRAME_LIMIT).unwrap();
+    shared.stop(Outcome::Retired);
+    accept_queued(&shared, &listener).unwrap();
+    assert_eq!(shared.state().sessions, 0, "no worker was started");
+    let body = frame::read(&mut queued, Duration::from_secs(2), CONTROL_FRAME_LIMIT).unwrap();
+    let reply: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(reply["id"], "q");
+    assert_eq!(code(&reply), "E_SERVICE_DRAINING");
+    assert_eq!(shut_down(&shared, listener), Outcome::Retired);
+    drop(lock);
+}

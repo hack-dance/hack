@@ -44,8 +44,11 @@ pub const SOCKET_PATH_LIMIT: usize = 103;
 const SESSION_IDLE: Duration = Duration::from_secs(30);
 /// Pause before accepting again after the process ran out of descriptors or memory.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
-/// How long a connection queued at shutdown may take to deliver its first request.
+/// How long one connection queued at shutdown may take to deliver its whole
+/// first request and receive the refusal.
 const QUEUED_WAIT: Duration = Duration::from_millis(50);
+/// The whole time shutdown spends refusing queued connections.
+const QUEUED_BUDGET: Duration = Duration::from_millis(500);
 const OPS: [&str; 3] = ["hello", "service.status", "service.retire"];
 
 /// Files of the service under a home's state root, all inside one 0700 directory.
@@ -446,31 +449,38 @@ fn shut_down(shared: &Arc<Shared>, listener: UnixListener) -> Outcome {
     shared.state().stopping.unwrap_or(Outcome::Idle)
 }
 
-/// Connections queued when the service stops are never served. One whose first
-/// request already arrived gets `E_SERVICE_DRAINING` before admission; the rest
-/// are closed. At most `MAX_SESSIONS` get the refusal, each within a short wait.
+/// Connections queued when the service stops are never served. One whose whole
+/// first request arrives in time gets `E_SERVICE_DRAINING` before admission; the
+/// rest are closed. Each gets at most `QUEUED_WAIT`, all of them `QUEUED_BUDGET`.
 fn refuse_queued(listener: &UnixListener) {
-    for refused in 0.. {
-        let mut stream = match listener.accept() {
+    let budget = Instant::now() + QUEUED_BUDGET;
+    loop {
+        let stream = match listener.accept() {
             Ok((stream, _)) => stream,
             Err(e) if e.kind() == ErrorKind::Interrupted => continue,
             Err(e) if e.kind() == ErrorKind::ConnectionAborted => continue,
             // Closing the listener resets anything still queued.
             Err(_) => return,
         };
-        if refused >= MAX_SESSIONS || crate::node::peer_uid(&stream).ok() != Some(euid()) {
-            continue;
+        if Instant::now() < budget {
+            refuse(stream, (Instant::now() + QUEUED_WAIT).min(budget));
         }
-        let Ok(body) = frame::read(&mut stream, QUEUED_WAIT, CONTROL_FRAME_LIMIT) else {
-            continue;
-        };
-        let id = parse(&body).map_or(Value::Null, |request| json!(request.id));
-        let _ = reply(
-            &mut stream,
-            &id,
-            Err(("E_SERVICE_DRAINING", "The service is stopping.")),
-        );
     }
+}
+
+/// Answer one connection's first request, if it arrives by `by`, with
+/// `E_SERVICE_DRAINING`, then close it. Nothing is admitted.
+fn refuse(mut stream: UnixStream, by: Instant) {
+    if stream.set_nonblocking(false).is_err() || crate::node::peer_uid(&stream).ok() != Some(euid())
+    {
+        return;
+    }
+    let Ok(body) = frame::read_by(&mut stream, by, CONTROL_FRAME_LIMIT) else {
+        return;
+    };
+    let id = parse(&body).map_or(Value::Null, |request| json!(request.id));
+    let refused = refusal(&id, ("E_SERVICE_DRAINING", "The service is stopping."));
+    let _ = frame::write_by(&mut stream, &refused, CONTROL_FRAME_LIMIT, by);
 }
 
 /// Accept every queued connection. `Err` only when the process is out of
@@ -493,6 +503,12 @@ fn accept_queued(shared: &Arc<Shared>, listener: &UnixListener) -> Result<(), ()
         };
         let id = {
             let mut state = shared.state();
+            if state.stopping.is_some() {
+                // Stopped while this connection waited: never hand it to a worker.
+                drop(state);
+                refuse(stream, Instant::now() + QUEUED_WAIT);
+                continue;
+            }
             if state.sessions >= MAX_SESSIONS {
                 None
             } else {
@@ -546,7 +562,7 @@ struct Request {
     op: String,
     #[serde(default)]
     args: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "text")]
     session: Option<String>,
     /// Field presence, whatever the value, including `null`.
     #[serde(default, rename = "intent", deserialize_with = "present")]
@@ -555,12 +571,22 @@ struct Request {
     has_private: bool,
 }
 
+/// A string when present; `null` and other types are refused.
+fn text<'de, D: Deserializer<'de>>(value: D) -> Result<Option<String>, D::Error> {
+    String::deserialize(value).map(Some)
+}
+
 fn present<'de, D: Deserializer<'de>>(value: D) -> Result<bool, D::Error> {
     serde::de::IgnoredAny::deserialize(value)?;
     Ok(true)
 }
 
+/// A request is a JSON object; the derive would also accept a positional array.
 fn parse(body: &[u8]) -> Option<Request> {
+    let first = body.iter().find(|byte| !byte.is_ascii_whitespace())?;
+    if *first != b'{' {
+        return None;
+    }
     serde_json::from_slice(body).ok()
 }
 
@@ -685,16 +711,22 @@ fn answer(shared: &Shared, greeted: &mut bool, request: &Request) -> Result<Valu
 /// TIMINGS HOOK (hack.timings/1, HACK-2458): finished span lines for the request
 /// go back with its reply once the record types land; never on stdout or stderr.
 fn reply(stream: &mut UnixStream, id: &Value, result: Result<Value, Refusal>) -> Result<(), ()> {
-    let value = match result {
-        Ok(result) => json!({"id": id, "ok": true, "result": result}),
-        // Nothing in this slice has effects, so no refusal is ever admitted.
-        Err((code, message)) => json!({
-            "id": id, "ok": false,
-            "error": {"code": code, "message": message, "admitted": false},
-        }),
+    let bytes = match result {
+        Ok(result) => {
+            serde_json::to_vec(&json!({"id": id, "ok": true, "result": result})).map_err(|_| ())?
+        }
+        Err(refused) => refusal(id, refused),
     };
-    let bytes = serde_json::to_vec(&value).map_err(|_| ())?;
     frame::write(stream, &bytes, CONTROL_FRAME_LIMIT).map_err(|_| ())
+}
+
+/// A refusal reply. Nothing in this slice has effects, so none is ever admitted.
+fn refusal(id: &Value, (code, message): Refusal) -> Vec<u8> {
+    let value = json!({
+        "id": id, "ok": false,
+        "error": {"code": code, "message": message, "admitted": false},
+    });
+    serde_json::to_vec(&value).unwrap_or_default()
 }
 
 #[cfg(test)]

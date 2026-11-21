@@ -47,7 +47,35 @@ pub fn read(stream: &mut UnixStream, idle: Duration, limit: usize) -> Result<Vec
 
 /// Write one frame within [`FRAME_DEADLINE`].
 pub fn write(stream: &mut UnixStream, bytes: &[u8], limit: usize) -> Result<(), FrameError> {
-    write_within(stream, bytes, limit, FRAME_DEADLINE)
+    write_within(stream, bytes, limit, FRAME_DEADLINE, None)
+}
+
+/// Read one whole frame by `by`: the wait for its first byte and the rest of the
+/// frame both end there (and the rest within [`FRAME_DEADLINE`] at most).
+pub fn read_by(stream: &mut UnixStream, by: Instant, limit: usize) -> Result<Vec<u8>, FrameError> {
+    let idle = by.saturating_duration_since(Instant::now());
+    if idle.is_zero() {
+        return Err(FrameError::Idle);
+    }
+    read_capped(stream, idle, limit, FRAME_DEADLINE, Some(by))
+}
+
+/// Write one whole frame by `by` (and within [`FRAME_DEADLINE`] at most).
+pub fn write_by(
+    stream: &mut UnixStream,
+    bytes: &[u8],
+    limit: usize,
+    by: Instant,
+) -> Result<(), FrameError> {
+    write_within(stream, bytes, limit, FRAME_DEADLINE, Some(by))
+}
+
+/// The earlier of `frame` from now and `cap`; `None` only if neither exists.
+fn deadline_for(frame: Duration, cap: Option<Instant>) -> Option<Instant> {
+    match (Instant::now().checked_add(frame), cap) {
+        (Some(own), Some(cap)) => Some(own.min(cap)),
+        (own, cap) => own.or(cap),
+    }
 }
 
 fn io(error: std::io::Error) -> FrameError {
@@ -60,9 +88,19 @@ fn read_within(
     limit: usize,
     frame: Duration,
 ) -> Result<Vec<u8>, FrameError> {
+    read_capped(stream, idle, limit, frame, None)
+}
+
+fn read_capped(
+    stream: &mut UnixStream,
+    idle: Duration,
+    limit: usize,
+    frame: Duration,
+    cap: Option<Instant>,
+) -> Result<Vec<u8>, FrameError> {
     let mut header = [0u8; 4];
     first_byte(stream, &mut header[..1], idle)?;
-    let deadline = Instant::now().checked_add(frame);
+    let deadline = deadline_for(frame, cap);
     read_exact_by(stream, &mut header[1..], deadline)?;
     let size = u32::from_be_bytes(header) as usize;
     if size == 0 || size > limit {
@@ -129,9 +167,10 @@ fn write_within(
     bytes: &[u8],
     limit: usize,
     frame: Duration,
+    cap: Option<Instant>,
 ) -> Result<(), FrameError> {
     let length = frame_length(bytes.len(), limit)?;
-    let deadline = Instant::now().checked_add(frame);
+    let deadline = deadline_for(frame, cap);
     for mut part in [&length.to_be_bytes()[..], bytes] {
         while !part.is_empty() {
             match send_now(stream, part) {
@@ -384,7 +423,7 @@ mod tests {
         let started = Instant::now();
         let frame = Duration::from_millis(200);
         assert_eq!(
-            write_within(&mut a, &body, CONTROL_FRAME_LIMIT, frame),
+            write_within(&mut a, &body, CONTROL_FRAME_LIMIT, frame, None),
             Err(FrameError::Truncated)
         );
         assert!(started.elapsed() < frame * 3, "{:?}", started.elapsed());
@@ -421,6 +460,33 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "child ended with {status:?}");
+    }
+
+    #[test]
+    fn a_partial_header_cannot_stretch_a_whole_frame_deadline() {
+        let (mut a, mut b) = pair();
+        a.write_all(&[0]).unwrap();
+        let started = Instant::now();
+        let by = started + Duration::from_millis(100);
+        assert_eq!(
+            read_by(&mut b, by, CONTROL_FRAME_LIMIT),
+            Err(FrameError::Truncated)
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "{:?}",
+            started.elapsed()
+        );
+        let (_c, mut d) = pair();
+        assert_eq!(
+            read_by(
+                &mut d,
+                Instant::now() + Duration::from_millis(30),
+                CONTROL_FRAME_LIMIT
+            ),
+            Err(FrameError::Idle)
+        );
+        drop(a);
     }
 
     #[test]

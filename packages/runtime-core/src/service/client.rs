@@ -67,7 +67,9 @@ pub(super) fn call_within(
         } else {
             REFUSAL_WAIT
         };
-        let body = frame::read(&mut stream, wait, frame::CONTROL_FRAME_LIMIT).map_err(|e| {
+        // One absolute deadline for the whole reply, not only its first byte.
+        let by = Instant::now() + wait;
+        let body = frame::read_by(&mut stream, by, frame::CONTROL_FRAME_LIMIT).map_err(|e| {
             let error = written.as_ref().err().unwrap_or(&e);
             failure("service_io", format!("{error:?}"))
         })?;

@@ -86,10 +86,20 @@ pub struct RuntimeStatus {
     /// first (see `guest_memory_peak`). A record only; absent when there is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guest_memory_peaks: Option<Vec<guest_memory_peak::Boot>>,
+    /// How a disk-holder scan started now would read the host (`disk_handles`): in this
+    /// process, or through `lsof` with the reason; or unknown when the self-test did not
+    /// answer in time. Computed when status runs, by the self-test a scan runs first, so
+    /// it describes this host and build and no pool or earlier scan. On macOS that test
+    /// makes and removes a private file in the process's temporary directory; status
+    /// waits at most 100 ms for it, and failing to make the file is reported as a
+    /// reason, never an error.
+    pub disk_handle_scan: disk_handles::MethodReport,
     /// Provider sockets native found world-accessible and made private for the running
     /// provider (`socket_repairs`); absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repaired_sockets: Option<socket_repairs::RepairedSockets>,
+    /// Whether this process hashes SHA-256 with the CPU's instructions (`sha256_backend`).
+    pub hashing: crate::sha256_backend::Report,
 }
 
 fn boot_reclamation_policy() -> state::ReclamationPolicy {
@@ -977,7 +987,9 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             graph_runs: users.graph_runs,
             pool_idle: Some(false),
             guest_memory_peaks: None,
+            disk_handle_scan: disk_handles::method_within(disk_handles::STATUS_METHOD_WAIT),
             repaired_sockets: None,
+            hashing: crate::sha256_backend::report(),
         });
     }
     let owner = Owner::load(candidate)?;
@@ -1049,11 +1061,13 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         )),
         persistent_disks_identified: owner.storage.is_some(),
         repaired_sockets: socket_repairs::report(&root(candidate), owner.process.as_ref()),
+        hashing: crate::sha256_backend::report(),
         guest_boot_id: owner.guest_boot_id,
         prepared_base: super::prepared_start::status(candidate),
         graph_runs: users.graph_runs,
         pool_idle,
         guest_memory_peaks: guest_memory_peak::history(&root(candidate)),
+        disk_handle_scan: disk_handles::method_within(disk_handles::STATUS_METHOD_WAIT),
     })
 }
 
@@ -1729,10 +1743,7 @@ fn start_pool(
         let cleanup = stop_verified_provider(process, &binary(candidate));
         state::write(
             &root(candidate).join("failed-boot.json"),
-            &json!({
-                "failure_code": error.code, "process": process,
-                "process_absent": cleanup.is_ok(), "disk_adoption": false,
-            }),
+            &failed_boot_record(error, process, cleanup.is_ok()),
         )?;
         if cleanup.is_ok() {
             phase(candidate, &mut owner, "failed-boot-stopped")?;
@@ -1859,6 +1870,27 @@ fn verify_disk_allocation(
 #[cfg(test)]
 #[path = "lifecycle/boot_sequence_tests.rs"]
 mod boot_sequence_tests;
+
+/// The record of a boot that failed after its provider process was recorded
+/// (`failed-boot.json` in the pool's private state directory). `process_absent` says whether
+/// the cleanup that followed the failure confirmed the provider stopped; it does not mean the
+/// provider had exited by itself.
+///
+/// The record keeps the failure's message as well as its code. A command reports most
+/// failures by code alone, because a message that is not a fixed literal can carry a path or
+/// another runtime value; many failures share one code (`provider_state` is any I/O error),
+/// and without the message the cause of a failed boot can only be found by reproducing it.
+/// This file is private to the home, like the paths it may name.
+fn failed_boot_record(
+    failure: &CandidateError,
+    process: &identity::ProcessIdentity,
+    cleanup_confirmed: bool,
+) -> serde_json::Value {
+    json!({
+        "failure_code": failure.code, "failure_message": failure.message,
+        "process": process, "process_absent": cleanup_confirmed, "disk_adoption": false,
+    })
+}
 
 fn failed_boot_stop_error(failure: CandidateError) -> CandidateError {
     CandidateError::new(
@@ -2110,7 +2142,7 @@ exit 43"#,
         ));
     }
     owner.save(candidate)?;
-    engine_ping(&socket(candidate, owner, "docker.sock")?)?;
+    engine_ping(|| socket(candidate, owner, "docker.sock"))?;
     if network_mode != "isolated" {
         // Build-bridge isolation is not a startup requirement: graph containers never
         // join the default bridge. A failure leaves no readiness marker, and native
@@ -2385,22 +2417,126 @@ pub(super) fn verify_retained_rootfs(
     Ok(())
 }
 
-fn engine_ping(path: &Path) -> Result<(), CandidateError> {
+/// How long one attempt of the host-side engine check may take from its request to the end
+/// of the reply, and how many attempts a boot makes.
+///
+/// Three seconds is what the single attempt allowed each read before, so the first attempt
+/// accepts every reply the old check accepted, apart from one that arrives in pieces more
+/// than three seconds apart in total: the limit now covers the whole exchange, where it used
+/// to start again at every read. A forward that never answers fails the boot after about
+/// 9.2 s (three attempts and two pauses); it used to fail it after 3 s.
+const ENGINE_PING_LIMIT: Duration = Duration::from_secs(3);
+const ENGINE_PING_ATTEMPTS: u32 = 3;
+/// The pause before each further attempt.
+const ENGINE_PING_PAUSE: Duration = Duration::from_millis(100);
+/// What the path checks answer for a path that is not safe to connect to: a socket that is
+/// not this user's own socket, a symlink on the way to it, or an ancestor that is not a
+/// directory. None of these is retried.
+const ENGINE_SOCKET_REFUSALS: [&str; 3] = ["foreign_state", "aliased_state", "invalid_state"];
+/// The longest single wait for reply bytes within an attempt.
+const ENGINE_PING_WAIT: Duration = Duration::from_millis(250);
+
+/// Confirm from the host that the engine answers through the provider's forwarded socket.
+///
+/// The engine has already answered inside the guest when this runs. The provider's host
+/// socket is a forward to it, and the forward can lag behind the provider's ready signal:
+/// a connection accepted in that window is never answered. One such connection used to
+/// fail the whole boot (HACK-2475: the request was written, no reply came for three
+/// seconds, and the boot was stopped as failed). So every attempt opens a fresh connection,
+/// and the boot fails when all of them failed, or at once on an unsafe path (below). The
+/// error is the last attempt's, so the failure codes are the ones a single attempt reported.
+///
+/// `socket` yields the path to connect to and is asked again for every attempt, so each
+/// connection is made to a path whose checks have just passed, as the single attempt's was.
+/// A path refused as unsafe ([`ENGINE_SOCKET_REFUSALS`]) ends the check at once: that is
+/// not a forward that is still coming up. A socket file that is not there yet is retried.
+/// The check does not identify which process answers; it never did.
+fn engine_ping(
+    socket: impl Fn() -> Result<std::path::PathBuf, CandidateError>,
+) -> Result<(), CandidateError> {
+    engine_ping_within(
+        socket,
+        ENGINE_PING_LIMIT,
+        ENGINE_PING_ATTEMPTS,
+        ENGINE_PING_PAUSE,
+    )
+}
+
+fn engine_ping_within(
+    socket: impl Fn() -> Result<std::path::PathBuf, CandidateError>,
+    limit: Duration,
+    attempts: u32,
+    pause: Duration,
+) -> Result<(), CandidateError> {
+    let mut result = Err(CandidateError::new(
+        "engine_not_ready",
+        "Private engine ping was not attempted.",
+    ));
+    for attempt in 0..attempts {
+        if attempt > 0 {
+            std::thread::sleep(pause);
+        }
+        result = socket().and_then(|path| engine_ping_once(&path, limit));
+        match &result {
+            Ok(()) => break,
+            Err(error) if ENGINE_SOCKET_REFUSALS.contains(&error.code) => break,
+            Err(_) => {}
+        }
+    }
+    result
+}
+
+/// One attempt on its own connection. `limit` covers the whole reply: it is read in waits of
+/// at most [`ENGINE_PING_WAIT`], and the attempt fails when the limit has passed, whatever
+/// the last read returned, so a reply that trickles in cannot outlast it by more than one
+/// wait. The request is sent with the limit as its write timeout. Connecting is not timed: a
+/// local connect normally returns at once or is refused, and only a listener with a full
+/// backlog could hold it.
+///
+/// Both socket timeouts are set once, before the request is written. Setting one later is
+/// not safe here: on macOS it fails with `EINVAL` on a connection the engine has already
+/// closed, which is what the engine does as soon as it has answered.
+fn engine_ping_once(path: &Path, limit: Duration) -> Result<(), CandidateError> {
+    const MOST: usize = 8192;
+    let deadline = Instant::now() + limit;
     let mut stream = UnixStream::connect(path).map_err(io)?;
+    stream.set_write_timeout(Some(limit)).map_err(io)?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .map_err(io)?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(3)))
+        .set_read_timeout(Some(limit.min(ENGINE_PING_WAIT)))
         .map_err(io)?;
     stream
         .write_all(b"GET /_ping HTTP/1.0\r\nHost: localhost\r\n\r\n")
         .map_err(io)?;
-    let mut response = String::new();
-    stream
-        .take(8192)
-        .read_to_string(&mut response)
-        .map_err(io)?;
+    let mut reply = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    loop {
+        let wanted = chunk.len().min(MOST - reply.len());
+        let read = stream.read(&mut chunk[..wanted]);
+        // The limit holds for every outcome of the read, the end of the reply included.
+        if Instant::now() >= deadline {
+            return Err(io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the engine did not answer through its forwarded socket in time",
+            )));
+        }
+        match read {
+            Ok(0) => break,
+            Ok(read) => reply.extend_from_slice(&chunk[..read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(io(error)),
+        }
+        if reply.len() >= MOST {
+            break;
+        }
+    }
+    let response = String::from_utf8(reply)
+        .map_err(|error| io(std::io::Error::new(std::io::ErrorKind::InvalidData, error)))?;
     if !response.starts_with("HTTP/1.0 200 ") && !response.starts_with("HTTP/1.1 200 ") {
         return Err(CandidateError::new(
             "engine_not_ready",
@@ -2883,9 +3019,11 @@ fn finish_stopped(
     finish_absent(candidate, owner, value, true)
 }
 
-/// Record `value` once the provider's VM lock is free, no handle remains on the owned disks and
-/// no owned socket accepts connections. The caller has established that no provider process
-/// remains; this proves the machine it launched released everything before the receipt changes.
+/// Record `value` once the provider's VM lock is free, the disk-holder scan names no process
+/// on the owned disks and no owned socket accepts connections. The caller has established that
+/// no provider process remains; these checks look for anything the machine it launched left
+/// behind before the receipt changes. The scan inspects what `lsof` inspects and does not
+/// prove that nothing maps a disk (`disk_handles`).
 /// With `record_disks`, unadopted disks are identified now; without it they stay unadopted, so
 /// the next boot's size, format-marker and template checks decide whether to adopt them.
 fn finish_absent(
@@ -2920,7 +3058,7 @@ impl Drop for VmLock {
 #[cfg(not(test))]
 const STOP_SCAN_WAIT: Duration = disk_handles::STOP_HANDLE_WAIT;
 /// The unit-test build of [`STOP_SCAN_WAIT`]. Release-check fixtures prove what the scan
-/// reports (status 1, no output), not how fast it reports it, and they run beside other
+/// reports (no holder, nothing unknown), not how fast it reports it, and they run beside other
 /// tests' work; on a loaded host one scan took longer than 5 s and the fixture failed as
 /// `provider_timeout_uncertain` before its result under test (HACK-1457). The production
 /// bounds themselves are tested on a fake clock in [`disk_handles`].
@@ -2979,7 +3117,7 @@ fn lock_disks_closed(
     }
     let vm_lock = VmLock(vm_lock);
     disk_handles::disks_closed(
-        &disk_handles::Lsof::host(),
+        &disk_handles::HostScan::host(),
         &process::MonotonicClock::new(),
         disks,
         handle_wait,
@@ -3150,6 +3288,37 @@ mod log_follow_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failed boot's record names the failure by code and by message, so a code shared by
+    /// many causes (`provider_state` is any I/O error) can be told apart afterwards.
+    #[test]
+    fn a_failed_boot_record_keeps_the_failure_message() {
+        let process = identity::ProcessIdentity {
+            pid: 41,
+            start_micros: 7,
+            uid: 501,
+            executable: std::path::PathBuf::from("/fixture/smolvm-bin"),
+        };
+        let failure = state::io(std::io::Error::other("fixture: socket vanished"));
+        let record = failed_boot_record(&failure, &process, true);
+        assert_eq!(
+            record,
+            json!({
+                "failure_code": "provider_state",
+                "failure_message": "fixture: socket vanished",
+                "process": {
+                    "pid": 41, "start_micros": 7, "uid": 501,
+                    "executable": "/fixture/smolvm-bin",
+                },
+                "process_absent": true,
+                "disk_adoption": false,
+            })
+        );
+        assert_eq!(
+            failed_boot_record(&failure, &process, false)["process_absent"],
+            json!(false)
+        );
+    }
 
     #[test]
     fn observation_treats_only_a_stopped_pool_without_a_live_provider_as_not_running() {
@@ -3904,6 +4073,212 @@ printf 'verified-cache\n'
         });
         assert!(agent_silent_at(&path));
         closing.join().unwrap();
+    }
+
+    /// A stand-in for the provider's forwarded engine socket. It holds its first `hold`
+    /// connections open and unanswered, then answers every later one with `reply` until it
+    /// is dropped, one byte every `gap` when a gap is given. A client that has already given
+    /// up is ignored. Dropping it stops and joins its thread, also when an assertion has
+    /// failed or no client ever connected: the thread polls for connections and never blocks
+    /// in accept.
+    struct Forward {
+        path: std::path::PathBuf,
+        done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Forward {
+        fn bind(path: &Path, hold: usize, reply: &'static [u8]) -> Self {
+            Self::bind_slow(path, hold, reply, None)
+        }
+
+        fn bind_slow(
+            path: &Path,
+            hold: usize,
+            reply: &'static [u8],
+            gap: Option<Duration>,
+        ) -> Self {
+            use std::sync::atomic::Ordering;
+            let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let thread = {
+                let (done, accepted) = (done.clone(), accepted.clone());
+                std::thread::spawn(move || {
+                    let mut held = Vec::new();
+                    // Never block in accept: the thread must end when it is told to, without
+                    // anybody having to connect.
+                    listener.set_nonblocking(true).unwrap();
+                    while !done.load(Ordering::SeqCst) {
+                        let mut stream = match listener.accept() {
+                            Ok((stream, _)) => stream,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(2));
+                                continue;
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                                continue;
+                            }
+                            Err(_) => break,
+                        };
+                        if accepted.fetch_add(1, Ordering::SeqCst) < hold {
+                            held.push(stream);
+                            continue;
+                        }
+                        // An accepted socket can inherit the listener's mode, and a client
+                        // that sends nothing must not hold the thread. A client that has
+                        // already gone makes these fail: drop it and carry on.
+                        if stream.set_nonblocking(false).is_err()
+                            || stream
+                                .set_read_timeout(Some(Duration::from_secs(1)))
+                                .is_err()
+                        {
+                            continue;
+                        }
+                        let mut request = [0_u8; 64];
+                        let _ = stream.read(&mut request);
+                        let Some(gap) = gap else {
+                            let _ = stream.write_all(reply);
+                            continue;
+                        };
+                        for byte in reply {
+                            if done.load(Ordering::SeqCst) || stream.write_all(&[*byte]).is_err() {
+                                break;
+                            }
+                            std::thread::sleep(gap);
+                        }
+                    }
+                })
+            };
+            Self {
+                path: path.to_owned(),
+                done,
+                accepted,
+                thread: Some(thread),
+            }
+        }
+
+        fn accepted(&self) -> usize {
+            self.accepted.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for Forward {
+        fn drop(&mut self) {
+            self.done.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    /// HACK-2475: the provider's forwarded engine socket can accept a connection it never
+    /// answers while the forward is still coming up. A later, fresh connection must be
+    /// tried before the boot is failed.
+    #[test]
+    fn the_engine_check_tries_a_fresh_connection_when_one_is_never_answered() {
+        const OK: &[u8] = b"HTTP/1.0 200 OK\r\n\r\nOK";
+        let limit = Duration::from_millis(400);
+        let pause = Duration::from_millis(10);
+        let directory = ShortDirectory::new();
+        let path = directory.0.join("docker.sock");
+        let check = |attempts| engine_ping_within(|| Ok(path.clone()), limit, attempts, pause);
+
+        // The first connection is accepted and never answered; the second is answered.
+        {
+            let forward = Forward::bind(&path, 1, OK);
+            let started = Instant::now();
+            check(8).unwrap();
+            assert!(
+                started.elapsed() >= limit,
+                "the first attempt used its whole limit"
+            );
+            assert!(forward.accepted() >= 2);
+        }
+        // A forward that never answers fails the check with the code a single attempt
+        // reported, after every attempt, each on its own connection.
+        {
+            let forward = Forward::bind(&path, usize::MAX, OK);
+            let started = Instant::now();
+            let error = check(3).unwrap_err();
+            assert_eq!(error.code, "provider_state");
+            assert!(
+                error.message.contains("did not answer"),
+                "{}",
+                error.message
+            );
+            assert!(started.elapsed() >= limit * 3);
+            assert_eq!(forward.accepted(), 3);
+        }
+        // No listener at all: every attempt is refused, and the check still ends.
+        assert_eq!(check(3).unwrap_err().code, "provider_state");
+        // An engine that answers at once is confirmed on the first connection.
+        {
+            let forward = Forward::bind(&path, 0, OK);
+            check(3).unwrap();
+            assert_eq!(forward.accepted(), 1);
+        }
+        // A wrong reply keeps `engine_not_ready`, after every attempt.
+        {
+            let forward = Forward::bind(&path, 0, b"HTTP/1.0 503 no\r\n\r\n");
+            assert_eq!(check(3).unwrap_err().code, "engine_not_ready");
+            assert_eq!(forward.accepted(), 3);
+        }
+        // A reply that trickles in cannot outlast the limit of its attempt.
+        {
+            let forward = Forward::bind_slow(&path, 0, OK, Some(Duration::from_millis(100)));
+            let started = Instant::now();
+            let error = check(1).unwrap_err();
+            assert_eq!(error.code, "provider_state");
+            assert!(
+                error.message.contains("did not answer"),
+                "{}",
+                error.message
+            );
+            assert!(started.elapsed() >= limit && started.elapsed() < limit * 3);
+            assert_eq!(forward.accepted(), 1);
+        }
+    }
+
+    /// Every attempt of the engine check asks for the socket path again, and a path refused
+    /// as foreign ends the check at once instead of being retried.
+    #[test]
+    fn the_engine_check_validates_its_socket_for_every_attempt() {
+        let calls = std::cell::Cell::new(0_u32);
+        let missing = std::path::PathBuf::from("/nonexistent/hack-fixture/docker.sock");
+        let error = engine_ping_within(
+            || {
+                calls.set(calls.get() + 1);
+                Ok(missing.clone())
+            },
+            Duration::from_millis(50),
+            3,
+            Duration::ZERO,
+        )
+        .unwrap_err();
+        assert_eq!((error.code, calls.get()), ("provider_state", 3));
+
+        // An unsafe path is not a forward that is still coming up: no further attempt.
+        for refusal in ENGINE_SOCKET_REFUSALS {
+            calls.set(0);
+            let error = engine_ping_within(
+                || {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == 2 {
+                        Err(CandidateError::new(refusal, "Fixture refusal."))
+                    } else {
+                        Ok(missing.clone())
+                    }
+                },
+                Duration::from_millis(50),
+                5,
+                Duration::ZERO,
+            )
+            .unwrap_err();
+            assert_eq!((error.code, calls.get()), (refusal, 2));
+        }
     }
 
     /// HACK-1968: a guest whose agent still answers pings, but whose engine never finishes

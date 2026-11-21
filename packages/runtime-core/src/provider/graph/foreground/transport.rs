@@ -314,7 +314,7 @@ fn verify_retirement(
         .read_to_end(&mut bytes)
         .map_err(|_| retirement_refused())?;
     let record: Record = serde_json::from_slice(&bytes).map_err(|_| retirement_refused())?;
-    if record != intent.owner || format!("{:x}", Sha256::digest(&bytes)) != expected.0 {
+    if record != intent.owner || format!("{:x}", crate::Hex(Sha256::digest(&bytes))) != expected.0 {
         return Err(retirement_refused());
     }
     Ok((socket_original, record_original))
@@ -401,7 +401,7 @@ pub(in crate::provider::graph) fn selected_retirement_process(
         return Ok(intent.owner.process);
     }
     let pin = Pin::read(candidate, run)?;
-    if format!("{:x}", Sha256::digest(&pin.bytes)) != expected_owner
+    if format!("{:x}", crate::Hex(Sha256::digest(&pin.bytes))) != expected_owner
         || identity::alive(pin.record.process.pid).unwrap_or(true)
     {
         return Err(retirement_refused());
@@ -434,7 +434,7 @@ pub(in crate::provider::graph) fn retire_recovered_publisher_locked_fenced(
         state::read(&path).map_err(|_| retirement_refused())?
     } else {
         let pin = Pin::read_with_rebind(candidate, run, device_rebind)?;
-        if format!("{:x}", Sha256::digest(&pin.bytes)) != expected_owner
+        if format!("{:x}", crate::Hex(Sha256::digest(&pin.bytes))) != expected_owner
             || identity::alive(pin.record.process.pid).unwrap_or(true)
         {
             return Err(retirement_refused());
@@ -583,7 +583,7 @@ pub(in crate::provider::graph) fn root_from_state(
         .map_err(|_| refused())?;
     Ok(PathBuf::from(format!(
         "/private/tmp/hkgf-{}",
-        &format!("{:x}", Sha256::digest(bytes))[..24]
+        &format!("{:x}", crate::Hex(Sha256::digest(bytes)))[..24]
     )))
 }
 fn id(m: &fs::Metadata) -> (u64, u64) {
@@ -733,7 +733,7 @@ impl Pin {
         device_rebind.definitely_dead_before_boot(&pin.record.process, host_boot_micros)?;
         no_listener(&pin.root.join("control.sock"))?;
         Ok(LegacyPublisher {
-            owner_sha256: format!("{:x}", Sha256::digest(&pin.bytes)),
+            owner_sha256: format!("{:x}", crate::Hex(Sha256::digest(&pin.bytes))),
             parent: pin.record.parent,
             socket: pin.record.socket,
             record: pin.record_id,
@@ -902,7 +902,7 @@ pub(in crate::provider::graph) fn dead_publisher_without_lock(
     }
     no_listener(&pin.root.join("control.sock"))?;
     Ok(LegacyPublisher {
-        owner_sha256: format!("{:x}", Sha256::digest(&pin.bytes)),
+        owner_sha256: format!("{:x}", crate::Hex(Sha256::digest(&pin.bytes))),
         parent: pin.record.parent,
         socket: pin.record.socket,
         record: pin.record_id,
@@ -1456,7 +1456,7 @@ impl DeadOwner {
         no_listener(&root.join("control.sock"))
     }
     pub(in crate::provider::graph) fn fingerprint(&self) -> String {
-        format!("{:x}", Sha256::digest(&self.pin.bytes))
+        format!("{:x}", crate::Hex(Sha256::digest(&self.pin.bytes)))
     }
     /// Retire this exact dead publication under the lock this guard holds. The
     /// immutable journal written first makes an interrupted rename resumable
@@ -1508,7 +1508,7 @@ pub(in crate::provider::graph) fn resume_recovered_publisher(
         return Err(retirement_refused());
     }
     let bytes = fs::read(root.join("owner.json")).map_err(|_| retirement_refused())?;
-    let owner = format!("{:x}", Sha256::digest(&bytes));
+    let owner = format!("{:x}", crate::Hex(Sha256::digest(&bytes)));
     if metadata(&retirement_path(&root, &owner))?.is_none() {
         return Err(retirement_refused());
     }

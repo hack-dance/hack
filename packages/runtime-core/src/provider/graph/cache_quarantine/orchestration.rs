@@ -845,7 +845,7 @@ fn legacy_timestamp_selections_refuse_after_upgrade() {
         "observed_driver": inspected["Driver"],
         "observed_labels_sha256": format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(&inspected["Labels"]).unwrap())
+            crate::Hex(Sha256::digest(serde_json::to_vec(&inspected["Labels"]).unwrap()))
         ),
         "labels": inspected["Labels"],
     });

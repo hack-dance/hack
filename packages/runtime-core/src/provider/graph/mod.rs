@@ -772,6 +772,9 @@ struct Session<'a, 's> {
     environments: BTreeMap<String, super::environment::PendingEnvironment>,
     leases: BTreeMap<String, super::environment::EnvironmentLease>,
     launcher: Option<String>,
+    /// What each probed service's latest unhealthy observation found, for its failure's
+    /// diagnostic (HACK-2416).
+    probe_findings: BTreeMap<String, crate::ProbeFinding>,
 }
 #[cfg(test)]
 pub(super) fn fault_pause(
@@ -1008,11 +1011,12 @@ impl Session<'_, '_> {
 }
 impl Driver for Session<'_, '_> {
     fn service_failure(&self, name: &str, observation: Observation) -> CandidateError {
-        probes::service_failure(
+        probes::service_failure_finding(
             "graph_service_failed",
             name,
             observation,
             self.receipt.probes.get(name).map(|probe| &probe.config),
+            self.probe_findings.get(name).copied(),
         )
     }
 
@@ -1222,7 +1226,17 @@ impl Driver for Session<'_, '_> {
             &self.expected_environment[service],
             &value,
         )?;
-        probes::observe(&self.engine, &self.receipt, service, &value)
+        let (observation, found) =
+            probes::observe_finding(&self.engine, &self.receipt, service, &value)?;
+        match found {
+            Some(found) => {
+                self.probe_findings.insert(service.into(), found);
+            }
+            None => {
+                self.probe_findings.remove(service);
+            }
+        }
+        Ok(observation)
     }
 }
 /// Explicit fresh attempt only. All commands must be non-secret until managed delivery is qualified.
@@ -1651,6 +1665,7 @@ fn run_inputs(
         receipt,
         configs: prepared.configs,
         expected_environment,
+        probe_findings: BTreeMap::new(),
         restarting: false,
         fresh_cache_completion: true,
         cache_initializers: prepared.cache_initializers,
@@ -1776,7 +1791,7 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         "run": receipt.run,
         "owner": receipt.owner,
         "phase": receipt.phase,
-        "receipt_sha256": format!("{:x}", Sha256::digest(&bytes)),
+        "receipt_sha256": format!("{:x}", crate::Hex(Sha256::digest(&bytes))),
         "foreground": publication.word(),
         "live_owner_recovery": resumable,
         "failed_start_recoverable": !running && live_owner_cleanup::failed_start_recoverable(&root, &receipt),
@@ -2449,6 +2464,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         receipt,
         configs: prepared.configs,
         expected_environment,
+        probe_findings: BTreeMap::new(),
         restarting: true,
         fresh_cache_completion: false,
         cache_initializers: BTreeMap::new(),

@@ -434,7 +434,7 @@ fn anonymous_registry_index_streams_zstd_and_gzip_layers_into_a_validated_archiv
     let bytes = fs::read(output.archive()).unwrap();
     assert_eq!(bytes.len() as u64, acquired.archive_bytes);
     assert_eq!(
-        format!("{:x}", Sha256::digest(&bytes)),
+        format!("{:x}", crate::Hex(Sha256::digest(&bytes))),
         acquired.archive_sha256
     );
     assert_eq!(
@@ -1610,7 +1610,7 @@ fn pinned_bun_node_image_downloads_without_docker() {
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(bytes.len() as u64, receipt.archive_bytes);
     assert_eq!(
-        format!("{:x}", Sha256::digest(&bytes)),
+        format!("{:x}", crate::Hex(Sha256::digest(&bytes))),
         receipt.archive_sha256
     );
     image_load::validate_file(

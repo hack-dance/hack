@@ -540,7 +540,7 @@ pub fn open_published(store: &Path, base_id: &str) -> Result<PublishedBase, Cand
     Ok(PublishedBase {
         dir,
         receipt,
-        receipt_sha256: format!("{:x}", Sha256::digest(&bytes)),
+        receipt_sha256: format!("{:x}", crate::Hex(Sha256::digest(&bytes))),
     })
 }
 

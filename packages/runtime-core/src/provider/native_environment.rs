@@ -207,7 +207,7 @@ fn entries(candidate: &Candidate) -> Result<Vec<(Intent, RecordWitness)>, Candid
             intent,
             RecordWitness {
                 identity: (after.dev(), after.ino()),
-                sha256: format!("{:x}", Sha256::digest(bytes)),
+                sha256: format!("{:x}", crate::Hex(Sha256::digest(bytes))),
             },
         ));
     }

@@ -7,6 +7,7 @@ import {
   receiptEmulationPolicy,
 } from "./native-project-platform.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
+import type { NativeRetainedGraphObservation } from "./native-project-retained-startup.ts";
 import {
   type NativeActiveReviewProof,
   selectNativeActiveReview,
@@ -44,14 +45,22 @@ export async function selectNativeRetainedImages(opts: {
   readonly amd64Emulation?: CurrentEmulation;
   readonly restore?: NativeProjectRun;
   readonly invoke?: typeof invokeNativeRuntime;
+  /**
+   * The snapshot startup already confirmed for this run after runtime up.
+   * Used only when it names the same run; it is still checked here.
+   */
+  readonly observed?: NativeRetainedGraphObservation;
 }): Promise<ReadonlyMap<string, string>> {
   if (!opts.restore) {
     return new Map();
   }
-  const observed = await inspectNativeProjectGraph({
-    ...opts,
-    run: opts.restore.run,
-  });
+  const observed =
+    opts.observed?.run === opts.restore.run
+      ? opts.observed.snapshot
+      : await inspectNativeProjectGraph({
+          ...opts,
+          run: opts.restore.run,
+        });
   if (
     !(
       confirmedNativeRetainedGraph(observed, opts.restore) &&

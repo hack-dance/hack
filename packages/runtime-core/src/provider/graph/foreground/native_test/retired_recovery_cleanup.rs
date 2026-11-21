@@ -163,7 +163,9 @@ fn previous_boot_recovered_publisher_allows_data_removal_without_touching_siblin
     assert_eq!(selected.phase, "ready-observed");
     let expected = format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec_pretty(&selected).unwrap())
+        crate::Hex(Sha256::digest(
+            serde_json::to_vec_pretty(&selected).unwrap()
+        ))
     );
     let before_reboot = crate::provider::lifecycle::status(&candidate).unwrap();
     assert_eq!(before_reboot.phase, "running");

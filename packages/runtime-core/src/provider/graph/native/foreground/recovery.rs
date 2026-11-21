@@ -19,7 +19,7 @@ fn refused() -> CandidateError {
     )
 }
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 fn id(path: &Path) -> Result<(u64, u64), CandidateError> {
     let metadata = fs::symlink_metadata(path).map_err(|_| refused())?;

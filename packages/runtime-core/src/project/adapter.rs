@@ -38,7 +38,7 @@ impl Input<'_> {
         if self.bytes.is_empty()
             || self.bytes.len() > yaml::MAX_BYTES
             || self.namespace != namespace
-            || self.original_sha256 != format!("{:x}", Sha256::digest(original))
+            || self.original_sha256 != format!("{:x}", crate::Hex(Sha256::digest(original)))
         {
             return Err(problem(
                 "normalized_compose_input",
@@ -110,7 +110,7 @@ mod tests {
                 project,
                 candidate,
                 namespace,
-                hash: format!("{:x}", Sha256::digest(ORIGINAL.as_bytes())),
+                hash: format!("{:x}", crate::Hex(Sha256::digest(ORIGINAL.as_bytes()))),
             }
         }
         fn options<'a>(&'a self, bytes: &'a [u8]) -> NormalizedComposeOptions<'a> {
@@ -320,7 +320,7 @@ mod tests {
         let mut fixture = Fixture::new();
         let bytes = b"services:\n  web:\n    image: alpine:3.21\n    labels: {caddy: web.hack, caddy.reverse_proxy: '{{upstreams 3000}}', caddy.tls: internal}\n";
         fs::write(fixture.project.join(".hack/compose.yml"), bytes).unwrap();
-        fixture.hash = format!("{:x}", Sha256::digest(bytes));
+        fixture.hash = format!("{:x}", crate::Hex(Sha256::digest(bytes)));
         let normal = super::super::plan(
             &fixture.candidate,
             PlanOptions {
@@ -509,7 +509,7 @@ mod tests {
         let before = plan_normalized(&fixture.candidate, fixture.options(bytes)).unwrap();
         let original = ORIGINAL.replace("alpine:3.21", "alpine:3.23");
         fs::write(fixture.project.join(".hack/compose.yml"), &original).unwrap();
-        fixture.hash = format!("{:x}", Sha256::digest(original.as_bytes()));
+        fixture.hash = format!("{:x}", crate::Hex(Sha256::digest(original.as_bytes())));
         let after = plan_normalized(&fixture.candidate, fixture.options(bytes)).unwrap();
         assert_eq!(before.plan.compose_sha256, after.plan.compose_sha256);
         assert_ne!(
@@ -539,7 +539,7 @@ mod tests {
         .unwrap();
         let original = "services:\n  discarded:\n    image: alpine:3.21\n    env_file: ../config/private-vars.txt\n  web:\n    image: alpine:3.21\n";
         fs::write(fixture.project.join(".hack/compose.yml"), original).unwrap();
-        fixture.hash = format!("{:x}", Sha256::digest(original.as_bytes()));
+        fixture.hash = format!("{:x}", crate::Hex(Sha256::digest(original.as_bytes())));
         for normalized in [
             b"services:\n  web:\n    image: alpine:3.21\n".as_slice(),
             b"services:\n  discarded:\n    image: alpine:3.21\n  web:\n    image: alpine:3.21\n"

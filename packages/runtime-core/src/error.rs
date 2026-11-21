@@ -130,13 +130,58 @@ pub struct PlanChangeDiagnostic {
     pub field: PlanChangeField,
 }
 
-/// Only the public reviewed port of an unhealthy inferred probe. No path,
-/// response, other configuration or application output crosses this boundary.
+/// Only the public reviewed port of an unhealthy inferred probe and, from version 2, what the
+/// probe observed (HACK-2416): a closed reason and counts. No path, response, other
+/// configuration or application output crosses this boundary.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteProbeDiagnostic {
     pub version: u8,
     pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ProbeReason>,
+    /// Requests the probe had completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
+    /// Consecutive failed requests it had counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failures: Option<u64>,
+    /// How long its last request took, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_elapsed_ms: Option<u64>,
+    /// How long the probe had been running when it was judged unhealthy, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_start_ms: Option<u64>,
+}
+
+/// Why an HTTP probe was judged unhealthy. A closed vocabulary: never response bytes.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeReason {
+    /// The probe's process inside the container is gone.
+    ExecNotRunning,
+    /// The probe's process exited.
+    ExecExited,
+    /// The probe never wrote a sample.
+    SampleMissing,
+    /// The probe's sample could not be read as one.
+    SampleInvalid,
+    /// The guest clock was ahead of the host's by more than the allowance.
+    SampleClockAhead,
+    /// The probe's last sample was too old.
+    SampleStale,
+    /// The probe counted its configured number of failed requests.
+    FailuresExhausted,
+}
+
+/// What a probe observation found when it was unhealthy; see [`RouteProbeDiagnostic`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProbeFinding {
+    pub reason: ProbeReason,
+    pub sequence: Option<u64>,
+    pub failures: Option<u64>,
+    pub last_elapsed_ms: Option<u64>,
+    pub since_start_ms: u64,
 }
 
 /// Network authority and bounded attempt count only; never a URL, token or response.
@@ -486,8 +531,29 @@ impl CandidateError {
     }
 
     pub fn with_route_probe(mut self, port: u16) -> Self {
-        self.refusals.get_or_insert_default().route_probe =
-            Some(RouteProbeDiagnostic { version: 1, port });
+        self.refusals.get_or_insert_default().route_probe = Some(RouteProbeDiagnostic {
+            version: 1,
+            port,
+            reason: None,
+            sequence: None,
+            failures: None,
+            last_elapsed_ms: None,
+            since_start_ms: None,
+        });
+        self
+    }
+
+    /// [`Self::with_route_probe`] with what the probe observed (version 2).
+    pub fn with_route_probe_finding(mut self, port: u16, finding: ProbeFinding) -> Self {
+        self.refusals.get_or_insert_default().route_probe = Some(RouteProbeDiagnostic {
+            version: 2,
+            port,
+            reason: Some(finding.reason),
+            sequence: finding.sequence,
+            failures: finding.failures,
+            last_elapsed_ms: finding.last_elapsed_ms,
+            since_start_ms: Some(finding.since_start_ms),
+        });
         self
     }
 

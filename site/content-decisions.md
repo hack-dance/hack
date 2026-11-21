@@ -2,21 +2,36 @@
 
 ## Positioning
 
-Hack runs your whole project on your own machine, and runs every project, branch
-and git worktree side by side, each at its own HTTPS address. One command
-starts a repo. Nothing is hosted. The root `README.md` carries this story in full;
-the site homepage and the v5 documentation index repeat it briefly and link out.
+The headline is "Hack on your project, not your setup." The description is: "One
+command starts your API, your database and the tunnel to staging, and catches the
+sign-in you forgot. Every branch gets its own running copy. One config, any
+machine. Docker optional." Both live in `site/lib/home.ts`, which the home page
+and the site metadata share.
+
+The home page (`site/app/page.tsx`) describes Hack 5.0 as it is being built. It is
+reviewed against the product before the 5.0 release. Its install commands are the
+real ones: the pinned v5 prerelease installer and the stable v4 Homebrew command.
+Every performance and resource figure it shows is recorded in
+`site/lib/home-numbers.ts` with whether it has been measured. No figure about
+another product is published without a measurement: the comparisons on the home
+page stay off until `COMPARISONS_MEASURED` in that file is set.
+
+The rest of this section is about the documentation pages. Hack runs your whole
+project on your own machine, and runs every project, branch and git worktree side
+by side, each at its own HTTPS address. One command starts a repo. Nothing is
+hosted. The root `README.md` carries this story in full; the v5 documentation
+index repeats it briefly and links out.
 
 The native backend is a proof point, not a headline. It is labelled beta and has
 its own section: it runs the same project in a lightweight Linux VM that Hack
-manages, without Docker Desktop. Pages never call it a sandbox or a microVM, and
-make no speed, memory or battery claim for it.
+manages, without Docker Desktop. Documentation pages never call it a sandbox or a
+microVM, and make no speed, memory or battery claim for it.
 
-Pages say "backend" for Compose and native, "instance" for a running copy of a
-project, and "prerelease" for a `5.0.0-next.N` build. They do not use "engine",
-"provider", "pool" or "candidate" for these in user-facing text. "Isolated" is
-always qualified: say what a branch instance gets of its own (containers,
-addresses, logs) and what it still shares.
+Documentation pages say "backend" for Compose and native, "instance" for a running
+copy of a project, and "prerelease" for a `5.0.0-next.N` build. They do not use
+"engine", "provider", "pool" or "candidate" for these in user-facing text.
+"Isolated" is always qualified: say what a branch instance gets of its own
+(containers, addresses, logs) and what it still shares.
 
 v5 is the same CLI and project model as v4 with a new way to run services. Docker Compose
 stays the default backend; the native backend is beta: opt-in, Apple Silicon macOS, `hack-next` channel only. Pages

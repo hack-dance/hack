@@ -167,36 +167,65 @@ pub(super) fn start_all(
     selected: &[(u8, &bridges::Assignment)],
     input: &str,
 ) -> Result<(), CandidateError> {
-    let mut args = Vec::with_capacity(1 + selected.len() * 11);
-    // Every start in a batch shares one run; tests select fault scripts by run.
-    let run = selected.first().map_or("", |(_, a)| a.run.as_str());
-    args.push(script(run, "start"));
-    for (slot, assignment) in selected {
-        args.extend(arguments(engine, *slot, assignment, "start")?);
-    }
-    let output = engine.guest().execute(
-        include_str!("relay-batch.sh"),
-        &args.iter().map(String::as_str).collect::<Vec<_>>(),
-        Some(input),
-    )?;
-    confirm_batch(&output, selected.len())
+    operate_all(engine, selected, "start", Some(input))
 }
 
-/// Exactly one `<index> running` line per started slot, in any order.
-fn confirm_batch(output: &str, expected: usize) -> Result<(), CandidateError> {
-    let mut confirmed = std::collections::BTreeSet::new();
+/// The batch counterpart of [`operate`] for `start`, `stop` and `remove`: one
+/// guest call runs the unchanged per-slot script for every selected slot
+/// concurrently, and every slot must confirm the action's own result. Stop and
+/// remove keep cleanup admission (no allocation), as [`operate`] does.
+pub(super) fn operate_all(
+    engine: &Engine<'_>,
+    selected: &[(u8, &bridges::Assignment)],
+    action: &str,
+    input: Option<&str>,
+) -> Result<(), CandidateError> {
+    let confirmed = match action {
+        "start" => "running",
+        "stop" => "stopped",
+        "remove" => "removed",
+        _ => return Err(error("bridge_relay", "Unsupported batch relay action.")),
+    };
+    if selected.is_empty() || (action == "start") != input.is_some() {
+        return Err(error("bridge_relay", "Unsupported batch relay action."));
+    }
+    let mut args = Vec::with_capacity(2 + selected.len() * 11);
+    // Every slot in a batch shares one run; tests select fault scripts by run.
+    args.push(script(&selected[0].1.run, action));
+    args.push(if input.is_some() { "stdin" } else { "none" }.to_owned());
+    for (slot, assignment) in selected {
+        args.extend(arguments(engine, *slot, assignment, action)?);
+    }
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = match input {
+        Some(input) => {
+            engine
+                .guest()
+                .execute(include_str!("relay-batch.sh"), &args, Some(input))?
+        }
+        None => engine
+            .guest()
+            .execute_cleanup(include_str!("relay-batch.sh"), &args)?,
+    };
+    confirm_batch(&output, selected.len(), confirmed)
+}
+
+/// Exactly one `<index> <confirmed>` line per selected slot, in any order.
+fn confirm_batch(output: &str, expected: usize, confirmed: &str) -> Result<(), CandidateError> {
+    let mut seen = std::collections::BTreeSet::new();
+    let suffix = format!(" {confirmed}");
     let well_formed = output.ends_with('\n')
         && output.lines().all(|line| {
-            line.strip_suffix(" running")
+            line.strip_suffix(suffix.as_str())
                 .and_then(|index| {
                     index
                         .parse::<usize>()
                         .ok()
                         .filter(|i| i.to_string() == index)
                 })
-                .is_some_and(|index| index < expected && confirmed.insert(index))
+                .is_some_and(|index| index < expected && seen.insert(index))
         });
-    if expected == 0 || !well_formed || confirmed.len() != expected {
+    if expected == 0 || !well_formed || seen.len() != expected {
         return Err(error(
             "bridge_relay",
             "Unconfirmed relay operation; retain intent before recovery.",
@@ -794,7 +823,9 @@ mod tests {
 
     #[test]
     fn batch_confirms_only_exactly_one_running_line_per_slot() {
-        confirm_batch("1 running\n0 running\n", 2).unwrap();
+        confirm_batch("1 running\n0 running\n", 2, "running").unwrap();
+        confirm_batch("0 stopped\n", 1, "stopped").unwrap();
+        assert!(confirm_batch("0 running\n", 1, "stopped").is_err());
         for output in [
             "",
             "0 running\n",
@@ -805,9 +836,12 @@ mod tests {
             "0 running\n1 running",
             "0 running\n1 running\nextra\n",
         ] {
-            assert!(confirm_batch(output, 2).is_err(), "accepted {output:?}");
+            assert!(
+                confirm_batch(output, 2, "running").is_err(),
+                "accepted {output:?}"
+            );
         }
-        assert!(confirm_batch("", 0).is_err());
+        assert!(confirm_batch("", 0, "running").is_err());
     }
 
     #[test]
@@ -856,7 +890,8 @@ mod tests {
         let mut command = std::process::Command::new("/bin/sh");
         command
             .args(["-c", include_str!("relay-batch.sh"), "relay-batch"])
-            .arg(&slot_script);
+            .arg(&slot_script)
+            .arg("stdin");
         for slot in 0..3 {
             command.args([
                 "start",
@@ -893,7 +928,7 @@ mod tests {
             .collect::<Vec<_>>();
         lines.sort();
         assert_eq!(lines, ["0 running", "1 running", "2 failed"]);
-        assert!(confirm_batch("0 running\n1 running\n2 failed\n", 3).is_err());
+        assert!(confirm_batch("0 running\n1 running\n2 failed\n", 3, "running").is_err());
         for slot in 0..3 {
             assert_eq!(
                 std::fs::read_to_string(directory.join(format!("args-{slot}"))).unwrap(),
@@ -904,6 +939,47 @@ mod tests {
                 "cGF5bG9hZA==\n"
             );
         }
+    }
+
+    /// Stop and remove pass no input: each slot reads an empty stdin, never the
+    /// caller's stream, and reports its own result word.
+    #[test]
+    fn batch_wrapper_without_input_gives_each_slot_an_empty_stdin() {
+        let slot_script = "set -eu\ntest -z \"$(cat)\"\nprintf 'stopped\\n'\n";
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args(["-c", include_str!("relay-batch.sh"), "relay-batch"])
+            .args([slot_script, "none"]);
+        for slot in 0..2 {
+            command.args([
+                "stop",
+                "r",
+                "m",
+                "s",
+                "d",
+                "1",
+                "2",
+                "3",
+                "4",
+                &slot.to_string(),
+                "reservation-v1",
+            ]);
+        }
+        let output = command.stdin(std::process::Stdio::null()).output().unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        confirm_batch(&text, 2, "stopped").unwrap();
+        let bad = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                include_str!("relay-batch.sh"),
+                "relay-batch",
+                slot_script,
+                "other",
+            ])
+            .output()
+            .unwrap();
+        assert!(!bad.status.success());
     }
 
     #[test]

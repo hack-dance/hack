@@ -1245,13 +1245,138 @@ pub(super) fn release_run(
     receipt: &Receipt,
 ) -> Result<(), CandidateError> {
     let mut store = load_store(candidate, engine, false)?;
-    let selected = owned_slots(&store, &receipt.run);
-    for slot in selected {
-        stop_slot(candidate, engine, &mut store, slot)?;
-        store.slots.remove(&slot);
-        save(candidate, &store)?;
+    release_selected(
+        candidate,
+        &LeasedRelease { candidate, engine },
+        &mut store,
+        &receipt.run,
+    )
+}
+
+/// Effects of releasing one run's bridges; the caller holds the provider lease.
+trait ReleaseGuest {
+    fn boot_id(&self) -> &str;
+    /// Retire the host publications of these reservations of `run`.
+    fn release_publications(
+        &self,
+        run: &str,
+        reservations: &std::collections::BTreeSet<&str>,
+    ) -> Result<(), CandidateError>;
+    /// `stop` or `remove` every selected relay; each must confirm.
+    fn relays(&self, action: &str, selected: &[(u8, &Assignment)]) -> Result<(), CandidateError>;
+    /// Test pause point between the guest stop and its durable `stopped` phase.
+    fn after_guest_stop(&self, run: &str) -> Result<(), CandidateError>;
+}
+
+struct LeasedRelease<'a, 'e> {
+    candidate: &'a Candidate,
+    engine: &'a Engine<'e>,
+}
+
+impl ReleaseGuest for LeasedRelease<'_, '_> {
+    fn boot_id(&self) -> &str {
+        self.engine.guest().boot_id()
     }
-    Ok(())
+    fn release_publications(
+        &self,
+        run: &str,
+        reservations: &std::collections::BTreeSet<&str>,
+    ) -> Result<(), CandidateError> {
+        super::super::publication::release_reservations(
+            self.candidate,
+            self.engine.guest().incarnation(),
+            run,
+            reservations,
+        )
+    }
+    fn relays(&self, action: &str, selected: &[(u8, &Assignment)]) -> Result<(), CandidateError> {
+        relay::operate_all(self.engine, selected, action, None)
+    }
+    fn after_guest_stop(&self, _run: &str) -> Result<(), CandidateError> {
+        #[cfg(test)]
+        fault_pause(
+            &directory(self.candidate, _run)?,
+            _run,
+            "bridge-normalization-after-guest-stop",
+        )?;
+        Ok(())
+    }
+}
+
+/// [`stop_slot`] for every slot of one run, phase by phase instead of slot by
+/// slot. Each slot passes through the same durable phases in the same order:
+///
+/// 1. host publications retired (all at once, before any guest effect);
+/// 2. `stopping` recorded for every same-boot relay (one save); a relay from an
+///    earlier guest boot is recorded `stopped`, since boot-local guest state is gone;
+/// 3. every same-boot relay stopped (one guest call), then `stopped` (one save);
+/// 4. every same-boot allocation removed (one guest call);
+/// 5. every slot of the run dropped from the registry (one save).
+///
+/// A refusal leaves each slot at its last recorded phase. Stop and remove are
+/// idempotent per slot, so the next release resumes from there, as before.
+fn release_selected(
+    candidate: &Candidate,
+    guest: &impl ReleaseGuest,
+    store: &mut Store,
+    run: &str,
+) -> Result<(), CandidateError> {
+    let selected = owned_slots(store, run);
+    if selected.is_empty() {
+        return Ok(());
+    }
+    let reservations = selected
+        .iter()
+        .map(|slot| store.slots[slot].reservation.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    guest.release_publications(run, &reservations)?;
+    let boot = guest.boot_id().to_owned();
+    let mut stopping = Vec::new();
+    let mut removing = Vec::new();
+    let mut changed = false;
+    for slot in &selected {
+        let a = store.slots.get_mut(slot).expect("owned slot");
+        if a.relay.is_none() {
+            continue;
+        }
+        if a.boot_id != boot {
+            changed |= a.phase != "stopped";
+            a.phase = "stopped".into();
+            continue;
+        }
+        if a.phase != "stopped" {
+            a.phase = "stopping".into();
+            changed = true;
+            stopping.push(*slot);
+        }
+        removing.push(*slot);
+    }
+    if changed {
+        save(candidate, store)?;
+    }
+    if !stopping.is_empty() {
+        let batch = stopping
+            .iter()
+            .map(|slot| (*slot, &store.slots[slot]))
+            .collect::<Vec<_>>();
+        guest.relays("stop", &batch)?;
+        guest.after_guest_stop(run)?;
+        for slot in &stopping {
+            store.slots.get_mut(slot).expect("owned slot").phase = "stopped".into();
+        }
+        save(candidate, store)?;
+    }
+    if !removing.is_empty() {
+        let batch = removing
+            .iter()
+            .map(|slot| (*slot, &store.slots[slot]))
+            .collect::<Vec<_>>();
+        guest.relays("remove", &batch)?;
+    }
+    for slot in &selected {
+        store.slots.remove(slot);
+    }
+    save(candidate, store)
 }
 
 fn owned_slots(store: &Store, run: &str) -> Vec<u8> {

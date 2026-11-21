@@ -484,9 +484,17 @@ function startExplorer(
     },
   });
 
+  /**
+   * Counts starts and stops. A wave scheduled by an earlier start must not raise
+   * a part after a later stop or restart, so each wave checks it is still current.
+   */
+  let generation = 0;
+
   /** Starts every local part: at once, or in waves from the data stores up. */
   function start(instant: boolean): void {
     model.state = "up";
+    generation += 1;
+    const current = generation;
     for (const part of locals) {
       if (instant) {
         model.h.set(part.id, part.H);
@@ -496,7 +504,11 @@ function startExplorer(
       model.t.set(part.id, 0);
       model.h.set(part.id, Math.min(model.h.get(part.id) ?? 0, 0.02));
       later(
-        () => model.t.set(part.id, part.H),
+        () => {
+          if (generation === current) {
+            model.t.set(part.id, part.H);
+          }
+        },
         140 + part.wave * 320 + hash01(`${part.id}d`) * 260
       );
     }
@@ -504,6 +516,7 @@ function startExplorer(
 
   function stop(): void {
     model.state = "down";
+    generation += 1;
     for (const part of locals) {
       model.t.set(part.id, 0);
       if (calm) {

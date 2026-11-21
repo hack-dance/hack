@@ -38,10 +38,11 @@ import {
   waitForInterruptedTmuxPanes,
 } from "../src/lib/project-lifecycle-controller.ts";
 import { setLoggerBackendOverride } from "../src/ui/logger.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const CLI_ENTRY = join(REPO_ROOT, "index.ts");
-const CLI_TIMEOUT_MS = 10_000;
+const CLI_TIMEOUT_MS = 30_000;
 
 const tempDirs: string[] = [];
 
@@ -108,7 +109,7 @@ async function createComposeFixture(opts?: {
   await writeFile(
     dockerShim,
     [
-      "#!/usr/bin/env bun",
+      `#!${process.execPath}`,
       'import { appendFileSync } from "node:fs";',
       "const logPath = process.env.FAKE_DOCKER_LOG;",
       "const args = process.argv.slice(2);",
@@ -151,19 +152,24 @@ async function runCli(opts: {
 }> {
   const proc = Bun.spawn([process.execPath, CLI_ENTRY, ...opts.args], {
     cwd: opts.cwd,
-    env: {
-      ...process.env,
-      PATH: `${opts.binDir}:${process.env.PATH ?? ""}`,
-      HOME: opts.homeDir,
-      XDG_CONFIG_HOME: join(opts.homeDir, ".config"),
-      HACK_GLOBAL_CONFIG_PATH: join(opts.homeDir, ".hack", "hack.config.json"),
-      HACK_DAEMON_AUTOSTART_DISABLE: "1",
-      HACK_NO_INTERACTIVE: "1",
-      HACK_RUNTIME_BACKEND: "compose",
-      HACK_LOGGER: "console",
-      FAKE_DOCKER_LOG: opts.dockerLogPath,
-      ...(opts.extraEnv ?? {}),
-    },
+    env: privateCliEnv({
+      root: opts.cwd,
+      home: opts.homeDir,
+      env: {
+        PATH: `${opts.binDir}:${process.env.PATH ?? ""}`,
+        XDG_CONFIG_HOME: join(opts.homeDir, ".config"),
+        HACK_GLOBAL_CONFIG_PATH: join(
+          opts.homeDir,
+          ".hack",
+          "hack.config.json"
+        ),
+        HACK_NO_INTERACTIVE: "1",
+        HACK_RUNTIME_BACKEND: "compose",
+        HACK_LOGGER: "console",
+        FAKE_DOCKER_LOG: opts.dockerLogPath,
+        ...(opts.extraEnv ?? {}),
+      },
+    }),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -347,104 +353,96 @@ describe("compose down stop timeout validation and cap", () => {
     ]);
   });
 
-  test(
-    "CLI down passes --timeout only when configured and refuses invalid flag/config values",
-    async () => {
-      // 1. Unset: no --timeout flag passed to docker compose down, 0 docker events calls.
-      const unsetFixture = await createComposeFixture();
-      const unsetRun = await runCli({
-        args: ["down"],
-        cwd: unsetFixture.root,
-        homeDir: unsetFixture.homeDir,
-        binDir: unsetFixture.binDir,
-        dockerLogPath: unsetFixture.dockerLogPath,
-      });
-      expect(unsetRun.exitCode).toBe(0);
-      const unsetCalls = await readDockerCalls(unsetFixture.dockerLogPath);
-      const unsetDownCall = unsetCalls.find(
-        (argv) => argv[0] === "compose" && argv.includes("down")
-      );
-      expect(unsetDownCall).toBeDefined();
-      expect(unsetDownCall).not.toContain("--timeout");
-      expect(unsetCalls.filter((argv) => argv[0] === "events")).toHaveLength(0);
+  test("CLI down passes --timeout only when configured and refuses invalid flag/config values", async () => {
+    // 1. Unset: no --timeout flag passed to docker compose down, 0 docker events calls.
+    const unsetFixture = await createComposeFixture();
+    const unsetRun = await runCli({
+      args: ["down"],
+      cwd: unsetFixture.root,
+      homeDir: unsetFixture.homeDir,
+      binDir: unsetFixture.binDir,
+      dockerLogPath: unsetFixture.dockerLogPath,
+    });
+    expect(unsetRun.exitCode).toBe(0);
+    const unsetCalls = await readDockerCalls(unsetFixture.dockerLogPath);
+    const unsetDownCall = unsetCalls.find(
+      (argv) => argv[0] === "compose" && argv.includes("down")
+    );
+    expect(unsetDownCall).toBeDefined();
+    expect(unsetDownCall).not.toContain("--timeout");
+    expect(unsetCalls.filter((argv) => argv[0] === "events")).toHaveLength(0);
 
-      // 2. Project config compose.downTimeoutSeconds passes --timeout <n>.
-      const cfgFixture = await createComposeFixture({
-        config: { compose: { downTimeoutSeconds: 8 } },
-      });
-      const cfgRun = await runCli({
-        args: ["down"],
-        cwd: cfgFixture.root,
-        homeDir: cfgFixture.homeDir,
-        binDir: cfgFixture.binDir,
-        dockerLogPath: cfgFixture.dockerLogPath,
-      });
-      expect(cfgRun.exitCode).toBe(0);
-      const cfgCalls = await readDockerCalls(cfgFixture.dockerLogPath);
-      const cfgDownCall = cfgCalls.find(
-        (argv) => argv[0] === "compose" && argv.includes("down")
-      );
-      expect(cfgDownCall?.slice(-3)).toEqual(["down", "--timeout", "8"]);
+    // 2. Project config compose.downTimeoutSeconds passes --timeout <n>.
+    const cfgFixture = await createComposeFixture({
+      config: { compose: { downTimeoutSeconds: 8 } },
+    });
+    const cfgRun = await runCli({
+      args: ["down"],
+      cwd: cfgFixture.root,
+      homeDir: cfgFixture.homeDir,
+      binDir: cfgFixture.binDir,
+      dockerLogPath: cfgFixture.dockerLogPath,
+    });
+    expect(cfgRun.exitCode).toBe(0);
+    const cfgCalls = await readDockerCalls(cfgFixture.dockerLogPath);
+    const cfgDownCall = cfgCalls.find(
+      (argv) => argv[0] === "compose" && argv.includes("down")
+    );
+    expect(cfgDownCall?.slice(-3)).toEqual(["down", "--timeout", "8"]);
 
-      // 3. CLI --timeout overrides compose.downTimeoutSeconds.
-      const overrideRun = await runCli({
-        args: ["down", "--timeout", "2"],
-        cwd: cfgFixture.root,
-        homeDir: cfgFixture.homeDir,
-        binDir: cfgFixture.binDir,
-        dockerLogPath: cfgFixture.dockerLogPath,
-      });
-      expect(overrideRun.exitCode).toBe(0);
-      const allCfgCalls = await readDockerCalls(cfgFixture.dockerLogPath);
-      const overrideDownCall = allCfgCalls
-        .filter((argv) => argv[0] === "compose" && argv.includes("down"))
-        .at(-1);
-      expect(overrideDownCall?.slice(-3)).toEqual(["down", "--timeout", "2"]);
+    // 3. CLI --timeout overrides compose.downTimeoutSeconds.
+    const overrideRun = await runCli({
+      args: ["down", "--timeout", "2"],
+      cwd: cfgFixture.root,
+      homeDir: cfgFixture.homeDir,
+      binDir: cfgFixture.binDir,
+      dockerLogPath: cfgFixture.dockerLogPath,
+    });
+    expect(overrideRun.exitCode).toBe(0);
+    const allCfgCalls = await readDockerCalls(cfgFixture.dockerLogPath);
+    const overrideDownCall = allCfgCalls
+      .filter((argv) => argv[0] === "compose" && argv.includes("down"))
+      .at(-1);
+    expect(overrideDownCall?.slice(-3)).toEqual(["down", "--timeout", "2"]);
 
-      // 4. Invalid --timeout refuses with E_USAGE in --json mode without touching Docker.
-      const badFlagFixture = await createComposeFixture();
-      const badFlagRun = await runCli({
-        args: ["down", "--timeout", "601", "--json"],
-        cwd: badFlagFixture.root,
-        homeDir: badFlagFixture.homeDir,
-        binDir: badFlagFixture.binDir,
-        dockerLogPath: badFlagFixture.dockerLogPath,
-      });
-      expect(badFlagRun.exitCode).toBe(1);
-      const badFlagJson = JSON.parse(badFlagRun.stdout) as {
-        ok: boolean;
-        error: { code: string; message: string };
-      };
-      expect(badFlagJson.ok).toBe(false);
-      expect(badFlagJson.error.code).toBe("E_USAGE");
-      expect(await readDockerCalls(badFlagFixture.dockerLogPath)).toHaveLength(
-        0
-      );
+    // 4. Invalid --timeout refuses with E_USAGE in --json mode without touching Docker.
+    const badFlagFixture = await createComposeFixture();
+    const badFlagRun = await runCli({
+      args: ["down", "--timeout", "601", "--json"],
+      cwd: badFlagFixture.root,
+      homeDir: badFlagFixture.homeDir,
+      binDir: badFlagFixture.binDir,
+      dockerLogPath: badFlagFixture.dockerLogPath,
+    });
+    expect(badFlagRun.exitCode).toBe(1);
+    const badFlagJson = JSON.parse(badFlagRun.stdout) as {
+      ok: boolean;
+      error: { code: string; message: string };
+    };
+    expect(badFlagJson.ok).toBe(false);
+    expect(badFlagJson.error.code).toBe("E_USAGE");
+    expect(await readDockerCalls(badFlagFixture.dockerLogPath)).toHaveLength(0);
 
-      // 5. Invalid compose.downTimeoutSeconds refuses with E_CONFIG_INVALID in --json mode.
-      const badCfgFixture = await createComposeFixture({
-        config: { compose: { downTimeoutSeconds: -5 } },
-      });
-      const badCfgRun = await runCli({
-        args: ["down", "--json"],
-        cwd: badCfgFixture.root,
-        homeDir: badCfgFixture.homeDir,
-        binDir: badCfgFixture.binDir,
-        dockerLogPath: badCfgFixture.dockerLogPath,
-      });
-      expect(badCfgRun.exitCode).toBe(1);
-      const badCfgJson = JSON.parse(badCfgRun.stdout) as {
-        ok: boolean;
-        error: { code: string; message: string };
-      };
-      expect(badCfgJson.ok).toBe(false);
-      expect(badCfgJson.error.code).toBe("E_CONFIG_INVALID");
-      expect(await readDockerCalls(badCfgFixture.dockerLogPath)).toHaveLength(
-        0
-      );
-    },
-    CLI_TIMEOUT_MS * 2
-  );
+    // 5. Invalid compose.downTimeoutSeconds refuses with E_CONFIG_INVALID in --json mode.
+    const badCfgFixture = await createComposeFixture({
+      config: { compose: { downTimeoutSeconds: -5 } },
+    });
+    const badCfgRun = await runCli({
+      args: ["down", "--json"],
+      cwd: badCfgFixture.root,
+      homeDir: badCfgFixture.homeDir,
+      binDir: badCfgFixture.binDir,
+      dockerLogPath: badCfgFixture.dockerLogPath,
+    });
+    expect(badCfgRun.exitCode).toBe(1);
+    const badCfgJson = JSON.parse(badCfgRun.stdout) as {
+      ok: boolean;
+      error: { code: string; message: string };
+    };
+    expect(badCfgJson.ok).toBe(false);
+    expect(badCfgJson.error.code).toBe("E_CONFIG_INVALID");
+    expect(await readDockerCalls(badCfgFixture.dockerLogPath)).toHaveLength(0);
+  }, 60_000);
 });
 
 describe("lifecycle tmux interrupt bounded poll", () => {

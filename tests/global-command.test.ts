@@ -2156,6 +2156,39 @@ describe("the opt-in logging stack (HACK-2468)", () => {
     expect(message).not.toContain("second line");
   });
 
+  test("a failed lookup of the disabled stack's containers fails global up instead of reporting it stopped", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    await writeComposeFile(loggingCompose());
+    execMockResponder = (cmd) =>
+      cmd[1] === "ps" &&
+      cmd.includes("label=com.docker.compose.project=hack-logging")
+        ? { exitCode: 1, stdout: "", stderr: "Cannot connect\n" }
+        : null;
+    const lines: string[] = [];
+    const capture = (chunk: string | Uint8Array) => {
+      lines.push(String(chunk));
+      return true;
+    };
+    const out = spyOn(process.stdout, "write").mockImplementation(capture);
+    const err = spyOn(process.stderr, "write").mockImplementation(capture);
+    let code: number;
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      code = await runCli(["global", "up", "--no-logging"]);
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
+    }
+    expect(code).toBe(1);
+    const text = lines.join("");
+    expect(text).toContain(
+      "Docker could not be asked for its containers, so none were stopped."
+    );
+    expect(text).toContain("They may still be running.");
+    expect(text).not.toContain("Logging stack (Loki, Alloy, Grafana) is off;");
+    expect(execCalls.filter((call) => call[1] === "stop")).toEqual([]);
+  });
+
   async function statusJson(): Promise<{
     readonly logging: {
       readonly ok: unknown;

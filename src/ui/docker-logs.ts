@@ -5,6 +5,7 @@ import {
   type LifecycleLogRecord,
   parseLifecycleLogRecord,
 } from "../lib/lifecycle-runtime.ts";
+import { parseTimeInput } from "../lib/time.ts";
 import { readLinesFromStream } from "./lines.ts";
 import { formatPrettyLogLine } from "./log-format.ts";
 import { createStructuredLogGrouper } from "./log-group.ts";
@@ -69,6 +70,7 @@ export async function dockerComposeLogsPlain(
     composeDisabled: opts.lifecycle?.composeDisabled === true,
   });
 
+  const window = lifecycleTimeWindow(opts);
   const lifecycleHandle = await startLifecycleTail({
     lifecycle: opts.lifecycle,
     tail: opts.tail,
@@ -78,7 +80,12 @@ export async function dockerComposeLogsPlain(
       if (!record) {
         return;
       }
-      if (!matchesLifecycleServiceFilter(record, opts.lifecycle)) {
+      if (
+        !(
+          matchesLifecycleServiceFilter(record, opts.lifecycle) &&
+          lifecycleRecordInWindow(record, window)
+        )
+      ) {
         return;
       }
       const stream = resolveLifecycleOutputStream(record);
@@ -171,6 +178,7 @@ export async function dockerComposeLogsPretty(
       }),
   });
 
+  const window = lifecycleTimeWindow(opts);
   const lifecycleHandle = await startLifecycleTail({
     lifecycle: opts.lifecycle,
     tail: opts.tail,
@@ -180,7 +188,12 @@ export async function dockerComposeLogsPretty(
       if (!record) {
         return;
       }
-      if (!matchesLifecycleServiceFilter(record, opts.lifecycle)) {
+      if (
+        !(
+          matchesLifecycleServiceFilter(record, opts.lifecycle) &&
+          lifecycleRecordInWindow(record, window)
+        )
+      ) {
         return;
       }
       const rewritten = lifecycleRecordToComposeLine({
@@ -305,6 +318,7 @@ export async function dockerComposeLogsJson(
     write: stderrWriter,
   });
 
+  const window = lifecycleTimeWindow(opts);
   const lifecycleHandle = await startLifecycleTail({
     lifecycle: opts.lifecycle,
     tail: opts.tail,
@@ -314,7 +328,12 @@ export async function dockerComposeLogsJson(
       if (!record) {
         return;
       }
-      if (!matchesLifecycleServiceFilter(record, opts.lifecycle)) {
+      if (
+        !(
+          matchesLifecycleServiceFilter(record, opts.lifecycle) &&
+          lifecycleRecordInWindow(record, window)
+        )
+      ) {
         return;
       }
       const entry = lifecycleRecordToJsonEntry({
@@ -545,6 +564,47 @@ function resolveLifecycleOutputStream(
     return "stderr";
   }
   return "stdout";
+}
+
+/** `--since`/`--until` as instants, resolved once per read. */
+export type LifecycleTimeWindow = {
+  readonly sinceMs: number | null;
+  readonly untilMs: number | null;
+};
+
+/**
+ * The time bounds `docker compose logs` gets, for the lifecycle companion's
+ * records too: Compose filters its own lines, but the companion reads a
+ * file with `tail`, so its records are filtered here by their timestamps.
+ */
+export function lifecycleTimeWindow(
+  opts: { readonly since?: string; readonly until?: string },
+  now: Date = new Date()
+): LifecycleTimeWindow {
+  const at = (raw: string | undefined) =>
+    raw ? (parseTimeInput(raw, now)?.getTime() ?? null) : null;
+  return { sinceMs: at(opts.since), untilMs: at(opts.until) };
+}
+
+/**
+ * Whether a lifecycle record falls in the window. A record whose timestamp
+ * cannot be read is kept, since its time is unknown, not outside.
+ */
+export function lifecycleRecordInWindow(
+  record: LifecycleLogRecord,
+  window: LifecycleTimeWindow
+): boolean {
+  if (window.sinceMs === null && window.untilMs === null) {
+    return true;
+  }
+  const at = Date.parse(record.timestamp);
+  if (!Number.isFinite(at)) {
+    return true;
+  }
+  return (
+    (window.sinceMs === null || at >= window.sinceMs) &&
+    (window.untilMs === null || at <= window.untilMs)
+  );
 }
 
 function matchesLifecycleServiceFilter(

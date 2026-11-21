@@ -2724,17 +2724,27 @@ async function settleGlobalLoggingSetting(opts: {
  * With logging off: stops the stack's containers if a home still has them
  * (it was on before), keeping its volumes, and says how to turn it on. A
  * home that never had the stack makes no Docker call here. Returns the exit
- * code: a failed stop is reported, since the containers may still run.
+ * code: a failed lookup or stop is reported, since the containers may still
+ * run.
  */
 async function stopDisabledLoggingStack(opts: {
   readonly paths: ReturnType<typeof getGlobalPaths>;
   readonly login: boolean;
 }): Promise<number> {
   if (!opts.login) {
-    const ids =
-      (await thisHomeLoggingContainers({
-        loggingDir: dirname(opts.paths.loggingCompose),
-      })) ?? [];
+    const ids = await thisHomeLoggingContainers({
+      loggingDir: dirname(opts.paths.loggingCompose),
+    });
+    if (ids === null) {
+      // Not known to be stopped: a failed lookup is not an absent stack.
+      logger.error({
+        message: [
+          "Logging is off, but Docker could not be asked for its containers, so none were stopped.",
+          "They may still be running. Retry: hack global up --no-logging",
+        ].join("\n"),
+      });
+      return 1;
+    }
     const stop =
       ids.length > 0
         ? await exec(["docker", "stop", ...ids], { stdin: "ignore" })

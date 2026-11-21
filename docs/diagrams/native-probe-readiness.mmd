@@ -1,0 +1,53 @@
+---
+title: ProbeReadiness · one probe
+---
+stateDiagram-v2
+    direction TB
+    classDef wait stroke-width:1.6px
+    classDef ok stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> created : start_probe
+    created --> starting : ExecStart
+    created --> doubt : Observe [not started]
+    starting --> doubt : Observe [missing or torn]
+    starting --> starting : Begin / Expire [in grace]
+    starting --> healthy : Answer
+    starting --> limit : Observe [starting sample]
+    healthy --> healthy : Answer
+    healthy --> unhealthy : Observe [stale or exhausted]
+    starting --> unhealthy : ExecExit
+    starting --> unhealthy : Expire [retries used up]
+
+    state doubt <<choice>>
+    doubt --> starting : [t <= Grace]
+    doubt --> unhealthy : [t > Grace]
+
+    state limit <<choice>>
+    limit --> starting : [t <= Limit]
+    limit --> unhealthy : [t > Limit]
+
+    unhealthy --> [*] : start fails
+
+    note right of starting
+        Patient: before the first
+        success, in the grace, one
+        attempt may use the rest of
+        the grace (attempt_timeout).
+    end note
+    note left of limit
+        Limit is host time since the
+        probe started, not the time
+        the sample carries
+        (starting_bound_ms).
+    end note
+    note right of unhealthy
+        INV NoFalseFailure
+        INV BoundedStarting
+        INV NoReadyWithoutSuccess
+        INV OneCompile
+    end note
+
+    class starting wait
+    class healthy ok
+    class unhealthy fail

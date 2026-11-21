@@ -155,7 +155,7 @@ impl Drop for Pool {
 /// receipt. In the shared parallel test process, an unrelated test's pre-exec fork
 /// (`process::clean_command`) holds a copy of every descriptor open at the fork until it
 /// execs, so a disk this test just read or a listener it just dropped can still show up to
-/// the host-wide `lsof` scan or accept a connection, and recovery correctly refuses as
+/// the host-wide disk-handle scan or accept a connection, and recovery correctly refuses as
 /// `stop_uncertain`. Every test that expects those release checks to pass runs isolated.
 fn isolated(child: &str) {
     use crate::provider::test_executable::{ISOLATED_HANG_GUARD, run_isolated};

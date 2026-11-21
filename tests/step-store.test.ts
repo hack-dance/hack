@@ -274,6 +274,23 @@ describe("step records", () => {
     }
   });
 
+  test("a record too large to read back is refused when encoded", () => {
+    const inputs = Object.fromEntries(
+      Array.from({ length: 600 }, (_, index) => [
+        `input-${String(index).padStart(58, "0")}`,
+        digestOf("1"),
+      ])
+    );
+    const big = stepKey({ ...base, inputs });
+    const record = newStepRecord({
+      key: big,
+      output: { digest: `sha256:${"e".repeat(64)}`, ref: "cas" },
+      observedAt: 1,
+      run: "run-1",
+    });
+    expect(() => encodeStepRecord(record)).toThrow();
+  });
+
   test("a cas step needs a cas reference", () => {
     expect(() =>
       newStepRecord({

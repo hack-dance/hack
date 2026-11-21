@@ -999,3 +999,16 @@ fn shared_refused_record_vectors_are_refused_with_their_reason() {
         );
     }
 }
+
+#[test]
+fn a_record_too_large_to_read_back_is_refused_before_it_is_written() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    // 64-character names and digests: about 140 bytes per input.
+    let inputs: BTreeMap<String, InputDigest> = (0..600_u32)
+        .map(|index| (format!("input-{index:058}"), input(1)))
+        .collect();
+    let key = StepKey::new("example-step", 1, StepClass::Slot, &inputs, None, "build-1").unwrap();
+    assert!(store.record(&key, output(None), "run-1").is_err());
+    assert!(!record_path(&fixture.root(), &key).exists());
+}

@@ -99,10 +99,19 @@ export function newStepRecord(opts: {
   };
 }
 
-/** The canonical bytes of a record, with its check. */
+/** The largest record either reader accepts (64 KiB), as in `record.rs`. */
+export const MAX_STEP_RECORD_BYTES = 64 * 1024;
+
+/** The canonical bytes of a record, with its check. Refuses a record too large to read back. */
 export function encodeStepRecord(record: StepRecord): string {
   const check = canonicalDigest(STEP_RECORD_DOMAIN, record);
-  return canonicalJson({ ...record, check });
+  const text = canonicalJson({ ...record, check });
+  if (Buffer.byteLength(text) > MAX_STEP_RECORD_BYTES) {
+    throw new CanonicalValueError(
+      "A step record exceeds the step store limit."
+    );
+  }
+  return text;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -139,6 +148,9 @@ export function decodeStepRecord(
   text: string,
   key: StepKey
 ): StepRecord | RecordMiss {
+  if (Buffer.byteLength(text) > MAX_STEP_RECORD_BYTES) {
+    return "torn-record";
+  }
   let value: unknown;
   try {
     value = JSON.parse(text);

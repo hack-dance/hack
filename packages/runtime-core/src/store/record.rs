@@ -165,7 +165,12 @@ impl Store {
         let shard = self.record_shard(key);
         disk::create_directory(&shard)?;
         let path = shard.join(format!("{:x}.json", crate::Hex(key.digest().0)));
-        disk::publish(&self.root, &path, &record.encode()?)?;
+        let bytes = record.encode()?;
+        // A record the reader would call torn is never written.
+        if bytes.len() as u64 > MAX_RECORD_BYTES {
+            return Err(invalid("Step record exceeds the step store limit."));
+        }
+        disk::publish(&self.root, &path, &bytes)?;
         Ok(record)
     }
 

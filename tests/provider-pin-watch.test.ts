@@ -288,9 +288,9 @@ describe("provider pin watch", () => {
     );
     const variables = [
       ...between(
-        lifecycle,
-        "fn command(",
-        "fn boot_reclamation_policy("
+        readFileSync(join(provider, "lifecycle/backend/smolvm_cli.rs"), "utf8"),
+        "// BEGIN provider command environment",
+        "// END provider command environment"
       ).matchAll(/"(SMOLVM_[A-Z_]+)"/g),
     ].map((match) => match[1]);
     expect(flags.length).toBeGreaterThan(10);

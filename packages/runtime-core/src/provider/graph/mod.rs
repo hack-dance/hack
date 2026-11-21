@@ -773,6 +773,9 @@ struct Session<'a, 's> {
     environments: BTreeMap<String, super::environment::PendingEnvironment>,
     leases: BTreeMap<String, super::environment::EnvironmentLease>,
     launcher: Option<String>,
+    /// What each probed service's latest unhealthy observation found, for its failure's
+    /// diagnostic (HACK-2416).
+    probe_findings: BTreeMap<String, crate::ProbeFinding>,
 }
 #[cfg(test)]
 pub(super) fn fault_pause(
@@ -1009,11 +1012,12 @@ impl Session<'_, '_> {
 }
 impl Driver for Session<'_, '_> {
     fn service_failure(&self, name: &str, observation: Observation) -> CandidateError {
-        probes::service_failure(
+        probes::service_failure_finding(
             "graph_service_failed",
             name,
             observation,
             self.receipt.probes.get(name).map(|probe| &probe.config),
+            self.probe_findings.get(name).copied(),
         )
     }
 
@@ -1099,8 +1103,10 @@ impl Driver for Session<'_, '_> {
                     "Restart requires a confirmed immutable container ID.",
                 )
             })?;
-            self.engine
-                .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+            crate::timings::measure(crate::timings::Step::ContainerStart, None, |_| {
+                self.engine
+                    .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)
+            })?;
             self.start_probe(service, id)?;
             return Ok(());
         }
@@ -1212,8 +1218,10 @@ impl Driver for Session<'_, '_> {
             startup.verify(&self.engine, &mut self.receipt, &self.root)?;
         }
         self.check_cancelled()?;
-        self.engine
-            .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+        crate::timings::measure(crate::timings::Step::ContainerStart, None, |_| {
+            self.engine
+                .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)
+        })?;
         if let Some(startup) = self.startup.as_mut() {
             startup.started(
                 &self.engine,
@@ -1242,7 +1250,17 @@ impl Driver for Session<'_, '_> {
             &self.expected_environment[service],
             &value,
         )?;
-        probes::observe(&self.engine, &self.receipt, service, &value)
+        let (observation, found) =
+            probes::observe_finding(&self.engine, &self.receipt, service, &value)?;
+        match found {
+            Some(found) => {
+                self.probe_findings.insert(service.into(), found);
+            }
+            None => {
+                self.probe_findings.remove(service);
+            }
+        }
+        Ok(observation)
     }
 }
 /// Explicit fresh attempt only. All commands must be non-secret until managed delivery is qualified.
@@ -1671,6 +1689,7 @@ fn run_inputs(
         receipt,
         configs: prepared.configs,
         expected_environment,
+        probe_findings: BTreeMap::new(),
         restarting: false,
         fresh_cache_completion: true,
         cache_initializers: prepared.cache_initializers,
@@ -2469,6 +2488,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         receipt,
         configs: prepared.configs,
         expected_environment,
+        probe_findings: BTreeMap::new(),
         restarting: true,
         fresh_cache_completion: false,
         cache_initializers: BTreeMap::new(),

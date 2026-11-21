@@ -172,6 +172,13 @@ const restartPolicyStaleUses = [
   { engine: "restarting", bound: 3 },
   { engine: "exited", bound: 3 },
 ] as const;
+// StartGraph's ghost flags: the whole record names every unsafe step taken,
+// so a control cannot pass on a violation its guard removal did not cause.
+type StartGraphFlag = "start" | "publish" | "replace" | "return";
+const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
+  `bad = [${(["start", "publish", "replace", "return"] as const)
+    .map((key) => `${key} |-> ${flags.includes(key) ? "TRUE" : "FALSE"}`)
+    .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
     name: "autostart-start-stop",
@@ -1201,6 +1208,20 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "executable-digest-cache",
+    module: "DigestCache",
+    states: 1943,
+    invariant: "CacheNeverStale",
+    action: "CacheHit",
+    fields: [
+      "staleHit = TRUE",
+      "cache = <<1, 1, 1>>",
+      "content = 2",
+      "ctime = 1",
+      "clock = 1",
+    ],
+  },
+  {
     name: "native-status-start",
     module: "StatusStart",
     states: 110,
@@ -1784,6 +1805,95 @@ const contracts: readonly ModelContract[] = [
           "authority = FALSE",
           "locked = TRUE",
         ],
+      },
+    ],
+  },
+  {
+    // One start of a pool that is not running: two chained Development samples
+    // (the second under the startup lease, a window after the first), Research's
+    // three pre-lease samples, the content proofs and the pre-boot check.
+    name: "pool-start-admission",
+    module: "PoolStart",
+    states: 21_400,
+    // Development's second sample taken before the startup lease.
+    invariant: "SecondSampleUnderLease",
+    action: "Recheck",
+    fields: ['pc = "Proven"', 'profile = "development"'],
+    additionalControls: [
+      // The follow-up ordering: root files proven in the window, rechecked
+      // under the lease.
+      { name: "root-before-lease", negative: false, states: 27_304 },
+      // Hypothetical: a tree recheck under the lease, which no code performs.
+      { name: "tree-recheck", negative: false, states: 21_076 },
+      {
+        name: "window-not-enforced",
+        negative: true,
+        invariant: "WindowRespected",
+        action: "Recheck",
+        fields: ['pc = "Qualified"', 'profile = "development"'],
+      },
+      {
+        name: "unchained-recheck",
+        negative: true,
+        invariant: "ChainUnbroken",
+        action: "Recheck",
+        fields: ['pc = "Qualified"', "swapouts = 1"],
+      },
+      {
+        name: "unchained-boot",
+        negative: true,
+        invariant: "BootBaselineIsLastSample",
+        action: "AdmitBoot",
+        fields: ['pc = "BootAdmitted"', "baseline = <<1>>", "swapouts = 1"],
+      },
+      {
+        name: "research-two-samples",
+        negative: true,
+        invariant: "ResearchThreeSamples",
+        action: "Start",
+        fields: ['pc = "Started"', 'profile = "research"', "vm = TRUE"],
+      },
+      {
+        name: "root-unchecked",
+        negative: true,
+        invariant: "StartFromProvenRoot",
+        action: "RecheckRoot",
+        fields: ['pc = "RootProven"', "rootOk = FALSE", "rootProved = TRUE"],
+      },
+      // The remaining gap, kept explicit: the trees are proven before the
+      // lease and not rechecked under it.
+      {
+        name: "changed-tree-start",
+        negative: true,
+        invariant: "NoStartFromChangedTree",
+        action: "Start",
+        fields: [
+          'pc = "Started"',
+          "treeOk = FALSE",
+          "treeProved = TRUE",
+          "vm = TRUE",
+        ],
+      },
+      {
+        name: "development-start-reachable",
+        negative: true,
+        invariant: "NeverStartsDevelopment",
+        action: "Start",
+        fields: ['profile = "development"', "vm = TRUE"],
+      },
+      {
+        name: "research-start-reachable",
+        negative: true,
+        invariant: "NeverStartsResearch",
+        action: "Start",
+        fields: ['profile = "research"', "vm = TRUE"],
+      },
+      {
+        name: "moved-alias-start-reachable",
+        negative: true,
+        invariant: "NeverStartsOnMovedAlias",
+        action: "Start",
+        fields: ['alias = "moved"', "selected = 2", "vm = TRUE"],
       },
     ],
   },
@@ -2444,6 +2554,52 @@ const contracts: readonly ModelContract[] = [
     fields: ["retired = <<1>>", "alive = 1"],
   },
   {
+    // HACK-2440 (c, d), HACK-2416: a patient first request, no failure on one
+    // doubtful reading, and a host-side bound on "starting". Slow, refusing and
+    // hanging apps; `legacy` runs the steady cadence before the first success.
+    name: "probe-readiness",
+    module: "ProbeReadiness",
+    states: 175_757,
+    invariant: "OneCompile",
+    action: "Begin",
+    fields: ["restarts = 1", 'app = "slow"'],
+    alternativeWitnesses: [
+      { action: "Begin", fields: ["restarts = 1", 'app = "hanging"'] },
+    ],
+    additionalControls: [
+      { name: "legacy", negative: false, states: 132_615 },
+      {
+        name: "no-host-bound",
+        negative: true,
+        invariant: "BoundedStarting",
+        action: "Observe",
+        fields: ['verdict = "starting"', "skewed = TRUE", "vt = 15"],
+      },
+      {
+        name: "no-tolerance",
+        negative: true,
+        invariant: "NoFalseFailure",
+        action: "Observe",
+        fields: ['verdict = "unhealthy"', 'app = "slow"'],
+      },
+      {
+        // Reachability: the positive run does exhaust retries.
+        name: "exhausts",
+        negative: true,
+        invariant: "NeverExhausted",
+        action: "Expire",
+        fields: ['health = "unhealthy"', "failures = 2"],
+      },
+      {
+        name: "tight-bound",
+        negative: true,
+        invariant: "NoPrematureFailure",
+        action: "Observe",
+        fields: ['verdict = "unhealthy"', 'vh = "starting"'],
+      },
+    ],
+  },
+  {
     name: "pool-emulation",
     module: "Emulation",
     states: 13,
@@ -2468,6 +2624,100 @@ const contracts: readonly ModelContract[] = [
           "config = FALSE",
           "engine = TRUE",
         ],
+      },
+    ],
+  },
+  // The CI tier bounds one VM boot with two specs; positive-reboot covers two
+  // boots with one spec. Witnesses omit `cur` and `intents`: the initial spec
+  // value is free and two-worker TLC reports either one.
+  {
+    name: "start-graph",
+    module: "StartGraph",
+    states: 1_656_372,
+    invariant: "NoEffectWithoutIntent",
+    action: "Create",
+    fields: ["intents = {}", "acted = TRUE", 'up = "running"'],
+    additionalControls: [
+      { name: "positive-reboot", negative: false, states: 81_534 },
+      {
+        name: "ignore-deps",
+        negative: true,
+        invariant: "DepsBeforeStart",
+        action: "Start",
+        fields: [
+          startGraphBad("start"),
+          "rgen = [a |-> 0, b |-> 1]",
+          'up = "running"',
+        ],
+      },
+      {
+        name: "no-publish-fence",
+        negative: true,
+        invariant: "NoPublishToReplaced",
+        action: "Publish",
+        fields: [startGraphBad("publish"), "route = [a |-> 1, b |-> 0]"],
+      },
+      {
+        name: "reuse-by-name",
+        negative: true,
+        invariant: "ReturnIsCurrent",
+        action: "Return",
+        fields: [startGraphBad("return"), "boot = 1", 'up = "returned"'],
+      },
+      {
+        name: "no-unpublish",
+        negative: true,
+        invariant: "NoReplaceWhileRouted",
+        action: "RemoveOld",
+        fields: [
+          startGraphBad("replace"),
+          "route = [a |-> 1, b |-> 0]",
+          "nextGen = [a |-> 3, b |-> 1]",
+        ],
+      },
+      {
+        name: "keep-across-boot",
+        negative: true,
+        invariant: "ReturnIsCurrent",
+        action: "Return",
+        // Without the boot fence a dependent may also start on a stale
+        // dependency, so both flags are set.
+        fields: [
+          startGraphBad("start", "return"),
+          "boot = 2",
+          'up = "returned"',
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Return",
+            fields: [startGraphBad("return"), "boot = 2", 'up = "returned"'],
+          },
+        ],
+      },
+      {
+        name: "blind-retry",
+        negative: true,
+        invariant: "OneContainerPerService",
+        action: "Create",
+        fields: ["rgen = [a |-> 2, b |-> 0]", "nextGen = [a |-> 3, b |-> 1]"],
+        alternativeWitnesses: [
+          {
+            action: "Create",
+            fields: [
+              "rgen = [a |-> 0, b |-> 2]",
+              "nextGen = [a |-> 1, b |-> 3]",
+            ],
+          },
+        ],
+      },
+      {
+        // Reachability: an `up` that began on a current, ready and routed
+        // project (`base`) returns without planning anything.
+        name: "reachable-noop",
+        negative: true,
+        invariant: "NeverNoOpUp",
+        action: "Return",
+        fields: ["base = TRUE", "acted = FALSE", 'up = "returned"'],
       },
     ],
   },

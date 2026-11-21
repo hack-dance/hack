@@ -9,6 +9,7 @@ pub mod project;
 pub mod provider;
 #[cfg(test)]
 mod test_root;
+pub mod timings;
 #[cfg(test)]
 pub(crate) use test_root::{private_test_root, unique_test_root};
 
@@ -24,7 +25,7 @@ mod error_stop_diagnostics;
 mod hex;
 pub mod sha256_backend;
 mod sha256_guard;
-pub use error::{CandidateError, ErrorMessage, LogFailurePhase};
+pub use error::{CandidateError, ErrorMessage, LogFailurePhase, ProbeFinding, ProbeReason};
 pub use hex::Hex;
 #[cfg(all(test, feature = "native-config-plan"))]
 mod test_budget;

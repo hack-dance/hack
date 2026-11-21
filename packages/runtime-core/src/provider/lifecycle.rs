@@ -1,4 +1,6 @@
+use backend::smolvm_cli::{binary, invoke, root};
 mod admission_pool;
+mod backend;
 mod disk_handles;
 mod guest_memory_peak;
 pub mod host_filesystem;
@@ -28,6 +30,7 @@ pub use prepared_boot::{
 #[cfg(target_os = "macos")]
 pub(super) use private_child::{RelayChild, RelayLaunch};
 pub(super) use relay_process::RelayProcess;
+
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::fs::{self, File, OpenOptions};
@@ -38,6 +41,12 @@ use std::os::unix::{
 };
 use std::path::Path;
 use std::time::{Duration, Instant};
+
+/// Expected executable for read-only identity checks; grants no launch authority.
+#[cfg(target_os = "macos")]
+pub(super) fn provider_binary(candidate: &Candidate) -> std::path::PathBuf {
+    binary(candidate)
+}
 
 #[derive(Debug, Serialize)]
 pub struct RuntimeStatus {
@@ -77,6 +86,14 @@ pub struct RuntimeStatus {
     /// first (see `guest_memory_peak`). A record only; absent when there is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guest_memory_peaks: Option<Vec<guest_memory_peak::Boot>>,
+    /// How a disk-holder scan started now would read the host (`disk_handles`): in this
+    /// process, or through `lsof` with the reason; or unknown when the self-test did not
+    /// answer in time. Computed when status runs, by the self-test a scan runs first, so
+    /// it describes this host and build and no pool or earlier scan. On macOS that test
+    /// makes and removes a private file in the process's temporary directory; status
+    /// waits at most 100 ms for it, and failing to make the file is reported as a
+    /// reason, never an error.
+    pub disk_handle_scan: disk_handles::MethodReport,
     /// Provider sockets native found world-accessible and made private for the running
     /// provider (`socket_repairs`); absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,51 +102,6 @@ pub struct RuntimeStatus {
     pub hashing: crate::sha256_backend::Report,
 }
 
-fn root(candidate: &Candidate) -> std::path::PathBuf {
-    candidate.state_root.join("run/smolvm")
-}
-fn binary(candidate: &Candidate) -> std::path::PathBuf {
-    artifact::root(candidate).join("smolvm-bin")
-}
-
-fn command(candidate: &Candidate, owner: &Owner) -> std::process::Command {
-    let mut command = process::clean_command(&binary(candidate));
-    command
-        .current_dir(root(candidate).join("home"))
-        .env("HOME", &owner.short_home)
-        .env("TMPDIR", root(candidate).join("tmp"))
-        .env("DOCKER_CONFIG", root(candidate).join("docker-config"))
-        .env("SMOLVM_AGENT_ROOTFS", root(candidate).join("rootfs"))
-        // Pinned Smol forwards this to the guest agent. Its automatic trim can
-        // truncate imago backing files; retained disk identity requires exact size.
-        .env("SMOLVM_DISK_TRIM", "0")
-        .env("DYLD_LIBRARY_PATH", artifact::root(candidate).join("lib"));
-    // All provider invocations (including start/recovery and private exec) use
-    // this clean environment. DNS-learned answers must not reopen host/private
-    // ranges; Smol's local default floor is insufficient for public egress modes.
-    if matches!(
-        &owner.network,
-        super::NetworkIntent::ApprovedHosts { .. } | super::NetworkIntent::Internet
-    ) {
-        command.env("SMOLVM_EGRESS_FLOOR", "strict");
-    }
-    let policy = owner.reclamation.unwrap_or_default();
-    command
-        .env(
-            "SMOLVM_BALLOON_RECLAIM",
-            if policy.enabled { "1" } else { "0" },
-        )
-        .env(
-            "SMOLVM_IDLE_RECLAIM",
-            policy.idle_minutes.unwrap_or(0).to_string(),
-        );
-    // The provider reads this at `machine start`; it is set on every invocation so the pool's
-    // provider processes agree. An ambient value never reaches the provider (clean command).
-    if super::hot_reload::Choice::off(owner.hot_reload) {
-        command.env(super::hot_reload::PROVIDER_SWITCH, "1");
-    }
-    command
-}
 fn boot_reclamation_policy() -> state::ReclamationPolicy {
     #[cfg(test)]
     if let Ok(value) = std::env::var("HACK_LOCAL_TEST_RECLAIM") {
@@ -141,39 +113,6 @@ fn boot_reclamation_policy() -> state::ReclamationPolicy {
         }
     }
     state::ReclamationPolicy::default()
-}
-fn invoke(candidate: &Candidate, owner: &Owner, args: &[&str]) -> Result<String, CandidateError> {
-    let output = process::capture(
-        command(candidate, owner).args(args),
-        Duration::from_secs(60),
-    )?;
-    if output.status.success() {
-        return String::from_utf8(output.stdout)
-            .map_err(|_| CandidateError::new("provider_protocol", "Non-UTF8 provider response."));
-    }
-    // The provider's own last line, cleaned, travels with the failure so the CLI can show it.
-    let shares = owner.project_shares();
-    let roots: Vec<&Path> = shares.iter().map(|share| share.project.as_path()).collect();
-    Err(super::provider_line::attach(
-        failed_provider_command(&output),
-        &output.stderr,
-        candidate,
-        &owner.short_home,
-        &roots,
-    ))
-}
-
-/// The error `process::run` gives a provider command that exited unsuccessfully, word for
-/// word (a test compares them), built here because the whole stderr is needed as well.
-fn failed_provider_command(output: &process::Captured) -> CandidateError {
-    CandidateError::new(
-        "provider_command_failed",
-        format!(
-            "Provider command exited {}; no automatic retry. {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr[..output.stderr.len().min(8192)]).trim()
-        ),
-    )
 }
 /// Record a lifecycle phase. Every phase other than `stopped` clears the clean-stop marker
 /// in the same write; only `down` records the marker (see [`finish_quiesced_stop`]), so a
@@ -368,17 +307,19 @@ pub(super) fn startup_lease(root: &Path, wait: Duration) -> Result<state::Lock, 
     operation_lease(root, Some(Instant::now() + wait), || Ok(())).map(|(lock, ())| lock)
 }
 
-/// Returning the mutation lease requires a fresh Development admission window.
+/// Returning the mutation lease requires a fresh Development admission sample under it,
+/// taken no sooner than the admission window after the start's first sample.
 /// On failure RAII drops the lease, without granting owner/allocation authority.
 fn startup_admission_lease(
     root: &Path,
     wait: Duration,
     profile: super::Profile,
-    samples: &[admission::Admission],
-    observe: impl FnMut() -> Result<admission::Admission, CandidateError>,
+    opened: Option<admission::Opened>,
+    clock: &impl process::Clock,
+    observe: impl FnOnce() -> Result<admission::Admission, CandidateError>,
 ) -> Result<(state::Lock, Vec<admission::Admission>), CandidateError> {
     let lock = startup_lease(root, wait)?;
-    let fresh = admission::recheck_after_lease(profile, samples, observe)?;
+    let fresh = admission::recheck_after_lease(profile, opened, clock, observe)?;
     Ok((lock, fresh))
 }
 
@@ -1048,6 +989,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             graph_runs: users.graph_runs,
             pool_idle: Some(false),
             guest_memory_peaks: None,
+            disk_handle_scan: disk_handles::method_within(disk_handles::STATUS_METHOD_WAIT),
             repaired_sockets: None,
             hashing: crate::sha256_backend::report(),
         });
@@ -1127,6 +1069,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         graph_runs: users.graph_runs,
         pool_idle,
         guest_memory_peaks: guest_memory_peak::history(&root(candidate)),
+        disk_handle_scan: disk_handles::method_within(disk_handles::STATUS_METHOD_WAIT),
     })
 }
 
@@ -1371,6 +1314,28 @@ fn start_pool(
     project_share: Option<super::ProjectShareIntent>,
     start: super::prepared_start::Start<'_>,
 ) -> Result<RuntimeStatus, CandidateError> {
+    crate::timings::measure(crate::timings::Step::VmEnsure, None, |_| {
+        start_pool_observed(
+            candidate,
+            profile,
+            bridge_request,
+            network,
+            dependency_request,
+            project_share,
+            start,
+        )
+    })
+}
+
+fn start_pool_observed(
+    candidate: &Candidate,
+    profile: super::Profile,
+    bridge_request: super::bridge::Request,
+    network: Option<super::NetworkIntent>,
+    dependency_request: super::dependency_socket::Request,
+    project_share: Option<super::ProjectShareIntent>,
+    start: super::prepared_start::Start<'_>,
+) -> Result<RuntimeStatus, CandidateError> {
     // A mistyped setting is refused before any effect.
     let hot_reload = super::hot_reload::Setting::from_environment()?;
     // A clean stop whose alias path another entry holds is moved to a fresh alias before
@@ -1467,12 +1432,14 @@ fn start_pool(
     // A pool that is already running and owned by this home allocates nothing, so it takes
     // the named fast path instead of the admission windows below (`running_start`).
     if let Some(running) = running_start::select(candidate, profile)? {
-        return running_start::resume(candidate, running, &request, || {
-            #[cfg(target_os = "macos")]
-            if let Some(guard) = &retained_guard {
-                guard.verify(candidate)?;
-            }
-            Ok(())
+        return crate::timings::measure(crate::timings::Step::VmReattach, None, |_| {
+            running_start::resume(candidate, running, &request, || {
+                #[cfg(target_os = "macos")]
+                if let Some(guard) = &retained_guard {
+                    guard.verify(candidate)?;
+                }
+                Ok(())
+            })
         });
     }
     // Admission before aliases, provider commands, disks or VM effects. Only
@@ -1486,18 +1453,19 @@ fn start_pool(
             admission.reasons.join(" "),
         ));
     }
-    let mut samples = if profile == super::Profile::Development {
-        let baseline_swapouts = admission.swapouts;
-        let mut samples = vec![admission];
-        samples.extend(admission::sample_after(profile, baseline_swapouts, || {
-            admission_pool::probe(candidate, profile, &admission_owner)
-        })?);
-        samples
+    // Development qualifies on two chained samples at least the admission window apart:
+    // this one, and one under the startup lease. The checks between them fill the window,
+    // so only the remainder of it is ever slept.
+    let admission_clock = process::MonotonicClock::new();
+    let (mut samples, opened) = if profile == super::Profile::Development {
+        let opened = admission::open(&admission, &admission_clock)?;
+        (vec![admission], Some(opened))
     } else {
         // Retain the frozen Research window and baseline semantics.
-        admission::sample_with(profile, || {
+        let samples = admission::sample_with(profile, || {
             admission_pool::probe(candidate, profile, &admission_owner)
-        })?
+        })?;
+        (samples, None)
     };
     // The content proof a boot records in its tree witness (`tree_witness`).
     let mut proven_trees = std::collections::BTreeMap::from([
@@ -1515,7 +1483,8 @@ fn start_pool(
         &root(candidate),
         STARTUP_LEASE_WAIT,
         profile,
-        &samples,
+        opened,
+        &admission_clock,
         || admission_pool::probe(candidate, profile, &admission_owner),
     )?;
     samples.extend(fresh_samples);
@@ -1604,16 +1573,18 @@ fn start_pool(
     // start won the lease first); every other running pool took the fast path. Keep the full
     // re-verification for that race.
     if owner.phase == "running" {
-        if let Some(selected) = settled.selected() {
-            selected.reverify(candidate)?;
-        }
-        #[cfg(target_os = "macos")]
-        if let Some(guard) = &retained_guard {
-            guard.verify(candidate)?;
-        }
-        verify_live(candidate, &owner)?;
-        audit_boot(candidate, &owner)?;
-        return status(candidate);
+        return crate::timings::measure(crate::timings::Step::VmReattach, None, |_| {
+            if let Some(selected) = settled.selected() {
+                selected.reverify(candidate)?;
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(guard) = &retained_guard {
+                guard.verify(candidate)?;
+            }
+            verify_live(candidate, &owner)?;
+            audit_boot(candidate, &owner)?;
+            status(candidate)
+        });
     }
     // Only a clean stopped selection continues, as a restart of its verified retained disks.
     let mut restart = admission_pool::restart_only(candidate, settled, &owner, &lock)?;
@@ -1776,40 +1747,42 @@ fn start_pool(
     // old identity.
     owner.process = None;
     phase(candidate, &mut owner, "booting")?;
-    start_machine(candidate, &owner, permit)?;
-    let observed = recorded_process(candidate, &owner)?;
-    identity::verify(
-        &observed,
-        &identity::observe(observed.pid)?,
-        &binary(candidate),
-        unsafe { libc::geteuid() },
-    )?;
-    owner.process = Some(observed);
-    owner.save(candidate)?;
-    let result = finish_boot(candidate, &mut owner, previous_boot.as_deref(), &lock);
-    // A witness is recorded only where it can be accepted (a qualified filesystem).
-    super::tree_witness::record_boot(
-        candidate,
-        &lock,
-        result.is_ok() && witness_qualified(candidate),
-        owner.process.as_ref(),
-        proven_trees,
-    );
-    if let Err(error) = &result {
-        // Disk rejection must not keep an allocation alive. Process authority is
-        // independent of disk adoption; this is an unclean stop, never reconciliation.
-        let process = owner.process.as_ref().expect("process just recorded");
-        let cleanup = stop_verified_provider(process, &binary(candidate));
-        state::write(
-            &root(candidate).join("failed-boot.json"),
-            &failed_boot_record(error, process, cleanup.is_ok()),
+    crate::timings::measure(crate::timings::Step::VmBoot, None, |_| {
+        start_machine(candidate, &owner, permit)?;
+        let observed = recorded_process(candidate, &owner)?;
+        identity::verify(
+            &observed,
+            &identity::observe(observed.pid)?,
+            &binary(candidate),
+            unsafe { libc::geteuid() },
         )?;
-        if cleanup.is_ok() {
-            phase(candidate, &mut owner, "failed-boot-stopped")?;
+        owner.process = Some(observed);
+        owner.save(candidate)?;
+        let result = finish_boot(candidate, &mut owner, previous_boot.as_deref(), &lock);
+        // A witness is recorded only where it can be accepted (a qualified filesystem).
+        super::tree_witness::record_boot(
+            candidate,
+            &lock,
+            result.is_ok() && witness_qualified(candidate),
+            owner.process.as_ref(),
+            proven_trees,
+        );
+        if let Err(error) = &result {
+            // Disk rejection must not keep an allocation alive. Process authority is
+            // independent of disk adoption; this is an unclean stop, never reconciliation.
+            let process = owner.process.as_ref().expect("process just recorded");
+            let cleanup = stop_verified_provider(process, &binary(candidate));
+            state::write(
+                &root(candidate).join("failed-boot.json"),
+                &failed_boot_record(error, process, cleanup.is_ok()),
+            )?;
+            if cleanup.is_ok() {
+                phase(candidate, &mut owner, "failed-boot-stopped")?;
+            }
+            cleanup.map_err(failed_boot_stop_error)?;
         }
-        cleanup.map_err(failed_boot_stop_error)?;
-    }
-    result
+        result
+    })
 }
 
 /// `machine create` allocates new disks; only a start without a reserve selection may.
@@ -2639,6 +2612,12 @@ fn provider_stopped(phase: &str, process_alive: Option<bool>) -> bool {
 }
 
 pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
+    crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
+        down_observed(candidate)
+    })
+}
+
+fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     // Status is read-only and idempotent down on an uninitialized pool creates nothing.
     let initial = status(candidate)?;
     if initial.phase == "uninitialized" {
@@ -3078,9 +3057,11 @@ fn finish_stopped(
     finish_absent(candidate, owner, value, true)
 }
 
-/// Record `value` once the provider's VM lock is free, no handle remains on the owned disks and
-/// no owned socket accepts connections. The caller has established that no provider process
-/// remains; this proves the machine it launched released everything before the receipt changes.
+/// Record `value` once the provider's VM lock is free, the disk-holder scan names no process
+/// on the owned disks and no owned socket accepts connections. The caller has established that
+/// no provider process remains; these checks look for anything the machine it launched left
+/// behind before the receipt changes. The scan inspects what `lsof` inspects and does not
+/// prove that nothing maps a disk (`disk_handles`).
 /// With `record_disks`, unadopted disks are identified now; without it they stay unadopted, so
 /// the next boot's size, format-marker and template checks decide whether to adopt them.
 fn finish_absent(
@@ -3115,7 +3096,7 @@ impl Drop for VmLock {
 #[cfg(not(test))]
 const STOP_SCAN_WAIT: Duration = disk_handles::STOP_HANDLE_WAIT;
 /// The unit-test build of [`STOP_SCAN_WAIT`]. Release-check fixtures prove what the scan
-/// reports (status 1, no output), not how fast it reports it, and they run beside other
+/// reports (no holder, nothing unknown), not how fast it reports it, and they run beside other
 /// tests' work; on a loaded host one scan took longer than 5 s and the fixture failed as
 /// `provider_timeout_uncertain` before its result under test (HACK-1457). The production
 /// bounds themselves are tested on a fake clock in [`disk_handles`].
@@ -3174,7 +3155,7 @@ fn lock_disks_closed(
     }
     let vm_lock = VmLock(vm_lock);
     disk_handles::disks_closed(
-        &disk_handles::Lsof::host(),
+        &disk_handles::HostScan::host(),
         &process::MonotonicClock::new(),
         disks,
         handle_wait,
@@ -3787,103 +3768,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_command_enforces_strict_floor_for_public_egress_modes() {
-        let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
-        let mut owner: Owner = serde_json::from_value(json!({
-            "version":1,"checkout":"/fixture","token":"fixture","machine":"fixture",
-            "short_home":"/fixture","created":true,"phase":"stopped","process":null,
-            "storage":null,"overlay":null,"guest_boot_id":null,
-            "daemon_pid":null,"daemon_start":null,"rootfs_digest":null
-        }))
-        .unwrap();
-        for intent in [
-            super::super::NetworkIntent::Isolated,
-            super::super::NetworkIntent::HostGateway,
-            super::super::NetworkIntent::Internet,
-            super::super::NetworkIntent::approved_hosts(vec!["registry.example.com".into()])
-                .unwrap(),
-        ] {
-            let approved = matches!(
-                &intent,
-                super::super::NetworkIntent::ApprovedHosts { .. }
-                    | super::super::NetworkIntent::Internet
-            );
-            owner.network = intent;
-            // The same constructor supplies normal start, re-start after stop,
-            // recovery and exec. Inspect argv/env only; never spawn a provider.
-            for action in ["create", "start", "stop", "exec"] {
-                let mut cmd = command(&candidate, &owner);
-                cmd.args(["machine", action, "--name", &owner.machine]);
-                let env: std::collections::BTreeMap<_, _> = cmd.get_envs().collect();
-                assert_eq!(
-                    env.get(std::ffi::OsStr::new("SMOLVM_EGRESS_FLOOR"))
-                        .copied()
-                        .flatten(),
-                    approved.then_some(std::ffi::OsStr::new("strict"))
-                );
-                for override_name in [
-                    "SMOLVM_EGRESS_ALLOW_PRIVATE",
-                    "SMOLVM_ALLOW_HOST_LOOPBACK",
-                    "SMOLVM_PUBLISH_ADDR",
-                ] {
-                    assert!(!env.contains_key(std::ffi::OsStr::new(override_name)));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn provider_command_disables_trim_despite_ambient_override() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "provider::lifecycle::tests::provider_command_uses_recorded_reclamation_policy",
-                "--nocapture",
-            ])
-            .env("SMOLVM_DISK_TRIM", "1")
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("provider-trim-disabled"));
-    }
-
-    #[test]
-    fn provider_command_uses_recorded_reclamation_policy() {
-        println!("provider-trim-disabled");
-        let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
-        let mut owner: Owner = serde_json::from_value(json!({
-            "version":1, "checkout":"/fixture", "token":"fixture", "machine":"fixture",
-            "short_home":"/fixture", "created":true, "phase":"stopped", "process":null,
-            "storage":null, "overlay":null, "guest_boot_id":null,
-            "daemon_pid":null, "daemon_start":null, "rootfs_digest":null
-        }))
-        .unwrap();
-        for policy in [
-            state::ReclamationPolicy::default(),
-            state::ReclamationPolicy {
-                enabled: false,
-                idle_minutes: None,
-            },
-        ] {
-            owner.reclamation = Some(policy);
-            let cmd = command(&candidate, &owner);
-            let env: std::collections::BTreeMap<_, _> = cmd.get_envs().collect();
-            assert_eq!(
-                env[std::ffi::OsStr::new("SMOLVM_DISK_TRIM")],
-                Some(std::ffi::OsStr::new("0"))
-            );
-            assert_eq!(
-                env[std::ffi::OsStr::new("SMOLVM_BALLOON_RECLAIM")],
-                Some(std::ffi::OsStr::new(if policy.enabled { "1" } else { "0" }))
-            );
-            assert_eq!(
-                env[std::ffi::OsStr::new("SMOLVM_IDLE_RECLAIM")],
-                Some(std::ffi::OsStr::new(if policy.enabled { "2" } else { "0" }))
-            );
-        }
-    }
-
-    #[test]
     fn only_a_start_the_provider_ended_for_no_boot_progress_is_named_stalled() {
         let provider = "Provider command exited exit status: 1; no automatic retry. Error: agent \
                         operation failed: start machine: agent operation failed: wait for ready: \
@@ -3926,75 +3810,6 @@ mod tests {
             format!("{NO_BOOT_PROGRESS} seen elsewhere"),
         ));
         assert_eq!(timeout.code, "provider_timeout_uncertain");
-    }
-
-    #[test]
-    fn a_failed_provider_command_keeps_the_error_process_run_gives_it() {
-        let shell = |script: &str| {
-            let mut command = std::process::Command::new("/bin/sh");
-            command.args(["-c", script]);
-            command
-        };
-        for script in [
-            "echo out; echo 'Error: machine not found' >&2; exit 3",
-            "exit 1",
-            "i=0; while [ $i -lt 600 ]; do echo 'warning: filler filler filler' >&2; i=$((i+1)); done; exit 2",
-        ] {
-            let expected = process::run(&mut shell(script), Duration::from_secs(20)).unwrap_err();
-            let output = process::capture(&mut shell(script), Duration::from_secs(20)).unwrap();
-            let built = failed_provider_command(&output);
-            assert_eq!(built.code, expected.code, "{script}");
-            assert_eq!(built.message, expected.message, "{script}");
-            assert_eq!(built.message_fixed, expected.message_fixed);
-        }
-    }
-
-    #[test]
-    fn provider_command_turns_notifications_off_only_for_a_recorded_choice() {
-        let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
-        let fixture = json!({
-            "version":1, "checkout":"/fixture", "token":"fixture", "machine":"fixture",
-            "short_home":"/fixture", "created":true, "phase":"stopped", "process":null,
-            "storage":null, "overlay":null, "guest_boot_id":null,
-            "daemon_pid":null, "daemon_start":null, "rootfs_digest":null
-        });
-        // A receipt written before this field existed keeps the provider's notifications.
-        let mut owner: Owner = serde_json::from_value(fixture.clone()).unwrap();
-        assert_eq!(owner.hot_reload, None);
-        let switch = std::ffi::OsStr::new(super::super::hot_reload::PROVIDER_SWITCH);
-        assert!(
-            command(&candidate, &owner)
-                .get_envs()
-                .all(|(name, _)| name != switch)
-        );
-        // A boot that keeps them writes nothing new into the receipt.
-        assert!(
-            serde_json::to_value(&owner)
-                .unwrap()
-                .get("hot_reload")
-                .is_none()
-        );
-        use super::super::hot_reload::{Choice, Reason};
-        for (enabled, reason) in [
-            (false, Reason::LargeShare),
-            (false, Reason::Setting),
-            (true, Reason::Setting),
-        ] {
-            owner.hot_reload = Some(Choice {
-                enabled,
-                reason,
-                limit: 100_000,
-            });
-            let cmd = command(&candidate, &owner);
-            let env: std::collections::BTreeMap<_, _> = cmd.get_envs().collect();
-            // Forced on is recorded for the user's sake and starts the provider as usual.
-            assert_eq!(
-                env.get(switch).copied(),
-                (!enabled).then_some(Some(std::ffi::OsStr::new("1")))
-            );
-            let saved = serde_json::to_value(&owner).unwrap();
-            assert_eq!(serde_json::from_value::<Owner>(saved).unwrap(), owner);
-        }
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::sync::Barrier;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 struct Fixture(PathBuf);
 
@@ -69,31 +69,166 @@ fn open_creates_private_layout_and_holds_shared_lock_until_drop() {
         io::ErrorKind::WouldBlock
     );
     drop(second);
-    flock(&lock, libc::LOCK_EX | libc::LOCK_NB).unwrap();
+    // Another test in this binary may be spawning a child process: until that child
+    // execs, it holds copies of every open descriptor, so the last shared lock can be
+    // released a moment late. It is never released early, so wait for it, briefly.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while flock(&lock, libc::LOCK_EX | libc::LOCK_NB).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "the shared lock outlived both handles"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
+/// Eight threads open a fresh store at once. The test has its own time limit, so a
+/// lock protocol that never finishes fails here instead of hanging the suite.
 #[test]
 fn concurrent_first_opens_share_one_generation_and_key() {
     let fixture = Fixture::new();
-    let start = Barrier::new(8);
-    let stores = std::thread::scope(|scope| {
-        (0..8)
-            .map(|_| {
-                scope.spawn(|| {
-                    start.wait();
-                    fixture.open()
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|thread| thread.join().unwrap())
-            .collect::<Vec<_>>()
-    });
-    let value = json!(42);
-    let expected = stores[0].keyed_digest(STEP, &value).unwrap();
-    for store in &stores {
-        assert_eq!(store.keyed_digest(STEP, &value).unwrap(), expected);
+    let root = fixture.root();
+    let start = std::sync::Arc::new(Barrier::new(8));
+    let (sender, results) = std::sync::mpsc::channel();
+    for _ in 0..8 {
+        let (root, start, sender) = (root.clone(), start.clone(), sender.clone());
+        std::thread::spawn(move || {
+            start.wait();
+            let store = Store::open(&root);
+            let digest = store
+                .as_ref()
+                .map(|store| store.keyed_digest(STEP, &json!(42)).unwrap());
+            // Keep every handle (and its shared lock) until all openers are done.
+            let _ = sender.send((digest.map_err(|error| format!("{error:?}")), store.ok()));
+        });
     }
+    drop(sender);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut digests = Vec::new();
+    let mut held = Vec::new();
+    for _ in 0..8 {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let (digest, store) = results
+            .recv_timeout(left)
+            .expect("an opener did not return within 15 s");
+        digests.push(digest.expect("an opener failed"));
+        held.push(store);
+    }
+    assert!(digests.iter().all(|digest| *digest == digests[0]));
+}
+
+/// A store whose lock another descriptor holds exclusively makes `open` fail with
+/// `step_store_busy` at its deadline, never wait without bound.
+#[test]
+fn an_open_behind_a_held_lock_fails_busy_at_its_deadline() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    let holder = File::open(fixture.root().join("lock")).unwrap();
+    flock(&holder, libc::LOCK_EX).unwrap();
+    let started = Instant::now();
+    let error = match disk::open_until(&fixture.root(), started + Duration::from_millis(300)) {
+        Ok(_) => panic!("open succeeded behind an exclusive lock"),
+        Err(error) => error,
+    };
+    let elapsed = started.elapsed();
+    assert!(
+        format!("{error:?}").contains("step_store_busy"),
+        "{error:?}"
+    );
+    assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+    drop(holder);
+    assert!(fixture.open().keyed_digest(STEP, &json!(1)).is_ok());
+}
+
+/// Run as a separate process by `separate_processes_open_alongside_a_long_lived_holder`
+/// (ignored in a normal run). Opens the store named by the environment, prints its
+/// key's digest of a fixed value, and keeps the store open for the requested time.
+#[test]
+#[ignore = "run as a child process by the multi-process store test"]
+fn child_store_opener() {
+    let Ok(root) = std::env::var("HACK_STORE_TEST_ROOT") else {
+        return;
+    };
+    let hold: u64 = std::env::var("HACK_STORE_TEST_HOLD_MS")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let store = Store::open(Path::new(&root)).unwrap();
+    println!(
+        "\nSTORE-DIGEST {}",
+        store.keyed_digest(STEP, &json!(42)).unwrap()
+    );
+    std::thread::sleep(Duration::from_millis(hold));
+    drop(store);
+}
+
+/// Threads and processes behave differently for these locks, so the first open is
+/// also tested across processes. Every child must finish within the time limit.
+fn processes_open_the_same_store(holds_ms: &[u64], holder_first: bool) {
+    let fixture = Fixture::new();
+    let exe = std::env::current_exe().unwrap();
+    let spawn = |hold_ms: u64| {
+        std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                "store::tests::child_store_opener",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("HACK_STORE_TEST_ROOT", fixture.root())
+            .env("HACK_STORE_TEST_HOLD_MS", hold_ms.to_string())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let mut children = Vec::new();
+    for (index, hold) in holds_ms.iter().enumerate() {
+        children.push(spawn(*hold));
+        if holder_first && index == 0 {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut digests = Vec::new();
+    for mut child in children {
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("a store opener process did not finish within 20 s");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let mut output = String::new();
+        std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut output).unwrap();
+        assert!(status.success(), "opener failed: {output}");
+        let digest = output
+            .lines()
+            .find_map(|line| line.split("STORE-DIGEST ").nth(1))
+            .unwrap_or_else(|| panic!("no digest in: {output}"))
+            .to_owned();
+        digests.push(digest);
+    }
+    assert_eq!(digests.len(), holds_ms.len());
+    assert!(digests.iter().all(|digest| *digest == digests[0]));
+}
+
+/// A long-lived holder keeps its shared lock while six other processes open.
+#[test]
+fn separate_processes_open_alongside_a_long_lived_holder() {
+    processes_open_the_same_store(&[3_000, 0, 0, 0, 0, 0, 0], true);
+}
+
+/// Seven processes open a fresh store at once; three keep it open for 2 s.
+#[test]
+fn separate_processes_race_to_open_a_fresh_store() {
+    processes_open_the_same_store(&[2_000, 2_000, 2_000, 0, 0, 0, 0], false);
 }
 
 #[test]

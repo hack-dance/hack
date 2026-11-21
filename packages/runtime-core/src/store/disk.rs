@@ -1,29 +1,46 @@
 //! Private layout, generation locking and atomic cache file publication.
 
 use super::{Result, Store, invalid, io_error};
+use crate::CandidateError;
 use crate::provider::state::{check_private_directory, flock, private_directory};
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 const VERSION: &[u8] = b"hack.store/1\n";
 const DIRECTORIES: [&str; 5] = ["records", "cas", "files", "tags", "tmp"];
 
+/// How long `open` may wait for the store lock before it reports the store busy.
+pub(super) const OPEN_DEADLINE: Duration = Duration::from_secs(5);
+
 pub(super) fn open(root: &Path) -> Result<Store> {
+    open_until(root, Instant::now() + OPEN_DEADLINE)
+}
+
+/// Open the store, waiting for its lock no later than `deadline`.
+///
+/// Every wait is bounded: no `flock` here blocks. Shared and exclusive locks are
+/// tried without blocking and retried until the deadline, then the open fails
+/// with `step_store_busy`, which a caller treats as "run the step". A lock
+/// problem can therefore slow a command by at most the deadline, never hang it.
+pub(super) fn open_until(root: &Path, deadline: Instant) -> Result<Store> {
     let root = store_path(root)?;
-    // Most opens only take a shared lock. Initialization waits briefly for other
-    // openers to finish probing, but refuses to rotate a store with live handles.
-    for _ in 0..32 {
+    // Most opens only take a shared lock. Initialization waits for other openers
+    // to finish probing, but refuses to rotate a store with live handles.
+    loop {
+        if Instant::now() >= deadline {
+            return Err(busy());
+        }
         let owner = create_directory(&root)?;
         let lock_path = root.join("lock");
         let lock = match open_lock(&lock_path, owner) {
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             result => result.map_err(io_error)?,
         };
-        lock_shared(&lock)?;
+        lock_shared(&lock, deadline)?;
         if !is_current(&lock, &lock_path)? {
             continue;
         }
@@ -42,8 +59,8 @@ pub(super) fn open(root: &Path) -> Result<Store> {
 
         // Upgrade to exclusive without blocking. Linux may release the shared lock
         // during the conversion; macOS keeps it when the upgrade fails. Either way a
-        // failed upgrade drops this handle and retries (up to 32 times, 5 ms apart),
-        // and both the inode and the contents are checked again once exclusive.
+        // failed upgrade drops this handle and retries until the deadline, 5 ms
+        // apart, and both the inode and the contents are checked again once exclusive.
         match flock(&lock, libc::LOCK_EX | libc::LOCK_NB) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
@@ -59,7 +76,13 @@ pub(super) fn open(root: &Path) -> Result<Store> {
         initialize(&root, owner)?;
         // Reopen under a shared lock, possibly on the newly created root.
     }
-    Err(invalid("Step store initialization is busy."))
+}
+
+fn busy() -> CandidateError {
+    CandidateError::new(
+        "step_store_busy",
+        "The step store is busy; the step runs without it.",
+    )
 }
 
 fn store_path(root: &Path) -> Result<PathBuf> {
@@ -117,12 +140,20 @@ fn set_aside(root: &Path) -> Result<()> {
     fs::rename(root, backup).map_err(io_error)
 }
 
-/// A blocking shared lock, retried when a signal interrupts the wait.
-fn lock_shared(lock: &File) -> Result<()> {
+/// A shared lock, tried without blocking every 2 ms until `deadline`.
+fn lock_shared(lock: &File, deadline: Instant) -> Result<()> {
     loop {
-        match flock(lock, libc::LOCK_SH) {
-            Err(error) if error.kind() == ErrorKind::Interrupted => {}
-            result => return result.map_err(io_error),
+        match flock(lock, libc::LOCK_SH | libc::LOCK_NB) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) =>
+            {
+                if Instant::now() >= deadline {
+                    return Err(busy());
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => return Err(io_error(error)),
         }
     }
 }

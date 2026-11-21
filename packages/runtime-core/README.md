@@ -527,7 +527,25 @@ an issue by themselves, and an open issue is not closed while availability is
 unknown. Size mismatches and refused redirects are reported as invalid pins.
 Availability alone never authorizes archive use or changes pins. Alpine package
 revisions may be retired upstream.
-The pinned host BuildKit client (`runtime prepare-builder`) and the pure Dockerfile
+`runtime setup` (`provider/setup.rs`) installs the three provider artifacts and then
+the pinned host BuildKit client, the image builder. The provider, the engine and the
+guest network tools are prepared in a private staging home and published together
+with one rename. The image builder is not part of that tree: after the provider set
+is published or reused, setup adds it with the manual preparation function
+(`artifact::prepare_builder`), which writes only the builder's own directory and
+record under the provider lock. A home that is already complete therefore gains the
+builder without its provider or engine being staged, published or prepared again; a
+pool may be running from them. Setup adds the builder only with download consent or
+the offline `--builder` file. Without either, a complete home is left unchanged and
+the result says `builder: "not_prepared"`; with it the result says `installed`, and
+`reused` when the builder was already prepared. `runtime prepare-builder` stays for
+offline and manual use. A build in a home without the builder refuses with
+`builder_not_prepared` and names the setup command; the read-only
+`runtime setup inspect --json` reports `builder.state` so the CLI's setup and doctor
+can say so before a build does. The setup tests (`provider/setup/tests.rs`) use a
+local server and fixture pins and never reach the network.
+
+The image builder and the pure Dockerfile
 image-reference scanner (`provider/build_scan.rs`) back `runtime build-image`
 (`provider/image_build.rs`), which builds one Compose-style image in the guest engine
 from a private request file. Its build key, receipts, leases, the `runtime down`

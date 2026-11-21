@@ -195,6 +195,9 @@ sizes, SHA-256 hashes, cache and destination, then asks once. Scripts use
 the runtime's setup result through unchanged. Completed files are verified and
 reused; interrupted downloads resume. The complete offline archive input form is
 also available; see [provider setup](native-candidate.md).
+Setup also installs the image builder that `build:` services need. A home that an
+earlier build set up gains it with `hack-next native setup --accept-downloads`,
+which downloads that one file and leaves the rest of the home in place.
 
 Preflight reports runtime installation separately from project review, in text
 and in the JSON `runtime_setup` item. A fresh or interrupted home blocks startup

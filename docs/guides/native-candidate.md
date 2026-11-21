@@ -1052,9 +1052,9 @@ truthy `HACK_NO_INTERACTIVE` values `1`, `true`, `yes` or `on`, ignoring case an
 surrounding whitespace) refuses with `E_INTERACTIVE_REQUIRED` unless
 `--accept-downloads` explicitly consents. Interactive `up` can offer setup with
 the same explicit consent; noninteractive `up` refuses until setup is complete.
-The installer and probe never download provider files. The optional BuildKit client
-is still prepared separately below.
-Setup lists the pinned SmolVM, Docker engine and four Alpine guest packages,
+The installer and probe never download provider files.
+Setup lists the pinned SmolVM, Docker engine, four Alpine guest packages and the
+BuildKit client (the image builder),
 including exact compressed sizes, hosts, hashes, private cache and destinations.
 
 Manual bundle frontends use `$HACK_HOME/native-runtime` or
@@ -1123,15 +1123,22 @@ hashes decide acceptance, and the existing SmolVM prepare step also checks its
 code signature. The qualification script's optional upstream checksum comparison
 remains a separate check.
 
-Successful `runtime setup --json` output includes `status`, `probe` and a `files`
-array. Each archive read has `name`, `outcome` (`downloaded`, `resumed`, `reused` or `offline`),
+Successful `runtime setup --json` output includes `status`, `builder`, `probe` and a `files`
+array. `status` and the archive entries describe the provider set (SmolVM, engine
+and guest packages). `builder` describes the image builder: `installed` when this
+run prepared it, `reused` when it was already prepared and verified, and
+`not_prepared` when the home has none and this run had neither download consent
+nor the offline builder file. The builder's own file joins `files` when this run
+read it.
+Each archive read has `name`, `outcome` (`downloaded`, `resumed`, `reused` or `offline`),
 `size_bytes`, `downloaded_bytes` and `reused_bytes`. The counts account for pinned
 artifacts this invocation, excluding HTTP headers and discarded prefixes.
 A resumed file counts only its new suffix as downloaded; a server that ignores
 Range restarts the download and counts the whole file as downloaded. Offline
 inputs report `offline`; verified cache files report `reused`. Both have zero
 downloaded bytes. Complete-home reuse verifies the installed tree without reading
-archives and returns `status: "reused"` with an empty `files` list.
+archives and returns `status: "reused"` with an empty `files` list, or with the
+image builder's file alone when this run added it.
 If another process finishes installation after this run read archives, the result
 keeps those actual archive entries even though its final status is `reused`.
 No input paths appear in these entries.
@@ -1141,7 +1148,20 @@ verifies the complete provider set, syncs it, then publishes the provider direct
 under the lifecycle lock. Interrupted staging is rebuilt on rerun. A complete
 matching install is verified before consent and reused without a prompt, consent
 flag, network or preparation; setup
-ends with `runtime probe --profile development`. An existing incomplete, changed
+ends with `runtime probe --profile development`.
+
+After the provider set is published or reused, setup adds the image builder with
+the manual `prepare-builder` function, under the lock that function takes. This
+step is additive: it writes the builder's own directory and record and the
+download cache, and never stages, publishes or prepares the provider set again,
+which a running pool may be executing from. A builder that is already prepared is
+verified and left alone. A complete home that has no image builder (a home set up
+by an earlier build, or offline without `--builder`) is never refused and never
+downloaded to without consent: `--accept-downloads` or the offline `--builder`
+file adds the builder and nothing else, and without either the result is
+`builder: "not_prepared"` with the home unchanged. `hack native setup` then prints
+one line naming `native setup --accept-downloads`. A prepared builder that changed
+keeps its `artifact_digest_mismatch` refusal. An existing incomplete, changed
 or differently pinned provider directory is preserved and refused as
 `setup_existing_invalid`: finish the manual steps, repair a changed tree, or use
 a fresh home. Setup never upgrades a home's provider pin in place.
@@ -1159,6 +1179,12 @@ network client:
   --engine-archive /absolute/docker-archive.tgz \
   --network-tools-directory /absolute/private/pinned-apks
 ```
+
+Add `--builder /absolute/docker-buildx` (the pinned `buildx` release file) to
+prepare the image builder in the same run. It is optional and accepted only with
+the three inputs above; without it, offline setup works as before and reports
+`builder: "not_prepared"`. On a home whose provider set is already installed, the
+three archive inputs are not read again.
 
 Or obtain the exact archives identified in `provider-pins.json` and run the
 unchanged individual manual commands (also supported by earlier prereleases):
@@ -1247,8 +1273,9 @@ An intact tree is reported with `repaired: false`. A repair that fails a check c
 no tree and keeps its private `-repairing-` staging directory. Without a kept archive the repair
 refuses (`provider_repair_unavailable`); prepare a fresh candidate home instead.
 
-The pins also name a BuildKit client (`buildx`, `darwin-arm64`) for native image
-builds. Prepare it before using `HACK_NATIVE_BUILDS=1`; it is optional otherwise:
+The pins also name a BuildKit client (`buildx`, `darwin-arm64`), the image builder
+for native image builds (`HACK_NATIVE_BUILDS=1`). `runtime setup` installs it, as
+described above. The manual command stays for offline and manual homes:
 
 ```sh
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare-builder --archive /absolute/docker-buildx
@@ -1257,8 +1284,24 @@ builds. Prepare it before using `HACK_NATIVE_BUILDS=1`; it is optional otherwise
 The command takes the exact release file named in `provider-pins.json`. It checks
 the SHA-256 before it changes any state, then copies the file into private candidate
 state and checks its code signature. If a prepared client exists, the command checks
-it again and does not replace it. If the prepared tree changes, `runtime probe`
-refuses; it reports `builder_prepared` when the client is present and unchanged.
+it again and does not replace it. A preparation that stopped after publishing the
+client's directory and before writing its record is finished by running the command
+(or setup) again: the record is written only when the directory holds exactly the
+pinned executable. If the prepared tree changes, `runtime probe` and every build
+refuse with `artifact_digest_mismatch`. `runtime probe` reports `builder_prepared`:
+`true` when the client is present and unchanged, `false` for a home without it.
+
+A home without the image builder refuses a build with `builder_not_prepared`:
+"The image builder is not installed in this native home", with the setup command
+that adds it, instead of a missing-file error. `hack up` prints that refusal with
+the command for the launcher you ran. A home that an earlier build set up is in
+this state until `native setup --accept-downloads` (or the offline `--builder`
+file, or the manual command above) adds the builder; nothing else in the home
+changes. `runtime setup inspect --json` reports the builder apart from readiness,
+as `builder.state` (`prepared`, `not_prepared` or `changed`), and `hack doctor` on
+the native backend adds a `native image builder` check: a warning with the same
+remedy when the project has a `build:` service and the home has no image builder.
+Doctor never installs or downloads it, with `--fix` either.
 
 `runtime build-image --request <file> --json` builds one image in the running
 runtime's engine with that client. Native `up` calls it for `build:` services when

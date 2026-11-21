@@ -59,3 +59,35 @@ test("download manifest and user docs retain the manual trust pins", async () =>
     "A one-command setup"
   );
 });
+
+test("setup installs the image builder; the manual command and the docs say what an older home does", async () => {
+  const setup = await Bun.file(join(runtime, "provider/setup.rs")).text();
+  const main = await Bun.file(join(runtime, "main.rs")).text();
+  // Setup prepares the builder with the manual entrypoint, which stays available.
+  expect(setup).toContain("artifact::prepare_builder(");
+  expect(main).toContain(
+    '["runtime", "prepare-builder", "--archive", archive]'
+  );
+  expect(main).toContain("[--builder <pinned-docker-buildx>]");
+  const guide = await Bun.file("docs/guides/native-candidate.md").text();
+  const page = await Bun.file("docs/versions/v5/native/setup.md").text();
+  const readme = await Bun.file("packages/runtime-core/README.md").text();
+  for (const text of [guide, readme]) {
+    expect(text).toContain("runtime prepare-builder");
+    expect(text).toContain("builder_not_prepared");
+    expect(text).toContain('builder: "not_prepared"');
+  }
+  expect(guide).toContain("runtime prepare-builder --archive");
+  for (const text of [
+    "## The image builder",
+    "native setup --accept-downloads",
+    "--builder /absolute/docker-buildx",
+    "native image builder",
+    "`doctor --fix`",
+  ]) {
+    expect(page).toContain(text);
+  }
+  expect(
+    await Bun.file("docs/versions/v5/troubleshooting.md").text()
+  ).toContain("builder_not_prepared");
+});

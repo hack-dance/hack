@@ -10,6 +10,7 @@ pub mod provider;
 pub mod store;
 #[cfg(test)]
 mod test_root;
+pub mod timings;
 #[cfg(test)]
 pub(crate) use test_root::{private_test_root, unique_test_root};
 

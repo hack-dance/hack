@@ -297,6 +297,8 @@ test("protected PR deferral passes the required fan-in only with successful sele
         TEST_FOCUS: outputs.test_focus,
         SHARD_RESULT: result,
         FOCUS_RESULT: "success",
+        GUEST_ENABLED: outputs.runtime_core,
+        GUEST_RESULT: "success",
         COMPILER_ENABLED: String(outputs.compiler_hosts !== "[]"),
         COMPILER_RESULT: "success",
         LIFETIME_ENABLED: outputs.docker_suite,

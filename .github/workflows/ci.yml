@@ -955,6 +955,8 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.runtime_core == 'true' }}
     uses: ./.github/workflows/guest-protocol.yml
+    with:
+      defer_macos: ${{ needs.changes.outputs.defer_macos == 'true' }}
 
   test:
     # The required `test` check (repository ruleset) for `next` and `main`. It

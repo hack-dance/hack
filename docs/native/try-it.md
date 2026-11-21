@@ -73,6 +73,8 @@ installation reports `status: "reused"` and an empty `files` list: no archive wa
 `builder` is `not_prepared` for a home that an earlier build set up without the
 image builder; rerun setup with `--accept-downloads` to add it, which downloads
 that one file ([the image builder](../versions/v5/native/setup.md#the-image-builder)).
+`builder` is `changed`, still with exit 0, when the builder in the home does not
+match the pinned release; setup leaves it alone and says what to remove.
 Connections time out after 15 seconds, each read after 60 seconds, and each file
 has a 30-minute overall deadline including redirects. A `setup_pin_unavailable`
 error means upstream returned 404 or 410; update Hack or use offline archives.

@@ -16,8 +16,10 @@ flowchart TD
   Builder -->|"yes"| Probe["Development profile probe"]
   Builder -->|"no, consent or file"| Add["Add the image builder only"]
   Builder -->|"no, neither"| Report["Report builder not_prepared"]
+  Builder -->|"does not verify"| Changed["Report builder changed, leave it"]
   Add --> Probe
   Report --> Probe
+  Changed --> Probe
   Retry -->|"explicit rerun"| Start
   class Refused,Preserved,Retry fail
   class Probe ok

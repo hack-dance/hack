@@ -1126,9 +1126,10 @@ remains a separate check.
 Successful `runtime setup --json` output includes `status`, `builder`, `probe` and a `files`
 array. `status` and the archive entries describe the provider set (SmolVM, engine
 and guest packages). `builder` describes the image builder: `installed` when this
-run prepared it, `reused` when it was already prepared and verified, and
+run prepared it, `reused` when it was already prepared and verified,
 `not_prepared` when the home has none and this run had neither download consent
-nor the offline builder file. The builder's own file joins `files` when this run
+nor the offline builder file, and `changed` when a builder is there that does not
+verify against the pinned release. The builder's own file joins `files` when this run
 read it.
 Each archive read has `name`, `outcome` (`downloaded`, `resumed`, `reused` or `offline`),
 `size_bytes`, `downloaded_bytes` and `reused_bytes`. The counts account for pinned
@@ -1160,8 +1161,17 @@ by an earlier build, or offline without `--builder`) is never refused and never
 downloaded to without consent: `--accept-downloads` or the offline `--builder`
 file adds the builder and nothing else, and without either the result is
 `builder: "not_prepared"` with the home unchanged. `hack native setup` then prints
-one line naming `native setup --accept-downloads`. A prepared builder that changed
-keeps its `artifact_digest_mismatch` refusal. An existing incomplete, changed
+one line naming `native setup --accept-downloads`.
+
+A builder that is there but does not verify never fails setup. The result is
+`builder: "changed"` with exit 0 and the provider set reported as before, with or
+without consent or `--builder`: setup never deletes or overwrites it. Builds and
+`runtime probe` keep refusing it with `artifact_digest_mismatch`. `hack native setup`
+prints one warning that names the builder's directory and record by their paths
+under the native home (`.hack-local/providers/buildx-<version>-darwin-arm64` and
+`.hack-local/providers/buildx.json`). To replace the builder, remove those two and
+run setup with `--accept-downloads` (or the offline `--builder` file). Removing only
+the directory works too: the stale record is replaced. An existing incomplete, changed
 or differently pinned provider directory is preserved and refused as
 `setup_existing_invalid`: finish the manual steps, repair a changed tree, or use
 a fresh home. Setup never upgrades a home's provider pin in place.
@@ -1284,10 +1294,22 @@ described above. The manual command stays for offline and manual homes:
 The command takes the exact release file named in `provider-pins.json`. It checks
 the SHA-256 before it changes any state, then copies the file into private candidate
 state and checks its code signature. If a prepared client exists, the command checks
-it again and does not replace it. A preparation that stopped after publishing the
-client's directory and before writing its record is finished by running the command
-(or setup) again: the record is written only when the directory holds exactly the
-pinned executable. If the prepared tree changes, `runtime probe` and every build
+it again and does not replace it. The record always carries the tree digest that the
+pin describes (one executable with that name, mode 0700 and the pinned bytes), never
+a digest read back from disk, so a file replaced after its check can never be
+recorded as good.
+
+A preparation that stopped after publishing the client's directory and before writing
+its record is finished by running the command (or setup) again. The record is written
+only when the directory is what preparation publishes: a real directory of yours with
+mode 0700 that holds exactly the pinned executable. Any other directory without a
+record is refused as changed, and its permissions and contents are left alone. A
+record write that stopped halfway leaves `buildx.pending` beside the record; the next
+preparation removes it under the provider lock when it is the private regular file
+that write creates (yours, mode 0600, one link), and refuses with `foreign_state`
+and leaves it in place when it is anything else, such as a symlink or a directory.
+
+If the prepared tree changes, `runtime probe` and every build
 refuse with `artifact_digest_mismatch`. `runtime probe` reports `builder_prepared`:
 `true` when the client is present and unchanged, `false` for a home without it.
 
@@ -1298,10 +1320,17 @@ the command for the launcher you ran. A home that an earlier build set up is in
 this state until `native setup --accept-downloads` (or the offline `--builder`
 file, or the manual command above) adds the builder; nothing else in the home
 changes. `runtime setup inspect --json` reports the builder apart from readiness,
-as `builder.state` (`prepared`, `not_prepared` or `changed`), and `hack doctor` on
+as `builder.state` (`prepared`, `not_prepared` or `changed`) with the builder's
+`directory` and `record` paths under the native home. That state is read from the
+record without hashing the builder, so bytes changed under an intact record still
+read as `prepared` there; setup and builds verify the bytes. `hack doctor` on
 the native backend adds a `native image builder` check: a warning with the same
-remedy when the project has a `build:` service and the home has no image builder.
-Doctor never installs or downloads it, with `--fix` either.
+remedy when the project has a `build:` service and the home has no image builder,
+or one whose record does not match the pinned release.
+Doctor never installs or downloads it, with `--fix` either. Its message, which is
+also the JSON `detail`, names the setup command by the launcher's name only
+(`hack-next native setup --accept-downloads`), not by the launcher's full path as
+terminal lines do, so a saved doctor report carries no home directory.
 
 `runtime build-image --request <file> --json` builds one image in the running
 runtime's engine with that client. Native `up` calls it for `build:` services when

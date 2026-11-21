@@ -538,7 +538,15 @@ builder without its provider or engine being staged, published or prepared again
 pool may be running from them. Setup adds the builder only with download consent or
 the offline `--builder` file. Without either, a complete home is left unchanged and
 the result says `builder: "not_prepared"`; with it the result says `installed`, and
-`reused` when the builder was already prepared. `runtime prepare-builder` stays for
+`reused` when the builder was already prepared. A builder that is there but does not
+verify is reported as `builder: "changed"` and never touched: setup still exits 0 for
+a complete home, and never deletes or overwrites the builder, with or without a
+source. The user removes its directory and record and runs setup with consent. The
+builder's record always carries the tree digest the pin describes
+(`artifact::pinned_tree_digest`), not a digest read back from disk, and preparation
+finishes an interrupted run (a published directory without its record, or a leftover
+`buildx.pending`) only for exactly what it would have written itself.
+`runtime prepare-builder` stays for
 offline and manual use. A build in a home without the builder refuses with
 `builder_not_prepared` and names the setup command; the read-only
 `runtime setup inspect --json` reports `builder.state` so the CLI's setup and doctor

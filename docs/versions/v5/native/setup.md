@@ -40,7 +40,7 @@ home's provider pin in place.
 Native `up` builds a Compose `build:` service with a pinned build client, the
 image builder. Setup installs it with the rest of the runtime. It is in the list
 you consent to, and the JSON result reports it in `builder`: `installed`,
-`reused`, or `not_prepared`.
+`reused`, `not_prepared` or `changed`.
 
 A home that an earlier build set up is complete without the image builder, so
 setup leaves it as it is. Plain `native setup` still succeeds there, downloads
@@ -61,6 +61,15 @@ in this native home" and the command above. `hack doctor` on the native backend
 reports the same thing first, as a `native image builder` warning, for a project
 with a `build:` service. Doctor only reports it: `doctor --fix` downloads
 nothing.
+
+If the image builder in a home no longer matches the pinned release, setup still
+succeeds and reports `builder: "changed"`. It prints one warning and leaves the
+builder exactly as it is, with or without `--accept-downloads` or `--builder`:
+setup never deletes or overwrites it. Image builds are refused until you replace
+it. The warning names the two paths to remove, relative to the native home (the
+builder's directory `.hack-local/providers/buildx-<version>-darwin-arm64` and its
+record `.hack-local/providers/buildx.json`). Remove them, then run
+`native setup --accept-downloads`.
 
 ## Offline inputs
 

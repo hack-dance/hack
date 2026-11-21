@@ -76,6 +76,8 @@ test("setup installs the image builder; the manual command and the docs say what
     expect(text).toContain("runtime prepare-builder");
     expect(text).toContain("builder_not_prepared");
     expect(text).toContain('builder: "not_prepared"');
+    // A builder that does not verify never fails setup; it is reported.
+    expect(text).toContain('builder: "changed"');
   }
   expect(guide).toContain("runtime prepare-builder --archive");
   for (const text of [
@@ -84,6 +86,8 @@ test("setup installs the image builder; the manual command and the docs say what
     "--builder /absolute/docker-buildx",
     "native image builder",
     "`doctor --fix`",
+    'builder: "changed"',
+    ".hack-local/providers/buildx.json",
   ]) {
     expect(page).toContain(text);
   }

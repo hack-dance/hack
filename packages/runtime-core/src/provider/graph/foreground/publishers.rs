@@ -171,61 +171,55 @@ impl Publishers {
             &BTreeSet::new(),
             &|| check_deadline(signals, deadline),
         )?;
-        if !routes.is_empty() {
-            self.start_routes(
-                candidate,
-                receipt,
-                signals,
-                deadline,
-                slots,
-                &routes,
-                &executable,
-            )?;
-        }
-        if loopback > 0 {
-            self.start_loopback(candidate, receipt, signals, deadline, &executable)?;
-        }
-        self.verify_live(candidate)
-    }
-
-    /// Loopback TCP publications start after routes, each through its own
-    /// reserved bridge. A refusal leaves earlier publishers owned by this set
-    /// for the caller's enrolled cleanup, as for routes.
-    fn start_loopback(
-        &mut self,
-        candidate: &Candidate,
-        receipt: &Receipt,
-        signals: &signals::Events,
-        deadline: Instant,
-        executable: &Path,
-    ) -> Result<(), CandidateError> {
         check_deadline(signals, deadline)?;
+        // One snapshot and one registry update reserve every route and port.
         // `started` readiness can finish while an image healthcheck is still
         // starting; wait for those endpoints within the same startup deadline.
         let reserved = retry_pending_endpoint(
-            || super::super::bridges::reserve_loopback_ports(candidate, receipt),
+            || super::super::bridges::reserve_publications(candidate, receipt, slots),
             || {
                 std::thread::sleep(PENDING_ENDPOINT_POLL);
                 check_deadline(signals, deadline)
             },
         )?;
-        for (port, selected) in reserved {
+        let mut launches = Vec::new();
+        for (service, route) in &routes {
+            let selected = reserved.routes.get(*service).ok_or_else(refused)?;
+            launches.push((selected, Frontend::Hostnames(&route.hostnames)));
+        }
+        for (port, selected) in &reserved.ports {
+            launches.push((selected, Frontend::Port(*port)));
+        }
+        if launches.len() != reserved.routes.len() + reserved.ports.len()
+            || reserved.ports.len() != loopback
+        {
+            return Err(refused());
+        }
+        check_deadline(signals, deadline)?;
+        // One provider lease starts every relay. A refusal leaves the reserved and
+        // started slots to the caller's enrolled cleanup, as one refused start did.
+        let batch = launches
+            .iter()
+            .map(|(selected, _)| (selected.slot, selected.assignment.reservation.as_str()))
+            .collect::<Vec<_>>();
+        super::super::bridges::start_bridges(candidate, &receipt.run, &batch)?;
+        // Every child is owned (and watched) as soon as it exists; they take the
+        // provider lease in turn while this owner observes all of them together.
+        let first = self.children.len();
+        for (selected, frontend) in launches {
             check_deadline(signals, deadline)?;
             let assignment = &selected.assignment;
-            graph::start_bridge(
-                candidate,
-                &receipt.run,
-                selected.slot,
-                &assignment.reservation,
-            )?;
-            check_deadline(signals, deadline)?;
+            let (hostnames, port) = match &frontend {
+                Frontend::Hostnames(names) => (names.to_vec(), None),
+                Frontend::Port(port) => (Vec::new(), Some(*port)),
+            };
             let child = command(
-                executable,
+                &executable,
                 &candidate.checkout,
                 &receipt.run,
                 selected.slot,
                 &assignment.reservation,
-                Frontend::Port(port),
+                frontend,
             )
             .spawn()
             .map_err(|_| refused())?;
@@ -234,33 +228,52 @@ impl Publishers {
                 run: receipt.run.clone(),
                 reservation: assignment.reservation.clone(),
                 service: assignment.service.clone(),
-                hostnames: Vec::new(),
-                port: Some(port),
+                hostnames,
+                port,
                 target: assignment.loopback_port.map(|binding| binding.target),
                 exited: None,
                 exit_proof: None,
                 exit_pending: false,
             });
-            self.await_published(candidate, signals, deadline, PublisherReadiness::Startup)?;
+            signals.watch_child(&self.children.last().expect("pushed").child)?;
         }
-        Ok(())
+        self.await_published(
+            candidate,
+            signals,
+            deadline,
+            first,
+            PublisherReadiness::Startup,
+        )?;
+        self.verify_live(candidate)
     }
 
+    /// Waits until every child from `first` on observes its publication. Only
+    /// children not yet observed are read again, every 10 ms.
     fn await_published(
         &mut self,
         candidate: &Candidate,
         signals: &signals::Events,
         deadline: Instant,
+        first: usize,
         scope: PublisherReadiness,
     ) -> Result<(), CandidateError> {
-        let selected = self.children.len().checked_sub(1).ok_or_else(refused)?;
-        signals.watch_child(&self.children[selected].child)?;
+        let mut pending = (first..self.children.len()).collect::<Vec<_>>();
+        if pending.is_empty() {
+            return Err(refused());
+        }
         loop {
             check_deadline(signals, deadline)?;
-            if self.publication_ready_with(candidate, selected, scope, published)? {
+            let mut waiting = Vec::with_capacity(pending.len());
+            for selected in pending {
+                if !self.publication_ready_with(candidate, selected, scope, published)? {
+                    waiting.push(selected);
+                }
+            }
+            if waiting.is_empty() {
                 return Ok(());
             }
-            std::thread::sleep(Duration::from_millis(20));
+            pending = waiting;
+            std::thread::sleep(PUBLISHED_POLL);
         }
     }
 
@@ -288,54 +301,6 @@ impl Publishers {
                 publication::require_loopback_port_free(port)
                     .is_err_and(|error| error.code == "published_port_in_use")
             }))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn start_routes(
-        &mut self,
-        candidate: &Candidate,
-        receipt: &Receipt,
-        signals: &signals::Events,
-        deadline: Instant,
-        slots: &BTreeMap<String, graph::RouteSlot>,
-        routes: &BTreeMap<&String, &crate::project::RoutingPlan>,
-        executable: &Path,
-    ) -> Result<(), CandidateError> {
-        check_deadline(signals, deadline)?;
-        let reserved = super::super::bridges::reserve_routes(candidate, receipt, slots)?;
-        for (service, route) in routes {
-            check_deadline(signals, deadline)?;
-            let selected = reserved.get(*service).ok_or_else(refused)?;
-            let slot = selected.slot;
-            let assignment = &selected.assignment;
-            check_deadline(signals, deadline)?;
-            graph::start_bridge(candidate, &receipt.run, slot, &assignment.reservation)?;
-            check_deadline(signals, deadline)?;
-            let child = command(
-                executable,
-                &candidate.checkout,
-                &receipt.run,
-                slot,
-                &assignment.reservation,
-                Frontend::Hostnames(&route.hostnames),
-            )
-            .spawn()
-            .map_err(|_| refused())?;
-            self.children.push(Owned {
-                child,
-                run: receipt.run.clone(),
-                reservation: assignment.reservation.clone(),
-                service: assignment.service.clone(),
-                hostnames: route.hostnames.clone(),
-                port: None,
-                target: None,
-                exited: None,
-                exit_proof: None,
-                exit_pending: false,
-            });
-            self.await_published(candidate, signals, deadline, PublisherReadiness::Startup)?;
-        }
-        Ok(())
     }
 
     /// Point-in-time publisher ownership, not guest health or TLS request proof.
@@ -530,10 +495,12 @@ impl Publishers {
                 exit_proof: None,
                 exit_pending: false,
             });
+            signals.watch_child(&self.children[replacement].child)?;
             if let Err(error) = self.await_published(
                 candidate,
                 signals,
                 deadline,
+                replacement,
                 PublisherReadiness::Replacement,
             ) {
                 // The listener can be taken after reservation. Never reuse this
@@ -651,6 +618,7 @@ fn exit_notice(
 }
 
 const PENDING_ENDPOINT_POLL: Duration = Duration::from_millis(100);
+const PUBLISHED_POLL: Duration = Duration::from_millis(10);
 
 /// Repeats `attempt` only while it refuses with `bridge_endpoint_pending`; each
 /// refusal wrote nothing. `wait` bounds the loop: its error ends it unchanged.

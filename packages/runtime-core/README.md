@@ -649,6 +649,27 @@ The same applies when the failed boot's provider was recorded and is proven dead
 (`failed-boot-stopped` after a template refusal): recovery sets those disks aside instead of
 adopting them on the stopped path. Repeating recovery on the resulting pool changes nothing.
 
+A boot that fails after its provider process was recorded writes `failed-boot.json` beside
+the owner record: the failure's code and message, the recorded process, and
+`process_absent`, which says that the cleanup after the failure confirmed the provider
+stopped (not that the provider had exited by itself). A command prints most failures by
+code alone, because a message can name a path; the record keeps the message so that a code
+many causes share, such as `provider_state` for any I/O error, can be told apart afterwards
+without reproducing the failure. The file is private to the home.
+
+While a boot is adopted, after the engine has answered inside the guest and before the pool
+is recorded as running, the engine is checked once more from the host: `GET /_ping` through
+the provider's forwarded engine socket. That forward can lag behind the provider's ready
+signal, and a connection it accepts in that window is never answered. So the check makes up
+to three attempts, each on a fresh connection to a socket path that is validated again for
+that attempt. The boot fails when all of them failed, with the last attempt's error, or at
+once when the path is refused as unsafe (not this user's socket, a symlink on the way, or an
+ancestor that is not a directory); a socket file that is not there yet is tried again
+(HACK-2475: a single unanswered connection used to fail the boot after three seconds). Each
+attempt has three seconds for its whole reply. A forward that never answers fails the boot
+after about 9.2 s. The check does not identify which process answers on that
+socket; it checks that the path is this user's own socket in the pool's directory.
+
 Guest control readiness does not mean exposed bridge sockets have bound. The pinned
 [SmolVM 1.35.4 guest](https://github.com/smol-machines/smolvm/blob/v1.35.4/crates/smolvm-agent/src/main.rs#L664)
 starts [independent expose threads](https://github.com/smol-machines/smolvm/blob/v1.35.4/crates/smolvm-agent/src/publish_socket.rs#L57)

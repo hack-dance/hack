@@ -318,4 +318,46 @@ fn complete_inventory_at_advertised_capacity() {
             handles: handles[..usize::from(session.max_jobs)].to_vec()
         }
     );
+    let start = |handle: Handle| Request::Start {
+        handle,
+        argv: vec!["/missing-probe-program".into()],
+        env: vec![],
+        cwd: "/".into(),
+        stdin: vec![],
+    };
+    let first = handles[0].clone();
+    assert_eq!(
+        session
+            .execute(&Request::Release {
+                handle: first.clone()
+            })
+            .unwrap(),
+        Response::Released {}
+    );
+    for counter in session.max_jobs..320 {
+        let handle = Handle {
+            id: format!("{counter:032x}"),
+            ..first.clone()
+        };
+        assert_eq!(
+            session.execute(&start(handle.clone())).unwrap(),
+            Response::SpawnFailed {}
+        );
+        assert_eq!(
+            session.execute(&Request::Release { handle }).unwrap(),
+            Response::Released {}
+        );
+    }
+    assert_eq!(
+        session.execute(&start(first)).unwrap(),
+        Response::Conflict {}
+    );
+    assert_eq!(
+        session
+            .execute(&Request::Inspect {
+                handle: handles[1].clone()
+            })
+            .unwrap(),
+        Response::SpawnFailed {}
+    );
 }

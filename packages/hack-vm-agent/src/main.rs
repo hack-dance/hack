@@ -18,11 +18,17 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Default)]
+struct Registry {
+    admitted: Option<u128>,
+    live: HashMap<String, Job>,
+}
+
 struct Agent {
     boot: String,
     incarnation: String,
     kernel: String,
-    jobs: Mutex<HashMap<String, Option<Job>>>,
+    jobs: Mutex<Registry>,
 }
 
 impl Agent {
@@ -32,9 +38,9 @@ impl Agent {
             List {} => {
                 let jobs = self.jobs.lock().unwrap();
                 let mut handles: Vec<_> = jobs
-                    .iter()
-                    .filter(|(_, job)| job.is_some())
-                    .map(|(id, _)| Handle {
+                    .live
+                    .keys()
+                    .map(|id| Handle {
                         boot: self.boot.clone(),
                         incarnation: self.incarnation.clone(),
                         id: id.clone(),
@@ -69,7 +75,11 @@ impl Agent {
         if self.boot != handle.boot || self.incarnation != handle.incarnation {
             return Response::Unknown {};
         }
+        let Ok(counter) = u128::from_str_radix(&handle.id, 16) else {
+            return Response::Invalid {};
+        };
         let mut jobs = self.jobs.lock().unwrap();
+        let retired_or_live = jobs.admitted.is_some_and(|last| counter <= last);
         if let Start {
             handle,
             argv,
@@ -78,21 +88,25 @@ impl Agent {
             stdin,
         } = req
         {
-            if jobs.contains_key(&handle.id) {
+            if retired_or_live {
                 return Response::Conflict {};
             }
-            if jobs.len() >= 256 || jobs.values().flatten().count() >= usize::from(MAX_JOBS) {
+            if jobs.live.len() >= usize::from(MAX_JOBS) {
                 return Response::Full {};
             }
-            let slot = jobs.entry(handle.id).or_default();
-            *slot = Some(Job::start(argv, env, cwd, stdin));
-            return slot.as_ref().unwrap().inspect();
+            jobs.admitted = Some(counter);
+            return jobs
+                .live
+                .entry(handle.id)
+                .or_insert_with(|| Job::start(argv, env, cwd, stdin))
+                .inspect();
         }
-        let Some(slot) = jobs.get_mut(&handle.id) else {
-            return Response::Absent {};
-        };
-        let Some(job) = slot else {
-            return Response::Released {};
+        let Some(job) = jobs.live.get_mut(&handle.id) else {
+            return if retired_or_live {
+                Response::Released {}
+            } else {
+                Response::Absent {}
+            };
         };
         job.refresh();
         match req {
@@ -100,7 +114,7 @@ impl Agent {
             Signal { signal, .. } => job.signal(signal),
             Output { stream, offset, .. } => job.output(stream, offset),
             Release { .. } if job.finished() => {
-                *slot = None;
+                jobs.live.remove(&handle.id);
                 Response::Released {}
             }
             Release { .. } => Response::Conflict {},
@@ -190,7 +204,7 @@ fn run() -> io::Result<()> {
     let supervisor = agent.clone();
     thread::spawn(move || {
         loop {
-            for job in supervisor.jobs.lock().unwrap().values_mut().flatten() {
+            for job in supervisor.jobs.lock().unwrap().live.values_mut() {
                 job.refresh();
             }
             thread::sleep(Duration::from_millis(100));

@@ -14,12 +14,11 @@ restart changes the incarnation and invalidates every old handle. A timed-out
 start can arrive after another connection observes absence. Inspect and keep
 the outcome unknown while the old request can still arrive.
 
-The registry holds up to 16 unreleased jobs and 256 total IDs per incarnation,
-including released tombstones. Exhaustion returns Full. A production supervisor
-needs an explicit epoch rollover policy before using this bounded proof agent
-for long-lived workloads.
+The registry holds up to 16 unreleased jobs. One counter per incarnation
+fences retired IDs. Releasing a job immediately frees its slot. A rejected
+admission at capacity leaves the counter unchanged.
 
-The finite model covers one ID, one terminal exit code, a half-open transport,
+The finite model covers two successive IDs per incarnation, terminal outcomes, a half-open transport,
 host reconnect and one guest restart. The Linux integration test drives the
 corresponding transitions over a socket and uses an agent restart to exercise
 incarnation fencing. Booting a guest and establishing its socket bridge require

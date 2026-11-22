@@ -618,7 +618,8 @@ fn successful_port_guards_own_all_four_allocated_addresses_during_observation() 
         .iter()
         .map(AsRawFd::as_raw_fd)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(descriptors.len(), 4);
+    // Every guard, interface addresses included, owns its own descriptor.
+    assert_eq!(descriptors.len(), guards.len());
     for (guard, ip) in guards.iter().zip(expected) {
         let listener = std::net::TcpListener::from(guard.try_clone().unwrap());
         let address = listener.local_addr().unwrap();

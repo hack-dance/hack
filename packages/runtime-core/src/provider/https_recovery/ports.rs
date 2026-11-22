@@ -65,6 +65,9 @@ pub(super) fn claim(port: u16, reuse: bool) -> Result<Vec<OwnedFd>, CandidateErr
 /// (`EADDRNOTAVAIL`: an IPv6 address still tentative, duplicated or detached) is
 /// skipped: no socket can bind it now, so no listener can start on it while the
 /// claim is held. A listener that bound it before it became unusable is the residual.
+/// The claim holds one socket per address for the archive's duration, so the number
+/// of descriptors is bounded by the host's interface addresses (VPN and container
+/// interfaces included), plus the four wildcard and loopback guards.
 #[cfg(target_os = "macos")]
 pub(super) fn reuse_claim(
     port: u16,

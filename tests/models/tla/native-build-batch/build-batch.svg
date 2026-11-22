@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="180" viewBox="0 0 660 180" role="img" aria-labelledby="title">
+  <title id="title">Build batch: dispatch, cancel and settle</title>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#64748b"/></marker></defs>
+  <g fill="#eff6ff" stroke="#64748b">
+    <rect x="15" y="35" width="150" height="55" rx="8"/>
+    <rect x="255" y="35" width="150" height="55" rx="8" fill="#fff7ed"/>
+    <rect x="495" y="35" width="150" height="55" rx="8" fill="#ecfdf5"/>
+  </g>
+  <g fill="none" stroke="#64748b" marker-end="url(#arrow)">
+    <path d="M165 62H253"/><path d="M405 62H493"/>
+    <path d="M90 91V131H570V92"/>
+  </g>
+  <g fill="#0f172a" font-family="system-ui, sans-serif" font-size="13" text-anchor="middle">
+    <text x="90" y="57">Dispatch in order</text><text x="90" y="75">At most three live</text>
+    <text x="330" y="57">Abort siblings</text><text x="330" y="75">Keep first outcome</text>
+    <text x="570" y="57">Return</text><text x="570" y="75">No builds live</text>
+    <text x="210" y="48">Fail or Ctrl-C</text><text x="450" y="48">All settled</text>
+    <text x="330" y="151">All queued builds succeeded and settled</text>
+  </g>
+</svg>

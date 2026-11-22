@@ -269,9 +269,9 @@ export async function prepareProjectRemoteChoices(
 export function applyRemoteEnv(
   env: Readonly<Record<string, string>>,
   choices: readonly EffectiveRemote[] = [],
-  bindingsOnly = false
+  options?: { readonly bindingsOnly?: boolean; readonly host?: boolean }
 ): Record<string, string> {
-  const result = bindingsOnly ? {} : { ...env };
+  const result = options?.bindingsOnly ? {} : { ...env };
   for (const { address, bindings, port } of choices) {
     let host: string;
     if (address.kind === "env_ref") {
@@ -285,8 +285,10 @@ export function applyRemoteEnv(
         });
       }
       host = value;
+    } else if (address.kind === "service") {
+      host = options?.host ? "127.0.0.1" : address.service;
     } else {
-      host = address.kind === "service" ? address.service : address.hostname;
+      host = address.hostname;
     }
     for (const [name, template] of Object.entries(bindings)) {
       Object.defineProperty(result, name, {

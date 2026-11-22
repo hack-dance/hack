@@ -911,11 +911,17 @@ async function resolveEnvInjection(input: {
       target: input.target,
     });
     return {
-      env: await adaptEnvForHostExecution({
-        env: applyRemoteEnv(env, choices),
-        target: input.target,
-        serviceNames,
-      }),
+      env: {
+        ...(await adaptEnvForHostExecution({
+          env,
+          target: input.target,
+          serviceNames,
+        })),
+        ...applyRemoteEnv(env, choices, {
+          bindingsOnly: true,
+          host: input.target === "host",
+        }),
+      },
       effectiveEnvName: modern.selection.effectiveEnv,
     };
   }
@@ -932,18 +938,19 @@ async function resolveEnvInjection(input: {
   const serviceNames = await discoverComposeServiceNames({
     composeFile: input.project.composeFile,
   });
+  const env = selectHackEnvValues({ resolved, serviceName: input.serviceName });
   return {
-    env: await adaptEnvForHostExecution({
-      env: applyRemoteEnv(
-        selectHackEnvValues({
-          resolved,
-          serviceName: input.serviceName,
-        }),
-        choices
-      ),
-      target: input.target,
-      serviceNames,
-    }),
+    env: {
+      ...(await adaptEnvForHostExecution({
+        env,
+        target: input.target,
+        serviceNames,
+      })),
+      ...applyRemoteEnv(env, choices, {
+        bindingsOnly: true,
+        host: input.target === "host",
+      }),
+    },
     effectiveEnvName: resolved.envSelection.effectiveEnv,
   };
 }

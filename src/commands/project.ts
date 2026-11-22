@@ -2099,7 +2099,10 @@ export async function resolveModernComposeEnvOverrides(opts: {
       scopeName: "global",
       target: "host",
     }),
-    ...applyRemoteEnv(modern.globalEnv, opts.remoteChoices, true),
+    ...applyRemoteEnv(modern.globalEnv, opts.remoteChoices, {
+      bindingsOnly: true,
+      host: true,
+    }),
   };
   const serviceEnv = opts.remoteChoices?.length
     ? Object.fromEntries(
@@ -2299,10 +2302,8 @@ async function resolveComposeEnvOverrides(opts: {
   }
 
   if (opts.remoteChoices?.length) {
-    const lifecycleEnv = applyRemoteEnv(
-      selectHackEnvValues({ resolved }),
-      opts.remoteChoices
-    );
+    const managedEnv = selectHackEnvValues({ resolved });
+    const globalEnv = applyRemoteEnv(managedEnv, opts.remoteChoices);
     const serviceEnv = Object.fromEntries(
       composeEnvOverrideServices(opts).map((service) => [
         service,
@@ -2317,12 +2318,12 @@ async function resolveComposeEnvOverrides(opts: {
         ? remoteSelectionLabels(opts.remoteChoices)
         : undefined,
       targetServices: composeEnvOverrideServices(opts),
-      globalEnv: lifecycleEnv,
+      globalEnv,
       serviceEnv,
     });
     const env = {
       ...resolved.envForCompose,
-      ...lifecycleEnv,
+      ...globalEnv,
       ...override?.env,
     };
     assertComposeSpawnEnvFits({ env });
@@ -2336,7 +2337,9 @@ async function resolveComposeEnvOverrides(opts: {
           })
         : [],
       env,
-      lifecycleEnv,
+      lifecycleEnv: applyRemoteEnv(managedEnv, opts.remoteChoices, {
+        host: true,
+      }),
       preflightEnvByService: serviceEnv,
       effectiveEnvName: resolved.envSelection.effectiveEnv,
     };
@@ -11881,7 +11884,9 @@ async function handleRun({
     targetServices: [service],
   });
   const preparedServices = [...new Set([service, ...cacheBootstrapServices])];
-  const allServiceNames = await readComposeServiceNames(project.composeFile);
+  const allServiceNames = await (remoteChoices.length
+    ? readIncludedComposeServiceNames
+    : readComposeServiceNames)(project.composeFile);
   await assertNoInactiveRemoteDependencies({
     files: composeFilesWithRuntimeOverrides,
     services: [service],

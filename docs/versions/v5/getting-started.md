@@ -293,3 +293,6 @@ Hack asks before using a target that requires confirmation. On a noninteractive
 run, name that target with `--use` on the command itself. The output names
 managed hostname references without printing their values. A target with
 `via` can be selected and reports that this version does not start its tunnel.
+
+For a local service target, host commands and sessions use `127.0.0.1` at the
+target port. Publish that port on the host if a host process needs to connect.

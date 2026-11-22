@@ -1117,7 +1117,8 @@ async function resolveSessionInjectedEnv(opts: {
           resolved: modern,
           scopeName: opts.serviceName,
         }),
-        opts.remoteChoices
+        opts.remoteChoices,
+        { host: true }
       )
     );
   }
@@ -1133,7 +1134,8 @@ async function resolveSessionInjectedEnv(opts: {
         resolved,
         serviceName: opts.serviceName,
       }),
-      opts.remoteChoices
+      opts.remoteChoices,
+      { host: true }
     )
   );
 }

@@ -22,7 +22,7 @@ test("the six --use entry points deliver the invocation target without saving it
       await mkdir(hack, { recursive: true });
       await Bun.write(
         join(hack, "docker-compose.yml"),
-        "include: [worker.yml]\nservices:\n  api:\n    image: alpine\n  postgres:\n    image: postgres\n  migrate:\n    image: alpine\n    profiles: [maintenance]\n"
+        "include: [worker.yml]\nservices:\n  api:\n    image: alpine\n    depends_on: [worker]\n  postgres:\n    image: postgres\n  migrate:\n    image: alpine\n    profiles: [maintenance]\n"
       );
       await Bun.write(
         join(hack, "worker.yml"),
@@ -145,6 +145,9 @@ test("the six --use entry points deliver the invocation target without saving it
     expect(ok(["host", "shell", ...choice]).stdout).toBe(
       "live.example.test:5432\n"
     );
+    expect(ok(["host", "shell", "--use", "db=local"]).stdout).toBe(
+      "127.0.0.1:5432\n"
+    );
     for (const args of [
       ["up", "--detach", ...choice],
       ["restart", ...choice],
@@ -158,6 +161,17 @@ test("the six --use entry points deliver the invocation target without saving it
       expect(delivery).toContain("live.example.test:5432\n");
       expect(delivery).not.toMatch(/ up .* postgres/);
     }
+    const override = await Bun.file(
+      join(stack, ".hack", ".internal", "compose.env.override.yml")
+    ).text();
+    expect(Bun.YAML.parse(override)).toMatchObject({
+      services: {
+        worker: {
+          environment: { DB_HOST: expect.stringMatching(/^\$\{HACK_ENV_/) },
+          labels: { "dev.hack.remote.db": "live:--use" },
+        },
+      },
+    });
     await Bun.write(log, "");
     ok(["up", "--detach", ...choice]);
     const defaultStartup = await Bun.file(log).text();
@@ -174,6 +188,17 @@ test("the six --use entry points deliver the invocation target without saving it
     expect(await Bun.file(log).text()).toContain(
       "DB_HOST=live.example.test:5432"
     );
+    await Bun.write(log, "");
+    ok([
+      "session",
+      "start",
+      "--use",
+      "db=local",
+      "--new",
+      "--detach",
+      "remote-stack",
+    ]);
+    expect(await Bun.file(log).text()).toContain("DB_HOST=127.0.0.1:5432");
     await Bun.write(log, "");
     const withUp = ok([
       "session",

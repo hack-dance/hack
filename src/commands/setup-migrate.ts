@@ -394,11 +394,12 @@ async function reportPreview(opts: {
     title: "Plugin migration preview (nothing changed)",
     items: planItems(opts.plan),
   });
-  createTextOutput().hint(
-    blocked
-      ? "install the hack plugin for blocked clients and verify it loads in a fresh session (or pass --skip-plugin-check after checking it yourself). run: hack setup migrate --apply"
-      : "back up and remove the marked files. run: hack setup migrate --apply"
-  );
+  createTextOutput().hint({
+    text: blocked
+      ? "install the hack plugin for blocked clients and verify it loads in a fresh session (or pass --skip-plugin-check after checking it yourself). run:"
+      : "back up and remove the marked files. run:",
+    command: "hack setup migrate --apply",
+  });
   return exitCode;
 }
 
@@ -482,9 +483,10 @@ async function reportApply(opts: {
       },
     ],
   });
-  createTextOutput().hint(
-    `undo with: hack setup migrate --rollback-manifest ${result.manifestPath}`
-  );
+  createTextOutput().hint({
+    text: "undo with:",
+    command: `hack setup migrate --rollback-manifest ${result.manifestPath}`,
+  });
   return exitCode;
 }
 

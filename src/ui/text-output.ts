@@ -18,7 +18,10 @@ export type StepRow = {
   readonly result?: string;
 };
 
-type TableCell = string | { readonly text: string; readonly role: Role } | null;
+export type TableCell =
+  | string
+  | { readonly text: string; readonly role: Role }
+  | null;
 
 const stepMarks = {
   ok: { mark: "✓", role: "identity" },
@@ -35,9 +38,22 @@ function pad(text: string, columns: number): string {
   return " ".repeat(Math.max(0, columns - width(text)));
 }
 
+const LINE_BREAKS = /[\r\n\u0085\u2028\u2029]+/g;
+const COMMAND_LINE_BREAK = /[\r\n\u0085\u2028\u2029]/;
+
+function singleLine(text: string): string {
+  return text.replaceAll(LINE_BREAKS, " ");
+}
+
+function requireCommand(command: string): void {
+  if (command.trim().length === 0 || COMMAND_LINE_BREAK.test(command)) {
+    throw new Error("Expected a non-empty, single-line command");
+  }
+}
+
 function cellText(cell: TableCell): string {
   const text = typeof cell === "string" ? cell : (cell?.text ?? "-");
-  return text.replaceAll(/[\r\n\t]/g, " ");
+  return singleLine(text).replaceAll("\t", " ");
 }
 
 export function formatDuration(milliseconds: number): string {
@@ -60,12 +76,15 @@ export function createTextOutput({
   }
 
   function line(text = "", role: Role = "ink"): void {
-    write(`${paint(text, role)}\n`);
+    write(`${paint(singleLine(text), role)}\n`);
   }
 
   return {
     line,
-    /** Measure names and details before emitting the first completed row. */
+    /**
+     * Reserve widths before the first completed row. Print late or wider
+     * fields in full, shifting subsequent cells in that row only.
+     */
     stepRows(
       rows: readonly Pick<StepRow, "name" | "detail">[],
       { markGap = 1 } = {}
@@ -73,18 +92,25 @@ export function createTextOutput({
       let nameWidth = 0;
       let detailWidth = 0;
       for (const row of rows) {
-        nameWidth = Math.max(nameWidth, width(row.name));
-        detailWidth = Math.max(detailWidth, width(row.detail ?? ""));
+        nameWidth = Math.max(nameWidth, width(singleLine(row.name)));
+        detailWidth = Math.max(
+          detailWidth,
+          width(singleLine(row.detail ?? ""))
+        );
       }
-      return ({ status, name, detail = "", result }: StepRow): void => {
+      return (row: StepRow): void => {
+        const { status, result } = row;
+        const name = singleLine(row.name);
+        const detail = singleLine(row.detail ?? "");
         const { mark, role } = stepMarks[status];
         const heading = `${paint(mark, role)}${" ".repeat(markGap)}${name}`;
         const details = detail ? paint(detail, "dim") : "";
         const between = "  ";
         if (result) {
-          const detailColumn = detailWidth
-            ? `${details}${pad(detail, detailWidth)}${between}`
-            : "";
+          const detailColumn =
+            detailWidth > 0 || detail
+              ? `${details}${pad(detail, detailWidth)}${between}`
+              : "";
           line(
             `${heading}${pad(name, nameWidth)}${between}${detailColumn}${paint(result, "faint")}`
           );
@@ -95,12 +121,18 @@ export function createTextOutput({
         }
       };
     },
+    /**
+     * Size columns from all rows before writing the header. Cells retain their
+     * contents at narrow terminal widths so commands and addresses stay copyable.
+     */
     table(input: {
       readonly columns: readonly string[];
       readonly rows: readonly (readonly TableCell[])[];
       readonly count?: string;
     }): void {
-      const headings = input.columns.map((column) => column.toUpperCase());
+      const headings = input.columns.map((column) =>
+        cellText(column).toUpperCase()
+      );
       const widths = headings.map((heading, index) =>
         input.rows.reduce(
           (maximum, row) =>
@@ -137,19 +169,23 @@ export function createTextOutput({
       readonly which?: string;
       readonly needs: string;
       readonly command: string;
+      /** Optional fourth line, printed only when stdout is a TTY. */
       readonly prompt?: string;
     }): void {
+      requireCommand(input.command);
       const which = input.which ? ` (${input.which})` : "";
       line(
         `${paint("!", "attention")} ${input.thing}  ${input.problem}${which}`
       );
-      line(`  ${input.needs}. run: ${input.command}`);
+      line(`  ${input.needs}. run:`);
+      line(`  ${input.command}`);
       if (tty && input.prompt) {
         line(`  ${input.prompt}`, "faint");
       }
     },
-    hint(text: string): void {
-      line(text, "faint");
+    hint(input: { readonly text: string; readonly command: string }): void {
+      requireCommand(input.command);
+      line(`${input.text} ${input.command}`, "faint");
     },
   };
 }

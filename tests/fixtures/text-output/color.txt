@@ -5,7 +5,8 @@ web      [36mhttps://app.hack.local[0m  healthy
 jobs     [2;90mno address[0m              -
 
 [2;90m2 services · 1 up[0m
-[33m![0m cloud  sign-in expired (example-dev)
-  db needs it. run: aws sso login --profile example-dev
+[33m![0m cloud  sign-in expired for profile (example-dev)
+  db needs it. run:
+  aws sso login --profile example-dev
 [2;90m  press enter to continue[0m
 [2;90mnothing running. try: hack up[0m

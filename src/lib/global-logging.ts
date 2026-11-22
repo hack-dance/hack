@@ -141,3 +141,20 @@ export function renderLoggingOffMessage(opts: {
 }): string {
   return `${opts.feature} cannot run: the global logging stack (Loki, Alloy, Grafana) is off. Turn it on with: ${LOGGING_ENABLE_COMMAND}`;
 }
+
+/**
+ * Where `hack logs` looks for Loki: `HACK_LOKI_URL` (the user's own Loki,
+ * which also bypasses the `logging.enabled` setting), else the local
+ * logging stack's published port. `HACK_TEST_LOCAL_LOKI_URL` moves that
+ * local address for tests, so a test never reaches a Loki the machine runs;
+ * unlike `HACK_LOKI_URL` it leaves the setting in force.
+ */
+export function lokiBaseUrl(
+  env: Readonly<Record<string, string | undefined>> = process.env
+): string {
+  return (
+    env.HACK_LOKI_URL ??
+    env.HACK_TEST_LOCAL_LOKI_URL ??
+    "http://127.0.0.1:3100"
+  ).trim();
+}

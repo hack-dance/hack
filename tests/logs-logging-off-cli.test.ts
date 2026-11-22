@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
 import {
   chmod,
   mkdir,
@@ -8,6 +8,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
@@ -70,16 +71,33 @@ async function runLogs(args: readonly string[]) {
   return await runHack(["logs", ...args]);
 }
 
+/**
+ * A loopback port this test owns and nothing listens on: the local Loki
+ * address for every run (HACK_TEST_LOCAL_LOKI_URL), so no test reaches a
+ * Loki the machine itself runs on 3100.
+ */
+let closedLokiUrl = "";
+beforeAll(async () => {
+  const server = createServer();
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  await new Promise<void>((done) => server.close(() => done()));
+  closedLokiUrl = `http://127.0.0.1:${port}`;
+});
+
 async function runHack(args: readonly string[]) {
   const child = Bun.spawn([process.execPath, CLI, ...args], {
     cwd: projectRoot,
-    // No HACK_LOKI_URL: the local stack's setting decides.
+    // No HACK_LOKI_URL: the local stack's setting decides; its Loki address
+    // is a closed port this test owns.
     env: privateCliEnv({
       root,
       env: {
         PATH: `${join(root, "bin")}:/usr/bin:/bin`,
         STUB_CAPTURE: capture,
         HACK_NO_INTERACTIVE: "1",
+        HACK_TEST_LOCAL_LOKI_URL: closedLokiUrl,
       },
     }),
     stdin: "ignore",
@@ -185,9 +203,7 @@ test("a home that turned the stack on gets the reachability answer instead", asy
   );
   const result = await runLogs(["--loki", "--no-follow"]);
   expect(result.exitCode).toBe(1);
-  expect(result.stderr).toContain(
-    "Loki is not reachable at http://127.0.0.1:3100."
-  );
+  expect(result.stderr).toContain(`Loki is not reachable at ${closedLokiUrl}.`);
   expect(`${result.stdout}${result.stderr}`).not.toContain("E_LOGGING_OFF");
 }, 60_000);
 

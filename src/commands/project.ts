@@ -339,6 +339,7 @@ import {
 import { ensureHackGitInfoExclude } from "../lib/git-info-exclude.ts";
 import {
   LOGGING_OFF_CODE,
+  lokiBaseUrl,
   renderLoggingOffMessage,
   resolveGlobalLoggingForHome,
 } from "../lib/global-logging.ts";
@@ -10811,7 +10812,7 @@ async function maybeManageProjectLogsAfterDown(opts: {
     return;
   }
 
-  const baseUrl = (process.env.HACK_LOKI_URL ?? "http://127.0.0.1:3100").trim();
+  const baseUrl = lokiBaseUrl();
   const lokiReachable = await canReachLoki({ baseUrl });
   if (!lokiReachable) {
     return;
@@ -12681,7 +12682,7 @@ async function handleLogs({
     servicesOpt: parseCsvList(args.options.services),
     positionalService: typeof service === "string" ? service : undefined,
   });
-  const baseUrl = (process.env.HACK_LOKI_URL ?? "http://127.0.0.1:3100").trim();
+  const baseUrl = lokiBaseUrl();
   const cfg = await readProjectConfig(project);
   if (cfg.parseError) {
     const configPath = cfg.configPath ?? project.configFile;

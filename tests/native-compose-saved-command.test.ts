@@ -176,7 +176,7 @@ async function savedFixture(
 import { writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 if (args[0] === "info") { writeFileSync(${JSON.stringify(join(root, "ingress-read"))}, "unexpected ingress read"); process.exit(23); }
-if (args[0] !== "compose") process.exit(0);
+if (args[0] !== "compose" && !(process.env.STUB_BLOCK_PS === "1" && args[0] === "container" && args[1] === "ls")) process.exit(0);
 process.on("SIGTERM", () => { writeFileSync(${JSON.stringify(join(root, "stopped"))}, "reaped"); process.exit(143); });
 // Publish readiness only after cancellation cleanup is installed.
 writeFileSync(${JSON.stringify(join(root, "started"))}, String(process.pid));
@@ -443,6 +443,7 @@ test.each([
           HACK_HOME: join(root, "home"),
           HACK_RUNTIME_BACKEND: "compose",
           HACK_LOGGER: "console",
+          STUB_BLOCK_PS: operation === "ps" ? "1" : "",
         },
       }),
       stdin: "ignore",
@@ -471,7 +472,14 @@ test.each([
   ]);
   const outputs = await Promise.all([stdout, stderr]);
   expect(exit).toBe(143);
-  expect(await Bun.file(join(root, "stopped")).text()).toBe("reaped");
+  const stopped = Bun.file(join(root, "stopped"));
+  if (operation === "ps") {
+    // The read-only ownership probe kills and awaits its subprocess group.
+    // Unlike a Compose stream it does not forward SIGTERM to the process.
+    expect(await stopped.exists()).toBe(false);
+  } else {
+    expect(await stopped.text()).toBe("reaped");
+  }
   expect(() => process.kill(pid, 0)).toThrow();
   expect(await readdir(leases)).toEqual([]);
   expect(outputs.join("")).not.toContain("invalid authored input");

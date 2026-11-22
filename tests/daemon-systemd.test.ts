@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rename,
   rm,
   stat,
@@ -2320,7 +2321,7 @@ linuxTest(
       await checkServiceExecutableTrusted({
         path: join(stable, "hack"),
       })
-    ).toContain(shared);
+    ).toContain(await realpath(shared));
 
     // A hop through a symlinked directory: linked -> shared-dirs (writable),
     // whose `bin` links to the program's directory.
@@ -2333,7 +2334,7 @@ linuxTest(
       await checkServiceExecutableTrusted({
         path: join(root, "linked", "bin", "hack"),
       })
-    ).toContain(sharedDirs);
+    ).toContain(await realpath(sharedDirs));
 
     // The same chain through protected directories passes.
     await chmod(shared, 0o755);
@@ -2377,9 +2378,9 @@ linuxTest(
       }
       // Hack does not change directories outside its own.
       expect((await stat(root)).mode & 0o777).toBe(0o777);
-      // The refusal names the writable directory.
+      // The chmod hint names the resolved directory to repair.
       expect(await checkSystemdUnitDirectoryChain({ unitPath })).toContain(
-        root
+        await realpath(root)
       );
     } finally {
       await chmod(root, 0o700);
@@ -2463,7 +2464,7 @@ linuxTest("a loaded drop-in's whole ancestor chain is checked", async () => {
   fake.dropInPaths = dropIn;
   expect(
     await checkSystemdLoadedUnitPaths({ unitPath, deps: fake.deps })
-  ).toContain(shared);
+  ).toContain(await realpath(shared));
   await chmod(shared, 0o755);
   expect(
     await checkSystemdLoadedUnitPaths({ unitPath, deps: fake.deps })
@@ -2555,7 +2556,7 @@ linuxTest(
     const entry = join(root, "entry-hack");
     await symlink("safe/link/../hack", entry);
     expect(await checkServiceExecutableTrusted({ path: entry })).toContain(
-      shared
+      await realpath(shared)
     );
     await chmod(shared, 0o755);
     expect(await checkServiceExecutableTrusted({ path: entry })).toBeNull();
@@ -2594,7 +2595,7 @@ linuxTest(
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error).toContain(shared);
+      expect(result.error).toContain(await realpath(shared));
     }
     expect(fake.calls).not.toContain("systemctl --user daemon-reload");
     expect(fake.calls).not.toContain("systemctl --user enable hackd.service");
@@ -2717,7 +2718,7 @@ linuxTest(
     await symlink(join(shared, "not-created-yet"), link);
     fake.unitSearchPath = `${join(root, "config", "systemd", "user")} ${link}`;
     expect(await checkSystemdUnitLoadPaths({ deps: fake.deps })).toContain(
-      `${shared} lets other users create`
+      `${await realpath(shared)} lets other users create`
     );
     // Pointing into a protected directory instead: accepted.
     await chmod(shared, 0o755);
@@ -3044,7 +3045,7 @@ linuxTest(
     await chmod(real, 0o755);
     await symlink(real, join(bin, "git"));
     expect(await checkServicePathDirectories({ dirs: [bin] })).toContain(
-      shared
+      await realpath(shared)
     );
     await chmod(shared, 0o755);
     expect(await checkServicePathDirectories({ dirs: [bin] })).toBeNull();
@@ -3135,7 +3136,7 @@ linuxTest(
     await chmod(shared, 0o777);
     await symlink(join(shared, "not-yet"), join(bin, "later"));
     expect(await checkServicePathDirectories({ dirs: [bin] })).toContain(
-      shared
+      await realpath(shared)
     );
   }
 );

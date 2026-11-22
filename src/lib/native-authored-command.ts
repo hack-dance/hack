@@ -48,6 +48,7 @@ import {
 import { CliUsageError } from "../cli/command.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
+import { psServiceState, renderPs } from "../ui/ps-output.ts";
 import { emitCliResult, HackCliError, okResult } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import type { NativeComposeCommandOptions } from "./native-compose-command.ts";
@@ -420,6 +421,7 @@ const STATUS_NOTES: Readonly<
 async function showStatus(options: {
   readonly result: NativeAuthoredProjectStatus;
   readonly json?: boolean;
+  readonly psWide?: boolean;
   readonly statusMetadata?: NativeComposeCommandOptions["statusMetadata"];
 }): Promise<void> {
   const { result } = options;
@@ -433,6 +435,18 @@ async function showStatus(options: {
   }
   if (result.status !== "observed") {
     logger.info({ message: STATUS_NOTES[result.status] });
+  }
+  if (options.psWide !== undefined) {
+    renderPs({
+      wide: options.psWide,
+      hintWhenEmpty: result.status === "not_started",
+      rows: result.items.map((item) => ({
+        ...item,
+        address: null,
+        state: psServiceState(item),
+      })),
+    });
+    return;
   }
   await display.table({
     columns: ["NATIVE SERVICE", "CONTAINER", "STATE", "HEALTH"],
@@ -547,6 +561,7 @@ async function runStatus(input: LifecycleInput): Promise<number> {
   await showStatus({
     result,
     json: input.options.json,
+    psWide: input.options.psWide,
     statusMetadata: input.options.statusMetadata,
   });
   return 0;

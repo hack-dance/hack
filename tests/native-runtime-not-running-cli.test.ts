@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { NATIVE_RUN_SELECTION_REFUSAL } from "../src/backends/native-project-one-off.ts";
 import { saveNativeProjectRun } from "../src/backends/native-project-run.ts";
+import { nativeSetupShellReply } from "./helpers/native-setup-inspection.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
 
 /**
@@ -39,7 +40,7 @@ afterEach(async () => {
   }
 });
 
-async function fixture(opts: { readonly nativeCode: string }) {
+async function fixture(opts: { readonly nativeCode?: string }) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-not-running-cli-"))
   );
@@ -52,23 +53,55 @@ async function fixture(opts: { readonly nativeCode: string }) {
   await writeFile(
     join(projectDir, "docker-compose.yml"),
     JSON.stringify({
-      services: { web: { image: "docker.io/library/busybox:1.37" } },
+      services: {
+        web: {
+          image: "docker.io/library/busybox:1.37",
+          labels: { caddy: "sample.hack" },
+        },
+        worker: { image: "docker.io/library/busybox:1.37" },
+      },
     })
   );
   await writeFile(
     join(projectDir, "hack.config.json"),
     JSON.stringify({
       name: "not-running-fixture",
-      dev_host: "not-running-fixture.hack.local",
+      dev_host: "sample.hack.local",
     })
   );
   const binary = join(root, "native-runtime");
+  const graph = {
+    receipt: {
+      ...run,
+      plan_id: run.planId,
+      phase: "ready-observed",
+      resources: Object.fromEntries(
+        ["web", "worker"].map((service) => [
+          `container:${service}`,
+          {
+            kind: "container",
+            key: service,
+            id: "e".repeat(64),
+            phase: "started",
+          },
+        ])
+      ),
+    },
+    journal_incomplete: false,
+    observations: {
+      "container:web": { state: "running", health: "healthy" },
+      "container:worker": { state: "exited", code: 1 },
+    },
+  };
+  const reply = opts.nativeCode
+    ? `printf '%s' '${JSON.stringify({ code: opts.nativeCode })}' >&2\nexit 1`
+    : `printf '%s' '${JSON.stringify(graph)}'`;
   await writeFile(
     binary,
     `#!/bin/sh
 printf '%s\\n' "$*" >> "$HOME/native-calls"
-printf '%s' '{"code":"${opts.nativeCode}"}' >&2
-exit 1
+${nativeSetupShellReply()}
+${reply}
 `,
     { mode: 0o700 }
   );
@@ -138,20 +171,91 @@ async function nativeCalls(root: string): Promise<string[]> {
 
 test("native ps reports a stopped runtime as a status, not a failure", async () => {
   const f = await fixture({ nativeCode: "runtime_not_running" });
-  const result = await cli({ fixture: f, args: ["ps"] });
+  const result = await cli({
+    fixture: f,
+    args: ["ps"],
+    env: { NO_COLOR: "1", COLUMNS: "20" },
+  });
   const output = result.stdout + result.stderr;
   expect(result.code).toBe(0);
   expect(output).toContain(
     "Native runtime is not running; no services are running."
   );
-  expect(output).toContain("NATIVE SERVICE");
+  expect(result.stdout).toContain("SERVICE  ADDRESS  STATE\n\n0 services\n");
   expect(output).not.toContain("Native runtime request failed");
   expect(output).not.toMatch(STACK_FRAME);
-  // The graph is read once. A failed supplemental tag lookup leaves its status intact.
+  // Default text reads the graph once without a supplemental image lookup.
   expect(await nativeCalls(f.root)).toEqual([
     `--candidate-root ${join(f.root, "native-home")} graph status --run-id ${run.run} --json`,
-    `--candidate-root ${join(f.root, "native-home")} runtime image-tag-status --json docker.io/library/busybox:1.37`,
   ]);
+});
+
+test("native ps keeps the complete address on a narrow plain terminal", async () => {
+  const f = await fixture({});
+  const result = await cli({
+    fixture: f,
+    args: ["ps"],
+    env: { NO_COLOR: "1", COLUMNS: "20" },
+  });
+  expect(result.code).toBe(0);
+  expect(result.stdout).toBe(
+    [
+      "SERVICE  ADDRESS                    STATE",
+      "web      https://alpha.sample.hack  healthy",
+      "worker   no address                 exited (1)",
+      "",
+      "2 services",
+      "",
+    ].join("\n")
+  );
+});
+
+test("native ps observes services despite an invalid startup-only setting", async () => {
+  const f = await fixture({});
+  const value = "invalid-fixture-setting";
+  const env = { HACK_NATIVE_HOT_RELOAD: value, NO_COLOR: "1" };
+  const ps = await cli({ fixture: f, args: ["ps"], env });
+  expect(ps.code).toBe(0);
+  expect(ps.stdout).toMatch(/web +https:\/\/alpha.sample.hack +healthy/);
+  expect(ps.stdout).toContain("exited (1)");
+  const up = await cli({ fixture: f, args: ["up"], env });
+  expect(up.code).toBe(1);
+  expect(up.stdout + up.stderr).toContain(
+    "HACK_NATIVE_HOT_RELOAD must be auto, on or off."
+  );
+  expect(up.stdout + up.stderr).not.toContain(value);
+});
+
+test("native ps keeps observing when HTTPS settings cannot supply an address", async () => {
+  const f = await fixture({});
+  const value = "invalid-fixture-port";
+  const ps = await cli({
+    fixture: f,
+    args: ["ps"],
+    env: { HACK_NATIVE_HTTPS_PORT: value, NO_COLOR: "1" },
+  });
+  expect(ps.code).toBe(0);
+  expect(ps.stdout).toMatch(/web +no address +healthy/);
+  expect(ps.stdout).toContain(
+    "native https settings invalid · addresses unavailable"
+  );
+  expect(ps.stdout + ps.stderr).not.toContain(value);
+});
+
+test("native ps reports the configured HTTPS frontend port", async () => {
+  const f = await fixture({});
+  const result = await cli({
+    fixture: f,
+    args: ["ps"],
+    env: {
+      HACK_NATIVE_CADDY_BINARY: join(f.root, "caddy"),
+      HACK_NATIVE_CADDY_SHA256: "a".repeat(64),
+      HACK_NATIVE_HTTPS_PORT: "18443",
+      NO_COLOR: "1",
+    },
+  });
+  expect(result.code).toBe(0);
+  expect(result.stdout).toContain("https://alpha.sample.hack:18443  healthy");
 });
 
 test("native ps --json returns the ok envelope with runtime_not_running", async () => {

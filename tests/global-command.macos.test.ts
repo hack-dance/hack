@@ -182,6 +182,11 @@ const shellMock = await registerScopedModuleMock({
       if (custom) {
         return custom;
       }
+      // The route probe's HTTPS request through the proxy: any status
+      // means the route answered (src/lib/global-route-probe.ts).
+      if (cmd.includes("--resolve")) {
+        return { exitCode: 0, stdout: "404", stderr: "" };
+      }
       if (cmd[0] === "docker" && cmd[1] === "info") {
         return { exitCode: 0, stdout: "", stderr: "" };
       }

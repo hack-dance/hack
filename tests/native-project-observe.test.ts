@@ -1128,3 +1128,47 @@ test("internal readiness admission reads only closed goals from the owned receip
     );
   }
 });
+
+test("native image pins and resolution times appear only in wide text and JSON", async () => {
+  const chunks: string[] = [];
+  const stdout = spyOn(process.stdout, "write").mockImplementation((line) => {
+    chunks.push(String(line));
+    return true;
+  });
+  const result: Parameters<typeof displayNativePs>[0] = {
+    backend: "native",
+    status: "runtime_busy",
+    run: null,
+    phase: null,
+    items: [],
+    imageTags: [
+      {
+        reference: "example.invalid/sample:latest",
+        registry: "example.invalid",
+        source_digest: "sha256:fixture",
+        resolved_at_unix_seconds: 1,
+        aliases: [],
+        selections: [
+          { policy: "local", platform: "linux/arm64", image_id: "fixture" },
+        ],
+      },
+    ],
+  };
+  try {
+    const addresses = new Map<string, readonly string[]>();
+    await displayNativePs(result, false, { addresses });
+    expect(chunks.join("")).toBe("service status is being updated\n");
+    chunks.length = 0;
+    await displayNativePs(result, false, { addresses, wide: true });
+    expect(chunks.join("")).toContain("RESOLVED AT");
+    expect(chunks.join("")).toContain("sha256:fixture");
+    expect(chunks.join("")).toContain("1970-01-01T00:00:01.000Z");
+    chunks.length = 0;
+    await displayNativePs(result, true, { addresses });
+    expect(JSON.parse(chunks.join("")).data.imageTags).toEqual(
+      result.imageTags
+    );
+  } finally {
+    stdout.mockRestore();
+  }
+});

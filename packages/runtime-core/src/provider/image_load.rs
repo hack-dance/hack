@@ -651,6 +651,17 @@ impl ImportTarget for Engine<'_> {
     }
 }
 
+pub(super) fn observe_image(
+    observer: &Observer<'_>,
+    image: &str,
+    platform: ImagePlatform,
+) -> Result<bool, CandidateError> {
+    if platform.emulated() && !observer.guest().amd64_emulation() {
+        return Ok(false);
+    }
+    inspect(image, platform, || observer.image(image))
+}
+
 /// How long an import waits for a provider lease that another operation holds, such as the
 /// `graph inspect` behind `hack ps`. The image cache publishes a complete archive and its
 /// acquisition receipt before starting import. On expiry the load refuses `provider_busy`
@@ -715,6 +726,10 @@ pub(super) struct CachedArchive<'a> {
     pub image: &'a str,
     pub bytes: u64,
     pub pin: &'a str,
+    // Both fields describe this invocation. The recorded config comes only from
+    // digest-verified registry metadata, never from the acquisition receipt.
+    pub recorded_config: Option<&'a str>,
+    pub require_present: bool,
     pub platform: ImagePlatform,
 }
 
@@ -763,20 +778,36 @@ fn load_cached_with(
         ));
     }
     check_emulation(archive.platform, guest)?;
+    if archive
+        .recorded_config
+        .is_some_and(|id| id != archive.image)
+    {
+        return Err(error(
+            "Cached image differs from the verified registry configuration.",
+        ));
+    }
     if resolved_config()? != archive.image {
         return Err(error(
             "Cached image differs from the verified registry configuration.",
         ));
     }
-    let requested = receipt(candidate, archive, Some(archive.pin), guest);
+    let mut requested = receipt(candidate, archive, Some(archive.pin), guest);
     let path = receipt_path(candidate, archive.sha);
-    if let Some(old) = read_receipt(&path, &requested)?
-        && reusable_validation(&old, &requested)
-        && old.source_pin.as_deref() == Some(archive.pin)
-    {
-        if inspect(archive.image, archive.platform, read_image)? {
-            return Ok(old);
-        }
+    let old = read_receipt(&path, &requested)?;
+    let bound = old.as_ref().is_some_and(|receipt| {
+        reusable_validation(receipt, &requested)
+            && receipt.source_pin.as_deref() == Some(archive.pin)
+    });
+    let verified = bound || archive.recorded_config == Some(archive.image);
+    if verified && inspect(archive.image, archive.platform, read_image)? {
+        requested.phase = "content-id-verified".into();
+        return Ok(requested);
+    }
+    if archive.require_present {
+        return Err(CandidateError::new(
+            "image_archive_offline_missing",
+            "Registry unavailable and the recorded image is not loaded in the guest.",
+        ));
     }
     // Image is absent, or a legacy receipt has no verified source pin. Read
     // the entire archive before taking a mutation lease in either case.
@@ -830,6 +861,8 @@ fn load_waiting(
         image,
         bytes: file.1,
         pin: "",
+        recorded_config: None,
+        require_present: false,
         platform,
     };
     import(candidate, &archive, None, policy, file, &engine)
@@ -1644,6 +1677,8 @@ pub(super) mod tests {
                 image: &self.image,
                 bytes: self.bytes,
                 pin: &self.pin,
+                recorded_config: None,
+                require_present: false,
                 platform: ImagePlatform::LinuxArm64,
             }
         }
@@ -1744,6 +1779,66 @@ pub(super) mod tests {
             refusal.message,
             "Cached image differs from the verified registry configuration."
         );
+    }
+
+    pub(in crate::provider) fn confirm_verified_tag_in_test_guest(
+        candidate: &Candidate,
+        pin: &str,
+        image: &str,
+    ) -> Result<String, CandidateError> {
+        let path = candidate.checkout.join("intentionally-unopened.tar");
+        let archive = CachedArchive {
+            path: &path,
+            sha: &"f".repeat(64),
+            image,
+            bytes: 0,
+            pin,
+            platform: ImagePlatform::LinuxArm64,
+            recorded_config: Some(image),
+            require_present: false,
+        };
+        load_cached_with(
+            candidate,
+            &archive,
+            &ImagePolicy::default(),
+            &test_guest(),
+            || Ok(serde_json::json!({"Id":image,"Architecture":"arm64","Os":"linux"})),
+            || Ok(image.into()),
+            |_| panic!("live observation must not import"),
+        )
+        .map(|receipt| receipt.image_id)
+    }
+
+    #[test]
+    fn verified_recorded_config_uses_live_guest_with_no_archive_or_import() {
+        let fixture = CacheFixture::new(false);
+        let mut archive = fixture.archive();
+        archive.recorded_config = Some(&fixture.image);
+        archive.require_present = true;
+        std::fs::remove_file(&fixture.path).unwrap();
+        let observed = load_cached_with(
+            &fixture.candidate,
+            &archive,
+            &ImagePolicy::default(),
+            &test_guest(),
+            || Ok(serde_json::json!({"Id":fixture.image,"Architecture":"arm64","Os":"linux"})),
+            || Ok(fixture.image.clone()),
+            |_| panic!("fallback must not load an archive"),
+        )
+        .unwrap();
+        assert_eq!(observed.image_id, fixture.image);
+        let refused = load_cached_with(
+            &fixture.candidate,
+            &archive,
+            &ImagePolicy::default(),
+            &test_guest(),
+            no_image,
+            || Ok(fixture.image.clone()),
+            |_| panic!("fallback must not load an archive"),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(refused.code, "image_archive_offline_missing");
     }
 
     #[test]

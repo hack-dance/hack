@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { HACK_VERSION } from "../src/lib/hack-version.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const CLI = resolve(import.meta.dir, "..", "index.ts");
@@ -162,6 +163,99 @@ test("Compose ps shows failed and completed services after failed up", async () 
           "docker compose ps failed (exit 2). Its output is omitted because Compose can expand project values into it; run `docker compose ps` in the project (or `hack ps` without --json) to see it.",
       },
     });
+    expect(JSON.parse(json.stdout)).not.toHaveProperty("remotes");
+    await writeFile(
+      join(hack, "hack.config.json"),
+      JSON.stringify({
+        name: "sample",
+        internal: { dns: false, tls: false },
+        min_cli_version: HACK_VERSION,
+        remotes: {
+          web: {
+            default: "local",
+            targets: { local: { service: "web", port: 8080 } },
+          },
+          db: {
+            default: "qa",
+            targets: {
+              qa: {
+                hostname: { env_ref: "REMOTE_DB_HOST" },
+                port: 5432,
+                via: {
+                  kind: "aws-ssm",
+                  instance: "i-example",
+                  region: "eu-west-1",
+                  listen: 15_432,
+                },
+              },
+            },
+          },
+          cache: {
+            default: "shared",
+            targets: {
+              shared: { hostname: "cache.example.test", port: 6379 },
+            },
+          },
+        },
+      })
+    );
+    const remoteEnv = { REMOTE_DB_HOST: "private-fixture.example.test" };
+    const remoteText = await cli(["ps"], remoteEnv);
+    expect(remoteText.exitCode).toBe(0);
+    expect(remoteText.stdout).toMatch(
+      /SERVICE\s+KIND\s+USE\s+POINTS AT\s+VIA\s+STATE/
+    );
+    expect(remoteText.stdout).toMatch(
+      /web\s+remote\s+local\s+web:8080\s+-\s+declared/
+    );
+    expect(remoteText.stdout).toMatch(
+      /db\s+remote\s+qa\s+\$REMOTE_DB_HOST:5432\s+aws-ssm\s+tunnel not started by this version/
+    );
+    expect(remoteText.stdout).toContain("6 services");
+    expect(remoteText.stdout).not.toContain("web (");
+    expect(remoteText.stdout + remoteText.stderr).not.toContain(
+      remoteEnv.REMOTE_DB_HOST
+    );
+    const remoteJson = await cli(["ps", "--json"], remoteEnv);
+    expect(remoteJson.exitCode).toBe(0);
+    const payload = JSON.parse(remoteJson.stdout);
+    expect(payload.items).toEqual(JSON.parse(json.stdout).items);
+    expect(payload.remotes).toEqual([
+      {
+        service: "web",
+        kind: "remote",
+        target: "local",
+        address: { kind: "service", service: "web", port: 8080 },
+        via: null,
+        state: "declared",
+        probe: "not checked",
+      },
+      {
+        service: "db",
+        kind: "remote",
+        target: "qa",
+        address: { kind: "env_ref", name: "REMOTE_DB_HOST", port: 5432 },
+        via: "aws-ssm",
+        state: "tunnel not started by this version",
+        probe: "not checked",
+      },
+      {
+        service: "cache",
+        kind: "remote",
+        target: "shared",
+        address: {
+          kind: "hostname",
+          hostname: "cache.example.test",
+          port: 6379,
+        },
+        via: null,
+        state: "declared",
+        probe: "not checked",
+      },
+    ]);
+    expect(remoteJson.stdout + remoteJson.stderr).not.toContain(
+      remoteEnv.REMOTE_DB_HOST
+    );
     const calls = (await readFile(join(root, "ps-args"), "utf8"))
       .trim()
       .split("\n");

@@ -33,6 +33,7 @@ import {
   wrapLifecyclePersistentCommand as wrapSharedLifecyclePersistentCommand,
 } from "../lib/project-lifecycle-controller.ts";
 import { enforceProjectPrerequisites } from "../lib/project-prerequisites.ts";
+import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
 import {
   writeStartBlocker,
   writeUpHookBlocker,
@@ -11149,6 +11150,7 @@ async function handlePs({
     }),
     entries,
   });
+  const remotes = projectRemoteStatuses(cfg.prerequisites?.config?.selected);
   if (json) {
     const payload = {
       project: baseProjectName,
@@ -11156,6 +11158,7 @@ async function handlePs({
       composeProject: composeProjectName ?? baseProjectName,
       items: await annotateEmulatedPsItems({ items: entries }),
       waiting,
+      ...(remotes.length > 0 ? { remotes } : {}),
     };
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
     return 0;
@@ -11164,6 +11167,7 @@ async function handlePs({
     entries,
     addresses,
     waiting,
+    remotes,
     wide: args.options.wide === true,
   });
   return 0;

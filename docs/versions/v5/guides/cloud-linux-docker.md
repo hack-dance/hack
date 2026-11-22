@@ -4,7 +4,8 @@
 > a fresh Ubuntu 24.04 x86_64 container: a user without sudo, a private Docker
 > Engine 29.1.3 with Compose 2.40.3, and a project with one encrypted value.
 > The commands below ran as written, except step 1, which copied in the built
-> binary. There is no published Linux v5 release yet.
+> binary. No Linux archive was published at that time. Step 1 now installs the
+> published prerelease; that install was not part of this run.
 
 This page is for a machine or sandbox you can open a shell on: a cloud VM, a
 CI runner, a container with its own Docker daemon, a remote dev box. The same
@@ -14,7 +15,7 @@ isolation.
 
 ## What you need
 
-- Linux on x86_64 or arm64.
+- Linux on x86_64 or arm64. The published archives need glibc.
 - A Docker Engine your user can reach, and Docker Compose v2. Check with
   `docker info` and `docker compose version`. Without them Hack stops at once
   and says which one is missing.
@@ -30,16 +31,23 @@ You do not need sudo, a browser or a desktop.
 
 ## Steps
 
-**1. Install `hack`.** v5 has no Linux release yet: the prerelease installer
-supports Apple Silicon macOS only. Until there is one, build `hack` from a
+**1. Install `hack`.** `5.0.0-next.24` publishes Linux x86_64 and arm64
+archives with the Compose backend. Install the prerelease as described in
+[Install](../install.md): it is the same installer as on macOS, it needs `curl`
+and `sha256sum`, and it installs under `~/.hack-next` without sudo. The
+launcher it installs is `~/.hack-next/bin/hack-next`. The commands below write
+`hack`, so define the `hack` function that page shows in the shell or script
+that runs them.
+
+The verified run did not use the published archive. It built `hack` from a
 `next` commit on a Linux machine (see
 [Qualify a fresh Linux host](https://github.com/hack-dance/hack/blob/next/docs/guides/linux-host-qualification.md), which also
-needs Rust 1.97.1 and a C compiler), then copy `dist/hack` to
-`~/.local/bin/hack`. If the project sets `lifecycle.runner` to `"supervisor"` in
-`.hack/hack.config.json`, also copy the matching `dist/hack-lifecycle-supervisor`
-from the same build into the same directory: `hack up` looks for it beside the
-`hack` executable and refuses to start such a project without it. This step
-becomes one install command once a Linux release is published.
+needs Rust 1.97.1 and a C compiler) and copied `dist/hack` to
+`~/.local/bin/hack`. If you build your own and the project sets
+`lifecycle.runner` to `"supervisor"` in `.hack/hack.config.json`, also copy the
+matching `dist/hack-lifecycle-supervisor` from the same build into the same
+directory: `hack up` looks for it beside the `hack` executable and refuses to
+start such a project without it. The published archives include it.
 
 **2. Set up Hack's proxy once for this Docker engine.** It creates Hack's shared
 networks and starts its proxy. The logging containers (Loki, Alloy, Grafana)

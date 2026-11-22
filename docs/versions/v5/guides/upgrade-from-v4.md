@@ -396,7 +396,8 @@ Sources: [global path resolution](https://github.com/hack-dance/hack/blob/26a142
 ## 3. Choose the version and installation path
 
 `V5` below means the absolute path to the reviewed v5 executable. On Apple
-Silicon this can be `$HOME/.hack-next/bin/hack-next`; a current-source Linux
+Silicon, and on Linux x86_64 or arm64 with the published Compose-only
+prerelease, this can be `$HOME/.hack-next/bin/hack-next`; a current-source Linux
 trial needs a separately prepared executable. Do not replace stable `hack` just
 to try the prerelease.
 
@@ -406,7 +407,7 @@ to try the prerelease.
 | Older 4.x, including 4.2.1 | Use the same backup and isolated-candidate sequence; inspect legacy env before any env-consuming command. Do not assume every project needs the same migration. | Direct 4.2.1 upgrade, or any need for an intermediate version: **to be confirmed in the dogfood run**. |
 | Homebrew install | Keep the installed v4 formula during the trial. `brew upgrade hack-dance/tap/hack` is the stable-release path, not the native-candidate installer. | Stable v5 formula availability and replacement/rollback: **to be confirmed in the dogfood run**. |
 | Script install | Use the separate reviewed candidate bootstrap on supported Macs. For stable software, the release downloader accepts `HACK_INSTALL_TAG` or `HACK_INSTALL_VERSION`. | Replacing an installed v4 with a stable v5 archive: **to be confirmed in the dogfood run**. |
-| Linux 4.x or a fresh Linux host | No prerelease publishes a Linux bundle. Keep stable Compose, or agree on a separately built current-source CLI before testing newer Linux setup. | Published v5 Linux install and full host migration: **to be confirmed in the dogfood run**. |
+| Linux 4.x or a fresh Linux host | `5.0.0-next.24` publishes Compose-only Linux x86_64 and arm64 archives; install the prerelease as described in [Install](../install.md). The trials recorded on this page did not use them. Keep stable v4 installed during the trial. | Published v5 Linux install and full host migration: **to be confirmed in the dogfood run**. |
 | Intel macOS or a fresh host | Native is unavailable. A fresh stable installation uses the normal Homebrew/release installer and Compose; use the candidate only on its supported host. | First stable v5 install and project initialization: **to be confirmed in the dogfood run**. |
 
 After backups and stable-daemon quiescence, read the migration section below
@@ -435,8 +436,8 @@ after restart. Record what failed, not just a green health endpoint.
 For a **current-source** Linux CLI, DNS and CA trust setup are implemented. Follow
 the [Linux DNS setup source](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/linux-setup.md)
 and [Linux trust guide](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/linux-certificate-trust.md).
-These sources are included in next.16; its published candidate bundle is still
-Apple Silicon only. DNS host integration is bounded to a rootful Linux Docker
+These sources are included in next.16, whose published bundle was Apple Silicon
+only; Linux archives are published since `5.0.0-next.23`. DNS host integration is bounded to a rootful Linux Docker
 bridge/systemd-resolved setup; trust has separate host and browser handling.
 Review the printed privileged steps and confirm them yourself.
 

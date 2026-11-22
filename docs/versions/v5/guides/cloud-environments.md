@@ -1,16 +1,20 @@
 # Run a project on another machine or in a cloud agent sandbox
 
-The `.hack/` folder you commit with your code is everything Hack needs to run the
-project, so the same folder and the same `hack up` work on your laptop, on
-another machine, or inside a cloud agent's sandbox. Hack does not provide the
-machine or the sandbox, and it adds no isolation: it runs inside whatever you
-give it, with that environment's rules for Docker, secrets, network and
-persistence.
+The `.hack/` folder you commit with your code holds what Hack needs to run the
+project. The same folder and the same commands start the project on your laptop
+and on another machine with Docker. The table below says where that has been
+run. Cloud agent sandboxes are listed there and have not been run yet.
 
-On Linux, Hack's Compose runtime needs a Docker Engine the user can reach, and
-Docker Compose v2. v5 has no Linux release yet (the prerelease installer
-supports Apple Silicon macOS only), so every page below starts from a `hack`
-binary you supply.
+Hack does not provide the machine or the sandbox, and it adds no isolation: it
+runs inside whatever you give it, with that environment's rules for Docker,
+secrets, network and persistence.
+
+On Linux, Hack's Compose backend needs a Docker Engine the user can reach, and
+Docker Compose v2. `5.0.0-next.24` publishes Linux x86_64 and arm64 archives
+with the Compose backend. Install it with the same prerelease installer as on
+macOS; [Install](../install.md) has the commands. The runs recorded below were
+made before a Linux archive was published, with a `hack` built from source, and
+have not been repeated with the published archive.
 
 ## Pick your environment
 

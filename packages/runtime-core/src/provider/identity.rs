@@ -835,7 +835,7 @@ mod tests {
     fn procargs2_yields_exactly_the_argument_vector() {
         let buffer = procargs(
             3,
-            b"/opt/hack/bin/hack\0\0\0\0hack\0--internal-native-https-owner\0/home/x/configuration.json\0HOME=/home/x\0",
+            b"/opt/hack/bin/hack\0\0\0\0hack\0--internal-native-https-owner\0/fixture/native-https/configuration.json\0HOME=/fixture\0",
         );
         let found = parse_procargs2(&buffer).unwrap();
         assert_eq!(
@@ -843,12 +843,12 @@ mod tests {
             [
                 b"hack".to_vec(),
                 b"--internal-native-https-owner".to_vec(),
-                b"/home/x/configuration.json".to_vec()
+                b"/fixture/native-https/configuration.json".to_vec()
             ]
         );
         let expected: [&[u8]; 2] = [
             b"--internal-native-https-owner",
-            b"/home/x/configuration.json",
+            b"/fixture/native-https/configuration.json",
         ];
         assert!(invocation_matches(&found, &expected));
         // The same executable with other arguments (a CLI command) is not the helper.

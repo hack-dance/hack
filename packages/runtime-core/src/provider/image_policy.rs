@@ -62,6 +62,7 @@ pub struct ImagePolicy {
     pub tag_ttl_seconds: u64,
     /// Override the ordinary tag lookup for an explicit refresh or an offline command.
     pub tag_mode: ImageTagMode,
+    pub(crate) short_tag_refresh: bool,
     /// Registries that are refused as local unless named here.
     pub local_registries: Vec<LocalRegistry>,
     /// Docker configuration directory for read-only credential lookup. `None` means
@@ -82,6 +83,7 @@ impl Default for ImagePolicy {
             cache_limit: DEFAULT_CACHE_LIMIT,
             tag_ttl_seconds: DEFAULT_TAG_TTL_SECONDS,
             tag_mode: ImageTagMode::Normal,
+            short_tag_refresh: false,
             local_registries: Vec::new(),
             docker_config: None,
             helper_path: None,
@@ -157,9 +159,9 @@ impl ImagePolicy {
                     policy.tag_ttl_seconds = value
                         .parse::<u64>()
                         .ok()
-                        .filter(|_| value.bytes().all(|byte| byte.is_ascii_digit()))
+                        .filter(|seconds| *seconds <= 2_592_000 && value.bytes().all(|byte| byte.is_ascii_digit()))
                         .ok_or_else(|| {
-                            invalid("Image tag lifetime must be a whole number of seconds.")
+                            invalid("Image tag lifetime must be a whole number from 0 to 2592000 seconds.")
                         })?;
                 }
                 "--image-tag-mode" if !tag_mode => {

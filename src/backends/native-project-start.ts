@@ -59,14 +59,9 @@ import {
 import { reportNativeIgnoredSettingNotices } from "./native-ignored-setting-notices.ts";
 import {
   NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
-  NATIVE_IMAGE_OFFLINE_NOTICE,
   nativeImagePolicyArgs,
 } from "./native-image-policy.ts";
-import {
-  nativeImageBlocker,
-  retainCurrentImageTags,
-  usedOfflineTag,
-} from "./native-image-tags.ts";
+import { nativeImageBlocker, offlineTagNotice } from "./native-image-tags.ts";
 import {
   type NativePreparedBase,
   preparedBaseArguments,
@@ -807,7 +802,7 @@ async function ensureNativeProjectImage(opts: {
   return {
     imageId: ensured.image_id,
     reference: ensured.pinned_reference,
-    offline: usedOfflineTag(ensured),
+    offline: offlineTagNotice(ensured),
   };
 }
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
@@ -838,7 +833,7 @@ async function pinNativeProjectImages(opts: {
       throw canceled();
     }
     const retainedImage = opts.retainedImages.get(name);
-    if (retainedImage) {
+    if (retainedImage && spec.build !== undefined) {
       spec.image = retainedImage;
       continue;
     }
@@ -910,8 +905,8 @@ async function pinNativeProjectImages(opts: {
       offlineReferences.add(reference);
     }
     if (ensured.offline && !reportedOffline) {
-      if (!reportNativeImageTagOffline()) {
-        opts.warn(NATIVE_IMAGE_OFFLINE_NOTICE);
+      if (!reportNativeImageTagOffline(ensured.offline)) {
+        opts.warn(ensured.offline);
       }
       reportedOffline = true;
     }
@@ -2752,15 +2747,7 @@ async function startNativeProjectAttempt(
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       specs,
-      retainedImages: await retainCurrentImageTags({
-        runtime: opts.runtime,
-        projectRoot: opts.scope.projectRoot,
-        specs,
-        retained: retainedImages,
-        policies: input.amd64Emulation,
-        mode: opts.imageTagMode,
-        invoke: deps.invoke,
-      }),
+      retainedImages,
       canonicalImages,
       profiles,
       amd64Emulation: input.amd64Emulation,

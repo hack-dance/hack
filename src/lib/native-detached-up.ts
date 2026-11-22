@@ -6,7 +6,6 @@ import {
   renderNativeHotReloadNotice,
 } from "../backends/native-hot-reload-notice.ts";
 import {
-  NATIVE_IMAGE_OFFLINE_NOTICE,
   NativeImageBlocker,
   type NativeImageBlockerDetail,
   nativeImageBlockerDetail,
@@ -66,7 +65,7 @@ let publishReady: ((ready: Ready) => void) | undefined;
 let publishImageBlocker:
   | ((detail: NativeImageBlockerDetail) => Promise<void>)
   | undefined;
-let publishImageTagOffline: (() => void) | undefined;
+let publishImageTagOffline: ((notice: string) => void) | undefined;
 let publishProfileNotice: ((notice: NativeProfileNotice) => void) | undefined;
 let publishBranchDropped: ((details: BranchDroppedSites) => void) | undefined;
 let publishHotReload: ((notice: NativeHotReloadNotice) => void) | undefined;
@@ -581,19 +580,30 @@ function writeHotReload(value: unknown): boolean {
   return true;
 }
 
-export function reportNativeImageTagOffline(): boolean {
+export function reportNativeImageTagOffline(notice: string): boolean {
   if (!publishImageTagOffline) {
     return false;
   }
-  publishImageTagOffline();
+  publishImageTagOffline(notice);
   return true;
 }
 
 function writeImageTagOffline(value: unknown): boolean {
-  if (value !== "image-tag-offline") {
+  if (
+    !(
+      isRecord(value) &&
+      value.kind === "image-tag-offline" &&
+      typeof value.notice === "string" &&
+      value.notice.length <= 512 &&
+      [...value.notice].every((character) => {
+        const code = character.charCodeAt(0);
+        return code >= 32 && code !== 127;
+      })
+    )
+  ) {
     return false;
   }
-  process.stderr.write(`${NATIVE_IMAGE_OFFLINE_NOTICE}\n`);
+  process.stderr.write(`${value.notice}\n`);
   return true;
 }
 
@@ -709,6 +719,7 @@ export async function runNativeDetachedOwner(opts: {
           readonly kind: "image-blocker";
           readonly detail: NativeImageBlockerDetail;
         }
+      | { readonly kind: "image-tag-offline"; readonly notice: string }
       | { readonly kind: "prestart-refusal"; readonly data: PrestartRefusal }
       | {
           readonly kind: "progress";
@@ -767,9 +778,9 @@ export async function runNativeDetachedOwner(opts: {
       await send({ kind: "image-blocker", detail });
     }
   };
-  publishImageTagOffline = () => {
+  publishImageTagOffline = (notice) => {
     if (!stopping) {
-      send("image-tag-offline");
+      send({ kind: "image-tag-offline", notice });
     }
   };
   publishProfileNotice = (notice) => {

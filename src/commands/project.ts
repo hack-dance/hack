@@ -708,7 +708,7 @@ const optImageOffline = defineOption({
   description:
     "Native backend: use recorded image resolutions and local archives without contacting a registry.",
 } as const);
-const pullOptions = [optPath, optProject, optEnv, optProfile] as const;
+const pullOptions = [optPath, optProject, optEnv, optProfile, optJson] as const;
 const upOptions = [
   optPath,
   optProject,
@@ -927,7 +927,17 @@ const pullSpec = defineCommand({
   subcommands: [],
 } as const);
 
-export const pullCommand = withHandler(pullSpec, handlePull);
+export const pullCommand = withHandler(pullSpec, async (input) => {
+  try {
+    return await handlePull(input);
+  } catch (error) {
+    if (!input.args.options.json) {
+      throw error;
+    }
+    emitCliResult({ result: buildLifecycleJsonErrorResult({ error }) });
+    return 1;
+  }
+});
 
 const downSpec = defineCommand({
   name: "down",
@@ -7206,6 +7216,7 @@ async function handlePull({
   readonly ctx: CliContext;
   readonly args: CommandArgs<typeof pullOptions, readonly []>;
 }): Promise<number> {
+  const json = args.options.json === true;
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -7218,7 +7229,7 @@ async function handlePull({
     const setup = await requireNativeSetup({
       runtime: native,
       cwd: ctx.cwd,
-      json: false,
+      json,
     });
     if (setup !== 0) {
       return setup;
@@ -7228,12 +7239,14 @@ async function handlePull({
       envName,
       cliProfile: args.options.profile,
     });
-    await pullNativeProjectImages({
+    const images = await pullNativeProjectImages({
       runtime: native,
       project: { ...project, envName },
       profiles,
-      warn: (message) => logger.warn({ message }),
     });
+    if (json) {
+      emitCliResult({ result: okResult({ data: { images } }) });
+    }
     return 0;
   }
   const cfg = await readProjectConfig(project);
@@ -7247,7 +7260,7 @@ async function handlePull({
     envName,
     persist: false,
   });
-  return await runShell(
+  const exitCode = await runShell(
     [
       ...buildComposeArgs({
         composeFiles: [project.composeFile],
@@ -7261,8 +7274,21 @@ async function handlePull({
       cwd: dirname(project.composeFile),
       env: envOverrides.env,
       forwardSignals: true,
+      stdout: json ? "stderr" : "inherit",
     }
   );
+  if (json) {
+    emitCliResult({
+      result:
+        exitCode === 0
+          ? okResult({ data: { backend: "compose" } })
+          : errorResult({
+              code: "E_LIFECYCLE_FAILED",
+              message: "Compose pull failed.",
+            }),
+    });
+  }
+  return exitCode;
 }
 
 function nativeImageTagMode(
@@ -7473,12 +7499,9 @@ async function handleUpUnlocked({
       },
       notifyRunning: async (saved, project) => {
         if (args.options.refreshImages) {
-          await pullNativeProjectImages({
-            runtime: native,
-            project: { ...project, envName: saved.effectiveEnvName },
-            profiles: saved.profiles ?? [],
-            warn: (message) => process.stderr.write(`${message}\n`),
-          });
+          throw new CliUsageError(
+            "Stop the running project with hack down, then run hack up --refresh-images."
+          );
         }
         await trackNativeLocalDirectories({
           project,

@@ -105,10 +105,11 @@ pub(super) fn count_requests<T>(operation: impl FnOnce() -> T) -> (T, u64) {
     (result, requests)
 }
 
+#[cfg(test)]
 pub(super) fn permits_recorded_fallback(failure: &CandidateError) -> bool {
     matches!(
         failure.cause_code.as_deref(),
-        Some("registry_unreachable" | "registry_http_refused")
+        Some("registry_unreachable" | "registry_http_429")
     )
 }
 
@@ -310,6 +311,18 @@ fn transport_error(failure: &reqwest::Error, message: &'static str) -> Candidate
 
 /// Failure to establish a route to the registry is distinct from authentication,
 /// TLS verification and an authoritative rejection by the registry.
+fn tls_failure(failure: &reqwest::Error) -> bool {
+    let mut source = std::error::Error::source(failure);
+    while let Some(error) = source {
+        let text = error.to_string().to_ascii_lowercase();
+        if text.contains("certificate") || text.contains("tls alert") {
+            return true;
+        }
+        source = error.source();
+    }
+    false
+}
+
 fn registry_unreachable(failure: &reqwest::Error) -> bool {
     if !failure.is_connect() {
         return false;
@@ -872,7 +885,12 @@ impl<'a> Fetch<'a> {
             policy,
             authorization: None,
             stage: Stage::Anonymous,
-            deadline: Instant::now() + ACQUISITION_DEADLINE,
+            deadline: Instant::now()
+                + if policy.short_tag_refresh {
+                    Duration::from_secs(3)
+                } else {
+                    ACQUISITION_DEADLINE
+                },
             request_timeout: REQUEST_TIMEOUT,
         })
     }
@@ -918,7 +936,12 @@ impl<'a> Fetch<'a> {
         timeout: Duration,
         retry: bool,
     ) -> Result<Response, CandidateError> {
-        for attempt in 1..=ATTEMPTS {
+        let attempts = if self.policy.short_tag_refresh {
+            1
+        } else {
+            ATTEMPTS
+        };
+        for attempt in 1..=attempts {
             let remaining =
                 match self.remaining() {
                     Ok(remaining) => remaining,
@@ -948,9 +971,17 @@ impl<'a> Fetch<'a> {
                     if !retry
                         || !transient(&failure)
                         || classified.code != "registry_image"
-                        || attempt == ATTEMPTS
+                        || attempt == attempts
                         || self.remaining().unwrap_or_default() <= delay
                     {
+                        if tls_failure(&failure) {
+                            return Err(CandidateError::new(
+                                "registry_image",
+                                "Registry TLS verification failed.",
+                            )
+                            .with_network_request(url.host_str().unwrap_or("unknown"), attempt)
+                            .with_cause_code("registry_tls".into()));
+                        }
                         let error = CandidateError::new(
                             classified.code,
                             format!(
@@ -960,14 +991,15 @@ impl<'a> Fetch<'a> {
                             ),
                         )
                         .with_network_request(url.host_str().unwrap_or("unknown"), attempt);
-                        return Err(
-                            if classified.code == "registry_image" && registry_unreachable(&failure)
-                            {
-                                error.with_cause_code("registry_unreachable".into())
-                            } else {
-                                error
-                            },
-                        );
+                        return Err(if failure.is_timeout() {
+                            error.with_cause_code("registry_timeout".into())
+                        } else if classified.code == "registry_image"
+                            && registry_unreachable(&failure)
+                        {
+                            error.with_cause_code("registry_unreachable".into())
+                        } else {
+                            error
+                        });
                     }
                     std::thread::sleep(delay);
                 }
@@ -1197,11 +1229,11 @@ impl<'a> Fetch<'a> {
                 },
                 "The registry token endpoint refused the Docker credentials configured for it.",
             )
-            .with_cause_code("registry_http_refused".into()));
+            .with_cause_code(format!("registry_http_{}", response.status().as_u16())));
         }
         if !response.status().is_success() {
             return Err(error("The registry token endpoint refused the request.")
-                .with_cause_code("registry_http_refused".into()));
+                .with_cause_code(format!("registry_http_{}", response.status().as_u16())));
         }
         #[derive(Deserialize)]
         struct Token {
@@ -1472,10 +1504,22 @@ fn layer_failure(
             "the 360-second image deadline was reached".to_owned()
         }
     };
-    error(format!(
+    let failure = error(format!(
         "A registry layer transfer failed: {why}. Host {host} after {attempts} attempt(s)."
     ))
-    .with_network_failure(host, attempts, reason, status)
+    .with_network_failure(host, attempts, reason, status);
+    match (reason, status) {
+        (NetworkFailureReason::DigestMismatch, _) => {
+            failure.with_cause_code("registry_digest_mismatch".into())
+        }
+        (NetworkFailureReason::Timeout | NetworkFailureReason::Deadline, _) => {
+            failure.with_cause_code("registry_timeout".into())
+        }
+        (NetworkFailureReason::HttpStatus, Some(code)) => {
+            failure.with_cause_code(format!("registry_http_{code}"))
+        }
+        _ => failure,
+    }
 }
 
 /// One layer's private temporary file next to the archive being assembled. Created
@@ -1524,7 +1568,8 @@ fn refusal(response: Response) -> Result<Response, CandidateError> {
     if response.status().is_success() {
         return Ok(response);
     }
-    let failure = match response.status() {
+    let status = response.status();
+    let failure = match status {
         StatusCode::NOT_FOUND => CandidateError::new(
             "registry_image_not_found",
             "The registry image or requested tag was not found.",
@@ -1537,7 +1582,7 @@ fn refusal(response: Response) -> Result<Response, CandidateError> {
         }
         _ => error("The registry request was refused."),
     };
-    Err(failure.with_cause_code("registry_http_refused".into()))
+    Err(failure.with_cause_code(format!("registry_http_{}", status.as_u16())))
 }
 
 fn verify_object(descriptor: &Descriptor, bytes: &[u8]) -> Result<(), CandidateError> {

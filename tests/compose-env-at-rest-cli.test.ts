@@ -441,8 +441,12 @@ test("Compose pull uses the selected managed environment for image interpolation
     value: "fixture-staging",
     secret: false,
   });
-  const result = await runCli({ args: ["pull", "--env", "staging"] });
+  const result = await runCli({ args: ["pull", "--env", "staging", "--json"] });
   expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
+    ok: true,
+    data: { backend: "compose" },
+  });
   expect(await readFile(join(capture, "pull-tag"), "utf8")).toBe(
     "fixture-staging\n"
   );

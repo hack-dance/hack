@@ -2108,17 +2108,17 @@ its input even if the guest already has that image.
 ### Mutable image tags
 
 An ordinary native start uses a verified tag resolution for up to 24 hours.
-Set `HACK_NATIVE_IMAGE_TAG_TTL_SECONDS` to change that interval. A value of
-`0` refreshes on every command. `hack pull` refreshes tags and verifies their
-archives without starting services. `hack up --refresh-images` refreshes the
-tags when starting services.
+Set `HACK_NATIVE_IMAGE_TAG_TTL_SECONDS` to a value from 0 to 2592000 seconds
+(30 days). A value of `0` refreshes on every command. `hack pull` refreshes tags
+and confirms their images in the native guest without starting services.
+`hack up --refresh-images` refreshes tags when starting services. For an
+already-running detached project, run `hack down` before refreshing.
 
 Use `hack up --offline` to use recorded resolutions of images already loaded
-without contacting a registry. The runtime can also use a recorded resolution
-of any age when it cannot reach the registry. The command reports that fallback
-once. A tag without a usable recorded resolution refuses with
-`image_tag_offline_missing`. If its immutable archive is unavailable locally,
-the refusal is `image_archive_offline_missing`. Invalid registry metadata is refused even when a previous resolution exists.
+without contacting a registry. An ordinary start can use a verified loaded
+image when refreshing its tag fails. Hack reports the reason and the recorded
+resolution time. Explicit refresh commands report the failure. Successful
+refreshes record the new selection after the guest confirms the image.
 
 `hack ps` and `hack status` show the recorded registry, source digest, selected
 image configuration IDs and last resolution time for the project's mutable

@@ -3048,7 +3048,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-image-presence",
     module: "ImagePresence",
-    states: 7828,
+    states: 7712,
     invariant: "Safe",
     action: "Readback",
     fields: [

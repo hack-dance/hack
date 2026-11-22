@@ -32,12 +32,23 @@ Begin ==
                 ELSE IF mode = "digest" THEN "readback" ELSE "tag"
     /\ UNCHANGED <<source, receipt, guest, archive, verified, uploaded, observed, tagVars>>
 
+Expire ==
+    /\ phase \in {"begin", "tag"}
+    /\ recorded = "fresh"
+    /\ recorded' = "expired"
+    /\ UNCHANGED <<imageVars, mode, online, chose>>
+
+ChangeAvailability ==
+    /\ phase \in {"begin", "tag"}
+    /\ online' = ~online
+    /\ UNCHANGED <<imageVars, mode, recorded, chose>>
+
 ResolveTag ==
     /\ phase = "tag"
     /\ chose' = IF mode = "normal" /\ (recorded = "fresh" \/ (TrustExpired /\ recorded = "expired"))
                  THEN "recorded"
                  ELSE IF mode # "offline" /\ online THEN "registry"
-                 ELSE IF recorded # "none" THEN "offline" ELSE "none"
+                 ELSE IF mode # "refresh" /\ recorded # "none" THEN "offline" ELSE "none"
     /\ phase' = IF chose' = "none" THEN "refused" ELSE "readback"
     /\ UNCHANGED <<source, receipt, guest, archive, verified, uploaded, observed, mode, recorded, online>>
 
@@ -84,7 +95,7 @@ Create ==
 
 Done == /\ phase \in {"created", "refused", "create_refused"} /\ UNCHANGED vars
 
-Spec == Init /\ [][Evict \/ Begin \/ ResolveTag \/ Readback \/ Verify \/ Reconcile \/ Upload \/ Create \/ Done]_vars
+Spec == Init /\ [][Evict \/ Begin \/ Expire \/ ChangeAvailability \/ ResolveTag \/ Readback \/ Verify \/ Reconcile \/ Upload \/ Create \/ Done]_vars
 
 Safe == /\ (phase = "ready" => observed)
         /\ (uploaded => verified /\ archive = "clean")

@@ -3,11 +3,9 @@ import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
-  NATIVE_IMAGE_OFFLINE_NOTICE,
   NativeImageBlocker,
   nativeImageBlockerDetail,
   nativeImagePolicyArgs,
-  nativeImageTagTtlSeconds,
 } from "./native-image-policy.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import { nativeServiceActive } from "./native-project-builds.ts";
@@ -42,19 +40,32 @@ function services(value: unknown): Record<string, unknown> {
   return value.services;
 }
 
-export function usedOfflineTag(reply: unknown): boolean {
-  return (
-    isRecord(reply) &&
-    isRecord(reply.tag_resolution) &&
-    reply.tag_resolution.source === "offline"
-  );
+export function offlineTagNotice(reply: unknown): string | undefined {
+  if (!(isRecord(reply) && isRecord(reply.tag_resolution))) {
+    return;
+  }
+  const tag = reply.tag_resolution;
+  if (tag.source !== "offline") {
+    return;
+  }
+  const reason =
+    typeof tag.fallback_reason === "string"
+      ? tag.fallback_reason
+      : "registry lookup disabled";
+  const time =
+    typeof tag.resolved_at_unix_seconds === "number"
+      ? new Date(tag.resolved_at_unix_seconds * 1000)
+      : undefined;
+  if (!(time && Number.isFinite(time.getTime()))) {
+    return "Registry lookup unavailable; using the loaded image.";
+  }
+  return `${reason}, using the loaded image resolved ${time.toISOString()}.`;
 }
 
 export async function pullNativeProjectImages(opts: {
   readonly project: Project;
   readonly runtime: NativeRuntimeSelection;
   readonly profiles: readonly string[];
-  readonly warn: (line: string) => void;
   readonly invoke?: typeof invokeNativeRuntime;
 }): Promise<readonly unknown[]> {
   const input = await prepareNativeProjectInput({
@@ -83,7 +94,6 @@ export async function pullNativeProjectImages(opts: {
   const seen = new Set<string>();
   const pins = new Map<string, string>();
   const results: unknown[] = [];
-  let reportedOffline = false;
   const invoke = opts.invoke ?? invokeNativeRuntime;
   const policyArgs = nativeImagePolicyArgs();
   const canonical = await admitNativeProjectImages({
@@ -105,7 +115,6 @@ export async function pullNativeProjectImages(opts: {
     }
     const pin = pins.get(reference);
     const args = nativeEnsureImageArgs(pin ?? reference, policy);
-    args[1] = "cache-image";
     const result = await invoke({
       runtime: opts.runtime,
       cwd: opts.project.projectRoot,
@@ -114,22 +123,18 @@ export async function pullNativeProjectImages(opts: {
     });
     if (
       !isRecord(result) ||
-      result.phase !== "archive-verified" ||
+      result.phase !== "content-id-verified" ||
       typeof result.image_id !== "string" ||
       !IMAGE_ID.test(result.image_id) ||
       typeof result.pinned_reference !== "string" ||
       !ensuredPlatformAccepted(result.platform, policy)
     ) {
       throw new ClosedCliError(
-        "Native pull did not confirm the requested image archive."
+        "Native pull did not confirm the requested image in the guest."
       );
     }
     if (!(reference.includes("@") || pin)) {
       pins.set(reference, result.pinned_reference);
-    }
-    if (usedOfflineTag(result) && !reportedOffline) {
-      opts.warn(NATIVE_IMAGE_OFFLINE_NOTICE);
-      reportedOffline = true;
     }
     seen.add(selection);
     results.push(result);
@@ -255,72 +260,4 @@ export async function nativeImageTagStatuses(
   );
   // Tag metadata is supplemental to the independently observed project status.
   return await readTagStatuses(opts, [...references]).catch(() => []);
-}
-
-type RetainedTagSelection = ReadTagStatuses & {
-  readonly retained: ReadonlyMap<string, string>;
-  readonly specs: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
-  readonly policies?: Parameters<typeof nativeEmulationPolicy>[0];
-  readonly mode?: "refresh" | "offline";
-};
-
-function policyMatches(
-  policy: string,
-  platform: string,
-  requested: string
-): boolean {
-  return (
-    policy === requested ||
-    (platform === "linux/arm64" &&
-      (requested === "native" || requested === "prefer-native")) ||
-    (platform === "linux/amd64" && requested === "amd64")
-  );
-}
-
-/** Keep the cheap restore only while every mutable input has its current recorded identity. */
-export async function retainCurrentImageTags(
-  opts: RetainedTagSelection
-): Promise<ReadonlyMap<string, string>> {
-  const retained = new Map(opts.retained);
-  const mutable = [...opts.retained].flatMap(([service, imageId]) => {
-    const reference = opts.specs[service]?.image;
-    return isTag(reference) ? [{ service, reference, imageId }] : [];
-  });
-  if (opts.mode) {
-    for (const { service } of mutable) {
-      retained.delete(service);
-    }
-    return retained;
-  }
-  const records = await readTagStatuses(opts, [
-    ...new Set(mutable.map((job) => job.reference)),
-  ]);
-  const byAlias = new Map(
-    records.flatMap((record) =>
-      record.aliases.map((alias) => [alias, record] as const)
-    )
-  );
-  const now = Math.floor(Date.now() / 1000);
-  const ttl = nativeImageTagTtlSeconds();
-  for (const { service, reference, imageId } of mutable) {
-    const record = byAlias.get(reference);
-    const policy = nativeEmulationPolicy(opts.policies, service) ?? "native";
-    const age =
-      record === undefined ? -1 : now - record.resolved_at_unix_seconds;
-    if (
-      !(
-        record &&
-        age >= 0 &&
-        age < ttl &&
-        record.selections.some(
-          (selection) =>
-            policyMatches(selection.policy, selection.platform, policy) &&
-            selection.image_id === imageId
-        )
-      )
-    ) {
-      retained.delete(service);
-    }
-  }
-  return retained;
 }

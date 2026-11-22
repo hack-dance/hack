@@ -74,9 +74,9 @@ export function nativeImageTagTtlSeconds(
     return DEFAULT_NATIVE_IMAGE_TAG_TTL_SECONDS;
   }
   const ttl = Number(raw);
-  if (!(SECONDS.test(raw) && Number.isSafeInteger(ttl))) {
+  if (!(SECONDS.test(raw) && Number.isSafeInteger(ttl) && ttl <= 2_592_000)) {
     throw invalid(
-      "HACK_NATIVE_IMAGE_TAG_TTL_SECONDS must be a whole number of seconds."
+      "HACK_NATIVE_IMAGE_TAG_TTL_SECONDS must be a whole number from 0 to 2592000 seconds."
     );
   }
   return ttl;

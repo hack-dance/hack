@@ -5392,7 +5392,7 @@ test("without an emulation selection the runtime pool and image pins stay arm64-
   expect(calls.flat()).not.toContain("--emulation");
 });
 
-test("retained startup reviews the saved content ID instead of a newly resolved mutable tag", async () => {
+test("retained startup asks the runtime to confirm the tag before review", async () => {
   const { opts, events } = await fixture(false);
   const saved = {
     run: "1".repeat(32),
@@ -5429,6 +5429,7 @@ test("retained startup reviews the saved content ID instead of a newly resolved 
   });
   const invoke = opts.dependencies.invoke!;
   let beforeReview = true;
+  let confirmed = false;
   opts.dependencies.invoke = async (request) => {
     if (request.args[1] === "image-tag-status") {
       return [
@@ -5445,7 +5446,8 @@ test("retained startup reviews the saved content ID instead of a newly resolved 
       ];
     }
     if (request.args[1] === "ensure-image") {
-      throw new Error("mutable tag was unexpectedly resolved");
+      confirmed = true;
+      return { image_id: image, platform: "linux/arm64" };
     }
     if (request.args[1] === "inspect" && beforeReview) {
       expect(events).toContain("runtime up");
@@ -5459,6 +5461,7 @@ test("retained startup reviews the saved content ID instead of a newly resolved 
   const review = opts.dependencies.review!;
   opts.dependencies.review = async (request) => {
     beforeReview = false;
+    expect(confirmed).toBe(true);
     expect(
       JSON.parse(request.input.normalizedComposeJson).services.web.image
     ).toBe(image);
@@ -5467,7 +5470,7 @@ test("retained startup reviews the saved content ID instead of a newly resolved 
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
 });
 
-test("retained startup selects an image again when the service's emulation policy changed", async () => {
+test("retained startup confirms the image under the currently selected emulation policy", async () => {
   const saved = {
     run: "1".repeat(32),
     owner: "c".repeat(32),
@@ -5529,7 +5532,10 @@ test("retained startup selects an image again when the service's emulation polic
       }
       if (request.args[1] === "ensure-image") {
         ensured.push([...request.args]);
-        return { image_id: selected, platform: "linux/amd64" };
+        return {
+          image_id: retainedPolicy === "amd64" ? retained : selected,
+          platform: "linux/amd64",
+        };
       }
       if (request.args[1] === "inspect" && beforeReview) {
         return observed;
@@ -5550,21 +5556,17 @@ test("retained startup selects an image again when the service's emulation polic
     expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
     const changed = retainedPolicy !== "amd64";
     expect(reviewedImage).toBe(changed ? selected : retained);
-    expect(ensured).toEqual(
-      changed
-        ? [
-            [
-              "runtime",
-              "ensure-image",
-              "--reference",
-              "redis:latest",
-              "--emulation",
-              "amd64",
-              "--json",
-            ],
-          ]
-        : []
-    );
+    expect(ensured).toEqual([
+      [
+        "runtime",
+        "ensure-image",
+        "--reference",
+        "redis:latest",
+        "--emulation",
+        "amd64",
+        "--json",
+      ],
+    ]);
   }
 });
 

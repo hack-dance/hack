@@ -203,13 +203,16 @@ pub struct EnsuredTag {
     pub source_digest: String,
     pub resolved_at_unix_seconds: u64,
     pub source: TagSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct EnsuredImage {
     pub pinned_reference: String,
     pub image_id: String,
-    pub archive_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_sha256: Option<String>,
     pub archive_reused: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag_resolution: Option<EnsuredTag>,
@@ -371,13 +374,53 @@ fn acquire_for_use(
     } else {
         None
     };
-    let tag = if reference.contains('@') {
+    let mut tag = if reference.contains('@') {
         None
     } else {
         Some(image_tag_store::resolve(
-            candidate, reference, policy, platform,
+            candidate,
+            reference,
+            policy,
+            platform,
+            observer.as_ref(),
         )?)
     };
+    let previous = tag.as_mut().and_then(|tag| tag.previous_loaded.take());
+    let result = acquire_selection(
+        candidate,
+        reference,
+        policy,
+        platform,
+        import,
+        observer.as_ref(),
+        tag,
+    );
+    match (result, previous) {
+        (Err(error), Some(mut previous)) if error.code.starts_with("registry_") => {
+            previous.fallback_reason = Some(image_tag_store::fallback_reason(&error));
+            acquire_selection(
+                candidate,
+                reference,
+                policy,
+                platform,
+                import,
+                observer.as_ref(),
+                Some(*previous),
+            )
+        }
+        (result, _) => result,
+    }
+}
+
+fn acquire_selection(
+    candidate: &Candidate,
+    reference: &str,
+    policy: &ImagePolicy,
+    platform: PlatformPolicy,
+    import: bool,
+    observer: Option<&engine::Observer<'_>>,
+    mut tag: Option<image_tag_store::TagResolution>,
+) -> Result<EnsuredImage, CandidateError> {
     let requested_platform = platform;
     let (pinned, platform) = match &tag {
         Some(tag) => (
@@ -423,78 +466,116 @@ fn acquire_for_use(
     let platform = selection
         .as_ref()
         .map_or(platform, |(selected, _)| PlatformPolicy::exact(*selected));
+    let guest_hit = match (observer, &selection) {
+        (Some(observer), Some((selected, config))) => {
+            image_load::observe_image(observer, config, *selected)?
+        }
+        _ => false,
+    };
     let acquired_proof = std::cell::RefCell::new(None);
-    let mut ensured = ensure_pinned_resolving(
-        candidate,
-        &pinned,
-        policy,
-        platform,
-        |reference, platform| {
-            if offline {
-                return Err(no_archive());
-            }
-            registry_image::pinned_platform(reference, policy, platform)
-        },
-        |reference, path, platform, limit| {
-            if offline {
-                return Err(no_archive());
-            }
-            let mut acquired =
-                registry_image::acquire_with(reference, path, policy, limit, platform)?;
-            *acquired_proof.borrow_mut() = acquired.proof.take();
-            Ok(acquired)
-        },
-        |candidate, path, receipt, _| {
-            let config = || {
-                if let Some((selected, config)) = &selection {
-                    check_registry_config(receipt, *selected, config)?;
-                    return Ok(config.clone());
-                }
+    let mut ensured = if let Some((selected, config)) = selection.as_ref().filter(|_| guest_hit) {
+        let receipt_path = candidate
+            .state_root
+            .join("artifacts/images")
+            .join(entry_key(&pinned, *selected))
+            .join("receipt.json");
+        let archive_sha256 = read_receipt(&receipt_path)
+            .ok()
+            .filter(|receipt| {
+                receipt.validate(candidate, &pinned).is_ok()
+                    && receipt.platform == *selected
+                    && receipt.image_id == *config
+            })
+            .map(|receipt| receipt.archive_sha256);
+        EnsuredImage {
+            pinned_reference: pinned.clone(),
+            image_id: config.clone(),
+            archive_sha256,
+            archive_reused: false,
+            tag_resolution: None,
+            phase: "content-id-verified",
+            platform: *selected,
+        }
+    } else {
+        if offline && import {
+            return Err(no_archive());
+        }
+        ensure_pinned_resolving(
+            candidate,
+            &pinned,
+            policy,
+            platform,
+            |reference, platform| {
                 if offline {
                     return Err(no_archive());
                 }
-                let proof = match acquired_proof.borrow_mut().take() {
-                    Some(proof) => proof,
-                    None => measure(Step::ImagePinVerify, None, |_| {
-                        registry_image::resolve_pinned(
-                            &receipt.reference,
-                            policy,
-                            requested_platform,
-                        )
-                        .map(|resolved| resolved.proof)
-                    })?,
+                registry_image::pinned_platform(reference, policy, platform)
+            },
+            |reference, path, platform, limit| {
+                if offline {
+                    return Err(no_archive());
+                }
+                let mut acquired =
+                    registry_image::acquire_with(reference, path, policy, limit, platform)?;
+                *acquired_proof.borrow_mut() = acquired.proof.take();
+                Ok(acquired)
+            },
+            |candidate, path, receipt, _| {
+                let config = || {
+                    if let Some((selected, config)) = &selection {
+                        check_registry_config(receipt, *selected, config)?;
+                        return Ok(config.clone());
+                    }
+                    if offline {
+                        return Err(no_archive());
+                    }
+                    let proof = match acquired_proof.borrow_mut().take() {
+                        Some(proof) => proof,
+                        None => measure(Step::ImagePinVerify, None, |_| {
+                            registry_image::resolve_pinned(
+                                &receipt.reference,
+                                policy,
+                                requested_platform,
+                            )
+                            .map(|resolved| resolved.proof)
+                        })?,
+                    };
+                    let (selected, config) =
+                        proof.verified_config(&receipt.reference, requested_platform)?;
+                    check_registry_config(receipt, selected, &config)?;
+                    publish_proof(candidate, &receipt.reference, requested_platform, &proof)?;
+                    Ok(config)
                 };
-                let (selected, config) =
-                    proof.verified_config(&receipt.reference, requested_platform)?;
-                check_registry_config(receipt, selected, &config)?;
-                publish_proof(candidate, &receipt.reference, requested_platform, &proof)?;
-                Ok(config)
-            };
-            let Some(observer) = &observer else {
-                config()?;
-                return image_load::validate_file_for(
+                let Some(observer) = observer else {
+                    config()?;
+                    return image_load::validate_file_for(
+                        path,
+                        &receipt.archive_sha256,
+                        &receipt.image_id,
+                        policy,
+                        receipt.platform,
+                    )
+                    .map(|_| ());
+                };
+                let archive = image_load::CachedArchive {
                     path,
-                    &receipt.archive_sha256,
-                    &receipt.image_id,
-                    policy,
-                    receipt.platform,
-                )
-                .map(|_| ());
-            };
-            let archive = image_load::CachedArchive {
-                path,
-                sha: &receipt.archive_sha256,
-                image: &receipt.image_id,
-                bytes: receipt.archive_bytes,
-                pin: &receipt.reference,
-                platform: receipt.platform,
-                recorded_config: selection.as_ref().map(|(_, config)| config.as_str()),
-                require_present: offline,
-            };
-            image_load::load_cached(candidate, &archive, policy, observer, config).map(|_| ())
-        },
-    )?;
-    if !import {
+                    sha: &receipt.archive_sha256,
+                    image: &receipt.image_id,
+                    bytes: receipt.archive_bytes,
+                    pin: &receipt.reference,
+                    platform: receipt.platform,
+                    recorded_config: selection.as_ref().map(|(_, config)| config.as_str()),
+                    require_present: offline,
+                };
+                image_load::load_cached(candidate, &archive, policy, observer, config).map(|_| ())
+            },
+        )?
+    };
+    if import {
+        if let Some(tag) = &mut tag {
+            tag.publish()?;
+        }
+    } else {
         ensured.phase = "archive-verified";
     }
     ensured.tag_resolution = tag.map(|tag| EnsuredTag {
@@ -503,6 +584,7 @@ fn acquire_for_use(
         source_digest: tag.record.source_digest,
         resolved_at_unix_seconds: tag.record.resolved_at_unix_seconds,
         source: tag.source,
+        fallback_reason: tag.fallback_reason,
     });
     Ok(ensured)
 }
@@ -655,7 +737,7 @@ fn ensure_pinned_resolving(
     Ok(EnsuredImage {
         pinned_reference: reference,
         image_id: receipt.image_id,
-        archive_sha256: receipt.archive_sha256,
+        archive_sha256: Some(receipt.archive_sha256),
         archive_reused: reused,
         tag_resolution: None,
         phase: "content-id-verified",

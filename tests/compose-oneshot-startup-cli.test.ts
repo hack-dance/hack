@@ -569,6 +569,12 @@ test("Compose closes a confirmed start and stop with plain lifecycle lines", asy
     JSON.stringify({
       name: "shop",
       dev_host: "SAMPLE.hack.local",
+      lifecycle: {
+        up: {
+          before: [{ name: "prepare", command: "printf 'before output\\n'" }],
+          after: [{ name: "verify", command: "printf 'after output\\n'" }],
+        },
+      },
       internal: { dns: false, tls: false },
     })
   );
@@ -589,6 +595,26 @@ test("Compose closes a confirmed start and stop with plain lifecycle lines", asy
     /https:\/\/sample\.hack\.local {2}up in \d+\.\ds · compose · 2 routes warming\n$/
   );
   expect(up.stdout).not.toContain("dormant.hack.local");
+  expect(up.stdout).not.toContain("printf");
+  const output = up.stdout.split("\n");
+  const before = output.findIndex((line) =>
+    /^✓ before +prepare +done · \d+\.\ds$/.test(line)
+  );
+  const after = output.findIndex((line) =>
+    /^✓ after +verify +done · \d+\.\ds$/.test(line)
+  );
+  const migration = output.findIndex((line) =>
+    /^✓ services +migrate +completed$/.test(line)
+  );
+  const service = output.findIndex((line) =>
+    /^✓ services +api +up$/.test(line)
+  );
+  expect(output.indexOf("before output")).toBeGreaterThanOrEqual(0);
+  expect(before).toBeGreaterThan(output.indexOf("before output"));
+  expect(output.indexOf("after output")).toBeGreaterThan(before);
+  expect(after).toBeGreaterThan(output.indexOf("after output"));
+  expect(migration).toBeGreaterThan(after);
+  expect(service).toBeGreaterThan(migration);
 
   const down = await cli(["down"]);
   expect(down.exitCode).toBe(0);

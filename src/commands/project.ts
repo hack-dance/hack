@@ -43,6 +43,10 @@ import {
   writeComposeStarted,
   writeComposeStopped,
 } from "./compose-lifecycle-closing.ts";
+import {
+  createComposeUpProgress,
+  type HookCompletion,
+} from "./compose-up-progress.ts";
 
 export function wrapLifecyclePersistentCommand(
   opts: Parameters<typeof wrapSharedLifecyclePersistentCommand>[0]
@@ -2517,6 +2521,7 @@ export async function runLifecycleCommands(opts: {
   readonly projectDir: string;
   readonly composeProject: string;
   readonly routeStdoutToStderr?: boolean;
+  readonly onHookComplete?: HookCompletion;
   readonly summarizeFailure?: (name: string, reason?: string) => void;
   readonly onPersistentCommand?: (opts: {
     readonly command: ProjectLifecycleCommand;
@@ -2533,7 +2538,10 @@ export async function runLifecycleCommands(opts: {
   assertAutostartHostCommandsAllowed({ hasCommands: commands.length > 0 });
   for (const [index, cmd] of commands.entries()) {
     const label = cmd.name ? `${cmd.name}: ${cmd.command}` : cmd.command;
-    logger.step({ message: `${opts.title}: ${label}` });
+    const startedAt = opts.onHookComplete ? performance.now() : 0;
+    if (!opts.onHookComplete) {
+      logger.step({ message: `${opts.title}: ${label}` });
+    }
     const serviceName = resolveLifecycleCommandServiceName({
       command: cmd,
       index,
@@ -2563,6 +2571,11 @@ export async function runLifecycleCommands(opts: {
         });
         return 1;
       }
+      opts.onHookComplete?.(
+        serviceName,
+        "running",
+        performance.now() - startedAt
+      );
       continue;
     }
     if (cmd.persistent === true) {
@@ -2629,6 +2642,7 @@ export async function runLifecycleCommands(opts: {
       });
       return exitCode;
     }
+    opts.onHookComplete?.(serviceName, "done", performance.now() - startedAt);
   }
   return 0;
 }
@@ -2740,6 +2754,7 @@ function hasPersistentLifecycleCommands(
 
 async function runLifecycleUpBeforeAndProcesses(opts: {
   readonly title: string;
+  readonly onHookComplete?: HookCompletion;
   readonly summarizeFailure?: (name: string, reason?: string) => void;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
@@ -2808,6 +2823,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     const beforeCode = await runLifecycleCommands({
       title: opts.title,
       summarizeFailure: opts.summarizeFailure,
+      onHookComplete: opts.onHookComplete,
       commands: beforeCommands,
       projectRoot: opts.project.projectRoot,
       env: opts.env,
@@ -2868,6 +2884,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   const beforeCode = await runLifecycleCommands({
     title: opts.title,
     summarizeFailure: opts.summarizeFailure,
+    onHookComplete: opts.onHookComplete,
     commands: beforeCommands,
     projectRoot: opts.project.projectRoot,
     env: opts.env,
@@ -7895,6 +7912,14 @@ async function runUpCommand({
     });
   }
 
+  const progress =
+    detach && !json
+      ? createComposeUpProgress({
+          services: targetServices,
+          before: serviceScoped ? undefined : cfg.lifecycle?.up?.before,
+          after: serviceScoped ? undefined : cfg.lifecycle?.up?.after,
+        })
+      : undefined;
   let lifecycleCleanup: LifecycleOperationCleanup | null = null;
   let lifecycleSignalCleanup: { readonly dispose: () => void } | null = null;
   let assertHelpersCurrent: LifecycleUpResult["assertSharedHelpersCurrent"];
@@ -7931,6 +7956,7 @@ async function runUpCommand({
       ? { code: 0, cleanup: null, signalCleanup: null, sessionName: null }
       : await runLifecycleUpBeforeAndProcesses({
           title: "Lifecycle (up before)",
+          onHookComplete: progress?.before,
           summarizeFailure,
           project,
           cfg,
@@ -8089,7 +8115,9 @@ async function runUpCommand({
       ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
       ...envOverrides.composeFiles,
     ];
-    reportComposeStartupBudget({ budgets, detach });
+    if (!progress) {
+      reportComposeStartupBudget({ budgets, detach });
+    }
     const bootstrapCode = await bootstrapDependencyCaches({
       timeoutMs: detach ? startupTimeoutMs : undefined,
       services: cacheBootstrapServices,
@@ -8246,6 +8274,7 @@ async function runUpCommand({
       ? 0
       : await runLifecycleCommands({
           title: "Lifecycle (up after)",
+          onHookComplete: progress?.after,
           summarizeFailure,
           commands: cfg.lifecycle?.up?.after,
           projectRoot: project.projectRoot,
@@ -8323,6 +8352,7 @@ async function runUpCommand({
         exitCode: 1,
       });
     }
+    progress?.services(startup);
     if (!serviceScoped) {
       await recordEnvMigrationProjectRun({
         projectRoot: project.projectRoot,

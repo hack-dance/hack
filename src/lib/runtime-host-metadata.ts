@@ -299,7 +299,7 @@ export function composeServiceAddresses(opts: {
       continue;
     }
     const sites = readCaddySiteLabels(entry.labels)
-      .filter((label) => !UNRESOLVED_SITE_LABEL.test(label))
+      .map((label) => label.replaceAll(UNRESOLVED_SITE_EXPRESSION, "{}"))
       .join(", ");
     const label = opts.branch
       ? rewriteCaddyLabelForBranch({
@@ -321,7 +321,7 @@ export function composeServiceAddresses(opts: {
   return addresses;
 }
 
-const UNRESOLVED_SITE_LABEL = /[{}$]/;
+const UNRESOLVED_SITE_EXPRESSION = /\{\{[\s\S]*?\}\}|\$\{[^}]*\}/g;
 const SITE_TEMPLATE = /[*{}$]/;
 const SITE_SCHEME = /^[a-z][a-z\d+.-]*:\/\//i;
 

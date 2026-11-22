@@ -387,7 +387,7 @@ test.each([
   }
   if (command === "ps") {
     expect(stdout).toMatch(/web +no address +port-down/);
-    expect(stdout).toContain(`hack down --path ${opts.scope.projectRoot}`);
+    expect(stdout).toContain(`hack down --path=${opts.scope.projectRoot}`);
   } else {
     expect(stdout + stderr).toContain("Run hack down");
   }
@@ -695,7 +695,7 @@ exit 2
     expect(code).toBe(0);
     expect(stdout).toContain("web");
     expect(stdout).toContain("owner is unconfirmed");
-    expect(stdout).toContain(`hack down --path ${opts.scope.projectRoot}`);
+    expect(stdout).toContain(`hack down --path=${opts.scope.projectRoot}`);
     expect(stderr).not.toContain("owner is unconfirmed");
   } finally {
     clearTimeout(timer);

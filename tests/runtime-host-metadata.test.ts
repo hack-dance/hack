@@ -247,6 +247,9 @@ services:
   insecure:
     labels:
       caddy: http://only.sample.hack.local
+  mixed:
+    labels:
+      caddy: 'sample.hack.local, \${OPTIONAL_HOST}'
   templated:
     labels:
       caddy: '{{ index .Labels "domain" }}'
@@ -281,6 +284,7 @@ services:
         ],
       ],
       ["insecure", ["http://only.sample.hack.local"]],
+      ["mixed", ["https://sample.hack.local"]],
       ["numbered-map", ["https://map.sample.hack.local"]],
       ["numbered-list", ["https://list.sample.hack.local"]],
     ])
@@ -304,6 +308,7 @@ services:
         ],
       ],
       ["insecure", ["http://only.feature-x.sample.hack.local"]],
+      ["mixed", ["https://feature-x.sample.hack.local"]],
       ["numbered-map", ["https://map.feature-x.sample.hack.local"]],
       ["numbered-list", ["https://list.feature-x.sample.hack.local"]],
     ])

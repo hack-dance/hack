@@ -519,11 +519,11 @@ jobs:
           echo "$RUNNER_TEMP/candidate-nextest" >> "$GITHUB_PATH"
       - name: Lint candidate core
         id: lint-default
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' && steps.zig.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' }}
         run: cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --jobs 2 -- -D warnings
       - name: Test candidate isolation contracts
         id: test-default
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' && steps.zig.outcome == 'success' && steps.nextest.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.rust.outcome == 'success' && steps.nextest.outcome == 'success' }}
         env:
           HACK_RUST_TEST_REPORT_DIR: ${{ runner.temp }}/candidate-rust-results
         run: bash scripts/test-runtime-core.sh

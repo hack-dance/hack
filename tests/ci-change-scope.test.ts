@@ -365,6 +365,11 @@ describe("CI workflow wiring", () => {
       );
       expect(step?.["continue-on-error"], id).toBeUndefined();
     }
+    for (const id of ["lint-default", "test-default"]) {
+      expect(steps.find((step) => step.id === id)?.if).not.toContain(
+        "steps.zig"
+      );
+    }
     expect(steps.find((step) => step.id === "kill-harness")?.if).toContain(
       "steps.test-all-features.outcome == 'success' && steps.release-build.outcome == 'success'"
     );

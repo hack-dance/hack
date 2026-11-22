@@ -373,6 +373,11 @@ function parseBuilt(value: unknown): NativeBuiltImage {
           : [];
       })
     : [];
+  if (value.reused_legacy_key === true && value.reused) {
+    fallbacks.push(
+      "Registry unavailable, using the verified build image for the unchanged context and Dockerfile."
+    );
+  }
   const selections = isRecord(value.base_selections)
     ? (Object.fromEntries(
         Object.entries(value.base_selections).filter(

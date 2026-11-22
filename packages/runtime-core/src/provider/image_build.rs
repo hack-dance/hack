@@ -206,6 +206,7 @@ pub struct BuildOutcome {
     pub base_fallbacks: Vec<super::image_ensure::EnsuredTag>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub base_selections: BTreeMap<String, String>,
+    pub reused_legacy_key: bool,
     /// Build cache bytes the post-build prune reclaimed; `None` when no prune ran or
     /// it failed (the build result stands either way).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -823,6 +824,78 @@ fn owned_image(
     }
 }
 
+fn reuse_verified<P: BuildPool>(
+    candidate: &Candidate,
+    pool: &P,
+    (lease, identity): (&P::Lease, &PoolIdentity),
+    inputs: &Inputs,
+    path: &Path,
+    previous: &Receipt,
+) -> Result<Option<BuildOutcome>, CandidateError> {
+    if inputs.policy == Policy::Missing
+        && previous.version == 1
+        && previous.namespace == inputs.namespace
+        && previous.build_key == inputs.key
+        && previous.phase == Phase::ContentIdVerified
+        && previous.checkout == candidate.checkout
+        && previous.provider_incarnation == identity.incarnation
+        && previous.engine_id == identity.engine_id
+        && let Some(id) = previous.image_id.as_deref().filter(|id| image_id(id))
+        && let Some(inspected) = pool.inspect(lease, id)?
+        && owned_image(&inspected, id, &labels(inputs, identity)).is_ok()
+    {
+        let mut current = previous.clone();
+        current.provider_boot_id = identity.boot_id.clone();
+        current.declaration = Some(inputs.declaration.clone());
+        current.sequence = path.parent().map(next_sequence);
+        state::write(path, &current)?;
+        return Ok(Some(reused(inputs, id, &previous.base_pins)));
+    }
+    Ok(None)
+}
+
+fn reuse_legacy<P: BuildPool>(
+    candidate: &Candidate,
+    pool: &P,
+    inputs: &Inputs,
+) -> Result<Option<BuildOutcome>, CandidateError> {
+    if inputs.policy != Policy::Missing {
+        return Ok(None);
+    }
+    let directory = builds_root(candidate).join(&inputs.namespace);
+    let path = directory.join(format!("{}.json", inputs.key));
+    if !path.try_exists().map_err(state::io)? {
+        return Ok(None);
+    }
+    let (lease, identity) = pool.lease()?;
+    let lock = Flock::open(&directory.join(format!("{}.lock", inputs.key)))?;
+    let Some(_lock) = Flock::try_lock(lock, libc::LOCK_EX)? else {
+        return Ok(None);
+    };
+    let Some(previous) = read_receipt(&path)? else {
+        return Ok(None);
+    };
+    if path
+        .with_extension("pending")
+        .try_exists()
+        .map_err(state::io)?
+    {
+        return Ok(None);
+    }
+    let mut outcome = reuse_verified(
+        candidate,
+        pool,
+        (&lease, &identity),
+        inputs,
+        &path,
+        &previous,
+    )?;
+    if let Some(reused) = &mut outcome {
+        reused.reused_legacy_key = true;
+    }
+    Ok(outcome)
+}
+
 /// Run one build operation end to end. See the module documentation for the protocol.
 /// `canceled` reports a pending cancellation request; it is checked before each
 /// unleased step, during base resolution and while the client runs. The time budget
@@ -909,22 +982,15 @@ fn run_with_bases<P: BuildPool>(
                 "A build receipt does not match its path; no image was adopted or replaced.",
             ));
         }
-        if inputs.policy == Policy::Missing
-            && previous.phase == Phase::ContentIdVerified
-            && previous.checkout == candidate.checkout
-            && previous.provider_incarnation == identity.incarnation
-            && previous.engine_id == identity.engine_id
-            && let Some(id) = previous.image_id.as_deref().filter(|id| image_id(id))
-            && let Some(inspected) = pool.inspect(&lease, id)?
-            && owned_image(&inspected, id, &expected).is_ok()
-        {
-            // The reused key becomes its declaration's image in use again.
-            let mut current = previous.clone();
-            current.provider_boot_id = identity.boot_id.clone();
-            current.declaration = Some(inputs.declaration.clone());
-            current.sequence = Some(next_sequence(&directory));
-            state::write(&receipt_path, &current)?;
-            return Ok(reused(inputs, id, &previous.base_pins));
+        if let Some(outcome) = reuse_verified(
+            candidate,
+            pool,
+            (&lease, &identity),
+            inputs,
+            &receipt_path,
+            previous,
+        )? {
+            return Ok(outcome);
         }
         if previous.phase == Phase::Building {
             // The key lock proves no live holder: that attempt died mid-build.
@@ -1185,6 +1251,7 @@ fn run_with_bases<P: BuildPool>(
         base_pins: pins,
         base_fallbacks: Vec::new(),
         base_selections: BTreeMap::new(),
+        reused_legacy_key: false,
         cache_reclaimed_bytes,
     })
 }
@@ -1213,6 +1280,7 @@ fn reused(inputs: &Inputs, id: &str, pins: &BTreeMap<String, String>) -> BuildOu
         base_pins: pins.clone(),
         base_fallbacks: Vec::new(),
         base_selections: BTreeMap::new(),
+        reused_legacy_key: false,
         cache_reclaimed_bytes: None,
     }
 }
@@ -1899,8 +1967,17 @@ pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome
             .get(&reference)
             .map(|pin| registry_image::pinned_syntax(pin).map(|(canonical, _)| canonical))
             .transpose()?;
-        let ensured = super::image_ensure::ensure(candidate, &reference, &policy)
-            .map_err(|error| error.with_build_base_reference(reference.clone()))?;
+        let ensured = match super::image_ensure::ensure(candidate, &reference, &policy) {
+            Ok(ensured) => ensured,
+            Err(error) => {
+                if error.code.starts_with("registry_")
+                    && let Some(outcome) = reuse_legacy(candidate, &pool, &inputs)?
+                {
+                    return Ok(outcome);
+                }
+                return Err(error.with_build_base_reference(reference));
+            }
+        };
         let proof = super::image_ensure::recorded_proof(
             candidate,
             &ensured.pinned_reference,

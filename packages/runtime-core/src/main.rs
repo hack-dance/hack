@@ -149,6 +149,18 @@ Runtime commands affect only the candidate pool. Graph commands support a bounde
 The installed hack and its state are never used as a fallback.";
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--internal-publication-child"))
+    {
+        std::process::exit(
+            if hack_runtime_core::provider::publication::run_publication_child().is_ok() {
+                0
+            } else {
+                1
+            },
+        );
+    }
     if let Some(argument) = std::env::args_os()
         .nth(1)
         .and_then(|value| value.into_string().ok())

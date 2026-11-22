@@ -67,6 +67,90 @@ fn publication_command(e: &Entry, upstream: &Path) -> Result<Command, CandidateE
     Ok(command)
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ChildLaunch {
+    entry: Entry,
+    upstream: PathBuf,
+}
+
+/// Under the provider lease, stage the exact child before sending authorization.
+/// An empty or incomplete message never grants the child authority to exec.
+#[cfg(target_os = "macos")]
+pub(super) fn launch_child(
+    candidate: &Candidate,
+    options: &Launch<'_>,
+    check: impl FnOnce() -> Result<(), CandidateError>,
+) -> Result<std::process::Child, CandidateError> {
+    let mut command = Command::new(std::env::current_exe().map_err(state::io)?);
+    command
+        .arg("--internal-publication-child")
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = super::process::spawn_child(&mut command).map_err(state::io)?;
+    let result = (|| {
+        let mut gate = child.stdin.take().ok_or_else(error)?;
+        let process = identity::observe(child.id() as i32)?;
+        let entry = stage_launch(candidate, options, process)?;
+        let request = ChildLaunch {
+            entry,
+            upstream: options.upstream.into(),
+        };
+        let bytes = serde_json::to_vec(&request).map_err(|_| error())?;
+        if bytes.len() >= CHILD_LAUNCH_LIMIT {
+            return Err(error());
+        }
+        check()?;
+        // Encode authorization after the complete payload. EOF alone is a refusal.
+        gate.write_all(&bytes).map_err(state::io)?;
+        gate.write_all(b"\n").map_err(state::io)
+    })();
+    if let Err(error) = result {
+        child.wait().map_err(state::io)?;
+        return Err(error);
+    }
+    Ok(child)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+const CHILD_LAUNCH_LIMIT: usize = 16 * 1024;
+
+#[cfg(any(test, target_os = "macos"))]
+fn read_launch_gate(input: impl Read) -> Result<Vec<u8>, CandidateError> {
+    let mut bytes = Vec::new();
+    input
+        .take(CHILD_LAUNCH_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(state::io)?;
+    if bytes.len() > CHILD_LAUNCH_LIMIT || bytes.pop() != Some(b'\n') {
+        return Err(error());
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn run_publication_child() -> Result<(), CandidateError> {
+    let bytes = read_launch_gate(std::io::stdin().lock())?;
+    let ChildLaunch { entry, upstream } = serde_json::from_slice(&bytes).map_err(|_| error())?;
+    validate(
+        &BTreeMap::from([(entry.reservation.clone(), entry.clone())]),
+        &entry.owner,
+    )?;
+    let (start, uid) = identity::birth(std::process::id() as i32)?;
+    if entry.process.pid != std::process::id() as i32
+        || entry.process.start_micros != start
+        || entry.process.uid != uid
+    {
+        return Err(error());
+    }
+    verify_staged_binary(&entry)?;
+    Err(state::io(publication_command(&entry, &upstream)?.exec()))
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Entry {
@@ -883,11 +967,7 @@ pub(crate) fn require_no_claims_locked(c: &Candidate, owner: &str) -> Result<(),
     Ok(())
 }
 
-fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
-    let observed = identity::observe(e.process.pid)?;
-    identity::verify(&e.process, &observed, &e.process.executable, unsafe {
-        libc::geteuid()
-    })?;
+fn verify_staged_binary(e: &Entry) -> Result<(), CandidateError> {
     if !verify_directory(e)? || !e.binary.as_ref().is_some_and(|b| b.ready) {
         return Err(error());
     }
@@ -915,6 +995,15 @@ fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
     if format!("{:x}", crate::Hex(Sha256::digest(bytes))) != e.digest {
         return Err(error());
     }
+    Ok(())
+}
+
+fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
+    let observed = identity::observe(e.process.pid)?;
+    identity::verify(&e.process, &observed, &e.process.executable, unsafe {
+        libc::geteuid()
+    })?;
+    verify_staged_binary(e)?;
     // A TCP frontend has no filesystem identity. The publisher binds its
     // control socket only after the frontend listener is bound and listening,
     // so an owned control socket also proves the TCP listener exists.
@@ -1171,6 +1260,14 @@ fn stage_launch(
 mod port_probe_tests {
     use super::*;
     use std::net::{Ipv4Addr, TcpListener};
+
+    #[test]
+    fn launch_gate_refuses_eof_without_authorization() {
+        assert!(read_launch_gate(b"".as_slice()).is_err());
+        assert!(read_launch_gate(b"{}".as_slice()).is_err());
+        assert_eq!(read_launch_gate(b"{}\n".as_slice()).unwrap(), b"{}");
+        assert!(read_launch_gate(vec![b'\n'; CHILD_LAUNCH_LIMIT + 1].as_slice()).is_err());
+    }
 
     #[test]
     fn loopback_probe_refuses_exact_and_wildcard_listeners_and_accepts_a_free_port() {

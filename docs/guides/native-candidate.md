@@ -2096,6 +2096,11 @@ configuration must confirm. An amd64 archive is cached under its own address, ne
 reused for arm64, and imports only into a pool booted with translation; see
 [amd64 emulation with Rosetta 2](#amd64-emulation-with-rosetta-2).
 
+During native project startup, active services with the same canonical image reference
+and platform policy share one validated image selection. If services request
+different platforms for the same tag, their selections use the same immutable
+registry digest. A later start resolves the tag again.
+
 ### Explicit writable development source
 
 An isolated development pool can opt into a direct host project mount with

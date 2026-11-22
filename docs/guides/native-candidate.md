@@ -135,7 +135,11 @@ Unfiltered writable source sharing still requires `HACK_NATIVE_SHARED_SOURCE=1`.
 An exact repository at `$HOME/.codex/worktrees/<id>/<repo>` is allowed only when
 bounded Git registration metadata verifies its worktree root, common directory and
 backlink. The enclosing Codex directories are never exported. Sensitive ancestors,
-aliases and unsafe ownership or permissions remain refused.
+aliases and unsafe ownership or permissions remain refused. Git can create
+group-writable worktree directories and registration files under umask `002`.
+Create a worktree intended for sharing with umask `022` or stricter, and ensure
+its existing registration directories and metadata are also free of group and
+other write permissions.
 
 The internal planning path accepts a canonical lowercase DNS-label `--branch`.
 It gives each checkout/branch pair a separate enrollment and source namespace;
@@ -1407,8 +1411,9 @@ tree, stop the runtime and run:
 
 The repair holds the provider lock and requires a stopped (or uninitialized) runtime.
 It requires the preparation record to match this executor's pins and the kept archive
-to be an owned regular file with the pinned SHA-256. It then copies and hashes the
-archive again, extracts it, checks the code signature (SmolVM), and requires the fresh
+to be an owned regular file with the pinned SHA-256. Group- or other-writable
+archives and staging directories are refused. New preparations create both with
+owner-only permissions. The repair then copies and hashes the archive again, extracts it, checks the code signature (SmolVM), and requires the fresh
 tree to match the digest recorded at preparation. Only then does it rename the changed
 tree aside as `providers/<tree>-changed-<id>` and put the fresh tree in its place. It
 keeps the changed tree for inspection and never deletes it; remove it yourself once

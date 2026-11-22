@@ -213,6 +213,33 @@ export async function verifyNativeHttpsLeaseGraph(
   }
 }
 
+/**
+ * Check the owner's pool boot every `poolBootCheckMs` while it runs and retire it
+ * once the boot has ended (HACK-2456). Checks are serialized with requests, so a
+ * release in progress finishes first; a failed check proves nothing.
+ */
+function watchPoolBoot(opts: {
+  readonly binding: NativeHttpsOwnerBinding;
+  readonly dependencies: NativeHttpsOwnerServerDependencies;
+  readonly serialize: (operation: () => Promise<void>) => Promise<void>;
+  readonly running: () => boolean;
+  readonly retire: () => Promise<void>;
+}): ReturnType<typeof setInterval> | undefined {
+  const ended = opts.dependencies.poolBootEnded;
+  if (!ended) {
+    return;
+  }
+  return setInterval(() => {
+    void opts
+      .serialize(async () => {
+        if (opts.running() && (await ended(opts.binding))) {
+          await opts.retire();
+        }
+      })
+      .catch(() => undefined);
+  }, opts.dependencies.poolBootCheckMs ?? NATIVE_HTTPS_POOL_BOOT_CHECK_MS);
+}
+
 /** Tests supply a fake child pair while retaining the real lease process/socket boundary. */
 export async function serveNativeHttpsOwner(opts: {
   readonly configurationPath: string;
@@ -717,18 +744,13 @@ export async function serveNativeHttpsOwner(opts: {
     }
     state = "running";
     settleStartup();
-    const poolBootEnded = opts.dependencies.poolBootEnded;
-    if (poolBootEnded) {
-      // Serialized with requests, so a release in progress finishes first. A failed
-      // check proves nothing and leaves the owner running.
-      poolBootTimer = setInterval(() => {
-        void serialize(async () => {
-          if (state === "running" && (await poolBootEnded(binding))) {
-            await failOwner();
-          }
-        }).catch(() => undefined);
-      }, opts.dependencies.poolBootCheckMs ?? NATIVE_HTTPS_POOL_BOOT_CHECK_MS);
-    }
+    poolBootTimer = watchPoolBoot({
+      binding,
+      dependencies: opts.dependencies,
+      serialize,
+      running: () => state === "running",
+      retire: failOwner,
+    });
     process.on("SIGTERM", onSignal);
     process.on("SIGINT", onSignal);
     startupTimer = setTimeout(() => {
@@ -770,9 +792,7 @@ export async function serveNativeHttpsOwner(opts: {
     if (startupTimer) {
       clearTimeout(startupTimer);
     }
-    if (poolBootTimer) {
-      clearInterval(poolBootTimer);
-    }
+    clearInterval(poolBootTimer);
     process.off("SIGTERM", onSignal);
     process.off("SIGINT", onSignal);
   }

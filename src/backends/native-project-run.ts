@@ -6,6 +6,7 @@ import {
   mkdir,
   open,
   readdir,
+  readFile,
   realpath,
   rename,
   rmdir,
@@ -14,6 +15,7 @@ import {
 import { basename, isAbsolute, join, relative } from "node:path";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { nativeHomeProcesses } from "./native-home-processes.ts";
 import {
   inspectNativeProjectFinalizationLifetime,
   isNativeProjectFinalizationToken,
@@ -1290,7 +1292,11 @@ export type NativeProjectRunForeignHomeInspection = {
    * The owning home's latest frontend lifetime for this run: `stopped` only when it
    * acknowledged confirmed cleanup (`NativeProjectFinalizationLifetime`).
    */
-  readonly owner: "stopped" | "live" | "interrupted" | "unproven";
+  /**
+   * `gone`: the recorded path no longer holds that home (absent, not a directory, or
+   * another identity), so its records are gone too (HACK-2524).
+   */
+  readonly owner: "stopped" | "live" | "interrupted" | "unproven" | "gone";
   /** The owning frontend's PID for a live or interrupted owner. */
   readonly ownerPid: number | null;
   readonly run: NativeProjectRun;
@@ -1399,6 +1405,7 @@ async function foreignHomeSelection(opts: {
       readonly fileIdentity: DirectoryIdentity;
       readonly ownerScope: NativeProjectRunScope;
       readonly attempt: string | null;
+      readonly gone: "absent" | "not-directory" | "replaced" | undefined;
     }
   | undefined
 > {
@@ -1410,21 +1417,39 @@ async function foreignHomeSelection(opts: {
     return undefined;
   }
   const ownerScope = { ...opts.scope, nativeHome: foreign.ownerHome };
-  const lifetime = (await ownerHomeMatches(
-    foreign.ownerHome,
-    foreign.ownerIdentity
-  ))
-    ? await inspectNativeProjectFinalizationLifetime({
-        scope: ownerScope,
-        run: foreign.run,
-        isAlive: opts.isAlive,
-      })
-    : ({ state: "unproven" } as const);
+  const gone = await homeGoneFromPath(foreign.ownerHome, foreign.ownerIdentity);
+  const lifetime =
+    gone === undefined &&
+    (await ownerHomeMatches(foreign.ownerHome, foreign.ownerIdentity))
+      ? await inspectNativeProjectFinalizationLifetime({
+          scope: ownerScope,
+          run: foreign.run,
+          isAlive: opts.isAlive,
+        })
+      : ({ state: "unproven" } as const);
   const mappingSha256 = createHash("sha256").update(bytes).digest("hex");
   const attempt = lifetime.state === "completed" ? lifetime.attempt : null;
+  const goneSelection =
+    gone === undefined
+      ? null
+      : createHash("sha256")
+          .update(
+            JSON.stringify({
+              schema: FOREIGN_SCHEMA,
+              kind: "gone-home",
+              mappingSha256,
+              fileIdentity: identity,
+              scope: p.identity,
+              ownerHome: foreign.ownerHome,
+              ownerIdentity: foreign.ownerIdentity,
+              run: foreign.run,
+              gone,
+            })
+          )
+          .digest("hex");
   const selectionSha256 =
     attempt === null
-      ? null
+      ? goneSelection
       : createHash("sha256")
           .update(
             JSON.stringify({
@@ -1444,7 +1469,7 @@ async function foreignHomeSelection(opts: {
       schema: FOREIGN_SCHEMA,
       state: "foreign-home",
       ownerHome: foreign.ownerHome,
-      owner: lifetime.state === "completed" ? "stopped" : lifetime.state,
+      owner: foreignOwnerState(gone, lifetime.state),
       ownerPid:
         lifetime.state === "live" || lifetime.state === "interrupted"
           ? lifetime.pid
@@ -1458,7 +1483,43 @@ async function foreignHomeSelection(opts: {
     fileIdentity: identity,
     ownerScope,
     attempt,
+    gone,
   };
+}
+
+function foreignOwnerState(
+  gone: "absent" | "not-directory" | "replaced" | undefined,
+  lifetime: "completed" | "live" | "interrupted" | "unproven"
+): NativeProjectRunForeignHomeInspection["owner"] {
+  if (gone !== undefined) {
+    return "gone";
+  }
+  return lifetime === "completed" ? "stopped" : lifetime;
+}
+
+/**
+ * What is at a recorded home path that no longer holds that home: nothing, something
+ * that is not a directory, or a directory of another identity. Undefined when the
+ * recorded directory is still there or the path cannot be read (never "gone" by doubt).
+ */
+async function homeGoneFromPath(
+  home: string,
+  identity: DirectoryIdentity
+): Promise<"absent" | "not-directory" | "replaced" | undefined> {
+  try {
+    const info = await lstat(home);
+    if (info.isSymbolicLink()) {
+      return undefined;
+    }
+    if (!info.isDirectory()) {
+      return "not-directory";
+    }
+    return info.dev === identity.dev && info.ino === identity.ino
+      ? undefined
+      : "replaced";
+  } catch (error) {
+    return isRecord(error) && error.code === "ENOENT" ? "absent" : undefined;
+  }
 }
 
 /** The doctor command that releases a stopped foreign-home mapping from this home. */
@@ -1478,6 +1539,15 @@ export function describeNativeForeignHomeMapping(opts: {
   const { inspection } = opts;
   const where = `run ${inspection.run.run} in another native home (${inspection.ownerHome})`;
   const stopThere = "run hack down with the Hack version that owns that home";
+  if (inspection.owner === "gone" && inspection.selectionSha256 !== null) {
+    return (
+      `Native project run mapping belongs to ${where}, which is no longer at that path; its records and retained data went with it. ` +
+      `To start this instance from this native home, release the mapping with ${nativeForeignHomeReleaseCommand(
+        { selectionSha256: inspection.selectionSha256, branch: opts.branch }
+      )}; it first checks that no process of that home is still running. ` +
+      "If that home was moved rather than deleted and started again from its new path, this check cannot see it: release again from the moved home afterwards."
+    );
+  }
   if (inspection.owner === "stopped" && inspection.selectionSha256 !== null) {
     return (
       `Native project run mapping belongs to ${where}, which stopped it cleanly; its retained data stays in that home. ` +
@@ -1540,7 +1610,8 @@ async function foreignHomeRefusal(
     }
     const { inspection } = selected;
     const releaseCommand =
-      inspection.owner === "stopped" && inspection.selectionSha256 !== null
+      (inspection.owner === "stopped" || inspection.owner === "gone") &&
+      inspection.selectionSha256 !== null
         ? nativeForeignHomeReleaseCommand({
             selectionSha256: inspection.selectionSha256,
             branch: scope.branch,
@@ -1625,6 +1696,8 @@ async function downHooksSettled(path: string, run: string): Promise<void> {
 export async function releaseNativeProjectRunForeignHome(opts: {
   readonly scope: NativeProjectRunScope;
   readonly expectSelection: string;
+  /** Test seam: the process scan of the recorded home (`nativeHomeProcesses`). */
+  readonly scanHome?: typeof nativeHomeProcesses;
 }): Promise<NativeProjectRunForeignHomeRelease> {
   if (!HEX64.test(opts.expectSelection)) {
     throw refused();
@@ -1632,6 +1705,9 @@ export async function releaseNativeProjectRunForeignHome(opts: {
   const initial = await foreignHomeSelection({ scope: opts.scope });
   if (initial === undefined) {
     throw refused();
+  }
+  if (initial.inspection.owner === "gone") {
+    return await releaseGoneHome({ ...opts, initial });
   }
   if (initial.attempt === null) {
     throw new ClosedCliError(
@@ -1707,6 +1783,125 @@ export async function releaseNativeProjectRunForeignHome(opts: {
           return { ...selected.inspection, released: true, auditPath: audit };
         },
       });
+    } finally {
+      await releaseHeldDirectory(initial.p.lock, mappingHeld);
+    }
+  } finally {
+    await releaseHeldDirectory(restartLock, restartHeld);
+  }
+}
+
+async function readIfPresent(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return null;
+    }
+    throw refused();
+  }
+}
+
+/**
+ * Release a mapping whose native home is gone (HACK-2524): the recorded path no longer
+ * holds it (absent, not a directory, or another identity) and no process of this user
+ * names that path or works inside it. The home's records went with it, so this is the
+ * only proof there is. Under the checkout's mapping and restart locks it rechecks the
+ * exact selection and scans again, keeps the mapping, restart intent and down-hook
+ * journal in one audit file (owed hooks are skipped: their services went with the
+ * home), and removes them. A home moved and started again from its new path names the
+ * new path only, so the scan cannot see it; the refusal text and docs say so.
+ */
+async function releaseGoneHome(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly expectSelection: string;
+  readonly scanHome?: typeof nativeHomeProcesses;
+  readonly initial: NonNullable<
+    Awaited<ReturnType<typeof foreignHomeSelection>>
+  >;
+}): Promise<NativeProjectRunForeignHomeRelease> {
+  const { initial } = opts;
+  if (initial.inspection.selectionSha256 !== opts.expectSelection) {
+    throw refused();
+  }
+  await recoveryLocksAbsent(initial.p);
+  const base = initial.p.file.slice(0, -5);
+  const restartLock = `${initial.p.lock.slice(0, -5)}.restart.lock.operation`;
+  await mkdir(restartLock, { mode: 0o700 });
+  const restartHeld = await heldDirectory(restartLock);
+  try {
+    await mkdir(initial.p.lock, { mode: 0o700 });
+    const mappingHeld = await heldDirectory(initial.p.lock);
+    try {
+      const selected = await foreignHomeSelection({ scope: opts.scope });
+      if (
+        selected === undefined ||
+        selected.inspection.owner !== "gone" ||
+        selected.inspection.selectionSha256 !== opts.expectSelection ||
+        selected.p.file !== initial.p.file ||
+        !selected.bytes.equals(initial.bytes) ||
+        selected.fileIdentity.dev !== initial.fileIdentity.dev ||
+        selected.fileIdentity.ino !== initial.fileIdentity.ino
+      ) {
+        throw refused();
+      }
+      const home = selected.inspection.ownerHome;
+      const alive = await (opts.scanHome ?? nativeHomeProcesses)(home);
+      if (alive.length > 0) {
+        const list = alive
+          .map(
+            ({ pid, why }) =>
+              `pid ${pid} (${why === "command" ? "names it" : "works in it"})`
+          )
+          .join(", ");
+        throw new ClosedCliError(
+          `Native project run mapping was not released: processes of the recorded native home ${home} are still running: ${list}. Stop them, then run the release again.`
+        );
+      }
+      await absentPath(`${base}.down-hooks.lock`);
+      const [restartIntent, downHooks] = await Promise.all([
+        readIfPresent(`${base}.restart.json`),
+        readIfPresent(`${base}.down-hooks.json`),
+      ]);
+      const audit = `${base}.gone-home-release-${selected.inspection.mappingSha256}.json`;
+      await preserveRecoveryAudit(
+        audit,
+        JSON.stringify({
+          version: 1,
+          schema: FOREIGN_SCHEMA,
+          kind: "gone-home",
+          selectionSha256: opts.expectSelection,
+          mappingSha256: selected.inspection.mappingSha256,
+          ownerHome: home,
+          gone: selected.gone,
+          mapping: selected.bytes.toString("utf8"),
+          restartIntent,
+          downHooks,
+        })
+      );
+      await sync(selected.p.root);
+      await Promise.all([restartHeld.verify(), mappingHeld.verify()]);
+      const closeMapping = await verifySelectedMappingPath(
+        selected.p.file,
+        selected.bytes,
+        selected.fileIdentity
+      );
+      try {
+        await unlink(selected.p.file);
+      } finally {
+        await closeMapping();
+      }
+      for (const [path, present] of [
+        [`${base}.restart.json`, restartIntent],
+        [`${base}.down-hooks.json`, downHooks],
+      ] as const) {
+        if (present !== null) {
+          await unlink(path);
+        }
+      }
+      await sync(selected.p.root);
+      await absentPath(selected.p.file);
+      return { ...selected.inspection, released: true, auditPath: audit };
     } finally {
       await releaseHeldDirectory(initial.p.lock, mappingHeld);
     }

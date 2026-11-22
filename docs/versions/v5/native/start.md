@@ -147,6 +147,14 @@ message names the exact command that releases the old mapping
 run it, then `hack up` again. The project's data stays in the old home. If the old
 run is still live or its stop cannot be proven, stop it with the old version first.
 
+If the old home was deleted, its records went with it. The same refusal then names
+the same release command: it releases the mapping once no process of this user
+still names the old home's path or works inside it, and keeps the mapping in an
+audit file beside it. The old home's data went with the home. A home that was moved
+rather than deleted, and started again from its new path, has processes that name
+only the new path, so this check cannot see it; in that case release again from the
+moved home afterwards.
+
 ## Back to Compose
 
 Once the native stop is confirmed, use the same prerelease on Compose:

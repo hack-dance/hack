@@ -1152,10 +1152,21 @@ that names the owning home and what to do. The refusal has its own code,
 - **Live.** The owning frontend's PID still exists. The refusal names the home and
   PID. Stop it with Ctrl-C in that `hack up`, or run `hack down` with the version
   that owns that home, then retry. Release refuses.
+- **Gone (HACK-2524).** The recorded path no longer holds that home: it is absent,
+  not a directory, or another directory. The home's records went with it.
+  Inspection reports `owner: "gone"` with a `selectionSha256`, and the refusal names
+  the same release command. The release first lists this user's processes. It
+  refuses, naming each PID, while any process names the old home's path in its
+  command line or works inside it. Otherwise it keeps the mapping, its restart intent
+  and its down-hook journal in an audit file (`<scope>.gone-home-release-<sha>.json`;
+  owed hooks are skipped, because their services went with the home) and removes
+  them. A home that was moved rather than deleted, and started again from its new
+  path, has processes that name only the new path, so this check cannot see it;
+  release again from the moved home afterwards.
 - **Interrupted or unproven.** The frontend exited without acknowledging cleanup, or
-  the home has no readable record for the run (for example a legacy mapping, or a
-  home that was moved or replaced). Use the owning version's
-  `hack doctor --native-cleanup inspect` and `hack down`. Release refuses.
+  the home has no readable record for the run (for example a legacy mapping). Use
+  the owning version's `hack doctor --native-cleanup inspect` and `hack down`.
+  Release refuses.
 
 Release proves ownership; it never just overwrites. The stored scope must differ
 from this checkout in its native home only, that home must still be the recorded

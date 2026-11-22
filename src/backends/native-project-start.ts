@@ -821,8 +821,10 @@ async function ensureNativeProjectImage(opts: {
         ...(opts.imageTagMode ? ["--image-tag-mode", opts.imageTagMode] : []),
       ],
       timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
-      onImageWait: (waiting) =>
-        reportNativeImageDownloadWait(waiting ? opts.waitReference : null),
+      onImageWait: (waiting, subject) =>
+        reportNativeImageDownloadWait(
+          waiting ? (subject ?? opts.waitReference) : null
+        ),
     })
     .catch((error: unknown) => {
       if (
@@ -941,7 +943,13 @@ async function pinNativeImageBatch(
             }
             return;
           }
-          if (!(reference && wave.some((job) => job.reference === reference))) {
+          if (
+            !(
+              reference &&
+              (reference === "image-cache" ||
+                wave.some((job) => job.reference === reference))
+            )
+          ) {
             return;
           }
           if (active) {

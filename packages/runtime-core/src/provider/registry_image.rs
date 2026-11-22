@@ -1320,8 +1320,8 @@ impl<'a> Fetch<'a> {
     /// A layer body can fail after its response headers, while it streams: a timeout,
     /// a connection that ends early, or bytes that do not match. Each such attempt is
     /// retried up to [`ATTEMPTS`] times, because the blob is content-addressed and the
-    /// request an idempotent GET. Every attempt's time limit is the layer's size-scaled
-    /// timeout, cut to what remains of the acquisition deadline, which is never
+    /// request an idempotent GET. A build uses its remaining acquisition budget.
+    /// Other callers use the size-scaled timeout, cut to the acquisition deadline, never
     /// extended; an attempt that would start after it, or a backoff that would outlast
     /// it, stops with [`NetworkFailureReason::Deadline`]. A failure names the host that
     /// served the body (after redirects), the attempts made and the last reason. Each
@@ -1329,8 +1329,9 @@ impl<'a> Fetch<'a> {
     /// removed when it is dropped.
     fn layer(&mut self, d: &Descriptor, directory: &Path) -> Result<LayerFile, CandidateError> {
         let url = self.url("blobs", &d.digest)?;
-        let timeout =
-            self.request_timeout + Duration::from_secs(d.size / MIN_BLOB_BYTES_PER_SECOND);
+        let timeout = self.policy.image_wait(
+            self.request_timeout + Duration::from_secs(d.size / MIN_BLOB_BYTES_PER_SECOND),
+        )?;
         let mut host = url.host_str().unwrap_or("unknown").to_owned();
         for attempt in 1..=ATTEMPTS {
             if self.remaining().is_err() {

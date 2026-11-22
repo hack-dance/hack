@@ -70,8 +70,11 @@ impl ImageCache {
         if let Some(lease) = &cache.lease {
             lease.verify_path(root)?;
         } else {
-            let lease =
-                lifecycle::startup_lease(root, policy.image_wait(lifecycle::STARTUP_LEASE_WAIT)?)?;
+            let lease = state::wait_for_image_lock(
+                policy.image_wait(std::time::Duration::from_secs(590))?,
+                "image-cache",
+                || state::Lock::acquire(root),
+            )?;
             let staging = root.with_file_name("image-staging");
             if staging.try_exists().map_err(state::io)? {
                 clean_staging(&staging, 0)?;
@@ -520,6 +523,7 @@ pub fn ensure_with(
     policy: &ImagePolicy,
     platform: PlatformPolicy,
 ) -> Result<EnsuredImage, CandidateError> {
+    let _fence = super::image_build::image_fence(candidate, libc::LOCK_SH)?;
     timed_acquire(
         Step::ImageEnsure,
         candidate,
@@ -531,12 +535,15 @@ pub fn ensure_with(
     )
 }
 
+type ImageBatchEntry = (usize, Result<EnsuredImage, CandidateError>, u64);
+
 /// Distinct references can prepare archives together. Only the existing loader imports.
 pub fn ensure_batch(
     candidate: &Candidate,
     jobs: &[(String, PlatformPolicy)],
     policy: &ImagePolicy,
-) -> Vec<(usize, Result<EnsuredImage, CandidateError>, u64)> {
+) -> Result<Vec<ImageBatchEntry>, CandidateError> {
+    let _fence = super::image_build::image_fence(candidate, libc::LOCK_SH)?;
     let cache = ImageCache::default();
     let queue = std::sync::atomic::AtomicUsize::new(0);
     let finished = Mutex::new(Vec::with_capacity(jobs.len()));
@@ -575,7 +582,7 @@ pub fn ensure_batch(
             });
         }
     });
-    finished.into_inner().unwrap()
+    Ok(finished.into_inner().unwrap())
 }
 
 pub use super::image_tag_store::{present as present_tags, status as tag_status};
@@ -613,7 +620,14 @@ fn timed_acquire(
         });
         attrs.registry_requests = Some(count);
         attrs.image_index = index.map(|index| index as u64);
-        result
+        let image = result?;
+        if import
+            && policy.build_deadline.is_none()
+            && (reference.contains('@') || reference.starts_with("sha256:"))
+        {
+            image_tag_store::protect_service_image(candidate, &image.image_id)?;
+        }
+        Ok(image)
     })
 }
 

@@ -375,7 +375,7 @@ function parseBuilt(value: unknown): NativeBuiltImage {
     : [];
   if (value.reused_legacy_key === true && value.reused) {
     fallbacks.push(
-      "Registry unavailable, using the verified build image for the unchanged context and Dockerfile."
+      "Using the verified pre-upgrade build image for the unchanged context and Dockerfile."
     );
   }
   const selections = isRecord(value.base_selections)

@@ -746,6 +746,20 @@ impl Drop for Flock {
     }
 }
 
+pub(super) fn image_fence(
+    candidate: &Candidate,
+    mode: libc::c_int,
+) -> Result<impl Drop, CandidateError> {
+    let root = builds_root(candidate);
+    state::private_directory(&root)?;
+    Flock::try_lock(Flock::open(&root.join("active.lock"))?, mode)?.ok_or_else(|| {
+        refusal(
+            "provider_busy",
+            "Image acquisition or reclamation is in progress; wait for it and retry.",
+        )
+    })
+}
+
 /// Refuse to stop the engine while a build operation is admitted. The caller holds the
 /// provider lease: a build takes its shared fence only under that lease, so a build
 /// cannot start between this check and the caller's effect.
@@ -758,7 +772,7 @@ pub(super) fn require_no_active_build(candidate: &Candidate) -> Result<(), Candi
         Some(_probe) => Ok(()),
         None => Err(refusal(
             "provider_busy",
-            "A native image build is running; let it finish or cancel it, then stop the runtime.",
+            "A native image operation is running; let it finish or cancel it, then stop the runtime.",
         )),
     }
 }
@@ -1647,7 +1661,10 @@ fn connect(
 ) -> Result<super::engine::Engine<'_>, CandidateError> {
     super::engine::Engine::connect_until(
         candidate,
-        deadline.unwrap_or_else(|| Instant::now() + LEASE_WAIT),
+        deadline.map_or_else(
+            || Instant::now() + LEASE_WAIT,
+            |deadline| deadline.min(Instant::now() + LEASE_WAIT),
+        ),
         || deadline.is_some() && CANCEL_REQUESTED.load(Ordering::Acquire),
     )
 }
@@ -1917,12 +1934,17 @@ fn acquire_bases(
 }
 
 fn base_registry_failed(error: &CandidateError) -> bool {
-    error.code.starts_with("registry_")
-        || (error.code == "image_tag_offline_missing"
-            && error
-                .cause_code
-                .as_deref()
-                .is_some_and(|code| code.starts_with("registry_")))
+    let cause = error.cause_code.as_deref().unwrap_or(error.code);
+    matches!(
+        cause,
+        "registry_http_429"
+            | "registry_unreachable"
+            | "registry_headers_stalled"
+            | "registry_body_stalled"
+    ) || cause
+        .strip_prefix("registry_http_")
+        .and_then(|status| status.parse::<u16>().ok())
+        .is_some_and(|status| (500..600).contains(&status))
 }
 
 fn recover_base_error(
@@ -1931,9 +1953,14 @@ fn recover_base_error(
     deadline: Instant,
     reuse: impl FnOnce() -> Result<Option<BuildOutcome>, CandidateError>,
 ) -> Result<BuildOutcome, CandidateError> {
-    if mode == super::image_policy::ImageTagMode::Normal
+    use super::image_policy::ImageTagMode::{Normal, Offline, Refresh};
+    let eligible = match mode {
+        Normal => base_registry_failed(&error),
+        Offline => error.code == "image_tag_offline_missing" && error.cause_code.is_none(),
+        Refresh => false,
+    };
+    if eligible
         && Instant::now() < deadline
-        && base_registry_failed(&error)
         && let Ok(Some(outcome)) = reuse()
     {
         return Ok(outcome);

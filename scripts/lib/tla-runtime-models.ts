@@ -2841,6 +2841,14 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-keeper-reclaim",
+    module: "KeeperReclaim",
+    states: 5,
+    invariant: "PinPreservesImage",
+    action: "Reclaim",
+    fields: ['fence = "pinning"', "keeper = FALSE"],
+  },
+  {
     name: "native-build-retention",
     module: "BuildRetention",
     states: 6181,

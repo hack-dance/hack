@@ -29,7 +29,7 @@
 //! BuildKit cache is then pruned to the build cache budget; that never removes images.
 use super::{
     BuildPool, CACHE_BUDGET, LivePool, Phase, RESERVED_LABEL_PREFIXES, Receipt, builds_root, hex64,
-    image_id, owner_label, refusal, require_no_active_build,
+    image_fence, image_id, owner_label, refusal,
 };
 use crate::{Candidate, CandidateError};
 use serde::Serialize;
@@ -347,7 +347,7 @@ pub(super) fn run<P: ReclaimPool>(
     pool: &P,
 ) -> Result<ReclaimReport, CandidateError> {
     let (lease, identity) = pool.lease()?;
-    require_no_active_build(candidate)?;
+    let _fence = image_fence(candidate, libc::LOCK_EX)?;
     super::aliases::sweep_stranded(
         &builds_root(candidate),
         pool,
@@ -374,6 +374,7 @@ pub(super) fn run<P: ReclaimPool>(
             }
         }
     }
+    let protected = super::super::image_tag_store::protected_image_ids(candidate);
     for image in pool.base_images(&lease).unwrap_or_default() {
         let Some(id) = image["Id"].as_str() else {
             continue;
@@ -383,6 +384,7 @@ pub(super) fn run<P: ReclaimPool>(
         };
         if !current.bases.contains(id)
             && !referenced.contains(id)
+            && protected.as_ref().is_ok_and(|ids| !ids.contains(id))
             && image["RepoTags"]
                 .as_array()
                 .is_some_and(|tags| tags.iter().any(|tag| tag == &keeper))

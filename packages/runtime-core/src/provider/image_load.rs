@@ -755,7 +755,10 @@ pub(super) fn load_cached(
         resolved_config,
         |file| {
             let engine = measure(Step::ImageImportConnect, None, |_| {
-                connect_for_import(candidate, policy.image_wait(IMPORT_LEASE_WAIT)?)
+                connect_for_import(
+                    candidate,
+                    policy.image_wait(IMPORT_LEASE_WAIT)?.min(IMPORT_LEASE_WAIT),
+                )
             })?;
             import(candidate, archive, Some(archive.pin), policy, file, &engine)
         },

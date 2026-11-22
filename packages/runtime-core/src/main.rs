@@ -1285,7 +1285,7 @@ fn run() -> Result<(), CandidateError> {
                 &discover_candidate(&requested)?,
                 &jobs,
                 &image_policy(flags)?,
-            ))?;
+            )?)?;
         }
         [
             "runtime",

@@ -2167,6 +2167,13 @@ fn reclaim_keeps_only_two_of_ten_base_keepers_for_one_build() {
         &serde_json::json!({"image": retained_base}),
     )
     .unwrap();
+    let fence = image_fence(&fixture.candidate, libc::LOCK_SH).unwrap();
+    assert_eq!(
+        reclaim::run(&fixture.candidate, &pool).unwrap_err().code,
+        "provider_busy"
+    );
+    assert_eq!(pool.base_images(&()).unwrap().len(), 11);
+    drop(fence);
     reclaim::run(&fixture.candidate, &pool).unwrap();
     assert_eq!(pool.base_images(&()).unwrap().len(), 3);
     fs::remove_file(graphs.join("receipt.json")).unwrap();
@@ -2294,10 +2301,37 @@ fn legacy_reuse_requires_the_original_context_and_a_verified_image() {
     use super::super::image_policy::ImageTagMode::{Normal, Offline, Refresh};
     let registry_error = || missing().with_cause_code("registry_unreachable".into());
     let soon = Instant::now() + Duration::from_secs(5);
-    for mode in [Offline, Refresh] {
-        let error =
-            recover_base_error(registry_error(), mode, soon, || panic!("must refuse")).unwrap_err();
-        assert_eq!(error.code, "image_tag_offline_missing");
+    assert_eq!(
+        recover_base_error(registry_error(), Refresh, soon, || panic!("must refuse"))
+            .unwrap_err()
+            .code,
+        "image_tag_offline_missing"
+    );
+    assert!(
+        recover_base_error(missing(), Offline, soon, || {
+            reuse_legacy(&fixture.candidate, &pool, &inputs)
+        })
+        .unwrap()
+        .reused_legacy_key
+    );
+    for cause in [
+        "registry_http_401",
+        "registry_http_404",
+        "registry_digest_mismatch",
+        "registry_image",
+    ] {
+        let error = CandidateError::new("registry_image", "fixture").with_cause_code(cause.into());
+        assert!(!base_registry_failed(&error), "{cause}");
+    }
+    for cause in [
+        "registry_http_429",
+        "registry_http_500",
+        "registry_http_503",
+        "registry_headers_stalled",
+        "registry_body_stalled",
+    ] {
+        let error = CandidateError::new("registry_image", "fixture").with_cause_code(cause.into());
+        assert!(base_registry_failed(&error), "{cause}");
     }
     assert_eq!(
         recover_base_error(registry_error(), Normal, Instant::now(), || panic!(

@@ -24,6 +24,7 @@ import { NATIVE_HOOK_OUTPUT_TERMINAL_ONLY } from "../src/lib/native-detached-up.
 import { installNext13Frontend } from "./helpers/native-next13-state.ts";
 import { nativeSetupShellReply } from "./helpers/native-setup-inspection.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 import { waitForFileContent } from "./helpers/wait-for-file-content.ts";
 
@@ -72,7 +73,7 @@ async function fixture(compose = COMPOSE) {
   const nativeHome = join(root, "native-home");
   const runtimeDir = join(root, "runtime");
   const stub = join(root, "stub");
-  await mkdir(projectDir, { recursive: true });
+  await mkdirOwnedFixture(projectDir, true);
   await mkdir(nativeHome, { mode: 0o700 });
   await mkdir(runtimeDir);
   await mkdir(stub);

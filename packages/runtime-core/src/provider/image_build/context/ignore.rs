@@ -42,7 +42,8 @@
 //! Patterns are compiled once; matching reuses one scratch buffer, so it allocates
 //! nothing per rule per entry beyond the per-entry record children inherit.
 
-/// `bufio.Scanner`'s default token limit; a longer line fails Docker's parser.
+/// `bufio.Scanner`'s default buffer; a line whose bytes and newline do not fit fails
+/// Docker's parser.
 const MAX_LINE_BYTES: usize = 64 * 1024;
 /// Effective rules (patterns after parsing) a file may hold.
 pub(super) const MAX_RULES: usize = 4096;
@@ -267,6 +268,15 @@ fn parse_patterns(bytes: &[u8]) -> Result<Option<Vec<Pattern>>, crate::Candidate
     // BuildKit matches every rule of the file whether or not Hack can compile it, so
     // the file-wide and per-pattern bounds apply to every line; a line Hack cannot
     // reproduce only selects the fallback (exclude nothing) and counting goes on.
+    // Docker's scanner holds a line, its `\r` and its `\n` in one 64 KiB buffer and
+    // fails on anything longer, comment or blank, before any trimming. Measured on
+    // the file's own bytes so nothing longer reaches the build.
+    if bytes
+        .split(|byte| *byte == b'\n')
+        .any(|line| line.len() >= MAX_LINE_BYTES)
+    {
+        return Err(over_bounds());
+    }
     let text = String::from_utf8_lossy(bytes);
     let mut fallback = matches!(text, std::borrow::Cow::Owned(_));
     let mut patterns = Vec::new();
@@ -292,11 +302,6 @@ fn parse_patterns(bytes: &[u8]) -> Result<Option<Vec<Pattern>>, crate::Candidate
     };
     for (index, raw) in text.split('\n').enumerate() {
         let mut line = raw.strip_suffix('\r').unwrap_or(raw);
-        // Docker's scanner fails on a longer line, comment or blank, before any
-        // trimming; refuse it here so it never reaches the build.
-        if line.len() > MAX_LINE_BYTES {
-            return Err(over_bounds());
-        }
         if index == 0 {
             line = line.strip_prefix('\u{feff}').unwrap_or(line);
         }

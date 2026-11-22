@@ -844,36 +844,10 @@ export async function invokeNativeRuntime(opts: {
       message: REQUEST_BUDGET_REFUSAL,
     });
   }
-  const env: Record<string, string> = {};
-  for (const key of SYSTEM_ENVIRONMENT) {
-    const value = process.env[key];
-    if (value !== undefined) {
-      env[key] = value;
-    }
-  }
-  // The two user settings a runtime request carries in its environment, both
-  // for `runtime up` only; an invalid value throws here, before the
-  // subprocess exists.
-  Object.assign(env, nativeHotReloadEnvironment(opts.args));
-  Object.assign(env, nativeAdmissionReuseEnvironment(opts.args));
-  const child = Bun.spawn(
-    [
-      opts.runtime.binary,
-      "--candidate-root",
-      opts.runtime.home,
-      // HACK-2461: the per-user step store, only with HACK_STEP_STORE=on.
-      ...stepStoreRuntimeArgs(),
-      ...opts.args,
-    ],
-    {
-      cwd: opts.cwd,
-      env: childEnvironment(env),
-      stdin: opts.privateInput ? "pipe" : "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      detached: opts.processGroup === "own",
-    }
-  );
+  const child = spawnNativeRuntime({
+    ...opts,
+    pipeInput: opts.privateInput !== undefined,
+  });
   // A descendant may inherit a pipe after the owned child exits. The child's
   // exit, not that writer's EOF, bounds draining (see
   // NATIVE_EXIT_DRAIN_BOUND_MS); its own closed code and response are already
@@ -948,6 +922,409 @@ export async function invokeNativeRuntime(opts: {
       await failureDetails;
     }
   }
+}
+
+function closedRuntimeEnvironment(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of SYSTEM_ENVIRONMENT) {
+    const value = process.env[key];
+    if (value !== undefined) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
+function spawnNativeRuntime(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly cwd: string;
+  readonly args: readonly string[];
+  readonly pipeInput: boolean;
+  readonly stepStoreArgs?: readonly string[];
+  readonly processGroup?: "inherit" | "own";
+}) {
+  const env = closedRuntimeEnvironment();
+  // The two user settings a runtime request carries in its environment, both
+  // for `runtime up` only; an invalid value throws here, before the
+  // subprocess exists.
+  Object.assign(env, nativeHotReloadEnvironment(opts.args));
+  Object.assign(env, nativeAdmissionReuseEnvironment(opts.args));
+  return Bun.spawn(
+    [
+      opts.runtime.binary,
+      "--candidate-root",
+      opts.runtime.home,
+      // HACK-2461: the per-user step store, only with HACK_STEP_STORE=on.
+      ...(opts.stepStoreArgs ?? stepStoreRuntimeArgs()),
+      ...opts.args,
+    ],
+    {
+      cwd: opts.cwd,
+      env: childEnvironment(env),
+      stdin: opts.pipeInput ? "pipe" : "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      detached: opts.processGroup === "own",
+    }
+  );
+}
+
+type StartupIntent =
+  | { operation: "retained_preflight" | "inspect"; run: string }
+  | { operation: "plan"; options: readonly string[] }
+  | { operation: "check_project_share" | "source_size"; project: string }
+  | { operation: "admit_image"; reference: string; policy: readonly string[] };
+
+function startupIntent(args: readonly string[]): StartupIntent | undefined {
+  const [group, action, flag, value, json, ...rest] = args;
+  if (group === "project" && action === "plan" && args.at(-1) === "--json") {
+    return { operation: "plan", options: args.slice(2) };
+  }
+  if (value === undefined) {
+    return;
+  }
+  if (
+    group === "graph" &&
+    flag === "--run-id" &&
+    json === "--json" &&
+    rest.length === 0 &&
+    (action === "retained-preflight" || action === "inspect")
+  ) {
+    return {
+      operation: action === "inspect" ? "inspect" : "retained_preflight",
+      run: value,
+    };
+  }
+  if (
+    group === "project" &&
+    action === "source-size" &&
+    flag === "--project" &&
+    json === "--json" &&
+    rest.length === 0
+  ) {
+    return { operation: "source_size", project: value };
+  }
+  if (
+    group === "runtime" &&
+    action === "check-project-share" &&
+    flag === "--project-share" &&
+    json === "--unfiltered-source" &&
+    rest.length === 1 &&
+    rest[0] === "--json"
+  ) {
+    return { operation: "check_project_share", project: value };
+  }
+  if (
+    group === "runtime" &&
+    action === "admit-image" &&
+    flag === "--reference" &&
+    json === "--json"
+  ) {
+    return { operation: "admit_image", reference: value, policy: rest };
+  }
+}
+
+const STARTUP_MESSAGE_MAX_MS = 600_000;
+const STARTUP_SESSION_MS = 24 * 60 * 60 * 1000;
+const STARTUP_REQUEST_LIMIT = 16 * 1024 * 1024;
+const STARTUP_REPLY_LIMIT = MAX_OUTPUT_BYTES + 32;
+const STARTUP_PROTOCOL_UNAVAILABLE = Symbol("startup-preflight-unavailable");
+const STARTUP_STANDALONE = Symbol("startup-preflight-standalone");
+
+interface StartupOperation {
+  readonly intent: StartupIntent;
+  readonly cwd: string;
+  readonly environment: Record<string, string>;
+  readonly step_store: string | null;
+  readonly timeout_ms: number;
+}
+
+/** One ordered request in flight. A partial frame or failed transport is
+ * terminal and is never replayed through either entry point. */
+export function nativeStartupPreflight(opts: {
+  readonly runtime: NativeRuntimeSelection;
+}) {
+  let session: ReturnType<typeof startPreflightChild> | undefined;
+  let singleCalls = false;
+  const invoke: typeof invokeNativeRuntime = async (request) => {
+    const intent = startupIntent(request.args);
+    if (
+      !intent ||
+      singleCalls ||
+      request.runtime.binary !== opts.runtime.binary ||
+      request.runtime.home !== opts.runtime.home
+    ) {
+      return await invokeNativeRuntime(request);
+    }
+    if (request.signal?.aborted) {
+      throw new NativeRuntimeRequestError({
+        message:
+          "Native runtime request was canceled before admission; no request was started.",
+      });
+    }
+    const timeout = request.timeoutMs ?? 180_000;
+    if (
+      !Number.isSafeInteger(timeout) ||
+      timeout < 1 ||
+      timeout > STARTUP_MESSAGE_MAX_MS
+    ) {
+      throw new HackCliError({
+        code: "E_CONFIG_INVALID",
+        message: REQUEST_BUDGET_REFUSAL,
+      });
+    }
+    if (
+      !(isAbsolute(request.cwd) && request.cwd.isWellFormed()) ||
+      request.args.some(
+        (arg) =>
+          !arg.isWellFormed() ||
+          arg.includes("\0") ||
+          (process.platform === "linux" && Buffer.byteLength(arg) >= 128 * 1024)
+      )
+    ) {
+      return await invokeNativeRuntime(request);
+    }
+    const operation: StartupOperation = {
+      intent,
+      cwd: request.cwd,
+      environment: closedRuntimeEnvironment(),
+      step_store: stepStoreRuntimeArgs()[1] ?? null,
+      timeout_ms: timeout,
+    };
+    session ??= startPreflightChild(opts);
+    const reply = await session.request(operation, request.signal);
+    if (reply === STARTUP_PROTOCOL_UNAVAILABLE) {
+      // An older executor rejected the protocol before any operation was sent.
+      singleCalls = true;
+      await session.close();
+    } else if (reply !== STARTUP_STANDALONE) {
+      return reply;
+    }
+    return await invokeNativeRuntime(request);
+  };
+  return {
+    invoke,
+    close: async () => {
+      await session?.close();
+    },
+  };
+}
+
+function startPreflightChild(opts: {
+  readonly runtime: NativeRuntimeSelection;
+}) {
+  const child = spawnNativeRuntime({
+    ...opts,
+    cwd: "/",
+    args: ["up", "preflight", "--json"],
+    pipeInput: true,
+    stepStoreArgs: [],
+  });
+  if (!child.stdin) {
+    child.kill("SIGKILL");
+    throw new Error("Native startup preflight requires an input pipe.");
+  }
+  const input = child.stdin;
+  const output = child.stdout.getReader();
+  const drain = new AbortController();
+  const failure = readNativeFailure(child.stderr, drain.signal);
+  let drainTimer: ReturnType<typeof setTimeout> | undefined;
+  void child.exited.then(() => {
+    drainTimer = setTimeout(() => {
+      void output.cancel().catch(() => undefined);
+      drain.abort();
+    }, NATIVE_EXIT_DRAIN_BOUND_MS);
+  });
+  let chunk: Uint8Array = new Uint8Array();
+  let offset = 0;
+  let overallTimedOut = false;
+  let negotiated = false;
+  let lastId = 0;
+  const stop = () => {
+    child.kill("SIGKILL");
+    void output.cancel().catch(() => undefined);
+    drain.abort();
+  };
+  const lifetime = setTimeout(() => {
+    overallTimedOut = true;
+    stop();
+  }, STARTUP_SESSION_MS);
+
+  async function read(length: number): Promise<Uint8Array> {
+    const bytes = new Uint8Array(length);
+    let filled = 0;
+    while (filled < length) {
+      if (offset === chunk.length) {
+        const next = await output.read();
+        if (next.done) {
+          throw new Error("Native startup preflight closed its output.");
+        }
+        chunk = next.value;
+        offset = 0;
+      }
+      const count = Math.min(chunk.length - offset, length - filled);
+      bytes.set(chunk.subarray(offset, offset + count), filled);
+      offset += count;
+      filled += count;
+    }
+    return bytes;
+  }
+
+  async function readFrame() {
+    const length = new DataView((await read(4)).buffer).getUint32(0);
+    if (length === 0 || length > STARTUP_REPLY_LIMIT) {
+      stop();
+      throw new ClosedCliError(
+        "Native runtime control response exceeds its output budget."
+      );
+    }
+    return completionResponse(await read(length), 0, false, undefined);
+  }
+
+  async function exchange(header: Uint8Array, body: Uint8Array) {
+    if (!negotiated) {
+      const hello = await readFrame();
+      if (!(isRecord(hello) && hello.version === 1)) {
+        throw new ClosedCliError(
+          "Native runtime returned an invalid control response."
+        );
+      }
+      negotiated = true;
+    }
+    await input.write(header);
+    await input.write(body);
+    await input.flush();
+    return await readFrame();
+  }
+
+  function canceledRequest() {
+    return new NativeRuntimeRequestError({
+      message:
+        "Native runtime request was canceled; its outcome may be uncertain. No request was replayed.",
+    });
+  }
+
+  async function failedExchange(opts: {
+    readonly error: unknown;
+    readonly timedOut: () => boolean;
+    readonly signal?: AbortSignal;
+  }) {
+    if (opts.signal?.aborted) {
+      throw canceledRequest();
+    }
+    if (opts.error instanceof ClosedCliError) {
+      stop();
+      throw opts.error;
+    }
+    // A truncated frame can come from an already failed child or a peer that
+    // is still waiting. Close stdin and bound exit before decoding stderr.
+    const kill = setTimeout(stop, NATIVE_EXIT_DRAIN_BOUND_MS);
+    try {
+      try {
+        await input.end();
+      } catch {
+        // The child may have already closed its input while writing stderr.
+      }
+      const code = await child.exited;
+      const detail = await failure;
+      if (opts.signal?.aborted) {
+        throw canceledRequest();
+      }
+      throwIfNativeRuntimeStopped(child.signalCode);
+      const timedOut = opts.timedOut();
+      if (
+        !(negotiated || timedOut) &&
+        code === 2 &&
+        detail?.code === "unsupported_command"
+      ) {
+        return STARTUP_PROTOCOL_UNAVAILABLE;
+      }
+      return completionResponse(new Uint8Array(), code || 2, timedOut, detail);
+    } finally {
+      clearTimeout(kill);
+    }
+  }
+
+  function replyValue(reply: unknown, id: number): unknown {
+    if (isRecord(reply) && reply.id === id && Object.keys(reply).length === 2) {
+      if ("value" in reply) {
+        return reply.value;
+      }
+      if ("error" in reply) {
+        return completionResponse(
+          new Uint8Array(),
+          2,
+          false,
+          nativeFailureFromReply(reply.error, false)
+        );
+      }
+      if (reply.standalone === true) {
+        return STARTUP_STANDALONE;
+      }
+    }
+    stop();
+    throw new ClosedCliError(
+      "Native runtime returned an invalid control response."
+    );
+  }
+
+  async function request(operation: StartupOperation, signal?: AbortSignal) {
+    const id = lastId + 1;
+    const body = new TextEncoder().encode(JSON.stringify({ ...operation, id }));
+    if (body.length > STARTUP_REQUEST_LIMIT) {
+      return STARTUP_STANDALONE;
+    }
+    lastId = id;
+    const header = new Uint8Array(4);
+    new DataView(header.buffer).setUint32(0, body.length);
+    let timedOut = false;
+    const expired = () => timedOut || overallTimedOut;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      stop();
+    }, operation.timeout_ms);
+    signal?.addEventListener("abort", stop, { once: true });
+    let reply: unknown;
+    try {
+      if (signal?.aborted) {
+        stop();
+        throw canceledRequest();
+      }
+      reply = await exchange(header, body);
+    } catch (error) {
+      return await failedExchange({ error, timedOut: expired, signal });
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", stop);
+    }
+    if (signal?.aborted) {
+      throw canceledRequest();
+    }
+    if (expired()) {
+      return completionResponse(new Uint8Array(), 2, true, undefined);
+    }
+    return replyValue(reply, id);
+  }
+
+  async function close(): Promise<void> {
+    clearTimeout(lifetime);
+    const kill = setTimeout(stop, NATIVE_EXIT_DRAIN_BOUND_MS);
+    try {
+      await input.end();
+    } catch {
+      stop();
+    } finally {
+      await child.exited;
+      clearTimeout(kill);
+      await output.cancel().catch(() => undefined);
+      clearTimeout(drainTimer);
+      drain.abort();
+      await failure;
+    }
+  }
+
+  let closing: Promise<void> | undefined;
+  return { request, close: () => (closing ??= close()) };
 }
 
 /** The exit-relative drain bound in effect: the test seam's value, else the shared constant. */

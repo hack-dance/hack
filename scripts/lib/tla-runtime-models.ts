@@ -1775,6 +1775,19 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "startup-preflight",
+    module: "Preflight",
+    states: 13,
+    invariant: "NoOrphan",
+    action: "EOFObserved",
+    fields: [
+      'frontend = "dead"',
+      'worker = "orphaned"',
+      'phase = "closed"',
+      "locked = FALSE",
+    ],
+  },
+  {
     name: "stopped-pool-startup",
     module: "Resume",
     states: 71,

@@ -140,6 +140,7 @@ pub use source_sync::{SyncReceipt, SyncSession, sync_status};
 pub mod setup;
 mod socket_requests;
 pub(crate) mod state;
+pub use state::with_operation_arguments;
 mod tree_witness;
 pub use lifecycle::{
     PreparedBaseBuilt, build_prepared_base, check_project_share, down, prepared_base_status,

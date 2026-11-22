@@ -241,11 +241,40 @@ fn canonical_directory(path: &Path) -> Result<PathBuf, CandidateError> {
 /// one of them is named in a diagnostic; project paths never lie inside a native home.
 static STATE_ROOTS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
-fn register_state_root(state_root: &Path) {
-    if let Ok(mut roots) = STATE_ROOTS.lock() {
-        if !roots.iter().any(|root| root == state_root) {
-            roots.push(state_root.to_path_buf());
+thread_local! {
+    static REQUEST_STATE_ROOTS: std::cell::RefCell<Option<Vec<PathBuf>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Scope path redaction to the candidates discovered by this operation.
+pub fn with_request_state_roots<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Vec<PathBuf>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REQUEST_STATE_ROOTS.replace(self.0.take());
         }
+    }
+    let _restore = Restore(REQUEST_STATE_ROOTS.replace(Some(Vec::new())));
+    run()
+}
+
+fn add_state_root(roots: &mut Vec<PathBuf>, root: &Path) {
+    if !roots.iter().any(|existing| existing == root) {
+        roots.push(root.to_path_buf());
+    }
+}
+
+fn register_state_root(state_root: &Path) {
+    let scoped = REQUEST_STATE_ROOTS.with_borrow_mut(|roots| {
+        if let Some(roots) = roots {
+            add_state_root(roots, state_root);
+            return true;
+        }
+        false
+    });
+    if !scoped && let Ok(mut roots) = STATE_ROOTS.lock() {
+        add_state_root(&mut roots, state_root);
     }
 }
 
@@ -253,13 +282,18 @@ fn register_state_root(state_root: &Path) {
 /// (`.hack-local/...`). Anything else, a project path or a home directory included, gets
 /// no label, so nothing a user named is ever carried.
 fn state_component_label(component: &Path) -> Option<String> {
-    let roots = STATE_ROOTS.lock().ok()?;
-    let root = roots.iter().find(|root| component.starts_with(root))?;
-    let relative = component.strip_prefix(root).ok()?.to_str()?;
-    Some(if relative.is_empty() {
-        ".hack-local".to_owned()
-    } else {
-        format!(".hack-local/{relative}")
+    fn label(roots: &[PathBuf], component: &Path) -> Option<String> {
+        let root = roots.iter().find(|root| component.starts_with(root))?;
+        let relative = component.strip_prefix(root).ok()?.to_str()?;
+        Some(if relative.is_empty() {
+            ".hack-local".to_owned()
+        } else {
+            format!(".hack-local/{relative}")
+        })
+    }
+    REQUEST_STATE_ROOTS.with_borrow(|roots| match roots {
+        Some(roots) => label(roots, component),
+        None => label(&STATE_ROOTS.lock().ok()?, component),
     })
 }
 

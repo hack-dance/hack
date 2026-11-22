@@ -23,6 +23,7 @@ use crate::canonical_digest::{self, Digest, Domain};
 use hmac::{Hmac, KeyInit, Mac};
 use serde_json::Value;
 use sha2::Sha256;
+use std::cell::RefCell;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -126,9 +127,32 @@ pub fn take_step_store_argument<'a, 'b>(command: &'b [&'a str]) -> Result<&'b [&
     }
 }
 
-/// The store base passed with `--step-store`, if any.
-pub fn configured_root() -> Option<&'static Path> {
-    CONFIGURED_ROOT.get().map(PathBuf::as_path)
+thread_local! {
+    static REQUEST_ROOT: RefCell<Option<Option<PathBuf>>> = const { RefCell::new(None) };
+}
+
+/// Select the store for one operation. A request with no root must not inherit
+/// another request's selection. The normal argv parser remains process-scoped.
+pub fn with_request_root<T>(root: Option<PathBuf>, run: impl FnOnce() -> Result<T>) -> Result<T> {
+    if root.as_ref().is_some_and(|path| !path.is_absolute()) {
+        return Err(invalid("The step store directory must be absolute."));
+    }
+    struct Restore(Option<Option<PathBuf>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REQUEST_ROOT.replace(self.0.take());
+        }
+    }
+    let _restore = Restore(REQUEST_ROOT.replace(Some(root)));
+    run()
+}
+
+/// The store base for the current request or standalone invocation, if any.
+pub fn configured_root() -> Option<PathBuf> {
+    REQUEST_ROOT.with_borrow(|root| {
+        root.clone()
+            .unwrap_or_else(|| CONFIGURED_ROOT.get().cloned())
+    })
 }
 
 fn invalid(message: &'static str) -> CandidateError {

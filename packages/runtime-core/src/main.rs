@@ -5,6 +5,9 @@ mod normalized_cli;
 mod prepared_base_cli;
 mod runtime_setup_cli;
 mod runtime_up_cli;
+mod startup_preflight;
+
+use std::io::Write;
 mod source_watch_retry;
 use hack_runtime_core::{CANDIDATE_VERSION, Candidate, CandidateError};
 use serde::Serialize;
@@ -19,6 +22,7 @@ Usage:
   hack-local project plan --project <directory> --file <compose.yaml> [--profile <name>] [--json]
   hack-local project enroll --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--json]
   hack-local project status --project <directory> [--json]
+  hack-local up preflight --json (framed startup control on stdin/stdout)
   hack-local project source-size --project <directory> --json
   hack-local project sync-source --project <directory> --file <compose.yaml> --expect-plan <sha256> [--watch] [--reconcile] [--duration-seconds <seconds>] [--json]
   hack-local project sync-status --project <directory> --file <compose.yaml> [--json]
@@ -270,6 +274,9 @@ fn run() -> Result<(), CandidateError> {
             _ => {}
         }
     }
+    if command == ["up", "preflight", "--json"] {
+        return startup_preflight::run(Path::new(&arguments[1]));
+    }
     let requested = resolve_candidate_root(Path::new(&arguments[1]))?;
     match command.as_slice() {
         [] | ["--help"] | ["help"] => {
@@ -431,7 +438,12 @@ fn run() -> Result<(), CandidateError> {
             }
         }
         ["project", arguments @ ..] => {
-            project_command(&discover_candidate(&requested)?, arguments)?;
+            project_command(
+                &discover_candidate(&requested)?,
+                arguments,
+                &mut std::io::stdout(),
+                false,
+            )?;
         }
         ["runtime", "network", "internet", "--json"] => {
             print_json(&hack_runtime_core::provider::enable_internet(
@@ -1207,7 +1219,12 @@ fn run() -> Result<(), CandidateError> {
     Ok(())
 }
 
-fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), CandidateError> {
+fn project_command(
+    candidate: &Candidate,
+    arguments: &[&str],
+    output: &mut impl Write,
+    require_json: bool,
+) -> Result<(), CandidateError> {
     use hack_runtime_core::project::{self, PlanOptions};
     let Some((action, arguments)) = arguments.split_first() else {
         return Err(CandidateError::new("unsupported_command", HELP));
@@ -1296,6 +1313,9 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
             _ => return Err(CandidateError::new("invalid_arguments", HELP)),
         }
     }
+    if require_json && !json {
+        return Err(CandidateError::new("invalid_arguments", HELP));
+    }
     let source = Path::new(
         source.ok_or_else(|| CandidateError::new("invalid_arguments", "--project is required."))?,
     );
@@ -1306,7 +1326,7 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         }
         // Metadata only: no content is read and no state is written.
         let preview = candidate.plan(source)?;
-        return print_json(&project::source_budget::report(&preview.source)?);
+        return write_json(output, &project::source_budget::report(&preview.source)?);
     }
     if *action == "status" {
         if file.is_some() || expected.is_some() || !profiles.is_empty() {
@@ -1414,7 +1434,7 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         let mut report = normalized_cli::review(candidate, options, normalized.as_ref())?;
         project::review_start_delivery(&mut report, &start_managed_services)?;
         if json {
-            print_json(&report)?;
+            write_json(output, &report)?;
         } else {
             println!("Compose review {}", report.plan_id);
             println!(
@@ -1722,4 +1742,11 @@ fn print_json(value: &impl Serialize) -> Result<(), CandidateError> {
             .map_err(|error| { CandidateError::new("serialization_failed", error.to_string()) })?
     );
     Ok(())
+}
+
+fn write_json(output: &mut impl Write, value: &impl Serialize) -> Result<(), CandidateError> {
+    let encoded = serde_json::to_string_pretty(value)
+        .map_err(|error| CandidateError::new("serialization_failed", error.to_string()))?;
+    writeln!(output, "{encoded}")
+        .map_err(|error| CandidateError::new("serialization_failed", error.to_string()))
 }

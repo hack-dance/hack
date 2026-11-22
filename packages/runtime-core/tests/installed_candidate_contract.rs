@@ -462,3 +462,316 @@ fn delivery_context_admits_the_full_compose_budget_and_oversized_files_refuse_be
         assert_eq!(fs::read_dir(&candidate).unwrap().count(), 0);
     }
 }
+
+fn startup_request(id: u32, cwd: &Path, intent: &Value) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "id": id, "cwd": cwd, "environment": {}, "step_store": null,
+        "timeout_ms": 5000, "intent": intent,
+    }))
+    .unwrap()
+}
+
+fn read_startup_frame(input: &mut impl std::io::Read) -> Vec<u8> {
+    let mut length = [0; 4];
+    input.read_exact(&mut length).unwrap();
+    let mut reply = vec![0; u32::from_be_bytes(length) as usize];
+    input.read_exact(&mut reply).unwrap();
+    reply
+}
+
+#[test]
+fn startup_preflight_matches_one_shot_bytes_and_launches_once() {
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+
+    let fixture = Fixture::new();
+    let home = fixture.directory("native");
+    let cwd = fixture.directory("example");
+    let wrapper = fixture.0.join("count-runtime");
+    let count = fixture.0.join("launches");
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\nprintf x >> \"$1\"\nshift\nexec \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    let command = || {
+        let mut command = Command::new(&wrapper);
+        command
+            .arg(&count)
+            .arg(env!("CARGO_BIN_EXE_hack-native"))
+            .arg("--candidate-root")
+            .arg(&home)
+            .current_dir(&cwd)
+            .env_clear();
+        command
+    };
+    fs::write(
+        cwd.join("compose.yml"),
+        "services:\n  web:\n    image: alpine:3.21\n",
+    )
+    .unwrap();
+    fs::create_dir(cwd.join("nested")).unwrap();
+    symlink(cwd.join("nested"), fixture.0.join("linked")).unwrap();
+    let linked_parent = fixture.0.join("linked/..");
+    let project = cwd.to_str().unwrap();
+    let run = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let oversized_image = "a".repeat(131_040);
+    let cases = [
+        (
+            vec![
+                "project",
+                "plan",
+                "--project",
+                ".",
+                "--file",
+                "compose.yml",
+                "--json",
+            ],
+            json!({"operation":"plan","options":["--project",".","--file","compose.yml","--json"]}),
+        ),
+        (
+            vec![
+                "project",
+                "plan",
+                "--project",
+                project,
+                "--file",
+                "absent.yml",
+                "--json",
+            ],
+            json!({"operation":"plan","options":["--project",project,"--file","absent.yml","--json"]}),
+        ),
+        (
+            vec![
+                "runtime",
+                "check-project-share",
+                "--project-share",
+                project,
+                "--unfiltered-source",
+                "--json",
+            ],
+            json!({"operation":"check_project_share","project":project}),
+        ),
+        (
+            vec![
+                "runtime",
+                "check-project-share",
+                "--project-share",
+                "",
+                "--unfiltered-source",
+                "--json",
+            ],
+            json!({"operation":"check_project_share","project":""}),
+        ),
+        (
+            vec!["project", "source-size", "--project", project, "--json"],
+            json!({"operation":"source_size","project":project}),
+        ),
+        (
+            vec![
+                "project",
+                "source-size",
+                "--project",
+                "/nonexistent",
+                "--json",
+            ],
+            json!({"operation":"source_size","project":"/nonexistent"}),
+        ),
+        (
+            vec![
+                "runtime",
+                "admit-image",
+                "--reference",
+                "alpine:3.21",
+                "--json",
+            ],
+            json!({"operation":"admit_image","reference":"alpine:3.21","policy":[]}),
+        ),
+        (
+            vec![
+                "runtime",
+                "admit-image",
+                "--reference",
+                "invalid image",
+                "--json",
+            ],
+            json!({"operation":"admit_image","reference":"invalid image","policy":[]}),
+        ),
+        (
+            vec![
+                "runtime",
+                "admit-image",
+                "--reference",
+                &oversized_image,
+                "--json",
+            ],
+            json!({"operation":"admit_image","reference":oversized_image,"policy":[]}),
+        ),
+        (
+            vec!["graph", "retained-preflight", "--run-id", run, "--json"],
+            json!({"operation":"retained_preflight","run":run}),
+        ),
+        (
+            vec!["graph", "inspect", "--run-id", run, "--json"],
+            json!({"operation":"inspect","run":run}),
+        ),
+    ];
+    let expected: Vec<_> = cases
+        .iter()
+        .enumerate()
+        .map(|(index, (args, _))| {
+            command()
+                .current_dir(if index == 0 { &linked_parent } else { &cwd })
+                .args(args)
+                .output()
+                .unwrap()
+        })
+        .collect();
+    assert!(expected[0].status.success(), "{:?}", expected[0]);
+    assert_eq!(fs::metadata(&count).unwrap().len(), cases.len() as u64);
+    fs::write(&count, b"").unwrap();
+
+    let mut stream = command()
+        .args(["up", "preflight", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = stream.stdin.take().unwrap();
+    let mut output = stream.stdout.take().unwrap();
+    assert_eq!(read_startup_frame(&mut output), br#"{"version":1}"#);
+    for (index, ((_, intent), old)) in cases.iter().zip(expected).enumerate() {
+        let id = u32::try_from(index + 1).unwrap();
+        let working_directory = if index == 0 { &linked_parent } else { &cwd };
+        let request = startup_request(id, working_directory, intent);
+        input
+            .write_all(&u32::try_from(request.len()).unwrap().to_be_bytes())
+            .unwrap();
+        input.write_all(&request).unwrap();
+        let reply = read_startup_frame(&mut output);
+        let mut same = if old.status.success() {
+            let mut same = format!(r#"{{"id":{id},"value":"#).into_bytes();
+            same.extend(old.stdout);
+            same
+        } else {
+            assert_eq!(old.status.code(), Some(2));
+            let mut same = format!(r#"{{"id":{id},"error":"#).into_bytes();
+            same.extend(old.stderr.strip_suffix(b"\n").unwrap());
+            same
+        };
+        same.push(b'}');
+        assert_eq!(reply, same, "operation {}", intent["operation"]);
+    }
+    let next = u32::try_from(cases.len() + 1).unwrap();
+    let absent = startup_request(next, &cwd.join("missing"), &cases[0].1);
+    input
+        .write_all(&u32::try_from(absent.len()).unwrap().to_be_bytes())
+        .unwrap();
+    input.write_all(&absent).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&read_startup_frame(&mut output)).unwrap(),
+        json!({"id":next,"standalone":true})
+    );
+    let duplicate = startup_request(next, &cwd, &cases[0].1);
+    input
+        .write_all(&u32::try_from(duplicate.len()).unwrap().to_be_bytes())
+        .unwrap();
+    input.write_all(&duplicate).unwrap();
+    assert_eq!(output.read(&mut [0]).unwrap(), 0);
+    drop(input);
+    assert_eq!(stream.wait().unwrap().code(), Some(2));
+    assert_eq!(fs::read(&count).unwrap(), b"x");
+}
+
+#[test]
+fn startup_preflight_frontend_death_retires_the_runtime() {
+    use std::io::Write;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    const CHECKOUT: &str = "PREFLIGHT_TEST_FRONTEND";
+    if let Some(home) = std::env::var_os(CHECKOUT) {
+        let mut runtime = Command::new(env!("CARGO_BIN_EXE_hack-native"))
+            .arg("--candidate-root")
+            .arg(&home)
+            .args(["up", "preflight", "--json"])
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = runtime.stdin.take().unwrap();
+        let mut output = runtime.stdout.take().unwrap();
+        assert_eq!(read_startup_frame(&mut output), br#"{"version":1}"#);
+        let request = startup_request(
+            1,
+            Path::new(&home),
+            &serde_json::json!({"operation":"admit_image","reference":"alpine:3.21","policy":[]}),
+        );
+        input
+            .write_all(&u32::try_from(request.len()).unwrap().to_be_bytes())
+            .unwrap();
+        input.write_all(&request).unwrap();
+        let reply = read_startup_frame(&mut output);
+        assert!(serde_json::from_slice::<Value>(&reply).unwrap()["value"].is_object());
+        input.write_all(&[0]).unwrap();
+        println!("runtime={}", runtime.id());
+        std::io::stdout().flush().unwrap();
+        let status = runtime.wait().unwrap();
+        panic!("runtime exited before frontend death: {status}");
+    }
+
+    let fixture = Fixture::new();
+    let home = fixture.directory("native");
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "startup_preflight_frontend_death_retires_the_runtime",
+            "--nocapture",
+        ])
+        .env(CHECKOUT, &home)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut frontend = output;
+    let mut stdout = frontend.stdout.take().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(&mut stdout).lines() {
+            if let Some(pid) = line.unwrap().strip_prefix("runtime=") {
+                send.send(pid.parse::<i32>().unwrap()).unwrap();
+                break;
+            }
+        }
+    });
+    let pid = receive.recv_timeout(Duration::from_secs(15));
+    frontend.kill().unwrap();
+    frontend.wait().unwrap();
+    reader.join().unwrap();
+    let pid = pid.unwrap();
+    let limit = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < limit {
+        // SAFETY: signal zero only observes existence. Linux containers may
+        // retain zombies, so use the proc state there when the PID still exists.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit_once(") ")
+                    .map(|(_, fields)| fields.starts_with('Z'))
+            })
+            == Some(true)
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("runtime preflight process survived frontend death");
+}

@@ -1,6 +1,7 @@
 //! Private state ownership and nonblocking operation serialization.
 use crate::{Candidate, CandidateError, reject_aliased_state};
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -202,10 +203,32 @@ fn provider_lock(root: &Path) -> bool {
     root.ends_with("run/smolvm")
 }
 
+thread_local! {
+    static REQUEST_LABEL: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+/// Use the standalone command's closed diagnostic label within one request.
+pub fn with_operation_arguments<T>(arguments: &[&str], run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<&'static str>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REQUEST_LABEL.set(self.0);
+        }
+    }
+    let _restore = Restore(REQUEST_LABEL.replace(Some(label(arguments.iter().copied()))));
+    run()
+}
+
 fn operation_label() -> &'static str {
+    REQUEST_LABEL
+        .get()
+        .unwrap_or_else(|| label(std::env::args_os().skip(1)))
+}
+
+fn label(arguments: impl Iterator<Item = impl AsRef<std::ffi::OsStr>>) -> &'static str {
     // Only closed command words enter diagnostics, never user arguments or paths.
-    for argument in std::env::args_os().skip(1) {
-        match argument.to_str() {
+    for argument in arguments {
+        match argument.as_ref().to_str() {
             Some("cleanup" | "down" | "stop") => return "cleanup",
             Some("recover" | "recover-live-owner" | "recover-cleanup") => return "recovery",
             Some("run" | "serve" | "start" | "restore" | "restart") => return "start",
@@ -886,6 +909,21 @@ impl Owner {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn staged_inspection_reports_existing_label_and_releases_lease_before_next_message() {
+        let fixture = fixture();
+        let root = fixture.join("run/smolvm");
+        super::with_operation_arguments(&["graph", "inspect", "--json"], || {
+            let _lease = super::Lock::acquire(&root).unwrap();
+            assert!(matches!(
+                super::Lock::acquire(&root),
+                Err(error) if error.code == "provider_busy" && error.message.contains("holder: inspection")
+            ));
+        });
+        drop(super::Lock::acquire(&root).unwrap());
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
     #[test]
     fn advisory_write_failure_does_not_refuse_the_acquired_provider_lease() {
         let fixture = fixture();

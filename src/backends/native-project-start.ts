@@ -203,6 +203,7 @@ import {
   NATIVE_IDLE_POOL_NOTE,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
+  nativeStartupPreflight,
   retainNativeRuntimeFailure,
 } from "./native-runtime-client.ts";
 import {
@@ -2268,7 +2269,8 @@ function emitNativeBranchDroppedNotice(
 
 async function startNativeProjectAttempt(
   opts: NativeProjectStartOptions,
-  observeStartup: () => Promise<void>
+  observeStartup: () => Promise<void>,
+  preflight: ReturnType<typeof nativeStartupPreflight>
 ): Promise<number> {
   const progress = progressReporter(opts.onProgress);
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
@@ -2283,6 +2285,7 @@ async function startNativeProjectAttempt(
   }
   const deps = { ...DEFAULTS, ...opts.dependencies };
   await refusePendingFreshStart(opts.restore, opts.scope, deps.loadRestart);
+  const invokePreflight = opts.dependencies?.invoke ?? preflight.invoke;
   const { retained, restore, selection, retainedFlags } =
     await selectNativeStartup({
       runtime: opts.runtime,
@@ -2295,7 +2298,7 @@ async function startNativeProjectAttempt(
       gcloud: opts.gcloud,
       gcloudWithheld: opts.gcloudWithheld,
       load: deps.load,
-      invoke: deps.invoke,
+      invoke: invokePreflight,
       signal: opts.signal,
     });
   requireActiveStartup(opts.signal);
@@ -2424,14 +2427,14 @@ async function startNativeProjectAttempt(
     branch: opts.scope.branch,
     deferredRestore: restore !== undefined,
     buildServices,
-    invoke: deps.invoke,
+    invoke: invokePreflight,
     signal: opts.signal,
   });
   await preflightNativeProjectSource({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
     signal: opts.signal,
-    invoke: deps.invoke,
+    invoke: invokePreflight,
   });
   await deps.prepareStorage(opts.scope);
   // A graph that captures source (bind mounts or a dependency cache) measures it
@@ -2443,7 +2446,7 @@ async function startNativeProjectAttempt(
     services: specs,
     profiles,
     signal: opts.signal,
-    invoke: deps.invoke,
+    invoke: invokePreflight,
     check: deps.sourceSize,
   });
   // Refuse malformed or unacquirable references before hooks, VM or provider start.
@@ -2452,9 +2455,10 @@ async function startNativeProjectAttempt(
     projectRoot: opts.scope.projectRoot,
     specs,
     signal: opts.signal,
-    invoke: deps.invoke,
+    invoke: invokePreflight,
   });
   requireActiveStartup(opts.signal);
+  await preflight.close();
   const bridgeCapacity = nativeBridgeSocketCount({
     routes: nativeBridgeCapacity(specs),
     ports: nativePortPublicationCount(specs),
@@ -3227,11 +3231,17 @@ export async function startNativeProject(
   opts: NativeProjectStartOptions
 ): Promise<number> {
   let finish: (() => Promise<void>) | undefined;
+  const preflight = nativeStartupPreflight({ runtime: opts.runtime });
   try {
-    return await startNativeProjectAttempt(opts, async () => {
-      finish = await beginNativeProjectStartupObservation(opts.scope);
-    });
+    return await startNativeProjectAttempt(
+      opts,
+      async () => {
+        finish = await beginNativeProjectStartupObservation(opts.scope);
+      },
+      preflight
+    );
   } finally {
+    await preflight.close();
     await finish?.();
   }
 }

@@ -289,6 +289,23 @@ test("with native builds enabled, the refusal names the first service and build 
   });
   expect(both.startBlocker).toBeUndefined();
   expect(both.message).toContain(" Service web uses build.ssh: r.");
+  // `image` together with `build` asks for one of them, not to remove a phrase.
+  expect(
+    composeBackendRefusal({
+      features,
+      restart: false,
+      buildsEnabled: true,
+      build: { service: "web", what: "image together with build", others: 0 },
+    }).startBlocker
+  ).toMatchObject({
+    problem: "web uses image together with build",
+    needs:
+      "use either image or build for native builds, or run this project on the Compose backend",
+  });
+  expect(refused.startBlocker).toMatchObject({
+    needs:
+      "remove build.ssh for native builds, or run this project on the Compose backend",
+  });
   // Without native builds, the build detail is not used.
   expect(
     composeBackendRefusal({ features, restart: false, build }).startBlocker

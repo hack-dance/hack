@@ -672,12 +672,8 @@ export function projectSelectorArgs(opts: {
   ];
 }
 
-/**
- * The closed refusal for a project that needs the Compose backend: stable code
- * `E_NATIVE_PROJECT_UNSUPPORTED`, one line, and a `detail` that lists only the
- * closed feature names.
- */
 const LINE_BREAK = /[\r\n]/;
+const IMAGE_WITH_BUILD = "image together with build";
 /** Compose service names that a refusal may print as they are. */
 const PRINTABLE_SERVICE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 
@@ -733,7 +729,7 @@ function unsupportedBuildWhat(
   service: Record<string, unknown>
 ): Pick<UnsupportedNativeBuild, "what" | "reason"> {
   if (Object.hasOwn(service, "image")) {
-    return { what: "image together with build" };
+    return { what: IMAGE_WITH_BUILD };
   }
   const field = isRecord(service.build)
     ? unsupportedNativeBuildField(service.build)
@@ -752,6 +748,13 @@ function unsupportedBuildSentence(build: UnsupportedNativeBuild): string {
   return ` ${who} uses ${what}${why}.${more}`;
 }
 
+/**
+ * The closed refusal for a project that needs the Compose backend: stable code
+ * `E_NATIVE_PROJECT_UNSUPPORTED`, one line, and a `detail` that lists only the
+ * closed feature names. With native builds enabled and an unsupported build the
+ * only reason, it also carries the three-line start blocker naming the service
+ * and field ({@link UnsupportedNativeBuild}).
+ */
 export function composeBackendRefusal(
   opts: {
     readonly features: readonly ComposeBackendFeature[];
@@ -791,6 +794,14 @@ export function composeBackendRefusal(
   });
 }
 
+/** The change the blocker's second line asks for. */
+function unsupportedBuildChange(what: string | undefined): string {
+  if (what === IMAGE_WITH_BUILD) {
+    return "use either image or build for native builds, or run this project on the Compose backend";
+  }
+  return `remove ${what ?? "that field"} for native builds, or run this project on the Compose backend`;
+}
+
 /** The three-line start blocker when an unsupported build field is the only reason. */
 function unsupportedBuildBlocker(
   build: UnsupportedNativeBuild,
@@ -804,7 +815,7 @@ function unsupportedBuildBlocker(
     ...(build.reason ? { which: build.reason } : {}),
     ...(printable
       ? {
-          needs: `remove ${build.what ?? "that field"} for native builds, or run this project on the Compose backend`,
+          needs: unsupportedBuildChange(build.what),
           command: fallback,
         }
       : {}),

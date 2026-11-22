@@ -723,7 +723,7 @@ publication left. `BootBoundUnreached` shows the boot bound (8) never limits a c
 | `https-finish-bound` | `https`, but a completed recovery's archive may run only in the boot the recovery ran in (`FinishAnyBoot = FALSE`) | fails once that boot ends with the archive still owed: `https = "records"`, `fin = TRUE`, pool running |
 | `reuse-no-check` | `https`, with the archive's port claim binding with address reuse but of the wildcard alone, without the exact claim of every local address (`ListenerCheck = FALSE`) | `NoArchiveOverListener` fails: the archive runs while another process listens on the port |
 | `idle-restart` | `positive`, plus another project's `up` that stops the running pool to add its share when the pool is idle (`IdleRestart`, HACK-2535) | passes: `NoDeadEnd`, `Recovers` and `NoRestartOverLiveRun` (a run that became live before the stop is never stopped by it) |
-| `idle-restart-one-check` | `idle-restart` without the second idle check right before the guest stops (`SecondCheck = FALSE`) | `NoRestartOverLiveRun` fails: a start between the first check and the stop is stopped |
+| `idle-restart-one-check` | `idle-restart` without the second idle check right before the guest stops (`SecondCheck = FALSE`) | `NoRestartOverLiveRun` fails: a start that took no lease and turned live between the first check and the stop is stopped. In the code every start takes the lease the stop holds, so this shows what the second check guards on its own, not a race the code has |
 
 `Recovers` also fails on `next` (TLC exit 13: the behavior stutters in the dead end).
 That is checked by hand, because the runner's controls are invariant violations only.

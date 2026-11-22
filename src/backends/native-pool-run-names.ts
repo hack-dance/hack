@@ -36,36 +36,55 @@ function checkouts(registry: ProjectsRegistry): Checkout[] {
   return found;
 }
 
-const STORES = ["native-runs", "native-authored-runs"] as const;
-
-/** The run a mapping record names: `run.run` (Compose), `run` or `receipt.run`. */
-function recordRun(value: unknown): string | undefined {
+/** The run a mapping file records, by store and file kind; `undefined` otherwise. */
+function recordRun(
+  store: "native-runs" | "native-authored-runs",
+  name: string,
+  value: unknown
+): string | undefined {
   if (!isRecord(value)) {
     return;
   }
-  for (const candidate of [
-    isRecord(value.run) ? value.run.run : value.run,
-    isRecord(value.receipt) ? value.receipt.run : undefined,
-  ]) {
-    if (typeof candidate === "string") {
-      return candidate;
-    }
+  // Compose: `{ version, scope, run: { run, namespace, ... } }`.
+  if (store === "native-runs") {
+    return isRecord(value.run) && typeof value.run.run === "string"
+      ? value.run.run
+      : undefined;
   }
+  // Native-authored, written as `{ scope, record }`: the ready record holds the run in
+  // its receipt's review, the start record (all a starting run may have) in its own
+  // review. Every other file in that folder is skipped.
+  const record = isRecord(value.record) ? value.record : undefined;
+  const receipt = isRecord(record?.receipt) ? record.receipt : undefined;
+  const review = name.endsWith(".start.json")
+    ? record?.review
+    : receipt?.review;
+  const provenance = isRecord(review) ? review.provenance : undefined;
+  return isRecord(provenance) && typeof provenance.run === "string"
+    ? provenance.run
+    : undefined;
 }
+
+/** `<digest>.json` (ready) or `<digest>.start.json` in the native-authored store. */
+const AUTHORED_FILE = /^[a-f0-9]{64}(\.start)?\.json$/;
 
 /** The run ids this checkout's mappings record; empty when unreadable. */
 async function mappedRuns(projectDir: string): Promise<string[]> {
   const runs: string[] = [];
-  for (const store of STORES) {
+  for (const store of ["native-runs", "native-authored-runs"] as const) {
     const root = join(projectDir, ".internal", store);
     const names = await readdir(root).catch(() => [] as string[]);
-    for (const name of names.filter((entry) => entry.endsWith(".json"))) {
+    for (const name of names.filter((entry) =>
+      store === "native-runs"
+        ? entry.endsWith(".json")
+        : AUTHORED_FILE.test(entry)
+    )) {
       const text = await readFile(join(root, name), "utf8").catch(() => "");
       if (text.length === 0 || text.length > MAPPING_BYTES) {
         continue;
       }
       try {
-        const run = recordRun(JSON.parse(text));
+        const run = recordRun(store, name, JSON.parse(text));
         if (run !== undefined) {
           runs.push(run);
         }

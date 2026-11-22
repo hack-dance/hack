@@ -73,7 +73,9 @@ test("live runs are named by the registered checkout that maps them, three at mo
     }))
   );
   await checkout(root, "wt", [run("9")]);
-  // A native-authored checkout's mapping names its run in the receipt.
+  // Native-authored checkouts write `{ scope, record }`: a ready record names its run
+  // in the receipt's review, a start record in its own review. Other files there
+  // (host-process records with a top-level `run`) are skipped.
   const authored = join(
     root,
     "authored",
@@ -82,13 +84,32 @@ test("live runs are named by the registered checkout that maps them, three at mo
     "native-authored-runs"
   );
   await mkdir(authored, { recursive: true });
+  const provenance = (id: string) => ({ review: { provenance: { run: id } } });
   await writeFile(
-    join(authored, "key.json"),
+    join(authored, `${"c".repeat(64)}.json`),
     JSON.stringify({
-      version: 2,
-      kind: "native-authored-project-run",
-      receipt: { run: run("8") },
+      scope: {},
+      record: {
+        version: 2,
+        kind: "native-authored-project-run",
+        receipt: provenance(run("8")),
+      },
     })
+  );
+  await writeFile(
+    join(authored, `${"d".repeat(64)}.start.json`),
+    JSON.stringify({
+      scope: {},
+      record: {
+        version: 2,
+        kind: "native-authored-project-start",
+        ...provenance(run("7")),
+      },
+    })
+  );
+  await writeFile(
+    join(authored, `${run("6")}.host-process-ready.json`),
+    JSON.stringify({ run: run("6") })
   );
   const all = registry([
     { ...apps[0], worktree: join(root, "wt") },
@@ -97,6 +118,14 @@ test("live runs are named by the registered checkout that maps them, three at mo
   ] as never);
   expect(await describeLivePoolRuns([run("8")], { registry: all })).toBe(
     "authored-app"
+  );
+  // A starting authored run, known only from its start record.
+  expect(await describeLivePoolRuns([run("7")], { registry: all })).toBe(
+    "authored-app"
+  );
+  // A host-process record is not a run mapping.
+  expect(await describeLivePoolRuns([run("6")], { registry: all })).toBe(
+    "1 live project run that no registered project's run mapping names"
   );
   expect(await describeLivePoolRuns([run("1")], { registry: all })).toBe(
     "one-app"

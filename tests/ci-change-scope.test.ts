@@ -14,6 +14,7 @@ import {
   touchesDocsSite,
 } from "../scripts/ci-change-scope.ts";
 import { fullPushPlan } from "../scripts/ci-pr-plan.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const repoRoot = resolve(import.meta.dir, "..");
@@ -379,7 +380,8 @@ describe("CI workflow wiring", () => {
     const root = await mkdtemp(join(tmpdir(), "candidate-summary-"));
     owned.push(root);
     const path = join(root, "summary.md");
-    const result = Bun.spawnSync(["bash", "-e", "-c", summary?.run ?? ""], {
+    const result = spawnSyncBounded(["bash", "-e", "-c", summary?.run ?? ""], {
+      timeout: 5000,
       env: {
         ...process.env,
         GITHUB_STEP_SUMMARY: path,

@@ -328,7 +328,9 @@ describe("CI workflow wiring", () => {
   test("the changes job exposes every scope output and checks out the merge parent", async () => {
     const changes = (await ciWorkflow()).jobs.changes;
     const keys = [...Object.keys(fullPushPlan()), "ci_evidence"].sort();
-    expect(Object.keys(changes?.outputs ?? {}).sort()).toEqual(keys);
+    expect(Object.keys(changes?.outputs ?? {}).sort()).toEqual(
+      [...keys, "guest_hosts"].sort()
+    );
     for (const key of keys) {
       expect(changes?.outputs?.[key]).toBe(
         `\${{ steps.scope.outputs.${key} }}`
@@ -367,8 +369,11 @@ describe("CI workflow wiring", () => {
     );
     const guest = jobs["guest-protocol"];
     expect(guest?.if).toBe(jobs["runtime-core"]?.if);
-    expect(guest?.strategy?.matrix?.os).toBe(
-      jobs["runtime-core"]?.strategy?.matrix?.os
+    expect(guest?.strategy?.matrix).toEqual({
+      include: "${{ fromJSON(needs.changes.outputs.guest_hosts) }}",
+    });
+    expect(jobs.changes?.outputs?.guest_hosts).toBe(
+      '${{ steps.scope.outputs.defer_macos == \'true\' && \'[{"os":"ubuntu-latest"}]\' || \'[{"os":"ubuntu-latest"},{"os":"macos-latest"}]\' }}'
     );
     expect(
       guest?.steps?.some((step) => step.name === "Test bounded guest protocol")

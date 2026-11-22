@@ -61,6 +61,7 @@ jobs:
       selection_mode: ${{ steps.scope.outputs.selection_mode }}
       ci_evidence: ${{ steps.scope.outputs.ci_evidence }}
       docker_suite: ${{ steps.scope.outputs.docker_suite }}
+      guest_hosts: ${{ steps.scope.outputs.defer_macos == 'true' && '[{"os":"ubuntu-latest"}]' || '[{"os":"ubuntu-latest"},{"os":"macos-latest"}]' }}
       defer_macos: ${{ steps.scope.outputs.defer_macos }}
       build_smoke: ${{ steps.scope.outputs.build_smoke }}
     steps:
@@ -989,7 +990,7 @@ jobs:
       contents: read
     strategy:
       matrix:
-        os: ${{ fromJSON(needs.changes.outputs.defer_macos == 'true' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest"]') }}
+        include: ${{ fromJSON(needs.changes.outputs.guest_hosts) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:

@@ -2096,6 +2096,14 @@ configuration must confirm. An amd64 archive is cached under its own address, ne
 reused for arm64, and imports only into a pool booted with translation; see
 [amd64 emulation with Rosetta 2](#amd64-emulation-with-rosetta-2).
 
+A completed load receipt bound to the requested registry pin lets
+`ensure-image` check the running guest by exact image ID and platform without
+a provider mutation lease or an archive read. An older pinned receipt without a
+verified registry binding checks the immutable manifest and config once to record
+that binding. A guest miss hashes the entire archive before taking the import
+lease and checks the guest again before upload. Explicit `load-image` verifies
+its input even if the guest already has that image.
+
 ### Mutable image tags
 
 An ordinary native start uses a verified tag resolution for up to 24 hours.
@@ -2109,12 +2117,12 @@ without contacting a registry. The runtime can also use a recorded resolution
 of any age when it cannot reach the registry. The command reports that fallback
 once. A tag without a usable recorded resolution refuses with
 `image_tag_offline_missing`. If its immutable archive is unavailable locally,
-the refusal is `image_archive_offline_missing`. An authoritative registry
-rejection remains a refusal.
+the refusal is `image_archive_offline_missing`. Invalid registry metadata is refused even when a previous resolution exists.
 
 `hack ps` and `hack status` show the recorded registry, source digest, selected
 image configuration IDs and last resolution time for the project's mutable
 tags. A running container keeps the image ID it was created with.
+
 
 ### Explicit writable development source
 

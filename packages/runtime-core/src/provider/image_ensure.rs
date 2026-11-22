@@ -6,7 +6,7 @@ use super::{
     image_tag_store::{self, TagSource},
     registry_image, state,
 };
-use crate::timings::{Step, measure_attributed};
+use crate::timings::{Step, measure, measure_attributed};
 use crate::{Candidate, CandidateError, reject_aliased_state};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -234,7 +234,7 @@ pub fn ensure(
 
 /// [`ensure`] under an explicit platform policy. `Native` is the default and admits only
 /// Linux arm64. An opted-in policy may select Linux amd64, which is cached separately and
-/// imported only into a pool booted with x86_64 translation (`image_load::load_for`).
+/// imported only into a pool booted with x86_64 translation (`image_load::load_cached`).
 pub fn ensure_with(
     candidate: &Candidate,
     reference: &str,
@@ -302,9 +302,15 @@ fn acquire_for_use(
     } else {
         registry_image::tagged(reference, policy)?;
     }
-    if import {
-        engine::info(candidate)?;
-    }
+    let observer = if import {
+        Some(measure(Step::ImageEnginePreflight, None, |_| -> Result<_, CandidateError> {
+            let observer = engine::Observer::connect(candidate)?;
+            observer.info()?;
+            Ok(observer)
+        })?)
+    } else {
+        None
+    };
     let tag = if reference.contains('@') {
         None
     } else {
@@ -349,18 +355,43 @@ fn acquire_for_use(
             }
             registry_image::acquire_with(reference, path, policy, limit, platform)
         },
-        |candidate, path, sha, image, platform| {
-            if tag.as_ref().is_some_and(|tag| tag.image_id != image) {
-                return Err(CandidateError::new(
-                    "image_tag_record",
-                    "Selected image configuration differs from the recorded tag resolution.",
-                ));
+        |candidate, path, receipt, reused| {
+            let config = tag.as_ref().map(|tag| tag.image_id.as_str());
+            if config.is_some_and(|id| id != receipt.image_id) {
+                return Err(refused("Cached image differs from the verified registry configuration."));
             }
-            if import {
-                image_load::load_for(candidate, path, sha, image, policy, platform).map(|_| ())
-            } else {
-                image_load::validate_file_for(path, sha, image, policy, platform).map(|_| ())
-            }
+            let Some(observer) = &observer else {
+                return image_load::validate_file_for(
+                    path, &receipt.archive_sha256, &receipt.image_id, policy, receipt.platform,
+                ).map(|_| ());
+            };
+            let archive = image_load::CachedArchive {
+                path,
+                sha: &receipt.archive_sha256,
+                image: &receipt.image_id,
+                bytes: receipt.archive_bytes,
+                pin: &receipt.reference,
+                platform: receipt.platform,
+                recorded_config: config,
+                require_present: offline,
+            };
+            image_load::load_cached(candidate, &archive, policy, observer, || {
+                if let Some(config) = config {
+                    return Ok(config.into());
+                }
+                if !reused {
+                    return Ok(receipt.image_id.clone());
+                }
+                if offline {
+                    return Err(no_archive());
+                }
+                measure(Step::ImagePinVerify, None, |_| {
+                    registry_image::resolve_pinned(
+                        &receipt.reference, policy, PlatformPolicy::exact(receipt.platform),
+                    ).map(|value| value.image_id)
+                })
+            }).map(|_| ())
+        },
         },
     )?;
     if !import {
@@ -398,7 +429,15 @@ fn ensure_pinned(
         platform,
         |_, _| panic!("must not resolve the published platform"),
         acquire,
-        load,
+        |candidate, path, receipt, _| {
+            load(
+                candidate,
+                path,
+                &receipt.archive_sha256,
+                &receipt.image_id,
+                receipt.platform,
+            )
+        },
     )
 }
 /// Ensure one pinned reference under `platform`. `resolve` names the platform the pinned
@@ -416,12 +455,12 @@ fn ensure_pinned_resolving(
         PlatformPolicy,
         u64,
     ) -> Result<registry_image::AcquiredImage, CandidateError>,
-    load: impl FnOnce(&Candidate, &Path, &str, &str, ImagePlatform) -> Result<(), CandidateError>,
+    load: impl FnOnce(&Candidate, &Path, &CacheReceipt, bool) -> Result<(), CandidateError>,
 ) -> Result<EnsuredImage, CandidateError> {
     let reference = canonical(reference)?;
     let root = candidate.state_root.join("artifacts/images");
     let _lock = state::Lock::acquire(&root)?;
-    let (count, bytes) = usage(candidate, &root)?;
+    let (count, bytes) = measure(Step::ImageCacheInventory, None, |_| usage(candidate, &root))?;
     // A cached entry is reused only for the platform the pinned image itself selects under
     // the policy. The first preference is published whenever its entry exists. A later
     // preference's entry (amd64 under `PreferNative`, perhaps left by an explicit `Amd64`
@@ -511,15 +550,8 @@ fn ensure_pinned_resolving(
         }
         (dir, receipt)
     };
-    // Even a warm cache goes through the loader's hash, ownership, validation receipt,
-    // and content-ID/architecture readback; cached metadata alone never proves import.
-    load(
-        candidate,
-        &dir.join("image.tar"),
-        &receipt.archive_sha256,
-        &receipt.image_id,
-        receipt.platform,
-    )?;
+    // The loader checks the owned guest even when the acquisition receipt is reusable.
+    load(candidate, &dir.join("image.tar"), &receipt, reused)?;
     Ok(EnsuredImage {
         pinned_reference: reference,
         image_id: receipt.image_id,
@@ -607,6 +639,32 @@ mod tests {
         assert_eq!(acquired.get(), 1);
         assert_eq!(loaded.get(), 2);
     }
+    #[test]
+    fn cache_receipt_at_the_wrong_platform_address_is_rejected() {
+        let f = Fixture::new();
+        let reference = pin(1);
+        ensure_pinned(
+            &f.1,
+            &reference,
+            &ImagePolicy::default(),
+            PlatformPolicy::Amd64,
+            acquire,
+            |_, _, _, _, _| Ok(()),
+        )
+        .unwrap();
+        let root = f.1.state_root.join("artifacts/images");
+        let correct = root.join(entry_key(&reference, ImagePlatform::LinuxAmd64));
+        let wrong = root.join(entry_key(&reference, ImagePlatform::LinuxArm64));
+        fs::rename(correct, &wrong).unwrap();
+        let failure = inspect_entry(&f.1, &wrong, &reference, ImagePlatform::LinuxArm64)
+            .err()
+            .unwrap();
+        assert_eq!(
+            failure.message,
+            "Image cache entry platform differs from its address."
+        );
+    }
+
     #[test]
     fn cache_count_budget_refuses_without_deleting_existing_archives() {
         let f = Fixture::new();
@@ -928,8 +986,8 @@ mod tests {
                 asked.set(Some(policy));
                 acquire(reference, path, policy, limit)
             },
-            |_, _, _, _, platform| {
-                assert_eq!(platform, ImagePlatform::LinuxArm64);
+            |_, _, receipt, _| {
+                assert_eq!(receipt.platform, ImagePlatform::LinuxArm64);
                 Ok(())
             },
         )
@@ -969,8 +1027,8 @@ mod tests {
             PlatformPolicy::PreferNative,
             |_, _| Ok(ImagePlatform::LinuxAmd64),
             |_, _, _, _| panic!("reuse complete archive"),
-            |_, _, _, _, platform| {
-                assert_eq!(platform, ImagePlatform::LinuxAmd64);
+            |_, _, receipt, _| {
+                assert_eq!(receipt.platform, ImagePlatform::LinuxAmd64);
                 Ok(())
             },
         )
@@ -986,7 +1044,7 @@ mod tests {
                 PlatformPolicy::PreferNative,
                 |_, _| Err(refused("synthetic resolution failure")),
                 |_, _, _, _| panic!("no acquire"),
-                |_, _, _, _, _| panic!("no load"),
+                |_, _, _, _| panic!("no load"),
             )
             .is_err()
         );

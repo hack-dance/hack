@@ -64,6 +64,22 @@ This slice implements the Rust contract and transport only. The TypeScript reade
 public `--timings`/`--json` integration, long-lived child transport wiring and measured
 command coverage follow separately. No CLI join or performance acceptance is claimed.
 
+For image acquisition, `image.engine.preflight` measures the initial guest
+check and `image.tag.resolve` measures mutable tag resolution.
+`image.cache.inventory` measures receipt and archive metadata checks across
+the local cache.
+`image.pin.verify` covers a pinned archive whose load receipt predates verified
+registry bindings.
+`image.import.connect` includes provider lease wait and engine authentication.
+`image.inspect` measures exact image readback, including guest ownership checks.
+`image.archive.digest` measures the standalone archive SHA-256 pass and is absent
+when a completed load receipt and live readback satisfy `ensure-image`.
+
+`image.ensure` and `image.cache` report `attrs.registry_requests`, the count
+of attempted HTTP sends in that runtime command, including registry
+authentication, retries and redirects. A fresh loaded selection reports zero.
+`image.tag.record` covers the local receipt read without network transfer.
+
 ## Growing the vocabulary
 
 A writer emits only the names shipped in its own build. A reader keeps names it

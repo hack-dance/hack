@@ -44,11 +44,14 @@ ResolveTag ==
 Readback ==
     /\ phase = "readback"
     /\ phase' = CASE receipt \in {"foreign", "wrong-pin"} -> "refused"
+                   [] chose = "offline" /\ guest # "present" -> "refused"
+                   [] chose # "none" /\ guest = "present" -> "ready"
                    [] receipt = "complete" /\ (guest = "present" \/ TrustReceipt) -> "ready"
                    [] receipt \in {"complete", "loading"} /\ guest \in {"wrong", "unknown"} -> "refused"
                    [] receipt = "loading" /\ guest = "absent" -> "refused"
                    [] OTHER -> "verify"
-    /\ observed' = (receipt = "complete" /\ guest = "present")
+    /\ observed' = (receipt \notin {"foreign", "wrong-pin"} /\
+                     (receipt = "complete" \/ chose # "none") /\ guest = "present")
     /\ UNCHANGED <<source, receipt, guest, archive, verified, uploaded, tagVars>>
 
 Verify ==
@@ -92,6 +95,7 @@ TagSafe ==
     /\ chose = "recorded" => mode = "normal" /\ recorded = "fresh"
     /\ chose = "registry" => online /\ mode \in {"normal", "refresh"}
     /\ chose = "offline" => recorded # "none" /\ (mode = "offline" \/ ~online)
+    /\ chose = "offline" => ~verified /\ ~uploaded
     /\ mode = "digest" => chose = "none"
     /\ phase = "ready" /\ source = "cached" /\ mode # "digest" => chose # "none"
 

@@ -29,6 +29,11 @@ steps! {
     ContainerStart => "container.start", ContainerStop => "container.stop",
     ContainerExec => "container.exec", ContainerRun => "container.run", ContainerInspect => "container.inspect",
     ImageEnsure => "image.ensure", ImageCache => "image.cache", ImageTagRecord => "image.tag.record",
+    ImageEnginePreflight => "image.engine.preflight", ImageTagResolve => "image.tag.resolve",
+    ImagePinVerify => "image.pin.verify",
+    ImageCacheInventory => "image.cache.inventory",
+    ImageArchiveDigest => "image.archive.digest", ImageImportConnect => "image.import.connect",
+    ImageInspect => "image.inspect",
     Truncated => "timings.truncated",
 }
 

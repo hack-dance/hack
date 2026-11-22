@@ -527,7 +527,7 @@ async function awaitPendingStartup(opts: {
     if (!waited) {
       // Say what this command waits for, once (HACK-2550).
       (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
-        `Waiting up to ${Math.ceil(waitMs / 1000)} s for an earlier start of this instance to end; a start whose native runtime stopped ends on its own within about 15 s.`
+        `Waiting up to ${Math.ceil(waitMs / 1000)} s for an earlier start of this instance to end; a start whose native runtime stopped ends on its own within about 11 s.`
       );
     }
     waited = true;

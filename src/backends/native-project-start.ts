@@ -226,7 +226,10 @@ import {
   monitorNativeServiceExits,
   type NativeServiceExit,
 } from "./native-service-exit-monitor.ts";
-import { watchNativeStartPool } from "./native-start-pool-watch.ts";
+import {
+  NATIVE_START_POOL_GRACE_MS,
+  watchNativeStartPool,
+} from "./native-start-pool-watch.ts";
 import { formatNativeStartupLogReport } from "./native-startup-logs.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
@@ -3472,13 +3475,17 @@ export async function startNativeProject(
   opts: NativeProjectStartOptions
 ): Promise<number> {
   let finish: (() => Promise<void>) | undefined;
+  // Ready and not stopping: the start has nothing left to finish on its own.
+  let serving = false;
   // A detached start whose pool boot has ended releases its marker and exits,
   // as a crash would, so the next up or down --recover need not wait for it
-  // (HACK-2550). A foreground start stays with the user's terminal.
+  // (HACK-2550). A ready one exits at once, a start still in progress after the
+  // grace. A foreground start stays with the user's terminal.
   const stopPoolWatch =
     (opts.watchPool ?? isNativeDetachedOwnerProcess())
       ? watchNativeStartPool({
           home: opts.runtime.home,
+          graceMs: () => (serving ? 0 : NATIVE_START_POOL_GRACE_MS),
           onEnded: async () => {
             await finish?.();
             (opts.exitOnPoolEnd ?? (() => process.exit(1)))();
@@ -3486,9 +3493,22 @@ export async function startNativeProject(
         })
       : undefined;
   try {
-    return await startNativeProjectAttempt(opts, async () => {
-      finish = await beginNativeProjectStartupObservation(opts.scope);
-    });
+    return await startNativeProjectAttempt(
+      {
+        ...opts,
+        onProgress: (event) => {
+          if (event.phase === "ready") {
+            serving = true;
+          } else if (event.phase === "stopping" || event.phase === "stopped") {
+            serving = false;
+          }
+          opts.onProgress?.(event);
+        },
+      },
+      async () => {
+        finish = await beginNativeProjectStartupObservation(opts.scope);
+      }
+    );
   } catch (error) {
     throw withStartupLockBlocker(error);
   } finally {

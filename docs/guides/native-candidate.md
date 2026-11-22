@@ -2482,8 +2482,10 @@ that is still retiring. If a recovery stopped the run but could not finish that 
 starts a stopped pool to finish it, with data kept.
 
 A detached start (`hack up -d`) whose pool stopped or booted again ends on its
-own about 15 seconds later, as a crash would, and the next `hack up` or `hack down
---recover` recovers its run. A command that finds an earlier start of the instance
+own, as a crash would: within about a second once it is ready (its services went
+with the guest), or about 11 seconds later while it is still starting, so it can
+finish or unwind first. The next `hack up` or `hack down --recover` waits for that
+process to be gone, then recovers its run. A command that finds an earlier start of the instance
 still running says so on stderr and waits up to two minutes for it.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0

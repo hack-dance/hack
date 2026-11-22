@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { scopedHackCommand } from "../src/lib/printed-shell-command.ts";
 import { psServiceState, renderPs } from "../src/ui/ps-output.ts";
 import { createTextOutput } from "../src/ui/text-output.ts";
 
@@ -71,4 +72,10 @@ test("replicas are named and multiple routes stay copyable", () => {
 
 test("running services without health probes keep their lifecycle state", () => {
   expect(psServiceState({ state: "running", health: "none" })).toBe("running");
+});
+
+test("recovery commands keep leading dashes inside their option value", () => {
+  expect(scopedHackCommand("down", { path: "-leading" })).toBe(
+    "hack down --path=-leading"
+  );
 });

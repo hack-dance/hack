@@ -270,6 +270,33 @@ async function allowPrerequisite(opts: {
   return false;
 }
 
+function dependencyNames(
+  service: Record<string, unknown>
+): readonly string[] | null {
+  // Fall back to every prerequisite for dependency forms outside this scan.
+  if (
+    [service.links, service.volumes_from, service.extends].some(
+      (value) => value !== undefined
+    ) ||
+    [service.network_mode, service.ipc, service.pid].some(
+      (value) => typeof value === "string" && value.startsWith("service:")
+    )
+  ) {
+    return null;
+  }
+  const dependencies = service.depends_on;
+  if (dependencies === undefined) {
+    return [];
+  }
+  if (
+    Array.isArray(dependencies) &&
+    dependencies.every((name) => typeof name === "string")
+  ) {
+    return dependencies;
+  }
+  return isRecord(dependencies) ? Object.keys(dependencies) : null;
+}
+
 async function selectedEnvironmentNames(
   composeFile: string,
   services: readonly string[]
@@ -283,26 +310,37 @@ async function selectedEnvironmentNames(
   } catch {
     return null;
   }
-  if (!(isRecord(model) && isRecord(model.services))) {
+  if (
+    !(isRecord(model) && isRecord(model.services)) ||
+    model.include !== undefined
+  ) {
     return null;
   }
   const names = new Set<string>();
-  for (const service of services) {
+  const visited = new Set<string>();
+  const pending = [...services];
+  for (
+    let service = pending.pop();
+    service !== undefined;
+    service = pending.pop()
+  ) {
+    if (visited.has(service)) {
+      continue;
+    }
+    visited.add(service);
     const definition = model.services[service];
-    if (
-      !isRecord(definition) ||
-      definition.extends !== undefined ||
-      model.include !== undefined
-    ) {
+    if (!isRecord(definition)) {
       return null;
     }
     const keys = composeServiceEnvironmentKeys(definition.environment);
-    if (!keys) {
+    const dependencies = dependencyNames(definition);
+    if (!(keys && dependencies)) {
       return null;
     }
     for (const key of keys) {
       names.add(key);
     }
+    pending.push(...dependencies);
   }
   return names;
 }

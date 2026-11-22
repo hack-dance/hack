@@ -1892,7 +1892,8 @@ Declare sign-in requirements in `.hack/hack.config.json`. A remote target's
 `requires` array names those requirements. Hack checks the default target's
 requirements before running Compose lifecycle hooks for `up`, `restart`, or
 `run`. When you select services explicitly, Hack checks the remotes whose
-mapped env names match an `environment` entry on a selected service. With
+mapped env names match an `environment` entry on a selected service or its
+Compose dependencies. With
 no service selection, Hack checks every default remote. When Hack cannot
 read the selected service declarations, it checks every default remote.
 Doctor runs preset checks and shows each declared login command. It reports

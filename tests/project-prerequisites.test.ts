@@ -268,7 +268,7 @@ test("explicit service selection checks only remotes with matching environment k
     const composeFile = join(root, "compose.yaml");
     await writeFile(
       composeFile,
-      "services:\n  api:\n    environment: [DB_HOST]\n  worker:\n    environment: [OTHER_HOST]\n"
+      "services:\n  api:\n    depends_on: [prepare]\n  prepare:\n    depends_on:\n      migrate:\n        condition: service_completed_successfully\n  migrate:\n    environment: [DB_HOST]\n  worker:\n    environment: [OTHER_HOST]\n"
     );
     const cfg = parseProjectConfigRecord(
       {

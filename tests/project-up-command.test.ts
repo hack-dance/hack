@@ -37,7 +37,7 @@ afterEach(async () => {
   }
 });
 
-test("up without .hack prints a user message without stack trace", async () => {
+test("up without .hack prints a project blocker without a stack trace", async () => {
   if (!tempDir) {
     throw new Error("Missing temp directory");
   }
@@ -47,12 +47,20 @@ test("up without .hack prints a user message without stack trace", async () => {
   expect(result.exitCode).toBe(1);
 
   const combinedOutput = `${result.stdout}\n${result.stderr}`;
-  expect(combinedOutput).toContain(
-    "No .hack/ (or legacy .dev/) found. Run: hack init"
+  expect(result.stderr).toBe(
+    `! project  no project found at the selected path · use a configured project path (${JSON.stringify(tempDir)})\n`
   );
   expect(combinedOutput).not.toContain("at requireProjectContext");
   expect(combinedOutput).not.toContain("at async handleUp");
   expect(combinedOutput).not.toContain("ERROR Error:");
+});
+
+test("up names an unregistered project without suggesting init", async () => {
+  const result = await runCliWithCapturedOutput(["up", "--project", "absent"]);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("selected project not registered");
+  expect(result.stderr).toContain("absent");
+  expect(result.stderr).not.toContain("hack init");
 });
 
 test("up still reports unrelated usage errors", async () => {

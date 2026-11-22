@@ -106,8 +106,10 @@ export async function restartNativeProject(opts: {
        * confirm a stopped graph from fresh observations.
        */
       readonly preparedRetry: boolean;
+      /** The restart's stop request: preflight work stops with it. */
+      readonly signal: AbortSignal;
     }
-  ) => Promise<void>;
+  ) => Promise<unknown>;
   readonly down: () => Promise<unknown>;
   readonly start: (options: {
     run: NativeProjectRun;
@@ -214,6 +216,7 @@ async function restartUnderLock(
       await opts.preflight(run, {
         cleanedRetry: intent?.phase === "cleaned",
         preparedRetry: intent?.phase === "prepared",
+        signal: opts.stop.signal,
       });
     } catch (error) {
       // Preflight stops nothing; a request it lost to this interrupt (for

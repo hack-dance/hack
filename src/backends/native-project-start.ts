@@ -83,9 +83,12 @@ import {
   buildNativeProjectImages,
   invokeNativeBuild,
   type NativeBuildRequest,
+  type NativeVerifiedBuild,
   nativeBuildsEnabled,
   nativeRebuildRequested,
   nativeServiceActive,
+  pinVerifiedNativeBuilds,
+  reclaimNativeBuildImagesAfterRebuild,
   refuseEmulatedBuilds,
   refuseManagedSecretBuildArguments,
 } from "./native-project-builds.ts";
@@ -757,6 +760,34 @@ export function prepareNativeProjectServices(
 export const NATIVE_SHARED_SOURCE_REFUSAL =
   "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 or sharedSource in the native machine settings to share this exact project, including ignored files. Grant that share and run the command again.";
 const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+/**
+ * Pin every active build service: to the image a restart preflight verified, or to
+ * what the runtime returns for its build (an unchanged build key reuses its image).
+ * Returns the pinned services; retained images never stand in for them (HACK-2533).
+ */
+async function resolveNativeBuildImages(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly branch: string | null | undefined;
+  readonly profiles: readonly string[];
+  readonly builds: ReadonlyMap<string, NativeBuildRequest>;
+  readonly specs: Record<string, Record<string, unknown>>;
+  readonly verified: ReadonlyMap<string, NativeVerifiedBuild> | undefined;
+  readonly signal: AbortSignal;
+  readonly invoke: typeof invokeNativeBuild | undefined;
+  readonly onBuilt: () => void;
+}): Promise<ReadonlySet<string>> {
+  const remaining = pinVerifiedNativeBuilds(opts);
+  const built = await buildNativeProjectImages({
+    ...opts,
+    builds: remaining,
+    rebuild: nativeRebuildRequested(),
+  });
+  return new Set([
+    ...built,
+    ...[...opts.builds.keys()].filter((service) => !remaining.has(service)),
+  ]);
+}
 const PINNED_IMAGE_REFERENCE = /^[^@\s]+@sha256:[a-f0-9]{64}$/;
 /** Acquire one image and accept only a confirmed content ID for the requested policy. */
 async function ensureNativeProjectImage(opts: {
@@ -2127,6 +2158,11 @@ function reportStopped(opts: {
 }
 
 type NativeProjectStartOptions = {
+  /**
+   * Build images a restart preflight verified before it stopped the old graph:
+   * those services are pinned as they are and never built again (HACK-2533).
+   */
+  readonly verifiedBuildImages?: ReadonlyMap<string, NativeVerifiedBuild>;
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
@@ -2816,24 +2852,30 @@ async function startNativeProjectAttempt(
       observed: resumed,
     });
     progress({ phase: "images" });
-    await buildNativeProjectImages({
+    // A restore asks the runtime too: its image is reused only under an unchanged
+    // build key, so a Dockerfile edited after `down` is built (HACK-2533).
+    let rebuilt = false;
+    const built = await resolveNativeBuildImages({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       branch: opts.scope.branch,
       profiles,
       builds,
       specs,
-      retainedImages,
-      restore: Boolean(restore),
-      rebuild: nativeRebuildRequested(),
+      verified: opts.verifiedBuildImages,
       signal: controller.signal,
       invoke: deps.build,
+      onBuilt: () => {
+        rebuilt = true;
+      },
     });
     await pinNativeProjectImages({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       specs,
-      retainedImages,
+      retainedImages: new Map(
+        [...retainedImages].filter(([service]) => !built.has(service))
+      ),
       canonicalImages,
       profiles,
       amd64Emulation: input.amd64Emulation,
@@ -3193,6 +3235,14 @@ async function startNativeProjectAttempt(
                     httpsPort: servedHttpsPort(https, opts.https),
                   })
                 );
+                // Superseded build images go once the new ones run; this never
+                // fails or delays the start (HACK-2533).
+                void reclaimNativeBuildImagesAfterRebuild({
+                  rebuilt,
+                  runtime: opts.runtime,
+                  projectRoot: opts.scope.projectRoot,
+                  invoke: deps.invoke,
+                });
               },
             });
           } catch (error) {

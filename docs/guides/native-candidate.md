@@ -483,15 +483,47 @@ With it:
   `runtime build-image` (below), and its filtered output streams to your terminal.
   Every service with that build is then pinned to the built content ID, so review,
   readiness and restore treat it like an image service.
-- An existing image for the same build inputs is reused without building. Set
-  `HACK_NATIVE_REBUILD=1` to build again; base-image tags then resolve again too.
-  Edits to other files in the context do not trigger a rebuild, as with Compose.
-- Restoring an unchanged retained run uses the retained images and never builds; if
-  one is missing, `up` refuses and asks you to start fresh. `hack restart` also never
-  builds: it reuses the running or retained image, or refuses before stopping anything.
+- An existing image for the same build inputs is reused without building. The build
+  inputs include every file and directory in the build context that the effective
+  ignore file (`<Dockerfile>.dockerignore`, else the context's `.dockerignore`) lets
+  the build read: paths, file contents, permission bits and symlink targets. Editing a
+  copied file builds a new image; editing an ignored file does not. An ignore file with
+  syntax Hack does not reproduce exactly (character classes or `\` escapes) counts as
+  excluding nothing: that never misses a change, but it can cause extra rebuilds, and
+  it can refuse the build when an otherwise ignored entry is unreadable, special or
+  pushes the context over its bounds. A context with more than
+  200,000 included entries or 4 GiB of included file content, deeper than 256 path
+  components, or whose included paths total more than 32 MiB, or with an unreadable
+  entry or a socket, FIFO or device the ignore file does not exclude, refuses.
+- Hack remembers each context file's size, timestamps and inode in a private cache, so
+  an unchanged context is not read again. The cache misses only a change that keeps the
+  size, inode, modification time and change time identical, which needs a deliberate
+  clock or timestamp manipulation; set `HACK_NATIVE_REBUILD=1` after one.
+- Only those inputs count. A changed network response (a download in a `RUN` step),
+  the contents of a cache mount (`RUN --mount=type=cache`), anything outside the build
+  context and a base-image tag that moved do not trigger a rebuild: a reused image keeps
+  the base-image digests it was built from. Set `HACK_NATIVE_REBUILD=1` on `up` or
+  `hack restart` to build every image again; base-image tags then resolve again too.
+- When an image is actually built, BuildKit reads a private copy of the included
+  context, made and checked against the build key right before it runs, so edits during
+  a build never reach the image. The copy keeps hard links as links and gives every
+  entry one fixed modification time, so it holds nothing the key does not describe. A file that changed between computing the key and
+  making the copy refuses; run `up` again. The copy costs time and disk only when a
+  build runs (about 2.7 s for 20,000 files and 632 MiB on a loaded Linux host); reusing
+  an image makes no copy.
+- Every `up` asks the runtime for each build, including an `up` that restores a run
+  stopped with `hack down`. The retained image is reused only while its build inputs
+  are unchanged (Dockerfile, ignore file, target, args, build context); an edited
+  Dockerfile or copied file builds a new image and the run's containers are recreated
+  from it, keeping named volumes when the stopped run can be restored.
+- `hack restart` resolves every build before it stops anything: a failed build, or a
+  rebuilt image the retained run could not take, refuses while the current graph keeps
+  running. It then stops the graph and starts it again on exactly the images it
+  resolved, rebuilt ones included; nothing is built after the stop, and a build
+  service added or changed in the meantime refuses instead.
 - "Unchanged" means the same Compose bytes. A run that mounts no project source and
   uses no dependency cache still restores after its Compose file was edited and put
-  back, or after any project file was touched; build-context edits do not rebuild it.
+  back, or after any project file was touched that its builds do not read.
   Its review then differs only in the project source inventory (file sizes and
   modification times), which such a run never reads, and restore keeps the retained
   ownership plan, images and data.
@@ -1474,8 +1506,11 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   the client prints values, terminal control characters are removed, lines are cut at
   16 KiB and output stops after 4 MiB.
 - `missing` reuses a verified image for the same build key without running the client;
-  `rebuild` always builds. The key covers the Dockerfile and `.dockerignore` bytes,
-  target, arguments and versions, not the context's other files (as with Compose).
+  `rebuild` always builds. The key (version 2) covers the Dockerfile and
+  `.dockerignore` bytes, target, arguments and versions, and every context entry the
+  ignore file lets the build read: its path, kind, permission bits, contents, symlink
+  target and hard-link group, as described with `HACK_NATIVE_BUILDS` above. It does
+  not cover network responses, cache mounts or a moved base-image tag.
 - The runtime must have network egress and the isolated build network that a runtime
   started by this version sets up. An older runtime refuses with
   `native_build_runtime_restart`: stop it and start it again.
@@ -1489,11 +1524,15 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   cache is pruned to 8 GiB. The cache holds only build steps; pruning never removes
   images, containers or volumes.
 
-`runtime reclaim-build-images --json` removes build images that a newer build of the
-same key replaced. It keeps every image a build receipt names as current, every image
-that any retained run's saved state mentions, every image a container still uses (the
-engine refuses those), and every image whose ownership labels are not exactly this
-runtime's. Each removal deletes that one image only, never its untagged parent
+`runtime reclaim-build-images --json` removes build images that newer builds
+replaced. For each build declaration (project root and branch, context, Dockerfile and
+target) it keeps the image of the most recently built or reused key (`current`) and of
+the one before it (`previous`, for a quick revert). It also keeps every image that any
+retained run's saved state mentions, every image a container still uses (the engine
+refuses those), every image of a receipt written before this rule, and every image
+whose ownership labels are not exactly this runtime's. An `up` that built an image runs
+it with `--best-effort` once the project is ready: that form never fails, reports a
+refusal as `skipped`, and never delays or fails the start. Each removal deletes that one image only, never its untagged parent
 images. It refuses while a build runs, and removes nothing if it cannot read all
 saved run state. The report lists removed images and why each other one was kept.
 

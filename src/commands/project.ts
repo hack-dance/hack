@@ -7852,6 +7852,7 @@ async function runUpCommand({
   const cfg = await readProjectConfig(project);
   const choices = await wholeProjectRemoteChoices(
     project,
+    cfg,
     args.positionals.services,
     args.options.use
   );
@@ -10654,6 +10655,10 @@ async function runRestartCommand({
     return 1;
   }
   reportLifecycleProgress({ service: null, phase: "stopping" });
+  const running = await runtimeRemoteEnv(
+    { project, cfg, baseProjectName, branch },
+    effectiveEnvName
+  );
   const downPhase = await runRestartDownPhase({
     project,
     cfg,
@@ -10663,7 +10668,7 @@ async function runRestartCommand({
     lifecycleComposeProject,
     profiles,
     branch,
-    envForCompose: lifecycleEnv,
+    envForCompose: teardownHookEnv(lifecycleEnv, running.choices),
     routeStdoutToStderr: json,
     preserveComposeRuntime: true,
   });

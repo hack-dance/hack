@@ -29,7 +29,7 @@ import {
   applyRemoteEnv,
   type EffectiveRemote,
   inactiveRemoteServices,
-  prepareProjectRemoteChoices,
+  prepareRemoteChoices,
   remoteSelectionLabels,
   remoteServiceTargets,
   runningRemoteTarget,
@@ -327,13 +327,20 @@ export function warnMissingRemoteEnv(remote: string, name: string): void {
 
 export async function wholeProjectRemoteChoices(
   project: ProjectContext,
+  cfg: ProjectConfig,
   services: readonly string[],
   use: string | undefined
 ) {
   if (services.length && use !== undefined) {
     throw new CliUsageError("--use currently requires whole-project up.");
   }
-  return services.length ? [] : await prepareProjectRemoteChoices(project, use);
+  return services.length
+    ? []
+    : await prepareRemoteChoices({
+        projectDir: project.projectDir,
+        defaults: cfg.prerequisites?.config?.selected ?? [],
+        use,
+      });
 }
 
 export function remotePrerequisites(

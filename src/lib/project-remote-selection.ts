@@ -9,7 +9,6 @@ import {
 import { ensureHackGitInfoExclude } from "./git-info-exclude.ts";
 import { isRecord } from "./guards.ts";
 import { canPrompt } from "./interactivity.ts";
-import { type ProjectContext, readProjectConfig } from "./project.ts";
 import { formatProjectRemoteAddress } from "./project-remote-status.ts";
 import type { SelectedProjectRemote } from "./project-remotes-config.ts";
 import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
@@ -237,31 +236,6 @@ export async function saveRemoteChoices(opts: {
         }
       );
     },
-  });
-}
-
-export async function prepareProjectRemoteChoices(
-  project: ProjectContext,
-  use: string | undefined
-): Promise<readonly EffectiveRemote[]> {
-  const { prerequisites } = await readProjectConfig(project);
-  if (prerequisites?.error) {
-    throw prerequisites.error;
-  }
-  const defaults = prerequisites?.config?.selected ?? [];
-  if (
-    process.env.HACK_RUNTIME_BACKEND === "native" &&
-    (defaults.length || use !== undefined)
-  ) {
-    throw new HackCliError({
-      code: "E_NATIVE_PROJECT_UNSUPPORTED",
-      message: "Remote selection currently requires the Compose backend.",
-    });
-  }
-  return await prepareRemoteChoices({
-    projectDir: project.projectDir,
-    defaults,
-    use,
   });
 }
 

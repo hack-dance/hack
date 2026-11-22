@@ -2301,8 +2301,8 @@ function nativeComposeHookCommand(
     if (options.detach) {
       flags.push("--detach");
     }
-    if (options.overlay != null) {
-      flags.push("--env", options.overlay);
+    if (options.overlay !== undefined) {
+      flags.push("--env", options.overlay ?? "base");
     }
     if (options.profiles?.length) {
       flags.push("--profile", options.profiles.join(","));

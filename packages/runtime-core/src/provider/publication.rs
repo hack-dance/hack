@@ -78,23 +78,39 @@ struct ChildLaunch {
 /// Under the provider lease, stage the exact child before sending authorization.
 /// An empty or incomplete message never grants the child authority to exec.
 #[cfg(target_os = "macos")]
+#[allow(
+    dead_code,
+    reason = "The staged launcher is enabled by the per-service publisher."
+)]
 pub(super) fn launch_child(
     candidate: &Candidate,
     options: &Launch<'_>,
     check: impl FnOnce() -> Result<(), CandidateError>,
 ) -> Result<std::process::Child, CandidateError> {
     let mut command = Command::new(std::env::current_exe().map_err(state::io)?);
+    command.arg("--internal-publication-child");
+    launch_child_with(candidate, options, check, command)
+}
+
+#[cfg(target_os = "macos")]
+fn launch_child_with(
+    candidate: &Candidate,
+    options: &Launch<'_>,
+    check: impl FnOnce() -> Result<(), CandidateError>,
+    mut command: Command,
+) -> Result<std::process::Child, CandidateError> {
     command
-        .arg("--internal-publication-child")
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut child = super::process::spawn_child(&mut command).map_err(state::io)?;
+    let mut committed = false;
     let result = (|| {
         let mut gate = child.stdin.take().ok_or_else(error)?;
         let process = identity::observe(child.id() as i32)?;
         let entry = stage_launch(candidate, options, process)?;
+        committed = true;
         let request = ChildLaunch {
             entry,
             upstream: options.upstream.into(),
@@ -110,6 +126,15 @@ pub(super) fn launch_child(
     })();
     if let Err(error) = result {
         child.wait().map_err(state::io)?;
+        // EOF has settled this incarnation. Retire only its exact committed
+        // entry while the caller still holds the publication lease.
+        if committed {
+            release(
+                candidate,
+                options.owner,
+                Some((options.run, options.reservation)),
+            )?;
+        }
         return Err(error);
     }
     Ok(child)
@@ -1791,6 +1816,37 @@ mod tests {
         fs::write(&path, serde_json::to_vec(entries).unwrap()).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
     }
+    #[cfg(feature = "native-stream-relay")]
+    #[test]
+    fn launch_refused_after_commit_reaps_and_retires_the_exact_entry() {
+        let (candidate, entry) = fixture();
+        let lease = state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
+        let options = Launch {
+            owner: &entry.owner,
+            run: &entry.run,
+            reservation: &entry.reservation,
+            slot: entry.slot,
+            port: None,
+            hostnames: &[],
+            upstream: Path::new("/unused"),
+        };
+        let refused = launch_child_with(
+            &candidate,
+            &options,
+            || {
+                let current = load(&candidate, options.owner).unwrap();
+                assert!(current[options.reservation].binary.as_ref().unwrap().ready);
+                Err(CandidateError::new("cancelled", "fixture"))
+            },
+            Command::new("/bin/cat"),
+        );
+        assert!(matches!(refused, Err(error) if error.code == "cancelled"));
+        assert!(load(&candidate, options.owner).unwrap().is_empty());
+        assert!(!directory(&entry).exists());
+        drop(lease);
+        fs::remove_dir_all(candidate.checkout).unwrap();
+    }
+
     #[test]
     fn cleanup_recovers_complete_single_step_journals_without_launching() {
         for phase in [

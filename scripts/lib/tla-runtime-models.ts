@@ -2426,6 +2426,46 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "per-service-publication",
+    module: "PerServicePublication",
+    states: 622,
+    invariant: "Safe",
+    action: "Record",
+    fields: [
+      'recorded = {"first"}',
+      'child = [first |-> "gated", second |-> "absent"]',
+    ],
+    alternativeWitnesses: [
+      {
+        action: "Record",
+        fields: [
+          'recorded = {"second"}',
+          'child = [first |-> "absent", second |-> "gated"]',
+        ],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "bind-before-commit",
+        negative: true,
+        action: "Bind",
+        fields: [
+          'child = [first |-> "uncommitted-bind", second |-> "absent"]',
+          "recorded = {}",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Bind",
+            fields: [
+              'child = [first |-> "absent", second |-> "uncommitted-bind"]',
+              "recorded = {}",
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
     // Loopback TCP publication of Compose `ports`: one listener per host
     // port, no forwarding to a replaced container, no recovery of a live
     // owner, no listener after acknowledged stop; see tests/models/tla/README.md.
@@ -3313,6 +3353,17 @@ const contracts: readonly ModelContract[] = [
         invariant: "NeverHits",
         ...statKeyedHits({ withCtime: true, stale: false }),
       },
+    ],
+  },
+  {
+    name: "native-image-batch",
+    module: "ImageBatch",
+    states: 3233,
+    invariant: "Safe",
+    action: "Import",
+    fields: [
+      'phase = <<"import", "import", "queued", "queued">>',
+      "verified = {1, 2}",
     ],
   },
   {

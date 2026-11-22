@@ -167,7 +167,7 @@ impl Publishers {
             candidate,
             &receipt.run,
             &mut self.probe_generations,
-            true,
+            Some(deadline),
             &BTreeSet::new(),
             &|| check_deadline(signals, deadline),
         )?;
@@ -176,7 +176,15 @@ impl Publishers {
         // `started` readiness can finish while an image healthcheck is still
         // starting; wait for those endpoints within the same startup deadline.
         let reserved = retry_pending_endpoint(
-            || super::super::bridges::reserve_publications(candidate, receipt, slots),
+            || {
+                super::super::bridges::reserve_publications(
+                    candidate,
+                    receipt,
+                    slots,
+                    deadline,
+                    &|| check_deadline(signals, deadline),
+                )
+            },
             || {
                 std::thread::sleep(PENDING_ENDPOINT_POLL);
                 check_deadline(signals, deadline)
@@ -202,7 +210,9 @@ impl Publishers {
             .iter()
             .map(|(selected, _)| (selected.slot, selected.assignment.reservation.as_str()))
             .collect::<Vec<_>>();
-        super::super::bridges::start_bridges(candidate, &receipt.run, &batch)?;
+        super::super::bridges::start_bridges(candidate, &receipt.run, &batch, deadline, &|| {
+            check_deadline(signals, deadline)
+        })?;
         // Every child is owned (and watched) as soon as it exists; they take the
         // provider lease in turn while this owner observes all of them together.
         let first = self.children.len();
@@ -431,7 +441,7 @@ impl Publishers {
             candidate,
             run,
             &mut self.probe_generations,
-            false,
+            None,
             &excluded,
             &check,
         )?;

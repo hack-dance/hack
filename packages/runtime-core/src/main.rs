@@ -117,7 +117,9 @@ Usage:
   hack-local runtime admit-image --reference <[registry/]repository[:tag][@sha256:digest]|sha256:image-id> --json [IMAGE-POLICY]
   hack-local runtime build-image --request <private-0600-request.json> --json
   hack-local runtime reclaim-build-images [--best-effort] --json
-  hack-local runtime ensure-image --reference <[registry/]repository[:tag]|[registry/]repository@sha256:digest> [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY]
+  hack-local runtime ensure-image --reference <[registry/]repository[:tag]|[registry/]repository@sha256:digest|sha256:image-id> [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY]
+  hack-local runtime cache-image --reference REF [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY]
+  hack-local runtime image-tag-status --json [REFERENCE...]
   hack-local runtime up ... --amd64-emulation [--json]
   hack-local runtime resolve-image --reference <[registry/]repository[:tag]> --json [IMAGE-POLICY]
   hack-local runtime fetch-image --reference <[registry/]repository@sha256:digest> --archive <new-flat-image.tar> [--json] [IMAGE-POLICY]
@@ -1046,21 +1048,17 @@ fn run() -> Result<(), CandidateError> {
         }
         [
             "runtime",
-            "ensure-image",
+            command @ ("ensure-image" | "cache-image"),
             "--reference",
             reference,
             "--json",
             policy @ ..,
         ] => {
-            print_json(&hack_runtime_core::provider::image_ensure::ensure(
-                &discover_candidate(&requested)?,
-                reference,
-                &image_policy(policy)?,
-            )?)?;
+            image_for_command(&requested, command, reference, "native", policy)?;
         }
         [
             "runtime",
-            "ensure-image",
+            command @ ("ensure-image" | "cache-image"),
             "--reference",
             reference,
             "--emulation",
@@ -1068,19 +1066,24 @@ fn run() -> Result<(), CandidateError> {
             "--json",
             policy @ ..,
         ] => {
-            let emulation =
-                hack_runtime_core::provider::image_platform::PlatformPolicy::parse(emulation)
-                    .ok_or_else(|| {
-                        CandidateError::new(
-                            "invalid_arguments",
-                            "Use runtime ensure-image --reference REF [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY].",
-                        )
-                    })?;
-            print_json(&hack_runtime_core::provider::image_ensure::ensure_with(
+            image_for_command(&requested, command, reference, emulation, policy)?;
+        }
+        [
+            "runtime",
+            "image-tag-status",
+            "--present",
+            "--json",
+            references @ ..,
+        ] => {
+            print_json(&hack_runtime_core::provider::image_ensure::present_tags(
                 &discover_candidate(&requested)?,
-                reference,
-                &image_policy(policy)?,
-                emulation,
+                references,
+            )?)?;
+        }
+        ["runtime", "image-tag-status", "--json", references @ ..] => {
+            print_json(&hack_runtime_core::provider::image_ensure::tag_status(
+                &discover_candidate(&requested)?,
+                references,
             )?)?;
         }
         ["runtime", "build-image", "--request", request, "--json"] => {
@@ -1715,6 +1718,31 @@ fn print_sync_event(
     println!("{}", serde_json::to_string(&serde_json::json!({ "sync": receipt, "watching": watching, "total_millis": total_millis, "native_rescan": native_rescan }))
         .map_err(|_| CandidateError::new("serialization_failed", "Cannot encode source acknowledgement."))?);
     Ok(())
+}
+
+fn image_for_command(
+    requested: &Path,
+    command: &str,
+    reference: &str,
+    emulation: &str,
+    flags: &[&str],
+) -> Result<(), CandidateError> {
+    use hack_runtime_core::provider::{image_ensure, image_platform::PlatformPolicy};
+
+    let emulation = PlatformPolicy::parse(emulation).ok_or_else(|| {
+        CandidateError::new(
+            "invalid_arguments",
+            "Use emulation native, prefer-native or amd64.",
+        )
+    })?;
+    let candidate = discover_candidate(requested)?;
+    let policy = image_policy(flags)?;
+    let result = if command == "cache-image" {
+        image_ensure::cache(&candidate, reference, &policy, emulation)?
+    } else {
+        image_ensure::ensure_with(&candidate, reference, &policy, emulation)?
+    };
+    print_json(&result)
 }
 
 fn image_policy(

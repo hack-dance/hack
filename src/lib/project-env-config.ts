@@ -8610,7 +8610,7 @@ async function assertComposeOverlaysStaySelected(opts: {
  * names of `KEY=value` / `KEY` list entries). Null when the entry has a shape
  * this check cannot read.
  */
-function composeServiceEnvironmentKeys(
+export function composeServiceEnvironmentKeys(
   environment: unknown
 ): ReadonlySet<string> | null {
   if (environment === undefined || environment === null) {

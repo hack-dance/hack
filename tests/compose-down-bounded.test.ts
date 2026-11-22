@@ -1067,6 +1067,32 @@ describe("compose down leftover-cleanup retry outcome (HACK-2547)", () => {
     expect(leftoverNetParsed.error.message).toContain("hack ps --json");
     expect(leftoverNetParsed.error.message).toContain("hack down");
 
+    // Retry exits 0 with a surviving one-off container holding the network -> exit 0.
+    const oneOffRow = `${JSON.stringify({
+      ID: "oneshot1",
+      Service: "api",
+      State: "running",
+      Labels: `com.docker.compose.oneoff=True,com.docker.compose.project.working_dir=${canonicalProjectDir}`,
+    })}\n`;
+    await writeFile(fixture.dockerLogPath, "");
+    await fixture.setDockerConfig({
+      downExitCode: 0,
+      secondDownExitCode: 0,
+      psJson: `${leftoverRow}${oneOffRow}`,
+      psJsonAfterRm: oneOffRow,
+      networks: ["retry-fail_default"],
+    });
+    const oneOffRetryRun = await runCli({
+      args: ["down", "--path", fixture.root, "--json"],
+      cwd: fixture.root,
+      homeDir: fixture.homeDir,
+      binDir: fixture.binDir,
+    });
+    expect(oneOffRetryRun.exitCode).toBe(0);
+    expect(
+      (JSON.parse(oneOffRetryRun.stdout) as { readonly ok: boolean }).ok
+    ).toBe(true);
+
     // Retry exits 0 with containers and project networks gone -> ok: true.
     await writeFile(fixture.dockerLogPath, "");
     await fixture.setDockerConfig({

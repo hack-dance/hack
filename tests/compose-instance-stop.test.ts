@@ -420,3 +420,57 @@ test("retry success observation is incomplete while a project network remains or
     );
   }
 });
+
+test("remaining network is ignored when held by a one-off or foreign container, while unknown network stays incomplete", async () => {
+  const { root, projectDir } = await checkout();
+  const oneOff = container({
+    id: "run1",
+    service: "web",
+    state: "running",
+    workingDir: projectDir,
+    oneOff: true,
+  });
+  expect(
+    classifyDownObservation({
+      listing: { ok: true, containers: [oneOff] },
+      networks: { ok: true, networks: ["demo_default"] },
+      projectDir,
+    })
+  ).toEqual({ complete: true });
+
+  expect(
+    classifyDownObservation({
+      listing: { ok: true, containers: [oneOff] },
+      networks: { ok: false, reason: "docker network ls timed out" },
+      projectDir,
+    })
+  ).toEqual({
+    complete: false,
+    running: [],
+    foreign: [],
+    networksUnknownReason: "docker network ls timed out",
+  });
+
+  const other = join(root, "other", ".hack");
+  expect(
+    classifyDownObservation({
+      listing: {
+        ok: true,
+        containers: [
+          container({
+            id: "f1",
+            service: "worker",
+            state: "running",
+            workingDir: other,
+          }),
+        ],
+      },
+      networks: { ok: true, networks: ["demo_default"] },
+      projectDir,
+    })
+  ).toEqual({
+    complete: false,
+    running: [],
+    foreign: [{ service: "worker", workingDir: other }],
+  });
+});

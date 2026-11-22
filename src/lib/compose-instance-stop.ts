@@ -323,9 +323,16 @@ export function classifyDownObservation(opts: {
       container.oneOff !== true &&
       (opts.includeStopped === true || !NOT_RUNNING_STATES.has(container.state))
   );
+  const networkHeldByAllowed = opts.listing.containers.some(
+    (container) =>
+      container.oneOff === true ||
+      containerOwnership({ container, projectDir: opts.projectDir }) ===
+        "foreign"
+  );
+  const countedNetworks = networkHeldByAllowed ? [] : net.names;
   if (
     mayRun.length === 0 &&
-    net.names.length === 0 &&
+    countedNetworks.length === 0 &&
     net.unknownReason === undefined
   ) {
     return { complete: true };
@@ -350,7 +357,10 @@ export function classifyDownObservation(opts: {
     complete: false,
     running: [...running].sort((a, b) => a.localeCompare(b)),
     foreign,
-    ...netFields,
+    ...(countedNetworks.length > 0 ? { networks: countedNetworks } : {}),
+    ...(net.unknownReason === undefined
+      ? {}
+      : { networksUnknownReason: net.unknownReason }),
   };
 }
 

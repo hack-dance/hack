@@ -47,15 +47,19 @@
 \*                     it never satisfies.
 \*   FinalizeStopped - `hack down --recover` on a stopped pool also starts it to
 \*                     finish a pending finalization.
+\*   FinishAnyBoot   - a completed recovery's archive may run in any later boot
+\*                     (HACK-2550, seen on a real VM: z338, z282); FALSE: only in
+\*                     the boot the recovery ran in (`finBoot`), as before.
+\* finBoot   - the boot in which the graph recovery completed.
 EXTENDS Naturals
 CONSTANTS Fixed, Strict, ByHand, OtherBoots, RecoveryFaults, MaxBoot, MaxFaults,
-          Https, OwnerRetires, ArchiveWorks, FinalizeStopped
+          Https, OwnerRetires, ArchiveWorks, FinalizeStopped, FinishAnyBoot
 
 VARIABLES pool, boot, run, runBoot, owner, pub, faults, recovering, https,
-          httpsBoot, fin
+          httpsBoot, fin, finBoot
 vars == <<pool, boot, run, runBoot, owner, pub, faults, recovering, https,
-          httpsBoot, fin>>
-H == <<https, httpsBoot, fin>>
+          httpsBoot, fin, finBoot>>
+H == <<https, httpsBoot, fin, finBoot>>
 
 TypeOK ==
     /\ pool \in {"running", "stopped", "crashed"}
@@ -64,12 +68,12 @@ TypeOK ==
     /\ owner \in {"none", "live", "dead"}
     /\ pub \in BOOLEAN /\ faults \in 0..MaxFaults /\ recovering \in BOOLEAN
     /\ https \in {"none", "live", "records"} /\ httpsBoot \in 0..MaxBoot
-    /\ fin \in BOOLEAN
+    /\ fin \in BOOLEAN /\ finBoot \in 0..MaxBoot
 
 Init ==
     /\ pool = "stopped" /\ boot = 0 /\ run = "none" /\ runBoot = 0
     /\ owner = "none" /\ pub = FALSE /\ faults = 0 /\ recovering = FALSE
-    /\ https = "none" /\ httpsBoot = 0 /\ fin = FALSE
+    /\ https = "none" /\ httpsBoot = 0 /\ fin = FALSE /\ finBoot = 0
 
 CanBoot == boot < MaxBoot
 \* Recovery of a dead owner's ready run in the current boot `b`.
@@ -106,7 +110,7 @@ OwnerNotices ==
 OwnerRetire ==
     /\ OwnerRetires /\ https = "live" /\ (pool /= "running" \/ httpsBoot /= boot)
     /\ https' = "records"
-    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering, httpsBoot, fin>>
+    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering, httpsBoot, fin, finBoot>>
 \* A boot by something else (another project's `hack up`, or `runtime up` by hand).
 \* With ByHand it is a user command of this project; otherwise a bounded fault.
 RuntimeUp ==
@@ -137,7 +141,7 @@ Start ==
           /\ https' = IF Https THEN "live" ELSE "none"
           /\ httpsBoot' = IF Https THEN b ELSE 0
     /\ pool' = "running" /\ run' = "ready" /\ owner' = "live" /\ pub' = TRUE
-    /\ UNCHANGED <<faults, recovering, fin>>
+    /\ UNCHANGED <<faults, recovering, fin, finBoot>>
 
 \* Recovery of a dead owner's ready run on a running pool (the existing
 \* `hack down --recover`, also plain `hack down` once the frontend is gone):
@@ -146,7 +150,7 @@ Start ==
 RecoverRunning ==
     /\ pool = "running" /\ run = "ready" /\ owner = "dead" /\ CanRecover(boot)
     /\ run' = "retained" /\ pub' = FALSE /\ owner' = "none" /\ recovering' = FALSE
-    /\ fin' = (https /= "none")
+    /\ fin' = (https /= "none") /\ finBoot' = boot
     /\ UNCHANGED <<pool, boot, runBoot, faults, https, httpsBoot>>
 
 \* The frontend finalization of a recovered run releases the HTTPS lease: through
@@ -156,9 +160,21 @@ RecoverRunning ==
 Finalize ==
     /\ pool = "running" /\ run = "retained" /\ fin /\ ~pub
     /\ \/ https = "live" /\ httpsBoot = boot
-       \/ https = "records" /\ ArchiveWorks
+       \/ https = "records" /\ ArchiveWorks /\ finBoot = boot
        \/ https = "none"
-    /\ https' = "none" /\ httpsBoot' = 0 /\ fin' = FALSE
+    /\ https' = "none" /\ httpsBoot' = 0 /\ fin' = FALSE /\ finBoot' = 0
+    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering>>
+
+\* A completed recovery whose archive failed (the port still in TIME_WAIT, or the
+\* start crashed) and whose boot has since ended: the graph is already stopped, so
+\* what is left is host-side and proven from current observations alone (owner
+\* gone, socket refused, port free, resources absent), whatever boot the recovery
+\* ran in (`HttpsArchiveGuard`, `bridges::cleanup::read_completed_recovery`).
+FinishCompleted ==
+    /\ FinishAnyBoot
+    /\ pool = "running" /\ run = "retained" /\ fin /\ ~pub
+    /\ https = "records" /\ ArchiveWorks /\ finBoot /= boot
+    /\ https' = "none" /\ httpsBoot' = 0 /\ fin' = FALSE /\ finBoot' = 0
     /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering>>
 
 \* HACK-2456: with the pool stopped, `hack up` / `hack down --recover` first send
@@ -179,12 +195,12 @@ Stop ==
     /\ pool = "running" /\ run = "ready" /\ owner = "live" /\ runBoot = boot
     /\ run' = "retained" /\ pub' = FALSE /\ owner' = "none"
     /\ https' = "none" /\ httpsBoot' = 0
-    /\ UNCHANGED <<pool, boot, runBoot, faults, recovering, fin>>
+    /\ UNCHANGED <<pool, boot, runBoot, faults, recovering, fin, finBoot>>
 
 \* `hack up` = Start, or (Fixed) recovery of a dead owner's run then Start on
 \* a later command; `hack down` = Stop, RecoverRunning or (Fixed) RecoverStopped.
 Up == Start \/ RecoverStopped
-Down == Stop \/ RecoverRunning \/ RecoverStopped \/ Finalize
+Down == Stop \/ RecoverRunning \/ RecoverStopped \/ Finalize \/ FinishCompleted
 User == Up \/ Down \/ PoolRecover \/ (ByHand /\ RuntimeUp)
 
 Next == RuntimeDown \/ Crash \/ OwnerCrash \/ OwnerNotices \/ OwnerRetire \/ RuntimeUp

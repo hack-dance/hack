@@ -32,6 +32,7 @@ import {
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
+const UP_BUILD_REFUSAL = /^Native foreground up cannot build /;
 const DISPLAY_IDENTITY = /^[A-Za-z0-9._:/@-]{1,512}$/;
 const TAG_REFERENCE = /^[A-Za-z0-9._:/-]{1,512}$/;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
@@ -111,18 +112,6 @@ export async function pullNativeProjectImages(opts: {
     invoke,
   });
 
-  const builds = admitNativeProjectBuilds({
-    services: Object.fromEntries(specs),
-    projectRoot: opts.project.projectRoot,
-    composeFile: opts.project.composeFile,
-    enabled: true,
-  });
-  const bases = await nativeBuildBases({
-    projectRoot: opts.project.projectRoot,
-    runtime: opts.runtime,
-    builds,
-    invoke,
-  });
   const images = specs.flatMap(([name, spec]) =>
     typeof spec.image === "string"
       ? [
@@ -133,14 +122,11 @@ export async function pullNativeProjectImages(opts: {
         ]
       : []
   );
-  for (const base of bases) {
-    images.push({ image: base, policy: undefined });
-  }
-  for (const { image, policy } of images) {
+  const pull = async ({ image, policy }: (typeof images)[number]) => {
     const reference = canonical.get(image) ?? image;
     const selection = `${reference}\n${policy ?? "native"}`;
     if (seen.has(selection)) {
-      continue;
+      return;
     }
     const pin = pins.get(reference);
     const args = nativeEnsureImageArgs(reference, policy);
@@ -200,6 +186,35 @@ export async function pullNativeProjectImages(opts: {
     }
     seen.add(selection);
     results.push(result);
+  };
+  for (const image of images) {
+    await pull(image);
+  }
+  let bases: readonly string[];
+  try {
+    const builds = admitNativeProjectBuilds({
+      services: Object.fromEntries(specs),
+      projectRoot: opts.project.projectRoot,
+      composeFile: opts.project.composeFile,
+      enabled: true,
+    });
+    bases = await nativeBuildBases({
+      projectRoot: opts.project.projectRoot,
+      runtime: opts.runtime,
+      builds,
+      invoke,
+    });
+  } catch (error) {
+    const detail =
+      error instanceof Error
+        ? error.message
+        : "Build bases could not be inspected.";
+    throw new ClosedCliError(
+      `Native pull could not confirm build bases: ${detail.replace(UP_BUILD_REFUSAL, "")}`
+    );
+  }
+  for (const base of bases) {
+    await pull({ image: base, policy: undefined });
   }
   return results;
 }

@@ -152,7 +152,7 @@ liveness/reachability controls have their own documented assumptions.
 | [native-pool-stop](../../tests/models/tla/native-pool-stop/PoolStop.tla) | 210 | 10 |
 | [start-graph](../../tests/models/tla/start-graph/COVERAGE.md) | 1,656,372 + 81,534 two-boot | 10 |
 | [probe-readiness](../../tests/models/tla/probe-readiness/ProbeReadiness.tla) | 175,757 | 7 |
-| [native-build-alias](../../tests/models/tla/native-build-alias/BuildAlias.tla) | 9 | 4 |
+| [native-build-alias](../../tests/models/tla/native-build-alias/BuildAlias.tla) | 23 | 5 |
 | [native-build-retention](../../tests/models/tla/native-build-retention/BuildRetention.tla) | 6,181 | 4 |
 | [runtime-service](../../tests/models/tla/runtime-service/RuntimeService.tla) | 1,006,849 | 11 |
 | [shared-helper-instance](../../tests/models/tla/shared-helper-instance/Instance.tla) | 7,649 | 11 |

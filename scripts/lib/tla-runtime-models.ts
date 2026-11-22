@@ -2812,11 +2812,18 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-build-alias",
     module: "BuildAlias",
-    states: 9,
+    states: 23,
     invariant: "BaseSurvives",
     action: "Cleanup",
     fields: ["base = FALSE", "alias = FALSE"],
     additionalControls: [
+      {
+        name: "old-order",
+        negative: true,
+        invariant: "CanRecover",
+        action: "Refuse",
+        fields: ['phase = "blocked"', "keeper = FALSE", "alias = TRUE"],
+      },
       {
         name: "unsafe-remote",
         negative: true,

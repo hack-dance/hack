@@ -554,7 +554,7 @@ mod tests {
             plan(
                 &[serde_json::json!({"Id": "bad"})],
                 &owner,
-                &current.builds,
+                &current,
                 &referenced
             )
             .is_err()

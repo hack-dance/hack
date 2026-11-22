@@ -4,6 +4,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import {
+  reportNativeImageDownloadWait,
+  reportNativeImageNotice,
+} from "../lib/native-detached-up.ts";
 import { requireWrappableNativeProcesses } from "../lib/native-process-wrappers.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
@@ -355,6 +359,12 @@ async function pinRestartImages(opts: {
     managedSecretValues: opts.managedSecretValues ?? [],
     rebuild: nativeRebuildRequested(),
     signal: opts.signal ?? new AbortController().signal,
+    onNotice: (line) => {
+      if (!reportNativeImageNotice(line)) {
+        process.stderr.write(`${line}\n`);
+      }
+    },
+    onImageWait: reportNativeImageDownloadWait,
     invoke: opts.build,
   });
   for (const [name, spec] of Object.entries(opts.specs)) {

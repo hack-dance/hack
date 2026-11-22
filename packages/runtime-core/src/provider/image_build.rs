@@ -272,20 +272,8 @@ pub(super) trait BuildPool {
     fn lease(&self) -> Result<(Self::Lease, PoolIdentity), CandidateError>;
     /// Inspect one image by content ID or tag; `None` when the engine reports it absent.
     fn inspect(&self, lease: &Self::Lease, image: &str) -> Result<Option<Value>, CandidateError>;
-    /// Resolve one base image to its pinned manifest. Network only; no lease is held.
-    /// Returns, with an error, by `deadline` or soon after `canceled` reports true.
-    fn resolve(
-        &self,
-        base: &BaseImage,
-        deadline: Instant,
-        canceled: &dyn Fn() -> bool,
-    ) -> Result<BuildBase, CandidateError>;
-    fn tag_base(&self, _: &Self::Lease, _: &str, _: &str) -> Result<(), CandidateError> {
-        unreachable!("only live builds use aliases")
-    }
-    fn untag_base(&self, _: &Self::Lease, _: &str) -> Result<(), CandidateError> {
-        unreachable!("only live builds use aliases")
-    }
+    fn tag_base(&self, lease: &Self::Lease, id: &str, tag: &str) -> Result<(), CandidateError>;
+    fn untag_base(&self, lease: &Self::Lease, tag: &str) -> Result<(), CandidateError>;
     /// The verified builder executable.
     fn builder(&self) -> Result<PathBuf, CandidateError>;
     /// Where the client's filtered output goes.
@@ -898,33 +886,12 @@ fn reuse_legacy<P: BuildPool>(
     Ok(outcome)
 }
 
-/// Run one build operation end to end. See the module documentation for the protocol.
-/// `canceled` reports a pending cancellation request; it is checked before each
-/// unleased step, during base resolution and while the client runs. The time budget
-/// starts here: base resolution and the client share it.
-#[cfg(test)]
-pub(super) fn run<P: BuildPool>(
-    candidate: &Candidate,
-    pool: &P,
-    inputs: &Inputs,
-    canceled: &dyn Fn() -> bool,
-) -> Result<BuildOutcome, CandidateError> {
-    run_with_bases(
-        candidate,
-        pool,
-        inputs,
-        canceled,
-        None,
-        Instant::now() + inputs.timeout,
-    )
-}
-
 fn run_with_bases<P: BuildPool>(
     candidate: &Candidate,
     pool: &P,
     inputs: &Inputs,
     canceled: &dyn Fn() -> bool,
-    selected: Option<&BTreeMap<String, BuildBase>>,
+    selected: &BTreeMap<String, BuildBase>,
     deadline: Instant,
 ) -> Result<BuildOutcome, CandidateError> {
     let canceled_early = || {
@@ -1001,51 +968,17 @@ fn run_with_bases<P: BuildPool>(
             state::write(&receipt_path, &dead)?;
         }
     }
-    if selected.is_some() {
-        aliases::sweep_stranded(&root, pool, &lease, &identity, &alias_path);
-        aliases::sweep(pool, &lease, &identity, &alias_path)?;
-    }
+    aliases::sweep_stranded(&root, pool, &lease, &identity, &alias_path);
+    aliases::sweep(pool, &lease, &identity, &alias_path)?;
     let previous_bytes = previous.as_ref().and_then(|receipt| receipt.image_bytes);
     drop(lease);
     // Snapshots other attempts in this namespace stranded when they were killed.
     remove_stranded_snapshots(&directory);
 
-    // Step 2, unleased: resolve every base image to a pinned manifest.
-    let pins = if let Some(selected) = selected {
-        selected
-            .iter()
-            .map(|(name, base)| (name.clone(), base.pinned_reference.clone()))
-            .collect()
-    } else {
-        let mut pins = BTreeMap::new();
-        for base in &inputs.images {
-            if canceled() {
-                return Err(canceled_early());
-            }
-            if Instant::now() >= deadline {
-                return Err(expired_early());
-            }
-            let resolved = pool.resolve(base, deadline, canceled).map_err(|error| {
-                if error.code.starts_with("registry_") && error.cause_code.is_some() {
-                    error.with_build_base_reference(base.reference.canonical())
-                } else {
-                    error
-                }
-            })?;
-            if !image_id(&resolved.source_digest)
-                || !resolved
-                    .pinned_reference
-                    .ends_with(&format!("@{}", resolved.source_digest))
-            {
-                return Err(refusal(
-                    "native_build_base_image",
-                    "A build base image did not resolve to a pinned manifest.",
-                ));
-            }
-            pins.insert(base.context_name.clone(), resolved.pinned_reference);
-        }
-        pins
-    };
+    let pins: BTreeMap<_, _> = selected
+        .iter()
+        .map(|(name, base)| (name.clone(), base.pinned_reference.clone()))
+        .collect();
     let builder = pool.builder()?;
     if canceled() {
         return Err(canceled_early());
@@ -1106,21 +1039,16 @@ fn run_with_bases<P: BuildPool>(
         image_bytes: previous_bytes,
         base_pins: pins.clone(),
         base_image_ids: selected
-            .into_iter()
-            .flat_map(|bases| bases.values().map(|base| base.image_id.clone()))
+            .values()
+            .map(|base| base.image_id.clone())
             .collect(),
         declaration: Some(inputs.declaration.clone()),
         // Kept from the last verified image of this key until this attempt verifies.
         sequence: previous.as_ref().and_then(|receipt| receipt.sequence),
     };
     state::write(&receipt_path, &receipt)?;
-    let (aliases, worker_pins) = if let Some(bases) = selected {
-        let (aliases, contexts) =
-            aliases::Aliases::prepare(pool, &lease, &identity, alias_path, bases)?;
-        (Some(aliases), contexts)
-    } else {
-        (None, pins.clone())
-    };
+    let (aliases, worker_pins) =
+        aliases::Aliases::prepare(pool, &lease, &identity, alias_path, selected)?;
     drop(lease);
 
     // Step 4, unleased: run the client in its own process group.
@@ -1808,19 +1736,6 @@ impl<'a> BuildPool for LivePool<'a> {
             Err(error) => Err(error),
         }
     }
-    fn resolve(
-        &self,
-        base: &BaseImage,
-        deadline: Instant,
-        canceled: &dyn Fn() -> bool,
-    ) -> Result<BuildBase, CandidateError> {
-        let reference = base.reference.clone();
-        interruptible(
-            move || registry_image::resolve_build_base(&reference, deadline),
-            deadline,
-            canceled,
-        )
-    }
     fn tag_base(
         &self,
         lease: &Self::Lease,
@@ -1899,44 +1814,6 @@ pub(super) fn prune_build_cache(
     })
 }
 
-/// Run a blocking, effect-free network step on its own thread and wait for it until
-/// `deadline` or a cancellation request. An abandoned step ends by its own deadline;
-/// its result is discarded and it changes no local state.
-fn interruptible<T: Send + 'static>(
-    step: impl FnOnce() -> Result<T, CandidateError> + Send + 'static,
-    deadline: Instant,
-    canceled: &dyn Fn() -> bool,
-) -> Result<T, CandidateError> {
-    let (sender, result) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = sender.send(step());
-    });
-    loop {
-        match result.recv_timeout(POLL) {
-            Ok(outcome) => return outcome,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(refusal(
-                    "native_build_base_image",
-                    "Base-image resolution ended without a result.",
-                ));
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-        }
-        if canceled() {
-            return Err(refusal(
-                "native_build_canceled",
-                "The image build was canceled before the build client started; no image was adopted.",
-            ));
-        }
-        if Instant::now() >= deadline {
-            return Err(refusal(
-                "native_build_timeout",
-                "The image build exceeded its time budget before the build client started; no image was adopted.",
-            ));
-        }
-    }
-}
-
 fn key_with_bases(
     key: &str,
     selected: &BTreeMap<String, BuildBase>,
@@ -1951,6 +1828,80 @@ fn key_with_bases(
     serde_json::to_vec(&(key, pins))
         .map(|encoded| sha256_hex(&encoded))
         .map_err(|_| invalid("Cannot encode the build key."))
+}
+
+type EnsuredBase = (BuildBase, Option<super::image_ensure::EnsuredTag>);
+
+fn ensure_build_base(
+    candidate: &Candidate,
+    reference: &str,
+    policy: &super::image_policy::ImagePolicy,
+) -> Result<EnsuredBase, CandidateError> {
+    let ensured = super::image_ensure::ensure(candidate, reference, policy)?;
+    let proof = super::image_ensure::recorded_proof(
+        candidate,
+        &ensured.pinned_reference,
+        super::image_platform::PlatformPolicy::Native,
+    )?
+    .ok_or_else(|| {
+        refusal(
+            "native_build_base_image",
+            "The verified base proof is missing.",
+        )
+    })?;
+    let resolved = proof.verified_build_base(&ensured.pinned_reference, policy.archive_limit)?;
+    if resolved.image_id != ensured.image_id {
+        return Err(refusal(
+            "native_build_base_image",
+            "The build base proof differs from the loaded image.",
+        ));
+    }
+    Ok((resolved, ensured.tag_resolution))
+}
+
+struct BaseSelections {
+    selected: BTreeMap<String, BuildBase>,
+    fallbacks: Vec<super::image_ensure::EnsuredTag>,
+    selections: BTreeMap<String, String>,
+}
+
+fn acquire_bases(
+    inputs: &Inputs,
+    prior_pins: &BTreeMap<String, String>,
+    mut policy: super::image_policy::ImagePolicy,
+    mut ensure: impl FnMut(
+        &str,
+        &super::image_policy::ImagePolicy,
+    ) -> Result<EnsuredBase, CandidateError>,
+    deadline: Instant,
+) -> Result<BaseSelections, CandidateError> {
+    let mut selected = BTreeMap::new();
+    let mut fallbacks = Vec::new();
+    let mut selections = BTreeMap::new();
+    for base in &inputs.images {
+        if Instant::now() >= deadline {
+            return Err(late_stop(false));
+        }
+        let reference = base.reference.canonical();
+        policy.command_image_pin = prior_pins
+            .get(&reference)
+            .map(|pin| registry_image::pinned_syntax(pin).map(|(canonical, _)| canonical))
+            .transpose()?;
+        let (resolved, tag) = ensure(&reference, &policy)
+            .map_err(|error| error.with_build_base_reference(reference.clone()))?;
+        if let Some(tag) = tag
+            && tag.source == super::image_tag_store::TagSource::Offline
+        {
+            fallbacks.push(tag);
+        }
+        selections.insert(reference, resolved.pinned_reference.clone());
+        selected.insert(base.context_name.clone(), resolved);
+    }
+    Ok(BaseSelections {
+        selected,
+        fallbacks,
+        selections,
+    })
 }
 
 /// `runtime build-image --request <private-file>`: build or reuse one native image.
@@ -1987,56 +1938,28 @@ pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome
             },
         )?;
     drop(lease);
-    let mut selected = BTreeMap::new();
-    let mut fallbacks = Vec::new();
-    let mut selections = BTreeMap::new();
-    for base in &inputs.images {
-        if Instant::now() >= deadline {
-            return Err(late_stop(false));
-        }
-        let reference = base.reference.canonical();
-        policy.command_image_pin = prior_pins
-            .get(&reference)
-            .map(|pin| registry_image::pinned_syntax(pin).map(|(canonical, _)| canonical))
-            .transpose()?;
-        let ensured = match super::image_ensure::ensure(candidate, &reference, &policy) {
-            Ok(ensured) => ensured,
-            Err(error) => {
-                if error.code.starts_with("registry_")
-                    && let Some(outcome) = reuse_legacy(candidate, &pool, &inputs)?
-                {
-                    return Ok(outcome);
-                }
-                return Err(error.with_build_base_reference(reference));
+    let BaseSelections {
+        selected,
+        fallbacks,
+        selections,
+    } = match acquire_bases(
+        &inputs,
+        &prior_pins,
+        policy,
+        |reference, policy| ensure_build_base(candidate, reference, policy),
+        deadline,
+    ) {
+        Ok(bases) => bases,
+        Err(error) => {
+            if Instant::now() < deadline
+                && error.code.starts_with("registry_")
+                && let Some(outcome) = reuse_legacy(candidate, &pool, &inputs)?
+            {
+                return Ok(outcome);
             }
-        };
-        let proof = super::image_ensure::recorded_proof(
-            candidate,
-            &ensured.pinned_reference,
-            super::image_platform::PlatformPolicy::Native,
-        )?
-        .ok_or_else(|| {
-            refusal(
-                "native_build_base_image",
-                "The verified base proof is missing.",
-            )
-        })?;
-        let resolved =
-            proof.verified_build_base(&ensured.pinned_reference, policy.archive_limit)?;
-        if resolved.image_id != ensured.image_id {
-            return Err(refusal(
-                "native_build_base_image",
-                "The build base proof differs from the loaded image.",
-            ));
+            return Err(error);
         }
-        if let Some(tag) = ensured.tag_resolution
-            && tag.source == super::image_tag_store::TagSource::Offline
-        {
-            fallbacks.push(tag);
-        }
-        selections.insert(reference, resolved.pinned_reference.clone());
-        selected.insert(base.context_name.clone(), resolved);
-    }
+    };
     // Acquisition keeps the default signal dispositions, like ensure-image.
     // Exit releases its locks and the next cache writer recovers private
     // staging. No BuildKit client, temporary base alias or build receipt
@@ -2044,14 +1967,7 @@ pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome
     let _signals = CancelSignals::install()?;
     let canceled = || CANCEL_REQUESTED.load(Ordering::Acquire);
     inputs.key = key_with_bases(&inputs.key, &selected)?;
-    let mut outcome = run_with_bases(
-        candidate,
-        &pool,
-        &inputs,
-        &canceled,
-        Some(&selected),
-        deadline,
-    )?;
+    let mut outcome = run_with_bases(candidate, &pool, &inputs, &canceled, &selected, deadline)?;
     outcome.base_fallbacks = fallbacks;
     outcome.base_selections = selections;
     Ok(outcome)

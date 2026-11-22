@@ -1874,13 +1874,32 @@ Not covered:
 
 ## Native build base aliases
 
-`native-build-alias/BuildAlias.tla` models one loaded base and one attempt.
-`Record` represents the cache tag and the durable alias journal written before
-`Tag`. The build-key lock is inherited by the builder. `Crash` can leave an alias
-and a live child; `Cleanup` is admitted only after the lock is free, or by the
-live owner after the solver is done. The source allowlist contains only that
-attempt's local alias. The negative controls remove the cache reference, allow
-remote resolution, or sweep while the child still holds the lock. The model
-does not simulate Docker's transport, key uniqueness, the registry, or disk
-durability. The Rust alias sweep regression and the classic-worker wire count
-cover separate implementation boundaries.
+`native-build-alias/BuildAlias.tla` models one loaded base, one attempt and a
+possible restart in a different runtime incarnation. The positive run visits 23
+states. The `old-order` control reaches `blocked`, where every retry sees the
+same missing keeper and refuses. The other controls allow deleting the last tag,
+registry fallback, or sweeping while the child holds the key lock.
+
+| Model action | Code or external step |
+| --- | --- |
+| `Record` | `Aliases::prepare` verifies the keeper and writes the alias journal |
+| `Tag` | `Aliases::prepare` installs the attempt alias after journal publication |
+| `Solve` | `run_with_bases` starts the client with the key lock |
+| `ResolveMissing` | Negative control for a registry request forbidden by the builder source policy |
+| `Finish` | The supervised client exits and the build can publish a verified receipt |
+| `Crash` | The coordinator exits before alias cleanup |
+| `ChildExits` | The surviving client exits and releases its inherited lock |
+| `LoseKeeper` | An external deletion removes the keeper tag and leaves the alias |
+| `RestoreKeeper` | `aliases::sweep` verifies the alias ID and restores its keeper |
+| `Cleanup` | `Aliases::drop` or `aliases::sweep_stranded` untags and removes the journal after the worker releases the key |
+| `Reuse` | `run_with_bases` returns a verified receipt before the alias sweep |
+| `Refuse`, `Retry` | Old sweep runs before reuse and leaves the same journal on every refusal |
+| `ChangeIncarnation` | The guest is replaced after the attempt ends |
+| `DiscardJournal` | `aliases::sweep` discards the journal without using its tags in the replacement guest |
+
+The verified flag abstracts a receipt already available to a retry. The model
+leaves out Docker transport, filesystem durability, and tag identity races
+outside the provider lease. The Rust regressions exercise journal and tag
+recovery, and the classic worker wire count exercises registry isolation.
+
+[Build alias state chart](native-build-alias/build-alias.svg)

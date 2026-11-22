@@ -16,6 +16,7 @@ import {
   buildNativeProjectImages,
   invokeNativeBuild,
   type NativeBuildRequest,
+  nativeBuildBases,
   nativeBuildIdentity,
   nativeBuildsDisabledRefusal,
   nativeBuildsEnabled,
@@ -795,4 +796,99 @@ test("a native home without the image builder says so and how to add it", async 
   expect(message).not.toContain("could not build");
   expect(message).not.toContain(VALUE);
   expect(written.join("")).toBe("resolving base images\n");
+});
+
+test("build base scans deduplicate references and remove the private request", async () => {
+  const projectRoot = await root();
+  const files: string[] = [];
+  const alpine = "docker.io/library/alpine:3.20";
+  expect(
+    await nativeBuildBases({
+      projectRoot,
+      runtime,
+      builds: new Map([
+        ["one", request()],
+        ["two", request({})],
+      ]),
+      invoke: async ({ args }) => {
+        const path = args[3];
+        if (!path) {
+          throw new Error("Expected a build request path");
+        }
+        files.push(path);
+        expect(args.slice(4)).toEqual(["--bases", "--json"]);
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+        return files.length === 1
+          ? [alpine]
+          : [alpine, "docker.io/library/busybox:latest"];
+      },
+    })
+  ).toEqual([alpine, "docker.io/library/busybox:latest"]);
+  expect(files).toHaveLength(2);
+  expect(await Bun.file(files[0] ?? "").exists()).toBe(false);
+});
+
+test("later builds receive command base pins and each fallback notice is reported once", async () => {
+  const projectRoot = await root();
+  const reference = "docker.io/library/alpine:3.20";
+  const pin = `docker.io/library/alpine@${IMAGE}`;
+  const notice = "Registry unavailable, using the loaded build base.";
+  const notices: string[] = [];
+  let calls = 0;
+  await buildNativeProjectImages({
+    runtime,
+    projectRoot,
+    branch: null,
+    profiles: [],
+    builds: new Map([
+      ["one", request()],
+      ["two", request({})],
+    ]),
+    specs: { one: { build: "app" }, two: { build: "app" } },
+    rebuild: false,
+    imageTagMode: "refresh",
+    signal: new AbortController().signal,
+    onNotice: (line) => notices.push(line),
+    invoke: async ({ requestFile }) => {
+      const body = JSON.parse(await readFile(requestFile, "utf8"));
+      expect(body.image_tag_mode).toBe("refresh");
+      expect(body.command_base_pins).toEqual(
+        calls === 0 ? undefined : { [reference]: pin }
+      );
+      calls += 1;
+      return {
+        imageId: IMAGE,
+        buildKey: KEY,
+        reused: true,
+        baseSelections: { [reference]: pin },
+        baseFallbacks: [notice],
+      };
+    },
+  });
+  expect(calls).toBe(2);
+  expect(notices).toEqual([notice]);
+});
+
+test("build output decodes lock progress and verified fallback notices", async () => {
+  const reference = "docker.io/library/alpine:3.20";
+  const fake = await fakeRuntime(
+    `printf 'hack.image-wait:begin ${reference}\\nhack.image-wait:end ${reference}\\n' >&2
+     printf '{"image_id":"${IMAGE}","build_key":"${KEY}","reused":true,"reused_legacy_key":true,"base_fallbacks":[{"reference":"${reference}","resolved_at_unix_seconds":0},{"reference":"invalid reference","resolved_at_unix_seconds":0}]}'`
+  );
+  const waiting: (string | null)[] = [];
+  const built = await invokeNativeBuild({
+    runtime: fake as never,
+    cwd: fake.home,
+    requestFile: join(fake.home, "request.json"),
+    onImageWait: (value) => waiting.push(value),
+    write: () => {
+      throw new Error("Expected the image-wait markers to be consumed");
+    },
+  });
+  expect(waiting).toEqual([reference, null, null]);
+  expect(built.baseFallbacks).toHaveLength(2);
+  expect(built.baseFallbacks?.[0]).toContain(reference);
+  expect(built.baseFallbacks?.[1]).toContain(
+    "unchanged context and Dockerfile"
+  );
 });

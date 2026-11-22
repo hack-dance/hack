@@ -727,6 +727,8 @@ export async function resolveNativeRestartBuilds(opts: {
   /** `HACK_NATIVE_REBUILD=1`: every build runs again, as on `up`. */
   readonly rebuild: boolean;
   readonly signal: AbortSignal;
+  readonly onNotice?: (line: string) => void;
+  readonly onImageWait?: (reference: string | null) => void;
   readonly invoke?: typeof invokeNativeBuild;
 }): Promise<ReadonlyMap<string, NativeVerifiedBuild>> {
   refuseManagedSecretBuildArguments({
@@ -984,14 +986,7 @@ const BUILD_SOURCE_POLICY: Readonly<Record<string, string>> = {
     "Remove VOLUME from the Dockerfile and its base images; declare volumes in Compose instead.",
 };
 
-/**
- * Name the services of a failed `runtime build-image`. A refusal from the build
- * source policy says so and what to change; a home without the image builder
- * says so and how to add it, naming this install's own command; any other
- * runtime failure keeps its message. The native code is kept for callers that
- * classify failures. Cancellation and closed client errors carry no
- * service-specific cause and pass through unchanged.
- */
+/** Scan the admitted Dockerfiles and return distinct canonical base references. */
 export async function nativeBuildBases(opts: {
   readonly projectRoot: string;
   readonly runtime: NativeRuntimeSelection;
@@ -1055,6 +1050,14 @@ export async function nativeBuildBases(opts: {
   }
 }
 
+/**
+ * Name the services of a failed `runtime build-image`. A refusal from the build
+ * source policy says so and what to change; a home without the image builder
+ * says so and how to add it, naming this install's own command; any other
+ * runtime failure keeps its message. The native code is kept for callers that
+ * classify failures. Cancellation and closed client errors carry no
+ * service-specific cause and pass through unchanged.
+ */
 function nameBuildFailure(
   services: readonly string[],
   error: unknown

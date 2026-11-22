@@ -1,0 +1,31 @@
+---
+title: BuildAlias · local base recovery
+---
+stateDiagram-v2
+  direction TB
+  [*] --> idle
+  idle --> recorded : Record
+  recorded --> tagged : Tag
+  tagged --> solving : Solve
+  solving --> solving : ResolveMissing [control]
+  solving --> finished : Finish
+  recorded --> stranded : Crash
+  tagged --> stranded : Crash
+  solving --> stranded : Crash
+  finished --> stranded : Crash
+  finished --> idle : Cleanup
+  stranded --> stranded : ChildExits
+  stranded --> stranded : LoseKeeper
+  stranded --> stranded : RestoreKeeper
+  stranded --> stranded : ChangeIncarnation
+  stranded --> idle : Cleanup [keeper]
+  stranded --> idle : DiscardJournal [changed]
+  stranded --> reused : Reuse [verified receipt]
+  stranded --> blocked : Refuse [old order]
+  blocked --> blocked : Retry
+  classDef live stroke-width:1.6px
+  class idle idle
+  class recorded,tagged,solving live
+  class stranded wait
+  class finished,reused ok
+  class blocked fail

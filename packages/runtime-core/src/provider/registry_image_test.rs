@@ -2025,22 +2025,6 @@ fn image_platform_fields_are_read_like_the_engine_and_refuse_repetition() {
 }
 
 #[test]
-fn build_bases_accept_only_docker_hub_references() {
-    let named = |value: &str| match normalize(value).unwrap() {
-        ImageReference::Named(named) => named,
-        ImageReference::ImageId(_) => unreachable!(),
-    };
-    for value in [
-        "ghcr.io/example/app:1",
-        "registry.test:5000/app:1",
-        "localhost/app:1",
-    ] {
-        let error = resolve_build_base(&named(value), Instant::now()).unwrap_err();
-        assert_eq!(error.code, "registry_image", "{value}");
-    }
-}
-
-#[test]
 fn retry_token_and_manifest_stalled_headers_within_deadline() {
     retry_registry_preheader_failure(false);
 }

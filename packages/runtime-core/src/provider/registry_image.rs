@@ -2041,52 +2041,6 @@ pub struct BuildBase {
     pub image_id: String,
 }
 
-/// Resolve one normalized base-image reference for a native build, through the same
-/// guarded, origin-bound client and address policy as acquisition. A tag resolves once
-/// to its current manifest; a digest-pinned reference must resolve to exactly that pin.
-/// Builds stay Docker Hub and Linux ARM64 only (the Dockerfile scan and the build source
-/// policy admit nothing else), and the configuration must declare no `ONBUILD`
-/// triggers: a stored trigger could pull images the Dockerfile scan never saw. Only
-/// bounded metadata is fetched. `deadline` bounds the whole resolution, never beyond
-/// the acquisition deadline.
-pub fn resolve_build_base(
-    named: &NamedReference,
-    deadline: Instant,
-) -> Result<BuildBase, CandidateError> {
-    if named.docker_hub_repository().is_none() {
-        return Err(error(
-            "Only public Docker Hub [namespace/]repository[:tag][@sha256] references are supported.",
-        ));
-    }
-    let policy = ImagePolicy::default();
-    let registry = registry(named, &policy)?;
-    let mut fetch = Fetch::new(&registry, &named.path, &policy)?;
-    fetch.deadline = fetch.deadline.min(deadline);
-    let (reference, expected) = match (&named.digest, &named.tag) {
-        (Some(pin), _) => (pin.as_str(), Some(pin.as_str())),
-        (None, Some(tag)) => (tag.as_str(), None),
-        (None, None) => ("latest", None),
-    };
-    let initial = fetch.manifest(reference)?;
-    let source_digest = digest(&initial);
-    if expected.is_some_and(|expected| expected != source_digest) {
-        return Err(error("Registry manifest digest or size mismatch.")
-            .with_cause_code("registry_digest_mismatch".into()));
-    }
-    let (manifest, _, _, child) =
-        select(&mut fetch, &initial, &source_digest, PlatformPolicy::Native)?;
-    let pinned_reference = format!("{}/{}@{source_digest}", registry.domain, named.path);
-    // BuildKit pulls the base itself, outside acquisition's archive budget, so the sizes
-    // the manifest declares are bounded here before any build runs.
-    bounded_build_base(&manifest, &pinned_reference, policy.archive_limit)?;
-    let config = manifest
-        .config
-        .ok_or_else(|| error("Image config descriptor is missing."))?;
-    let config_bytes = fetch.object("blobs", &config)?;
-    ManifestProof::new(initial, child, config_bytes)?
-        .verified_build_base(&pinned_reference, policy.archive_limit)
-}
-
 /// Refuse a build base whose manifest declares more than `limit` compressed bytes of
 /// config and layers (the per-image archive budget acquisition applies), or no layers
 /// or more than the layer limit. Every descriptor's `size` is a required unsigned
@@ -2110,9 +2064,6 @@ fn bounded_build_base(
         .config
         .as_ref()
         .ok_or_else(|| error("Image config descriptor is missing."))?;
-    // The same descriptor checks direct acquisition applies: BuildKit fetches these
-    // itself, and a foreign-layer `urls` entry or a non-distributable layer would be
-    // fetched from the guest's own namespace, outside the build network's isolation.
     let refused = |what: &str, reason: CandidateError| {
         CandidateError::new(
             "native_build_base_image",

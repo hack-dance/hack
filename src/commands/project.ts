@@ -7440,7 +7440,6 @@ async function handleUpUnlocked({
   }
 }
 
-// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: `up` orchestrates remote routing, lifecycle hooks, compose, and the JSON envelope in one linear flow.
 const UP_RETRY_VALUE_OPTIONS = new Set([
   "--path",
   "-p",
@@ -7473,6 +7472,7 @@ function printedUpRetry(argv: readonly string[]): string {
   return printedShellCommand(words);
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: `up` orchestrates remote routing, lifecycle hooks, compose, and the JSON envelope in one linear flow.
 async function runUpCommand({
   ctx,
   args,

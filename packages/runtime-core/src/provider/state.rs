@@ -22,6 +22,17 @@ fn replaced_alias() -> CandidateError {
     CandidateError::new("foreign_state", "Short provider HOME alias was replaced.")
 }
 
+fn alias_creation_error(error: std::io::Error, message: &'static str) -> CandidateError {
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        CandidateError::new(
+            "temp_alias_sweep_busy",
+            "Timed out waiting for the temporary HOME alias sweep to release its lease.",
+        )
+    } else {
+        CandidateError::new("socket_alias_collision", message)
+    }
+}
+
 pub fn private_directory(path: &Path) -> Result<(), CandidateError> {
     reject_aliased_state(path)?;
     fs::DirBuilder::new()
@@ -130,7 +141,6 @@ impl Lock {
         Self::from_file(file)?.describe_holder(root)
     }
 
-    #[cfg(target_os = "macos")]
     /// [`Self::acquire_existing`], waiting up to `wait` for another holder, such as the
     /// short read-only inspection behind `hack ps`, to release the lock. Only acquisition
     /// is retried: nothing is created or admitted while waiting, and on expiry the
@@ -614,7 +624,7 @@ impl Owner {
             ));
         }
         if alias == Alias::Missing {
-            match std::os::unix::fs::symlink(self.home(candidate), &self.short_home) {
+            match super::temp_aliases::create_link(&self.home(candidate), &self.short_home) {
                 Ok(()) => return self.check_short_home(candidate, false),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     // Another entry took the path between the check and the creation.
@@ -622,9 +632,9 @@ impl Owner {
                         return Ok(());
                     }
                 }
-                Err(_) => {
-                    return Err(CandidateError::new(
-                        "socket_alias_collision",
+                Err(error) => {
+                    return Err(alias_creation_error(
+                        error,
                         "Cannot exclusively restore provider HOME alias; no existing path was replaced.",
                     ));
                 }
@@ -650,10 +660,15 @@ impl Owner {
             }
             next.save(candidate)?;
             *self = next;
-            match std::os::unix::fs::symlink(self.home(candidate), &self.short_home) {
+            match super::temp_aliases::create_link(&self.home(candidate), &self.short_home) {
                 Ok(()) => return self.check_short_home(candidate, false),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(io(error)),
+                Err(error) => {
+                    return Err(alias_creation_error(
+                        error,
+                        "Cannot exclusively create a fresh provider HOME alias; receipt retained.",
+                    ));
+                }
             }
         }
         Err(CandidateError::new(
@@ -676,13 +691,14 @@ impl Owner {
             Err(error) => return Err(io(error)),
         };
         // SAFETY: geteuid has no preconditions.
-        if alias.file_type().is_symlink()
-            && alias.uid() == unsafe { libc::geteuid() }
-            && fs::read_link(&self.short_home).map_err(io)? == self.home(candidate)
-        {
-            Ok(Alias::Owned)
-        } else {
-            Ok(Alias::Foreign)
+        if !alias.file_type().is_symlink() || alias.uid() != unsafe { libc::geteuid() } {
+            return Ok(Alias::Foreign);
+        }
+        match fs::read_link(&self.short_home) {
+            Ok(target) if target == self.home(candidate) => Ok(Alias::Owned),
+            Ok(_) => Ok(Alias::Foreign),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Alias::Missing),
+            Err(error) => Err(io(error)),
         }
     }
 
@@ -713,12 +729,10 @@ impl Owner {
                 "Provider owner changed during HOME recovery; no alias was restored.",
             ));
         }
-        std::os::unix::fs::symlink(self.home(candidate), &self.short_home).map_err(|_| {
-            CandidateError::new(
-                "socket_alias_collision",
-                "Cannot exclusively restore provider HOME alias; no existing path was replaced.",
-            )
-        })?;
+        super::temp_aliases::create_link(&self.home(candidate), &self.short_home).map_err(|error| alias_creation_error(
+            error,
+            "Cannot exclusively restore provider HOME alias; no existing path was replaced.",
+        ))?;
         self.check_short_home(candidate, false)
     }
 
@@ -817,12 +831,10 @@ impl Owner {
         };
         // Persist the intended alias before its first external effect. Collisions are never adopted.
         owner.save(candidate)?;
-        std::os::unix::fs::symlink(root.join("home"), &owner.short_home).map_err(|_| {
-            CandidateError::new(
-                "socket_alias_collision",
-                "Cannot exclusively create short provider alias; receipt retained for inspection.",
-            )
-        })?;
+        super::temp_aliases::create_link(&root.join("home"), &owner.short_home).map_err(|error| alias_creation_error(
+            error,
+            "Cannot exclusively create short provider alias; receipt retained for inspection.",
+        ))?;
         if owner
             .data_dir()
             .join("agent.sock")

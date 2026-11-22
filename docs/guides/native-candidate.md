@@ -788,6 +788,27 @@ within the macOS length limit. A clean `runtime down` keeps this alias, so no ot
 local user can take its name while the pool is stopped. It removes only the provider
 socket files the stop proved closed, through the real data directory.
 
+On macOS, successful native setup and runtime startup check for old dangling provider
+HOME links. The check keeps links to existing homes, including stopped homes and homes
+with interrupted updates. It removes only this user's verified links for absent homes
+that have been unchanged for at least five minutes. `hack native temp-aliases` lists
+eligible names. Add `--fix` to remove them, or use `hack doctor --fix` where the native
+runtime is installed. Ordinary doctor shows a count after its diagnostic checks.
+The scan stops at its time
+or entry limit and reports an incomplete scan when it cannot finish. Fix scans
+resume from the previous batch, although repeated listing timeouts can still
+leave some entries unseen. A later fix also recovers entries moved aside by an
+interrupted sweep. Updating the link's timestamp with `touch -h`
+extends its retention.
+
+Automatic cleanup requires the recorded native home path to lie under the user's
+home or the host temporary root. Doctor counts aliases outside those roots.
+`hack native temp-aliases` lists their names and explains that the volume may be
+unmounted or the home may be deleted. The automatic sweep and
+`doctor --fix` keep these entries. After checking the volume yourself,
+add `--include-unverified-volumes` to either command with `--fix` to include them.
+The command still checks age, owner, identity and target absence.
+
 On a fresh pool boot or a boot after stopping the pool, native waits up to 10 seconds
 plus 1 second per bridge slot (20 seconds for 10 slots, at most 42) for every declared
 bridge socket to appear with the required private ownership and mode.
@@ -2110,7 +2131,7 @@ a private certificate authority is not reachable yet. Host names are classified
 before connecting, and resolved addresses are checked again before each
 connection (see [Local registries](#local-registries)).
 
-No implicit image refresh occurs. Keep the archive only as long as needed for owned
+Explicit fetch uses the requested digest. Keep the archive only as long as needed for owned
 imports; fetch does not install a background cache or cleanup daemon. The complete
 archive is synced, validated and published without replacing an existing path.
 A failed write or verification leaves no final archive; process interruption may
@@ -2134,14 +2155,31 @@ stored registry manifest against the requested pin, then checks the configuratio
 digest. For indexes it also verifies the selected child manifest and platform.
 A cache entry without the metadata fetches it once to establish the binding. A guest miss hashes the entire archive before taking the import
 lease and checks the guest again before upload. Explicit `load-image` verifies
-its input even if the guest already has that image. Mutable tags are resolved
-on each `ensure-image` invocation.
+its input even if the guest already has that image.
 
+### Mutable image tags
+
+An ordinary native start uses a verified tag resolution for up to 24 hours.
+Set `HACK_NATIVE_IMAGE_TAG_TTL_SECONDS` to a value from 0 to 2592000 seconds
+(30 days). A value of `0` refreshes on every command. `hack pull` refreshes tags
+and confirms their images in the native guest without starting services.
+`hack up --refresh-images` refreshes tags when starting services. For an
+already-running detached project, run `hack down` before refreshing.
+
+Use `hack up --offline` to use recorded resolutions of images already loaded
+without contacting a registry. An ordinary start can use a verified loaded
+image when refreshing its tag fails. Hack reports the reason and the recorded
+resolution time. Explicit refresh commands report the failure. Successful
+refreshes record the new selection after the guest confirms the image.
+
+`hack ps` and `hack status` show the recorded registry, source digest, selected
+image configuration IDs and last resolution time for the project's mutable
+tags. A running container keeps the image ID it was created with.
 
 During native project startup, active services with the same canonical image reference
 and platform policy share one validated image selection. If services request
 different platforms for the same tag, their selections use the same immutable
-registry digest. A later start resolves the tag again.
+registry digest.
 
 ### Explicit writable development source
 

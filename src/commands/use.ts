@@ -21,6 +21,10 @@ import {
 } from "../lib/project-remote-selection.ts";
 import { formatProjectRemoteAddress } from "../lib/project-remote-status.ts";
 import { readProjectRuntimeStateEntry } from "../lib/project-runtime-state.ts";
+import { isHostControlEnvKey } from "../lib/vetted-env.ts";
+
+const COMPOSE_INSPECTION_TRANSPORT =
+  /^(?:DOCKER_HOST|DOCKER_CONTEXT|DOCKER_TLS_VERIFY|DOCKER_CERT_PATH|COMPOSE_PROJECT_NAME|COMPOSE_PROFILES)$/;
 
 const spec = defineCommand({
   name: "use",
@@ -62,14 +66,31 @@ export const useCommand = withHandler(spec, async ({ ctx, args }) => {
   const { composeProjectName, lifecycleComposeProject } =
     await resolveUseInstance({ project, cfg, base });
   const readActive = async () => {
-    const env = await resolveRemoteInspectionEnv({
-      filterControlEnv: true,
+    const managed = await resolveRemoteInspectionEnv({
       project,
       baseProjectName: base,
       composeProject: lifecycleComposeProject,
       requestedEnvName: resolveRequestedEnvName({ envOption: undefined }),
       choices: pending,
     });
+    if (
+      ["DOCKER_CONFIG", "HOME", "PATH", "COMPOSE_ENV_FILES"].some(
+        (key) =>
+          Object.hasOwn(managed, key) && managed[key] !== process.env[key]
+      )
+    ) {
+      throw new HackCliError({
+        code: "E_USAGE",
+        message:
+          "Cannot check whether the Compose copy is stopped with checkout-managed client settings. Use the same settings in the caller environment.",
+      });
+    }
+    const env = Object.fromEntries(
+      Object.entries(managed).filter(
+        ([key]) =>
+          !isHostControlEnvKey(key) || COMPOSE_INSPECTION_TRANSPORT.test(key)
+      )
+    );
     const result = await readComposePs({
       redactValues: Object.values(env),
       run: () =>

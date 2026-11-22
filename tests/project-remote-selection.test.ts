@@ -7,6 +7,7 @@ import {
   parseRemoteChoices,
   readRemoteChoices,
   resolveRemoteChoices,
+  runningRemoteTarget,
   saveRemoteChoices,
 } from "../src/lib/project-remote-selection.ts";
 import { parseProjectPrerequisites } from "../src/lib/project-remotes-config.ts";
@@ -74,4 +75,18 @@ test("checkout save publishes only after the stopped check", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("active remote labels outrank stopped backing containers", () => {
+  const stopped = ["exited", "dead", "created"].map((State) => ({
+    State,
+    Labels: "dev.hack.remote.db=local",
+  }));
+  expect(runningRemoteTarget(stopped, "db")).toBe("local");
+  expect(
+    runningRemoteTarget(
+      [...stopped, { State: "running", Labels: "dev.hack.remote.db=qa" }],
+      "db"
+    )
+  ).toBe("qa");
 });

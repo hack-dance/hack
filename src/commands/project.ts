@@ -9126,7 +9126,8 @@ async function runDownCommand({
   const {
     choices,
     env: interpolationEnv,
-    recovery: initialRecovery,
+    recover,
+    cleanup: cleanupRemoteOverride,
   } = await runtimeRemoteEnv(
     { project, cfg, baseProjectName, branch },
     effectiveEnvName
@@ -9219,7 +9220,6 @@ async function runDownCommand({
       composeProject: lifecycleComposeProject,
     });
     reportLifecycleProgress({ service: null, phase: "stopping" });
-    let recovery = initialRecovery;
     const stop = (
       file: string,
       name: string | null,
@@ -9238,26 +9238,14 @@ async function runDownCommand({
           downTimedOut = outcome.timedOut;
         },
       });
-    let stopEnv = interpolationEnv ?? lifecycleEnv;
+    const stopEnv = interpolationEnv ?? lifecycleEnv;
+    code = await stop(project.composeFile, composeProjectName, stopEnv);
+    const recovery =
+      code > 0 && code < 128 && !downTimedOut ? await recover?.() : undefined;
     if (recovery) {
-      code = 0;
-    } else {
-      code = await stop(project.composeFile, composeProjectName, stopEnv);
-      if (code !== 0 && !downTimedOut && code < 128 && !interpolationEnv) {
-        const fallback = await runtimeRemoteEnv(
-          { project, cfg, baseProjectName, branch, recovery: true },
-          effectiveEnvName
-        );
-        recovery = fallback.recovery;
-        stopEnv = fallback.env ?? stopEnv;
-      }
+      code = await stop(recovery.path, recovery.name, stopEnv);
     }
-    if (recovery) {
-      code = recovery.empty
-        ? 0
-        : await stop(recovery.path, recovery.name, stopEnv);
-    }
-    if (code === 0 && !recovery?.empty) {
+    if (code === 0) {
       const finish = await finishInstanceStop({
         project: recovery
           ? { ...project, composeFile: recovery.path }
@@ -9349,6 +9337,7 @@ async function runDownCommand({
     logger.error({ message });
     return 1;
   }
+  await cleanupRemoteOverride?.();
   reportLifecycleProgress({ service: null, phase: "stopped" });
   if (helperReleaseFailures.length > 0) {
     const message = sharedHelperReleaseFailureMessage(helperReleaseFailures);
@@ -11392,7 +11381,6 @@ async function handlePs({
     baseProjectName,
     branch,
     quiet: true,
-    recovery: false,
   });
   const read = await readComposePs({
     redactValues: env && Object.values(env),
@@ -11405,7 +11393,7 @@ async function handlePs({
         cwd,
         all: true,
       });
-      return result.exitCode !== 0 && rows
+      return result.exitCode !== 0 && rows?.length
         ? { ...result, exitCode: 0, stdout: JSON.stringify(remotePsRows(rows)) }
         : result;
     },
@@ -12000,26 +11988,26 @@ async function handleExec({
     envName,
     persist: false,
   });
-  const { env, recovery } = await runtimeRemoteEnv(
+  const { env, bindingsMissing, recover } = await runtimeRemoteEnv(
     { project, cfg, baseProjectName, branch },
     envName
   );
+  const recovery = bindingsMissing ? await recover?.() : undefined;
   const envOverrides = {
     ...managedOverrides,
     env: { ...managedOverrides.env, ...env },
   };
-  const composeFilesWithEnv =
-    recovery && !recovery.empty
-      ? [recovery.path]
-      : [
-          ...composeFilesWithInternal,
-          ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
-          ...envOverrides.composeFiles,
-        ];
+  const composeFilesWithEnv = recovery
+    ? [recovery.path]
+    : [
+        ...composeFilesWithInternal,
+        ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
+        ...envOverrides.composeFiles,
+      ];
   const readiness = {
     composeFiles: composeFilesWithEnv,
     composeProjectKey: lifecycleComposeProject,
-    composeProject: composeProjectName,
+    composeProject: recovery?.name ?? composeProjectName,
     project,
     profiles,
     effectiveEnvName: envOverrides.effectiveEnvName,
@@ -12041,7 +12029,7 @@ async function handleExec({
 
   const execOptions = {
     composeFiles: composeFilesWithEnv,
-    composeProject: composeProjectName,
+    composeProject: recovery?.name ?? composeProjectName,
     profiles,
     service,
     workdir: workdir.length > 0 ? workdir : undefined,

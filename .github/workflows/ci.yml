@@ -888,6 +888,11 @@ jobs:
           git fetch --no-tags origin "$PR_BASE"
           export HACK_NEUTRALITY_BASE_SHA
           HACK_NEUTRALITY_BASE_SHA=$(git merge-base HEAD "$PR_BASE")
+          if git diff --quiet "$HACK_NEUTRALITY_BASE_SHA" HEAD -- \
+            src/commands/project.ts src/commands/use.ts src/backends 'src/lib/project-remote-*' \
+            src/lib/project-runtime-state.ts tests/project-remote-compose-cli.test.ts .github/workflows/ci.yml; then
+            exit 0
+          fi
           root=$(mktemp -d "$RUNNER_TEMP/compose-neutrality.XXXXXX")
           trap 'rm "$root/base/node_modules"; git worktree remove "$root/base"; rmdir "$root"' EXIT
           git worktree add --detach "$root/base" "$HACK_NEUTRALITY_BASE_SHA"

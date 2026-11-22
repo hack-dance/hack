@@ -10,6 +10,7 @@ stateDiagram-v2
   starting --> failed: Fail
   started --> failed: Fail
   started --> started: RemoveConfig / ObservePeer
+  started --> started: Switch / RenameBinding
   failed --> failed: RemoveConfig / ObservePeer
   started --> refused: Restart [declared]
   failed --> refused: Restart [declared]
@@ -24,5 +25,6 @@ stateDiagram-v2
   class done ok
   note right of done
     INV Hook target is absent or was started.
-    INV Recovery requires owned containers.
+    INV Recovery needs owned rows.
+    INV Active labels win.
   end note

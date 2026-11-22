@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { realpath, stat } from "node:fs/promises";
+import { realpath, rm, stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import YAML from "yaml";
 import { buildComposeArgs } from "../backends/runtime-backend.ts";
@@ -9,6 +9,7 @@ import { resolveEffectiveBranch } from "./branches.ts";
 import { HackCliError } from "./cli-result.ts";
 import { renderComposeEnvReferenceOverride } from "./compose-managed-env.ts";
 import { parseComposePsJson } from "./compose-ps-result.ts";
+import { dockerHelperRunEnvironment } from "./docker-helper-environment.ts";
 import { ensureDir, writeTextFileAtomicIfChanged } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import { resolveHackEnv } from "./hack-env.ts";
@@ -41,7 +42,6 @@ import {
 } from "./project-runtime-state.ts";
 import { selectEnvForRunningInstance } from "./running-env-selection.ts";
 import { exec } from "./shell.ts";
-import { isHostControlEnvKey } from "./vetted-env.ts";
 
 export async function resolveUseProject(opts: {
   readonly cwd: string;
@@ -87,7 +87,7 @@ export async function resolveUseInstance(opts: {
   };
 }
 
-/** Resolve the managed Compose env. Inspecting an untrusted checkout can filter client settings. */
+/** Resolve interpolation against the managed environment of the selected instance. */
 export async function resolveRemoteInspectionEnv(opts: {
   readonly project: ProjectContext;
   readonly baseProjectName: string;
@@ -95,7 +95,6 @@ export async function resolveRemoteInspectionEnv(opts: {
   readonly requestedEnvName: string | null | undefined;
   readonly choices: readonly EffectiveRemote[];
   readonly tolerant?: typeof warnMissingRemoteEnv;
-  readonly filterControlEnv?: boolean;
 }): Promise<Record<string, string>> {
   const { project } = opts;
   const envName = selectEnvForRunningInstance({
@@ -122,13 +121,7 @@ export async function resolveRemoteInspectionEnv(opts: {
         envName,
       })
     ).envForCompose;
-  return Object.fromEntries(
-    Object.entries(
-      applyRemoteEnv(managed, opts.choices, {
-        missing: opts.tolerant,
-      })
-    ).filter(([key]) => !(opts.filterControlEnv && isHostControlEnvKey(key)))
-  );
+  return applyRemoteEnv(managed, opts.choices, { missing: opts.tolerant });
 }
 
 const REMOTE_INSTANCE_LABEL = "dev.hack.remote-instance";
@@ -234,7 +227,7 @@ async function observeRemoteInstance(opts: {
         "--format",
         "{{json .}}",
       ],
-      { cwd, env: opts.env, timeoutMs: 5000 }
+      { cwd, ...dockerHelperRunEnvironment(opts.env), timeoutMs: 5000 }
     ).catch(() => undefined);
     return result?.exitCode === 0 ? parseComposePsJson(result.stdout) : null;
   };
@@ -277,26 +270,22 @@ function isOneOff(row: Record<string, unknown>): boolean {
 async function recoveryComposeFile(
   project: ProjectContext,
   observation: Awaited<ReturnType<typeof observeRemoteInstance>>,
-  env: Readonly<Record<string, string>>,
-  expectedName: string
+  env: Readonly<Record<string, string>>
 ) {
   const names = new Set(
     (observation.rows ?? []).map((row) =>
       dockerLabel(row, "com.docker.compose.project")
     )
   );
-  const name = [...names][0] ?? expectedName;
+  const name = [...names][0];
   if (names.size > 1 || !name) {
     return undefined;
   }
   const peers = (
     await observation.read(`com.docker.compose.project=${name}`)
   )?.filter((row) => !isOneOff(row));
-  if (!peers || peers.some((row) => !observation.owns(row))) {
+  if (!peers?.length || peers.some((row) => !observation.owns(row))) {
     return undefined;
-  }
-  if (!peers.length) {
-    return { empty: true as const };
   }
   const serviceNames = peers.map((row) =>
     dockerLabel(row, "com.docker.compose.service")
@@ -314,7 +303,11 @@ async function recoveryComposeFile(
       "--format",
       "{{json .}}",
     ],
-    { cwd: observation.cwd, env, timeoutMs: 5000 }
+    {
+      cwd: observation.cwd,
+      ...dockerHelperRunEnvironment(env),
+      timeoutMs: 5000,
+    }
   );
   const networkRows =
     networksResult.exitCode === 0
@@ -358,7 +351,7 @@ async function recoveryComposeFile(
       noFollowTarget: true,
     }
   );
-  return { empty: false as const, path, name };
+  return { path, name };
 }
 
 async function recoverRemoteChoices(opts: {
@@ -409,7 +402,7 @@ export function warnMissingRemoteEnv(remote: string, name: string): void {
 export function refuseRemoteStart(cfg: ProjectConfig, command: string): void {
   if (cfg.prerequisites?.config?.selected?.length) {
     throw new HackCliError({
-      code: "E_INVALID_REMOTE",
+      code: "E_REMOTE_START_UNSUPPORTED",
       message: `${command} cannot start a project that declares remotes. Run hack up --detach for the whole project.`,
     });
   }
@@ -478,7 +471,6 @@ export async function runtimeRemoteEnv(
     cfg: ProjectConfig;
     baseProjectName: string;
     branch: string | null;
-    recovery?: boolean;
     quiet?: boolean;
   },
   envName?: string | null
@@ -500,17 +492,13 @@ export async function runtimeRemoteEnv(
     ".internal",
     `compose.remote.override.${identity}.yml`
   );
-  if (
-    !(
-      defaults.length ||
-      input.recovery ||
-      (await stat(generated).catch(() => null))
-    )
-  ) {
+  if (!(defaults.length || (await stat(generated).catch(() => null)))) {
     return {
       choices: [],
       env: undefined,
-      recovery: undefined,
+      recover: undefined,
+      bindingsMissing: false,
+      cleanup: undefined,
       rows: undefined,
     };
   }
@@ -536,28 +524,26 @@ export async function runtimeRemoteEnv(
           lifecycleComposeProject,
           entries: observation.rows ?? [],
         });
-  let missing = choices.length < defaults.length || !defaults.length;
+  let bindingsMissing = choices.length < defaults.length || !defaults.length;
   const env = applyRemoteEnv(managed, choices, {
     missing: (remote, key) => {
-      missing = true;
+      bindingsMissing = true;
       if (!input.quiet) {
         warnMissingRemoteEnv(remote, key);
       }
     },
   });
-  const recovery =
-    missing && input.recovery !== false
-      ? await recoveryComposeFile(
-          input.project,
-          observation,
-          managed,
-          composeProjectName ??
-            managed.COMPOSE_PROJECT_NAME ??
-            process.env.COMPOSE_PROJECT_NAME ??
-            input.baseProjectName
-        ).catch(() => undefined)
-      : undefined;
-  return { choices, env, recovery, rows: observation.rows };
+  return {
+    choices,
+    env,
+    rows: observation.rows,
+    bindingsMissing,
+    recover: () =>
+      recoveryComposeFile(input.project, observation, managed).catch(
+        () => undefined
+      ),
+    cleanup: () => rm(generated, { force: true }),
+  };
 }
 
 export function remotePsRows(rows: readonly Record<string, unknown>[]) {
@@ -570,10 +556,10 @@ export function remotePsRows(rows: readonly Record<string, unknown>[]) {
 }
 
 export function remoteRuntimeStatuses(
-  cfg: ProjectConfig,
+  cfg: ProjectConfig | null,
   choices: readonly EffectiveRemote[]
 ) {
-  return (cfg.prerequisites?.config?.selected ?? []).flatMap(({ remote }) => {
+  return (cfg?.prerequisites?.config?.selected ?? []).flatMap(({ remote }) => {
     const choice = choices.find((entry) => entry.remote === remote);
     return choice
       ? projectRemoteStatuses([choice])

@@ -52,10 +52,8 @@ import {
   type ProjectObservation,
   projectObservation,
 } from "./project-observation.ts";
-import {
-  type ProjectRemoteStatus,
-  projectRemoteStatuses,
-} from "./project-remote-status.ts";
+import { remoteRuntimeStatuses } from "./project-remote-compose.ts";
+import type { ProjectRemoteStatus } from "./project-remote-status.ts";
 import type { ServiceReadiness } from "./project-state.ts";
 import type {
   RegisteredProject,
@@ -405,9 +403,7 @@ async function buildRegisteredProjectView(opts: {
       })
     : null;
   const lifecycle = resolveProjectLifecycleView({ config });
-  const remotes = projectRemoteStatuses(
-    config?.prerequisites?.config?.selected
-  );
+  const remotes = remoteRuntimeStatuses(config, []);
 
   return {
     projectId: opts.registration.id,

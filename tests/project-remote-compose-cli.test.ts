@@ -11,9 +11,11 @@ const neutralityBase =
   "3f2f00e1b8b2bb0fe26cadf47369dbc75e693001";
 const fixtureEngine = `#!${process.execPath}
 import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import YAML from ${JSON.stringify(resolve(root, "node_modules/yaml/dist/index.js"))};
 const argv = Bun.argv.slice(2);
-const control = process.env.TEST_CONTROL;
+const control = join(dirname(dirname(Bun.argv[1])), "control");
+const foreign = readFileSync(join(control, "peer"), "utf8");
 const state = control + "/engine.json";
 const files = argv.flatMap((arg, i) => arg === "-f" ? [argv[i+1]] : []);
 const generated = files.filter((file) => file.includes("/.internal/") || file.includes("/.branch/"))
@@ -45,10 +47,11 @@ else if (command === "config") {
 } else if (command === "ps") {
   if (process.env.TEST_FAIL_PS === "1") process.exit(19);
   if (row) console.log(JSON.stringify(row));
-  if (process.env.TEST_FOREIGN_PEER && argv.some((arg) => arg.startsWith("label=com.docker.compose.project="))) {
-    console.log(JSON.stringify({ ...row, ID: "b".repeat(64), Labels: "com.docker.compose.project=remote-fixture,com.docker.compose.service=foreign" + (process.env.TEST_FOREIGN_PEER === "oneoff" ? ",com.docker.compose.oneoff=True" : "") }));
+  if (foreign && argv.some((arg) => arg.startsWith("label=com.docker.compose.project="))) {
+    console.log(JSON.stringify({ ...row, ID: "b".repeat(64), Labels: "com.docker.compose.project=remote-fixture,com.docker.compose.service=foreign" + (foreign === "oneoff" ? ",com.docker.compose.oneoff=True" : "") }));
   }
 } else if (command === "down") {
+  if (process.env.TEST_FAIL_DOWN === "1") process.exit(19);
   const recovery = files.find((file) => file.includes("/compose.remote-recovery."));
   const networks = recovery ? JSON.parse(readFileSync(recovery, "utf8")).networks : null;
   appendFileSync(control + "/down", JSON.stringify({networks, db: process.env.DB_HOST ?? null, daemon: process.env.DOCKER_HOST, profiles: process.env.COMPOSE_PROFILES, files}) + "\\n");
@@ -104,6 +107,7 @@ async function fixture() {
     extra?: Record<string, string>,
     cwd = repo
   ) => {
+    await Bun.write(join(control, "peer"), extra?.TEST_FOREIGN_PEER ?? "");
     const child = Bun.spawn(
       [process.execPath, join(cliRoot, "index.ts"), ...args],
       {
@@ -211,6 +215,12 @@ test.skipIf(!base)(
         });
         expect(failed.code).toBe(1);
         traces.push(await Bun.file(join(f.control, "calls")).text());
+        await Bun.write(join(f.control, "calls"), "");
+        const downFailure = await f.cli(["down"], cliRoot, {
+          TEST_FAIL_DOWN: "1",
+        });
+        expect(downFailure.code).toBe(19);
+        traces.push(await Bun.file(join(f.control, "calls")).text());
         const git = (...args: string[]) => {
           const result = Bun.spawnSync(
             [
@@ -295,7 +305,13 @@ test("teardown after a crash preserves the observed target and tolerates missing
       );
     };
     const envFile = join(f.project, "hack.env.default.yaml");
-    for (const mode of ["running", "deleted", "missing", "removed"] as const) {
+    for (const mode of [
+      "running",
+      "deleted",
+      "missing",
+      "removed",
+      "renamed",
+    ] as const) {
       await configure(false);
       await Bun.write(
         envFile,
@@ -333,6 +349,11 @@ test("teardown after a crash preserves the observed target and tolerates missing
           })
         );
       }
+      if (mode === "renamed") {
+        const config = Bun.file(join(f.project, "hack.config.json"));
+        const text = await config.text();
+        await Bun.write(config, text.replace('"DB_HOST"', '"NEW_DB_HOST"'));
+      }
       if (mode === "running" || mode === "deleted") {
         const status = await f.cli(["ps", "--json"]);
         expect(status.code, status.stderr).toBe(0);
@@ -351,7 +372,7 @@ test("teardown after a crash preserves the observed target and tolerates missing
           await Bun.write(join(f.control, "calls"), "");
           const refused = await f.cli(args);
           expect(refused.code).not.toBe(0);
-          expect(refused.stderr).toContain("E_INVALID_REMOTE");
+          expect(refused.stderr).toContain("E_REMOTE_START_UNSUPPORTED");
           expect(refused.stderr).toContain("hack up --detach");
           expect(await Bun.file(join(f.control, "calls")).text()).toBe("");
         }
@@ -392,7 +413,11 @@ test("teardown after a crash preserves the observed target and tolerates missing
         false
       );
       const repeated = await f.cli(["down"]);
-      expect(repeated.code, repeated.stderr).toBe(0);
+      expect(repeated.code, repeated.stderr).not.toBe(0);
+      const failedStatus = await f.cli(["ps", "--json"], root, {
+        TEST_FAIL_PS: "1",
+      });
+      expect(failedStatus.code).toBe(1);
     }
   } finally {
     await rm(f.path, { recursive: true });

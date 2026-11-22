@@ -357,7 +357,9 @@ export function runningRemoteTarget(
 ): string | null | undefined {
   const prefix = `dev.hack.remote.${remote}=`;
   const observed = new Set<string>();
-  for (const { Labels } of entries) {
+  const inactive = new Set<string>();
+  let active = false;
+  for (const { State, Labels } of entries) {
     if (typeof Labels !== "string") {
       continue;
     }
@@ -369,12 +371,16 @@ export function runningRemoteTarget(
     ) {
       continue;
     }
+    const stopped =
+      State === "exited" || State === "dead" || State === "created";
+    active ||= !stopped;
     const target = fields
       .find((label) => label.startsWith(prefix))
       ?.slice(prefix.length);
     if (target) {
-      observed.add(target.split(":")[0] ?? target);
+      (stopped ? inactive : observed).add(target.split(":")[0] ?? target);
     }
   }
-  return observed.size > 1 ? null : [...observed][0];
+  const targets = active ? observed : inactive;
+  return targets.size > 1 ? null : [...targets][0];
 }

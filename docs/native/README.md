@@ -1,8 +1,8 @@
 # Native backend (beta)
 
 The native backend is a second way for Hack to run your project. It is a beta for
-Apple Silicon Macs. Docker Compose is still the default, and nothing changes for a
-project unless you choose native for it.
+Apple Silicon Macs. Stable `hack` uses Compose. The current `hack-next`
+prerelease selects native on Apple Silicon macOS and Compose on Linux.
 
 ## What it is
 
@@ -15,14 +15,17 @@ on the Mac. The pool runs its pinned Docker Engine inside the VM; it does not us
 your host's Docker app. Preparing that provider pool is still a separate step.
 
 It is not a different container format. Your images and your Compose file are the
-same. Projects using the same native pool share that pool's VM resources.
+same. Projects the pool was started with share its VM resources. A running pool refuses
+a start from an unshared project root.
 
 Your project stays the same. The `.hack/` folder, the commands (`hack up`,
 `hack down`, `hack logs`) and your env and secrets are the same on both backends.
 
 ## What it is not
 
-- **Not the default.** Compose runs your project unless you select native.
+- **Backend selection.** Set `HACK_RUNTIME_BACKEND=compose` to run project
+  commands through the macOS candidate on Compose. Native is the planned default
+  for stable v5.
 - **Not in stable Hack.** It ships only through the separate `hack-next` channel.
   The stable release archives and the Homebrew formula do not contain it.
 - **Not for every platform.** It runs on Apple Silicon macOS only. Intel Macs,
@@ -113,8 +116,8 @@ and synthetic data.
 Stay on Compose if you need every Compose feature, you work on Linux or an Intel
 Mac, or the project holds data you cannot lose.
 
-Compose remains the default; a native trial requires a supported Mac, explicit
-beta opt-in, supported workload features and a separately prepared runtime.
+A native trial requires a supported Mac, supported workload features and a
+separately prepared runtime.
 
 ```mermaid
 ---

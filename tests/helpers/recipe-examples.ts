@@ -169,7 +169,8 @@ export function composeDurationMs(value: unknown): number | null {
 }
 
 /** Images whose server handles SIGTERM itself and may need time to stop. */
-const SELF_STOPPING_IMAGE = /^(postgres|redis|mysql|mariadb|mongo|caddy)[:@]/;
+const SELF_STOPPING_IMAGE =
+  /^(?:[\w.-]+\/)?(postgres|redis|mysql|mariadb|mongo|caddy)[:@]/;
 
 /**
  * True when a database or proxy image runs its own server: no command, or a

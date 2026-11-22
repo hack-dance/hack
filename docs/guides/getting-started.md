@@ -74,7 +74,7 @@ hack down
 
 ## Exploring v5
 
-v5 keeps these commands and the Compose default, and adds a native backend (beta)
-for Apple Silicon macOS.
-Prereleases install beside stable Hack through `hack-next`. Read
+v5 keeps these commands. Stable `hack` uses Compose. The current `hack-next`
+prerelease defaults to native on Apple Silicon macOS and uses Compose on supported
+Linux. Native is the planned default for stable v5. Read
 [Upgrade to v5](upgrade-to-v5.md), then [install a prerelease](candidate-install.md).

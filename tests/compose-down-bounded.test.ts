@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -59,7 +66,11 @@ function restoreEnv(key: string, previous: string | undefined): void {
 type FakeDockerConfig = {
   readonly downExitCode?: number;
   readonly downDelayMs?: number;
+  readonly secondDownExitCode?: number;
+  readonly secondDownDelayMs?: number;
   readonly psJson?: string;
+  readonly psJsonAfterRm?: string;
+  readonly networks?: readonly string[];
 };
 
 async function createComposeFixture(opts?: {
@@ -127,17 +138,30 @@ async function createComposeFixture(opts?: {
       'try { cfg = JSON.parse(readFileSync(configPath, "utf8")); } catch {}',
       "const args = process.argv.slice(2);",
       'appendFileSync(logPath, JSON.stringify(args) + "\\n");',
+      "let priorCalls = [];",
+      "try {",
+      '  priorCalls = readFileSync(logPath, "utf8").split("\\n").filter(Boolean).map((line) => JSON.parse(line));',
+      "} catch {}",
+      'const rmCalled = priorCalls.some((call) => call[0] === "rm");',
+      'const downCount = priorCalls.filter((call) => call[0] === "compose" && call.includes("down")).length;',
       'if (args[0] === "compose" && args.includes("ps")) {',
-      '  process.stdout.write(typeof cfg.psJson === "string" ? cfg.psJson : "[]\\n");',
+      '  const body = rmCalled && typeof cfg.psJsonAfterRm === "string" ? cfg.psJsonAfterRm : typeof cfg.psJson === "string" ? cfg.psJson : "[]\\n";',
+      "  process.stdout.write(body);",
       "  process.exit(0);",
       "}",
       'if (args[0] === "compose" && args.includes("down")) {',
-      "  const delayMs = Number(cfg.downDelayMs ?? 0);",
+      "  const isRetry = downCount >= 2;",
+      "  const delayMs = Number(isRetry && cfg.secondDownDelayMs !== undefined ? cfg.secondDownDelayMs : (cfg.downDelayMs ?? 0));",
       "  if (Number.isFinite(delayMs) && delayMs > 0) {",
       "    await Bun.sleep(delayMs);",
       "  }",
-      "  const code = Number(cfg.downExitCode ?? 0);",
+      "  const code = Number(isRetry && cfg.secondDownExitCode !== undefined ? cfg.secondDownExitCode : (cfg.downExitCode ?? 0));",
       "  process.exit(Number.isInteger(code) ? code : 0);",
+      "}",
+      'if (args[0] === "network" && args[1] === "ls") {',
+      '  const out = Array.isArray(cfg.networks) && cfg.networks.length > 0 ? cfg.networks.join("\\n") + "\\n" : "";',
+      "  process.stdout.write(out);",
+      "  process.exit(0);",
       "}",
       'if (args[0] === "ps") {',
       '  process.stdout.write("");',
@@ -858,5 +882,178 @@ describe("compose down stop timeout validation, argv, and cap", () => {
       (argv) => argv[0] === "compose" && argv.includes("down")
     );
     expect(upperWithDown?.slice(-3)).toEqual(["down", "--timeout", "2"]);
+  }, 60_000);
+});
+
+describe("compose down leftover-cleanup retry outcome (HACK-2547)", () => {
+  test("stalling second compose down fails with E_COMPOSE_FAILED (exit 124) naming leftovers and next steps in JSON and text", async () => {
+    const fixture = await createComposeFixture({ name: "retry-stall" });
+    const canonicalProjectDir = await realpath(fixture.projectDir);
+    await fixture.setDockerConfig({
+      downExitCode: 0,
+      downDelayMs: 0,
+      secondDownExitCode: 0,
+      secondDownDelayMs: 10_000,
+      psJson: `${JSON.stringify({
+        ID: "leftover1",
+        Service: "worker",
+        State: "running",
+        Labels: `com.docker.compose.project.working_dir=${canonicalProjectDir}`,
+      })}\n`,
+      psJsonAfterRm: "[]\n",
+      networks: ["retry-stall_default"],
+    });
+
+    // Shorten only the 2nd composeRuntimeBackend.down call's capMs while still
+    // running the real subprocess runner and timeout timer against the docker shim.
+    const preloadPath = join(fixture.root, "retry-cap-preload.ts");
+    await writeFile(
+      preloadPath,
+      [
+        `import { composeRuntimeBackend } from ${JSON.stringify(RUNTIME_BACKEND_ENTRY)};`,
+        "const originalDown = composeRuntimeBackend.down.bind(composeRuntimeBackend);",
+        "let downCallCount = 0;",
+        "(composeRuntimeBackend as { down: typeof composeRuntimeBackend.down }).down = async (downOpts) => {",
+        "  downCallCount += 1;",
+        "  return await originalDown(downCallCount >= 2 ? { ...downOpts, capMs: 250 } : downOpts);",
+        "};",
+        "",
+      ].join("\n")
+    );
+
+    const jsonRun = await runCli({
+      args: ["down", "--path", fixture.root, "--json"],
+      cwd: fixture.root,
+      homeDir: fixture.homeDir,
+      binDir: fixture.binDir,
+      preloadPath,
+    });
+    expect(jsonRun.exitCode).toBe(124);
+    const parsed = JSON.parse(jsonRun.stdout) as {
+      readonly ok: boolean;
+      readonly error: {
+        readonly code: string;
+        readonly message: string;
+        readonly detail: Record<string, unknown>;
+      };
+    };
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error.code).toBe("E_COMPOSE_FAILED");
+    expect(parsed.error.detail).toEqual({
+      exitCode: 124,
+      retry: true,
+      timedOut: true,
+      capMs: DEFAULT_COMPOSE_DOWN_CAP_MS,
+      containers: [],
+      networks: ["retry-stall_default"],
+    });
+    expect(parsed.error.message).toContain("90s cap");
+    expect(parsed.error.message).toContain("retry-stall_default");
+    expect(parsed.error.message).toContain("hack ps --json");
+    expect(parsed.error.message).toContain("hack down");
+    expect(parsed.error.message).toContain("--timeout <seconds>");
+
+    const calls = await readDockerCalls(fixture.dockerLogPath);
+    const downCalls = calls.filter(
+      (argv) => argv[0] === "compose" && argv.includes("down")
+    );
+    expect(downCalls).toHaveLength(2);
+    expect(calls.some((argv) => argv[0] === "stop")).toBe(true);
+    expect(calls.some((argv) => argv[0] === "rm")).toBe(true);
+    expect(calls).toContainEqual([
+      "network",
+      "ls",
+      "--filter",
+      "label=com.docker.compose.project=retry-stall",
+      "--format",
+      "{{.Name}}",
+    ]);
+
+    await writeFile(fixture.dockerLogPath, "");
+    const textRun = await runCli({
+      args: ["down", "--path", fixture.root],
+      cwd: fixture.root,
+      homeDir: fixture.homeDir,
+      binDir: fixture.binDir,
+      preloadPath,
+    });
+    expect(textRun.exitCode).toBe(124);
+    const textOutput = `${textRun.stdout}\n${textRun.stderr}`;
+    expect(textOutput).toContain("90s cap");
+    expect(textOutput).toContain("retry-stall_default");
+    expect(textOutput).toContain("hack ps --json");
+    expect(textOutput).toContain("hack down");
+  }, 60_000);
+
+  test("non-timeout second compose down failure fails with E_COMPOSE_FAILED naming remaining containers and networks", async () => {
+    const fixture = await createComposeFixture({ name: "retry-fail" });
+    const canonicalProjectDir = await realpath(fixture.projectDir);
+    const leftoverRow = `${JSON.stringify({
+      ID: "leftover1",
+      Service: "worker",
+      State: "exited",
+      Labels: `com.docker.compose.project.working_dir=${canonicalProjectDir}`,
+    })}\n`;
+    await fixture.setDockerConfig({
+      downExitCode: 0,
+      secondDownExitCode: 1,
+      psJson: leftoverRow,
+      psJsonAfterRm: leftoverRow,
+      networks: ["retry-fail_default"],
+    });
+
+    const jsonRun = await runCli({
+      args: ["down", "--path", fixture.root, "--json"],
+      cwd: fixture.root,
+      homeDir: fixture.homeDir,
+      binDir: fixture.binDir,
+    });
+    expect(jsonRun.exitCode).toBe(1);
+    const parsed = JSON.parse(jsonRun.stdout) as {
+      readonly ok: boolean;
+      readonly error: {
+        readonly code: string;
+        readonly message: string;
+        readonly detail: Record<string, unknown>;
+      };
+    };
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error.code).toBe("E_COMPOSE_FAILED");
+    expect(parsed.error.detail).toEqual({
+      exitCode: 1,
+      retry: true,
+      containers: ["worker"],
+      networks: ["retry-fail_default"],
+    });
+    expect(parsed.error.message).toContain("exit 1");
+    expect(parsed.error.message).not.toContain("reached its");
+    expect(parsed.error.message).toContain("worker");
+    expect(parsed.error.message).toContain("retry-fail_default");
+    expect(parsed.error.message).toContain("hack ps --json");
+    expect(parsed.error.message).toContain("hack down");
+
+    // A passing retry still succeeds and skips docker network ls.
+    await writeFile(fixture.dockerLogPath, "");
+    await fixture.setDockerConfig({
+      downExitCode: 0,
+      secondDownExitCode: 0,
+      psJson: leftoverRow,
+      psJsonAfterRm: "[]\n",
+      networks: ["retry-fail_default"],
+    });
+    const okRun = await runCli({
+      args: ["down", "--path", fixture.root, "--json"],
+      cwd: fixture.root,
+      homeDir: fixture.homeDir,
+      binDir: fixture.binDir,
+    });
+    expect(okRun.exitCode).toBe(0);
+    const okParsed = JSON.parse(okRun.stdout) as { readonly ok: boolean };
+    expect(okParsed.ok).toBe(true);
+    const okCalls = await readDockerCalls(fixture.dockerLogPath);
+    expect(
+      okCalls.filter((argv) => argv[0] === "compose" && argv.includes("down"))
+    ).toHaveLength(2);
+    expect(okCalls.some((argv) => argv[0] === "network")).toBe(false);
   }, 60_000);
 });

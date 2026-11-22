@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { COMPOSE_DOWN_TIMEOUT_CONFIG } from "./compose-down-budget.ts";
 import { isRecord } from "./guards.ts";
 
 /**
@@ -260,6 +261,7 @@ export type DownObservation =
 export function classifyDownObservation(opts: {
   readonly listing: InstanceContainerListing;
   readonly projectDir: string;
+  readonly includeStopped?: boolean;
 }): DownObservation {
   if (!opts.listing.ok) {
     return {
@@ -273,7 +275,8 @@ export function classifyDownObservation(opts: {
   // `hack run` keeps running through it), so they never make it incomplete.
   const mayRun = opts.listing.containers.filter(
     (container) =>
-      container.oneOff !== true && !NOT_RUNNING_STATES.has(container.state)
+      container.oneOff !== true &&
+      (opts.includeStopped === true || !NOT_RUNNING_STATES.has(container.state))
   );
   if (mayRun.length === 0) {
     return { complete: true };
@@ -324,4 +327,91 @@ export function downIncompleteMessage(opts: {
     );
   }
   return `docker compose down left ${parts.join("; and ")}.`;
+}
+
+/** Project networks listed by `docker network ls`, or why they could not be listed. */
+export type InstanceNetworkListing =
+  | { readonly ok: true; readonly networks: readonly string[] }
+  | { readonly ok: false; readonly reason: string };
+
+/** Failure payload returned when `finishInstanceStop`'s retry down fails or times out. */
+export type ComposeDownRetryFailure = {
+  readonly exitCode: number;
+  readonly message: string;
+  readonly detail: Record<string, unknown>;
+};
+
+function formatRemaining(
+  kind: "container" | "network",
+  items: readonly string[],
+  unknownReason?: string
+): string | null {
+  if (unknownReason !== undefined) {
+    return `${kind}s could not be checked (${unknownReason})`;
+  }
+  return items.length > 0
+    ? `${kind}${items.length === 1 ? "" : "s"} still present (${items.join(", ")})`
+    : null;
+}
+
+/** Format E_COMPOSE_FAILED message and detail when finishInstanceStop's retry fails or times out. */
+export function buildComposeDownRetryFailure(opts: {
+  readonly exitCode: number;
+  readonly timedOut: boolean;
+  readonly capMs: number;
+  readonly listing: InstanceContainerListing;
+  readonly networks: InstanceNetworkListing;
+  readonly projectDir: string;
+}): ComposeDownRetryFailure {
+  const obs = classifyDownObservation({
+    listing: opts.listing,
+    projectDir: opts.projectDir,
+    includeStopped: true,
+  });
+  const containers = obs.complete ? [] : obs.running;
+  const foreign = obs.complete ? [] : obs.foreign;
+  const containerReason = opts.listing.ok ? undefined : opts.listing.reason;
+  const networkReason = opts.networks.ok ? undefined : opts.networks.reason;
+  const networks = opts.networks.ok
+    ? [
+        ...new Set(opts.networks.networks.map((n) => n.trim()).filter(Boolean)),
+      ].sort((a, b) => a.localeCompare(b))
+    : [];
+  const cap =
+    opts.capMs < 1000
+      ? `${Math.max(1, Math.round(opts.capMs))}ms`
+      : `${Math.round(opts.capMs / 1000)}s`;
+  const headline = opts.timedOut
+    ? `docker compose down retry reached its ${cap} cap before finishing`
+    : `docker compose down retry failed (exit ${opts.exitCode})`;
+  const parts = [
+    formatRemaining("container", containers, containerReason),
+    foreign.length > 0
+      ? `container${foreign.length === 1 ? "" : "s"} from another checkout (${[...new Set(foreign.map((e) => e.service))].join(", ")})`
+      : null,
+    formatRemaining("network", networks, networkReason),
+  ].filter((part): part is string => part !== null);
+  const foreignDirs = [...new Set(foreign.map((e) => e.workingDir))];
+  const nextStep =
+    (foreignDirs.length > 0
+      ? `Run \`hack down\` from ${foreignDirs.join(" or ")}, then `
+      : "Run ") +
+    "`hack ps --json` to inspect and `hack down` again" +
+    (opts.timedOut
+      ? ` (pass \`--timeout <seconds>\` or set \`${COMPOSE_DOWN_TIMEOUT_CONFIG}\` if cleanup needs more time)`
+      : "");
+  return {
+    exitCode: opts.exitCode,
+    message: `${headline}; ${parts.length > 0 ? parts.join(", ") : "no containers or project networks remain"}. ${nextStep}.`,
+    detail: {
+      exitCode: opts.exitCode,
+      retry: true,
+      ...(opts.timedOut ? { timedOut: true, capMs: opts.capMs } : {}),
+      containers,
+      ...(foreign.length > 0 ? { foreign } : {}),
+      networks,
+      ...(containerReason ? { containersUnknownReason: containerReason } : {}),
+      ...(networkReason ? { networksUnknownReason: networkReason } : {}),
+    },
+  };
 }

@@ -5242,11 +5242,12 @@ test("a runtime failure during image admission keeps its own diagnostic and star
 test("opted-in amd64 services boot a translation pool and pin with their own platform policy", async () => {
   const { opts } = await fixture(false);
   const id = `sha256:${"e".repeat(64)}`;
-  const immutable = `docker.io/example/multi-arch@${id}`;
+  const sharedTag = "example/shared-image:2";
+  const immutable = `docker.io/example/shared-image@${id}`;
   withImages(opts, {
     legacy: "example/amd64-only:1",
-    tool: "example/multi-arch:2",
-    cache: "example/multi-arch:2",
+    tool: sharedTag,
+    cache: sharedTag,
   });
   const adaptationFile = join(opts.scope.projectRoot, "adaptation.json");
   await writeFile(
@@ -5305,7 +5306,7 @@ test("opted-in amd64 services boot a translation pool and pin with their own pla
       "runtime",
       "ensure-image",
       "--reference",
-      "example/multi-arch:2",
+      sharedTag,
       "--emulation",
       "prefer-native",
       "--json",

@@ -983,6 +983,19 @@ fn credentialed_realms_are_limited_to_the_registry_host_and_its_parent_domains()
 }
 
 #[test]
+fn dns_lookup_failure_is_registry_unavailability() {
+    let docker = empty_docker();
+    let policy = ImagePolicy {
+        host_lookup: Some(HostLookup(Arc::new(|_| {
+            Err(std::io::Error::other("fixture lookup failed"))
+        }))),
+        ..docker.policy()
+    };
+    let failure = resolve("registry.example.test/fixture/image:v1", &policy).unwrap_err();
+    assert!(permits_recorded_fallback(&failure), "{failure:?}");
+}
+
+#[test]
 fn public_names_resolving_to_local_addresses_refuse_unless_the_registry_is_allowed() {
     let content = content();
     let registry = Registry::start(content.clone(), Auth::None, false);

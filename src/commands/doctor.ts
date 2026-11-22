@@ -297,6 +297,7 @@ import {
   inspectProjectLifecycleHygiene,
   repairProjectLifecycleSessions,
 } from "../lib/project-lifecycle-hygiene.ts";
+import { inspectProjectPrerequisites } from "../lib/project-prerequisites.ts";
 import {
   findIncompleteRuntimeProjects,
   findMissingRegistryEntries,
@@ -1276,7 +1277,61 @@ async function collectDoctorProjectChecks(opts: {
     }))
   );
 
+  if (!adopted && projectCtx.status === "ok") {
+    results.push(...(await collectPrerequisiteChecks(startDir, s)));
+  }
+
   return results;
+}
+
+async function collectPrerequisiteChecks(
+  startDir: string,
+  progress: DoctorProgress
+): Promise<TimedCheckResult[]> {
+  const project = await findProjectContext(startDir);
+  if (!project) {
+    return [];
+  }
+  const { prerequisites } = await readProjectConfig(project);
+  if (prerequisites?.error) {
+    const { code, message } = prerequisites.error;
+    return [
+      await runCheck(progress, "prerequisites", () =>
+        Promise.resolve({
+          name: "prerequisites",
+          status: "error",
+          message: `${code}: ${message}`,
+        })
+      ),
+    ];
+  }
+  if (!prerequisites?.config) {
+    return [];
+  }
+  const observed = await inspectProjectPrerequisites(
+    prerequisites.config,
+    project.projectRoot
+  );
+  return await Promise.all(
+    observed.map(({ name, state, check, login, tools }) => {
+      const checkName = `prerequisite ${name}`;
+      const label =
+        state.state === "missing" ? `${state.bin} not found` : state.state;
+      return runCheck(progress, checkName, () =>
+        Promise.resolve({
+          name: checkName,
+          status: state.state === "ok" ? "ok" : "warn",
+          message: [
+            `${label}${check ? ` · check: ${check}` : ""} · login: ${login}`,
+            ...tools.map(
+              ({ bin, path, source, inProject }) =>
+                `  ${bin}  ${path ?? "not found"} · ${source}${inProject ? " · in project" : ""}`
+            ),
+          ].join("\n"),
+        })
+      );
+    })
+  );
 }
 
 function assertMachineDoctorOptions(

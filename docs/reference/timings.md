@@ -76,6 +76,11 @@ metadata is missing it includes the registry lookup.
 `image.archive.digest` measures the standalone archive SHA-256 pass and is absent
 when a completed load receipt and live readback satisfy `ensure-image`.
 
+`image.ensure` and `image.cache` report `attrs.registry_requests`, the count
+of attempted HTTP sends in that runtime command, including registry
+authentication, retries and redirects. A fresh loaded selection reports zero.
+`image.tag.record` covers the local receipt read without network transfer.
+
 ## Growing the vocabulary
 
 A writer emits only the names shipped in its own build. A reader keeps names it

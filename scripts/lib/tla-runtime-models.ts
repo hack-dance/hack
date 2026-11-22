@@ -2796,6 +2796,19 @@ const contracts: readonly ModelContract[] = [
           "boot = 3",
           'owner = "dead"',
         ],
+        // TLC's two workers may report the same dead end one boot later, after
+        // an extra `runtime up` and stop before the start (fault bound 3).
+        alternativeWitnesses: [
+          {
+            action: "RuntimeUp",
+            fields: [
+              'pool = "running"',
+              "runBoot = 2",
+              "boot = 4",
+              'owner = "dead"',
+            ],
+          },
+        ],
       },
       {
         name: "strict",

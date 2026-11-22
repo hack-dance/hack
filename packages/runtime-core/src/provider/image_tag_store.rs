@@ -276,40 +276,49 @@ fn resolve_with(
     let named = tag(reference, policy)?;
     let canonical = named.canonical();
     let root = record_directory(candidate, &canonical);
-    let lock = state::Lock::acquire(&root)?;
     let path = root.join("resolution.json");
-    let previous = measure(Step::ImageTagRecord, None, |_| read(&path, &named))?;
-    let offline = || {
-        previous.clone().ok_or_else(offline_missing)?.resolution(
+    crate::reject_aliased_state(&root)?;
+    let read_record = || measure(Step::ImageTagRecord, None, |_| read(&path, &named));
+    let previous = read_record()?;
+    if policy.tag_mode == ImageTagMode::Offline {
+        return previous.ok_or_else(offline_missing)?.resolution(
             &named,
             platform,
             TagSource::Offline,
-        )
+        );
+    }
+    let opened_at = now()?;
+    let is_fresh = |entry: &TagRecord| {
+        policy.tag_mode == ImageTagMode::Normal && entry.fresh(opened_at, policy.tag_ttl_seconds)
     };
-    if policy.tag_mode == ImageTagMode::Offline {
-        return offline();
+    let matching = |entry: &TagRecord| is_fresh(entry) && entry.selection(platform).is_some();
+    if let Some(entry) = previous.filter(matching) {
+        return entry.resolution(&named, platform, TagSource::Recorded);
     }
 
-    let opened_at = now()?;
-    let fresh = previous.as_ref().filter(|entry| {
-        policy.tag_mode == ImageTagMode::Normal && entry.fresh(opened_at, policy.tag_ttl_seconds)
-    });
-    if let Some(entry) = fresh
-        && entry.selection(platform).is_some()
-    {
+    // Atomic publication lets established readers avoid the writer's lock.
+    // Recheck under the writer lock so an automatic refresh can reuse a
+    // resolution another process just published.
+    let lock = state::Lock::acquire(&root)?;
+    let previous = read_record()?;
+    if let Some(entry) = previous.as_ref().filter(|entry| matching(entry)) {
         return entry
             .clone()
             .resolution(&named, platform, TagSource::Recorded);
     }
-
-    let resolved = match fresh {
+    let fresh = previous.as_ref().filter(|entry| is_fresh(entry));
+    let resolved = measure(Step::ImageTagResolve, None, |_| match fresh {
         Some(entry) => lookup(&pin(&named, &entry.source_digest), true),
         None => lookup(&canonical, false),
-    };
+    });
     let resolved = match resolved {
         Ok(value) => value,
         Err(error) if registry_image::permits_recorded_fallback(&error) => {
-            return offline();
+            return previous.ok_or_else(offline_missing)?.resolution(
+                &named,
+                platform,
+                TagSource::Offline,
+            );
         }
         Err(error) => return Err(error),
     };
@@ -640,10 +649,24 @@ mod tests {
         assert_eq!(second_requests, 2);
         version.store(2, Ordering::SeqCst);
         let before = request_count.load(Ordering::SeqCst);
+        let named = tag(&reference, &policy).unwrap();
+        let refresh_lock =
+            state::Lock::acquire(&record_directory(&f.0, &named.canonical())).unwrap();
         for _ in 0..20 {
             let (cached, requests) = lookup(&reference, &policy);
             let cached = cached.unwrap();
             assert_eq!(cached.image_id, first.image_id);
+            let proof = super::super::image_ensure::recorded_proof(
+                &f.0,
+                &cached.pinned_reference,
+                cached.proof_policy,
+            )
+            .unwrap()
+            .unwrap();
+            let (_, verified_config) = proof
+                .verified_config(&cached.pinned_reference, PlatformPolicy::Native)
+                .unwrap();
+            assert_eq!(verified_config, cached.image_id);
             let observed = super::super::image_load::tests::confirm_verified_tag_in_test_guest(
                 &f.0,
                 &cached.pinned_reference,
@@ -653,6 +676,7 @@ mod tests {
             assert_eq!(observed, first.image_id);
             assert_eq!(requests, 0);
         }
+        drop(refresh_lock);
         assert_eq!(request_count.load(Ordering::SeqCst), before);
         policy.tag_ttl_seconds = 0;
         let (fallback, requests) = lookup(&reference, &policy);

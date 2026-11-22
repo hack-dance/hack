@@ -8250,6 +8250,7 @@ async function runUpCommand({
 
   if (serviceScoped) {
     await updateProjectRuntimeServiceEnvFingerprints({
+      remoteTargets: runtimeRemoteTargets(remoteChoices),
       projectDir: project.projectDir,
       composeProject: lifecycleComposeProject,
       effectiveEnvName: envOverrides.effectiveEnvName,
@@ -10520,6 +10521,8 @@ async function runTargetedServiceRestart(opts: {
   // Force-recreate applies the env resolved above; after a failure the
   // services' delivered env is unknown, so their digests are dropped.
   await updateProjectRuntimeServiceEnvFingerprints({
+    remoteTargets:
+      code === 0 ? runtimeRemoteTargets(opts.remoteChoices) : undefined,
     projectDir: opts.project.projectDir,
     composeProject: resolveLifecycleComposeProjectName({
       projectName: opts.projectName,
@@ -11198,6 +11201,14 @@ export function resolveRestartTarget(opts: {
   };
 }
 
+function runtimeRemoteTargets(
+  choices: readonly EffectiveRemote[] = []
+): Readonly<Record<string, string>> | undefined {
+  return choices.length
+    ? Object.fromEntries(choices.map(({ remote, target }) => [remote, target]))
+    : undefined;
+}
+
 /**
  * Record the env selection of a full-stack up/restart together with fresh,
  * value-free digests of the env set delivered to each prepared service, so
@@ -11229,13 +11240,7 @@ async function persistProjectRuntimeEnvSelection(opts: {
       composeProject: opts.composeProject,
       envName: opts.envName,
       updatedAt: new Date().toISOString(),
-      ...(opts.remoteChoices?.length
-        ? {
-            remoteTargets: Object.fromEntries(
-              opts.remoteChoices.map(({ remote, target }) => [remote, target])
-            ),
-          }
-        : {}),
+      remoteTargets: runtimeRemoteTargets(opts.remoteChoices),
       envFingerprint: withComposeServiceEnvFingerprints({
         existing: undefined,
         services: opts.services,

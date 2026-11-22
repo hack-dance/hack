@@ -134,13 +134,14 @@ export async function removeProjectRuntimeStateEntry(opts: {
  * Refresh or forget the env digests of `services` after a service-scoped
  * (re)create, preserving the rest of the stack's entry.
  *
- * - No entry: nothing is written. Service-scoped commands never create the
- *   stack entry (its env selection belongs to a full `up`/`restart`).
+ * - A scoped start with remote targets can create the teardown record.
+ *   Other scoped operations leave an absent record alone.
  * - `applied` with the entry's env selection: digests are recorded.
  * - Otherwise (`unknown` outcome, or a different env selection): the digests
  *   are dropped so exec reports nothing rather than a wrong comparison.
  */
 export async function updateProjectRuntimeServiceEnvFingerprints(opts: {
+  readonly remoteTargets?: Readonly<Record<string, string>>;
   readonly projectDir: string;
   readonly composeProject: string;
   readonly effectiveEnvName: string | null;
@@ -150,13 +151,18 @@ export async function updateProjectRuntimeServiceEnvFingerprints(opts: {
   >;
   readonly outcome: "applied" | "unknown";
 }): Promise<void> {
-  const entry = await readProjectRuntimeStateEntry({
+  const previous = await readProjectRuntimeStateEntry({
     projectDir: opts.projectDir,
     composeProject: opts.composeProject,
   });
-  if (!entry) {
+  if (!(previous || opts.remoteTargets)) {
     return;
   }
+  const entry: ProjectRuntimeStateEntry = previous ?? {
+    composeProject: opts.composeProject,
+    envName: opts.effectiveEnvName,
+    updatedAt: new Date().toISOString(),
+  };
   const envFingerprint =
     opts.outcome === "applied" && entry.envName === opts.effectiveEnvName
       ? withComposeServiceEnvFingerprints({
@@ -171,7 +177,11 @@ export async function updateProjectRuntimeServiceEnvFingerprints(opts: {
   const { envFingerprint: _previous, ...rest } = entry;
   await upsertProjectRuntimeStateEntry({
     projectDir: opts.projectDir,
-    entry: { ...rest, ...(envFingerprint ? { envFingerprint } : {}) },
+    entry: {
+      ...rest,
+      ...(opts.remoteTargets ? { remoteTargets: opts.remoteTargets } : {}),
+      ...(envFingerprint ? { envFingerprint } : {}),
+    },
   });
 }
 

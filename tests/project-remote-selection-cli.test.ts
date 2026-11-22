@@ -258,6 +258,11 @@ test("the six --use entry points deliver the invocation target without saving it
     expect(await Bun.file(log).text()).toContain("down=live.example.test:5432");
     expect(await Bun.file(join(root, "stack-state")).exists()).toBe(false);
 
+    ok(["up", "--detach", ...choice, "api"]);
+    await Bun.write(log, "");
+    ok(["down"]);
+    expect(await Bun.file(log).text()).toContain("down=live.example.test:5432");
+
     for (const dependency of [
       "links: [postgres:db]",
       "volumes_from: [postgres:ro]",

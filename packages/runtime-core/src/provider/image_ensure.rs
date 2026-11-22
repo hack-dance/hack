@@ -67,16 +67,18 @@ impl ImageCache {
 
     fn enter(&self, root: &Path, policy: &ImagePolicy) -> Result<CacheLease<'_>, CandidateError> {
         let mut cache = self.state.lock().unwrap();
-        if cache.lease.is_none() {
+        if let Some(lease) = &cache.lease {
+            lease.verify_path(root)?;
+        } else {
             let lease =
                 lifecycle::startup_lease(root, policy.image_wait(lifecycle::STARTUP_LEASE_WAIT)?)?;
             let staging = root.with_file_name("image-staging");
             if staging.try_exists().map_err(state::io)? {
                 clean_staging(&staging, 0)?;
             }
+            lease.verify_path(root)?;
             cache.lease = Some(lease);
         }
-        cache.lease.as_ref().unwrap().verify_path(root)?;
         cache.users += 1;
         Ok(CacheLease(self))
     }

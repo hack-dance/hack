@@ -13,6 +13,7 @@ import {
   admitNativeProjectBuilds,
   nativeBuildBases,
   nativeServiceActive,
+  refuseManagedSecretBuildArguments,
 } from "./native-project-builds.ts";
 import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
@@ -197,6 +198,10 @@ export async function pullNativeProjectImages(opts: {
       projectRoot: opts.project.projectRoot,
       composeFile: opts.project.composeFile,
       enabled: true,
+    });
+    refuseManagedSecretBuildArguments({
+      builds,
+      managedSecretValues: input.managedSecretValues ?? [],
     });
     bases = await nativeBuildBases({
       projectRoot: opts.project.projectRoot,

@@ -11,6 +11,9 @@ import {
   pullNativeProjectImages,
 } from "../src/backends/native-image-tags.ts";
 
+import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
+import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
+
 const runtime = { binary: "/fixture/hack-native", home: "/fixture/home" };
 const projectRoot = "/fixture/project";
 
@@ -64,6 +67,7 @@ test.each([
   "supported",
   "unsupported field",
   "unsupported base",
+  "managed argument",
 ])("native pull acquires service images first: %s", async (scenario) => {
   const root = await mkdtemp(join(tmpdir(), "native-pull-build-"));
   try {
@@ -72,6 +76,19 @@ test.each([
     const composeFile = join(projectDir, "compose.yaml");
     const id = `sha256:${"a".repeat(64)}`;
     const base = "docker.io/library/alpine:3.20";
+    const fixtureValue = "synthetic-managed-fixture";
+    if (scenario === "managed argument") {
+      await writeFile(join(root, PROJECT_ENV_KEY_FILENAME), "synthetic-key");
+      await setProjectEnvValue({
+        projectRoot: root,
+        projectDir,
+        envName: null,
+        scope: "global",
+        key: "FIXTURE_KEY",
+        value: fixtureValue,
+        secret: true,
+      });
+    }
     await writeFile(
       composeFile,
       `services:
@@ -80,7 +97,7 @@ test.each([
   app:
     build:
       context: ..
-${scenario === "unsupported field" ? "      ssh: [default]\n" : ""}`
+${scenario === "unsupported field" ? "      ssh: [default]\n" : ""}${scenario === "managed argument" ? `      args: { BASE: ${fixtureValue} }\n` : ""}`
     );
     const confirmed: string[] = [];
     const pull = pullNativeProjectImages({
@@ -90,6 +107,7 @@ ${scenario === "unsupported field" ? "      ssh: [default]\n" : ""}`
       invoke: async ({ args }) => {
         if (args[1] === "build-image") {
           expect(confirmed).toEqual([id]);
+          expect(scenario).not.toBe("managed argument");
           if (scenario === "unsupported base") {
             throw new Error("Use public Docker Hub images.");
           }
@@ -115,6 +133,10 @@ ${scenario === "unsupported field" ? "      ssh: [default]\n" : ""}`
         "Native pull could not confirm build bases"
       );
       expect(String(error)).not.toContain("foreground up");
+      if (scenario === "managed argument") {
+        expect(String(error)).toContain("build arg BASE");
+        expect(String(error)).not.toContain(fixtureValue);
+      }
       expect(confirmed).toEqual([id]);
     }
   } finally {

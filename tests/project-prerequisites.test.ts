@@ -9,7 +9,10 @@ import {
 import { HackCliError } from "../src/lib/cli-result.ts";
 import { HACK_VERSION } from "../src/lib/hack-version.ts";
 import { parseProjectConfigRecord } from "../src/lib/project.ts";
-import { enforceProjectPrerequisites } from "../src/lib/project-prerequisites.ts";
+import {
+  enforceProjectPrerequisites,
+  inspectProjectPrerequisites,
+} from "../src/lib/project-prerequisites.ts";
 import { renderProjectConfigSchemaJson } from "../src/templates.ts";
 import { validateJsonSchemaSubset } from "./helpers/json-schema-subset.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -412,6 +415,35 @@ test("failed check output stays private and noninteractive TTY does not start lo
     expect(tty.stderr).not.toContain(outputMarker);
     expect(tty.stderr).not.toContain("run it now?");
     expect(await Bun.file(join(root, "login-started")).exists()).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Doctor reports a custom prerequisite without executing it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-prerequisite-doctor-"));
+  try {
+    const parsed = parseProjectConfigRecord(
+      {
+        min_cli_version: HACK_VERSION,
+        requires: {
+          cloud: {
+            check: ["touch", "check-ran"],
+            login: ["true"],
+          },
+        },
+      },
+      "fixture.json"
+    );
+    const config = parsed.prerequisites?.config;
+    expect(config).toBeDefined();
+    if (!config) {
+      throw new Error("Expected a parsed prerequisite declaration.");
+    }
+    expect(await inspectProjectPrerequisites(config, root)).toEqual([
+      { name: "cloud", login: "true", state: { state: "not checked" } },
+    ]);
+    expect(await Bun.file(join(root, "check-ran")).exists()).toBe(false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

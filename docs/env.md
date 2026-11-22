@@ -1895,7 +1895,8 @@ requirements before running Compose lifecycle hooks for `up`, `restart`, or
 mapped env names match an `environment` entry on a selected service. With
 no service selection, Hack checks every default remote. When Hack cannot
 read the selected service declarations, it checks every default remote.
-Doctor checks each declared prerequisite and shows the login command.
+Doctor runs preset checks and shows each declared login command. It reports
+custom checks as `not checked` after looking up their executables.
 
 A prerequisite can use the `aws-sso` preset with a `profile`, or the
 `gcloud-adc` preset. For other providers, give `check` and `login` as argv

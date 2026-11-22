@@ -47,7 +47,7 @@ function resolveExecutable(bin: string): string | null {
 function findMissingTool(
   requirement: ProjectPrerequisite,
   tools: ProjectPrerequisiteConfig["tools"]
-): CheckState | undefined {
+): Extract<CheckState, { state: "missing" }> | undefined {
   for (const name of requirement.tools) {
     const tool = tools.get(name);
     const missing = tool?.bins.find((bin) => !resolveExecutable(bin));
@@ -342,15 +342,42 @@ export async function enforceProjectPrerequisites(
   return true;
 }
 
+type DoctorPrerequisiteState = CheckState | { readonly state: "not checked" };
+
+async function inspectPrerequisite(
+  requirement: ProjectPrerequisite,
+  tools: ProjectPrerequisiteConfig["tools"],
+  cwd: string
+): Promise<DoctorPrerequisiteState> {
+  if (requirement.preset) {
+    return await checkPrerequisite(requirement, tools, cwd);
+  }
+  const missing = findMissingTool(requirement, tools);
+  if (missing) {
+    return missing;
+  }
+  const [bin] = requirement.check;
+  return resolveExecutable(bin)
+    ? { state: "not checked" }
+    : { state: "missing", bin, tool: bin };
+}
+
+/** Doctor can describe custom checks without executing checkout-provided argv. */
 export async function inspectProjectPrerequisites(
   config: ProjectPrerequisiteConfig,
   cwd: string
-): Promise<readonly { name: string; state: CheckState; login: string }[]> {
-  const results: { name: string; state: CheckState; login: string }[] = [];
+): Promise<
+  readonly { name: string; state: DoctorPrerequisiteState; login: string }[]
+> {
+  const results: {
+    name: string;
+    state: DoctorPrerequisiteState;
+    login: string;
+  }[] = [];
   for (const [name, requirement] of config.requires) {
     results.push({
       name,
-      state: await checkPrerequisite(requirement, config.tools, cwd),
+      state: await inspectPrerequisite(requirement, config.tools, cwd),
       login: displayArgv(requirement.login),
     });
   }

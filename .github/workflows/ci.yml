@@ -1015,6 +1015,14 @@ jobs:
           cargo clippy --locked --all-targets --manifest-path packages/hack-vm-protocol/Cargo.toml -- -D warnings
           cargo test --locked --manifest-path packages/hack-vm-protocol/Cargo.toml
 
+      - name: Check guest agent and replay job recovery
+        if: runner.os == 'Linux'
+        working-directory: packages/hack-vm-agent
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+
   test:
     # The required `test` check (repository ruleset) for `next` and `main`. It
     # always runs. When the change scope runs the suite, every bun shard must

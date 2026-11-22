@@ -339,17 +339,30 @@ pub(super) fn publish_proof(
     platform: PlatformPolicy,
     proof: &registry_image::ManifestProof,
 ) -> Result<(), CandidateError> {
-    static PROOF_WRITER: Mutex<()> = Mutex::new(());
-    let _writer = PROOF_WRITER.lock().unwrap();
     let path = manifest_path(candidate, pin, platform);
-    state::private_directory(
-        path.parent()
-            .ok_or_else(|| refused("Image proof parent is missing."))?,
-    )?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| refused("Image proof parent is missing."))?;
+    let lock = lifecycle::startup_lease(parent, lifecycle::STARTUP_LEASE_WAIT)?;
+    let pending = path.with_extension("pending");
+    match fs::symlink_metadata(&pending) {
+        Ok(metadata)
+            if metadata.is_file()
+                && metadata.uid() == current_uid()
+                && metadata.nlink() == 1
+                && metadata.mode() & 0o077 == 0 =>
+        {
+            lock.verify_path(parent)?;
+            fs::remove_file(pending).map_err(state::io)?;
+        }
+        Ok(_) => return Err(refused("Unsafe pending image proof was left in place.")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(state::io(error)),
+    }
     if path.try_exists().map_err(state::io)? {
         return Ok(());
     }
-    state::write(&path, proof)
+    state::write_before_rename(&path, proof, &|| lock.verify_path(parent))
 }
 
 fn check_registry_config(
@@ -1015,6 +1028,60 @@ mod tests {
             platform: platform.candidates()[0],
         })
     }
+    #[test]
+    #[ignore = "subprocess fixture"]
+    fn stopped_proof_writer() {
+        let file = PathBuf::from(std::env::var_os("HACK_TEST_PENDING_IMAGE_PROOF").unwrap());
+        let _lock = state::Lock::acquire(file.parent().unwrap()).unwrap();
+        let proof = registry_image::test_manifest_resolution().proof;
+        state::write_before_rename(&file, &proof, &|| {
+            fs::write(file.with_extension("synced"), b"ready").unwrap();
+            loop {
+                std::thread::park();
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn killed_proof_writer_can_be_replaced_after_pending_sync() {
+        let f = Fixture::new();
+        let path = manifest_path(&f.1, &pin(1), PlatformPolicy::Native);
+        let mut child = super::super::process::spawn_child(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "provider::image_ensure::tests::stopped_proof_writer",
+                ])
+                .env("HACK_TEST_PENDING_IMAGE_PROOF", &path)
+                .stdout(std::process::Stdio::null()),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !path.with_extension("synced").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(path.with_extension("synced").exists());
+        assert!(path.with_extension("pending").exists());
+        assert!(!path.exists());
+        publish_proof(
+            &f.1,
+            &pin(1),
+            PlatformPolicy::Native,
+            &registry_image::test_manifest_resolution().proof,
+        )
+        .unwrap();
+        assert!(
+            recorded_proof(&f.1, &pin(1), PlatformPolicy::Native)
+                .unwrap()
+                .is_some()
+        );
+        assert!(!path.with_extension("pending").exists());
+    }
+
     #[test]
     fn unrelated_staging_files_are_named_and_preserved() {
         let f = Fixture::new();

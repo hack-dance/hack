@@ -31,3 +31,15 @@ test("ps uses service columns and a count in both layouts", () => {
     "SERVICE  KIND    USE  POINTS AT             VIA     STATE\ndb       remote  qa   $REMOTE_DB_HOST:5432  tunnel  healthy\n\n1 service\n"
   );
 });
+
+test("a known empty service list ends with a start hint", () => {
+  const lines: string[] = [];
+  const output = createTextOutput({
+    tty: false,
+    write: (text) => lines.push(text),
+  });
+  renderPs({ rows: [], output, hintWhenEmpty: true });
+  expect(lines.join("")).toBe(
+    "SERVICE  ADDRESS  STATE\n\n0 services\nnothing running. try: hack up\n"
+  );
+});

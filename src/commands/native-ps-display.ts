@@ -64,6 +64,7 @@ export async function displayNativePs(
   if (ps) {
     renderPs({
       wide: ps.wide,
+      hintWhenEmpty: result.status === "not_started",
       rows: result.items.map((item) => ({
         service: item.service,
         address: ps.addresses.get(item.service) ?? null,

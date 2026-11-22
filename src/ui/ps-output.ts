@@ -31,6 +31,7 @@ export function renderPs(input: {
   readonly rows: readonly PsRow[];
   readonly wide?: boolean;
   readonly hasRemotes?: boolean;
+  readonly hintWhenEmpty?: boolean;
   readonly output?: ReturnType<typeof createTextOutput>;
 }): void {
   const output = input.output ?? createTextOutput();
@@ -69,4 +70,7 @@ export function renderPs(input: {
     rows,
     count: `${count} service${count === 1 ? "" : "s"}`,
   });
+  if (count === 0 && input.hintWhenEmpty) {
+    output.hint({ text: "nothing running. try:", command: "hack up" });
+  }
 }

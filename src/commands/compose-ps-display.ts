@@ -20,6 +20,7 @@ export function displayComposePs(opts: {
 }): void {
   renderPs({
     wide: opts.wide,
+    hintWhenEmpty: true,
     rows: opts.entries.map((entry) => {
       const service = getString(entry, "Service") ?? "-";
       const state = getString(entry, "State") ?? "";

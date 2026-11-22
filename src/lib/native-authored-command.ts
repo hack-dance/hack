@@ -439,6 +439,7 @@ async function showStatus(options: {
   if (options.psWide !== undefined) {
     renderPs({
       wide: options.psWide,
+      hintWhenEmpty: result.status === "not_started",
       rows: result.items.map((item) => ({
         ...item,
         address: null,

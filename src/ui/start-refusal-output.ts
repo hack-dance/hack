@@ -1,4 +1,5 @@
 import type { HackErrorCode } from "../lib/cli-result.ts";
+import { canPrompt } from "../lib/interactivity.ts";
 import { isColorDisabledByEnv } from "./terminal.ts";
 import { createTextOutput } from "./text-output.ts";
 
@@ -11,7 +12,7 @@ const setupBlocker: StartBlocker = {
   thing: "native runtime",
   problem: "setup required",
   needs: "this start needs the native runtime",
-  command: "hack native setup",
+  command: "hack native setup --accept-downloads",
 };
 
 const blockers: Partial<Record<HackErrorCode, StartBlocker>> = {
@@ -20,13 +21,11 @@ const blockers: Partial<Record<HackErrorCode, StartBlocker>> = {
     thing: "project",
     problem: "not found",
     needs: "this start needs a configured project",
-    command: "hack init",
+    command: "hack init --auto",
   },
   E_DOCKER_UNAVAILABLE: {
     thing: "docker",
-    problem: "engine or compose unavailable",
-    needs: "this start needs a working docker installation",
-    command: "docker compose version && docker info",
+    problem: "engine unavailable · start docker or select a running engine",
   },
   E_INTERACTIVE_REQUIRED: {
     thing: "terminal",
@@ -53,18 +52,29 @@ export function writeStartBlocker(input: StartBlocker): void {
 export function startRefusalBlocker(
   code: HackErrorCode
 ): StartBlocker | undefined {
-  return blockers[code];
+  const blocker = blockers[code];
+  if (blocker && canPrompt()) {
+    if (code === "E_NATIVE_SETUP_REQUIRED") {
+      return { ...blocker, command: "hack native setup" };
+    }
+    if (code === "E_PROJECT_NOT_FOUND") {
+      return { ...blocker, command: "hack init" };
+    }
+  }
+  return blocker;
 }
 
 export function writeUpHookBlocker(
   phase: "before" | "after",
-  exitCode: number
+  exitCode: number,
+  name: string | undefined,
+  command: string
 ): void {
   writeStartBlocker({
     thing: "lifecycle",
     problem: "hook failed",
-    which: `${phase}, exit ${exitCode}`,
+    which: [phase, name, `exit ${exitCode}`].filter(Boolean).join(", "),
     needs: "fix the failing hook and retry this start",
-    command: "hack up",
+    command,
   });
 }

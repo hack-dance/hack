@@ -531,6 +531,7 @@ import { displayNativePs } from "./native-ps-display.ts";
 import {
   answerNativeAlreadyRunning,
   explainUnconfirmedNativeDetachedStart,
+  quoteSingleLineShellWord,
 } from "./native-up-already-running.ts";
 import {
   assertAutostartEnvironment,
@@ -2411,6 +2412,7 @@ export async function runLifecycleCommands(opts: {
   readonly projectDir: string;
   readonly composeProject: string;
   readonly routeStdoutToStderr?: boolean;
+  readonly summarizeFailure?: (name: string) => void;
   readonly onPersistentCommand?: (opts: {
     readonly command: ProjectLifecycleCommand;
     readonly index: number;
@@ -2443,7 +2445,11 @@ export async function runLifecycleCommands(opts: {
           error instanceof Error
             ? error.message
             : `Failed to start persistent lifecycle command: ${serviceName}`;
-        logger.error({ message });
+        if (opts.summarizeFailure) {
+          opts.summarizeFailure(serviceName);
+        } else {
+          logger.error({ message });
+        }
         // The lines the foreground just printed, for a detached owner (HACK-2339).
         nativeDetachedUpHookFailed({
           step: `${opts.title}: ${label}`,
@@ -2506,7 +2512,11 @@ export async function runLifecycleCommands(opts: {
 
     if (exitCode !== 0) {
       const failure = `${opts.title} failed (exit ${exitCode}): ${label}`;
-      logger.error({ message: failure });
+      if (opts.summarizeFailure) {
+        opts.summarizeFailure(serviceName);
+      } else {
+        logger.error({ message: failure });
+      }
       nativeDetachedUpHookFailed({
         step: `${opts.title}: ${label}`,
         output: tail.lines,
@@ -2625,6 +2635,7 @@ function hasPersistentLifecycleCommands(
 
 async function runLifecycleUpBeforeAndProcesses(opts: {
   readonly title: string;
+  readonly summarizeFailure?: (name: string) => void;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly projectName: string;
@@ -2691,6 +2702,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   if (!hasPersistentLifecycleCommands(beforeCommands)) {
     const beforeCode = await runLifecycleCommands({
       title: opts.title,
+      summarizeFailure: opts.summarizeFailure,
       commands: beforeCommands,
       projectRoot: opts.project.projectRoot,
       env: opts.env,
@@ -2750,6 +2762,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   });
   const beforeCode = await runLifecycleCommands({
     title: opts.title,
+    summarizeFailure: opts.summarizeFailure,
     commands: beforeCommands,
     projectRoot: opts.project.projectRoot,
     env: opts.env,
@@ -7624,11 +7637,22 @@ async function runUpCommand({
         }),
       keepSharedHelpers,
     });
+  let failedHook: string | undefined;
+  const retryCommand = [
+    "hack",
+    ...args.raw.argv.map(quoteSingleLineShellWord),
+  ].join(" ");
+  const summarizeFailure = json
+    ? undefined
+    : (name: string) => {
+        failedHook = name;
+      };
   try {
     const lifecycleUp: LifecycleUpResult = serviceScoped
       ? { code: 0, cleanup: null, signalCleanup: null, sessionName: null }
       : await runLifecycleUpBeforeAndProcesses({
           title: "Lifecycle (up before)",
+          summarizeFailure,
           project,
           cfg,
           projectName,
@@ -7647,7 +7671,7 @@ async function runUpCommand({
           exitCode: lifecycleUp.code,
         });
       }
-      writeUpHookBlocker("before", lifecycleUp.code);
+      writeUpHookBlocker("before", lifecycleUp.code, failedHook, retryCommand);
       return lifecycleUp.code;
     }
     if (lifecycleUp.sessionName) {
@@ -7675,7 +7699,7 @@ async function runUpCommand({
       problem: "setup failed",
       which: message,
       needs: "resolve the setup failure and retry this start",
-      command: "hack up",
+      command: retryCommand,
     });
     return 1;
   }
@@ -7936,6 +7960,7 @@ async function runUpCommand({
       ? 0
       : await runLifecycleCommands({
           title: "Lifecycle (up after)",
+          summarizeFailure,
           commands: cfg.lifecycle?.up?.after,
           projectRoot: project.projectRoot,
           env: envOverrides.lifecycleEnv,
@@ -7946,7 +7971,7 @@ async function runUpCommand({
     if (afterCode !== 0) {
       await lifecycleCleanup?.();
       if (!json) {
-        writeUpHookBlocker("after", afterCode);
+        writeUpHookBlocker("after", afterCode, failedHook, retryCommand);
         return afterCode;
       }
       return emitLifecycleResult({

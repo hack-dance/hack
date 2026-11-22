@@ -295,6 +295,7 @@ function refuse(inspection: Pick<NativeSetupInspection, "state">): never {
           command: launcherCommand(currentCandidateLauncher(), [
             "native",
             "setup",
+            ...(canPrompt() ? [] : ["--accept-downloads"]),
           ]),
         }
       : undefined,

@@ -49,6 +49,9 @@ export async function runCli(argv: readonly string[]): Promise<number> {
   }
   // Set once argument parsing succeeded and the handler owns the request.
   let handlerPath: readonly string[] | undefined;
+  let startSelector:
+    | { readonly path?: string; readonly project?: string }
+    | undefined;
   try {
     const cli = CLI_SPEC;
     const allowUnknownOptions = shouldAllowUnknownOptions({
@@ -120,6 +123,12 @@ export async function runCli(argv: readonly string[]): Promise<number> {
     });
 
     handlerPath = resolved.path.map((command) => command.name);
+    if (handlerPath[0] === "up") {
+      startSelector = {
+        path: typeof opts.path === "string" ? opts.path : undefined,
+        project: typeof opts.project === "string" ? opts.project : undefined,
+      };
+    }
     return await resolved.command.handler({
       ctx: { cwd: process.cwd(), cli },
       args: {
@@ -140,6 +149,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       error,
       jsonRequested,
       handlerPath,
+      startSelector,
       logFollowJson:
         jsonRequested &&
         process.env.HACK_RUNTIME_BACKEND === "native" &&
@@ -212,6 +222,10 @@ export async function handleRunCliError(opts: {
   readonly jsonRequested: boolean;
   readonly handlerPath?: readonly string[];
   readonly logFollowJson?: boolean;
+  readonly startSelector?: {
+    readonly path?: string;
+    readonly project?: string;
+  };
 }): Promise<number> {
   const { error, jsonRequested } = opts;
   if (opts.logFollowJson) {
@@ -236,6 +250,17 @@ export async function handleRunCliError(opts: {
       });
       return 1;
     }
+    if (
+      opts.startSelector?.project &&
+      error.message.startsWith("Unknown project")
+    ) {
+      writeStartBlocker({
+        thing: "project",
+        problem: "selected project not registered",
+        which: error.message,
+      });
+      return 1;
+    }
     // Do not use the UI logger here: clack writes errors to stdout.
     process.stderr.write(`ERROR: ${error.message}\n`);
     if (opts.handlerPath === undefined) {
@@ -254,7 +279,9 @@ export async function handleRunCliError(opts: {
   if (error instanceof HackCliError) {
     const blocker =
       opts.handlerPath?.[0] === "up"
-        ? (error.startBlocker ?? startRefusalBlocker(error.code))
+        ? (error.startBlocker ??
+          selectedProjectBlocker(error, opts.startSelector) ??
+          startRefusalBlocker(error.code))
         : undefined;
     if (blocker) {
       writeStartBlocker(blocker);
@@ -291,6 +318,31 @@ export async function handleRunCliError(opts: {
     logger.error({ message: error.stack });
   }
   return 1;
+}
+
+function selectedProjectBlocker(
+  error: HackCliError,
+  selection: { readonly path?: string; readonly project?: string } | undefined
+) {
+  if (error.code !== "E_PROJECT_NOT_FOUND") {
+    return;
+  }
+  if (selection?.project !== undefined) {
+    return {
+      thing: "project",
+      problem:
+        "selected project not registered · use a registered project name",
+      which: JSON.stringify(selection.project),
+    };
+  }
+  if (selection?.path !== undefined) {
+    return {
+      thing: "project",
+      problem:
+        "no project found at the selected path · use a configured project path",
+      which: JSON.stringify(selection.path),
+    };
+  }
 }
 
 /** One-line pointer to a command's help, printed after a handler refusal. */

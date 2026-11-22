@@ -2290,6 +2290,14 @@ function assertSelectedWorkloads(inputs: AcquiredComposeInputs): void {
   }
 }
 
+const uncertainNativeHookBlocker = {
+  thing: "lifecycle",
+  problem: "native hook may have run",
+  which: "recovery unavailable",
+  needs: "startup is blocked without replay · inspect the saved state",
+  command: "hack ps",
+};
+
 function assertStartupAvailable(
   current: Awaited<ReturnType<NativeComposeGenerationStore["loadCurrent"]>>
 ) {
@@ -2301,13 +2309,7 @@ function assertStartupAvailable(
       code: "E_LIFECYCLE_FAILED",
       message:
         "Native host hook completion remains uncertain; startup is blocked without replay. Hook recovery is not supported in this slice. Values omitted.",
-      startBlocker: {
-        thing: "lifecycle",
-        problem: "native hook completion uncertain",
-        which: "recovery unavailable",
-        needs: "startup is blocked without replay · inspect the saved state",
-        command: "hack ps",
-      },
+      startBlocker: uncertainNativeHookBlocker,
     });
   }
   if (current.pending !== null) {
@@ -2366,6 +2368,7 @@ async function prepareBeforeHooks(opts: {
       code: "E_LIFECYCLE_FAILED",
       message:
         "Native host hook completion is uncertain; startup is blocked without replay. Hook recovery is not supported in this slice. Values omitted.",
+      startBlocker: uncertainNativeHookBlocker,
     });
   }
   if (result.value !== 0) {

@@ -88,7 +88,7 @@ test("text-mode up without docker prints the engine blocker", async () => {
   const result = await hack(["up", "--detach"]);
   expect(result.code).toBe(1);
   expect(result.stderr).toEndWith(
-    "! docker  engine or compose unavailable\n  this start needs a working docker installation. run:\n  docker compose version && docker info\n"
+    "! docker  cli missing · install docker engine with compose v2\n"
   );
   expect(result.all).not.toContain("Executable not found");
   expect(result.all).not.toContain("    at ");

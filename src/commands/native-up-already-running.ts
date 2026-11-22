@@ -160,6 +160,7 @@ export type NativeUpSelection = {
 /** One shell-safe command targeting the same instance, without changing its env/profiles. */
 export function nativeScopedCommand(opts: {
   readonly action: "restart" | "down";
+  readonly singleLine?: boolean;
   readonly selection: NativeUpSelection;
 }): string {
   const words = ["hack", opts.action];
@@ -169,10 +170,30 @@ export function nativeScopedCommand(opts: {
     branch: opts.selection.branch,
   })) {
     if (value !== undefined) {
-      words.push(`--${key}`, quoteShellWord(value));
+      words.push(
+        `--${key}`,
+        opts.singleLine
+          ? quoteSingleLineShellWord(value)
+          : quoteShellWord(value)
+      );
     }
   }
   return words.join(" ");
+}
+
+const SHELL_LINE_CONTROLS = /[\p{Cc}\u2028\u2029]/u;
+const SHELL_QUOTED_CONTROLS = /[\\'\p{Cc}\u2028\u2029]/gu;
+
+export function quoteSingleLineShellWord(value: string): string {
+  if (!SHELL_LINE_CONTROLS.test(value)) {
+    return quoteShellWord(value);
+  }
+  const escaped = value.replaceAll(SHELL_QUOTED_CONTROLS, (char) =>
+    char === "'" || char === "\\"
+      ? `\\${char}`
+      : `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`
+  );
+  return `$'${escaped}'`;
 }
 
 function selectionMatches(
@@ -311,7 +332,11 @@ export async function answerNativeAlreadyRunning(opts: {
         thing: "project",
         problem: "already running with a different or unknown selection",
         needs: "this start needs the running instance stopped first",
-        command,
+        command: nativeScopedCommand({
+          action: "down",
+          selection,
+          singleLine: true,
+        }),
       },
     });
   }

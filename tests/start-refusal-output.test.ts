@@ -9,15 +9,15 @@ const cases = [
   ],
   [
     "E_NATIVE_SETUP_REQUIRED",
-    "! native runtime  setup required\n  this start needs the native runtime. run:\n  hack native setup\n",
+    "! native runtime  setup required\n  this start needs the native runtime. run:\n  hack native setup --accept-downloads\n",
   ],
   [
     "E_DOCKER_UNAVAILABLE",
-    "! docker  engine or compose unavailable\n  this start needs a working docker installation. run:\n  docker compose version && docker info\n",
+    "! docker  engine unavailable · start docker or select a running engine\n",
   ],
   [
     "E_PROJECT_NOT_FOUND",
-    "! project  not found\n  this start needs a configured project. run:\n  hack init\n",
+    "! project  not found\n  this start needs a configured project. run:\n  hack init --auto\n",
   ],
   [
     "E_INTERACTIVE_REQUIRED",
@@ -31,7 +31,7 @@ const cases = [
 
 test.each(
   cases
-)("%s preserves the JSON envelope and prints three human lines", async (code, expected) => {
+)("%s preserves the JSON envelope and prints at most three human lines", async (code, expected) => {
   const error = new HackCliError({
     code,
     message: "Original message.",

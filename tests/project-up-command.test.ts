@@ -48,7 +48,7 @@ test("up without .hack prints a project blocker without a stack trace", async ()
 
   const combinedOutput = `${result.stdout}\n${result.stderr}`;
   expect(result.stderr).toBe(
-    "! project  not found\n  this start needs a configured project. run:\n  hack init\n"
+    `! project  no project found at the selected path · use a configured project path (${JSON.stringify(tempDir)})\n`
   );
   expect(combinedOutput).not.toContain("at requireProjectContext");
   expect(combinedOutput).not.toContain("at async handleUp");

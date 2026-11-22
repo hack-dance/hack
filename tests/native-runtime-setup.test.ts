@@ -235,7 +235,7 @@ test("fresh foreground and detached up show a setup blocker and preserve the JSO
       });
     } else {
       expect(reply.stderr).toEndWith(
-        "! native runtime  setup required\n  this start needs the native runtime. run:\n  hack native setup\n"
+        "! native runtime  setup required\n  this start needs the native runtime. run:\n  hack native setup --accept-downloads\n"
       );
     }
     expect(existsSync(f.home)).toBe(false);

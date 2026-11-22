@@ -514,6 +514,43 @@ fn prove_quiescence(
     Ok(())
 }
 
+/// The recorded control socket's state, read only after the owner has exited. A
+/// retiring owner unlinks its socket and removes its directory as it closes
+/// (`closeServer`), so evidence read while it still runs would name a socket that
+/// is gone a moment later and the archive would refuse once (HACK-2456).
+fn capture_socket(
+    endpoint: &Endpoint,
+    config: &Configuration,
+    home: &Path,
+) -> Result<SocketEvidence, CandidateError> {
+    await_owner_exit(config, home)?;
+    let parent = socket_parent(&endpoint.socket)?;
+    match (absent(parent)?, absent(&endpoint.socket)?) {
+        (true, true) => Ok(SocketEvidence::Absent {
+            path: endpoint.socket.clone(),
+        }),
+        (false, false) => {
+            let parent_id = dir(parent)?;
+            exact_entries(parent, &["control.sock"])?;
+            let socket_m = fs::symlink_metadata(&endpoint.socket).map_err(|_| refused())?;
+            if !socket_m.file_type().is_socket()
+                || socket_m.mode() & 0o777 != 0o600
+                || socket_m.uid() != unsafe { libc::geteuid() }
+                || socket_m.dev() != endpoint.dev
+                || socket_m.ino() != endpoint.ino
+            {
+                return Err(refused());
+            }
+            Ok(SocketEvidence::Present {
+                path: endpoint.socket.clone(),
+                parent: parent_id,
+                socket: inode(&socket_m),
+            })
+        }
+        _ => Err(refused()),
+    }
+}
+
 /// Wait, bounded, for an owner that is retiring itself after its pool boot ended. Only
 /// a running owner is waited for; every other check refuses at once.
 fn await_owner_exit(config: &Configuration, home: &Path) -> Result<(), CandidateError> {
@@ -695,31 +732,7 @@ pub fn archive(
             if lease.run != run {
                 return Err(refused());
             }
-            let parent = socket_parent(&endpoint.socket)?;
-            let socket = match (absent(parent)?, absent(&endpoint.socket)?) {
-                (true, true) => SocketEvidence::Absent {
-                    path: endpoint.socket,
-                },
-                (false, false) => {
-                    let parent_id = dir(parent)?;
-                    exact_entries(parent, &["control.sock"])?;
-                    let socket_m = fs::symlink_metadata(&endpoint.socket).map_err(|_| refused())?;
-                    if !socket_m.file_type().is_socket()
-                        || socket_m.mode() & 0o777 != 0o600
-                        || socket_m.uid() != unsafe { libc::geteuid() }
-                        || socket_m.dev() != endpoint.dev
-                        || socket_m.ino() != endpoint.ino
-                    {
-                        return Err(refused());
-                    }
-                    SocketEvidence::Present {
-                        path: endpoint.socket,
-                        parent: parent_id,
-                        socket: inode(&socket_m),
-                    }
-                }
-                _ => return Err(refused()),
-            };
+            let socket = capture_socket(&endpoint, &config, home)?;
             let (_, ca) = read_file(
                 &paths
                     .storage

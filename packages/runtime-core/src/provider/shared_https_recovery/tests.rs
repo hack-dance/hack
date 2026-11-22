@@ -600,3 +600,36 @@ fn a_retiring_owner_is_awaited_before_the_archive() {
     assert!(reaper.join().unwrap().success());
     prove_quiescence(&config, &f.home, None).unwrap();
 }
+
+/// Codex finding on #1017: an owner still retiring when the archive starts unlinks
+/// its socket and directory as it closes. The evidence is read after it exits, so the
+/// archive sees the socket absent and succeeds the first time.
+#[test]
+fn socket_evidence_is_captured_after_a_retiring_owner_removes_it() {
+    let f = fixture_with(
+        true,
+        Binaries {
+            frontend_sleeper: Some(1),
+            runtime_is_self: true,
+        },
+    );
+    let config = config_of(&f);
+    let (bytes, _) = read_file(&f.paths.source.join("endpoint.json"), MAX_FILE, true).unwrap();
+    let endpoint: Endpoint = serde_json::from_slice(&bytes).unwrap();
+    assert!(!absent(&endpoint.socket).unwrap());
+    let arguments = owner_arguments(&f);
+    let owner = spawn_frontend(&f, &[arguments[0].as_os_str(), arguments[1].as_os_str()]);
+    // The owner's closeServer: unlink the socket, then remove its directory.
+    let socket = endpoint.socket.clone();
+    let closing = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        fs::remove_file(&socket).unwrap();
+        fs::remove_dir(socket.parent().unwrap()).unwrap();
+        let mut owner = owner;
+        owner.wait().unwrap()
+    });
+    let evidence = capture_socket(&endpoint, &config, &f.home).unwrap();
+    assert!(closing.join().unwrap().success());
+    assert!(matches!(evidence, SocketEvidence::Absent { .. }));
+    prove_quiescence(&config, &f.home, None).unwrap();
+}

@@ -45,7 +45,7 @@ export async function displayNativePs(
     logger.info({
       message: "Native runtime is not running; no services are running.",
     });
-  } else if (result.status === "runtime_busy") {
+  } else if (result.status === "runtime_busy" && !ps) {
     logger.info({
       message:
         "Native runtime is busy with another operation, such as a starting hack up; service state is available once it finishes or reports ready.",
@@ -64,41 +64,7 @@ export async function displayNativePs(
     });
   }
   if (ps) {
-    renderPs({
-      wide: ps.wide,
-      hintWhenEmpty: result.status === "not_started",
-      rows: result.items.map((item) => ({
-        service: item.service,
-        address: null,
-        addresses: ps.addresses.get(item.service),
-        container: item.container,
-        exitCode: item.exitCode,
-        ports:
-          result.ports
-            ?.filter((port) => port.service === item.service)
-            .map((port) => `127.0.0.1:${port.port} (${port.state})`)
-            .join(", ") || null,
-        state: result.ports?.some(
-          (port) => port.service === item.service && port.state === "down"
-        )
-          ? "port-down"
-          : psServiceState(item),
-      })),
-    });
-    if (
-      result.status === "owner_unconfirmed" ||
-      result.status === "runtime_degraded" ||
-      result.ports?.some((port) => port.state === "down")
-    ) {
-      const reason =
-        result.status === "owner_unconfirmed"
-          ? "owner is unconfirmed"
-          : "runtime is degraded";
-      createTextOutput().line(
-        `${reason} · retain data and stop with ${ps.recoveryCommand ?? "hack down"}`,
-        "faint"
-      );
-    }
+    displayNativeServiceRows(result, ps);
     return;
   }
   await display.table({
@@ -119,5 +85,76 @@ export async function displayNativePs(
         port.state,
       ]),
     });
+  }
+}
+
+function displayNativeServiceRows(
+  result: NativeProjectPsResult,
+  ps: {
+    readonly addresses: ReadonlyMap<string, readonly string[]>;
+    readonly wide?: boolean;
+    readonly recoveryCommand?: string;
+  }
+): void {
+  const output = createTextOutput();
+  const portServices = new Set(result.ports?.map((port) => port.service));
+  for (const item of result.items) {
+    portServices.delete(item.service);
+  }
+  const rows = [
+    ...result.items.map((item) => ({
+      service: item.service,
+      container: item.container,
+      exitCode: item.exitCode,
+      state: psServiceState(item),
+    })),
+    ...[...portServices].map((service) => ({
+      service,
+      container: null,
+      exitCode: null,
+      state: "unconfirmed",
+    })),
+  ].map((row) => {
+    const ports = result.ports?.filter((port) => port.service === row.service);
+    return {
+      ...row,
+      address: null,
+      addresses: ps.addresses.get(row.service),
+      ports:
+        ports
+          ?.map((port) => `127.0.0.1:${port.port} (${port.state})`)
+          .join(", ") || null,
+      state: ports?.some((port) => port.state === "down")
+        ? "port-down"
+        : row.state,
+    };
+  });
+  if (rows.length === 0 && result.status === "runtime_busy") {
+    output.line("service status is being updated", "faint");
+    return;
+  }
+  const ownerUnconfirmed = result.status === "owner_unconfirmed";
+  const degraded =
+    result.status === "runtime_degraded" ||
+    rows.some((row) => row.state === "port-down");
+  if (
+    rows.length > 0 ||
+    !(ownerUnconfirmed || degraded || result.status === "provider_pin_changed")
+  ) {
+    renderPs({
+      rows,
+      output,
+      wide: ps.wide,
+      hintWhenEmpty: result.status === "not_started",
+    });
+  }
+  if (ownerUnconfirmed || degraded) {
+    const reason = ownerUnconfirmed
+      ? "owner is unconfirmed"
+      : "runtime is degraded";
+    output.line(
+      `${reason} · retain data and stop with ${ps.recoveryCommand ?? "hack down"}`,
+      "faint"
+    );
   }
 }

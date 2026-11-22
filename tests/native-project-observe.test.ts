@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import {
   mkdir,
   mkdtemp,
@@ -23,7 +23,9 @@ import {
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
+import { displayNativePs } from "../src/commands/native-ps-display.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
+import { scopedHackCommand } from "../src/lib/printed-shell-command.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
@@ -982,11 +984,40 @@ exit 2
   await writeFile(marker, "");
   const busy = await ps();
   expect(busy.code).toBe(0);
-  expect(busy.stderr).toContain(
-    "Native runtime is busy with another operation"
-  );
+  expect(busy.stdout).toBe("service status is being updated\n");
   expect(busy.stderr).not.toContain("provider_busy");
 }, 60_000);
+test("busy native ps keeps known port failures and the exact recovery command", async () => {
+  const chunks: string[] = [];
+  const stdout = spyOn(process.stdout, "write").mockImplementation((line) => {
+    chunks.push(String(line));
+    return true;
+  });
+  const path = "/tmp/fixture\n";
+  const recoveryCommand = scopedHackCommand("down", { path });
+  try {
+    await displayNativePs(
+      {
+        backend: "native",
+        status: "runtime_busy",
+        run: null,
+        phase: null,
+        items: [],
+        ports: [{ service: "web", state: "down", port: 18_080, target: 8080 }],
+      },
+      false,
+      { addresses: new Map(), recoveryCommand }
+    );
+    expect(chunks.join("")).toMatch(/web +no address +port-down/);
+    expect(chunks.join("")).toContain(
+      `retain data and stop with ${recoveryCommand}\n`
+    );
+    expect(chunks.join("")).not.toContain("0 services");
+  } finally {
+    stdout.mockRestore();
+  }
+});
+
 test("logs keep the runtime's interleaved whole lines and refuse malformed ones", async () => {
   const opts = await fixture();
   const lines: NativeLogLine[] = [

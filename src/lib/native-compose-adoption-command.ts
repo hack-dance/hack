@@ -268,7 +268,11 @@ async function reportAdoptedPs({
   if (options.psWide !== undefined) {
     for (const route of Object.values(routingResolution?.routes ?? {})) {
       addresses.set(route.service, [
-        ...new Set([...(addresses.get(route.service) ?? []), route.origin]),
+        ...new Set([
+          ...(addresses.get(route.service) ?? []),
+          route.origin,
+          ...Object.values(route.aliases),
+        ]),
       ]);
     }
   }

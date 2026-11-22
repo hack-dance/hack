@@ -245,7 +245,12 @@ test("Compose ps reports the engine's cause with a stable code (HACK-2068)", asy
       const text = await cli(["ps"], mode);
       expect(text.exitCode).toBe(1);
       expect(`${text.stdout}${text.stderr}`).toContain(`${code}:`);
-      expect(`${text.stdout}${text.stderr}`).toContain(engineLine[mode] ?? "");
+      expect(text.stderr).toBe(
+        mode === "permission"
+          ? "E_PERMISSION: access denied while reading compose status\n"
+          : "E_DOCKER_UNAVAILABLE: docker engine unavailable\n"
+      );
+      expect(text.stdout).toBe("");
       expect(`${text.stdout}${text.stderr}`).not.toMatch(STACK_FRAME);
       const calls = (await readFile(join(root, "ps-args"), "utf8"))
         .trim()

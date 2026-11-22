@@ -11,6 +11,7 @@ import {
 import { resolveLifecycleRunner } from "../lib/lifecycle-runner.ts";
 import { preflightLifecycleSupervisor } from "../lib/lifecycle-supervisor.ts";
 import { childStdoutTarget } from "../lib/machine-stdout.ts";
+import { scopedHackCommand } from "../lib/printed-shell-command.ts";
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
@@ -532,7 +533,6 @@ import { displayNativePs } from "./native-ps-display.ts";
 import {
   answerNativeAlreadyRunning,
   explainUnconfirmedNativeDetachedStart,
-  nativeScopedCommand,
 } from "./native-up-already-running.ts";
 import {
   assertAutostartEnvironment,
@@ -10548,13 +10548,10 @@ async function handlePs({
     await displayNativePs(result, json, {
       addresses,
       wide: args.options.wide,
-      recoveryCommand: nativeScopedCommand({
-        action: "down",
-        selection: {
-          path: args.options.path,
-          project: args.options.project,
-          branch: branch ?? undefined,
-        },
+      recoveryCommand: scopedHackCommand("down", {
+        path: args.options.path,
+        project: args.options.project,
+        branch: branch ?? undefined,
       }),
     });
     return 0;
@@ -10588,6 +10585,16 @@ async function handlePs({
       }),
   });
   if (!read.ok) {
+    if (!json && read.error.code === "E_DOCKER_UNAVAILABLE") {
+      process.stderr.write("E_DOCKER_UNAVAILABLE: docker engine unavailable\n");
+      return 1;
+    }
+    if (!json && read.error.code === "E_PERMISSION") {
+      process.stderr.write(
+        "E_PERMISSION: access denied while reading compose status\n"
+      );
+      return 1;
+    }
     if (!json && composePsTextFallbackAllowed(read.error)) {
       process.stderr.write(
         `${read.error.code}: docker compose did not return a formatted service list\n`

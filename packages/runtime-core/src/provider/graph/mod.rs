@@ -20,6 +20,8 @@ pub use normalized::{
 #[cfg(target_os = "macos")]
 mod absent_publication_cleanup;
 mod admission;
+#[cfg(any(target_os = "macos", test))]
+mod boot_match;
 mod cache_provenance;
 mod dependency_hosts;
 #[cfg(target_os = "macos")]
@@ -1070,6 +1072,21 @@ impl Driver for Session<'_, '_> {
                 self.save()
             }
             Event::Observed { .. } => Ok(()),
+            Event::ServiceReady { service } => {
+                let Some(startup) = self.startup.as_mut() else {
+                    return Ok(());
+                };
+                let id = self.receipt.resources[&format!("container:{service}")]
+                    .id
+                    .as_deref()
+                    .ok_or_else(|| {
+                        error(
+                            "graph_resource_identity",
+                            "A ready service has no confirmed container ID.",
+                        )
+                    })?;
+                startup.service_ready(service, id)
+            }
             Event::Ready => {
                 if let Some(startup) = self.startup.as_mut() {
                     startup.verify(&self.engine, &mut self.receipt, &self.root)?;
@@ -1839,6 +1856,15 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
 /// (for example a foreground start refused before admission). Every other journal
 /// state keeps the ordinary receipt validation.
 pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
+    inspect_with_startup_wait(candidate, run, false)
+}
+
+/// Inspect for a startup caller using the existing provider lease budget.
+pub fn inspect_with_startup_wait(
+    candidate: &Candidate,
+    run: &str,
+    startup_wait: bool,
+) -> Result<Snapshot, CandidateError> {
     #[cfg(target_os = "macos")]
     if unreserved(candidate, run)? {
         return Err(error(
@@ -1846,7 +1872,11 @@ pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateEr
             "No runtime state was reserved for this graph attempt: no journal exists and no foreground owner is published. Nothing was created, repaired or adopted.",
         ));
     }
-    let engine = Engine::connect_cleanup(candidate)?;
+    let engine = if startup_wait {
+        Engine::connect_cleanup_for_start(candidate)
+    } else {
+        Engine::connect_cleanup(candidate)
+    }?;
     inspect_using(candidate, &engine, run)
 }
 
@@ -1955,7 +1985,7 @@ pub fn source_compatibility(
     {
         return Err(refused());
     }
-    let engine = Engine::connect_cleanup(candidate)?;
+    let engine = Engine::connect_cleanup_for_start(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
     #[cfg(target_os = "macos")]
     let source_rebind = source_device_rebind::select(&engine, &receipt, &root)?;

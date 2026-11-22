@@ -1,7 +1,7 @@
 # Run and inspect a project
 
 Use this after [Getting started](../getting-started.md). The examples use the
-default Compose backend.
+Compose backend.
 
 ## Start or restart
 
@@ -25,8 +25,10 @@ hack logs --loki --since 2h --pretty
 ```
 
 The first command is a finite snapshot. The second follows live output until
-Ctrl-C. Loki history needs the global logging stack running on that host and is
-unavailable in slim environments.
+Ctrl-C. Both read container logs, and so do `--since` and `--until`. Loki
+history and queries (`--loki`, `--query`) need the global logging stack, which
+is opt-in: turn it on once with `hack global up --logging`. Without it they
+fail with `E_LOGGING_OFF`; they are unavailable in slim environments.
 
 `--services api,worker` reads several services at once. For scripts,
 `hack logs --json` is a stable line-per-event stream; `--max-line-bytes <n>`
@@ -51,10 +53,7 @@ registry and container cleanup to one project family.
 
 ## Native backend
 
-On the native backend, `hack up` starts the whole project, in the foreground or in
-the background with `--detach`. `hack restart` runs in the foreground only. Neither
-accepts a subset of services. Logs support finite snapshots; live
-[single-service following](../native/log-follow.md) is
-**under verification**, with real-VM acceptance pending. See
-[Native authored commands](../../reference/native-authored-commands.md) for the
-exact supported forms.
+Native starts and restarts the whole project. Use the [native command table and
+startup limits](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md) for the supported forms, refusal codes,
+and the equivalent Compose capabilities. Live log following is
+[under verification](../native/log-follow.md).

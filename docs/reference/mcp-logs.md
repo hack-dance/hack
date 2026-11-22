@@ -123,7 +123,7 @@ Reasons for no-go:
    can repeat or skip lines with the same timestamp. The lifecycle log
    companion is a file tail. Loki selects by time range, and its timestamps
    are not unique. A cursor would promise gapless, duplicate-free resume that
-   Hack cannot deliver, least of all for the default compose backend.
+   Hack cannot deliver, including on the Compose backend.
 2. **A handle needs state that does not survive the common reconnect.** A
    stdio MCP client reconnects by starting a new `hack mcp serve` process, so
    in-memory handles are lost. Keeping them on disk under `HACK_HOME` would add

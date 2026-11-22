@@ -55,6 +55,7 @@ const UNSUPPORTED = "unsupported or internal command";
 
 const COMMANDS: Readonly<Record<string, Expectation>> = {
   up: { kind: "envelope", argv: ["up", "-p", "DIR", "--json"] },
+  pull: { kind: "line", argv: ["pull", "-p", "DIR"] },
   down: { kind: "envelope", argv: ["down", "-p", "DIR", "--json"] },
   restart: { kind: "envelope", argv: ["restart", "-p", "DIR", "--json"] },
   ps: { kind: "envelope", argv: ["ps", "-p", "DIR", "--json"] },
@@ -399,7 +400,6 @@ for (const [name, expectation] of Object.entries(COMMANDS)) {
  * prints the same closed line (HACK-1426: `up` used to drop the code).
  */
 const ENVELOPE_COMMANDS_WITHOUT_JSON = [
-  "up",
   "down",
   "restart",
   "ps",
@@ -424,14 +424,14 @@ for (const command of ENVELOPE_COMMANDS_WITHOUT_JSON) {
 }
 
 test(
-  "up from a working directory without a project prints the closed E_PROJECT_NOT_FOUND line",
+  "up from a working directory without a project prints the project blocker",
   async () => {
     const { root, dir } = await emptyProject();
     const result = await cli({ root, cwd: dir, args: ["up"] });
     expect(result.code).toBe(1);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe(
-      `ERROR: E_PROJECT_NOT_FOUND: ${MISSING_PROJECT_MESSAGE}\n`
+      "! project  E_PROJECT_NOT_FOUND: No .hack/ (or legacy .dev/) found. Run: hack init\n  this start needs a configured project. run:\n  hack init --auto\n"
     );
   },
   SPAWN_TIMEOUT_MS

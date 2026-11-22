@@ -5,6 +5,7 @@ import { isRecord } from "../src/lib/guards.ts";
 import {
   buildRuntimeHostMetadataEnvironments,
   buildRuntimeHostMetadataOverride,
+  composeServiceAddresses,
   type RuntimeHostMetadata,
 } from "../src/lib/runtime-host-metadata.ts";
 
@@ -230,3 +231,86 @@ function readRuntimeMetadata(opts: {
   }
   return JSON.parse(raw) as RuntimeHostMetadata;
 }
+
+test("ps selects a concrete site from the chosen branch's routing scope", () => {
+  const composeYaml = `
+services:
+  web:
+    labels:
+      caddy: shared.example, sample.hack.local api.sample.hack.local
+  external:
+    labels:
+      caddy: external.example
+  api:
+    labels:
+      caddy: http://plain.sample.hack.local api.sample.hack.local other.example
+  insecure:
+    labels:
+      caddy: http://only.sample.hack.local
+  mixed:
+    labels:
+      caddy: 'sample.hack.local, \${OPTIONAL_HOST}'
+  templated:
+    labels:
+      caddy: '{{ index .Labels "domain" }}'
+  numbered-map:
+    labels:
+      caddy_0.reverse_proxy: "{{upstreams}}"
+      caddy_0: map.sample.hack.local
+  numbered-list:
+    labels:
+      - caddy_1=list.sample.hack.local
+`;
+  const baseHosts = ["sample.hack.local"];
+  expect(
+    composeServiceAddresses({ composeYaml, baseHosts, branch: null })
+  ).toEqual(
+    new Map([
+      [
+        "web",
+        [
+          "https://shared.example",
+          "https://sample.hack.local",
+          "https://api.sample.hack.local",
+        ],
+      ],
+      ["external", ["https://external.example"]],
+      [
+        "api",
+        [
+          "http://plain.sample.hack.local",
+          "https://api.sample.hack.local",
+          "https://other.example",
+        ],
+      ],
+      ["insecure", ["http://only.sample.hack.local"]],
+      ["mixed", ["https://sample.hack.local"]],
+      ["numbered-map", ["https://map.sample.hack.local"]],
+      ["numbered-list", ["https://list.sample.hack.local"]],
+    ])
+  );
+  expect(
+    composeServiceAddresses({ composeYaml, baseHosts, branch: "feature-x" })
+  ).toEqual(
+    new Map([
+      [
+        "web",
+        [
+          "https://feature-x.sample.hack.local",
+          "https://api.feature-x.sample.hack.local",
+        ],
+      ],
+      [
+        "api",
+        [
+          "http://plain.feature-x.sample.hack.local",
+          "https://api.feature-x.sample.hack.local",
+        ],
+      ],
+      ["insecure", ["http://only.feature-x.sample.hack.local"]],
+      ["mixed", ["https://feature-x.sample.hack.local"]],
+      ["numbered-map", ["https://map.feature-x.sample.hack.local"]],
+      ["numbered-list", ["https://list.feature-x.sample.hack.local"]],
+    ])
+  );
+});

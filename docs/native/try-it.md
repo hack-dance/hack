@@ -139,7 +139,8 @@ Ask Hack whether the project can run on native before you start it:
 "$HOME/.hack-next/bin/hack-next" doctor --path /absolute/project
 ```
 
-`hack-next` selects the native backend by default. If the project uses a Compose
+Native is the planned default for stable v5. On Apple Silicon macOS, the current
+`hack-next` already selects native by default. If the project uses a Compose
 feature that native does not support, `doctor` names it. Starting the project would
 refuse with `E_NATIVE_PROJECT_UNSUPPORTED` and change nothing. Both print the
 command that runs it on Compose instead, with the full `hack-next` path. See

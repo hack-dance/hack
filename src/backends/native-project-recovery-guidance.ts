@@ -10,7 +10,9 @@ export function nativeRecoveryGuidance(code: string | undefined): string {
     return NATIVE_PROVIDER_PIN_MESSAGE;
   }
   if (code === "runtime_not_running") {
-    return "Run hack ps --json to confirm that the native runtime is stopped.";
+    // Follows the runtime's own sentence, which says only that it did not connect: a
+    // pool that is booting or quiescing may still run containers (HACK-2420).
+    return "Run hack ps --json to see whether the native runtime is stopped, starting or stopping. Once it is stopped, hack up starts the project again and hack down --recover cleans up a run whose owner exited.";
   }
   if (code === "publisher_identity_unconfirmed") {
     return "Recovery waits for the process holding the recorded publisher PID to exit when its identity cannot be confirmed. After it exits, rerun hack down --recover.";

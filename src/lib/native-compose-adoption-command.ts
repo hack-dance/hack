@@ -1,10 +1,12 @@
 import { dirname, resolve } from "node:path";
 import { CliUsageError } from "../cli/command.ts";
 import { parseProjectSelectorOption } from "../cli/project-selector.ts";
+import { psServiceState, renderPs } from "../ui/ps-output.ts";
 import { assertAutostartAdoptionAllowed } from "./autostart-refusal.ts";
 import { HackCliError } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import { warnLocalDirectoriesNotApplied } from "./local-directories-project.ts";
+import { UnregisteredProjectError } from "./missing-project-error.ts";
 import type { LegacyComposeVerifiedBinding } from "./native-compose-adoption-binding.ts";
 import { legacyComposeOrderedRefusal } from "./native-compose-adoption-diagnostics.ts";
 import { runLegacyComposeRetainedOperation } from "./native-compose-adoption-execution.ts";
@@ -19,6 +21,7 @@ import { runLegacyComposeRetainedRoutingOperation } from "./native-compose-adopt
 import { inspectLegacyComposeContainerStates } from "./native-compose-adoption-runtime.ts";
 import type { NativeComposeCommandOptions } from "./native-compose-command.ts";
 import { requireNativeComposeBackend } from "./native-compose-selection.ts";
+import type { NativeRoutingResolution } from "./native-routing-plan-protocol.ts";
 import { inspectProjectInputsAtRoot } from "./project-input-selection.ts";
 import {
   readProjectsRegistry,
@@ -98,10 +101,7 @@ async function registeredAdoptedRoot(project: string) {
       name,
     });
   if (!registered) {
-    throw new HackCliError({
-      code: "E_PROJECT_NOT_FOUND",
-      message: "The selected project is not registered.",
-    });
+    throw new UnregisteredProjectError();
   }
   const state = await inspectLegacyComposeAdoptionSelection({
     projectRoot: registered.repoRoot,
@@ -249,12 +249,69 @@ async function logs(opts: {
     }
   );
 }
+async function reportAdoptedPs({
+  options,
+  containers,
+  states,
+  routingResolution,
+}: {
+  readonly options: NativeComposeCommandOptions;
+  readonly containers: LegacyComposeVerifiedBinding["containers"];
+  readonly states: Awaited<
+    ReturnType<typeof inspectLegacyComposeContainerStates>
+  >;
+  readonly routingResolution?: NativeRoutingResolution;
+}): Promise<void> {
+  const addresses = new Map<string, readonly string[]>();
+  if (options.psWide !== undefined) {
+    for (const route of Object.values(routingResolution?.routes ?? {})) {
+      addresses.set(route.service, [
+        ...new Set([
+          ...(addresses.get(route.service) ?? []),
+          route.origin,
+          ...Object.values(route.aliases),
+        ]),
+      ]);
+    }
+  }
+  const report = containers.map((container) => ({
+    service: container.service,
+    status:
+      states.find((state) => state.id === container.id)?.status ?? "unknown",
+  }));
+  if (!options.json && options.psWide !== undefined) {
+    renderPs({
+      wide: options.psWide,
+      rows: containers.map((container) => {
+        const observed = states.find((state) => state.id === container.id);
+        const state = observed?.status ?? "unknown";
+        const exitCode = state === "exited" ? observed?.exitCode : undefined;
+        return {
+          service: container.service,
+          state: psServiceState({ state, exitCode }),
+          address: null,
+          addresses: addresses.get(container.service),
+          container: container.name,
+          exitCode,
+        };
+      }),
+    });
+    return;
+  }
+  process.stdout.write(
+    options.json
+      ? `${JSON.stringify({ owner: "legacy-compose", services: report, ...(await options.statusMetadata?.()) })}\n`
+      : report.map((entry) => `${entry.service}\t${entry.status}\n`).join("")
+  );
+}
+
 async function observe(opts: {
   readonly options: NativeComposeCommandOptions;
   readonly binding: LegacyComposeVerifiedBinding;
   readonly signal: AbortSignal;
   readonly timeoutMs: number;
   readonly deadline: number;
+  readonly routingResolution?: NativeRoutingResolution;
 }) {
   const { options, binding, signal, timeoutMs } = opts;
   cancelled(signal);
@@ -262,22 +319,19 @@ async function observe(opts: {
   if (options.operation === "ps") {
     const states = await inspectLegacyComposeContainerStates({
       binding,
+      includeExitCode: !options.json && options.psWide === true,
       signal,
       timeoutMs: legacyAdoptionProbePhaseMs({
         deadline: opts.deadline,
         now: Date.now(),
       }),
     });
-    const report = containers.map((container) => ({
-      service: container.service,
-      status:
-        states.find((state) => state.id === container.id)?.status ?? "unknown",
-    }));
-    process.stdout.write(
-      options.json
-        ? `${JSON.stringify({ owner: "legacy-compose", services: report, ...(await options.statusMetadata?.()) })}\n`
-        : report.map((entry) => `${entry.service}\t${entry.status}\n`).join("")
-    );
+    await reportAdoptedPs({
+      options,
+      containers,
+      states,
+      routingResolution: opts.routingResolution,
+    });
     return 0;
   }
   const container = containers[0];
@@ -422,6 +476,7 @@ export async function tryLegacyComposeAdoptedCommand(
           await observe({
             options,
             binding: privateInput.binding,
+            routingResolution: privateInput.routingResolution,
             signal,
             timeoutMs,
             deadline,

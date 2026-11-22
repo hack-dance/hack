@@ -16,6 +16,11 @@ export type GlobalContainerState = {
   readonly service: string;
   readonly state: string;
   readonly exitCode: number | null;
+  /**
+   * Docker's health status (`starting`, `healthy`, `unhealthy`) for a
+   * service with a healthcheck; `null` or absent when it has none.
+   */
+  readonly health?: string | null;
 };
 
 /**
@@ -42,26 +47,31 @@ export function parseComposePs(stdout: string): GlobalContainerState[] {
       }
     }
   }
-  const containers: GlobalContainerState[] = [];
-  for (const record of records) {
-    if (typeof record !== "object" || record === null) {
-      continue;
-    }
-    const { Name, Service, State, ExitCode } = record as Record<
-      string,
-      unknown
-    >;
-    if (typeof Name !== "string" || typeof State !== "string") {
-      continue;
-    }
-    containers.push({
-      name: Name,
-      service: typeof Service === "string" ? Service : Name,
-      state: State,
-      exitCode: typeof ExitCode === "number" ? ExitCode : null,
-    });
+  return records.flatMap((record) => {
+    const container = toContainerState(record);
+    return container ? [container] : [];
+  });
+}
+
+/** One `compose ps` record, or `null` when it is not a container record. */
+function toContainerState(record: unknown): GlobalContainerState | null {
+  if (typeof record !== "object" || record === null) {
+    return null;
   }
-  return containers;
+  const { Name, Service, State, ExitCode, Health } = record as Record<
+    string,
+    unknown
+  >;
+  if (typeof Name !== "string" || typeof State !== "string") {
+    return null;
+  }
+  return {
+    name: Name,
+    service: typeof Service === "string" ? Service : Name,
+    state: State,
+    exitCode: typeof ExitCode === "number" ? ExitCode : null,
+    ...(typeof Health === "string" && Health !== "" ? { health: Health } : {}),
+  };
 }
 
 /** The containers Compose does not report as `running`. */
@@ -91,37 +101,100 @@ export function describeContainersNotRunning(opts: {
   ].join("\n");
 }
 
+/** Why a started stack is not ready; see {@link waitForStartedContainers}. */
+export type StackNotReady = {
+  /**
+   * `stopped`: a container is not running; `unhealthy`: its healthcheck
+   * failed; `timeout`: a healthcheck did not pass within the bound.
+   */
+  readonly reason: "stopped" | "unhealthy" | "timeout";
+  readonly containers: readonly GlobalContainerState[];
+};
+
 /**
- * Watches a just-started stack for `settleMs`: fails as soon as a container
- * is seen not running, and passes only when every look in the window found
- * all of them running. A config error ends a container within about a
- * second of its start, so a short window is enough to see it. Returns the
- * containers that are not running, or an empty list.
+ * Waits until a just-started stack is ready: every container running, and
+ * every one with a healthcheck `healthy`. Returns `null` when ready, at the
+ * first look that shows it, so a healthy stack costs no fixed wait. Fails at
+ * once when a container stops or turns unhealthy, and after `timeoutMs` when
+ * a healthcheck still has not passed.
+ *
+ * A container without a healthcheck (CoreDNS, whose image has no shell)
+ * counts as ready once running. A config error ends it within about a
+ * second, which the looks made while the others become healthy see. A stack
+ * with no healthcheck at all (its compose file predates them) has nothing to
+ * wait for, so it is watched for `withoutHealthchecksMs` instead, the fixed
+ * window Hack used before: still failing at the first stopped container.
  *
  * `read` returning an empty list means nothing is known (no Docker answer,
- * or an output this parser does not understand): the watch then ends at once
+ * or an output this parser does not understand): the wait then ends at once
  * without a finding, so it can never fail a healthy start.
  */
-export async function watchStartedContainers(opts: {
+export async function waitForStartedContainers(opts: {
   readonly read: () => Promise<readonly GlobalContainerState[]>;
-  readonly settleMs?: number;
+  readonly timeoutMs: number;
+  /** The watch for a stack none of whose containers has a healthcheck. */
+  readonly withoutHealthchecksMs?: number;
   readonly pollMs?: number;
   readonly sleep?: (ms: number) => Promise<void>;
-}): Promise<GlobalContainerState[]> {
-  const settleMs = opts.settleMs ?? 2000;
-  const pollMs = opts.pollMs ?? 500;
+  readonly now?: () => number;
+}): Promise<StackNotReady | null> {
+  const pollMs = opts.pollMs ?? 250;
+  const now = opts.now ?? Date.now;
   const sleep =
     opts.sleep ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  for (let waited = 0; ; waited += pollMs) {
+  const started = now();
+  const deadline = started + opts.timeoutMs;
+  for (;;) {
     const containers = await opts.read();
     if (containers.length === 0) {
-      return [];
+      return null;
     }
     const stopped = containersNotRunning(containers);
-    if (stopped.length > 0 || waited >= settleMs) {
-      return stopped;
+    if (stopped.length > 0) {
+      return { reason: "stopped", containers: stopped };
+    }
+    const unhealthy = containers.filter((c) => c.health === "unhealthy");
+    if (unhealthy.length > 0) {
+      return { reason: "unhealthy", containers: unhealthy };
+    }
+    const pending = containers.filter(
+      (c) => (c.health ?? null) !== null && c.health !== "healthy"
+    );
+    const noHealthchecks = containers.every((c) => (c.health ?? null) === null);
+    if (noHealthchecks && now() - started < (opts.withoutHealthchecksMs ?? 0)) {
+      await sleep(pollMs);
+      continue;
+    }
+    if (pending.length === 0) {
+      return null;
+    }
+    if (now() >= deadline) {
+      return { reason: "timeout", containers: pending };
     }
     await sleep(pollMs);
   }
+}
+
+/**
+ * The error for containers that did not pass their healthcheck: each by name,
+ * and the commands that show why.
+ */
+export function describeContainersNotHealthy(opts: {
+  readonly stack: string;
+  readonly reason: "unhealthy" | "timeout";
+  readonly timeoutMs: number;
+  readonly containers: readonly GlobalContainerState[];
+}): string {
+  const names = opts.containers.map((c) => c.name).join(", ");
+  const plural = opts.containers.length !== 1;
+  return [
+    opts.reason === "unhealthy"
+      ? `${opts.stack} started, but ${plural ? "these containers are" : "this container is"} unhealthy: ${names}.`
+      : `${opts.stack} started, but ${plural ? "these containers were" : "this container was"} not ready within ${Math.round(opts.timeoutMs / 1000)} s: ${names}.`,
+    ...opts.containers.map(
+      (c) =>
+        `See why: docker inspect --format '{{json .State.Health}}' ${c.name}; docker logs --tail 50 ${c.name}`
+    ),
+  ].join("\n");
 }

@@ -50,13 +50,14 @@ directory: `hack up` looks for it beside the `hack` executable and refuses to
 start such a project without it. The published archives include it.
 
 **2. Set up Hack's proxy once for this Docker engine.** It creates Hack's shared
-networks and starts its proxy and logging containers. It needs no sudo and asks
-nothing with `--no-interactive`. The first line keeps the proxy on this
-machine's loopback address: without it, the proxy listens on every interface,
-and on a machine whose firewall lets in ports 80 and 443, anyone who can reach
-it can open your app and query Hack's log store (Loki, whose API has no
-authentication), and reach the Grafana log viewer's sign-in page, which keeps
-its default admin password unless you change it:
+networks and starts its proxy. The logging containers (Loki, Alloy, Grafana)
+are opt-in and stay off unless you run `hack global up --logging`. It needs no
+sudo and asks nothing with `--no-interactive`. The first line keeps the proxy
+on this machine's loopback address: without it, the proxy listens on every
+interface, and on a machine whose firewall lets in ports 80 and 443, anyone who
+can reach it can open your app, and with logging on also query Hack's log store
+(Loki, whose API has no authentication) and reach the Grafana log viewer's
+sign-in page, which keeps its default admin password unless you change it:
 
 ```sh
 export HACK_RUNTIME_BACKEND=compose
@@ -80,10 +81,10 @@ is missing it prints one error with a code and what to do; see
 [When `hack up` cannot start the project here](cloud-environments.md#when-hack-up-cannot-start-the-project-here).
 
 **4. Check it.** Use the project's host from `.hack/hack.config.json`
-(`hello.hack` here):
+(`hello.hack.local` for a fresh project using the default suffix):
 
 ```sh
-curl --noproxy hello.hack --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
+curl --noproxy hello.hack.local --resolve hello.hack.local:443:127.0.0.1 -k https://hello.hack.local/
 ```
 
 You should see your app's page. `--noproxy` keeps an inherited HTTPS proxy

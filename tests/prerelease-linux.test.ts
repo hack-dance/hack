@@ -60,13 +60,13 @@ import {
   PRERELEASE_LINUX_PLATFORMS,
   PRERELEASE_PAYLOAD,
   packageLinuxPrerelease,
-  packagePrerelease,
+  packagePrerelease as packagePrereleaseActual,
   prereleaseMetadata,
   prereleaseNotes,
   releaseAssets,
   renderChecksums,
   requireLinuxManagerElf,
-  verifyReleaseAssets,
+  verifyReleaseAssets as verifyReleaseAssetsActual,
   writeRehearsalInstaller,
 } from "../scripts/prerelease-plan.ts";
 import {
@@ -83,6 +83,18 @@ import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
  * is exact; the installer and manager choose it only on Linux; and the macOS
  * asset set stays what every published macOS manager accepts.
  */
+
+function packagePrerelease(
+  options: Parameters<typeof packagePrereleaseActual>[0]
+) {
+  return packagePrereleaseActual({ ...options, nativeSignatures: () => {} });
+}
+
+function verifyReleaseAssets(
+  options: Parameters<typeof verifyReleaseAssetsActual>[0]
+) {
+  return verifyReleaseAssetsActual({ ...options, nativeSignatures: () => {} });
+}
 
 const fixtureTest = (name: string, run: () => void | Promise<void>) =>
   test(name, run, 30_000);
@@ -302,7 +314,11 @@ test("the plan lists the Linux assets apart from the unchanged macOS set", () =>
     "hack-next-manager-linux-arm64",
     "SHA256SUMS-linux",
   ]);
-  expect(releaseAssets(plan)).toEqual([...plan.assets, ...plan.linuxAssets]);
+  expect(releaseAssets(plan)).toEqual([
+    ...plan.assets,
+    ...plan.linuxAssets,
+    "prerelease-platforms.json",
+  ]);
   expect(linuxSumsNames(VERSION)).toEqual(plan.linuxAssets.slice(0, 4));
   // The release-level metadata keeps the platform published managers require.
   expect(
@@ -1696,10 +1712,11 @@ test("the prerelease workflow builds, installs and gates Linux before the macOS 
     )
   ).toBe(true);
 
-  // Publication is unchanged: same approval environment, same single command.
+  // Publication uses macOS signature verification and keeps the same approval gate.
   const publish = workflow.jobs.publish as Job;
   expect(publish.needs).toEqual(["plan", "build"]);
   expect(publish.environment).toBe("v5-prerelease");
+  expect(publish["runs-on"]).toBe("macos-15");
   expect(publish.if).toContain("inputs.publish");
   expect(
     publish.steps.filter((step) => step.run !== undefined).map((s) => s.run)

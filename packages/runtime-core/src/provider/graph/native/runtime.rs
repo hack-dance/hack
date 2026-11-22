@@ -877,7 +877,7 @@ impl<B: Backend> Driver for Session<'_, B> {
                 self.receipt.failed(service, observation);
                 self.save()
             }
-            Event::Observed { .. } => Ok(()),
+            Event::Observed { .. } | Event::ServiceReady { .. } => Ok(()),
             Event::Ready => {
                 self.check_cancelled()?;
                 self.receipt.phase = Phase::ReadyObserved;

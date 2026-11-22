@@ -28,6 +28,9 @@ Usage:
   hack-local graph run|restart|restore --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... [--source-revision <sha256>] [--live-source] [--profile <name>] [--timeout-seconds <seconds>] [--json]
   hack-local graph inspect|status|observe|reconcile|archive|export|reconcile-export|prune --run-id <32-hex> [--json]
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
+  hack-local service serve [--idle-seconds <1..86400>] [--drain-seconds <1..60>] [--notify-fd <3..1023>]
+      (exit 0 after idle, stop or SIGTERM/SIGINT/SIGHUP; 2 on an error; 3 after a drain that ran out of time)
+  hack-local service status|stop
   hack-local graph native plan --source-file <absolute-v2-native-source.json> [--json]
   hack-local graph native run|serve --source-file <absolute-v2-native-source.json> --expect-review <64-hex> [--environment-stdin] [--timeout-seconds <1..300>] [--json]
   hack-local graph native inspect|cleanup --run-id <32-hex> [--json]
@@ -116,8 +119,10 @@ Usage:
   hack-local runtime prepared-base remove --base-id <id> [--store <absolute-private-store>] [--json]
   hack-local runtime admit-image --reference <[registry/]repository[:tag][@sha256:digest]|sha256:image-id> --json [IMAGE-POLICY]
   hack-local runtime build-image --request <private-0600-request.json> --json
-  hack-local runtime reclaim-build-images --json
-  hack-local runtime ensure-image --reference <[registry/]repository[:tag]|[registry/]repository@sha256:digest> [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY]
+  hack-local runtime reclaim-build-images [--best-effort] --json
+  hack-local runtime ensure-image --reference <[registry/]repository[:tag]|[registry/]repository@sha256:digest|sha256:image-id> [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY]
+  hack-local runtime cache-image --reference REF [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY]
+  hack-local runtime image-tag-status --json [REFERENCE...]
   hack-local runtime up ... --amd64-emulation [--json]
   hack-local runtime resolve-image --reference <[registry/]repository[:tag]> --json [IMAGE-POLICY]
   hack-local runtime fetch-image --reference <[registry/]repository@sha256:digest> --archive <new-flat-image.tar> [--json] [IMAGE-POLICY]
@@ -127,6 +132,7 @@ Usage:
   hack-local runtime up --profile development --internet --json
   hack-local runtime network extend --allow-host <hostname> [--allow-host <hostname>] --json
   hack-local runtime up|status|down|recover [--json]
+  hack-local runtime temp-aliases [--fix [--include-unverified-volumes]] --json
   hack-local runtime repair-provider-tree [--json]
   hack-local runtime host-filesystem-recovery [--json]
   hack-local runtime recover-host-filesystem --expect-sha256 <sha256> --accept-legacy-device-rebind [--json]
@@ -149,6 +155,13 @@ fn main() {
     {
         hack_runtime_core::timings::enable_argument(&argument);
     }
+    // `service serve` sets itself up before anything else can fail or wait:
+    // core dumps off, stop signals routed, the starter's notify descriptor
+    // taken, then the closed environment. From here on every refusal reaches
+    // the starter as one line, and no exit can block on a write.
+    if serve_requested() {
+        prepare_serve();
+    }
     let result = hack_runtime_core::timings::measure_candidate(
         hack_runtime_core::timings::Step::RuntimeDispatch,
         None,
@@ -156,13 +169,100 @@ fn main() {
     );
     hack_runtime_core::timings::shutdown();
     if let Err(error) = result {
+        let line = serde_json::to_string(&error).expect("error is serializable");
+        if SERVING.load(std::sync::atomic::Ordering::SeqCst) {
+            // A refusal the starter has not heard yet goes to it now. Then no
+            // write that could block stands between this and the exit.
+            if let Some(file) = early_notify().take() {
+                let refused = serde_json::json!({"refused": {"code": error.code}});
+                let _ = hack_runtime_core::service::notify(&file, &refused);
+            }
+            // With a starter waiting, nothing more is written: no write to
+            // stderr (a full pipe, a stalled file) can be bounded without
+            // changing a descriptor others share. Run by hand, it says why.
+            if !STARTER.load(std::sync::atomic::Ordering::SeqCst) {
+                eprintln!("{line}");
+            }
+            // SAFETY: _exit ends the process at once; nothing here relies on cleanup.
+            unsafe { libc::_exit(2) }
+        }
         // Keep errors structured even before a connection to a runtime exists.
-        eprintln!(
-            "{}",
-            serde_json::to_string(&error).expect("error is serializable")
-        );
+        eprintln!("{line}");
         hack_runtime_core::timings::exit(2);
     }
+}
+
+/// Set when `service serve` was given a `--notify-fd`: a starter waits on it.
+static STARTER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set once `main` has recognised `service serve`.
+static SERVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// What `prepare_serve` found, for the `serve` arm.
+static EARLY_FAILURE: std::sync::Mutex<Option<CandidateError>> = std::sync::Mutex::new(None);
+/// The starter's notify descriptor until something writes its one line.
+static EARLY_NOTIFY: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+
+fn early_notify() -> std::sync::MutexGuard<'static, Option<std::fs::File>> {
+    EARLY_NOTIFY.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Where `service serve` stands in the raw arguments, if that is the command:
+/// only at the command position, after the optional leading timings argument,
+/// `--candidate-root <dir>` and `--step-store <dir>`. The same words inside
+/// another command's arguments (a forwarded command, say) are not it.
+fn serve_position(arguments: &[std::ffi::OsString]) -> Option<usize> {
+    let mut at = 1;
+    if arguments
+        .get(at)
+        .and_then(|argument| argument.to_str())
+        .is_some_and(|value| value.starts_with(hack_runtime_core::timings::REQUEST_PREFIX))
+    {
+        at += 1;
+    }
+    if arguments.get(at)? != "--candidate-root" {
+        return None;
+    }
+    at += 2;
+    if arguments
+        .get(at)
+        .is_some_and(|argument| argument == "--step-store")
+    {
+        at += 2;
+    }
+    (arguments.get(at)? == "service" && arguments.get(at + 1)? == "serve").then_some(at)
+}
+
+/// Whether the raw arguments ask for `service serve`.
+fn serve_requested() -> bool {
+    serve_position(&std::env::args_os().collect::<Vec<_>>()).is_some()
+}
+
+/// The `service serve` prelude, before argument checks can refuse. The notify
+/// descriptor is claimed before this process opens any descriptor of its own
+/// (the signal channel is a socket pair), so a number the starter left closed
+/// can never turn out to be ours.
+fn prepare_serve() {
+    SERVING.store(true, std::sync::atomic::Ordering::SeqCst);
+    let core = disable_core_dumps();
+    let arguments: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let after_serve = serve_position(&arguments).map_or(arguments.len(), |at| at + 2);
+    let reserved = arguments
+        .get(1)
+        .and_then(|argument| argument.to_str())
+        .and_then(hack_runtime_core::timings::requested_fd);
+    let rest = &arguments[after_serve..];
+    // `--notify-fd` anywhere after `serve`, with or without a usable value,
+    // means a starter is waiting: its exit never writes to stderr.
+    if let Some(at) = rest.iter().position(|argument| argument == "--notify-fd") {
+        STARTER.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(value) = rest.get(at + 1).and_then(|value| value.to_str()) {
+            *early_notify() = notify_descriptor(value, reserved);
+        }
+    }
+    let failure = core
+        .and_then(|()| hack_runtime_core::service::install_stop_signals())
+        .err();
+    *EARLY_FAILURE.lock().unwrap_or_else(|p| p.into_inner()) = failure;
+    keep_closed_environment();
 }
 
 fn installed_entrypoint() -> bool {
@@ -251,6 +351,46 @@ fn run() -> Result<(), CandidateError> {
     let all: Vec<&str> = arguments[2..].iter().map(String::as_str).collect();
     // HACK-2461: an optional `--step-store <dir>` follows the candidate root.
     let command: Vec<&str> = hack_runtime_core::store::take_step_store_argument(&all)?.to_vec();
+    if matches!(
+        command.as_slice(),
+        ["runtime", "temp-aliases", "--json"]
+            | ["runtime", "temp-aliases", "--fix", "--json"]
+            | [
+                "runtime",
+                "temp-aliases",
+                "--fix",
+                "--include-unverified-volumes",
+                "--json"
+            ]
+    ) {
+        return print_json(&hack_runtime_core::provider::temp_aliases::sweep(
+            command.contains(&"--fix"),
+            command.contains(&"--include-unverified-volumes"),
+        ));
+    }
+    // `service serve` takes its notify descriptor first, before this process
+    // opens anything else or anything else can fail, so every later refusal
+    // (root resolution and discovery included) reaches its starter as a line.
+    let mut serving = match command.as_slice() {
+        ["service", "serve", rest @ ..] => {
+            // `main` already disabled core dumps, routed stop signals, took the
+            // notify descriptor and cleared the environment; report what failed.
+            let serving = Some(service_serve_arguments(rest)?);
+            if let Some(error) = EARLY_FAILURE
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take()
+            {
+                return Err(error);
+            }
+            #[cfg(feature = "service-test-hooks")]
+            if rest.contains(&"--test-pause-before-discovery") {
+                test_pause_until_signalled();
+            }
+            serving
+        }
+        _ => None,
+    };
     // First-use observation/setup must work before installed-home discovery:
     // an absent home is an ordinary installation state, not provider_state.
     if installed_entrypoint() {
@@ -265,7 +405,9 @@ fn run() -> Result<(), CandidateError> {
                 return print_json(&hack_runtime_core::provider::setup::inspect_home(home)?);
             }
             ["runtime", "setup", arguments @ ..] => {
-                return runtime_setup_cli::run_home(home, arguments);
+                runtime_setup_cli::run_home(home, arguments)?;
+                hack_runtime_core::provider::temp_aliases::sweep(true, false);
+                return Ok(());
             }
             _ => {}
         }
@@ -332,6 +474,75 @@ fn run() -> Result<(), CandidateError> {
                 println!("No configuration loaded, files changed, or runtime started.");
                 println!("Next checkpoint: {}", plan.next_checkpoint);
             }
+        }
+        ["service", "serve", ..] => {
+            // A failure here returns to `main`, which tells the starter.
+            let candidate = discover_candidate(&requested)?;
+            let Serving { idle, drain } = serving
+                .take()
+                .expect("service serve arguments are parsed before dispatch");
+            let notify = early_notify().take();
+            let served = hack_runtime_core::service::serve(
+                &candidate.state_root,
+                hack_runtime_core::service::Options {
+                    idle,
+                    drain,
+                    signals: true,
+                },
+                notify,
+            );
+            // A drain that ran out of time keeps both locks for a worker that
+            // may still run. Exit now, with nothing in between (no message, no
+            // flush that a full stderr or stdout could block): the kernel then
+            // ends that worker and frees the locks, so the next client can
+            // start a service. The exit code says what happened.
+            if matches!(&served, Err(error) if error.code == "service_drain_timeout") {
+                // SAFETY: _exit ends the process at once; nothing here relies on cleanup.
+                unsafe { libc::_exit(SERVICE_DRAIN_TIMEOUT_EXIT) }
+            }
+            served?;
+        }
+        ["service", action @ ("status" | "stop")] => {
+            let candidate = discover_candidate(&requested)?;
+            let op = if *action == "status" {
+                "service.status"
+            } else {
+                "service.retire"
+            };
+            let answer =
+                hack_runtime_core::service::call(&candidate.state_root, op, serde_json::json!({}));
+            // Two stops at once: the second may reach the service while it
+            // drains and lose its connection. With the socket already gone that
+            // is a service that is stopping or stopped, not an I/O failure.
+            let answer = match answer {
+                // The service refused this stop because it is already stopping:
+                // what `stop` asked for is under way.
+                Err(error)
+                    if *action == "stop"
+                        && error.code == "service_refused"
+                        && error.message.starts_with("E_SERVICE_DRAINING:") =>
+                {
+                    Ok(serde_json::json!({
+                        "schema": "hack.runtime.service.retire.v1",
+                        "draining": true,
+                    }))
+                }
+                Err(error)
+                    if *action == "stop"
+                        && error.code == "service_closed"
+                        && hack_runtime_core::service::paths(&candidate.state_root)
+                            .socket
+                            .symlink_metadata()
+                            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    Err(CandidateError::new(
+                        "service_absent",
+                        "No runtime service is serving this home; it was already stopping.",
+                    ))
+                }
+                other => other,
+            };
+            print_json(&answer?)?;
         }
         ["node", "serve"] => {
             let candidate = discover_candidate(&requested)?;
@@ -558,7 +769,9 @@ fn run() -> Result<(), CandidateError> {
                     retained,
                 )
             };
-            print_json(&started?)?;
+            let started = started?;
+            sweep_running_pool(&started.phase, started.process_alive);
+            print_json(&started)?;
         }
         ["runtime", action @ ("probe" | "up"), "--profile", profile]
         | [
@@ -583,7 +796,9 @@ fn run() -> Result<(), CandidateError> {
             if *action == "probe" {
                 print_json(&provider::probe_with_profile(&candidate, profile)?)?;
             } else {
-                print_json(&provider::up_with_profile(&candidate, profile)?)?;
+                let started = provider::up_with_profile(&candidate, profile)?;
+                sweep_running_pool(&started.phase, started.process_alive);
+                print_json(&started)?;
             }
         }
         ["runtime", "hostname-authority", "--socket", socket]
@@ -1019,6 +1234,7 @@ fn run() -> Result<(), CandidateError> {
         }
         ["runtime", "setup", arguments @ ..] => {
             runtime_setup_cli::run(&discover_candidate(&requested)?, arguments)?;
+            hack_runtime_core::provider::temp_aliases::sweep(true, false);
         }
         ["runtime", "prepare", "--archive", archive] => {
             print_json(&hack_runtime_core::provider::prepare(
@@ -1046,21 +1262,17 @@ fn run() -> Result<(), CandidateError> {
         }
         [
             "runtime",
-            "ensure-image",
+            command @ ("ensure-image" | "cache-image"),
             "--reference",
             reference,
             "--json",
             policy @ ..,
         ] => {
-            print_json(&hack_runtime_core::provider::image_ensure::ensure(
-                &discover_candidate(&requested)?,
-                reference,
-                &image_policy(policy)?,
-            )?)?;
+            image_for_command(&requested, command, reference, "native", policy)?;
         }
         [
             "runtime",
-            "ensure-image",
+            command @ ("ensure-image" | "cache-image"),
             "--reference",
             reference,
             "--emulation",
@@ -1068,19 +1280,24 @@ fn run() -> Result<(), CandidateError> {
             "--json",
             policy @ ..,
         ] => {
-            let emulation =
-                hack_runtime_core::provider::image_platform::PlatformPolicy::parse(emulation)
-                    .ok_or_else(|| {
-                        CandidateError::new(
-                            "invalid_arguments",
-                            "Use runtime ensure-image --reference REF [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY].",
-                        )
-                    })?;
-            print_json(&hack_runtime_core::provider::image_ensure::ensure_with(
+            image_for_command(&requested, command, reference, emulation, policy)?;
+        }
+        [
+            "runtime",
+            "image-tag-status",
+            "--present",
+            "--json",
+            references @ ..,
+        ] => {
+            print_json(&hack_runtime_core::provider::image_ensure::present_tags(
                 &discover_candidate(&requested)?,
-                reference,
-                &image_policy(policy)?,
-                emulation,
+                references,
+            )?)?;
+        }
+        ["runtime", "image-tag-status", "--json", references @ ..] => {
+            print_json(&hack_runtime_core::provider::image_ensure::tag_status(
+                &discover_candidate(&requested)?,
+                references,
             )?)?;
         }
         ["runtime", "build-image", "--request", request, "--json"] => {
@@ -1089,6 +1306,14 @@ fn run() -> Result<(), CandidateError> {
                 &discover_candidate(&requested)?,
                 Path::new(request),
             )?)?;
+        }
+        ["runtime", "reclaim-build-images", "--best-effort", "--json"] => {
+            // Never fails: a refusal is reported as `skipped`, for callers such as `up`.
+            print_json(
+                &hack_runtime_core::provider::image_build::reclaim::reclaim_build_images_best_effort(
+                    &discover_candidate(&requested)?,
+                ),
+            )?;
         }
         ["runtime", "reclaim-build-images", "--json"] => {
             print_json(
@@ -1200,11 +1425,35 @@ fn run() -> Result<(), CandidateError> {
                 "recover" => hack_runtime_core::provider::recover(&candidate),
                 _ => return Err(CandidateError::new("unsupported_command", HELP)),
             }?;
+            // Typed by hand: say what stopped with the pool and what brings it back (HACK-2456).
+            if let Some(runs) = result
+                .interrupted_runs
+                .as_ref()
+                .filter(|runs| !runs.is_empty())
+            {
+                eprintln!(
+                    "Stopped the native runtime while {} project run(s) were running; their containers stopped with it and their data is kept. Run hack up in each project to start the runtime again and recover its run.",
+                    runs.len()
+                );
+            } else if result.interrupted_runs_unknown {
+                eprintln!(
+                    "Stopped the native runtime. Its graph runs could not be read, so any that were running are not listed; hack up in a project recovers its run."
+                );
+            }
+            if *action == "up" {
+                sweep_running_pool(&result.phase, result.process_alive);
+            }
             print_json(&result)?;
         }
         _ => return Err(CandidateError::new("unsupported_command", HELP)),
     }
     Ok(())
+}
+
+fn sweep_running_pool(phase: &str, process_alive: Option<bool>) {
+    if phase == "running" && process_alive == Some(true) {
+        hack_runtime_core::provider::temp_aliases::sweep(true, false);
+    }
 }
 
 fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), CandidateError> {
@@ -1709,10 +1958,168 @@ fn print_sync_event(
     Ok(())
 }
 
+fn image_for_command(
+    requested: &Path,
+    command: &str,
+    reference: &str,
+    emulation: &str,
+    flags: &[&str],
+) -> Result<(), CandidateError> {
+    use hack_runtime_core::provider::{image_ensure, image_platform::PlatformPolicy};
+
+    let emulation = PlatformPolicy::parse(emulation).ok_or_else(|| {
+        CandidateError::new(
+            "invalid_arguments",
+            "Use emulation native, prefer-native or amd64.",
+        )
+    })?;
+    let candidate = discover_candidate(requested)?;
+    let policy = image_policy(flags)?;
+    let result = if command == "cache-image" {
+        image_ensure::cache(&candidate, reference, &policy, emulation)?
+    } else {
+        image_ensure::ensure_with(&candidate, reference, &policy, emulation)?
+    };
+    print_json(&result)
+}
+
 fn image_policy(
     flags: &[&str],
 ) -> Result<hack_runtime_core::provider::image_policy::ImagePolicy, CandidateError> {
     hack_runtime_core::provider::image_policy::ImagePolicy::from_flags(flags)
+}
+
+/// The exit code of a service whose drain ran out of time.
+const SERVICE_DRAIN_TIMEOUT_EXIT: i32 = 3;
+
+/// A parsed `service serve`. Its notify descriptor stays in `EARLY_NOTIFY`
+/// until `serve` takes it, so `main` can always refuse through it.
+struct Serving {
+    idle: std::time::Duration,
+    drain: std::time::Duration,
+}
+
+/// Private input will pass through the service; keep it out of core dumps.
+fn disable_core_dumps() -> Result<(), CandidateError> {
+    let none = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: a valid rlimit value; lowering a limit needs no privilege.
+    if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) } != 0 {
+        return Err(CandidateError::new(
+            "service_core_limit",
+            "Could not disable core dumps for the runtime service.",
+        ));
+    }
+    Ok(())
+}
+
+/// The service keeps only the closed environment (PATH, HOME, TMPDIR, USER,
+/// LOGNAME), whatever its starter passed, so nothing it runs later inherits
+/// more. Called while this process is still single-threaded.
+fn keep_closed_environment() {
+    const KEEP: [&str; 5] = ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"];
+    let others: Vec<std::ffi::OsString> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| !KEEP.iter().any(|keep| name == keep))
+        .collect();
+    for name in others {
+        // SAFETY: no other thread exists yet to read the environment.
+        unsafe { std::env::remove_var(name) };
+    }
+}
+
+/// `service serve [--idle-seconds <1..86400>] [--drain-seconds <1..60>] [--notify-fd <3..1023>]`.
+/// Each option at most once. `main` took the notify descriptor already; a
+/// `--notify-fd` it could not use is an argument error like any other.
+fn service_serve_arguments(arguments: &[&str]) -> Result<Serving, CandidateError> {
+    let invalid = || {
+        CandidateError::new(
+            "invalid_arguments",
+            "Use service serve [--idle-seconds <1..86400>] [--drain-seconds <1..60>] [--notify-fd <3..1023>], each at most once.",
+        )
+    };
+    let mut serving = Serving {
+        idle: std::time::Duration::from_secs(300),
+        drain: hack_runtime_core::service::DEFAULT_DRAIN,
+    };
+    let mut seen: Vec<&str> = Vec::new();
+    let mut rest = arguments;
+    loop {
+        match rest {
+            [] => break,
+            #[cfg(feature = "service-test-hooks")]
+            ["--test-pause-before-discovery", tail @ ..] => {
+                rest = tail;
+                continue;
+            }
+            [flag, value, tail @ ..] => {
+                if seen.contains(flag) {
+                    return Err(invalid());
+                }
+                seen.push(flag);
+                match *flag {
+                    "--idle-seconds" => {
+                        serving.idle = value
+                            .parse()
+                            .ok()
+                            .filter(|s| (1..=86_400).contains(s))
+                            .map(std::time::Duration::from_secs)
+                            .ok_or_else(invalid)?
+                    }
+                    "--drain-seconds" => {
+                        serving.drain = value
+                            .parse()
+                            .ok()
+                            .filter(|s| (1..=60).contains(s))
+                            .map(std::time::Duration::from_secs)
+                            .ok_or_else(invalid)?
+                    }
+                    "--notify-fd" if early_notify().is_some() => {}
+                    _ => return Err(invalid()),
+                }
+                rest = tail;
+            }
+            [_] => return Err(invalid()),
+        }
+    }
+    Ok(serving)
+}
+
+/// Test only: report on stderr that the stop-signal handlers are in place,
+/// then wait (at most 30 s) for a stop signal before discovery begins.
+#[cfg(feature = "service-test-hooks")]
+fn test_pause_until_signalled() {
+    eprintln!("paused before discovery");
+    let started = std::time::Instant::now();
+    while !hack_runtime_core::service::stop_signal_received()
+        && started.elapsed() < std::time::Duration::from_secs(30)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Take the starter's notify descriptor: a FIFO or a socket (the transports the
+/// bounded notify write supports), open for writing, made close-on-exec, never
+/// the descriptor the timings collector owns. `None` if it is unusable.
+fn notify_descriptor(value: &str, reserved: Option<i32>) -> Option<std::fs::File> {
+    let fd: i32 = value.parse().ok().filter(|fd| (3..=1023).contains(fd))?;
+    if Some(fd) == reserved {
+        return None;
+    }
+    hack_runtime_core::service::notify_kind(fd)?;
+    // SAFETY: F_GETFL only queries the descriptor's status flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || !matches!(flags & libc::O_ACCMODE, libc::O_WRONLY | libc::O_RDWR) {
+        return None;
+    }
+    // SAFETY: F_SETFD on a descriptor just checked to be open.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+        return None;
+    }
+    // SAFETY: an open descriptor the starter handed over for this one line; owned here.
+    Some(unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) })
 }
 
 fn print_json(value: &impl Serialize) -> Result<(), CandidateError> {

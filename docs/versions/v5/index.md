@@ -73,9 +73,10 @@ each page distinguishes the compatibility audit from its original execution note
 
 A second backend for the same project on an Apple Silicon Mac. It runs the same
 Compose file in a lightweight Linux VM that Hack manages, without a Docker app.
-It ships only through `hack-next`, where it is what runs on a Mac unless you
-select Compose. It is not a sandbox, and we make no speed, memory or battery
-claim for it.
+Native is the planned default for stable v5. Today, stable `hack` uses Compose.
+The current `hack-next` prerelease defaults to native on Apple Silicon macOS and
+uses Compose on supported Linux. To use Compose with the macOS prerelease, set
+`HACK_RUNTIME_BACKEND=compose`. We make no speed, memory or battery claim for native.
 
 - [Overview](native/overview.md): what it is, what it is not, and why to try it.
 - [Try it](native/try-it.md): install, run one project on native, switch back.

@@ -83,8 +83,13 @@ than treating it as a complete plan.
 Have a running Docker-compatible engine and Docker Compose. Check with
 `docker info` and `docker compose version`.
 
-On macOS, `hack-next` selects **native** unless you select Compose. On Linux it
-always runs Compose, and the `export` below is optional. In this terminal:
+| Entry point | Apple Silicon macOS | Supported Linux |
+| --- | --- | --- |
+| Stable v4 `hack` executable | Compose | Compose |
+| Current `hack-next` or manual `hack-v5` | Native by default. Set `HACK_RUNTIME_BACKEND=compose` for Compose project commands. | Compose only. Explicit native selection is refused. |
+
+Native is the planned default for stable v5. Set up the
+prerelease Compose path in this terminal. On Linux, the export is optional.
 
 ```sh
 export HACK_RUNTIME_BACKEND=compose
@@ -106,7 +111,10 @@ hack global install
 ```
 
 Read the prompts for DNS and certificate trust. Host changes can require your
-approval. Then continue to [First project on Compose](getting-started.md).
+approval. This starts the proxy and DNS only. The logging stack (Loki, Alloy and
+Grafana, for log history and queries) is opt-in: add it any time with
+`hack global up --logging`. Then continue to
+[First project on Compose](getting-started.md).
 
 ## Stop using or remove an install
 

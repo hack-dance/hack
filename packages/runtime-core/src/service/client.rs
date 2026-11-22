@@ -30,7 +30,59 @@ pub(super) fn call_within(
     args: Value,
     deadline: Duration,
 ) -> Result<Value, CandidateError> {
-    let paths = paths(state_root);
+    let mut stream = connect_checked(&paths(state_root), Instant::now() + deadline)?;
+    let mut ask = |id: &str, op: &str, args: Value| -> Result<Value, CandidateError> {
+        let request = json!({"v": FRAME_VERSION, "id": id, "op": op, "args": args});
+        let bytes = serde_json::to_vec(&request).map_err(|e| failure("service_io", e))?;
+        let written = frame::write(&mut stream, &bytes, frame::CONTROL_FRAME_LIMIT);
+        // A server that refused the whole connection (for example the session
+        // limit) may already have replied and closed; read that reply first.
+        let wait = if written.is_ok() {
+            deadline
+        } else {
+            REFUSAL_WAIT
+        };
+        // One absolute deadline for the whole reply, not only its first byte.
+        let by = Instant::now() + wait;
+        let body = frame::read_by(&mut stream, by, frame::CONTROL_FRAME_LIMIT).map_err(|e| {
+            let error = written.as_ref().err().unwrap_or(&e);
+            // `service_closed`: the connection went away without a reply,
+            // nothing more is known. Any other failure stays `service_io`.
+            let code = if connection_lost(error) {
+                "service_closed"
+            } else {
+                "service_io"
+            };
+            failure(code, format!("{error:?}"))
+        })?;
+        let value: Value = serde_json::from_slice(&body).map_err(|e| failure("service_io", e))?;
+        answer_for(id, value)
+    };
+    ask("1", "hello", json!({"client": {"kind": "cli"}}))?;
+    ask("2", op, args)
+}
+
+/// The peer closed or reset the connection at a frame boundary. A truncated
+/// frame is not counted: it may be a deadline that expired while the peer was
+/// still connected, which says nothing about the service having gone.
+fn connection_lost(error: &frame::FrameError) -> bool {
+    matches!(
+        error,
+        frame::FrameError::Closed
+            | frame::FrameError::Io(
+                ErrorKind::ConnectionReset | ErrorKind::BrokenPipe | ErrorKind::ConnectionAborted
+            )
+    )
+}
+
+/// Connect to this home's service socket by `deadline` with every check a
+/// client makes: no aliased state path, a private service directory, a socket
+/// (not a symlink) owned by this user, and a server running as this user.
+/// `service_absent` means nothing is there to connect to.
+pub(super) fn connect_checked(
+    paths: &super::Paths,
+    deadline: Instant,
+) -> Result<UnixStream, CandidateError> {
     let absent = || failure("service_absent", "No runtime service is serving this home.");
     crate::reject_aliased_state(&paths.dir)?;
     match paths.dir.symlink_metadata() {
@@ -49,35 +101,14 @@ pub(super) fn call_within(
         }
         Ok(_) => {}
     }
-    let mut stream = connect(&paths.socket, Instant::now() + deadline)?;
+    let stream = connect(&paths.socket, deadline)?;
     if crate::node::peer_uid(&stream)? != super::euid() {
         return Err(failure(
             "service_foreign",
             "The service runs as another user.",
         ));
     }
-    let mut ask = |id: &str, op: &str, args: Value| -> Result<Value, CandidateError> {
-        let request = json!({"v": FRAME_VERSION, "id": id, "op": op, "args": args});
-        let bytes = serde_json::to_vec(&request).map_err(|e| failure("service_io", e))?;
-        let written = frame::write(&mut stream, &bytes, frame::CONTROL_FRAME_LIMIT);
-        // A server that refused the whole connection (for example the session
-        // limit) may already have replied and closed; read that reply first.
-        let wait = if written.is_ok() {
-            deadline
-        } else {
-            REFUSAL_WAIT
-        };
-        // One absolute deadline for the whole reply, not only its first byte.
-        let by = Instant::now() + wait;
-        let body = frame::read_by(&mut stream, by, frame::CONTROL_FRAME_LIMIT).map_err(|e| {
-            let error = written.as_ref().err().unwrap_or(&e);
-            failure("service_io", format!("{error:?}"))
-        })?;
-        let value: Value = serde_json::from_slice(&body).map_err(|e| failure("service_io", e))?;
-        answer_for(id, value)
-    };
-    ask("1", "hello", json!({"client": {"kind": "cli"}}))?;
-    ask("2", op, args)
+    Ok(stream)
 }
 
 /// Accept a reply only for the request it names, with a complete envelope. A
@@ -117,7 +148,7 @@ fn answer_for(id: &str, mut value: Value) -> Result<Value, CandidateError> {
 }
 
 /// Connect without blocking past `deadline`, then return a blocking stream.
-pub(super) fn connect(path: &Path, deadline: Instant) -> Result<UnixStream, CandidateError> {
+fn connect(path: &Path, deadline: Instant) -> Result<UnixStream, CandidateError> {
     let io = |e: std::io::Error| failure("service_io", e);
     let bytes = path.as_os_str().as_encoded_bytes();
     // SAFETY: an all-zero sockaddr_un is a valid empty address.

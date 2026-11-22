@@ -127,7 +127,7 @@ Source: `src/commands/env.ts:437 (backendUseSpec)`. No command alias is declared
 | `hack global dns preview` | `--json`; `--domain v5.hack.gy` | Missing; drafted above |
 | `hack global dns activate` | `--domain v5.hack.gy` | Missing; drafted above |
 | `hack global dns deactivate` | `--domain v5.hack.gy` | Missing; drafted above |
-| `hack global up` | none | Present |
+| `hack global up` | `--logging`; `--no-logging`; `--json` | Present |
 | `hack global down` | none | Present |
 | `hack global status` | `--json` | Present |
 | `hack global logs [service]` | `--follow, -f`; `--no-follow`; `--tail <n>`; `--pretty` | Present |
@@ -456,7 +456,7 @@ These sections are also present in the pinned reference. Some parents handle dir
 
 ## Stable shared error codes
 
-`E_DOCKER_UNAVAILABLE`, `E_GLOBAL_INFRA_DOWN`, `E_CONFIG_PARSE`, `E_CONFIG_INVALID`, `E_PROJECT_NOT_FOUND`, `E_NATIVE_PROJECT_CONFLICT`, `E_NATIVE_PROJECT_UNSUPPORTED`, `E_NATIVE_COMPOSE_PROXY_ACCESS`, `E_SERVICE_NOT_FOUND`, `E_COMPOSE_FAILED`, `E_STARTUP_INCOMPLETE`, `E_DEPENDENCY_BOOTSTRAP_FAILED`, `E_STARTUP_TIMEOUT`, `E_LIFECYCLE_FAILED`, `E_ENV_KEY_MISSING`, `E_PERMISSION`, `E_INTERACTIVE_REQUIRED`, `E_USAGE`, `E_UNEXPECTED`. Optional error.detail is unknown; direct-return failures need not use this envelope.
+`E_DOCKER_UNAVAILABLE`, `E_GLOBAL_INFRA_DOWN`, `E_LOGGING_OFF`, `E_GLOBAL_NOT_READY`, `E_GLOBAL_STOPPED`, `E_CONFIG_PARSE`, `E_CONFIG_INVALID`, `E_PROJECT_NOT_FOUND`, `E_NATIVE_PROJECT_CONFLICT`, `E_NATIVE_PROJECT_UNSUPPORTED`, `E_NATIVE_COMPOSE_PROXY_ACCESS`, `E_SERVICE_NOT_FOUND`, `E_COMPOSE_FAILED`, `E_STARTUP_INCOMPLETE`, `E_DEPENDENCY_BOOTSTRAP_FAILED`, `E_STARTUP_TIMEOUT`, `E_LIFECYCLE_FAILED`, `E_ENV_KEY_MISSING`, `E_PERMISSION`, `E_INTERACTIVE_REQUIRED`, `E_USAGE`, `E_UNEXPECTED`. Optional error.detail is unknown; direct-return failures need not use this envelope.
 
 Update success fields: ok:true, current/latest:string, updateAvailable/installed:boolean, target:{platform:string,arch:string}, binaryPath/assetsDir:string, optional mutagen provisioning report. Handled failure is {ok:false,error:string}. 
 

@@ -6,8 +6,8 @@
 
 Hack 5 keeps the v4 project model and commands. Your `.hack/` folder, encrypted env
 values, branch instances and lifecycle processes carry over; interactive
-workspaces require tmux, with the zellij stop procedure below. Docker
-Compose stays the default backend. The release tightens how Hack handles commands
+workspaces require tmux, with the zellij stop procedure below. Stable `hack` uses
+Compose. Native is the planned default for stable v5. The release tightens how Hack handles commands
 and env, makes agent integrations opt-in, and introduces a native backend as a
 beta. `hack dev`, added in 4.3.0, is part of the core.
 
@@ -268,8 +268,8 @@ the move confirmation. See [store recovery and retirement](../env.md#compatibili
 
 ## Highlights
 
-- **Same project folder and default backend.** Compose remains the default;
-  inspect legacy env migration before accepting project-file changes.
+- **Same project folder.** Inspect legacy env migration before accepting
+  project-file changes.
 - **Safer env.** Secrets can be entered without appearing in command arguments, and
   the env migration never rewrites a tracked file without your consent.
 - **`hack dev`.** One command runs a repository's own side-by-side development
@@ -316,11 +316,12 @@ Projects that still use the legacy `.hack/hack.env.json` and `.hack/.env` files
 move to the layered YAML format with:
 
 ```bash
-hack doctor --migrate-env-config
+hack env migrate --json
+hack env migrate --apply
 ```
 
-From next.18, prefer `hack env migrate` to preview, apply, clean up and roll back
-in separate steps; see [next.18](#next18-what-changed-and-what-to-do).
+From next.18, `hack env migrate` can also clean up and roll back in separate steps.
+Older builds can use `hack doctor --migrate-env-config`; see [next.18](#next18-what-changed-and-what-to-do).
 
 Back up the project, env files and original project key before migration. On
 next.16 or earlier prereleases, explicit Doctor cleanup can remove the project
@@ -394,14 +395,15 @@ Docker. It is a beta:
   and leaves the stable executable and its state untouched. The stable release
   archives and the Homebrew formula do not contain it; stable `hack` asked for the
   native backend refuses and points at [the install guide](candidate-install.md).
-- Docker Compose remains the default. Nothing selects the native backend for an
-  existing project automatically.
+- The current `hack-next` prerelease defaults to native on Apple Silicon macOS.
+  Select Compose there with `HACK_RUNTIME_BACKEND=compose`. On supported Linux,
+  the prerelease uses Compose and refuses native.
 - It supports a bounded command subset and is qualified project by project. It does
   not claim parity with Compose, lower resource use, or compatibility with every
   project.
-- `hack config validate`, `hack config plan`, `hack config import --dry-run` and
-  `hack config adopt --dry-run` preview native configuration without starting
-  anything.
+- `hack config validate`, `hack config plan` and `hack config import --dry-run`
+  preview configuration without starting anything. `hack config adopt` requires
+  Compose, including with `--dry-run`.
 
 Start with a disposable project. See
 [candidate capability limits](prereleases.md#candidate-capability-limits),

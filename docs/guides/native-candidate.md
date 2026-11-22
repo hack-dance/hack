@@ -128,8 +128,7 @@ worktree when its exact source root can be shared with a fresh or matching pool.
 The runtime checks source compatibility before startup hooks; `restart` repeats
 this check before stopping the existing graph. A root that a running pool does not
 already share is refused, because a running VM's mounts never change. Stop the pool
-and run `up` again: the root joins at the next boot. One pool can then serve several
-project roots and worktrees at once; see
+and run `up` again: the root joins at the next boot. Projects and worktrees the pool was started with can run together; see
 [one pool, several project roots](#explicit-writable-development-source).
 
 Unfiltered writable source sharing still requires `HACK_NATIVE_SHARED_SOURCE=1`.
@@ -484,15 +483,47 @@ With it:
   `runtime build-image` (below), and its filtered output streams to your terminal.
   Every service with that build is then pinned to the built content ID, so review,
   readiness and restore treat it like an image service.
-- An existing image for the same build inputs is reused without building. Set
-  `HACK_NATIVE_REBUILD=1` to build again; base-image tags then resolve again too.
-  Edits to other files in the context do not trigger a rebuild, as with Compose.
-- Restoring an unchanged retained run uses the retained images and never builds; if
-  one is missing, `up` refuses and asks you to start fresh. `hack restart` also never
-  builds: it reuses the running or retained image, or refuses before stopping anything.
+- An existing image for the same build inputs is reused without building. The build
+  inputs include every file and directory in the build context that the effective
+  ignore file (`<Dockerfile>.dockerignore`, else the context's `.dockerignore`) lets
+  the build read: paths, file contents, permission bits and symlink targets. Editing a
+  copied file builds a new image; editing an ignored file does not. An ignore file with
+  syntax Hack does not reproduce exactly (character classes or `\` escapes) counts as
+  excluding nothing: that never misses a change, but it can cause extra rebuilds, and
+  it can refuse the build when an otherwise ignored entry is unreadable, special or
+  pushes the context over its bounds. A context with more than
+  200,000 included entries or 4 GiB of included file content, deeper than 256 path
+  components, or whose included paths total more than 32 MiB, or with an unreadable
+  entry or a socket, FIFO or device the ignore file does not exclude, refuses.
+- Hack remembers each context file's size, timestamps and inode in a private cache, so
+  an unchanged context is not read again. The cache misses only a change that keeps the
+  size, inode, modification time and change time identical, which needs a deliberate
+  clock or timestamp manipulation; set `HACK_NATIVE_REBUILD=1` after one.
+- Only those inputs count. A changed network response (a download in a `RUN` step),
+  the contents of a cache mount (`RUN --mount=type=cache`), anything outside the build
+  context and a base-image tag that moved do not trigger a rebuild: a reused image keeps
+  the base-image digests it was built from. Set `HACK_NATIVE_REBUILD=1` on `up` or
+  `hack restart` to build every image again; base-image tags then resolve again too.
+- When an image is actually built, BuildKit reads a private copy of the included
+  context, made and checked against the build key right before it runs, so edits during
+  a build never reach the image. The copy keeps hard links as links and gives every
+  entry one fixed modification time, so it holds nothing the key does not describe. A file that changed between computing the key and
+  making the copy refuses; run `up` again. The copy costs time and disk only when a
+  build runs (about 2.7 s for 20,000 files and 632 MiB on a loaded Linux host); reusing
+  an image makes no copy.
+- Every `up` asks the runtime for each build, including an `up` that restores a run
+  stopped with `hack down`. The retained image is reused only while its build inputs
+  are unchanged (Dockerfile, ignore file, target, args, build context); an edited
+  Dockerfile or copied file builds a new image and the run's containers are recreated
+  from it, keeping named volumes when the stopped run can be restored.
+- `hack restart` resolves every build before it stops anything: a failed build, or a
+  rebuilt image the retained run could not take, refuses while the current graph keeps
+  running. It then stops the graph and starts it again on exactly the images it
+  resolved, rebuilt ones included; nothing is built after the stop, and a build
+  service added or changed in the meantime refuses instead.
 - "Unchanged" means the same Compose bytes. A run that mounts no project source and
   uses no dependency cache still restores after its Compose file was edited and put
-  back, or after any project file was touched; build-context edits do not rebuild it.
+  back, or after any project file was touched that its builds do not read.
   Its review then differs only in the project source inventory (file sizes and
   modification times), which such a run never reads, and restore keeps the retained
   ownership plan, images and data.
@@ -789,6 +820,27 @@ within the macOS length limit. A clean `runtime down` keeps this alias, so no ot
 local user can take its name while the pool is stopped. It removes only the provider
 socket files the stop proved closed, through the real data directory.
 
+On macOS, successful native setup and runtime startup check for old dangling provider
+HOME links. The check keeps links to existing homes, including stopped homes and homes
+with interrupted updates. It removes only this user's verified links for absent homes
+that have been unchanged for at least five minutes. `hack native temp-aliases` lists
+eligible names. Add `--fix` to remove them, or use `hack doctor --fix` where the native
+runtime is installed. Ordinary doctor shows a count after its diagnostic checks.
+The scan stops at its time
+or entry limit and reports an incomplete scan when it cannot finish. Fix scans
+resume from the previous batch, although repeated listing timeouts can still
+leave some entries unseen. A later fix also recovers entries moved aside by an
+interrupted sweep. Updating the link's timestamp with `touch -h`
+extends its retention.
+
+Automatic cleanup requires the recorded native home path to lie under the user's
+home or the host temporary root. Doctor counts aliases outside those roots.
+`hack native temp-aliases` lists their names and explains that the volume may be
+unmounted or the home may be deleted. The automatic sweep and
+`doctor --fix` keep these entries. After checking the volume yourself,
+add `--include-unverified-volumes` to either command with `--fix` to include them.
+The command still checks age, owner, identity and target absence.
+
 On a fresh pool boot or a boot after stopping the pool, native waits up to 10 seconds
 plus 1 second per bridge slot (20 seconds for 10 slots, at most 42) for every declared
 bridge socket to appear with the required private ownership and mode.
@@ -856,6 +908,84 @@ then validates socket absence and flushes the disks before recording
 data, and requires inspection before retry. No guest is started by alias recovery.
 Interrupted starts without a recorded process or both identified disks remain
 outside this repair path.
+
+`runtime down` stops the pool even while projects run in it, because a crash or a
+host reboot ends the same way. Their containers stop with the guest and their data is
+kept. Its JSON then lists the graph runs (Compose and native-authored) whose receipts were live, including a failed start that kept its started services, in
+`interrupted_runs`, or sets `interrupted_runs_unknown` when they could not be read,
+and it writes one line on stderr saying how many it stopped. `hack up` in each of those
+projects starts the pool again and recovers its run.
+
+How a run moves across a pool stop. It is checked as the TLA+ model
+`tests/models/tla/native-pool-stop`. A run left from a boot older than the previous
+one is recovered too: another project's `hack up` or a `runtime up` by hand booted
+the pool and it stopped again before this project recovered, or the pool stopped
+again between a recovery's `runtime up` and its recovery. Each boot records the boots
+it supersedes in a bounded history (`run/smolvm/boot-history.json`, the last 16,
+bound to the pool), and recovery selects the one earlier boot the run's receipt
+names, never the current one. A run whose boot has left that history, or whose
+evidence names more than one boot, is refused with its data kept. Two paths stay
+limited to the previous boot: a `graph recover-cleanup` selection made while the
+pool was stopped (another boot in between may have restarted the run's containers),
+and absent-publication cleanup after a host reboot.
+
+```mermaid
+---
+title: PoolStop · run and pool stop
+---
+stateDiagram-v2
+    direction TB
+    classDef ok stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> none
+    none --> ready : hack up
+    retained --> ready : hack up
+    ready --> retained : hack down
+    ready --> orphaned : runtime down, owner dies
+    ready --> crashed : VM or provider dies
+    crashed --> orphaned : hack native recover
+    orphaned --> recover : hack up, down --recover
+    state recover <<choice>>
+    recover --> retained : [boot known, no HTTPS lease]
+    recover --> finalizing : [boot known, HTTPS lease]
+    recover --> stranded : [boot not known]
+    finalizing --> retained : lease released or archived
+
+    note left of orphaned
+        Receipt still ready-observed,
+        owner dead, publication left.
+        Pool stopped or in a new boot.
+    end note
+    note right of recover
+        runtime up first, then the
+        existing recovery as its own
+        request, data kept.
+    end note
+    note right of stranded
+        Refused, data kept: the run's
+        boot left the 16-boot history,
+        or its evidence is ambiguous.
+    end note
+    note right of finalizing
+        Graph stopped, HTTPS lease held.
+        The old owner retires when its
+        boot ends; up refuses until
+        down --recover finishes.
+    end note
+    note left of retained
+        INV NoDeadEnd: some named
+        command always acts.
+        PROP Recovers.
+    end note
+
+    class ready ok
+    class orphaned wait
+    class crashed wait
+    class finalizing wait
+    class stranded fail
+```
 
 `runtime down` first quiesces the guest engine, which leaves the pool in phase
 `quiescing` until the engine exits. A guest agent that answers no ping lets `down`
@@ -1376,8 +1506,11 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   the client prints values, terminal control characters are removed, lines are cut at
   16 KiB and output stops after 4 MiB.
 - `missing` reuses a verified image for the same build key without running the client;
-  `rebuild` always builds. The key covers the Dockerfile and `.dockerignore` bytes,
-  target, arguments and versions, not the context's other files (as with Compose).
+  `rebuild` always builds. The key (version 2) covers the Dockerfile and
+  `.dockerignore` bytes, target, arguments and versions, and every context entry the
+  ignore file lets the build read: its path, kind, permission bits, contents, symlink
+  target and hard-link group, as described with `HACK_NATIVE_BUILDS` above. It does
+  not cover network responses, cache mounts or a moved base-image tag.
 - The runtime must have network egress and the isolated build network that a runtime
   started by this version sets up. An older runtime refuses with
   `native_build_runtime_restart`: stop it and start it again.
@@ -1391,11 +1524,15 @@ JSON file (a singly linked, mode-`0600` file owned by you):
   cache is pruned to 8 GiB. The cache holds only build steps; pruning never removes
   images, containers or volumes.
 
-`runtime reclaim-build-images --json` removes build images that a newer build of the
-same key replaced. It keeps every image a build receipt names as current, every image
-that any retained run's saved state mentions, every image a container still uses (the
-engine refuses those), and every image whose ownership labels are not exactly this
-runtime's. Each removal deletes that one image only, never its untagged parent
+`runtime reclaim-build-images --json` removes build images that newer builds
+replaced. For each build declaration (project root and branch, context, Dockerfile and
+target) it keeps the image of the most recently built or reused key (`current`) and of
+the one before it (`previous`, for a quick revert). It also keeps every image that any
+retained run's saved state mentions, every image a container still uses (the engine
+refuses those), every image of a receipt written before this rule, and every image
+whose ownership labels are not exactly this runtime's. An `up` that built an image runs
+it with `--best-effort` once the project is ready: that form never fails, reports a
+refusal as `skipped`, and never delays or fails the start. Each removal deletes that one image only, never its untagged parent
 images. It refuses while a build runs, and removes nothing if it cannot read all
 saved run state. The report lists removed images and why each other one was kept.
 
@@ -1533,6 +1670,38 @@ Older launcher mounts require a restart before using command names. Changing
 overlays is unsupported. Neither command persists application output in runtime
 receipts; output can contain sensitive application values and should be handled
 accordingly.
+
+## The runtime service
+
+One native home can run one runtime service: a small control process that later
+releases will use to answer `hack` commands without starting a new runtime process
+for each one. Today no `hack` command uses it, it never starts by itself, and it
+serves only `hello`, `service.status` and `service.retire`. Stopping it does not stop
+project services, the provider VM or anything else in the home.
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home service serve [--idle-seconds <1..86400>] [--drain-seconds <1..60>] [--notify-fd <3..1023>]
+./hack-native --candidate-root /absolute/private/candidate-home service status
+./hack-native --candidate-root /absolute/private/candidate-home service stop
+```
+
+- **One per home.** It listens on `run/service/hack-runtime.sock` (mode 0600) and holds
+  locks on `run/service/` and `run/service/service.lock`; a second `serve` on the same
+  home reports `lost` and exits. Only the same user can connect.
+- **Ending.** It exits after `--idle-seconds` (default 300) with no session, on
+  `service stop`, or on SIGTERM, SIGINT or SIGHUP. Each finishes requests in progress
+  for up to `--drain-seconds` (default 10) and removes the socket. Exit codes: `0`
+  after one of those, `2` on an error, `3` when requests did not finish in time (the
+  process then ends at once, and the next `serve` can start).
+- **Starting it from a program.** `--notify-fd` names a pipe or socket the starter
+  reads: the service writes exactly one line, `{"listening":…}`, `{"lost":true}` or
+  `{"refused":{"code":…}}`, as the first thing that can fail is checked. If the
+  `listening` line cannot be written within a second (the pipe or socket is full),
+  the service stops before it serves anyone. A written line is not proof that the
+  starter read it. "Listening" is not "ready": a client uses the service only after
+  a `hello` has succeeded.
+- **Environment.** It keeps only `PATH`, `HOME`, `TMPDIR`, `USER` and `LOGNAME`, and
+  disables core dumps.
 
 ## Explicit normalized public Compose input
 
@@ -1760,7 +1929,7 @@ the container's own namespaces or cgroup limits: `NET_ADMIN` and `NET_BROADCAST`
 often declared for database images), `IPC_LOCK` (memory locking, still charged to
 the memory limit) and `IPC_OWNER` (the container's own IPC namespace). Plan review
 refuses every other addition with `capability_refused`, including `cap_add: [ALL]`.
-One VM can host several projects and worktrees, and Hack runs its own helpers
+Projects and worktrees the pool was started with can run together. Hack runs its own helpers
 inside service containers. These refused capabilities would act on that shared
 kernel or on those helpers:
 
@@ -2079,7 +2248,7 @@ a private certificate authority is not reachable yet. Host names are classified
 before connecting, and resolved addresses are checked again before each
 connection (see [Local registries](#local-registries)).
 
-No implicit image refresh occurs. Keep the archive only as long as needed for owned
+Explicit fetch uses the requested digest. Keep the archive only as long as needed for owned
 imports; fetch does not install a background cache or cleanup daemon. The complete
 archive is synced, validated and published without replacing an existing path.
 A failed write or verification leaves no final archive; process interruption may
@@ -2096,6 +2265,39 @@ configuration must confirm. An amd64 archive is cached under its own address, ne
 reused for arm64, and imports only into a pool booted with translation; see
 [amd64 emulation with Rosetta 2](#amd64-emulation-with-rosetta-2).
 
+A completed load receipt bound to the requested registry pin lets
+`ensure-image` check the running guest by exact image ID and platform without
+a provider mutation lease or an archive read. A digest reference hashes the
+stored registry manifest against the requested pin, then checks the configuration
+digest. For indexes it also verifies the selected child manifest and platform.
+A cache entry without the metadata fetches it once to establish the binding. A guest miss hashes the entire archive before taking the import
+lease and checks the guest again before upload. Explicit `load-image` verifies
+its input even if the guest already has that image.
+
+### Mutable image tags
+
+An ordinary native start uses a verified tag resolution for up to 24 hours.
+Set `HACK_NATIVE_IMAGE_TAG_TTL_SECONDS` to a value from 0 to 2592000 seconds
+(30 days). A value of `0` refreshes on every command. `hack pull` refreshes tags
+and confirms their images in the native guest without starting services.
+`hack up --refresh-images` refreshes tags when starting services. For an
+already-running detached project, run `hack down` before refreshing.
+
+Use `hack up --offline` to use recorded resolutions of images already loaded
+without contacting a registry. An ordinary start can use a verified loaded
+image when refreshing its tag fails. Hack reports the reason and the recorded
+resolution time. Explicit refresh commands report the failure. Successful
+refreshes record the new selection after the guest confirms the image.
+
+`hack ps` and `hack status` show the recorded registry, source digest, selected
+image configuration IDs and last resolution time for the project's mutable
+tags. A running container keeps the image ID it was created with.
+
+During native project startup, active services with the same canonical image reference
+and platform policy share one validated image selection. If services request
+different platforms for the same tag, their selections use the same immutable
+registry digest.
+
 ### Explicit writable development source
 
 An isolated development pool can opt into a direct host project mount with
@@ -2107,8 +2309,8 @@ unfiltered mode for a checkout whose local files must remain hidden from its ser
 Only the exact canonical project root is accepted; home/credential directories,
 aliased roots, and changes to a running pool's mount intent are refused.
 
-One development pool can host several project roots and linked worktrees, so one
-installed native home serves every project on the machine. The first root is the
+Projects and linked worktrees the development pool was started with can run
+together in one native home. The first root is the
 pool's primary share. Native `up` in another root adds that root itself when the
 pool is **stopped**, before any lifecycle hook runs, with the same unfiltered-source
 consent the first root gave; the share is mounted at the next boot. The explicit
@@ -2221,6 +2423,12 @@ line naming the native backend as a beta for Apple Silicon macOS, delivered by t
 `hack-next` channel, with a link to
 [the install guide](candidate-install.md). The line is omitted with `--json`.
 
+When a native start needs a provider or image-cache lock already in use,
+it can wait up to five seconds for the other operation to finish. If the wait
+expires, startup reports the holder it observed and asks you to run
+`hack up` again. A running pool still needs to already share the project's
+root because its mounts stay fixed until it stops.
+
 Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME` selects native observations for normal `hack ps`, for
 `hack status`, `hack logs SERVICE --follow` (available under verification) and bounded `logs --no-follow`. `hack status`
@@ -2243,7 +2451,35 @@ present it exits 0 and reports `runtime_not_running` (no phase, no service rows)
 and text output prints "Native runtime is not running; no services are running."
 That includes a pool left stopped by a failed or recovered boot (`failed-boot-stopped`,
 `recovered-unclean`, `stopped-before-engine`) whose provider is not alive; before, `ps`
-failed there with `runtime_changed`.
+failed there with `runtime_changed`. When a command that needs the running pool finds it in any other phase (stopped,
+or still booting or quiescing), it refuses with `runtime_not_running` and says only
+that it did not connect: "The native runtime is not in its running state, so this
+command did not connect to it; nothing was changed." `hack down` adds the next
+commands: `hack ps --json` to see the phase, then `hack up` or `hack down --recover`
+once the pool is stopped.
+When the pool stopped or the VM died under a running project, the run's foreground
+owner exits and the run is left neither running nor stopped (after a VM crash, run
+`hack native recover` first so the pool is recorded as stopped). `hack up` then starts the
+pool, recovers the run with its data retained, and starts it again. `hack down --recover`
+(and plain `hack down`) start the pool to recover the run the same way, then leave the
+pool running and say so; run `runtime down` to stop it. A run whose owner is still alive,
+or that is already stopped with data retained, keeps the refusal above, and so does one
+whose only recovery needs the boot it ran in (a failed start, or an interrupted
+same-boot recovery): starting the pool begins a new boot, so it would not help.
+
+A project with HTTPS routes also holds a lease on the shared HTTPS owner, a host
+process bound to the pool boot it started in. `runtime down` does not stop it; the
+owner retires on its own within a few seconds once its boot has ended (the pool
+stopped, crashed or booted again), keeping its records. The recovery then archives
+those records and releases the run's lease, waiting up to 20 seconds for an owner
+that is still retiring. If a recovery stopped the run but could not finish that step,
+`hack up` refuses with `E_RECOVERY_REQUIRED` and names `hack down --recover`, which
+starts a stopped pool to finish it, with data kept.
+
+A detached start (`hack up -d`) whose pool stopped or booted again ends on its
+own about 15 seconds later, as a crash would, and the next `hack up` or `hack down
+--recover` recovers its run. A command that finds an earlier start of the instance
+still running says so on stderr and waits up to two minutes for it.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,
@@ -4496,15 +4732,15 @@ owned containers and networks, and retains named volumes and dependency caches.
 It neither marks incomplete package caches valid nor replays initializers.
 
 If a foreground owner died after its graph reached `ready-observed` and the pool
-has already restarted once, the same explicit command can select recovery on that
-immediate successor boot. It requires the retained dead-owner identity, exact receipt
-hash, and bridge assignments belonging to the recorded previous boot. The recovery
-intent pins those assignments before effects and refuses replacements on retry.
+has restarted since, the same explicit command can select recovery on any later
+boot. It requires the retained dead-owner identity, exact receipt hash, the one
+earlier boot of the pool that the receipt names, and bridge assignments belonging
+to that boot. The recovery intent pins those assignments before effects and refuses replacements on retry.
 A remaining legacy device-rebound dependency reservation also requires the
 original recovery boot and host-pin witness. A further boot change refuses its
 release; no automatic recovery command for that state is implemented.
-Do not restart again to attempt this path: another boot rollover invalidates the
-previous-boot evidence. Old guest helper absence follows the verified boot transition;
+Do not restart while a selected recovery is unfinished: its intent is bound to the
+boot it was selected on, and another boot refuses it. Old guest helper absence follows the verified boot transition;
 it is not recorded as a live helper acknowledgement.
 
 Recovery retains its own durable intent and completion evidence. A guest completion

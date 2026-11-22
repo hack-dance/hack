@@ -64,6 +64,7 @@ Coder. They have no page yet.
   `hack config set --global proxy.bind_address 127.0.0.1` before
   `hack global install`. Without it, Hack's proxy listens on every interface,
   and anyone who can reach the machine's ports 80 and 443 can open the app,
+  and with the opt-in logging stack on (`hack global up --logging`) also
   query Hack's log store (Loki, whose API has no authentication) and reach the
   Grafana log viewer's sign-in page, which keeps its default admin password
   unless you change it. Leave it unset only if you want that
@@ -78,14 +79,16 @@ translate project configuration into a deployment.
 
 ## Reaching the app without local DNS
 
-Hack's addresses (`https://<project>.hack`) need local DNS. On Linux, Hack sets
+Hack's project addresses need local DNS. A fresh project defaults to
+`https://<project>.hack.local`; use the configured `dev_host` for an existing
+project. On Linux, Hack sets
 it up only through systemd-resolved, which most containers and cloud sandboxes
 do not run, so the name has no address there. The app still runs, and Hack's
 proxy answers on this machine's ports 80 and 443. `hack open` then warns and
 prints the address with a command that needs no DNS, for example:
 
 ```sh
-curl --noproxy 'hello.hack' --resolve 'hello.hack:443:127.0.0.1' 'https://hello.hack/'
+curl --noproxy 'hello.hack.local' --resolve 'hello.hack.local:443:127.0.0.1' 'https://hello.hack.local/'
 ```
 
 The command sends the request to the address the proxy publishes on, and

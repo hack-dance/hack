@@ -1,0 +1,79 @@
+import { expect, test } from "bun:test";
+import { watchNativeStartPool } from "../src/backends/native-start-pool-watch.ts";
+
+const owner = "a".repeat(32);
+const boot = "12345678-1234-1234-1234-123456789abc";
+const record = (fields: Record<string, unknown>) => ({
+  token: owner,
+  guest_boot_id: boot,
+  phase: "running",
+  ...fields,
+});
+
+/** Run a watch against a scripted sequence of pool records (the last one repeats). */
+async function run(
+  records: readonly unknown[],
+  opts: { readonly stopAfterMs?: number; readonly waitMs?: number } = {}
+) {
+  let index = 0;
+  let ended = 0;
+  const stop = watchNativeStartPool({
+    home: "/fixture",
+    checkMs: 5,
+    graceMs: 20,
+    read: () => {
+      const value = records[Math.min(index, records.length - 1)];
+      index += 1;
+      return value instanceof Error
+        ? Promise.reject(value)
+        : Promise.resolve(value);
+    },
+    onEnded: () => {
+      ended += 1;
+    },
+  });
+  if (opts.stopAfterMs !== undefined) {
+    await Bun.sleep(opts.stopAfterMs);
+    stop();
+  }
+  await Bun.sleep(opts.waitMs ?? 150);
+  stop();
+  return ended;
+}
+
+test("a start whose pool stopped, crashed into recovery or booted again ends after the grace", async () => {
+  for (const ended of [
+    record({ phase: "stopped" }),
+    record({ phase: "recovered-unclean" }),
+    record({ guest_boot_id: "87654321-4321-4321-4321-cba987654321" }),
+    record({ token: "b".repeat(32) }),
+  ]) {
+    expect(await run([record({}), ended])).toBe(1);
+  }
+});
+
+test("a pool that is only slow never ends the start", async () => {
+  for (const slow of [
+    record({ phase: "starting" }),
+    record({ phase: "stopping" }),
+    new Error("unreadable"),
+    "not json",
+    {},
+  ]) {
+    expect(await run([record({}), slow])).toBe(0);
+  }
+});
+
+test("a start that never saw its pool running is not ended by a stopped record", async () => {
+  // The start may be booting the pool itself: no identity is recorded yet.
+  expect(await run([record({ phase: "stopped" })])).toBe(0);
+  expect(
+    await run([record({ phase: "starting" }), record({ phase: "stopped" })])
+  ).toBe(0);
+});
+
+test("a start that finishes on its own within the grace is not ended", async () => {
+  expect(
+    await run([record({}), record({ phase: "stopped" })], { stopAfterMs: 12 })
+  ).toBe(0);
+});

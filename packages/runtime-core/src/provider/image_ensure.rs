@@ -5,6 +5,7 @@ use super::{
     image_policy::{ARCHIVE_CEILING, CACHE_CEILING, ImagePolicy},
     registry_image, state,
 };
+use crate::timings::{Step, measure};
 use crate::{Candidate, CandidateError, reject_aliased_state};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -221,7 +222,7 @@ pub fn ensure(
 
 /// [`ensure`] under an explicit platform policy. `Native` is the default and admits only
 /// Linux arm64. An opted-in policy may select Linux amd64, which is cached separately and
-/// imported only into a pool booted with x86_64 translation (`image_load::load_for`).
+/// imported only into a pool booted with x86_64 translation (`image_load::load_cached`).
 pub fn ensure_with(
     candidate: &Candidate,
     reference: &str,
@@ -236,7 +237,9 @@ pub fn ensure_with(
     } else {
         registry_image::tagged(reference, policy)?;
     }
-    engine::info(candidate)?;
+    measure(Step::ImageEnginePreflight, None, |_| {
+        engine::info(candidate)
+    })?;
     let (pinned, platform) = if reference.contains('@') {
         (
             registry_image::pinned(reference, policy)?.canonical(),
@@ -244,7 +247,9 @@ pub fn ensure_with(
         )
     } else {
         // A tag resolves to one platform; the pinned entry is then that exact platform.
-        let resolved = registry_image::resolve_with(reference, policy, platform)?;
+        let resolved = measure(Step::ImageTagResolve, None, |_| {
+            registry_image::resolve_with(reference, policy, platform)
+        })?;
         let exact = match resolved.platform {
             "linux/amd64" => PlatformPolicy::Amd64,
             _ => PlatformPolicy::Native,
@@ -260,8 +265,17 @@ pub fn ensure_with(
         |reference, path, platform, limit| {
             registry_image::acquire_with(reference, path, policy, limit, platform)
         },
-        |candidate, path, sha, image, platform| {
-            image_load::load_for(candidate, path, sha, image, policy, platform).map(|_| ())
+        |candidate, path, receipt| {
+            image_load::load_cached(
+                candidate,
+                path,
+                &receipt.archive_sha256,
+                &receipt.image_id,
+                receipt.archive_bytes,
+                policy,
+                receipt.platform,
+            )
+            .map(|_| ())
         },
     )
 }
@@ -288,7 +302,15 @@ fn ensure_pinned(
         platform,
         |_, _| panic!("must not resolve the published platform"),
         acquire,
-        load,
+        |candidate, path, receipt| {
+            load(
+                candidate,
+                path,
+                &receipt.archive_sha256,
+                &receipt.image_id,
+                receipt.platform,
+            )
+        },
     )
 }
 /// Ensure one pinned reference under `platform`. `resolve` names the platform the pinned
@@ -306,12 +328,12 @@ fn ensure_pinned_resolving(
         PlatformPolicy,
         u64,
     ) -> Result<registry_image::AcquiredImage, CandidateError>,
-    load: impl FnOnce(&Candidate, &Path, &str, &str, ImagePlatform) -> Result<(), CandidateError>,
+    load: impl FnOnce(&Candidate, &Path, &CacheReceipt) -> Result<(), CandidateError>,
 ) -> Result<EnsuredImage, CandidateError> {
     let reference = canonical(reference)?;
     let root = candidate.state_root.join("artifacts/images");
     let _lock = state::Lock::acquire(&root)?;
-    let (count, bytes) = usage(candidate, &root)?;
+    let (count, bytes) = measure(Step::ImageCacheInventory, None, |_| usage(candidate, &root))?;
     // A cached entry is reused only for the platform the pinned image itself selects under
     // the policy. The first preference is published whenever its entry exists. A later
     // preference's entry (amd64 under `PreferNative`, perhaps left by an explicit `Amd64`
@@ -401,15 +423,8 @@ fn ensure_pinned_resolving(
         }
         (dir, receipt)
     };
-    // Even a warm cache goes through the loader's hash, ownership, validation receipt,
-    // and content-ID/architecture readback; cached metadata alone never proves import.
-    load(
-        candidate,
-        &dir.join("image.tar"),
-        &receipt.archive_sha256,
-        &receipt.image_id,
-        receipt.platform,
-    )?;
+    // The loader checks the owned guest even when the acquisition receipt is reusable.
+    load(candidate, &dir.join("image.tar"), &receipt)?;
     Ok(EnsuredImage {
         pinned_reference: reference,
         image_id: receipt.image_id,
@@ -817,8 +832,8 @@ mod tests {
                 asked.set(Some(policy));
                 acquire(reference, path, policy, limit)
             },
-            |_, _, _, _, platform| {
-                assert_eq!(platform, ImagePlatform::LinuxArm64);
+            |_, _, receipt| {
+                assert_eq!(receipt.platform, ImagePlatform::LinuxArm64);
                 Ok(())
             },
         )
@@ -858,8 +873,8 @@ mod tests {
             PlatformPolicy::PreferNative,
             |_, _| Ok(ImagePlatform::LinuxAmd64),
             |_, _, _, _| panic!("reuse complete archive"),
-            |_, _, _, _, platform| {
-                assert_eq!(platform, ImagePlatform::LinuxAmd64);
+            |_, _, receipt| {
+                assert_eq!(receipt.platform, ImagePlatform::LinuxAmd64);
                 Ok(())
             },
         )
@@ -875,7 +890,7 @@ mod tests {
                 PlatformPolicy::PreferNative,
                 |_, _| Err(refused("synthetic resolution failure")),
                 |_, _, _, _| panic!("no acquire"),
-                |_, _, _, _, _| panic!("no load"),
+                |_, _, _| panic!("no load"),
             )
             .is_err()
         );

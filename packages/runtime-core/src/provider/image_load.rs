@@ -13,6 +13,7 @@ use super::{
     image_policy::ImagePolicy,
     state,
 };
+use crate::timings::{Step, measure};
 use crate::{Candidate, CandidateError};
 use flate2::read::MultiGzDecoder;
 use reqwest::Method;
@@ -25,7 +26,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
     io::{BufRead, BufReader, Read, Seek},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Component, Path, PathBuf},
@@ -596,7 +597,9 @@ fn inspect(
     image: &str,
     platform: ImagePlatform,
 ) -> Result<bool, CandidateError> {
-    match engine.request(Method::GET, &format!("/v1.53/images/{image}/json"), None) {
+    match measure(Step::ImageInspect, None, |_| {
+        engine.request(Method::GET, &format!("/v1.53/images/{image}/json"), None)
+    }) {
         Ok(value)
             if value["Id"] == image
                 && value["Architecture"] == platform.architecture()
@@ -611,10 +614,9 @@ fn inspect(
 }
 
 /// How long an import waits for a provider lease that another operation holds, such as the
-/// `graph inspect` behind `hack ps`. Everything `load` does before taking the lease is read-only
-/// archive verification, and an `ensure-image` cache entry written before it (under the image
-/// cache's own lock) is complete and reusable on its own, so waiting admits nothing early. On
-/// expiry the load refuses `provider_busy` before any engine or receipt mutation.
+/// `graph inspect` behind `hack ps`. The image cache publishes a complete archive and its
+/// acquisition receipt before starting import. On expiry the load refuses `provider_busy`
+/// before any engine or load receipt mutation.
 const IMPORT_LEASE_WAIT: Duration = Duration::from_secs(5);
 
 /// The provider lease for one import, waiting at most `wait` for a holder to release it. Only
@@ -658,30 +660,36 @@ pub fn load_with(
     image: &str,
     policy: &ImagePolicy,
 ) -> Result<ImageReceipt, CandidateError> {
-    load_for(
+    load_waiting(
         candidate,
-        path,
+        ArchiveSource::Explicit(path),
         expected_sha,
         image,
         policy,
+        IMPORT_LEASE_WAIT,
         ImagePlatform::LinuxArm64,
     )
 }
 
-/// [`load_with`] for an archive of `platform`. An emulated platform imports only into a
-/// pool whose audited boot enabled x86_64 translation; the archive and readback are both
-/// bound to that platform.
-pub(super) fn load_for(
+/// Ensure a cache entry whose acquisition receipt and file metadata were checked under
+/// the cache lock. A completed load receipt permits live readback before opening the archive.
+pub(super) fn load_cached(
     candidate: &Candidate,
     path: &Path,
     expected_sha: &str,
     image: &str,
+    archive_bytes: u64,
     policy: &ImagePolicy,
     platform: ImagePlatform,
 ) -> Result<ImageReceipt, CandidateError> {
+    if archive_bytes > policy.archive_limit {
+        return Err(error(
+            "Image input must be a singly linked regular file within the configured image budget.",
+        ));
+    }
     load_waiting(
         candidate,
-        path,
+        ArchiveSource::Cached(path),
         expected_sha,
         image,
         policy,
@@ -690,18 +698,16 @@ pub(super) fn load_for(
     )
 }
 
-fn load_waiting(
-    candidate: &Candidate,
+enum ArchiveSource<'a> {
+    Explicit(&'a Path),
+    Cached(&'a Path),
+}
+
+fn open_verified(
     path: &Path,
     expected_sha: &str,
-    image: &str,
     policy: &ImagePolicy,
-    lease_wait: Duration,
-    platform: ImagePlatform,
-) -> Result<ImageReceipt, CandidateError> {
-    if !hex(expected_sha) || !image.strip_prefix("sha256:").is_some_and(hex) {
-        return Err(error("Expected archive and image hashes are required."));
-    }
+) -> Result<(File, u64), CandidateError> {
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -715,10 +721,34 @@ fn load_waiting(
             "Image input must be a singly linked regular file within the configured image budget.",
         ));
     }
-    if verify_digest(&mut file, expected_sha, policy.archive_limit)? != metadata.len() {
+    let length = measure(Step::ImageArchiveDigest, None, |_| {
+        verify_digest(&mut file, expected_sha, policy.archive_limit)
+    })?;
+    if length != metadata.len() {
         return Err(error("Image archive size changed during verification."));
     }
-    let engine = connect_for_import(candidate, lease_wait)?;
+    Ok((file, length))
+}
+
+fn load_waiting(
+    candidate: &Candidate,
+    source: ArchiveSource<'_>,
+    expected_sha: &str,
+    image: &str,
+    policy: &ImagePolicy,
+    lease_wait: Duration,
+    platform: ImagePlatform,
+) -> Result<ImageReceipt, CandidateError> {
+    if !hex(expected_sha) || !image.strip_prefix("sha256:").is_some_and(hex) {
+        return Err(error("Expected archive and image hashes are required."));
+    }
+    let (archive_path, verified) = match source {
+        ArchiveSource::Explicit(path) => (path, Some(open_verified(path, expected_sha, policy)?)),
+        ArchiveSource::Cached(path) => (path, None),
+    };
+    let engine = measure(Step::ImageImportConnect, None, |_| {
+        connect_for_import(candidate, lease_wait)
+    })?;
     if platform.emulated() && !engine.guest().amd64_emulation() {
         return Err(super::lifecycle::amd64_emulation_not_enabled());
     }
@@ -744,9 +774,9 @@ fn load_waiting(
         {
             return Err(error("Foreign image-load intent."));
         }
-        // The complete archive hash was checked above. Only this validator's completed,
-        // identity-bound receipt can avoid expanding the same layers again; engine presence
-        // and architecture are still checked on every invocation, including after reboot.
+        // Only this validator's completed, identity-bound receipt permits reuse. The
+        // guest must report the exact config digest and platform under this provider lease.
+        // Any path leading to upload still verifies the archive in full.
         if reusable_validation(&old, &receipt) && inspect(&engine, image, platform)? {
             if old.provider_boot_id == receipt.provider_boot_id {
                 return Ok(old);
@@ -765,6 +795,10 @@ fn load_waiting(
             ));
         }
     }
+    let (mut file, file_length) = match verified {
+        Some(verified) => verified,
+        None => open_verified(archive_path, expected_sha, policy)?,
+    };
     // Validate exactly the bytes that hash to the expected value, then stream the same file;
     // the upload releases only re-read blocks that match the validated ones, and its final
     // block only once the re-read stream hashes identically.
@@ -779,7 +813,7 @@ fn load_waiting(
         platform,
     )?;
     let length = validated.length;
-    if length != metadata.len() {
+    if length != file_length {
         return Err(error("Image archive size changed during verification."));
     }
     if !inspect(&engine, image, platform)? {
@@ -1393,7 +1427,7 @@ pub(super) mod tests {
         let started = Instant::now();
         let refused = load_waiting(
             &pool.candidate,
-            &path,
+            ArchiveSource::Explicit(&path),
             &sha,
             &image,
             &ImagePolicy::default(),
@@ -1417,7 +1451,7 @@ pub(super) mod tests {
         let started = Instant::now();
         let admitted = load_waiting(
             &pool.candidate,
-            &path,
+            ArchiveSource::Explicit(&path),
             &sha,
             &image,
             &ImagePolicy::default(),
@@ -1431,6 +1465,35 @@ pub(super) mod tests {
         assert!(started.elapsed() >= Duration::from_millis(200));
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(!loads.exists());
+    }
+
+    #[test]
+    fn an_oversized_cached_archive_refuses_before_guest_readback() {
+        let root = crate::unique_test_root(&std::env::temp_dir(), "hkl-image-budget");
+        let candidate = Candidate::discover(&root).unwrap();
+        let (bytes, image) = fixture("arm64", false, false);
+        let path = root.join("image.tar");
+        std::fs::write(&path, &bytes).unwrap();
+        let archive_bytes = bytes.len() as u64;
+        let policy = ImagePolicy {
+            archive_limit: archive_bytes - 1,
+            ..ImagePolicy::default()
+        };
+
+        let refusal = load_cached(
+            &candidate,
+            &path,
+            &hash(&bytes),
+            &image,
+            archive_bytes,
+            &policy,
+            ImagePlatform::LinuxArm64,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(refusal.code, "image_archive");
+        assert!(!candidate.state_root.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

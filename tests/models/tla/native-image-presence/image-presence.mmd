@@ -1,0 +1,33 @@
+---
+title: ImagePresence · cached archive readback
+---
+stateDiagram-v2
+    direction TB
+    [*] --> begin
+    begin --> begin: Evict [present]
+    begin --> readback: Begin [cached]
+    begin --> verify: Begin [explicit]
+    readback --> ready: Readback [complete, present]
+    readback --> refused: Readback [refusal]
+    readback --> verify: Readback [needs archive]
+    verify --> refused: Verify [changed]
+    verify --> verified: Verify [clean]
+    verified --> ready: Reconcile [present]
+    verified --> refused: Reconcile [refusal]
+    verified --> upload: Reconcile [absent]
+    upload --> ready: Upload [readback observed]
+    ready --> [*]
+    refused --> [*]
+    class begin idle
+    class readback,verify,verified,upload live
+    class ready ok
+    class refused fail
+    note right of ready
+        INV: success observed the exact image.
+        Upload requires a verified archive.
+    end note
+    note right of refused
+        Foreign intent and unknown or wrong
+        guest identity refuse. A same-boot
+        unresolved load with absence refuses.
+    end note

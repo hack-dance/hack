@@ -2096,6 +2096,12 @@ configuration must confirm. An amd64 archive is cached under its own address, ne
 reused for arm64, and imports only into a pool booted with translation; see
 [amd64 emulation with Rosetta 2](#amd64-emulation-with-rosetta-2).
 
+A completed load receipt lets `ensure-image` check the running guest by exact
+image ID and platform before reading archive bytes. A guest miss still requires
+full archive verification before upload. Explicit `load-image` verifies its input
+even if the guest already has that image. Mutable tags are resolved on each
+`ensure-image` invocation.
+
 ### Explicit writable development source
 
 An isolated development pool can opt into a direct host project mount with

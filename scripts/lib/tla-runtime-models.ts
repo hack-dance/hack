@@ -3046,6 +3046,34 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-image-presence",
+    module: "ImagePresence",
+    states: 230,
+    invariant: "Safe",
+    action: "Readback",
+    fields: [
+      'phase = "ready"',
+      'source = "cached"',
+      'receipt = "complete"',
+      "observed = FALSE",
+    ],
+    additionalControls: [
+      {
+        name: "reachability",
+        negative: true,
+        invariant: "NeverSkipsRead",
+        action: "Readback",
+        fields: [
+          'phase = "ready"',
+          'receipt = "complete"',
+          'guest = "present"',
+          "verified = FALSE",
+          "observed = TRUE",
+        ],
+      },
+    ],
+  },
+  {
     // HACK-2460. One runtime service per native home. The negative control
     // binds the socket without holding service.lock.
     name: "runtime-service",

@@ -22,6 +22,9 @@ const STEP_CLASSES: ReadonlySet<string> = new Set([
 /** A `sha256:<64 lowercase hex>` digest of one step input. */
 export type InputDigest = string & { readonly __inputDigest: unique symbol };
 
+/** The identity of the running build. */
+export type StepBuild = string & { readonly __stepBuild: unique symbol };
+
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const NAME = /^[a-z0-9][a-z0-9.-]{0,63}$/;
 const IDENTIFIER = /^[A-Za-z0-9._:+-]{1,128}$/;
@@ -58,7 +61,7 @@ export type StepKeyParts = {
   readonly inputs: Readonly<Record<string, InputDigest>>;
   readonly epoch: string | null;
   /** Pass the build from `stepStoreBuild()`. Skip caching if it returns null. */
-  readonly build: string;
+  readonly build: StepBuild;
 };
 
 /** A validated step key and its digest. */

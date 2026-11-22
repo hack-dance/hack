@@ -1,6 +1,7 @@
 import { dirname } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
+import { resolveComposeDownCapMs } from "../lib/compose-down-budget.ts";
 import {
   effectiveComposeProfiles,
   readComposeInterpolationEnv,
@@ -12,7 +13,6 @@ import {
 import { parseComposePsJson } from "../lib/compose-ps-result.ts";
 import {
   type ComposeStartupPhase,
-  DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
   resolveComposeImageTimeoutMs,
   resolveComposeStartupCeilingMs,
   resolveComposeStartupTimeoutMs,
@@ -102,7 +102,25 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
   readonly forceRecreate?: boolean;
 }
 
-export interface RuntimeDownOptions extends RuntimeBaseOptions {}
+export interface RuntimeDownOptions extends RuntimeBaseOptions {
+  /**
+   * Optional per-container stop grace period in seconds (0..600) passed to
+   * `docker compose down --timeout`. When omitted, `--timeout` is not passed.
+   */
+  readonly timeoutSeconds?: number;
+  /**
+   * Optional precomputed overall subprocess cap (ms) for `docker compose down`.
+   */
+  readonly capMs?: number;
+  /**
+   * Optional callback invoked once `docker compose down` exits with its exit
+   * code and whether the subprocess timeout timer actually fired.
+   */
+  readonly onOutcome?: (outcome: {
+    readonly exitCode: number;
+    readonly timedOut: boolean;
+  }) => void;
+}
 
 export interface RuntimePsOptions extends RuntimeBaseOptions {
   readonly all?: boolean;
@@ -144,6 +162,20 @@ export function buildComposeArgs(opts: RuntimeBaseOptions): string[] {
     ...(opts.profiles
       ? opts.profiles.flatMap((profile) => ["--profile", profile] as const)
       : []),
+  ];
+}
+
+/**
+ * `docker compose down` argv. Passes `--timeout <seconds>` only when explicitly
+ * configured so unset keeps Docker Compose's default behaviour unchanged.
+ */
+export function buildComposeDownCommand(opts: RuntimeDownOptions): string[] {
+  return [
+    ...buildComposeArgs(opts),
+    "down",
+    ...(opts.timeoutSeconds === undefined
+      ? []
+      : ["--timeout", String(opts.timeoutSeconds)]),
   ];
 }
 
@@ -659,12 +691,24 @@ export const composeRuntimeBackend: RuntimeBackend = {
     }
   },
   async down(opts) {
-    const cmd = [...buildComposeArgs(opts), "down"];
+    const cmd = buildComposeDownCommand(opts);
+    const timeoutMs =
+      opts.capMs ??
+      resolveComposeDownCapMs({ timeoutSeconds: opts.timeoutSeconds });
     return await run(cmd, {
       cwd: opts.cwd,
       env: opts.env,
       stdout: childStdoutTarget(opts.routeStdoutToStderr),
-      timeoutMs: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+      timeoutMs,
+      onExit: opts.onOutcome
+        ? (event) => {
+            opts.onOutcome?.({
+              exitCode: event.exitCode,
+              timedOut: event.timedOut,
+            });
+            return Promise.resolve();
+          }
+        : undefined,
     });
   },
   async psJson(opts) {

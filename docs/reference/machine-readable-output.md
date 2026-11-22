@@ -181,3 +181,6 @@ Additive fields keep a command's row and shape above; consumers ignore keys they
   services, project-relative files and lines, and architectures. `hack doctor --fix --only
   'polling watchers' --json` adds `data.fix` with `id`, `applied`, `changed`, `confirmed`,
   `removed` and `diff`.
+- Compose `hack down --json`: when the overall down cap ends `docker compose down`
+  (exit `124`), `error.message` explains the cap and `error.detail` adds `timedOut: true`
+  and `capMs`.

@@ -365,6 +365,14 @@ describe("CI workflow wiring", () => {
     expect(jobs["runtime-core"]?.strategy?.matrix?.os).toBe(
       "${{ fromJSON(needs.changes.outputs.defer_macos == 'true' && '[\"ubuntu-latest\"]' || '[\"ubuntu-latest\",\"macos-latest\"]') }}"
     );
+    const guest = jobs["guest-protocol"];
+    expect(guest?.if).toBe(jobs["runtime-core"]?.if);
+    expect(guest?.strategy?.matrix?.os).toBe(
+      jobs["runtime-core"]?.strategy?.matrix?.os
+    );
+    expect(
+      guest?.steps?.some((step) => step.name === "Test bounded guest protocol")
+    ).toBe(true);
     for (const name of [
       "runtime-images",
       "docker-e2e-shard",

@@ -869,6 +869,25 @@ async function checkGlobalContainers(
   });
 }
 
+async function proxyOnLoopback(run: FirstRun, when: string): Promise<boolean> {
+  const ports = await run.sh([
+    "docker",
+    "port",
+    "hack-dev-proxy-caddy-1",
+    "443/tcp",
+  ]);
+  const ok = ports.stdout.trim() === "127.0.0.1:443";
+  run.record({
+    step: `7 proxy on loopback, ${when}`,
+    command: "docker port hack-dev-proxy-caddy-1 443/tcp",
+    exit: ports.exit,
+    seconds: ports.seconds,
+    result: ok ? "pass" : "fail",
+    note: ports.stdout.trim().split("\n").join(", ") || "not published",
+  });
+  return ok;
+}
+
 /**
  * Turns the opt-in logging stack on and off again. Loki and Grafana do not run
  * as root, so this is what shows that they can read the configs Hack wrote
@@ -885,6 +904,32 @@ async function loggingFlow(run: FirstRun): Promise<void> {
     });
     return;
   }
+  // Loki answers without authentication and Alloy reads every container of
+  // the daemon, so the proxy must not listen on the network while logging is
+  // on: this host may be reachable.
+  const bound = await run.step(
+    "7 config set proxy.bind_address 127.0.0.1",
+    ["config", "set", "--global", "proxy.bind_address", "127.0.0.1"],
+    (r) => ({
+      ok: r.exit === 0,
+      note: r.exit === 0 ? "loopback before logging" : firstError(r),
+    })
+  );
+  if (bound.exit !== 0) {
+    return;
+  }
+  // The binding is written by `global install`, not by `global up`.
+  const installed = await run.step(
+    "7 global install (proxy on loopback)",
+    ["global", "install"],
+    (r) => ({
+      ok: r.exit === 0,
+      note: r.exit === 0 ? "proxy restarted on loopback" : firstError(r),
+    })
+  );
+  if (installed.exit !== 0 || !(await proxyOnLoopback(run, "before logging"))) {
+    return;
+  }
   for (const logging of ["on", "off"] as const) {
     const flag = logging === "on" ? "--logging" : "--no-logging";
     await run.step(`7 global up ${flag}`, ["global", "up", flag], (r) => ({
@@ -895,6 +940,7 @@ async function loggingFlow(run: FirstRun): Promise<void> {
       step: `7 global containers, logging ${logging}`,
       logging,
     });
+    await proxyOnLoopback(run, `logging ${logging}`);
   }
 }
 

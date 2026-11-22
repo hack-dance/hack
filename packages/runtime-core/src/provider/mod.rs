@@ -26,6 +26,7 @@ pub mod graph;
 #[cfg(target_os = "macos")]
 mod host_pin;
 pub mod hot_reload;
+pub mod temp_aliases;
 pub use engine::{EngineInfo, info as engine_info};
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 mod gateway_probe_test;
@@ -43,6 +44,7 @@ mod image_load;
 pub mod image_platform;
 pub mod image_policy;
 pub mod image_reference;
+mod image_tag_store;
 #[cfg(any(all(target_os = "macos", feature = "native-config-plan"), test))]
 mod interactive_handoff;
 #[cfg(any(target_os = "macos", test))]

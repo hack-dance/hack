@@ -186,6 +186,18 @@ impl Sink for FdSink {
     }
 }
 
+/// The descriptor a reserved leading timings argument names, whether or not
+/// the collector accepted it: it is the collector's, or already closed, and no
+/// other part of the process may claim that number.
+pub fn requested_fd(argument: &str) -> Option<i32> {
+    argument
+        .strip_prefix(REQUEST_PREFIX)?
+        .split(':')
+        .next()?
+        .parse()
+        .ok()
+}
+
 /// Invalid/unavailable diagnostics never change the product command's result.
 /// Only a reserved leading argument is consumed; stderr remains untouched.
 pub fn enable_argument(argument: &str) -> bool {

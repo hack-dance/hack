@@ -28,7 +28,7 @@ export async function secureGlobalLoginRouting(opts: {
     throw new HackCliError({
       code: "E_PERMISSION",
       message:
-        "Automatic routing refused untrusted or outdated installed assets. Review and move unexpected schema/dashboard files aside, then reinstall current assets before retrying. Values omitted.",
+        "Automatic routing refused untrusted or outdated installed assets. Review and move unexpected Compose or schema files aside, then reinstall current assets before retrying. Values omitted.",
       detail: { reason: "routing_assets_untrusted" },
     });
   }

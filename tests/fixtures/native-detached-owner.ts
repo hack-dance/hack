@@ -1,4 +1,5 @@
 import { ChildProcess, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -18,6 +19,7 @@ import {
   nativeDetachedUpProgress,
   nativeDetachedUpReady,
   nativeDetachedUpShellVariables,
+  reportNativeImageDownloadWait,
   runNativeDetachedOwner,
   setNativeDetachedHeartbeatIntervalForTests,
   startNativeDetachedUp,
@@ -76,11 +78,19 @@ function publishFixtureHotReload(fixtureMode: string): void {
 }
 
 /** HACK-2351 modes: phase reports against short launcher limits. */
-const DEADLINE_MODES = ["slow-images", "slow-runtime", "images-ceiling"];
+const DEADLINE_MODES = [
+  "slow-images",
+  "slow-runtime",
+  "images-ceiling",
+  "images-wait-ceiling",
+];
 
 /** The launcher's limits for a fixture mode. */
 function fixtureLimits(fixtureMode: string) {
-  if (fixtureMode === "images-ceiling") {
+  if (
+    fixtureMode === "images-ceiling" ||
+    fixtureMode === "images-wait-ceiling"
+  ) {
     return { budgetMs: 1000, ceilingMs: 2000 };
   }
   if (["timeout", "late-ready", ...DEADLINE_MODES].includes(fixtureMode)) {
@@ -111,6 +121,9 @@ async function reportFixturePhases(fixtureMode: string): Promise<void> {
     return;
   }
   nativeDetachedUpProgress("images");
+  if (fixtureMode === "images-wait-ceiling") {
+    reportNativeImageDownloadWait("docker.io/fixture/image:stable");
+  }
   if (fixtureMode === "slow-images") {
     await Bun.sleep(2500);
     nativeDetachedUpProgress("services");
@@ -245,6 +258,14 @@ const [role, root, mode] = Bun.argv.slice(2);
 if (!(root && mode)) {
   process.exit(2);
 }
+
+const rootPoll = setInterval(() => {
+  if (!existsSync(root)) {
+    process.exit(0);
+  }
+}, 100);
+rootPoll.unref();
+await publish(join(root, `${role}.fixture-pid`), String(process.pid));
 
 /** Exercise the valid exit-before-buffered-IPC order in this isolated launcher. */
 function deliverExitBeforeMessages(): () => void {
@@ -402,6 +423,7 @@ if (role === "channel-holder") {
       "prestart-persistent-hook",
       "slow-runtime",
       "images-ceiling",
+      "images-wait-ceiling",
     ].includes(mode)
       ? await handleRunCliError({ error, jsonRequested: true })
       : 1;

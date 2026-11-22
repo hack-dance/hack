@@ -24,7 +24,9 @@ import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
   resolveNativeRuntimeSelection,
+  resolveNativeSetupSelection,
 } from "../backends/native-runtime-client.ts";
+import { inspectTempAliases } from "../backends/native-temp-aliases.ts";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -96,6 +98,7 @@ import {
 } from "../lib/config-paths.ts";
 import { resolveDefaultDomain } from "../lib/default-domain.ts";
 import { queryDnsARecord } from "../lib/dns-query.ts";
+import { dockerEngineSupportsStartInterval } from "../lib/docker-engine-features.ts";
 import {
   adoptedProjectCheckResult,
   adoptedProjectNotApplicableResults,
@@ -194,6 +197,11 @@ import {
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import {
+  LOGGING_ENABLE_COMMAND,
+  resolveGlobalLogging,
+  resolveGlobalLoggingForHome,
+} from "../lib/global-logging.ts";
 import { describeProxyNetworkIssue } from "../lib/global-proxy-network.ts";
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
@@ -362,6 +370,8 @@ import {
 
 type CheckStatus = "ok" | "warn" | "error";
 
+const NATIVE_TEMP_ALIASES_CHECK = "native temporary aliases";
+
 interface CheckResult {
   readonly name: string;
   readonly status: CheckStatus;
@@ -472,6 +482,13 @@ const optBrowserResult = defineOption({
 const doctorOptions = [
   optPath,
   optFix,
+  defineOption({
+    name: "includeUnverifiedVolumes",
+    type: "boolean",
+    long: "--include-unverified-volumes",
+    description:
+      "With --fix, include native aliases whose volume may be unmounted",
+  } as const),
   defineOption({
     name: "machine",
     type: "boolean",
@@ -852,6 +869,11 @@ async function runDoctorAudit(
     migrateEnvConfig: args.options.migrateEnvConfig === true,
     acceptTrackedEnvChanges: args.options.acceptTrackedEnvChanges === true,
   });
+  const includeUnverifiedVolumes =
+    args.options.includeUnverifiedVolumes === true;
+  if (includeUnverifiedVolumes && args.options.fix !== true) {
+    throw new CliUsageError("--include-unverified-volumes requires --fix.");
+  }
   const native = resolveNativeRuntimeSelection();
   if (native) {
     noteNativeBackendBeta({ json });
@@ -862,6 +884,7 @@ async function runDoctorAudit(
       json,
       machine: args.options.machine === true,
       fix: args.options.fix === true,
+      includeUnverifiedVolumes,
       migrateEnvConfig: args.options.migrateEnvConfig === true,
       acceptTrackedEnvChanges: args.options.acceptTrackedEnvChanges === true,
     });
@@ -1112,21 +1135,8 @@ async function runDoctorAudit(
   results.push(oauthDns);
   await appendCustomDomainDnsChecks({ results, progress: s, defaultDomain });
 
-  // Endpoint reachability (best-effort). Skip if DNS isn't set up.
-  if (dns.status === "ok") {
-    results.push(
-      await runCheck(s, "grafana", () => checkGrafanaReachable(), {
-        timeoutMs: 2000,
-      })
-    );
-  } else {
-    results.push({
-      name: "grafana",
-      status: "warn",
-      message: `Skipped reachability (DNS for ${LEGACY_GRAFANA_HOST} not configured)`,
-      durationMs: 0,
-    });
-  }
+  // Endpoint reachability (best-effort).
+  results.push(await checkGrafanaUnlessOff({ progress: s, dns }));
 
   // Authenticate loopback independently of direct container reachability.
   results.push(
@@ -1174,6 +1184,15 @@ async function runDoctorAudit(
   }
 
   await appendDoctorScopeChecks({ args, progress: s, adopted, results });
+
+  results.push(
+    ...(await checkTempAliasesOnMac({
+      progress: s,
+      machine: args.options.machine === true,
+      fix: args.options.fix === true,
+      includeUnverifiedVolumes,
+    }))
+  );
 
   s.stop(`Doctor checks complete (${results.length} checks)`);
 
@@ -1529,6 +1548,7 @@ async function handleNativeDoctor(opts: {
   readonly json: boolean;
   readonly machine: boolean;
   readonly fix: boolean;
+  readonly includeUnverifiedVolumes: boolean;
   /**
    * Runs the same project-file env migration as Compose doctor after the
    * checks. It changes project files only, so it needs no native runtime.
@@ -1752,6 +1772,16 @@ async function handleNativeDoctor(opts: {
     );
   }
   await appendNativeMachineChecks({ ...opts, progress, results });
+  results.push(
+    ...(await checkTempAliasesOnMac({
+      progress,
+      machine: opts.machine,
+      fix: opts.fix,
+      includeUnverifiedVolumes: opts.includeUnverifiedVolumes,
+      runtime: opts.runtime,
+    }))
+  );
+
   progress.stop(`Native doctor checks complete (${results.length} checks)`);
   const hasError = results.some((result) => result.status === "error");
   const reported = await reportDoctorResults({
@@ -1808,6 +1838,86 @@ async function appendNativeMachineChecks(opts: {
  * by its timeout; any failure warns that status is unavailable, never claims idle.
  * Never stops the pool.
  */
+async function checkTempAliasesOnMac(opts: {
+  readonly progress: Parameters<typeof runCheck>[0];
+  readonly machine: boolean;
+  readonly fix: boolean;
+  readonly includeUnverifiedVolumes: boolean;
+  readonly runtime?: NativeRuntimeSelection;
+}): Promise<TimedCheckResult[]> {
+  if (opts.machine || !isMac()) {
+    return [];
+  }
+  let runtime: NativeRuntimeSelection;
+  try {
+    runtime = opts.runtime ?? resolveNativeSetupSelection();
+  } catch {
+    return [];
+  }
+  return [
+    await runCheck(
+      opts.progress,
+      NATIVE_TEMP_ALIASES_CHECK,
+      () =>
+        checkNativeTempAliases({
+          runtime,
+          fix: opts.fix,
+          includeUnverifiedVolumes: opts.includeUnverifiedVolumes,
+        }),
+      { timeoutMs: 4000 }
+    ),
+  ];
+}
+
+async function checkNativeTempAliases(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly fix: boolean;
+  readonly includeUnverifiedVolumes: boolean;
+}): Promise<CheckResult> {
+  const name = NATIVE_TEMP_ALIASES_CHECK;
+  try {
+    const report = await inspectTempAliases({ ...opts, cwd: process.cwd() });
+    const removed = new Set(report.removed);
+    const uncertain = report.uncertainVolume.filter(
+      (alias) => !removed.has(alias)
+    ).length;
+    const retained = report.dangling.filter(
+      (alias) => !removed.has(alias)
+    ).length;
+    const count = retained + uncertain;
+    const subject = (total: number) =>
+      `${total} temporary ${total === 1 ? "alias" : "aliases"}`;
+    let summary = "No old dangling provider HOME aliases found";
+    if (count > 0) {
+      summary =
+        uncertain === count
+          ? `${subject(count)} cannot be attributed`
+          : `${subject(count)} to inspect`;
+    } else if (removed.size > 0) {
+      summary = `${subject(removed.size)} removed`;
+    }
+    if (report.incomplete) {
+      summary =
+        count > 0 || removed.size > 0
+          ? `${summary} (scan incomplete)`
+          : "Temporary alias scan incomplete";
+    }
+    return {
+      name,
+      scope: "machine",
+      status: report.incomplete ? "warn" : "ok",
+      message: `${summary} · hack native temp-aliases`,
+    };
+  } catch {
+    return {
+      name,
+      scope: "machine",
+      status: "warn",
+      message: "Temporary alias scan unavailable · hack native temp-aliases",
+    };
+  }
+}
+
 async function checkNativePoolIdle(opts: {
   readonly runtime: NativeRuntimeSelection;
 }): Promise<CheckResult> {
@@ -2375,14 +2485,33 @@ async function checkGlobalFiles(): Promise<CheckResult> {
     GLOBAL_LOGGING_COMPOSE_FILENAME
   );
 
+  const logging = await resolveGlobalLogging({ loggingCompose });
+  const caddyText = await readTextFile(caddyCompose);
   const ok =
-    (await pathExists(caddyCompose)) && (await pathExists(loggingCompose));
+    caddyText !== null &&
+    (!logging.enabled || (await pathExists(loggingCompose)));
+  if (!ok) {
+    return {
+      name: "global files",
+      status: "warn",
+      message: `Missing compose files under ${root} (run: hack global install)`,
+    };
+  }
+  // A proxy file from before healthchecks: `hack global up` then keeps its
+  // old fixed waits instead of waiting for readiness.
+  if (!caddyText.includes("healthcheck:")) {
+    return {
+      name: "global files",
+      status: "warn",
+      message: `${root}: the global stack files predate readiness checks, so \`hack global up\` waits a fixed time for them (run: hack global install)`,
+    };
+  }
   return {
     name: "global files",
-    status: ok ? "ok" : "warn",
-    message: ok
+    status: "ok",
+    message: logging.enabled
       ? root
-      : `Missing compose files under ${root} (run: hack global install)`,
+      : `${root} (logging stack off; turn it on with: ${LOGGING_ENABLE_COMMAND})`,
   };
 }
 
@@ -2766,6 +2895,52 @@ async function checkOauthAliasDns(): Promise<CheckResult> {
       message: `Unable to resolve ${host} (run: hack global install)`,
     };
   }
+}
+
+/**
+ * Grafana reachability, skipped when DNS is not set up, and reported as off
+ * when the opt-in logging stack is off (there is no Grafana to reach).
+ */
+async function checkGrafanaUnlessOff(opts: {
+  readonly progress: Parameters<typeof runCheck>[0];
+  readonly dns: CheckResult;
+}): Promise<TimedCheckResult> {
+  // A bad logging.enabled value is a finding, not a reason to stop doctor.
+  let enabled: boolean;
+  try {
+    enabled = (await resolveGlobalLoggingForHome()).enabled;
+  } catch (error) {
+    return {
+      name: "grafana",
+      status: "warn",
+      message: error instanceof Error ? error.message : String(error),
+      durationMs: 0,
+    };
+  }
+  if (!enabled) {
+    return {
+      name: "grafana",
+      status: "ok",
+      message: `Logging stack off (opt-in); turn it on with: ${LOGGING_ENABLE_COMMAND}`,
+      durationMs: 0,
+    };
+  }
+  if (opts.dns.status === "ok") {
+    return await runCheck(
+      opts.progress,
+      "grafana",
+      () => checkGrafanaReachable(),
+      {
+        timeoutMs: 2000,
+      }
+    );
+  }
+  return {
+    name: "grafana",
+    status: "warn",
+    message: `Skipped reachability (DNS for ${LEGACY_GRAFANA_HOST} not configured)`,
+    durationMs: 0,
+  };
 }
 
 async function checkGrafanaReachable(): Promise<CheckResult> {
@@ -4451,6 +4626,7 @@ async function runDoctorFix(opts: {
         useStaticCoreDnsIp: useStaticIps,
         useStaticCaddyIp: useStaticIps,
         bindAddress: bind.bindAddress,
+        startInterval: await dockerEngineSupportsStartInterval(),
       }),
     });
     if (proxyCompose.kind === "replaced-hand-edit") {
@@ -6040,6 +6216,7 @@ export function buildDoctorSummaryLines(input: {
 
   const ungrouped = input.results.filter(
     (result) =>
+      result.name !== NATIVE_TEMP_ALIASES_CHECK &&
       !DOCTOR_SUMMARY_GROUPS.some((group) => group.checks.has(result.name))
   );
   if (ungrouped.length > 0) {
@@ -6052,6 +6229,13 @@ export function buildDoctorSummaryLines(input: {
         ? "Other checks: ok"
         : `Other checks: warn - ${summarizeDoctorIssues(issues)}`
     );
+  }
+
+  const aliases = input.results.find(
+    (result) => result.name === NATIVE_TEMP_ALIASES_CHECK
+  );
+  if (aliases) {
+    lines.push(aliases.message);
   }
 
   return lines;
@@ -6074,6 +6258,7 @@ export function buildDoctorSummaryStatusItems(input: {
 
   const ungrouped = input.results.filter(
     (result) =>
+      result.name !== NATIVE_TEMP_ALIASES_CHECK &&
       !DOCTOR_SUMMARY_GROUPS.some((group) => group.checks.has(result.name))
   );
   if (ungrouped.length > 0) {
@@ -6083,6 +6268,16 @@ export function buildDoctorSummaryStatusItems(input: {
         members: ungrouped,
       })
     );
+  }
+
+  const aliases = input.results.find(
+    (result) => result.name === NATIVE_TEMP_ALIASES_CHECK
+  );
+  if (aliases) {
+    items.push({
+      label: aliases.message,
+      status: aliases.status === "ok" ? "info" : aliases.status,
+    });
   }
 
   return items;

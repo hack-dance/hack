@@ -226,6 +226,15 @@ pub(super) trait Driver {
         config: &Value,
         service: &str,
     ) -> Result<(), CandidateError>;
+    /// `service`'s own readiness goal first held on an observation of
+    /// `container_id`, the receipt's confirmed id, checked against its reviewed
+    /// config on that same inspect. Called at most once per service per attempt,
+    /// never after a failure, on the evaluator's thread: queue work, never block,
+    /// and re-check fences against fresh observations before any effect. Nothing
+    /// is written to the receipt for it. The default does nothing.
+    fn service_ready(&mut self, _service: &str, _container_id: &str) -> Result<(), CandidateError> {
+        Ok(())
+    }
 }
 
 /// Named routes rely on the engine-owned hosts file and the image resolver policy.

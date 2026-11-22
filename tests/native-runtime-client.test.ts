@@ -147,6 +147,13 @@ async function fixture() {
   await Bun.write(
     binary,
     `#!${process.execPath}
+if (process.argv.includes("image-wait-fixture")) {
+  process.stderr.write("hack.image-wa");
+  await Bun.sleep(10);
+  process.stderr.write("it:begin\\nhack.image-wait:end\\n");
+  console.error(JSON.stringify({code:"image_tag_download_busy"}));
+  process.exit(2);
+}
 if (process.argv.includes("hang")) await Bun.sleep(60_000);
 if (process.argv.includes("configuration-batch")) { console.error(JSON.stringify({code:"invalid_dependency_cache",message:"synthetic-secret-diagnostic",configuration_refusals:Array.from({length:128},(_,i)=>({text_fixed:true,service:"s"+i,field:"labels.hack.dependencies.lockfiles",message:"The file list is invalid.",fix:"Use relative paths without variables."})),startup_logs:[{service:"web",lines:["synthetic-secret-diagnostic"]}]})); process.exit(2); }
 if (process.argv.includes("old-provider")) { console.error(JSON.stringify({code:"provider_pin_changed",message:"synthetic-secret-diagnostic"})); process.exit(2); }
@@ -1995,3 +2002,22 @@ test("HACK-2418: a failed provider command shows the provider's own last line, v
     );
   }
 });
+
+bunTest(
+  "image wait markers survive split stderr and preserve the final refusal",
+  async () => {
+    const runtime = await fixture();
+    const wait: boolean[] = [];
+    const error = await invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args: ["image-wait-fixture"],
+      onImageWait: (waiting) => wait.push(waiting),
+    }).catch((failure: unknown) => failure);
+    expect(wait).toEqual([true, false]);
+    expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+    expect((error as NativeRuntimeRequestError).nativeCode).toBe(
+      "image_tag_download_busy"
+    );
+  }
+);

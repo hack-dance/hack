@@ -17,6 +17,8 @@ import {
   nativeDetachedUpProfileNotice,
   nativeDetachedUpShellVariables,
   nativeShellForwardingNotice,
+  reportNativeImageDownloadWait,
+  reportNativeImageTagOffline,
 } from "../lib/native-detached-up.ts";
 import {
   describeNativeProcessRefusals,
@@ -59,7 +61,9 @@ import { reportNativeIgnoredSettingNotices } from "./native-ignored-setting-noti
 import {
   NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
   nativeImagePolicyArgs,
+  nativeImageRegistryReason,
 } from "./native-image-policy.ts";
+import { nativeImageBlocker, offlineTagNotice } from "./native-image-tags.ts";
 import {
   type NativePreparedBase,
   preparedBaseArguments,
@@ -755,7 +759,10 @@ async function ensureNativeProjectImage(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   readonly reference: string;
+  readonly imageTagMode?: "refresh" | "offline";
   readonly affectedServices: () => readonly string[];
+  readonly commandPin?: string;
+  readonly waitReference: string;
   readonly policy: NativeEmulationPolicy | undefined;
   readonly invoke: typeof invokeNativeRuntime;
 }) {
@@ -766,8 +773,12 @@ async function ensureNativeProjectImage(opts: {
       args: [
         ...nativeEnsureImageArgs(opts.reference, opts.policy),
         ...nativeImagePolicyArgs(),
+        ...(opts.commandPin ? ["--command-image-pin", opts.commandPin] : []),
+        ...(opts.imageTagMode ? ["--image-tag-mode", opts.imageTagMode] : []),
       ],
       timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+      onImageWait: (waiting) =>
+        reportNativeImageDownloadWait(waiting ? opts.waitReference : null),
     })
     .catch((error: unknown) => {
       if (
@@ -782,7 +793,7 @@ async function ensureNativeProjectImage(opts: {
             ? `service ${names[0]}`
             : `services ${names.join(", ")}`;
         throw new ClosedCliError(
-          `Native image acquisition failed for ${label} field image (registry_image_not_found); the selected registry image or tag was not found. Values omitted.`
+          `Native image acquisition failed for ${label} field image (registry_image_not_found); the selected image ${opts.reference} was not found.`
         );
       }
       throw error;
@@ -795,7 +806,11 @@ async function ensureNativeProjectImage(opts: {
   ) {
     throw unconfirmed("the runtime image selection");
   }
-  return { imageId: ensured.image_id, reference: ensured.pinned_reference };
+  return {
+    imageId: ensured.image_id,
+    reference: ensured.pinned_reference,
+    offline: offlineTagNotice(ensured),
+  };
 }
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
 async function pinNativeProjectImages(opts: {
@@ -809,8 +824,14 @@ async function pinNativeProjectImages(opts: {
   /** Opted-in services' platform policies; every other service resolves Linux arm64. */
   readonly amd64Emulation?: Readonly<Record<string, NativeEmulationPolicy>>;
   readonly signal: AbortSignal;
+  readonly imageTagMode?: "refresh" | "offline";
+  readonly warn: (line: string) => void;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<void> {
+  const reportedOffline = new Set<string>();
+  const confirmed = new Set<string>();
+  const references = [...new Set(opts.canonicalImages.values())];
+  const offlineReferences = new Set<string>();
   const pinnedImages = new Map<string, string>();
   const immutableReferences = new Map<string, string | null>();
   const canonical = (image: string) => opts.canonicalImages.get(image) ?? image;
@@ -819,7 +840,7 @@ async function pinNativeProjectImages(opts: {
       throw canceled();
     }
     const retainedImage = opts.retainedImages.get(name);
-    if (retainedImage) {
+    if (retainedImage && spec.build !== undefined) {
       spec.image = retainedImage;
       continue;
     }
@@ -853,7 +874,9 @@ async function pinNativeProjectImages(opts: {
     const ensured = await ensureNativeProjectImage({
       runtime: opts.runtime,
       projectRoot: opts.projectRoot,
-      reference: immutableReference ?? image,
+      reference: image,
+      waitReference: reference,
+      commandPin: reference.includes("@") ? undefined : immutableReference,
       affectedServices: () =>
         Object.entries(opts.specs)
           .filter(
@@ -865,8 +888,49 @@ async function pinNativeProjectImages(opts: {
           )
           .map(([service]) => service),
       policy,
+      imageTagMode: offlineReferences.has(reference)
+        ? "offline"
+        : opts.imageTagMode,
       invoke: opts.invoke,
+    }).catch(async (error: unknown) => {
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        (error.nativeCode === "image_tag_download_busy" ||
+          error.nativeCode === "image_tag_offline_missing" ||
+          error.nativeCode === "image_archive_offline_missing")
+      ) {
+        throw await nativeImageBlocker({
+          runtime: opts.runtime,
+          projectRoot: opts.projectRoot,
+          missing: reference,
+          downloading: error.nativeCode === "image_tag_download_busy",
+          reason: error.nativeCauseCode,
+          references,
+          confirmed,
+          invoke: opts.invoke,
+        });
+      }
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode?.startsWith("registry_")
+      ) {
+        const reason =
+          nativeImageRegistryReason(error.nativeCauseCode) ?? error.message;
+        throw new ClosedCliError(`Image unavailable: ${reference}: ${reason}`);
+      }
+      throw error;
     });
+    confirmed.add(reference);
+    if (ensured.offline) {
+      offlineReferences.add(reference);
+    }
+    const noticeKey = `${reference}\n${ensured.imageId}`;
+    if (ensured.offline && !reportedOffline.has(noticeKey)) {
+      if (!reportNativeImageTagOffline(ensured.offline)) {
+        opts.warn(ensured.offline);
+      }
+      reportedOffline.add(noticeKey);
+    }
     if (immutableReference === undefined) {
       immutableReferences.set(
         reference,
@@ -1725,6 +1789,7 @@ async function selectNativeStartup(opts: {
     const observed =
       preflight.runtimePhase === "running"
         ? await inspectNativeProjectGraph({
+            startupWait: true,
             runtime: opts.runtime,
             projectRoot: opts.scope.projectRoot,
             run: retained.run,
@@ -2025,6 +2090,7 @@ type NativeProjectStartOptions = {
     envName: string | null | undefined
   ) => Promise<NativeProfileSelection>;
   readonly sharedSource: boolean;
+  readonly imageTagMode?: "refresh" | "offline";
   readonly restore?: NativeProjectRun;
   readonly onReady?: (services: {
     readonly started: readonly string[];
@@ -2708,6 +2774,8 @@ async function startNativeProjectAttempt(
       profiles,
       amd64Emulation: input.amd64Emulation,
       signal: controller.signal,
+      imageTagMode: opts.imageTagMode,
+      warn: deps.warn,
       invoke: deps.invoke,
     });
     // Image work is done: what follows counts against a detached start's
@@ -2841,6 +2909,7 @@ async function startNativeProjectAttempt(
           }
           const invokeInspect = () =>
             inspectNativeProjectGraph({
+              startupWait: true,
               runtime: opts.runtime,
               projectRoot: opts.scope.projectRoot,
               run,
@@ -3222,6 +3291,26 @@ function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
   }
 }
 
+const START_LOCK_HOLDER =
+  /^Provider lease acquisition refused; recorded holder: ([a-z ]+); no operation was admitted\.$/;
+
+function withStartupLockBlocker(error: unknown): unknown {
+  if (
+    !(error instanceof NativeRuntimeRequestError) ||
+    error.nativeCode !== "provider_busy"
+  ) {
+    return error;
+  }
+  const holder =
+    START_LOCK_HOLDER.exec(error.nativeMessage ?? "")?.[1] ?? "unavailable";
+  error.message = [
+    "Native startup could not acquire a runtime lock (provider_busy).",
+    `Holder: ${holder}.`,
+    "Run hack up again after the holder finishes.",
+  ].join("\n");
+  return error;
+}
+
 /** Publish advisory startup evidence until this foreground invocation settles. */
 export async function startNativeProject(
   opts: NativeProjectStartOptions
@@ -3231,6 +3320,8 @@ export async function startNativeProject(
     return await startNativeProjectAttempt(opts, async () => {
       finish = await beginNativeProjectStartupObservation(opts.scope);
     });
+  } catch (error) {
+    throw withStartupLockBlocker(error);
   } finally {
     await finish?.();
   }

@@ -282,10 +282,12 @@ fn start(batch: &Batch, guest: &Guest) -> Result<Vec<(u8, Assignment)>, Candidat
         guest,
         guest,
         &mut store,
-        RUN,
-        &selected,
+        StartSelection {
+            run: RUN,
+            selected: &selected,
+            ready_service: None,
+        },
         &"9".repeat(64),
-        None,
     )
 }
 
@@ -467,10 +469,12 @@ fn a_changed_or_repeated_reservation_refuses_before_any_guest_call() {
                 &guest,
                 &guest,
                 &mut store,
-                RUN,
-                &selected,
+                StartSelection {
+                    run: RUN,
+                    selected: &selected,
+                    ready_service: None
+                },
                 &"9".repeat(64),
-                None,
             )
             .is_err()
         );

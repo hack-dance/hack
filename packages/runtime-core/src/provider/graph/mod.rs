@@ -330,6 +330,8 @@ pub struct Snapshot {
     #[cfg(target_os = "macos")]
     pub interrupted_start_cleanup_incomplete: bool,
     pub observations: BTreeMap<String, Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub startup_observed_ports: Vec<u16>,
     pub guest_endpoints: BTreeMap<String, GuestEndpoint>,
     /// Ready containers' loopback publication targets, keyed by
     /// [`port_endpoint_key`]. Independent of HTTP probes: a published port
@@ -779,7 +781,7 @@ struct Session<'a, 's> {
     /// diagnostic (HACK-2416).
     probe_findings: BTreeMap<String, crate::ProbeFinding>,
 }
-#[cfg(test)]
+#[cfg(any(test, all(debug_assertions, target_os = "macos")))]
 pub(super) fn fault_pause(
     root: &std::path::Path,
     run: &str,
@@ -796,7 +798,7 @@ pub(super) fn fault_pause(
     }
     Ok(())
 }
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(any(test, debug_assertions), target_os = "macos"))]
 pub(super) fn publisher_recovery_fault(
     candidate: &Candidate,
     run: &str,
@@ -2163,6 +2165,7 @@ fn inspect_using(
         #[cfg(target_os = "macos")]
         interrupted_start_cleanup_incomplete,
         observations,
+        startup_observed_ports: Vec::new(),
         guest_endpoints,
         port_endpoints,
         storage_references,

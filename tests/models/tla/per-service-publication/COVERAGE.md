@@ -19,8 +19,10 @@ ready boundary.
 | Abort, Retire, Settled | Existing rollback/recovery and planned handling of an unbound child |
 | Finish | Aggregate graph readiness and complete publication observation |
 
-TLC 1.7.4 checked 622 distinct states. The controls violate `Safe` at
-`Bind` and `Record`. The abstraction assumes atomic journal steps,
+TLC 1.7.4 checked 669 distinct states. The controls violate `Safe` at
+`Bind` and `Record`. A separate reachability control witnesses an
+already-authorized child binding after owner death. Recovery must then
+stop the exact committed incarnation. The abstraction assumes atomic journal steps,
 a single owner and exact child identity. Down models the owner reaching
 cancellation, not concurrent guest mutation under the lease. It does not
 test kernel pipes, process identity, filesystem durability or live cleanup.

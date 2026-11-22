@@ -128,7 +128,6 @@ impl EarlyPublications {
             };
             let upstream = || {
                 graph::bridges::publication_upstream(
-                    candidate,
                     engine,
                     run,
                     slot,
@@ -178,6 +177,8 @@ impl EarlyPublications {
                         return Err(refused());
                     }
                     if published(candidate, owned).is_ok() {
+                        #[cfg(debug_assertions)]
+                        graph::publisher_recovery_fault(candidate, run, "publisher-bound")?;
                         return Ok(());
                     }
                     std::thread::sleep(PUBLISHED_POLL);

@@ -680,10 +680,12 @@ pub(super) fn admit_ready_service(
             input: &input,
         },
         &mut load_store(candidate, engine, false)?,
-        run,
-        &selected,
+        StartSelection {
+            run,
+            selected: &selected,
+            ready_service: scope,
+        },
         &digest,
-        scope,
     )
 }
 
@@ -974,10 +976,12 @@ pub(in crate::provider::graph) fn start_bridges(
             input: &input,
         },
         &mut store,
-        run,
-        selected,
+        StartSelection {
+            run,
+            selected,
+            ready_service: None,
+        },
         &digest,
-        None,
     )
 }
 
@@ -1025,16 +1029,25 @@ impl RelayGuest for LeasedRelays<'_, '_> {
 ///
 /// A refusal after step 4 leaves every intent recorded for the caller's cleanup,
 /// exactly as a refused single start did.
+struct StartSelection<'a> {
+    run: &'a str,
+    selected: &'a [(u8, &'a str)],
+    ready_service: Option<(&'a str, &'a str)>,
+}
+
 fn start_selected(
     candidate: &Candidate,
     inspection: &impl Inspection,
     guest: &impl RelayGuest,
     store: &mut Store,
-    run: &str,
-    selected: &[(u8, &str)],
+    selection: StartSelection<'_>,
     digest: &str,
-    ready_service: Option<(&str, &str)>,
 ) -> Result<Vec<(u8, Assignment)>, CandidateError> {
+    let StartSelection {
+        run,
+        selected,
+        ready_service,
+    } = selection;
     let inspect = |services: &std::collections::BTreeSet<&str>| {
         inspect_targets_scoped(candidate, inspection, run, services, ready_service)
     };
@@ -1231,16 +1244,7 @@ pub fn publish_bridge(
     hostnames: &[String],
 ) -> Result<(), CandidateError> {
     let engine = connect_waiting(candidate)?;
-    let upstream = publication_upstream(
-        candidate,
-        &engine,
-        run,
-        slot,
-        reservation,
-        port,
-        hostnames,
-        None,
-    )?;
+    let upstream = publication_upstream(&engine, run, slot, reservation, port, hostnames, None)?;
     super::super::publication::launch(
         candidate,
         super::super::publication::Launch {
@@ -1257,7 +1261,6 @@ pub fn publish_bridge(
 
 /// Revalidate the exact frontend and relay under the caller's provider lease.
 pub(super) fn publication_upstream(
-    candidate: &Candidate,
     engine: &Engine<'_>,
     run: &str,
     slot: u8,
@@ -1266,6 +1269,7 @@ pub(super) fn publication_upstream(
     hostnames: &[String],
     ready_service: Option<(&str, &str)>,
 ) -> Result<std::path::PathBuf, CandidateError> {
+    let candidate = engine.guest().candidate();
     let store = load_store(candidate, engine, false)?;
     let a = store
         .slots

@@ -2437,7 +2437,7 @@ const contracts: readonly ModelContract[] = [
         name: "bind-before-commit",
         negative: true,
         action: "Bind",
-        fields: ['first |-> "uncommitted-bind"'],
+        fields: ['first |-> "uncommitted-bind"', "recorded = {}"],
       },
     ],
   },

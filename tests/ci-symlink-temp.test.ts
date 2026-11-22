@@ -45,37 +45,37 @@ test("the fixed list names existing tracked tests and runs exactly those files",
   expect(result.stdout.toString().trim().split("\n").sort()).toEqual(files);
 });
 
-test("Linux routing leaves the other files in place and keeps a normal fallback", () => {
-  const selection = JSON.stringify([
-    "tests/ci-symlink-temp.test.ts",
-    "tests/daemon-systemd.test.ts",
-  ]);
-  const plan = (route: boolean) => {
-    const result = Bun.spawnSync(
-      [
-        process.execPath,
-        "scripts/test-shard.ts",
-        "plan",
-        "--shard=1/1",
-        "--layout=full",
-        ...(route ? ["--route-symlink-temp=true"] : []),
-      ],
-      {
-        cwd: repository,
-        env: { ...isolatedShardEnv(), HACK_TEST_SELECTION: selection },
-        timeout: 5000,
-      }
-    );
-    expect(result.exitCode, result.stderr.toString()).toBe(0);
-    return result.stdout.toString().trim().split("\n");
-  };
+test.skipIf(process.platform !== "linux")(
+  "every Linux file is assigned once across routed shards and the fixed step",
+  async () => {
+    const fixed = await Bun.file(resolve(repository, listPath)).text();
+    const plan = (args: string[], selection?: string) => {
+      const result = Bun.spawnSync(
+        [process.execPath, "scripts/test-shard.ts", "plan", ...args],
+        {
+          cwd: repository,
+          env: { ...isolatedShardEnv(), HACK_TEST_SELECTION: selection },
+          timeout: 5000,
+        }
+      );
+      expect(result.exitCode, result.stderr.toString()).toBe(0);
+      return result.stdout.toString().trim().split("\n").filter(Boolean);
+    };
 
-  const fallback = JSON.parse(selection);
-  expect(plan(false)).toEqual(fallback);
-  expect(plan(true)).toEqual(
-    process.platform === "linux" ? ["tests/ci-symlink-temp.test.ts"] : fallback
-  );
-});
+    const expected = new Set(plan(["--shard=1/1", "--layout=full"], fixed));
+    const actual = [...expected];
+    for (const shard of [4, 5, 6, 7, 8]) {
+      const args = [`--shard=${shard}/8`, "--layout=pooled"];
+      const normal = plan(args);
+      for (const file of normal) {
+        expected.add(file);
+      }
+      actual.push(...plan([...args, "--route-symlink-temp=true"]));
+    }
+    expect(actual.sort()).toEqual([...expected].sort());
+  },
+  20_000
+);
 
 test("the Linux variant runs the fixed list behind a real temp symlink and cleans up", async () => {
   const workflow = Bun.YAML.parse(

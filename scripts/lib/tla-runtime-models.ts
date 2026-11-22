@@ -2873,7 +2873,7 @@ const contracts: readonly ModelContract[] = [
     // recovery's boot and its graph recovery: each reaches a dead end.
     name: "native-pool-stop",
     module: "PoolStop",
-    states: 113,
+    states: 210,
     invariant: "NoDeadEnd",
     action: "OwnerCrash",
     fields: [
@@ -2956,7 +2956,7 @@ const contracts: readonly ModelContract[] = [
       // the owner never retires when its boot ends, the previous-boot archive
       // cannot prove quiescence, or down --recover does not start a stopped pool
       // for a pending finalization. Each strands the recovered run's lease.
-      { name: "https", negative: false, states: 284 },
+      { name: "https", negative: false, states: 292 },
       {
         name: "https-no-retire",
         negative: true,
@@ -2983,6 +2983,25 @@ const contracts: readonly ModelContract[] = [
           },
           {
             action: "RecoverStopped",
+            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+          },
+        ],
+      },
+      {
+        // HACK-2550: a completed recovery whose archive could not run before its
+        // boot ended (z338, z282) is stranded when the archive stays bound to
+        // the recovery's own boot.
+        name: "https-finish-bound",
+        negative: true,
+        action: "RuntimeUp",
+        fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+        alternativeWitnesses: [
+          {
+            action: "RecoverStopped",
+            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+          },
+          {
+            action: "OwnerRetire",
             fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
           },
         ],

@@ -6,7 +6,10 @@
 //! Budgets are configurable within fixed hard ceilings, so a policy can relax the
 //! defaults for large development images but never remove the bound.
 use crate::CandidateError;
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 const MIB: u64 = 1024 * 1024;
 /// Default compressed archive budget for one image: fits ordinary language and database
@@ -64,6 +67,7 @@ pub struct ImagePolicy {
     /// Override the ordinary tag lookup for an explicit refresh or an offline command.
     pub tag_mode: ImageTagMode,
     pub(crate) short_tag_refresh: bool,
+    pub(crate) build_deadline: Option<Instant>,
     pub(crate) command_image_pin: Option<String>,
     /// Registries that are refused as local unless named here.
     pub local_registries: Vec<LocalRegistry>,
@@ -86,6 +90,7 @@ impl Default for ImagePolicy {
             tag_ttl_seconds: DEFAULT_TAG_TTL_SECONDS,
             tag_mode: ImageTagMode::Normal,
             short_tag_refresh: false,
+            build_deadline: None,
             command_image_pin: None,
             local_registries: Vec::new(),
             docker_config: None,
@@ -108,6 +113,20 @@ fn mebibytes(value: &str, min: u64, max: u64) -> Result<u64, CandidateError> {
 }
 
 impl ImagePolicy {
+    pub(super) fn image_wait(&self, default: Duration) -> Result<Duration, CandidateError> {
+        match self.build_deadline {
+            Some(deadline) => deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| {
+                    CandidateError::new(
+                        "native_build_timeout",
+                        "The image build exceeded its time budget.",
+                    )
+                }),
+            None => Ok(default),
+        }
+    }
+
     /// The local registry opt-in for `domain`, if any.
     pub fn local_registry(&self, domain: &str) -> Option<&LocalRegistry> {
         self.local_registries.iter().find(|r| r.domain == domain)

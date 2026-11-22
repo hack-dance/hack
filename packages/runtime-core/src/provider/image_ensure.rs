@@ -64,10 +64,15 @@ impl ImageCache {
         }
     }
 
-    fn enter(&self, root: &Path) -> Result<MutexGuard<'_, CacheState>, CandidateError> {
+    fn enter(
+        &self,
+        root: &Path,
+        policy: &ImagePolicy,
+    ) -> Result<MutexGuard<'_, CacheState>, CandidateError> {
         let mut cache = self.state.lock().unwrap();
         if cache.lease.is_none() {
-            let lease = lifecycle::startup_lease(root, lifecycle::STARTUP_LEASE_WAIT)?;
+            let lease =
+                lifecycle::startup_lease(root, policy.image_wait(lifecycle::STARTUP_LEASE_WAIT)?)?;
             let staging = root.with_file_name("image-staging");
             if staging.try_exists().map_err(state::io)? {
                 clean_staging(&staging, 0)?;
@@ -956,7 +961,7 @@ fn ensure_pinned_coordinated(
         .or_default()
         .clone();
     let _pin = pin.lock().unwrap();
-    let mut state = coordinator.enter(&root)?;
+    let mut state = coordinator.enter(&root, policy)?;
     let inventory = || measure(Step::ImageCacheInventory, None, |_| usage(candidate, &root));
     let mut occupied = inventory()?;
     // A cached entry is reused only for the platform the pinned image itself selects under
@@ -1047,7 +1052,7 @@ fn ensure_pinned_coordinated(
         }
         state::write(&dir.join("receipt.json"), &receipt)?;
         inspect_entry(candidate, dir, &reference, acquired.platform)?;
-        let state = coordinator.enter(&root)?;
+        let state = coordinator.enter(&root, policy)?;
         let target = root.join(entry_key(&reference, acquired.platform));
         if target.try_exists().map_err(state::io)? {
             return Err(refused(
@@ -1280,7 +1285,7 @@ mod tests {
         state::private_directory(&staged).unwrap();
         fs::write(staged.join(".hack-image-1-0.tmp"), b"fixture").unwrap();
         let coordinator = ImageCache::default();
-        let _cache = coordinator.enter(&root).unwrap();
+        let _cache = coordinator.enter(&root, &ImagePolicy::default()).unwrap();
         assert!(!staged.exists());
         assert_eq!(usage(&f.1, &root).unwrap(), (0, 0));
     }

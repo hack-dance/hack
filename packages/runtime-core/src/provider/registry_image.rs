@@ -891,6 +891,12 @@ impl<'a> Fetch<'a> {
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|_| error("Cannot initialize registry TLS client."))?;
+        let wait = policy.image_wait(ACQUISITION_DEADLINE)?;
+        let wait = if policy.short_tag_refresh {
+            wait.min(Duration::from_secs(3))
+        } else {
+            wait
+        };
         Ok(Self {
             client,
             registry: registry.clone(),
@@ -898,12 +904,7 @@ impl<'a> Fetch<'a> {
             policy,
             authorization: None,
             stage: Stage::Anonymous,
-            deadline: Instant::now()
-                + if policy.short_tag_refresh {
-                    Duration::from_secs(3)
-                } else {
-                    ACQUISITION_DEADLINE
-                },
+            deadline: Instant::now() + wait,
             request_timeout: REQUEST_TIMEOUT,
         })
     }
@@ -1516,7 +1517,7 @@ fn layer_failure(
             "the registry answered an error status".to_owned()
         }
         (NetworkFailureReason::Deadline, _) => {
-            "the 360-second image deadline was reached".to_owned()
+            "the image acquisition deadline was reached".to_owned()
         }
     };
     let failure = error(format!(

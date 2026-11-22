@@ -1704,15 +1704,26 @@ fn stop_group(child: &mut Child) -> Result<(), CandidateError> {
 /// The live pool: the candidate's running provider and its pinned builder.
 struct LivePool<'a> {
     candidate: &'a Candidate,
+    build_deadline: Option<Instant>,
 }
 
 #[cfg(target_os = "macos")]
-fn connect(candidate: &Candidate) -> Result<super::engine::Engine<'_>, CandidateError> {
-    super::engine::Engine::connect_until(candidate, Instant::now() + LEASE_WAIT, || false)
+fn connect(
+    candidate: &Candidate,
+    deadline: Option<Instant>,
+) -> Result<super::engine::Engine<'_>, CandidateError> {
+    super::engine::Engine::connect_until(
+        candidate,
+        deadline.unwrap_or_else(|| Instant::now() + LEASE_WAIT),
+        || CANCEL_REQUESTED.load(Ordering::Acquire),
+    )
 }
 #[cfg(not(target_os = "macos"))]
-fn connect(candidate: &Candidate) -> Result<super::engine::Engine<'_>, CandidateError> {
-    let _ = LEASE_WAIT;
+fn connect(
+    candidate: &Candidate,
+    deadline: Option<Instant>,
+) -> Result<super::engine::Engine<'_>, CandidateError> {
+    let _ = (LEASE_WAIT, deadline);
     super::engine::Engine::connect(candidate)
 }
 
@@ -1768,7 +1779,7 @@ fn verify_build_network(engine: &super::engine::Engine<'_>) -> Result<(), Candid
 impl<'a> BuildPool for LivePool<'a> {
     type Lease = super::engine::Engine<'a>;
     fn lease(&self) -> Result<(Self::Lease, PoolIdentity), CandidateError> {
-        let engine = connect(self.candidate)?;
+        let engine = connect(self.candidate, self.build_deadline)?;
         verify_build_network(&engine)?;
         let info = engine.request(reqwest::Method::GET, "/v1.53/info", None)?;
         let engine_id = info["ID"]
@@ -1958,7 +1969,11 @@ pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome
     let prior_pins = request.command_base_pins.clone();
     let mut inputs = prepare(request, &builds_root(candidate))?;
     let deadline = Instant::now() + inputs.timeout;
-    let pool = LivePool { candidate };
+    policy.build_deadline = Some(deadline);
+    let pool = LivePool {
+        candidate,
+        build_deadline: Some(deadline),
+    };
     let (lease, _) = pool.lease()?;
     let root = builds_root(candidate);
     state::private_directory(&root)?;

@@ -442,7 +442,13 @@ fn removal_path(image: &str) -> String {
 
 /// `runtime reclaim-build-images`: see the module documentation.
 pub fn reclaim_build_images(candidate: &Candidate) -> Result<ReclaimReport, CandidateError> {
-    run(candidate, &LivePool { candidate })
+    run(
+        candidate,
+        &LivePool {
+            candidate,
+            build_deadline: None,
+        },
+    )
 }
 
 /// Why a best-effort reclamation removed nothing.
@@ -493,7 +499,13 @@ pub(super) fn best_effort<P: ReclaimPool>(candidate: &Candidate, pool: &P) -> Be
 
 /// `runtime reclaim-build-images --best-effort`: see [`best_effort`].
 pub fn reclaim_build_images_best_effort(candidate: &Candidate) -> BestEffortReport {
-    best_effort(candidate, &LivePool { candidate })
+    best_effort(
+        candidate,
+        &LivePool {
+            candidate,
+            build_deadline: None,
+        },
+    )
 }
 
 #[cfg(test)]

@@ -2529,7 +2529,7 @@ fn the_deadline_reached_mid_retry_ends_the_layer_without_extending_it() {
         serde_json::json!({"version": 2, "host": "127.0.0.1", "attempts": 2, "reason": "deadline"})
     );
     assert!(
-        failure.message.contains("360-second image deadline"),
+        failure.message.contains("image acquisition deadline"),
         "{}",
         failure.message
     );

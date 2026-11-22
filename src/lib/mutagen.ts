@@ -105,6 +105,11 @@ export async function ensureBundledMutagenInstalled(): Promise<BundledMutagenIns
     return { ok: false, reason: "home-not-set" };
   }
 
+  if (existsSync(installPath) && existsSync(agentBundlePath)) {
+    mutagenPathCached = installPath;
+    return { ok: true, installed: false, mutagenPath: installPath };
+  }
+
   const version =
     (process.env.HACK_MUTAGEN_VERSION ?? "").trim() || DEFAULT_MUTAGEN_VERSION;
   if (version !== DEFAULT_MUTAGEN_VERSION) {
@@ -113,11 +118,6 @@ export async function ensureBundledMutagenInstalled(): Promise<BundledMutagenIns
       reason: "unpinned-version",
       message: "HACK_MUTAGEN_VERSION has no release checksum pinned by Hack.",
     };
-  }
-
-  if (existsSync(installPath) && existsSync(agentBundlePath)) {
-    mutagenPathCached = installPath;
-    return { ok: true, installed: false, mutagenPath: installPath };
   }
 
   const artifact = resolveMutagenArtifact({

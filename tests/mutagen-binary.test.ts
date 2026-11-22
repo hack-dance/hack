@@ -47,7 +47,8 @@ test.each([
   "downloaded",
   "bundled",
   "override",
-] as const)("managed Mutagen rejects %s archive before touching an existing binary", async (source) => {
+  "installed with override",
+] as const)("managed Mutagen handles %s without replacing an existing binary", async (source) => {
   const root = await mkdtemp(join(tmpdir(), "mutagen-checksum-"));
   try {
     const artifact = __testOnlyMutagen.resolveMutagenArtifact({
@@ -62,6 +63,12 @@ test.each([
     await Bun.write(join(bin, "mutagen"), "installed copy");
     if (source === "bundled" && artifact) {
       await Bun.write(join(assets, artifact.filename), "unverified archive");
+    }
+    const bundle = join(root, "libexec", "mutagen-agents.tar.gz");
+    const alreadyInstalled = source === "installed with override";
+    if (alreadyInstalled) {
+      await mkdir(join(root, "libexec"));
+      await Bun.write(bundle, "installed bundle");
     }
     const modulePath = resolve("src/lib/mutagen.ts");
     const child = Bun.spawn(
@@ -84,7 +91,9 @@ test.each([
           HOME: root,
           HACK_HOME: root,
           HACK_ASSETS_DIR: assets,
-          ...(source === "override" ? { HACK_MUTAGEN_VERSION: "1.2.3" } : {}),
+          ...(source === "override" || alreadyInstalled
+            ? { HACK_MUTAGEN_VERSION: "1.2.3" }
+            : {}),
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -98,14 +107,21 @@ test.each([
     ]);
     expect(code).toBe(0);
     expect(stderr).toBe(source === "downloaded" ? "download requested\n" : "");
-    expect(JSON.parse(stdout)).toMatchObject({
-      ok: false,
-      reason: source === "override" ? "unpinned-version" : "checksum-mismatch",
-    });
+    expect(JSON.parse(stdout)).toEqual(
+      alreadyInstalled
+        ? { ok: true, installed: false, mutagenPath: join(bin, "mutagen") }
+        : expect.objectContaining({
+            ok: false,
+            reason:
+              source === "override" ? "unpinned-version" : "checksum-mismatch",
+          })
+    );
     expect(await Bun.file(join(bin, "mutagen")).text()).toBe("installed copy");
-    expect(
-      await Bun.file(join(root, "libexec", "mutagen-agents.tar.gz")).exists()
-    ).toBe(false);
+    if (alreadyInstalled) {
+      expect(await Bun.file(bundle).text()).toBe("installed bundle");
+    } else {
+      expect(await Bun.file(bundle).exists()).toBe(false);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

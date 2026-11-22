@@ -4,6 +4,7 @@ import { YAML } from "bun";
 import { HackCliError, type HackErrorCode } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
 import { canPrompt } from "./interactivity.ts";
+import { waitForOwnedProcessGroupSettlement } from "./process-group-settlement.ts";
 import { composeServiceEnvironmentKeys } from "./project-env-config.ts";
 import type {
   ProjectPrerequisite,
@@ -29,7 +30,8 @@ type CheckState =
       readonly exitCode: number;
       readonly signal?: NodeJS.Signals | number;
     }
-  | { readonly state: "timeout" };
+  | { readonly state: "timeout" }
+  | { readonly state: "cleanup pending" };
 
 function resolveExecutable(bin: string): string | null {
   const key = bin.toUpperCase().replace(TOOL_KEY_PUNCTUATION, "_");
@@ -86,7 +88,12 @@ async function checkPrerequisite(
     env: { ...process.env, AWS_CLI_AUTO_PROMPT: "off" },
   });
   let timedOut = false;
+  let stopRequested = false;
   const endGroup = (): void => {
+    if (stopRequested) {
+      return;
+    }
+    stopRequested = true;
     try {
       process.kill(-child.pid, "SIGKILL");
     } catch {
@@ -103,13 +110,16 @@ async function checkPrerequisite(
   }
   try {
     const exitCode = await child.exited;
+    endGroup();
+    if (
+      !(await waitForOwnedProcessGroupSettlement({ processGroupId: child.pid }))
+    ) {
+      return { state: "cleanup pending" };
+    }
     if (timedOut) {
       return { state: "timeout" };
     }
     const signal = child.signalCode ?? undefined;
-    if (signal) {
-      endGroup();
-    }
     return exitCode === 0 && !signal
       ? { state: "ok" }
       : { state: "failed", exitCode, signal };
@@ -139,6 +149,12 @@ function blocker(
     return {
       code: "E_PREREQUISITE_TOOL_MISSING",
       message: `! ${result.bin}  not found (${result.tool})\n  ${consumer} needs it.${result.hint ? ` run:\n  ${result.hint}` : ""}`,
+    };
+  }
+  if (result.state === "cleanup pending") {
+    return {
+      code: "E_PREREQUISITE_CHECK_FAILED",
+      message: `! ${name}  could not confirm that the check process group stopped\n  ${consumer} needs it. Retry the command.`,
     };
   }
   const timedOut = result.state === "timeout";

@@ -307,7 +307,7 @@ test("explicit service selection checks only remotes with matching environment k
   }
 });
 
-test("a signal exit differs from timeout and timeout stops the check group", async () => {
+test("check exits and timeouts stop descendants and report distinct outcomes", async () => {
   const root = await mkdtemp(join(tmpdir(), "hack-prerequisite-timeout-"));
   try {
     const check = async (command: string) => {
@@ -334,6 +334,21 @@ test("a signal exit differs from timeout and timeout stops the check group", asy
       );
       return await enforceProjectPrerequisites(cfg.prerequisites, true, root);
     };
+    expect(
+      await check("(sleep 1; touch normal-exit-child-survived) & exit 0")
+    ).toBe(true);
+    await expect(
+      check("(sleep 1; touch failed-exit-child-survived) & exit 1")
+    ).rejects.toMatchObject({
+      code: "E_PREREQUISITE_CHECK_FAILED",
+    });
+    await Bun.sleep(1250);
+    expect(
+      await Bun.file(join(root, "normal-exit-child-survived")).exists()
+    ).toBe(false);
+    expect(
+      await Bun.file(join(root, "failed-exit-child-survived")).exists()
+    ).toBe(false);
     await expect(check("kill -KILL $$")).rejects.toMatchObject({
       code: "E_PREREQUISITE_CHECK_FAILED",
       detail: { signal: "SIGKILL" },

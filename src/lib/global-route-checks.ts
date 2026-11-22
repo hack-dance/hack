@@ -7,7 +7,11 @@ import { isIP } from "node:net";
 import { GLOBAL_CADDY_PROJECT_NAME } from "../constants.ts";
 import { inspectCaddyCaIdentity } from "./caddy-ca-identity.ts";
 import { resolveHackLocalCaCertPath } from "./local-ca.ts";
-import { type ProxyHttpsState, probeProxyRoute } from "./proxy-loopback.ts";
+import {
+  type ProxyHttpsState,
+  probeProxyRoute,
+  resolveProxyLoopbackAddresses,
+} from "./proxy-loopback.ts";
 import { exec } from "./shell.ts";
 
 const WHITESPACE = /\s+/;
@@ -101,4 +105,15 @@ export async function probeProxyHttpsAt(opts: {
       }),
     }))
   );
+}
+
+/**
+ * The addresses the OS resolver gives for `name` (resolver files, hosts
+ * file and local overrides included), from a bounded owned child as doctor
+ * asks it; empty when it has none or cannot answer in time.
+ */
+export async function resolveSystemAddresses(
+  name: string
+): Promise<readonly string[]> {
+  return await resolveProxyLoopbackAddresses({ hostname: name });
 }

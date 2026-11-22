@@ -6,6 +6,7 @@ import {
 import {
   classifyHttps,
   classifyNslookup,
+  lookHttps,
   parseNslookupAnswers,
   ROUTE_PROBE_NAME,
   routeHttpsTargets,
@@ -363,3 +364,100 @@ test("the probe asks for the schemas name the proxy file routes, so an older fil
   expect(routeProbeName(renderGlobalCaddyCompose())).toBe(ROUTE_PROBE_NAME);
   expect(routeProbeName("")).toBe(ROUTE_PROBE_NAME);
 });
+
+test("HTTPS is checked where the OS sends the name; loopback is only a fallback, where a refusal is not checked", async () => {
+  const CONTAINER = "172.30.0.2";
+  const loopback = { addresses: ["127.0.0.1", "::1"] } as const;
+  const probed: string[][] = [];
+  const probe =
+    (states: Readonly<Record<string, ProxyHttpsStateForTest>>) =>
+    async (addresses: readonly string[]) => {
+      probed.push([...addresses]);
+      return addresses.map((address) => ({
+        address,
+        state: states[address] ?? "timeout",
+      }));
+    };
+  // 1. The OS answers with the container's address, served there; loopback
+  // (a container runtime's process) rejects every name: ready.
+  expect(
+    await lookHttps({
+      name: "schemas.hack",
+      resolve: async () => [CONTAINER],
+      fallback: loopback,
+      probe: probe({
+        [CONTAINER]: "ok",
+        "127.0.0.1": "timeout",
+        "::1": "rejected",
+      }),
+    })
+  ).toEqual(answered);
+  expect(probed.at(-1)).toEqual([CONTAINER]);
+
+  // 2. The OS answers with loopback, and loopback rejects: a refusal.
+  expect(
+    await lookHttps({
+      name: "schemas.hack",
+      resolve: async () => ["127.0.0.1"],
+      fallback: loopback,
+      probe: probe({ "127.0.0.1": "rejected" }),
+    })
+  ).toMatchObject({ kind: "refused" });
+
+  // 3. No OS answer: loopback rejecting is not checked, with the DNS hint.
+  const unresolved = await lookHttps({
+    name: "schemas.hack",
+    resolve: async () => [],
+    fallback: loopback,
+    probe: probe({ "127.0.0.1": "timeout", "::1": "rejected" }),
+  });
+  expect(unresolved).toMatchObject({ kind: "unknown", retry: false });
+  expect(unresolved.kind === "unknown" && unresolved.detail).toContain(
+    "schemas.hack has no address on this machine yet (hack global install sets up Hack's domains"
+  );
+  // ... while an answer at the fallback is still ready.
+  expect(
+    await lookHttps({
+      name: "schemas.hack",
+      resolve: async () => [],
+      fallback: loopback,
+      probe: probe({ "127.0.0.1": "ok" }),
+    })
+  ).toEqual(answered);
+
+  // 4. The OS answers with an address another server holds: a refusal
+  // naming that address.
+  expect(
+    await lookHttps({
+      name: "schemas.hack",
+      resolve: async () => ["10.9.9.9"],
+      fallback: loopback,
+      probe: probe({ "10.9.9.9": "untrusted" }),
+    })
+  ).toEqual({
+    kind: "refused",
+    detail:
+      "port 443 on 10.9.9.9 answered with a certificate this home's proxy did not issue for schemas.hack (another server is answering there, or the proxy does not serve that name)",
+  });
+
+  // A resolver that throws counts as no answer.
+  expect(
+    await lookHttps({
+      name: "schemas.hack",
+      resolve: () => Promise.reject(new Error("resolver down")),
+      fallback: {
+        skipped:
+          "the proxy does not publish port 443 on a loopback address, so HTTPS through the proxy was not checked (as in hack doctor)",
+      },
+      probe: probe({}),
+    })
+  ).toMatchObject({ kind: "unknown", retry: false });
+});
+
+type ProxyHttpsStateForTest =
+  | "ok"
+  | "timeout"
+  | "unreachable"
+  | "tls-error"
+  | "untrusted"
+  | "rejected";

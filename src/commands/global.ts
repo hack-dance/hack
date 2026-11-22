@@ -118,8 +118,8 @@ import {
 import { describeProxyNetworkIssue } from "../lib/global-proxy-network.ts";
 import * as routeChecks from "../lib/global-route-checks.ts";
 import {
-  classifyHttps,
   classifyNslookup,
+  lookHttps,
   type RouteProbeResult,
   routeHttpsTargets,
   routeProbeName,
@@ -2432,31 +2432,29 @@ async function globalRoutesNotReady(opts: {
           expected: caddyAddresses,
         });
       },
-      requestHttps:
-        "addresses" in targets
-          ? async (name) => {
-              if (runtime.caPem === null) {
-                runtime = await routeChecks.readProxyRuntime();
-              }
-              if (runtime.caPem === null) {
-                return {
-                  kind: "unknown",
-                  detail:
-                    "the running proxy's CA could not be read, so HTTPS through the proxy was not checked",
-                  retry: true,
-                };
-              }
-              return classifyHttps(
-                await routeChecks.probeProxyHttpsAt({
-                  addresses: targets.addresses,
-                  caPem: runtime.caPem,
-                  name,
-                }),
-                name
-              );
-            }
-          : null,
-      httpsSkipped: "skipped" in targets ? targets.skipped : undefined,
+      requestHttps: async (name) => {
+        if (runtime.caPem === null) {
+          runtime = await routeChecks.readProxyRuntime();
+        }
+        const caPem = runtime.caPem;
+        if (caPem === null) {
+          return {
+            kind: "unknown",
+            detail:
+              "the running proxy's CA could not be read, so HTTPS through the proxy was not checked",
+            // Caddy has its root before its healthcheck passes; a CA that
+            // cannot be read then is not one a few more looks would find.
+            retry: false,
+          };
+        }
+        return await lookHttps({
+          name,
+          resolve: routeChecks.resolveSystemAddresses,
+          fallback: targets,
+          probe: (addresses) =>
+            routeChecks.probeProxyHttpsAt({ addresses, caPem, name }),
+        });
+      },
       progress: login
         ? undefined
         : ({ waitingFor, elapsedMs }) =>

@@ -156,6 +156,8 @@ type ProxyRuntimeAnswer = {
 let proxyRuntimeAnswer: ProxyRuntimeAnswer | null = null;
 let caddyAddressesAnswer: string[] | null = null;
 let httpsStateAnswer: ((address: string) => string) | null = null;
+/** What the OS resolver answers for the selected name (none by default). */
+let systemAddressesAnswer: readonly string[] = [];
 const httpsProbeCalls: string[][] = [];
 /** The name each HTTPS look asked for (TLS name and Host). */
 const httpsProbeNames: string[] = [];
@@ -166,6 +168,7 @@ const routeChecksMock = await registerScopedModuleMock({
     readProxyRuntime: async () =>
       proxyRuntimeAnswer ?? { caPem: null, loopbackPorts: null },
     readCaddyAddresses: async () => caddyAddressesAnswer,
+    resolveSystemAddresses: async () => systemAddressesAnswer,
     probeProxyHttpsAt: async (opts: {
       readonly addresses: readonly string[];
       readonly name: string;
@@ -1879,6 +1882,7 @@ describe("global up's route probe: only Hack's own proxy passes, and what cannot
     proxyRuntimeAnswer = null;
     caddyAddressesAnswer = null;
     httpsStateAnswer = null;
+    systemAddressesAnswer = [];
     httpsProbeCalls.length = 0;
     httpsProbeNames.length = 0;
     // `runCli` reserves stdout for a `--json` run; later tests run without.
@@ -1891,7 +1895,10 @@ describe("global up's route probe: only Hack's own proxy passes, and what cannot
     readonly published443?: readonly string[];
     readonly https?: (address: string) => string;
     readonly args?: readonly string[];
+    /** The OS resolver's answer for the selected name; default none. */
+    readonly resolved?: readonly string[];
   }) {
+    systemAddressesAnswer = opts.resolved ?? [];
     process.env.DOCKER_HOST = opts.dockerHost;
     proxyRuntimeAnswer = {
       caPem: "PEM",
@@ -1941,6 +1948,43 @@ describe("global up's route probe: only Hack's own proxy passes, and what cannot
     expect(httpsProbeCalls).toEqual([["127.0.0.1"]]);
   });
 
+  test("HTTPS goes where the OS resolves the name: the proxy container's address served, loopback rejecting, is ready", async () => {
+    const result = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      resolved: [CADDY],
+      https: (address) => (address === CADDY ? "ok" : "rejected"),
+    });
+    expect(result.code).toBe(0);
+    expect(result.output).not.toContain("Not checked");
+    // Only the resolved address is probed, not loopback.
+    expect(httpsProbeCalls).toEqual([[CADDY]]);
+  });
+
+  test("no OS answer for the name: loopback rejecting is not checked, with the DNS hint, and up succeeds", async () => {
+    const result = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      https: (address) => (address === "127.0.0.1" ? "timeout" : "rejected"),
+      published443: ["0.0.0.0", "::"],
+    });
+    expect(result.code).toBe(0);
+    expect(httpsProbeCalls).toEqual([["127.0.0.1", "::1"]]);
+    expect(result.output).toContain(
+      "Not checked: schemas.hack.local has no address on this machine yet (hack global install sets up Hack's domains, and hack doctor shows the DNS checks); at the proxy's published loopback port 443 on ::1 refused TLS for schemas.hack.local"
+    );
+  });
+
+  test("an OS answer that another server holds is a refusal naming that address", async () => {
+    const result = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      resolved: ["10.9.9.9"],
+      https: () => "untrusted",
+    });
+    expect(result.code).toBe(1);
+    expect(result.output).toContain(
+      "port 443 on 10.9.9.9 answered with a certificate this home's proxy did not issue"
+    );
+  }, 60_000);
+
   test("the HTTPS step asks for the name the DNS step resolved: the one the proxy file routes", async () => {
     expect(
       (await upWith({ dockerHost: "unix:///var/run/docker.sock" })).code
@@ -1985,6 +2029,7 @@ describe("global up's route probe: only Hack's own proxy passes, and what cannot
     const result = await upWith({
       dockerHost: "unix:///var/run/docker.sock",
       https: () => "rejected",
+      resolved: ["127.0.0.1"],
     });
     expect(result.code).toBe(1);
     expect(result.output).toContain(
@@ -1996,6 +2041,7 @@ describe("global up's route probe: only Hack's own proxy passes, and what cannot
     const result = await upWith({
       dockerHost: "unix:///var/run/docker.sock",
       https: () => "untrusted",
+      resolved: ["127.0.0.1"],
     });
     expect(result.code).toBe(1);
     expect(result.output).toContain("E_GLOBAL_NOT_READY");
@@ -2055,7 +2101,7 @@ describe("global up's route probe: only Hack's own proxy passes, and what cannot
     expect(result.code).toBe(0);
     expect(httpsProbeCalls).toEqual([]);
     expect(result.output).toContain(
-      "Not checked: the proxy does not publish port 443 on a loopback address"
+      "the proxy does not publish port 443 on a loopback address"
     );
   });
 
@@ -2076,7 +2122,7 @@ describe("global up's route probe: only Hack's own proxy passes, and what cannot
     expect(ssh.code).toBe(0);
     expect(httpsProbeCalls).toEqual([]);
     expect(ssh.output).toContain(
-      "Not checked: the Docker engine is not local and its address is not known here"
+      "the Docker engine is not local and its address is not known here"
     );
   });
 
@@ -2117,6 +2163,7 @@ describe("global up's route probe: only Hack's own proxy passes, and what cannot
     const failed = await upWith({
       dockerHost: "unix:///var/run/docker.sock",
       https: () => "untrusted",
+      resolved: ["127.0.0.1"],
       args: ["--json"],
     });
     expect(failed.code).toBe(1);

@@ -26,6 +26,7 @@ const NAME_LINE = /^\s*Name:/;
 const ADDRESS_LINE = /^\s*Address(?:\s+\d+)?:\s*([0-9a-fA-F:.]+)\s*$/;
 const TCP_SCHEME = /^tcp:/;
 const BRACKETS = /^\[|\]$/g;
+const SKIPPED_TAIL = /, so HTTPS through the proxy was not checked.*$/;
 
 export type RouteProbeStep = "dns" | "https";
 
@@ -303,6 +304,59 @@ export function classifyHttps(
   return {
     kind: "unknown",
     detail: `HTTPS for ${name} through port 443 on ${where} did not complete (${looks.map((look) => look.state).join(", ")}), so it was not checked; hack doctor reports this path`,
+    retry: false,
+  };
+}
+
+const NOT_RESOLVED_HINT =
+  "hack global install sets up Hack's domains, and hack doctor shows the DNS checks";
+
+/**
+ * One look at the HTTPS step for `name`, sent where this machine would send
+ * it: the addresses the OS resolver gives for `name` (resolver files, hosts
+ * file and local overrides included). A refusal or a foreign certificate at
+ * an address the OS resolves is a refusal; the per-family rule of
+ * {@link classifyHttps} applies across those addresses.
+ *
+ * When the OS has no address for `name` (Hack's DNS not set up yet), the
+ * `fallback` endpoints (the proxy's loopback bindings, or the engine's
+ * address) are probed instead; an answer there is ready, but a refusal there
+ * is only "not checked": nothing on this machine is sent there yet, and a
+ * container runtime may hold the loopback port with something else.
+ */
+export async function lookHttps(opts: {
+  readonly name: string;
+  readonly resolve: (name: string) => Promise<readonly string[]>;
+  readonly fallback:
+    | { readonly addresses: readonly string[] }
+    | { readonly skipped: string };
+  readonly probe: (
+    addresses: readonly string[]
+  ) => Promise<
+    readonly { readonly address: string; readonly state: ProxyHttpsState }[]
+  >;
+}): Promise<StepLook> {
+  const resolved = await opts.resolve(opts.name).catch(() => []);
+  if (resolved.length > 0) {
+    return classifyHttps(await opts.probe(resolved), opts.name);
+  }
+  if ("skipped" in opts.fallback) {
+    return {
+      kind: "unknown",
+      detail: `${opts.name} has no address on this machine yet (${NOT_RESOLVED_HINT}), and ${opts.fallback.skipped.replace(SKIPPED_TAIL, "")}, so HTTPS through the proxy was not checked`,
+      retry: false,
+    };
+  }
+  const look = classifyHttps(
+    await opts.probe(opts.fallback.addresses),
+    opts.name
+  );
+  if (look.kind !== "refused") {
+    return look;
+  }
+  return {
+    kind: "unknown",
+    detail: `${opts.name} has no address on this machine yet (${NOT_RESOLVED_HINT}); at the proxy's published loopback ${look.detail}, so HTTPS through the proxy was not checked`,
     retry: false,
   };
 }

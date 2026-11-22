@@ -248,3 +248,22 @@ chmod-before-after-state recording and completion. Resume followed by rollback
 restores original bytes and mode. A linked-worktree regression covers two targets
 sharing one primary key. This adds implementation evidence, not finite-model
 coverage or protection against arbitrary concurrent filesystem writers.
+
+### Compose stopped-cache removal
+
+[CachePrune](../../tests/models/tla/compose-cache-prune/CachePrune.tla) checks
+that a detached volume is removed only with matching retained identity and no
+container reference. The [chart](../../tests/models/tla/compose-cache-prune/cache-prune.svg)
+shows the receipt-before-stop order. The model maps retention and reinspection
+to `src/lib/disposable-cache-volumes.ts` and the stop-confirmation gate to
+`src/commands/project.ts`. The fake-engine regression in
+`tests/project-down-worktree-safety.test.ts` covers a separate down and prune,
+a second prune, foreign and data volumes, and a running sibling.
+
+TLC 1.7.4 explored 11 distinct states with one volume, one name reuse and one
+sibling attachment. Removing the matching-receipt guard violated `Safe`.
+The model assumes an atomic receipt publication and Docker's no-force
+in-use check. It assumes a recreated volume changes a fingerprinted field.
+Docker has no compare-and-delete API for a volume name, so an
+external replacement between the last inspect and the remove request is
+outside the modeled protection.

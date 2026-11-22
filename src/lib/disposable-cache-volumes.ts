@@ -125,6 +125,9 @@ export async function verifyDisposableCacheVolumes(opts: {
 
   for (const candidate of opts.candidates) {
     const proof = await inspectVolume(candidate.name);
+    if (proof === false) {
+      continue;
+    }
     const labels = proof?.labels;
     if (
       labels?.[COMPOSE_PROJECT_LABEL] !== opts.composeProject ||
@@ -164,8 +167,7 @@ export async function removeDisposableCacheVolumes(opts: {
   for (const candidate of opts.candidates) {
     if (
       candidate.fingerprint &&
-      (await inspectVolume(candidate.name))?.fingerprint !==
-        candidate.fingerprint
+      (await volumeFingerprint(candidate.name)) !== candidate.fingerprint
     ) {
       failed.push({
         name: candidate.name,
@@ -199,7 +201,10 @@ function isNextCacheDestination(destination: string): boolean {
 
 export type CacheVolumeKept = {
   readonly name: string;
-  readonly reason: "ownership-unverified" | "not-disposable";
+  readonly reason:
+    | "ownership-unverified"
+    | "not-disposable"
+    | "mounted-elsewhere";
 };
 
 const VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
@@ -213,9 +218,10 @@ async function inspectVolume(name: string) {
   }
   const result = await exec(["docker", "volume", "inspect", name], {
     stdin: "ignore",
+    timeoutMs: 2000,
   });
   if (result.exitCode !== 0) {
-    return null;
+    return result.stderr.includes(`get ${name}: no such volume`) ? false : null;
   }
   try {
     const parsed: unknown = JSON.parse(result.stdout);
@@ -233,12 +239,27 @@ async function inspectVolume(name: string) {
     return {
       labels: parsed[0].Labels,
       fingerprint: getString(parsed[0], "CreatedAt")
-        ? fingerprint(result.stdout)
+        ? fingerprint(
+            JSON.stringify([
+              parsed[0].Name,
+              parsed[0].CreatedAt,
+              parsed[0].Driver,
+              parsed[0].Labels,
+              parsed[0].Options,
+              parsed[0].Mountpoint,
+              parsed[0].Scope,
+            ])
+          )
         : undefined,
     };
   } catch {
     return null;
   }
+}
+
+async function volumeFingerprint(name: string): Promise<string | undefined> {
+  const proof = await inspectVolume(name);
+  return proof ? proof.fingerprint : undefined;
 }
 
 async function cacheReceipt(opts: {
@@ -247,19 +268,20 @@ async function cacheReceipt(opts: {
 }) {
   const id = await exec(["docker", "info", "--format", "{{.ID}}"], {
     stdin: "ignore",
+    timeoutMs: 2000,
   });
   if (id.exitCode !== 0 || !id.stdout.trim()) {
     return null;
   }
   const directory = resolve(resolveGlobalHackDir(), "compose-cache-receipts");
   const key = fingerprint(
-    JSON.stringify([
-      id.stdout.trim(),
-      canonicalPath(opts.currentProjectDir),
-      opts.composeProject,
-    ])
+    JSON.stringify([id.stdout.trim(), opts.composeProject])
   );
-  return { directory, path: resolve(directory, `${key}.json`) };
+  return {
+    directory,
+    path: resolve(directory, `${key}.json`),
+    checkout: canonicalPath(opts.currentProjectDir),
+  };
 }
 
 function isRecordedMount(value: unknown): value is MountedNamedVolumeCandidate {
@@ -289,12 +311,12 @@ export async function retainDownCacheMounts(
   }
   const recorded: MountedNamedVolumeCandidate[] = [];
   for (const mount of mounts) {
-    const proof = await inspectVolume(mount.name);
-    if (proof?.fingerprint) {
-      recorded.push({ ...mount, fingerprint: proof.fingerprint });
+    const identity = await volumeFingerprint(mount.name);
+    if (identity) {
+      recorded.push({ ...mount, fingerprint: identity });
     }
   }
-  const text = JSON.stringify(recorded);
+  const text = JSON.stringify({ checkout: receipt.checkout, mounts: recorded });
   if (Buffer.byteLength(text) <= RECEIPT_LIMIT) {
     await ensurePrivateDirectory(receipt.directory);
     await writeTextFileAtomicIfChanged(receipt.path, text, {
@@ -321,10 +343,38 @@ export async function readDownCacheMounts(
       refusal: () => new Error("Cache receipt could not be verified."),
     });
     const recorded: unknown = text ? JSON.parse(text) : null;
-    return Array.isArray(recorded) ? recorded.filter(isRecordedMount) : [];
+    return isRecord(recorded) &&
+      recorded.checkout === receipt.checkout &&
+      Array.isArray(recorded.mounts)
+      ? recorded.mounts.filter(isRecordedMount)
+      : [];
   } catch {
     return [];
   }
+}
+
+export function foreignCacheMounts(
+  opts: Parameters<typeof findMountedNamedVolumeCandidates>[0]
+): Set<string> {
+  const checkout = canonicalPath(opts.currentProjectDir);
+  return new Set(
+    opts.runtime.flatMap((project) =>
+      [...project.services.values()].flatMap((service) =>
+        service.containers
+          .filter(
+            (container) =>
+              container.project !== opts.composeProject ||
+              !container.workingDir ||
+              canonicalPath(container.workingDir) !== checkout
+          )
+          .flatMap((container) =>
+            container.mounts
+              .filter((mount) => mount.type === "volume")
+              .map((mount) => mount.name?.trim() || mount.source.trim())
+          )
+      )
+    )
+  );
 }
 
 function canonicalPath(path: string): string {

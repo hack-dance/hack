@@ -1,0 +1,14 @@
+stateDiagram-v2
+    state "Mounted in exact checkout" as Mounted
+    state "Mount evidence recorded" as Recorded
+    state "Detached volume" as Detached
+    state "Kept" as Kept
+    state "Removed" as Removed
+    [*] --> Mounted
+    Mounted --> Recorded: Save identity before down
+    Mounted --> Detached: No receipt
+    Recorded --> Detached: Stop removes containers
+    Detached --> Kept: Proof changed or in use
+    Detached --> Removed: Match and confirm
+    Kept --> [*]
+    Removed --> [*]

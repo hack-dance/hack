@@ -9038,14 +9038,15 @@ async function runDownCommand({
     !args.resolvedAutostartBranch &&
     resolveBranchSlug(args.options.branch) === null &&
     branch !== null;
-  const runtimeResult = await readRuntimeProjects({ includeGlobal: false });
-  if (runtimeResult.ok) {
+  if (implicitLinkedWorktreeTarget || pruneCaches) {
+    const runtimeResult = await readRuntimeProjects({ includeGlobal: false });
+    if (!runtimeResult.ok) {
+      throw new HackCliError({
+        code: "E_DOCKER_UNAVAILABLE",
+        message: `Cannot inspect runtime ownership before down: ${runtimeResult.error}`,
+      });
+    }
     runtime = runtimeResult.runtime;
-  } else if (implicitLinkedWorktreeTarget || pruneCaches) {
-    throw new HackCliError({
-      code: "E_DOCKER_UNAVAILABLE",
-      message: `Cannot inspect runtime ownership before down: ${runtimeResult.error}`,
-    });
   }
   if (implicitLinkedWorktreeTarget && branch !== null && runtime) {
     branch = reconcileImplicitDownBranch({
@@ -9175,11 +9176,11 @@ async function runDownCommand({
       return beforeCode;
     }
 
-    if (!pruneCaches && runtime) {
+    if (!pruneCaches) {
       await retainDownCacheMounts({
         composeProject: composeProjectName ?? baseProjectName,
         currentProjectDir: project.projectDir,
-        runtime,
+        runtime: (await readRuntimeProjects({ includeGlobal: false })).runtime,
       }).catch(() =>
         writeDownNotice({
           json,
@@ -9311,6 +9312,7 @@ async function runDownCommand({
     logger.error({ message });
     return 1;
   }
+  cacheVolumesKept.sort((left, right) => left.name.localeCompare(right.name));
   const cacheRemoval = await removeDisposableCacheVolumes({
     candidates: cachePruneCandidates,
   });

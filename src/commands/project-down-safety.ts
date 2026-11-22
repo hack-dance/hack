@@ -4,6 +4,7 @@ import {
   type CacheVolumeKept,
   type DisposableCacheVolumeCandidate,
   findMountedNamedVolumeCandidates,
+  foreignCacheMounts,
   readDownCacheMounts,
   verifyDisposableCacheVolumes,
 } from "../lib/disposable-cache-volumes.ts";
@@ -61,19 +62,23 @@ export async function prepareDisposableCachePrune(opts: {
   readonly yes: boolean;
   readonly kept: CacheVolumeKept[];
 }): Promise<readonly DisposableCacheVolumeCandidate[]> {
-  const observed = findMountedNamedVolumeCandidates({
-    composeProject: opts.composeProject,
-    currentProjectDir: opts.projectDir,
-    runtime: opts.runtime,
+  const selection = { ...opts, currentProjectDir: opts.projectDir };
+  const saved = await readDownCacheMounts(selection);
+  const observed = findMountedNamedVolumeCandidates(selection);
+  const mountedElsewhere = foreignCacheMounts(selection);
+  const selected = new Map(
+    [...saved, ...observed].map((candidate) => [candidate.name, candidate])
+  );
+  const candidates = [...selected.values()].filter((candidate) => {
+    if (!mountedElsewhere.has(candidate.name)) {
+      return true;
+    }
+    opts.kept.push({ name: candidate.name, reason: "mounted-elsewhere" });
+    return false;
   });
   const verified = await verifyDisposableCacheVolumes({
     composeProject: opts.composeProject,
-    candidates: observed.length
-      ? observed
-      : await readDownCacheMounts({
-          composeProject: opts.composeProject,
-          currentProjectDir: opts.projectDir,
-        }),
+    candidates,
     kept: opts.kept,
   });
   if (verified.length === 0) {

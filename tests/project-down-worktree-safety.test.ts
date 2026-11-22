@@ -319,6 +319,16 @@ test("a plain down retains proof for a later cache prune of that instance", asyn
         workingDir: join(fixture.worktreeRoot, ".hack"),
         mounts: [
           { type: "volume", source: "owned-next", destination: "/app/.next" },
+          {
+            type: "volume",
+            source: "owned-replaced",
+            destination: "/app/replaced/.next",
+          },
+          {
+            type: "volume",
+            source: "owned-claimed",
+            destination: "/app/claimed/.next",
+          },
           { type: "volume", source: "owned-turbo", destination: "/app/.turbo" },
           {
             type: "volume",
@@ -344,7 +354,23 @@ test("a plain down retains proof for a later cache prune of that instance", asyn
   ];
   expect((await runCliWithCapturedOutput(down)).exitCode).toBe(0);
   // The fake engine retains the volumes after Compose removes the containers.
-  await writeRuntimeFixtures({ fixture, runtime: [other] });
+  await writeFile(join(fixture.primaryRoot, "changed-volume"), "");
+  await writeRuntimeFixtures({
+    fixture,
+    runtime: [
+      {
+        ...other,
+        mounts: [
+          ...other.mounts,
+          {
+            type: "volume",
+            source: "owned-claimed",
+            destination: "/app/.next",
+          },
+        ],
+      },
+    ],
+  });
   const prune = await runCliWithCapturedOutput([
     ...down,
     "--prune-caches",
@@ -357,7 +383,9 @@ test("a plain down retains proof for a later cache prune of that instance", asyn
       cacheVolumesRemoved: ["owned-next", "owned-turbo"],
       cacheVolumesKept: [
         { name: "database-data", reason: "not-disposable" },
+        { name: "owned-claimed", reason: "mounted-elsewhere" },
         { name: "owned-next-foreign", reason: "ownership-unverified" },
+        { name: "owned-replaced", reason: "ownership-unverified" },
       ],
     },
   });
@@ -369,7 +397,15 @@ test("a plain down retains proof for a later cache prune of that instance", asyn
   expect(again.exitCode).toBe(0);
   expect(JSON.parse(again.stdout)).toMatchObject({
     ok: true,
-    data: { cacheVolumesRemoved: [] },
+    data: {
+      cacheVolumesRemoved: [],
+      cacheVolumesKept: [
+        { name: "database-data", reason: "not-disposable" },
+        { name: "owned-claimed", reason: "mounted-elsewhere" },
+        { name: "owned-next-foreign", reason: "ownership-unverified" },
+        { name: "owned-replaced", reason: "ownership-unverified" },
+      ],
+    },
   });
   const log = await readFile(fixture.dockerLogPath, "utf8");
   expect(log.match(/^volume rm /gm)).toHaveLength(2);
@@ -442,15 +478,16 @@ async function createWorktreeFixture(): Promise<{
       "fi",
       'if [ "$1" = info ]; then echo fixture-engine; exit 0; fi',
       'if [ "$1 $2" = "volume inspect" ]; then',
-      `  [ ! -e "${tempDir}/removed-$3" ] || exit 1`,
+      `  [ ! -e "${tempDir}/removed-$3" ] || { echo "get $3: no such volume" >&2; exit 1; }`,
+      `  created=2026-01-01T00:00:00Z; [ "$3" != owned-replaced ] || [ ! -e "${primaryRoot}/changed-volume" ] || created=2026-01-01T00:00:01Z`,
       '  case "$3" in',
-      '    owned-next) key=next; project=downsafe--feature-current; extra="" ;;',
+      '    owned-next|owned-replaced|owned-claimed) key=next; project=downsafe--feature-current; extra="" ;;',
       `    owned-turbo) key=turbo; project=downsafe--feature-current; extra=',"hack.cache.disposable":"true"' ;;`,
       '    owned-next-foreign) key=next; project=downsafe--foreign; extra="" ;;',
       '    database-data) key=data; project=downsafe--feature-current; extra="" ;;',
       "    *) exit 1 ;;",
       "  esac",
-      `  printf '[{"Name":"%s","CreatedAt":"2026-01-01T00:00:00Z","Labels":{"com.docker.compose.project":"%s","com.docker.compose.volume":"%s"%s}}]\\n' "$3" "$project" "$key" "$extra"`,
+      `  printf '[{"Name":"%s","CreatedAt":"%s","Labels":{"com.docker.compose.project":"%s","com.docker.compose.volume":"%s"%s}}]\\n' "$3" "$created" "$project" "$key" "$extra"`,
       "  exit 0",
       "fi",
       'if [ "$1 $2" = "volume rm" ]; then',

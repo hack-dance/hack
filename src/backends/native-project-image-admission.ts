@@ -61,9 +61,8 @@ function imageReferences(
  *
  * The native runtime owns reference normalization (`runtime admit-image`), so
  * this adapter only collects distinct references and checks the closed response.
- * Content IDs need no registry and are not sent. Admission does not pin or
- * rewrite images: acquisition later re-normalizes with the same runtime rule and
- * the same image policy flags (local registry opt-ins and budgets).
+ * Content IDs need no registry and are not sent. Return the runtime's canonical
+ * references so acquisition can share one selection across equivalent spellings.
  * An unsupported reference throws a value-free `E_NATIVE_PROJECT_UNSUPPORTED`
  * refusal; a malformed reply or cancellation throws a value-free closed error.
  * Other runtime request failures propagate unchanged.
@@ -76,10 +75,11 @@ export async function admitNativeProjectImages(opts: {
   readonly invoke?: typeof invokeNativeRuntime;
   /** Source of image policy settings; defaults to the process environment. */
   readonly env?: Readonly<Record<string, string | undefined>>;
-}): Promise<void> {
+}): Promise<ReadonlyMap<string, string>> {
   const invoke = opts.invoke ?? invokeNativeRuntime;
   const policy = nativeImagePolicyArgs(opts.env);
   const references = imageReferences(opts.specs);
+  const canonical = new Map<string, string>();
   for (const reference of references) {
     if (opts.signal?.aborted) {
       throw canceled();
@@ -115,11 +115,14 @@ export async function admitNativeProjectImages(opts: {
       !(
         isRecord(admitted) &&
         typeof admitted.reference === "string" &&
+        admitted.reference.length > 0 &&
         typeof admitted.kind === "string" &&
         KINDS.has(admitted.kind)
       )
     ) {
       throw malformed();
     }
+    canonical.set(reference, admitted.reference);
   }
+  return canonical;
 }

@@ -755,7 +755,7 @@ async function ensureNativeProjectImage(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   readonly reference: string;
-  readonly name: string;
+  readonly affectedServices: () => readonly string[];
   readonly policy: NativeEmulationPolicy | undefined;
   readonly invoke: typeof invokeNativeRuntime;
 }) {
@@ -774,9 +774,13 @@ async function ensureNativeProjectImage(opts: {
         error instanceof NativeRuntimeRequestError &&
         error.nativeCode === "registry_image_not_found"
       ) {
-        const label = SERVICE_NAME.test(opts.name)
-          ? `service ${opts.name}`
-          : "a service";
+        const names = opts
+          .affectedServices()
+          .map((name) => (SERVICE_NAME.test(name) ? name : "(name omitted)"));
+        const label =
+          names.length === 1
+            ? `service ${names[0]}`
+            : `services ${names.join(", ")}`;
         throw new ClosedCliError(
           `Native image acquisition failed for ${label} field image (registry_image_not_found); the selected registry image or tag was not found. Values omitted.`
         );
@@ -799,6 +803,7 @@ async function pinNativeProjectImages(opts: {
   readonly projectRoot: string;
   readonly specs: Record<string, Record<string, unknown>>;
   readonly retainedImages: ReadonlyMap<string, string>;
+  readonly canonicalImages: ReadonlyMap<string, string>;
   /** The selected Compose profiles: a service outside them is never pulled. */
   readonly profiles: readonly string[];
   /** Opted-in services' platform policies; every other service resolves Linux arm64. */
@@ -808,6 +813,7 @@ async function pinNativeProjectImages(opts: {
 }): Promise<void> {
   const pinnedImages = new Map<string, string>();
   const immutableReferences = new Map<string, string | null>();
+  const canonical = (image: string) => opts.canonicalImages.get(image) ?? image;
   for (const [name, spec] of Object.entries(opts.specs)) {
     if (opts.signal.aborted) {
       throw canceled();
@@ -833,13 +839,14 @@ async function pinNativeProjectImages(opts: {
     }
     const policy = nativeEmulationPolicy(opts.amd64Emulation, name);
     // The same tag may select different images under different platform policies.
-    const key = JSON.stringify([image, policy]);
+    const reference = canonical(image);
+    const key = JSON.stringify([reference, policy]);
     const pinned = pinnedImages.get(key);
     if (pinned !== undefined) {
       spec.image = pinned;
       continue;
     }
-    const immutableReference = immutableReferences.get(image);
+    const immutableReference = immutableReferences.get(reference);
     if (immutableReference === null) {
       throw unconfirmed("the runtime image reference");
     }
@@ -847,16 +854,25 @@ async function pinNativeProjectImages(opts: {
       runtime: opts.runtime,
       projectRoot: opts.projectRoot,
       reference: immutableReference ?? image,
-      name,
+      affectedServices: () =>
+        Object.entries(opts.specs)
+          .filter(
+            ([service, candidate]) =>
+              !opts.retainedImages.has(service) &&
+              nativeServiceActive(candidate, opts.profiles) &&
+              typeof candidate.image === "string" &&
+              canonical(candidate.image) === reference
+          )
+          .map(([service]) => service),
       policy,
       invoke: opts.invoke,
     });
     if (immutableReference === undefined) {
-      const reference = ensured.reference;
       immutableReferences.set(
-        image,
-        typeof reference === "string" && PINNED_IMAGE_REFERENCE.test(reference)
-          ? reference
+        reference,
+        typeof ensured.reference === "string" &&
+          PINNED_IMAGE_REFERENCE.test(ensured.reference)
+          ? ensured.reference
           : null
       );
     }
@@ -2431,7 +2447,7 @@ async function startNativeProjectAttempt(
     check: deps.sourceSize,
   });
   // Refuse malformed or unacquirable references before hooks, VM or provider start.
-  await admitNativeProjectImages({
+  const canonicalImages = await admitNativeProjectImages({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
     specs,
@@ -2688,6 +2704,7 @@ async function startNativeProjectAttempt(
       projectRoot: opts.scope.projectRoot,
       specs,
       retainedImages,
+      canonicalImages,
       profiles,
       amd64Emulation: input.amd64Emulation,
       signal: controller.signal,

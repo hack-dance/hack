@@ -130,7 +130,6 @@ impl Lock {
         Self::from_file(file)?.describe_holder(root)
     }
 
-    #[cfg(target_os = "macos")]
     /// [`Self::acquire_existing`], waiting up to `wait` for another holder, such as the
     /// short read-only inspection behind `hack ps`, to release the lock. Only acquisition
     /// is retried: nothing is created or admitted while waiting, and on expiry the

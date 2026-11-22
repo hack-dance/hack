@@ -16,7 +16,7 @@ Compose volumes.
 For Postgres, use a TCP health check such as `pg_isready -h 127.0.0.1`. A
 Unix-socket check can pass against the temporary server that initializes a fresh
 volume. If the service omits `start_interval`, native uses the authored timing
-on a start that creates its volume and uses the fast defaults with retained data.
+on a start that creates its data volume and uses the fast defaults with retained data.
 
 ## 1. List the blockers
 

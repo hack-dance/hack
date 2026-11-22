@@ -24,7 +24,7 @@ pub(super) struct Prepared {
     pub legacy_caches: BTreeMap<String, dependency_cache::CacheBinding>,
     pub configs: BTreeMap<String, Value>,
     /// Services with an injected start interval, and whether the period was also injected.
-    pub default_health_cadence: BTreeMap<String, bool>,
+    pub default_health_cadence: BTreeMap<String, DefaultHealthCadence>,
     pub probes: BTreeMap<String, super::super::http_probe::HttpProbe>,
     pub resources: BTreeMap<String, Resource>,
     pub namespace: String,
@@ -1000,7 +1000,13 @@ pub(super) fn prepare_delivery(
         } else if let Some(health) = &service.healthcheck {
             let mut value = json!({});
             if !health.disabled && health.start_interval_nanos.is_none() {
-                default_health_cadence.insert(name.clone(), health.start_period_nanos.is_none());
+                default_health_cadence.insert(
+                    name.clone(),
+                    DefaultHealthCadence {
+                        period: health.start_period_nanos.is_none(),
+                        data_volumes: BTreeSet::new(),
+                    },
+                );
             }
             if let Some(test) = &values.health_test {
                 value["Test"] = json!(test);
@@ -1064,24 +1070,55 @@ pub(super) fn prepare_delivery(
     })
 }
 
-/// Drop only Hack's startup defaults for a service mounting a volume created
-/// in this attempt. Compose anonymous mounts have generated owned names.
-pub(super) fn use_authored_health_cadence(
-    config: &mut Value,
-    default_period: bool,
-    created_volumes: &BTreeSet<String>,
-) {
-    let has_new_volume = config["HostConfig"]["Mounts"]
+pub(super) struct DefaultHealthCadence {
+    pub period: bool,
+    pub data_volumes: BTreeSet<String>,
+}
+
+impl DefaultHealthCadence {
+    pub(super) fn apply(&self, config: &mut Value, created: &BTreeSet<String>) {
+        if !self.data_volumes.is_disjoint(created) {
+            use_authored_health_cadence(config, self.period);
+        }
+    }
+}
+
+pub(super) fn data_health_volumes(
+    config: &Value,
+    resources: &BTreeMap<String, Resource>,
+    image_volumes: &Value,
+) -> BTreeSet<String> {
+    let image_targets = image_volumes
+        .as_object()
+        .into_iter()
+        .flat_map(|volumes| volumes.keys())
+        .map(|target| image_volumes::normalized(target))
+        .collect::<BTreeSet<_>>();
+    config["HostConfig"]["Mounts"]
         .as_array()
         .into_iter()
         .flatten()
-        .any(|mount| {
-            mount["Type"] == "volume"
-                && mount["Source"]
-                    .as_str()
-                    .is_some_and(|name| created_volumes.contains(name))
-        });
-    if has_new_volume && let Some(health) = config["Healthcheck"].as_object_mut() {
+        .filter(|mount| mount["Type"] == "volume")
+        .filter_map(|mount| {
+            let source = mount["Source"].as_str()?;
+            let volume = resources
+                .values()
+                .find(|resource| resource.kind == Kind::Volume && resource.name == source)?;
+            // Source copies are binds, and both current and legacy dependency caches
+            // have a cache binding. An anonymous Compose mount counts only if it
+            // covers a data target declared by the verified image.
+            (volume.cache.is_none()
+                && (!volume.key.starts_with(crate::project::ANONYMOUS_PREFIX)
+                    || mount["Target"].as_str().is_some_and(|target| {
+                        image_targets.contains(&image_volumes::normalized(target))
+                    })))
+            .then(|| source.to_owned())
+        })
+        .collect()
+}
+
+pub(super) fn use_authored_health_cadence(config: &mut Value, default_period: bool) {
+    if let Some(health) = config["Healthcheck"].as_object_mut() {
         health.remove("StartInterval");
         if default_period {
             health.remove("StartPeriod");

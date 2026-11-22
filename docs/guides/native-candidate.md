@@ -3514,7 +3514,7 @@ defines it. Declared values are kept, and a disabled check gets neither. Authore
 native readiness (`readiness.exec`) gets the same cadence. A container started by an
 earlier build, without these fields, is still accepted as the same container.
 
-For a Compose service that mounts a volume created during this start, native
+For a Compose service that mounts a data volume created during this start, native
 uses the authored timing when `start_interval` is omitted. Restoring with the
 retained volume uses the fast defaults again. For Postgres, use
 `pg_isready -h 127.0.0.1` so a temporary socket-only server during initialization

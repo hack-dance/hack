@@ -519,6 +519,7 @@ fn restore_inputs(
         &mut prepared.configs,
         &wrapped,
         &file_owners,
+        Some(&mut prepared.default_health_cadence),
     )?;
     super::validate_dependency_processes(&prepared.configs, &dependency_processes)?;
     for resource in receipt.resources.values() {

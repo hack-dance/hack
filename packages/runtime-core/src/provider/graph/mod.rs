@@ -768,7 +768,7 @@ struct Session<'a, 's> {
     root: PathBuf,
     receipt: Receipt,
     configs: BTreeMap<String, Value>,
-    default_health_cadence: BTreeMap<String, bool>,
+    default_health_cadence: BTreeMap<String, config::DefaultHealthCadence>,
     expected_environment: BTreeMap<String, image_environment::Expected>,
     restarting: bool,
     fresh_cache_completion: bool,
@@ -1015,10 +1015,9 @@ impl Session<'_, '_> {
             }
         }
         if !created_volumes.is_empty() {
-            for (service, default_period) in &self.default_health_cadence {
-                config::use_authored_health_cadence(
+            for (service, cadence) in &self.default_health_cadence {
+                cadence.apply(
                     self.configs.get_mut(service).expect("compiled service"),
-                    *default_period,
                     &created_volumes,
                 );
             }
@@ -1033,17 +1032,8 @@ fn restart_health_cadence(
     default_period: bool,
     inspected: &Value,
 ) -> Result<(), CandidateError> {
-    let volumes = context
-        .resources
-        .values()
-        .filter(|r| r.kind == Kind::Volume)
-        .map(|r| r.name.clone())
-        .collect();
     let mut authored = config.clone();
-    config::use_authored_health_cadence(&mut authored, default_period, &volumes);
-    if authored == *config {
-        return Ok(());
-    }
+    config::use_authored_health_cadence(&mut authored, default_period);
     let authored_spec = spec::of(&authored, context)?;
     // Only the exact create spec can select omitted timing fields; an
     // inherited image value alone cannot distinguish a cold create.
@@ -1702,6 +1692,7 @@ fn run_inputs(
         &mut prepared.configs,
         &wrapped,
         &file_owners,
+        Some(&mut prepared.default_health_cadence),
     )?;
     validate_private_delivery(&prepared.configs, &environments)?;
     validate_dependency_processes(&prepared.configs, &dependency_processes)?;
@@ -2522,6 +2513,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         &mut prepared.configs,
         &BTreeSet::new(),
         &BTreeSet::new(),
+        Some(&mut prepared.default_health_cadence),
     )?;
     probes::unchanged(&prepared.configs, &prepared.probes, &receipt)?;
     for resource in receipt.resources.values() {
@@ -2534,7 +2526,9 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         cache_provenance::verify(&engine, &receipt, resource)?;
         if resource.kind == Kind::Container {
             admission::unchanged(&value, &prepared.configs[&resource.key])?;
-            if let Some(default_period) = prepared.default_health_cadence.get(&resource.key) {
+            if let Some(cadence) = prepared.default_health_cadence.get(&resource.key)
+                && !cadence.data_volumes.is_empty()
+            {
                 restart_health_cadence(
                     &spec::Context {
                         resources: &receipt.resources,
@@ -2552,7 +2546,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
                         .configs
                         .get_mut(&resource.key)
                         .expect("compiled service"),
-                    *default_period,
+                    cadence.period,
                     &value,
                 )?;
             }
@@ -2916,6 +2910,7 @@ fn verify_images(
     configs: &mut BTreeMap<String, Value>,
     private_services: &BTreeSet<String>,
     file_owners: &BTreeSet<String>,
+    mut cadence: Option<&mut BTreeMap<String, config::DefaultHealthCadence>>,
 ) -> Result<BTreeMap<String, image_environment::Expected>, CandidateError> {
     let mut expected = BTreeMap::new();
     let mut refusals = process_refusals::Collector::default();
@@ -2952,6 +2947,16 @@ fn verify_images(
             &configs[&resource.key],
             resources,
         )?;
+        if let Some(cadence) = cadence
+            .as_deref_mut()
+            .and_then(|map| map.get_mut(&resource.key))
+        {
+            cadence.data_volumes = config::data_health_volumes(
+                &configs[&resource.key],
+                resources,
+                &image["Config"]["Volumes"],
+            );
+        }
         if private_services.contains(&resource.key) || file_owners.contains(&resource.key) {
             resolve_named_user(engine, &image, configs, &resource.key)?;
         }

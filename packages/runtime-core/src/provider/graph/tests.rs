@@ -118,8 +118,14 @@ fn a_declared_healthcheck_gets_the_fast_first_check_unless_it_says_otherwise() {
             None => BTreeSet::new(),
         };
         let config = prepared.configs.get_mut("web").unwrap();
-        if let Some(default_period) = prepared.default_health_cadence.get("web") {
-            config::use_authored_health_cadence(config, *default_period, &created);
+        if let Some(cadence) = prepared.default_health_cadence.get_mut("web") {
+            let image = if mount == Some("/data") {
+                json!({"/data":{}})
+            } else {
+                Value::Null
+            };
+            cadence.data_volumes = config::data_health_volumes(config, &prepared.resources, &image);
+            cadence.apply(config, &created);
         }
         config["Healthcheck"].clone()
     };
@@ -169,6 +175,49 @@ fn a_declared_healthcheck_gets_the_fast_first_check_unless_it_says_otherwise() {
     );
     assert!(disabled.get("StartInterval").is_none(), "{disabled}");
     assert!(disabled.get("StartPeriod").is_none(), "{disabled}");
+}
+
+#[test]
+fn new_cache_volumes_do_not_disable_the_fast_health_check() {
+    let volume = |key: &str| -> Resource {
+        serde_json::from_value(json!({
+            "kind":"volume","key":key,"name":key,"id":null,"image":null,"phase":"created"
+        }))
+        .unwrap()
+    };
+    let mut cache = volume("cache");
+    cache.cache = Some(dependency_cache::CacheBinding {
+        scope: "c".repeat(64),
+        fingerprint: "d".repeat(64),
+        image: format!("sha256:{}", "e".repeat(64)),
+    });
+    let anonymous = format!("{}fixture", crate::project::ANONYMOUS_PREFIX);
+    let resources = BTreeMap::from([
+        ("volume:cache".into(), cache),
+        ("volume:data".into(), volume("data")),
+        (format!("volume:{anonymous}"), volume(&anonymous)),
+    ]);
+    let created = resources.values().map(|r| r.name.clone()).collect();
+    let mut config = json!({
+        "Healthcheck":{"StartInterval":250_000_000},
+        "HostConfig":{"Mounts":[
+            {"Type":"volume", "Source":"cache", "Target":"/packages"},
+            {"Type":"volume", "Source":anonymous, "Target":"/node_modules"},
+            {"Type":"bind", "Source":"data", "Target":"/source"}
+        ]}
+    });
+    let cadence = |config: &Value| config::DefaultHealthCadence {
+        period: false,
+        data_volumes: config::data_health_volumes(config, &resources, &Value::Null),
+    };
+    cadence(&config).apply(&mut config, &created);
+    assert_eq!(config["Healthcheck"]["StartInterval"], 250_000_000);
+    config["HostConfig"]["Mounts"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"Type":"volume", "Source":"data", "Target":"/data"}));
+    cadence(&config).apply(&mut config, &created);
+    assert!(config["Healthcheck"].get("StartInterval").is_none());
 }
 
 /// A container created before HACK-2443 has no startup cadence; it still matches the compiled

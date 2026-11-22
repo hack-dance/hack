@@ -15,7 +15,7 @@ engine will check at `interval` from the start.
 The native backend's engine is pinned to a newer version and passes these
 settings through for services without a route. When a health check sets no
 `start_interval`, native uses 250 ms, and when it sets no `start_period`, 60 s.
-If this start creates a volume the service mounts, native uses the authored
+If this start creates a data volume the service mounts, native uses the authored
 timings for that service. A service that explicitly sets `start_interval` keeps
 its existing startup settings.
 The Compose backend adds no defaults: your engine runs the file as written. So

@@ -57,17 +57,22 @@ export function nativeHttpsPoolBootEnded(
   );
 }
 
+/** The home's parsed pool record (`run/smolvm/owner.json`); a read failure rejects. */
+export async function readNativePoolRecord(home: string): Promise<unknown> {
+  const { bytes } = await nativeHttpsReadFile(
+    join(home, ".hack-local/run/smolvm/owner.json"),
+    1_048_576
+  );
+  return JSON.parse(bytes.toString("utf8"));
+}
+
 /** Read the home's pool record and apply the rule; any read failure proves nothing. */
 export async function readNativeHttpsPoolBootEnded(
   binding: NativeHttpsOwnerBinding
 ): Promise<boolean> {
   try {
-    const { bytes } = await nativeHttpsReadFile(
-      join(binding.runtime.home, ".hack-local/run/smolvm/owner.json"),
-      1_048_576
-    );
     return nativeHttpsPoolBootEnded(
-      JSON.parse(bytes.toString("utf8")),
+      await readNativePoolRecord(binding.runtime.home),
       binding.pool
     );
   } catch {

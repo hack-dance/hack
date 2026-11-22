@@ -61,6 +61,10 @@ import { nativeAdmissionReuseEnvironment } from "../backends/native-admission-re
 import { createNativeDependencyOwnerResolver } from "../backends/native-dependency-owners.ts";
 import { nativeHotReloadEnvironment } from "../backends/native-hot-reload-notice.ts";
 import {
+  nativeImageTagStatuses,
+  pullNativeProjectImages,
+} from "../backends/native-image-tags.ts";
+import {
   followAllNativeServices,
   nativeLogPrefix,
 } from "../backends/native-log-all.ts";
@@ -126,7 +130,10 @@ import {
 } from "../backends/native-runtime-client.ts";
 import { requireNativeSetup } from "../backends/native-runtime-setup.ts";
 import type { NativeServiceExit } from "../backends/native-service-exit-monitor.ts";
-import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
+import {
+  buildComposeArgs,
+  composeRuntimeBackend,
+} from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -370,6 +377,7 @@ import {
   LOKI_FOLLOW_EMPTY_NOTICE_DELAY_MS,
   type LogsCommandSelectors,
   type LogsCommandTarget,
+  quoteShellWord,
   renderEmptyLokiFollowNotice,
   resolveShouldTryLoki,
   resolveUseLoki,
@@ -695,6 +703,21 @@ const optProgress = defineOption({
   description:
     "With --json: stream ndjson progress lines before the result envelope (Compose backend)",
 } as const);
+const optRefreshImages = defineOption({
+  name: "refreshImages",
+  type: "boolean",
+  long: "--refresh-images",
+  description:
+    "Native backend: refresh the project's mutable image tags from the registry.",
+} as const);
+const optImageOffline = defineOption({
+  name: "offline",
+  type: "boolean",
+  long: "--offline",
+  description:
+    "Native backend: use recorded image resolutions and local archives without contacting a registry.",
+} as const);
+const pullOptions = [optPath, optProject, optEnv, optProfile, optJson] as const;
 const upOptions = [
   optPath,
   optProject,
@@ -705,6 +728,8 @@ const upOptions = [
   optTarget,
   optJson,
   optProgress,
+  optRefreshImages,
+  optImageOffline,
   defineOption({
     name: "always",
     type: "boolean",
@@ -909,6 +934,27 @@ export const upCommand = withHandler(
   upSpec,
   withBackgroundSweep(withActivity("up", handleUp))
 );
+
+const pullSpec = defineCommand({
+  name: "pull",
+  summary: "Refresh and download project images without starting services",
+  group: "Project",
+  options: pullOptions,
+  positionals: [],
+  subcommands: [],
+} as const);
+
+export const pullCommand = withHandler(pullSpec, async (input) => {
+  try {
+    return await handlePull(input);
+  } catch (error) {
+    if (!input.args.options.json) {
+      throw error;
+    }
+    emitCliResult({ result: buildLifecycleJsonErrorResult({ error }) });
+    return 1;
+  }
+});
 
 const downSpec = defineCommand({
   name: "down",
@@ -6749,6 +6795,7 @@ async function handleNativeUp({
       branch,
     },
     composeFile: project.composeFile,
+    imageTagMode: nativeImageTagMode(args.options),
     envName: requestedEnvName,
     // An explicit --profile only; otherwise native start resolves Compose's
     // own sources for the effective env (HACK-2338 item 8).
@@ -7201,10 +7248,107 @@ async function updateAutostartIntent(opts: {
   }
 }
 
+async function handlePull({
+  ctx,
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: CommandArgs<typeof pullOptions, readonly []>;
+}): Promise<number> {
+  const json = args.options.json === true;
+  const project = await resolveProjectForArgs({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+    touchRegistration: false,
+  });
+  const native = resolveNativeRuntimeSelection();
+  const envName = resolveRequestedEnvName({ envOption: args.options.env });
+  if (native) {
+    const setup = await requireNativeSetup({
+      runtime: native,
+      cwd: ctx.cwd,
+      json,
+    });
+    if (setup !== 0) {
+      return setup;
+    }
+    const { profiles } = await resolveNativeProfileSelectionForProject({
+      project,
+      envName,
+      cliProfile: args.options.profile,
+    });
+    const images = await pullNativeProjectImages({
+      runtime: native,
+      project: { ...project, envName },
+      profiles,
+    });
+    if (json) {
+      emitCliResult({ result: okResult({ data: { images } }) });
+    }
+    return 0;
+  }
+  const cfg = await readProjectConfig(project);
+  const composeProject = await resolveComposeProjectName({ project, cfg });
+  const allServiceNames = await readComposeServiceNames(project.composeFile);
+  const envOverrides = await resolveComposeEnvOverrides({
+    project,
+    projectName: sanitizeProjectSlug(composeProject),
+    targetServices: allServiceNames,
+    allServiceNames,
+    envName,
+    persist: false,
+  });
+  const exitCode = await runShell(
+    [
+      ...buildComposeArgs({
+        composeFiles: [project.composeFile],
+        composeProject,
+        profiles: parseCsvList(args.options.profile),
+        cwd: dirname(project.composeFile),
+      }),
+      "pull",
+    ],
+    {
+      cwd: dirname(project.composeFile),
+      env: envOverrides.env,
+      forwardSignals: true,
+      stdout: json ? "stderr" : "inherit",
+    }
+  );
+  if (json) {
+    emitCliResult({
+      result:
+        exitCode === 0
+          ? okResult({ data: { backend: "compose" } })
+          : errorResult({
+              code: "E_LIFECYCLE_FAILED",
+              message: "Compose pull failed.",
+            }),
+    });
+  }
+  return exitCode;
+}
+
+function nativeImageTagMode(
+  options: UpArgs["options"]
+): "refresh" | "offline" | undefined {
+  if (options.refreshImages && options.offline) {
+    throw new CliUsageError("Use either --refresh-images or --offline.");
+  }
+  if (options.refreshImages) {
+    return "refresh";
+  }
+  if (options.offline) {
+    return "offline";
+  }
+}
+
 async function handleUp(
   input: Parameters<typeof handleUpUnlocked>[0]
 ): Promise<number> {
   parseRequestedTarget({ raw: input.args.options.target });
+  nativeImageTagMode(input.args.options);
   const login = process.env.HACK_AUTOSTART_LOGIN === "1";
   if (!login) {
     await updateAutostartIntent({ ...input, action: "up" });
@@ -7305,6 +7449,14 @@ async function handleUpUnlocked({
     noteNativeBackendBeta({ json: args.options.json === true });
   }
   const native = resolveNativeRuntimeSelection();
+  if ((args.options.refreshImages || args.options.offline) && !native) {
+    throw new CliUsageError(
+      "--refresh-images and --offline require the native backend."
+    );
+  }
+  if (args.options.refreshImages && args.options.offline) {
+    throw new CliUsageError("Use either --refresh-images or --offline.");
+  }
   if (native) {
     refuseUnsupportedNativeUpOptions({
       restart: false,
@@ -7385,6 +7537,17 @@ async function handleUpUnlocked({
         }
       },
       notifyRunning: async (saved, project) => {
+        if (args.options.refreshImages) {
+          const selection = [
+            `--path=${quoteShellWord(project.projectRoot)}`,
+            ...(launchBranch
+              ? [`--branch=${quoteShellWord(launchBranch)}`]
+              : []),
+          ].join(" ");
+          throw new CliUsageError(
+            `Stop the running project with hack down ${selection}, then run hack up ${selection} --refresh-images.`
+          );
+        }
         await trackNativeLocalDirectories({
           project,
           branch: launchBranch ?? args.options.branch ?? null,
@@ -9870,7 +10033,13 @@ async function handleRestart({
       ctx,
       args: {
         ...args,
-        options: { ...args.options, detach: false, always: false },
+        options: {
+          ...args.options,
+          detach: false,
+          always: false,
+          refreshImages: false,
+          offline: false,
+        },
       },
       native,
       restart: true,
@@ -10654,7 +10823,15 @@ async function handlePs({
         branch,
       },
     });
-    await displayNativePs(result, json);
+    const imageTags = await nativeImageTagStatuses({
+      runtime: native,
+      projectRoot: project.projectRoot,
+      composeFile: project.composeFile,
+    });
+    await displayNativePs(
+      imageTags.length ? { ...result, imageTags } : result,
+      json
+    );
     return 0;
   }
   const profiles = parseCsvList(args.options.profile);

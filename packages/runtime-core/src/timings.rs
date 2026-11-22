@@ -28,6 +28,7 @@ steps! {
     ContainerReady => "container.ready", ContainerPublish => "container.publish", SpecDigest => "spec.digest",
     ContainerStart => "container.start", ContainerStop => "container.stop",
     ContainerExec => "container.exec", ContainerRun => "container.run", ContainerInspect => "container.inspect",
+    ImageEnsure => "image.ensure", ImageCache => "image.cache", ImageTagRecord => "image.tag.record",
     ImageEnginePreflight => "image.engine.preflight", ImageTagResolve => "image.tag.resolve",
     ImagePinVerify => "image.pin.verify",
     ImageCacheInventory => "image.cache.inventory",
@@ -110,7 +111,7 @@ macro_rules! attributes {
     };
 }
 attributes! {
-    service_index:u64, attempt:u64, engine_requests:u64, dropped:u64,
+    service_index:u64, attempt:u64, registry_requests:u64, engine_requests:u64, dropped:u64,
     services:u64, wave:u64, syncs:u64, waited_on_index:u64, generation:u64,
     waited_on_cap:bool, blocked:bool, service_index_stable:bool, anchor_fresh:bool,
     admission_reused:bool,

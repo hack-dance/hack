@@ -2078,7 +2078,7 @@ a private certificate authority is not reachable yet. Host names are classified
 before connecting, and resolved addresses are checked again before each
 connection (see [Local registries](#local-registries)).
 
-No implicit image refresh occurs. Keep the archive only as long as needed for owned
+Explicit fetch uses the requested digest. Keep the archive only as long as needed for owned
 imports; fetch does not install a background cache or cleanup daemon. The complete
 archive is synced, validated and published without replacing an existing path.
 A failed write or verification leaves no final archive; process interruption may
@@ -2102,14 +2102,31 @@ stored registry manifest against the requested pin, then checks the configuratio
 digest. For indexes it also verifies the selected child manifest and platform.
 A cache entry without the metadata fetches it once to establish the binding. A guest miss hashes the entire archive before taking the import
 lease and checks the guest again before upload. Explicit `load-image` verifies
-its input even if the guest already has that image. Mutable tags are resolved
-on each `ensure-image` invocation.
+its input even if the guest already has that image.
 
+### Mutable image tags
+
+An ordinary native start uses a verified tag resolution for up to 24 hours.
+Set `HACK_NATIVE_IMAGE_TAG_TTL_SECONDS` to a value from 0 to 2592000 seconds
+(30 days). A value of `0` refreshes on every command. `hack pull` refreshes tags
+and confirms their images in the native guest without starting services.
+`hack up --refresh-images` refreshes tags when starting services. For an
+already-running detached project, run `hack down` before refreshing.
+
+Use `hack up --offline` to use recorded resolutions of images already loaded
+without contacting a registry. An ordinary start can use a verified loaded
+image when refreshing its tag fails. Hack reports the reason and the recorded
+resolution time. Explicit refresh commands report the failure. Successful
+refreshes record the new selection after the guest confirms the image.
+
+`hack ps` and `hack status` show the recorded registry, source digest, selected
+image configuration IDs and last resolution time for the project's mutable
+tags. A running container keeps the image ID it was created with.
 
 During native project startup, active services with the same canonical image reference
 and platform policy share one validated image selection. If services request
 different platforms for the same tag, their selections use the same immutable
-registry digest. A later start resolves the tag again.
+registry digest.
 
 ### Explicit writable development source
 

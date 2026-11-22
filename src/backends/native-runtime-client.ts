@@ -1085,7 +1085,10 @@ function startPreflightChild(opts: {
   const failure = readNativeFailure(child.stderr, drain.signal);
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
   void child.exited.then(() => {
-    drainTimer = setTimeout(() => drain.abort(), NATIVE_EXIT_DRAIN_BOUND_MS);
+    drainTimer = setTimeout(() => {
+      void output.cancel().catch(() => undefined);
+      drain.abort();
+    }, NATIVE_EXIT_DRAIN_BOUND_MS);
   });
   let chunk: Uint8Array = new Uint8Array();
   let offset = 0;

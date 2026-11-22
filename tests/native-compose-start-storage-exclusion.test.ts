@@ -79,8 +79,8 @@ test("a pre-spawn guard storage proof longer than the start budget does not cons
   });
   const stderrFile = join(root, "cli-stderr");
   await injectAfter({
-    file: join(root, "docker"),
-    anchor: "const args=process.argv.slice(2);",
+    file: join(root, "docker.mjs"),
+    anchor: "const output=[];",
     source: `if(args[0]==="image"&&args[1]==="inspect"){
 ${guardStorageOpenSource(stderrFile)}
  if(guardStorageOpen){await appendFile(root+"/guard-carrier-delays","1\\n");await Bun.sleep(${GUARD_CARRIER_DELAY_MS});}

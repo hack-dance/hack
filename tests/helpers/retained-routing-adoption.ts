@@ -528,6 +528,7 @@ else {
             paused: false,
             status: model.running ? "running" : "exited",
             ...(format.includes("Health") ? { health: "" } : {}),
+            ...(format.includes("ExitCode") ? { exitCode: 0 } : {}),
           });
         } else {
           return refuse();

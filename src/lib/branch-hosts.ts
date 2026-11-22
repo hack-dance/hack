@@ -89,6 +89,11 @@ const NUMBERED_SITE_LABEL = /^caddy_\d+$/;
 const SITE_SEPARATOR = /[\s,]+/;
 const SITE = /^(?<scheme>https?:\/\/)?(?<host>[^\s/:]+)(?<port>:\d{1,5})?$/i;
 
+/** Split a Caddy label into its configured site addresses. */
+export function splitCaddySites(value: string): string[] {
+  return value.split(SITE_SEPARATOR).filter(Boolean);
+}
+
 /**
  * Rewrite one Caddy site label for a branch instance. A host in the project's
  * route namespaces (see `resolveProjectRouteBaseHosts`) is branch-qualified;
@@ -105,10 +110,7 @@ export function rewriteCaddyLabelForBranch(opts: {
   readonly changed: boolean;
   readonly dropped: readonly string[];
 } {
-  const parts = opts.value
-    .split(SITE_SEPARATOR)
-    .map((site) => site.trim())
-    .filter((site) => site.length > 0);
+  const parts = splitCaddySites(opts.value);
 
   if (parts.length === 0) {
     return { value: opts.value, changed: false, dropped: [] };

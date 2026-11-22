@@ -437,7 +437,7 @@ hack restart [services...] [options]
 
 ## `hack ps`
 
-Show project status (docker compose ps)
+Show project services
 
 ### Usage
 
@@ -449,6 +449,7 @@ hack ps [options]
 
 | Option | Description |
 | --- | --- |
+| `--wide` | Include container, exit code and port details |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |

@@ -72,6 +72,10 @@ hack open
 If `hack up` stops before the project is ready, look for the `!` line. It
 names the blocker and shows the command to run next.
 
+`hack ps` lists services with their primary address and current state. An
+address followed by `+1` has one more configured address. Use `hack ps --wide`
+for all addresses, container names, exit codes and port details.
+
 To start this project at future logins, use `hack up -d --always` and install
 the per-user daemon with `hack daemon install`. `hack down` pauses its marker;
 `hack up` resumes it. See [Always-on projects](https://github.com/hack-dance/hack/blob/next/docs/always-on-projects.md) for

@@ -12,7 +12,10 @@ import {
 import { resolveLifecycleRunner } from "../lib/lifecycle-runner.ts";
 import { preflightLifecycleSupervisor } from "../lib/lifecycle-supervisor.ts";
 import { childStdoutTarget } from "../lib/machine-stdout.ts";
-import { printedShellCommand } from "../lib/printed-shell-command.ts";
+import {
+  printedShellCommand,
+  scopedHackCommand,
+} from "../lib/printed-shell-command.ts";
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
@@ -487,6 +490,7 @@ import {
 } from "../lib/running-env-selection.ts";
 import {
   buildRuntimeHostMetadataOverride,
+  composeServiceAddresses,
   runtimeHostUrl,
 } from "../lib/runtime-host-metadata.ts";
 import {
@@ -527,6 +531,10 @@ import {
   startNativeBackgroundCommand,
   withBackgroundSweep,
 } from "./background-command-start.ts";
+import {
+  displayComposePs,
+  parseComposeExitCode,
+} from "./compose-ps-display.ts";
 import { withActivity } from "./lifecycle-activity.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
@@ -750,6 +758,12 @@ const restartOptions = [
   optExpectFrontendPid,
 ] as const;
 const psOptions = [
+  defineOption({
+    name: "wide",
+    type: "boolean",
+    long: "--wide",
+    description: "Include container, exit code and port details",
+  }),
   optPath,
   optProject,
   optBranch,
@@ -930,7 +944,7 @@ export const restartCommand = withHandler(
 
 const psSpec = defineCommand({
   name: "ps",
-  summary: "Show project status (docker compose ps)",
+  summary: "Show project services",
   group: "Project",
   options: psOptions,
   positionals: [],
@@ -1348,17 +1362,6 @@ async function readComposeServiceStates(opts: {
         entry.service.length > 0 &&
         (serviceFilter === null || serviceFilter.has(entry.service))
     );
-}
-
-function parseComposeExitCode(value: unknown): number | null {
-  if (typeof value === "number" && Number.isInteger(value)) {
-    return value;
-  }
-  if (typeof value !== "string" || value.trim().length === 0) {
-    return null;
-  }
-  const parsed = Number.parseInt(value, 10);
-  return Number.isInteger(parsed) ? parsed : null;
 }
 
 function startupSnapshotIsIncomplete(opts: {
@@ -10561,7 +10564,6 @@ async function maybeManageProjectLogsAfterDown(opts: {
   });
 }
 
-/** Compose-style state cell: an exited container shows its exit code. */
 async function handlePs({
   ctx,
   args,
@@ -10580,6 +10582,7 @@ async function handlePs({
         ? undefined
         : parseCsvList(args.options.profile),
     json: args.options.json,
+    psWide: args.options.wide === true,
   });
   if (authored !== null) {
     return authored;
@@ -10596,7 +10599,16 @@ async function handlePs({
     branchOption: args.options.branch,
     noticeToStderr: json,
   });
+  const cfg = await readProjectConfig(project);
   const native = resolveNativeRuntimeSelection();
+  const addresses = json
+    ? new Map<string, readonly string[]>()
+    : await readPsServiceAddresses({
+        project,
+        cfg,
+        branch,
+        native: native !== null,
+      });
   if (native) {
     if (args.options.profile) {
       throw new CliUsageError("Native ps does not support profile filtering.");
@@ -10610,12 +10622,19 @@ async function handlePs({
         branch,
       },
     });
-    await displayNativePs(result, json);
+    await displayNativePs(result, json, {
+      addresses,
+      wide: args.options.wide,
+      recoveryCommand: scopedHackCommand("down", {
+        path: args.options.path,
+        project: args.options.project,
+        branch: branch ?? undefined,
+      }),
+    });
     return 0;
   }
   const profiles = parseCsvList(args.options.profile);
 
-  const cfg = await readProjectConfig(project);
   if (cfg.parseError) {
     const configPath = cfg.configPath ?? project.configFile;
     logger.warn({
@@ -10632,7 +10651,6 @@ async function handlePs({
   // lag behind a failed startup. Both formats must observe the same containers.
   // A failed or unparsable read throws a coded error with the engine's cause
   // (envelope under --json, one line otherwise); see compose-ps-result.ts.
-  // Text mode keeps the plain `ps` fallback for Compose without JSON output.
   const read = await readComposePs({
     run: () =>
       composeRuntimeBackend.psJson({
@@ -10644,16 +10662,23 @@ async function handlePs({
       }),
   });
   if (!read.ok) {
-    if (json || !composePsTextFallbackAllowed(read.error)) {
-      throw read.error;
+    if (!json && read.error.code === "E_DOCKER_UNAVAILABLE") {
+      process.stderr.write("E_DOCKER_UNAVAILABLE: docker engine unavailable\n");
+      return 1;
     }
-    return await composeRuntimeBackend.ps({
-      composeFiles: [project.composeFile],
-      composeProject: composeProjectName,
-      profiles,
-      cwd,
-      all: true,
-    });
+    if (!json && read.error.code === "E_PERMISSION") {
+      process.stderr.write(
+        "E_PERMISSION: access denied while reading compose status\n"
+      );
+      return 1;
+    }
+    if (!json && composePsTextFallbackAllowed(read.error)) {
+      process.stderr.write(
+        `${read.error.code}: docker compose did not return a formatted service list\n`
+      );
+      return 1;
+    }
+    throw read.error;
   }
   const entries = read.entries;
   // A Created service whose one-shot dependency is still running starts only
@@ -10688,39 +10713,37 @@ async function handlePs({
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
     return 0;
   }
-  const rows = entries.map((e) => [
-    getString(e, "Service") ?? "",
-    getString(e, "Name") ?? "",
-    psStateLabel({ entry: e, waiting }),
-    (getString(e, "State") ?? "").toLowerCase() === "exited"
-      ? String(parseComposeExitCode(e.ExitCode) ?? "")
-      : "",
-    getString(e, "Status") ?? "",
-    getString(e, "Ports") ?? "",
-  ]);
-
-  await display.table({
-    columns: ["SERVICE", "NAME", "STATE", "EXIT CODE", "STATUS", "PORTS"],
-    rows,
+  displayComposePs({
+    entries,
+    addresses,
+    waiting,
+    wide: args.options.wide === true,
   });
-
   return 0;
 }
 
-/** STATE column: Compose's state, plus the one-shots a Created service waits on. */
-function psStateLabel(opts: {
-  readonly entry: Record<string, unknown>;
-  readonly waiting: Readonly<Record<string, readonly string[]>>;
-}): string {
-  const state = getString(opts.entry, "State") ?? "";
-  const service = getString(opts.entry, "Service") ?? "";
-  // Own entries only: a service named like an Object member is not waiting.
-  const blockers = Object.hasOwn(opts.waiting, service)
-    ? opts.waiting[service]
-    : undefined;
-  return blockers && state.toLowerCase() === "created"
-    ? `${state} (waiting for ${blockers.join(", ")})`
-    : state;
+async function readPsServiceAddresses(opts: {
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly branch: string | null;
+  readonly native: boolean;
+}): Promise<ReadonlyMap<string, readonly string[]>> {
+  const { project, cfg, branch } = opts;
+  const devHost = await readProjectDevHost(project);
+  const aliasHost = devHost ? resolveBranchAliasHost({ devHost, cfg }) : null;
+  const composeYaml = await Bun.file(project.composeFile)
+    .text()
+    .catch(() => "");
+  return composeServiceAddresses({
+    composeYaml,
+    branch,
+    baseHosts: devHost
+      ? resolveProjectRouteBaseHosts({ devHost, aliasHost })
+      : [],
+    httpsPort: opts.native
+      ? await resolveNativeProjectHttpsPort({ project, cfg })
+      : null,
+  });
 }
 
 /**
@@ -12736,6 +12759,13 @@ async function resolveNativeOpenPort(opts: {
   ) {
     return { native: false };
   }
+  return { native: true, httpsPort: await resolveNativeProjectHttpsPort(opts) };
+}
+
+async function resolveNativeProjectHttpsPort(opts: {
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+}): Promise<number | null> {
   const host = await resolveNativeHostSettings({
     env: process.env,
     projectName: await resolveComposeProjectName({
@@ -12744,7 +12774,7 @@ async function resolveNativeOpenPort(opts: {
     }),
     projectRoot: opts.project.projectRoot,
   });
-  return { native: true, httpsPort: host.https?.httpsPort ?? null };
+  return host.https?.httpsPort ?? null;
 }
 
 /** Whether `hack open <target>` names a project host, not Grafana or a URL. */

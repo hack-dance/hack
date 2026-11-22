@@ -959,6 +959,8 @@ fn run_with_bases<P: BuildPool>(
             &receipt_path,
             previous,
         )? {
+            // Recovery cannot invalidate the verified reuse decision.
+            let _ = aliases::sweep(pool, &lease, &identity, &alias_path);
             return Ok(outcome);
         }
         if previous.phase == Phase::Building {
@@ -1904,6 +1906,15 @@ fn acquire_bases(
     })
 }
 
+fn base_registry_failed(error: &CandidateError) -> bool {
+    error.code.starts_with("registry_")
+        || (error.code == "image_tag_offline_missing"
+            && error
+                .cause_code
+                .as_deref()
+                .is_some_and(|code| code.starts_with("registry_")))
+}
+
 /// `runtime build-image --request <private-file>`: build or reuse one native image.
 pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome, CandidateError> {
     let request: BuildRequest = state::read_bounded(request, MAX_REQUEST_BYTES)?;
@@ -1952,7 +1963,7 @@ pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome
         Ok(bases) => bases,
         Err(error) => {
             if Instant::now() < deadline
-                && error.code.starts_with("registry_")
+                && base_registry_failed(&error)
                 && let Some(outcome) = reuse_legacy(candidate, &pool, &inputs)?
             {
                 return Ok(outcome);

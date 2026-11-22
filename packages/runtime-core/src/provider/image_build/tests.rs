@@ -2082,7 +2082,7 @@ fn a_verified_base_selects_the_build_key_and_only_a_local_worker_source() {
         .unwrap()
         .reused
     );
-    assert!(journal.exists(), "reuse must precede journal inspection");
+    assert!(!journal.exists());
     assert!(!pending.exists());
     let bake: Value =
         serde_json::from_slice(&fs::read(scratch.join("seen-bake.json")).unwrap()).unwrap();
@@ -2236,6 +2236,11 @@ fn aliases_restore_a_keeper_and_quarantine_a_malformed_journal() {
 
 #[test]
 fn legacy_reuse_requires_the_original_context_and_a_verified_image() {
+    let missing = || CandidateError::new("image_tag_offline_missing", "fixture");
+    assert!(base_registry_failed(
+        &missing().with_cause_code("registry_unreachable".into())
+    ));
+    assert!(!base_registry_failed(&missing()));
     let fixture = Fixture::new();
     let inputs = fixture.inputs(Policy::Missing);
     let pool = FakePool::new("pool-1");

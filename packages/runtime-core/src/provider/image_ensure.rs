@@ -27,6 +27,7 @@ const IMAGE_WORKERS: usize = 3;
 #[derive(Default)]
 struct CacheState {
     lease: Option<state::Lock>,
+    users: usize,
     reservations: BTreeMap<String, u64>,
     disk_reserved: u64,
 }
@@ -64,11 +65,7 @@ impl ImageCache {
         }
     }
 
-    fn enter(
-        &self,
-        root: &Path,
-        policy: &ImagePolicy,
-    ) -> Result<MutexGuard<'_, CacheState>, CandidateError> {
+    fn enter(&self, root: &Path, policy: &ImagePolicy) -> Result<CacheLease<'_>, CandidateError> {
         let mut cache = self.state.lock().unwrap();
         if cache.lease.is_none() {
             let lease =
@@ -80,7 +77,30 @@ impl ImageCache {
             cache.lease = Some(lease);
         }
         cache.lease.as_ref().unwrap().verify_path(root)?;
+        cache.users += 1;
+        Ok(CacheLease(self))
+    }
+}
+
+/// Only workers using the cache hold this lease. Workers still resolving tags
+/// can never keep it alive while another command needs it to confirm a tag.
+struct CacheLease<'a>(&'a ImageCache);
+
+impl CacheLease<'_> {
+    fn lock(&self, root: &Path) -> Result<MutexGuard<'_, CacheState>, CandidateError> {
+        let cache = self.0.state.lock().unwrap();
+        cache.lease.as_ref().unwrap().verify_path(root)?;
         Ok(cache)
+    }
+}
+
+impl Drop for CacheLease<'_> {
+    fn drop(&mut self) {
+        let mut cache = self.0.state.lock().unwrap();
+        cache.users -= 1;
+        if cache.users == 0 {
+            cache.lease = None;
+        }
     }
 }
 
@@ -961,7 +981,8 @@ fn ensure_pinned_coordinated(
         .or_default()
         .clone();
     let _pin = pin.lock().unwrap();
-    let mut state = coordinator.enter(&root, policy)?;
+    let lease = coordinator.enter(&root, policy)?;
+    let mut state = lease.lock(&root)?;
     let inventory = || measure(Step::ImageCacheInventory, None, |_| usage(candidate, &root));
     let mut occupied = inventory()?;
     // A cached entry is reused only for the platform the pinned image itself selects under
@@ -1052,7 +1073,7 @@ fn ensure_pinned_coordinated(
         }
         state::write(&dir.join("receipt.json"), &receipt)?;
         inspect_entry(candidate, dir, &reference, acquired.platform)?;
-        let state = coordinator.enter(&root, policy)?;
+        let state = lease.lock(&root)?;
         let target = root.join(entry_key(&reference, acquired.platform));
         if target.try_exists().map_err(state::io)? {
             return Err(refused(
@@ -1067,6 +1088,7 @@ fn ensure_pinned_coordinated(
         drop(reservation);
         (target, receipt)
     };
+    drop(lease);
     // Keep the import lease and the loader’s own live recheck unchanged.
     let _import = coordinator.importer.lock().unwrap();
     load(candidate, &dir.join("image.tar"), &receipt, reused)?;
@@ -1288,6 +1310,25 @@ mod tests {
         let _cache = coordinator.enter(&root, &ImagePolicy::default()).unwrap();
         assert!(!staged.exists());
         assert_eq!(usage(&f.1, &root).unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn batch_releases_the_cache_lease_when_its_last_cache_worker_finishes() {
+        let f = Fixture::new();
+        let root = f.1.state_root.join("artifacts/images");
+        let cache = ImageCache::default();
+        let policy = ImagePolicy::default();
+        let first = cache.enter(&root, &policy).unwrap();
+        let second = cache.enter(&root, &policy).unwrap();
+        drop(first);
+        assert_eq!(
+            state::Lock::acquire(&root).err().unwrap().code,
+            "provider_busy"
+        );
+        drop(second);
+        // The batch can still be waiting on another tag at this point. That
+        // tag's owner is now free to enter the cache from another command.
+        assert!(state::Lock::acquire(&root).is_ok());
     }
 
     #[test]

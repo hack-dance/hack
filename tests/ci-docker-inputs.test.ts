@@ -187,6 +187,17 @@ test("base-tree dependencies select Docker after an input is deleted or renamed"
     steps:
       - if: matrix.shard == 8 && needs.changes.outputs.build_smoke == 'true'
         run: bun run build
+  config-compiler:
+    steps:
+      - if: needs.changes.outputs.compiler_rust == 'true'
+        run: echo compiler fixture
+  runtime-core:
+    steps:
+      - run: echo candidate fixture
+  docs-site:
+    steps:
+      - if: needs.changes.outputs.docs_site == 'true'
+        run: echo docs fixture
 `;
     for (const tree of [headRoot, baseRoot]) {
       await mkdir(join(tree, "packages/db"), { recursive: true });
@@ -221,7 +232,7 @@ test("base-tree dependencies select Docker after an input is deleted or renamed"
 test.each([
   ["packages/config-compiler/src/lib.rs", true, true, true],
   ["tests/tla-result.test.ts", false, true, false],
-  ["packages/runtime-core/src/lib.rs", true, false, false],
+  ["packages/runtime-core/src/lib.rs", false, false, false],
 ] as const)("consumers select the affected tiers for %s", async (path, docker, models, build) => {
   const plan = await planPullRequest({
     repoRoot,
@@ -285,7 +296,7 @@ test("Python model discovery follows literal source and reference inputs", () =>
 test.each([
   ["docs/reference/application-benchmark-protocol.md", false],
   ["docs/performance.md", false],
-  ["packages/runtime-core/src/provider/profile.rs", true],
+  ["packages/runtime-core/src/provider/profile.rs", false],
 ] as const)(
   "model workflow retains its Python reference input %s",
   async (path, docker) => {
@@ -304,3 +315,18 @@ test.each([
   },
   30_000
 );
+
+test("generated project paths do not traverse contributor toolchain commands", () => {
+  const inputs = dockerJobInputs({
+    repoRoot: "/fixture",
+    sources: {
+      ...sources,
+      "tests/e2e/scenarios/base.ts":
+        'const example = ".hack/toolchain/run.sh";',
+      ".hack/toolchain/run.sh": "sh scripts/private-toolchain.sh",
+      "scripts/private-toolchain.sh": "# contributor tooling",
+    },
+  });
+  expect(inputs?.has(".hack/toolchain/run.sh")).toBe(true);
+  expect(inputs?.has("scripts/private-toolchain.sh")).toBe(false);
+});

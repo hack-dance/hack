@@ -216,6 +216,11 @@ jobs:
           fi
           # Protected inputs retain full Linux/Docker/build coverage. Ready PRs
           # defer macOS unless targeting main or explicitly labeled. Drafts stay light.
+          if [ "$(sed -n 's/^job_input_policy=//p' "$GITHUB_OUTPUT" | tail -n 1)" = "v1" ]; then
+            # The trusted policy owns every job gate. Legacy bases still use
+            # the compatibility overrides below until they acquire that policy.
+            exit 0
+          fi
           if [ "$EVENT_NAME" = "pull_request" ]; then
             mac=false; e2e=false; builds=false; models=false
             if [ "$(sed -n 's/^scope=//p' "$GITHUB_OUTPUT" | tail -n 1)" = "full" ]; then full=true; fi

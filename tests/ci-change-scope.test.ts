@@ -266,6 +266,17 @@ describe("pull request diff", () => {
     steps:
       - if: matrix.shard == 8 && needs.changes.outputs.build_smoke == 'true'
         run: echo fixture
+  config-compiler:
+    steps:
+      - if: needs.changes.outputs.compiler_rust == 'true'
+        run: echo compiler fixture
+  runtime-core:
+    steps:
+      - run: echo candidate fixture
+  docs-site:
+    steps:
+      - if: needs.changes.outputs.docs_site == 'true'
+        run: echo docs fixture
 `
     );
     const result = Bun.spawnSync(

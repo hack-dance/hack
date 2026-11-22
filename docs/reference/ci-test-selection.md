@@ -2,9 +2,9 @@
 
 A PR uses a light tier by default: typecheck, lint/privacy, secret scan, docs
 checks when relevant, and selected Linux unit files on five Linux shards. It runs
-no macOS jobs by default. Ready CLI-source PRs retain Linux x64 relocated CLI
-acceptance; Rust-input PRs retain Linux Candidate core and both Linux compiler
-hosts. Changes to model inputs select state models independently of build smoke.
+no macOS jobs by default. Ready PRs that change CLI release inputs retain relocated CLI
+acceptance on both Linux compiler hosts. Changes to candidate inputs retain
+the Linux Candidate core job. Changes to model inputs select state models independently of build smoke.
 
 | Change kind (ready PR to `next`) | Tiers selected in addition to selected Linux units and required checks |
 | --- | --- |
@@ -12,11 +12,11 @@ hosts. Changes to model inputs select state models independently of build smoke.
 | `scripts/lib/tla-runtime-models.ts` or `tests/models/**` | State models; no Docker or build smoke |
 | TLA helper skill, `tests/tla-result.test.ts`, or the four Python controls bundled with the model job | State models; no Docker or build smoke |
 | Reference documents and source read by the benchmark Python controls | State models, plus other jobs that consume those files |
-| Runtime-core or guest Rust source | Linux candidate/compiler checks and Docker tier because the runtime images copy `packages/`; models when a model input also changes |
-| Config compiler or lifecycle supervisor Rust source | Docker and release build smoke; Linux Rust checks where applicable |
-| Other CLI release build inputs, including the packaged root README | Build smoke, plus Docker where shared with the Docker tier |
+| Runtime-core or guest Rust source | Linux Candidate core. Docker, models and compiler run when their own inputs also change. |
+| Config compiler or lifecycle supervisor Rust source | Docker, both Linux compiler hosts and release build smoke. Candidate and compiler Rust checks run for inputs they compile or read. |
+| Other CLI release build inputs, including the packaged root README | Build smoke and both Linux compiler hosts, plus Docker where shared with the Docker tier |
 | Compose backend, templates, E2E harness and their derived imported/executed inputs | Docker E2E, runtime images and Linux process lifetime |
-| Shared CLI source (`src/**`, `index.ts`, `packages/cli/**`), `.hack/**`, Docker definitions, lifecycle supervisor, examples/assets and recipe snippets | Docker tier conservatively; CLI source also retains relocated acceptance |
+| Dockerfile definitions, copied CLI sources, and enumerated recipe examples | Docker tier. Shared release inputs also retain compiler and build smoke. |
 | Unknown input families, shared test helpers/preloads, other scripts, manifests, lockfiles, toolchain/config pins, workflows or selectors | Full Linux, Docker, state-model and build tiers |
 | `ci:e2e` label | Docker tier, independently of model/build tiers |
 | `ci:full` label | Full ordinary tiers and selected macOS/native hosts |
@@ -27,17 +27,25 @@ Docker dependencies are derived from the `docker-e2e-shard`, `runtime-images` an
 transitive local imports, nested shell helpers and literal execution/data paths.
 Local Compose builds contribute their Dockerfiles, ignore files and local
 `COPY`/`ADD` sources. The runtime image builder uses the repository root as its
-context. Build smoke and state models follow their own workflow commands. The
+context, with Dockerfile-specific allowlists for the CLI, workspace manifests
+and the slim image’s lifecycle supervisor. Candidate Rust and guest crates
+stay outside both image contexts. Build smoke and state models follow their own workflow commands. The
 model tier follows Python unittest discovery and literal references in those
 controls, including reference documents and source they read. Cargo
-manifests select their compiled crate directories. The planner reads both the
+manifests select their crate inputs and follow local dependency manifests. The
+workflow gate table in `scripts/ci-job-policy.ts` maps each skippable job and
+step group to its selector output. Tests compare those rows to the workflow
+conditions and check that every derived checkout input enables its gate. The
+unit suite and diagnostic reporting already run on PRs. The planner reads both the
 base and merge trees, so deleted inputs and both sides of a rename still count. Thus the shared-host
 fixture, real-Docker context test and configuration compiler remain Docker inputs
 without relying on a filename-prefix guess. A new registered scenario importing a
 new helper automatically brings that helper into Docker qualification. Fixture
 regressions exercise that edge; unavailable dependency evidence selects full.
-A path outside explicit scope rules, discovered unit tests and derived tier
-inputs selects every job. This applies inside `tests/`, too. Unit inventory expansion and job-tier expansion are separate.
+A path without a derived dependency or an explicit input rule selects the
+full Linux plan. A broad Cargo or image copy directory alone cannot classify
+an arbitrary new file as a known source input. Unit tests can establish known
+fixture inputs through literal paths or a bounded directory and filename suffix. Unit inventory expansion and job-tier expansion are separate.
 
 Unknown scripts and shared helpers remain full-tier inputs until their consumers
 are audited. In particular, this change exempts only the known model registry from
@@ -151,7 +159,7 @@ working directory and Bun preload.
 
 The candidate job follows its crate, its config-compiler path dependency, guest, launcher, helper/toolchain and CI
 inputs. The compiler's native host matrix follows its crate/build/toolchain/CI
-inputs. CLI source changes retain Linux x64 compiler acceptance even when
+inputs. CLI release inputs retain both Linux compiler hosts even when
 macOS is deferred. These are job
 input gates, separate from the unit import graph.
 

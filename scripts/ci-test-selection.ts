@@ -16,6 +16,8 @@ export type TestSelection = {
 export const ALWAYS_RUN_TESTS: Readonly<Record<string, string>> = {
   "tests/ci-docker-inputs.test.ts":
     "Real-engine dependency closure and unknown-input qualification",
+  "tests/ci-job-policy.test.ts":
+    "Every scope-conditioned job must have covered inputs",
   "tests/ci-change-scope.test.ts": "CI policy and required-check wiring",
   "tests/ci-test-selection.test.ts": "Selection must verify itself on every PR",
 };

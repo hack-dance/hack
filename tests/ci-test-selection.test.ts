@@ -455,7 +455,7 @@ describe("PR matrix policy", () => {
     expect(await planPullRequest({ ...input, mac: true })).toMatchObject({
       defer_macos: false,
       runtime_core: true,
-      docker_suite: true,
+      docker_suite: false,
       build_smoke: false,
       test_shards: "[1,2,3,4,5,6,7,8]",
     });
@@ -491,18 +491,21 @@ describe("PR matrix policy", () => {
     "packages/runtime-core/provider-pins.json",
     "packages/config-compiler/tests/fixtures/schema-corpus.json",
     "packages/relay-guest/README.md",
-  ])("light Rust input retains Linux candidate and compiler legs: %s", async (path) => {
+  ])("Rust inputs retain their Linux consumers: %s", async (path) => {
     const input = { repoRoot, changed: [path], draft: false, full: false };
     const plan = await planPullRequest(input);
+    const compilerInput = path.startsWith("packages/config-compiler/");
     expect(plan).toMatchObject({
       runtime_core: true,
-      compiler_rust: true,
+      compiler_rust: compilerInput,
       compiler_hosts: JSON.stringify(
-        COMPILER_HOSTS.filter((host) => host.platform === "linux")
+        COMPILER_HOSTS.filter(
+          (host) => compilerInput && host.platform === "linux"
+        )
       ),
       defer_macos: true,
-      docker_suite: true,
-      build_smoke: path.startsWith("packages/config-compiler/"),
+      docker_suite: compilerInput,
+      build_smoke: compilerInput,
       test_shards: "[4,5,6,7,8]",
     });
     expect(await planPullRequest({ ...input, draft: true })).toMatchObject({
@@ -531,9 +534,9 @@ describe("PR matrix policy", () => {
         selection: { mode: "selected", reason: "fixture", files: [] },
       });
       expect(plan.compiler_hosts, path).toBe(
-        JSON.stringify([
-          { os: "ubuntu-latest", platform: "linux", arch: "x64" },
-        ])
+        JSON.stringify(
+          COMPILER_HOSTS.filter((host) => host.platform === "linux")
+        )
       );
       expect(plan).toMatchObject({
         compiler_rust: false,
@@ -862,14 +865,14 @@ describe("CI tier table (HACK-2493)", () => {
         "scripts/lib/tla-runtime-models.ts",
         "packages/runtime-core/src/main.rs",
       ],
-      docker: true,
+      docker: false,
       models: true,
       full: false,
     },
     {
       name: "Rust",
       paths: ["packages/runtime-core/src/main.rs"],
-      docker: true,
+      docker: false,
       models: false,
       full: false,
     },
@@ -882,7 +885,7 @@ describe("CI tier table (HACK-2493)", () => {
     },
     {
       name: "Compose template",
-      paths: ["templates/compose.yml"],
+      paths: ["src/templates.ts"],
       docker: true,
       models: false,
       full: false,
@@ -951,9 +954,8 @@ describe("CI tier table (HACK-2493)", () => {
   test.each([
     "docker/node-runtime/Dockerfile",
     ".dockerignore",
-    "examples/app/compose.yml",
-    "assets/compose.yml",
-    "docs/recipes/example.md",
+    "examples/configs/python-postgres/.hack/docker-compose.yml",
+    "docs/recipes/fast-health-checks.md",
     "packages/lifecycle-supervisor/src/main.rs",
   ])("Docker image/harness input: %s", async (path) => {
     const plan = await planPullRequest({

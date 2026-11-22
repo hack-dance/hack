@@ -47,6 +47,7 @@ async function scope(opts: {
   tierModels?: boolean;
   tierBuild?: boolean;
   tierScope?: "full";
+  jobPolicy?: boolean;
   before?: string;
   predecessor?: string;
   dispatchFull?: boolean;
@@ -94,7 +95,7 @@ async function scope(opts: {
       await writeFile(join(root, path), source);
     };
     const tierPlan = opts.tierPlan
-      ? ` await Bun.write(process.env.GITHUB_OUTPUT!, await Bun.file(process.env.GITHUB_OUTPUT!).text() + ${JSON.stringify(`compiler_hosts=${fullPushPlan({ releaseHosts: false }).compiler_hosts}\nruntime_core=true\ntest_shards=[1,2,3,4,5,6,7,8]\ndocker_suite=${String(opts.tierDocker === true)}\nstate_models=${String(opts.tierModels === true)}\nbuild_smoke=${String(opts.tierBuild === true)}\n${opts.tierScope ? `scope=${opts.tierScope}\n` : ""}`)});`
+      ? ` await Bun.write(process.env.GITHUB_OUTPUT!, await Bun.file(process.env.GITHUB_OUTPUT!).text() + ${JSON.stringify(`compiler_hosts=${fullPushPlan({ releaseHosts: false }).compiler_hosts}\nruntime_core=true\ntest_shards=[1,2,3,4,5,6,7,8]\ndocker_suite=${String(opts.tierDocker === true)}\nstate_models=${String(opts.tierModels === true)}\nbuild_smoke=${String(opts.tierBuild === true)}\n${opts.tierScope ? `scope=${opts.tierScope}\n` : ""}${opts.jobPolicy ? "job_input_policy=v1\n" : ""}`)});`
       : "";
     const policy = opts.legacy
       ? 'throw Error("legacy policy must not execute");'
@@ -596,6 +597,22 @@ test("the workflow preserves tiers selected by trusted base policy", async () =>
   });
   expect(output).toMatchObject({
     docker_suite: "false",
+    state_models: "true",
+    build_smoke: "true",
+  });
+});
+
+test("job policy outputs survive the hosted shell unchanged", async () => {
+  const output = await scope({
+    path: "tests/native-compose-file-owner.test.ts",
+    tierPlan: true,
+    jobPolicy: true,
+    tierModels: true,
+    tierBuild: true,
+  });
+  expect(output).toMatchObject({
+    compiler_hosts: fullPushPlan({ releaseHosts: false }).compiler_hosts,
+    runtime_core: "true",
     state_models: "true",
     build_smoke: "true",
   });

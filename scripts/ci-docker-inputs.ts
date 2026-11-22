@@ -4,6 +4,7 @@ import { posix, resolve } from "node:path";
 import ts from "typescript";
 import { isRecord } from "../src/lib/guards.ts";
 import { composeBuilds, dockerContextInputs } from "./ci-docker-context.ts";
+import { DERIVED_JOB_ROWS, type Tier } from "./ci-job-policy.ts";
 import {
   buildSelectionGraph,
   selectionModuleInputs,
@@ -13,9 +14,9 @@ type InputOptions = {
   readonly repoRoot: string;
   readonly sources?: Readonly<Record<string, string>>;
 };
-const JOBS = ["docker-e2e-shard", "runtime-images", "linux-process-lifetime"];
-type Tier = "docker" | "models" | "build";
-type JobInputs = Pick<ReadonlySet<string>, "has">;
+type JobInputs = Pick<ReadonlySet<string>, "has"> & {
+  readonly knows: (path: string) => boolean;
+};
 const cache = new Map<string, JobInputs>();
 
 function inputReader(opts: InputOptions) {
@@ -67,10 +68,45 @@ function inputReader(opts: InputOptions) {
   };
 }
 
-function workflowCommands(
-  source: string | undefined,
-  tier: Tier
-): readonly string[] | null {
+type Command = { readonly text: string; readonly cwd: string };
+
+function defaultDirectory(config: Record<string, unknown>): unknown {
+  const defaults = config.defaults;
+  return isRecord(defaults) && isRecord(defaults.run)
+    ? defaults.run["working-directory"]
+    : undefined;
+}
+
+function workingDirectory(value: unknown): string | undefined {
+  if (typeof value !== "string" || !/^[.\w/-]+$/.test(value)) {
+    return;
+  }
+  const directory = posix.normalize(value);
+  if (
+    directory !== ".." &&
+    !directory.startsWith("../") &&
+    !posix.isAbsolute(directory)
+  ) {
+    return directory;
+  }
+}
+
+function runText(
+  step: unknown,
+  output: string | undefined
+): string | undefined {
+  if (!isRecord(step) || typeof step.run !== "string") {
+    return;
+  }
+  if (
+    !output ||
+    (typeof step.if === "string" && step.if.includes(`outputs.${output}`))
+  ) {
+    return step.run;
+  }
+}
+
+function parseWorkflow(source: string | undefined) {
   if (!source) {
     return null;
   }
@@ -80,31 +116,44 @@ function workflowCommands(
   } catch {
     return null;
   }
-  if (!(isRecord(workflow) && isRecord(workflow.jobs))) {
+  return isRecord(workflow) && isRecord(workflow.jobs)
+    ? { workflow, jobs: workflow.jobs }
+    : null;
+}
+
+function workflowCommands(
+  source: string | undefined,
+  tier: Tier
+): readonly Command[] | null {
+  const parsed = parseWorkflow(source);
+  if (!parsed) {
     return null;
   }
-  const commands: string[] = [];
-  const jobs =
-    tier === "docker"
-      ? JOBS
-      : tier === "models"
-        ? ["state-models"]
-        : ["test-shard"];
-  for (const name of jobs) {
-    const job = workflow.jobs[name];
+  const { workflow, jobs } = parsed;
+  const commands: Command[] = [];
+  for (const row of DERIVED_JOB_ROWS) {
+    if (row.tier !== tier) {
+      continue;
+    }
+    const job = jobs[row.job];
     if (!(isRecord(job) && Array.isArray(job.steps))) {
       continue;
     }
     for (const step of job.steps) {
-      if (
-        isRecord(step) &&
-        typeof step.run === "string" &&
-        (tier !== "build" ||
-          (typeof step.if === "string" &&
-            step.if.includes("outputs.build_smoke")))
-      ) {
-        commands.push(step.run);
+      const text = runText(step, "steps" in row ? row.output : undefined);
+      if (text === undefined || !isRecord(step)) {
+        continue;
       }
+      const cwd = workingDirectory(
+        step["working-directory"] ??
+          defaultDirectory(job) ??
+          defaultDirectory(workflow) ??
+          "."
+      );
+      if (!cwd) {
+        return null;
+      }
+      commands.push({ text, cwd });
     }
   }
   return commands.length ? commands : null;
@@ -171,7 +220,7 @@ function packageScript(opts: {
   return typeof script === "string" ? script : undefined;
 }
 
-function commandDirectory(command: { text: string; cwd: string }) {
+function commandDirectory(command: Command) {
   const changeDirectory = /^cd\s+([.\w/-]+)\s+&&\s*/.exec(command.text);
   const text = changeDirectory
     ? command.text.slice(changeDirectory[0].length)
@@ -204,13 +253,12 @@ function collectPythonUnittests(opts: {
 }
 
 function collectCommands(opts: {
-  readonly commands: readonly string[];
-  readonly cwd?: string;
+  readonly commands: readonly Command[];
   readonly reader: ReturnType<typeof inputReader>;
   readonly collector: ReturnType<typeof inputCollector>;
 }): void {
   const scripts = new Set<string>();
-  const queue = opts.commands.map((text) => ({ text, cwd: opts.cwd ?? "." }));
+  const queue = [...opts.commands];
   while (queue.length) {
     const command = queue.pop();
     if (!command) {
@@ -224,7 +272,7 @@ function collectCommands(opts: {
       collector: opts.collector,
     });
     for (const match of text.matchAll(
-      /(?:^|[\s"'=])([.\w/-]+\.(?:[cm]?[jt]sx?|sh|py|json|toml|lock|ya?ml))\b/g
+      /(?:^|[\s"'=])([.\w/-]+\.[\w.-]+|\.\/hack-local)\b/g
     )) {
       if (match[1]) {
         opts.collector.literal(match[1], cwd);
@@ -260,6 +308,11 @@ function callName(node: ts.CallExpression): string {
     : "";
 }
 
+/** Standalone .hack paths in CLI and test code name the project under test. */
+function projectRelative(value: string): boolean {
+  return /^(?:\.\/)?\.hack\//.test(value);
+}
+
 function collectLiteralPaths(opts: {
   readonly file: string;
   readonly source: string;
@@ -280,7 +333,11 @@ function collectLiteralPaths(opts: {
     if (ts.isStringLiteralLike(node)) {
       // Inventory keys name data; spelling a test path does not execute its
       // module. Explicit imports and workflow commands still traverse it.
-      opts.collector.literal(node.text, cwd, !dataKeys.has(node));
+      opts.collector.literal(
+        node.text,
+        cwd,
+        !(dataKeys.has(node) || projectRelative(node.text))
+      );
     }
     if (ts.isCallExpression(node)) {
       const name = callName(node);
@@ -289,7 +346,8 @@ function collectLiteralPaths(opts: {
           .filter(ts.isStringLiteralLike)
           .map((arg) => arg.text);
         if (pieces.length) {
-          opts.collector.literal(posix.join(...pieces), cwd);
+          const path = posix.join(...pieces);
+          opts.collector.literal(path, cwd, !projectRelative(path));
         }
       }
     }
@@ -307,26 +365,105 @@ function collectTextReferences(opts: {
   const { file, source, reader, collector } = opts;
   const cwd = posix.dirname(file);
   switch (posix.extname(file)) {
+    case "":
     case ".sh":
       collectCommands({
-        commands: [source.replace(/\$\{(?:SCRIPT_DIR|script_dir)\}\//g, "./")],
-        cwd,
+        commands: [
+          {
+            text: source.replace(/\$\{(?:SCRIPT_DIR|script_dir)\}\//g, "./"),
+            cwd,
+          },
+        ],
         reader,
         collector,
       });
       break;
+    case ".toml":
     case ".py":
       // Benchmark controls load checkout modules and reference files via pathlib.
       // Literal references can be resolved without importing untrusted Python.
       for (const match of source.matchAll(/(['"])([.\w/-]+)\1/g)) {
         if (match[2]) {
           collector.literal(match[2], cwd);
+          if (posix.basename(file) === "Cargo.toml") {
+            collector.add(posix.join(cwd, match[2], "Cargo.toml"));
+          }
         }
       }
       break;
     default:
       break;
   }
+}
+
+/** A unit test may name a fixture directly or interpolate a name inside its fixture directory. */
+export function readsUnitFixture(opts: {
+  readonly repoRoot: string;
+  readonly files: readonly string[];
+  readonly path: string;
+}): boolean {
+  if (!opts.path.startsWith("tests/fixtures/")) {
+    return false;
+  }
+  const reader = inputReader(opts);
+  const parent = posix.dirname(opts.path);
+  if (reader.kind(opts.path) !== "file") {
+    return false;
+  }
+  for (const file of opts.files) {
+    const source = reader.read(file);
+    const relative = posix.relative(posix.dirname(file), parent);
+    if (
+      !(
+        source &&
+        (source.includes(posix.basename(opts.path)) ||
+          (relative && source.includes(`${relative}/`)))
+      )
+    ) {
+      continue;
+    }
+    const collector = inputCollector(reader);
+    collectLiteralPaths({ file, source, collector });
+    if (collector.inputs.has(opts.path)) {
+      return true;
+    }
+    // Template strings such as ./fixtures/goldens/${name}.txt enumerate a
+    // bounded directory. Other computed paths retain the unknown-path fallback.
+    const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest);
+    if (
+      readsFixtureDirectory({
+        node: ast,
+        cwd: posix.dirname(file),
+        path: opts.path,
+      })
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function readsFixtureDirectory(opts: {
+  readonly node: ts.Node;
+  readonly cwd: string;
+  readonly path: string;
+}): boolean {
+  const { node, cwd, path } = opts;
+  if (
+    ts.isTemplateExpression(node) &&
+    node.head.text.endsWith("/") &&
+    posix.normalize(posix.join(cwd, node.head.text)).replace(/\/$/, "") ===
+      posix.dirname(path) &&
+    posix.basename(path).endsWith(node.templateSpans.at(-1)?.literal.text ?? "")
+  ) {
+    return true;
+  }
+  return (
+    ts.forEachChild(
+      node,
+      (child) => readsFixtureDirectory({ node: child, cwd, path }) || undefined
+    ) === true
+  );
 }
 
 function collectFiles(opts: {
@@ -336,11 +473,6 @@ function collectFiles(opts: {
   readonly graph: ReturnType<typeof buildSelectionGraph>;
 }) {
   const { tier, collector, reader, graph } = opts;
-  if (tier === "build") {
-    // Release packaging enumerates these directories rather than naming each file.
-    collector.inputs.add("binaries/gum/");
-    collector.inputs.add("packages/config-compiler/generated/");
-  }
   const contexts: ReturnType<typeof dockerContextInputs>[] = [];
   for (let index = 0; index < collector.queue.length; index += 1) {
     const file = collector.queue[index];
@@ -415,10 +547,29 @@ export function deriveJobInputs(
     }
   }
   const prefixes = [...collector.inputs].filter((path) => path.endsWith("/"));
+  const trees = DERIVED_JOB_ROWS.flatMap((row) =>
+    row.tier === opts.tier && "trees" in row ? row.trees : []
+  );
+  const files = new Set<string>(
+    DERIVED_JOB_ROWS.flatMap((row) =>
+      row.tier === opts.tier && "files" in row ? row.files : []
+    )
+  );
+  const isCatalogued = (path: string): boolean =>
+    files.has(path) || trees.some((prefix) => path.startsWith(prefix));
+  const hasSource = (path: string): boolean =>
+    collector.inputs.has(path) ||
+    isCatalogued(path) ||
+    (/\.(?:rs|zig|toml|lock|json|md|[cm]?[jt]sx?|sh|ya?ml)$/.test(path) &&
+      (prefixes.some((prefix) => path.startsWith(prefix)) ||
+        contexts.some((context) => context.includes(path))) &&
+      reader.kind(path) === "file");
   const result = {
+    knows: hasSource,
     has(path: string): boolean {
       return (
         collector.inputs.has(path) ||
+        isCatalogued(path) ||
         prefixes.some((prefix) => path.startsWith(prefix)) ||
         contexts.some((context) => context.includes(path))
       );

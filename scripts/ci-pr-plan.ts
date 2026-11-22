@@ -1,14 +1,12 @@
 /** PR and next-push policy layered over the coarse change-scope classifier. */
 import {
   COMPILER_HOSTS,
-  isKnownCiInput,
+  pathKind,
   planScope,
   scopeOutputs,
-  touchesDockerSuite,
-  touchesRelocatedCli,
-  touchesStateModels,
 } from "./ci-change-scope.ts";
-import { deriveJobInputs } from "./ci-docker-inputs.ts";
+import { deriveJobInputs, readsUnitFixture } from "./ci-docker-inputs.ts";
+import { JOB_TIERS, type Tier } from "./ci-job-policy.ts";
 import {
   buildSelectionGraph,
   selectTests,
@@ -28,6 +26,7 @@ export type PullRequestPlan = ReturnType<typeof scopeOutputs> & {
   readonly defer_macos: boolean;
   readonly build_smoke: boolean;
   readonly state_models: boolean;
+  readonly job_input_policy?: "v1";
 };
 
 function compilerHosts(
@@ -42,24 +41,14 @@ function compilerHosts(
 function selectedCompilerHosts(opts: {
   readonly draft: boolean;
   readonly mac: boolean;
-  readonly linuxRust: boolean;
-  readonly changed: readonly string[] | null;
+  readonly enabled: boolean;
   readonly releaseHosts: boolean;
-  readonly nativeHosts: boolean;
-  readonly coarseHosts: string;
 }): ReturnType<typeof compilerHosts> {
-  if (opts.draft) {
-    return [];
-  }
-  const relocatedCli = opts.changed?.some(touchesRelocatedCli) ?? true;
-  return compilerHosts(opts.releaseHosts).filter(
-    (host) =>
-      (opts.linuxRust && host.platform === "linux") ||
-      (relocatedCli && host.os === "ubuntu-latest") ||
-      (opts.mac &&
-        (opts.nativeHosts ||
-          opts.coarseHosts.includes(JSON.stringify(host.os))))
-  );
+  return opts.draft || !opts.enabled
+    ? []
+    : compilerHosts(opts.releaseHosts).filter(
+        (host) => opts.mac || host.platform === "linux"
+      );
 }
 
 /** Main and explicit release qualification retain every compiler architecture. */
@@ -103,21 +92,6 @@ export function touchesRustInput(path: string): boolean {
   );
 }
 
-function shouldRunCandidate(opts: {
-  readonly linuxRust: boolean;
-  readonly mac: boolean;
-  readonly full: boolean;
-  readonly changed: readonly string[] | null;
-}): boolean {
-  return (
-    opts.linuxRust ||
-    (opts.mac && (opts.full || (opts.changed?.some(touchesCandidate) ?? true)))
-  );
-}
-
-const tiers = ["docker", "models", "build"] as const;
-type Tier = (typeof tiers)[number];
-
 function changedTiers(opts: {
   readonly repoRoot: string;
   readonly baseRoot?: string;
@@ -125,31 +99,29 @@ function changedTiers(opts: {
 }) {
   const roots = new Set([opts.repoRoot, opts.baseRoot || opts.repoRoot]);
 
-  const inputs = tiers.map((tier) => ({
+  const inputs = JOB_TIERS.map((tier) => ({
     tier,
     trees: [...roots].map((repoRoot) => deriveJobInputs({ repoRoot, tier })),
   }));
   const selectedTiers = new Set<Tier>();
   let full = inputs.some(({ trees }) => trees.includes(null));
   if (!full) {
-    const unitFiles = new Set(
-      [...roots].flatMap((repoRoot) => buildSelectionGraph({ repoRoot }).files)
-    );
+    const testTrees = [...roots].map((repoRoot) => ({
+      repoRoot,
+      files: buildSelectionGraph({ repoRoot }).files,
+    }));
+    const unitFiles = new Set(testTrees.flatMap(({ files }) => files));
     for (const path of opts.changed ?? []) {
-      let known = isKnownCiInput(path) || unitFiles.has(path);
-      if (touchesDockerSuite(path)) {
-        selectedTiers.add("docker");
-      }
-      if (touchesStateModels(path)) {
-        selectedTiers.add("models");
-      }
+      let known = pathKind(path) === "docs" || unitFiles.has(path);
       for (const { tier, trees } of inputs) {
         if (trees.some((tree) => tree?.has(path))) {
-          known = true;
           selectedTiers.add(tier);
+          known ||= trees.some((tree) => tree?.knows(path));
         }
       }
-      full ||= !known;
+      full ||= !(
+        known || testTrees.some((tree) => readsUnitFixture({ ...tree, path }))
+      );
     }
   }
   return { full, selectedTiers };
@@ -193,47 +165,43 @@ export async function planPullRequest(opts: {
     files: selection.files,
   });
   const integration = opts.pullRequest === false;
-  const linuxRust =
-    !opts.draft && (full || opts.changed?.some(touchesRustInput) === true);
   const mac =
     !opts.draft && (integration || stablePr || opts.full || opts.mac === true);
   const tierEnabled = (tier: Tier): boolean =>
-    !opts.draft && (integration || full || selectedTiers.has(tier));
-  const e2e = tierEnabled("docker") || (!opts.draft && opts.e2e === true);
+    !opts.draft && (full || selectedTiers.has(tier));
+  const integrationTiers = !opts.draft && integration;
+  const e2e =
+    tierEnabled("docker") ||
+    integrationTiers ||
+    (!opts.draft && opts.e2e === true);
   const macos = mac && pools.macos.length > 0 ? [1, 2, 3] : [];
   const linux = [4, 5, 6, 7, 8];
-  const allJobs = full;
+  const compilerRust = tierEnabled("compilerRust");
   const compiler = selectedCompilerHosts({
     draft: opts.draft,
     mac,
-    linuxRust,
-    changed: opts.changed,
+    enabled: compilerRust || tierEnabled("compiler"),
     releaseHosts: stablePr || opts.releaseHosts === true,
-    nativeHosts: allJobs || (opts.changed?.some(touchesCompilerHost) ?? false),
-    coarseHosts: coarse.compiler_hosts,
   });
   return {
     ...coarse,
+    job_input_policy: "v1",
     // All PRs use the selector, including docs and native-only changes. The
     // prior focused path stays available for manual use, not as a second oracle.
     suite: true,
     test_focus: "",
     test_layout: "pooled",
     compiler_hosts: JSON.stringify(compiler),
-    compiler_rust: coarse.compiler_rust || linuxRust,
-    runtime_core: shouldRunCandidate({
-      linuxRust,
-      mac,
-      full: allJobs,
-      changed: opts.changed,
-    }),
+    compiler_rust: compilerRust,
+    runtime_core: tierEnabled("candidate"),
+    docs_site: full || selectedTiers.has("docs"),
     draft: opts.draft,
     test_files: JSON.stringify(selection.files),
     test_shards: JSON.stringify([...macos, ...linux]),
     selection_mode: selection.mode,
     docker_suite: e2e,
-    state_models: tierEnabled("models"),
+    state_models: tierEnabled("models") || integrationTiers,
     defer_macos: !mac,
-    build_smoke: tierEnabled("build"),
+    build_smoke: tierEnabled("build") || integrationTiers,
   };
 }

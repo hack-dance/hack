@@ -591,3 +591,27 @@ test("Compose closes a confirmed start and stop with plain lifecycle lines", asy
   expect(unrouted.exitCode).toBe(0);
   expect(unrouted.stdout).toMatch(/no address {2}up in \d+\.\ds · compose\n$/);
 }, 60_000);
+
+test("a detached Compose branch prefers its branch-qualified primary route", async () => {
+  await writeFile(
+    join(project, ".hack", "hack.config.json"),
+    JSON.stringify({
+      name: "shop",
+      dev_host: "sample.hack.local",
+      internal: { dns: false, tls: false },
+    })
+  );
+  await writeFile(
+    join(project, ".hack", "docker-compose.yml"),
+    `${ONE_SHOT_COMPOSE}    labels:
+      caddy: api.sample.hack.local, sample.hack.local
+`
+  );
+  const up = await cli(["up", "--detach", "--branch", "feature"], {
+    STUB_UP_SECONDS: "0",
+  });
+  expect(up.exitCode).toBe(0);
+  expect(up.stdout).toMatch(
+    /^https:\/\/feature\.sample\.hack\.local {2}up in \d+\.\ds · compose · 2 routes warming$/m
+  );
+}, 60_000);

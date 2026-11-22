@@ -8344,7 +8344,17 @@ async function runUpCommand({
         writeComposeStarted({
           addresses,
           running: startup.running,
-          primaryHost: devHost,
+          primaryHost:
+            branch && devHost
+              ? applyBranchToHost({
+                  branch,
+                  host: devHost,
+                  baseHosts: resolveProjectRouteBaseHosts({
+                    devHost,
+                    aliasHost,
+                  }),
+                })
+              : devHost,
           durationMs: containersStartedAt - startedAt,
         });
       }

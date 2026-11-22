@@ -528,6 +528,21 @@ fn refusals_before_the_command_is_parsed_still_reach_the_starter() {
 }
 
 #[test]
+fn a_trailing_notify_option_without_a_value_never_waits_on_a_full_stderr() {
+    let home = Home::new();
+    let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+    let (_stderr_reader, stderr_writer) = full_pipe(true);
+    let mut command = command(&home, &["service", "serve", "--notify-fd"]);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr_writer);
+    let mut service = Service(command.spawn().unwrap());
+    drop(spawning);
+    assert_eq!(service.exit().code(), Some(2));
+}
+
+#[test]
 fn an_error_exit_never_waits_on_a_full_stderr() {
     // The notify pipe is full (so the service ends with an error) and stderr is
     // a full pipe nobody reads: the error print must not keep the process.

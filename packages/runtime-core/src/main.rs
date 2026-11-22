@@ -246,15 +246,13 @@ fn prepare_serve() {
         .get(1)
         .and_then(|argument| argument.to_str())
         .and_then(hack_runtime_core::timings::requested_fd);
-    let value = arguments[after_serve..]
-        .windows(2)
-        .find(|pair| pair[0] == "--notify-fd")
-        .map(|pair| pair[1].to_str().map(str::to_owned));
-    if let Some(value) = value {
-        // A starter is waiting on a line: its exit never writes to stderr.
+    let rest = &arguments[after_serve..];
+    // `--notify-fd` anywhere after `serve`, with or without a usable value,
+    // means a starter is waiting: its exit never writes to stderr.
+    if let Some(at) = rest.iter().position(|argument| argument == "--notify-fd") {
         STARTER.store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Some(value) = value {
-            *early_notify() = notify_descriptor(&value, reserved);
+        if let Some(value) = rest.get(at + 1).and_then(|value| value.to_str()) {
+            *early_notify() = notify_descriptor(value, reserved);
         }
     }
     let failure = core

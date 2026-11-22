@@ -11,6 +11,7 @@ import {
 } from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  isNativeDetachedOwnerProcess,
   nativeDetachedUpBranchDropped,
   nativeDetachedUpFailedServices,
   nativeDetachedUpHotReload,
@@ -225,6 +226,7 @@ import {
   monitorNativeServiceExits,
   type NativeServiceExit,
 } from "./native-service-exit-monitor.ts";
+import { watchNativeStartPool } from "./native-start-pool-watch.ts";
 import { formatNativeStartupLogReport } from "./native-startup-logs.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
@@ -2164,6 +2166,9 @@ type NativeProjectStartOptions = {
    */
   readonly verifiedBuildImages?: ReadonlyMap<string, NativeVerifiedBuild>;
   readonly runtime: NativeRuntimeSelection;
+  /** Test seams for the pool watch: whether it runs, and how the start ends. */
+  readonly watchPool?: boolean;
+  readonly exitOnPoolEnd?: () => void;
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
   readonly envName?: string | null;
@@ -3430,6 +3435,19 @@ export async function startNativeProject(
   opts: NativeProjectStartOptions
 ): Promise<number> {
   let finish: (() => Promise<void>) | undefined;
+  // A detached start whose pool boot has ended releases its marker and exits,
+  // as a crash would, so the next up or down --recover need not wait for it
+  // (HACK-2550). A foreground start stays with the user's terminal.
+  const stopPoolWatch =
+    (opts.watchPool ?? isNativeDetachedOwnerProcess())
+      ? watchNativeStartPool({
+          home: opts.runtime.home,
+          onEnded: async () => {
+            await finish?.();
+            (opts.exitOnPoolEnd ?? (() => process.exit(1)))();
+          },
+        })
+      : undefined;
   try {
     return await startNativeProjectAttempt(opts, async () => {
       finish = await beginNativeProjectStartupObservation(opts.scope);
@@ -3437,6 +3455,7 @@ export async function startNativeProject(
   } catch (error) {
     throw withStartupLockBlocker(error);
   } finally {
+    stopPoolWatch?.();
     await finish?.();
   }
 }

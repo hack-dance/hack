@@ -517,10 +517,19 @@ async function awaitPendingStartup(opts: {
    * again, stop waiting and stop it (see {@link RetainedRunResumed}).
    */
   readonly resumed?: () => Promise<boolean>;
+  /** Where the one-line wait notice goes; stderr by default. */
+  readonly notice?: (line: string) => void;
 }): Promise<boolean> {
-  const deadline = performance.now() + (opts.waitMs ?? 120_000);
+  const waitMs = opts.waitMs ?? 120_000;
+  const deadline = performance.now() + waitMs;
   let waited = false;
   while (await nativeProjectStartupPending(opts.scope)) {
+    if (!waited) {
+      // Say what this command waits for, once (HACK-2550).
+      (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+        `Waiting up to ${Math.ceil(waitMs / 1000)} s for an earlier start of this instance to end; a start whose native runtime stopped ends on its own within about 15 s.`
+      );
+    }
     waited = true;
     if (opts.untilPublished && (await loadNativeProjectRun(opts.scope))) {
       return true;

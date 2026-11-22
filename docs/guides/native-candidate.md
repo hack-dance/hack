@@ -2475,6 +2475,11 @@ those records and releases the run's lease, waiting up to 20 seconds for an owne
 that is still retiring. If a recovery stopped the run but could not finish that step,
 `hack up` refuses with `E_RECOVERY_REQUIRED` and names `hack down --recover`, which
 starts a stopped pool to finish it, with data kept.
+
+A detached start (`hack up -d`) whose pool stopped or booted again ends on its
+own about 15 seconds later, as a crash would, and the next `hack up` or `hack down
+--recover` recovers its run. A command that finds an earlier start of the instance
+still running says so on stderr and waits up to two minutes for it.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,

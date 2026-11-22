@@ -58,7 +58,7 @@ fn offline_missing() -> CandidateError {
     )
 }
 
-fn epoch_seconds() -> Result<u64, CandidateError> {
+pub(super) fn epoch_seconds() -> Result<u64, CandidateError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|time| time.as_secs())
@@ -82,6 +82,10 @@ impl TagRecord {
         if self.version != 1
             || self.reference != named.canonical()
             || self.registry != named.domain
+            || named
+                .digest
+                .as_ref()
+                .is_some_and(|digest| digest != &self.source_digest)
             || registry_image::pinned_syntax(&pin(named, &self.source_digest)).is_err()
             || !(1..=3).contains(&self.selections.len())
         {
@@ -191,6 +195,96 @@ pub fn status(
     Ok(statuses.into_values().flatten().collect())
 }
 
+/// Observe already-loaded tag selections without contacting a registry or
+/// migrating any receipt. Used only for the missing-resolution diagnostic.
+pub fn present(candidate: &Candidate, references: &[&str]) -> Result<Vec<String>, CandidateError> {
+    let observer = super::engine::Observer::connect(candidate)?;
+    observer.info()?;
+    let mut observed = std::collections::BTreeMap::new();
+    let mut loaded = Vec::new();
+    for status in status(candidate, references)? {
+        for selection in &status.record.selections {
+            let key = (selection.image_id.as_str(), selection.platform.name());
+            let key = (key.0.to_owned(), key.1);
+            let present = match observed.get(&key) {
+                Some(present) => *present,
+                None => {
+                    let present = super::image_load::observe_image(
+                        &observer,
+                        &selection.image_id,
+                        selection.platform,
+                    )?;
+                    observed.insert(key, present);
+                    present
+                }
+            };
+            if present {
+                loaded.push(status.record.reference);
+                break;
+            }
+        }
+    }
+    Ok(loaded)
+}
+
+pub(super) fn recorded_pin(
+    candidate: &Candidate,
+    reference: &str,
+    platform: PlatformPolicy,
+) -> Result<Option<(ImagePlatform, String)>, CandidateError> {
+    let named = match normalize(reference).map_err(|_| invalid())? {
+        ImageReference::Named(named) if named.digest.is_some() => named,
+        _ => return Err(invalid()),
+    };
+    let root = record_directory(candidate, &named.canonical());
+    crate::reject_aliased_state(&root)?;
+    Ok(
+        read(&root.join("resolution.json"), &named)?.and_then(|entry| {
+            entry
+                .selection(platform)
+                .map(|selection| (selection.platform, selection.image_id.clone()))
+        }),
+    )
+}
+
+pub(super) fn remember_pin(
+    candidate: &Candidate,
+    reference: &str,
+    platform: PlatformPolicy,
+    selected: ImagePlatform,
+    image_id: &str,
+    at: u64,
+) -> Result<(), CandidateError> {
+    let named = match normalize(reference).map_err(|_| invalid())? {
+        ImageReference::Named(named) if named.digest.is_some() => named,
+        _ => return Err(invalid()),
+    };
+    let canonical = named.canonical();
+    let root = record_directory(candidate, &canonical);
+    let lock = state::Lock::acquire(&root)?;
+    let path = root.join("resolution.json");
+    let mut entry = read(&path, &named)?.unwrap_or_else(|| TagRecord {
+        version: 1,
+        reference: canonical,
+        registry: named.domain.clone(),
+        source_digest: named.digest.clone().unwrap_or_default(),
+        resolved_at_unix_seconds: at,
+        selections: Vec::new(),
+    });
+    if let Some(previous) = entry.selection(platform) {
+        if previous.platform != selected || previous.image_id != image_id {
+            return Err(invalid());
+        }
+        return Ok(());
+    }
+    entry.selections.push(Selection {
+        policy: platform,
+        platform: selected,
+        image_id: image_id.into(),
+    });
+    write_record(&entry, &named, &lock, &root, &path)
+}
+
 pub(super) fn resolve(
     candidate: &Candidate,
     reference: &str,
@@ -280,12 +374,31 @@ fn resolve_with(
     entry
         .selections
         .retain(|selection| selection.policy != platform);
-    entry.selections.push(selected(&resolved, platform)?);
-    entry.validate(&named)?;
-    lock.verify_path(&root)?;
-    discard_pending(&path)?;
-    state::write_before_rename(&path, &entry, &|| lock.verify_path(&root))?;
+    let selection = selected(&resolved, platform)?;
+    remember_pin(
+        candidate,
+        &resolved.pinned_reference,
+        platform,
+        selection.platform,
+        &selection.image_id,
+        entry.resolved_at_unix_seconds,
+    )?;
+    entry.selections.push(selection);
+    write_record(&entry, &named, &lock, &root, &path)?;
     entry.resolution(&named, platform, TagSource::Registry)
+}
+
+fn write_record(
+    entry: &TagRecord,
+    named: &NamedReference,
+    lock: &state::Lock,
+    root: &Path,
+    path: &Path,
+) -> Result<(), CandidateError> {
+    entry.validate(named)?;
+    lock.verify_path(root)?;
+    discard_pending(path)?;
+    state::write_before_rename(path, entry, &|| lock.verify_path(root))
 }
 
 fn discard_pending(path: &Path) -> Result<(), CandidateError> {
@@ -572,7 +685,15 @@ mod tests {
         let before = request_count.load(Ordering::SeqCst);
         for _ in 0..20 {
             let (cached, requests) = lookup(&reference, &policy);
-            assert_eq!(cached.unwrap().image_id, first.image_id);
+            let cached = cached.unwrap();
+            assert_eq!(cached.image_id, first.image_id);
+            let observed = super::super::image_load::tests::confirm_verified_tag_in_test_guest(
+                &f.0,
+                &cached.pinned_reference,
+                &cached.image_id,
+            )
+            .unwrap();
+            assert_eq!(observed, first.image_id);
             assert_eq!(requests, 0);
         }
         assert_eq!(request_count.load(Ordering::SeqCst), before);

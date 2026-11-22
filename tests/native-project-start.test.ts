@@ -5158,6 +5158,52 @@ test("startup admits each reference once and reuses validated pins for shared se
   expect(events.indexOf("before")).toBeLessThan(events.indexOf("runtime up"));
 });
 
+test("a changed 11-service plan uses the loaded selections of two recorded references", async () => {
+  const { opts } = await fixture(false);
+  const image = `sha256:${"e".repeat(64)}`;
+  const reference = "docker.io/fixture/app:stable";
+  const alias = "docker.io/fixture/app:also-stable";
+  const names = [
+    "web",
+    ...Array.from({ length: 10 }, (_, index) => `worker${index + 1}`),
+  ];
+  withImages(
+    opts,
+    Object.fromEntries(
+      names.map((name, index) => [name, index < 8 ? reference : alias])
+    )
+  );
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    originalSha256: "1".repeat(64),
+  });
+  const ensureRequests: string[] = [];
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "ensure-image") {
+      ensureRequests.push(String(request.args[3]));
+      return {
+        image_id: image,
+        pinned_reference: `docker.io/fixture/app@${image}`,
+        tag_resolution: { source: "recorded" },
+      };
+    }
+    return await invoke(request);
+  };
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) => {
+    const specs = JSON.parse(request.input.normalizedComposeJson).services;
+    expect(Object.keys(specs)).toEqual(names);
+    expect(
+      Object.values(specs).map((spec) => (spec as { image: string }).image)
+    ).toEqual(names.map(() => image));
+    return await review(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(ensureRequests).toEqual([reference, alias]);
+});
+
 test("a service outside the selected profiles is not pulled, and the start says it was left out (HACK-2338)", async () => {
   const id = `sha256:${"e".repeat(64)}`;
   for (const selected of [[], ["jobs"]] as const) {
@@ -5384,6 +5430,20 @@ test("retained startup reviews the saved content ID instead of a newly resolved 
   const invoke = opts.dependencies.invoke!;
   let beforeReview = true;
   opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "image-tag-status") {
+      return [
+        {
+          reference: "docker.io/library/redis:latest",
+          aliases: ["redis:latest"],
+          registry: "docker.io",
+          source_digest: image,
+          resolved_at_unix_seconds: Math.floor(Date.now() / 1000),
+          selections: [
+            { policy: "native", platform: "linux/arm64", image_id: image },
+          ],
+        },
+      ];
+    }
     if (request.args[1] === "ensure-image") {
       throw new Error("mutable tag was unexpectedly resolved");
     }
@@ -5453,6 +5513,20 @@ test("retained startup selects an image again when the service's emulation polic
     const ensured: string[][] = [];
     let beforeReview = true;
     opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "image-tag-status") {
+        return [
+          {
+            reference: "docker.io/library/redis:latest",
+            aliases: ["redis:latest"],
+            registry: "docker.io",
+            source_digest: retained,
+            resolved_at_unix_seconds: Math.floor(Date.now() / 1000),
+            selections: [
+              { policy: "amd64", platform: "linux/amd64", image_id: retained },
+            ],
+          },
+        ];
+      }
       if (request.args[1] === "ensure-image") {
         ensured.push([...request.args]);
         return { image_id: selected, platform: "linux/amd64" };

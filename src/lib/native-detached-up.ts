@@ -5,7 +5,12 @@ import {
   parseNativeHotReloadNotice,
   renderNativeHotReloadNotice,
 } from "../backends/native-hot-reload-notice.ts";
-import { NATIVE_IMAGE_OFFLINE_NOTICE } from "../backends/native-image-policy.ts";
+import {
+  NATIVE_IMAGE_OFFLINE_NOTICE,
+  NativeImageBlocker,
+  type NativeImageBlockerDetail,
+  nativeImageBlockerDetail,
+} from "../backends/native-image-policy.ts";
 import {
   type NativeProfileNotice,
   parseNativeProfileNotice,
@@ -58,6 +63,9 @@ type Ready = {
   readonly completed?: readonly string[];
 };
 let publishReady: ((ready: Ready) => void) | undefined;
+let publishImageBlocker:
+  | ((detail: NativeImageBlockerDetail) => Promise<void>)
+  | undefined;
 let publishImageTagOffline: (() => void) | undefined;
 let publishProfileNotice: ((notice: NativeProfileNotice) => void) | undefined;
 let publishBranchDropped: ((details: BranchDroppedSites) => void) | undefined;
@@ -341,6 +349,10 @@ export function nativeDetachedUpFailedServices(names: readonly string[]): void {
 /** Only the runtime's validated fixed detail crosses IPC; never an Error's text or logs. */
 export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
   if (!publishFailure) {
+    return;
+  }
+  if (error instanceof NativeImageBlocker) {
+    await publishImageBlocker?.(error.observation);
     return;
   }
   const { nativeRuntimeFailure } = await import(
@@ -693,6 +705,10 @@ export async function runNativeDetachedOwner(opts: {
           readonly kind: "hot-reload";
           readonly notice: NativeHotReloadNotice;
         }
+      | {
+          readonly kind: "image-blocker";
+          readonly detail: NativeImageBlockerDetail;
+        }
       | { readonly kind: "prestart-refusal"; readonly data: PrestartRefusal }
       | {
           readonly kind: "progress";
@@ -746,6 +762,11 @@ export async function runNativeDetachedOwner(opts: {
       });
     }
   };
+  publishImageBlocker = async (detail) => {
+    if (!(ready || stopping)) {
+      await send({ kind: "image-blocker", detail });
+    }
+  };
   publishImageTagOffline = () => {
     if (!stopping) {
       send("image-tag-offline");
@@ -795,6 +816,7 @@ export async function runNativeDetachedOwner(opts: {
     publishShellVariables = undefined;
     publishProfileNotice = undefined;
     publishImageTagOffline = undefined;
+    publishImageBlocker = undefined;
     publishBranchDropped = undefined;
     publishHotReload = undefined;
     publishFailure = undefined;
@@ -1032,7 +1054,14 @@ export async function startNativeDetachedUp(opts: {
     if (failed) {
       return;
     }
-    const refused = ready ? undefined : startupRefusal(value);
+    const imageBlocked =
+      !ready &&
+      isRecord(value) &&
+      value.kind === "image-blocker" &&
+      nativeImageBlockerDetail(value.detail)
+        ? new NativeImageBlocker(value.detail)
+        : undefined;
+    const refused = ready ? undefined : (imageBlocked ?? startupRefusal(value));
     if (refused) {
       failed = true;
       result.reject(refused);

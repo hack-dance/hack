@@ -1179,10 +1179,12 @@ impl<'a> Fetch<'a> {
                     "registry_token_refused"
                 },
                 "The registry token endpoint refused the Docker credentials configured for it.",
-            ));
+            )
+            .with_cause_code("registry_http_refused".into()));
         }
         if !response.status().is_success() {
-            return Err(error("The registry token endpoint refused the request."));
+            return Err(error("The registry token endpoint refused the request.")
+                .with_cause_code("registry_http_refused".into()));
         }
         #[derive(Deserialize)]
         struct Token {

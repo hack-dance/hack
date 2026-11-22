@@ -251,7 +251,7 @@ pub fn ensure_with(
     )
 }
 
-pub use super::image_tag_store::status as tag_status;
+pub use super::image_tag_store::{present as present_tags, status as tag_status};
 
 /// Resolve and verify an archive for `hack pull` without requiring a running guest.
 pub fn cache(
@@ -342,6 +342,15 @@ fn acquire_for_use(
             "Registry unavailable and the selected immutable image archive is unavailable locally.",
         )
     };
+    let requested_platform = platform;
+    let recorded = if tag.is_none() {
+        image_tag_store::recorded_pin(candidate, &pinned, platform)?
+    } else {
+        None
+    };
+    let platform = recorded
+        .as_ref()
+        .map_or(platform, |(selected, _)| PlatformPolicy::exact(*selected));
     let mut ensured = ensure_pinned_resolving(
         candidate,
         &pinned,
@@ -360,7 +369,10 @@ fn acquire_for_use(
             registry_image::acquire_with(reference, path, policy, limit, platform)
         },
         |candidate, path, receipt, reused| {
-            let config = tag.as_ref().map(|tag| tag.image_id.as_str());
+            let config = tag
+                .as_ref()
+                .map(|tag| tag.image_id.as_str())
+                .or_else(|| recorded.as_ref().map(|(_, config)| config.as_str()));
             if config.is_some_and(|id| id != receipt.image_id) {
                 return Err(refused(
                     "Cached image differs from the verified registry configuration.",
@@ -408,6 +420,20 @@ fn acquire_for_use(
             .map(|_| ())
         },
     )?;
+    if !offline
+        && (!ensured.archive_reused || (observer.is_some() && tag.is_none() && recorded.is_none()))
+    {
+        // Publication is complete. A pin-record failure cannot leave an
+        // archive without its acquisition receipt.
+        image_tag_store::remember_pin(
+            candidate,
+            &ensured.pinned_reference,
+            requested_platform,
+            ensured.platform,
+            &ensured.image_id,
+            image_tag_store::epoch_seconds()?,
+        )?;
+    }
     if !import {
         ensured.phase = "archive-verified";
     }

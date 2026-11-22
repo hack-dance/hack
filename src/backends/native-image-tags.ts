@@ -4,11 +4,14 @@ import { isRecord } from "../lib/guards.ts";
 import {
   NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
   NATIVE_IMAGE_OFFLINE_NOTICE,
+  NativeImageBlocker,
+  nativeImageBlockerDetail,
   nativeImagePolicyArgs,
   nativeImageTagTtlSeconds,
 } from "./native-image-policy.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import { nativeServiceActive } from "./native-project-builds.ts";
+import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
   prepareNativeProjectInput,
   readNativeComposeBytes,
@@ -70,42 +73,29 @@ export async function pullNativeProjectImages(opts: {
       envName: input.effectiveEnvName,
     }),
   });
-  const specs = services(JSON.parse(adapted.normalizedComposeJson));
+  const specs = Object.entries(
+    services(JSON.parse(adapted.normalizedComposeJson))
+  ).flatMap(([name, spec]) =>
+    isRecord(spec) && nativeServiceActive(spec, opts.profiles)
+      ? [[name, spec] as const]
+      : []
+  );
   const seen = new Set<string>();
   const pins = new Map<string, string>();
   const results: unknown[] = [];
   let reportedOffline = false;
   const invoke = opts.invoke ?? invokeNativeRuntime;
   const policyArgs = nativeImagePolicyArgs();
-  const canonical = new Map<string, string>();
+  const canonical = await admitNativeProjectImages({
+    runtime: opts.runtime,
+    projectRoot: opts.project.projectRoot,
+    specs: Object.fromEntries(specs),
+    invoke,
+  });
 
-  for (const [name, spec] of Object.entries(specs)) {
-    if (
-      !(isRecord(spec) && nativeServiceActive(spec, opts.profiles)) ||
-      typeof spec.image !== "string" ||
-      IMAGE_ID.test(spec.image)
-    ) {
+  for (const [name, spec] of specs) {
+    if (typeof spec.image !== "string" || IMAGE_ID.test(spec.image)) {
       continue;
-    }
-    if (!canonical.has(spec.image)) {
-      const admitted = await invoke({
-        runtime: opts.runtime,
-        cwd: opts.project.projectRoot,
-        args: [
-          "runtime",
-          "admit-image",
-          "--reference",
-          spec.image,
-          "--json",
-          ...policyArgs,
-        ],
-      });
-      if (!(isRecord(admitted) && typeof admitted.reference === "string")) {
-        throw new ClosedCliError(
-          "Native image admission did not return a canonical reference."
-        );
-      }
-      canonical.set(spec.image, admitted.reference);
     }
     const reference = canonical.get(spec.image) ?? spec.image;
     const policy = nativeEmulationPolicy(adapted.amd64Emulation, name);
@@ -124,6 +114,7 @@ export async function pullNativeProjectImages(opts: {
     });
     if (
       !isRecord(result) ||
+      result.phase !== "archive-verified" ||
       typeof result.image_id !== "string" ||
       !IMAGE_ID.test(result.image_id) ||
       typeof result.pinned_reference !== "string" ||
@@ -211,6 +202,42 @@ async function readTagStatuses(
     );
   }
   return result;
+}
+
+export async function nativeImageBlocker(
+  opts: ReadTagStatuses & {
+    readonly missing: string;
+    readonly references: readonly string[];
+    readonly confirmed: ReadonlySet<string>;
+  }
+): Promise<NativeImageBlocker> {
+  const result = await (opts.invoke ?? invokeNativeRuntime)({
+    runtime: opts.runtime,
+    cwd: opts.projectRoot,
+    args: [
+      "runtime",
+      "image-tag-status",
+      "--present",
+      "--json",
+      ...opts.references,
+    ],
+    timeoutMs: 10_000,
+  }).catch(() => null);
+  let present: readonly string[] | null = opts.confirmed.size
+    ? [...opts.confirmed].slice(0, 32)
+    : null;
+  if (
+    Array.isArray(result) &&
+    result.every((image) => typeof image === "string")
+  ) {
+    present = [...new Set([...opts.confirmed, ...result])].slice(0, 32);
+  }
+  const observation = { missing: opts.missing, present };
+  return new NativeImageBlocker(
+    nativeImageBlockerDetail(observation)
+      ? observation
+      : { missing: "unknown", present: null }
+  );
 }
 
 export async function nativeImageTagStatuses(

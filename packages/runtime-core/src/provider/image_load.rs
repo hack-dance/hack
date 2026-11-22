@@ -651,6 +651,17 @@ impl ImportTarget for Engine<'_> {
     }
 }
 
+pub(super) fn observe_image(
+    observer: &Observer<'_>,
+    image: &str,
+    platform: ImagePlatform,
+) -> Result<bool, CandidateError> {
+    if platform.emulated() && !observer.guest().amd64_emulation() {
+        return Ok(false);
+    }
+    inspect(image, platform, || observer.image(image))
+}
+
 /// How long an import waits for a provider lease that another operation holds, such as the
 /// `graph inspect` behind `hack ps`. The image cache publishes a complete archive and its
 /// acquisition receipt before starting import. On expiry the load refuses `provider_busy`
@@ -1768,6 +1779,34 @@ pub(super) mod tests {
             refusal.message,
             "Cached image differs from the verified registry configuration."
         );
+    }
+
+    pub(in crate::provider) fn confirm_verified_tag_in_test_guest(
+        candidate: &Candidate,
+        pin: &str,
+        image: &str,
+    ) -> Result<String, CandidateError> {
+        let path = candidate.checkout.join("intentionally-unopened.tar");
+        let archive = CachedArchive {
+            path: &path,
+            sha: &"f".repeat(64),
+            image,
+            bytes: 0,
+            pin,
+            platform: ImagePlatform::LinuxArm64,
+            recorded_config: Some(image),
+            require_present: false,
+        };
+        load_cached_with(
+            candidate,
+            &archive,
+            &ImagePolicy::default(),
+            &test_guest(),
+            || Ok(serde_json::json!({"Id":image,"Architecture":"arm64","Os":"linux"})),
+            || panic!("recorded tag must not touch the registry"),
+            |_| panic!("live observation must not import"),
+        )
+        .map(|receipt| receipt.image_id)
     }
 
     #[test]

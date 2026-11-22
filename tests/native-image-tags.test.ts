@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { retainCurrentImageTags } from "../src/backends/native-image-tags.ts";
+import {
+  nativeImageBlocker,
+  retainCurrentImageTags,
+} from "../src/backends/native-image-tags.ts";
 
 const image = `sha256:${"a".repeat(64)}`;
 const other = `sha256:${"b".repeat(64)}`;
@@ -65,4 +68,32 @@ test("refresh and explicit offline go through runtime selection for retained tag
     expect(response.has("web")).toBe(false);
     expect(response.get("db")).toBe(image);
   }
+});
+
+test("an unavailable tag names the missing image and the locally observed images", async () => {
+  const missing = "docker.io/fixture/image:missing";
+  const present = "docker.io/fixture/image:loaded";
+  const refusal = await nativeImageBlocker({
+    runtime,
+    projectRoot,
+    missing,
+    references: [missing, present],
+    confirmed: new Set(),
+    invoke: async (request) => {
+      expect(request.args).toEqual([
+        "runtime",
+        "image-tag-status",
+        "--present",
+        "--json",
+        missing,
+        present,
+      ]);
+      return [present];
+    },
+  });
+  expect(refusal.message.split("\n")).toEqual([
+    `Image unavailable: ${missing} has no usable recorded resolution in the running guest.`,
+    `Already present: ${present}.`,
+    "Run hack pull when the registry is reachable, then retry hack up.",
+  ]);
 });

@@ -62,7 +62,11 @@ import {
   NATIVE_IMAGE_OFFLINE_NOTICE,
   nativeImagePolicyArgs,
 } from "./native-image-policy.ts";
-import { retainCurrentImageTags, usedOfflineTag } from "./native-image-tags.ts";
+import {
+  nativeImageBlocker,
+  retainCurrentImageTags,
+  usedOfflineTag,
+} from "./native-image-tags.ts";
 import {
   type NativePreparedBase,
   preparedBaseArguments,
@@ -823,6 +827,9 @@ async function pinNativeProjectImages(opts: {
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<void> {
   let reportedOffline = false;
+  const confirmed = new Set<string>();
+  const references = [...new Set(opts.canonicalImages.values())];
+  const offlineReferences = new Set<string>();
   const pinnedImages = new Map<string, string>();
   const immutableReferences = new Map<string, string | null>();
   const canonical = (image: string) => opts.canonicalImages.get(image) ?? image;
@@ -877,9 +884,31 @@ async function pinNativeProjectImages(opts: {
           )
           .map(([service]) => service),
       policy,
-      imageTagMode: opts.imageTagMode,
+      imageTagMode: offlineReferences.has(reference)
+        ? "offline"
+        : opts.imageTagMode,
       invoke: opts.invoke,
+    }).catch(async (error: unknown) => {
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        (error.nativeCode === "image_tag_offline_missing" ||
+          error.nativeCode === "image_archive_offline_missing")
+      ) {
+        throw await nativeImageBlocker({
+          runtime: opts.runtime,
+          projectRoot: opts.projectRoot,
+          missing: reference,
+          references,
+          confirmed,
+          invoke: opts.invoke,
+        });
+      }
+      throw error;
     });
+    confirmed.add(reference);
+    if (ensured.offline) {
+      offlineReferences.add(reference);
+    }
     if (ensured.offline && !reportedOffline) {
       if (!reportNativeImageTagOffline()) {
         opts.warn(NATIVE_IMAGE_OFFLINE_NOTICE);

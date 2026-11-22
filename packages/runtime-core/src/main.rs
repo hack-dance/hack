@@ -1068,6 +1068,18 @@ fn run() -> Result<(), CandidateError> {
         ] => {
             image_for_command(&requested, command, reference, emulation, policy)?;
         }
+        [
+            "runtime",
+            "image-tag-status",
+            "--present",
+            "--json",
+            references @ ..,
+        ] => {
+            print_json(&hack_runtime_core::provider::image_ensure::present_tags(
+                &discover_candidate(&requested)?,
+                references,
+            )?)?;
+        }
         ["runtime", "image-tag-status", "--json", references @ ..] => {
             print_json(&hack_runtime_core::provider::image_ensure::tag_status(
                 &discover_candidate(&requested)?,

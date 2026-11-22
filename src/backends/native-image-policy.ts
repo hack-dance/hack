@@ -1,5 +1,5 @@
 import { isAbsolute } from "node:path";
-import { HackCliError } from "../lib/cli-result.ts";
+import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 
 /** Fixed bounds the native runtime also enforces (`image_policy.rs`). */
 const MIN_BUDGET_MIB = 16;
@@ -14,6 +14,55 @@ const LOCAL_REGISTRY = /^(?:http:\/\/)?[a-z0-9.-]+(?::[0-9]{1,5})?$/;
 
 export const NATIVE_IMAGE_OFFLINE_NOTICE =
   "Registry unavailable or offline mode selected. Using recorded image tag resolutions.";
+
+const DISPLAY_REFERENCE = /^[A-Za-z0-9._:/@-]{1,512}$/;
+export type NativeImageBlockerDetail = {
+  readonly missing: string;
+  readonly present: readonly string[] | null;
+};
+
+export function nativeImageBlockerDetail(
+  value: unknown
+): value is NativeImageBlockerDetail {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("missing" in value && "present" in value)
+  ) {
+    return false;
+  }
+  return (
+    typeof value.missing === "string" &&
+    DISPLAY_REFERENCE.test(value.missing) &&
+    (value.present === null ||
+      (Array.isArray(value.present) &&
+        value.present.length <= 32 &&
+        value.present.every(
+          (image: unknown) =>
+            typeof image === "string" && DISPLAY_REFERENCE.test(image)
+        )))
+  );
+}
+
+export class NativeImageBlocker extends ClosedCliError {
+  readonly observation: NativeImageBlockerDetail;
+
+  constructor(observation: NativeImageBlockerDetail) {
+    const { missing, present } = observation;
+    const known =
+      present === null
+        ? "could not verify"
+        : present.join(", ") || "none confirmed";
+    super(
+      [
+        `Image unavailable: ${missing} has no usable recorded resolution in the running guest.`,
+        `Already present: ${known}.`,
+        "Run hack pull when the registry is reachable, then retry hack up.",
+      ].join("\n")
+    );
+    this.observation = observation;
+  }
+}
 
 export const DEFAULT_NATIVE_IMAGE_TAG_TTL_SECONDS = 86_400;
 

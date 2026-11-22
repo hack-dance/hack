@@ -26,7 +26,7 @@ pub struct ServiceExecResult {
 /// Bind an explicit service operation to the exact reviewed graph receipt.
 pub fn service_exec_generation(receipt: &Receipt) -> Result<String, CandidateError> {
     let bytes = serde_json::to_vec(receipt).map_err(|_| refused())?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(format!("{:x}", crate::Hex(Sha256::digest(bytes))))
 }
 
 fn refused() -> CandidateError {

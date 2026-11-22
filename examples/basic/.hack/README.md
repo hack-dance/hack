@@ -95,8 +95,9 @@ db:
     - postgres-data:/var/lib/postgresql/data
   # Healthy about 250 ms after Postgres is ready; checked every 10 s after that.
   healthcheck:
-    test: ["CMD", "pg_isready", "-U", "postgres", "-d", "mydb"]
+    test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "mydb"]
     start_period: 30s
+    # Requires Docker Engine 25+. On older engines, remove start_interval to check at interval.
     start_interval: 250ms
     interval: 10s
     timeout: 3s

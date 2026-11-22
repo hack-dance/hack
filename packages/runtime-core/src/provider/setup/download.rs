@@ -184,7 +184,7 @@ fn hash(file: &mut File, pin: &FilePin) -> Result<(), CandidateError> {
         }
         hash.update(&buffer[..n]);
     }
-    if format!("{:x}", hash.finalize()) != pin.archive_sha256 {
+    if format!("{:x}", crate::Hex(hash.finalize())) != pin.archive_sha256 {
         return Err(error(pin, "setup_hash_mismatch", "pinned SHA-256 mismatch"));
     }
     if total != pin.size_bytes {

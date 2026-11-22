@@ -84,7 +84,35 @@ Phases, each optional through `--phases`:
 Read the numbers with these limits:
 
 - A start counts only when the routed checks pass, and a data marker written after the
-  first start must read back after every later start.
+  first start must read back after every later start. All routes are checked at once,
+  20 ms apart. A start sample can be late by the rest of a check round already under
+  way when the routes became ready, plus 20 ms and one more round: on a local proxy,
+  tens of milliseconds. Each start timing also records `readySeconds`, the wait after
+  the CLI command exited.
+- Both backends run the same health checks: the fixture's Postgres and Redis checks run
+  in the engine on both, with `start_interval: 250ms` and a 10 s steady interval, and
+  its routed services have no command check, because native probes their routes itself.
+  `result.json` records under `method` the readiness mode, the Compose file's SHA-256
+  and each service's health check on that lane. A command check that runs on Compose
+  only is listed under `unevenHealthChecks` and noted, and so is a command check whose
+  start settings differ between lanes because native fills in a 250 ms start interval
+  and a 60 s start period that the Compose backend does not. A service with no test in the
+  Compose file uses its image's own check, which the benchmark does not inspect; it is
+  listed under `unknownHealthChecks` (the fixture's images define none).
+
+  ![Which health check a lane runs](diagrams/bench-health-checks.svg)
+
+  [Diagram source](diagrams/bench-health-checks.mmd). It follows native review in
+  `packages/runtime-core/src/project/compose/service.rs` and `routing.rs`.
+- Results from before Nov 2026 used fixture version 1 and polled routes one after the
+  other, 500 ms apart, which added up to half a second to each start. To reproduce them,
+  copy `scripts/fixtures/runtime-bench/legacy/docker-compose.v1.yml` over
+  `.hack/docker-compose.yml` in the fixture copy and pass `--legacy-readiness`. Version 1
+  is not like for like: its API health check (`bun -e fetch` every 5 s) runs on Compose
+  only, and its 2 s intervals delay each start by about 2 s on Compose. A native build
+  that fills in a 250 ms start interval when a check sets none no longer has that delay
+  on native, so version 1 reproduces earlier native numbers only with the CLI build that
+  produced them.
 - Each timing carries the 1-minute load before and after. Above `--max-load` (default
   40) it is flagged and kept in `result.json`. `summary` groups timings by operation and
   leaves flagged ones out of its medians; each phase's own figures use every completed
@@ -876,3 +904,10 @@ without a separate safety review and approval.
 
 Native recovery investigations can use the explicit, value-free
 [process census phase diagnostics](guides/native-census-diagnostics.md).
+
+## Built-in timing contract
+
+The Rust runtime emits opt-in [versioned timing spans](reference/timings.md) on a
+dedicated inherited pipe. The TypeScript reader and public CLI timing flags are not
+implemented yet. Current wrappers add observations without changing lifecycle state
+machines; local format tests do not establish command coverage or low overhead.

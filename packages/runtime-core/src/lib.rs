@@ -1,13 +1,17 @@
 //! Checkout-local v5 candidate contracts and experimental private runtime lifecycle.
 //! Project planning remains read-only; provider commands are explicit and separately qualified.
 
+pub mod canonical_digest;
 pub mod node;
 #[cfg(test)]
 pub(crate) mod owned_tmp_root;
 pub mod project;
 pub mod provider;
+pub mod service;
+pub mod store;
 #[cfg(test)]
 mod test_root;
+pub mod timings;
 #[cfg(test)]
 pub(crate) use test_root::{private_test_root, unique_test_root};
 
@@ -20,7 +24,11 @@ pub const CANDIDATE_VERSION: &str = "5.0.0-dev.6";
 
 mod error;
 mod error_stop_diagnostics;
-pub use error::{CandidateError, ErrorMessage, LogFailurePhase};
+mod hex;
+pub mod sha256_backend;
+mod sha256_guard;
+pub use error::{CandidateError, ErrorMessage, LogFailurePhase, ProbeFinding, ProbeReason};
+pub use hex::Hex;
 #[cfg(all(test, feature = "native-config-plan"))]
 mod test_budget;
 #[cfg(test)]
@@ -133,9 +141,9 @@ impl Candidate {
             digest.update(project_text.as_bytes());
             digest.update(b"\0");
             digest.update(branch.as_bytes());
-            format!("{:x}", digest.finalize())
+            format!("{:x}", crate::Hex(digest.finalize()))
         } else {
-            format!("{:x}", Sha256::digest(project_text.as_bytes()))
+            format!("{:x}", crate::Hex(Sha256::digest(project_text.as_bytes())))
         };
         let planned_paths = PlannedPaths {
             provider_home: self.state_root.join("run/provider"),

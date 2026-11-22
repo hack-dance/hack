@@ -286,7 +286,11 @@ fn rebase_selection_with(
         return Err(refused());
     }
     let bytes = serde_json::to_vec(&(receipt, &previous)).map_err(|_| refused())?;
-    Ok((format!("{:x}", Sha256::digest(bytes)), previous, next))
+    Ok((
+        format!("{:x}", crate::Hex(Sha256::digest(bytes))),
+        previous,
+        next,
+    ))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -301,7 +305,9 @@ fn digest(value: &impl Serialize) -> Result<String, CandidateError> {
     use sha2::{Digest, Sha256};
     Ok(format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(value).map_err(|_| refused())?)
+        crate::Hex(Sha256::digest(
+            serde_json::to_vec(value).map_err(|_| refused())?
+        ))
     ))
 }
 

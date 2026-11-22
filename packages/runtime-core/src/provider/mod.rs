@@ -139,7 +139,7 @@ pub use source_probe::{ProbeReceipt, verify as verify_source};
 pub use source_sync::{SyncReceipt, SyncSession, sync_status};
 pub mod setup;
 mod socket_requests;
-mod state;
+pub(crate) mod state;
 mod tree_witness;
 pub use lifecycle::{
     PreparedBaseBuilt, build_prepared_base, check_project_share, down, prepared_base_status,
@@ -163,7 +163,9 @@ pub struct Status {
     pub lifecycle_qualified: bool,
     pub artifact_prepared: bool,
     pub engine_prepared: bool,
-    /// The optional pinned BuildKit client; verified whenever its record exists.
+    /// The pinned BuildKit client, which only image builds need. `false` for a home
+    /// that never prepared it; a prepared client is verified, and one that changed is
+    /// an error.
     pub builder_prepared: bool,
     pub memory_admission: admission::Admission,
     pub runtime_effects: [&'static str; 0],
@@ -186,14 +188,7 @@ pub fn probe(candidate: &Candidate) -> Result<Status, CandidateError> {
     if engine_prepared {
         artifact::verify_engine(candidate)?;
     }
-    let builder_prepared = candidate
-        .state_root
-        .join("providers/buildx.json")
-        .try_exists()
-        .map_err(state::io)?;
-    if builder_prepared {
-        artifact::verify_builder(candidate)?;
-    }
+    let builder_prepared = artifact::builder_prepared(candidate)?;
     Ok(Status {
         checkpoint: "WU02-provider-preflight",
         lifecycle_qualified: false,

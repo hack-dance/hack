@@ -40,6 +40,10 @@ import {
   resolveNativeDetachedStartLimits,
 } from "./native-detached-start-deadline.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "./native-environment-notices.ts";
+import {
+  NATIVE_BUILDER_NOT_PREPARED,
+  nativeBuilderMissingDetachedRefusal,
+} from "./native-image-builder.ts";
 
 export const NATIVE_DETACHED_OWNER_ARGUMENT =
   "--internal-native-detached-owner";
@@ -422,6 +426,14 @@ function startupFailureError(failure: StartupFailure): HackCliError {
     return new HackCliError({
       code: "E_STARTUP_INCOMPLETE",
       message: `Native detached startup refused (provider_pin_changed); ${NATIVE_PROVIDER_PIN_MESSAGE}`,
+    });
+  }
+  if (failure.code === NATIVE_BUILDER_NOT_PREPARED) {
+    // A detached owner passes only the code; the remedy is the same sentence
+    // the foreground refusal, setup and doctor print.
+    return new HackCliError({
+      code: "E_STARTUP_INCOMPLETE",
+      message: `${nativeBuilderMissingDetachedRefusal()} ${NATIVE_IDLE_POOL_NOTE}`,
     });
   }
   let detail = "";
@@ -866,6 +878,9 @@ function launchLimits(
   return override ?? resolveNativeDetachedStartLimits(process.env);
 }
 
+/** Upper bound for handing the `cancel` message to a live local IPC channel. */
+const CANCEL_SEND_MS = 5000;
+
 /** Wait for `promise`, but never longer than `ms` (default 120 s). */
 async function settleWithin(
   promise: Promise<void>,
@@ -1092,11 +1107,20 @@ export async function startNativeDetachedUp(opts: {
         // Acceptance may already be queued when the caller cancels. Explicit
         // cancellation requests stop even if the child accepted just before
         // it observed disconnection; disconnection alone cannot undo that.
-        child.send("cancel", () => {
-          if (child.connected) {
-            child.disconnect();
-          }
+        // The CLI exits explicitly once this command returns, so wait (bounded)
+        // until the message has been handed to the channel.
+        // A closed channel or an exited child ends the wait as well: then the
+        // callback may never run, and there is nobody left to deliver to.
+        const sent = new Promise<void>((resolve) => {
+          child.once("disconnect", resolve);
+          child.send("cancel", () => {
+            if (child.connected) {
+              child.disconnect();
+            }
+            resolve();
+          });
         });
+        await settleWithin(Promise.race([sent, exited]), CANCEL_SEND_MS);
       }
     }
     // After a timeout, give the owner a bounded chance to stop what it started

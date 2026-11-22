@@ -119,7 +119,7 @@ fn invalid(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     refusal("native_build_request", message)
 }
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    format!("{:x}", crate::Hex(Sha256::digest(bytes)))
 }
 fn hex64(value: &str) -> bool {
     value.len() == 64
@@ -314,7 +314,7 @@ pub(super) fn namespace(root: &Path, branch: Option<&str>) -> String {
     digest.update(root.as_os_str().as_encoded_bytes());
     digest.update(b"\0");
     digest.update(branch.unwrap_or("").as_bytes());
-    format!("{:x}", digest.finalize())
+    format!("{:x}", crate::Hex(digest.finalize()))
 }
 
 /// Build-argument names BuildKit or buildx interpret themselves rather than passing to
@@ -538,7 +538,10 @@ pub(super) fn prepare(request: BuildRequest) -> Result<Inputs, CandidateError> {
             digest.update(name.as_bytes());
             digest.update(b"\0");
             digest.update(value.as_bytes());
-            (name.as_str(), format!("{:x}", digest.finalize()))
+            (
+                name.as_str(),
+                format!("{:x}", crate::Hex(digest.finalize())),
+            )
         })
         .collect();
     let ignore = IgnoreFiles::read(&context, &dockerfile)?;
@@ -1276,7 +1279,7 @@ fn supervise(
     filter: output::Filter,
     sink: Box<dyn Write + Send>,
 ) -> Result<Ended, CandidateError> {
-    let mut child = command.spawn().map_err(|_| {
+    let mut child = super::process::spawn_child(&mut command).map_err(|_| {
         refusal(
             "native_build_client",
             "The pinned build client could not be started.",

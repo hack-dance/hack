@@ -191,7 +191,7 @@ fn memory_return_is_started_after_the_engine_answers_and_before_the_running_phas
             .find(needle)
             .unwrap_or_else(|| panic!("missing {needle}"))
     };
-    let engine = position("engine_ping(&socket(candidate, owner, \"docker.sock\")?)?;");
+    let engine = position("engine_ping(|| socket(candidate, owner, \"docker.sock\"))?;");
     let build_network = position("include_str!(\"guest-build-network.sh\")");
     let memory = position("start_memory_return(owner, |script, args, background| {");
     let running = memory
@@ -408,6 +408,12 @@ fn a_reading_is_kept_only_after_a_successful_stop_and_never_changes_its_result()
 fn down_reads_the_memory_peak_before_the_stop_and_keeps_it_only_after() {
     let source = include_str!("../lifecycle.rs");
     let down = source.find("pub fn down(candidate: &Candidate)").unwrap();
+    let wrapper = &source[down..down + source[down..].find("\n}\n").unwrap()];
+    assert!(wrapper.contains("crate::timings::Step::VmStop"));
+    assert!(wrapper.contains("down_observed(candidate)"));
+    let down = source
+        .find("fn down_observed(candidate: &Candidate)")
+        .unwrap();
     let body = &source[down..down + source[down..].find("\n}\n").unwrap()];
     let live = body.find("verify_live(candidate, &owner)?;").unwrap();
     let read = body.find("read_memory_peak(").unwrap();

@@ -243,22 +243,47 @@ test("each example Compose file follows the routing, image and deps rules", asyn
   ).toEqual([]);
 });
 
-/** Other example projects held to the same startup and shutdown rules. */
-const TIMING_ONLY_EXAMPLES = [
-  "examples/basic",
-  "examples/next-app",
+const TOP_LEVEL_EXAMPLES = ["examples/basic", "examples/next-app"];
+const PATTERN_EXAMPLES = [
   "examples/patterns/p01-dependency-bootstrap",
   "examples/patterns/p02-portable-toolchain",
   "examples/patterns/p07-capability-overlays",
 ];
 
 test("each example starts on the first passing health check and stops at once", async () => {
-  for (const dir of [...examples, ...TIMING_ONLY_EXAMPLES]) {
+  for (const dir of [...examples, ...PATTERN_EXAMPLES, ...TOP_LEVEL_EXAMPLES]) {
     const compose = await readRecord(
       join(REPO_ROOT, dir, ".hack/docker-compose.yml")
     );
     expect(startupTimingIssues(compose), dir).toEqual([]);
   }
+});
+
+test("Postgres health checks in every example wait for TCP readiness", async () => {
+  const composeFiles = new Bun.Glob("**/.hack/docker-compose.yml");
+  const examplesRoot = join(REPO_ROOT, "examples");
+  let checked = 0;
+  for await (const path of composeFiles.scan({
+    cwd: examplesRoot,
+    dot: true,
+  })) {
+    const compose = await readRecord(join(examplesRoot, path));
+    const services = isRecord(compose.services) ? compose.services : {};
+    for (const [name, service] of Object.entries(services)) {
+      if (!(isRecord(service) && isRecord(service.healthcheck))) {
+        continue;
+      }
+      const check = service.healthcheck.test;
+      const command = Array.isArray(check) ? check.join(" ") : check;
+      if (typeof command === "string" && /\bpg_isready\b/.test(command)) {
+        checked++;
+        expect(command, `${path}: ${name}`).toMatch(
+          /(?:^|\s)(?:-h\s+|--host(?:=|\s+))127\.0\.0\.1(?:\s|$)/
+        );
+      }
+    }
+  }
+  expect(checked).toBeGreaterThan(0);
 });
 
 test("negative controls: the startup timing rules reject slow settings", () => {
@@ -752,7 +777,7 @@ test("include markers can only name files under examples/", async () => {
 composeConfigTest(
   "docker compose config accepts every example Compose file",
   async () => {
-    for (const dir of examples) {
+    for (const dir of [...examples, ...TOP_LEVEL_EXAMPLES]) {
       const { root, project } = await copyExample(dir);
       const child = Bun.spawn({
         cmd: [

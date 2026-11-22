@@ -562,12 +562,32 @@ bridge to the container's target port, after the graph is ready. The rules:
 - A connection is forwarded only to the container incarnation the bridge was
   started for. A replaced container does not receive traffic from an older
   publication.
-- Stopping the foreground owner (Ctrl-C) closes each host listener before its
-  bridge and the containers stop, then retires the publication. Dead-owner
+- Routes and published ports start as one batch: one reservation, one provider
+  lease that starts every bridge together, then every host listener launched at
+  once. Before and after the bridges start, and again before each listener
+  launches, each target container's identity (ID, network attachment, start
+  time, VM boot) and health are checked again; a bridge whose container changed
+  or became unhealthy is stopped and `up` refuses with `bridge_generation_stale`.
+- Stopping the foreground owner (Ctrl-C) closes every host listener of the
+  graph (together) before its bridges stop, all in one guest call, and before
+  the containers stop, then retires the publication. Dead-owner
   cleanup retires a publication only after proving its owner is gone. A
   retaining restart publishes the same ports again.
 - `graph run` and other non-foreground paths do not publish ports and keep
   refusing them with `graph_subset`.
+
+How one batch of bridges starts and how a run's bridges are released is
+modeled in [bridge-batch](../../tests/models/tla/bridge-batch/COVERAGE.md):
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/diagrams/bridge-batch-start.dark.svg">
+  <img alt="State chart: reserve, three fences around one relay batch, then every publisher child, ready or failed" src="../assets/diagrams/bridge-batch-start.light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/diagrams/bridge-batch-release.dark.svg">
+  <img alt="State chart: release every listener, then stopping, stop, stopped, remove and drop for the whole run; a crash resumes" src="../assets/diagrams/bridge-batch-release.light.svg">
+</picture>
 
 The loopback check is point-in-time. A process that binds the same port on all
 interfaces between the check and native's own bind can still share loopback
@@ -1032,9 +1052,9 @@ truthy `HACK_NO_INTERACTIVE` values `1`, `true`, `yes` or `on`, ignoring case an
 surrounding whitespace) refuses with `E_INTERACTIVE_REQUIRED` unless
 `--accept-downloads` explicitly consents. Interactive `up` can offer setup with
 the same explicit consent; noninteractive `up` refuses until setup is complete.
-The installer and probe never download provider files. The optional BuildKit client
-is still prepared separately below.
-Setup lists the pinned SmolVM, Docker engine and four Alpine guest packages,
+The installer and probe never download provider files.
+Setup lists the pinned SmolVM, Docker engine, four Alpine guest packages and the
+BuildKit client (the image builder),
 including exact compressed sizes, hosts, hashes, private cache and destinations.
 
 Manual bundle frontends use `$HACK_HOME/native-runtime` or
@@ -1103,15 +1123,23 @@ hashes decide acceptance, and the existing SmolVM prepare step also checks its
 code signature. The qualification script's optional upstream checksum comparison
 remains a separate check.
 
-Successful `runtime setup --json` output includes `status`, `probe` and a `files`
-array. Each archive read has `name`, `outcome` (`downloaded`, `resumed`, `reused` or `offline`),
+Successful `runtime setup --json` output includes `status`, `builder`, `probe` and a `files`
+array. `status` and the archive entries describe the provider set (SmolVM, engine
+and guest packages). `builder` describes the image builder: `installed` when this
+run prepared it, `reused` when it was already prepared and verified,
+`not_prepared` when the home has none and this run had neither download consent
+nor the offline builder file, and `changed` when a builder is there that does not
+verify against the pinned release. The builder's own file joins `files` when this run
+read it.
+Each archive read has `name`, `outcome` (`downloaded`, `resumed`, `reused` or `offline`),
 `size_bytes`, `downloaded_bytes` and `reused_bytes`. The counts account for pinned
 artifacts this invocation, excluding HTTP headers and discarded prefixes.
 A resumed file counts only its new suffix as downloaded; a server that ignores
 Range restarts the download and counts the whole file as downloaded. Offline
 inputs report `offline`; verified cache files report `reused`. Both have zero
 downloaded bytes. Complete-home reuse verifies the installed tree without reading
-archives and returns `status: "reused"` with an empty `files` list.
+archives and returns `status: "reused"` with an empty `files` list, or with the
+image builder's file alone when this run added it.
 If another process finishes installation after this run read archives, the result
 keeps those actual archive entries even though its final status is `reused`.
 No input paths appear in these entries.
@@ -1121,7 +1149,29 @@ verifies the complete provider set, syncs it, then publishes the provider direct
 under the lifecycle lock. Interrupted staging is rebuilt on rerun. A complete
 matching install is verified before consent and reused without a prompt, consent
 flag, network or preparation; setup
-ends with `runtime probe --profile development`. An existing incomplete, changed
+ends with `runtime probe --profile development`.
+
+After the provider set is published or reused, setup adds the image builder with
+the manual `prepare-builder` function, under the lock that function takes. This
+step is additive: it writes the builder's own directory and record and the
+download cache, and never stages, publishes or prepares the provider set again,
+which a running pool may be executing from. A builder that is already prepared is
+verified and left alone. A complete home that has no image builder (a home set up
+by an earlier build, or offline without `--builder`) is never refused and never
+downloaded to without consent: `--accept-downloads` or the offline `--builder`
+file adds the builder and nothing else, and without either the result is
+`builder: "not_prepared"` with the home unchanged. `hack native setup` then prints
+one line naming `native setup --accept-downloads`.
+
+A builder that is there but does not verify never fails setup. The result is
+`builder: "changed"` with exit 0 and the provider set reported as before, with or
+without consent or `--builder`: setup never deletes or overwrites it. Builds and
+`runtime probe` keep refusing it with `artifact_digest_mismatch`. `hack native setup`
+prints one warning that names the builder's directory and record by their paths
+under the native home (`.hack-local/providers/buildx-<version>-darwin-arm64` and
+`.hack-local/providers/buildx.json`). To replace the builder, remove those two and
+run setup with `--accept-downloads` (or the offline `--builder` file). Removing only
+the directory works too: the stale record is replaced. An existing incomplete, changed
 or differently pinned provider directory is preserved and refused as
 `setup_existing_invalid`: finish the manual steps, repair a changed tree, or use
 a fresh home. Setup never upgrades a home's provider pin in place.
@@ -1139,6 +1189,12 @@ network client:
   --engine-archive /absolute/docker-archive.tgz \
   --network-tools-directory /absolute/private/pinned-apks
 ```
+
+Add `--builder /absolute/docker-buildx` (the pinned `buildx` release file) to
+prepare the image builder in the same run. It is optional and accepted only with
+the three inputs above; without it, offline setup works as before and reports
+`builder: "not_prepared"`. On a home whose provider set is already installed, the
+three archive inputs are not read again.
 
 Or obtain the exact archives identified in `provider-pins.json` and run the
 unchanged individual manual commands (also supported by earlier prereleases):
@@ -1227,8 +1283,9 @@ An intact tree is reported with `repaired: false`. A repair that fails a check c
 no tree and keeps its private `-repairing-` staging directory. Without a kept archive the repair
 refuses (`provider_repair_unavailable`); prepare a fresh candidate home instead.
 
-The pins also name a BuildKit client (`buildx`, `darwin-arm64`) for native image
-builds. Prepare it before using `HACK_NATIVE_BUILDS=1`; it is optional otherwise:
+The pins also name a BuildKit client (`buildx`, `darwin-arm64`), the image builder
+for native image builds (`HACK_NATIVE_BUILDS=1`). `runtime setup` installs it, as
+described above. The manual command stays for offline and manual homes:
 
 ```sh
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare-builder --archive /absolute/docker-buildx
@@ -1237,8 +1294,50 @@ builds. Prepare it before using `HACK_NATIVE_BUILDS=1`; it is optional otherwise
 The command takes the exact release file named in `provider-pins.json`. It checks
 the SHA-256 before it changes any state, then copies the file into private candidate
 state and checks its code signature. If a prepared client exists, the command checks
-it again and does not replace it. If the prepared tree changes, `runtime probe`
-refuses; it reports `builder_prepared` when the client is present and unchanged.
+it again and does not replace it. The record always carries the tree digest that the
+pin describes (one executable with that name, mode 0700 and the pinned bytes), never
+a digest read back from disk, so a file replaced after its check can never be
+recorded as good.
+
+A preparation that stopped after publishing the client's directory and before writing
+its record is finished by running the command (or setup) again. The record is written
+only when the directory is what preparation publishes: a real directory of yours with
+mode 0700 that holds exactly the pinned executable. Any other directory without a
+record is refused as changed, and its permissions and contents are left alone. A
+record write that stopped halfway leaves `buildx.pending` beside the record; the next
+preparation removes it under the provider lock when it is the private regular file
+that write creates (yours, mode 0600, one link), and refuses with `foreign_state`
+and leaves it in place when it is anything else, such as a symlink or a directory.
+
+If the prepared tree changes, `runtime probe` and every build
+refuse with `artifact_digest_mismatch`. `runtime probe` reports `builder_prepared`:
+`true` when the client is present and unchanged, `false` for a home without it.
+
+A home without the image builder refuses a build with `builder_not_prepared`:
+"The image builder is not installed in this native home", with the setup command
+that adds it, instead of a missing-file error. `hack up` prints that refusal with
+the command for the launcher you ran. A home that an earlier build set up is in
+this state until `native setup --accept-downloads` (or the offline `--builder`
+file, or the manual command above) adds the builder; nothing else in the home
+changes. `runtime setup inspect --json` reports the builder apart from readiness,
+as `builder.state` (`prepared`, `not_prepared` or `changed`) with the builder's
+`directory` and `record` paths under the native home. That state is read from the
+record without hashing the builder, so bytes changed under an intact record still
+read as `prepared` there; setup and builds verify the bytes. `hack doctor` on
+the native backend adds a `native image builder` check: a warning with the same
+remedy when the project has a `build:` service and the home has no image builder,
+or one whose record does not match the pinned release.
+Doctor never installs or downloads it, with `--fix` either.
+
+Every message about the image builder names one setup command: the `hack up`
+refusal, the `hack native setup` hint and warning, and doctor's message with its
+JSON `detail`. A stable install prints `hack native setup --accept-downloads`. A
+candidate launcher under your home prints its path from the home,
+`~/.hack-next/bin/hack-next native setup --accept-downloads`, which runs as pasted
+and shows no home directory, so a saved doctor report carries none. A launcher
+outside the home, or one whose path needs shell quoting, keeps its full quoted
+path. Other printed commands are unchanged and name a candidate launcher by its
+full path ([printed commands](candidate-install.md#printed-commands-name-your-launcher)).
 
 `runtime build-image --request <file> --json` builds one image in the running
 runtime's engine with that client. Native `up` calls it for `build:` services when
@@ -3169,6 +3268,11 @@ defines it. Declared values are kept, and a disabled check gets neither. Authore
 native readiness (`readiness.exec`) gets the same cadence. A container started by an
 earlier build, without these fields, is still accepted as the same container.
 
+The 250 ms cadence applies only inside the startup period that follows a container
+start. After a pause and resume the container's startup period is not restarted, so
+the check runs every `interval` from the resume, and readiness can take up to one
+`interval` to see it.
+
 #### Native HTTP readiness probe
 
 For a complete Caddy route with no authored `healthcheck`, native reviews a default
@@ -3184,6 +3288,83 @@ missing listener or HTTP 5xx during boot, check `hack logs <service>` in the sam
 project/branch, fix the route
 port, or declare `healthcheck.x-hack-http` with a longer `start_period_ms` and a
 readiness path that answers 2xx.
+
+Until its first success, inside `start_period_ms`, one probe request may run for
+the rest of the startup period instead of `timeout_ms`. An app that compiles its
+first page on the first request gets one request that waits for the page, not a
+series of abandoned requests that each start the compile again. After the first
+success, or once the startup period has passed, each request has `timeout_ms`.
+
+Inside the startup period a start is not failed on one doubtful reading. A probe
+process that hasn't started yet, a status file that is missing or unreadable, or
+a "starting" status that is late because one request is still waiting all read
+as starting. A service fails only on a definite unhealthy result: failures used
+up after the startup period, the probe process gone, a status still missing or
+unreadable after the startup period, or a "starting" status read later than the
+startup period, the patient attempt and `retries` further attempts allow, counted
+on the host from when the probe started, whatever time the status itself carries. The failure message says which of
+these the probe saw, how many requests it made, how many failed in a row, how
+long the last one took and how long after the probe started it was seen.
+
+The host's reading of one probe. It is checked as the TLA+ model
+`tests/models/tla/probe-readiness`; `Grace` is `start_period_ms` and `Limit` is the
+bound described above.
+
+```mermaid
+---
+title: ProbeReadiness · one probe
+---
+stateDiagram-v2
+    direction TB
+    classDef wait stroke-width:1.6px
+    classDef ok stroke-width:1.6px
+    classDef fail stroke-width:1.6px
+
+    [*] --> created : start_probe
+    created --> starting : ExecStart
+    created --> doubt : Observe [not started]
+    starting --> doubt : Observe [missing or torn]
+    starting --> starting : Begin / Expire [in grace]
+    starting --> healthy : Answer
+    starting --> limit : Observe [starting sample]
+    healthy --> healthy : Answer
+    healthy --> unhealthy : Observe [stale or exhausted]
+    starting --> unhealthy : ExecExit
+    starting --> unhealthy : Expire [retries used up]
+
+    state doubt <<choice>>
+    doubt --> starting : [t <= Grace]
+    doubt --> unhealthy : [t > Grace]
+
+    state limit <<choice>>
+    limit --> starting : [t <= Limit]
+    limit --> unhealthy : [t > Limit]
+
+    unhealthy --> [*] : start fails
+
+    note right of starting
+        Patient: before the first
+        success, in the grace, one
+        attempt may use the rest of
+        the grace (attempt_timeout).
+    end note
+    note left of limit
+        Limit is host time since the
+        probe started, not the time
+        the sample carries
+        (starting_bound_ms).
+    end note
+    note right of unhealthy
+        INV NoFalseFailure
+        INV BoundedStarting
+        INV NoReadyWithoutSuccess
+        INV OneCompile
+    end note
+
+    class starting wait
+    class healthy ok
+    class unhealthy fail
+```
 
 The graph start deadline (300 seconds by default) belongs to the whole graph; it
 is not renewed when a service starts. Slow earlier services or `service_healthy`

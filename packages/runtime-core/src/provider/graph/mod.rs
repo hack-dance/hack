@@ -139,6 +139,7 @@ mod environment_crash_test;
 mod launcher;
 mod probes;
 mod process_refusals;
+mod spec;
 #[cfg(all(test, feature = "environment-launcher"))]
 mod startup_test;
 pub use environment::stage_environment;
@@ -772,6 +773,9 @@ struct Session<'a, 's> {
     environments: BTreeMap<String, super::environment::PendingEnvironment>,
     leases: BTreeMap<String, super::environment::EnvironmentLease>,
     launcher: Option<String>,
+    /// What each probed service's latest unhealthy observation found, for its failure's
+    /// diagnostic (HACK-2416).
+    probe_findings: BTreeMap<String, crate::ProbeFinding>,
 }
 #[cfg(test)]
 pub(super) fn fault_pause(
@@ -1008,11 +1012,12 @@ impl Session<'_, '_> {
 }
 impl Driver for Session<'_, '_> {
     fn service_failure(&self, name: &str, observation: Observation) -> CandidateError {
-        probes::service_failure(
+        probes::service_failure_finding(
             "graph_service_failed",
             name,
             observation,
             self.receipt.probes.get(name).map(|probe| &probe.config),
+            self.probe_findings.get(name).copied(),
         )
     }
 
@@ -1098,8 +1103,10 @@ impl Driver for Session<'_, '_> {
                     "Restart requires a confirmed immutable container ID.",
                 )
             })?;
-            self.engine
-                .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+            crate::timings::measure(crate::timings::Step::ContainerStart, None, |_| {
+                self.engine
+                    .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)
+            })?;
             self.start_probe(service, id)?;
             return Ok(());
         }
@@ -1115,6 +1122,28 @@ impl Driver for Session<'_, '_> {
                 "Fresh graph cannot adopt an existing container.",
             ));
         }
+        // Identity of the compiled config before any per-run attachment.
+        let span = crate::timings::start(crate::timings::Step::SpecDigest, None);
+        let spec = spec::of(
+            &self.configs[service],
+            &spec::Context {
+                resources: &self.receipt.resources,
+                probe: self.receipt.probes.get(service),
+                managed: self.environments.contains_key(service),
+                relay: self
+                    .receipt
+                    .relay_startup
+                    .as_ref()
+                    .and_then(|startup| startup.services.get(service))
+                    .map(|selected| selected.bindings.keys().cloned().collect())
+                    .unwrap_or_default(),
+                amd64_emulation: resource.amd64_emulation,
+            },
+        );
+        if let Some(span) = span {
+            spec::finish_span(span, &spec, &resource.name);
+        }
+        let spec = spec?;
         self.prepare_probe(service)?;
         if let Some(pending) = self.environments.remove(service) {
             self.receipt.environment_attached = true;
@@ -1154,11 +1183,11 @@ impl Driver for Session<'_, '_> {
             }
         }
         self.check_cancelled()?;
-        let config = &self.configs[service];
+        let body = spec::stamped(&self.configs[service], &spec);
         let value = self.engine.request(
             Method::POST,
             &format!("/v1.53/containers/create?name={}", resource.name),
-            Some(config),
+            Some(&body),
         )?;
         #[cfg(test)]
         self.fault_pause("after-create")?;
@@ -1177,6 +1206,7 @@ impl Driver for Session<'_, '_> {
         let inspected =
             inspect_resource(&self.engine, &self.receipt, &self.receipt.resources[&key])?
                 .ok_or_else(|| error("graph_resource_missing", "Created container is missing."))?;
+        spec::verify_label(&inspected, &spec)?;
         Self::verify_config(
             &self.receipt,
             service,
@@ -1192,8 +1222,10 @@ impl Driver for Session<'_, '_> {
             startup.verify(&self.engine, &mut self.receipt, &self.root)?;
         }
         self.check_cancelled()?;
-        self.engine
-            .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+        crate::timings::measure(crate::timings::Step::ContainerStart, None, |_| {
+            self.engine
+                .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)
+        })?;
         if let Some(startup) = self.startup.as_mut() {
             startup.started(
                 &self.engine,
@@ -1222,7 +1254,17 @@ impl Driver for Session<'_, '_> {
             &self.expected_environment[service],
             &value,
         )?;
-        probes::observe(&self.engine, &self.receipt, service, &value)
+        let (observation, found) =
+            probes::observe_finding(&self.engine, &self.receipt, service, &value)?;
+        match found {
+            Some(found) => {
+                self.probe_findings.insert(service.into(), found);
+            }
+            None => {
+                self.probe_findings.remove(service);
+            }
+        }
+        Ok(observation)
     }
 }
 /// Explicit fresh attempt only. All commands must be non-secret until managed delivery is qualified.
@@ -1651,6 +1693,7 @@ fn run_inputs(
         receipt,
         configs: prepared.configs,
         expected_environment,
+        probe_findings: BTreeMap::new(),
         restarting: false,
         fresh_cache_completion: true,
         cache_initializers: prepared.cache_initializers,
@@ -1776,7 +1819,7 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         "run": receipt.run,
         "owner": receipt.owner,
         "phase": receipt.phase,
-        "receipt_sha256": format!("{:x}", Sha256::digest(&bytes)),
+        "receipt_sha256": format!("{:x}", crate::Hex(Sha256::digest(&bytes))),
         "foreground": publication.word(),
         "live_owner_recovery": resumable,
         "failed_start_recoverable": !running && live_owner_cleanup::failed_start_recoverable(&root, &receipt),
@@ -2449,6 +2492,7 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         receipt,
         configs: prepared.configs,
         expected_environment,
+        probe_findings: BTreeMap::new(),
         restarting: true,
         fresh_cache_completion: false,
         cache_initializers: BTreeMap::new(),

@@ -24,6 +24,7 @@ import {
 } from "../src/backends/native-project-builds.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
+import { nativeBuilderRemedy } from "../src/lib/native-image-builder.ts";
 
 const IMAGE = `sha256:${"a".repeat(64)}`;
 const RETAINED = `sha256:${"b".repeat(64)}`;
@@ -549,4 +550,52 @@ test("runtime build refusals name the services and the build source policy", asy
   expect((odd as Error).message).toBe(
     "Native foreground up could not build services web and worker: Unexpected failure."
   );
+});
+
+test("a native home without the image builder says so and how to add it", async () => {
+  const project = await root();
+  // The runtime's own reply for a home that never prepared the builder, as
+  // `runtime build-image` prints it: one JSON line on stderr and a failure exit.
+  const fake = await fakeRuntime(
+    `printf 'resolving base images\\n' >&2\nprintf '{"code":"builder_not_prepared","message":"The image builder is not installed in this native home, so no image was built.","message_fixed":true}\\n' >&2\nexit 1`
+  );
+  const written: string[] = [];
+  const refused = await buildNativeProjectImages({
+    runtime: fake as never,
+    projectRoot: project,
+    branch: null,
+    profiles: [],
+    builds: new Map([
+      ["web", request()],
+      ["worker", request()],
+    ]),
+    specs: { web: { build: "app" }, worker: { build: "app" } },
+    retainedImages: new Map(),
+    restore: false,
+    rebuild: false,
+    signal: new AbortController().signal,
+    invoke: (opts) =>
+      invokeNativeBuild({ ...opts, write: (text) => written.push(text) }),
+  }).catch((caught: unknown) => caught);
+  expect(refused).toBeInstanceOf(NativeRuntimeRequestError);
+  expect(refused).toMatchObject({ nativeCode: "builder_not_prepared" });
+  const message = (refused as Error).message;
+  expect(message).toBe(
+    `Native foreground up cannot build services web and worker: the image builder is not installed in this native home. ${nativeBuilderRemedy()} No image was built.`
+  );
+  // The command for a stable install; other installs name their own launcher.
+  expect(message).toContain(
+    "Run hack native setup --accept-downloads to add it; offline, add --builder <pinned builder file> to the offline setup inputs."
+  );
+  expect(
+    nativeBuilderRemedy({
+      launcher: { kind: "bundle", command: "/opt/bundle/hack-v5" },
+    })
+  ).toStartWith("Run /opt/bundle/hack-v5 native setup --accept-downloads ");
+  // Neither the missing file's OS error nor a build-failure wording reaches the user.
+  expect(message).not.toContain("os error");
+  expect(message).not.toContain("No such file");
+  expect(message).not.toContain("could not build");
+  expect(message).not.toContain(VALUE);
+  expect(written.join("")).toBe("resolving base images\n");
 });

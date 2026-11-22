@@ -8,8 +8,9 @@ and how long `hack down` waits for a dev server to stop. Every project in
 
 `start_interval` needs Docker Engine 25.0 or later and Docker Compose 2.20.2 or
 later. Hack's Compose backend uses your own engine and Compose; check them with
-`docker version` and `docker compose version`. An older engine does not use
-`start_interval`, so it checks at the steady `interval` from the start.
+`docker version` and `docker compose version`. Docker Compose refuses `start_interval` on Docker Engine versions below 25.
+On an older engine, remove `start_interval` and keep the health check. The
+engine will check at `interval` from the start.
 
 The native backend's engine is pinned to a newer version and passes these
 settings through for services without a route. When a health check sets no
@@ -45,13 +46,17 @@ needed to leave `starting` or `healthy` for `unhealthy`; one passing check retur
 
 ```yaml
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "app", "-d", "app"]
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "app", "-d", "app"]
       start_period: 30s     # time the service may take to start
       start_interval: 250ms # check this often until it is healthy
       interval: 10s         # then check this often
       timeout: 3s
       retries: 3
 ```
+
+Probe the same interface your clients use. Inside a Postgres container,
+`pg_isready -h 127.0.0.1` checks TCP and waits past the temporary socket-only
+server that the image starts to initialize a fresh data directory.
 
 Set both. Compose refuses `start_interval` without `start_period`. Make
 `start_period` longer than the slowest start you expect; a check that still
@@ -77,22 +82,21 @@ itself ignores it and the stop takes the full 10 seconds.
 
 Use them for dev servers, watchers and stand-in services. Leave databases on the
 default grace period: Postgres and Redis handle `SIGTERM` themselves and may need
-the time to write their data safely.
+the time to write their data safely. Give workers that must finish an in-flight
+job a grace period long enough to finish it.
 
-## Before and after
+## Earlier Linux measurements
 
 The same two-service project (Postgres with a health check, and a Bun server
 that waits for it) on Docker Engine 29.9.2 and Compose 5.6.1 on Linux, eight
 interleaved runs of each version, on a busy machine (load average 17 to 37 on
-20 cores), so treat the `up` numbers as estimates:
+20 cores). These runs predate the TCP probe shown above, so treat the `up`
+numbers as historical estimates:
 
-| | `interval: 2s`, no `init` | settings above |
+| | `interval: 2s`, no `init` | earlier fast timings with `init` |
 | --- | --- | --- |
 | `docker compose up -d`, median | 4.3 s | 3.3 s |
 | `docker compose down`, median | 13.6 s | 1.9 s |
-
-On macOS, Hack's own four-service benchmark fixture spent 2.3 s of a 5.7 s
-warm start waiting for the first health check at `interval: 2s`.
 
 ## Sources
 

@@ -556,7 +556,7 @@ fn qualify_active_rebind(refreshable: bool, cancel_after_fence: bool) {
     .unwrap();
     assert!(plan.plan.enrollment_compatible);
     let compose_bytes = fs::read(fixture.0.join("compose.yaml")).unwrap();
-    let compose_sha256 = format!("{:x}", Sha256::digest(&compose_bytes));
+    let compose_sha256 = format!("{:x}", crate::Hex(Sha256::digest(&compose_bytes)));
     let compose = project::NormalizedComposeOptions {
         branch: None,
         project: &fixture.0,

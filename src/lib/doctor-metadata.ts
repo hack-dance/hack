@@ -61,6 +61,7 @@ const PROJECT_AREAS: Readonly<Record<string, DoctorArea>> = {
   "native settings": "native",
   "native process wrappers": "native",
   "native source size": "native",
+  "native image builder": "native",
   "emulated services": "engine",
   "polling watchers": "engine",
   "shared volume architectures": "engine",

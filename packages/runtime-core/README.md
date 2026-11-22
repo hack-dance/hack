@@ -6,7 +6,8 @@ planning request to dependency IR and ephemeral
 workload inputs. It calls the compiler in-process and performs no filesystem,
 provider, image acquisition or receipt effects. This feature's compiler path
 dependency requires the repository's pinned Rust 1.97.1. The default runtime
-package keeps its declared Rust 1.85 minimum; enabling the adapter requires Rust 1.97.1.
+package declares Rust 1.88 as its minimum, the minimum of its `sha2` release; enabling the
+adapter requires Rust 1.97.1.
 
 The adapter accepts at most 32 selected pinned-image services/jobs, exec readiness,
 explicit exec/shell commands, entrypoint clearing, init, exact shutdown intent and
@@ -526,7 +527,33 @@ an issue by themselves, and an open issue is not closed while availability is
 unknown. Size mismatches and refused redirects are reported as invalid pins.
 Availability alone never authorizes archive use or changes pins. Alpine package
 revisions may be retired upstream.
-The pinned host BuildKit client (`runtime prepare-builder`) and the pure Dockerfile
+`runtime setup` (`provider/setup.rs`) installs the three provider artifacts and then
+the pinned host BuildKit client, the image builder. The provider, the engine and the
+guest network tools are prepared in a private staging home and published together
+with one rename. The image builder is not part of that tree: after the provider set
+is published or reused, setup adds it with the manual preparation function
+(`artifact::prepare_builder`), which writes only the builder's own directory and
+record under the provider lock. A home that is already complete therefore gains the
+builder without its provider or engine being staged, published or prepared again; a
+pool may be running from them. Setup adds the builder only with download consent or
+the offline `--builder` file. Without either, a complete home is left unchanged and
+the result says `builder: "not_prepared"`; with it the result says `installed`, and
+`reused` when the builder was already prepared. A builder that is there but does not
+verify is reported as `builder: "changed"` and never touched: setup still exits 0 for
+a complete home, and never deletes or overwrites the builder, with or without a
+source. The user removes its directory and record and runs setup with consent. The
+builder's record always carries the tree digest the pin describes
+(`artifact::pinned_tree_digest`), not a digest read back from disk, and preparation
+finishes an interrupted run (a published directory without its record, or a leftover
+`buildx.pending`) only for exactly what it would have written itself.
+`runtime prepare-builder` stays for
+offline and manual use. A build in a home without the builder refuses with
+`builder_not_prepared` and names the setup command; the read-only
+`runtime setup inspect --json` reports `builder.state` so the CLI's setup and doctor
+can say so before a build does. The setup tests (`provider/setup/tests.rs`) use a
+local server and fixture pins and never reach the network.
+
+The image builder and the pure Dockerfile
 image-reference scanner (`provider/build_scan.rs`) back `runtime build-image`
 (`provider/image_build.rs`), which builds one Compose-style image in the guest engine
 from a private request file. Its build key, receipts, leases, the `runtime down`
@@ -565,7 +592,7 @@ pinned release and SHA-256 verified, for default and all-feature tests. Each tes
 runs in its own process: on macOS the two-call close-on-exec setup briefly permits
 another test's spawned child to inherit a socket and delay EOF. Retries are zero.
 The admission-pool test group retains the old mutex's serialization of whole-host
-`lsof` scans. Ignored helpers remain ignored and their owning tests still invoke
+disk-handle scans. Ignored helpers remain ignored and their owning tests still invoke
 them explicitly; `cargo test --doc` runs separately because nextest omits doctests.
 Focused target selections such as `bun run test:local --lib` or `--test <name>`
 skip doctests, matching Cargo; explicit `--doc` selection runs through Cargo alone.
@@ -629,8 +656,8 @@ after the guest has booted from it. Size, owner and mode checks are not integrit
 digest is. A mismatch refuses with `disk_template_untrusted` and changes no files. Before a start,
 removing the refused file lets SmolVM re-expand it from the verified compressed template. After a
 start, the boot is stopped as a failed boot without adopting its disks. `runtime recover --json`
-then proves the provider stopped and idle, takes the VM lock with the disk handles closed, and
-renames the unadopted `storage.raw` and `overlay.raw`, plus any owned expanded template that
+then proves the provider stopped and idle, takes the VM lock, finds no process holding the
+disks (the disk-handle scan below), and renames the unadopted `storage.raw` and `overlay.raw`, plus any owned expanded template that
 failed, into an `untrusted-first-boot-<n>` directory beside each. It deletes nothing and keeps
 the compressed templates, and it returns the pool to `stopped-before-engine`, so the next start
 expands and clones again and verifies before adoption. Those disks were never adopted, so they
@@ -647,6 +674,27 @@ it moved files between, and the intent is removed only after the owner records
 The same applies when the failed boot's provider was recorded and is proven dead
 (`failed-boot-stopped` after a template refusal): recovery sets those disks aside instead of
 adopting them on the stopped path. Repeating recovery on the resulting pool changes nothing.
+
+A boot that fails after its provider process was recorded writes `failed-boot.json` beside
+the owner record: the failure's code and message, the recorded process, and
+`process_absent`, which says that the cleanup after the failure confirmed the provider
+stopped (not that the provider had exited by itself). A command prints most failures by
+code alone, because a message can name a path; the record keeps the message so that a code
+many causes share, such as `provider_state` for any I/O error, can be told apart afterwards
+without reproducing the failure. The file is private to the home.
+
+While a boot is adopted, after the engine has answered inside the guest and before the pool
+is recorded as running, the engine is checked once more from the host: `GET /_ping` through
+the provider's forwarded engine socket. That forward can lag behind the provider's ready
+signal, and a connection it accepts in that window is never answered. So the check makes up
+to three attempts, each on a fresh connection to a socket path that is validated again for
+that attempt. The boot fails when all of them failed, with the last attempt's error, or at
+once when the path is refused as unsafe (not this user's socket, a symlink on the way, or an
+ancestor that is not a directory); a socket file that is not there yet is tried again
+(HACK-2475: a single unanswered connection used to fail the boot after three seconds). Each
+attempt has three seconds for its whole reply. A forward that never answers fails the boot
+after about 9.2 s. The check does not identify which process answers on that
+socket; it checks that the path is this user's own socket in the pool's directory.
 
 Guest control readiness does not mean exposed bridge sockets have bound. The pinned
 [SmolVM 1.35.4 guest](https://github.com/smol-machines/smolvm/blob/v1.35.4/crates/smolvm-agent/src/main.rs#L664)
@@ -715,7 +763,8 @@ candidate's provider binary. An interrupted create that never recorded its machi
 this pool's own machine record and returns to `initializing`. A start that created no disks
 returns to `stopped-before-engine`. A launched start becomes an unclean stop after the
 provider's own PID record is verified (and the provider stopped if alive), or after it has
-exited, and after its VM lock, disk handles and sockets are proven released. Recovery never
+exited, and after its VM lock is free, the disk-handle scan finds no holder of its disks and
+its sockets accept no connection. Recovery never
 adopts disks: a first start's disks stay unadopted until the next boot's template, size and
 format checks accept them. Missing adopted disks, a partial launch and other phases still
 refuse for manual inspection. `down` treats a stopped pool with no recorded provider as already
@@ -1701,10 +1750,23 @@ A fresh boot starts a second best-effort guest job
 ([`guest-memory-peak.sh`](src/provider/guest-memory-peak.sh)) at the same point and under
 the same rules: background mode, result ignored, owner token and boot ID checked first, at
 most once per boot, nothing written under `/storage`. Every five seconds it reads memory in
-use (`MemTotal` minus `MemAvailable`) and keeps the highest value for the boot in one line
-at `/run/hack-local/memory-peak.status`, together with counters the kernel keeps since
-boot: memory stall time (`/proc/pressure/memory`), OOM kills and major page faults. A
-sample can miss a short peak; those counters cannot miss a guest that ran short of memory.
+use (`MemTotal` minus `MemAvailable`, minus the memory balloon) and keeps the highest value
+for the boot in one line at `/run/hack-local/memory-peak.status`, together with counters
+the kernel keeps since boot: memory stall time (`/proc/pressure/memory`), OOM kills and
+major page faults. A sample can miss a short peak; those counters cannot miss a guest that
+ran short of memory.
+
+The balloon is subtracted because the provider inflates it to most of the guest once the
+pool has been idle for a while and releases it seconds later. Balloon pages are not
+available to the guest, so an idle guest using 0.2 GiB used to record a peak near its
+whole size. The size comes from `nr_balloon_pages` in `/proc/vmstat` (or, on a kernel
+without it, inflations minus deflations), in the kernel's base pages. Their size is read
+once from the sampler's own memory map (`KernelPageSize` in `/proc/self/smaps`); on a
+kernel that does not report it, a sample taken while the balloon holds anything counts
+as taken but cannot raise the peak, so the pressure counters are still recorded. The
+balloon is read before and after the memory figures and the larger reading is
+used, so a balloon that moves during a sample can only lower that sample. A reading that
+is not a plausible page count is ignored, and one larger than the sample caps at it.
 A sample is read with shell builtins, so the loop starts one process every five seconds
 (`sleep`).
 
@@ -1779,7 +1841,7 @@ waits for the scan and hot reload works; above it the boot does not wait and hot
 - **The setting.** `HACK_NATIVE_HOT_RELOAD` is `auto` (the default), `on` or `off`, read by
   `runtime up`; any other value is refused before any effect. `on` keeps the notifications
   whatever the size; `off` drops them whatever the size. The CLI gives runtime subprocesses
-  a closed environment, so it hands this one setting to `runtime up` explicitly and refuses
+  a closed environment, so it hands this setting to `runtime up` explicitly and refuses
   a mistyped value itself, before the runtime starts.
 - **The record.** The choice is made at every boot and written to the owner receipt
   (`hot_reload`) only when it is not the plain default: off, or forced on over a large share.
@@ -1831,12 +1893,191 @@ does not see a file that a root process inside the guest writes into a search di
 while the VM runs; only the guest's root can do that, and the order change is not a
 defence against it.
 
+### Starting a stopped pool: the steps and their size
+
+`runtime up` on a Development pool whose disks exist but whose VM is not running (after a
+host reboot or a `runtime down`) runs these steps in this order. The times are one
+measurement, three boots of about 3.1 s each on an Apple Silicon host under moderate load,
+pool only, with a scratch build that timed each step. They show the order and relative
+size of the steps, not a guarantee. A Research pool admits differently: three qualifying
+samples fifteen seconds apart before the lease and none under it, so its start is longer
+by those pauses.
+
+| Step | About | Note |
+| --- | --- | --- |
+| First admission sample | 50 ms | host memory, pressure, swapouts, thermal state, disk |
+| Provider and engine trees proven by content | 940 ms | fills the one-second admission window |
+| Startup lease, rest of the window, second sample, then both trees compared with their proof | 115 ms | only the rest of the window is slept; measured before the tree comparison was added |
+| Root files proven by content | 180 ms | measured under the lease; the proof now runs in the admission window beside the tree proofs, and only a metadata comparison is left here (below) |
+| Pre-boot sample, configuration audit, template check | 75 ms | |
+| `machine start` | 210 ms | the provider starts the VM |
+| Guest setup | 680 ms | about 430 ms is the guest hashing the engine binary over the share |
+| Network tools in the guest | 100 ms | |
+| Executable cache (`runc`, `docker-init`) | 300 ms | measured when each binary was read over the share twice; it is now read over the share once, by the copy, and the cache's own copy is hashed before it is made executable and again where it is executed |
+| Engine start | 390 ms | until the engine answers |
+| Everything else | 60 ms | identity checks, disk adoption, pings |
+
+In this measurement the content proof of the provider and engine trees added nothing to
+the start: it ran between the two admission samples, which must be at least one second
+apart, and finished inside that second. Only the rest of the window is slept, so a proof
+or a lease wait that takes longer than the window lengthens the start by the excess. A brand-new
+home adds `machine create`, the provider's first-start disk template copy and the root
+files copy, about 5 s in the same measurement.
+
+The trees are proven before the lease, and only the lease keeps another `runtime` command
+from rewriting them. So the first thing the start does with the lease, after the second
+sample, is compare each tree with its proof: if the tree's metadata digest and its
+record's content digest are what the proof saw, on a filesystem where metadata is trusted
+(APFS), the proof stands; otherwise the tree is proven by content again under the lease,
+and a tree that no longer matches refuses the start with `artifact_digest_mismatch`.
+The recheck itself writes nothing, and a refusal comes before the admission record, any
+later owner record update, a HOME alias repair under the lease and any provider command.
+What the start did earlier stays: a HOME alias it repaired before admission, and the
+lease file's own bookkeeping. The comparison is one metadata walk per tree and reads no
+file content. It is not part of the boot measurement above. A unit bench
+(`bench_one_metadata_walk_of_a_prepared_tree`, an unoptimized test build on a busy Apple
+Silicon host, not a boot) timed one walk at 11 to 20 ms for a tree with the 936 entries
+of the pinned provider tree and under 1 ms for the engine tree's 8 entries. On any other
+filesystem both trees are hashed a second time under the lease, which the table does not
+show either.
+
+A cleanly stopped pool's root files are held to the same rule (`lifecycle::rootfs_proof`):
+a pool whose owner record is the `stopped` phase with the marker a completed `down` writes.
+Their content proof runs before the lease, read-only, on a thread beside the tree proofs,
+so it fills the admission window too. If the host cannot start that thread, or the proof
+fails in any way, the start has no early proof and proves the root files under the lease;
+it is never refused for that. The step after the tree comparison is the same comparison
+for the root files, against the owner record the lease now fences: if the readiness
+marker and the pin are the ones that record names, the metadata digest is what the proof
+saw and the filesystem is one where metadata is trusted, the proof stands. On another
+marker or pin, or a metadata difference, on such a filesystem the root files are proven
+by content again at this step, and root files that no longer match their pin refuse the
+start with `artifact_digest_mismatch` there: before the admission record, any later owner
+record update and any provider command. If the root files are no longer on such a
+filesystem, this step hashes nothing and refuses nothing: their content proof, and any
+refusal, are where the result is used. The recheck itself writes nothing either way. The
+root files are compared once more where the result is used (`prepare_rootfs`), after the
+admission record, the owner record updates and `machine update --rosetta` when
+translation is being enabled: one more metadata walk, no file content read, and the
+content proof at that point if anything differs, or if this step left it to that point.
+Root files that changed after the recheck are refused there, after those effects. The
+digest of that last comparison is the one the boot's witness records. From there to `machine start` nothing looks at the
+root files again, as before. On a filesystem where metadata is not trusted no earlier
+proof could be accepted, so none is taken, no thread is started and nothing is rechecked:
+such a start hashes the root files once, where it always did. A start with no earlier
+proof is unchanged: the first boot of a new home copies the root files and proves them by
+content in `prepare_rootfs`, and so does any start whose earlier proof could not be made
+(an owner record that is not a clean stop or has no pin, an alias, an unreadable entry,
+or root files that did not match before the lease). Its refusal, if any, is at that point
+too, after the admission record, as it was before the early proof existed. The table's 180 ms
+was measured before this change and the root files comparison was not timed on its own.
+
+#### Skipping the rest of the admission window
+
+The table's second and third rows are a wait: the two admission samples of a Development
+start must be at least one second apart, and a start whose own checks are quicker than
+that sleeps the rest. On a stopped pool whose tree proofs take a tenth of a second, that
+sleep is most of the time before the VM boots.
+
+A home therefore keeps a record of one earlier host sample that passed every Development
+predicate on its own (`provider::admission::opening`). The record is the file
+`run/smolvm/admission-opening.json` under the home, beside the owner record. It holds
+three fields and nothing else: the OS boot session (`kern.bootsessionuuid` on macOS, the
+kernel's `boot_id` on Linux), a time on a clock that keeps counting while the machine
+sleeps (`CLOCK_MONOTONIC` on macOS, `CLOCK_BOOTTIME` on Linux), and the sample's swapout
+count. It is written atomically, under the provider lease, readable and writable by the
+user only.
+
+Not every passing sample is recorded. Exactly two things write the record, both under the
+provider lease and only into a pool that already has its owner record (an unowned pool
+root holds nothing but the operation lock, which the source admission of a first project
+start checks):
+
+- a Development start records its own passing sample under the lease, once both
+  comparisons under the lease have passed and the pool's owner record exists (before the
+  last root files comparison, in `prepare_rootfs`);
+- `runtime down` of a running Development pool takes one sample beside the stop, on its
+  own thread, and records it after the stop if it is back and passes. A pool that is
+  already stopped takes no sample. The stop never waits for the sample and cannot fail on
+  it.
+
+A sample that Hack itself sees failing removes the record: a sample under the lease that
+fails a predicate, cannot be taken or shows another swapout count, a first sample refused
+before the lease (if the lease is free), and a stop sample that fails or is not back when
+the stop is done. A retry right after a refusal therefore waits its window and qualifies
+on its own two samples.
+
+The record does not carry the disk basis a sample was judged on (a stop samples on the
+basis of a pool that owns no disks yet; a start on the basis it selected). That is
+acceptable because the record never stands in for a judgement about this start's
+resources: the start's own two samples are each judged on the start's own basis, and the
+record contributes only "the host passed at that time and has not swapped out since".
+
+Under the startup lease, when part of the window is still to be slept, the start reads
+the record. It skips the sleep only when all of this holds:
+
+- the record is from this OS boot;
+- it is at least one window (one second) and at most the bound (60 seconds) old, both
+  when it is read and again once the sample under the lease exists, on the same clock: a
+  slow probe or a host that slept in between cannot stretch the bound;
+- the sample the start now takes under the lease passes every predicate, as it always
+  must, and shows the record's swapout count and the count of the start's own first
+  sample.
+
+The record replaces the wait and nothing else. The start still takes both of its own
+samples, `admission.json` still records the two, and the pre-boot check is unchanged.
+Anything else is a miss: no file, a file that is not a private regular file of this user
+(a link, a second name, another owner, group or world access), contents that are not an
+object of exactly the three named fields (a list of the three values is not a record),
+another boot session, a record too young or too old at either judgement, a clock or boot
+session that cannot be read, a swapout count that differs, or a sample under the lease
+that does not pass. A miss costs the wait the start had before, and nothing more
+than one discarded sample when the miss is only found after sampling: the start sleeps
+the rest of the window measured from its own first sample and takes its sample then,
+chained to that first sample. A record never refuses a start and never stands in for a
+sample.
+
+What the record itself costs, from a unit bench (`bench_the_sample_and_record_of_a_stop`,
+an unoptimized test build on a busy Apple Silicon host, no VM): the host sample that
+`runtime down` adds took 13 to 18 ms, the record write about 8 ms (it syncs the file and
+its directory), and the two together, as a stop runs them, 22 to 27 ms. Reading and
+judging the record at a start took about 0.02 ms.
+
+What this gives up: without a record the two samples are at least a second apart. With
+one they can be milliseconds apart, and the evidence that the host held for a second is
+a sample up to a minute old. A host that failed and recovered in between is not seen,
+unless it swapped out, which the count catches. That is the same kind of gap two samples
+already leave, stretched to the bound.
+
+`HACK_NATIVE_ADMISSION_REUSE_SECONDS` sets the bound in whole seconds, from 0 to 600;
+the default is 60 and `0` turns reuse off (records are still written). Any other value,
+including one above 600, refuses `runtime up` with `admission_reuse_setting` before
+anything else happens; a larger value is not reduced to 600. The runtime
+reads it from its own environment. The CLI gives runtime subprocesses a closed
+environment, so it hands this setting to `runtime up` explicitly, `0` included, and to no
+other command. It applies the same rule itself: a value the runtime would refuse is
+refused by the CLI with `E_CONFIG_INVALID`, before the runtime starts and before a
+restart stops anything. Unset or empty in the CLI's environment hands over nothing, so
+the default applies.
+
+Research is unchanged. It keeps its three samples fifteen seconds apart before the
+lease, never reads the record, and neither its start nor its stop writes one.
+
+To measure how often the wait is skipped: the `vm.ensure` timing span carries the boolean
+attribute `admission_reused`, `true` when a record replaced the wait and `false` when the
+start waited. A start whose sample under the lease was not accepted leaves it out: a pool
+that was already running, a Research pool, or a start refused before or at that sample.
+
+The order of the admission steps, and what can change between them, is modelled in
+[`pool-start-admission`](../../tests/models/tla/pool-start-admission/COVERAGE.md);
+[its statechart](../../docs/pool-start-admission-statechart.md) names each step.
+
 ### Starting a pool that is already running
 
 `runtime up` on a pool that is already running and owned by this home (every warm frontend
 `up` and `restart`) takes a named fast path, `lifecycle::running_start`. It allocates
 nothing, so it skips the host admission windows, which guard memory, swapout, thermal and
-disk headroom for a VM allocation (four one-second sampling pauses for Development, two
+disk headroom for a VM allocation (a one-second window for Development, two
 fifteen-second pauses for Research). Under the startup lease it re-checks the receipt, the
 provider identity, disk identity and size, the request (bridges, dependency sockets,
 network, project share and translation), the owner registry, dependency sockets, network
@@ -1882,12 +2123,56 @@ by the same user. `tree_witness` lists what the metadata check gives up relative
 content proof (writes that keep size and ctime, such as raw device writes, clock changes,
 shared-mapping stores not yet reflected in ctime, and filesystems without fine ctime).
 
+### SHA-256 with the CPU's instructions
+
+The content proofs above hash a few hundred megabytes at every cold start and stop. The
+runtime, the guest relay and the configuration compiler use `sha2` 0.11.1, which hashes
+SHA-256 with the CPU's instructions where the CPU has them and in software otherwise; the
+digests are the same either way.
+
+| Target | How the instructions are found | Without them |
+|---|---|---|
+| macOS on Apple Silicon | always present; no check at run time | not applicable |
+| Linux on arm64, including the guest | `AT_HWCAP` once per process | software |
+| Linux and macOS on x86_64 | CPUID (`sha` and `sse4.1`) once per process | software |
+
+`runtime status` reports the choice of the process that answered as
+`hashing: {"sha256": "hardware"}` or `"software"`. Two checks keep software hashing from
+coming back unnoticed. `src/sha256_guard.rs` stops a build for arm64 or x86_64 that sets
+`sha2`'s configuration flag for its software backend; the guest relay and the configuration
+compiler carry the same guard. A unit test (`sha256_backend`) fails when the CPU has the
+instructions and the build would not use them. Both rest on how `sha2` 0.11.1 selects its
+backend, so the dependency is pinned exactly; read its `src/sha256.rs` again before moving
+the pin. To measure a build, run
+`cargo test --release --lib sha256_rate_of_this_build -- --ignored --nocapture`.
+
+### Step store
+
+The CLI resolves the store base to a canonical path, following symlinks. The
+runtime refuses symlinked ancestors of the path it receives and keeps its
+format in a separate subdirectory, currently `hack.store-1/`. Initialization
+keeps at most the newest `hack.store-1.old-*` directory owned by this user and
+removes it too once it is older than seven days.
+
+The store has no eviction yet. Files left in `tmp/` by a crashed writer stay
+until garbage collection (slice P8).
+
+### Never wait in a blocking `flock`
+
+On macOS, releasing an exclusive `flock` wakes only one blocked waiter and queues
+the others behind it, so a woken waiter that keeps a shared lock strands the rest
+with no bound. The step store (`src/store/`) therefore never blocks in `flock`: it
+tries every lock with `LOCK_NB`, closes and retries 1 to 5 ms later until a time
+deadline, and then reports the store busy. Every other `flock` in this crate is
+non-blocking too; keep it that way for any lock that several openers may wait for.
+
 ### Extending a stopped pool's approved hosts
 
 `runtime network extend --allow-host pkg-npm.githubusercontent.com --json` adds
 explicit hostnames to an existing approved-host pool without replacing its disks
 or starting it. It requires the retained provider process to be absent, its PID
-record and database identity to match, the VM lock and disk handles to be free,
+record and database identity to match, the VM lock to be free, the disk-handle scan to
+find no holder,
 and existing disk/configuration/owner-registry checks to pass. Isolated and
 host-gateway pools cannot be converted through this command.
 
@@ -1945,12 +2230,17 @@ The development profile's guest allocation is 6 GiB; guest allocation plus
 Startup requires the unchanged 10 GiB free-plus-file-cache estimate: 6 GiB guest,
 2 GiB provisional provider overhead and 2 GiB host reserve. Development admits
 observed normal or warning macOS memory pressure only with that headroom, normal
-thermal/performance status, and unchanged swapouts. It samples before acquiring
-the startup lease, then samples a fresh three-observation window under the lease
-before creating ownership, aliases, disks or provider capacity. Swapouts must
-remain at the pre-lease baseline; a stale or incomplete observation refuses.
-The final pre-boot check remains in place. Research keeps its normal-only pressure
-policy, 16 GiB raw-free-memory floor and three samples 15 seconds apart.
+thermal/performance status, and unchanged swapouts. It samples once before
+acquiring the startup lease and once under the lease, before creating ownership,
+aliases, disks or provider capacity. The sample under the lease starts at least
+one second, on a monotonic clock, after the first one finished. The start's own
+checks and any lease wait count towards that second, so only the remainder is
+slept and a start that already took that long does not pause. Each sample must
+pass every check on its own, and swapouts must stay at the first sample's count
+through the sample under the lease and the final pre-boot check, which remains
+in place; a stale or incomplete observation refuses. Research keeps its
+normal-only pressure policy, 16 GiB raw-free-memory floor and three samples
+15 seconds apart.
 
 Before new live Development effects, normal pressure requires at least 2 GiB of
 estimated host headroom; warning requires 4 GiB, retaining both provisional
@@ -2240,11 +2530,71 @@ next clean `down`. Clean also requires a creation receipt, rootfs pin, both disk
 identities and declared sizes, the recorded executable and user, a dead recorded
 provider and no pending owner update; these receipt checks are read-only, take no
 provider lock and run around every sample, including `runtime probe`. The disk-handle
-scan (`lsof` over both disks) that proves the provider's release is bounded at 30 s on
-the stop paths (`down`, `recover`) and in release checks, well above the slowest scan
-measured on a loaded host. A scan that still does not finish ends the stop as
-`provider_timeout_uncertain`, without the marker. `scripts/measure-lsof-scan.ts`
-re-measures a host.
+scan looks for processes that still hold either disk. It was an `lsof` child. On macOS it
+now runs inside the runtime, and it is faster because it walks processes on several
+threads (half the host's cores, at most eight).
+
+The in-process scan inspects what the shipped `lsof` inspects for these files (vnode
+descriptors, file ports, and file mappings through the same kernel query with the same
+end condition), matched by device and inode, and falls back to `lsof` whenever it cannot
+trust itself. It does not prove that nothing maps a disk, and neither did `lsof`. With
+either method the process table is read while it changes, processes of other users are
+not inspected, and the mapping query ends a process's walk at a region whose file it
+cannot get as it does at the last region.
+
+The scan falls back when its self-test fails or when it reads something it cannot use.
+The mapping query is one the SDK header does not declare, so every scan first maps a file
+of its own, closes the descriptor and requires the query to report that mapping with that
+file's device and inode. A list that will not settle, a partial record, an unexpected
+error or a process with more mapped files than the walk reads also hand the scan over.
+The whole scan is then run again through `lsof` (`/usr/sbin/lsof`, then `/usr/bin/lsof`),
+and only `lsof`'s answer counts.
+
+On every other platform the scan is still the `lsof` child. A Linux scan of `/proc` was
+written and removed: `/proc/<pid>/maps` names a mapped file by a path that may no longer
+lead to it and by an inode that overlay filesystems report differently from `stat`, and
+the `map_files` links that would settle it cannot be followed without privilege. The
+`lsof` scan there differs from the earlier one in three ways: `lsof` is started by the
+scan's thread instead of the caller, `/usr/bin/lsof` is tried when `/usr/sbin/lsof` is
+absent, and a scan whose wait expires while it runs reports `provider_timeout_uncertain`
+with the scan's own message, whatever the child was doing.
+
+A scan writes nothing into the pool's directory, so the directory can be removed or set
+aside the moment a scan returns. On macOS its self-test creates a private temporary file
+in the process's temporary directory and removes it; removal errors are ignored, so that
+cleanup is best-effort.
+
+`runtime status --json` reports the method as `disk_handle_scan`, computed when status
+runs: it runs the scan's own self-test and says what a scan started now would use,
+`{"method": "in-process"}`, or `{"method": "lsof", "reason": ...}` with a reason of
+`not_built_for_this_platform`, `query_unanswered`, `self_test_failed` or
+`self_test_unavailable`. It describes the host and the build, so it is the same for every
+pool, initialized or not. The self-test's temporary file is the one thing an otherwise
+read-only status writes, and status waits at most 100 ms for the test: when it has not
+answered by then (a stalled filesystem behind the temporary directory), status reports
+`{"method": "unknown", "reason": "self_test_timed_out"}` and returns. While such a test is
+still running, later status calls in the same process report the same and start no second
+test, so stalled tests cannot pile up in a long-lived process. A file that cannot
+be made is reported as `self_test_unavailable`. Neither fails status. Status shows what a
+scan would use now: a scan that fell back for a reason of its own moment, something it
+could not read, is not recorded anywhere.
+
+Scanning every process to learn whether a VM disk is held is a consequence of not owning
+the VM process: a launcher of our own would hold an exclusive lock on each disk, and the
+question would be one lock attempt. This scan is the fix for today's provider and should
+not be built on further.
+
+The stop paths (`down`, `recover`) and the release checks wait at most 30 s for the scan,
+which covers choosing the method, the scan, and finding, starting and waiting for `lsof`
+when it is needed. A scan whose wait expires while it runs ends the stop as
+`provider_timeout_uncertain`, without the marker; an error that had already arrived is
+reported as itself, and both refuse. The 30 s limit the wait, not the work. An `lsof`
+child that is running, or that is started after the caller gave up, is stopped and
+reaped by the scan's thread; the caller waits up to 250 ms more for that, which bounds
+its extra wait and not the reaping. A scan thread blocked in a system call can outlive
+the timeout, and whatever it answers later is discarded.
+`scripts/measure-lsof-scan.ts` re-measures a host: the runtime's scan with `--scan-binary`
+(macOS), the `lsof` child without.
 
 The reserve is used only when a start needs it. Once the startup lease is held, a
 start whose every qualifying sample, including the lease recheck, also fits the 58 GiB
@@ -2254,9 +2604,9 @@ start whose free disk lies between the host reserve and the fresh budget keeps t
 selection. `runtime probe` takes no lease and settles no basis, so it reports the reserve
 basis for a qualifying stopped pool whatever its headroom; the start's `admission.json`
 records the basis that start used. Under the lease, before any restart effect and again immediately before
-`machine start`, its release checks also require a free VM lock, no open disk handle
-(`lsof`, bounded at 30 seconds because it scans every process and is slow on a loaded
-host), no owned listener and an unchanged audited provider configuration. The short-HOME
+`machine start`, its release checks also require a free VM lock, no holder found by the
+disk-handle scan (the same scan, waited on for at most 30 seconds because it walks every process and is
+slow on a loaded host), no owned listener and an unchanged audited provider configuration. The short-HOME
 alias is checked on every owner load, and the rootfs content against its pin before
 boot.
 
@@ -2266,8 +2616,8 @@ Each refusal maps to a closed code: `retained_reserve_foreign_owner`,
 keeps the 58 GiB fresh-allocation budget, and the admission report carries
 `retained_reserve_refusal` with that code; the reserve is never relaxed. A selected pool
 that fails a later check refuses the start with the code. Because only a start that
-needs the reserve runs the release checks, a release-check refusal, including an `lsof`
-scan that times out, never refuses a start whose samples all fit the fresh budget. `machine create` requires an
+needs the reserve runs the release checks, a release-check refusal, including a
+disk-handle scan that times out, never refuses a start whose samples all fit the fresh budget. `machine create` requires an
 authority only a start without a reserve selection obtains, and `machine start` requires
 one issued only by the pre-boot admission on the qualifying basis followed by the final
 leased recheck. The start sequence itself is typed: the check before any restart effect

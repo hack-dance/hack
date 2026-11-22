@@ -26,7 +26,9 @@ published ports instead of their `*.hack.local` names.
 Health checks check every 250 milliseconds while a service starts and every 10 seconds
 after it is healthy, and dev servers run with `init: true` and a short
 `stop_grace_period`, so `hack up` and `hack down` do not wait on fixed timers.
-`start_interval` needs Docker Engine 25.0 and Docker Compose 2.20.2 or later. See
+`start_interval` requires Docker Engine 25.0 or later and Docker Compose 2.20.2
+or later. On an older engine, remove `start_interval` to keep checking at
+`interval`. See
 [Fast, correct health checks and shutdown](fast-health-checks.md).
 
 Each example keeps the project identity, Compose services and default environment
@@ -113,8 +115,9 @@ services:
       - db-data:/var/lib/postgresql/data
     # Checked every 250ms while starting, then every 10s once healthy.
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "app", "-d", "app"]
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "app", "-d", "app"]
       start_period: 30s
+      # Requires Docker Engine 25+. On older engines, remove start_interval to check at interval.
       start_interval: 250ms
       interval: 10s
       timeout: 3s
@@ -210,6 +213,7 @@ services:
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       start_period: 30s
+      # Requires Docker Engine 25+. On older engines, remove start_interval to check at interval.
       start_interval: 250ms
       interval: 10s
       timeout: 3s
@@ -390,8 +394,9 @@ services:
     volumes:
       - db-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "app", "-d", "app"]
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "app", "-d", "app"]
       start_period: 30s
+      # Requires Docker Engine 25+. On older engines, remove start_interval to check at interval.
       start_interval: 250ms
       interval: 10s
       timeout: 3s
@@ -530,8 +535,9 @@ services:
     volumes:
       - db-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "app", "-d", "app"]
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "app", "-d", "app"]
       start_period: 30s
+      # Requires Docker Engine 25+. On older engines, remove start_interval to check at interval.
       start_interval: 250ms
       interval: 10s
       timeout: 3s

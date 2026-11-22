@@ -67,7 +67,7 @@ ops:
     - ..:/app
     - node_modules:/app/node_modules
   environment:
-    DATABASE_URL: postgres://postgres:postgres@db:5432/mydb
+    DATABASE_URL: postgres://postgres:postgres@db:5432/example-db
   depends_on:
     db:
       condition: service_healthy
@@ -76,7 +76,7 @@ ops:
   networks:
     - default
   profiles: ["ops"]
-  command: bun run db:generate //optionally add a default command to run.
+  command: bun run db:generate # optional default command
 ```
 
 ## 4) Run

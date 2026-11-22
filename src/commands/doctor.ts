@@ -146,6 +146,11 @@ import {
   doctorMetadata,
 } from "../lib/doctor-metadata.ts";
 import {
+  checkNativeImageBuilder,
+  NATIVE_BUILDER_CHECK,
+  type NativeBuilderReport,
+} from "../lib/doctor-native-builder.ts";
+import {
   AMD64_EMULATION_CHECK,
   type Amd64EmulationReport,
   amd64EmulationCheckResult,
@@ -300,6 +305,7 @@ import {
 } from "../lib/project-runtime-hygiene.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { readProxyBindFromCompose } from "../lib/proxy-bind.ts";
+import { withIngressChange } from "../lib/proxy-ingress-addresses.ts";
 import { inspectProxyLoopback } from "../lib/proxy-loopback.ts";
 import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
@@ -384,6 +390,8 @@ interface CheckResult {
   readonly devPerformance?: DevPerformanceReport;
   /** Native pool idleness: state, graph count and memory; no paths. */
   readonly nativePool?: NativePoolReport;
+  /** A count of build services and the image builder's closed state. */
+  readonly nativeBuilder?: NativeBuilderReport;
 }
 
 const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
@@ -1673,6 +1681,20 @@ async function handleNativeDoctor(opts: {
         { timeoutMs: 25_000 }
       )
     );
+    // Read-only, with --fix too: adding the builder needs download consent.
+    results.push(
+      await runCheck(
+        progress,
+        NATIVE_BUILDER_CHECK,
+        async () =>
+          await checkNativeImageBuilder({
+            runtime: opts.runtime,
+            cwd: nativeProject.projectRoot,
+            compose: await readNativeComposeDocument(nativeProject.composeFile),
+          }),
+        { timeoutMs: 35_000 }
+      )
+    );
   }
   await appendNativeMachineChecks({ ...opts, progress, results });
   progress.stop(`Native doctor checks complete (${results.length} checks)`);
@@ -1932,6 +1954,8 @@ export type DoctorJsonCheck = DoctorMetadata & {
   readonly devPerformance?: DevPerformanceReport;
   /** Present only on the native pool idle machine check. */
   readonly nativePool?: NativePoolReport;
+  /** Present only on the native image builder check: a count and a closed state. */
+  readonly nativeBuilder?: NativeBuilderReport;
 };
 
 export type DoctorJsonData = {
@@ -1963,6 +1987,7 @@ const DOCTOR_REPORT_FIELDS = [
   "nativeSource",
   "devPerformance",
   "nativePool",
+  "nativeBuilder",
 ] as const satisfies readonly (keyof CheckResult)[];
 
 type DoctorReportFields = Pick<
@@ -5548,20 +5573,26 @@ async function maybeStartGlobalCaddyCompose(opts: {
     return;
   }
 
-  const started = await exec(
-    [
-      "docker",
-      "compose",
-      "-f",
-      opts.paths.caddyCompose,
-      "up",
-      "-d",
-      "--remove-orphans",
-    ],
-    {
-      cwd: dirname(opts.paths.caddyCompose),
-      stdin: "ignore",
-    }
+  // The proxy may come back with new addresses: no record read before or
+  // during the repair is trusted after it.
+  const started = await withIngressChange(
+    resolveGlobalHackDir(),
+    async () =>
+      await exec(
+        [
+          "docker",
+          "compose",
+          "-f",
+          opts.paths.caddyCompose,
+          "up",
+          "-d",
+          "--remove-orphans",
+        ],
+        {
+          cwd: dirname(opts.paths.caddyCompose),
+          stdin: "ignore",
+        }
+      )
   );
   if (started.exitCode !== 0) {
     note(commandFailureDetail({ result: started }), "runtime repair");

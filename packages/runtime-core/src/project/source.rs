@@ -348,7 +348,7 @@ fn rules(
                 .expect("project rule")
                 .to_string_lossy()
                 .into_owned(),
-            format!("{:x}", Sha256::digest(&bytes)),
+            format!("{:x}", crate::Hex(Sha256::digest(&bytes))),
         );
         found = true;
     }
@@ -558,7 +558,7 @@ pub fn inventory(
     Ok(SourceSelection {
         policy:"project-local .gitignore/.ignore rules plus fixed and env_file credential exclusions; no global ignore rules".into(),
         identity_kind:"path/type/size/mtime/executable metadata plus ignore-rule identity; NOT a content revision or synchronized snapshot".into(),
-        metadata_sha256:format!("{:x}",Sha256::digest(bytes)),ignore_files,entries,excluded_paths,
+        metadata_sha256:format!("{:x}",crate::Hex(Sha256::digest(bytes))),ignore_files,entries,excluded_paths,
         exclusion_rules:vec!["known credential paths, .env*, hack.env* and every declared env_file input".into(),"generated builds/dependencies, nested .worktrees and candidate/provider state".into(),"Git and agent-local configuration directories".into(),"project .gitignore/.ignore rules, including tracked files they exclude".into()],
     })
 }

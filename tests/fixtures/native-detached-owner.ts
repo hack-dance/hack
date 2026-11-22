@@ -388,6 +388,7 @@ if (role === "channel-holder") {
     process.exitCode = [
       "wrapped-failure",
       "wrapped-static-failure",
+      "builder-missing",
       "provider-pin",
       "wrapped-provider-pin",
       "immediate-failure",
@@ -457,6 +458,14 @@ if (role === "channel-holder") {
         nativeDetachedUpShellVariables([], true);
         nativeDetachedUpShellVariables([], true);
       }
+      if (mode === "builder-missing") {
+        await nativeDetachedUpFailure(
+          new NativeRuntimeRequestError({
+            nativeCode: "builder_not_prepared",
+            message: "synthetic-private-value",
+          })
+        );
+      }
       if (["provider-pin", "wrapped-provider-pin"].includes(mode)) {
         await nativeDetachedUpFailure(new Error("synthetic-private-value"));
         const failure = new NativeRuntimeRequestError({
@@ -477,6 +486,7 @@ if (role === "channel-holder") {
         [
           ...PRESTART_MODES,
           "fail",
+          "builder-missing",
           "provider-pin",
           "wrapped-provider-pin",
         ].includes(mode)

@@ -778,7 +778,8 @@ Software upgrades do not opt you into agent integrations. `hack setup` is
 explicit. Existing agent files need their own review; do not regenerate or delete
 them as part of an upgrade. `hack setup migrate` defaults to a read-only preview;
 its explicit apply backs up selected legacy files and has a manifest-based
-rollback. Client loading on the upgraded machine is **to be confirmed in the
+rollback. The text summary aligns counts by scope and prints the undo command
+after apply. Client loading on the upgraded machine is **to be confirmed in the
 dogfood run**.
 
 Sources: [explicit setup](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/setup.ts),

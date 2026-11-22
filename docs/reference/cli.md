@@ -1779,7 +1779,7 @@ Download and prepare the pinned native runtime for this home
 hack native setup [options]
 ```
 
-Verifies and resumes pinned downloads without starting a VM. Requires Apple Silicon macOS. Non-interactive downloads need --accept-downloads. --json passes the runtime result through unchanged.
+Verifies and resumes pinned downloads without starting a VM: the VM provider, the engine, the guest networking packages and the image builder. Requires Apple Silicon macOS. Non-interactive downloads need --accept-downloads. A home that is already set up is left as it is; with --accept-downloads it gains the image builder if it has none. --json passes the runtime result through unchanged.
 
 ### Options
 
@@ -1790,6 +1790,7 @@ Verifies and resumes pinned downloads without starting a VM. Requires Apple Sili
 | `--archive <path>` | Offline pinned provider archive (requires the complete offline input set) |
 | `--engine-archive <path>` | Offline pinned engine archive |
 | `--network-tools-directory <path>` | Private directory containing all pinned networking packages |
+| `--builder <path>` | Offline pinned image builder file (optional; with the offline input set) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

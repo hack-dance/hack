@@ -466,6 +466,63 @@ function readsFixtureDirectory(opts: {
   );
 }
 
+function collectRustReferences(opts: {
+  readonly file: string;
+  readonly source: string;
+  readonly collector: ReturnType<typeof inputCollector>;
+  readonly reader: ReturnType<typeof inputReader>;
+}): void {
+  const { file, source, collector, reader } = opts;
+  const cwd = posix.dirname(file);
+  let crate = cwd;
+  while (
+    crate !== "." &&
+    reader.kind(posix.join(crate, "Cargo.toml")) !== "file"
+  ) {
+    crate = posix.dirname(crate);
+  }
+  for (const [, path] of source.matchAll(
+    /\binclude_(?:str|bytes)!\s*\(\s*"([.\w/-]+)"/g
+  )) {
+    if (path) {
+      collector.add(posix.join(cwd, path));
+    }
+  }
+  for (const [, chain] of source.matchAll(
+    /Path(?:Buf)?::(?:new|from)\s*\(\s*env!\("CARGO_MANIFEST_DIR"\)\s*\)((?:\s*\.join\s*\(\s*"[.\w/-]+"\s*\))+)/g
+  )) {
+    if (chain) {
+      const paths = [...chain.matchAll(/"([.\w/-]+)"/g)].flatMap(([, path]) =>
+        path ? [path] : []
+      );
+      collector.add(posix.join(crate, ...paths));
+    }
+  }
+  for (const [, path] of source.matchAll(
+    /concat!\(\s*env!\("CARGO_MANIFEST_DIR"\)\s*,\s*"([.\w/-]+)"/g
+  )) {
+    if (path) {
+      collector.add(posix.join(crate, path));
+    }
+  }
+}
+
+function enqueueRustSources(opts: {
+  readonly manifest: string;
+  readonly collector: ReturnType<typeof inputCollector>;
+  readonly reader: ReturnType<typeof inputReader>;
+}): void {
+  const crate = posix.dirname(opts.manifest);
+  opts.collector.add(posix.join(crate, "build.rs"));
+  for (const directory of ["src", "tests", "examples", "benches"]) {
+    for (const file of opts.reader.glob(
+      posix.join(crate, directory, "**/*.rs")
+    )) {
+      opts.collector.add(file);
+    }
+  }
+}
+
 function collectFiles(opts: {
   readonly tier: Tier;
   readonly collector: ReturnType<typeof inputCollector>;
@@ -492,6 +549,12 @@ function collectFiles(opts: {
     const source = reader.read(file);
     if (!source) {
       continue;
+    }
+    if (posix.basename(file) === "Cargo.toml") {
+      enqueueRustSources({ manifest: file, collector, reader });
+    }
+    if (file.endsWith(".rs")) {
+      collectRustReferences({ file, source, reader, collector });
     }
     collectTextReferences({ file, source, reader, collector });
     const builds = tier === "docker" ? dockerBuilds(file, source) : [];

@@ -32,11 +32,14 @@ and the slim image’s lifecycle supervisor. Candidate Rust and guest crates
 stay outside both image contexts. Build smoke and state models follow their own workflow commands. The
 model tier follows Python unittest discovery and literal references in those
 controls, including reference documents and source they read. Cargo
-manifests select their crate inputs and follow local dependency manifests. The
+manifests select their crate inputs and follow local dependency manifests.
+Rust include macros and manifest-relative references also retain files outside
+the crate, including the candidate guide used by its network-tool test. The
 workflow gate table in `scripts/ci-job-policy.ts` maps each skippable job and
-step group to its selector output. Tests compare those rows to the workflow
+step group and matrix to its selector output. Tests compare those rows to the workflow
 conditions and check that every derived checkout input enables its gate. The
-unit suite and diagnostic reporting already run on PRs. The planner reads both the
+unit suite and diagnostic reporting already run on PRs. Shard 8 owns the
+shared TypeScript check. The planner reads both the
 base and merge trees, so deleted inputs and both sides of a rename still count. Thus the shared-host
 fixture, real-Docker context test and configuration compiler remain Docker inputs
 without relying on a filename-prefix guess. A new registered scenario importing a

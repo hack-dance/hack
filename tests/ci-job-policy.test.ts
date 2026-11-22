@@ -26,39 +26,55 @@ function gateKeys(workflow: unknown): Set<string> {
     throw new Error("CI workflow has no jobs");
   }
   const found = new Set<string>();
+  const add = (
+    id: string,
+    value: unknown,
+    location: "job" | "step" | "matrix"
+  ): void => {
+    if (typeof value === "string") {
+      for (const [, property, bracket] of value.matchAll(outputReferences)) {
+        found.add(
+          workflowGateKey(id, property ?? bracket ?? "<computed>", location)
+        );
+      }
+    } else if (Array.isArray(value)) {
+      for (const item of value) {
+        add(id, item, location);
+      }
+    } else if (isRecord(value)) {
+      for (const item of Object.values(value)) {
+        add(id, item, location);
+      }
+    }
+  };
   for (const [id, job] of Object.entries(workflow.jobs)) {
     if (!isRecord(job)) {
       continue;
     }
-    const conditions = [{ condition: job.if, steps: false }];
+    add(id, job.if, "job");
+    if (isRecord(job.strategy)) {
+      add(id, job.strategy.matrix, "matrix");
+    }
     for (const step of Array.isArray(job.steps) ? job.steps : []) {
       if (isRecord(step)) {
-        conditions.push({ condition: step.if, steps: true });
-      }
-    }
-    for (const { condition, steps } of conditions) {
-      if (typeof condition !== "string") {
-        continue;
-      }
-      for (const [, property, bracket] of condition.matchAll(
-        outputReferences
-      )) {
-        found.add(
-          workflowGateKey(id, property ?? bracket ?? "<computed>", steps)
-        );
+        add(id, step.if, "step");
       }
     }
   }
   return found;
 }
 
-test("every scope-conditioned workflow job or step has a policy row", async () => {
+test("every scope-conditioned workflow job, step or matrix has a policy row", async () => {
   const workflow: unknown = Bun.YAML.parse(
     await Bun.file(resolve(repoRoot, ".github/workflows/ci.yml")).text()
   );
   const declared = CI_JOB_POLICY.flatMap((row) =>
     [row.output, ...("modifiers" in row ? row.modifiers : [])].map((output) =>
-      workflowGateKey(row.job, output, "steps" in row)
+      workflowGateKey(
+        row.job,
+        output,
+        "matrix" in row ? "matrix" : "steps" in row ? "step" : "job"
+      )
     )
   );
   expect([...gateKeys(workflow)].sort()).toEqual(declared.sort());
@@ -142,4 +158,17 @@ test.each([
   expect(result.suite).toBe(true);
   expect(result.docker_suite).toBe(false);
   expect(result.state_models).toBe(false);
+}, 30_000);
+
+test("Rust checkout references retain Candidate core on a guide-only diff", async () => {
+  const path = "docs/guides/native-candidate.md";
+  expect(deriveJobInputs({ repoRoot, tier: "candidate" })?.has(path)).toBe(
+    true
+  );
+  expect(await plan(path)).toMatchObject({
+    scope: "docs",
+    runtime_core: true,
+    build_smoke: false,
+    compiler_hosts: "[]",
+  });
 }, 30_000);

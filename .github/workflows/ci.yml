@@ -343,7 +343,6 @@ jobs:
         run: |
           bunx ultracite check scripts/build-lifecycle-supervisor.ts scripts/check-release-lifecycle-supervisor.ts scripts/build-config-compiler.ts scripts/build-release.ts scripts/check-release-config-compiler.ts scripts/check-config-compiler-cli.ts tests/config-compiler-build.test.ts tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts tests/native-project-inputs.test.ts tests/native-project-inputs-acquisition-race.test.ts tests/release-download-installer.test.ts
           bun test tests/config-compiler-build.test.ts tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts tests/native-project-inputs.test.ts tests/native-project-inputs-acquisition-race.test.ts
-          bun run --cwd packages/cli typecheck
           bun test tests/release-download-installer.test.ts
           bun run build:release --skip-tests --out=dist/config-compiler-release
           bun scripts/check-release-config-compiler.ts dist/config-compiler-release
@@ -910,6 +909,7 @@ jobs:
         env:
           HACK_TEST_SELECTION: ${{ needs.changes.outputs.test_files }}
         run: bun scripts/test-shard.ts report-deferred
+      # TypeScript checks use the same sources on all hosts. Run once here.
       - name: Typecheck (Turbo)
         if: matrix.shard == 8
         run: bun run turbo:typecheck

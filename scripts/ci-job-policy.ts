@@ -13,6 +13,25 @@ export const CI_JOB_POLICY = [
     tier: "compilerRust",
     steps: true,
   },
+  {
+    job: "config-compiler",
+    output: "compiler_hosts",
+    matrix: true,
+    always: "The matrix uses the compiler job’s derived host list.",
+  },
+  {
+    job: "runtime-core",
+    output: "defer_macos",
+    matrix: true,
+    always:
+      "Linux remains selected for every Candidate core input. The macOS leg follows the platform policy.",
+  },
+  {
+    job: "test-shard",
+    output: "test_shards",
+    matrix: true,
+    always: "All Linux shards run; the macOS pool follows the platform policy.",
+  },
   { job: "runtime-core", output: "runtime_core", tier: "candidate" },
   {
     job: "state-models",
@@ -90,7 +109,7 @@ export const JOB_TIERS = [...new Set(DERIVED_JOB_ROWS.map((row) => row.tier))];
 export function workflowGateKey(
   job: string,
   output: string,
-  steps: boolean
+  location: "job" | "step" | "matrix"
 ): string {
-  return `${job}:${steps ? "step" : "job"}:${output}`;
+  return `${job}:${location}:${output}`;
 }

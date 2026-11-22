@@ -892,10 +892,10 @@ fn legacy_cleanup_does_not_follow_symlinks() {
     symlink(fixture.root(), &archive_link).unwrap();
 
     let reopened = fixture.open();
-    assert_eq!(
-        fs::symlink_metadata(base.join("key")).unwrap_err().kind(),
-        io::ErrorKind::NotFound
-    );
+    // The symlinked `records` cannot be removed, so the flat key, VERSION and lock
+    // all stay together; nothing is followed, and the live key is untouched.
+    assert!(fs::symlink_metadata(base.join("key")).unwrap().is_symlink());
+    assert!(fixture.root().join("key").is_file());
     assert!(fs::symlink_metadata(directory_link).unwrap().is_symlink());
     assert!(fs::symlink_metadata(archive_link).unwrap().is_symlink());
     assert_eq!(fs::read(base.join("VERSION")).unwrap(), disk::VERSION);
@@ -1967,7 +1967,7 @@ fn the_current_build_uses_the_running_images_embedded_identity() {
     );
 }
 
-/// The flat migration removes VERSION before the lock, while still holding it:
+/// The flat migration removes VERSION, then the key, then the lock, while holding it:
 /// a P1 process opening the base afterwards finds no flat store, and no P1 process
 /// can lock a fresh `lock` while VERSION still names the flat store as live.
 #[test]
@@ -1981,8 +1981,32 @@ fn flat_migration_removes_version_before_the_lock() {
     drop(fixture.open());
     assert_eq!(
         disk::FLAT_FINAL_REMOVALS.with_borrow(Clone::clone),
-        ["VERSION", "lock"]
+        ["VERSION", "key", "lock"]
     );
     assert!(!base.join("VERSION").exists());
     assert!(!base.join("lock").exists());
+}
+
+/// A flat directory that cannot be removed (here a symlinked `records`) keeps
+/// VERSION, the key and the lock together: a P1 process opening the base later
+/// must never see VERSION without its key, which would make it set the whole
+/// base aside, live `hack.store-1` included.
+#[test]
+fn a_flat_entry_that_cannot_be_removed_keeps_version_key_and_lock_together() {
+    let fixture = Fixture::new();
+    let live = fixture.open();
+    let base = fixture.base();
+    write_legacy_markers(&base);
+    fs::write(base.join("key"), [7; 32]).unwrap();
+    let elsewhere = fixture.0.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    symlink(&elsewhere, base.join("records")).unwrap();
+    disk::FLAT_FINAL_REMOVALS.with_borrow_mut(Vec::clear);
+    drop(fixture.open());
+    assert!(disk::FLAT_FINAL_REMOVALS.with_borrow(Vec::is_empty));
+    for name in ["VERSION", "key", "lock"] {
+        assert!(base.join(name).exists(), "{name} was removed");
+    }
+    assert!(elsewhere.is_dir());
+    assert!(live.keyed_digest(STEP, &json!(1)).is_ok());
 }

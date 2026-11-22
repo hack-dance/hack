@@ -343,27 +343,39 @@ fn cleanup_flat_layout(base: &Path, owner: u32) {
     if !lock_for_cleanup(&lock, base) || !has_legacy_version(&directory, owner).unwrap_or(false) {
         return;
     }
+    // Directories first. While any of them remains, nothing else is touched: a P1
+    // process that opens the base later must find VERSION, key and lock together,
+    // or it would treat a lone VERSION as a lost key and set the whole base aside,
+    // moving the live hack.store-1 with it.
     let mut removed = true;
     for name in DIRECTORIES {
         removed &= remove_owned_directory(&base.join(name), owner);
     }
+    // The key must be removable once VERSION is gone (absent, or a regular file of
+    // this user); anything else keeps the whole flat store for a later retry.
     let key_path = base.join("key");
-    removed &= remove_file_if_present(&key_path).is_ok() && absent(&key_path);
-    // Keep VERSION and the lock if any prior entry remains, so the next opener
-    // recognizes what is left and takes the same lock to retry. Once everything
-    // else is gone, VERSION goes first, while the lock is still held: a P1
-    // process that opens the base after that finds no store to adopt, and the
-    // lock name is removed last so no such process can lock a fresh inode while
-    // VERSION still says the flat store is live.
-    let lock_path = base.join("lock");
-    let version_path = base.join("VERSION");
-    if removed && remove_file_if_present(&version_path).is_ok() && absent(&version_path) {
-        #[cfg(test)]
-        FLAT_FINAL_REMOVALS.with_borrow_mut(|order| order.push("VERSION"));
-        let _ = remove_file_if_present(&lock_path);
-        #[cfg(test)]
-        FLAT_FINAL_REMOVALS.with_borrow_mut(|order| order.push("lock"));
+    let key_removable = match fs::symlink_metadata(&key_path) {
+        Err(error) => error.kind() == ErrorKind::NotFound,
+        Ok(metadata) => metadata.is_file() && metadata.uid() == owner,
+    };
+    if !(removed && key_removable) {
+        return;
     }
+    // Then VERSION, while the lock is still held: once it is gone a P1 opener finds
+    // no flat store to adopt. Only then the key, and the lock name last, so no P1
+    // process can lock a fresh inode while VERSION still names the flat store.
+    let version_path = base.join("VERSION");
+    if !(remove_file_if_present(&version_path).is_ok() && absent(&version_path)) {
+        return;
+    }
+    #[cfg(test)]
+    FLAT_FINAL_REMOVALS.with_borrow_mut(|order| order.push("VERSION"));
+    let _ = remove_file_if_present(&key_path);
+    #[cfg(test)]
+    FLAT_FINAL_REMOVALS.with_borrow_mut(|order| order.push("key"));
+    let _ = remove_file_if_present(&base.join("lock"));
+    #[cfg(test)]
+    FLAT_FINAL_REMOVALS.with_borrow_mut(|order| order.push("lock"));
 }
 
 fn open_cleanup_lock(directory: &File, owner: u32) -> io::Result<File> {

@@ -1,4 +1,5 @@
 // biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: The terminal dashboard is intentionally event-driven and keeps renderer state and keybindings colocated.
+
 import { dirname, resolve } from "node:path";
 import {
   BoxRenderable,
@@ -29,6 +30,7 @@ import { ensureDir, writeTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { renderHackBanner } from "../lib/hack-banner.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
+import { holdProcessUntil } from "../lib/process-exit.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import {
   defaultProjectSlugFromPath,
@@ -45,6 +47,7 @@ import { exec, run } from "../lib/shell.ts";
 import { parseTimeInput } from "../lib/time.ts";
 import { copyToClipboard } from "../ui/clipboard.ts";
 import type { LogStreamBackend, LogStreamEvent } from "../ui/log-stream.ts";
+import { consumeLogStream } from "./log-stream.ts";
 import { runWithTerminalHandoff } from "./terminal-handoff.ts";
 
 /** Matches block characters used in ASCII banners */
@@ -2730,6 +2733,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       activeRenderer.off("resize", renderFooter);
       activeRenderer.stop();
       activeRenderer.destroy();
+      // Terminal restore finishes asynchronously; the CLI exits after it.
+      holdProcessUntil(activeRenderer.closed);
 
       process.off("SIGINT", handleSignal);
       process.off("SIGTERM", handleSignal);
@@ -2770,21 +2775,27 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         stderr: "pipe",
         stdin: "ignore",
       });
-
       const actionStderr = proc.stderr;
-      if (actionStderr && typeof actionStderr !== "number") {
-        void consumeLogStream({
-          stream: actionStderr,
-          isActive: () => isActive,
-          onLine: (line) =>
-            appendLogEntry(
-              formatSystemLine({
-                message: `[${opts.label}] ${line}`,
-                tone: "warn",
-              })
-            ),
-        });
-      }
+      // Quitting mid-action must neither cut the action's stderr pipe (an
+      // `up` or `down` would fail writing to it) nor stop draining it (a full
+      // pipe would block the child forever): the stream is read to its end
+      // and the CLI exits after the child and the drain finish.
+      const drained =
+        actionStderr && typeof actionStderr !== "number"
+          ? consumeLogStream({
+              stream: actionStderr,
+              isActive: () => isActive,
+              drainWhenInactive: true,
+              onLine: (line) =>
+                appendLogEntry(
+                  formatSystemLine({
+                    message: `[${opts.label}] ${line}`,
+                    tone: "warn",
+                  })
+                ),
+            })
+          : Promise.resolve();
+      holdProcessUntil(Promise.all([proc.exited, drained]));
 
       const exitCode = await proc.exited;
       appendLogEntry(
@@ -4409,48 +4420,6 @@ function xtermToRgba(code: number): RGBA {
   return RGBA.fromInts(steps[r] ?? 0, steps[g] ?? 0, steps[b] ?? 0, 255);
 }
 
-async function consumeLogStream(opts: {
-  readonly stream: ReadableStream<Uint8Array>;
-  readonly isActive: () => boolean;
-  readonly onLine: (line: string) => void;
-}): Promise<void> {
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  const reader = opts.stream.getReader();
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) {
-        break;
-      }
-      if (!opts.isActive()) {
-        break;
-      }
-      if (!value || value.length === 0) {
-        continue;
-      }
-      buffer += decoder.decode(value, { stream: true });
-      let idx = buffer.indexOf("\n");
-      while (idx >= 0) {
-        const line = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 1);
-        if (line.trim().length > 0) {
-          opts.onLine(line);
-        }
-        idx = buffer.indexOf("\n");
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const rest = buffer.trim();
-  if (rest.length > 0 && opts.isActive()) {
-    opts.onLine(rest);
-  }
-}
-
 function shutdownRenderer(opts: {
   readonly renderer: Awaited<ReturnType<typeof createCliRenderer>> | null;
 }): void {
@@ -4459,6 +4428,7 @@ function shutdownRenderer(opts: {
   }
   opts.renderer.stop();
   opts.renderer.destroy();
+  holdProcessUntil(opts.renderer.closed);
 }
 
 function formatErrorMessage(opts: { readonly error: unknown }): string {

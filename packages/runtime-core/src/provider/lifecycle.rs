@@ -1,8 +1,12 @@
+use backend::smolvm_cli::{SmolvmCli, binary, root};
+use backend::{MachineSpec, VmBackend};
 mod admission_pool;
+mod backend;
 mod disk_handles;
 mod guest_memory_peak;
 pub mod host_filesystem;
 mod interrupted;
+mod leased_trees;
 mod operating_guard;
 mod pool_users;
 mod prepared_boot;
@@ -13,6 +17,7 @@ mod private_child;
 #[cfg(all(test, target_os = "macos"))]
 mod provider_repair_tests;
 mod relay_process;
+mod rootfs_proof;
 mod running_start;
 mod short_home;
 mod socket_repairs;
@@ -28,6 +33,7 @@ pub use prepared_boot::{
 #[cfg(target_os = "macos")]
 pub(super) use private_child::{RelayChild, RelayLaunch};
 pub(super) use relay_process::RelayProcess;
+
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::fs::{self, File, OpenOptions};
@@ -38,6 +44,12 @@ use std::os::unix::{
 };
 use std::path::Path;
 use std::time::{Duration, Instant};
+
+/// Expected executable for read-only identity checks; grants no launch authority.
+#[cfg(target_os = "macos")]
+pub(super) fn provider_binary(candidate: &Candidate) -> std::path::PathBuf {
+    binary(candidate)
+}
 
 #[derive(Debug, Serialize)]
 pub struct RuntimeStatus {
@@ -77,6 +89,14 @@ pub struct RuntimeStatus {
     /// first (see `guest_memory_peak`). A record only; absent when there is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guest_memory_peaks: Option<Vec<guest_memory_peak::Boot>>,
+    /// How a disk-holder scan started now would read the host (`disk_handles`): in this
+    /// process, or through `lsof` with the reason; or unknown when the self-test did not
+    /// answer in time. Computed when status runs, by the self-test a scan runs first, so
+    /// it describes this host and build and no pool or earlier scan. On macOS that test
+    /// makes and removes a private file in the process's temporary directory; status
+    /// waits at most 100 ms for it, and failing to make the file is reported as a
+    /// reason, never an error.
+    pub disk_handle_scan: disk_handles::MethodReport,
     /// Provider sockets native found world-accessible and made private for the running
     /// provider (`socket_repairs`); absent when there were none.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,51 +105,6 @@ pub struct RuntimeStatus {
     pub hashing: crate::sha256_backend::Report,
 }
 
-fn root(candidate: &Candidate) -> std::path::PathBuf {
-    candidate.state_root.join("run/smolvm")
-}
-fn binary(candidate: &Candidate) -> std::path::PathBuf {
-    artifact::root(candidate).join("smolvm-bin")
-}
-
-fn command(candidate: &Candidate, owner: &Owner) -> std::process::Command {
-    let mut command = process::clean_command(&binary(candidate));
-    command
-        .current_dir(root(candidate).join("home"))
-        .env("HOME", &owner.short_home)
-        .env("TMPDIR", root(candidate).join("tmp"))
-        .env("DOCKER_CONFIG", root(candidate).join("docker-config"))
-        .env("SMOLVM_AGENT_ROOTFS", root(candidate).join("rootfs"))
-        // Pinned Smol forwards this to the guest agent. Its automatic trim can
-        // truncate imago backing files; retained disk identity requires exact size.
-        .env("SMOLVM_DISK_TRIM", "0")
-        .env("DYLD_LIBRARY_PATH", artifact::root(candidate).join("lib"));
-    // All provider invocations (including start/recovery and private exec) use
-    // this clean environment. DNS-learned answers must not reopen host/private
-    // ranges; Smol's local default floor is insufficient for public egress modes.
-    if matches!(
-        &owner.network,
-        super::NetworkIntent::ApprovedHosts { .. } | super::NetworkIntent::Internet
-    ) {
-        command.env("SMOLVM_EGRESS_FLOOR", "strict");
-    }
-    let policy = owner.reclamation.unwrap_or_default();
-    command
-        .env(
-            "SMOLVM_BALLOON_RECLAIM",
-            if policy.enabled { "1" } else { "0" },
-        )
-        .env(
-            "SMOLVM_IDLE_RECLAIM",
-            policy.idle_minutes.unwrap_or(0).to_string(),
-        );
-    // The provider reads this at `machine start`; it is set on every invocation so the pool's
-    // provider processes agree. An ambient value never reaches the provider (clean command).
-    if super::hot_reload::Choice::off(owner.hot_reload) {
-        command.env(super::hot_reload::PROVIDER_SWITCH, "1");
-    }
-    command
-}
 fn boot_reclamation_policy() -> state::ReclamationPolicy {
     #[cfg(test)]
     if let Ok(value) = std::env::var("HACK_LOCAL_TEST_RECLAIM") {
@@ -141,39 +116,6 @@ fn boot_reclamation_policy() -> state::ReclamationPolicy {
         }
     }
     state::ReclamationPolicy::default()
-}
-fn invoke(candidate: &Candidate, owner: &Owner, args: &[&str]) -> Result<String, CandidateError> {
-    let output = process::capture(
-        command(candidate, owner).args(args),
-        Duration::from_secs(60),
-    )?;
-    if output.status.success() {
-        return String::from_utf8(output.stdout)
-            .map_err(|_| CandidateError::new("provider_protocol", "Non-UTF8 provider response."));
-    }
-    // The provider's own last line, cleaned, travels with the failure so the CLI can show it.
-    let shares = owner.project_shares();
-    let roots: Vec<&Path> = shares.iter().map(|share| share.project.as_path()).collect();
-    Err(super::provider_line::attach(
-        failed_provider_command(&output),
-        &output.stderr,
-        candidate,
-        &owner.short_home,
-        &roots,
-    ))
-}
-
-/// The error `process::run` gives a provider command that exited unsuccessfully, word for
-/// word (a test compares them), built here because the whole stderr is needed as well.
-fn failed_provider_command(output: &process::Captured) -> CandidateError {
-    CandidateError::new(
-        "provider_command_failed",
-        format!(
-            "Provider command exited {}; no automatic retry. {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr[..output.stderr.len().min(8192)]).trim()
-        ),
-    )
 }
 /// Record a lifecycle phase. Every phase other than `stopped` clears the clean-stop marker
 /// in the same write; only `down` records the marker (see [`finish_quiesced_stop`]), so a
@@ -324,28 +266,10 @@ fn operation_lease<T>(
     deadline: Option<Instant>,
     verify: impl FnOnce() -> Result<T, CandidateError>,
 ) -> Result<(state::Lock, T), CandidateError> {
-    let mut holder = None;
-    let lock = loop {
-        if deadline.is_some_and(|limit| Instant::now() >= limit) {
-            return Err(holder.unwrap_or_else(|| {
-                CandidateError::new(
-                    "provider_busy",
-                    "Provider lease acquisition deadline expired; no operation was admitted.",
-                )
-            }));
-        }
-        match state::Lock::acquire(root) {
-            Ok(lock) => break lock,
-            Err(error) if error.code == "provider_busy" && deadline.is_some() => {
-                holder = Some(error);
-                let remaining = deadline
-                    .expect("bounded acquisition")
-                    .saturating_duration_since(Instant::now());
-                std::thread::sleep(remaining.min(Duration::from_millis(50)));
-            }
-            Err(error) => return Err(error),
-        }
-    };
+    let lock = match deadline {
+        Some(deadline) => state::Lock::acquire_until(root, deadline),
+        None => state::Lock::acquire(root),
+    }?;
     let current = verify()?;
     Ok((lock, current))
 }
@@ -368,18 +292,23 @@ pub(super) fn startup_lease(root: &Path, wait: Duration) -> Result<state::Lock, 
     operation_lease(root, Some(Instant::now() + wait), || Ok(())).map(|(lock, ())| lock)
 }
 
-/// Returning the mutation lease requires a fresh Development admission window.
-/// On failure RAII drops the lease, without granting owner/allocation authority.
+/// Returning the mutation lease requires a fresh Development admission sample under it,
+/// taken no sooner than the admission window after the start's first sample, or after an
+/// earlier recorded sample of this home that `earlier` finds usable (`admission::opening`).
+/// The record is read under the lease. On failure RAII drops the lease, without granting
+/// owner/allocation authority.
 fn startup_admission_lease(
     root: &Path,
     wait: Duration,
     profile: super::Profile,
-    samples: &[admission::Admission],
+    opened: Option<admission::Opened>,
+    clock: &impl process::Clock,
+    earlier: &impl admission::Earlier,
     observe: impl FnMut() -> Result<admission::Admission, CandidateError>,
-) -> Result<(state::Lock, Vec<admission::Admission>), CandidateError> {
+) -> Result<(state::Lock, admission::Leased), CandidateError> {
     let lock = startup_lease(root, wait)?;
-    let fresh = admission::recheck_after_lease(profile, samples, observe)?;
-    Ok((lock, fresh))
+    let leased = admission::recheck_after_lease(profile, opened, clock, earlier, observe)?;
+    Ok((lock, leased))
 }
 
 /// Read-only observation takes no mutation lease and detects lifecycle changes around each read.
@@ -389,7 +318,6 @@ pub(super) struct ObservedGuest<'a> {
 }
 
 impl<'a> ObservedGuest<'a> {
-    #[cfg(target_os = "macos")]
     pub(super) fn boot_id(&self) -> Result<&str, CandidateError> {
         self.owner.guest_boot_id.as_deref().ok_or_else(|| {
             CandidateError::new("runtime_changed", "Observed guest boot is unavailable.")
@@ -451,13 +379,16 @@ impl<'a> ObservedGuest<'a> {
         verify_live(self.candidate, &current)
     }
 
+    pub(super) fn amd64_emulation(&self) -> bool {
+        self.owner.amd64_emulation
+    }
+
     pub(super) fn engine_socket(&self) -> Result<std::path::PathBuf, CandidateError> {
         self.verify()?;
         socket(self.candidate, &self.owner, "docker.sock")
     }
 
     /// The observed runtime incarnation; receipts name the incarnation that owns them.
-    #[cfg(target_os = "macos")]
     pub(super) fn incarnation(&self) -> &str {
         &self.owner.token
     }
@@ -567,6 +498,12 @@ impl<'a> OwnedGuest<'a> {
 
     pub(super) fn connect_cleanup(candidate: &'a Candidate) -> Result<Self, CandidateError> {
         Self::connect_mode(candidate, false, None)
+    }
+
+    pub(super) fn connect_cleanup_for_start(
+        candidate: &'a Candidate,
+    ) -> Result<Self, CandidateError> {
+        Self::connect_mode(candidate, false, Some(Instant::now() + STARTUP_LEASE_WAIT))
     }
 
     #[cfg(target_os = "macos")]
@@ -857,11 +794,7 @@ fn enable_amd64_emulation(
     if owner.amd64_emulation {
         require_host_translation()?;
         if owner.created && !super::config_audit::recorded_amd64_emulation(candidate, owner)? {
-            invoke(
-                candidate,
-                owner,
-                &["machine", "update", "--name", &owner.machine, "--rosetta"],
-            )?;
+            SmolvmCli::new(candidate, owner).enable_translation()?;
         }
     }
     if enabled {
@@ -1048,6 +981,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             graph_runs: users.graph_runs,
             pool_idle: Some(false),
             guest_memory_peaks: None,
+            disk_handle_scan: disk_handles::method_within(disk_handles::STATUS_METHOD_WAIT),
             repaired_sockets: None,
             hashing: crate::sha256_backend::report(),
         });
@@ -1127,6 +1061,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         graph_runs: users.graph_runs,
         pool_idle,
         guest_memory_peaks: guest_memory_peak::history(&root(candidate)),
+        disk_handle_scan: disk_handles::method_within(disk_handles::STATUS_METHOD_WAIT),
     })
 }
 
@@ -1371,8 +1306,37 @@ fn start_pool(
     project_share: Option<super::ProjectShareIntent>,
     start: super::prepared_start::Start<'_>,
 ) -> Result<RuntimeStatus, CandidateError> {
+    // `admission_reused` on this span says whether a recorded earlier sample replaced the
+    // admission wait; a start whose sample under the lease was not accepted leaves it out.
+    crate::timings::measure_attributed(crate::timings::Step::VmEnsure, None, |_, attributes| {
+        start_pool_observed(
+            candidate,
+            profile,
+            bridge_request,
+            network,
+            dependency_request,
+            project_share,
+            start,
+            &mut attributes.admission_reused,
+        )
+    })
+}
+
+// The last argument reports on the caller's timing span, on either outcome.
+#[allow(clippy::too_many_arguments)]
+fn start_pool_observed(
+    candidate: &Candidate,
+    profile: super::Profile,
+    bridge_request: super::bridge::Request,
+    network: Option<super::NetworkIntent>,
+    dependency_request: super::dependency_socket::Request,
+    project_share: Option<super::ProjectShareIntent>,
+    start: super::prepared_start::Start<'_>,
+    admission_reused: &mut Option<bool>,
+) -> Result<RuntimeStatus, CandidateError> {
     // A mistyped setting is refused before any effect.
     let hot_reload = super::hot_reload::Setting::from_environment()?;
+    let admission_reuse = admission::opening::Reuse::from_environment()?;
     // A clean stop whose alias path another entry holds is moved to a fresh alias before
     // any strict owner read below refuses it.
     restore_released_short_home_before_use(candidate)?;
@@ -1467,58 +1431,99 @@ fn start_pool(
     // A pool that is already running and owned by this home allocates nothing, so it takes
     // the named fast path instead of the admission windows below (`running_start`).
     if let Some(running) = running_start::select(candidate, profile)? {
-        return running_start::resume(candidate, running, &request, || {
-            #[cfg(target_os = "macos")]
-            if let Some(guard) = &retained_guard {
-                guard.verify(candidate)?;
-            }
-            Ok(())
+        return crate::timings::measure(crate::timings::Step::VmReattach, None, |_| {
+            running_start::resume(candidate, running, &request, || {
+                #[cfg(target_os = "macos")]
+                if let Some(guard) = &retained_guard {
+                    guard.verify(candidate)?;
+                }
+                Ok(())
+            })
         });
     }
     // Admission before aliases, provider commands, disks or VM effects. Only
     // independently verified ownership of existing disks (a live pool, or an exactly
     // clean stopped pool this start reuses) avoids charging a second VM's disks.
     let mut admission_owner = admission_pool::select(candidate, profile)?;
-    let admission = admission_pool::probe(candidate, profile, &admission_owner)?;
+    // A host this start sees failing, or cannot observe, before it holds the lease is not
+    // one an earlier record may vouch for: the record is removed if the lease is free.
+    let forget_record = || {
+        if profile == super::Profile::Development {
+            admission::opening::forget_unleased(&root(candidate));
+        }
+    };
+    let admission = admission_pool::probe(candidate, profile, &admission_owner)
+        .inspect_err(|_| forget_record())?;
     if !admission.admitted {
+        forget_record();
         return Err(CandidateError::new(
             "admission_rejected",
             admission.reasons.join(" "),
         ));
     }
-    let mut samples = if profile == super::Profile::Development {
-        let baseline_swapouts = admission.swapouts;
-        let mut samples = vec![admission];
-        samples.extend(admission::sample_after(profile, baseline_swapouts, || {
-            admission_pool::probe(candidate, profile, &admission_owner)
-        })?);
-        samples
+    // Development qualifies on two chained samples at least the admission window apart:
+    // this one, and one under the startup lease. The checks between them fill the window,
+    // so only the remainder of it is ever slept.
+    let admission_clock = process::MonotonicClock::new();
+    let (mut samples, opened) = if profile == super::Profile::Development {
+        let opened =
+            admission::open(&admission, &admission_clock).inspect_err(|_| forget_record())?;
+        (vec![admission], Some(opened))
     } else {
         // Retain the frozen Research window and baseline semantics.
-        admission::sample_with(profile, || {
+        let samples = admission::sample_with(profile, || {
             admission_pool::probe(candidate, profile, &admission_owner)
-        })?
+        })?;
+        (samples, None)
     };
-    // The content proof a boot records in its tree witness (`tree_witness`).
-    let mut proven_trees = std::collections::BTreeMap::from([
-        (
-            super::tree_witness::SMOLVM.to_owned(),
-            artifact::verify_witnessed(candidate, &artifact::SMOLVM)?,
-        ),
-        (
-            super::tree_witness::ENGINE.to_owned(),
-            artifact::verify_witnessed(candidate, &artifact::ENGINE)?,
-        ),
-    ]);
+    // The content proofs, taken inside the admission window and rechecked under the lease
+    // (`leased_trees`). A boot records them in its tree witness (`tree_witness`). A cleanly
+    // stopped pool's root files are proven beside them, read-only, on a thread of their own
+    // (`rootfs_proof`): both fill the window instead of adding to the start after it. Root
+    // files on a filesystem where that proof could not be accepted get none, and no thread.
+    // No thread, or a proof that fails or panics, is no early proof, never a refusal.
+    let (proven_trees, early_rootfs) =
+        rootfs_proof::early_beside(candidate, || -> Result<_, CandidateError> {
+            let smolvm = artifact::verify_witnessed(candidate, &artifact::SMOLVM)?;
+            let engine = artifact::verify_witnessed(candidate, &artifact::ENGINE)?;
+            Ok(std::collections::BTreeMap::from([
+                (super::tree_witness::SMOLVM.to_owned(), smolvm),
+                (super::tree_witness::ENGINE.to_owned(), engine),
+            ]))
+        });
+    let mut proven_trees = proven_trees?;
     super::network_tools::verify(candidate)?;
-    let (lock, fresh_samples) = startup_admission_lease(
-        &root(candidate),
+    // A recorded earlier sample of this home may replace the rest of the window, never a
+    // sample: the start takes its sample under the lease either way (`admission::opening`).
+    let pool_root = root(candidate);
+    let opening_host = admission::opening::System;
+    let opening = admission::opening::Opening::new(&pool_root, &opening_host, admission_reuse);
+    let (lock, leased) = startup_admission_lease(
+        &pool_root,
         STARTUP_LEASE_WAIT,
         profile,
-        &samples,
+        opened,
+        &admission_clock,
+        &opening,
         || admission_pool::probe(candidate, profile, &admission_owner),
     )?;
+    let admission::Leased {
+        samples: fresh_samples,
+        reused,
+        sampled_at,
+    } = leased;
+    *admission_reused = reused;
     samples.extend(fresh_samples);
+    // The trees were proven before the lease, which is what fences their writers. Before
+    // anything below reads or executes them, each must still be what its proof saw, or be
+    // proven again; the witness this boot records names these proofs (`leased_trees`).
+    leased_trees::recheck(candidate, &lock, &mut proven_trees)?;
+    // The same for the root files proven beside them: still what that proof saw, or proven
+    // again here, before the admission record, any later owner record update or any
+    // provider command (`rootfs_proof`). Without an early proof, or once the root files are
+    // not on a qualified filesystem, nothing is proven here and `prepare_rootfs` decides.
+    // The recheck writes nothing; an alias repaired before admission stays repaired.
+    let leased_rootfs = rootfs_proof::recheck(candidate, &lock, early_rootfs)?;
     // Recheck a clean stop's alias under the lease before the release checks probe its
     // sockets or the provider runs with it as HOME.
     restore_released_short_home(candidate)?;
@@ -1559,6 +1564,14 @@ fn start_pool(
         existing_dependencies,
         existing_share.clone(),
     )?;
+    // This start's passing sample under the lease becomes the home's recorded earlier
+    // sample, also when the start reused one. It is written only now that the pool has its
+    // owner record: an unowned pool root may hold nothing but the operation lock
+    // (`require_fresh_source_pool` above), and both rechecks have passed. A record that
+    // cannot be written costs the next start its wait and nothing else.
+    if let (Some(_), Some(sample)) = (reused, samples.last()) {
+        admission::opening::record(&pool_root, &lock, &opening_host, sample, sampled_at);
+    }
     // These leased checks must stay a superset of `running_start::StartRequest::check`, which
     // the fast path runs under its lease; network is bound to the pre-lease receipt here.
     super::project_share::check_request(&owner.project_shares(), project_share.as_ref())?;
@@ -1604,16 +1617,18 @@ fn start_pool(
     // start won the lease first); every other running pool took the fast path. Keep the full
     // re-verification for that race.
     if owner.phase == "running" {
-        if let Some(selected) = settled.selected() {
-            selected.reverify(candidate)?;
-        }
-        #[cfg(target_os = "macos")]
-        if let Some(guard) = &retained_guard {
-            guard.verify(candidate)?;
-        }
-        verify_live(candidate, &owner)?;
-        audit_boot(candidate, &owner)?;
-        return status(candidate);
+        return crate::timings::measure(crate::timings::Step::VmReattach, None, |_| {
+            if let Some(selected) = settled.selected() {
+                selected.reverify(candidate)?;
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(guard) = &retained_guard {
+                guard.verify(candidate)?;
+            }
+            verify_live(candidate, &owner)?;
+            audit_boot(candidate, &owner)?;
+            status(candidate)
+        });
     }
     // Only a clean stopped selection continues, as a restart of its verified retained disks.
     let mut restart = admission_pool::restart_only(candidate, settled, &owner, &lock)?;
@@ -1649,7 +1664,10 @@ fn start_pool(
         &mut restart,
         &lock,
     )?;
-    let rootfs_metadata = prepare_rootfs(candidate, &mut owner)?;
+    // The root files were last compared before the owner record updates and provider
+    // commands above: `prepare_rootfs` walks their metadata once more before the digest of
+    // the recheck is used, and proves them by content on any difference (`rootfs_proof`).
+    let rootfs_metadata = prepare_rootfs(candidate, &mut owner, leased_rootfs.as_ref())?;
     // Guest commands search the guest's own directories before the engine share
     // (`agent::GUEST_PATH`): the engine binaries are found only if the root files hold
     // nothing of their names.
@@ -1673,71 +1691,32 @@ fn start_pool(
         // around that start.
         super::prepared_start::before_create(candidate, &owner, &lock, start.prepared)?;
         phase(candidate, &mut owner, "creating")?;
-        let mount = format!(
-            "{}:/opt/hack-engine:ro",
-            artifact::engine_root(candidate).display()
-        );
-        let mut arguments = vec![
-            "machine".to_owned(),
-            "create".into(),
-            "--name".into(),
-            owner.machine.clone(),
-            "--label".into(),
-            format!("hack-local.owner={}", owner.token),
-            "--cpus".into(),
-            profile.cpus().to_string(),
-            "--mem".into(),
-            profile.memory_mib().to_string(),
-            "--storage".into(),
-            profile.storage_gib().to_string(),
-            "--overlay".into(),
-            profile.overlay_gib().to_string(),
-            "--docker-socket".into(),
-            "--volume".into(),
-            mount,
-        ];
-        if owner.amd64_emulation {
-            arguments.push("--rosetta".into());
-        }
-        for share in owner.project_shares() {
-            share.validate()?;
-            arguments.extend(["--volume".into(), share.argument()]);
-        }
-        arguments.extend(
-            owner
-                .network
-                .arguments()
-                .iter()
-                .map(|value| (*value).to_owned()),
-        );
-        if let Some(bridge) = owner.application_bridge {
-            for path in bridge.guest_paths() {
-                arguments.extend(["--expose-socket".into(), path]);
-            }
-        }
-        if let Some(intent) = owner.dependency_sockets {
-            for path in intent.paths(&owner.short_home) {
-                arguments.extend([
-                    "--mount-socket".into(),
-                    format!("{}:{}", path.host_path.display(), path.guest_path),
-                ]);
-            }
-        }
-        create_machine(candidate, &owner, &arguments, fresh)?;
+        let spec = pool_spec(candidate, &owner, profile);
+        create_machine(&SmolvmCli::new(candidate, &owner), &spec, fresh)?;
         super::config_audit::pin_created_network(candidate, &mut owner)?;
         owner.created = true;
         owner.save(candidate)?;
     }
     // A fresh admission immediately before boot, on the qualification's basis, closes
     // installation/lock delays. `machine start` needs the permit it leads to.
+    // The check before boot is a host sample too: one that fails or cannot be taken removes
+    // the record this start wrote above, so a retry waits its window again.
+    let forget_leased = || {
+        if profile == super::Profile::Development {
+            admission::opening::forget(&pool_root, &lock);
+        }
+    };
     let boot = match admission_pool::admit_boot(
         candidate,
         profile,
         &restart,
         samples.last().and_then(|sample| sample.swapouts),
-    )? {
+    )
+    .inspect_err(|_| forget_leased())?
+    {
         admission_pool::BootGate::Admitted(boot) => boot,
         admission_pool::BootGate::Refused(error) => {
+            forget_leased();
             // Nothing booted: a clean stop stays clean, an unclean one stays unclean.
             phase(candidate, &mut owner, "stopped")?;
             return Err(error);
@@ -1776,70 +1755,86 @@ fn start_pool(
     // old identity.
     owner.process = None;
     phase(candidate, &mut owner, "booting")?;
-    start_machine(candidate, &owner, permit)?;
-    let observed = recorded_process(candidate, &owner)?;
-    identity::verify(
-        &observed,
-        &identity::observe(observed.pid)?,
-        &binary(candidate),
-        unsafe { libc::geteuid() },
-    )?;
-    owner.process = Some(observed);
-    owner.save(candidate)?;
-    let result = finish_boot(candidate, &mut owner, previous_boot.as_deref(), &lock);
-    // A witness is recorded only where it can be accepted (a qualified filesystem).
-    super::tree_witness::record_boot(
-        candidate,
-        &lock,
-        result.is_ok() && witness_qualified(candidate),
-        owner.process.as_ref(),
-        proven_trees,
-    );
-    if let Err(error) = &result {
-        // Disk rejection must not keep an allocation alive. Process authority is
-        // independent of disk adoption; this is an unclean stop, never reconciliation.
-        let process = owner.process.as_ref().expect("process just recorded");
-        let cleanup = stop_verified_provider(process, &binary(candidate));
-        state::write(
-            &root(candidate).join("failed-boot.json"),
-            &failed_boot_record(error, process, cleanup.is_ok()),
+    crate::timings::measure(crate::timings::Step::VmBoot, None, |_| {
+        start_machine(&SmolvmCli::new(candidate, &owner), permit)?;
+        let observed = recorded_process(candidate, &owner)?;
+        identity::verify(
+            &observed,
+            &identity::observe(observed.pid)?,
+            &binary(candidate),
+            unsafe { libc::geteuid() },
         )?;
-        if cleanup.is_ok() {
-            phase(candidate, &mut owner, "failed-boot-stopped")?;
+        owner.process = Some(observed);
+        owner.save(candidate)?;
+        let result = finish_boot(candidate, &mut owner, previous_boot.as_deref(), &lock);
+        // A witness is recorded only where it can be accepted (a qualified filesystem).
+        super::tree_witness::record_boot(
+            candidate,
+            &lock,
+            result.is_ok() && witness_qualified(candidate),
+            owner.process.as_ref(),
+            proven_trees,
+        );
+        if let Err(error) = &result {
+            // Disk rejection must not keep an allocation alive. Process authority is
+            // independent of disk adoption; this is an unclean stop, never reconciliation.
+            let process = owner.process.as_ref().expect("process just recorded");
+            let cleanup = stop_verified_provider(process, &binary(candidate));
+            state::write(
+                &root(candidate).join("failed-boot.json"),
+                &failed_boot_record(error, process, cleanup.is_ok()),
+            )?;
+            if cleanup.is_ok() {
+                phase(candidate, &mut owner, "failed-boot-stopped")?;
+            }
+            cleanup.map_err(failed_boot_stop_error)?;
         }
-        cleanup.map_err(failed_boot_stop_error)?;
-    }
-    result
+        result
+    })
 }
 
-/// `machine create` allocates new disks; only a start without a reserve selection may.
+fn pool_spec(candidate: &Candidate, owner: &Owner, profile: super::Profile) -> MachineSpec {
+    MachineSpec {
+        cpus: profile.cpus(),
+        memory_mib: profile.memory_mib(),
+        storage_gib: profile.storage_gib(),
+        overlay_gib: profile.overlay_gib(),
+        engine_share: Some(artifact::engine_root(candidate)),
+        amd64_translation: owner.amd64_emulation,
+        project_shares: owner.project_shares().into_iter().cloned().collect(),
+        network: owner.network.clone(),
+        exposed_sockets: owner
+            .application_bridge
+            .map(|bridge| bridge.guest_paths())
+            .unwrap_or_default(),
+        mounted_sockets: owner
+            .dependency_sockets
+            .map(|intent| {
+                intent
+                    .paths(&owner.short_home)
+                    .into_iter()
+                    .map(|path| (path.host_path, path.guest_path))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// Define a machine whose first boot can allocate disks; reserve selections cannot create.
 fn create_machine(
-    candidate: &Candidate,
-    owner: &Owner,
-    arguments: &[String],
-    _fresh: admission_pool::FreshCreate,
+    backend: &impl VmBackend,
+    spec: &MachineSpec,
+    fresh: admission_pool::FreshCreate,
 ) -> Result<(), CandidateError> {
-    invoke(
-        candidate,
-        owner,
-        &arguments.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
-    .map(drop)
+    backend.create(spec, fresh)
 }
 
 /// `machine start` hands the VM lock to the provider; only a released boot admission may.
 fn start_machine(
-    candidate: &Candidate,
-    owner: &Owner,
-    _permit: admission_pool::StartPermit,
+    backend: &impl VmBackend,
+    permit: admission_pool::StartPermit,
 ) -> Result<(), CandidateError> {
-    invoke(
-        candidate,
-        owner,
-        &["machine", "start", "--name", &owner.machine],
-    )
-    .map(drop)
-    .map_err(stalled_boot)
+    backend.start(permit).map_err(stalled_boot)
 }
 
 /// The pinned provider's words when it ends a start whose VM showed no boot progress for its
@@ -2308,8 +2303,16 @@ fn keep_memory_peak(
 }
 
 /// Copy (once) and prove the pool's guest rootfs by content. Returns its metadata digest
-/// (`tree_witness`), taken around the final content proof.
-fn prepare_rootfs(candidate: &Candidate, owner: &mut Owner) -> Result<String, CandidateError> {
+/// (`tree_witness`), taken around the final content proof. `leased` is what this start's
+/// recheck under the lease established for the root files (`rootfs_proof::recheck`); it
+/// stands in for the proof here only for the marker and the pin it was made against, and
+/// only while one more metadata walk, made here, finds the root files as the recheck left
+/// them (`rootfs_proof::Leased::stands`).
+fn prepare_rootfs(
+    candidate: &Candidate,
+    owner: &mut Owner,
+    leased: Option<&rootfs_proof::Leased>,
+) -> Result<String, CandidateError> {
     let templates = root(candidate).join("home/.smolvm");
     state::private_directory(&templates)?;
     for name in ["storage-template.ext4.zst", "overlay-template.ext4.zst"] {
@@ -2365,6 +2368,11 @@ fn prepare_rootfs(candidate: &Candidate, owner: &mut Owner) -> Result<String, Ca
         }
         owner.rootfs_digest = Some(source_hash);
         owner.save(candidate)?;
+    }
+    if let Some(metadata) = leased
+        .and_then(|leased| leased.stands(&destination, &marker, owner.rootfs_digest.as_deref()))
+    {
+        return Ok(metadata);
     }
     prove_rootfs(&destination, &marker, owner.rootfs_digest.as_deref())
 }
@@ -2639,16 +2647,37 @@ fn provider_stopped(phase: &str, process_alive: Option<bool>) -> bool {
 }
 
 pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
+    crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
+        down_observed(candidate)
+    })
+}
+
+fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     // Status is read-only and idempotent down on an uninitialized pool creates nothing.
     let initial = status(candidate)?;
     if initial.phase == "uninitialized" {
         return Ok(initial);
     }
-    let _lock = state::Lock::acquire(&root(candidate))?;
+    let lock = state::Lock::acquire(&root(candidate))?;
     // Builds take their shared fence only under this lease, so none can start after this.
     super::image_build::require_no_active_build(candidate)?;
     let mut owner = Owner::load(candidate)?;
     let stopped = provider_stopped(&owner.phase, initial.process_alive);
+    // When there is a pool to stop, one host sample is taken beside the stop, on its own
+    // thread, so a start that follows soon need not wait out its admission window
+    // (`admission::opening`). It is taken on the unowned basis, which claims nothing about
+    // this pool. The stop never waits for it and cannot fail on it: it is settled after the
+    // stop, under this lease, if it is back by then.
+    let stop_sample = if stopped {
+        admission::opening::StopSample::NotTaken
+    } else {
+        let checkout = candidate.checkout.clone();
+        admission::opening::StopSample::beside(
+            owner.profile,
+            move || admission::probe_for(&checkout, super::Profile::Development),
+            || admission::opening::Host::now(&admission::opening::System),
+        )
+    };
     // Only stopping a provider reaches the prepared tree. A stopped pool's down executes
     // nothing from it, so a tree changed outside Hack cannot block quiescence; any later
     // start still verifies the tree (see `repair_provider_trees`).
@@ -2684,6 +2713,7 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         Err(error) => Err(error),
     };
     keep_memory_peak(&root(candidate), peak, &mut result);
+    stop_sample.settle(&root(candidate), &lock, &admission::opening::System);
     result
 }
 
@@ -3078,9 +3108,11 @@ fn finish_stopped(
     finish_absent(candidate, owner, value, true)
 }
 
-/// Record `value` once the provider's VM lock is free, no handle remains on the owned disks and
-/// no owned socket accepts connections. The caller has established that no provider process
-/// remains; this proves the machine it launched released everything before the receipt changes.
+/// Record `value` once the provider's VM lock is free, the disk-holder scan names no process
+/// on the owned disks and no owned socket accepts connections. The caller has established that
+/// no provider process remains; these checks look for anything the machine it launched left
+/// behind before the receipt changes. The scan inspects what `lsof` inspects and does not
+/// prove that nothing maps a disk (`disk_handles`).
 /// With `record_disks`, unadopted disks are identified now; without it they stay unadopted, so
 /// the next boot's size, format-marker and template checks decide whether to adopt them.
 fn finish_absent(
@@ -3115,7 +3147,7 @@ impl Drop for VmLock {
 #[cfg(not(test))]
 const STOP_SCAN_WAIT: Duration = disk_handles::STOP_HANDLE_WAIT;
 /// The unit-test build of [`STOP_SCAN_WAIT`]. Release-check fixtures prove what the scan
-/// reports (status 1, no output), not how fast it reports it, and they run beside other
+/// reports (no holder, nothing unknown), not how fast it reports it, and they run beside other
 /// tests' work; on a loaded host one scan took longer than 5 s and the fixture failed as
 /// `provider_timeout_uncertain` before its result under test (HACK-1457). The production
 /// bounds themselves are tested on a fake clock in [`disk_handles`].
@@ -3174,7 +3206,7 @@ fn lock_disks_closed(
     }
     let vm_lock = VmLock(vm_lock);
     disk_handles::disks_closed(
-        &disk_handles::Lsof::host(),
+        &disk_handles::HostScan::host(),
         &process::MonotonicClock::new(),
         disks,
         handle_wait,
@@ -3619,9 +3651,11 @@ mod tests {
             std::fs::write(&identity, "original").unwrap();
             let held = state::Lock::acquire(&root).unwrap();
             let calls = std::cell::Cell::new(0);
+            let immediate = Instant::now();
             assert!(
                 matches!(operation_lease(&root, None, || { calls.set(1); Ok(()) }), Err(e) if e.code == "provider_busy")
             );
+            assert!(immediate.elapsed() < Duration::from_secs(1));
             let writer = identity.clone();
             let worker = std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(100));
@@ -3787,103 +3821,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_command_enforces_strict_floor_for_public_egress_modes() {
-        let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
-        let mut owner: Owner = serde_json::from_value(json!({
-            "version":1,"checkout":"/fixture","token":"fixture","machine":"fixture",
-            "short_home":"/fixture","created":true,"phase":"stopped","process":null,
-            "storage":null,"overlay":null,"guest_boot_id":null,
-            "daemon_pid":null,"daemon_start":null,"rootfs_digest":null
-        }))
-        .unwrap();
-        for intent in [
-            super::super::NetworkIntent::Isolated,
-            super::super::NetworkIntent::HostGateway,
-            super::super::NetworkIntent::Internet,
-            super::super::NetworkIntent::approved_hosts(vec!["registry.example.com".into()])
-                .unwrap(),
-        ] {
-            let approved = matches!(
-                &intent,
-                super::super::NetworkIntent::ApprovedHosts { .. }
-                    | super::super::NetworkIntent::Internet
-            );
-            owner.network = intent;
-            // The same constructor supplies normal start, re-start after stop,
-            // recovery and exec. Inspect argv/env only; never spawn a provider.
-            for action in ["create", "start", "stop", "exec"] {
-                let mut cmd = command(&candidate, &owner);
-                cmd.args(["machine", action, "--name", &owner.machine]);
-                let env: std::collections::BTreeMap<_, _> = cmd.get_envs().collect();
-                assert_eq!(
-                    env.get(std::ffi::OsStr::new("SMOLVM_EGRESS_FLOOR"))
-                        .copied()
-                        .flatten(),
-                    approved.then_some(std::ffi::OsStr::new("strict"))
-                );
-                for override_name in [
-                    "SMOLVM_EGRESS_ALLOW_PRIVATE",
-                    "SMOLVM_ALLOW_HOST_LOOPBACK",
-                    "SMOLVM_PUBLISH_ADDR",
-                ] {
-                    assert!(!env.contains_key(std::ffi::OsStr::new(override_name)));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn provider_command_disables_trim_despite_ambient_override() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "provider::lifecycle::tests::provider_command_uses_recorded_reclamation_policy",
-                "--nocapture",
-            ])
-            .env("SMOLVM_DISK_TRIM", "1")
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("provider-trim-disabled"));
-    }
-
-    #[test]
-    fn provider_command_uses_recorded_reclamation_policy() {
-        println!("provider-trim-disabled");
-        let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
-        let mut owner: Owner = serde_json::from_value(json!({
-            "version":1, "checkout":"/fixture", "token":"fixture", "machine":"fixture",
-            "short_home":"/fixture", "created":true, "phase":"stopped", "process":null,
-            "storage":null, "overlay":null, "guest_boot_id":null,
-            "daemon_pid":null, "daemon_start":null, "rootfs_digest":null
-        }))
-        .unwrap();
-        for policy in [
-            state::ReclamationPolicy::default(),
-            state::ReclamationPolicy {
-                enabled: false,
-                idle_minutes: None,
-            },
-        ] {
-            owner.reclamation = Some(policy);
-            let cmd = command(&candidate, &owner);
-            let env: std::collections::BTreeMap<_, _> = cmd.get_envs().collect();
-            assert_eq!(
-                env[std::ffi::OsStr::new("SMOLVM_DISK_TRIM")],
-                Some(std::ffi::OsStr::new("0"))
-            );
-            assert_eq!(
-                env[std::ffi::OsStr::new("SMOLVM_BALLOON_RECLAIM")],
-                Some(std::ffi::OsStr::new(if policy.enabled { "1" } else { "0" }))
-            );
-            assert_eq!(
-                env[std::ffi::OsStr::new("SMOLVM_IDLE_RECLAIM")],
-                Some(std::ffi::OsStr::new(if policy.enabled { "2" } else { "0" }))
-            );
-        }
-    }
-
-    #[test]
     fn only_a_start_the_provider_ended_for_no_boot_progress_is_named_stalled() {
         let provider = "Provider command exited exit status: 1; no automatic retry. Error: agent \
                         operation failed: start machine: agent operation failed: wait for ready: \
@@ -3929,75 +3866,6 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_provider_command_keeps_the_error_process_run_gives_it() {
-        let shell = |script: &str| {
-            let mut command = std::process::Command::new("/bin/sh");
-            command.args(["-c", script]);
-            command
-        };
-        for script in [
-            "echo out; echo 'Error: machine not found' >&2; exit 3",
-            "exit 1",
-            "i=0; while [ $i -lt 600 ]; do echo 'warning: filler filler filler' >&2; i=$((i+1)); done; exit 2",
-        ] {
-            let expected = process::run(&mut shell(script), Duration::from_secs(20)).unwrap_err();
-            let output = process::capture(&mut shell(script), Duration::from_secs(20)).unwrap();
-            let built = failed_provider_command(&output);
-            assert_eq!(built.code, expected.code, "{script}");
-            assert_eq!(built.message, expected.message, "{script}");
-            assert_eq!(built.message_fixed, expected.message_fixed);
-        }
-    }
-
-    #[test]
-    fn provider_command_turns_notifications_off_only_for_a_recorded_choice() {
-        let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
-        let fixture = json!({
-            "version":1, "checkout":"/fixture", "token":"fixture", "machine":"fixture",
-            "short_home":"/fixture", "created":true, "phase":"stopped", "process":null,
-            "storage":null, "overlay":null, "guest_boot_id":null,
-            "daemon_pid":null, "daemon_start":null, "rootfs_digest":null
-        });
-        // A receipt written before this field existed keeps the provider's notifications.
-        let mut owner: Owner = serde_json::from_value(fixture.clone()).unwrap();
-        assert_eq!(owner.hot_reload, None);
-        let switch = std::ffi::OsStr::new(super::super::hot_reload::PROVIDER_SWITCH);
-        assert!(
-            command(&candidate, &owner)
-                .get_envs()
-                .all(|(name, _)| name != switch)
-        );
-        // A boot that keeps them writes nothing new into the receipt.
-        assert!(
-            serde_json::to_value(&owner)
-                .unwrap()
-                .get("hot_reload")
-                .is_none()
-        );
-        use super::super::hot_reload::{Choice, Reason};
-        for (enabled, reason) in [
-            (false, Reason::LargeShare),
-            (false, Reason::Setting),
-            (true, Reason::Setting),
-        ] {
-            owner.hot_reload = Some(Choice {
-                enabled,
-                reason,
-                limit: 100_000,
-            });
-            let cmd = command(&candidate, &owner);
-            let env: std::collections::BTreeMap<_, _> = cmd.get_envs().collect();
-            // Forced on is recorded for the user's sake and starts the provider as usual.
-            assert_eq!(
-                env.get(switch).copied(),
-                (!enabled).then_some(Some(std::ffi::OsStr::new("1")))
-            );
-            let saved = serde_json::to_value(&owner).unwrap();
-            assert_eq!(serde_json::from_value::<Owner>(saved).unwrap(), owner);
-        }
-    }
-
-    #[test]
     #[ignore = "Owned reclamation experiment boot helper; external watchdog and teardown required"]
     fn start_reclamation_experiment() {
         assert!(matches!(
@@ -4039,6 +3907,247 @@ mod tests {
                 .unwrap();
             assert!(!status.success());
         }
+    }
+
+    /// Every active line of the executable cache script, in order. None of them runs a file
+    /// from the cache or from the share: each command is a shell word or a fixed utility
+    /// (`test`, `cat`, `findmnt`, `stat`, `mountpoint`, `mkdir`, `mount`, `sha256sum`, `cut`,
+    /// `chmod`, `printf`). A change to the script must change this list, and whoever
+    /// changes it answers for that property. An exact list is used because a reader of shell
+    /// words cannot be made tight without parsing quotes, comments and substitutions.
+    const CACHE_SCRIPT_LINES: [&str; 49] = [
+        "set -eu",
+        r#"test "$#" = 4"#,
+        r#"for digest in "$3" "$4"; do"#,
+        r#"test "${#digest}" = 64"#,
+        r#"case "$digest" in *[!0-9a-f]*) exit 64;; esac"#,
+        "done",
+        r#"test "$(cat /storage/.hack-local-owner)" = "$1""#,
+        r#"test "$(cat /proc/sys/kernel/random/boot_id)" = "$2""#,
+        r#"test "$(findmnt -n -o FSTYPE --mountpoint /opt/hack-engine)" = virtiofs"#,
+        r#"test "$(findmnt -n -o FSTYPE --mountpoint /run/hack-local)" = tmpfs"#,
+        r#"test "$(stat -c %u:%g:%a /run/hack-local)" = 0:0:700"#,
+        "total=0",
+        "for name in runc docker-init; do",
+        "path=/opt/hack-engine/$name",
+        r#"test -f "$path""#,
+        r#"test ! -L "$path""#,
+        r#"size=$(stat -c %s "$path")"#,
+        r#"test "$size" -gt 0"#,
+        r#"test "$size" -le 33554432"#,
+        "total=$((total + size))",
+        r#"if mountpoint -q "$path"; then exit 44; fi"#,
+        "done",
+        r#"test "$total" -le 33554432"#,
+        "cache=/run/hack-local/engine-exec",
+        r#"test ! -e "$cache""#,
+        r#"test ! -L "$cache""#,
+        r#"mkdir -m 700 "$cache""#,
+        r#"mount -t tmpfs -o size=32m,mode=700,nosuid,nodev tmpfs "$cache""#,
+        "for name in runc docker-init; do",
+        r#"case "$name" in runc) expected=$3;; docker-init) expected=$4;; esac"#,
+        r#"cat "/opt/hack-engine/$name" > "$cache/$name""#,
+        r#"test "$(sha256sum "$cache/$name" | cut -d ' ' -f 1)" = "$expected""#,
+        r#"chmod 555 "$cache/$name""#,
+        r#"test "$(stat -c %u:%g:%a "$cache/$name")" = 0:0:555"#,
+        "done",
+        r#"mount -o remount,ro "$cache""#,
+        "for name in runc docker-init; do",
+        "path=/opt/hack-engine/$name",
+        r#"mount --bind "$cache/$name" "$path""#,
+        r#"mount -o remount,bind,ro "$path""#,
+        r#"test "$(findmnt -n -o FSTYPE --mountpoint "$path")" = tmpfs"#,
+        r#"test "$(stat -c %u:%g:%a "$path")" = 0:0:555"#,
+        r#"case "$name" in runc) expected=$3;; docker-init) expected=$4;; esac"#,
+        r#"test "$(sha256sum "$path" | cut -d ' ' -f 1)" = "$expected""#,
+        "done",
+        r#"for target in "$cache" /opt/hack-engine/runc /opt/hack-engine/docker-init; do"#,
+        r#"case ",$(findmnt -n -o OPTIONS --mountpoint "$target")," in *,ro,*) ;; *) exit 45;; esac"#,
+        "done",
+        r#"printf 'engine-exec-cache-v1\n'"#,
+    ];
+
+    #[test]
+    fn executable_cache_runs_nothing_it_copied_and_confirms_only_after_the_final_hash() {
+        let script = include_str!("guest-runc-cache.sh");
+        let lines: Vec<&str> = script
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        // The script is exactly the reviewed lines: a failed check ends it (`set -eu`), and
+        // the confirmation is its last command.
+        assert_eq!(lines, CACHE_SCRIPT_LINES);
+        assert_eq!(lines.first(), Some(&"set -eu"));
+        assert_eq!(lines.last(), Some(&"printf 'engine-exec-cache-v1\\n'"));
+        // No quoted text runs over a line end, so a comment line is a comment to the shell too.
+        for line in &lines {
+            assert_eq!(line.matches('"').count() % 2, 0, "{line}");
+            assert_eq!(line.matches('\'').count() % 2, 0, "{line}");
+        }
+        assert!(!script.contains('`'));
+        // The cache's own copy is hashed after the copy and before it is made executable,
+        // and the bound path is hashed after the cache is read-only and bound: that second
+        // hash is the last check before the read-only checks and the confirmation.
+        let position = |needle: &str| {
+            let found: Vec<_> = script.match_indices(needle).collect();
+            assert_eq!(found.len(), 1, "{needle}");
+            found[0].0
+        };
+        let copied = position(r#"cat "/opt/hack-engine/$name" > "$cache/$name""#);
+        let checked =
+            position(r#"test "$(sha256sum "$cache/$name" | cut -d ' ' -f 1)" = "$expected""#);
+        let executable = position(r#"chmod 555 "$cache/$name""#);
+        assert!(copied < checked && checked < executable);
+        // Nothing but that one line writes into the cache. The only pipelines are the two
+        // that cut a digest out of `sha256sum`'s line, where a failed `sha256sum` leaves
+        // nothing to compare: no command whose failure the shell would not see stands
+        // between the copy and its digest.
+        assert_eq!(script.matches(" > ").count(), 1);
+        assert_eq!(script.matches('|').count(), 2);
+        assert_eq!(script.matches("| cut -d ' ' -f 1)").count(), 2);
+        // The loop the other cache tests replay is these lines of the script.
+        let replayed: Vec<&str> = cache_copy_loop().lines().map(str::trim).collect();
+        assert_eq!(replayed, CACHE_SCRIPT_LINES[28..35]);
+        let read_only = position(r#"mount -o remount,ro "$cache""#);
+        let bound = position(r#"mount --bind "$cache/$name" "$path""#);
+        let hashed = position(r#"test "$(sha256sum "$path" | cut -d ' ' -f 1)" = "$expected""#);
+        let confirmed = position("printf 'engine-exec-cache-v1");
+        assert!(executable < read_only && read_only < bound);
+        assert!(bound < hashed && hashed < confirmed);
+    }
+
+    /// The copy-and-check loop of the executable cache script, verbatim: copy one
+    /// executable into `$cache`, compare the digest of that copy with `$3` (`runc`) or `$4`
+    /// (`docker-init`), and only then make it executable.
+    fn cache_copy_loop() -> &'static str {
+        let script = include_str!("guest-runc-cache.sh");
+        let start = script
+            .find("for name in runc docker-init; do\n case \"$name\" in")
+            .unwrap();
+        let end = start + script[start..].find("\ndone\n").unwrap() + "\ndone\n".len();
+        &script[start..end]
+    }
+
+    /// Runs [`cache_copy_loop`] on the host against a fixture share and cache. `cat` is the
+    /// stub at `copier` when one is given; `sha256sum` and `stat` are stand-ins for the
+    /// guest's (the owner the script requires is reported as it is in the guest, root).
+    #[cfg(target_os = "macos")]
+    fn replay_cache_copy(
+        root: &Path,
+        copier: Option<&str>,
+        digests: [&str; 2],
+    ) -> (bool, Vec<(String, u32, Vec<u8>)>) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let stub = |name: &str, body: &str| {
+            fs::write(bin.join(name), format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        stub("sha256sum", "exec /usr/bin/shasum -a 256 \"$@\"");
+        stub(
+            "stat",
+            "printf '0:0:%s\\n' \"$(/usr/bin/stat -f %Lp \"$3\")\"",
+        );
+        stub("cat", copier.unwrap_or("exec /bin/cat \"$@\""));
+        let cache = root.join("cache");
+        let _ = fs::remove_dir_all(&cache);
+        fs::create_dir(&cache).unwrap();
+        let script = format!(
+            "set -eu\ncache=$5\n{}",
+            cache_copy_loop().replace(
+                "/opt/hack-engine/",
+                &format!("{}/", root.join("share").display())
+            )
+        );
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", &script, "cache-copy", "owner", "boot"])
+            .args(digests)
+            .arg(&cache)
+            .env_clear()
+            .env("PATH", format!("{}:/bin:/usr/bin", bin.display()))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        let mut left: Vec<_> = fs::read_dir(&cache)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (
+                    entry.file_name().into_string().unwrap(),
+                    entry.metadata().unwrap().permissions().mode() & 0o777,
+                    fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect();
+        left.sort();
+        (status.success(), left)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn executable_cache_checks_its_own_copy_before_the_copy_is_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-cache-copy-loop",
+        );
+        fs::create_dir_all(root.join("share")).unwrap();
+        for (name, bytes) in [("runc", &b"runc bytes"[..]), ("docker-init", b"init bytes")] {
+            fs::write(root.join("share").join(name), bytes).unwrap();
+            // As on the host share: the source is executable already.
+            fs::set_permissions(
+                root.join("share").join(name),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let digest = |name: &str| artifact::digest(&root.join("share").join(name)).unwrap();
+        let (runc, init) = (digest("runc"), digest("docker-init"));
+        let wrong = "0".repeat(64);
+        // The right digests: both copies are in the cache, executable, byte for byte.
+        let (passed, left) = replay_cache_copy(&root, None, [&runc, &init]);
+        assert!(passed);
+        assert_eq!(
+            left,
+            [
+                ("docker-init".to_owned(), 0o555, b"init bytes".to_vec()),
+                ("runc".to_owned(), 0o555, b"runc bytes".to_vec()),
+            ]
+        );
+        // A wrong digest for either: the script ends at the comparison. The copy it was
+        // made of is there and is not executable, and nothing after it was copied.
+        let (passed, left) = replay_cache_copy(&root, None, [&wrong, &init]);
+        assert!(!passed);
+        assert_eq!(left.len(), 1);
+        assert_eq!((left[0].0.as_str(), left[0].1 & 0o111), ("runc", 0));
+        let (passed, left) = replay_cache_copy(&root, None, [&runc, &wrong]);
+        assert!(!passed);
+        assert_eq!(
+            left.iter()
+                .map(|(name, mode, _)| (name.as_str(), mode & 0o111 != 0))
+                .collect::<Vec<_>>(),
+            [("docker-init", false), ("runc", true)]
+        );
+        // A copy that fails ends the script at that line: no digest is asked for.
+        let (passed, left) =
+            replay_cache_copy(&root, Some("/bin/cat \"$@\"; exit 1"), [&runc, &init]);
+        assert!(!passed);
+        assert_eq!((left.len(), left[0].1 & 0o111), (1, 0));
+        // A copy that reports success but wrote other bytes than it read (what a digest of
+        // the bytes read would accept): the digest is of the cache's copy, so it refuses,
+        // before that copy is executable.
+        let (passed, left) = replay_cache_copy(
+            &root,
+            Some("/bin/cat \"$@\" | /usr/bin/head -c 4"),
+            [&runc, &init],
+        );
+        assert!(!passed);
+        assert_eq!(left, [("runc".to_owned(), left[0].1, b"runc".to_vec())]);
+        assert_eq!(left[0].1 & 0o111, 0);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -4134,6 +4243,66 @@ printf 'verified-cache\n'
             assert_eq!(error.code, "guest_command_failed");
             verify();
         }
+        // The replays above end where the script first meets the live cache (its bound
+        // executables are mount points), before any digest is compared. So the script's
+        // copy-and-check loop, verbatim, is replayed on a scratch directory beside the
+        // cache: it reaches the comparison of each copy's digest, passes with the right
+        // digests and stops at the comparison with a wrong one, leaving the copy it
+        // refused not executable. The scratch directory is a tmpfs of its own, as the
+        // cache is (`/run/hack-local` holds 16 MiB), and is unmounted and removed each time.
+        let replay = format!(
+            r#"
+scratch=/run/hack-local/engine-exec-replay
+test ! -e "$scratch"
+test ! -L "$scratch"
+mkdir -m 700 "$scratch"
+trap 'umount "$scratch" 2>/dev/null; rmdir "$scratch"' EXIT
+mount -t tmpfs -o size=32m,mode=700,nosuid,nodev tmpfs "$scratch"
+set +e
+(set -eu; cache=$scratch; set -- - - "$1" "$2"
+{}) >/dev/null 2>&1
+status=$?
+set -e
+left=
+for name in runc docker-init; do
+ if test -e "$scratch/$name"; then left="$left $name:$(stat -c %a "$scratch/$name")"; fi
+done
+printf 'status=%s%s\n' "$status" "$left"
+"#,
+            cache_copy_loop()
+        );
+        let replayed = |runc: &str, init: &str| {
+            let reply = owned.execute_cleanup(&replay, &[runc, init]).unwrap();
+            let mut fields = reply.split_whitespace().map(str::to_owned);
+            let passed = fields.next().unwrap() == "status=0";
+            (passed, fields.collect::<Vec<_>>())
+        };
+        assert_eq!(
+            replayed(&digest, &init_digest),
+            (
+                true,
+                vec!["runc:555".to_owned(), "docker-init:555".to_owned()]
+            )
+        );
+        // A wrong `runc` digest: copied, compared, refused; never made executable, and the
+        // loop went no further.
+        let (passed, left) = replayed(&"0".repeat(64), &init_digest);
+        assert!(!passed);
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(
+            left[0].starts_with("runc:") && left[0] != "runc:555",
+            "{left:?}"
+        );
+        // A wrong `docker-init` digest: `runc` passed its comparison, `docker-init` did not.
+        let (passed, left) = replayed(&digest, &"0".repeat(64));
+        assert!(!passed);
+        assert_eq!(left.len(), 2, "{left:?}");
+        assert_eq!(left[0], "runc:555");
+        assert!(
+            left[1].starts_with("docker-init:") && left[1] != "docker-init:555",
+            "{left:?}"
+        );
+        verify();
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

@@ -509,6 +509,16 @@ test("project and branch selection are preserved in the one working recovery com
   );
 });
 
+test("single-line recovery command keeps a line break in the path argument", () => {
+  expect(
+    nativeScopedCommand({
+      action: "down",
+      selection: { path: "/tmp/project\nwith-break" },
+      singleLine: true,
+    })
+  ).toStartWith("sh -c");
+});
+
 test("recovery command quotes every explicit selector as one shell argument", () => {
   expect(
     nativeScopedCommand({

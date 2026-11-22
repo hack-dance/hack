@@ -156,7 +156,7 @@ pub fn serve_restore_normalized_with_routes(
 /// Read-only selection requires an explicitly retired owner and acknowledged data retention.
 pub fn restore_selection(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
     let retired = transport::Retired::acquire(candidate, run)?.ok_or_else(refused)?;
-    let engine = Engine::connect_cleanup(candidate)?;
+    let engine = Engine::connect_cleanup_for_start(candidate)?;
     let (receipt, root) = super::load(candidate, &engine, run)?;
     if receipt.phase != "stopped-data-retained" || receipt.normalized_input.is_none() {
         return Err(refused());

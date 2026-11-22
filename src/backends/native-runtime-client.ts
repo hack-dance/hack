@@ -9,7 +9,9 @@ import {
   type NativeProcessRefusal,
   readNativeProcessRefusals,
 } from "../lib/native-process-wrappers.ts";
+import { stepStoreRuntimeArgs } from "../lib/step-store/location.ts";
 import type { SubprocessSignal } from "../lib/subprocess-signal.ts";
+import { nativeAdmissionReuseEnvironment } from "./native-admission-reuse.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import { nativeBetaCandidatePointer } from "./native-beta.ts";
 import {
@@ -17,6 +19,7 @@ import {
   readNativeConfigurationRefusals,
 } from "./native-configuration-refusals.ts";
 import { nativeHotReloadEnvironment } from "./native-hot-reload-notice.ts";
+import { nativeImageRegistryReason } from "./native-image-policy.ts";
 import {
   type NativePlanChange,
   nativePlanChangeGuidance,
@@ -396,6 +399,58 @@ function execStageFailureMessage(
   return fixed ? `${fixed} ${step}` : step;
 }
 
+/** What an unhealthy probe last observed (route probe diagnostic version 2, HACK-2416). */
+// A Map, not an object literal: inherited keys such as "toString" are not reasons.
+const PROBE_REASONS: ReadonlyMap<string, string> = new Map([
+  ["exec_not_running", "the probe process inside the container was gone"],
+  ["exec_exited", "the probe process inside the container exited"],
+  ["sample_missing", "the probe never wrote a result"],
+  ["sample_invalid", "the probe's result could not be read"],
+  ["sample_clock_ahead", "the guest clock was ahead of the host's"],
+  ["sample_stale", "the probe's last result was too old"],
+  [
+    "failures_exhausted",
+    "the route answered no request in time, retries exhausted",
+  ],
+]);
+const PROBE_COUNT = (value: unknown): value is number =>
+  typeof value === "number" &&
+  Number.isSafeInteger(value) &&
+  value >= 0 &&
+  value <= 1e12;
+
+function routeProbeObservation(probe: Record<string, unknown>): string | null {
+  const reason =
+    typeof probe.reason === "string"
+      ? PROBE_REASONS.get(probe.reason)
+      : undefined;
+  if (!(reason && PROBE_COUNT(probe.since_start_ms))) {
+    return null;
+  }
+  for (const key of ["sequence", "failures", "last_elapsed_ms"]) {
+    if (probe[key] !== undefined && !PROBE_COUNT(probe[key])) {
+      return null;
+    }
+  }
+  const allowed = new Set([
+    "version",
+    "port",
+    "reason",
+    "sequence",
+    "failures",
+    "last_elapsed_ms",
+    "since_start_ms",
+  ]);
+  if (Object.keys(probe).some((key) => !allowed.has(key))) {
+    return null;
+  }
+  const counts =
+    typeof probe.sequence === "number"
+      ? ` after ${probe.sequence} requests (${probe.failures ?? 0} failed in a row, the last took ${probe.last_elapsed_ms ?? 0} ms)`
+      : "";
+  return ` The probe observed that ${reason}${counts}, ${Math.round((probe.since_start_ms as number) / 1000)} s after it started.`;
+}
+
 /** Render only the closed inferred-route diagnostic; never runtime error text. */
 function routeProbeFailureMessage(
   value: Record<string, unknown>,
@@ -410,8 +465,6 @@ function routeProbeFailureMessage(
       ) &&
       isRecord(probe)
     ) ||
-    Object.keys(probe).length !== 2 ||
-    probe.version !== 1 ||
     typeof probe.port !== "number" ||
     !Number.isSafeInteger(probe.port) ||
     probe.port < 1 ||
@@ -419,7 +472,19 @@ function routeProbeFailureMessage(
   ) {
     return;
   }
-  return `Inferred route probe on port ${probe.port} is unhealthy. Check hack logs ${service} in the same project/branch, fix the route port, or declare healthcheck.x-hack-http with a longer start_period_ms and a readiness path, within the 300-second graph budget.`;
+  let observed = "";
+  if (probe.version === 1 && Object.keys(probe).length === 2) {
+    observed = "";
+  } else if (probe.version === 2) {
+    const text = routeProbeObservation(probe);
+    if (text === null) {
+      return;
+    }
+    observed = text;
+  } else {
+    return;
+  }
+  return `Inferred route probe on port ${probe.port} is unhealthy.${observed} Check hack logs ${service} in the same project/branch, fix the route port, or declare healthcheck.x-hack-http with a longer start_period_ms and a readiness path, within the 300-second graph budget.`;
 }
 
 /** Fixed/closed diagnostic text and the validated service a failure carries. */
@@ -713,6 +778,7 @@ export async function invokeNativeRuntime(opts: {
   readonly cwd: string;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  readonly onImageWait?: (waiting: boolean) => void;
   readonly privateInput?: Uint8Array;
   /** Graph exec and run-service return command exit status alongside JSON. */
   readonly serviceExecResponse?: boolean;
@@ -787,11 +853,23 @@ export async function invokeNativeRuntime(opts: {
       env[key] = value;
     }
   }
-  // The one user setting a runtime request carries in its environment; an
-  // invalid value throws here, before the subprocess exists.
+  // The two user settings a runtime request carries in its environment, both
+  // for `runtime up` only; an invalid value throws here, before the
+  // subprocess exists.
   Object.assign(env, nativeHotReloadEnvironment(opts.args));
+  Object.assign(env, nativeAdmissionReuseEnvironment(opts.args));
+  if (opts.onImageWait) {
+    env.HACK_INTERNAL_REPORT_IMAGE_WAIT = "1";
+  }
   const child = Bun.spawn(
-    [opts.runtime.binary, "--candidate-root", opts.runtime.home, ...opts.args],
+    [
+      opts.runtime.binary,
+      "--candidate-root",
+      opts.runtime.home,
+      // HACK-2461: the per-user step store, only with HACK_STEP_STORE=on.
+      ...stepStoreRuntimeArgs(),
+      ...opts.args,
+    ],
     {
       cwd: opts.cwd,
       env: childEnvironment(env),
@@ -812,7 +890,13 @@ export async function invokeNativeRuntime(opts: {
       drainTimer = setTimeout(() => drain.abort(), exitDrainBoundMs);
     });
   }
-  const failureDetails = readNativeFailure(child.stderr, drain?.signal);
+  const failureDetails = readNativeFailure(
+    child.stderr,
+    drain?.signal,
+    undefined,
+    false,
+    opts.onImageWait
+  );
   let timedOut = false;
   let canceled = false;
   const cancel = () => {
@@ -1196,6 +1280,13 @@ function nativeFailureCause(input: {
   if (typeof input.cause !== "string" || !ERROR_CODE.test(input.cause)) {
     return undefined;
   }
+  if (
+    (input.code.startsWith("registry_") ||
+      input.code === "image_tag_offline_missing") &&
+    nativeImageRegistryReason(input.cause)
+  ) {
+    return input.cause;
+  }
   return ["graph_one_off_failed", "graph_owner_recovery"].includes(
     input.code
   ) ||
@@ -1262,7 +1353,8 @@ async function readNativeFailure(
   stream: ReadableStream<Uint8Array>,
   signal?: AbortSignal,
   limit = MAX_NATIVE_FAILURE_BYTES,
-  startupLogs = false
+  startupLogs = false,
+  onImageWait?: (waiting: boolean) => void
 ): Promise<NativeFailure | undefined> {
   const reader = stream.getReader();
   const cancel = () => {
@@ -1272,6 +1364,7 @@ async function readNativeFailure(
   if (signal?.aborted) {
     cancel();
   }
+  let waiting = false;
   let bytes = 0;
   let text = "";
   const decoder = new TextDecoder();
@@ -1284,6 +1377,25 @@ async function readNativeFailure(
       bytes += result.value.byteLength;
       if (bytes <= limit) {
         text += decoder.decode(result.value, { stream: true });
+        if (onImageWait) {
+          while (text.startsWith("hack.image-wait:")) {
+            const newline = text.indexOf("\n");
+            if (newline === -1) {
+              break;
+            }
+            const state = text.slice(0, newline);
+            if (
+              state === "hack.image-wait:begin" ||
+              state === "hack.image-wait:end"
+            ) {
+              waiting = state.endsWith(":begin");
+              onImageWait(waiting);
+            } else {
+              break;
+            }
+            text = text.slice(newline + 1);
+          }
+        }
       }
     }
     if (bytes > limit) {
@@ -1296,6 +1408,9 @@ async function readNativeFailure(
   } catch {
     return;
   } finally {
+    if (waiting) {
+      onImageWait?.(false);
+    }
     signal?.removeEventListener("abort", cancel);
     reader.releaseLock();
   }

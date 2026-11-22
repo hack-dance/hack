@@ -3,7 +3,7 @@ use crate::CandidateError;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 pub struct Captured {
@@ -43,13 +43,15 @@ impl Clock for MonotonicClock {
     }
 }
 
-/// A started child that [`wait_within`] waits on until it completes or its bound expires.
-pub trait Pending {
-    /// `Some` once the child exited and both its output streams closed; `None` while it runs
-    /// or a detached helper still holds a stream open.
-    fn poll(&mut self) -> Result<Option<Captured>, CandidateError>;
-    /// The bound expired: signal and reap only the unreaped direct child (no PID-file or
-    /// process-group kill) and return the uncertain outcome.
+/// Started work that [`wait_within`] waits on until it completes or its bound expires. `T`
+/// is what the finished work reports: a child's [`Captured`] exit and output unless stated.
+pub trait Pending<T = Captured> {
+    /// `Some` once the work finished. For a child: once it exited and both its output
+    /// streams closed; `None` while it runs or a detached helper still holds a stream open.
+    fn poll(&mut self) -> Result<Option<T>, CandidateError>;
+    /// The bound expired: stop only what this value owns and return the uncertain outcome.
+    /// For a child: signal and reap only the unreaped direct child (no PID-file or
+    /// process-group kill).
     fn expire(&mut self) -> CandidateError;
     /// Return once the next [`Pending::poll`] may answer differently, and after at most
     /// `limit` on `clock` either way. Returning early is always allowed.
@@ -115,12 +117,82 @@ pub fn spawn(command: &mut Command) -> Result<Running, CandidateError> {
 
 /// [`spawn`] with the blocking exit observation injected, so a test can take it away.
 fn start(command: &mut Command, observe_exit: fn(u32) -> bool) -> Result<Running, CandidateError> {
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| CandidateError::new("provider_spawn_failed", e.to_string()))?;
+    let child = spawn_child(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .map_err(|e| CandidateError::new("provider_spawn_failed", e.to_string()))?;
+    supervise(child, observe_exit, helper)
+}
+
+/// Held while a child is being spawned, so two threads of this process are never inside a
+/// spawn at once.
+///
+/// A spawn creates pipes: the child's piped streams, and the pipe the standard library reads
+/// the exec result from when it forks (which [`clean_command`]'s `pre_exec` makes it do). A
+/// host that cannot create a pipe already marked close-on-exec (macOS has no `pipe2`) sets
+/// the mark in a second step. A child that another thread forks between the two steps
+/// inherits the pipe and keeps it open until it exits, so the pipe's owner waits on that
+/// unrelated child: for end-of-file on a stream, or inside the spawn for the exec result.
+///
+/// The lock covers the spawn alone, never the wait: children still run side by side.
+///
+/// Limits:
+/// - It protects only spawns made through [`spawn_child`]. A child forked any other way can
+///   still inherit a pipe that a spawn under the lock is creating.
+/// - A descriptor that other code opens without close-on-exec is not covered.
+static SPAWNING: Mutex<()> = Mutex::new(());
+
+/// The spawn lock. A thread that panicked inside a spawn left nothing behind that the next
+/// spawn depends on, so a poisoned lock is taken as it is: never a panic or a refusal.
+fn spawning() -> MutexGuard<'static, ()> {
+    SPAWNING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// [`Command::spawn`] under the process-wide spawn lock (see [`SPAWNING`]). Every child this
+/// process starts while other threads may be spawning goes through here. It returns as soon
+/// as the child was started or refused; waiting for the child is the caller's.
+pub(crate) fn spawn_child(command: &mut Command) -> std::io::Result<std::process::Child> {
+    let _spawning = spawning();
+    command.spawn()
+}
+
+/// Starts one helper thread of a [`Running`] child. Injected so a test can make it fail.
+type Helper = fn(Box<dyn FnOnce() + Send>) -> std::io::Result<std::thread::JoinHandle<()>>;
+
+fn helper(work: Box<dyn FnOnce() + Send>) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new().spawn(work)
+}
+
+/// A spawned child nobody owns yet: killed and reaped on drop unless it was handed on.
+struct Unowned(Option<std::process::Child>);
+
+impl Drop for Unowned {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            // No watcher exists yet (it is started last), so reaping here cannot leave one
+            // waiting on a recycled PID.
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Take ownership of a child that was just spawned with both streams piped: start its
+/// stream readers and its exit watcher.
+///
+/// The child has an owner from here on. If a helper thread cannot be started (the host is
+/// out of threads), supervision failed after the spawn: the direct child is killed and
+/// reaped and the caller gets `provider_spawn_failed`, instead of a panic that left the
+/// child running with nobody to stop or reap it. The child did run until then, so whatever
+/// it had already done is not undone, and a caller must not take the error to mean no effect.
+fn supervise(
+    child: std::process::Child,
+    observe_exit: fn(u32) -> bool,
+    helper: Helper,
+) -> Result<Running, CandidateError> {
     fn drain(mut pipe: impl Read) -> Vec<u8> {
         let mut output = Vec::new();
         let mut buffer = [0; 4096];
@@ -133,27 +205,37 @@ fn start(command: &mut Command, observe_exit: fn(u32) -> bool) -> Result<Running
         }
         output
     }
+    let mut unowned = Unowned(Some(child));
+    let child = unowned.0.as_mut().expect("the child was just put here");
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let pid = child.id();
     let (report, progress) = mpsc::channel();
+    let thread = |work: Box<dyn FnOnce() + Send>| {
+        helper(work).map_err(|e| {
+            CandidateError::new(
+                "provider_spawn_failed",
+                format!("Cannot start a helper thread for a provider child: {e}"),
+            )
+        })
+    };
     // A send fails only when the owner dropped the child's handle; nobody is waiting then.
     let (out, err) = (report.clone(), report.clone());
-    std::thread::spawn(move || {
+    thread(Box::new(move || {
         let _ = out.send(Progress::Stdout(drain(stdout)));
-    });
-    std::thread::spawn(move || {
+    }))?;
+    thread(Box::new(move || {
         let _ = err.send(Progress::Stderr(drain(stderr)));
-    });
-    let watcher = std::thread::spawn(move || {
+    }))?;
+    let watcher = thread(Box::new(move || {
         let _ = report.send(if observe_exit(pid) {
             Progress::Exited
         } else {
             Progress::ExitUnobserved
         });
-    });
+    }))?;
     Ok(Running {
-        child,
+        child: unowned.0.take().expect("the child is still here"),
         status: None,
         exit: ExitWatch::Watching,
         watcher: Some(watcher),
@@ -293,17 +375,17 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// signalled. A child still running, or one whose streams are still held open, at the bound
 /// is expired by [`Pending::expire`], which keeps the timeout and output-retention outcomes
 /// apart.
-pub fn wait_within(
-    pending: &mut dyn Pending,
+pub fn wait_within<T>(
+    pending: &mut dyn Pending<T>,
     timeout: Duration,
     clock: &dyn Clock,
-) -> Result<Captured, CandidateError> {
+) -> Result<T, CandidateError> {
     let start = clock.now();
     loop {
         let polled = pending.poll()?;
         let left = timeout.saturating_sub(clock.now().saturating_sub(start));
         match polled {
-            Some(captured) if !left.is_zero() => return Ok(captured),
+            Some(finished) if !left.is_zero() => return Ok(finished),
             Some(_) => return Err(completed_late()),
             None if !left.is_zero() => pending.wait(left, clock),
             None => return Err(pending.expire()),
@@ -450,6 +532,163 @@ mod tests {
         let mut command = clean_command(std::path::Path::new("/bin/sh"));
         command.args(["-c", script]);
         command
+    }
+
+    /// A child whose helper threads cannot all be started has no reader or watcher to own
+    /// it. It is killed and reaped at once and the caller gets an error, whichever of the
+    /// three threads failed, instead of a panic that left the child running.
+    #[test]
+    fn a_child_whose_helper_thread_cannot_start_is_killed_and_reaped() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        /// Which helper of the child under test fails to start; the earlier ones start.
+        static FAILING: AtomicUsize = AtomicUsize::new(0);
+        static STARTED: AtomicUsize = AtomicUsize::new(0);
+        fn out_of_threads(
+            work: Box<dyn FnOnce() + Send>,
+        ) -> std::io::Result<std::thread::JoinHandle<()>> {
+            if STARTED.fetch_add(1, Ordering::Relaxed) == FAILING.load(Ordering::Relaxed) {
+                return Err(std::io::Error::from_raw_os_error(libc::EAGAIN));
+            }
+            helper(work)
+        }
+        for failing in 0..3 {
+            FAILING.store(failing, Ordering::Relaxed);
+            STARTED.store(0, Ordering::Relaxed);
+            let child = shell("exec sleep 600")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let pid = child.id() as i32;
+            // SAFETY: signal 0 only asks whether this test's own child still exists.
+            assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+            let error = supervise(child, exited, out_of_threads).err().unwrap();
+            assert_eq!(error.code, "provider_spawn_failed", "helper {failing}");
+            assert_eq!(STARTED.load(Ordering::Relaxed), failing + 1);
+            // Gone and reaped: a zombie would still answer the signal.
+            // SAFETY: as above; a reaped child of this process has no process left.
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "helper {failing}");
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+        // The same child is owned and waited for as usual when every helper starts.
+        let child = shell("printf done")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut running = supervise(child, exited, helper).unwrap();
+        let output = wait_within(
+            &mut running,
+            Duration::from_secs(30),
+            &MonotonicClock::new(),
+        )
+        .unwrap();
+        assert_eq!(output.stdout, b"done");
+    }
+
+    /// Children spawned from several threads at once each start with only their own
+    /// descriptors. Each child lists what it has open; a pipe another thread's spawn was
+    /// still creating would show up as one more entry than a child spawned alone has.
+    ///
+    /// The race runs alone in a subprocess (see [`spawn_leak_probe`]): in this process
+    /// other tests spawn children outside the lock and open descriptors of their own.
+    ///
+    /// macOS only: that is the host whose pipes need the lock. When this was written, 99 of
+    /// 100 runs of the probe failed with the lock taken out of [`spawn_child`] (about 7
+    /// children in 512 inherited a descriptor), and 100 of 100 passed with it. A pass says
+    /// nothing about children spawned outside [`spawn_child`].
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn concurrent_spawns_leak_no_descriptor_into_another_threads_child() {
+        let output = capture(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "provider::process::tests::spawn_leak_probe",
+                    "--nocapture",
+                ])
+                .env("HACK_TEST_SPAWN_LEAK_PROBE", "1"),
+            Duration::from_secs(120),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("no-descriptor-leaked"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn spawn_leak_probe() {
+        if std::env::var_os("HACK_TEST_SPAWN_LEAK_PROBE").is_none() {
+            return;
+        }
+        // Many threads with few spawns each: what exposes a leak is how many spawns overlap.
+        const THREADS: usize = 32;
+        const SPAWNS: usize = 16;
+        // The shell opens the directory to list it, so the list is the descriptors the
+        // child started with and that one.
+        fn open_descriptors() -> String {
+            let listed = capture(&mut shell("echo /dev/fd/*"), Duration::from_secs(30)).unwrap();
+            assert!(listed.status.success());
+            String::from_utf8(listed.stdout).unwrap()
+        }
+        let alone = open_descriptors();
+        assert!(
+            alone.starts_with("/dev/fd/0 /dev/fd/1 /dev/fd/2"),
+            "{alone}"
+        );
+        let together = std::sync::Barrier::new(THREADS);
+        let inherited: Vec<String> = std::thread::scope(|scope| {
+            let spawners: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        together.wait();
+                        (0..SPAWNS)
+                            .map(|_| open_descriptors())
+                            .filter(|listed| *listed != alone)
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            spawners
+                .into_iter()
+                .flat_map(|spawner| spawner.join().unwrap())
+                .collect()
+        });
+        assert!(
+            inherited.is_empty(),
+            "{} of {} children inherited another spawn's descriptors; alone: {alone:?}, \
+             first: {:?}",
+            inherited.len(),
+            THREADS * SPAWNS,
+            inherited[0],
+        );
+        println!("no-descriptor-leaked");
+    }
+
+    /// A thread that panicked while it held the spawn lock does not stop later spawns.
+    #[test]
+    fn a_poisoned_spawn_lock_still_spawns() {
+        let poisoned = std::thread::spawn(|| {
+            let _spawning = spawning();
+            // Unwinds without the panic hook, so the test prints no panic message.
+            std::panic::resume_unwind(Box::new(()));
+        })
+        .join();
+        assert!(poisoned.is_err());
+        assert!(SPAWNING.is_poisoned());
+        let output = capture(&mut shell("printf spawned"), Duration::from_secs(30)).unwrap();
+        // Later tests in this process start from an unpoisoned lock again.
+        SPAWNING.clear_poison();
+        assert_eq!(output.stdout, b"spawned");
     }
 
     #[test]

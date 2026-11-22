@@ -27,6 +27,7 @@ export type LegacyComposeContainerState = {
   readonly running: boolean;
   readonly paused: boolean;
   readonly status: string;
+  readonly exitCode?: number;
 };
 function refuse(): never {
   throw new Error(
@@ -210,14 +211,8 @@ export async function inspectLegacyComposeContainerStates(opts: {
   readonly binding: LegacyComposeVerifiedBinding;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
-}): Promise<
-  readonly {
-    readonly id: string;
-    readonly running: boolean;
-    readonly paused: boolean;
-    readonly status: string;
-  }[]
-> {
+  readonly includeExitCode?: boolean;
+}): Promise<readonly LegacyComposeContainerState[]> {
   const probe = createNativeComposeProbe(opts);
   const result: LegacyComposeContainerState[] = [];
   for (const {
@@ -225,12 +220,18 @@ export async function inspectLegacyComposeContainerStates(opts: {
     row: value,
   } of await inspectNativeComposeContainers({
     resources: opts.binding.containers,
-    format:
-      '{"id":{{json .Id}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"status":{{json .State.Status}}}',
+    format: `{"id":{{json .Id}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"status":{{json .State.Status}}${opts.includeExitCode ? ',"exitCode":{{json .State.ExitCode}}' : ""}}`,
     probe,
   })) {
     if (
-      Object.keys(value).sort().join() !== "id,paused,running,status" ||
+      Object.keys(value).sort().join() !==
+        (opts.includeExitCode
+          ? "exitCode,id,paused,running,status"
+          : "id,paused,running,status") ||
+      (opts.includeExitCode &&
+        !(
+          typeof value.exitCode === "number" && Number.isInteger(value.exitCode)
+        )) ||
       value.id !== container.id ||
       typeof value.running !== "boolean" ||
       typeof value.paused !== "boolean" ||
@@ -253,6 +254,9 @@ export async function inspectLegacyComposeContainerStates(opts: {
         running: value.running,
         paused: value.paused,
         status: value.status,
+        ...(opts.includeExitCode && typeof value.exitCode === "number"
+          ? { exitCode: value.exitCode }
+          : {}),
       })
     );
   }

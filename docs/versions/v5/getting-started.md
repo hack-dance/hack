@@ -69,6 +69,18 @@ hack ps
 hack open
 ```
 
+On Compose, a successful detached `hack up` ends with the primary address,
+startup time, and count of configured routes for running services whose HTTP
+readiness has yet to be checked. The command makes no HTTP request to warm the
+routes. A successful `hack down` ends with a stopped line and the elapsed time.
+
+If `hack up` stops before the project is ready, look for the `!` line. It
+names the blocker and shows the command to run next.
+
+`hack ps` lists services with their primary address and current state. An
+address followed by `+1` has one more configured address. Use `hack ps --wide`
+for all addresses, container names, exit codes and port details.
+
 To start this project at future logins, use `hack up -d --always` and install
 the per-user daemon with `hack daemon install`. `hack down` pauses its marker;
 `hack up` resumes it. See [Always-on projects](https://github.com/hack-dance/hack/blob/next/docs/always-on-projects.md) for
@@ -86,6 +98,15 @@ engine volumes and Hack's authenticated read-only TLS mounts remain supported.
 Interrupting `hack autostart run` cancels the pass and waits for startup cleanup.
 After upgrades that change global templates, run `hack global install` manually
 before relying on login routing.
+
+If a default remote target declares a [sign-in prerequisite](https://github.com/hack-dance/hack/blob/next/docs/env.md#sign-in-prerequisites-for-compose-projects),
+Hack checks it before startup hooks. If the check fails, follow the displayed
+login command and try again. Use `hack config validate` to verify declarations
+without running the checks.
+
+When the project declares remotes, `hack ps` shows each default target with
+its configured address. An environment-backed hostname displays the variable
+name. This view reports declarations and whether their connection was checked.
 
 Expect the declared services in `ps` and the app's local URL from `open`.
 If a project has several URLs, choose the app's route. A worker-only project may
@@ -152,8 +173,22 @@ HACK_COMPOSE_STARTUP_TIMEOUT_MS=300000 hack up -d
 ```
 
 ```json
-{ "compose": { "startupTimeoutMs": 180000, "startupCeilingMs": 3600000 } }
+{
+  "compose": {
+    "startupTimeoutMs": 180000,
+    "startupCeilingMs": 3600000,
+    "downTimeoutSeconds": 5
+  }
+}
 ```
+
+`compose.downTimeoutSeconds` (whole seconds, `0` to `600`) sets the stop grace
+period passed to `docker compose down --timeout` in `hack down` (invalid values
+refuse with `E_CONFIG_INVALID`), and `hack down --timeout <seconds>` overrides
+it for one run. Leaving both unset keeps Docker Compose's default grace period
+and the 90-second overall cap (which does not inspect per-service
+`stop_grace_period` settings in Compose); setting a timeout scales the cap to
+`max(90s, timeout × distinct running services + 30s)`.
 
 If the start stops at the ceiling while a one-shot still runs, the
 `E_STARTUP_TIMEOUT` error names that service. The one-shot keeps running, but
@@ -169,11 +204,9 @@ mid-run, and a half-applied migration is hard to repair. In a terminal, they ask
 first and the default answer is no. With `--json` or `--no-interactive` they go
 on, and report the service in `data.interrupted` and `data.warnings`.
 
-These limits apply to detached Compose starts. Foreground `hack up` has no start
-limit. The native backend has one plain start limit,
-`HACK_COMPOSE_STARTUP_TIMEOUT_MS`, of at most 300000 ms (5 minutes). Native
-image builds use `HACK_COMPOSE_IMAGE_TIMEOUT_MS`. Native has no one-shot ceiling
-and does not read the project settings.
+These limits apply to detached Compose starts. Foreground Compose `hack up`
+has no start limit. Native has separate detached and readiness settings.
+See [native startup limits](../native/limits.md#native-startup-limits).
 
 A failed startup prints a reason. Read it before retrying; use
 [troubleshooting](troubleshooting.md) and `hack doctor` for setup problems.
@@ -212,8 +245,8 @@ log history and restarts. When this Compose run works, try native only on a
 [disposable project](native/start.md).
 
 Always-on login restores Caddy/CoreDNS routing only. Logging (Grafana, Loki and
-Alloy) starts through manual `hack global up`; login leaves existing logging
-containers running. Change default Grafana credentials before network exposure.
+Alloy) is opt-in (`hack global up --logging`) and starts through manual
+`hack global up`; login leaves existing logging containers running. Change default Grafana credentials before network exposure.
 
 Login requires a non-SSH Docker transport and already-prepared DNS. It skips
 macOS dnsmasq startup and passwordless DNS recovery; use manual `hack global up`

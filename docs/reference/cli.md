@@ -362,6 +362,8 @@ hack up [services...] [options]
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
 | `--json` | Output JSON (machine-readable) |
 | `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
+| `--refresh-images` | Native backend: refresh the project's mutable image tags from the registry. |
+| `--offline` | Native backend: use recorded image resolutions and local archives without contacting a registry. |
 | `--always` | Mark this project for machine-local autostart and start it |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -388,6 +390,7 @@ hack down [options]
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
+| `--timeout <seconds>` | Compose backend: container stop timeout in seconds (0-600) passed to docker compose down --timeout |
 | `--prune-caches` | After down, remove confirmed Compose-owned disposable cache volumes |
 | `--remove-data` | Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first) |
 | `--yes` | Confirm --prune-caches or --remove-data without prompting |
@@ -437,7 +440,7 @@ hack restart [services...] [options]
 
 ## `hack ps`
 
-Show project status (docker compose ps)
+Show project services
 
 ### Usage
 
@@ -449,9 +452,34 @@ hack ps [options]
 
 | Option | Description |
 | --- | --- |
+| `--wide` | Include container, exit code, port and native image pin details |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
+## `hack pull`
+
+Refresh and download project images without starting services
+
+### Usage
+
+```bash
+hack pull [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
@@ -913,7 +941,7 @@ hack config <subcommand> [options]
 | --- | --- |
 | `hack config get <key>` | Read a value from hack.config.json |
 | `hack config set <key> <value>` | Update a value in hack.config.json |
-| `hack config validate` | Validate native configuration and selected local overlays without starting workloads |
+| `hack config validate` | Validate project configuration without starting workloads |
 | `hack config plan` | Inspect native environment binding completeness without decrypting or starting workloads |
 | `hack config import` | Preview a bounded legacy config and Compose conversion without writes |
 | `hack config adopt` | Explicitly adopt a stopped, verified existing Compose instance |
@@ -983,7 +1011,7 @@ hack config set <key> <value> [options]
 
 ## `hack config validate`
 
-Validate native configuration and selected local overlays without starting workloads
+Validate project configuration without starting workloads
 
 ### Usage
 
@@ -991,7 +1019,7 @@ Validate native configuration and selected local overlays without starting workl
 hack config validate [options]
 ```
 
-Uses the matching bundled Rust compiler. Without --file, discovers a native project and resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. With HACK_RUNTIME_BACKEND=native, a selected workload image that is not a sha256: content ID refuses with the native consumer's native_graph_admission code. Neither mode reads env values, writes state, or starts workloads.
+Uses the matching bundled Rust compiler. Without --file, discovers a Compose or native project. Native validation resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. With HACK_RUNTIME_BACKEND=native, a selected workload image that is not a sha256: content ID refuses with the native consumer's native_graph_admission code. Neither mode reads env values, writes state, or starts workloads.
 
 ### Options
 
@@ -1380,7 +1408,7 @@ hack global <subcommand> [options]
 
 | Command | Summary |
 | --- | --- |
-| `hack global install` | Bootstrap ~/.hack and start Caddy + Grafana/Loki/Alloy |
+| `hack global install` | Bootstrap ~/.hack and start Caddy and CoreDNS (Grafana/Loki/Alloy only when logging is on) |
 | `hack global dns` | Manage scoped native custom-domain DNS |
 | `hack global up` | Start global infra containers |
 | `hack global down` | Stop global infra containers |
@@ -1402,7 +1430,7 @@ hack global <subcommand> [options]
 
 ## `hack global install`
 
-Bootstrap ~/.hack and start Caddy + Grafana/Loki/Alloy
+Bootstrap ~/.hack and start Caddy and CoreDNS (Grafana/Loki/Alloy only when logging is on)
 
 ### Usage
 
@@ -1460,6 +1488,9 @@ hack global up [options]
 
 | Option | Description |
 | --- | --- |
+| `--logging` | Turn the logging stack (Loki, Alloy, Grafana) on, save logging.enabled=true and start it |
+| `--no-logging` | Turn the logging stack off, save logging.enabled=false and stop it; its logs are kept |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1760,6 +1791,7 @@ hack native <subcommand> [options]
 | --- | --- |
 | `hack native setup` | Download and prepare the pinned native runtime for this home |
 | `hack native recover` | Recover this home's native runtime after an interrupted or failed start |
+| `hack native temp-aliases` | List dangling native provider HOME aliases |
 
 ### Options
 
@@ -1779,7 +1811,7 @@ Download and prepare the pinned native runtime for this home
 hack native setup [options]
 ```
 
-Verifies and resumes pinned downloads without starting a VM. Requires Apple Silicon macOS. Non-interactive downloads need --accept-downloads. --json passes the runtime result through unchanged.
+Verifies and resumes pinned downloads without starting a VM: the VM provider, the engine, the guest networking packages and the image builder. Requires Apple Silicon macOS. Non-interactive downloads need --accept-downloads. A home that is already set up is left as it is; with --accept-downloads it gains the image builder if it has none. --json passes the runtime result through unchanged.
 
 ### Options
 
@@ -1790,6 +1822,7 @@ Verifies and resumes pinned downloads without starting a VM. Requires Apple Sili
 | `--archive <path>` | Offline pinned provider archive (requires the complete offline input set) |
 | `--engine-archive <path>` | Offline pinned engine archive |
 | `--network-tools-directory <path>` | Private directory containing all pinned networking packages |
+| `--builder <path>` | Offline pinned image builder file (optional; with the offline input set) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1811,6 +1844,29 @@ Runs the runtime's own recovery for this native home: it proves what a failed or
 | Option | Description |
 | --- | --- |
 | `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack native temp-aliases`
+
+List dangling native provider HOME aliases
+
+### Usage
+
+```bash
+hack native temp-aliases [options]
+```
+
+List old aliases whose native home is gone, or remove them with --fix.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--fix` | Remove verified dangling aliases |
+| `--include-unverified-volumes` | With --fix, include aliases whose volume may be unmounted |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1876,6 +1932,7 @@ hack doctor [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--fix` | Attempt safe auto-remediations (network + CoreDNS + CA) |
+| `--include-unverified-volumes` | With --fix, include native aliases whose volume may be unmounted |
 | `--machine` | Observe machine checks only, without discovering a project or repairing state |
 | `--only <id>` | With --fix, select exactly one allowlisted repair: 'hack gitignore' (needs --yes) or 'polling watchers' (shows the diff; --yes applies it) |
 | `--yes` | Consent to the one repair selected with --fix --only |
@@ -3611,7 +3668,7 @@ hack the planet [options]
 
 ## Experimental (unsupported)
 
-These commands are source-available but outside the supported v3 product contract. They are hidden from default `hack --help` (see them with `hack help --all`) and print a warning when invoked.
+These commands are source-available but outside the supported Hack CLI contract. They are hidden from default `hack --help` (see them with `hack help --all`) and print a warning when invoked.
 
 - `hack dispatch` — Unsupported: run branch-scoped jobs on remote nodes
 - `hack gateway` — Unsupported: manage the remote control plane entrypoint

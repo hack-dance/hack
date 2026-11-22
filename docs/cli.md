@@ -46,7 +46,12 @@ ports take precedence over requested publication intent, so IPv6-disabled hosts 
 IPv4-only forwarders do not gain an implied IPv6 listener. Requested bindings are
 used only when the runtime projection is absent. HTTPS must verify against the running
 proxy's internal CA using its
-schemas hostname; an unrelated TCP listener cannot pass. A warning names the failed
+schemas hostname; an unrelated TCP listener cannot pass. That hostname is the one
+the proxy file routes (as `hack global up` probes it), resolved first with this
+machine's resolver: only the loopback addresses it resolves to are checked, and a
+name that resolves straight to the proxy container (as with OrbStack on macOS)
+skips the loopback check. With no answer, every published loopback binding is
+checked. A warning names the failed
 port and any listener process visible without privilege. Check competing listeners,
 a VPN's serve feature, the container runtime's HTTPS setting, and local DNS overrides.
 This warning has no automatic repair. Hostnames resolving directly to the container
@@ -211,7 +216,8 @@ Historical remote guides are excluded from the supported documentation.
   `config get`/`set`, `env ...`, `host exec`/`shell`, `usage --by-service` and
   `project owner`/`target`/`task`, for
   example `hack ps -p <dir> --json` and `hack branch list -p <dir>`. Under `--json` it is one
-  error envelope; without `--json` it is one closed error message, `E_PROJECT_NOT_FOUND: <message>`,
+  error envelope. In text mode `up` shows a project blocker with the next command. Other commands print
+  a closed error message, `E_PROJECT_NOT_FOUND: <message>`,
   and no stack trace. The logger decides how it looks: the console logger (`HACK_LOGGER=console`)
   prints one line, `ERROR: E_PROJECT_NOT_FOUND: ...`, on stderr; gum prints one line with a styled
   `ERROR` level on stderr; and clack prints two lines on stdout, its `│` guide line and then the
@@ -433,8 +439,34 @@ The project can set both in `.hack/hack.config.json`; a host variable set on the
 invocation wins over the project setting:
 
 ```json
-{ "compose": { "startupTimeoutMs": 180000, "startupCeilingMs": 3600000 } }
+{
+  "compose": {
+    "startupTimeoutMs": 180000,
+    "startupCeilingMs": 3600000,
+    "downTimeoutSeconds": 5
+  }
+}
 ```
+
+For Compose `hack down`, `compose.downTimeoutSeconds` (or
+`hack down --timeout <seconds>`, which wins over the project setting) sets the
+per-container stop grace period passed to `docker compose down --timeout`. The
+`--timeout` flag requires a canonical base-10 integer string from `0` to `600`
+(no whitespace or leading zeros), while `compose.downTimeoutSeconds` is a JSON
+integer from `0` to `600`; invalid values are refused (`E_USAGE` for the flag,
+`E_CONFIG_INVALID` for the config key) and never clamped. Leaving both unset
+passes no `--timeout` flag and keeps Docker Compose's default behaviour and the
+90-second overall subprocess cap. When either `--timeout` or
+`compose.downTimeoutSeconds` is set, the overall subprocess cap scales to
+`max(90s, timeout × distinct running services + 30s)` using the running service
+list `down` reads, with no lower ceiling below that allowance. When no timeout
+is given, the cap does not inspect per-service `stop_grace_period` values in
+Compose; set `--timeout` or `compose.downTimeoutSeconds` if a project needs more
+than 90 seconds to stop. If Hack's overall cap timer ends `docker compose down`
+(exit `124`), `hack down` reports the cap message in text output and in
+`error.message` (with `error.detail.timedOut: true` and `error.detail.capMs`)
+under `--json`. On the native backend, `hack down --timeout` is refused with
+`E_USAGE`.
 
 If the start is cut short at the ceiling while a one-shot is still running,
 `E_STARTUP_TIMEOUT` names that service and says the start is still in progress
@@ -578,7 +610,9 @@ volumes. Changed fingerprints, uncertain container identity, or caches mounted o
 by other services leave dependency reconciliation to Compose. This does not certify
 cache completeness or skip installer/generation commands by itself.
 
-`hack exec` uses the existing container and its existing mounts. After changing a
+`hack exec` uses the existing container and its existing mounts, and the internal
+override `up` stored in Hack's home, so it makes no Docker call or write before
+`docker compose exec`. After changing a
 lockfile/runtime input, use `hack restart` to move the long-running service to the
 new cache; a successful one-off `run` does not remount that existing service.
 Unlabelled services retain their existing behavior. Old cache volumes are retained;

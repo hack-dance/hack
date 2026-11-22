@@ -18,6 +18,10 @@ import { getString, isRecord } from "../lib/guards.ts";
 import { resolveLifecycleComposeProjectName } from "../lib/lifecycle-runtime.ts";
 import { quoteShellWord } from "../lib/logs.ts";
 import { readNativeComposeDocument } from "../lib/native-compose-backend-features.ts";
+import {
+  canPrintStartSelection,
+  scopedHackCommand,
+} from "../lib/printed-shell-command.ts";
 import { type ProjectContext, readProjectConfig } from "../lib/project.ts";
 
 /**
@@ -160,8 +164,16 @@ export type NativeUpSelection = {
 /** One shell-safe command targeting the same instance, without changing its env/profiles. */
 export function nativeScopedCommand(opts: {
   readonly action: "restart" | "down";
+  readonly singleLine?: boolean;
   readonly selection: NativeUpSelection;
 }): string {
+  if (opts.singleLine) {
+    return scopedHackCommand(opts.action, {
+      path: opts.selection.path,
+      project: opts.selection.project,
+      branch: opts.selection.branch,
+    });
+  }
   const words = ["hack", opts.action];
   for (const [key, value] of Object.entries({
     path: opts.selection.path,
@@ -303,9 +315,18 @@ export async function answerNativeAlreadyRunning(opts: {
   };
   const restartCommand = nativeScopedCommand({ action: "restart", selection });
   if (!observed.matches) {
+    const command = nativeScopedCommand({ action: "down", selection });
     throw new HackCliError({
       code: "E_STARTUP_INCOMPLETE",
-      message: `Native project is already running with a different or unknown environment/profile selection. Stop it with ${nativeScopedCommand({ action: "down", selection })}, then rerun this up command. Nothing was started or stopped.`,
+      message: `Native project is already running with a different or unknown environment/profile selection. Stop it with ${command}, then rerun this up command. Nothing was started or stopped.`,
+      startBlocker: {
+        thing: "project",
+        problem: "already running with a different or unknown selection",
+        needs: "this start needs the running instance stopped first",
+        command: canPrintStartSelection(opts.selection)
+          ? nativeScopedCommand({ action: "down", selection, singleLine: true })
+          : undefined,
+      },
     });
   }
   if (observed.state.kind === "partial") {

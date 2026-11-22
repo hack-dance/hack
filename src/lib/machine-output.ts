@@ -8,6 +8,7 @@ export const MACHINE_SCHEMAS = {
   projectsObserve: "hack.projects.observe.v1",
   globalAdminPlan: "hack.global-admin-plan.v1",
   globalStatusObserve: "hack.global-status.observe.v1",
+  globalUp: "hack.global-up.v1",
   usageByService: "hack.usage.by-service.v1",
   updateCheck: "hack.update-check.v1",
   daemonStart: "hack.daemon-start.v1",

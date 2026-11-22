@@ -1,0 +1,45 @@
+---
+title: LoggingOptIn · when logging runs
+---
+stateDiagram-v2
+  direction TB
+  [*] --> NewHome
+  [*] --> ExistingHome
+  NewHome --> Off : install / up [unset]
+  ExistingHome --> On : first start saves on
+  Off --> On : up --logging
+  Off --> On : config true, then up
+  On --> Stopped : up --no-logging
+  On --> Stopped : config false, then up
+  Stopped --> On : up --logging
+  On --> Down : global down
+  Down --> On : up [on]
+  Stopped --> Wiped : logs-reset
+  Down --> Wiped : logs-reset
+  Wiped --> On : up --logging
+  note right of Off
+    No logging files written.
+    hack logs reads container
+    logs; --loki says how to
+    turn it on.
+  end note
+  note right of Stopped
+    INV NoSurpriseDataLoss: off
+    stops this home's containers
+    (found by Compose labels) and
+    keeps their volumes.
+  end note
+  note left of ExistingHome
+    A failed save warns and this
+    run still follows the choice;
+    routing is not blocked.
+  end note
+  note left of NewHome
+    INV FreshNeverStartsUnasked:
+    install writes the logging
+    files only while on.
+  end note
+  classDef ok stroke-width:1.6px
+  classDef idle stroke-dasharray:4 3
+  class On ok
+  class Off,Stopped,Down,NewHome,ExistingHome,Wiped idle

@@ -1,5 +1,5 @@
 use super::Profile;
-use super::process::{clean_command, run};
+use super::process::{Clock, clean_command, run};
 use crate::CandidateError;
 use serde::Serialize;
 use std::path::Path;
@@ -465,36 +465,191 @@ pub(super) fn sample_with(
     sample_checked(profile, None, observe, std::thread::sleep)
 }
 
-/// The initial observation and a lease wait cannot hide a swapout counter change.
-pub(super) fn sample_after(
+/// How long a Development host must stay admitted before the sample under the startup lease
+/// may admit an allocation. Measured on a monotonic clock from the first checked sample.
+pub(super) const DEVELOPMENT_WINDOW: Duration = Duration::from_secs(1);
+
+/// Development's first checked sample: when it finished, and the swapout count every later
+/// sample of this start must still show.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Opened {
+    at: Duration,
+    swapouts: u64,
+}
+
+/// Open Development's admission window on its first sample, which must pass every predicate
+/// on its own. `clock` fixes the time the sample under the lease is measured from.
+pub(super) fn open(first: &Admission, clock: &impl Clock) -> Result<Opened, CandidateError> {
+    let swapouts = check(Profile::Development, first, None)?;
+    Ok(Opened {
+        at: clock.now(),
+        swapouts,
+    })
+}
+
+/// What the sample under the lease may use in place of waiting out the window: an earlier
+/// sample of this home that passed every predicate on its own ([`opening`]).
+pub(super) trait Earlier {
+    /// A recorded earlier sample that may replace the wait now. Asked under the startup
+    /// lease, at most once, and only when a wait is due.
+    fn usable(&self) -> Option<Recorded>;
+    /// The time a sample taken now is recorded with, or `None` when it cannot be read.
+    fn now(&self) -> Option<Duration>;
+    /// Whether `recorded` is still at least one window and at most the bound old at `at`,
+    /// a time [`Earlier::now`] returned. Asked once the sample under the lease exists: the
+    /// age that counts is the one at that sample, not the one when the record was read.
+    fn in_age(&self, recorded: &Recorded, at: Duration) -> bool;
+    /// Remove the recorded earlier sample. Called under the startup lease when a sample this
+    /// start took failed, was refused, or showed another swapout count than the record: a
+    /// retry right after must qualify on its own two samples, a window apart.
+    fn forget(&self);
+}
+
+/// A recorded earlier sample as [`Earlier::usable`] found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Recorded {
+    /// The swapout count the recorded sample showed.
+    pub(super) swapouts: u64,
+    /// When the recorded sample was taken, on the clock of [`Earlier::now`].
+    pub(super) taken: Duration,
+}
+
+/// The outcome of [`recheck_after_lease`].
+#[derive(Debug)]
+pub(super) struct Leased {
+    /// The qualifying sample taken under the lease. Research takes none here.
+    pub(super) samples: Vec<Admission>,
+    /// Whether a recorded earlier sample replaced the wait. `None` when no sample was
+    /// taken here.
+    pub(super) reused: Option<bool>,
+    /// [`Earlier::now`] when the sample was accepted: the time it may be recorded with.
+    pub(super) sampled_at: Option<Duration>,
+}
+
+/// Development's sample under the startup lease, before creating an owner, disks, provider
+/// capacity, or any aliases. It starts no sooner than [`DEVELOPMENT_WINDOW`] after the first
+/// sample finished: only the remainder of that time is slept, so a start whose own checks
+/// and lease wait already took that long does not pause. The sample must pass every
+/// predicate and show the first sample's swapout count; the caller chains the pre-boot
+/// check to it. Research keeps its frozen pre-lease window: it takes no sample here and
+/// never asks `earlier`.
+///
+/// When a wait is due and `earlier` holds a usable recorded sample, the sample is taken at
+/// once instead. It replaces the wait only if it passes every predicate, shows both the
+/// first sample's swapout count and the recorded one's, and the record is still within its
+/// age range once the sample exists (a delay or a host sleep between reading the record
+/// and taking the sample must not stretch the bound). Otherwise it is discarded, and the
+/// start waits and samples exactly as it does without a record: a record never refuses a
+/// start and never stands in for a sample.
+pub(super) fn recheck_after_lease(
     profile: Profile,
-    baseline_swapouts: Option<u64>,
-    observe: impl FnMut() -> Result<Admission, CandidateError>,
-) -> Result<Vec<Admission>, CandidateError> {
-    let baseline = baseline_swapouts.ok_or_else(|| {
+    opened: Option<Opened>,
+    clock: &impl Clock,
+    earlier: &impl Earlier,
+    mut observe: impl FnMut() -> Result<Admission, CandidateError>,
+) -> Result<Leased, CandidateError> {
+    if profile == Profile::Research {
+        return Ok(Leased {
+            samples: Vec::new(),
+            reused: None,
+            sampled_at: None,
+        });
+    }
+    let opened = opened.ok_or_else(|| {
         CandidateError::new(
             "admission_unavailable",
             "Cannot observe the swapout baseline.",
         )
     })?;
-    sample_checked(profile, Some(baseline), observe, std::thread::sleep)
+    let due = || {
+        DEVELOPMENT_WINDOW
+            .checked_sub(clock.now().saturating_sub(opened.at))
+            .filter(|rest| !rest.is_zero())
+    };
+    if due().is_some()
+        && let Some(recorded) = earlier.usable()
+    {
+        match observe() {
+            Ok(sample) => {
+                let same_host = check(profile, &sample, Some(opened.swapouts))
+                    .is_ok_and(|count| count == recorded.swapouts);
+                // The age is judged again now that the sample exists; an unreadable clock
+                // is a miss.
+                if same_host
+                    && let Some(sampled_at) = earlier.now()
+                    && earlier.in_age(&recorded, sampled_at)
+                {
+                    return Ok(Leased {
+                        samples: vec![sample],
+                        reused: Some(true),
+                        sampled_at: Some(sampled_at),
+                    });
+                }
+                // A sample that fails a predicate, or shows another swapout count, is a
+                // host the record no longer describes.
+                if !same_host {
+                    earlier.forget();
+                }
+            }
+            Err(_) => earlier.forget(),
+        }
+    }
+    // Judge by the clock, not by having asked to sleep: an early wake sleeps again.
+    while let Some(rest) = due() {
+        clock.sleep(rest);
+    }
+    // A refused or failed sample also removes the record, so the retry waits its window.
+    let refused = |error: CandidateError| {
+        earlier.forget();
+        error
+    };
+    let sample = observe().map_err(refused)?;
+    check(profile, &sample, Some(opened.swapouts)).map_err(refused)?;
+    Ok(Leased {
+        samples: vec![sample],
+        reused: Some(false),
+        sampled_at: earlier.now(),
+    })
 }
 
-/// Development revalidates a full window after obtaining the startup lease,
-/// before creating an owner, disks, provider capacity, or any aliases.
-pub(super) fn recheck_after_lease(
+/// Every startup predicate for one sample, and its swapout count. With a baseline, the
+/// count must equal it: the chain from the first sample of a start is never broken.
+fn check(
     profile: Profile,
-    samples: &[Admission],
-    observe: impl FnMut() -> Result<Admission, CandidateError>,
-) -> Result<Vec<Admission>, CandidateError> {
-    if profile == Profile::Research {
-        return Ok(Vec::new());
+    sample: &Admission,
+    baseline_swapouts: Option<u64>,
+) -> Result<u64, CandidateError> {
+    let headroom = match profile {
+        Profile::Research => sample.free_memory_bytes,
+        Profile::Development => sample.free_plus_file_cache_estimate_bytes,
+    };
+    // `admitted` remains a report field, not authority to reinterpret a
+    // legacy normal-only boolean or ignore an incomplete typed observation.
+    let swapouts = sample.swapouts.filter(|_| {
+        sample.admitted
+            && sample.host_supported
+            && sample.profile == profile
+            && sample.memory_pressure.admitted(profile)
+            && sample.thermal_normal
+            && headroom.is_some_and(|bytes| bytes >= profile.minimum_free_memory_bytes())
+    });
+    let Some(swapouts) = swapouts else {
+        return Err(CandidateError::new(
+            "admission_rejected",
+            if sample.reasons.is_empty() {
+                "A required startup resource observation is not admitted.".into()
+            } else {
+                sample.reasons.join(" ")
+            },
+        ));
+    };
+    if baseline_swapouts.is_some_and(|baseline| baseline != swapouts) {
+        return Err(CandidateError::new(
+            "admission_rejected",
+            "Swapouts changed during admission.",
+        ));
     }
-    sample_after(
-        profile,
-        samples.last().and_then(|sample| sample.swapouts),
-        observe,
-    )
+    Ok(swapouts)
 }
 
 fn sample_checked(
@@ -506,36 +661,7 @@ fn sample_checked(
     let mut samples: Vec<Admission> = Vec::new();
     for index in 0..3 {
         let sample = observe()?;
-        let headroom = match profile {
-            Profile::Research => sample.free_memory_bytes,
-            Profile::Development => sample.free_plus_file_cache_estimate_bytes,
-        };
-        // `admitted` remains a report field, not authority to reinterpret a
-        // legacy normal-only boolean or ignore an incomplete typed observation.
-        if !sample.admitted
-            || !sample.host_supported
-            || sample.profile != profile
-            || !sample.memory_pressure.admitted(profile)
-            || !sample.thermal_normal
-            || sample.swapouts.is_none()
-            || headroom.is_none_or(|bytes| bytes < profile.minimum_free_memory_bytes())
-        {
-            return Err(CandidateError::new(
-                "admission_rejected",
-                if sample.reasons.is_empty() {
-                    "A required startup resource observation is not admitted.".into()
-                } else {
-                    sample.reasons.join(" ")
-                },
-            ));
-        }
-        if baseline_swapouts.is_some() && baseline_swapouts != sample.swapouts {
-            return Err(CandidateError::new(
-                "admission_rejected",
-                "Swapouts changed during admission.",
-            ));
-        }
-        baseline_swapouts = sample.swapouts;
+        baseline_swapouts = Some(check(profile, &sample, baseline_swapouts)?);
         samples.push(sample);
         if index < 2 {
             pause(Duration::from_secs(if profile == Profile::Research {
@@ -548,6 +674,7 @@ fn sample_checked(
     Ok(samples)
 }
 
+pub(super) mod opening;
 #[cfg(test)]
 mod pressure_tests;
 

@@ -19,7 +19,7 @@ exact release tag over HTTPS, review it, then run it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.24/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -47,11 +47,13 @@ Run the candidate explicitly:
 "$HOME/.hack-next/bin/hack-next" --manager status
 ```
 
-By default `hack-next` uses the native backend with the selected version's private
+On Apple Silicon macOS, `hack-next` defaults to native with the selected version's private
 native and CLI homes, overriding inherited selectors such as `HACK_NATIVE_BINARY`,
 `HACK_NATIVE_HOME`, `HACK_HOME` and `HACK_GLOBAL_CONFIG_PATH`. To run the same
 verified candidate on Compose, set `HACK_RUNTIME_BACKEND=compose`; any other
-non-empty value refuses before the candidate starts. Explicit native project
+non-empty value refuses before the candidate starts. On supported Linux,
+`hack-next` uses Compose and refuses explicit native selection. Native is the
+planned default for stable v5. Explicit native project
 adaptation, dependency, routing and source-sharing settings still reach the CLI, as
 do the committed `.hack/native/adaptation.json` and the per-machine
 `~/.config/hack/native/<project>/settings.json`
@@ -65,15 +67,14 @@ any launcher is active.
 
 ## Linux: the Compose-only candidate
 
-Starting with the first release that ships Linux assets (`SHA256SUMS-linux` is in
-its asset list; `5.0.0-next.22` and earlier have none), a release also carries a
-bundle for Linux on x86_64 and arm64 with glibc. It runs the Compose backend only. The native backend is Apple Silicon
-macOS only. musl-based systems such as Alpine and other architectures are not
+Since `5.0.0-next.23`, a release also carries a bundle for Linux on x86_64 and
+arm64 with glibc (`SHA256SUMS-linux` is in its asset list; `5.0.0-next.22` and
+earlier have none). It runs
+the Compose backend only. The native backend is Apple Silicon macOS only. musl-based systems such as Alpine and other architectures are not
 supported; the installer refuses there and names the supported platforms.
 
-Install with the same commands as above, using the tag of a release that has
-Linux assets (`SHA256SUMS-linux` is in its asset list; the `5.0.0-next.22`
-installer stops on Linux). The same `hack-next-install.sh` picks the Linux manager
+Install with the same commands as above. The release they name has Linux
+assets; the `5.0.0-next.22` installer stops on Linux. The same `hack-next-install.sh` picks the Linux manager
 from `uname`. It needs `curl`, `sha256sum` (or `shasum`), `mktemp`, `chmod`, `rm`
 and `date`. It runs without `sudo` and needs no compiler, Python or Bun, so it
 works in a dev container or an agent sandbox. It checks the manager against the
@@ -133,13 +134,12 @@ bundled `hack-cli` directly or create a private `HACK_HOME` to test Compose.
 
 | Backend | Command | Hack home | Routing, DNS and TLS |
 | --- | --- | --- | --- |
-| Native (default) | `"$HOME/.hack-next/bin/hack-next" up --path /absolute/project` | The version's private `cli-home` and `native-home` | The candidate's native routing, set up through [native candidate preparation](native-candidate.md) |
+| Native (Apple Silicon macOS default) | `"$HOME/.hack-next/bin/hack-next" up --path /absolute/project` | The version's private `cli-home` and `native-home` | The candidate's native routing, set up through [native candidate preparation](native-candidate.md) |
 | Compose | `HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" up --path /absolute/project` | Your own `HACK_HOME` (default `~/.hack`) and `HACK_GLOBAL_CONFIG_PATH` | Your existing global Caddy, CoreDNS and local CA |
 
-On the native backend, every project root and linked worktree uses the version's
-one `native-home`, so they share one VM pool and one HTTPS router, as Compose
-projects share one Docker VM and the global Caddy. A root joins the pool while the
-pool is stopped; see [one pool, several project roots](native-candidate.md#explicit-writable-development-source).
+Projects and linked worktrees the native pool was started with can run together
+and share that pool's VM and HTTPS router. Add another project root while the
+pool is stopped. A start from an unshared root is refused while the pool runs; see [one pool, several project roots](native-candidate.md#explicit-writable-development-source).
 
 With `HACK_RUNTIME_BACKEND=compose`, `hack-next` verifies the selected bundle as
 usual and then runs its `hack-cli` on the Compose backend. It keeps your Hack home,
@@ -195,6 +195,9 @@ sizes, SHA-256 hashes, cache and destination, then asks once. Scripts use
 the runtime's setup result through unchanged. Completed files are verified and
 reused; interrupted downloads resume. The complete offline archive input form is
 also available; see [provider setup](native-candidate.md).
+Setup also installs the image builder that `build:` services need. A home that an
+earlier build set up gains it with `hack-next native setup --accept-downloads`,
+which downloads that one file and leaves the rest of the home in place.
 
 Preflight reports runtime installation separately from project review, in text
 and in the JSON `runtime_setup` item. A fresh or interrupted home blocks startup
@@ -294,7 +297,7 @@ starts `hackd` again when you need it.
 ### Keep `.hack/.internal/` out of Git
 
 Do not commit a project's `.hack/.internal/` directory. It holds generated,
-machine-local files, such as `.hack/.internal/compose.override.yml`, and Hack
+machine-local files, such as `.hack/.internal/compose.runtime.override.yml`, and Hack
 rewrites them when project commands such as `up` run. Newer generators, including
 candidate bundles, can write different content into those files than older ones.
 If a project tracks `.hack/.internal/`, every run of a newer generator leaves its
@@ -324,6 +327,11 @@ launcher the command ran through:
 A Compose run also prints `HACK_RUNTIME_BACKEND=compose` in front. A custom
 `HACK_NATIVE_HOME` is the one exception: `hack-next` refuses it, so that fix
 names the selected bundle's `hack-v5` instead.
+
+Messages about the native image builder (from `up`, `native setup` and
+`doctor`) print a launcher under your home from the home, as
+`~/.hack-next/bin/hack-next native setup --accept-downloads`. It is the same
+launcher, runs as pasted, and keeps the home directory out of saved reports.
 
 ## Upgrade, roll back and return to stable
 
@@ -362,7 +370,7 @@ lifecycle supervisor that `5.0.0-next.18` added. The installed manager cannot fe
 a newer one: `upgrade-manager` installs the executable it is run from. Download the
 standalone manager from the release you are upgrading to, verify it against that
 release's `INSTALLER-SHA256SUMS`, then run that file against your channel root.
-The example names `v5.0.0-next.22`; use the release you are upgrading to in both
+The example names `v5.0.0-next.24`; use the release you are upgrading to in both
 URLs and replace `NEWER` with its number. For a channel that a compiled manager
 installed (`5.0.0-next.6` to `next.17`) that is `5.0.0-next.19` or later: the
 `5.0.0-next.18` manager does not recognize earlier managers. The takeover works only
@@ -372,10 +380,10 @@ on a channel the newer manager can validate. A channel from the `5.0.0-next.1` t
 ```sh
 dir=$(mktemp -d) && cd "$dir" &&
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/hack-next-manager-darwin-arm64 \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.24/hack-next-manager-darwin-arm64 \
   --output hack-next-manager-darwin-arm64 &&
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/INSTALLER-SHA256SUMS \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.24/INSTALLER-SHA256SUMS \
   --output INSTALLER-SHA256SUMS &&
 grep '[ *]hack-next-manager-darwin-arm64$' INSTALLER-SHA256SUMS > manager.sha256 &&
 shasum -a 256 --check manager.sha256 &&

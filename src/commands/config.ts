@@ -19,6 +19,10 @@ import {
   parseDefaultDomain,
 } from "../lib/default-domain.ts";
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
+import {
+  LOGGING_ENABLED_CONFIG_KEY,
+  parseLoggingEnabled,
+} from "../lib/global-logging.ts";
 import { isRecord } from "../lib/guards.ts";
 import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import type { ProjectContext } from "../lib/project.ts";
@@ -240,6 +244,22 @@ function parseConfigSetValue(opts: {
   }
   if (opts.path.join(".") === PROXY_BIND_CONFIG_KEY) {
     return parseGlobalProxyBind({ target: opts.target, value });
+  }
+  if (opts.path.join(".") === LOGGING_ENABLED_CONFIG_KEY) {
+    if (opts.target.scope === "project") {
+      throw new CliUsageError(
+        `${LOGGING_ENABLED_CONFIG_KEY} is global-only. Re-run with --global.`
+      );
+    }
+    try {
+      return parseLoggingEnabled(value);
+    } catch (error) {
+      throw new CliUsageError(
+        error instanceof Error
+          ? error.message
+          : `Invalid ${LOGGING_ENABLED_CONFIG_KEY}`
+      );
+    }
   }
   if (opts.path.join(".") !== DEFAULT_DOMAIN_CONFIG_KEY) {
     return value;

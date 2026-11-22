@@ -171,7 +171,7 @@ Use `hack` as the primary interface for local-first development.
 
 - Bootstrap once: `hack global install`
 - Start/stop/status: `hack global up`, `hack global down`, `hack global status`
-- Use `hack global up` before Loki/Grafana queries if global logging is offline.
+- The global logging stack (Loki/Grafana) is opt-in; use `hack global up --logging` before Loki/Grafana queries if it is off.
 
 ## Daemon (optional)
 

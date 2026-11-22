@@ -165,8 +165,16 @@ test("a running pool in use names the projects that use it, or says why it canno
   for (const [refusal, liveRuns, says] of [
     [inUse, ["a".repeat(32)], "in use by first-app"],
     [extensionRequired(), ["a".repeat(32)], "in use by first-app"],
-    [inUse, [], "an open session, a pending recovery"],
+    [inUse, [], "an open interactive session"],
     [inUse, undefined, "its live runs could not be read"],
+    [
+      new NativeRuntimeRequestError({
+        message: "Native runtime request failed (provider_busy).",
+        nativeCode: "provider_busy",
+      }),
+      undefined,
+      "a native image build is running",
+    ],
   ] as const) {
     const lines: string[] = [];
     const described: (readonly string[])[] = [];
@@ -223,7 +231,7 @@ test("a pool starting or stopping, or a running record whose provider is gone, i
       },
     }).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ClosedCliError);
-    expect(String(error)).toContain("still starting or stopping");
+    expect(String(error)).toContain("starting or stopping, or its provider");
     expect(String(error)).toContain("mounts never change");
     expect(calls.some((args) => args[1] === "project-share")).toBe(false);
   }

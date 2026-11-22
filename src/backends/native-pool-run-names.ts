@@ -2,9 +2,10 @@
  * Names for the live runs that keep a running native pool in use (HACK-2535).
  *
  * The runtime reports live run ids only (`runtime status` `live_runs`). Each
- * checkout's run mapping (`<project dir>/.internal/native-runs/<scope>.json`)
- * records the run it owns, so the registered projects and their linked worktrees
- * map a run id to a project. Reading is best-effort and read-only: a checkout
+ * checkout's run mappings (`<project dir>/.internal/native-runs/` for Compose
+ * projects, `.internal/native-authored-runs/` for native-authored ones) record
+ * the runs it owns, so the registered projects and their linked worktrees map a
+ * run id to a project. Reading is best-effort and read-only: a checkout
  * whose mappings cannot be read maps nothing, and its runs count as unnamed.
  */
 import { readdir, readFile } from "node:fs/promises";
@@ -35,26 +36,42 @@ function checkouts(registry: ProjectsRegistry): Checkout[] {
   return found;
 }
 
+const STORES = ["native-runs", "native-authored-runs"] as const;
+
+/** The run a mapping record names: `run.run` (Compose), `run` or `receipt.run`. */
+function recordRun(value: unknown): string | undefined {
+  if (!isRecord(value)) {
+    return;
+  }
+  for (const candidate of [
+    isRecord(value.run) ? value.run.run : value.run,
+    isRecord(value.receipt) ? value.receipt.run : undefined,
+  ]) {
+    if (typeof candidate === "string") {
+      return candidate;
+    }
+  }
+}
+
 /** The run ids this checkout's mappings record; empty when unreadable. */
 async function mappedRuns(projectDir: string): Promise<string[]> {
-  const root = join(projectDir, ".internal", "native-runs");
-  const names = await readdir(root).catch(() => [] as string[]);
   const runs: string[] = [];
-  for (const name of names.filter((entry) => entry.endsWith(".json"))) {
-    const text = await readFile(join(root, name), "utf8").catch(() => "");
-    if (text.length === 0 || text.length > MAPPING_BYTES) {
-      continue;
-    }
-    try {
-      const value: unknown = JSON.parse(text);
-      if (isRecord(value) && isRecord(value.run)) {
-        const run = value.run.run;
-        if (typeof run === "string") {
+  for (const store of STORES) {
+    const root = join(projectDir, ".internal", store);
+    const names = await readdir(root).catch(() => [] as string[]);
+    for (const name of names.filter((entry) => entry.endsWith(".json"))) {
+      const text = await readFile(join(root, name), "utf8").catch(() => "");
+      if (text.length === 0 || text.length > MAPPING_BYTES) {
+        continue;
+      }
+      try {
+        const run = recordRun(JSON.parse(text));
+        if (run !== undefined) {
           runs.push(run);
         }
+      } catch {
+        // Not a run mapping: maps nothing.
       }
-    } catch {
-      // Not a run mapping: maps nothing.
     }
   }
   return runs;

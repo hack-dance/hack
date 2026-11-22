@@ -200,8 +200,28 @@ pub(super) fn live_graph_runs(state_root: &Path) -> Option<Vec<String>> {
     live.sort();
     Some(live)
 }
-/// The pending recovery a graph run directory may hold (`graph::dead_owner_cleanup`).
+/// The recovery intent a graph run directory may hold (`graph::dead_owner_cleanup`),
+/// and its staging file. A completed intent stays as history: it records
+/// `complete_sha256` and is not a pending operation.
 const CLEANUP_INTENT: &str = "dead-owner-cleanup.json";
+const CLEANUP_STAGING: &str = "dead-owner-cleanup.pending";
+
+/// Whether this run directory holds an unfinished dead-owner recovery: a staging file,
+/// or an intent without its completion digest. `None` when either cannot be read.
+fn recovery_pending(run: &Path) -> Option<bool> {
+    match fs::symlink_metadata(run.join(CLEANUP_STAGING)) {
+        Ok(_) => return Some(true),
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    match fs::symlink_metadata(run.join(CLEANUP_INTENT)) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Some(false),
+        Err(_) => return None,
+        Ok(_) => {}
+    }
+    let intent: serde_json::Value = state::read(&run.join(CLEANUP_INTENT)).ok()?;
+    Some(!intent["complete_sha256"].is_string())
+}
 /// The refusal code of a pool that is not idle (HACK-2535).
 pub(super) const POOL_IN_USE: &str = "project_share_pool_in_use";
 
@@ -215,7 +235,7 @@ pub(super) fn require_idle(state_root: &Path) -> Result<(), CandidateError> {
     const LIVE: &str = "The running native pool has a live project run (running, starting, restoring or stopping), so it was not stopped; nothing was changed.";
     const UNREAD: &str = "The running native pool's project runs or sessions could not be read, so it was not stopped; nothing was changed.";
     const RECOVERY: &str = "A project run of the running native pool has a pending recovery, so the pool was not stopped; nothing was changed.";
-    const SESSION: &str = "The running native pool has an open interactive session, so it was not stopped; nothing was changed.";
+    const SESSION: &str = "The running native pool has an open interactive session, so it was not stopped; nothing was changed. `hack exec-sessions --reconcile` clears sessions that have finished.";
     let in_use = |message: &'static str| CandidateError::new(POOL_IN_USE, message);
     match live_graph_runs(state_root) {
         None => return Err(in_use(UNREAD)),
@@ -223,14 +243,12 @@ pub(super) fn require_idle(state_root: &Path) -> Result<(), CandidateError> {
         Some(_) => {}
     }
     for directory in GRAPH_DIRECTORIES {
-        let pending = count(
-            &state_root.join(directory),
-            |name, path| match fs::symlink_metadata(path.join(CLEANUP_INTENT)) {
-                Ok(_) => Some(is_graph_run(name)),
-                Err(e) if e.kind() == ErrorKind::NotFound => Some(false),
-                Err(_) => None,
-            },
-        );
+        let pending = count(&state_root.join(directory), |name, path| {
+            if !is_graph_run(name) {
+                return Some(false);
+            }
+            recovery_pending(path)
+        });
         match pending {
             Some(0) => {}
             Some(_) => return Err(in_use(RECOVERY)),
@@ -276,10 +294,25 @@ mod tests {
             assert_eq!(error.code, POOL_IN_USE);
             assert!(error.message.contains(why), "{}", error.message);
         };
-        // A pending recovery of a retained run.
-        fs::write(native.join(CLEANUP_INTENT), b"{}").unwrap();
+        // A pending recovery of a retained run: an intent without its completion digest,
+        // or a staging file.
+        let intent = native.join(CLEANUP_INTENT);
+        state::write(&intent, &serde_json::json!({ "complete_sha256": null })).unwrap();
         refused(&home, "pending recovery");
-        fs::remove_file(native.join(CLEANUP_INTENT)).unwrap();
+        // A completed recovery stays as history and does not keep the pool in use.
+        state::write(
+            &intent,
+            &serde_json::json!({ "complete_sha256": "a".repeat(64) }),
+        )
+        .unwrap();
+        assert!(require_idle(&home.0).is_ok());
+        fs::write(native.join(CLEANUP_STAGING), b"{}").unwrap();
+        refused(&home, "pending recovery");
+        fs::remove_file(native.join(CLEANUP_STAGING)).unwrap();
+        // An unreadable intent refuses.
+        fs::write(&intent, b"{").unwrap();
+        refused(&home, "could not be read");
+        fs::remove_file(&intent).unwrap();
         // An open interactive session.
         let sessions = home.dir("run/exec-sessions");
         fs::write(sessions.join(LOCK_FILE), b"").unwrap();

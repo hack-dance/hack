@@ -2680,9 +2680,11 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
 
 /// Stop a running pool that nothing uses, so a stopped-pool share update can follow
 /// (HACK-2535). The pool is checked idle (`pool_users::require_idle`) under the provider
-/// lease, and again right before the guest stops. Every graph start needs that lease
-/// before it creates a container, so no container starts between the second check and
-/// the stop; a start whose receipt turned live meanwhile makes the second check refuse.
+/// lease, and again right before the guest stops. The lease is held from the first
+/// check to the stop, and graph starts and interactive sessions are admitted only under
+/// it, so a start that begins meanwhile waits for the lease and then finds the pool
+/// stopped. The second check is a second guard, should a receipt ever turn live
+/// without the lease; it costs one read of the receipts.
 pub(super) fn stop_idle_pool(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
         down_observed(

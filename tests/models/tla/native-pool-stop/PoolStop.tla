@@ -243,10 +243,13 @@ Stop ==
 
 \* HACK-2535: the other project's `up` checks idleness under the provider lease. Idle:
 \* no live run (a ready receipt, whatever its owner), no pending finalization and no
-\* recovery in progress. Every graph start needs that same lease before it runs a
-\* container, so the second check and the guest stop are one step (RestartStop); a
-\* start may still make its receipt live between the two checks (Start while
-\* "checked"). A bounded fault: it is another project's command.
+\* recovery in progress. The code holds the lease from the first check to the stop,
+\* and graph starts take that lease before they write a live receipt, so in the code
+\* no start runs between the checks. The model is more permissive on purpose: it lets
+\* a start turn its receipt live between the two checks (Start while "checked"), as if
+\* some start needed no lease, so it shows what the second check, right before the
+\* guest stops (RestartStop), guards on its own. A bounded fault: it is another
+\* project's command.
 Idle == run /= "ready" /\ ~fin /\ ~recovering
 RestartCheck ==
     /\ IdleRestart /\ Fault /\ restart = "none" /\ pool = "running" /\ Idle

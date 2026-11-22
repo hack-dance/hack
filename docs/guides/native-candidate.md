@@ -2344,8 +2344,10 @@ runs, printing `Restarting the native runtime to add this project's folder, abou
 project run whose receipt is live (running, starting, restoring, stopping, or a failed
 start that kept its services), no pending dead-owner recovery, no open interactive
 session and no image build. The runtime checks this under its provider lease before
-any effect and again right before the guest stops, so a start that begins meanwhile
-makes it refuse (`project_share_pool_in_use`) instead of being stopped. The host-side
+any effect and again right before the guest stops, and holds that lease in between,
+so a start that begins meanwhile waits for the lease (up to 5 s) and then finds the
+pool stopped; it is never stopped itself. A pool found in use refuses with
+`project_share_pool_in_use`. The host-side
 releases of a stop (the managed hostname authority and the pool's publishers) follow
 that second check, so either refusal changes nothing. The same rule applies to a
 pool started by hand with `runtime up`. A pool in use, or one still starting or

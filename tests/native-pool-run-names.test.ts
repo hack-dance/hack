@@ -73,10 +73,31 @@ test("live runs are named by the registered checkout that maps them, three at mo
     }))
   );
   await checkout(root, "wt", [run("9")]);
+  // A native-authored checkout's mapping names its run in the receipt.
+  const authored = join(
+    root,
+    "authored",
+    ".hack",
+    ".internal",
+    "native-authored-runs"
+  );
+  await mkdir(authored, { recursive: true });
+  await writeFile(
+    join(authored, "key.json"),
+    JSON.stringify({
+      version: 2,
+      kind: "native-authored-project-run",
+      receipt: { run: run("8") },
+    })
+  );
   const all = registry([
     { ...apps[0], worktree: join(root, "wt") },
     ...apps.slice(1),
+    { name: "authored-app", projectDir: join(root, "authored", ".hack") },
   ] as never);
+  expect(await describeLivePoolRuns([run("8")], { registry: all })).toBe(
+    "authored-app"
+  );
   expect(await describeLivePoolRuns([run("1")], { registry: all })).toBe(
     "one-app"
   );

@@ -110,7 +110,9 @@ async function addNativeProjectShare(opts: {
     !running &&
     (status.phase === "running" || status.process_alive === true)
   ) {
-    throw runningPoolShareRefusal("it is still starting or stopping");
+    throw runningPoolShareRefusal(
+      "it is still starting or stopping, or its provider has exited"
+    );
   }
   const added = await opts
     .invoke({
@@ -137,6 +139,13 @@ async function addNativeProjectShare(opts: {
           error.nativeCode === NATIVE_PROJECT_SHARE_POOL_IN_USE)
       ) {
         throw runningPoolShareRefusal(await inUseReason(opts));
+      }
+      // `runtime down` refuses while an image build runs, under the same lease.
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode === "provider_busy"
+      ) {
+        throw runningPoolShareRefusal("a native image build is running");
       }
       throw error;
     });
@@ -185,7 +194,7 @@ async function inUseReason(opts: {
     return "it is in use, and its live runs could not be read";
   }
   if (runs.length === 0) {
-    return "it is in use (an open session, a pending recovery, or a start that has just begun)";
+    return "it is in use (an open interactive session, which `hack exec-sessions --reconcile` clears once finished, or a pending recovery)";
   }
   return `it is in use by ${await opts.describe(runs)}`;
 }

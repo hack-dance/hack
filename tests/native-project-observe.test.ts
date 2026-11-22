@@ -301,9 +301,14 @@ test("ps keeps current service rows and marks the reaped publisher's port down",
 });
 
 test.each([
-  "ps",
-  "status",
-])("plain native %s shows the failed port and a working stop command", async (command) => {
+  { command: "ps", wide: false, showsPort: false },
+  { command: "ps", wide: true, showsPort: true },
+  { command: "status", wide: false, showsPort: true },
+])("native $command (wide=$wide) reports degraded status and a recovery command", async ({
+  command,
+  wide,
+  showsPort,
+}) => {
   const opts = await fixture();
   await writeFile(
     join(opts.scope.projectDir, "hack.config.json"),
@@ -346,6 +351,7 @@ test.each([
       process.execPath,
       new URL("../index.ts", import.meta.url).pathname,
       command,
+      ...(wide ? ["--wide"] : []),
       ...(command === "ps" ? ["--path", opts.scope.projectRoot] : []),
     ],
     {
@@ -372,8 +378,11 @@ test.each([
   ]);
   expect(code).toBe(0);
   expect(stdout + stderr).toContain("web");
-  expect(stdout + stderr).toContain("127.0.0.1:18080");
-  expect(stdout + stderr).toContain("down");
+  if (showsPort) {
+    expect(stdout).toMatch(/127\.0\.0\.1:18080[ (]+down/);
+  } else {
+    expect(stdout).not.toContain("127.0.0.1:18080");
+  }
   expect(stdout + stderr).toContain("Run hack down");
 }, 20_000);
 test("bounded logs verify current container before and after using exact CLI contract", async () => {

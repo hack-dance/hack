@@ -1552,6 +1552,129 @@ async function run(
   }
 }
 
+async function releaseApi(
+  args: string[],
+  env?: NodeJS.ProcessEnv
+): Promise<unknown> {
+  const child = Bun.spawn(["gh", "api", ...args], {
+    env,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "inherit",
+    timeout: 60_000,
+  });
+  const [json, status] = await Promise.all([
+    new Response(child.stdout).text(),
+    child.exited,
+  ]);
+  if (status !== 0) {
+    throw new Error("Could not read back the published prerelease");
+  }
+  return JSON.parse(json);
+}
+
+/** Post-create verification reports failures without deleting or replacing the release. */
+export async function createAndVerifyPrerelease({
+  plan,
+  output,
+  env,
+}: {
+  readonly plan: PrereleasePlan;
+  readonly output: string;
+  readonly env?: NodeJS.ProcessEnv;
+}) {
+  const names = releaseAssets(plan);
+  const expected = new Map<string, { size: number; digest: string }>();
+  for (const name of names) {
+    const path = join(output, name);
+    const size = (await lstat(path)).size;
+    expected.set(name, { size, digest: `sha256:${digest(path)}` });
+  }
+  // Exclusive reference creation refuses a tag created since gate verification.
+  // Failure retains this tag for inspection; reruns must never replace it.
+  await run(
+    [
+      "gh",
+      "api",
+      "--method",
+      "POST",
+      "repos/hack-dance/hack/git/refs",
+      "--raw-field",
+      `ref=refs/tags/${plan.tag}`,
+      "--raw-field",
+      `sha=${plan.source_revision}`,
+    ],
+    { env }
+  );
+  await run(
+    [
+      "gh",
+      "release",
+      "create",
+      plan.tag,
+      ...names.map((name) => join(output, name)),
+      "--repo",
+      "hack-dance/hack",
+      "--target",
+      plan.source_revision,
+      "--verify-tag",
+      "--prerelease",
+      "--latest=false",
+      "--title",
+      `Hack ${plan.version}`,
+      "--notes",
+      prereleaseNotes(plan),
+    ],
+    { env }
+  );
+  const repository = "repos/hack-dance/hack";
+  const release = object(
+    await releaseApi([`${repository}/releases/tags/${plan.tag}`], env)
+  );
+  if (
+    release.tag_name !== plan.tag ||
+    !Number.isSafeInteger(release.id) ||
+    Number(release.id) <= 0
+  ) {
+    throw new Error("Read-back did not identify the published prerelease");
+  }
+  const pages = array(
+    await releaseApi(
+      [
+        "--paginate",
+        "--slurp",
+        `${repository}/releases/${release.id}/assets?per_page=100`,
+      ],
+      env
+    )
+  );
+  for (const raw of pages.flatMap(array)) {
+    const asset = object(raw);
+    const local =
+      typeof asset.name === "string" ? expected.get(asset.name) : undefined;
+    if (!local || typeof asset.name !== "string") {
+      throw new Error(
+        "Published prerelease contains an unexpected or duplicate asset"
+      );
+    }
+    if (
+      asset.state !== "uploaded" ||
+      asset.size !== local.size ||
+      asset.digest !== local.digest
+    ) {
+      throw new Error(
+        `Published prerelease asset does not match the local set: ${asset.name}`
+      );
+    }
+    expected.delete(asset.name);
+  }
+  if (expected.size > 0) {
+    throw new Error(
+      `Published prerelease is missing assets: ${[...expected.keys()].join(", ")}`
+    );
+  }
+}
+
 function env(name: string): string {
   return process.env[name] ?? "";
 }
@@ -1692,37 +1815,7 @@ async function main() {
     if (mode === "publish") {
       const output = resolve(env("HACK_PRERELEASE_OUTPUT"));
       await verifyReleaseAssets({ plan, output, linux: true });
-      // Exclusive reference creation refuses a tag created since gate verification.
-      // Failure retains this tag for inspection; reruns must never replace it.
-      await run([
-        "gh",
-        "api",
-        "--method",
-        "POST",
-        "repos/hack-dance/hack/git/refs",
-        "--raw-field",
-        `ref=refs/tags/${plan.tag}`,
-        "--raw-field",
-        `sha=${plan.source_revision}`,
-      ]);
-      await run([
-        "gh",
-        "release",
-        "create",
-        plan.tag,
-        ...releaseAssets(plan).map((name) => join(output, name)),
-        "--repo",
-        "hack-dance/hack",
-        "--target",
-        plan.source_revision,
-        "--verify-tag",
-        "--prerelease",
-        "--latest=false",
-        "--title",
-        `Hack ${plan.version}`,
-        "--notes",
-        prereleaseNotes(plan),
-      ]);
+      await createAndVerifyPrerelease({ plan, output });
     }
   } else if (mode !== "plan") {
     throw new Error(

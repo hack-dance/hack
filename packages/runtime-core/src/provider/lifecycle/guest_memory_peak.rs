@@ -320,6 +320,19 @@ mod tests {
     }
 
     #[test]
+    fn a_reading_whose_samples_could_not_raise_the_peak_keeps_its_pressure_counters() {
+        // The sampler counts a sample it cannot correct for the balloon without letting it
+        // raise the peak, so an out-of-memory kill in such a boot is still recorded.
+        let reading = parse(
+            "memory-peak-v1 peak_kib=0 samples=3 total_kib=6087220 some_us=7 full_us=2 oom_kill=1 pgmajfault=9\n",
+        )
+        .unwrap();
+        assert_eq!((reading.peak_kib, reading.samples), (0, 3));
+        assert_eq!(reading.oom_kills, Some(1));
+        assert_eq!(reading.some_stall_us, Some(7));
+    }
+
+    #[test]
     fn anything_but_the_exact_line_is_no_reading() {
         let no_samples = LINE.replace("samples=42", "samples=0");
         let no_total = LINE.replace("total_kib=6087220", "total_kib=unavailable");

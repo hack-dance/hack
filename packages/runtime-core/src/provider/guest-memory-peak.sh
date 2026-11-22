@@ -17,7 +17,8 @@
 # subtracted: a balloon that grows or shrinks during a sample can then only make the
 # sample smaller, never invent a peak. The balloon is counted in the kernel's base pages;
 # their size is read once from the sampler's own memory map. On a kernel that does not say,
-# a sample taken while the balloon holds anything is not used at all.
+# a sample taken while the balloon holds anything is counted as taken but cannot raise the
+# peak, so the pressure counters beside it are still recorded.
 #
 # Every sample is read with shell builtins. The loop starts one process per sample, `sleep`.
 # The host reads the one-line status file; it is rewritten on every sample.
@@ -139,16 +140,16 @@ while :; do
   total=$checked
   check "$available"
   available=$checked
-  # A balloon of unknown page size cannot be subtracted; such a sample says nothing.
-  usable=yes
-  if test "$balloon" -gt 0 && test "$page_kib" = unknown; then
-    usable=no
-  fi
-  if test "$usable" = yes && test "$total" != unavailable &&
-    test "$available" != unavailable && test "$total" -ge "$available"; then
+  if test "$total" != unavailable && test "$available" != unavailable &&
+    test "$total" -ge "$available"; then
     used=$((total - available))
     held=0
-    if test "$balloon" -gt 0; then
+    if test "$balloon" -gt 0 && test "$page_kib" = unknown; then
+      # A balloon of unknown page size cannot be subtracted: the sample was taken, but it
+      # says nothing about the guest's own use.
+      held=$used
+    fi
+    if test "$balloon" -gt 0 && test "$page_kib" != unknown; then
       held=$((balloon * page_kib))
     fi
     if test "$held" -gt "$used"; then

@@ -1736,8 +1736,9 @@ available to the guest, so an idle guest using 0.2 GiB used to record a peak nea
 whole size. The size comes from `nr_balloon_pages` in `/proc/vmstat` (or, on a kernel
 without it, inflations minus deflations), in the kernel's base pages. Their size is read
 once from the sampler's own memory map (`KernelPageSize` in `/proc/self/smaps`); on a
-kernel that does not report it, a sample taken while the balloon holds anything is left
-out. The balloon is read before and after the memory figures and the larger reading is
+kernel that does not report it, a sample taken while the balloon holds anything counts
+as taken but cannot raise the peak, so the pressure counters are still recorded. The
+balloon is read before and after the memory figures and the larger reading is
 used, so a balloon that moves during a sample can only lower that sample. A reading that
 is not a plausible page count is ignored, and one larger than the sample caps at it.
 A sample is read with shell builtins, so the loop starts one process every five seconds

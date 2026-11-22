@@ -19,7 +19,7 @@ exact release tag over HTTPS, review it, then run it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.24/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -65,15 +65,14 @@ any launcher is active.
 
 ## Linux: the Compose-only candidate
 
-Starting with the first release that ships Linux assets (`SHA256SUMS-linux` is in
-its asset list; `5.0.0-next.22` and earlier have none), a release also carries a
-bundle for Linux on x86_64 and arm64 with glibc. It runs the Compose backend only. The native backend is Apple Silicon
-macOS only. musl-based systems such as Alpine and other architectures are not
+Since `5.0.0-next.23`, a release also carries a bundle for Linux on x86_64 and
+arm64 with glibc (`SHA256SUMS-linux` is in its asset list; `5.0.0-next.22` and
+earlier have none). It runs
+the Compose backend only. The native backend is Apple Silicon macOS only. musl-based systems such as Alpine and other architectures are not
 supported; the installer refuses there and names the supported platforms.
 
-Install with the same commands as above, using the tag of a release that has
-Linux assets (`SHA256SUMS-linux` is in its asset list; the `5.0.0-next.22`
-installer stops on Linux). The same `hack-next-install.sh` picks the Linux manager
+Install with the same commands as above. The release they name has Linux
+assets; the `5.0.0-next.22` installer stops on Linux. The same `hack-next-install.sh` picks the Linux manager
 from `uname`. It needs `curl`, `sha256sum` (or `shasum`), `mktemp`, `chmod`, `rm`
 and `date`. It runs without `sudo` and needs no compiler, Python or Bun, so it
 works in a dev container or an agent sandbox. It checks the manager against the
@@ -362,7 +361,7 @@ lifecycle supervisor that `5.0.0-next.18` added. The installed manager cannot fe
 a newer one: `upgrade-manager` installs the executable it is run from. Download the
 standalone manager from the release you are upgrading to, verify it against that
 release's `INSTALLER-SHA256SUMS`, then run that file against your channel root.
-The example names `v5.0.0-next.22`; use the release you are upgrading to in both
+The example names `v5.0.0-next.24`; use the release you are upgrading to in both
 URLs and replace `NEWER` with its number. For a channel that a compiled manager
 installed (`5.0.0-next.6` to `next.17`) that is `5.0.0-next.19` or later: the
 `5.0.0-next.18` manager does not recognize earlier managers. The takeover works only
@@ -372,10 +371,10 @@ on a channel the newer manager can validate. A channel from the `5.0.0-next.1` t
 ```sh
 dir=$(mktemp -d) && cd "$dir" &&
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/hack-next-manager-darwin-arm64 \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.24/hack-next-manager-darwin-arm64 \
   --output hack-next-manager-darwin-arm64 &&
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/INSTALLER-SHA256SUMS \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.24/INSTALLER-SHA256SUMS \
   --output INSTALLER-SHA256SUMS &&
 grep '[ *]hack-next-manager-darwin-arm64$' INSTALLER-SHA256SUMS > manager.sha256 &&
 shasum -a 256 --check manager.sha256 &&

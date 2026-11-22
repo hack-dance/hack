@@ -28,12 +28,14 @@
 //!   keyed ones; a reused image's key misses only what the stat cache can miss (see
 //!   [`context`]). Base images are pinned by digest.
 //! - One pin per base reference per command. A request may pass `pins` (canonical
-//!   reference to pin, from an earlier outcome's `base_pins`); a passed pin is used
-//!   under either policy, with no registry call. Otherwise, with policy `missing`, a
-//!   fresh receipt's pin or a shared record (`run/image-builds/<namespace>/bases/<reference
-//!   digest>.json`, written atomically whenever a tag resolves, trusted for
-//!   [`BASE_RESOLUTION_TTL`], 24 hours) is used before the registry; `rebuild`
-//!   resolves. A receipt is reused only when every pin chosen for the request equals
+//!   reference to pin, from an earlier outcome's `base_pins`, in a version-2 request);
+//!   a passed pin binds under either policy: used directly when a fresh shared record
+//!   holds it, else verified by digest through the resolver, else the build refuses
+//!   `native_build_base_pin`. A Dockerfile's own digest is never replaced. Otherwise,
+//!   with policy `missing`, a fresh receipt's pin or a shared record
+//!   (`run/image-builds/<namespace>/bases/<reference digest>.json`, written atomically
+//!   whenever a tag resolves or a passed pin is verified, trusted for
+//!   [`BASE_RESOLUTION_TTL`], 24 hours) is used before the registry; `rebuild` resolves. A receipt is reused only when every pin chosen for the request equals
 //!   its recorded pin, and a receipt's pins are trusted for 24 hours after they were
 //!   resolved (an unknown time counts as expired).
 //! - Every image the Dockerfile can pull (see [`super::build_scan`]) resolves to a digest
@@ -109,7 +111,11 @@ const MAX_TIMEOUT_SECONDS: u64 = 2 * 60 * 60;
 const CANCEL_GRACE: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(50);
 const LEASE_WAIT: Duration = Duration::from_secs(5);
-const MAX_REQUEST_BYTES: u64 = 192 * 1024;
+/// The request reader's limit. It covers a request at every field bound with room to
+/// spare: arguments at [`MAX_ARG_BYTES`] even if every byte is JSON-escaped as
+/// `\u00XX` (384 KiB), pins at [`MAX_PIN_BYTES`] plus their quoting (134 KiB), and paths
+/// and the remaining fields well under 64 KiB.
+const MAX_REQUEST_BYTES: u64 = 640 * 1024;
 /// Covers a receipt with the most base pins the scanner accepts at their longest
 /// (about 32 KiB pretty-printed), so a receipt the build writes is always readable.
 const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
@@ -118,6 +124,13 @@ const MAX_IGNORE_BYTES: u64 = 1024 * 1024;
 const MAX_ARGS: usize = 64;
 /// Passed base-image pins a request accepts (see [`BuildRequest::pins`]).
 pub const MAX_PINS: usize = 1024;
+/// Total bytes of the passed pins' references and values together.
+pub const MAX_PIN_BYTES: usize = 128 * 1024;
+/// Each passed pin's reference and value are at most this long.
+const MAX_PIN_FIELD_BYTES: usize = 512;
+/// The build-image protocol this runtime speaks; reported as `protocol` in every
+/// outcome. Version 2 requests may carry `pins`.
+pub const BUILD_PROTOCOL: u32 = 2;
 /// How long a reused image's recorded base-image resolution is trusted.
 pub(super) const BASE_RESOLUTION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// The build key document version; 2 added the context digest.
@@ -195,16 +208,22 @@ pub struct BuildRequest {
     pub timeout_seconds: Option<u64>,
     /// Base-image pins this command already chose, keyed by canonical reference (for
     /// example `docker.io/library/alpine:3.20`), each `docker.io/<repository>@sha256:<hex>`
-    /// as an earlier outcome's `base_pins` reported it. A passed pin is a hint, never
-    /// evidence: a Dockerfile base found here uses it, under either policy and with no
-    /// registry call, only when this namespace's fresh shared resolution record (which
-    /// only a verified resolution writes) holds exactly that pin, and takes that
-    /// record's resolution time. Otherwise, and always for a base the Dockerfile pins by
-    /// digest, the pin is ignored and the base is pinned as if none were passed.
-    /// Entries for other references are ignored. At most [`MAX_PINS`] entries, each key
-    /// and value at most 512 bytes.
+    /// as an earlier outcome's `base_pins` reported it. Only a `version: 2` request may
+    /// carry this field (a version-1 request that does refuses `native_build_request`);
+    /// send it only to a runtime whose outcome reported `protocol: 2`.
+    ///
+    /// A passed pin binds: a Dockerfile base found here builds on exactly that digest
+    /// under either policy, or the build refuses `native_build_base_pin`; another digest
+    /// is never substituted. It is used directly when this namespace's fresh shared
+    /// resolution record (which only a verified resolution writes) holds exactly that pin,
+    /// taking that record's resolution time; otherwise the resolver verifies that exact
+    /// digest (manifest by digest, platform, size bounds, no `ONBUILD`) and records it.
+    /// A base the Dockerfile itself pins by digest always uses its own digest and
+    /// ignores a passed pin. Entries for other references are ignored. At most
+    /// [`MAX_PINS`] entries, each reference and value at most 512 printable ASCII bytes
+    /// (no `"` or `\`), and at most [`MAX_PIN_BYTES`] in total.
     #[serde(default)]
-    pub pins: BTreeMap<String, String>,
+    pub pins: Option<BTreeMap<String, String>>,
 }
 fn default_dockerfile() -> String {
     "Dockerfile".into()
@@ -213,6 +232,10 @@ fn default_dockerfile() -> String {
 /// The result of one `runtime build-image`.
 #[derive(Debug, Serialize)]
 pub struct BuildOutcome {
+    /// [`BUILD_PROTOCOL`] (2): this runtime accepts version-2 requests with `pins`, and
+    /// `base_pins` below is keyed by canonical reference. A runtime without this field
+    /// speaks protocol 1 and must not be sent `pins`.
+    pub protocol: u32,
     pub image_id: String,
     pub build_key: String,
     pub tag: String,
@@ -428,8 +451,12 @@ fn valid_branch(value: &str) -> bool {
 }
 
 fn validate_request(request: &BuildRequest) -> Result<(), CandidateError> {
-    if request.version != 1 {
-        return Err(invalid("Unsupported build request version."));
+    match (request.version, &request.pins) {
+        (1, None) | (2, _) => {}
+        (1, Some(_)) => {
+            return Err(invalid("Base-image pins need a version-2 build request."));
+        }
+        _ => return Err(invalid("Unsupported build request version.")),
     }
     if !request.project_root.is_absolute() {
         return Err(invalid("The project root must be an absolute path."));
@@ -480,19 +507,32 @@ fn validate_request(request: &BuildRequest) -> Result<(), CandidateError> {
             "Build arguments exceed 64 KiB in total.",
         ));
     }
-    if request.pins.len() > MAX_PINS
-        || request.pins.iter().any(|(reference, pin)| {
-            reference.is_empty()
-                || reference.len() > 512
-                || !pin.starts_with("docker.io/")
-                || pin.len() > 512
-                || !pin
-                    .rsplit_once('@')
-                    .is_some_and(|(_, digest)| image_id(digest))
-        })
-    {
+    let pins = request.pins.as_ref();
+    let printable = |text: &str| {
+        !text.is_empty()
+            && text.len() <= MAX_PIN_FIELD_BYTES
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\\')
+    };
+    if pins.is_some_and(|pins| {
+        pins.len() > MAX_PINS
+            || pins
+                .iter()
+                .map(|(reference, pin)| reference.len() + pin.len())
+                .sum::<usize>()
+                > MAX_PIN_BYTES
+            || pins.iter().any(|(reference, pin)| {
+                !printable(reference)
+                    || !printable(pin)
+                    || !pin.starts_with("docker.io/")
+                    || !pin
+                        .rsplit_once('@')
+                        .is_some_and(|(_, digest)| image_id(digest))
+            })
+    }) {
         return Err(invalid(
-            "Passed base-image pins must be at most 1024 `docker.io/<repository>@sha256:<hex>` references.",
+            "Passed base-image pins must be at most 1024 printable `docker.io/<repository>@sha256:<hex>` references, 128 KiB in total.",
         ));
     }
     let timeout = request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS);
@@ -671,7 +711,7 @@ pub(super) fn prepare(request: BuildRequest, builds: &Path) -> Result<Inputs, Ca
         policy: request.policy,
         timeout: Duration::from_secs(request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS)),
         recorded: context_digest.recorded,
-        pins: request.pins,
+        pins: request.pins.unwrap_or_default(),
         #[cfg(test)]
         key_input,
     })
@@ -1156,6 +1196,7 @@ pub(super) fn run<P: BuildPool>(
     let cache_reclaimed_bytes = pool.prune_cache(&lease, CACHE_BUDGET).ok();
     drop(lease);
     Ok(BuildOutcome {
+        protocol: BUILD_PROTOCOL,
         image_id: id,
         build_key: inputs.key.clone(),
         tag: inputs.tag(),
@@ -1246,6 +1287,7 @@ fn late_stop(canceled: bool) -> CandidateError {
 
 fn reused(inputs: &Inputs, id: &str, pins: &BTreeMap<String, String>) -> BuildOutcome {
     BuildOutcome {
+        protocol: BUILD_PROTOCOL,
         image_id: id.to_owned(),
         build_key: inputs.key.clone(),
         tag: inputs.tag(),
@@ -1267,8 +1309,44 @@ fn reference_pins(inputs: &Inputs, pins: &BTreeMap<String, String>) -> BTreeMap<
         .collect()
 }
 
+/// Verify that exactly the passed pin is usable for `base`, through the resolver's own
+/// checks applied to that digest. Every failure, including an unreachable registry,
+/// refuses `native_build_base_pin` (cancellation and the deadline keep their codes):
+/// a passed pin is never replaced by another digest.
+fn verify_passed_pin<P: BuildPool>(
+    pool: &P,
+    base: &BaseImage,
+    passed: &str,
+    deadline: Instant,
+    canceled: &dyn Fn() -> bool,
+) -> Result<BuildBase, CandidateError> {
+    let unusable = || {
+        refusal(
+            "native_build_base_pin",
+            "A base image pinned earlier in this command could not be used for this build; no image was built.",
+        )
+    };
+    let digest = passed
+        .strip_prefix(&format!("docker.io/{}@", base.repository()))
+        .filter(|digest| image_id(digest))
+        .ok_or_else(unusable)?;
+    let mut pinned = base.clone();
+    pinned.reference.digest = Some(digest.to_owned());
+    let resolved = match pool.resolve(&pinned, deadline, canceled) {
+        Ok(resolved) => resolved,
+        Err(error) if matches!(error.code, "native_build_canceled" | "native_build_timeout") => {
+            return Err(error);
+        }
+        Err(_) => return Err(unusable()),
+    };
+    if resolved.source_digest != digest || resolved.pinned_reference != passed {
+        return Err(unusable());
+    }
+    Ok(resolved)
+}
+
 /// Choose one pin per base image of this request, in order of preference: a passed
-/// pin backed by a fresh shared record holding exactly it (see [`BuildRequest::pins`]);
+/// pin, which binds (see [`BuildRequest::pins`]);
 /// under policy `missing`, the fresh receipt's pin or a fresh shared record;
 /// otherwise a registry resolution (recorded for later builds). Returns the pins by
 /// named build context and the oldest resolution time among them.
@@ -1299,19 +1377,33 @@ fn choose_pins<P: BuildPool>(
         let reference = base.reference.canonical();
         let record = base_record_path(directory, &reference);
         let missing = inputs.policy == Policy::Missing;
-        // A passed pin is only a hint: it is used when this runtime's own fresh record
-        // of a verified resolution holds exactly that pin, and never for a base the
-        // Dockerfile already pins by digest.
-        let backed = inputs
+        // A passed pin binds (see `BuildRequest::pins`), except for a base the
+        // Dockerfile pins by digest itself.
+        let passed = inputs
             .pins
             .get(&reference)
-            .filter(|_| base.reference.digest.is_none())
-            .and_then(|passed| {
-                read_base_record(&record, &reference, now)
-                    .filter(|known| &known.pinned_reference == passed)
-            });
-        let (pinned, at) = if let Some(known) = backed {
-            (known.pinned_reference, known.resolved_at)
+            .filter(|_| base.reference.digest.is_none());
+        let (pinned, at) = if let Some(passed) = passed {
+            match read_base_record(&record, &reference, now)
+                .filter(|known| &known.pinned_reference == passed)
+            {
+                Some(known) => (known.pinned_reference, known.resolved_at),
+                None => {
+                    let pinned = verify_passed_pin(pool, base, passed, deadline, canceled)?;
+                    let at = unix_seconds(now);
+                    write_base_record(
+                        &record,
+                        &BaseRecord {
+                            version: BASE_RECORD_VERSION,
+                            reference,
+                            pinned_reference: pinned.pinned_reference.clone(),
+                            source_digest: pinned.source_digest,
+                            resolved_at: at,
+                        },
+                    );
+                    (pinned.pinned_reference, at)
+                }
+            }
         } else if let Some((pin, at)) = fresh_receipt.filter(|_| missing).and_then(|receipt| {
             Some((
                 receipt.base_pins.get(&base.context_name)?.clone(),

@@ -272,6 +272,8 @@ export interface NativeBuiltImage {
    * base tag resolves once per command.
    */
   readonly basePins?: Readonly<Record<string, string>>;
+  /** The runtime's build protocol: 2 accepts `pins` in a version-2 request. */
+  readonly protocol?: number;
 }
 /** The runtime's own bound on a request's `pins`. */
 const MAX_BASE_PINS = 1024;
@@ -297,6 +299,7 @@ function parseBuilt(value: unknown): NativeBuiltImage {
     buildKey: value.build_key,
     reused: value.reused,
     basePins: parseBasePins(value.base_pins),
+    ...(value.protocol === 2 ? { protocol: 2 } : {}),
   };
 }
 
@@ -740,6 +743,7 @@ async function runPendingBuilds(opts: {
   // One pin per base reference for the whole command: each build receives the
   // pins earlier builds used, so a shared tag resolves once (HACK-2533).
   const pins: Record<string, string> = {};
+  let pinsAccepted = false;
   try {
     let index = 0;
     for (const { request, services } of opts.pending.values()) {
@@ -753,7 +757,9 @@ async function runPendingBuilds(opts: {
       await writeFile(
         requestFile,
         JSON.stringify({
-          version: 1,
+          // Version 2 carries `pins`, and is sent only to a runtime that reported
+          // protocol 2 earlier in this command; an older runtime keeps version 1.
+          version: pinsAccepted ? 2 : 1,
           project_root: projectRoot,
           branch: opts.branch ?? null,
           context: request.context,
@@ -761,9 +767,7 @@ async function runPendingBuilds(opts: {
           target: request.target,
           args: request.args,
           policy: opts.rebuild ? "rebuild" : "missing",
-          // Sent only once a build returned pins: the runtime ships with this CLI,
-          // and a request without the field stays the version-1 shape.
-          ...(Object.keys(pins).length > 0 ? { pins } : {}),
+          ...(pinsAccepted ? { pins } : {}),
           timeout_seconds: BUILD_TIMEOUT_SECONDS,
         }),
         { mode: 0o600, flag: "wx" }
@@ -778,7 +782,10 @@ async function runPendingBuilds(opts: {
       });
       // The request carries argument values; remove it as soon as it is consumed.
       await rm(requestFile, { force: true });
-      Object.assign(pins, built.basePins ?? {});
+      if (built.protocol === 2) {
+        pinsAccepted = true;
+        Object.assign(pins, built.basePins ?? {});
+      }
       for (const service of services) {
         const spec = opts.specs[service];
         if (spec) {

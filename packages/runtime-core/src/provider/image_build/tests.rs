@@ -61,7 +61,7 @@ impl Fixture {
             args: BTreeMap::from([("GREETING".to_owned(), SECRET.to_owned())]),
             policy,
             timeout_seconds: Some(30),
-            pins: BTreeMap::new(),
+            pins: None,
         }
     }
     fn inputs(&self, policy: Policy) -> Inputs {
@@ -163,6 +163,8 @@ struct FakePool {
     output: Arc<Mutex<Vec<u8>>>,
     /// The manifest digest every base resolves to.
     pin: RefCell<String>,
+    /// Digests the fake registry refuses to verify.
+    unverifiable: RefCell<Vec<String>>,
     now: RefCell<SystemTime>,
 }
 impl FakePool {
@@ -180,6 +182,7 @@ impl FakePool {
             resolve_deadlines: RefCell::new(Vec::new()),
             output: Arc::default(),
             pin: RefCell::new(PIN.into()),
+            unverifiable: RefCell::new(Vec::new()),
             now: RefCell::new(SystemTime::now()),
         }
     }
@@ -222,7 +225,15 @@ impl BuildPool for FakePool {
         if self.resolve_error {
             return Err(CandidateError::new("registry_image", "offline"));
         }
-        let pin = self.pin.borrow().clone();
+        // A digest-pinned reference resolves to exactly that digest, as the resolver does.
+        let pin = base
+            .reference
+            .digest
+            .clone()
+            .unwrap_or_else(|| self.pin.borrow().clone());
+        if self.unverifiable.borrow().contains(&pin) {
+            return Err(CandidateError::new("registry_image", "unverifiable"));
+        }
         Ok(BuildBase {
             pinned_reference: format!("docker.io/{}@{pin}", base.repository()),
             source_digest: pin,
@@ -266,6 +277,12 @@ fn target_context(scratch: &Path) -> String {
         .as_str()
         .unwrap()
         .to_owned()
+}
+
+fn with_pins(mut request: BuildRequest, pins: BTreeMap<String, String>) -> BuildRequest {
+    request.version = 2;
+    request.pins = Some(pins);
+    request
 }
 
 fn never() -> bool {
@@ -1114,8 +1131,19 @@ fn requests_refuse_unsafe_paths_arguments_and_bounds() {
     let base = || fixture.request(Policy::Missing);
 
     let mut request = base();
-    request.version = 2;
+    request.version = 3;
     assert_eq!(code(&fixture, request), "native_build_request");
+    // Version 1 never carries pins; version 2 may.
+    let mut request = base();
+    request.pins = Some(BTreeMap::new());
+    assert_eq!(code(&fixture, request), "native_build_request");
+    assert!(
+        prepare(
+            with_pins(base(), BTreeMap::new()),
+            &builds_root(&fixture.candidate)
+        )
+        .is_ok()
+    );
     let mut request = base();
     request.project_root = PathBuf::from("relative");
     assert_eq!(code(&fixture, request), "native_build_request");
@@ -1729,7 +1757,7 @@ fn second_build(fixture: &Fixture, policy: Policy, pins: BTreeMap<String, String
     fs::write(other.join("Dockerfile"), "FROM alpine:3.20\nRUN echo two\n").unwrap();
     let mut request = fixture.request(policy);
     request.context = "other".into();
-    request.pins = pins;
+    let request = with_pins(request, pins);
     prepare(request, &builds_root(&fixture.candidate)).unwrap()
 }
 
@@ -1778,25 +1806,32 @@ fn passed_pins_are_hints_used_only_when_a_shared_record_backs_them() {
         Some(unix_seconds(start))
     );
 
-    // No record: the passed pin is ignored and the base resolves (to the moved tag).
+    // No record: the passed pin still binds; the resolver verifies that exact digest.
     let bases = builds_root(&fixture.candidate)
         .join(&first.namespace)
         .join("bases");
     fs::remove_dir_all(&bases).unwrap();
-    let unbacked = build(&second_build(&fixture, Policy::Rebuild, passed.clone()));
+    let verified = build(&second_build(&fixture, Policy::Rebuild, passed.clone()));
     assert_eq!(resolves(), 2);
+    assert_eq!(verified.base_pins, passed);
+    // A record naming another pin (the moved tag) does not replace the passed pin.
     let moved = BTreeMap::from([(
         "docker.io/library/alpine:3.20".to_owned(),
         format!("docker.io/library/alpine@{MOVED}"),
     )]);
-    assert_eq!(unbacked.base_pins, moved);
-    // A record naming another pin (now the moved one) does not back the old pin.
-    build(&second_build(&fixture, Policy::Rebuild, passed.clone()));
+    assert_eq!(
+        build(&second_build(&fixture, Policy::Rebuild, BTreeMap::new())).base_pins,
+        moved
+    );
     assert_eq!(resolves(), 3);
+    assert_eq!(
+        build(&second_build(&fixture, Policy::Rebuild, passed.clone())).base_pins,
+        passed
+    );
+    assert_eq!(resolves(), 4);
 
-    // A fresh receipt whose pin differs from a backed passed pin builds.
-    let mut request = fixture.request(Policy::Missing);
-    request.pins = moved.clone();
+    // A fresh receipt whose pin differs from the passed pin builds on the passed one.
+    let request = with_pins(fixture.request(Policy::Missing), moved.clone());
     let repinned = prepare(request, &builds_root(&fixture.candidate)).unwrap();
     assert_eq!(repinned.key, first.key);
     let calls = fixture.calls(&first);
@@ -1804,20 +1839,66 @@ fn passed_pins_are_hints_used_only_when_a_shared_record_backs_them() {
     assert!(!rebuilt.reused);
     assert_eq!(rebuilt.base_pins, moved);
     assert_eq!(fixture.calls(&first), calls + 1);
-    assert_eq!(resolves(), 3);
-    // An unbacked pin never forces a build: it is ignored and the receipt is reused.
-    let mut request = fixture.request(Policy::Missing);
-    request.pins = BTreeMap::from([(
-        "docker.io/library/alpine:3.20".to_owned(),
-        format!("docker.io/library/busybox@{PIN}"),
-    )]);
-    let foreign = prepare(request, &builds_root(&fixture.candidate)).unwrap();
-    assert!(
-        run(&fixture.candidate, &pool, &foreign, &never)
-            .unwrap()
-            .reused
+    // A pin of another repository is never substituted: it refuses.
+    let request = with_pins(
+        fixture.request(Policy::Missing),
+        BTreeMap::from([(
+            "docker.io/library/alpine:3.20".to_owned(),
+            format!("docker.io/library/busybox@{PIN}"),
+        )]),
     );
-    assert_eq!(resolves(), 3);
+    let foreign = prepare(request, &builds_root(&fixture.candidate)).unwrap();
+    let error = run(&fixture.candidate, &pool, &foreign, &never).unwrap_err();
+    assert_eq!(error.code, "native_build_base_pin");
+    assert!(!error.message.contains("busybox"));
+    assert_eq!(fixture.calls(&first), calls + 1);
+}
+
+#[test]
+fn a_passed_pin_binds_even_against_another_fresh_receipt() {
+    const Y: &str = "sha256:abababababababababababababababababababababababababababababababab";
+    let fixture = Fixture::new();
+    let pool = FakePool::new("pool-1");
+    let build = |inputs: &Inputs| {
+        pool.built(inputs, "pool-1", serde_json::json!({}));
+        fixture.client(inputs, "ok");
+        run(&fixture.candidate, &pool, inputs, &never)
+    };
+    // Service A pinned the tag to X; a forced rebuild of B then moved B's receipt and
+    // the shared record to Y. Both receipts are fresh.
+    let a = fixture.inputs(Policy::Missing);
+    let x = build(&a).unwrap().base_pins;
+    *pool.pin.borrow_mut() = Y.into();
+    let y = build(&second_build(&fixture, Policy::Rebuild, BTreeMap::new()))
+        .unwrap()
+        .base_pins;
+    assert_ne!(x, y);
+    assert!(build(&a).unwrap().reused, "A's fast path keeps X");
+    // With no pin passed, B keeps its own fresh receipt, as before.
+    let b = second_build(&fixture, Policy::Missing, BTreeMap::new());
+    let calls = fixture.calls(&b);
+    let kept = build(&b).unwrap();
+    assert!(kept.reused);
+    assert_eq!(kept.base_pins, y);
+    // With A's X passed, B builds on X, not its receipt's Y.
+    let b = second_build(&fixture, Policy::Missing, x.clone());
+    let bound = build(&b).unwrap();
+    assert!(!bound.reused);
+    assert_eq!(bound.base_pins, x);
+    assert_eq!(fixture.calls(&b), calls + 1);
+    let bake: Value =
+        serde_json::from_slice(&fs::read(fixture.scratch(&b).join("seen-bake.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        bake["target"]["build"]["contexts"]["alpine:3.20"],
+        format!("docker-image://docker.io/library/alpine@{PIN}")
+    );
+    // When X cannot be verified (and no record backs it), B refuses instead of using Y.
+    build(&second_build(&fixture, Policy::Rebuild, BTreeMap::new())).unwrap();
+    pool.unverifiable.borrow_mut().push(PIN.into());
+    let error = build(&second_build(&fixture, Policy::Missing, x.clone())).unwrap_err();
+    assert_eq!(error.code, "native_build_base_pin");
+    assert_eq!(fixture.calls(&b), calls + 2);
 }
 
 #[test]
@@ -1848,8 +1929,11 @@ fn a_dockerfile_digest_is_never_replaced_by_a_passed_pin() {
             resolved_at: unix_seconds(*pool.now.borrow()),
         },
     );
-    let mut request = fixture.request(Policy::Rebuild);
-    request.pins = BTreeMap::from([(reference.clone(), forged.clone())]);
+    let request = fixture.request(Policy::Rebuild);
+    let request = with_pins(
+        request,
+        BTreeMap::from([(reference.clone(), forged.clone())]),
+    );
     let inputs = prepare(request, &builds_root(&fixture.candidate)).unwrap();
     pool.built(&inputs, "pool-1", serde_json::json!({}));
     fixture.client(&inputs, "ok");
@@ -1863,29 +1947,123 @@ fn a_dockerfile_digest_is_never_replaced_by_a_passed_pin() {
 }
 
 #[test]
-fn requests_accept_up_to_1024_pins() {
+fn requests_at_every_bound_fit_the_request_reader() {
     let fixture = Fixture::new();
-    let pins = |count: usize| -> BTreeMap<String, String> {
+    // `count` pins whose references and values total exactly `bytes`.
+    let pins = |count: usize, bytes: usize| -> BTreeMap<String, String> {
+        let value = |index: usize| format!("docker.io/library/i{index:04}@{PIN}");
+        let fixed: usize = (0..count).map(|index| value(index).len()).sum();
+        let per_key = (bytes - fixed) / count;
+        let extra = (bytes - fixed) % count;
         (0..count)
             .map(|index| {
-                (
-                    format!("docker.io/library/image{index}:1"),
-                    format!("docker.io/library/image{index}@{PIN}"),
-                )
+                let length = per_key + usize::from(index < extra);
+                let prefix = format!("docker.io/library/i{index:04}:");
+                let key = format!("{prefix}{}", "t".repeat(length - prefix.len()));
+                (key, value(index))
             })
             .collect()
     };
-    let mut request = fixture.request(Policy::Missing);
-    request.pins = pins(MAX_PINS);
+    let total = |pins: &BTreeMap<String, String>| -> usize {
+        pins.iter().map(|(k, v)| k.len() + v.len()).sum()
+    };
+    let at_bound = pins(MAX_PINS, MAX_PIN_BYTES);
+    assert_eq!(
+        (at_bound.len(), total(&at_bound)),
+        (MAX_PINS, MAX_PIN_BYTES)
+    );
+    assert!(at_bound.keys().all(|key| key.len() <= 512));
+    // Arguments at their byte bound, every value byte escaped by JSON as `\u00XX`.
+    let mut args = serde_json::Map::new();
+    let per_arg = MAX_ARG_BYTES / MAX_ARGS;
+    for index in 0..MAX_ARGS {
+        let name = format!("A{index:02}");
+        args.insert(name.clone(), "\u{1}".repeat(per_arg - name.len()).into());
+    }
+    let request = |pins: &BTreeMap<String, String>| {
+        serde_json::json!({
+            "version": 2,
+            "project_root": fixture.project,
+            "context": "app",
+            "dockerfile": "Dockerfile",
+            "target": "t".repeat(128),
+            "args": args,
+            "policy": "missing",
+            "timeout_seconds": 30,
+            "pins": pins,
+        })
+    };
+    let path = fixture.root.join("request.json");
+    let write = |value: &Value| {
+        let bytes = serde_json::to_vec(value).unwrap();
+        let _ = fs::remove_file(&path);
+        fs::write(&path, &bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        bytes.len() as u64
+    };
+    let size = write(&request(&at_bound));
+    assert!(size > 500 * 1024 && size <= MAX_REQUEST_BYTES, "{size}");
+    // The same reader `runtime build-image` uses, then the request bounds.
+    let read: BuildRequest = state::read_bounded(&path, MAX_REQUEST_BYTES).unwrap();
+    assert!(validate_request(&read).is_ok());
+
+    // One byte over the pins' total, or one entry over the count, refuses.
+    let over = pins(MAX_PINS, MAX_PIN_BYTES + 1);
+    write(&request(&over));
+    let read: BuildRequest = state::read_bounded(&path, MAX_REQUEST_BYTES).unwrap();
+    assert_eq!(
+        validate_request(&read).unwrap_err().code,
+        "native_build_request"
+    );
+    let mut counted = pins(MAX_PINS, MAX_PIN_BYTES - 100);
+    counted.insert(
+        "docker.io/library/z:1".into(),
+        format!("docker.io/library/z@{PIN}"),
+    );
+    assert_eq!(counted.len(), MAX_PINS + 1);
+    let request = with_pins(fixture.request(Policy::Missing), counted);
+    assert_eq!(code(&fixture, request), "native_build_request");
+    // A file over the reader's limit is refused before parsing.
+    fs::remove_file(&path).unwrap();
+    fs::write(&path, vec![b' '; MAX_REQUEST_BYTES as usize + 1]).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(state::read_bounded::<BuildRequest>(&path, MAX_REQUEST_BYTES).is_err());
+    // Malformed values and quoting characters refuse; other references are ignored.
+    for (key, value) in [
+        ("docker.io/library/alpine:3.20", "alpine".to_owned()),
+        (
+            "docker.io/library/a\"b:1",
+            format!("docker.io/library/a@{PIN}"),
+        ),
+        ("", format!("docker.io/library/a@{PIN}")),
+    ] {
+        let request = with_pins(
+            fixture.request(Policy::Missing),
+            BTreeMap::from([(key.to_owned(), value)]),
+        );
+        assert_eq!(code(&fixture, request), "native_build_request", "{key}");
+    }
     assert_eq!(MAX_PINS, 1024);
-    // Entries for other references are ignored.
-    assert!(prepare(request, &builds_root(&fixture.candidate)).is_ok());
-    let mut request = fixture.request(Policy::Missing);
-    request.pins = pins(MAX_PINS + 1);
-    assert_eq!(code(&fixture, request), "native_build_request");
-    let mut request = fixture.request(Policy::Missing);
-    request.pins = BTreeMap::from([("docker.io/library/alpine:3.20".to_owned(), "alpine".into())]);
-    assert_eq!(code(&fixture, request), "native_build_request");
+    assert_eq!(MAX_PIN_BYTES, 128 * 1024);
+    assert_eq!(MAX_REQUEST_BYTES, 640 * 1024);
+}
+
+#[test]
+fn outcomes_report_protocol_two() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "ok");
+    for _ in 0..2 {
+        let outcome = run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+        let value = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(value["protocol"], 2);
+        assert_eq!(
+            value["base_pins"]["docker.io/library/alpine:3.20"],
+            format!("docker.io/library/alpine@{PIN}")
+        );
+    }
 }
 
 #[test]

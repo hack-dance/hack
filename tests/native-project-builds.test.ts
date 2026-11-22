@@ -291,6 +291,7 @@ test("one command pins each base tag once: later builds receive earlier pins", a
   const project = await root();
   const pin = `docker.io/library/node:22@sha256:${"e".repeat(64)}`;
   const sent: unknown[] = [];
+  const versions: unknown[] = [];
   await buildNativeProjectImages({
     runtime,
     projectRoot: project,
@@ -304,17 +305,54 @@ test("one command pins each base tag once: later builds receive earlier pins", a
     rebuild: true,
     signal: new AbortController().signal,
     invoke: async ({ requestFile }) => {
-      sent.push(JSON.parse(await readFile(requestFile, "utf8")).pins);
+      const body = JSON.parse(await readFile(requestFile, "utf8"));
+      sent.push(body.pins);
+      versions.push(body.version);
       return {
         imageId: IMAGE,
         buildKey: KEY,
         reused: false,
         basePins: { "docker.io/library/node:22": pin },
+        protocol: 2,
       };
     },
   });
-  // The first request omits the field; later ones carry the command's pins.
+  // The first request is version 1; once the runtime reported protocol 2, later
+  // requests are version 2 and carry the command's pins.
+  expect(versions).toEqual([1, 2]);
   expect(sent).toEqual([undefined, { "docker.io/library/node:22": pin }]);
+});
+
+test("a runtime that does not report protocol 2 never receives pins", async () => {
+  const project = await root();
+  const bodies: Record<string, unknown>[] = [];
+  await buildNativeProjectImages({
+    runtime,
+    projectRoot: project,
+    branch: null,
+    profiles: [],
+    builds: new Map([
+      ["web", request()],
+      ["worker", { ...request(), target: "worker" }],
+    ]),
+    specs: { web: { build: "app" }, worker: { build: "app" } },
+    rebuild: false,
+    signal: new AbortController().signal,
+    // The previous runtime's result: base pins keyed by base name, no protocol.
+    invoke: async ({ requestFile }) => {
+      bodies.push(JSON.parse(await readFile(requestFile, "utf8")));
+      return {
+        imageId: IMAGE,
+        buildKey: KEY,
+        reused: true,
+        basePins: { "node:22": `node@sha256:${"e".repeat(64)}` },
+      };
+    },
+  });
+  expect(bodies.map((body) => [body.version, "pins" in body])).toEqual([
+    [1, false],
+    [1, false],
+  ]);
 });
 
 test("restart resolves its builds before stopping: a rebuilt image is what it runs", async () => {

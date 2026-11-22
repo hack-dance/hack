@@ -32,6 +32,8 @@ type ProbeState = "ok" | "timeout" | "unreachable" | "tls-error";
 export type Endpoint = { readonly address: string; readonly port: number };
 type ProbeOptions = Endpoint & {
   readonly caPem: string;
+  /** SNI and verified name; defaults to the legacy schemas name. */
+  readonly servername?: string;
   readonly timeoutMs?: number;
   readonly protocol?: "http" | "https";
 };
@@ -193,7 +195,7 @@ function probeEndpoint(
       ? connect({
           host: opts.address,
           port: opts.port,
-          servername: LEGACY_SCHEMAS_HOST,
+          servername: opts.servername ?? LEGACY_SCHEMAS_HOST,
           ca: opts.caPem,
           rejectUnauthorized: true,
         })
@@ -266,6 +268,18 @@ export async function inspectProxyLoopback(
     readonly loadCa?: () => Promise<CaddyCaIdentity>;
     readonly probe?: (opts: ProbeOptions) => Promise<ProbeState>;
     readonly listListeners?: () => Promise<readonly HostListener[] | null>;
+    /**
+     * The name the proxy serves (the proxy file's schemas route) and this
+     * machine's resolver. When given, loopback is checked only at the
+     * loopback addresses that name resolves to, under that name; a name
+     * resolving only elsewhere (straight to the proxy container, as on
+     * macOS with OrbStack) is not sent to loopback, so nothing there is
+     * reported. No answer keeps the published loopback endpoints.
+     */
+    readonly servedName?: {
+      readonly name: string;
+      readonly resolve: (hostname: string) => Promise<readonly string[]>;
+    };
   } = {}
 ): Promise<ProxyLoopbackReport> {
   const identity = await (
@@ -297,10 +311,26 @@ export async function inspectProxyLoopback(
         "Cannot verify loopback forwarding: the running proxy's published port bindings are unavailable.",
     };
   }
+  const served = opts.servedName;
+  const resolved = served
+    ? await served.resolve(served.name).catch(() => [])
+    : [];
+  const resolvedLoopback = resolved.filter(isLoopback);
+  if (served && resolved.length > 0 && resolvedLoopback.length === 0) {
+    return {
+      name: "proxy ports",
+      status: "ok",
+      verified: false,
+      reachable: false,
+      message: `Loopback check skipped: ${served.name} resolves to ${resolved.join(", ")} on this machine, not to loopback, so the proxy's loopback ports are not on its path.`,
+    };
+  }
   const endpoints = proxyLoopbackEndpoints({
     loopbackPorts: identity.loopbackPorts,
     ports: opts.ports ?? [80, 443],
-    addresses: opts.addresses,
+    addresses:
+      opts.addresses ??
+      (resolvedLoopback.length > 0 ? resolvedLoopback : undefined),
   });
   if (!endpoints.length) {
     return {
@@ -321,6 +351,7 @@ export async function inspectProxyLoopback(
           address,
           port,
           caPem,
+          ...(served ? { servername: served.name } : {}),
         }),
       })
     )

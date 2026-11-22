@@ -59,17 +59,28 @@
 \*                     does not block it (HACK-2550); FALSE: it waits for "free".
 \*   ListenerCheck   - with ReuseBind, the kernel's listener list must show no other
 \*                     listener; FALSE is the broken control `reuse-no-check`.
+\*
+\* Another project's `hack up` needs a project share this running pool lacks
+\* (HACK-2535). A running pool's mounts never change, so when the pool is idle that
+\* `up` stops it, adds the share and boots it again (RuntimeUp, another boot).
+\* restart     - "none" or "checked": the idle check passed under the provider lease
+\*               and the stop has not happened yet.
+\* stoppedLive - that stop ran while this project's run was live.
+\*   IdleRestart - the restart exists (FALSE in every older control).
+\*   SecondCheck - the stop checks idleness again right before the guest stops;
+\*                 FALSE is the broken control `idle-restart-one-check`.
 EXTENDS Naturals
 CONSTANTS Fixed, Strict, ByHand, OtherBoots, RecoveryFaults, MaxBoot, MaxFaults,
           Https, OwnerRetires, ArchiveWorks, FinalizeStopped, FinishAnyBoot,
-          ReuseBind, ListenerCheck
+          ReuseBind, ListenerCheck, IdleRestart, SecondCheck
 
 VARIABLES pool, boot, run, runBoot, owner, pub, faults, recovering, https,
-          httpsBoot, fin, finBoot, port, overListener
+          httpsBoot, fin, finBoot, port, overListener, restart, stoppedLive
 vars == <<pool, boot, run, runBoot, owner, pub, faults, recovering, https,
-          httpsBoot, fin, finBoot, port, overListener>>
-H == <<https, httpsBoot, fin, finBoot, port, overListener>>
-P == <<port, overListener>>
+          httpsBoot, fin, finBoot, port, overListener, restart, stoppedLive>>
+R == <<restart, stoppedLive>>
+P == <<port, overListener, R>>
+H == <<https, httpsBoot, fin, finBoot, P>>
 
 TypeOK ==
     /\ pool \in {"running", "stopped", "crashed"}
@@ -80,12 +91,14 @@ TypeOK ==
     /\ https \in {"none", "live", "records"} /\ httpsBoot \in 0..MaxBoot
     /\ fin \in BOOLEAN /\ finBoot \in 0..MaxBoot
     /\ port \in {"free", "timewait", "listener"} /\ overListener \in BOOLEAN
+    /\ restart \in {"none", "checked"} /\ stoppedLive \in BOOLEAN
 
 Init ==
     /\ pool = "stopped" /\ boot = 0 /\ run = "none" /\ runBoot = 0
     /\ owner = "none" /\ pub = FALSE /\ faults = 0 /\ recovering = FALSE
     /\ https = "none" /\ httpsBoot = 0 /\ fin = FALSE /\ finBoot = 0
     /\ port = "free" /\ overListener = FALSE
+    /\ restart = "none" /\ stoppedLive = FALSE
 
 CanBoot == boot < MaxBoot
 \* Recovery of a dead owner's ready run in the current boot `b`.
@@ -122,19 +135,19 @@ OwnerNotices ==
 OwnerRetire ==
     /\ OwnerRetires /\ https = "live" /\ (pool /= "running" \/ httpsBoot /= boot)
     /\ https' = "records" /\ port' = IF port = "listener" THEN port ELSE "timewait"
-    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering, httpsBoot, fin, finBoot, overListener>>
+    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering, httpsBoot, fin, finBoot, overListener>> /\ UNCHANGED R
 \* The retired Caddy's TIME_WAIT connections expire (about 30 s on macOS).
 TimeWaitEnds ==
     /\ port = "timewait" /\ port' = "free"
-    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering, https, httpsBoot, fin, finBoot, overListener>>
+    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering, https, httpsBoot, fin, finBoot, overListener>> /\ UNCHANGED R
 \* Another process listens on the port (a bounded fault), and later stops.
 Listen ==
     /\ Https /\ Fault /\ port = "free" /\ https /= "live"
     /\ port' = "listener" /\ faults' = faults + 1
-    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, recovering, https, httpsBoot, fin, finBoot, overListener>>
+    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, recovering, https, httpsBoot, fin, finBoot, overListener>> /\ UNCHANGED R
 ListenerExits ==
     /\ port = "listener" /\ port' = "free"
-    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering, https, httpsBoot, fin, finBoot, overListener>>
+    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering, https, httpsBoot, fin, finBoot, overListener>> /\ UNCHANGED R
 \* The archive's port claim (`https_recovery::port_absent`).
 PortClaimable ==
     IF ReuseBind THEN (~ListenerCheck \/ port /= "listener") ELSE port = "free"
@@ -191,7 +204,7 @@ Finalize ==
        \/ https = "none"
     /\ https' = "none" /\ httpsBoot' = 0 /\ fin' = FALSE /\ finBoot' = 0
     /\ overListener' = (overListener \/ (https = "records" /\ port = "listener"))
-    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering, port>>
+    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering, port>> /\ UNCHANGED R
 
 \* A completed recovery whose archive failed (the port still in TIME_WAIT, or the
 \* start crashed) and whose boot has since ended: the graph is already stopped, so
@@ -204,7 +217,7 @@ FinishCompleted ==
     /\ https = "records" /\ ArchiveWorks /\ finBoot /= boot /\ PortClaimable
     /\ https' = "none" /\ httpsBoot' = 0 /\ fin' = FALSE /\ finBoot' = 0
     /\ overListener' = (overListener \/ port = "listener")
-    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering, port>>
+    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering, port>> /\ UNCHANGED R
 
 \* HACK-2456: with the pool stopped, `hack up` / `hack down --recover` first send
 \* `runtime up` (`inspectOrStartStoppedPool`), then start over; the restarted down
@@ -226,6 +239,34 @@ Stop ==
     /\ https' = "none" /\ httpsBoot' = 0
     /\ UNCHANGED <<pool, boot, runBoot, faults, recovering, fin, finBoot>> /\ UNCHANGED P
 
+\* HACK-2535: the other project's `up` checks idleness under the provider lease. Idle:
+\* no live run (a ready receipt, whatever its owner), no pending finalization and no
+\* recovery in progress. Every graph start needs that same lease before it runs a
+\* container, so the second check and the guest stop are one step (RestartStop); a
+\* start may still make its receipt live between the two checks (Start while
+\* "checked"). A bounded fault: it is another project's command.
+Idle == run /= "ready" /\ ~fin /\ ~recovering
+RestartCheck ==
+    /\ IdleRestart /\ Fault /\ restart = "none" /\ pool = "running" /\ Idle
+    /\ restart' = "checked" /\ faults' = faults + 1
+    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, recovering, stoppedLive>>
+    /\ UNCHANGED <<https, httpsBoot, fin, finBoot, port, overListener>>
+\* The stop: the guest and every container in it stop; the share is added and the
+\* other project's start boots the pool later (RuntimeUp).
+RestartStop ==
+    /\ restart = "checked" /\ pool = "running" /\ (SecondCheck => Idle)
+    /\ pool' = "stopped" /\ restart' = "none"
+    /\ stoppedLive' = (stoppedLive \/ run = "ready")
+    /\ UNCHANGED <<boot, run, runBoot, owner, pub, faults, recovering>>
+    /\ UNCHANGED <<https, httpsBoot, fin, finBoot, port, overListener>>
+\* The second check refuses, or the pool changed meanwhile: nothing is stopped.
+RestartRefused ==
+    /\ restart = "checked" /\ (~Idle \/ pool /= "running")
+    /\ restart' = "none"
+    /\ UNCHANGED <<pool, boot, run, runBoot, owner, pub, faults, recovering, stoppedLive>>
+    /\ UNCHANGED <<https, httpsBoot, fin, finBoot, port, overListener>>
+Restart == RestartCheck \/ RestartStop \/ RestartRefused
+
 \* `hack up` = Start, or (Fixed) recovery of a dead owner's run then Start on
 \* a later command; `hack down` = Stop, RecoverRunning or (Fixed) RecoverStopped.
 Up == Start \/ RecoverStopped
@@ -233,7 +274,7 @@ Down == Stop \/ RecoverRunning \/ RecoverStopped \/ Finalize \/ FinishCompleted
 User == Up \/ Down \/ PoolRecover \/ (ByHand /\ RuntimeUp)
 
 Next == RuntimeDown \/ Crash \/ OwnerCrash \/ OwnerNotices \/ OwnerRetire \/ RuntimeUp
-        \/ TimeWaitEnds \/ Listen \/ ListenerExits \/ User
+        \/ TimeWaitEnds \/ Listen \/ ListenerExits \/ User \/ Restart
 Spec == Init /\ [][Next]_vars
 \* User commands keep being tried; the owner notices its guest is gone.
 FairSpec == Spec /\ WF_vars(Up) /\ WF_vars(Down) /\ WF_vars(PoolRecover)
@@ -253,6 +294,8 @@ NoDeadEnd == Settled \/ ENABLED User \/ ENABLED OwnerNotices \/ ENABLED OwnerRet
              \/ ENABLED TimeWaitEnds \/ ENABLED ListenerExits
 \* The previous-boot archive never runs while another process listens on the port.
 NoArchiveOverListener == ~overListener
+\* HACK-2535: a run that became live before the idle restart's stop is never stopped by it.
+NoRestartOverLiveRun == ~stoppedLive
 \* The boot bound is a model limit, not a dead end: it must never be what stops a command.
 BootBoundUnreached == CanBoot
 \* Under fair user commands, with faults bounded, the project settles again and again.

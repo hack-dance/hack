@@ -444,3 +444,49 @@ fn serve_with_distinct_timings_and_notify_descriptors_listens() {
     let mut service = service;
     assert!(service.exit().success());
 }
+
+#[test]
+fn a_starter_learns_why_serve_refused_a_home_that_cannot_be_resolved() {
+    // The candidate root does not exist: root resolution fails before any
+    // command runs, and the starter must still get one refused line, not EOF.
+    let home = Home::new();
+    let missing = home.0.join("missing");
+    let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+    let (reader, writer) = pipe();
+    let raw = writer.as_raw_fd();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hack-native"));
+    command
+        .arg("--candidate-root")
+        .arg(&missing)
+        .args(["service", "serve", "--notify-fd", "3"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home.0)
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(raw, 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut service = Service(command.spawn().unwrap());
+    drop(writer);
+    drop(spawning);
+    assert!(!service.exit().success());
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert!(line.ends_with('\n'), "{line:?}");
+    let refused: Value = serde_json::from_str(&line).unwrap();
+    assert!(refused["refused"]["code"].is_string(), "{refused}");
+    let mut rest = String::new();
+    reader.read_to_string(&mut rest).unwrap();
+    assert_eq!(rest, "", "exactly one refused line");
+    assert!(!missing.exists());
+}

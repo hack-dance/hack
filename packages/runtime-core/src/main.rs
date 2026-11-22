@@ -253,6 +253,19 @@ fn run() -> Result<(), CandidateError> {
     let all: Vec<&str> = arguments[2..].iter().map(String::as_str).collect();
     // HACK-2461: an optional `--step-store <dir>` follows the candidate root.
     let command: Vec<&str> = hack_runtime_core::store::take_step_store_argument(&all)?.to_vec();
+    // `service serve` takes its notify descriptor first, before this process
+    // opens anything else or anything else can fail, so every later refusal
+    // (root resolution and discovery included) reaches its starter as a line.
+    let mut serving = match command.as_slice() {
+        ["service", "serve", rest @ ..] => {
+            let reserved = std::env::args_os()
+                .nth(1)
+                .and_then(|argument| argument.into_string().ok())
+                .and_then(|argument| hack_runtime_core::timings::requested_fd(&argument));
+            Some(service_serve_arguments(rest, reserved)?)
+        }
+        _ => None,
+    };
     // First-use observation/setup must work before installed-home discovery:
     // an absent home is an ordinary installation state, not provider_state.
     if installed_entrypoint() {
@@ -272,7 +285,8 @@ fn run() -> Result<(), CandidateError> {
             _ => {}
         }
     }
-    let requested = resolve_candidate_root(Path::new(&arguments[1]))?;
+    let requested = resolve_candidate_root(Path::new(&arguments[1]))
+        .map_err(|error| refuse_starter(&mut serving, error))?;
     match command.as_slice() {
         [] | ["--help"] | ["help"] => {
             println!(
@@ -335,26 +349,12 @@ fn run() -> Result<(), CandidateError> {
                 println!("Next checkpoint: {}", plan.next_checkpoint);
             }
         }
-        ["service", "serve", arguments @ ..] => {
-            // Parse first, before this process opens anything else: the notify
-            // descriptor must be one the starter handed over. The one a leading
-            // timings argument names already belongs to the collector.
-            let reserved = std::env::args_os()
-                .nth(1)
-                .and_then(|argument| argument.into_string().ok())
-                .and_then(|argument| hack_runtime_core::timings::requested_fd(&argument));
-            let (idle, mut notify) = service_serve_arguments(arguments, reserved)?;
-            let candidate = match discover_candidate(&requested) {
-                Ok(candidate) => candidate,
-                Err(error) => {
-                    if let Some(mut file) = notify.take() {
-                        use std::io::Write;
-                        let refused = serde_json::json!({"refused": {"code": error.code}});
-                        let _ = writeln!(file, "{refused}");
-                    }
-                    return Err(error);
-                }
-            };
+        ["service", "serve", ..] => {
+            let candidate = discover_candidate(&requested)
+                .map_err(|error| refuse_starter(&mut serving, error))?;
+            let (idle, notify) = serving
+                .take()
+                .expect("service serve arguments are parsed before dispatch");
             // Private input will pass through this process; keep it out of core dumps.
             let no_core = libc::rlimit {
                 rlim_cur: 0,
@@ -1789,6 +1789,20 @@ fn image_policy(
     flags: &[&str],
 ) -> Result<hack_runtime_core::provider::image_policy::ImagePolicy, CandidateError> {
     hack_runtime_core::provider::image_policy::ImagePolicy::from_flags(flags)
+}
+
+/// Tell a `service serve` starter why this process refuses, once, then pass the
+/// error on. A no-op for every other command.
+fn refuse_starter(
+    serving: &mut Option<(std::time::Duration, Option<std::fs::File>)>,
+    error: CandidateError,
+) -> CandidateError {
+    if let Some(mut file) = serving.as_mut().and_then(|(_, notify)| notify.take()) {
+        use std::io::Write;
+        let refused = serde_json::json!({"refused": {"code": error.code}});
+        let _ = writeln!(file, "{refused}");
+    }
+    error
 }
 
 /// `service serve [--idle-seconds <1..86400>] [--notify-fd <3..1023>]`.

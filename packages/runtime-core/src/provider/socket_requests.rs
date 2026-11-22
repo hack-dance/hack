@@ -42,8 +42,10 @@ pub(super) fn fresh_project_capacity(
     bridge: bridge::Request,
     dependency: dependency_socket::Request,
 ) -> Result<(Option<BridgeIntent>, Option<DependencySocketIntent>), CandidateError> {
-    const DEFAULT_BRIDGES: u8 = 8;
-    const DEFAULT_DEPENDENCIES: u8 = 4;
+    // Projects and branches draw from the same pool. Use the full budget by
+    // default, favoring published services while reserving room for dependencies.
+    const DEFAULT_BRIDGES: u8 = 24;
+    const DEFAULT_DEPENDENCIES: u8 = 8;
 
     let mut bridges = bridge.initial();
     let mut dependencies = dependency.initial();
@@ -77,14 +79,14 @@ mod tests {
                 dependency.map_or(0, |v| v.slots),
             )
         };
-        assert_eq!(size(SocketRequests::default()), (8, 4));
+        assert_eq!(size(SocketRequests::default()), (24, 8));
         assert_eq!(
             size(SocketRequests {
                 bridges: Some(BridgeIntent::new(1).unwrap()),
                 minimum_dependencies: Some(DependencySocketIntent::new(5).unwrap()),
                 ..Default::default()
             }),
-            (1, 5)
+            (1, 8)
         );
         assert_eq!(
             size(SocketRequests {

@@ -4,7 +4,9 @@ Run `hack doctor` using the **same CLI, backend and home** as the command that
 failed. On the Compose path, use the terminal from [Install](install.md). On
 native, use the full `hack-next` path from [Try native](native/start.md).
 Read the named finding before using `--fix`; some problems need a decision or
-an original key, not an automatic repair.
+an original key, not an automatic repair. The Doctor summary aligns result
+counts with their check groups and indents diagnostic details. The summary
+uses the same layout with or without gum.
 
 `hack doctor --json` returns `{ok:true,data:{schema:1,checks,summary,counts}}`. Each check adds an area, machine/project scope and a fix category (`safe`, `admin` or `manual`), argv after `hack`, and a documentation URL. Empty argv means consult the docs. The audit remains read-only; `ok:true` means the audit ran, while error findings still exit 1. Unknown checks offer no runnable repair.
 

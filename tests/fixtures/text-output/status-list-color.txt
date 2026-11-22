@@ -1,0 +1,5 @@
+
+Doctor summary
+[36m✓[0m  Runtime  [2;90m12 checks[0m
+[33m×[0m  Routing  [2;90m1 error[0m
+[2m   Proxy is unreachable[0m

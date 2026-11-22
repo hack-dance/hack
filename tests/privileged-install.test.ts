@@ -5,7 +5,6 @@ import {
   mkdtemp,
   readdir,
   readFile,
-  realpath,
   rm,
   stat,
   symlink,
@@ -40,11 +39,7 @@ async function sandbox(opts?: {
   /** Replace `find` with one that fails without output. */
   readonly failingFind?: boolean;
 }) {
-  // The root script refuses any linked ancestor; CI shard 8 runs with a linked
-  // TMPDIR (HACK_TEST_SYMLINK_TMP), so resolve it first.
-  const root = await mkdtemp(
-    join(await realpath(tmpdir()), "hack-stdin-install-")
-  );
+  const root = await mkdtemp(join(tmpdir(), "hack-stdin-install-"));
   dirs.push(root);
   const bin = join(root, "bin");
   const dest = join(root, "etc");

@@ -142,6 +142,11 @@ test("the six --use entry points deliver the invocation target without saving it
     const choice = ["--use", "db=live"];
     ok(["up", "--detach", "--use", "db=local"]);
     expect(await Bun.file(log).text()).toMatch(/ up .* postgres/);
+    await Bun.write(log, "");
+    ok(["restart", "--use", "db=local", "api"]);
+    const targetedRestart = await Bun.file(log).text();
+    expect(targetedRestart).toMatch(/ up .*--force-recreate.* api/);
+    expect(targetedRestart).not.toMatch(/ up .* postgres/);
     expect(
       ok(["host", "exec", ...choice, "--", "/usr/bin/printenv", "DB_HOST"])
         .stdout

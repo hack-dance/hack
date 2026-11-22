@@ -335,7 +335,7 @@ export function inactiveRemoteServices(
 export function remoteServiceTargets(
   choices: readonly EffectiveRemote[] | undefined,
   services: readonly string[],
-  scoped = false
+  scope: "whole" | "start" | "restart" = "whole"
 ): readonly string[] {
   if (!choices?.length) {
     return services;
@@ -343,7 +343,7 @@ export function remoteServiceTargets(
   const { selected, inactive } = backingServices(choices);
   const included = services.filter((service) => !inactive.includes(service));
   if (
-    (scoped && included.length !== services.length) ||
+    (scope !== "whole" && included.length !== services.length) ||
     included.length + selected.size === 0
   ) {
     throw new HackCliError({
@@ -352,7 +352,9 @@ export function remoteServiceTargets(
         "No requested Compose service is available with this remote selection.",
     });
   }
-  return [...new Set([...included, ...selected])];
+  return scope === "restart"
+    ? included
+    : [...new Set([...included, ...selected])];
 }
 
 export async function assertNoInactiveRemoteDependencies(opts: {

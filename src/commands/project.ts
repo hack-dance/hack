@@ -8133,7 +8133,7 @@ async function runUpCommand({
   const initialServices = remoteServiceTargets(
     remoteChoices,
     serviceScoped ? requestedServices : allServiceNames,
-    serviceScoped
+    serviceScoped ? "start" : "whole"
   );
   const cacheBootstrapServices = scopedDependencyCache
     ? await resolveDependencyCacheBootstrapServices({
@@ -10789,7 +10789,11 @@ async function runRestartCommand({
       profiles,
       branch,
       envName: effectiveEnvName,
-      services: remoteServiceTargets(remoteChoices, requestedServices, true),
+      services: remoteServiceTargets(
+        remoteChoices,
+        requestedServices,
+        "restart"
+      ),
       allServiceNames,
       routeStdoutToStderr: json,
       json,

@@ -78,28 +78,98 @@ const UNTRUSTED_CERTIFICATE_CODES: ReadonlySet<string> = new Set([
   "ERR_TLS_CERT_ALTNAME_INVALID",
 ]);
 
-/** HTTPS to the proxy, as `hack global up` reads it. */
-export type ProxyHttpsState = ProbeState | "untrusted";
+/** One route request through the proxy, as `hack global up` reads it. */
+export type ProxyHttpsState = ProbeState | "untrusted" | "rejected";
+
+const TLS_ALERT = /ALERT|UNRECOGNIZED_NAME/;
+const HTTP_STATUS_LINE = /^HTTP\/1\.[01] [1-5]\d\d/;
 
 /**
- * Doctor's HTTPS check, with one more distinction for `hack global up`:
- * `untrusted` when the handshake completed with a certificate that is not
- * the running proxy's (another server answers on that address), separate
- * from `tls-error`, a handshake that did not complete (a container runtime
- * that does not forward the port cleanly), which doctor tolerates.
+ * One HTTPS request to `servername` through `address:port`, as `hack global
+ * up` checks a route: TLS with `servername` as the SNI and verified name,
+ * against `caPem` (the running proxy's root), then `GET /` with that `Host`.
+ * `ok` only when an HTTP status line comes back on that verified connection.
+ * - `untrusted`: the handshake presented a certificate `caPem` did not issue
+ *   for `servername` (another server, or the proxy without that name);
+ * - `rejected`: the peer answered TLS with an alert (a TLS server is there
+ *   and refused the name, as Caddy does for a name it does not serve);
+ * - `unreachable`: the connection was refused;
+ * - `timeout` / `tls-error`: no answer, or the connection ended without an
+ *   alert (a reset: a container runtime that does not forward the port
+ *   cleanly), which doctor tolerates.
+ * The timer covers the whole exchange; the socket is destroyed either way.
  */
-export async function probeProxyHttps(
-  opts: Omit<ProbeOptions, "protocol">
-): Promise<ProxyHttpsState> {
-  const result = await probeEndpoint({ ...opts, protocol: "https" });
-  if (
-    result.state === "tls-error" &&
-    result.code !== undefined &&
-    UNTRUSTED_CERTIFICATE_CODES.has(result.code)
-  ) {
-    return "untrusted";
-  }
-  return result.state;
+export function probeProxyRoute(opts: {
+  readonly address: string;
+  readonly port: number;
+  readonly servername: string;
+  readonly caPem: string;
+  readonly timeoutMs?: number;
+}): Promise<ProxyHttpsState> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let connected = false;
+    let received = "";
+    const done = (state: ProxyHttpsState) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(state);
+    };
+    const socket = connect({
+      host: opts.address,
+      port: opts.port,
+      servername: opts.servername,
+      ca: opts.caPem,
+      rejectUnauthorized: true,
+    });
+    const timer = setTimeout(
+      () => done("timeout"),
+      opts.timeoutMs ?? PROBE_TIMEOUT_MS
+    );
+    socket.once("connect", () => {
+      connected = true;
+    });
+    socket.once("secureConnect", () => {
+      if (!socket.authorized) {
+        done("untrusted");
+        return;
+      }
+      const host = opts.servername.includes(":")
+        ? `[${opts.servername}]`
+        : opts.servername;
+      socket.write(
+        `GET / HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: hack-global-up\r\nConnection: close\r\n\r\n`
+      );
+    });
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      received += chunk;
+      if (HTTP_STATUS_LINE.test(received)) {
+        done("ok");
+      } else if (received.length > 64) {
+        done("tls-error");
+      }
+    });
+    socket.once("end", () => done("tls-error"));
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      if (!connected) {
+        done("unreachable");
+      } else if (
+        error.code !== undefined &&
+        UNTRUSTED_CERTIFICATE_CODES.has(error.code)
+      ) {
+        done("untrusted");
+      } else if (error.code !== undefined && TLS_ALERT.test(error.code)) {
+        done("rejected");
+      } else {
+        done("tls-error");
+      }
+    });
+  });
 }
 
 function probeEndpoint(

@@ -157,6 +157,8 @@ let proxyRuntimeAnswer: ProxyRuntimeAnswer | null = null;
 let caddyAddressesAnswer: string[] | null = null;
 let httpsStateAnswer: ((address: string) => string) | null = null;
 const httpsProbeCalls: string[][] = [];
+/** The name each HTTPS look asked for (TLS name and Host). */
+const httpsProbeNames: string[] = [];
 const routeChecksMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
   specifier: "../src/lib/global-route-checks.ts",
@@ -166,8 +168,10 @@ const routeChecksMock = await registerScopedModuleMock({
     readCaddyAddresses: async () => caddyAddressesAnswer,
     probeProxyHttpsAt: async (opts: {
       readonly addresses: readonly string[];
+      readonly name: string;
     }) => {
       httpsProbeCalls.push([...opts.addresses]);
+      httpsProbeNames.push(opts.name);
       return opts.addresses.map((address) => ({
         address,
         state: httpsStateAnswer?.(address) ?? "ok",
@@ -1876,6 +1880,7 @@ describe("global up's route probe: only Hack's own proxy passes, and what cannot
     caddyAddressesAnswer = null;
     httpsStateAnswer = null;
     httpsProbeCalls.length = 0;
+    httpsProbeNames.length = 0;
     // `runCli` reserves stdout for a `--json` run; later tests run without.
     resetStdoutReservationForTests();
   });
@@ -1936,6 +1941,57 @@ describe("global up's route probe: only Hack's own proxy passes, and what cannot
     expect(httpsProbeCalls).toEqual([["127.0.0.1"]]);
   });
 
+  test("the HTTPS step asks for the name the DNS step resolved: the one the proxy file routes", async () => {
+    expect(
+      (await upWith({ dockerHost: "unix:///var/run/docker.sock" })).code
+    ).toBe(0);
+    const resolved = execCalls
+      .filter((call) => call.includes("nslookup"))
+      .map((call) => call[call.indexOf("nslookup") + 1]);
+    expect(resolved).toEqual(["schemas.hack.local"]);
+    expect(httpsProbeNames).toEqual(["schemas.hack.local"]);
+
+    // A v4 file routes only schemas.hack: both steps use that name.
+    execCalls.length = 0;
+    httpsProbeNames.length = 0;
+    await mkdir(dirname(globalCaddyComposePath()), { recursive: true });
+    const v4 = renderGlobalCaddyCompose().replace(
+      /caddy: schemas\.hack\.local, schemas\.hack/,
+      "caddy: schemas.hack"
+    );
+    expect(v4).toContain("caddy: schemas.hack\n");
+    execMockResponder = (cmd) =>
+      cmd.includes("nslookup")
+        ? {
+            exitCode: 0,
+            stdout: `Name:\tschemas.hack\nAddress: ${CADDY}\n`,
+            stderr: "",
+          }
+        : null;
+    await writeFile(globalCaddyComposePath(), v4);
+    const { runCli } = await import("../src/cli/run.ts");
+    const out = spyOn(process.stdout, "write").mockImplementation(() => true);
+    const err = spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(await runCli(["global", "up"])).toBe(0);
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
+    }
+    expect(httpsProbeNames).toEqual(["schemas.hack"]);
+  });
+
+  test("a TLS server that refuses the selected name (an alert) fails up with E_GLOBAL_NOT_READY", async () => {
+    const result = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      https: () => "rejected",
+    });
+    expect(result.code).toBe(1);
+    expect(result.output).toContain(
+      "port 443 on 127.0.0.1 refused TLS for schemas.hack.local: the server there does not serve that name"
+    );
+  }, 60_000);
+
   test("another server answering HTTPS (a certificate the proxy's CA did not issue) fails up with E_GLOBAL_NOT_READY", async () => {
     const result = await upWith({
       dockerHost: "unix:///var/run/docker.sock",
@@ -1986,7 +2042,7 @@ describe("global up's route probe: only Hack's own proxy passes, and what cannot
       });
       expect(result.code).toBe(0);
       expect(result.output).toContain(
-        `HTTPS through port 443 on 127.0.0.1 did not complete (${state}), so it was not checked`
+        `HTTPS for schemas.hack.local through port 443 on 127.0.0.1 did not complete (${state}), so it was not checked`
       );
     }
   });

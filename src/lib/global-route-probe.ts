@@ -256,30 +256,41 @@ export function classifyNslookup(opts: {
 }
 
 /**
- * HTTPS looks at each endpoint, as one look at the HTTPS step. Another
- * server's certificate at any endpoint is a refusal: names resolving to that
- * address reach it instead of the proxy. Otherwise ready when an endpoint
- * completed TLS with a certificate the running proxy's CA issued for the
- * schemas name (one family is enough, as in doctor). A refused port is a
- * refusal; a handshake that did not complete, or a timeout, is the path
- * doctor tolerates (a container runtime that does not forward the port
- * cleanly): not checked.
+ * HTTPS looks at each endpoint, as one look at the HTTPS step for `name`
+ * (the name the DNS step resolved, used as the TLS name and the `Host`).
+ * - Another server's certificate at any endpoint is a refusal: names
+ *   resolving to that address reach it instead of the proxy.
+ * - Ready when an endpoint answered HTTP on a connection verified against
+ *   the running proxy's CA for `name` (one family is enough, as in doctor).
+ * - A TLS alert (a TLS server refused `name`, as Caddy does for a name it
+ *   does not serve) or a refused port is a refusal.
+ * - A timeout, or a connection that ended without an alert, is the path
+ *   doctor tolerates (a container runtime that does not forward the port
+ *   cleanly): not checked.
  */
 export function classifyHttps(
   looks: readonly {
     readonly address: string;
     readonly state: ProxyHttpsState;
-  }[]
+  }[],
+  name: string = ROUTE_PROBE_NAME
 ): StepLook {
   const impostor = looks.find((look) => look.state === "untrusted");
   if (impostor) {
     return {
       kind: "refused",
-      detail: `port 443 on ${impostor.address} answered with a certificate this home's proxy did not issue (another server is answering there)`,
+      detail: `port 443 on ${impostor.address} answered with a certificate this home's proxy did not issue for ${name} (another server is answering there, or the proxy does not serve that name)`,
     };
   }
   if (looks.some((look) => look.state === "ok")) {
     return { kind: "answered" };
+  }
+  const rejected = looks.find((look) => look.state === "rejected");
+  if (rejected) {
+    return {
+      kind: "refused",
+      detail: `port 443 on ${rejected.address} refused TLS for ${name}: the server there does not serve that name`,
+    };
   }
   const refused = looks.find((look) => look.state === "unreachable");
   if (refused) {
@@ -291,7 +302,7 @@ export function classifyHttps(
   const where = looks.map((look) => look.address).join(", ");
   return {
     kind: "unknown",
-    detail: `HTTPS through port 443 on ${where} did not complete (${looks.map((look) => look.state).join(", ")}), so it was not checked; hack doctor reports this path`,
+    detail: `HTTPS for ${name} through port 443 on ${where} did not complete (${looks.map((look) => look.state).join(", ")}), so it was not checked; hack doctor reports this path`,
     retry: false,
   };
 }

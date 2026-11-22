@@ -2434,7 +2434,7 @@ async function globalRoutesNotReady(opts: {
       },
       requestHttps:
         "addresses" in targets
-          ? async () => {
+          ? async (name) => {
               if (runtime.caPem === null) {
                 runtime = await routeChecks.readProxyRuntime();
               }
@@ -2450,7 +2450,9 @@ async function globalRoutesNotReady(opts: {
                 await routeChecks.probeProxyHttpsAt({
                   addresses: targets.addresses,
                   caPem: runtime.caPem,
-                })
+                  name,
+                }),
+                name
               );
             }
           : null,

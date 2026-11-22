@@ -7,7 +7,7 @@ import { isIP } from "node:net";
 import { GLOBAL_CADDY_PROJECT_NAME } from "../constants.ts";
 import { inspectCaddyCaIdentity } from "./caddy-ca-identity.ts";
 import { resolveHackLocalCaCertPath } from "./local-ca.ts";
-import { type ProxyHttpsState, probeProxyHttps } from "./proxy-loopback.ts";
+import { type ProxyHttpsState, probeProxyRoute } from "./proxy-loopback.ts";
 import { exec } from "./shell.ts";
 
 const WHITESPACE = /\s+/;
@@ -80,17 +80,22 @@ export async function readCaddyAddresses(): Promise<string[] | null> {
   return addresses.length > 0 ? addresses : null;
 }
 
-/** One HTTPS look at each address, verified against the proxy's CA. */
+/**
+ * One HTTPS request for `name` at each address: `name` as the TLS name and
+ * the `Host`, verified against the proxy's CA (see `probeProxyRoute`).
+ */
 export async function probeProxyHttpsAt(opts: {
   readonly addresses: readonly string[];
   readonly caPem: string;
+  readonly name: string;
 }): Promise<{ readonly address: string; readonly state: ProxyHttpsState }[]> {
   return await Promise.all(
     opts.addresses.map(async (address) => ({
       address,
-      state: await probeProxyHttps({
+      state: await probeProxyRoute({
         address,
         port: 443,
+        servername: opts.name,
         caPem: opts.caPem,
         timeoutMs: 2000,
       }),

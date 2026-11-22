@@ -284,7 +284,15 @@ test("HTTPS: only the proxy's own certificate answers; a refused port or another
   ).toEqual({
     kind: "refused",
     detail:
-      "port 443 on 127.0.0.1 answered with a certificate this home's proxy did not issue (another server is answering there)",
+      "port 443 on 127.0.0.1 answered with a certificate this home's proxy did not issue for schemas.hack.local (another server is answering there, or the proxy does not serve that name)",
+  });
+  // A TLS alert: a server there refused the selected name.
+  expect(
+    classifyHttps([{ address: "127.0.0.1", state: "rejected" }], "schemas.hack")
+  ).toEqual({
+    kind: "refused",
+    detail:
+      "port 443 on 127.0.0.1 refused TLS for schemas.hack: the server there does not serve that name",
   });
   expect(
     classifyHttps([{ address: "127.0.0.1", state: "unreachable" }])

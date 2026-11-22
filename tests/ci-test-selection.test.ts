@@ -540,6 +540,7 @@ describe("PR matrix policy", () => {
         runtime_core: false,
         defer_macos: true,
         docker_suite: true,
+        build_smoke: true,
       });
       expect(
         await planPullRequest({

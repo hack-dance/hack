@@ -101,20 +101,24 @@ function workflowCommands(
 function inputCollector(reader: ReturnType<typeof inputReader>) {
   const inputs = new Set<string>();
   const queue: string[] = [];
-  const add = (file: string): void => {
+  const queued = new Set<string>();
+  const add = (file: string, follow = true): void => {
     const normalized = posix.normalize(file).replace(/^\.\//, "");
     if (
       !normalized ||
       normalized === "." ||
       normalized.startsWith("../") ||
-      posix.isAbsolute(normalized) ||
-      inputs.has(normalized)
+      posix.isAbsolute(normalized)
     ) {
       return;
     }
     const kind = reader.kind(normalized);
     if (kind === "file") {
       inputs.add(normalized);
+      if (!follow || queued.has(normalized)) {
+        return;
+      }
+      queued.add(normalized);
       queue.push(normalized);
       // Cargo compiles the crate, not just the manifest named by the build script.
       if (posix.basename(normalized) === "Cargo.toml") {
@@ -125,7 +129,7 @@ function inputCollector(reader: ReturnType<typeof inputReader>) {
     // dependency. Compile manifests supply explicit crate-wide inputs above;
     // shared template/fixture families remain conservatively covered by policy.
   };
-  const literal = (value: string, cwd: string): void => {
+  const literal = (value: string, cwd: string, follow = true): void => {
     // Bare labels and generated fixture names are not repository path witnesses.
     if (
       !/[/.]/.test(value) ||
@@ -134,8 +138,8 @@ function inputCollector(reader: ReturnType<typeof inputReader>) {
     ) {
       return;
     }
-    add(posix.join(cwd, value));
-    add(value);
+    add(posix.join(cwd, value), follow);
+    add(value, follow);
   };
   return { inputs, queue, add, literal };
 }
@@ -208,6 +212,15 @@ function collectCommands(opts: {
   }
 }
 
+function callName(node: ts.CallExpression): string {
+  if (ts.isIdentifier(node.expression)) {
+    return node.expression.text;
+  }
+  return ts.isPropertyAccessExpression(node.expression)
+    ? node.expression.name.text
+    : "";
+}
+
 function collectLiteralPaths(opts: {
   readonly file: string;
   readonly source: string;
@@ -220,16 +233,18 @@ function collectLiteralPaths(opts: {
     false
   );
   const cwd = posix.dirname(opts.file);
+  const dataKeys = new Set<ts.Node>();
   const visit = (node: ts.Node): void => {
+    if (ts.isPropertyAssignment(node) && ts.isStringLiteralLike(node.name)) {
+      dataKeys.add(node.name);
+    }
     if (ts.isStringLiteralLike(node)) {
-      opts.collector.literal(node.text, cwd);
+      // Inventory keys name data; spelling a test path does not execute its
+      // module. Explicit imports and workflow commands still traverse it.
+      opts.collector.literal(node.text, cwd, !dataKeys.has(node));
     }
     if (ts.isCallExpression(node)) {
-      const name = ts.isIdentifier(node.expression)
-        ? node.expression.text
-        : ts.isPropertyAccessExpression(node.expression)
-          ? node.expression.name.text
-          : "";
+      const name = callName(node);
       if (name === "join" || name === "resolve") {
         const pieces = node.arguments
           .filter(ts.isStringLiteralLike)

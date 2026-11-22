@@ -145,7 +145,7 @@ test("nested shell files, Compose definitions and unignored context contents are
       "fixtures/compose.yaml":
         "services:\n  app:\n    build:\n      context: ./ctx\n      dockerfile: Containerfile\n",
       "fixtures/ctx/Containerfile":
-        'COPY ["payload", "/dest"]\nADD extras /extras\nCOPY --from=other /external /dest\n',
+        'COPY ["payload/", "/dest"]\nADD extras /extras\nCOPY --from=other /external /dest\n',
       "fixtures/ctx/.dockerignore": "payload\n",
       "fixtures/ctx/Containerfile.dockerignore":
         "payload/private\npayload/**/*.tmp\n",
@@ -236,4 +236,20 @@ test.each([
     state_models: models,
     build_smoke: build,
   });
+});
+
+test("guard inventory keys do not execute the named tests or their sample crate paths", () => {
+  const inputs = dockerJobInputs({
+    repoRoot: "/fixture",
+    sources: {
+      ...sources,
+      "tests/e2e/scenarios/base.ts":
+        'const inventory={"tests/policy.test.ts":"guard budget"};',
+      "tests/policy.test.ts":
+        'const manifest=resolve("packages","runtime-core","Cargo.toml");',
+      "packages/runtime-core/Cargo.toml": "[package]",
+    },
+  });
+  expect(inputs?.has("tests/policy.test.ts")).toBe(true);
+  expect(inputs?.has("packages/runtime-core/")).toBe(false);
 });

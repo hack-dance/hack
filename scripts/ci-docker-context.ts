@@ -90,7 +90,9 @@ function copySources(source: string): string[] {
       if (typeof argument !== "string" || !/^[\w./-]+$/.test(argument)) {
         return ["."];
       }
-      paths.push(posix.normalize(`/${argument}`).slice(1) || ".");
+      paths.push(
+        posix.normalize(`/${argument}`).slice(1).replace(/\/$/, "") || "."
+      );
     }
   }
   return paths;

@@ -65,7 +65,7 @@ async function fixture(opts: { readonly nativeCode?: string }) {
     join(projectDir, "hack.config.json"),
     JSON.stringify({
       name: "not-running-fixture",
-      dev_host: "not-running-fixture.hack.local",
+      dev_host: "sample.hack.local",
     })
   );
   const binary = join(root, "native-runtime");
@@ -198,9 +198,9 @@ test("native ps keeps the complete address on a narrow plain terminal", async ()
   expect(result.code).toBe(0);
   expect(result.stdout).toBe(
     [
-      "SERVICE  ADDRESS                    STATE",
-      "web      https://sample.hack.local  healthy",
-      "worker   no address                 exited (1)",
+      "SERVICE  ADDRESS                          STATE",
+      "web      https://alpha.sample.hack.local  healthy",
+      "worker   no address                       exited (1)",
       "",
       "2 services",
       "",
@@ -221,7 +221,9 @@ test("native ps reports the configured HTTPS frontend port", async () => {
     },
   });
   expect(result.code).toBe(0);
-  expect(result.stdout).toContain("https://sample.hack.local:18443  healthy");
+  expect(result.stdout).toContain(
+    "https://alpha.sample.hack.local:18443  healthy"
+  );
 });
 
 test("native ps --json returns the ok envelope with runtime_not_running", async () => {

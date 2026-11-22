@@ -1,6 +1,10 @@
 import { YAML } from "bun";
 
-import { applyBranchToHost } from "./branch-hosts.ts";
+import {
+  applyBranchToHost,
+  rewriteCaddyLabelForBranch,
+  splitCaddySites,
+} from "./branch-hosts.ts";
 import { isRecord } from "./guards.ts";
 
 export const RUNTIME_HOST_METADATA_KEYS = {
@@ -288,15 +292,23 @@ export function composeServiceAddresses(opts: {
   for (const [service, entry] of readEffectiveServices({
     composeYamls: [opts.composeYaml],
   })) {
-    const host =
-      entry.caddy && extractCaddyLabelHosts({ value: entry.caddy })[0];
+    if (!entry.caddy) {
+      continue;
+    }
+    const label = opts.branch
+      ? rewriteCaddyLabelForBranch({
+          value: entry.caddy,
+          branch: opts.branch,
+          baseHosts: opts.baseHosts,
+        }).value
+      : entry.caddy;
+    const host = splitCaddySites(label).flatMap((value) =>
+      extractCaddyLabelHosts({ value })
+    )[0];
     if (host) {
       addresses.set(
         service,
-        runtimeHostUrl({
-          host: applyBranchIfNeeded({ ...opts, host }),
-          httpsPort: opts.httpsPort,
-        })
+        runtimeHostUrl({ host, httpsPort: opts.httpsPort })
       );
     }
   }

@@ -5,6 +5,7 @@ import { isRecord } from "../src/lib/guards.ts";
 import {
   buildRuntimeHostMetadataEnvironments,
   buildRuntimeHostMetadataOverride,
+  composeServiceAddresses,
   type RuntimeHostMetadata,
 } from "../src/lib/runtime-host-metadata.ts";
 
@@ -230,3 +231,36 @@ function readRuntimeMetadata(opts: {
   }
   return JSON.parse(raw) as RuntimeHostMetadata;
 }
+
+test("ps selects a concrete site from the chosen branch's routing scope", () => {
+  const composeYaml = `
+services:
+  web:
+    labels:
+      caddy: shared.example, sample.hack.local api.sample.hack.local
+  external:
+    labels:
+      caddy: external.example
+  api:
+    labels:
+      caddy: api.sample.hack.local other.example
+`;
+  const baseHosts = ["sample.hack.local"];
+  expect(
+    composeServiceAddresses({ composeYaml, baseHosts, branch: null })
+  ).toEqual(
+    new Map([
+      ["web", "https://shared.example"],
+      ["external", "https://external.example"],
+      ["api", "https://api.sample.hack.local"],
+    ])
+  );
+  expect(
+    composeServiceAddresses({ composeYaml, baseHosts, branch: "feature-x" })
+  ).toEqual(
+    new Map([
+      ["web", "https://feature-x.sample.hack.local"],
+      ["api", "https://api.feature-x.sample.hack.local"],
+    ])
+  );
+});

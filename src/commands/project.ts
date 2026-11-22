@@ -38,6 +38,10 @@ import {
   writeUpHookBlocker,
 } from "../ui/start-refusal-output.ts";
 import { createTextOutput } from "../ui/text-output.ts";
+import {
+  writeComposeStarted,
+  writeComposeStopped,
+} from "./compose-lifecycle-closing.ts";
 
 export function wrapLifecyclePersistentCommand(
   opts: Parameters<typeof wrapSharedLifecyclePersistentCommand>[0]
@@ -7702,6 +7706,7 @@ async function runUpCommand({
   readonly startedAtMs?: number;
 }): Promise<number> {
   const detach = args.options.detach || json;
+  const startedAt = performance.now();
   let budgets = resolveDetachedComposeBudgets(detach);
   let project: Awaited<ReturnType<typeof requireProjectContext>>;
   try {
@@ -8217,6 +8222,7 @@ async function runUpCommand({
       return upCode;
     }
 
+    const containersStartedAt = performance.now();
     if (detach) {
       // The containers now run: a later failure keeps their helpers.
       keepSharedHelpers?.();
@@ -8328,6 +8334,20 @@ async function runUpCommand({
       warn: (message) => logger.warn({ message }),
     });
     if (!json) {
+      if (detach) {
+        const addresses = await readProjectServiceAddresses({
+          project,
+          cfg,
+          branch,
+          native: false,
+        });
+        writeComposeStarted({
+          addresses,
+          running: startup.running,
+          primaryHost: devHost,
+          durationMs: containersStartedAt - startedAt,
+        });
+      }
       return 0;
     }
     return emitLifecycleResult({
@@ -8731,6 +8751,7 @@ async function runDownCommand({
   readonly startedAtMs?: number;
   readonly flagTimeoutSeconds?: number;
 }): Promise<number> {
+  const startedAt = performance.now();
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -9104,6 +9125,9 @@ async function runDownCommand({
         message: `Project stopped, but cache volume removal failed: ${cacheRemoval.failed.map((failure) => `${failure.name} (${failure.error})`).join(", ")}`,
       });
       return 1;
+    }
+    if (afterCode === 0) {
+      writeComposeStopped(performance.now() - startedAt);
     }
     return afterCode;
   }
@@ -11013,7 +11037,7 @@ async function handlePs({
   let addressUnavailable = false;
   const addresses = json
     ? new Map<string, readonly string[]>()
-    : await readPsServiceAddresses({
+    : await readProjectServiceAddresses({
         project,
         cfg,
         branch,
@@ -11162,7 +11186,7 @@ async function handlePs({
   return 0;
 }
 
-async function readPsServiceAddresses(opts: {
+async function readProjectServiceAddresses(opts: {
   readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly branch: string | null;

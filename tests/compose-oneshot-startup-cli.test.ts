@@ -561,3 +561,33 @@ test("a migration dependency declared in an included file keeps the wait", async
   expect(envelope.error?.code).not.toBe("E_STARTUP_TIMEOUT");
   expect(result.stderr).toContain("compose-up-stdout-marker");
 }, 60_000);
+
+test("Compose closes a confirmed start and stop with plain lifecycle lines", async () => {
+  const file = join(project, ".hack", "docker-compose.yml");
+  await writeFile(
+    file,
+    `${ONE_SHOT_COMPOSE}    labels:
+      caddy: https://sample.hack.local, http://alias.hack.local
+  dormant:
+    image: alpine:3.22
+    profiles: ["extra"]
+    labels:
+      caddy: https://dormant.hack.local
+`
+  );
+  const up = await cli(["up", "--detach"], { STUB_UP_SECONDS: "0" });
+  expect(up.exitCode).toBe(0);
+  expect(up.stdout).toMatch(
+    /https:\/\/sample\.hack\.local {2}up in \d+\.\ds · compose · 2 routes warming\n$/
+  );
+  expect(up.stdout).not.toContain("dormant.hack.local");
+
+  const down = await cli(["down"]);
+  expect(down.exitCode).toBe(0);
+  expect(down.stdout).toMatch(/✓ services {2}stopped · \d+\.\ds\n$/);
+
+  await writeFile(file, ONE_SHOT_COMPOSE);
+  const unrouted = await cli(["up", "--detach"], { STUB_UP_SECONDS: "0" });
+  expect(unrouted.exitCode).toBe(0);
+  expect(unrouted.stdout).toMatch(/no address {2}up in \d+\.\ds · compose\n$/);
+}, 60_000);

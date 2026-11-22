@@ -16,7 +16,8 @@ project on another machine with Docker.
   settings and secrets, and serves the project at `https://myapp.hack.local`.
 - **A worktree on a branch gets its own running copy.** Its own containers,
   addresses and logs, so three branches, or three coding agents, can each run
-  and test the app at once. A detached worktree needs `--branch <name>`.
+  and test the app at once. A detached worktree needs `--branch <name>` unless
+  `worktree.auto_branch=false` selects the base instance.
 - **The parts around the containers are declared too.** A sign-in check or a
   migration can run as a lifecycle hook. A tunnel or a worker runs as a host
   process the project declares. `hack down` stops what this copy started and
@@ -112,7 +113,7 @@ label its logs, and keep its instances apart.
 - `hack up --branch review` starts a second instance of the same project with its
   own addresses. In a linked git worktree, `hack up` does this without the flag
   and names the instance after the branch. A detached worktree needs
-  `--branch <name>`.
+  `--branch <name>` unless `worktree.auto_branch=false` selects the base instance.
 - An instance has its own containers, so each one has its own database container.
   Instances still share anything outside them: an external database, a
   bind-mounted folder, the same credentials. Hack separates what runs; it is not a
@@ -162,8 +163,8 @@ The `hack` command reads the project's `.hack/` folder and starts its services
 through Docker Compose. One shared local proxy gives every instance its names and
 HTTPS, with local DNS helpers for the names and Caddy for the certificates. An
 optional daemon, `hackd`, caches project state so status commands answer quickly.
-Stable Hack runs services with Compose; the native VM is a beta in the
-`hack-next` prerelease, described under [versions and backends](#versions-and-backends).
+Stable Hack runs services with Compose. See [versions and backends](#versions-and-backends)
+for prerelease backend selection.
 
 ## First run
 
@@ -246,7 +247,7 @@ instance. See [agent integrations](docs/integrations.md).
 Homebrew or the release installer above.
 
 **v5 is in prerelease.** It keeps the same commands and the same `.hack/` folder
-and replaces the runtime layer underneath. Docker Compose stays the default. The
+and replaces the runtime layer underneath. Stable v4 uses Compose. The
 current prerelease is `5.0.0-next.24`. Prerelease builds install beside stable
 Hack through the separate `hack-next` channel and do not change the stable
 install. Read
@@ -258,20 +259,22 @@ v5 work; `main` holds the stable line.
 **Native backend (beta, Apple Silicon macOS).** A second way to run the same
 project. Hack runs the project's containers in a Linux VM, without Docker Desktop
 or OrbStack. Preparing that VM is a separate step today. Your `.hack/` folder and
-your commands stay the same. It ships only through the `hack-next` prerelease.
-There it is what runs on an Apple Silicon Mac unless you select Compose with
-`HACK_RUNTIME_BACKEND=compose`; stable Hack runs Compose.
+your commands stay the same. The current `hack-next` prerelease selects native
+by default on Apple Silicon macOS and Compose on supported Linux. Use
+`HACK_RUNTIME_BACKEND=compose` to select Compose on macOS. Native is the planned
+default for stable v5.
 
 - It runs a whole multi-service Compose project: start, stop, restart, logs for
   every service and `hack open`.
 - It supports part of what Compose supports. When a project needs something
   outside that part, Hack refuses and names the feature.
-- One VM can run several projects and worktrees at once. A running VM cannot
-  add a project folder it was not started with: `hack up` there refuses and
-  says what to stop, and the folder joins when the VM next starts. See
+- Projects and worktrees the pool was started with can run together. A running VM cannot
+  add a project folder it was not started with. `hack up` there refuses and
+  explains what to stop. The folder joins when the VM next starts. See
   [one VM, several project folders](docs/guides/native-candidate.md#explicit-writable-development-source).
-- A linked worktree starts under its branch name, as on Compose. A detached
-  worktree needs `--branch <name>`.
+- With automatic branch selection enabled, an attached linked worktree starts
+  under its branch name on Compose and for Compose-backed projects on native.
+  A detached worktree needs `--branch <name>` unless automatic selection is off.
 - Native data does not carry over when you move to a new prerelease, and it does
   not move between backends.
 - We have published no speed, memory or battery comparison with Compose. Do not

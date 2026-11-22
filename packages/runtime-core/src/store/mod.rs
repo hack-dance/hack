@@ -2,9 +2,28 @@
 //!
 //! The CLI follows symlinks to resolve the base to its canonical path. The runtime
 //! refuses symlinked ancestors of the path it receives. Each format has its own
-//! subdirectory, currently `hack.store-1/`. Initialization keeps at most the newest
-//! set-aside copy of this format, and removes it too once it is older than seven days.
-//! There is no eviction yet. Garbage collection (P8) will also clean up files that
+//! subdirectory, currently `hack.store-1/`. Rotation writes a `SET_ASIDE` marker
+//! with the canonical base and archive timestamp before renaming the root, and
+//! reopening a live root clears a stray marker. After a successful open, best-effort
+//! cleanup keeps the newest marked archive for up to seven days. It removes an owned
+//! archive only when both its own `lock` and the `hack.store-1/lock` a store opened
+//! inside it would hold are taken without waiting; an archive without its marker is
+//! kept indefinitely. The old flat layout and P1 sibling archives require the P1
+//! `VERSION` and their own lock, taken without waiting. A held flat lock leaves the
+//! flat layout for a later open; the open still succeeds. The flat migration renames
+//! `VERSION` to `VERSION.migrating` once the flat directories are gone, then removes
+//! `key` and `lock`, and removes the marker last, so a later open finishes it.
+//!
+//! `record()` and `put_cas()` can fail on a directory at the write path or a
+//! wrong-mode or symlinked shard. Writes leave that damage in place. Callers must
+//! ignore a cache write error and keep the step's result. A CAS lookup reads the
+//! whole object (up to 16 MiB) to verify it.
+//!
+//! Some damage makes every open fail until a person fixes it. This includes a
+//! damaged top-level layout entry (such as a non-directory `records`), a wrong-mode
+//! `lock`, a mode-000 `VERSION`, and a foreign-owned or hard-linked key.
+//!
+//! There is no eviction yet. Garbage collection (P8) will clean up files that
 //! crashed writers leave in `tmp/`.
 
 mod cas;

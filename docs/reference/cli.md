@@ -388,6 +388,7 @@ hack down [options]
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
+| `--timeout <seconds>` | Compose backend: container stop timeout in seconds (0-600) passed to docker compose down --timeout |
 | `--prune-caches` | After down, remove confirmed Compose-owned disposable cache volumes |
 | `--remove-data` | Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first) |
 | `--yes` | Confirm --prune-caches or --remove-data without prompting |
@@ -914,7 +915,7 @@ hack config <subcommand> [options]
 | --- | --- |
 | `hack config get <key>` | Read a value from hack.config.json |
 | `hack config set <key> <value>` | Update a value in hack.config.json |
-| `hack config validate` | Validate native configuration and selected local overlays without starting workloads |
+| `hack config validate` | Validate project configuration without starting workloads |
 | `hack config plan` | Inspect native environment binding completeness without decrypting or starting workloads |
 | `hack config import` | Preview a bounded legacy config and Compose conversion without writes |
 | `hack config adopt` | Explicitly adopt a stopped, verified existing Compose instance |
@@ -984,7 +985,7 @@ hack config set <key> <value> [options]
 
 ## `hack config validate`
 
-Validate native configuration and selected local overlays without starting workloads
+Validate project configuration without starting workloads
 
 ### Usage
 
@@ -992,7 +993,7 @@ Validate native configuration and selected local overlays without starting workl
 hack config validate [options]
 ```
 
-Uses the matching bundled Rust compiler. Without --file, discovers a native project and resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. With HACK_RUNTIME_BACKEND=native, a selected workload image that is not a sha256: content ID refuses with the native consumer's native_graph_admission code. Neither mode reads env values, writes state, or starts workloads.
+Uses the matching bundled Rust compiler. Without --file, discovers a Compose or native project. Native validation resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. With HACK_RUNTIME_BACKEND=native, a selected workload image that is not a sha256: content ID refuses with the native consumer's native_graph_admission code. Neither mode reads env values, writes state, or starts workloads.
 
 ### Options
 
@@ -3613,7 +3614,7 @@ hack the planet [options]
 
 ## Experimental (unsupported)
 
-These commands are source-available but outside the supported v3 product contract. They are hidden from default `hack --help` (see them with `hack help --all`) and print a warning when invoked.
+These commands are source-available but outside the supported Hack CLI contract. They are hidden from default `hack --help` (see them with `hack help --all`) and print a warning when invoked.
 
 - `hack dispatch` — Unsupported: run branch-scoped jobs on remote nodes
 - `hack gateway` — Unsupported: manage the remote control plane entrypoint

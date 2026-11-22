@@ -32,7 +32,7 @@ const GROUP_HEADINGS: Readonly<Record<CliGroup, string>> = {
  *
  * Supported commands get a full markdown section (including one level of
  * subcommands); Beta-group commands are listed but not expanded — they are
- * outside the supported v3 product contract and hidden from default help.
+ * outside the supported Hack CLI contract and hidden from default help.
  * Output is deterministic and version-free so the committed file only changes
  * when the CLI surface changes (enforced by tests/cli-reference-docs.test.ts).
  */
@@ -60,7 +60,7 @@ export function renderCliReferenceMarkdown(opts: {
     lines.push(`## ${GROUP_HEADINGS[group]}`, "");
     if (group === "Beta") {
       lines.push(
-        "These commands are source-available but outside the supported v3 product contract. They are hidden from default `hack --help` (see them with `hack help --all`) and print a warning when invoked.",
+        "These commands are source-available but outside the supported Hack CLI contract. They are hidden from default `hack --help` (see them with `hack help --all`) and print a warning when invoked.",
         ""
       );
       for (const command of commands) {

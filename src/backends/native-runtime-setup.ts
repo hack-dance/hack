@@ -287,6 +287,17 @@ function refuse(inspection: Pick<NativeSetupInspection, "state">): never {
       ? "E_NATIVE_SETUP_REQUIRED"
       : "E_STARTUP_INCOMPLETE",
     message: nativeSetupGuidance(inspection),
+    startBlocker: nativeSetupCanResume(inspection)
+      ? {
+          thing: "native runtime",
+          problem: "setup required",
+          needs: "this start needs the native runtime",
+          command: launcherCommand(currentCandidateLauncher(), [
+            "native",
+            "setup",
+          ]),
+        }
+      : undefined,
     detail: {
       runtime_setup: inspection.state,
       native_code: CODES[inspection.state],

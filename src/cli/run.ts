@@ -12,6 +12,10 @@ import { reserveStdoutForMachineOutput } from "../lib/machine-stdout.ts";
 import { nativeDetachedUpFailure } from "../lib/native-detached-up.ts";
 import { logger } from "../ui/logger.ts";
 import {
+  startRefusalBlocker,
+  writeStartBlocker,
+} from "../ui/start-refusal-output.ts";
+import {
   type AnyCommandSpec,
   CliUsageError,
   collectAllowedOptionNames,
@@ -248,6 +252,15 @@ export async function handleRunCliError(opts: {
   }
 
   if (error instanceof HackCliError) {
+    const blocker =
+      opts.handlerPath?.[0] === "up"
+        ? (error.startBlocker ?? startRefusalBlocker(error.code))
+        : undefined;
+    if (blocker) {
+      writeStartBlocker(blocker);
+      logDebugStack(error);
+      return 1;
+    }
     logger.error({ message: `${error.code}: ${error.message}` });
     if (error.detail !== undefined) {
       // Loaded only for a detailed error, off the ordinary CLI start path.

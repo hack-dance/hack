@@ -211,7 +211,8 @@ Historical remote guides are excluded from the supported documentation.
   `config get`/`set`, `env ...`, `host exec`/`shell`, `usage --by-service` and
   `project owner`/`target`/`task`, for
   example `hack ps -p <dir> --json` and `hack branch list -p <dir>`. Under `--json` it is one
-  error envelope; without `--json` it is one closed error message, `E_PROJECT_NOT_FOUND: <message>`,
+  error envelope. In text mode `up` shows a project blocker with the next command. Other commands print
+  a closed error message, `E_PROJECT_NOT_FOUND: <message>`,
   and no stack trace. The logger decides how it looks: the console logger (`HACK_LOGGER=console`)
   prints one line, `ERROR: E_PROJECT_NOT_FOUND: ...`, on stderr; gum prints one line with a styled
   `ERROR` level on stderr; and clack prints two lines on stdout, its `│` guide line and then the

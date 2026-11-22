@@ -26,6 +26,7 @@ import {
   stopLifecycleProcessController,
   wrapLifecyclePersistentCommand as wrapSharedLifecyclePersistentCommand,
 } from "../lib/project-lifecycle-controller.ts";
+import { writeUpHookBlocker } from "../ui/start-refusal-output.ts";
 
 export function wrapLifecyclePersistentCommand(
   opts: Parameters<typeof wrapSharedLifecyclePersistentCommand>[0]
@@ -7643,6 +7644,7 @@ async function runUpCommand({
           exitCode: lifecycleUp.code,
         });
       }
+      writeUpHookBlocker("before", lifecycleUp.code);
       return lifecycleUp.code;
     }
     if (lifecycleUp.sessionName) {
@@ -7665,7 +7667,7 @@ async function runUpCommand({
         exitCode: 1,
       });
     }
-    logger.error({ message });
+    writeUpHookBlocker("before");
     return 1;
   }
 
@@ -7935,6 +7937,7 @@ async function runUpCommand({
     if (afterCode !== 0) {
       await lifecycleCleanup?.();
       if (!json) {
+        writeUpHookBlocker("after", afterCode);
         return afterCode;
       }
       return emitLifecycleResult({

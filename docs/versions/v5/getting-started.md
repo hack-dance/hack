@@ -69,6 +69,9 @@ hack ps
 hack open
 ```
 
+If `hack up` stops before the project is ready, look for the `!` line. It
+names the blocker and shows the command to run next.
+
 To start this project at future logins, use `hack up -d --always` and install
 the per-user daemon with `hack daemon install`. `hack down` pauses its marker;
 `hack up` resumes it. See [Always-on projects](https://github.com/hack-dance/hack/blob/next/docs/always-on-projects.md) for

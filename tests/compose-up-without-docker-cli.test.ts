@@ -84,10 +84,12 @@ test("up --json without docker names the missing engine even with global proxy f
   expect(result.all).not.toContain("Executable not found");
 }, 60_000);
 
-test("text-mode up without docker prints the closed line, not a stack", async () => {
+test("text-mode up without docker prints the engine blocker", async () => {
   const result = await hack(["up", "--detach"]);
   expect(result.code).toBe(1);
-  expect(result.all).toContain("E_DOCKER_UNAVAILABLE");
+  expect(result.stderr).toEndWith(
+    "! docker  engine or compose unavailable\n  this start needs a working docker installation. run:\n  docker compose version && docker info\n"
+  );
   expect(result.all).not.toContain("Executable not found");
   expect(result.all).not.toContain("    at ");
 }, 60_000);

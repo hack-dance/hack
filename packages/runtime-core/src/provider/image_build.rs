@@ -1883,8 +1883,6 @@ pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome
     policy.tag_mode = request.image_tag_mode;
     let prior_pins = request.command_base_pins.clone();
     let mut inputs = prepare(request, &builds_root(candidate))?;
-    let _signals = CancelSignals::install()?;
-    let canceled = || CANCEL_REQUESTED.load(Ordering::Acquire);
     let deadline = Instant::now() + inputs.timeout;
     let pool = LivePool { candidate };
     let (lease, _) = pool.lease()?;
@@ -1893,8 +1891,8 @@ pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome
     let mut fallbacks = Vec::new();
     let mut selections = BTreeMap::new();
     for base in &inputs.images {
-        if canceled() || Instant::now() >= deadline {
-            return Err(late_stop(canceled()));
+        if Instant::now() >= deadline {
+            return Err(late_stop(false));
         }
         let reference = base.reference.canonical();
         policy.command_image_pin = prior_pins
@@ -1930,6 +1928,12 @@ pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome
         selections.insert(reference, resolved.pinned_reference.clone());
         selected.insert(base.context_name.clone(), resolved);
     }
+    // Acquisition keeps the default signal dispositions, like ensure-image.
+    // Exit releases its locks and the next cache writer recovers private
+    // staging. No BuildKit client, temporary base alias or build receipt
+    // exists yet. Install cooperative cancellation before starting BuildKit.
+    let _signals = CancelSignals::install()?;
+    let canceled = || CANCEL_REQUESTED.load(Ordering::Acquire);
     inputs.key = key_with_bases(&inputs.key, &selected)?;
     let mut outcome = run_with_bases(
         candidate,

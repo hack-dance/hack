@@ -783,6 +783,7 @@ async function resolveNativeBuildImages(opts: {
   readonly signal: AbortSignal;
   readonly invoke: typeof invokeNativeBuild | undefined;
   readonly onBuilt: () => void;
+  readonly onImageWait: (reference: string | null) => void;
   readonly onNotice: (line: string) => void;
 }): Promise<ReadonlySet<string>> {
   const remaining = pinVerifiedNativeBuilds(opts);
@@ -3065,6 +3066,7 @@ async function startNativeProjectAttempt(
       onBuilt: () => {
         rebuilt = true;
       },
+      onImageWait: reportNativeImageDownloadWait,
       onNotice: (line) => {
         if (!reportNativeImageNotice(line)) {
           process.stderr.write(`${line}\n`);

@@ -399,12 +399,28 @@ function parseBuilt(value: unknown): NativeBuiltImage {
  */
 async function forwardBuildOutput(
   stream: ReadableStream<Uint8Array>,
-  write: (text: string) => void
+  write: (text: string) => void,
+  onImageWait?: (reference: string | null) => void
 ): Promise<string | undefined> {
   const decoder = new TextDecoder();
   let pending = "";
   let held: string | undefined;
   const emit = (line: string) => {
+    if (onImageWait && line.startsWith("hack.image-wait:")) {
+      const [state, reference] = line.split(" ", 2);
+      if (
+        state === "hack.image-wait:begin" &&
+        reference &&
+        BUILD_BASE_REFERENCE.test(reference)
+      ) {
+        onImageWait(reference);
+        return;
+      }
+      if (state === "hack.image-wait:end") {
+        onImageWait(null);
+        return;
+      }
+    }
     if (held !== undefined) {
       write(`${held}\n`);
       held = undefined;
@@ -499,6 +515,7 @@ export async function invokeNativeBuild(opts: {
   readonly cwd: string;
   readonly requestFile: string;
   readonly signal?: AbortSignal;
+  readonly onImageWait?: (reference: string | null) => void;
   readonly write?: (text: string) => void;
 }): Promise<NativeBuiltImage> {
   if (opts.signal?.aborted) {
@@ -519,7 +536,12 @@ export async function invokeNativeBuild(opts: {
     ],
     {
       cwd: opts.cwd,
-      env: childEnvironment(systemEnvironment()),
+      env: childEnvironment({
+        ...systemEnvironment(),
+        ...(opts.onImageWait
+          ? { HACK_INTERNAL_REPORT_IMAGE_WAIT: "batch" }
+          : {}),
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -539,7 +561,8 @@ export async function invokeNativeBuild(opts: {
       new Response(child.stdout).arrayBuffer(),
       forwardBuildOutput(
         child.stderr,
-        opts.write ?? ((text) => process.stderr.write(text))
+        opts.write ?? ((text) => process.stderr.write(text)),
+        opts.onImageWait
       ),
       child.exited,
     ]);
@@ -558,6 +581,7 @@ export async function invokeNativeBuild(opts: {
     }
     return parseBuilt(JSON.parse(new TextDecoder().decode(stdout)));
   } finally {
+    opts.onImageWait?.(null);
     opts.signal?.removeEventListener("abort", cancel);
     clearTimeout(outer);
     clearTimeout(killTimer);
@@ -668,6 +692,7 @@ export async function buildNativeProjectImages(opts: {
   /** Called once for each build the runtime actually ran (not a reused image). */
   readonly onBuilt?: () => void;
   /** One line per distinct base-image fallback; stderr when the caller gives none. */
+  readonly onImageWait?: (reference: string | null) => void;
   readonly onNotice?: (line: string) => void;
 }): Promise<ReadonlySet<string>> {
   const pending = pendingBuilds(opts);
@@ -853,6 +878,7 @@ async function runPendingBuilds(opts: {
   readonly signal: AbortSignal;
   readonly invoke?: typeof invokeNativeBuild;
   readonly onBuilt?: () => void;
+  readonly onImageWait?: (reference: string | null) => void;
   readonly onNotice?: (line: string) => void;
 }): Promise<void> {
   const invoke = opts.invoke ?? invokeNativeBuild;
@@ -896,6 +922,7 @@ async function runPendingBuilds(opts: {
         runtime: opts.runtime,
         cwd: opts.projectRoot,
         requestFile,
+        onImageWait: opts.onImageWait,
         signal: opts.signal,
       }).catch((error: unknown) => {
         throw nameBuildFailure(services, error);

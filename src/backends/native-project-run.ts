@@ -12,7 +12,7 @@ import {
   rmdir,
   unlink,
 } from "node:fs/promises";
-import { basename, isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { nativeHomeProcesses } from "./native-home-processes.ts";
@@ -1297,6 +1297,12 @@ export type NativeProjectRunForeignHomeInspection = {
    * another identity), so its records are gone too (HACK-2524).
    */
   readonly owner: "stopped" | "live" | "interrupted" | "unproven" | "gone";
+  /**
+   * For a gone home whose path is absent: the missing directory just under a mount
+   * base (`/Volumes`, `/mnt`, `/media`, `/run/media/<user>`), likely a disk that is
+   * not mounted. The home and its data may well still exist there.
+   */
+  readonly missingVolume?: string;
   /** The owning frontend's PID for a live or interrupted owner. */
   readonly ownerPid: number | null;
   readonly run: NativeProjectRun;
@@ -1470,6 +1476,11 @@ async function foreignHomeSelection(opts: {
       state: "foreign-home",
       ownerHome: foreign.ownerHome,
       owner: foreignOwnerState(gone, lifetime.state),
+      ...(gone === "absent"
+        ? await unmountedVolume(foreign.ownerHome).then((volume) =>
+            volume === undefined ? {} : { missingVolume: volume }
+          )
+        : {}),
       ownerPid:
         lifetime.state === "live" || lifetime.state === "interrupted"
           ? lifetime.pid
@@ -1495,6 +1506,29 @@ function foreignOwnerState(
     return "gone";
   }
   return lifetime === "completed" ? "stopped" : lifetime;
+}
+
+/** Mount bases whose direct children are disks (macOS `/Volumes`; Linux `/mnt`, `/media`). */
+const MOUNT_BASE = /^\/(Volumes|mnt|media)$|^\/(run\/)?media\/[^/]+$/;
+
+/**
+ * The topmost missing directory of an absent home path when its parent is a mount
+ * base: the home is then most likely on a disk that is not mounted, not deleted.
+ */
+async function unmountedVolume(home: string): Promise<string | undefined> {
+  let missing = home;
+  for (;;) {
+    const parent = dirname(missing);
+    if (parent === missing) {
+      return undefined;
+    }
+    try {
+      await lstat(parent);
+      return MOUNT_BASE.test(parent) ? missing : undefined;
+    } catch {
+      missing = parent;
+    }
+  }
 }
 
 /**
@@ -1541,7 +1575,10 @@ export function describeNativeForeignHomeMapping(opts: {
   const stopThere = "run hack down with the Hack version that owns that home";
   if (inspection.owner === "gone" && inspection.selectionSha256 !== null) {
     return (
-      `Native project run mapping belongs to ${where}, which is no longer at that path; its records and retained data went with it. ` +
+      `Native project run mapping belongs to ${where}, which is not at that path any more. ` +
+      (inspection.missingVolume === undefined
+        ? "If that home is on a disk that is not mounted, mount it and stop the run there instead. "
+        : `It was under ${inspection.missingVolume}, which looks like a disk that is not mounted: mount it and stop the run there instead. `) +
       `To start this instance from this native home, release the mapping with ${nativeForeignHomeReleaseCommand(
         { selectionSha256: inspection.selectionSha256, branch: opts.branch }
       )}; it first checks that no process of that home is still running. ` +
@@ -1805,7 +1842,7 @@ async function readIfPresent(path: string): Promise<string | null> {
 /**
  * Release a mapping whose native home is gone (HACK-2524): the recorded path no longer
  * holds it (absent, not a directory, or another identity) and no process of this user
- * names that path or works inside it. The home's records went with it, so this is the
+ * names that path or works inside it. The home's records are not there, so this is the
  * only proof there is. Under the checkout's mapping and restart locks it rechecks the
  * exact selection and scans again, keeps the mapping, restart intent and down-hook
  * journal in one audit file (owed hooks are skipped: their services went with the

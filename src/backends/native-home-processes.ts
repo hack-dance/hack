@@ -7,7 +7,9 @@
  * owner's configuration path) or runs with its working directory inside it. So no
  * such process means nothing holds the run's sockets, VM or published ports.
  *
- * A listing that cannot be read or parsed refuses; it never reads as empty. A home
+ * A listing that cannot be read or parsed refuses; it never reads as empty. Each
+ * listing must also show this very process (its pid in `ps`, its working directory
+ * in `lsof`), so a run that failed or returned nothing refuses too. A home
  * moved and started again from its new path has processes that name the new path
  * only: this scan cannot see them (the residual of the gone-home release).
  */
@@ -71,6 +73,7 @@ async function byCommand(exec: Run, home: string, self: number) {
     throw scanRefused();
   }
   const pids: number[] = [];
+  let sawSelf = false;
   for (const line of ps.stdout.split("\n")) {
     if (line.trim() === "") {
       continue;
@@ -80,9 +83,14 @@ async function byCommand(exec: Run, home: string, self: number) {
       throw scanRefused();
     }
     const pid = Number(match[1]);
-    if (pid !== self && namesHome(match[2] ?? "", home)) {
+    if (pid === self) {
+      sawSelf = true;
+    } else if (namesHome(match[2] ?? "", home)) {
       pids.push(pid);
     }
+  }
+  if (!sawSelf) {
+    throw scanRefused();
   }
   return pids;
 }
@@ -105,20 +113,26 @@ async function byDirectory(exec: Run, home: string, self: number) {
   }
   const pids: number[] = [];
   let pid: number | undefined;
+  let sawSelf = false;
   for (const line of lsof.stdout.split("\n")) {
     if (line.startsWith("p")) {
       pid = Number(line.slice(1));
       continue;
     }
     const cwd = line.startsWith("n") ? line.slice(1) : undefined;
-    if (
-      cwd !== undefined &&
-      pid !== undefined &&
-      pid !== self &&
-      (cwd === home || cwd.startsWith(`${home}/`))
-    ) {
+    if (cwd === undefined || pid === undefined) {
+      continue;
+    }
+    if (pid === self) {
+      sawSelf = true;
+    } else if (cwd === home || cwd.startsWith(`${home}/`)) {
       pids.push(pid);
     }
+  }
+  // lsof exits 1 both for "some process unreadable" and for a failed run: only a
+  // listing that shows this process's own working directory counts.
+  if (!sawSelf) {
+    throw scanRefused();
   }
   return pids;
 }

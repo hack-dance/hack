@@ -147,13 +147,16 @@ message names the exact command that releases the old mapping
 run it, then `hack up` again. The project's data stays in the old home. If the old
 run is still live or its stop cannot be proven, stop it with the old version first.
 
-If the old home was deleted, its records went with it. The same refusal then names
-the same release command: it releases the mapping once no process of this user
-still names the old home's path or works inside it, and keeps the mapping in an
-audit file beside it. The old home's data went with the home. A home that was moved
-rather than deleted, and started again from its new path, has processes that name
-only the new path, so this check cannot see it; in that case release again from the
-moved home afterwards.
+If the old home is no longer at its path (deleted, or on a disk that is not
+mounted), its records cannot be read there. The same refusal then names the same
+release command: it releases the mapping once no process of this user still names
+the old home's path or works inside it, and keeps the mapping in an audit file
+beside it. If the home is on a disk that is not mounted (the message names a missing
+directory under `/Volumes`, `/mnt` or `/media` when it can tell), mount it and stop
+the run there instead; its data is still on that disk. A home that was moved rather
+than deleted, and started again from its new path, has processes that name only the
+new path, so this check cannot see it; in that case release again from the moved
+home afterwards.
 
 ## Back to Compose
 

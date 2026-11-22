@@ -1153,7 +1153,11 @@ that names the owning home and what to do. The refusal has its own code,
   PID. Stop it with Ctrl-C in that `hack up`, or run `hack down` with the version
   that owns that home, then retry. Release refuses.
 - **Gone (HACK-2524).** The recorded path no longer holds that home: it is absent,
-  not a directory, or another directory. The home's records went with it.
+  not a directory, or another directory, so its records cannot be read there. An
+  absent path may be a disk that is not mounted: when the missing directory sits
+  directly under `/Volumes`, `/mnt`, `/media` or `/run/media/<user>`, inspection adds
+  `missingVolume` and the refusal says so. Mount it and stop the run there instead;
+  its data is still on that disk.
   Inspection reports `owner: "gone"` with a `selectionSha256`, and the refusal names
   the same release command. The release first lists this user's processes. It
   refuses, naming each PID, while any process names the old home's path in its

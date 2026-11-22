@@ -18,6 +18,7 @@ import {
   recoverNativeProjectFinalization,
 } from "../src/backends/native-project-finalization.ts";
 import {
+  describeNativeForeignHomeMapping,
   inspectNativeProjectRunMapping,
   loadNativeProjectRun as load,
   type NativeProjectRun,
@@ -317,6 +318,20 @@ test("a deleted owning home is named with the release and the moved-home residua
     load(f.b),
     "E_NATIVE_RUN_MAPPING_FOREIGN_HOME",
     "moved rather than deleted"
+  );
+  // An absent home may be a disk that is not mounted: never claim its data is gone.
+  expect(coded.message).toContain(
+    "If that home is on a disk that is not mounted, mount it and stop the run there instead."
+  );
+  expect(coded.message).not.toContain("went with");
+  expect(inspection.missingVolume).toBeUndefined();
+  expect(
+    describeNativeForeignHomeMapping({
+      inspection: { ...inspection, missingVolume: "/Volumes/External" },
+      branch: null,
+    })
+  ).toContain(
+    "It was under /Volumes/External, which looks like a disk that is not mounted: mount it and stop the run there instead."
   );
   expect(coded.detail).toMatchObject({
     owner: "gone",

@@ -24,7 +24,17 @@ test("processes naming the home or working inside it are found; prefixes and the
         "  104 /usr/bin/editor notes.txt",
         `   99 hack doctor --native-run-mapping release (scanner, names ${home})`,
       ].join("\n"),
-      ["p104", "fcwd", `n${home}/logs`, "p105", "fcwd", "n/tmp"].join("\n")
+      [
+        "p104",
+        "fcwd",
+        `n${home}/logs`,
+        "p105",
+        "fcwd",
+        "n/tmp",
+        "p99",
+        "fcwd",
+        "n/project",
+      ].join("\n")
     ),
   });
   expect(found).toEqual([
@@ -35,11 +45,17 @@ test("processes naming the home or working inside it are found; prefixes and the
 });
 
 test("an unreadable or unparsable listing refuses instead of reading as empty", async () => {
+  const self = "  99 hack doctor";
   for (const run of [
     listings("", ""),
     listings("garbage row", ""),
-    listings("  1 /sbin/launchd", "", { ps: 1, lsof: 0 }),
-    listings("  1 /sbin/launchd", "", { ps: 0, lsof: 2 }),
+    listings(`${self}\n  1 /sbin/launchd`, "p99\nfcwd\nn/", { ps: 1, lsof: 0 }),
+    listings(`${self}\n  1 /sbin/launchd`, "p99\nfcwd\nn/", { ps: 0, lsof: 2 }),
+    // A failed lsof run also exits 1: with no output it must not read as empty.
+    listings(`${self}\n  1 /sbin/launchd`, "", { ps: 0, lsof: 1 }),
+    // A listing that does not show this very process did not really run.
+    listings("  1 /sbin/launchd", "p99\nfcwd\nn/"),
+    listings(self, "p1\nfcwd\nn/"),
   ]) {
     await expect(nativeHomeProcesses(home, { self: 99, run })).rejects.toThrow(
       "cannot be proven gone"
@@ -49,7 +65,14 @@ test("an unreadable or unparsable listing refuses instead of reading as empty", 
   expect(
     await nativeHomeProcesses(home, {
       self: 99,
-      run: listings("  1 /sbin/launchd", "p1\nfcwd\nn/", { ps: 0, lsof: 1 }),
+      run: listings(
+        `${self}\n  1 /sbin/launchd`,
+        "p99\nfcwd\nn/\np1\nfcwd\nn/",
+        {
+          ps: 0,
+          lsof: 1,
+        }
+      ),
     })
   ).toEqual([]);
 });

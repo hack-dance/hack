@@ -209,7 +209,7 @@ function foreignHomeText(
       `Native run mapping released from another native home: ${head}` +
       `audit=${data.auditPath}\n` +
       (data.owner === "gone"
-        ? "That home is gone, and its retained data went with it. Run hack up to start this instance from this home. If that home was only moved and runs from its new path, release again from the moved home.\n"
+        ? "That home is not at its recorded path any more. Run hack up to start this instance from this home. If that home is on a disk that is not mounted, its data is still there; if it was moved and runs from its new path, release again from the moved home.\n"
         : "Its graph and retained data stay in that home. Run hack up to start this instance from this home.\n")
     );
   }

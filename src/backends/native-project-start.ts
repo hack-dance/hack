@@ -3231,10 +3231,7 @@ export async function startNativeProject(
   opts: NativeProjectStartOptions
 ): Promise<number> {
   let finish: (() => Promise<void>) | undefined;
-  const preflight = nativeStartupPreflight({
-    runtime: opts.runtime,
-    projectRoot: opts.scope.projectRoot,
-  });
+  const preflight = nativeStartupPreflight({ runtime: opts.runtime });
   try {
     return await startNativeProjectAttempt(
       opts,

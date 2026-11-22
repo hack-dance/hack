@@ -1,6 +1,6 @@
 import { accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
@@ -924,13 +924,7 @@ export async function invokeNativeRuntime(opts: {
   }
 }
 
-function spawnNativeRuntime(opts: {
-  readonly runtime: NativeRuntimeSelection;
-  readonly cwd: string;
-  readonly args: readonly string[];
-  readonly pipeInput: boolean;
-  readonly processGroup?: "inherit" | "own";
-}) {
+function closedRuntimeEnvironment(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of SYSTEM_ENVIRONMENT) {
     const value = process.env[key];
@@ -938,6 +932,18 @@ function spawnNativeRuntime(opts: {
       env[key] = value;
     }
   }
+  return env;
+}
+
+function spawnNativeRuntime(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly cwd: string;
+  readonly args: readonly string[];
+  readonly pipeInput: boolean;
+  readonly stepStoreArgs?: readonly string[];
+  readonly processGroup?: "inherit" | "own";
+}) {
+  const env = closedRuntimeEnvironment();
   // The two user settings a runtime request carries in its environment, both
   // for `runtime up` only; an invalid value throws here, before the
   // subprocess exists.
@@ -949,7 +955,7 @@ function spawnNativeRuntime(opts: {
       "--candidate-root",
       opts.runtime.home,
       // HACK-2461: the per-user step store, only with HACK_STEP_STORE=on.
-      ...stepStoreRuntimeArgs(),
+      ...(opts.stepStoreArgs ?? stepStoreRuntimeArgs()),
       ...opts.args,
     ],
     {
@@ -1018,22 +1024,36 @@ function startupIntent(args: readonly string[]): StartupIntent | undefined {
   }
 }
 
-const STARTUP_SESSION_MS = 600_000;
-const STARTUP_REQUEST_LIMIT = 128 * 1024;
+const STARTUP_MESSAGE_MAX_MS = 600_000;
+const STARTUP_SESSION_MS = 24 * 60 * 60 * 1000;
+const STARTUP_REQUEST_LIMIT = 16 * 1024 * 1024;
 const STARTUP_REPLY_LIMIT = MAX_OUTPUT_BYTES + 32;
 const STARTUP_PROTOCOL_UNAVAILABLE = Symbol("startup-preflight-unavailable");
+const STARTUP_STANDALONE = Symbol("startup-preflight-standalone");
+
+interface StartupOperation {
+  readonly intent: StartupIntent;
+  readonly cwd: string;
+  readonly environment: Record<string, string>;
+  readonly step_store: string | null;
+  readonly timeout_ms: number;
+}
 
 /** One ordered request in flight. A partial frame or failed transport is
  * terminal and is never replayed through either entry point. */
 export function nativeStartupPreflight(opts: {
   readonly runtime: NativeRuntimeSelection;
-  readonly projectRoot: string;
 }) {
   let session: ReturnType<typeof startPreflightChild> | undefined;
   let singleCalls = false;
   const invoke: typeof invokeNativeRuntime = async (request) => {
     const intent = startupIntent(request.args);
-    if (!intent || singleCalls) {
+    if (
+      !intent ||
+      singleCalls ||
+      request.runtime.binary !== opts.runtime.binary ||
+      request.runtime.home !== opts.runtime.home
+    ) {
       return await invokeNativeRuntime(request);
     }
     if (request.signal?.aborted) {
@@ -1042,19 +1062,42 @@ export function nativeStartupPreflight(opts: {
           "Native runtime request was canceled before admission; no request was started.",
       });
     }
-    session ??= startPreflightChild(opts);
-    const reply = await session.request(
+    const timeout = request.timeoutMs ?? 180_000;
+    if (
+      !Number.isSafeInteger(timeout) ||
+      timeout < 1 ||
+      timeout > STARTUP_MESSAGE_MAX_MS
+    ) {
+      throw new HackCliError({
+        code: "E_CONFIG_INVALID",
+        message: REQUEST_BUDGET_REFUSAL,
+      });
+    }
+    if (
+      request.args.some(
+        (arg) =>
+          arg.includes("\0") ||
+          (process.platform === "linux" && Buffer.byteLength(arg) >= 128 * 1024)
+      )
+    ) {
+      return await invokeNativeRuntime(request);
+    }
+    const operation: StartupOperation = {
       intent,
-      request.timeoutMs ?? 180_000,
-      request.signal
-    );
-    if (reply !== STARTUP_PROTOCOL_UNAVAILABLE) {
+      cwd: resolve(request.cwd),
+      environment: closedRuntimeEnvironment(),
+      step_store: stepStoreRuntimeArgs()[1] ?? null,
+      timeout_ms: timeout,
+    };
+    session ??= startPreflightChild(opts);
+    const reply = await session.request(operation, request.signal);
+    if (reply === STARTUP_PROTOCOL_UNAVAILABLE) {
+      // An older executor rejected the protocol before any operation was sent.
+      singleCalls = true;
+      await session.close();
+    } else if (reply !== STARTUP_STANDALONE) {
       return reply;
     }
-    // An older explicitly selected executor can reject only the protocol
-    // command. No operation was written to its pipe before negotiation.
-    singleCalls = true;
-    await session.close();
     return await invokeNativeRuntime(request);
   };
   return {
@@ -1067,13 +1110,13 @@ export function nativeStartupPreflight(opts: {
 
 function startPreflightChild(opts: {
   readonly runtime: NativeRuntimeSelection;
-  readonly projectRoot: string;
 }) {
   const child = spawnNativeRuntime({
     ...opts,
-    cwd: opts.projectRoot,
+    cwd: "/",
     args: ["up", "preflight", "--json"],
     pipeInput: true,
+    stepStoreArgs: [],
   });
   if (!child.stdin) {
     child.kill("SIGKILL");
@@ -1094,6 +1137,7 @@ function startPreflightChild(opts: {
   let offset = 0;
   let overallTimedOut = false;
   let negotiated = false;
+  let lastId = 0;
   const stop = () => {
     child.kill("SIGKILL");
     void output.cancel().catch(() => undefined);
@@ -1199,8 +1243,8 @@ function startPreflightChild(opts: {
     }
   }
 
-  function replyValue(reply: unknown): unknown {
-    if (isRecord(reply) && Object.keys(reply).length === 1) {
+  function replyValue(reply: unknown, id: number): unknown {
+    if (isRecord(reply) && reply.id === id && Object.keys(reply).length === 2) {
       if ("value" in reply) {
         return reply.value;
       }
@@ -1212,6 +1256,9 @@ function startPreflightChild(opts: {
           nativeFailureFromReply(reply.error, false)
         );
       }
+      if (reply.standalone === true) {
+        return STARTUP_STANDALONE;
+      }
     }
     stop();
     throw new ClosedCliError(
@@ -1219,25 +1266,13 @@ function startPreflightChild(opts: {
     );
   }
 
-  async function request(
-    intent: StartupIntent,
-    timeoutMs: number,
-    signal?: AbortSignal
-  ) {
-    const body = new TextEncoder().encode(
-      JSON.stringify({ timeout_ms: timeoutMs, intent })
-    );
-    if (
-      !Number.isSafeInteger(timeoutMs) ||
-      timeoutMs < 1 ||
-      timeoutMs > STARTUP_SESSION_MS ||
-      body.length > STARTUP_REQUEST_LIMIT
-    ) {
-      throw new HackCliError({
-        code: "E_CONFIG_INVALID",
-        message: REQUEST_BUDGET_REFUSAL,
-      });
+  async function request(operation: StartupOperation, signal?: AbortSignal) {
+    const id = lastId + 1;
+    const body = new TextEncoder().encode(JSON.stringify({ ...operation, id }));
+    if (body.length > STARTUP_REQUEST_LIMIT) {
+      return STARTUP_STANDALONE;
     }
+    lastId = id;
     const header = new Uint8Array(4);
     new DataView(header.buffer).setUint32(0, body.length);
     let timedOut = false;
@@ -1245,7 +1280,7 @@ function startPreflightChild(opts: {
     const timer = setTimeout(() => {
       timedOut = true;
       stop();
-    }, timeoutMs);
+    }, operation.timeout_ms);
     signal?.addEventListener("abort", stop, { once: true });
     let reply: unknown;
     try {
@@ -1266,7 +1301,7 @@ function startPreflightChild(opts: {
     if (expired()) {
       return completionResponse(new Uint8Array(), 2, true, undefined);
     }
-    return replyValue(reply);
+    return replyValue(reply, id);
   }
 
   async function close(): Promise<void> {

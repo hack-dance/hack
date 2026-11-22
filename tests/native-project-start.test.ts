@@ -6766,3 +6766,155 @@ for (const [name, hotReload, expected] of [
     ).toEqual(expected ? [renderNativeHotReloadNotice(expected)] : []);
   });
 }
+
+test("warm-pool startup counts real runtime launches from preflight through final inspection", async () => {
+  async function count(staged: boolean) {
+    const { opts } = await fixture(false);
+    const { binary, home } = opts.runtime;
+    const trace = join(home, "launches");
+    const ready = join(home, "ready");
+    const activeRun = "1".repeat(32);
+    const retained: NativeProjectRun = {
+      run: activeRun,
+      owner: "c".repeat(32),
+      namespace: "b".repeat(64),
+      planId: "a".repeat(64),
+      effectiveEnvName: null,
+      profiles: [],
+      aws: null,
+    };
+    await Bun.write(
+      binary,
+      `#!${process.execPath}
+import { appendFileSync, existsSync, readSync, writeSync } from "node:fs";
+const argv = process.argv.slice(2);
+const [group, action] = argv.slice(2);
+appendFileSync(${JSON.stringify(trace)}, group + " " + action + "\\n");
+const retained = ${JSON.stringify(retained)};
+function answer(operation, arg) {
+  switch (operation) {
+    case "retained_preflight": return ${JSON.stringify(retainedPreflight(retained))};
+    case "inspect": {
+      const value = ${JSON.stringify(stoppedGraph(retained))};
+      value.receipt.run = arg;
+      if (existsSync(${JSON.stringify(ready)})) {
+        value.receipt.phase = "ready-observed";
+        value.observations["container:web"].state = "running";
+      }
+      return value;
+    }
+    case "check_project_share": return { source_admitted: true, pool_initialized: true };
+    case "source_size": return ${JSON.stringify(nativeSourceSizeReceipt())};
+    case "admit_image": return { reference: arg, kind: "docker_hub" };
+    case "ensure_image": return { image_id: "sha256:" + "e".repeat(64) };
+    case "restore_selection": return {...retained, plan: retained.planId, generation: "2".repeat(64)};
+    default: return {};
+  }
+}
+function read(buffer) {
+  let offset = 0;
+  while (offset < buffer.length) {
+    const length = readSync(0, buffer, offset, buffer.length - offset, null);
+    if (length === 0) return false;
+    offset += length;
+  }
+  return true;
+}
+const header = Buffer.alloc(4);
+function send(reply) {
+  const body = Buffer.from(JSON.stringify(reply));
+  header.writeUInt32BE(body.length);
+  writeSync(1, header);
+  writeSync(1, body);
+}
+if (group === "up" && action === "preflight") {
+  send({version: 1});
+  while (read(header)) {
+    const body = Buffer.alloc(header.readUInt32BE());
+    if (!read(body)) process.exit(2);
+    const {id, intent} = JSON.parse(body);
+    send({id, value: answer(intent.operation, intent.reference ?? intent.run)});
+  }
+} else {
+  console.log(JSON.stringify(answer(action.replaceAll("-", "_"), argv[5])));
+}
+`
+    );
+    await chmod(binary, 0o700);
+    opts.dependencies.load = async () => retained;
+    await acknowledgeRetainedFrontend(opts.scope, retained);
+    if (staged) {
+      Reflect.deleteProperty(opts.dependencies, "invoke");
+    } else {
+      opts.dependencies.invoke = invokeNativeRuntime;
+    }
+    const prepare = opts.dependencies.prepare!;
+    opts.dependencies.prepare = async (request) => ({
+      ...(await prepare(request)),
+      normalizedComposeJson: JSON.stringify({
+        services: {
+          web: { image: "alpine:3.21", volumes: ["./src:/data"] },
+          db: { image: "busybox:1.36" },
+        },
+      }),
+    });
+    const request = (args: string[]) => ({
+      runtime: opts.runtime,
+      cwd: home,
+      args,
+    });
+    opts.dependencies.staticReview = async ({
+      invoke = invokeNativeRuntime,
+    }) => {
+      await invoke(request(["project", "plan", "--json"]));
+      await invoke(
+        request(["project", "plan", "--normalized-file", "selected", "--json"])
+      );
+      return undefined;
+    };
+    const review = opts.dependencies.review!;
+    opts.dependencies.review = async (input) => {
+      await invokeNativeRuntime(request(["project", "plan", "--json"]));
+      return await review(input);
+    };
+    const serve = opts.dependencies.serve!;
+    opts.dependencies.serve = async (input) => {
+      await invokeNativeRuntime(request(["graph", "serve-restore", "--json"]));
+      try {
+        await Bun.write(ready, "");
+        return await serve(input);
+      } finally {
+        await rm(ready);
+      }
+    };
+    expect(await startNativeProject(opts)).toBe(0);
+    return (await Bun.file(trace).text()).trim().split("\n");
+  }
+
+  const standalone = await count(false);
+  const staged = await count(true);
+  expect(standalone.slice(0, 8)).toEqual([
+    "graph retained-preflight",
+    "graph inspect",
+    "project plan",
+    "project plan",
+    "runtime check-project-share",
+    "project source-size",
+    "runtime admit-image",
+    "runtime admit-image",
+  ]);
+  expect(standalone.slice(8)).toEqual([
+    "runtime up",
+    "graph inspect",
+    "runtime ensure-image",
+    "runtime ensure-image",
+    "project plan",
+    "graph restore-selection",
+    "graph serve-restore",
+    "graph inspect",
+    "graph inspect",
+  ]);
+  expect(staged).toEqual(["up preflight", ...standalone.slice(8)]);
+  expect([standalone.length, staged.length]).toEqual([17, 10]);
+  expect(standalone.at(-1)).toBe("graph inspect");
+}, 20_000);

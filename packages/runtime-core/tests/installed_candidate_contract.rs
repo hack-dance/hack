@@ -463,6 +463,14 @@ fn delivery_context_admits_the_full_compose_budget_and_oversized_files_refuse_be
     }
 }
 
+fn startup_request(id: u32, cwd: &Path, intent: &Value) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "id": id, "cwd": cwd, "environment": {}, "step_store": null,
+        "timeout_ms": 5000, "intent": intent,
+    }))
+    .unwrap()
+}
+
 fn read_startup_frame(input: &mut impl std::io::Read) -> Vec<u8> {
     let mut length = [0; 4];
     input.read_exact(&mut length).unwrap();
@@ -474,7 +482,7 @@ fn read_startup_frame(input: &mut impl std::io::Read) -> Vec<u8> {
 #[test]
 fn startup_preflight_matches_one_shot_bytes_and_launches_once() {
     use serde_json::json;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::process::Stdio;
 
     let fixture = Fixture::new();
@@ -506,6 +514,7 @@ fn startup_preflight_matches_one_shot_bytes_and_launches_once() {
     .unwrap();
     let project = cwd.to_str().unwrap();
     let run = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let oversized_image = "a".repeat(131_040);
     let cases = [
         (
             vec![
@@ -588,6 +597,16 @@ fn startup_preflight_matches_one_shot_bytes_and_launches_once() {
             json!({"operation":"admit_image","reference":"invalid image","policy":[]}),
         ),
         (
+            vec![
+                "runtime",
+                "admit-image",
+                "--reference",
+                &oversized_image,
+                "--json",
+            ],
+            json!({"operation":"admit_image","reference":oversized_image,"policy":[]}),
+        ),
+        (
             vec!["graph", "retained-preflight", "--run-id", run, "--json"],
             json!({"operation":"retained_preflight","run":run}),
         ),
@@ -607,34 +626,51 @@ fn startup_preflight_matches_one_shot_bytes_and_launches_once() {
         .args(["up", "preflight", "--json"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::null())
         .spawn()
         .unwrap();
     let mut input = stream.stdin.take().unwrap();
     let mut output = stream.stdout.take().unwrap();
     assert_eq!(read_startup_frame(&mut output), br#"{"version":1}"#);
-    for ((_, intent), old) in cases.iter().zip(expected) {
-        let request = serde_json::to_vec(&json!({"timeout_ms":5000,"intent":intent})).unwrap();
+    for (index, ((_, intent), old)) in cases.iter().zip(expected).enumerate() {
+        let id = u32::try_from(index + 1).unwrap();
+        let request = startup_request(id, &cwd, intent);
         input
             .write_all(&u32::try_from(request.len()).unwrap().to_be_bytes())
             .unwrap();
         input.write_all(&request).unwrap();
         let reply = read_startup_frame(&mut output);
         let mut same = if old.status.success() {
-            let mut same = b"{\"value\":".to_vec();
+            let mut same = format!(r#"{{"id":{id},"value":"#).into_bytes();
             same.extend(old.stdout);
             same
         } else {
             assert_eq!(old.status.code(), Some(2));
-            let mut same = b"{\"error\":".to_vec();
+            let mut same = format!(r#"{{"id":{id},"error":"#).into_bytes();
             same.extend(old.stderr.strip_suffix(b"\n").unwrap());
             same
         };
         same.push(b'}');
-        assert_eq!(reply, same, "{intent}");
+        assert_eq!(reply, same, "operation {}", intent["operation"]);
     }
+    let next = u32::try_from(cases.len() + 1).unwrap();
+    let absent = startup_request(next, &cwd.join("missing"), &cases[0].1);
+    input
+        .write_all(&u32::try_from(absent.len()).unwrap().to_be_bytes())
+        .unwrap();
+    input.write_all(&absent).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&read_startup_frame(&mut output)).unwrap(),
+        json!({"id":next,"standalone":true})
+    );
+    let duplicate = startup_request(next, &cwd, &cases[0].1);
+    input
+        .write_all(&u32::try_from(duplicate.len()).unwrap().to_be_bytes())
+        .unwrap();
+    input.write_all(&duplicate).unwrap();
+    assert_eq!(output.read(&mut [0]).unwrap(), 0);
     drop(input);
-    assert!(stream.wait().unwrap().success());
+    assert_eq!(stream.wait().unwrap().code(), Some(2));
     assert_eq!(fs::read(&count).unwrap(), b"x");
 }
 
@@ -650,6 +686,7 @@ fn startup_preflight_frontend_death_retires_the_runtime() {
             .arg("--candidate-root")
             .arg(&home)
             .args(["up", "preflight", "--json"])
+            .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -657,11 +694,15 @@ fn startup_preflight_frontend_death_retires_the_runtime() {
         let mut input = runtime.stdin.take().unwrap();
         let mut output = runtime.stdout.take().unwrap();
         assert_eq!(read_startup_frame(&mut output), br#"{"version":1}"#);
-        let request = br#"{"timeout_ms":5000,"intent":{"operation":"admit_image","reference":"alpine:3.21","policy":[]}}"#;
+        let request = startup_request(
+            1,
+            Path::new(&home),
+            &serde_json::json!({"operation":"admit_image","reference":"alpine:3.21","policy":[]}),
+        );
         input
             .write_all(&u32::try_from(request.len()).unwrap().to_be_bytes())
             .unwrap();
-        input.write_all(request).unwrap();
+        input.write_all(&request).unwrap();
         let reply = read_startup_frame(&mut output);
         assert!(serde_json::from_slice::<Value>(&reply).unwrap()["value"].is_object());
         input.write_all(&[0]).unwrap();
@@ -673,7 +714,7 @@ fn startup_preflight_frontend_death_retires_the_runtime() {
 
     let fixture = Fixture::new();
     let home = fixture.directory("native");
-    let output = Command::new(&std::env::current_exe().unwrap())
+    let output = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "startup_preflight_frontend_death_retires_the_runtime",

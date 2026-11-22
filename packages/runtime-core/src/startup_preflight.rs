@@ -6,7 +6,7 @@ use hack_runtime_core::{CandidateError, provider};
 use serde::Deserialize;
 use std::{
     io::{self, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -14,18 +14,26 @@ use std::{
     time::Instant,
 };
 
-const REQUEST_MAX: usize = 128 * 1024;
+// A legacy argv can be up to 2 MiB on Linux. JSON may encode each
+// byte as six characters. The frontend uses a one-shot for larger input.
+const REQUEST_MAX: usize = 16 * 1024 * 1024;
 // Keep the same budgets as standalone stdout and stderr. The envelope
 // is transport overhead and does not count against an operation's JSON.
 const STDOUT_MAX: usize = 16 * 1024 * 1024;
 const STDERR_MAX: usize = 1024 * 1024;
 const REPLY_MAX: usize = STDOUT_MAX + 32;
-const SESSION_MS: u64 = 600_000;
+const MESSAGE_MAX_MS: u64 = 600_000;
+const SESSION_MS: u64 = 24 * 60 * 60 * 1000;
+const SYSTEM_ENVIRONMENT: [&str; 5] = ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
+    id: u32,
     timeout_ms: u64,
+    cwd: PathBuf,
+    step_store: Option<PathBuf>,
+    environment: std::collections::BTreeMap<String, String>,
     intent: Intent,
 }
 
@@ -62,54 +70,94 @@ fn invalid() -> CandidateError {
 }
 
 impl Intent {
-    fn execute(self, root: &Path, output: &mut Vec<u8>) -> Result<(), CandidateError> {
+    fn arguments(&self) -> Vec<&str> {
+        match self {
+            Self::RetainedPreflight { run } => {
+                vec!["graph", "retained-preflight", "--run-id", run, "--json"]
+            }
+            Self::Inspect { run } => vec!["graph", "inspect", "--run-id", run, "--json"],
+            Self::Plan { options } => ["project", "plan"]
+                .into_iter()
+                .chain(options.iter().map(String::as_str))
+                .collect(),
+            Self::CheckProjectShare { project } => vec![
+                "runtime",
+                "check-project-share",
+                "--project-share",
+                project,
+                "--unfiltered-source",
+                "--json",
+            ],
+            Self::SourceSize { project } => {
+                vec!["project", "source-size", "--project", project, "--json"]
+            }
+            Self::AdmitImage { reference, policy } => {
+                ["runtime", "admit-image", "--reference", reference, "--json"]
+                    .into_iter()
+                    .chain(policy.iter().map(String::as_str))
+                    .collect()
+            }
+        }
+    }
+
+    fn execute(
+        &self,
+        root: &Path,
+        arguments: &[&str],
+        output: &mut Vec<u8>,
+    ) -> Result<(), CandidateError> {
         let root = &resolve_candidate_root(root)?;
         match self {
-            Self::RetainedPreflight { run } => write_json(
+            Self::RetainedPreflight { .. } | Self::Inspect { .. } => write_json(
                 output,
-                &graph_cli::command(
-                    &discover_candidate(root)?,
-                    &["retained-preflight", "--run-id", &run, "--json"],
-                )?,
+                &graph_cli::command(&discover_candidate(root)?, &arguments[1..])?,
             ),
-            Self::Inspect { run } => write_json(
-                output,
-                &graph_cli::command(
-                    &discover_candidate(root)?,
-                    &["inspect", "--run-id", &run, "--json"],
-                )?,
-            ),
-            Self::Plan { options } => {
-                let mut args = vec!["plan"];
-                // The existing plan parser owns option validation. Require JSON
-                // output so the handler cannot write text onto the control stream.
-                if options.last().is_none_or(|arg| arg != "--json") {
-                    return Err(invalid());
-                }
-                args.extend(options.iter().map(String::as_str));
-                project_command(&discover_candidate(root)?, &args, output, true)
+            Self::Plan { .. } | Self::SourceSize { .. } => {
+                project_command(&discover_candidate(root)?, &arguments[1..], output, true)
             }
             Self::CheckProjectShare { project } => {
-                let share = provider::ProjectShareIntent::approve(Path::new(&project), true)?;
+                let share = provider::ProjectShareIntent::approve(Path::new(project), true)?;
                 write_json(
                     output,
                     &provider::check_project_share(&discover_candidate(root)?, &share)?,
                 )
             }
-            Self::SourceSize { project } => project_command(
-                &discover_candidate(root)?,
-                &["source-size", "--project", &project, "--json"],
+            Self::AdmitImage { reference, .. } => write_json(
                 output,
-                true,
-            ),
-            Self::AdmitImage { reference, policy } => write_json(
-                output,
-                &provider::registry_image::admit(
-                    &reference,
-                    &image_policy(&policy.iter().map(String::as_str).collect::<Vec<_>>())?,
-                )?,
+                &provider::registry_image::admit(reference, &image_policy(&arguments[5..])?)?,
             ),
         }
+    }
+}
+
+impl Request {
+    fn admits_process_context(&self) -> bool {
+        self.environment
+            .keys()
+            .all(|key| SYSTEM_ENVIRONMENT.contains(&key.as_str()))
+            && SYSTEM_ENVIRONMENT.iter().all(|&key| {
+                std::env::var_os(key).as_deref()
+                    == self.environment.get(key).map(std::ffi::OsStr::new)
+            })
+            && self.cwd.is_absolute()
+            && std::env::set_current_dir(&self.cwd).is_ok()
+    }
+
+    fn execute(self, root: &Path, output: &mut Vec<u8>) -> Result<(), CandidateError> {
+        let arguments = self.intent.arguments();
+        let mut label_arguments = Vec::with_capacity(arguments.len() + 4);
+        label_arguments.extend(["--candidate-root", root.to_str().ok_or_else(invalid)?]);
+        if let Some(store) = &self.step_store {
+            label_arguments.extend(["--step-store", store.to_str().ok_or_else(invalid)?]);
+        }
+        label_arguments.extend(arguments.iter().copied());
+        provider::with_operation_arguments(&label_arguments, || {
+            hack_runtime_core::with_request_state_roots(|| {
+                hack_runtime_core::store::with_request_root(self.step_store.clone(), || {
+                    self.intent.execute(root, &arguments, output)
+                })
+            })
+        })
     }
 }
 
@@ -171,21 +219,36 @@ pub(super) fn run(root: &Path) -> Result<(), CandidateError> {
     let mut input = io::stdin();
     let mut output = io::stdout();
     send(&mut output, br#"{"version":1}"#)?;
+    let mut last_id = 0u32;
     while let Some(body) = frame(&mut input)? {
         let request: Request = serde_json::from_slice(&body).map_err(|_| invalid())?;
-        if !(1..=SESSION_MS).contains(&request.timeout_ms) {
+        if last_id.checked_add(1) != Some(request.id)
+            || !(1..=MESSAGE_MAX_MS).contains(&request.timeout_ms)
+        {
             return Err(invalid());
         }
+        last_id = request.id;
         let elapsed = u64::try_from(start.elapsed().as_millis()).unwrap_or(SESSION_MS);
         // The caller applies the same request timeout from before writing. A
         // server backstop also bounds execution if the client stops progressing.
-        deadline.store(
-            SESSION_MS.min(elapsed + request.timeout_ms + 100),
-            Ordering::Relaxed,
-        );
-        let mut reply = b"{\"value\":".to_vec();
-        match request.intent.execute(root, &mut reply) {
-            Ok(()) if reply.len() - b"{\"value\":".len() > STDOUT_MAX => {
+        deadline.store(elapsed + request.timeout_ms + 100, Ordering::Relaxed);
+        if !request.admits_process_context() {
+            send(
+                &mut output,
+                format!(r#"{{"id":{last_id},"standalone":true}}"#).as_bytes(),
+            )?;
+            deadline.store(SESSION_MS, Ordering::Relaxed);
+            continue;
+        }
+        let prefix = format!(r#"{{"id":{last_id},"value":"#);
+        let mut reply = prefix.as_bytes().to_vec();
+        let result = request.execute(root, &mut reply);
+        // Only this pipe worker uses process cwd. Its watchdog observes stdin
+        // and never uses paths. A future socket worker can resolve the same
+        // request's paths without changing process cwd.
+        std::env::set_current_dir("/").map_err(|_| invalid())?;
+        match result {
+            Ok(()) if reply.len() - prefix.len() > STDOUT_MAX => {
                 // The client sees the oversized frame header and uses its
                 // standalone output-budget diagnostic without reading a body.
                 output
@@ -196,11 +259,12 @@ pub(super) fn run(root: &Path) -> Result<(), CandidateError> {
             }
             Ok(()) => {}
             Err(error) => {
-                reply = b"{\"error\":".to_vec();
+                let prefix = format!(r#"{{"id":{last_id},"error":"#);
+                reply = prefix.as_bytes().to_vec();
                 serde_json::to_writer(&mut reply, &error).map_err(|_| invalid())?;
                 // Standalone stderr has a trailing newline.
-                if reply.len() - b"{\"error\":".len() >= STDERR_MAX {
-                    reply = b"{\"error\":null".to_vec();
+                if reply.len() - prefix.len() >= STDERR_MAX {
+                    reply = format!("{prefix}null").into_bytes();
                 }
             }
         }

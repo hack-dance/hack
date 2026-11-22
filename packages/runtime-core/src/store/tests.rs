@@ -1310,7 +1310,10 @@ fn step_store_argument_is_optional_and_needs_an_absolute_directory() {
     // The only call that records a directory (it is process-wide, set once).
     let rest = take_step_store_argument(&["--step-store", "/tmp/hack-store-arg", "info"]).unwrap();
     assert_eq!(rest, ["info"]);
-    assert_eq!(configured_root(), Some(Path::new("/tmp/hack-store-arg")));
+    assert_eq!(
+        configured_root().as_deref(),
+        Some(Path::new("/tmp/hack-store-arg"))
+    );
     assert!(take_step_store_argument(&["--step-store", "/tmp/other", "info"]).is_err());
 }
 
@@ -1559,4 +1562,23 @@ fn the_current_build_uses_the_running_images_embedded_identity() {
             env!("HACK_RUNTIME_BUILD_ID"),
         )
     );
+}
+
+#[test]
+fn request_store_selection_is_independent_of_previous_requests() {
+    let first = PathBuf::from("/tmp/example-store-a");
+    let second = PathBuf::from("/tmp/example-store-b");
+    super::with_request_root(Some(first.clone()), || {
+        assert_eq!(super::configured_root(), Some(first.clone()));
+        super::with_request_root(Some(second.clone()), || {
+            assert_eq!(super::configured_root(), Some(second));
+            Ok(())
+        })?;
+        assert_eq!(super::configured_root(), Some(first));
+        super::with_request_root(None, || {
+            assert!(super::configured_root().is_none());
+            Ok(())
+        })
+    })
+    .unwrap();
 }

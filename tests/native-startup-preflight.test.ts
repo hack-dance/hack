@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-type WorkerMode = "framed" | "older" | "crash";
+type WorkerMode = "framed" | "older" | "crash" | "context";
 
 const client = new URL(
   "../src/backends/native-runtime-client.ts",
@@ -11,8 +11,11 @@ const client = new URL(
 ).pathname;
 
 async function runPreflight(mode: WorkerMode) {
-  const root = await mkdtemp(join(tmpdir(), "hack-startup-preflight-"));
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-startup-preflight-"))
+  );
   try {
+    await mkdir(join(root, "different-cwd"));
     const binary = join(root, "runtime");
     const launches = join(root, "launches");
     const frontend = join(root, "frontend.ts");
@@ -45,16 +48,26 @@ if (process.argv.includes("preflight")) {
   while (read(header)) {
     const request = Buffer.alloc(header.readUInt32BE());
     if (!read(request)) process.exit(2);
-    const { intent } = JSON.parse(request);
+    const { id, intent, cwd, step_store } = JSON.parse(request);
+    if (${JSON.stringify(mode)} === "context") {
+      const reply = Buffer.from(JSON.stringify({id, value: [cwd, step_store]}));
+      header.writeUInt32BE(reply.length);
+      writeSync(1, header);
+      writeSync(1, reply);
+      continue;
+    }
     if (${JSON.stringify(mode)} === "crash" && intent.reference === "broken") {
       console.error(JSON.stringify(error));
       process.exit(2);
     }
-    const reply = Buffer.from(JSON.stringify(intent.reference === "broken" ? {error} : {value}));
+    const reply = Buffer.from(JSON.stringify(intent.reference === "broken" ? {id, error} : {id, value}));
     header.writeUInt32BE(reply.length);
     writeSync(1, header);
     writeSync(1, reply);
   }
+} else if (${JSON.stringify(mode)} === "context") {
+  const index = process.argv.indexOf("--step-store");
+  console.log(JSON.stringify([process.cwd(), index < 0 ? null : process.argv[index + 1]]));
 } else if (process.argv.includes("broken")) {
   console.error(JSON.stringify(error));
   process.exit(2);
@@ -69,18 +82,25 @@ if (process.argv.includes("preflight")) {
       `import { invokeNativeRuntime, nativeStartupPreflight } from ${JSON.stringify(client)};
 const [binary, projectRoot] = process.argv.slice(2);
 const runtime = { binary, home: projectRoot };
-const session = nativeStartupPreflight({ runtime, projectRoot });
+const session = nativeStartupPreflight({ runtime });
 const result = [];
 try {
   for (const invoke of [invokeNativeRuntime, session.invoke]) {
     for (const reference of ["alpine", "busybox", "broken"]) {
+      if (${JSON.stringify(mode)} === "context") {
+        process.env.HACK_STEP_STORE = reference === "busybox" ? "on" : "off";
+        if (reference === "busybox") await Bun.sleep(1200);
+      }
       try {
         result.push(await invoke({
-          runtime, cwd: projectRoot,
+          runtime, cwd: ${JSON.stringify(mode)} === "context" && reference === "busybox"
+            ? projectRoot + "/different-cwd" : projectRoot,
           args: ["runtime", "admit-image", "--reference", reference, "--json"],
+          timeoutMs: ${JSON.stringify(mode)} === "context" && reference === "broken"
+            ? 600001 : (${JSON.stringify(mode)} === "context" ? 1000 : undefined),
         }));
       } catch (error) {
-        result.push({ message: error.message, code: error.nativeCode, native: error.nativeMessage });
+        result.push({ message: error.message, code: error.nativeCode ?? error.code, native: error.nativeMessage });
       }
     }
   }
@@ -99,6 +119,7 @@ console.log(JSON.stringify(result));
         USER: "fixture",
         LOGNAME: "fixture",
         DOCKER_HOST: "unix:///nonexistent",
+        HACK_HOME: root,
         HACK_DAEMON_AUTOSTART_DISABLE: "1",
         HACK_NO_INTERACTIVE: "1",
       },
@@ -140,4 +161,16 @@ test("a crash after negotiation keeps the one-shot diagnostic without replaying"
   const { replies, launches } = await runPreflight("crash");
   expect(replies.slice(0, 3)).toEqual(replies.slice(3));
   expect(launches).toBe("xxxx");
+});
+
+test("each staged request carries its working directory and current step-store setting", async () => {
+  const { replies, launches } = await runPreflight("context");
+  expect(replies.slice(0, 3)).toEqual(replies.slice(3));
+  expect(replies[0]).toEqual([expect.any(String), null]);
+  expect(replies[1]).toEqual([
+    expect.stringMatching(/different-cwd$/),
+    expect.stringMatching(/store$/),
+  ]);
+  expect(replies[2]).toMatchObject({ code: "E_CONFIG_INVALID" });
+  expect(launches).toBe("xxx");
 });

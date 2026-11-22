@@ -10653,9 +10653,9 @@ async function readPsServiceAddresses(opts: {
   return composeServiceAddresses({
     composeYaml,
     branch,
-    baseHosts: [devHost, aliasHost].filter((host): host is string =>
-      Boolean(host)
-    ),
+    baseHosts: devHost
+      ? resolveProjectRouteBaseHosts({ devHost, aliasHost })
+      : [],
     httpsPort: opts.native
       ? await resolveNativeProjectHttpsPort({ project, cfg })
       : null,

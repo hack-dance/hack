@@ -55,7 +55,7 @@ async function fixture(opts: { readonly nativeCode?: string }) {
       services: {
         web: {
           image: "docker.io/library/busybox:1.37",
-          labels: { caddy: "sample.hack.local" },
+          labels: { caddy: "sample.hack" },
         },
         worker: { image: "docker.io/library/busybox:1.37" },
       },
@@ -198,9 +198,9 @@ test("native ps keeps the complete address on a narrow plain terminal", async ()
   expect(result.code).toBe(0);
   expect(result.stdout).toBe(
     [
-      "SERVICE  ADDRESS                          STATE",
-      "web      https://alpha.sample.hack.local  healthy",
-      "worker   no address                       exited (1)",
+      "SERVICE  ADDRESS                    STATE",
+      "web      https://alpha.sample.hack  healthy",
+      "worker   no address                 exited (1)",
       "",
       "2 services",
       "",
@@ -221,9 +221,7 @@ test("native ps reports the configured HTTPS frontend port", async () => {
     },
   });
   expect(result.code).toBe(0);
-  expect(result.stdout).toContain(
-    "https://alpha.sample.hack.local:18443  healthy"
-  );
+  expect(result.stdout).toContain("https://alpha.sample.hack:18443  healthy");
 });
 
 test("native ps --json returns the ok envelope with runtime_not_running", async () => {

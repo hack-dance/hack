@@ -247,6 +247,9 @@ services:
   insecure:
     labels:
       caddy: http://only.sample.hack.local
+  templated:
+    labels:
+      caddy: '{{ index .Labels "domain" }}'
   numbered-map:
     labels:
       caddy_0.reverse_proxy: "{{upstreams}}"

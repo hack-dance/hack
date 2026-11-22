@@ -468,37 +468,61 @@ fn selected_evidence(
     pinned_file(&ca, &journal.ca, false)?;
     Ok((config, lease, endpoint, selected_socket))
 }
-fn prove_quiescence(config: &Configuration, socket: Option<&Path>) -> Result<(), CandidateError> {
-    let self_binary =
-        fs::canonicalize(std::env::current_exe().map_err(|_| refused())?).map_err(|_| refused())?;
-    for (path, hash) in [
-        (
-            &config.binding.frontend.binary,
-            &config.binding.frontend.sha256,
-        ),
-        (
-            &config.binding.runtime.binary,
-            &config.binding.runtime_sha256,
-        ),
-        (&config.binding.caddy_binary, &config.binding.caddy_sha256),
-    ] {
-        if https_recovery::executable_hash(path)? != *hash {
-            return Err(refused());
-        }
-    }
-    for binary in [
+/// The frontend argument that runs the shared owner; the same value as
+/// `NATIVE_HTTPS_OWNER_ARGUMENT` in `src/backends/native-https-owner-protocol.ts`.
+const OWNER_ARGUMENT: &str = "--internal-native-https-owner";
+/// How long an archive waits for an owner that is retiring itself (it checks its pool
+/// boot every few seconds; `native-https-owner-server.ts`) before refusing.
+const OWNER_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Whether the shared owner of `home` still runs: the frontend executable invoked with
+/// exactly the owner argument and this home's configuration path (how
+/// `spawnNativeHttpsOwner` starts it). The path is the original one even after the
+/// owner directory is archived, because a live owner keeps the argument it started with.
+fn owner_running(config: &Configuration, home: &Path) -> Result<bool, CandidateError> {
+    let configuration = home.join("native-https/shared-owner/configuration.json");
+    identity::invocation_running(
         &config.binding.frontend.binary,
-        &config.binding.runtime.binary,
-        &config.binding.caddy_binary,
-    ] {
-        if fs::canonicalize(binary).map_err(|_| refused())? == self_binary
-            || identity::executable_running(binary)?
-        {
-            return Err(refused());
-        }
+        &[OWNER_ARGUMENT.as_ref(), configuration.as_os_str()],
+    )
+}
+
+/// Quiescence of the recorded owner, proven without signaling anything:
+/// - no process runs this home's exact owner invocation;
+/// - the pinned Caddy executable runs nowhere (Caddy runs only under an owner);
+/// - the recorded control socket, if it still exists, refuses connections.
+///
+/// The caller separately proves the HTTPS port has no listener. Processes of the
+/// frontend or runtime executable with other arguments are not the owner: the CLI that
+/// asks for this archive and this runtime command are such processes, so requiring
+/// those executables to be absent could never succeed (HACK-2456, seen on a real VM).
+/// An absence proof needs no content hash; it holds after an in-place upgrade too.
+///
+/// Residual: a legacy CLI that ignores the admission lock could start an owner after
+/// this check; current-source starts are excluded by the admission lock held here.
+fn prove_quiescence(
+    config: &Configuration,
+    home: &Path,
+    socket: Option<&Path>,
+) -> Result<(), CandidateError> {
+    if owner_running(config, home)? || identity::executable_running(&config.binding.caddy_binary)? {
+        return Err(refused());
     }
     if let Some(socket) = socket {
         socket_dead(socket)?;
+    }
+    Ok(())
+}
+
+/// Wait, bounded, for an owner that is retiring itself after its pool boot ended. Only
+/// a running owner is waited for; every other check refuses at once.
+fn await_owner_exit(config: &Configuration, home: &Path) -> Result<(), CandidateError> {
+    let deadline = std::time::Instant::now() + OWNER_EXIT_WAIT;
+    while owner_running(config, home)? {
+        if std::time::Instant::now() >= deadline {
+            return Err(refused());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
     Ok(())
 }
@@ -745,7 +769,8 @@ pub fn archive(
         if !journal.current_boot.is_empty() && journal.current_boot != graph.current_boot() {
             return Err(refused());
         }
-        prove_quiescence(&config, socket.as_deref())?;
+        await_owner_exit(&config, home)?;
+        prove_quiescence(&config, home, socket.as_deref())?;
         let _ports = https_recovery::port_absent(config.binding.https_port)?;
         if !intent_written {
             let current = Journal {
@@ -759,12 +784,12 @@ pub fn archive(
             // barrier until a selected resume can prove the exact journal.
             intent_written = true;
             write_new(&paths.intent, &current, storage_id)?;
-            run_archive(&paths, &current, storage_id, &mut || {
+            run_archive(&paths, home, &current, storage_id, &mut || {
                 verify_admission(&paths, admission_id, lock_id, &admission_lock)?;
                 graph.verify(candidate)
             })?;
         } else {
-            run_archive(&paths, &journal, storage_id, &mut || {
+            run_archive(&paths, home, &journal, storage_id, &mut || {
                 verify_admission(&paths, admission_id, lock_id, &admission_lock)?;
                 graph.verify(candidate)
             })?;
@@ -791,6 +816,7 @@ pub fn archive(
 }
 fn run_archive(
     paths: &Paths,
+    home: &Path,
     journal: &Journal,
     storage_id: Inode,
     verify_graph: &mut impl FnMut() -> Result<(), CandidateError>,
@@ -798,7 +824,7 @@ fn run_archive(
     let intent_bytes = pinned_intent(paths, journal)?;
     if absent(&paths.complete)? {
         let (config, _, _, socket) = selected_evidence(paths, journal)?;
-        prove_quiescence(&config, socket.as_deref())?;
+        prove_quiescence(&config, home, socket.as_deref())?;
         verify_graph()?;
         if let (SocketEvidence::Present { path, parent, .. }, Some(selected)) =
             (&journal.socket, socket.as_ref())
@@ -809,14 +835,14 @@ fn run_archive(
             }
         }
         let (config, _, _, socket) = selected_evidence(paths, journal)?;
-        prove_quiescence(&config, socket.as_deref())?;
+        prove_quiescence(&config, home, socket.as_deref())?;
         verify_graph()?;
         if !absent(&paths.source)? {
             rename_exclusive(&paths.source, &paths.archive)?;
             sync_dir(&paths.storage, storage_id)?;
         }
         let (config, _, _, socket) = selected_evidence(paths, journal)?;
-        prove_quiescence(&config, socket.as_deref())?;
+        prove_quiescence(&config, home, socket.as_deref())?;
         verify_graph()?;
         let complete = serde_json::json!({"version":1,"intent_sha256":digest(&intent_bytes),"run":journal.run,
             "owner_generation":journal.owner_generation,"lease_id":journal.lease_id,
@@ -837,7 +863,7 @@ fn run_archive(
         return Err(refused());
     }
     let (config, _, _, socket) = selected_evidence(paths, journal)?;
-    prove_quiescence(&config, socket.as_deref())?;
+    prove_quiescence(&config, home, socket.as_deref())?;
     verify_graph()
 }
 fn pinned_intent(paths: &Paths, journal: &Journal) -> Result<Vec<u8>, CandidateError> {
@@ -853,3 +879,15 @@ fn pinned_intent(paths: &Paths, journal: &Journal) -> Result<Vec<u8>, CandidateE
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests;
+
+#[cfg(test)]
+mod owner_argument_tests {
+    #[test]
+    fn the_owner_argument_matches_the_frontend_protocol() {
+        let protocol = include_str!("../../../../src/backends/native-https-owner-protocol.ts");
+        assert!(protocol.contains(&format!(
+            "export const NATIVE_HTTPS_OWNER_ARGUMENT = \"{}\";",
+            super::OWNER_ARGUMENT
+        )));
+    }
+}

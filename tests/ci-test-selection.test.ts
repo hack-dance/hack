@@ -855,6 +855,8 @@ test("static guards stay in the selected Linux pool for an ordinary test diff", 
     graph: repoGraph,
   });
   expect(result.mode).toBe("selected");
+  const catalogGuard = "tests/project-task-catalog.test.ts";
+  expect(Object.hasOwn(STATIC_GUARD_TESTS, catalogGuard)).toBe(true);
   const guards = Object.keys(STATIC_GUARD_TESTS);
   expect(result.files).toEqual(expect.arrayContaining(guards));
   const pools = await classifyTestPools({ repoRoot, files: guards });

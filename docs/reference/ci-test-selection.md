@@ -35,6 +35,8 @@ selections under the existing policy. The workflow checks both sides of
 renames. Integration pushes continue to qualify Docker under the existing
 push policy. The static guard tests stay selected in the Linux pool for
 ordinary PRs, including when the selector classifies them as platform-sensitive.
+The task-catalog guard checks recipe provenance digests in `.hack/tasks.json`
+against the checkout.
 
 Both required names, test and docs site, always report. The named Docker fan-in
 passes an expected out-of-scope skip. Adding ci:mac enables the selected macOS

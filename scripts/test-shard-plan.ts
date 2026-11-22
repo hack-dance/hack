@@ -516,6 +516,8 @@ export const MACOS_POOL_FILES: Readonly<Record<string, string>> = {};
 export const STATIC_GUARD_TESTS: Readonly<Record<string, string>> = {
   "tests/sync-spawn-bound.test.ts":
     "Scans all tests and check scripts for unbounded synchronous processes",
+  "tests/project-task-catalog.test.ts":
+    "Verifies provenance digests of checked-in task recipe inputs",
   "tests/process-exit-holds.test.ts":
     "Scans source for long-running work without exit holds",
   "tests/cli-spawn-env-isolation.test.ts":

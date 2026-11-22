@@ -909,17 +909,20 @@ jobs:
           HACK_TEST_SELECTION: ${{ needs.changes.outputs.test_files }}
           HACK_TEST_DRAFT: ${{ needs.changes.outputs.draft }}
           HACK_TEST_DEFER_MACOS: ${{ needs.changes.outputs.defer_macos }}
-          HACK_TEST_SYMLINK_TMP: ${{ matrix.shard == 8 && runner.os == 'Linux' }}
+        run: bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD" --layout="$HACK_TEST_LAYOUT" --durations-out="$RUNNER_TEMP/test-shard-durations.json"
+      - name: Tests (symlinked TMPDIR)
+        if: matrix.shard == 8 && runner.os == 'Linux'
         shell: bash
         run: |
-          if [ "$HACK_TEST_SYMLINK_TMP" = "true" ]; then
-            root=$(mktemp -d "$RUNNER_TEMP/symlink-tmp.XXXXXX")
-            trap 'rm -rf -- "$root"' EXIT
-            mkdir "$root/physical"
-            ln -s "$root/physical" "$root/linked"
-            export TMPDIR="$root/linked"
-          fi
-          bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD" --layout="$HACK_TEST_LAYOUT" --durations-out="$RUNNER_TEMP/test-shard-durations.json"
+          root=$(mktemp -d "$RUNNER_TEMP/symlink-tmp.XXXXXX")
+          trap 'rm -rf -- "$root"' EXIT
+          mkdir "$root/physical"
+          ln -s "$root/physical" "$root/linked"
+          export TMPDIR="$root/linked"
+          HACK_TEST_SELECTION=$(cat scripts/test-shard-symlink-temp-files.json)
+          : "${HACK_TEST_SELECTION:?Missing symlinked TMPDIR test list}"
+          export HACK_TEST_SELECTION
+          bun scripts/test-shard.ts run --shard=1/1 --layout=full
       - name: Preserve measured file durations
         # Per-file seconds only; refresh scripts/test-shard-durations.json with
         # `bun scripts/test-shard.ts update-durations`.

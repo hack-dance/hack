@@ -19,11 +19,18 @@ import {
   resolveComposeDownTimeoutSeconds,
 } from "../src/lib/compose-down-budget.ts";
 import { classifyComposeStartupState } from "../src/lib/compose-startup-state.ts";
+import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
+import { setLoggerBackendOverride } from "../src/ui/logger.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const CLI_ENTRY = join(REPO_ROOT, "index.ts");
 const CLI_TIMEOUT_MS = 25_000;
+const HERMETIC_SYSTEM_PATH = "/usr/bin:/bin";
+
+function hermeticPath(binDir: string): string {
+  return `${binDir}:${HERMETIC_SYSTEM_PATH}`;
+}
 
 const tempDirs: string[] = [];
 
@@ -159,7 +166,7 @@ async function runCli(opts: {
       root: opts.cwd,
       home: opts.homeDir,
       env: {
-        PATH: `${opts.binDir}:${process.env.PATH ?? ""}`,
+        PATH: hermeticPath(opts.binDir),
         XDG_CONFIG_HOME: join(opts.homeDir, ".config"),
         HACK_GLOBAL_CONFIG_PATH: join(
           opts.homeDir,
@@ -507,7 +514,7 @@ describe("compose down stop timeout validation, argv, and cap", () => {
     // 1. Real low-cap enforcement through composeRuntimeBackend.down sets timedOut=true.
     await fixture.setDockerConfig({ downDelayMs: 5000, downExitCode: 0 });
     const previousPath = process.env.PATH;
-    process.env.PATH = `${fixture.binDir}:${previousPath ?? ""}`;
+    process.env.PATH = hermeticPath(fixture.binDir);
     let lowCapCode = 0;
     const lowCapOutcomes: Array<{
       readonly exitCode: number;
@@ -542,7 +549,7 @@ describe("compose down stop timeout validation, argv, and cap", () => {
 
     // 2. Child exiting 124 immediately does NOT set timedOut=true.
     await fixture.setDockerConfig({ downDelayMs: 0, downExitCode: 124 });
-    process.env.PATH = `${fixture.binDir}:${previousPath ?? ""}`;
+    process.env.PATH = hermeticPath(fixture.binDir);
     let selfExitCode = 0;
     const selfExitOutcomes: Array<{
       readonly exitCode: number;
@@ -604,30 +611,39 @@ describe("compose down stop timeout validation, argv, and cap", () => {
   }): Promise<{
     readonly exitCode: number;
     readonly stdout: string;
+    readonly stderr: string;
     readonly downCalls: readonly {
       readonly timeoutSeconds: number | undefined;
       readonly capMs: number | undefined;
     }[];
   }> {
-    const envOverrides: Record<string, string> = {
-      HOME: opts.fixture.homeDir,
-      HACK_HOME: join(opts.fixture.homeDir, ".hack"),
-      XDG_CONFIG_HOME: join(opts.fixture.homeDir, ".config"),
-      HACK_GLOBAL_CONFIG_PATH: join(
-        opts.fixture.homeDir,
-        ".hack",
-        "hack.config.json"
-      ),
-      HACK_NO_INTERACTIVE: "1",
-      HACK_RUNTIME_BACKEND: "compose",
-      HACK_LOGGER: "console",
-      PATH: `${opts.fixture.binDir}:${process.env.PATH ?? ""}`,
-    };
+    const isolatedEnv = privateCliEnv({
+      root: opts.fixture.root,
+      home: opts.fixture.homeDir,
+      env: {
+        PATH: hermeticPath(opts.fixture.binDir),
+        HACK_HOME: join(opts.fixture.homeDir, ".hack"),
+        XDG_CONFIG_HOME: join(opts.fixture.homeDir, ".config"),
+        HACK_GLOBAL_CONFIG_PATH: join(
+          opts.fixture.homeDir,
+          ".hack",
+          "hack.config.json"
+        ),
+        HACK_NO_INTERACTIVE: "1",
+        HACK_RUNTIME_BACKEND: "compose",
+        HACK_LOGGER: "console",
+      },
+    });
     const previousEnv = new Map<string, string | undefined>();
-    for (const [key, value] of Object.entries(envOverrides)) {
+    for (const key of Object.keys(process.env)) {
       previousEnv.set(key, process.env[key]);
+      delete process.env[key];
+    }
+    for (const [key, value] of Object.entries(isolatedEnv)) {
       process.env[key] = value;
     }
+    setLoggerBackendOverride({ backend: null });
+    resetGumPathCacheForTests();
 
     const downCalls: Array<{
       readonly timeoutSeconds: number | undefined;
@@ -646,12 +662,19 @@ describe("compose down stop timeout validation, argv, and cap", () => {
     );
 
     let stdout = "";
-    const originalWrite = process.stdout.write;
+    let stderr = "";
+    const originalStdoutWrite = process.stdout.write;
+    const originalStderrWrite = process.stderr.write;
     process.stdout.write = ((chunk: string | Uint8Array) => {
       stdout +=
         typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
       return true;
     }) as typeof process.stdout.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderr +=
+        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+      return true;
+    }) as typeof process.stderr.write;
 
     try {
       const input = {
@@ -687,10 +710,18 @@ describe("compose down stop timeout validation, argv, and cap", () => {
         },
       } as unknown as Parameters<typeof downCommand.handler>[0];
       const exitCode = await downCommand.handler(input);
-      return { exitCode, stdout, downCalls };
+      return { exitCode, stdout, stderr, downCalls };
     } finally {
-      process.stdout.write = originalWrite;
+      process.stdout.write = originalStdoutWrite;
+      process.stderr.write = originalStderrWrite;
       downSpy.mockRestore();
+      setLoggerBackendOverride({ backend: null });
+      resetGumPathCacheForTests();
+      for (const key of Object.keys(process.env)) {
+        if (!previousEnv.has(key)) {
+          delete process.env[key];
+        }
+      }
       for (const [key, previous] of previousEnv.entries()) {
         restoreEnv(key, previous);
       }
@@ -713,7 +744,11 @@ describe("compose down stop timeout validation, argv, and cap", () => {
       timeout: "60",
       json: true,
     });
-    expect(replicaRun.exitCode).toBe(0);
+    expect({
+      exitCode: replicaRun.exitCode,
+      stderr: replicaRun.stderr,
+      ...(replicaRun.exitCode === 0 ? {} : { stdout: replicaRun.stdout }),
+    }).toEqual({ exitCode: 0, stderr: "" });
     expect(replicaRun.downCalls).toEqual([
       { timeoutSeconds: 60, capMs: 90_000 },
     ]);
@@ -731,7 +766,11 @@ describe("compose down stop timeout validation, argv, and cap", () => {
       timeout: "60",
       json: true,
     });
-    expect(distinctRun.exitCode).toBe(0);
+    expect({
+      exitCode: distinctRun.exitCode,
+      stderr: distinctRun.stderr,
+      ...(distinctRun.exitCode === 0 ? {} : { stdout: distinctRun.stdout }),
+    }).toEqual({ exitCode: 0, stderr: "" });
     expect(distinctRun.downCalls).toEqual([
       { timeoutSeconds: 60, capMs: 210_000 },
     ]);
@@ -762,7 +801,11 @@ describe("compose down stop timeout validation, argv, and cap", () => {
         timeout: "60",
         json: true,
       });
-      expect(run.exitCode).toBe(0);
+      expect({
+        exitCode: run.exitCode,
+        stderr: run.stderr,
+        ...(run.exitCode === 0 ? {} : { stdout: run.stdout }),
+      }).toEqual({ exitCode: 0, stderr: "" });
       expect(run.downCalls).toEqual([{ timeoutSeconds: 60, capMs: 210_000 }]);
       const parsed = JSON.parse(run.stdout) as {
         readonly ok: boolean;

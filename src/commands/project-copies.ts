@@ -16,15 +16,19 @@ import {
 } from "../lib/branch-instance-identity.ts";
 import { readBranchUsage } from "../lib/branch-usage.ts";
 import { autoWorktreeBranch } from "../lib/branches.ts";
-import { currentCandidateLauncher } from "../lib/candidate-launcher.ts";
+import {
+  currentCandidateLauncher,
+  homeRelativeLauncher,
+  homeRelativeLauncherCommand,
+} from "../lib/candidate-launcher.ts";
 import { emitCliResult, HackCliError, okResult } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { listGitWorktrees } from "../lib/git-worktree.ts";
 import { isRecord } from "../lib/guards.ts";
+import { resolveUserHomeDir } from "../lib/home-dir.ts";
 import { expectedNativeComposeProject } from "../lib/native-compose-generation.ts";
 import { jsonPrivate } from "../lib/native-compose-private-state.ts";
 import { selectNativeComposeProject } from "../lib/native-compose-selection.ts";
-import { printedShellCommand } from "../lib/printed-shell-command.ts";
 import {
   defaultProjectSlugFromPath,
   type ProjectContext,
@@ -95,20 +99,19 @@ function nativeRecovery(
   const selection = isRecord(detail) ? detail.selectionSha256 : null;
   const release =
     typeof selection === "string" && RELEASE_SELECTION.test(selection);
-  const command = {
-    stable: "hack",
-    "hack-next": "hack-next",
-    bundle: "hack-v5",
-  }[currentCandidateLauncher().kind];
-  return printedShellCommand([
-    command,
-    "doctor",
-    `--path=${path}`,
-    "--native-run-mapping",
-    release ? "release" : "inspect",
-    ...(release ? ["--expect-selection", selection] : []),
-    ...(instance === null ? [] : [`--branch=${instance}`]),
-  ]);
+  const expandHome = path.startsWith("~/");
+  const command = homeRelativeLauncherCommand({
+    launcher: currentCandidateLauncher(),
+    args: [
+      "doctor",
+      ...(expandHome ? [] : [`--path=${path}`]),
+      "--native-run-mapping",
+      release ? "release" : "inspect",
+      ...(release ? ["--expect-selection", selection] : []),
+      ...(instance === null ? [] : [`--branch=${instance}`]),
+    ],
+  });
+  return expandHome ? `${command} --path ${path}` : command;
 }
 
 const emptyStates = new Map<string, string>();
@@ -256,14 +259,14 @@ async function selectCopies(opts: CopiesOptions) {
   const root = await canonical(
     authored?.projectRoot ?? legacy?.projectRoot ?? opts.cwd
   );
-  const listed = await listGitWorktrees({ repoRoot: root });
+  const listed = await listGitWorktrees({ repoRoot: root, timeoutMs: 10_000 });
   const worktrees = await Promise.all(
     (listed ?? []).map(async (item) => ({
       ...item,
       path: await canonical(item.path),
     }))
   );
-  const gitFor = (path: string) =>
+  const containingTree = (path: string) =>
     worktrees
       .filter((item) => containsRoot(item.path, path))
       .reduce<(typeof worktrees)[number] | undefined>(
@@ -271,12 +274,23 @@ async function selectCopies(opts: CopiesOptions) {
           !best || item.path.length > best.path.length ? item : best,
         undefined
       );
-  const selectedTree = gitFor(root);
+  const selectedTree = containingTree(root);
   const peers = new Set(
     worktrees.map(({ path }) =>
       resolve(path, selectedTree ? relative(selectedTree.path, root) : "")
     )
   );
+  const gitFor = (path: string) =>
+    peers.has(path) ? containingTree(path) : undefined;
+  const configured = legacy
+    ? await readProjectConfig(legacy).catch(() => undefined)
+    : await Bun.file(resolve(root, ".hack/hack.project.json"))
+        .json()
+        .catch(() => null);
+  const configuredName =
+    isRecord(configured) && typeof configured.name === "string"
+      ? configured.name
+      : undefined;
   const { projects } = await readProjectsRegistry();
   const entries = await Promise.all(
     projects.map(async (project) => ({
@@ -294,6 +308,10 @@ async function selectCopies(opts: CopiesOptions) {
       : (exact ??
         entries.find(({ project }) =>
           project.worktrees?.some((item) => resolve(item.path) === root)
+        )?.project ??
+        entries.find(
+          ({ root: peer, project }) =>
+            peers.has(peer) && project.name === configuredName
         )?.project ??
         entries.find((entry) => peers.has(entry.root))?.project);
   const projectDirName =
@@ -488,12 +506,19 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
   const jobs: ((
     signal: AbortSignal
   ) => Promise<{ row: Copy; recovery?: string }>)[] = [];
+  const cwd = await canonical(opts.cwd);
+  const home = await canonical(resolveUserHomeDir());
   for (const checkout of checkouts) {
     const root = await canonical(checkout.root);
     const registeredBranch =
       registration?.worktrees?.find((item) => item.path === checkout.root)
         ?.branch ?? null;
     const current = gitFor(root);
+    const localTarget = root === cwd ? "." : `./${relative(cwd, root)}`;
+    const target = containsRoot(cwd, root)
+      ? localTarget
+      : homeRelativeLauncher(root, home);
+
     const gitBranch = current ? current.branch : registeredBranch;
     const label =
       checkout.kind === "primary" ? "primary" : (gitBranch ?? "worktree");
@@ -509,13 +534,12 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
     }).catch(() => null);
     const authored = family?.kind === "native";
     const cfg = await readProjectConfig(context).catch(() => undefined);
-    const automatic =
+    const autoBranch =
       checkout.kind === "worktree" &&
-      gitBranch &&
       !authored &&
-      resolveWorktreeAutoBranch(cfg)
-        ? autoWorktreeBranch(gitBranch, worktrees)
-        : null;
+      resolveWorktreeAutoBranch(cfg);
+    const automatic =
+      autoBranch && gitBranch ? autoWorktreeBranch(gitBranch, worktrees) : null;
     const usage = await readBranchUsage({
       projectDir: checkout.projectDir,
     }).catch(() => null);
@@ -573,7 +597,7 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
             },
             authored,
             signal,
-            relative(opts.cwd, root) || "."
+            target ?? "."
           )
         : unknownCopy;
     };
@@ -604,8 +628,9 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
           row,
           recovery:
             recovery &&
-            (instance !== null || (automatic === null && !current?.detached))
-              ? `from ${name} (${instance ?? "base"}), run: ${recovery}`
+            (instance !== null ||
+              (automatic === null && !(autoBranch && current?.detached)))
+              ? `${target === undefined ? "from" : "for"} ${name} (${instance ?? "base"}), run: ${recovery}`
               : undefined,
         };
       });

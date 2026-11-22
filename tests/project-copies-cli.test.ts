@@ -71,7 +71,8 @@ cat "$COPY_TEST_REPLY"
   async function run(
     args: readonly string[],
     native = false,
-    selection = "--project=sample"
+    selection = "--project=sample",
+    candidateHome?: string
   ) {
     const startedAt = performance.now();
     const proc = Bun.spawn(
@@ -79,7 +80,9 @@ cat "$COPY_TEST_REPLY"
       {
         env: privateCliEnv({
           root,
+          home: candidateHome,
           env: {
+            HACK_CANDIDATE_ENTRYPOINT: candidateHome ? "hack-next" : undefined,
             PATH: `${root}:${process.env.PATH}`,
             HACK_GLOBAL_CONFIG_PATH: join(root, "global.json"),
             HACK_NO_INTERACTIVE: "1",
@@ -224,6 +227,13 @@ test("a foreign native home leaves an unknown row and a scoped recovery hint", a
     expect(result.stdout).toContain("from feature-1 (feature-1), run:");
     expect(result.stdout).toContain("--native-run-mapping");
     expect(result.stdout).toContain("--branch=feature-1");
+    expect(result.stdout).toContain("--path=.");
+    expect(result.stdout).not.toContain("../");
+    const inHome = await f.run([], true, "--project=sample", f.root);
+    expect(inHome.code).toBe(0);
+    expect(inHome.stdout).toContain("~/.hack-next/bin/hack-next doctor");
+    expect(inHome.stdout).toContain("--path ~/checkout-1");
+    expect(inHome.stdout).not.toContain(f.root);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }
@@ -662,6 +672,42 @@ console.log(JSON.stringify(value));
     const missing = await f.run([], true);
     expect(missing.code).toBe(0);
     expect(missing.stdout).toContain("install the hack-next candidate");
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("a pruned nested worktree cannot take the containing main tree's identity", async () => {
+  const f = await fixture(1);
+  try {
+    const main = join(f.checkout(0), "apps", "web");
+    const deleted = join(f.checkout(0), "removed", "apps", "web");
+    await mkdir(join(main, ".hack"), { recursive: true });
+    await writeFile(
+      join(main, ".hack", "docker-compose.yml"),
+      "name: sample\nservices: {web: {image: web}}\n"
+    );
+    const path = join(f.root, "projects.json");
+    const registry = JSON.parse(await readFile(path, "utf8"));
+    Object.assign(registry.projects[0], {
+      repoRoot: main,
+      projectDir: join(main, ".hack"),
+      worktrees: [
+        {
+          path: deleted,
+          branch: "former",
+          lastSeenAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+    await writeFile(path, JSON.stringify(registry));
+    await gitList(f.root, [[f.checkout(0), "main"]]);
+    const result = await f.run(["--json"]);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout).data.copies).toMatchObject([
+      { branch: "main", checkout: { kind: "primary" }, instance: null },
+      { branch: "former", checkout: { kind: "worktree" }, state: "unknown" },
+    ]);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }

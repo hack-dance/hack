@@ -209,12 +209,13 @@ export type GitWorktreeListEntry = {
  */
 export async function listGitWorktrees(opts: {
   readonly repoRoot: string;
+  readonly timeoutMs?: number;
 }): Promise<readonly GitWorktreeListEntry[] | null> {
   let result: Awaited<ReturnType<typeof exec>>;
   try {
     result = await exec(
       ["git", "-C", opts.repoRoot, "worktree", "list", "--porcelain"],
-      { stdin: "ignore", timeoutMs: 10_000 }
+      { stdin: "ignore", timeoutMs: opts.timeoutMs }
     );
   } catch {
     return null;

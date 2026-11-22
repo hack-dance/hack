@@ -87,7 +87,8 @@ for all addresses, container names, exit codes and port details.
 Use `hack ps --copies` to list the project's checkouts and branch instances
 together. The count names the backend that was observed. A copy whose runtime
 state cannot be confirmed on that backend shows `unknown`. Saved native
-instances stay listed when Compose is selected. Authored projects leave the
+instances stay listed when Compose is selected. Native mode lists only native
+records and does not query Docker. Authored projects leave the
 address cell empty because the copies view cannot resolve their saved routes.
 Use `hack ps --copies --json` for the same inventory in structured form.
 The result includes `observation: {ok, code}` for inventory, setup, or

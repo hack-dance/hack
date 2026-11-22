@@ -2,22 +2,25 @@
 
 [State chart](state.svg) · [model](PerServicePublication.tla)
 
-Two services may independently report readiness. Failure, cancellation and
-owner death can occur after any prefix of readiness, admission, connection
-and record. Retirement drains the run's intents. The successful boundary
-requires every required listener to be observed. The negative control allows
-a run to record an address before its listener exists.
+Two services may both be gated under one scheduler lease. A target can
+become stale before authorization. Failure, cancellation, down and owner
+death can occur at every startup boundary. An uncommitted child exits on
+EOF. A committed child is retired through the publication journal. The
+run exposes a listener only after it binds and preserves its aggregate
+ready boundary.
 
 | Action | Implementation boundary |
 | --- | --- |
-| Ready | Scheduler `ServiceReady` event after observation, cancellation and deadline checks |
-| Admit | Planned reservation and launch authority scoped to one ready service |
-| Connect, Record | Planned verified listener observation and address exposure |
-| Abort, Retire, Settled | Startup failure, cancellation or owner recovery, followed by retirement of the run's intents |
+| Ready | Scheduler `ServiceReady` after observation, cancellation and deadline checks |
+| Admit | Planned gated host child and scoped relay validation under the scheduler lease |
+| Commit | Publication intent, directory and ready binary checkpoints in `stage_launch` |
+| Authorize, Bind, Record | Planned one-shot launch gate and existing listener identity observation |
+| EOFExit | Planned pipe close without authorization |
+| Abort, Retire, Settled | Existing rollback/recovery and planned handling of an unbound child |
 | Finish | Aggregate graph readiness and complete publication observation |
 
-TLC 1.7.4 found 105 distinct states with no errors. The negative control
-violates `Safe` at `Record`. This model is a contract for the WIP handoff.
-It abstracts generation and process identity, journal durability, engine
-leases and the progress of recovery. No model state stands in for a Mac
-runtime result.
+TLC 1.7.4 checked 622 distinct states. The controls violate `Safe` at
+`Bind` and `Record`. The abstraction assumes atomic journal steps,
+a single owner and exact child identity. Down models the owner reaching
+cancellation, not concurrent guest mutation under the lease. It does not
+test kernel pipes, process identity, filesystem durability or live cleanup.

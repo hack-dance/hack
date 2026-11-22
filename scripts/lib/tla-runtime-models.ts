@@ -2428,10 +2428,18 @@ const contracts: readonly ModelContract[] = [
   {
     name: "per-service-publication",
     module: "PerServicePublication",
-    states: 105,
+    states: 622,
     invariant: "Safe",
     action: "Record",
-    fields: ['recorded = {"first"}', "listening = {}"],
+    fields: ['recorded = {"first"}', 'first |-> "gated"'],
+    additionalControls: [
+      {
+        name: "bind-before-commit",
+        negative: true,
+        action: "Bind",
+        fields: ['first |-> "uncommitted-bind"'],
+      },
+    ],
   },
   {
     // Loopback TCP publication of Compose `ports`: one listener per host

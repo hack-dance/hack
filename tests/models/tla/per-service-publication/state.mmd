@@ -1,25 +1,23 @@
 ---
-title: PerServicePublication · startup and retirement
+title: PerServicePublication · child admission
 ---
 stateDiagram-v2
     direction TB
-    [*] --> starting
-    starting --> starting : Ready, Admit, Connect, Record
-    starting --> ready : Finish [all recorded]
-    starting --> failed : Abort [failure]
-    starting --> cancelled : Abort [Ctrl-C]
-    starting --> dead : Abort [owner death]
-    failed --> retired : Settled [no intents]
-    cancelled --> retired : Settled [no intents]
-    dead --> retired : Settled [no intents]
-    note right of starting
-        INV Recorded ports have an observed listener.
-    end note
-    note right of retired
-        INV No listener from this run survives.
+    [*] --> absent
+    absent --> gated : Admit [ready and current]
+    gated --> committed : Commit [target current]
+    committed --> authorized : Authorize [target current]
+    authorized --> bound : Bind [starting]
+    bound --> bound : Record [observed]
+    gated --> absent : EOFExit [aborted]
+    committed --> absent : Retire [aborted]
+    authorized --> absent : Retire [aborted]
+    bound --> absent : Retire [aborted]
+    note right of committed
+        INV Identity commits before bind.
     end note
     classDef live stroke-width:1.6px
-    class starting live
-    class ready ok
-    class failed,cancelled,dead fail
-    class retired idle
+    class gated,committed wait
+    class authorized live
+    class bound ok
+    class absent idle

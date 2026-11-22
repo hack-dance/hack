@@ -1051,6 +1051,25 @@ fn payload() -> Result<&'static [u8], CandidateError> {
 }
 /// The caller must retain its operation lock until exec closes inherited descriptors.
 pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), CandidateError> {
+    let process = identity::observe(std::process::id() as i32)?;
+    let entry = stage_launch(c, &options, process)?;
+    if entry.unix {
+        eprintln!(
+            "Unix publication endpoint (await ready): {}",
+            directory(&entry).join("frontend").display()
+        );
+    }
+    let failure = publication_command(&entry, options.upstream)?.exec();
+    Err(state::io(failure))
+}
+
+/// Record the process birth and stage the relay under the caller's provider lease.
+/// Completing staging does not grant the process permission to bind a listener.
+fn stage_launch(
+    c: &Candidate,
+    options: &Launch<'_>,
+    process: identity::ProcessIdentity,
+) -> Result<Entry, CandidateError> {
     if let Some(port) = options.port {
         require_loopback_port_free(port)?;
     }
@@ -1081,7 +1100,6 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
         .read_exact(&mut random)
         .map_err(state::io)?;
     let token = random.iter().map(|b| format!("{b:02x}")).collect();
-    let process = identity::observe(std::process::id() as i32)?;
     let mut e = Entry {
         owner: options.owner.into(),
         run: options.run.into(),
@@ -1146,14 +1164,7 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
     e.binary.as_mut().expect("recorded staged file").ready = true;
     entries.insert(e.reservation.clone(), e.clone());
     save(c, &entries)?;
-    if e.unix {
-        eprintln!(
-            "Unix publication endpoint (await ready): {}",
-            dir.join("frontend").display()
-        );
-    }
-    let failure = publication_command(&e, options.upstream)?.exec();
-    Err(state::io(failure))
+    Ok(e)
 }
 
 #[cfg(test)]

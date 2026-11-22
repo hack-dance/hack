@@ -186,7 +186,7 @@ const contracts: readonly ModelContract[] = [
     states: 22,
     invariant: "ReaderSeesWholeChoice",
     action: "Claim",
-    fields: ['saved = "partial"'],
+    fields: ["running = FALSE", 'saved = "partial"'],
   },
   {
     name: "project-prerequisites",

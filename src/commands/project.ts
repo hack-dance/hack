@@ -17,6 +17,7 @@ import {
   printedShellCommand,
   scopedHackCommand,
 } from "../lib/printed-shell-command.ts";
+import { withProcessDeadline } from "../lib/process-deadline.ts";
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
@@ -46,6 +47,7 @@ import {
 import {
   createComposeUpProgress,
   type HookCompletion,
+  type HookStart,
 } from "./compose-up-progress.ts";
 
 export function wrapLifecyclePersistentCommand(
@@ -2486,6 +2488,7 @@ function runLifecycleChild(opts: {
   readonly signal?: AbortSignal;
   /** The hook's log sink, shared with its end record. */
   readonly sink: LifecycleLogSink;
+  readonly beforeOutput?: () => void;
   /** Each output line, for a bounded tail of a failed hook's output. */
   readonly onLine?: (line: string) => void;
 }): Promise<number> {
@@ -2502,6 +2505,7 @@ function runLifecycleChild(opts: {
         service: opts.service,
         sink,
         onLine: opts.onLine,
+        beforeWrite: opts.beforeOutput,
       }),
   });
 }
@@ -2521,6 +2525,7 @@ export async function runLifecycleCommands(opts: {
   readonly projectDir: string;
   readonly composeProject: string;
   readonly routeStdoutToStderr?: boolean;
+  readonly onHookStart?: HookStart;
   readonly onHookComplete?: HookCompletion;
   readonly summarizeFailure?: (name: string, reason?: string) => void;
   readonly onPersistentCommand?: (opts: {
@@ -2547,12 +2552,15 @@ export async function runLifecycleCommands(opts: {
       index,
     });
     if (cmd.persistent === true && opts.onPersistentCommand) {
+      const clear = opts.onHookStart?.(serviceName);
       try {
-        await opts.onPersistentCommand({
-          command: cmd,
-          index,
-          serviceName,
-        });
+        await opts
+          .onPersistentCommand({
+            command: cmd,
+            index,
+            serviceName,
+          })
+          .finally(clear);
       } catch (error: unknown) {
         const message =
           error instanceof Error
@@ -2603,12 +2611,15 @@ export async function runLifecycleCommands(opts: {
       message: `[start] ${opts.title}: ${label}`,
     });
     const tail = failedHookTail();
+    const env = await mergeLifecycleCommandEnv(opts.env);
+    const clear = opts.onHookStart?.(serviceName);
     const exitCode = await runLifecycleChild({
       sink,
       onLine: tail.onLine,
+      beforeOutput: clear,
       command: cmd.command,
       cwd,
-      env: await mergeLifecycleCommandEnv(opts.env),
+      env,
       // Under Hack's own `--json`, stdout holds only the envelope
       // (HACK-2311), whatever this call site passed.
       output:
@@ -2619,7 +2630,7 @@ export async function runLifecycleCommands(opts: {
       composeProject: opts.composeProject,
       service: serviceName,
       signal: opts.signal,
-    });
+    }).finally(clear);
 
     await sink.append({
       timestamp: new Date().toISOString(),
@@ -2754,6 +2765,7 @@ function hasPersistentLifecycleCommands(
 
 async function runLifecycleUpBeforeAndProcesses(opts: {
   readonly title: string;
+  readonly onHookStart?: HookStart;
   readonly onHookComplete?: HookCompletion;
   readonly summarizeFailure?: (name: string, reason?: string) => void;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
@@ -2823,6 +2835,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     const beforeCode = await runLifecycleCommands({
       title: opts.title,
       summarizeFailure: opts.summarizeFailure,
+      onHookStart: opts.onHookStart,
       onHookComplete: opts.onHookComplete,
       commands: beforeCommands,
       projectRoot: opts.project.projectRoot,
@@ -2884,6 +2897,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   const beforeCode = await runLifecycleCommands({
     title: opts.title,
     summarizeFailure: opts.summarizeFailure,
+    onHookStart: opts.onHookStart,
     onHookComplete: opts.onHookComplete,
     commands: beforeCommands,
     projectRoot: opts.project.projectRoot,
@@ -7956,6 +7970,7 @@ async function runUpCommand({
       ? { code: 0, cleanup: null, signalCleanup: null, sessionName: null }
       : await runLifecycleUpBeforeAndProcesses({
           title: "Lifecycle (up before)",
+          onHookStart: progress?.beforeStart,
           onHookComplete: progress?.before,
           summarizeFailure,
           project,
@@ -8270,10 +8285,51 @@ async function runUpCommand({
           budgets.startupTimeoutMs - (performance.now() - upPhase.progressAt())
         )
       : budgets.startupTimeoutMs;
+    const readStartup = (strict: boolean) =>
+      readComposeServiceStates({
+        project,
+        composeProjectName,
+        profiles,
+        services: targetServices,
+        env: envOverrides.env,
+        strict,
+      });
+    const completionServices = async () =>
+      new Set(
+        await discoverSuccessfulCompletionServices({
+          composeFile: project.composeFile,
+          activeProfiles: resolveEffectiveComposeProfiles({
+            cliProfiles: profiles,
+            composeEnv: envOverrides.env,
+          }),
+          selectedServices: serviceScoped ? targetServices : undefined,
+        })
+      );
+    const showBeforeAfter =
+      progress && !serviceScoped && (cfg.lifecycle?.up?.after?.length ?? 0) > 0;
+    if (showBeforeAfter) {
+      // Display a snapshot before hooks without moving the authoritative
+      // post-hook confirmation or making the display read a startup gate.
+      const clear = progress.serviceWait();
+      const snapshot = await Promise.all([
+        withProcessDeadline(Date.now() + 1000, () => readStartup(false)),
+        completionServices(),
+      ])
+        .catch(() => null)
+        .finally(clear);
+      if (snapshot) {
+        progress.services(
+          classifyComposeStartupState(snapshot[0], {
+            successfulCompletionServices: snapshot[1],
+          })
+        );
+      }
+    }
     const afterCode = serviceScoped
       ? 0
       : await runLifecycleCommands({
           title: "Lifecycle (up after)",
+          onHookStart: progress?.afterStart,
           onHookComplete: progress?.after,
           summarizeFailure,
           commands: cfg.lifecycle?.up?.after,
@@ -8298,30 +8354,13 @@ async function runUpCommand({
       });
     }
 
-    const effectiveProfiles = resolveEffectiveComposeProfiles({
-      cliProfiles: profiles,
-      composeEnv: envOverrides.env,
-    });
-    const successfulCompletionServices = new Set(
-      await discoverSuccessfulCompletionServices({
-        composeFile: project.composeFile,
-        activeProfiles: effectiveProfiles,
-        selectedServices: serviceScoped ? targetServices : undefined,
-      })
-    );
+    const successfulCompletionServices = await completionServices();
+    const clearServiceWait = progress?.serviceWait();
     const { states, startup } = await waitForComposeStartupState({
       successfulCompletionServices,
       deadlineMs: performance.now() + observationBudgetMs,
-      read: () =>
-        readComposeServiceStates({
-          project,
-          composeProjectName,
-          profiles,
-          services: targetServices,
-          env: envOverrides.env,
-          strict: true,
-        }),
-    });
+      read: () => readStartup(true),
+    }).finally(clearServiceWait);
     if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
       await lifecycleCleanup?.();
       await removeProjectRuntimeStateEntry({
@@ -8352,7 +8391,9 @@ async function runUpCommand({
         exitCode: 1,
       });
     }
-    progress?.services(startup);
+    if (!showBeforeAfter) {
+      progress?.services(startup);
+    }
     if (!serviceScoped) {
       await recordEnvMigrationProjectRun({
         projectRoot: project.projectRoot,

@@ -1775,6 +1775,34 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-start-lock-wait",
+    module: "LeaseWait",
+    states: 19,
+    invariant: "NoEffectWhileHeld",
+    action: "Acquire",
+    fields: ['holder = "second"', 'waiter = "acquired"', "earlyEffect = TRUE"],
+    additionalControls: [
+      {
+        name: "acquisition-reachable",
+        negative: true,
+        invariant: "NeverAcquired",
+        action: "Acquire",
+        fields: [
+          'holder = "second"',
+          'waiter = "acquired"',
+          "earlyEffect = FALSE",
+        ],
+      },
+      {
+        name: "expiry-reachable",
+        negative: true,
+        invariant: "NeverExpired",
+        action: "Expire",
+        fields: ['waiter = "expired"', "elapsed = 5", "earlyEffect = FALSE"],
+      },
+    ],
+  },
+  {
     name: "stopped-pool-startup",
     module: "Resume",
     states: 71,

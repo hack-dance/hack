@@ -14,7 +14,7 @@
 //! retained graph receipt still names it, unless that receipt is a native run this pool
 //! owner proves fully removed.
 use super::{
-    ProjectShareIntent, config_audit, network_update,
+    ProjectShareIntent, config_audit, lifecycle, network_update,
     project_share::{self, MAX_PROJECT_SHARES},
     state::{self, Owner},
 };
@@ -352,8 +352,12 @@ fn update(
     operation: Operation,
     share: ProjectShareIntent,
 ) -> Result<Value, CandidateError> {
-    reject_aliased_state(&root(candidate))?;
-    let _lock = state::Lock::acquire(&root(candidate))?;
+    let lease_root = root(candidate);
+    reject_aliased_state(&lease_root)?;
+    let _lock = match operation {
+        Operation::Add => lifecycle::startup_lease(&lease_root, lifecycle::STARTUP_LEASE_WAIT),
+        Operation::Remove => state::Lock::acquire(&lease_root),
+    }?;
     network_update::require_complete(candidate)?;
     let owner = Owner::load(candidate)?;
     let path = root(candidate).join(JOURNAL);
@@ -364,8 +368,13 @@ fn update(
     };
     if !journal_present {
         let present = owner.project_shares().contains(&&share);
-        if operation == Operation::Add && present {
-            return Ok(result(&owner, operation, &share, false));
+        if operation == Operation::Add {
+            if present {
+                return Ok(result(&owner, operation, &share, false));
+            }
+            if owner.phase == "running" {
+                return Err(project_share::extension_required());
+            }
         }
     }
     let _vm_lock = network_update::stopped_with(candidate, &owner, refused)?;

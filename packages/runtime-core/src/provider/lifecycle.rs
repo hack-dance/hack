@@ -266,28 +266,10 @@ fn operation_lease<T>(
     deadline: Option<Instant>,
     verify: impl FnOnce() -> Result<T, CandidateError>,
 ) -> Result<(state::Lock, T), CandidateError> {
-    let mut holder = None;
-    let lock = loop {
-        if deadline.is_some_and(|limit| Instant::now() >= limit) {
-            return Err(holder.unwrap_or_else(|| {
-                CandidateError::new(
-                    "provider_busy",
-                    "Provider lease acquisition deadline expired; no operation was admitted.",
-                )
-            }));
-        }
-        match state::Lock::acquire(root) {
-            Ok(lock) => break lock,
-            Err(error) if error.code == "provider_busy" && deadline.is_some() => {
-                holder = Some(error);
-                let remaining = deadline
-                    .expect("bounded acquisition")
-                    .saturating_duration_since(Instant::now());
-                std::thread::sleep(remaining.min(Duration::from_millis(50)));
-            }
-            Err(error) => return Err(error),
-        }
-    };
+    let lock = match deadline {
+        Some(deadline) => state::Lock::acquire_until(root, deadline),
+        None => state::Lock::acquire(root),
+    }?;
     let current = verify()?;
     Ok((lock, current))
 }
@@ -516,6 +498,12 @@ impl<'a> OwnedGuest<'a> {
 
     pub(super) fn connect_cleanup(candidate: &'a Candidate) -> Result<Self, CandidateError> {
         Self::connect_mode(candidate, false, None)
+    }
+
+    pub(super) fn connect_cleanup_for_start(
+        candidate: &'a Candidate,
+    ) -> Result<Self, CandidateError> {
+        Self::connect_mode(candidate, false, Some(Instant::now() + STARTUP_LEASE_WAIT))
     }
 
     #[cfg(target_os = "macos")]

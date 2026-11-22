@@ -3,7 +3,7 @@ use super::image_platform::{ImagePlatform, PlatformPolicy};
 use super::{
     engine, image_load,
     image_policy::{ARCHIVE_CEILING, CACHE_CEILING, ImagePolicy},
-    registry_image, state,
+    lifecycle, registry_image, state,
 };
 use crate::timings::{Step, measure};
 use crate::{Candidate, CandidateError, reject_aliased_state};
@@ -451,7 +451,7 @@ fn ensure_pinned_resolving(
 ) -> Result<EnsuredImage, CandidateError> {
     let reference = canonical(reference)?;
     let root = candidate.state_root.join("artifacts/images");
-    let _lock = state::Lock::acquire(&root)?;
+    let _lock = lifecycle::startup_lease(&root, lifecycle::STARTUP_LEASE_WAIT)?;
     let (count, bytes) = measure(Step::ImageCacheInventory, None, |_| usage(candidate, &root))?;
     // A cached entry is reused only for the platform the pinned image itself selects under
     // the policy. The first preference is published whenever its entry exists. A later

@@ -1846,7 +1846,7 @@ pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateEr
             "No runtime state was reserved for this graph attempt: no journal exists and no foreground owner is published. Nothing was created, repaired or adopted.",
         ));
     }
-    let engine = Engine::connect_cleanup(candidate)?;
+    let engine = Engine::connect_cleanup_for_start(candidate)?;
     inspect_using(candidate, &engine, run)
 }
 
@@ -1955,7 +1955,7 @@ pub fn source_compatibility(
     {
         return Err(refused());
     }
-    let engine = Engine::connect_cleanup(candidate)?;
+    let engine = Engine::connect_cleanup_for_start(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
     #[cfg(target_os = "macos")]
     let source_rebind = source_device_rebind::select(&engine, &receipt, &root)?;

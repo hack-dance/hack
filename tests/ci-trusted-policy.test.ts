@@ -15,7 +15,7 @@ const linuxCompilerHosts = JSON.stringify(
 const workflow = Bun.YAML.parse(
   await Bun.file(join(repository, ".github/workflows/ci.yml")).text()
 ) as {
-  concurrency: { group: string; "cancel-in-progress": boolean };
+  concurrency: { group: string; "cancel-in-progress": string };
   on: { pull_request: { types: string[] }; merge_group: { types: string[] } };
   jobs: Record<
     string,
@@ -459,11 +459,13 @@ test("merge queue trees receive full Linux qualification without a predecessor",
   });
 });
 
-test("PR and next queues keep active evidence and isolate merge group runs", () => {
+test("only a new PR head cancels active CI", () => {
   expect(workflow.concurrency.group).toBe(
     "${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/next' && 'push-next') || format('push-{0}', github.run_id) }}"
   );
-  expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
+  expect(workflow.concurrency["cancel-in-progress"]).toBe(
+    "${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}"
+  );
 });
 
 test("next push runs trusted before policy only after a successful predecessor", async () => {

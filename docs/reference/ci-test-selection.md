@@ -110,8 +110,8 @@ No PR install script executes while computing scope. The base archive supplies
 the working directory, Bun configuration and dependency lockfile for the policy.
 PR metadata edits do not start CI. After retargeting, push a new revision or
 close and reopen the PR to qualify it against the new base. Readiness and
-push events still start runs. An active PR run finishes while GitHub keeps
-at most one pending run per PR.
+push events still start runs. A new PR head cancels the active run. Same-head
+events queue behind it, and GitHub keeps at most one pending run per PR.
 
 Merge queue requests qualify GitHub’s combined commit with the full Linux
 unit pool, compiler hosts, candidate, Docker, build smoke, models and docs.

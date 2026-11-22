@@ -25,12 +25,13 @@ on:
         default: "1"
 
 concurrency:
-  # Let active PR and next runs finish. A newer event can replace the pending
-  # run. Main pushes, merge groups and dispatches have independent groups.
+  # A new PR head cancels the active run. Same-head events and next pushes
+  # can replace a pending run. Main pushes, merge groups and dispatches use
+  # independent groups.
   # The lead waits for a completed next run between batches unless its batch
   # verifier ran the same checks: pending revisions may still be replaced.
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/next' && 'push-next') || format('push-{0}', github.run_id) }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
 
 jobs:
   changes:

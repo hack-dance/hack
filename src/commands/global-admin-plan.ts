@@ -283,7 +283,7 @@ export async function planGlobalInstall(
   steps.push(
     userStep(
       "global-stack",
-      "Start Caddy and logging Compose services and the optional user daemon",
+      "Start Caddy, the opt-in logging stack when it is on, and the optional user daemon",
       "after global-up dnsmasq on macOS; no administrator rights for this step"
     )
   );

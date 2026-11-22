@@ -29,7 +29,7 @@ const PROBE_TIMEOUT_MS = 1000;
 const MAPPED_LOOPBACK = /^::ffff:(7f[\da-f]{2}):([\da-f]{1,4})$/i;
 const WHITESPACE = /\s+/;
 type ProbeState = "ok" | "timeout" | "unreachable" | "tls-error";
-type Endpoint = { readonly address: string; readonly port: number };
+export type Endpoint = { readonly address: string; readonly port: number };
 type ProbeOptions = Endpoint & {
   readonly caPem: string;
   readonly timeoutMs?: number;
@@ -53,13 +53,64 @@ export type ProxyLoopbackReport = {
  * The wall-clock timer covers the entire handshake, including a silent peer;
  * all outcomes destroy this probe's socket. HTTP only checks TCP reachability.
  */
-export function probeProxyLoopback(opts: ProbeOptions): Promise<ProbeState> {
-  const https =
-    (opts.protocol ?? (opts.port === 443 ? "https" : "http")) === "https";
+export async function probeProxyLoopback(
+  opts: ProbeOptions
+): Promise<ProbeState> {
+  return (await probeEndpoint(opts)).state;
+}
+
+/**
+ * Certificate verification failures: a server answered TLS with a
+ * certificate that the running proxy's CA did not issue for the schemas
+ * name. Something other than this home's proxy is answering there.
+ */
+const UNTRUSTED_CERTIFICATE_CODES: ReadonlySet<string> = new Set([
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "CERT_SIGNATURE_FAILURE",
+  "CERT_UNTRUSTED",
+  "CERT_REJECTED",
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+]);
+
+/** One route request through the proxy, as `hack global up` reads it. */
+export type ProxyHttpsState = ProbeState | "untrusted" | "rejected";
+
+const TLS_ALERT = /ALERT|UNRECOGNIZED_NAME/;
+const HTTP_STATUS_LINE = /^HTTP\/1\.[01] [1-5]\d\d/;
+
+/**
+ * One HTTPS request to `servername` through `address:port`, as `hack global
+ * up` checks a route: TLS with `servername` as the SNI and verified name,
+ * against `caPem` (the running proxy's root), then `GET /` with that `Host`.
+ * `ok` only when an HTTP status line comes back on that verified connection.
+ * - `untrusted`: the handshake presented a certificate `caPem` did not issue
+ *   for `servername` (another server, or the proxy without that name);
+ * - `rejected`: the peer answered TLS with an alert (a TLS server is there
+ *   and refused the name, as Caddy does for a name it does not serve);
+ * - `unreachable`: the connection was refused;
+ * - `timeout` / `tls-error`: no answer, or the connection ended without an
+ *   alert (a reset: a container runtime that does not forward the port
+ *   cleanly), which doctor tolerates.
+ * The timer covers the whole exchange; the socket is destroyed either way.
+ */
+export function probeProxyRoute(opts: {
+  readonly address: string;
+  readonly port: number;
+  readonly servername: string;
+  readonly caPem: string;
+  readonly timeoutMs?: number;
+}): Promise<ProxyHttpsState> {
   return new Promise((resolve) => {
     let settled = false;
     let connected = false;
-    const done = (state: ProbeState) => {
+    let received = "";
+    const done = (state: ProxyHttpsState) => {
       if (settled) {
         return;
       }
@@ -67,6 +118,76 @@ export function probeProxyLoopback(opts: ProbeOptions): Promise<ProbeState> {
       clearTimeout(timer);
       socket.destroy();
       resolve(state);
+    };
+    const socket = connect({
+      host: opts.address,
+      port: opts.port,
+      servername: opts.servername,
+      ca: opts.caPem,
+      rejectUnauthorized: true,
+    });
+    const timer = setTimeout(
+      () => done("timeout"),
+      opts.timeoutMs ?? PROBE_TIMEOUT_MS
+    );
+    socket.once("connect", () => {
+      connected = true;
+    });
+    socket.once("secureConnect", () => {
+      if (!socket.authorized) {
+        done("untrusted");
+        return;
+      }
+      const host = opts.servername.includes(":")
+        ? `[${opts.servername}]`
+        : opts.servername;
+      socket.write(
+        `GET / HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: hack-global-up\r\nConnection: close\r\n\r\n`
+      );
+    });
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      received += chunk;
+      if (HTTP_STATUS_LINE.test(received)) {
+        done("ok");
+      } else if (received.length > 64) {
+        done("tls-error");
+      }
+    });
+    socket.once("end", () => done("tls-error"));
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      if (!connected) {
+        done("unreachable");
+      } else if (
+        error.code !== undefined &&
+        UNTRUSTED_CERTIFICATE_CODES.has(error.code)
+      ) {
+        done("untrusted");
+      } else if (error.code !== undefined && TLS_ALERT.test(error.code)) {
+        done("rejected");
+      } else {
+        done("tls-error");
+      }
+    });
+  });
+}
+
+function probeEndpoint(
+  opts: ProbeOptions
+): Promise<{ readonly state: ProbeState; readonly code?: string }> {
+  const https =
+    (opts.protocol ?? (opts.port === 443 ? "https" : "http")) === "https";
+  return new Promise((resolve) => {
+    let settled = false;
+    let connected = false;
+    const done = (state: ProbeState, code?: string) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(code === undefined ? { state } : { state, code });
     };
     const socket = https
       ? connect({
@@ -91,8 +212,8 @@ export function probeProxyLoopback(opts: ProbeOptions): Promise<ProbeState> {
     } else {
       socket.once("connect", () => done("ok"));
     }
-    socket.once("error", () => {
-      done(connected && https ? "tls-error" : "unreachable");
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      done(connected && https ? "tls-error" : "unreachable", error.code);
     });
   });
 }
@@ -176,15 +297,10 @@ export async function inspectProxyLoopback(
         "Cannot verify loopback forwarding: the running proxy's published port bindings are unavailable.",
     };
   }
-  const endpoints = (opts.ports ?? ([80, 443] as const)).flatMap((port) => {
-    const published =
-      port === 80 || port === 443 ? (identity.loopbackPorts?.[port] ?? []) : [];
-    const candidates = opts.addresses ?? published.map(defaultLoopbackAddress);
-    return [...new Set(candidates)]
-      .filter((address) =>
-        published.some((binding) => sameLoopbackAddress(address, binding))
-      )
-      .map((address) => ({ address, port }));
+  const endpoints = proxyLoopbackEndpoints({
+    loopbackPorts: identity.loopbackPorts,
+    ports: opts.ports ?? [80, 443],
+    addresses: opts.addresses,
   });
   if (!endpoints.length) {
     return {
@@ -224,6 +340,30 @@ export async function inspectProxyLoopback(
       ? failureMessage(failed, listeners ?? [])
       : `Loopback ports reachable (${observations.map(hostPort).join(", ")}); HTTPS verifies against the running Hack proxy's internal CA.`,
   };
+}
+
+/**
+ * The loopback endpoints to check, from the running proxy's live published
+ * bindings (not the Compose file or the setting): each published loopback
+ * binding's default address (`0.0.0.0` → `127.0.0.1`, `::` → `::1`), or the
+ * given `addresses` that a binding covers. Shared by doctor and `hack global
+ * up`, so both look at the same endpoints. An unpublished port has none.
+ */
+export function proxyLoopbackEndpoints(opts: {
+  readonly loopbackPorts: Readonly<Record<80 | 443, readonly string[]>>;
+  readonly ports: readonly number[];
+  readonly addresses?: readonly string[];
+}): Endpoint[] {
+  return opts.ports.flatMap((port) => {
+    const published =
+      port === 80 || port === 443 ? (opts.loopbackPorts[port] ?? []) : [];
+    const candidates = opts.addresses ?? published.map(defaultLoopbackAddress);
+    return [...new Set(candidates)]
+      .filter((address) =>
+        published.some((binding) => sameLoopbackAddress(address, binding))
+      )
+      .map((address) => ({ address, port }));
+  });
 }
 
 function defaultLoopbackAddress(binding: string): string {

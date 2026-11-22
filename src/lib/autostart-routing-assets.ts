@@ -2,34 +2,20 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import { lstat, open, readdir, rename, unlink } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import {
-  GLOBAL_ALLOY_FILENAME,
   GLOBAL_BRANCHES_SCHEMA_FILENAME,
   GLOBAL_CADDY_COMPOSE_FILENAME,
   GLOBAL_CADDY_DIR_NAME,
   GLOBAL_CONFIG_SCHEMA_FILENAME,
   GLOBAL_COREDNS_FILENAME,
   GLOBAL_ENV_SCHEMA_FILENAME,
-  GLOBAL_GRAFANA_DASHBOARD_FILENAME,
-  GLOBAL_GRAFANA_DASHBOARDS_DIR,
-  GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
-  GLOBAL_GRAFANA_DATASOURCE_FILENAME,
-  GLOBAL_LOGGING_COMPOSE_FILENAME,
-  GLOBAL_LOGGING_DIR_NAME,
-  GLOBAL_LOKI_CONFIG_FILENAME,
   GLOBAL_MANAGED_ENV_SCHEMA_FILENAME,
   GLOBAL_SCHEMAS_DIR_NAME,
 } from "../constants.ts";
 import {
-  renderGlobalAlloyConfig,
   renderGlobalCaddyCompose,
   renderGlobalCoreDnsConfig,
-  renderGlobalGrafanaDashboardsProvisioningYaml,
-  renderGlobalGrafanaDatasourceYaml,
-  renderGlobalGrafanaLogsDashboardJson,
-  renderGlobalLoggingCompose,
-  renderGlobalLokiConfigYaml,
   renderProjectBranchesSchemaJson,
   renderProjectConfigSchemaJson,
   renderProjectEnvSchemaJson,
@@ -67,6 +53,12 @@ const MAX_ASSET_BYTES = 1024 * 1024;
  * read-only; publication replaces matching nonsecret bytes on fresh 0644 inodes so an
  * older writable descriptor cannot change what the upcoming Compose run reads.
  * Missing/custom assets refuse; this is neither installation nor migration.
+ * The logging stack's files are not part of the set: login never starts that
+ * stack (`globalLoggingUpArguments` is null at login), so they are not what
+ * the upcoming Compose run reads. Install may keep an older or hand-edited
+ * logging file (it asks before replacing one that is not Hack's rendering),
+ * and that must not stop automatic routing. A manual `hack global up` starts
+ * logging from its own files.
  */
 export async function secureAutostartRoutingAssets(
   opts: AutostartRoutingAssetsOptions
@@ -89,14 +81,6 @@ export async function secureAutostartRoutingAssets(
         GLOBAL_BRANCHES_SCHEMA_FILENAME,
       ],
     });
-    await assertMountedDirectory({
-      path: resolve(
-        opts.root,
-        GLOBAL_LOGGING_DIR_NAME,
-        GLOBAL_GRAFANA_DASHBOARDS_DIR
-      ),
-      names: [basename(GLOBAL_GRAFANA_DASHBOARD_FILENAME)],
-    });
     const observed: ObservedAsset[] = [];
     for (const asset of assets) {
       observed.push(await readCurrentAsset({ asset, uid }));
@@ -117,7 +101,7 @@ export async function secureAutostartRoutingAssets(
     throw new HackCliError({
       code: "E_PERMISSION",
       message:
-        "Automatic routing startup refused untrusted or outdated installed assets. Review and move unexpected schema/dashboard files aside before running hack global install manually, then retry. Values omitted.",
+        "Automatic routing startup refused untrusted or outdated installed assets. Review and move unexpected Compose or schema files aside before running hack global install manually, then retry. Values omitted.",
       detail: { reason: "routing_assets_untrusted" },
     });
   }
@@ -130,18 +114,21 @@ function routingAssets(
     opts.bindAddress === null ? null : parseProxyBindAddress(opts.bindAddress);
   const defaultDomain = parseDefaultDomain(opts.defaultDomain);
   const caddy = resolve(opts.root, GLOBAL_CADDY_DIR_NAME);
-  const logging = resolve(opts.root, GLOBAL_LOGGING_DIR_NAME);
   const schemas = resolve(opts.root, GLOBAL_SCHEMAS_DIR_NAME);
   const compose: string[] = [];
   for (const useStaticCoreDnsIp of [false, true]) {
     for (const useStaticCaddyIp of [false, true]) {
-      compose.push(
-        renderGlobalCaddyCompose({
-          useStaticCoreDnsIp,
-          useStaticCaddyIp,
-          bindAddress,
-        })
-      );
+      // Either healthcheck variant: install renders the one its engine takes.
+      for (const startInterval of [false, true]) {
+        compose.push(
+          renderGlobalCaddyCompose({
+            useStaticCoreDnsIp,
+            useStaticCaddyIp,
+            bindAddress,
+            startInterval,
+          })
+        );
+      }
     }
   }
   return [
@@ -152,28 +139,6 @@ function routingAssets(
         renderGlobalCoreDnsConfig({ useStaticCaddyIp, defaultDomain })
       ),
     },
-    ...(
-      [
-        [GLOBAL_LOGGING_COMPOSE_FILENAME, renderGlobalLoggingCompose()],
-        [GLOBAL_ALLOY_FILENAME, renderGlobalAlloyConfig()],
-        [GLOBAL_LOKI_CONFIG_FILENAME, renderGlobalLokiConfigYaml()],
-        [
-          GLOBAL_GRAFANA_DATASOURCE_FILENAME,
-          renderGlobalGrafanaDatasourceYaml(),
-        ],
-        [
-          GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
-          renderGlobalGrafanaDashboardsProvisioningYaml(),
-        ],
-        [
-          GLOBAL_GRAFANA_DASHBOARD_FILENAME,
-          renderGlobalGrafanaLogsDashboardJson(),
-        ],
-      ] as const
-    ).map(([name, text]) => ({
-      path: resolve(logging, name),
-      accepted: [text],
-    })),
     ...(
       [
         [GLOBAL_CONFIG_SCHEMA_FILENAME, renderProjectConfigSchemaJson()],

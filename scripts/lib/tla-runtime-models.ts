@@ -2863,16 +2863,17 @@ const contracts: readonly ModelContract[] = [
     fields: ["retired = <<1>>", "alive = 1"],
   },
   {
-    // HACK-2456: a pool that stops or dies under a live run. Positive: this
-    // change with nothing else booting the pool and no fault between its boot
-    // and its recovery; `any-boot` is recovery from any earlier boot (follow-up)
-    // with every fault. `negative` is `next` before the change, `by-hand` adds an
-    // unnamed `runtime up`, `strict` keeps predecessor-only recovery while
-    // something else boots the pool, `crash-in-recovery` lets the pool stop between
-    // the recovery's boot and its graph recovery: each reaches a dead end.
+    // HACK-2456: a pool that stops or dies under a live run. Positive: the
+    // stopped-pool recovery plus recovery from any earlier boot of the pool,
+    // with every fault (other boots, a stop between a recovery's boot and its
+    // graph recovery). The failing controls document the old predecessor-only
+    // rule: `negative` is `next` before HACK-2456, `by-hand` adds an unnamed
+    // `runtime up`, `strict` keeps predecessor-only recovery while something
+    // else boots the pool, `crash-in-recovery` lets the pool stop between the
+    // recovery's boot and its graph recovery: each reaches a dead end.
     name: "native-pool-stop",
     module: "PoolStop",
-    states: 81,
+    states: 113,
     invariant: "NoDeadEnd",
     action: "OwnerCrash",
     fields: [
@@ -2893,7 +2894,6 @@ const contracts: readonly ModelContract[] = [
       },
     ],
     additionalControls: [
-      { name: "any-boot", negative: false, states: 113 },
       {
         name: "by-hand",
         negative: true,
@@ -2956,7 +2956,7 @@ const contracts: readonly ModelContract[] = [
       // the owner never retires when its boot ends, the previous-boot archive
       // cannot prove quiescence, or down --recover does not start a stopped pool
       // for a pending finalization. Each strands the recovered run's lease.
-      { name: "https", negative: false, states: 181 },
+      { name: "https", negative: false, states: 284 },
       {
         name: "https-no-retire",
         negative: true,

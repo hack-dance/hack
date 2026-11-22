@@ -918,9 +918,16 @@ projects starts the pool again and recovers its run.
 
 How a run moves across a pool stop. It is checked as the TLA+ model
 `tests/models/tla/native-pool-stop`. A run left from a boot older than the previous
-one is not recovered yet: another project's `hack up` or a `runtime up` by hand
-booted the pool and it stopped again before this project recovered, or the pool
-stopped again between a recovery's `runtime up` and its recovery.
+one is recovered too: another project's `hack up` or a `runtime up` by hand booted
+the pool and it stopped again before this project recovered, or the pool stopped
+again between a recovery's `runtime up` and its recovery. Each boot records the boots
+it supersedes in a bounded history (`run/smolvm/boot-history.json`, the last 16,
+bound to the pool), and recovery selects the one earlier boot the run's receipt
+names, never the current one. A run whose boot has left that history, or whose
+evidence names more than one boot, is refused with its data kept. Two paths stay
+limited to the previous boot: a `graph recover-cleanup` selection made while the
+pool was stopped (another boot in between may have restarted the run's containers),
+and absent-publication cleanup after a host reboot.
 
 ```mermaid
 ---
@@ -941,9 +948,9 @@ stateDiagram-v2
     crashed --> orphaned : hack native recover
     orphaned --> recover : hack up, down --recover
     state recover <<choice>>
-    recover --> retained : [boot ok, no HTTPS lease]
-    recover --> finalizing : [boot ok, HTTPS lease]
-    recover --> stranded : [older boot]
+    recover --> retained : [boot known, no HTTPS lease]
+    recover --> finalizing : [boot known, HTTPS lease]
+    recover --> stranded : [boot not known]
     finalizing --> retained : lease released or archived
 
     note left of orphaned
@@ -957,9 +964,9 @@ stateDiagram-v2
         request, data kept.
     end note
     note right of stranded
-        Known gap: another boot, or a
-        stop mid-recovery, came first.
-        Follow-up: any-boot.
+        Refused, data kept: the run's
+        boot left the 16-boot history,
+        or its evidence is ambiguous.
     end note
     note right of finalizing
         Graph stopped, HTTPS lease held.
@@ -4720,15 +4727,15 @@ owned containers and networks, and retains named volumes and dependency caches.
 It neither marks incomplete package caches valid nor replays initializers.
 
 If a foreground owner died after its graph reached `ready-observed` and the pool
-has already restarted once, the same explicit command can select recovery on that
-immediate successor boot. It requires the retained dead-owner identity, exact receipt
-hash, and bridge assignments belonging to the recorded previous boot. The recovery
-intent pins those assignments before effects and refuses replacements on retry.
+has restarted since, the same explicit command can select recovery on any later
+boot. It requires the retained dead-owner identity, exact receipt hash, the one
+earlier boot of the pool that the receipt names, and bridge assignments belonging
+to that boot. The recovery intent pins those assignments before effects and refuses replacements on retry.
 A remaining legacy device-rebound dependency reservation also requires the
 original recovery boot and host-pin witness. A further boot change refuses its
 release; no automatic recovery command for that state is implemented.
-Do not restart again to attempt this path: another boot rollover invalidates the
-previous-boot evidence. Old guest helper absence follows the verified boot transition;
+Do not restart while a selected recovery is unfinished: its intent is bound to the
+boot it was selected on, and another boot refuses it. Old guest helper absence follows the verified boot transition;
 it is not recorded as a live helper acknowledgement.
 
 Recovery retains its own durable intent and completion evidence. A guest completion

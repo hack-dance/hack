@@ -96,10 +96,18 @@ fn validate_selection_with_absence(
     {
         return Err(invalid());
     }
-    let previous = if selection.previous_boot.is_some() {
-        crate::provider::state::Owner::load(engine.guest().candidate())?.previous_guest_boot_id
-    } else {
-        None
+    // A recorded earlier boot is admitted only while the pool still knows it as one
+    // of its earlier boots (never the current one); `validate_bindings` then binds the
+    // selection to exactly that boot.
+    let previous = match &selection.previous_boot {
+        Some(recorded) => {
+            let candidate = engine.guest().candidate();
+            let owner = crate::provider::state::Owner::load(candidate)?;
+            crate::provider::boot_history::earlier_boots(candidate, &owner)?
+                .into_iter()
+                .find(|boot| boot == recorded && boot != &selection.boot)
+        }
+        None => None,
     };
     validate_bindings(receipt, selection, previous.as_deref())?;
     if let Some(expected) = &selection.predecessor_owner {
@@ -404,7 +412,8 @@ fn pending_interrupted(receipt: &Receipt, previous: &str) -> bool {
 }
 
 /// Explicit dead-owner recovery only: guest helper absence follows the audited
-/// immediate boot transition, never a fabricated live-helper observation.
+/// boot transition since the run's earlier boot (guest tmpfs does not survive any
+/// reboot), never a fabricated live-helper observation.
 pub(crate) fn capture_previous_boot(
     candidate: &Candidate,
     engine: &Engine<'_>,
@@ -461,7 +470,7 @@ pub(crate) fn capture_previous_boot(
             if prior.selected.is_empty() {
                 // Zero ingress is still an enrolled graph cleanup. The prior
                 // empty sidecar alone cannot authorize it: require the exact
-                // dead pinned predecessor from the immediate old boot.
+                // dead pinned predecessor from the run's earlier boot.
                 selection.predecessor_owner = Some(predecessor_owner(receipt, previous, host_pin)?);
             } else {
                 selection.selected = prior
@@ -744,10 +753,18 @@ fn prior_generation(
     } else {
         !previous.is_empty() && !prior.boot.is_empty() && prior.boot != current.boot
     };
+    // A completed dead-owner recovery's own selection also records the boot it selected
+    // from (`capture_previous_boot`). A run recovered, restored and stranded again leaves
+    // it (HACK-2550, seen on a real VM). Only that recovery's retired intent, naming these
+    // exact bridges for the stopped receipt, proves it complete; neither of its boots
+    // may be the live one.
+    let recovered = prior.previous_boot.is_some();
     prior.version == 1
         && prior.owner == current.owner
         && earlier
-        && prior.previous_boot.is_none()
+        && (!recovered
+            || (!prior.selected.is_empty()
+                && prior.previous_boot.as_deref() != Some(current.boot.as_str())))
         && prior.predecessor_owner.is_none()
         && prior.predecessor_absence.is_none()
         && prior.run == current.run
@@ -762,7 +779,14 @@ fn prior_generation(
                 .is_some_and(|relay| relay.launch_serial > prior.serial)
         })
         && (prior.selected.is_empty()
-            || stopped.is_some_and(|receipt| stopped_prior_bindings(root, prior, receipt)))
+            || stopped.is_some_and(|receipt| {
+                stopped_prior_bindings(root, prior, receipt)
+                    && (!recovered
+                        || super::super::dead_owner_cleanup::retired_prior_bridges(
+                            root, receipt, prior,
+                        )
+                        .unwrap_or(false))
+            }))
 }
 
 fn stopped_prior_bindings(root: &std::path::Path, prior: &Selection, receipt: &Receipt) -> bool {
@@ -772,7 +796,7 @@ fn stopped_prior_bindings(root: &std::path::Path, prior: &Selection, receipt: &R
         }) || super::super::dead_owner_cleanup::retired_prior_bridges(root, receipt, prior)
             .unwrap_or(false);
     acknowledged
-        && validate_bindings(receipt, prior, None).is_ok()
+        && validate_bindings(receipt, prior, prior.previous_boot.as_deref()).is_ok()
         && prior.selected.values().all(|selected| {
             let assignment = &selected.assignment;
             receipt

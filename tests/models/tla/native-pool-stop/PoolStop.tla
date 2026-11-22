@@ -20,7 +20,9 @@
 \*             FALSE is `next` before HACK-2456.
 \*   Strict  - recovery of a dead owner's ready run accepts only its own boot
 \*             (same-boot `recover-live-owner`) or the immediate predecessor boot
-\*             (`dead_owner_cleanup`); FALSE accepts any earlier boot.
+\*             (`dead_owner_cleanup` before the boot history); FALSE accepts any
+\*             earlier boot, as `dead_owner_cleanup` now does (`boot_history`,
+\*             `boot_match`). The model does not bound the history (16 boots).
 \*   ByHand  - `runtime up` by hand counts as a user command (no message names it).
 \*   OtherBoots - something else may boot the pool between the stop and this
 \*             project's recovery: another project's `hack up`, or `runtime up` by hand.

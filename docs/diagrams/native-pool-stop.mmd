@@ -16,9 +16,9 @@ stateDiagram-v2
     crashed --> orphaned : hack native recover
     orphaned --> recover : hack up, down --recover
     state recover <<choice>>
-    recover --> retained : [boot ok, no HTTPS lease]
-    recover --> finalizing : [boot ok, HTTPS lease]
-    recover --> stranded : [older boot]
+    recover --> retained : [boot known, no HTTPS lease]
+    recover --> finalizing : [boot known, HTTPS lease]
+    recover --> stranded : [boot not known]
     finalizing --> retained : lease released or archived
 
     note left of orphaned
@@ -32,9 +32,9 @@ stateDiagram-v2
         request, data kept.
     end note
     note right of stranded
-        Known gap: another boot, or a
-        stop mid-recovery, came first.
-        Follow-up: any-boot.
+        Refused, data kept: the run's
+        boot left the 16-boot history,
+        or its evidence is ambiguous.
     end note
     note right of finalizing
         Graph stopped, HTTPS lease held.

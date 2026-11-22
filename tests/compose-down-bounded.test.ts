@@ -1032,7 +1032,7 @@ describe("compose down leftover-cleanup retry outcome (HACK-2547)", () => {
     expect(parsed.error.message).toContain("hack ps --json");
     expect(parsed.error.message).toContain("hack down");
 
-    // A passing retry still succeeds and skips docker network ls.
+    // Retry exits 0 while a project network is still present -> E_DOWN_INCOMPLETE.
     await writeFile(fixture.dockerLogPath, "");
     await fixture.setDockerConfig({
       downExitCode: 0,
@@ -1041,19 +1041,73 @@ describe("compose down leftover-cleanup retry outcome (HACK-2547)", () => {
       psJsonAfterRm: "[]\n",
       networks: ["retry-fail_default"],
     });
-    const okRun = await runCli({
+    const leftoverNetRun = await runCli({
       args: ["down", "--path", fixture.root, "--json"],
       cwd: fixture.root,
       homeDir: fixture.homeDir,
       binDir: fixture.binDir,
     });
-    expect(okRun.exitCode).toBe(0);
-    const okParsed = JSON.parse(okRun.stdout) as { readonly ok: boolean };
-    expect(okParsed.ok).toBe(true);
-    const okCalls = await readDockerCalls(fixture.dockerLogPath);
+    expect(leftoverNetRun.exitCode).toBe(1);
+    const leftoverNetParsed = JSON.parse(leftoverNetRun.stdout) as {
+      readonly ok: boolean;
+      readonly error: {
+        readonly code: string;
+        readonly message: string;
+        readonly detail: Record<string, unknown>;
+      };
+    };
+    expect(leftoverNetParsed.ok).toBe(false);
+    expect(leftoverNetParsed.error.code).toBe("E_DOWN_INCOMPLETE");
+    expect(leftoverNetParsed.error.detail).toEqual({
+      running: [],
+      foreign: [],
+      networks: ["retry-fail_default"],
+    });
+    expect(leftoverNetParsed.error.message).toContain("retry-fail_default");
+    expect(leftoverNetParsed.error.message).toContain("hack ps --json");
+    expect(leftoverNetParsed.error.message).toContain("hack down");
+
+    // Retry exits 0 with containers and project networks gone -> ok: true.
+    await writeFile(fixture.dockerLogPath, "");
+    await fixture.setDockerConfig({
+      downExitCode: 0,
+      secondDownExitCode: 0,
+      psJson: leftoverRow,
+      psJsonAfterRm: "[]\n",
+      networks: [],
+    });
+    const cleanRetryRun = await runCli({
+      args: ["down", "--path", fixture.root, "--json"],
+      cwd: fixture.root,
+      homeDir: fixture.homeDir,
+      binDir: fixture.binDir,
+    });
+    expect(cleanRetryRun.exitCode).toBe(0);
     expect(
-      okCalls.filter((argv) => argv[0] === "compose" && argv.includes("down"))
-    ).toHaveLength(2);
-    expect(okCalls.some((argv) => argv[0] === "network")).toBe(false);
+      (JSON.parse(cleanRetryRun.stdout) as { readonly ok: boolean }).ok
+    ).toBe(true);
+
+    // Ordinary fast path (no owned leftover containers, no retry) skips docker network ls.
+    await writeFile(fixture.dockerLogPath, "");
+    await fixture.setDockerConfig({
+      downExitCode: 0,
+      psJson: "[]\n",
+      networks: ["retry-fail_default"],
+    });
+    const fastRun = await runCli({
+      args: ["down", "--path", fixture.root, "--json"],
+      cwd: fixture.root,
+      homeDir: fixture.homeDir,
+      binDir: fixture.binDir,
+    });
+    expect(fastRun.exitCode).toBe(0);
+    expect((JSON.parse(fastRun.stdout) as { readonly ok: boolean }).ok).toBe(
+      true
+    );
+    const fastCalls = await readDockerCalls(fixture.dockerLogPath);
+    expect(
+      fastCalls.filter((argv) => argv[0] === "compose" && argv.includes("down"))
+    ).toHaveLength(1);
+    expect(fastCalls.some((argv) => argv[0] === "network")).toBe(false);
   }, 60_000);
 });

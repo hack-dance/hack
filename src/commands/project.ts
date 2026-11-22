@@ -8781,9 +8781,18 @@ async function runDownCommand({
               service: entry.service,
               workingDir: entry.workingDir,
             })),
+            ...(stopObservation.networks && stopObservation.networks.length > 0
+              ? { networks: [...stopObservation.networks] }
+              : {}),
             ...(stopObservation.unknownReason === undefined
               ? {}
               : { unknown: true, reason: stopObservation.unknownReason }),
+            ...(stopObservation.networksUnknownReason === undefined
+              ? {}
+              : {
+                  networksUnknown: true,
+                  networksUnknownReason: stopObservation.networksUnknownReason,
+                }),
           },
         }),
         exitCode: 1,
@@ -10567,14 +10576,14 @@ async function finishInstanceStop(opts: {
           retryTimedOut = outcome.timedOut;
         },
       });
+      const [listing, networks] = await Promise.all([
+        listInstanceContainers(opts),
+        listInstanceNetworks({
+          composeProject: opts.composeProjectLabel,
+          env: opts.env,
+        }),
+      ]);
       if (retryExitCode !== 0) {
-        const [listing, networks] = await Promise.all([
-          listInstanceContainers(opts),
-          listInstanceNetworks({
-            composeProject: opts.composeProjectLabel,
-            env: opts.env,
-          }),
-        ]);
         return {
           ok: false,
           ...buildComposeDownRetryFailure({
@@ -10587,6 +10596,14 @@ async function finishInstanceStop(opts: {
           }),
         };
       }
+      return {
+        ok: true,
+        observation: classifyDownObservation({
+          listing,
+          networks,
+          projectDir: opts.project.projectDir,
+        }),
+      };
     }
   }
   return {

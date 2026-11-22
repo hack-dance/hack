@@ -236,6 +236,37 @@ export function selectOwnedInstanceContainers(opts: {
  */
 const NOT_RUNNING_STATES = new Set(["created", "exited", "dead"]);
 
+/** Project networks listed by `docker network ls`, or why they could not be listed. */
+export type InstanceNetworkListing =
+  | { readonly ok: true; readonly networks: readonly string[] }
+  | { readonly ok: false; readonly reason: string };
+
+/** Failure payload returned when `finishInstanceStop`'s retry down fails or times out. */
+export type ComposeDownRetryFailure = {
+  readonly exitCode: number;
+  readonly message: string;
+  readonly detail: Record<string, unknown>;
+};
+
+function normalizeNetworkListing(
+  networks: InstanceNetworkListing | undefined
+): {
+  readonly names: readonly string[];
+  readonly unknownReason?: string;
+} {
+  if (!networks) {
+    return { names: [] };
+  }
+  if (!networks.ok) {
+    return { names: [], unknownReason: networks.reason };
+  }
+  return {
+    names: [
+      ...new Set(networks.networks.map((name) => name.trim()).filter(Boolean)),
+    ].sort((a, b) => a.localeCompare(b)),
+  };
+}
+
 /** The observed result of a down. */
 export type DownObservation =
   | { readonly complete: true }
@@ -248,27 +279,41 @@ export type DownObservation =
         readonly service: string;
         readonly workingDir: string;
       }[];
+      /** Project networks still present after the leftover-cleanup retry. */
+      readonly networks?: readonly string[];
       /** Set when the containers could not be listed at all. */
       readonly unknownReason?: string;
+      /** Set when project networks could not be listed after the retry. */
+      readonly networksUnknownReason?: string;
     };
 
 /**
  * Complete only when nothing labelled with the instance's project may still
- * run. A container of another checkout is never stopped here, but it is not
- * hidden either: it makes the down incomplete and is named. An unknown
- * listing is incomplete, never "none left".
+ * run and (when checked) no project network remains. A container of another
+ * checkout is never stopped here, but it is not hidden either: it makes the
+ * down incomplete and is named. An unknown listing is incomplete, never
+ * "none left".
  */
 export function classifyDownObservation(opts: {
   readonly listing: InstanceContainerListing;
+  readonly networks?: InstanceNetworkListing;
   readonly projectDir: string;
   readonly includeStopped?: boolean;
 }): DownObservation {
+  const net = normalizeNetworkListing(opts.networks);
+  const netFields = {
+    ...(net.names.length > 0 ? { networks: net.names } : {}),
+    ...(net.unknownReason === undefined
+      ? {}
+      : { networksUnknownReason: net.unknownReason }),
+  };
   if (!opts.listing.ok) {
     return {
       complete: false,
       running: [],
       foreign: [],
       unknownReason: opts.listing.reason,
+      ...netFields,
     };
   }
   // One-off run containers outlive a down on purpose (a background
@@ -278,7 +323,11 @@ export function classifyDownObservation(opts: {
       container.oneOff !== true &&
       (opts.includeStopped === true || !NOT_RUNNING_STATES.has(container.state))
   );
-  if (mayRun.length === 0) {
+  if (
+    mayRun.length === 0 &&
+    net.names.length === 0 &&
+    net.unknownReason === undefined
+  ) {
     return { complete: true };
   }
   const running = new Set<string>();
@@ -301,6 +350,7 @@ export function classifyDownObservation(opts: {
     complete: false,
     running: [...running].sort((a, b) => a.localeCompare(b)),
     foreign,
+    ...netFields,
   };
 }
 
@@ -309,9 +359,10 @@ export function downIncompleteMessage(opts: {
   readonly observation: Extract<DownObservation, { complete: false }>;
 }): string {
   const { observation } = opts;
-  if (observation.unknownReason !== undefined) {
-    return `Could not confirm that this instance stopped: ${observation.unknownReason}. Run \`hack ps --json\` to inspect, then \`hack down\` again.`;
-  }
+  const unknownReasons = [
+    observation.unknownReason,
+    observation.networksUnknownReason,
+  ].filter((reason): reason is string => reason !== undefined);
   const parts: string[] = [];
   if (observation.running.length > 0) {
     parts.push(
@@ -326,20 +377,21 @@ export function downIncompleteMessage(opts: {
       `running containers of the same Compose project started from another checkout (${observation.foreign.map((entry) => entry.service).join(", ")}); run \`hack down\` from ${dirs.join(" or ")}`
     );
   }
+  if (observation.networks && observation.networks.length > 0) {
+    parts.push(
+      `${observation.networks.length === 1 ? "a project network" : "project networks"} still present (${observation.networks.join(", ")}); run \`hack ps --json\` to inspect, then \`hack down\` again`
+    );
+  }
+  if (unknownReasons.length > 0 && parts.length === 0) {
+    return `Could not confirm that this instance stopped: ${unknownReasons.join("; ")}. Run \`hack ps --json\` to inspect, then \`hack down\` again.`;
+  }
+  if (unknownReasons.length > 0) {
+    parts.push(
+      `remaining state could not be confirmed (${unknownReasons.join("; ")}); run \`hack ps --json\` to inspect, then \`hack down\` again`
+    );
+  }
   return `docker compose down left ${parts.join("; and ")}.`;
 }
-
-/** Project networks listed by `docker network ls`, or why they could not be listed. */
-export type InstanceNetworkListing =
-  | { readonly ok: true; readonly networks: readonly string[] }
-  | { readonly ok: false; readonly reason: string };
-
-/** Failure payload returned when `finishInstanceStop`'s retry down fails or times out. */
-export type ComposeDownRetryFailure = {
-  readonly exitCode: number;
-  readonly message: string;
-  readonly detail: Record<string, unknown>;
-};
 
 function formatRemaining(
   kind: "container" | "network",
@@ -371,12 +423,8 @@ export function buildComposeDownRetryFailure(opts: {
   const containers = obs.complete ? [] : obs.running;
   const foreign = obs.complete ? [] : obs.foreign;
   const containerReason = opts.listing.ok ? undefined : opts.listing.reason;
-  const networkReason = opts.networks.ok ? undefined : opts.networks.reason;
-  const networks = opts.networks.ok
-    ? [
-        ...new Set(opts.networks.networks.map((n) => n.trim()).filter(Boolean)),
-      ].sort((a, b) => a.localeCompare(b))
-    : [];
+  const { names: networks, unknownReason: networkReason } =
+    normalizeNetworkListing(opts.networks);
   const cap =
     opts.capMs < 1000
       ? `${Math.max(1, Math.round(opts.capMs))}ms`

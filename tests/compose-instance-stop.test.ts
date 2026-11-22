@@ -375,3 +375,48 @@ test("retry failure reports unknown checks and clean remainders without faking c
     "docker compose down retry failed (exit 1); no containers or project networks remain. Run `hack ps --json` to inspect and `hack down` again."
   );
 });
+
+test("retry success observation is incomplete while a project network remains or cannot be checked", async () => {
+  const { projectDir } = await checkout();
+  expect(
+    classifyDownObservation({
+      listing: { ok: true, containers: [] },
+      networks: { ok: true, networks: [] },
+      projectDir,
+    })
+  ).toEqual({ complete: true });
+
+  const withNetwork = classifyDownObservation({
+    listing: { ok: true, containers: [] },
+    networks: { ok: true, networks: ["demo_default", "demo_default"] },
+    projectDir,
+  });
+  expect(withNetwork).toEqual({
+    complete: false,
+    running: [],
+    foreign: [],
+    networks: ["demo_default"],
+  });
+  if (!withNetwork.complete) {
+    expect(downIncompleteMessage({ observation: withNetwork })).toBe(
+      "docker compose down left a project network still present (demo_default); run `hack ps --json` to inspect, then `hack down` again."
+    );
+  }
+
+  const unknownNet = classifyDownObservation({
+    listing: { ok: true, containers: [] },
+    networks: { ok: false, reason: "docker network ls timed out" },
+    projectDir,
+  });
+  expect(unknownNet).toEqual({
+    complete: false,
+    running: [],
+    foreign: [],
+    networksUnknownReason: "docker network ls timed out",
+  });
+  if (!unknownNet.complete) {
+    expect(downIncompleteMessage({ observation: unknownNet })).toBe(
+      "Could not confirm that this instance stopped: docker network ls timed out. Run `hack ps --json` to inspect, then `hack down` again."
+    );
+  }
+});

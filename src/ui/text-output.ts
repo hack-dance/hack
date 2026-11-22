@@ -39,21 +39,24 @@ function pad(text: string, columns: number): string {
 }
 
 const LINE_BREAKS = /[\r\n\u0085\u2028\u2029]+/g;
-const COMMAND_LINE_BREAK = /[\r\n\u0085\u2028\u2029]/;
+const CONTROL_CHARACTERS = /\p{Cc}/gu;
 
 function singleLine(text: string): string {
-  return text.replaceAll(LINE_BREAKS, " ");
+  return Bun.stripANSI(text)
+    .replaceAll(LINE_BREAKS, " ")
+    .replaceAll("\t", " ")
+    .replaceAll(CONTROL_CHARACTERS, "");
 }
 
 function requireCommand(command: string): void {
-  if (command.trim().length === 0 || COMMAND_LINE_BREAK.test(command)) {
+  if (command.trim().length === 0 || singleLine(command) !== command) {
     throw new Error("Expected a non-empty, single-line command");
   }
 }
 
 function cellText(cell: TableCell): string {
   const text = typeof cell === "string" ? cell : (cell?.text ?? "-");
-  return singleLine(text).replaceAll("\t", " ");
+  return singleLine(text);
 }
 
 export function formatDuration(milliseconds: number): string {
@@ -75,8 +78,12 @@ export function createTextOutput({
     return color && tty && style && text ? `${style}${text}\x1b[0m` : text;
   }
 
+  function writeRenderedLine(text: string): void {
+    write(`${text}\n`);
+  }
+
   function line(text = "", role: Role = "ink"): void {
-    write(`${paint(singleLine(text), role)}\n`);
+    writeRenderedLine(paint(singleLine(text), role));
   }
 
   return {
@@ -111,13 +118,15 @@ export function createTextOutput({
             detailWidth > 0 || detail
               ? `${details}${pad(detail, detailWidth)}${between}`
               : "";
-          line(
-            `${heading}${pad(name, nameWidth)}${between}${detailColumn}${paint(result, "faint")}`
+          writeRenderedLine(
+            `${heading}${pad(name, nameWidth)}${between}${detailColumn}${paint(singleLine(result), "faint")}`
           );
         } else if (details) {
-          line(`${heading}${pad(name, nameWidth)}${between}${details}`);
+          writeRenderedLine(
+            `${heading}${pad(name, nameWidth)}${between}${details}`
+          );
         } else {
-          line(heading);
+          writeRenderedLine(heading);
         }
       };
     },
@@ -152,7 +161,7 @@ export function createTextOutput({
             ? styled
             : `${styled}${pad(text, columns)}`;
         });
-        line(cells.join("  "));
+        writeRenderedLine(cells.join("  "));
       }
       renderRow(headings, "faint");
       for (const row of input.rows) {
@@ -173,9 +182,9 @@ export function createTextOutput({
       readonly prompt?: string;
     }): void {
       requireCommand(input.command);
-      const which = input.which ? ` (${input.which})` : "";
-      line(
-        `${paint("!", "attention")} ${input.thing}  ${input.problem}${which}`
+      const which = input.which ? ` (${singleLine(input.which)})` : "";
+      writeRenderedLine(
+        `${paint("!", "attention")} ${singleLine(input.thing)}  ${singleLine(input.problem)}${which}`
       );
       line(`  ${input.needs}. run:`);
       line(`  ${input.command}`);
@@ -185,7 +194,7 @@ export function createTextOutput({
     },
     hint(input: { readonly text: string; readonly command: string }): void {
       requireCommand(input.command);
-      line(`${input.text} ${input.command}`, "faint");
+      line(`${singleLine(input.text).toLowerCase()} ${input.command}`, "faint");
     },
   };
 }

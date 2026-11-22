@@ -24,6 +24,7 @@ import { optJson, optPath } from "../cli/options.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { readHomeEnv } from "../lib/home-dir.ts";
+import { quoteShellWord } from "../lib/logs.ts";
 import { findRepoRootForInit } from "../lib/project.ts";
 import { type DisplayStatusItem, display } from "../ui/display.ts";
 import { createTextOutput } from "../ui/text-output.ts";
@@ -243,7 +244,7 @@ export async function handleSetupMigrate({
 
   if (!options.apply) {
     const plan = await planPluginMigration(input);
-    return await reportPreview({ plan, json: options.json === true });
+    return await reportPreview({ plan, options });
   }
   const result = await applyPluginMigration({
     ...input,
@@ -370,12 +371,38 @@ function planItems(plan: PluginMigrationPlan): DisplayStatusItem[] {
   });
 }
 
+function previewApplyCommand(options: SetupMigrateArgs["options"]): string {
+  const words = ["hack", "setup", "migrate", "--apply"];
+  const flags = [
+    [options.global, optMigrateGlobal.long],
+    [options.allScopes, optMigrateAllScopes.long],
+    [options.claude, optMigrateClaude.long],
+    [options.codex, optMigrateCodex.long],
+    [options.cursor, optMigrateCursor.long],
+  ] as const;
+  for (const [enabled, name] of flags) {
+    if (enabled) {
+      words.push(name);
+    }
+  }
+  const values = [
+    [options.path, optPath.long],
+    [options.skipPluginCheck, optSkipPluginCheck.long],
+  ] as const;
+  for (const [value, name] of values) {
+    if (value !== undefined) {
+      words.push(name, quoteShellWord(value));
+    }
+  }
+  return words.join(" ");
+}
+
 async function reportPreview(opts: {
   readonly plan: PluginMigrationPlan;
-  readonly json: boolean;
+  readonly options: SetupMigrateArgs["options"];
 }): Promise<number> {
   const exitCode = migratePreviewExitCode(opts.plan);
-  if (opts.json) {
+  if (opts.options.json) {
     emitCliResult({
       result: okResult({
         data: {
@@ -398,7 +425,7 @@ async function reportPreview(opts: {
     text: blocked
       ? "install the hack plugin for blocked clients and verify it loads in a fresh session (or pass --skip-plugin-check after checking it yourself). run:"
       : "back up and remove the marked files. run:",
-    command: "hack setup migrate --apply",
+    command: previewApplyCommand(opts.options),
   });
   return exitCode;
 }
@@ -485,7 +512,7 @@ async function reportApply(opts: {
   });
   createTextOutput().hint({
     text: "undo with:",
-    command: `hack setup migrate --rollback-manifest ${result.manifestPath}`,
+    command: `hack setup migrate --rollback-manifest ${quoteShellWord(result.manifestPath)}`,
   });
   return exitCode;
 }

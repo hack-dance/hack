@@ -101,3 +101,31 @@ test("text fields stay on one line and commands are validated before writing", (
   ).toThrow("single-line command");
   expect(lines).toEqual([]);
 });
+
+test("caller terminal controls cannot leak into rendered text", () => {
+  const lines: string[] = [];
+  const output = createTextOutput({
+    tty: false,
+    write: (line) => lines.push(line),
+  });
+  const painted = "\x1b[31mweb\x1b[0m";
+  output.stepRows([{ name: painted }])({
+    name: painted,
+    status: "ok",
+    detail: "\x1b[2Jready",
+    result: "0.3s\x07",
+  });
+  output.table({
+    columns: ["service", "state"],
+    rows: [
+      [painted, "\x1b]8;;https://example.invalid\x1b\\ready\x1b]8;;\x1b\\"],
+    ],
+  });
+  output.hint({ text: "\x1b[31mTRY THIS:\x1b[0m", command: "hack open Web" });
+  expect(lines.join("")).toBe(
+    "✓ web  ready  0.3s\nSERVICE  STATE\nweb      ready\ntry this: hack open Web\n"
+  );
+  expect(() =>
+    output.hint({ text: "try:", command: "hack up\x1b[31m" })
+  ).toThrow("single-line command");
+});

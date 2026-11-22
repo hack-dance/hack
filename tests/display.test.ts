@@ -46,3 +46,32 @@ test("panel lines keep bullet indentation when wrapping", () => {
     "     restart)",
   ]);
 });
+
+test("colored Doctor status list matches the golden", async () => {
+  let text = "";
+  renderStatusList({
+    title: "Doctor summary",
+    items: [
+      { label: "Runtime", status: "ok", meta: "12 checks" },
+      {
+        label: "Routing",
+        status: "error",
+        meta: "1 error",
+        detail: "Proxy is unreachable",
+      },
+    ],
+    width: 80,
+    output: createTextOutput({
+      color: true,
+      tty: true,
+      write: (line) => {
+        text += line;
+      },
+    }),
+  });
+  expect(text).toBe(
+    await Bun.file(
+      new URL("./fixtures/text-output/status-list-color.txt", import.meta.url)
+    ).text()
+  );
+});

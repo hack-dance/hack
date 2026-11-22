@@ -16,7 +16,9 @@ const listPath = "scripts/test-shard-symlink-temp-files.json";
 test("the fixed list names existing tracked tests and runs exactly those files", async () => {
   const selection = await Bun.file(resolve(repository, listPath)).text();
   const files: unknown = JSON.parse(selection);
-  expect(Array.isArray(files) && files.length > 0).toBe(true);
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new Error("The symlinked TMPDIR test list must be a nonempty array");
+  }
   const result = Bun.spawnSync(
     [
       process.execPath,

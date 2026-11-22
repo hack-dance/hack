@@ -1138,8 +1138,10 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
     save(c, &entries)?;
     file.write_all(bytes).map_err(state::io)?;
     file.sync_all().map_err(state::io)?;
-    // The earlier directory sync persisted this name and inode. Writing bytes
-    // does not change either, and the file sync persists the changed contents.
+    // On macOS, the sync of `dir` immediately after create_new persisted the
+    // final `publisher` directory entry and its inode. This branch writes
+    // through the same open file without renaming it. The file sync above
+    // persists its contents before the ready record is committed.
     #[cfg(not(target_os = "macos"))]
     File::open(&dir)
         .map_err(state::io)?
@@ -1166,16 +1168,43 @@ mod port_probe_tests {
 
     #[cfg(all(target_os = "macos", feature = "native-stream-relay"))]
     #[test]
-    fn host_relay_can_prime_without_publication_arguments() {
-        let mut command = Command::new(concat!(env!("OUT_DIR"), "/stream-relay-host"));
-        command
-            .arg("--prime")
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut child = super::super::process::spawn_child(&mut command).unwrap();
-        assert!(child.wait().unwrap().success());
+    fn host_relay_can_prime_and_run_after_a_single_name_transfer() {
+        let fixture = crate::private_test_root(&std::env::temp_dir(), "hack-publication-prime");
+        let staged = fixture.join("staged");
+        let published = fixture.join("publisher");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&staged)
+            .unwrap();
+        file.write_all(payload().unwrap()).unwrap();
+        let original = file.metadata().unwrap();
+        drop(file);
+        let prime = |path: &Path| {
+            let mut command = Command::new(path);
+            command
+                .arg("--prime")
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let mut child = crate::provider::process::spawn_child(&mut command).unwrap();
+            assert!(child.wait().unwrap().success());
+        };
+        assert_eq!(original.nlink(), 1);
+        prime(&staged);
+        fs::rename(&staged, &published).unwrap();
+        assert!(!staged.exists());
+        let renamed = fs::symlink_metadata(&published).unwrap();
+        assert_eq!(renamed.nlink(), 1);
+        assert_eq!(
+            (renamed.dev(), renamed.ino()),
+            (original.dev(), original.ino())
+        );
+        prime(&published);
+        fs::remove_file(published).unwrap();
+        fs::remove_dir(fixture).unwrap();
     }
 
     #[test]

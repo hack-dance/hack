@@ -750,12 +750,61 @@ export function prepareNativeProjectServices(
 export const NATIVE_SHARED_SOURCE_REFUSAL =
   "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 or sharedSource in the native machine settings to share this exact project, including ignored files. Grant that share and run the command again.";
 const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const PINNED_IMAGE_REFERENCE = /^[^@\s]+@sha256:[a-f0-9]{64}$/;
+/** Acquire one image and accept only a confirmed content ID for the requested policy. */
+async function ensureNativeProjectImage(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly reference: string;
+  readonly affectedServices: () => readonly string[];
+  readonly policy: NativeEmulationPolicy | undefined;
+  readonly invoke: typeof invokeNativeRuntime;
+}) {
+  const ensured = await opts
+    .invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: [
+        ...nativeEnsureImageArgs(opts.reference, opts.policy),
+        ...nativeImagePolicyArgs(),
+      ],
+      timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+    })
+    .catch((error: unknown) => {
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode === "registry_image_not_found"
+      ) {
+        const names = opts
+          .affectedServices()
+          .map((name) => (SERVICE_NAME.test(name) ? name : "(name omitted)"));
+        const label =
+          names.length === 1
+            ? `service ${names[0]}`
+            : `services ${names.join(", ")}`;
+        throw new ClosedCliError(
+          `Native image acquisition failed for ${label} field image (registry_image_not_found); the selected registry image or tag was not found. Values omitted.`
+        );
+      }
+      throw error;
+    });
+  if (
+    !isRecord(ensured) ||
+    typeof ensured.image_id !== "string" ||
+    !IMAGE.test(ensured.image_id) ||
+    !ensuredPlatformAccepted(ensured.platform, opts.policy)
+  ) {
+    throw unconfirmed("the runtime image selection");
+  }
+  return { imageId: ensured.image_id, reference: ensured.pinned_reference };
+}
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
 async function pinNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   readonly specs: Record<string, Record<string, unknown>>;
   readonly retainedImages: ReadonlyMap<string, string>;
+  readonly canonicalImages: ReadonlyMap<string, string>;
   /** The selected Compose profiles: a service outside them is never pulled. */
   readonly profiles: readonly string[];
   /** Opted-in services' platform policies; every other service resolves Linux arm64. */
@@ -763,6 +812,9 @@ async function pinNativeProjectImages(opts: {
   readonly signal: AbortSignal;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<void> {
+  const pinnedImages = new Map<string, string>();
+  const immutableReferences = new Map<string, string | null>();
+  const canonical = (image: string) => opts.canonicalImages.get(image) ?? image;
   for (const [name, spec] of Object.entries(opts.specs)) {
     if (opts.signal.aborted) {
       throw canceled();
@@ -787,39 +839,46 @@ async function pinNativeProjectImages(opts: {
       continue;
     }
     const policy = nativeEmulationPolicy(opts.amd64Emulation, name);
-    const ensured = await opts
-      .invoke({
-        runtime: opts.runtime,
-        cwd: opts.projectRoot,
-        args: [
-          ...nativeEnsureImageArgs(image, policy),
-          ...nativeImagePolicyArgs(),
-        ],
-        timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
-      })
-      .catch((error: unknown) => {
-        if (
-          error instanceof NativeRuntimeRequestError &&
-          error.nativeCode === "registry_image_not_found"
-        ) {
-          const label = SERVICE_NAME.test(name)
-            ? `service ${name}`
-            : "a service";
-          throw new ClosedCliError(
-            `Native image acquisition failed for ${label} field image (registry_image_not_found); the selected registry image or tag was not found. Values omitted.`
-          );
-        }
-        throw error;
-      });
-    if (
-      !isRecord(ensured) ||
-      typeof ensured.image_id !== "string" ||
-      !IMAGE.test(ensured.image_id) ||
-      !ensuredPlatformAccepted(ensured.platform, policy)
-    ) {
-      throw unconfirmed("the runtime image selection");
+    // The same tag may select different images under different platform policies.
+    const reference = canonical(image);
+    const key = JSON.stringify([reference, policy]);
+    const pinned = pinnedImages.get(key);
+    if (pinned !== undefined) {
+      spec.image = pinned;
+      continue;
     }
-    spec.image = ensured.image_id;
+    const immutableReference = immutableReferences.get(reference);
+    if (immutableReference === null) {
+      throw unconfirmed("the runtime image reference");
+    }
+    const ensured = await ensureNativeProjectImage({
+      runtime: opts.runtime,
+      projectRoot: opts.projectRoot,
+      reference: immutableReference ?? image,
+      affectedServices: () =>
+        Object.entries(opts.specs)
+          .filter(
+            ([service, candidate]) =>
+              !opts.retainedImages.has(service) &&
+              nativeServiceActive(candidate, opts.profiles) &&
+              typeof candidate.image === "string" &&
+              canonical(candidate.image) === reference
+          )
+          .map(([service]) => service),
+      policy,
+      invoke: opts.invoke,
+    });
+    if (immutableReference === undefined) {
+      immutableReferences.set(
+        reference,
+        typeof ensured.reference === "string" &&
+          PINNED_IMAGE_REFERENCE.test(ensured.reference)
+          ? ensured.reference
+          : null
+      );
+    }
+    pinnedImages.set(key, ensured.imageId);
+    spec.image = ensured.imageId;
   }
 }
 /** Services whose review carries Hack's exact one-shot marker as `one_shot: true`. */
@@ -2391,7 +2450,7 @@ async function startNativeProjectAttempt(
     check: deps.sourceSize,
   });
   // Refuse malformed or unacquirable references before hooks, VM or provider start.
-  await admitNativeProjectImages({
+  const canonicalImages = await admitNativeProjectImages({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
     specs,
@@ -2649,6 +2708,7 @@ async function startNativeProjectAttempt(
       projectRoot: opts.scope.projectRoot,
       specs,
       retainedImages,
+      canonicalImages,
       profiles,
       amd64Emulation: input.amd64Emulation,
       signal: controller.signal,

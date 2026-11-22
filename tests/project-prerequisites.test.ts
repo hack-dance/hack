@@ -319,6 +319,17 @@ test("explicit service selection checks only remotes with matching environment k
         services: ["worker"],
       })
     ).rejects.toMatchObject({ code: "E_PREREQUISITE_CHECK_FAILED" });
+    await writeFile(composeFile, "services:\n  worker: {}\n");
+    await writeFile(
+      join(root, "hack.env.default.yaml"),
+      "values:\n  worker:\n    DB_HOST: db.example.test\n"
+    );
+    await expect(
+      enforceProjectPrerequisites(cfg.prerequisites, true, root, {
+        composeFile,
+        services: ["worker"],
+      })
+    ).rejects.toMatchObject({ code: "E_PREREQUISITE_CHECK_FAILED" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

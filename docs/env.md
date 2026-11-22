@@ -1895,7 +1895,8 @@ requirements before running Compose lifecycle hooks for `up`, `restart`, or
 mapped env names match an `environment` entry on a selected service or its
 Compose dependencies. With no service selection, Hack checks every default
 remote. Hack also checks every default remote when it cannot determine the
-selected services' environment keys, including when a service uses `env_file`.
+selected services' environment keys, including when a service uses `env_file`
+or the checkout has managed env layers.
 Doctor runs preset checks and shows each declared login command. It reports
 custom checks as `not checked` after looking up their executables.
 

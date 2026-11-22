@@ -1,6 +1,11 @@
-import { isAbsolute } from "node:path";
+import { readdir } from "node:fs/promises";
+import { dirname, isAbsolute } from "node:path";
 import { createInterface } from "node:readline";
 import { YAML } from "bun";
+import {
+  PROJECT_ENV_CONFIG_FILENAME_PREFIX,
+  PROJECT_ENV_CONFIG_FILENAME_SUFFIX,
+} from "../constants.ts";
 import { childEnvironment } from "./child-environment.ts";
 import { HackCliError, type HackErrorCode } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
@@ -13,6 +18,7 @@ import type {
   ProjectPrerequisiteValidation,
 } from "./project-remotes-config.ts";
 import { findExecutableInPath } from "./shell.ts";
+import { resolvePrimaryLocalProjectDir } from "./worktree-local-config.ts";
 
 const UNQUOTED_ARG = /^[a-zA-Z0-9_.:/@%+=,-]+$/;
 const CHECK_TIMEOUT_MS = 10_000;
@@ -290,11 +296,43 @@ function dependencyNames(
   return isRecord(dependencies) ? Object.keys(dependencies) : null;
 }
 
+async function mayInjectManagedEnv(
+  projectRoot: string,
+  projectDir: string
+): Promise<boolean> {
+  try {
+    const primary = await resolvePrimaryLocalProjectDir({
+      projectRoot,
+      projectDir,
+    });
+    const directories = primary === null ? [projectDir] : [projectDir, primary];
+    for (const directory of directories) {
+      const names = await readdir(directory);
+      if (
+        names.some(
+          (name) =>
+            name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+            name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 async function selectedEnvironmentNames(
+  projectRoot: string,
   composeFile: string,
   services: readonly string[]
 ): Promise<ReadonlySet<string> | null> {
-  if (services.length === 0) {
+  if (
+    services.length === 0 ||
+    (await mayInjectManagedEnv(projectRoot, dirname(composeFile)))
+  ) {
     return null;
   }
   let model: unknown;
@@ -363,6 +401,7 @@ export async function enforceProjectPrerequisites(
   const names =
     selection && config.selected.length > 0
       ? await selectedEnvironmentNames(
+          cwd,
           selection.composeFile,
           selection.services
         )

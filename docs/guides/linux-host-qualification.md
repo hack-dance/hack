@@ -417,11 +417,12 @@ bun scripts/linux-first-run-check.ts --hack "$PWD/dist/hack" --scratch /abs/new/
 ```
 
 It covers doctor, `global install` (including the `proxy.bind_address` retry
-when another program holds :443), init, `up`/`ps`/`logs`/`open`/`exec`/`run`/
+when another program holds :443; the logging stack stays off), init, `up`/`ps`/`logs`/`open`/`exec`/`run`/
 `restart`/`down` with `--json` shape checks, routed HTTPS against Hack's CA
 (`curl --resolve` to loopback, so no DNS change is needed), env and a secret
 (compared, never printed), `host exec`, a branch instance, foreground `up` with
-Ctrl-C in a pty, the daemon, the update check and `native setup`. It prints a
+Ctrl-C in a pty, `global up --logging` and `--no-logging` with every logging
+container's state, the daemon, the update check and `native setup`. It prints a
 Markdown table (step, command, exit, seconds, result, note), writes it to
 `<scratch>/report.md`, and exits 0 only when no step failed.
 

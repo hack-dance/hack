@@ -545,7 +545,8 @@ test("not-started native down does not run configured hooks", async () => {
       child.exited,
     ]);
     expect(code).toBe(0);
-    expect(stdout + stderr).toContain("Native project is not started");
+    expect(stdout).toMatch(/^✓ nothing changed {2}\d+\.\ds\n$/);
+    expect(stderr).toBe("");
   } finally {
     clearTimeout(timer);
   }

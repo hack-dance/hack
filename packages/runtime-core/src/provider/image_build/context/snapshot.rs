@@ -37,7 +37,9 @@
 //! gone (see [`owner_gone`]), and the next attempt of the same key removes it in any
 //! case. The copy observes the operation's cancellation and
 //! deadline before every entry and every chunk of a file.
-use super::{Entry, Kind, changed, fsat::Dir, moved, open_path, unreadable};
+use super::{
+    Entry, Kind, changed, descriptor_limit, fsat::Dir, moved, open_path, read_error, unreadable,
+};
 use crate::{CandidateError, provider::state};
 use sha2::{Digest, Sha256};
 use std::{
@@ -105,23 +107,24 @@ impl Snapshot {
         fs::DirBuilder::new()
             .mode(0o700)
             .create(holder)
-            .map_err(state::io)?;
+            .map_err(snapshot_io)?;
         state::check_private_directory(holder)?;
-        let holder_dir = Dir::open(holder).map_err(state::io)?;
+        let holder_dir = Dir::open(holder).map_err(snapshot_io)?;
         holder_dir
             .mkdir(ROOT.as_bytes(), 0o700)
-            .map_err(state::io)?;
-        let destination = holder_dir.dir(ROOT.as_bytes()).map_err(state::io)?;
-        let copy_root = destination.duplicate().map_err(state::io)?;
-        // Open directories along the current path: (relative path, source, copy).
+            .map_err(snapshot_io)?;
+        let destination = holder_dir.dir(ROOT.as_bytes()).map_err(snapshot_io)?;
+        let copy_root = destination.duplicate().map_err(snapshot_io)?;
+        // Open directories along the current path: two descriptors per level.
         let mut open: Vec<(Vec<u8>, Dir, Dir)> =
             vec![(Vec::new(), open_path(source)?, destination)];
         let mut directories: Vec<&Entry> = Vec::new();
         // Each copied first name of a hard-link group: its source `(dev, ino)`.
+        // Looking up its destination can hold a third descriptor per level.
         let mut sources: std::collections::BTreeMap<&[u8], (u64, u64)> =
             std::collections::BTreeMap::new();
         let mut links: Vec<(Vec<u8>, Dir)> =
-            vec![(Vec::new(), copy_root.duplicate().map_err(state::io)?)];
+            vec![(Vec::new(), copy_root.duplicate().map_err(snapshot_io)?)];
         for entry in recorded {
             if let Some(stopped) = stop() {
                 return Ok(Err(stopped));
@@ -136,7 +139,7 @@ impl Snapshot {
             match &entry.kind {
                 Kind::Directory => {
                     // Writable while it is filled; the recorded mode is set afterwards.
-                    to.mkdir(leaf, 0o700).map_err(state::io)?;
+                    to.mkdir(leaf, 0o700).map_err(snapshot_io)?;
                     directories.push(entry);
                 }
                 Kind::Symlink(target) => {
@@ -144,8 +147,8 @@ impl Snapshot {
                     if &current != target {
                         return Err(changed());
                     }
-                    to.symlink(target, leaf).map_err(state::io)?;
-                    to.set_times(leaf, SNAPSHOT_TIME).map_err(state::io)?;
+                    to.symlink(target, leaf).map_err(snapshot_io)?;
+                    to.set_times(leaf, SNAPSHOT_TIME).map_err(snapshot_io)?;
                 }
                 Kind::File(..) if entry.link.is_some() => {
                     // A later name of a hard-link group: still the same source inode as
@@ -160,7 +163,7 @@ impl Snapshot {
                     descend_copy(&mut links, first_parent)?;
                     let (_, first_directory) = links.last().ok_or_else(unreadable)?;
                     to.link(first_directory, first_leaf, leaf)
-                        .map_err(state::io)?;
+                        .map_err(snapshot_io)?;
                 }
                 Kind::File(hash, size) => {
                     let copied = copy_file(
@@ -186,11 +189,11 @@ impl Snapshot {
         for entry in directories.iter().rev() {
             descend_copy(&mut copies, &entry.path)?;
             let (_, directory) = copies.last().ok_or_else(unreadable)?;
-            let handle = directory.handle().map_err(state::io)?;
+            let handle = directory.handle().map_err(snapshot_io)?;
             handle
                 .set_permissions(fs::Permissions::from_mode(entry.mode))
-                .map_err(state::io)?;
-            handle.set_times(fixed_times()).map_err(state::io)?;
+                .map_err(snapshot_io)?;
+            handle.set_times(fixed_times()).map_err(snapshot_io)?;
             require_mode(&handle, &self_path(holder, &entry.path), entry.mode)?;
         }
         Ok(Ok(snapshot))
@@ -229,6 +232,10 @@ fn within(ancestor: &[u8], path: &[u8]) -> bool {
         || (path.starts_with(ancestor) && path.get(ancestor.len()) == Some(&b'/'))
 }
 
+fn snapshot_io(error: std::io::Error) -> CandidateError {
+    descriptor_limit(&error).unwrap_or_else(|| state::io(error))
+}
+
 /// Make the top of `open` the directory `parent`, in both trees: close what is not on
 /// its path, then enter each missing component through the held descriptors.
 fn descend(open: &mut Vec<(Vec<u8>, Dir, Dir)>, parent: &[u8]) -> Result<(), CandidateError> {
@@ -251,7 +258,7 @@ fn descend(open: &mut Vec<(Vec<u8>, Dir, Dir)>, parent: &[u8]) -> Result<(), Can
         #[cfg(test)]
         super::before_descend(&relative);
         let from = from.dir(component).map_err(|e| moved(&e))?;
-        let to = to.dir(component).map_err(state::io)?;
+        let to = to.dir(component).map_err(snapshot_io)?;
         open.push((relative, from, to));
     }
 }
@@ -274,7 +281,7 @@ fn descend_copy(open: &mut Vec<(Vec<u8>, Dir)>, path: &[u8]) -> Result<(), Candi
         let rest = &path[start..];
         let component = rest.split(|b| *b == b'/').next().unwrap_or(rest);
         let relative = path[..start + component.len()].to_vec();
-        let to = to.dir(component).map_err(state::io)?;
+        let to = to.dir(component).map_err(snapshot_io)?;
         open.push((relative, to));
     }
 }
@@ -349,7 +356,7 @@ fn require_mode(created: &File, path: &Path, mode: u32) -> Result<(), CandidateE
     });
     #[cfg(not(test))]
     let _ = path;
-    let status = super::fsat::status(created).map_err(state::io)?;
+    let status = super::fsat::status(created).map_err(snapshot_io)?;
     if status.mode & 0o7777 != mode {
         return Err(crate::CandidateError::new(
             "native_build_context_copy",
@@ -369,11 +376,11 @@ fn copy_file(
     stop: &dyn Fn() -> Option<Stopped>,
 ) -> Result<Result<(u64, u64), Stopped>, CandidateError> {
     let source = from.file(leaf).map_err(|e| moved(&e))?;
-    let status = super::fsat::status(&source).map_err(|_| unreadable())?;
+    let status = super::fsat::status(&source).map_err(read_error)?;
     if !status.is_file() || status.mode & 0o7777 != mode || status.size != size {
         return Err(changed());
     }
-    let mut target = to.create(leaf, 0o600).map_err(state::io)?;
+    let mut target = to.create(leaf, 0o600).map_err(snapshot_io)?;
     let mut reader = (&source).take(size.saturating_add(1));
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; COPY_BUFFER];
@@ -382,7 +389,7 @@ fn copy_file(
         if let Some(stopped) = stop() {
             return Ok(Err(stopped));
         }
-        let read = reader.read(&mut buffer).map_err(|_| unreadable())?;
+        let read = reader.read(&mut buffer).map_err(read_error)?;
         if read == 0 {
             break;
         }
@@ -391,15 +398,15 @@ fn copy_file(
             return Err(changed());
         }
         digest.update(&buffer[..read]);
-        target.write_all(&buffer[..read]).map_err(state::io)?;
+        target.write_all(&buffer[..read]).map_err(snapshot_io)?;
     }
     if total != size || digest.finalize().as_slice() != hash {
         return Err(changed());
     }
     target
         .set_permissions(fs::Permissions::from_mode(mode))
-        .map_err(state::io)?;
-    target.set_times(fixed_times()).map_err(state::io)?;
+        .map_err(snapshot_io)?;
+    target.set_times(fixed_times()).map_err(snapshot_io)?;
     require_mode(&target, path, mode)?;
     Ok(Ok((status.dev, status.ino)))
 }
@@ -410,20 +417,20 @@ fn remove_tree(path: &Path) -> Result<(), CandidateError> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(state::io(error)),
-        Ok(metadata) if !metadata.is_dir() => return fs::remove_file(path).map_err(state::io),
+        Ok(metadata) if !metadata.is_dir() => return fs::remove_file(path).map_err(snapshot_io),
         Ok(_) => {}
     }
     let mut pending = vec![path.to_owned()];
     while let Some(directory) = pending.pop() {
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).map_err(state::io)?;
-        for entry in fs::read_dir(&directory).map_err(state::io)? {
-            let entry = entry.map_err(state::io)?;
-            if entry.file_type().map_err(state::io)?.is_dir() {
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).map_err(snapshot_io)?;
+        for entry in fs::read_dir(&directory).map_err(snapshot_io)? {
+            let entry = entry.map_err(snapshot_io)?;
+            if entry.file_type().map_err(snapshot_io)?.is_dir() {
                 pending.push(entry.path());
             }
         }
     }
-    fs::remove_dir_all(path).map_err(state::io)
+    fs::remove_dir_all(path).map_err(snapshot_io)
 }
 
 /// A `stop` check for [`Snapshot::create`] from the operation's cancellation request

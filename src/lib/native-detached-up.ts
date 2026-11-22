@@ -20,6 +20,7 @@ import {
   NATIVE_PROVIDER_PIN_MESSAGE,
 } from "../backends/native-runtime-client.ts";
 import { CliUsageError } from "../cli/command.ts";
+import { writeLifecycleStarted } from "../ui/lifecycle-closing.ts";
 import {
   noteActivityFailedServices,
   suppressActivityRecording,
@@ -58,6 +59,7 @@ type Ready = {
   readonly project: string;
   readonly branch: string | null;
   readonly composeProject: string;
+  readonly address?: string;
   readonly started: readonly string[];
   readonly completed?: readonly string[];
 };
@@ -909,9 +911,11 @@ export function nativeDetachedOwnerArgs(opts: {
   return args;
 }
 
-function nativeDetachedReadyLine(action: "up" | "restart"): string {
-  const done = action === "restart" ? "restarted and is ready" : "is ready";
-  return `Project ${done}. Use hack ps, hack logs SERVICE --no-follow, and hack down.\n`;
+function nativeReadyAddress(address: unknown): string | undefined {
+  const url = typeof address === "string" ? URL.parse(address) : null;
+  return url?.protocol === "https:" && !url.username && !url.password
+    ? url.origin
+    : undefined;
 }
 
 /**
@@ -1069,7 +1073,7 @@ export async function startNativeDetachedUp(opts: {
       new HackCliError({
         code: "E_CANCELLED",
         message:
-          "Native detached startup canceled; ordinary owned stop was requested. Inspect hack ps before retrying.",
+          "Native detached startup interrupted; ordinary owned stop was requested. Inspect hack ps before retrying.",
       })
     );
   };
@@ -1178,8 +1182,16 @@ export async function startNativeDetachedUp(opts: {
           },
         }),
       });
+    } else if (action === "up") {
+      writeLifecycleStarted({
+        url: nativeReadyAddress(data.address),
+        backend: "native",
+        durationMs: Date.now() - startedAt,
+      });
     } else {
-      process.stdout.write(nativeDetachedReadyLine(action));
+      process.stdout.write(
+        "Project restarted and is ready. Use hack ps, hack logs SERVICE --no-follow, and hack down.\n"
+      );
     }
     return 0;
   } catch (error) {

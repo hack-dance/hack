@@ -247,6 +247,13 @@ services:
   insecure:
     labels:
       caddy: http://only.sample.hack.local
+  numbered-map:
+    labels:
+      caddy_0.reverse_proxy: "{{upstreams}}"
+      caddy_0: map.sample.hack.local
+  numbered-list:
+    labels:
+      - caddy_1=list.sample.hack.local
 `;
   const baseHosts = ["sample.hack.local"];
   expect(
@@ -256,6 +263,8 @@ services:
       ["web", "https://shared.example"],
       ["external", "https://external.example"],
       ["api", "https://api.sample.hack.local"],
+      ["numbered-map", "https://map.sample.hack.local"],
+      ["numbered-list", "https://list.sample.hack.local"],
     ])
   );
   expect(
@@ -264,6 +273,8 @@ services:
     new Map([
       ["web", "https://feature-x.sample.hack.local"],
       ["api", "https://api.feature-x.sample.hack.local"],
+      ["numbered-map", "https://map.feature-x.sample.hack.local"],
+      ["numbered-list", "https://list.feature-x.sample.hack.local"],
     ])
   );
 });

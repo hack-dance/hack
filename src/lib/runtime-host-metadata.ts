@@ -2,6 +2,7 @@ import { YAML } from "bun";
 
 import {
   applyBranchToHost,
+  isCaddySiteLabel,
   rewriteCaddyLabelForBranch,
   splitCaddySites,
 } from "./branch-hosts.ts";
@@ -289,19 +290,22 @@ export function composeServiceAddresses(opts: {
   readonly httpsPort?: number | null;
 }): ReadonlyMap<string, string> {
   const addresses = new Map<string, string>();
-  for (const [service, entry] of readEffectiveServices({
-    composeYamls: [opts.composeYaml],
-  })) {
-    if (!entry.caddy) {
+  const services = parseComposeYaml({ text: opts.composeYaml })?.services;
+  if (!isRecord(services)) {
+    return addresses;
+  }
+  for (const [service, entry] of Object.entries(services)) {
+    if (!isRecord(entry)) {
       continue;
     }
+    const sites = readCaddySiteLabels(entry.labels).join(", ");
     const label = opts.branch
       ? rewriteCaddyLabelForBranch({
-          value: entry.caddy,
+          value: sites,
           branch: opts.branch,
           baseHosts: opts.baseHosts,
         }).value
-      : entry.caddy;
+      : sites;
     const host = splitCaddySites(label)
       .filter((site) => !site.toLowerCase().startsWith("http://"))
       .flatMap((value) => extractCaddyLabelHosts({ value }))[0];
@@ -313,6 +317,26 @@ export function composeServiceAddresses(opts: {
     }
   }
   return addresses;
+}
+
+function readCaddySiteLabels(labels: unknown): string[] {
+  if (isRecord(labels)) {
+    return Object.entries(labels).flatMap(([key, value]) =>
+      isCaddySiteLabel(key) && typeof value === "string" ? [value] : []
+    );
+  }
+  if (!Array.isArray(labels)) {
+    return [];
+  }
+  return labels.flatMap((label: unknown) => {
+    if (typeof label !== "string") {
+      return [];
+    }
+    const separator = label.indexOf("=");
+    return separator > 0 && isCaddySiteLabel(label.slice(0, separator).trim())
+      ? [label.slice(separator + 1)]
+      : [];
+  });
 }
 
 function applyBranchIfNeeded(opts: {

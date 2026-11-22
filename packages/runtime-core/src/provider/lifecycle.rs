@@ -1345,6 +1345,79 @@ fn start_pool(
     })
 }
 
+/// Capacity growth is a separate stopped-pool transaction. The idle stop
+/// verifies the provider under its own lease, before boot admission samples
+/// or acquires the lease for the new boot.
+fn resize_pool_for_start(
+    candidate: &Candidate,
+    profile: super::Profile,
+    request: &running_start::StartRequest<'_>,
+    mut owner: Owner,
+) -> Result<Owner, CandidateError> {
+    if profile == super::Profile::Development && owner.profile == profile {
+        let target = super::socket_update::target(&owner, request.bridges, request.dependencies)?;
+        if super::socket_update::pending(candidate)?
+            || super::socket_update::changed(&owner, target)
+        {
+            let mut after = owner.clone();
+            target.apply(&mut after);
+            if after.application_bridge.is_some() && !cfg!(feature = "native-stream-relay") {
+                return Err(CandidateError::new(
+                    "bridge_unavailable",
+                    "Application bridges require a native-stream-relay build.",
+                ));
+            }
+            request.check(
+                &after,
+                emulation_pool_alive(candidate, &owner, request.amd64_emulation)?,
+            )?;
+            if owner.phase == "running" {
+                super::socket_update::require_complete(candidate)?;
+                let token = &owner.token;
+                stop_idle_pool_checked(candidate, &|| {
+                    super::socket_update::require_complete(candidate)?;
+                    super::network_update::require_complete(candidate)?;
+                    super::share_update::require_complete(candidate)?;
+                    let current = Owner::load(candidate)?;
+                    if &current.token != token
+                        || current.application_bridge != owner.application_bridge
+                        || current.dependency_sockets != owner.dependency_sockets
+                    {
+                        return Err(CandidateError::new(
+                            "runtime_changed",
+                            "The native pool changed before the capacity stop. Retry startup.",
+                        ));
+                    }
+                    let alive = emulation_pool_alive(candidate, &current, request.amd64_emulation)?;
+                    let mut current = current;
+                    target.apply(&mut current);
+                    request.check(&current, alive)
+                })
+                .map_err(|error| {
+                    if error.code == pool_users::POOL_IN_USE {
+                        CandidateError::new(
+                            "pool_socket_in_use",
+                            "The pool is in use, so its capacity was not changed.",
+                        )
+                    } else {
+                        error
+                    }
+                })?;
+                let stopped = Owner::load(candidate)?;
+                if stopped.token != owner.token {
+                    return Err(CandidateError::new(
+                        "runtime_changed",
+                        "The native pool changed after the capacity stop. Retry startup.",
+                    ));
+                }
+                owner = stopped;
+            }
+            owner = super::socket_update::update(candidate, &owner, target)?;
+        }
+    }
+    Ok(owner)
+}
+
 // The last argument reports on the caller's timing span, on either outcome.
 #[allow(clippy::too_many_arguments)]
 fn start_pool_observed(
@@ -1413,67 +1486,8 @@ fn start_pool_observed(
             .try_exists()
             .map_err(io)?
         {
-            let mut owner = Owner::load(candidate)?;
-            if profile == super::Profile::Development && owner.profile == profile {
-                let target =
-                    super::socket_update::target(&owner, bridge_request, dependency_request)?;
-                if super::socket_update::pending(candidate)?
-                    || super::socket_update::changed(&owner, target)
-                {
-                    let mut after = owner.clone();
-                    target.apply(&mut after);
-                    if after.application_bridge.is_some() && !cfg!(feature = "native-stream-relay")
-                    {
-                        return Err(CandidateError::new(
-                            "bridge_unavailable",
-                            "Application bridges require a native-stream-relay build.",
-                        ));
-                    }
-                    request.check(
-                        &after,
-                        emulation_pool_alive(candidate, &owner, request.amd64_emulation)?,
-                    )?;
-                    if owner.phase == "running" {
-                        super::socket_update::require_complete(candidate)?;
-                        let token = &owner.token;
-                        stop_idle_pool_checked(candidate, &|| {
-                            super::socket_update::require_complete(candidate)?;
-                            super::network_update::require_complete(candidate)?;
-                            super::share_update::require_complete(candidate)?;
-                            let current = Owner::load(candidate)?;
-                            if &current.token != token
-                                || current.application_bridge != owner.application_bridge
-                                || current.dependency_sockets != owner.dependency_sockets
-                            {
-                                return Err(CandidateError::new(
-                                    "runtime_changed",
-                                    "The native pool changed before the capacity stop. Retry startup.",
-                                ));
-                            }
-                            let alive =
-                                emulation_pool_alive(candidate, &current, request.amd64_emulation)?;
-                            let mut current = current;
-                            target.apply(&mut current);
-                            request.check(&current, alive)
-                        }).map_err(|error| {
-                            if error.code == pool_users::POOL_IN_USE {
-                                CandidateError::new("pool_socket_in_use", "The pool is in use, so its capacity was not changed.")
-                            } else {
-                                error
-                            }
-                        })?;
-                        let stopped = Owner::load(candidate)?;
-                        if stopped.token != owner.token {
-                            return Err(CandidateError::new(
-                                "runtime_changed",
-                                "The native pool changed after the capacity stop. Retry startup.",
-                            ));
-                        }
-                        owner = stopped;
-                    }
-                    owner = super::socket_update::update(candidate, &owner, target)?;
-                }
-            }
+            let owner =
+                resize_pool_for_start(candidate, profile, &request, Owner::load(candidate)?)?;
             super::socket_update::require_complete(candidate)?;
             request.check(
                 &owner,

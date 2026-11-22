@@ -2426,6 +2426,14 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "per-service-publication",
+    module: "PerServicePublication",
+    states: 105,
+    invariant: "Safe",
+    action: "Record",
+    fields: ['recorded = {"first"}', "listening = {}"],
+  },
+  {
     // Loopback TCP publication of Compose `ports`: one listener per host
     // port, no forwarding to a replaced container, no recovery of a live
     // owner, no listener after acknowledged stop; see tests/models/tla/README.md.

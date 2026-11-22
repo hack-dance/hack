@@ -1,0 +1,25 @@
+---
+title: PerServicePublication · startup and retirement
+---
+stateDiagram-v2
+    direction TB
+    [*] --> starting
+    starting --> starting : Ready, Admit, Connect, Record
+    starting --> ready : Finish [all recorded]
+    starting --> failed : Abort [failure]
+    starting --> cancelled : Abort [Ctrl-C]
+    starting --> dead : Abort [owner death]
+    failed --> retired : Settled [no intents]
+    cancelled --> retired : Settled [no intents]
+    dead --> retired : Settled [no intents]
+    note right of starting
+        INV Recorded ports have an observed listener.
+    end note
+    note right of retired
+        INV No listener from this run survives.
+    end note
+    classDef live stroke-width:1.6px
+    class starting live
+    class ready ok
+    class failed,cancelled,dead fail
+    class retired idle

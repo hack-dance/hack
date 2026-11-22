@@ -6,5 +6,5 @@ stateDiagram-v2
     Dispatch --> Dispatch: Slot available
     Dispatch --> Drain: Failure or Ctrl-C
     Dispatch --> Done: All succeeded and settled
-    Drain --> Done: All started builds settled
+    Drain --> Done: All builds settled
     Done --> [*]

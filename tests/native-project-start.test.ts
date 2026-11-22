@@ -142,6 +142,49 @@ async function fixture(withEnvironment = true) {
         },
       }),
     invoke: async (opts) => {
+      if (opts.args[1] === "ensure-images") {
+        const jobs = JSON.parse(
+          new TextDecoder().decode(opts.privateInput)
+        ) as [string, string][];
+        return await Promise.all(
+          jobs.map(async ([reference, policy], index) => {
+            try {
+              const args = [
+                "runtime",
+                "ensure-image",
+                "--reference",
+                reference,
+                ...(policy === "native" ? [] : ["--emulation", policy]),
+                "--json",
+              ];
+              return [
+                index,
+                {
+                  Ok: await dependencies.invoke!({
+                    ...opts,
+                    args,
+                    privateInput: undefined,
+                  }),
+                },
+                1,
+              ];
+            } catch (error) {
+              return [
+                index,
+                {
+                  Err: {
+                    code:
+                      error instanceof NativeRuntimeRequestError
+                        ? error.nativeCode
+                        : "fixture",
+                  },
+                },
+                1,
+              ];
+            }
+          })
+        );
+      }
       if (opts.args[1] === "source-size") {
         return nativeSourceSizeReceipt();
       }
@@ -6545,6 +6588,9 @@ test("a missing shared tag names the requested image and every affected active s
       };
     }
     if (request.args[1] === "ensure-image") {
+      if (request.args[3] === "another:latest") {
+        return { image_id: `sha256:${"f".repeat(64)}` };
+      }
       throw new NativeRuntimeRequestError({
         nativeCode: "registry_image_not_found",
         message: "private registry detail",

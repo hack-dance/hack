@@ -11,15 +11,68 @@ use crate::{Candidate, CandidateError, reject_aliased_state};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     fs,
     io::Read,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
+    sync::{Arc, Condvar, Mutex, MutexGuard},
 };
 /// Content-addressed archives one candidate's cache may hold.
 const MAX_ARCHIVES: usize = 64;
 /// A new slot needs at least this much remaining cache budget.
 const MIN_SLOT: u64 = 1024 * 1024;
+const IMAGE_WORKERS: usize = 3;
+
+#[derive(Default)]
+struct CacheState {
+    lease: Option<state::Lock>,
+    reservations: BTreeMap<String, u64>,
+}
+
+#[derive(Default)]
+struct ImageCache {
+    state: Mutex<CacheState>,
+    changed: Condvar,
+    importer: Mutex<()>,
+    pins: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+}
+
+impl ImageCache {
+    fn enter(&self, root: &Path) -> Result<MutexGuard<'_, CacheState>, CandidateError> {
+        let mut cache = self.state.lock().unwrap();
+        if cache.lease.is_none() {
+            let lease = state::Lock::acquire(root)?;
+            let staging = root.with_file_name("image-staging");
+            if staging.try_exists().map_err(state::io)? {
+                state::check_private_directory(&staging)?;
+                fs::remove_dir_all(&staging).map_err(state::io)?;
+            }
+            cache.lease = Some(lease);
+        }
+        cache.lease.as_ref().unwrap().verify_path(root)?;
+        Ok(cache)
+    }
+}
+
+struct Reservation<'a> {
+    cache: &'a ImageCache,
+    key: String,
+    path: PathBuf,
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+        self.cache
+            .state
+            .lock()
+            .unwrap()
+            .reservations
+            .remove(&self.key);
+        self.cache.changed.notify_all();
+    }
+}
 fn refused(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("image_cache", message)
 }
@@ -251,6 +304,8 @@ pub(super) fn publish_proof(
     platform: PlatformPolicy,
     proof: &registry_image::ManifestProof,
 ) -> Result<(), CandidateError> {
+    static PROOF_WRITER: Mutex<()> = Mutex::new(());
+    let _writer = PROOF_WRITER.lock().unwrap();
     let path = manifest_path(candidate, pin, platform);
     state::private_directory(
         path.parent()
@@ -307,7 +362,47 @@ pub fn ensure_with(
         policy,
         platform,
         true,
+        (&ImageCache::default(), None),
     )
+}
+
+/// Distinct references can prepare archives together. Only the existing loader imports.
+pub fn ensure_batch(
+    candidate: &Candidate,
+    jobs: &[(String, PlatformPolicy)],
+    policy: &ImagePolicy,
+) -> Vec<(usize, Result<EnsuredImage, CandidateError>, u64)> {
+    let cache = ImageCache::default();
+    let queue = std::sync::atomic::AtomicUsize::new(0);
+    let finished = Mutex::new(Vec::with_capacity(jobs.len()));
+    std::thread::scope(|scope| {
+        for _ in 0..IMAGE_WORKERS.min(jobs.len()) {
+            scope.spawn(|| {
+                loop {
+                    let index = queue.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((reference, platform)) = jobs.get(index) else {
+                        break;
+                    };
+                    let started = std::time::Instant::now();
+                    let result = timed_acquire(
+                        Step::ImageEnsure,
+                        candidate,
+                        reference,
+                        policy,
+                        *platform,
+                        true,
+                        (&cache, Some(index)),
+                    );
+                    finished.lock().unwrap().push((
+                        index,
+                        result,
+                        started.elapsed().as_millis() as u64,
+                    ));
+                }
+            });
+        }
+    });
+    finished.into_inner().unwrap()
 }
 
 pub use super::image_tag_store::{present as present_tags, status as tag_status};
@@ -326,6 +421,7 @@ pub fn cache(
         policy,
         platform,
         false,
+        (&ImageCache::default(), None),
     )
 }
 
@@ -336,12 +432,14 @@ fn timed_acquire(
     policy: &ImagePolicy,
     platform: PlatformPolicy,
     import: bool,
+    (cache, index): (&ImageCache, Option<usize>),
 ) -> Result<EnsuredImage, CandidateError> {
     measure_attributed(step, None, |_, attrs| {
         let (result, count) = registry_image::count_requests(|| {
-            acquire_for_use(candidate, reference, policy, platform, import)
+            acquire_for_use(candidate, reference, policy, platform, import, cache)
         });
         attrs.registry_requests = Some(count);
+        attrs.image_index = index.map(|index| index as u64);
         result
     })
 }
@@ -352,6 +450,7 @@ fn acquire_for_use(
     policy: &ImagePolicy,
     platform: PlatformPolicy,
     import: bool,
+    cache: &ImageCache,
 ) -> Result<EnsuredImage, CandidateError> {
     let content_id = reference.strip_prefix("sha256:").is_some_and(hex);
     if content_id && !import {
@@ -417,8 +516,8 @@ fn acquire_for_use(
         reference,
         policy,
         platform,
-        import,
         observer.as_ref(),
+        cache,
         tag,
     );
     match (result, previous) {
@@ -429,8 +528,8 @@ fn acquire_for_use(
                 reference,
                 policy,
                 platform,
-                import,
                 observer.as_ref(),
+                cache,
                 Some(*previous),
             )
         }
@@ -443,13 +542,21 @@ fn acquire_selection(
     reference: &str,
     policy: &ImagePolicy,
     platform: PlatformPolicy,
-    import: bool,
     observer: Option<&engine::Observer<'_>>,
+    cache: &ImageCache,
     mut tag: Option<image_tag_store::TagResolution>,
 ) -> Result<EnsuredImage, CandidateError> {
     let mut ensured = match tag.as_mut() {
-        Some(tag) if import => tag.confirm(|tag| {
-            confirm_selection(candidate, reference, policy, platform, observer, Some(tag))
+        Some(tag) if observer.is_some() => tag.confirm(|tag| {
+            confirm_selection(
+                candidate,
+                reference,
+                policy,
+                platform,
+                observer,
+                cache,
+                Some(tag),
+            )
         })?,
         _ => confirm_selection(
             candidate,
@@ -457,10 +564,11 @@ fn acquire_selection(
             policy,
             platform,
             observer,
+            cache,
             tag.as_ref(),
         )?,
     };
-    if !import {
+    if observer.is_none() {
         ensured.phase = "archive-verified";
     }
     ensured.tag_resolution = tag.map(|tag| EnsuredTag {
@@ -480,6 +588,7 @@ fn confirm_selection(
     policy: &ImagePolicy,
     platform: PlatformPolicy,
     observer: Option<&engine::Observer<'_>>,
+    cache: &ImageCache,
     tag: Option<&image_tag_store::TagResolution>,
 ) -> Result<EnsuredImage, CandidateError> {
     let requested_platform = platform;
@@ -561,8 +670,8 @@ fn confirm_selection(
         if offline && observer.is_some() {
             return Err(no_archive());
         }
-        ensure_pinned_resolving(
-            candidate,
+        ensure_pinned_coordinated(
+            (candidate, cache),
             &pinned,
             policy,
             platform,
@@ -634,7 +743,7 @@ fn confirm_selection(
     };
     Ok(ensured)
 }
-/// [`ensure_pinned_resolving`] for a cache that must never need to resolve the published
+/// [`ensure_pinned_coordinated`] for a cache that must never need to resolve the published
 /// platform: every case it covers has its preferred entry cached, or none.
 #[cfg(test)]
 fn ensure_pinned(
@@ -650,8 +759,8 @@ fn ensure_pinned(
     ) -> Result<registry_image::AcquiredImage, CandidateError>,
     load: impl FnOnce(&Candidate, &Path, &str, &str, ImagePlatform) -> Result<(), CandidateError>,
 ) -> Result<EnsuredImage, CandidateError> {
-    ensure_pinned_resolving(
-        candidate,
+    ensure_pinned_coordinated(
+        (candidate, &ImageCache::default()),
         reference,
         policy,
         platform,
@@ -671,8 +780,8 @@ fn ensure_pinned(
 /// Ensure one pinned reference under `platform`. `resolve` names the platform the pinned
 /// image itself selects under a policy; it is consulted only when the cache holds a later
 /// preference but not an earlier one.
-fn ensure_pinned_resolving(
-    candidate: &Candidate,
+fn ensure_pinned_coordinated(
+    (candidate, coordinator): (&Candidate, &ImageCache),
     reference: &str,
     policy: &ImagePolicy,
     platform: PlatformPolicy,
@@ -687,8 +796,17 @@ fn ensure_pinned_resolving(
 ) -> Result<EnsuredImage, CandidateError> {
     let reference = canonical(reference)?;
     let root = candidate.state_root.join("artifacts/images");
-    let _lock = state::Lock::acquire(&root)?;
-    let (count, bytes) = measure(Step::ImageCacheInventory, None, |_| usage(candidate, &root))?;
+    let pin = coordinator
+        .pins
+        .lock()
+        .unwrap()
+        .entry(reference.clone())
+        .or_default()
+        .clone();
+    let _pin = pin.lock().unwrap();
+    let mut state = coordinator.enter(&root)?;
+    let inventory = || measure(Step::ImageCacheInventory, None, |_| usage(candidate, &root));
+    let mut occupied = inventory()?;
     // A cached entry is reused only for the platform the pinned image itself selects under
     // the policy. The first preference is published whenever its entry exists. A later
     // preference's entry (amd64 under `PreferNative`, perhaps left by an explicit `Amd64`
@@ -719,28 +837,39 @@ fn ensure_pinned_resolving(
     let reused = existing.is_some();
     let (dir, receipt) = if let Some((dir, entry_platform)) = existing {
         let receipt = inspect_entry(candidate, &dir, &reference, entry_platform)?;
+        drop(state);
         (dir, receipt)
     } else {
-        let limit = policy
-            .archive_limit
-            .min(policy.cache_limit.saturating_sub(bytes));
-        if count >= MAX_ARCHIVES || limit < MIN_SLOT {
-            return Err(refused(
-                "Image cache admission requires a free slot within 64 archives and the configured cache budget; no automatic deletion.",
-            ));
-        }
-        // Acquire into the first candidate's slot; a different confirmed platform moves the
-        // complete entry to its own address below, still under the cache lock.
-        let first = platform.candidates()[0];
-        let mut dir = root.join(entry_key(&reference, first));
-        state::private_directory(&dir)?;
-        let acquired = match acquire(&reference, &dir.join("image.tar"), platform, limit) {
-            Ok(value) => value,
-            Err(error) => {
-                let _ = fs::remove_dir(&dir);
-                return Err(error);
+        let limit = loop {
+            let (count, bytes) = occupied;
+            let limit = policy
+                .archive_limit
+                .min(policy.cache_limit.saturating_sub(bytes));
+            if count >= MAX_ARCHIVES || limit < MIN_SLOT {
+                return Err(refused(
+                    "Image cache admission requires a free slot within 64 archives and the configured cache budget; no automatic deletion.",
+                ));
             }
+            let reserved: u64 = state.reservations.values().sum();
+            if count + state.reservations.len() < MAX_ARCHIVES
+                && policy.cache_limit.saturating_sub(bytes + reserved) >= limit
+            {
+                break limit;
+            }
+            state = coordinator.changed.wait(state).unwrap();
+            occupied = inventory()?;
         };
+        let staging = root.with_file_name("image-staging").join(key(&reference));
+        state::private_directory(&staging)?;
+        state.reservations.insert(reference.clone(), limit);
+        let reservation = Reservation {
+            cache: coordinator,
+            key: reference.clone(),
+            path: staging,
+        };
+        drop(state);
+        let dir = &reservation.path;
+        let acquired = acquire(&reference, &dir.join("image.tar"), platform, limit)?;
         if !platform.candidates().contains(&acquired.platform) {
             return Err(refused(
                 "Acquired image platform is outside the requested platform policy.",
@@ -766,19 +895,23 @@ fn ensure_pinned_resolving(
             return Err(refused("New archive differs from its acquisition receipt."));
         }
         state::write(&dir.join("receipt.json"), &receipt)?;
-        if acquired.platform != first {
-            let target = root.join(entry_key(&reference, acquired.platform));
-            if target.try_exists().map_err(state::io)? {
-                return Err(refused(
-                    "Conflicting image cache entry; no entry was adopted or removed.",
-                ));
-            }
-            fs::rename(&dir, &target).map_err(state::io)?;
-            dir = target;
+        let state = coordinator.enter(&root)?;
+        let target = root.join(entry_key(&reference, acquired.platform));
+        if target.try_exists().map_err(state::io)? {
+            return Err(refused(
+                "Conflicting image cache entry; no entry was adopted or removed.",
+            ));
         }
-        (dir, receipt)
+        fs::rename(dir, &target).map_err(state::io)?;
+        fs::File::open(&root)
+            .and_then(|dir| dir.sync_all())
+            .map_err(state::io)?;
+        drop(state);
+        drop(reservation);
+        (target, receipt)
     };
-    // The loader checks the owned guest even when the acquisition receipt is reusable.
+    // Keep the import lease and the loader’s own live recheck unchanged.
+    let _import = coordinator.importer.lock().unwrap();
     load(candidate, &dir.join("image.tar"), &receipt, reused)?;
     Ok(EnsuredImage {
         pinned_reference: reference,
@@ -839,6 +972,75 @@ mod tests {
             platform: platform.candidates()[0],
         })
     }
+    #[test]
+    fn next_cache_writer_recovers_staging_left_by_interrupt() {
+        let f = Fixture::new();
+        let root = f.1.state_root.join("artifacts/images");
+        let staged = root.with_file_name("image-staging").join(key(&pin(1)));
+        state::private_directory(&staged).unwrap();
+        fs::write(staged.join("partial"), b"fixture").unwrap();
+        let coordinator = ImageCache::default();
+        let _cache = coordinator.enter(&root).unwrap();
+        assert!(!staged.exists());
+        assert_eq!(usage(&f.1, &root).unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn a_failed_fetch_can_settle_while_another_verified_archive_imports() {
+        let f = Fixture::new();
+        let cache = ImageCache::default();
+        let policy = ImagePolicy::default();
+        let (fetching, started) = std::sync::mpsc::channel();
+        let (importing, import_started) = std::sync::mpsc::channel();
+        let timeout = std::time::Duration::from_secs(5);
+        std::thread::scope(|scope| {
+            let candidate = &f.1;
+            let cache = &cache;
+            let policy = &policy;
+            let first = scope.spawn(move || {
+                ensure_pinned_coordinated(
+                    (candidate, cache),
+                    &pin(1),
+                    policy,
+                    PlatformPolicy::Native,
+                    |_, _| panic!("no platform lookup"),
+                    |reference, path, platform, limit| {
+                        started.recv_timeout(timeout).unwrap();
+                        acquire(reference, path, platform, limit)
+                    },
+                    |_, _, _, _| {
+                        importing.send(()).unwrap();
+                        Ok(())
+                    },
+                )
+            });
+            let second = scope.spawn(move || {
+                ensure_pinned_coordinated(
+                    (candidate, cache),
+                    &pin(2),
+                    policy,
+                    PlatformPolicy::Native,
+                    |_, _| panic!("no platform lookup"),
+                    |_, path, _, _| {
+                        fetching.send(()).unwrap();
+                        import_started.recv_timeout(timeout).unwrap();
+                        fs::write(path, "partial").unwrap();
+                        Err(refused("fixture acquisition failed"))
+                    },
+                    |_, _, _, _| panic!("a failed acquisition cannot import"),
+                )
+            });
+            assert!(first.join().unwrap().is_ok());
+            assert_eq!(
+                second.join().unwrap().unwrap_err().message,
+                "fixture acquisition failed"
+            );
+        });
+        let root = f.1.state_root.join("artifacts");
+        assert_eq!(fs::read_dir(root.join("image-staging")).unwrap().count(), 0);
+        assert_eq!(usage(&f.1, &root.join("images")).unwrap(), (1, 7));
+    }
+
     #[test]
     fn warm_pin_reuses_archive_but_always_invokes_existing_loader() {
         let f = Fixture::new();
@@ -1228,8 +1430,8 @@ mod tests {
         // natively instead of reusing the emulated entry.
         let resolved = Cell::new(0);
         let asked = Cell::new(None);
-        let preferred = ensure_pinned_resolving(
-            &f.1,
+        let preferred = ensure_pinned_coordinated(
+            (&f.1, &ImageCache::default()),
             &pin(1),
             &ImagePolicy::default(),
             PlatformPolicy::PreferNative,
@@ -1277,8 +1479,8 @@ mod tests {
             |_, _, _, _, _| Ok(()),
         )
         .unwrap();
-        let reused = ensure_pinned_resolving(
-            &f.1,
+        let reused = ensure_pinned_coordinated(
+            (&f.1, &ImageCache::default()),
             &pin(2),
             &ImagePolicy::default(),
             PlatformPolicy::PreferNative,
@@ -1294,8 +1496,8 @@ mod tests {
         assert_eq!(reused.platform, ImagePlatform::LinuxAmd64);
         // A failed resolution refuses before any acquisition or load.
         assert!(
-            ensure_pinned_resolving(
-                &f.1,
+            ensure_pinned_coordinated(
+                (&f.1, &ImageCache::default()),
                 &pin(2),
                 &ImagePolicy::default(),
                 PlatformPolicy::PreferNative,

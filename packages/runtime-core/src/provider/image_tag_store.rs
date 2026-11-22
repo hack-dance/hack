@@ -428,12 +428,12 @@ fn resolve_pending(
             let report_wait = std::env::var_os("HACK_INTERNAL_REPORT_IMAGE_WAIT")
                 .is_some_and(|value| value == "1");
             if report_wait {
-                eprintln!("hack.image-wait:begin");
+                eprintln!("hack.image-wait:begin {canonical}");
             }
             let lock =
                 state::Lock::acquire_existing_waiting(&root, std::time::Duration::from_secs(590));
             if report_wait {
-                eprintln!("hack.image-wait:end");
+                eprintln!("hack.image-wait:end {canonical}");
             }
             lock.map_err(|error| {
                 if error.code == "provider_busy" {

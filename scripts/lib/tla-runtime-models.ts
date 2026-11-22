@@ -3054,6 +3054,14 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-image-batch",
+    module: "ImageBatch",
+    states: 3233,
+    invariant: "Safe",
+    action: "Import",
+    fields: ['phase = <<"import", "import", "queued", "queued">>'],
+  },
+  {
     name: "native-image-presence",
     module: "ImagePresence",
     states: 7712,

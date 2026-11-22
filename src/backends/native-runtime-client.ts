@@ -778,7 +778,7 @@ export async function invokeNativeRuntime(opts: {
   readonly cwd: string;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
-  readonly onImageWait?: (waiting: boolean) => void;
+  readonly onImageWait?: (waiting: boolean, reference?: string) => void;
   readonly privateInput?: Uint8Array;
   /** Graph exec and run-service return command exit status alongside JSON. */
   readonly serviceExecResponse?: boolean;
@@ -1354,7 +1354,7 @@ async function readNativeFailure(
   signal?: AbortSignal,
   limit = MAX_NATIVE_FAILURE_BYTES,
   startupLogs = false,
-  onImageWait?: (waiting: boolean) => void
+  onImageWait?: (waiting: boolean, reference?: string) => void
 ): Promise<NativeFailure | undefined> {
   const reader = stream.getReader();
   const cancel = () => {
@@ -1364,7 +1364,7 @@ async function readNativeFailure(
   if (signal?.aborted) {
     cancel();
   }
-  let waiting = false;
+  const waiting = new Set<string | undefined>();
   let bytes = 0;
   let text = "";
   const decoder = new TextDecoder();
@@ -1383,13 +1383,18 @@ async function readNativeFailure(
             if (newline === -1) {
               break;
             }
-            const state = text.slice(0, newline);
+            const [state, reference] = text.slice(0, newline).split(" ", 2);
             if (
               state === "hack.image-wait:begin" ||
               state === "hack.image-wait:end"
             ) {
-              waiting = state.endsWith(":begin");
-              onImageWait(waiting);
+              const active = state.endsWith(":begin");
+              if (active) {
+                waiting.add(reference);
+              } else {
+                waiting.delete(reference);
+              }
+              onImageWait(active, reference);
             } else {
               break;
             }
@@ -1408,8 +1413,8 @@ async function readNativeFailure(
   } catch {
     return;
   } finally {
-    if (waiting) {
-      onImageWait?.(false);
+    for (const reference of waiting) {
+      onImageWait?.(false, reference);
     }
     signal?.removeEventListener("abort", cancel);
     reader.releaseLock();

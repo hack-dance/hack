@@ -66,7 +66,7 @@ let publishImageBlocker:
   | ((detail: NativeImageBlockerDetail) => Promise<void>)
   | undefined;
 let publishImageDownloadWait: ((reference: string | null) => void) | undefined;
-let publishImageTagOffline: ((notice: string) => void) | undefined;
+let publishImageNotice: ((notice: string) => void) | undefined;
 let publishProfileNotice: ((notice: NativeProfileNotice) => void) | undefined;
 let publishBranchDropped: ((details: BranchDroppedSites) => void) | undefined;
 let publishHotReload: ((notice: NativeHotReloadNotice) => void) | undefined;
@@ -585,19 +585,19 @@ export function reportNativeImageDownloadWait(reference: string | null): void {
   publishImageDownloadWait?.(reference);
 }
 
-export function reportNativeImageTagOffline(notice: string): boolean {
-  if (!publishImageTagOffline) {
+export function reportNativeImageNotice(notice: string): boolean {
+  if (!publishImageNotice) {
     return false;
   }
-  publishImageTagOffline(notice);
+  publishImageNotice(notice);
   return true;
 }
 
-function writeImageTagOffline(value: unknown): boolean {
+function writeImageNotice(value: unknown): boolean {
   if (
     !(
       isRecord(value) &&
-      value.kind === "image-tag-offline" &&
+      value.kind === "image-notice" &&
       typeof value.notice === "string" &&
       value.notice.length <= 512 &&
       [...value.notice].every((character) => {
@@ -615,7 +615,7 @@ function writeImageTagOffline(value: unknown): boolean {
 /** Prints any validated owner notice; true when `value` was one. */
 function writeOwnerNotice(value: unknown): boolean {
   return (
-    writeImageTagOffline(value) ||
+    writeImageNotice(value) ||
     writeProfileNotice(value) ||
     writeBranchDropped(value) ||
     writeHotReload(value)
@@ -728,7 +728,7 @@ export async function runNativeDetachedOwner(opts: {
           readonly kind: "image-download-wait";
           readonly reference: string | null;
         }
-      | { readonly kind: "image-tag-offline"; readonly notice: string }
+      | { readonly kind: "image-notice"; readonly notice: string }
       | { readonly kind: "prestart-refusal"; readonly data: PrestartRefusal }
       | {
           readonly kind: "progress";
@@ -792,9 +792,9 @@ export async function runNativeDetachedOwner(opts: {
       void send({ kind: "image-download-wait", reference });
     }
   };
-  publishImageTagOffline = (notice) => {
+  publishImageNotice = (notice) => {
     if (!stopping) {
-      send({ kind: "image-tag-offline", notice });
+      send({ kind: "image-notice", notice });
     }
   };
   publishProfileNotice = (notice) => {
@@ -840,7 +840,7 @@ export async function runNativeDetachedOwner(opts: {
     publishReady = undefined;
     publishShellVariables = undefined;
     publishProfileNotice = undefined;
-    publishImageTagOffline = undefined;
+    publishImageNotice = undefined;
     publishImageDownloadWait = undefined;
     publishImageBlocker = undefined;
     publishBranchDropped = undefined;

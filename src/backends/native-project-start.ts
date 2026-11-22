@@ -18,7 +18,7 @@ import {
   nativeDetachedUpShellVariables,
   nativeShellForwardingNotice,
   reportNativeImageDownloadWait,
-  reportNativeImageTagOffline,
+  reportNativeImageNotice,
 } from "../lib/native-detached-up.ts";
 import {
   describeNativeProcessRefusals,
@@ -812,6 +812,174 @@ async function ensureNativeProjectImage(opts: {
     offline: offlineTagNotice(ensured),
   };
 }
+/** Feed independent references to the runtime cache coordinator. */
+async function pinNativeImageBatch(
+  opts: Parameters<typeof pinNativeProjectImages>[0]
+): Promise<void> {
+  const report = (line: string) => {
+    if (!reportNativeImageNotice(line)) {
+      opts.warn(line);
+    }
+  };
+  const jobs = new Map<
+    string,
+    {
+      reference: string;
+      input: string;
+      names: string[];
+      policy: NativeEmulationPolicy | undefined;
+      specs: Record<string, unknown>[];
+    }
+  >();
+  for (const [name, spec] of Object.entries(opts.specs)) {
+    if (!nativeServiceActive(spec, opts.profiles)) {
+      continue;
+    }
+    if (
+      typeof spec.image !== "string" ||
+      IMAGE.test(spec.image) ||
+      spec.build !== undefined
+    ) {
+      continue;
+    }
+    const reference = opts.canonicalImages.get(spec.image) ?? spec.image;
+    const policy = nativeEmulationPolicy(opts.amd64Emulation, name);
+    const job = jobs.get(reference);
+    if (job && job.policy !== policy) {
+      // The existing path binds both platform policies to one command pin.
+      return;
+    }
+    if (job) {
+      job.specs.push(spec);
+      job.names.push(name);
+    } else {
+      jobs.set(reference, {
+        reference,
+        input: spec.image,
+        policy,
+        specs: [spec],
+        names: [name],
+      });
+    }
+  }
+  if (jobs.size < 2 || opts.imageTagMode) {
+    return;
+  }
+  const pending = [...jobs.values()];
+  const failures: Error[] = [];
+  const confirmed = new Set<string>();
+  for (let offset = 0; offset < pending.length; offset += 3) {
+    const wave = pending.slice(offset, offset + 3);
+    const waiting = new Set<string>();
+    const reply = await opts.invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: ["runtime", "ensure-images", "--json", ...nativeImagePolicyArgs()],
+      privateInput: new TextEncoder().encode(
+        JSON.stringify(wave.map((job) => [job.input, job.policy ?? "native"]))
+      ),
+      signal: opts.signal,
+      onImageWait: (active, reference) => {
+        if (!(reference && wave.some((job) => job.reference === reference))) {
+          return;
+        }
+        if (active) {
+          waiting.add(reference);
+        } else {
+          waiting.delete(reference);
+        }
+        reportNativeImageDownloadWait(waiting.values().next().value ?? null);
+      },
+      timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+    });
+    if (!Array.isArray(reply) || reply.length !== wave.length) {
+      throw unconfirmed("the runtime image batch");
+    }
+    const seen = new Set<number>();
+    for (const pair of reply) {
+      if (
+        !(Array.isArray(pair) && Number.isInteger(pair[0])) ||
+        seen.has(pair[0])
+      ) {
+        throw unconfirmed("the runtime image batch");
+      }
+      const [index, result, elapsed] = pair;
+      const job = wave[index];
+      if (
+        !(
+          job &&
+          isRecord(result) &&
+          Number.isSafeInteger(elapsed) &&
+          elapsed >= 0
+        )
+      ) {
+        throw unconfirmed("the runtime image batch");
+      }
+      seen.add(index);
+      const image = result.Ok;
+      if (
+        !(
+          isRecord(image) &&
+          typeof image.image_id === "string" &&
+          IMAGE.test(image.image_id) &&
+          ensuredPlatformAccepted(image.platform, job.policy)
+        )
+      ) {
+        const error = isRecord(result.Err) ? result.Err : undefined;
+        report(`${job.reference} · image preparation failed · ${elapsed} ms`);
+        if (
+          error?.code === "image_tag_offline_missing" ||
+          error?.code === "image_archive_offline_missing" ||
+          error?.code === "image_tag_download_busy"
+        ) {
+          failures.push(
+            await nativeImageBlocker({
+              runtime: opts.runtime,
+              projectRoot: opts.projectRoot,
+              missing: job.reference,
+              references: pending.map((image) => image.reference),
+              confirmed,
+              downloading: error.code === "image_tag_download_busy",
+              reason:
+                typeof error.cause_code === "string"
+                  ? error.cause_code
+                  : undefined,
+              invoke: opts.invoke,
+            })
+          );
+        } else {
+          const reason = nativeImageRegistryReason(error?.cause_code);
+          const names = job.names.filter((name) => SERVICE_NAME.test(name));
+          const affected = names.length
+            ? ` for service${names.length > 1 ? "s" : ""} ${names.join(", ")} field image`
+            : "";
+          const detail =
+            error?.code === "registry_image_not_found"
+              ? `Native image acquisition failed${affected} (registry_image_not_found); the selected image ${job.reference} was not found.`
+              : `Image unavailable: ${job.reference}${reason ? ` (${reason})` : ""}`;
+          failures.push(new ClosedCliError(detail));
+        }
+        continue;
+      }
+      confirmed.add(job.reference);
+      report(`${job.reference} · image verified in guest · ${elapsed} ms`);
+      const notice = offlineTagNotice(image);
+      if (notice && !reportNativeImageNotice(notice)) {
+        report(notice);
+      }
+      for (const spec of job.specs) {
+        spec.image = image.image_id;
+      }
+    }
+  }
+  if (failures.length === 1) {
+    throw failures[0];
+  }
+  if (failures.length) {
+    throw new ClosedCliError(failures.map((error) => error.message).join("\n"));
+  }
+}
+
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
 async function pinNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -828,6 +996,7 @@ async function pinNativeProjectImages(opts: {
   readonly warn: (line: string) => void;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<void> {
+  await pinNativeImageBatch(opts);
   const reportedOffline = new Set<string>();
   const confirmed = new Set<string>();
   const references = [...new Set(opts.canonicalImages.values())];
@@ -926,7 +1095,7 @@ async function pinNativeProjectImages(opts: {
     }
     const noticeKey = `${reference}\n${ensured.imageId}`;
     if (ensured.offline && !reportedOffline.has(noticeKey)) {
-      if (!reportNativeImageTagOffline(ensured.offline)) {
+      if (!reportNativeImageNotice(ensured.offline)) {
         opts.warn(ensured.offline);
       }
       reportedOffline.add(noticeKey);

@@ -1260,7 +1260,7 @@ fn a_cache_with_paths_over_the_bounds_is_ignored() {
 #[test]
 fn deep_snapshot_uses_bounded_descriptor_headroom() {
     crate::provider::test_executable::run_isolated(
-        concat!(module_path!(), "::deep_snapshot_at_fixed_descriptor_limits"),
+        "provider::image_build::context::tests::deep_snapshot_at_fixed_descriptor_limits",
         crate::provider::test_executable::ISOLATED_HANG_GUARD,
     );
 }

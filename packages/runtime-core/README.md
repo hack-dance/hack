@@ -527,7 +527,33 @@ an issue by themselves, and an open issue is not closed while availability is
 unknown. Size mismatches and refused redirects are reported as invalid pins.
 Availability alone never authorizes archive use or changes pins. Alpine package
 revisions may be retired upstream.
-The pinned host BuildKit client (`runtime prepare-builder`) and the pure Dockerfile
+`runtime setup` (`provider/setup.rs`) installs the three provider artifacts and then
+the pinned host BuildKit client, the image builder. The provider, the engine and the
+guest network tools are prepared in a private staging home and published together
+with one rename. The image builder is not part of that tree: after the provider set
+is published or reused, setup adds it with the manual preparation function
+(`artifact::prepare_builder`), which writes only the builder's own directory and
+record under the provider lock. A home that is already complete therefore gains the
+builder without its provider or engine being staged, published or prepared again; a
+pool may be running from them. Setup adds the builder only with download consent or
+the offline `--builder` file. Without either, a complete home is left unchanged and
+the result says `builder: "not_prepared"`; with it the result says `installed`, and
+`reused` when the builder was already prepared. A builder that is there but does not
+verify is reported as `builder: "changed"` and never touched: setup still exits 0 for
+a complete home, and never deletes or overwrites the builder, with or without a
+source. The user removes its directory and record and runs setup with consent. The
+builder's record always carries the tree digest the pin describes
+(`artifact::pinned_tree_digest`), not a digest read back from disk, and preparation
+finishes an interrupted run (a published directory without its record, or a leftover
+`buildx.pending`) only for exactly what it would have written itself.
+`runtime prepare-builder` stays for
+offline and manual use. A build in a home without the builder refuses with
+`builder_not_prepared` and names the setup command; the read-only
+`runtime setup inspect --json` reports `builder.state` so the CLI's setup and doctor
+can say so before a build does. The setup tests (`provider/setup/tests.rs`) use a
+local server and fixture pins and never reach the network.
+
+The image builder and the pure Dockerfile
 image-reference scanner (`provider/build_scan.rs`) back `runtime build-image`
 (`provider/image_build.rs`), which builds one Compose-style image in the guest engine
 from a private request file. Its build key, receipts, leases, the `runtime down`
@@ -1802,7 +1828,7 @@ waits for the scan and hot reload works; above it the boot does not wait and hot
 - **The setting.** `HACK_NATIVE_HOT_RELOAD` is `auto` (the default), `on` or `off`, read by
   `runtime up`; any other value is refused before any effect. `on` keeps the notifications
   whatever the size; `off` drops them whatever the size. The CLI gives runtime subprocesses
-  a closed environment, so it hands this one setting to `runtime up` explicitly and refuses
+  a closed environment, so it hands this setting to `runtime up` explicitly and refuses
   a mistyped value itself, before the runtime starts.
 - **The record.** The choice is made at every boot and written to the owner receipt
   (`hot_reload`) only when it is not the plain default: off, or forced on over a large share.
@@ -1933,6 +1959,102 @@ or root files that did not match before the lease). Its refusal, if any, is at t
 too, after the admission record, as it was before the early proof existed. The table's 180 ms
 was measured before this change and the root files comparison was not timed on its own.
 
+#### Skipping the rest of the admission window
+
+The table's second and third rows are a wait: the two admission samples of a Development
+start must be at least one second apart, and a start whose own checks are quicker than
+that sleeps the rest. On a stopped pool whose tree proofs take a tenth of a second, that
+sleep is most of the time before the VM boots.
+
+A home therefore keeps a record of one earlier host sample that passed every Development
+predicate on its own (`provider::admission::opening`). The record is the file
+`run/smolvm/admission-opening.json` under the home, beside the owner record. It holds
+three fields and nothing else: the OS boot session (`kern.bootsessionuuid` on macOS, the
+kernel's `boot_id` on Linux), a time on a clock that keeps counting while the machine
+sleeps (`CLOCK_MONOTONIC` on macOS, `CLOCK_BOOTTIME` on Linux), and the sample's swapout
+count. It is written atomically, under the provider lease, readable and writable by the
+user only.
+
+Not every passing sample is recorded. Exactly two things write the record, both under the
+provider lease and only into a pool that already has its owner record (an unowned pool
+root holds nothing but the operation lock, which the source admission of a first project
+start checks):
+
+- a Development start records its own passing sample under the lease, once both
+  comparisons under the lease have passed and the pool's owner record exists (before the
+  last root files comparison, in `prepare_rootfs`);
+- `runtime down` of a running Development pool takes one sample beside the stop, on its
+  own thread, and records it after the stop if it is back and passes. A pool that is
+  already stopped takes no sample. The stop never waits for the sample and cannot fail on
+  it.
+
+A sample that Hack itself sees failing removes the record: a sample under the lease that
+fails a predicate, cannot be taken or shows another swapout count, a first sample refused
+before the lease (if the lease is free), and a stop sample that fails or is not back when
+the stop is done. A retry right after a refusal therefore waits its window and qualifies
+on its own two samples.
+
+The record does not carry the disk basis a sample was judged on (a stop samples on the
+basis of a pool that owns no disks yet; a start on the basis it selected). That is
+acceptable because the record never stands in for a judgement about this start's
+resources: the start's own two samples are each judged on the start's own basis, and the
+record contributes only "the host passed at that time and has not swapped out since".
+
+Under the startup lease, when part of the window is still to be slept, the start reads
+the record. It skips the sleep only when all of this holds:
+
+- the record is from this OS boot;
+- it is at least one window (one second) and at most the bound (60 seconds) old, both
+  when it is read and again once the sample under the lease exists, on the same clock: a
+  slow probe or a host that slept in between cannot stretch the bound;
+- the sample the start now takes under the lease passes every predicate, as it always
+  must, and shows the record's swapout count and the count of the start's own first
+  sample.
+
+The record replaces the wait and nothing else. The start still takes both of its own
+samples, `admission.json` still records the two, and the pre-boot check is unchanged.
+Anything else is a miss: no file, a file that is not a private regular file of this user
+(a link, a second name, another owner, group or world access), contents that are not an
+object of exactly the three named fields (a list of the three values is not a record),
+another boot session, a record too young or too old at either judgement, a clock or boot
+session that cannot be read, a swapout count that differs, or a sample under the lease
+that does not pass. A miss costs the wait the start had before, and nothing more
+than one discarded sample when the miss is only found after sampling: the start sleeps
+the rest of the window measured from its own first sample and takes its sample then,
+chained to that first sample. A record never refuses a start and never stands in for a
+sample.
+
+What the record itself costs, from a unit bench (`bench_the_sample_and_record_of_a_stop`,
+an unoptimized test build on a busy Apple Silicon host, no VM): the host sample that
+`runtime down` adds took 13 to 18 ms, the record write about 8 ms (it syncs the file and
+its directory), and the two together, as a stop runs them, 22 to 27 ms. Reading and
+judging the record at a start took about 0.02 ms.
+
+What this gives up: without a record the two samples are at least a second apart. With
+one they can be milliseconds apart, and the evidence that the host held for a second is
+a sample up to a minute old. A host that failed and recovered in between is not seen,
+unless it swapped out, which the count catches. That is the same kind of gap two samples
+already leave, stretched to the bound.
+
+`HACK_NATIVE_ADMISSION_REUSE_SECONDS` sets the bound in whole seconds, from 0 to 600;
+the default is 60 and `0` turns reuse off (records are still written). Any other value,
+including one above 600, refuses `runtime up` with `admission_reuse_setting` before
+anything else happens; a larger value is not reduced to 600. The runtime
+reads it from its own environment. The CLI gives runtime subprocesses a closed
+environment, so it hands this setting to `runtime up` explicitly, `0` included, and to no
+other command. It applies the same rule itself: a value the runtime would refuse is
+refused by the CLI with `E_CONFIG_INVALID`, before the runtime starts and before a
+restart stops anything. Unset or empty in the CLI's environment hands over nothing, so
+the default applies.
+
+Research is unchanged. It keeps its three samples fifteen seconds apart before the
+lease, never reads the record, and neither its start nor its stop writes one.
+
+To measure how often the wait is skipped: the `vm.ensure` timing span carries the boolean
+attribute `admission_reused`, `true` when a record replaced the wait and `false` when the
+start waited. A start whose sample under the lease was not accepted leaves it out: a pool
+that was already running, a Research pool, or a start refused before or at that sample.
+
 The order of the admission steps, and what can change between them, is modelled in
 [`pool-start-admission`](../../tests/models/tla/pool-start-admission/COVERAGE.md);
 [its statechart](../../docs/pool-start-admission-statechart.md) names each step.
@@ -2010,6 +2132,17 @@ instructions and the build would not use them. Both rest on how `sha2` 0.11.1 se
 backend, so the dependency is pinned exactly; read its `src/sha256.rs` again before moving
 the pin. To measure a build, run
 `cargo test --release --lib sha256_rate_of_this_build -- --ignored --nocapture`.
+
+### Step store
+
+The CLI resolves the store base to a canonical path, following symlinks. The
+runtime refuses symlinked ancestors of the path it receives and keeps its
+format in a separate subdirectory, currently `hack.store-1/`. Initialization
+keeps at most the newest `hack.store-1.old-*` directory owned by this user and
+removes it too once it is older than seven days.
+
+The store has no eviction yet. Files left in `tmp/` by a crashed writer stay
+until garbage collection (slice P8).
 
 ### Never wait in a blocking `flock`
 

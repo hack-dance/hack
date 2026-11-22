@@ -241,14 +241,14 @@ fn drain(
 fn spawn_helper(executable: &Path, deadline: Instant) -> Result<Child, CandidateError> {
     let mut backoff = Duration::from_millis(5);
     loop {
-        match Command::new(executable)
-            .arg("get")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
-        {
+        match super::process::spawn_child(
+            Command::new(executable)
+                .arg("get")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .process_group(0),
+        ) {
             Ok(child) => return Ok(child),
             Err(err)
                 if err.kind() == std::io::ErrorKind::ExecutableFileBusy

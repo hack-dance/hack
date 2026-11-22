@@ -250,10 +250,24 @@ fn consent_refuses_without_effects_and_calls_confirmation_once() {
 #[test]
 fn compiled_pins_match_manual_preparation_and_use_https() {
     let pins = pins().unwrap();
-    assert_eq!(pins.len(), 6);
-    for pin in pins {
+    assert_eq!(pins.len(), 7);
+    for pin in &pins {
         assert!(pin.url.starts_with("https://"));
     }
+    // The consent listing ends with the image builder, the same pin manual preparation
+    // accepts; the provider set that is published as one tree does not contain it.
+    let builder = pins.last().unwrap();
+    assert_eq!(builder.archive_sha256, artifact::BUILDER_SHA256);
+    assert_eq!(
+        builder.name().unwrap(),
+        format!("buildx-v{}.darwin-arm64", artifact::BUILDER_VERSION)
+    );
+    assert_eq!(builder.size_bytes, 62_685_504);
+    assert_eq!(builder_pin().unwrap().url, builder.url);
+    let (provider_set, apart) = pin_set().unwrap();
+    assert_eq!(provider_set.len(), 6);
+    assert_eq!(apart.url, builder.url);
+    assert!(provider_set.iter().all(|pin| pin.url != builder.url));
 }
 
 #[test]
@@ -394,7 +408,8 @@ fn full_setup_orchestration_downloads_once_and_reuses_without_prepare() {
             Some(OfflineInputs {
                 archive: Path::new("/unavailable"),
                 engine_archive: Path::new("/unavailable"),
-                network_tools: Path::new("/unavailable")
+                network_tools: Path::new("/unavailable"),
+                builder: None,
             }),
             &files,
             |_, _| panic!("repeat prepared again"),
@@ -477,6 +492,7 @@ fn offline_setup_and_partial_manual_install_preservation() {
             archive: &linked,
             engine_archive: &engine,
             network_tools: &source,
+            builder: None,
         }),
         &files,
         fixture_prepare,
@@ -755,6 +771,8 @@ fn json_accounts_for_download_resume_cache_and_complete_reuse() {
         .with_probe(serde_json::json!({"supported": true}));
     server.join().unwrap();
     assert_eq!(result["status"], "installed");
+    // Installing the provider set alone never prepares or claims the image builder.
+    assert_eq!(result["builder"], "not_prepared");
     assert_eq!(result["probe"]["supported"], true);
     assert_eq!(
         result["files"],
@@ -1150,4 +1168,475 @@ fn retry_never_replays_a_setup_http_refusal() {
         assert_eq!(server.count(), 1);
         assert!(!root.0.join("archive.tgz").exists());
     }
+}
+
+const BUILDER_BYTES: &[u8] = b"hello";
+const SERVED: &str = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+
+/// The image builder's download pin beside `fixture_pins`.
+fn builder_file_pin(pin: &FilePin) -> FilePin {
+    FilePin {
+        url: pin.url.replace("archive.tgz", "builder.bin"),
+        ..pin.clone()
+    }
+}
+
+/// `ensure_builder` with the real preparation and the real build-time verification,
+/// against a test pin for the served bytes instead of the signed release.
+fn ensure(
+    candidate: &Candidate,
+    source: BuilderSource<'_>,
+    pin: &FilePin,
+) -> Result<(Builder, Option<FileResult>), CandidateError> {
+    let binary = artifact::test_binary_pin(BUILDER_BYTES);
+    ensure_builder(
+        candidate,
+        source,
+        pin,
+        |candidate, file| artifact::prepare_binary(candidate, file, &binary).map(drop),
+        |candidate| artifact::verify_binary(candidate, &binary).map(drop),
+        || Ok(client()),
+    )
+}
+
+/// The check a native image build runs before it executes the builder.
+fn build_time_verify(candidate: &Candidate) -> Result<(), CandidateError> {
+    artifact::verify_binary(candidate, &artifact::test_binary_pin(BUILDER_BYTES)).map(drop)
+}
+
+type Entry = (String, Vec<u8>, u32, u64, i64, i64);
+
+/// Every entry below `root` by relative path: kind, bytes (or link target), mode, inode
+/// and modification time. Equal entries were neither rewritten nor replaced.
+fn snapshot(root: &Path) -> std::collections::BTreeMap<String, Entry> {
+    use std::os::unix::fs::MetadataExt;
+    fn visit(base: &Path, path: &Path, entries: &mut std::collections::BTreeMap<String, Entry>) {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            let (kind, bytes) = if metadata.is_dir() {
+                ("directory", Vec::new())
+            } else if metadata.is_file() {
+                ("file", fs::read(&path).unwrap())
+            } else {
+                (
+                    "symlink",
+                    fs::read_link(&path)
+                        .unwrap()
+                        .as_os_str()
+                        .as_encoded_bytes()
+                        .to_vec(),
+                )
+            };
+            entries.insert(
+                path.strip_prefix(base)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+                (
+                    kind.to_owned(),
+                    bytes,
+                    metadata.mode(),
+                    metadata.ino(),
+                    metadata.mtime(),
+                    metadata.mtime_nsec(),
+                ),
+            );
+            if metadata.is_dir() {
+                visit(base, &path, entries);
+            }
+        }
+    }
+    let mut entries = std::collections::BTreeMap::new();
+    visit(root, root, &mut entries);
+    entries
+}
+
+#[test]
+fn setup_with_downloads_installs_the_builder_and_a_build_time_verify_passes() {
+    let root = Fixture::new();
+    let candidate = Candidate::discover(&root.0).unwrap();
+    let (pin, server) = server(vec![
+        ("get /provider.tgz", SERVED),
+        ("get /engine.tgz", SERVED),
+        ("get /guest.apk", SERVED),
+        ("get /builder.bin", SERVED),
+    ]);
+    let builder = builder_file_pin(&pin);
+    assert_eq!(
+        build_time_verify(&candidate).unwrap_err().code,
+        "builder_not_prepared"
+    );
+    // The same order as `run`: the provider set is published, then the builder is added.
+    let result = install(
+        &candidate,
+        None,
+        &fixture_pins(&pin),
+        fixture_prepare,
+        fixture_verify,
+    )
+    .unwrap()
+    .with_builder(ensure(&candidate, BuilderSource::Download, &builder).unwrap())
+    .with_probe(serde_json::json!({"supported": true}));
+    server.join().unwrap();
+    assert_eq!(result["status"], "installed");
+    assert_eq!(result["builder"], "installed");
+    let downloaded = |name: &str| {
+        serde_json::json!({"name": name, "outcome": "downloaded", "size_bytes": 5,
+            "downloaded_bytes": 5, "reused_bytes": 0})
+    };
+    assert_eq!(
+        result["files"],
+        serde_json::json!([
+            downloaded("provider.tgz"),
+            downloaded("engine.tgz"),
+            downloaded("guest.apk"),
+            downloaded("builder.bin")
+        ])
+    );
+    build_time_verify(&candidate).unwrap();
+    fixture_verify(&candidate).unwrap();
+    let executable = candidate
+        .state_root
+        .join("providers/test-client-1.2.3/test-client");
+    assert_eq!(fs::read(&executable).unwrap(), BUILDER_BYTES);
+    assert_eq!(
+        fs::metadata(&executable).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+
+    // A second setup finds the builder prepared: the server is gone, so a request would
+    // fail, and a second preparation would panic.
+    let again = ensure_builder(
+        &candidate,
+        BuilderSource::Download,
+        &builder,
+        |_, _| panic!("a prepared builder was prepared again"),
+        build_time_verify,
+        || panic!("a prepared builder was downloaded again"),
+    )
+    .unwrap();
+    assert_eq!(again.0, Builder::Reused);
+    assert!(again.1.is_none());
+    let reused = Installation::reused()
+        .with_builder(again)
+        .with_probe(serde_json::json!({"supported": true}));
+    assert_eq!(reused["status"], "reused");
+    assert_eq!(reused["builder"], "reused");
+    assert_eq!(reused["files"], serde_json::json!([]));
+}
+
+#[test]
+fn a_changed_builder_is_reported_and_left_alone_and_replacing_it_by_hand_works() {
+    let root = Fixture::new();
+    let candidate = Candidate::discover(&root.0).unwrap();
+    let (pin, server) = server(vec![
+        ("get /provider.tgz", SERVED),
+        ("get /engine.tgz", SERVED),
+        ("get /guest.apk", SERVED),
+        ("get /builder.bin", SERVED),
+    ]);
+    let builder = builder_file_pin(&pin);
+    install(
+        &candidate,
+        None,
+        &fixture_pins(&pin),
+        fixture_prepare,
+        fixture_verify,
+    )
+    .unwrap();
+    ensure(&candidate, BuilderSource::Download, &builder).unwrap();
+    server.join().unwrap(); // gone: any later request would fail
+    let providers = candidate.state_root.join("providers");
+    let tree = providers.join("test-client-1.2.3");
+    let executable = tree.join("test-client");
+    let record = providers.join("test-client.json");
+    let offline_file = root.0.join("builder-file");
+    fs::write(&offline_file, BUILDER_BYTES).unwrap();
+
+    // Setup reports a builder that does not verify and changes nothing: with no source,
+    // with download consent and with the offline file alike. It does not fail the home.
+    let untouched = |source: BuilderSource<'_>| {
+        let before = snapshot(&providers);
+        let outcome = ensure_builder(
+            &candidate,
+            source,
+            &builder,
+            |_, _| panic!("a changed builder was prepared over"),
+            build_time_verify,
+            || panic!("a changed builder was downloaded again"),
+        )
+        .unwrap();
+        assert_eq!(outcome.0, Builder::Changed);
+        assert!(outcome.1.is_none());
+        assert_eq!(snapshot(&providers), before);
+        let reported = Installation::reused()
+            .with_builder(outcome)
+            .with_probe(serde_json::json!({"supported": true}));
+        assert_eq!(reported["status"], "reused");
+        assert_eq!(reported["builder"], "changed");
+        assert_eq!(reported["files"], serde_json::json!([]));
+        // The build keeps its own refusal.
+        assert_eq!(
+            build_time_verify(&candidate).unwrap_err().code,
+            "artifact_digest_mismatch"
+        );
+    };
+    let every_source = |state: &str| {
+        for source in [
+            BuilderSource::Absent,
+            BuilderSource::Download,
+            BuilderSource::File(&offline_file),
+        ] {
+            untouched(source);
+        }
+        fixture_verify(&candidate).expect(state);
+    };
+    // Other bytes under an intact record.
+    fs::write(&executable, b"other").unwrap();
+    every_source("changed bytes");
+    // The record removed while the changed directory stays: still changed, not absent,
+    // so setup is never told to prepare over it.
+    fs::remove_file(&record).unwrap();
+    every_source("changed bytes without a record");
+
+    // The remedy setup prints: remove the directory and the record by hand, then run
+    // setup with consent. The verified download is still cached, so nothing is requested.
+    fs::remove_file(&executable).unwrap();
+    fs::remove_dir(&tree).unwrap();
+    assert_eq!(
+        build_time_verify(&candidate).unwrap_err().code,
+        "builder_not_prepared"
+    );
+    let replaced = ensure(&candidate, BuilderSource::Download, &builder).unwrap();
+    assert_eq!(replaced.0, Builder::Installed);
+    assert_eq!(replaced.1.as_ref().unwrap().outcome, Outcome::Reused);
+    build_time_verify(&candidate).unwrap();
+    assert_eq!(fs::read(&executable).unwrap(), BUILDER_BYTES);
+
+    // The same remedy with only the directory removed (a stale record stays), and with
+    // an interrupted record write left behind: setup with consent still completes.
+    fs::write(&executable, b"other").unwrap();
+    assert_eq!(
+        ensure(&candidate, BuilderSource::Absent, &builder)
+            .unwrap()
+            .0,
+        Builder::Changed
+    );
+    fs::remove_file(&executable).unwrap();
+    fs::remove_dir(&tree).unwrap();
+    let pending = record.with_extension("pending");
+    fs::write(&pending, b"partial").unwrap();
+    fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        ensure(&candidate, BuilderSource::Download, &builder)
+            .unwrap()
+            .0,
+        Builder::Installed
+    );
+    assert!(!pending.exists());
+    build_time_verify(&candidate).unwrap();
+    fixture_verify(&candidate).unwrap();
+}
+
+#[test]
+fn a_complete_home_gains_only_the_builder_and_only_with_consent() {
+    use std::os::unix::fs::MetadataExt;
+    let root = Fixture::new();
+    let candidate = Candidate::discover(&root.0).unwrap();
+    // A complete home from an older build: a prepared provider tree with nested
+    // directories, its record and its retained archive, and no image builder.
+    let tree = artifact::tree_fixture::prepare(&candidate, &root.0);
+    let verify = |candidate: &Candidate| artifact::verify_tree(candidate, &tree).map(drop);
+    drop(state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap());
+    assert!(observe_existing(&candidate, &verify).unwrap());
+    let providers = candidate.state_root.join("providers");
+    let before = snapshot(&providers);
+    let record = fs::read(providers.join(tree.record_name())).unwrap();
+    let identity = fs::metadata(&providers).unwrap().ino();
+    assert!(before.len() > 12, "the fixture tree is not trivial");
+    let builder = FilePin {
+        url: "http://127.0.0.1:9/builder.bin".into(),
+        archive_sha256: format!("{:x}", crate::Hex(Sha256::digest(BUILDER_BYTES))),
+        max_bytes: 16,
+        size_bytes: 5,
+        redirect_hosts: vec![],
+    };
+
+    // Without consent or an offline file nothing is requested and nothing is written:
+    // setup still succeeds and reports the builder as not prepared.
+    let observed = ensure_builder(
+        &candidate,
+        BuilderSource::Absent,
+        &builder,
+        |_, _| panic!("the builder was prepared without a source"),
+        build_time_verify,
+        || panic!("a network client was built without consent"),
+    )
+    .unwrap();
+    assert_eq!(observed.0, Builder::NotPrepared);
+    assert!(observed.1.is_none());
+    let reported = Installation::reused()
+        .with_builder(observed)
+        .with_probe(serde_json::json!({"supported": true}));
+    assert_eq!(reported["status"], "reused");
+    assert_eq!(reported["builder"], "not_prepared");
+    assert_eq!(reported["files"], serde_json::json!([]));
+    assert_eq!(snapshot(&providers), before);
+    assert!(!candidate.state_root.join("setup").exists());
+    assert!(!download_directory(&candidate).exists());
+
+    // With consent only the builder is requested, and only the builder is added.
+    let (pin, server) = server(vec![("get /builder.bin", SERVED)]);
+    let builder = builder_file_pin(&pin);
+    let added = ensure(&candidate, BuilderSource::Download, &builder).unwrap();
+    server.join().unwrap(); // one scripted reply: any other request would have failed
+    assert_eq!(added.0, Builder::Installed);
+    let file = added.1.as_ref().unwrap();
+    assert_eq!(file.name, "builder.bin");
+    assert_eq!(file.outcome, Outcome::Downloaded);
+    assert_eq!(file.downloaded_bytes, 5);
+    let reported = Installation::reused()
+        .with_builder(added)
+        .with_probe(serde_json::json!({"supported": true}));
+    assert_eq!(reported["status"], "reused");
+    assert_eq!(reported["builder"], "installed");
+    assert_eq!(reported["files"].as_array().unwrap().len(), 1);
+
+    // The provider tree, its record and its retained archive are the same files with the
+    // same bytes, modes and times: nothing was re-prepared or published again.
+    let after = snapshot(&providers);
+    for (path, entry) in &before {
+        assert_eq!(after.get(path), Some(entry), "{path} changed");
+    }
+    assert_eq!(
+        fs::read(providers.join(tree.record_name())).unwrap(),
+        record
+    );
+    assert_eq!(fs::metadata(&providers).unwrap().ino(), identity);
+    let added: Vec<&str> = after
+        .keys()
+        .filter(|path| !before.contains_key(*path))
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        added,
+        [
+            "test-client-1.2.3",
+            "test-client-1.2.3/test-client",
+            "test-client.json"
+        ]
+    );
+    verify(&candidate).unwrap();
+    assert!(observe_existing(&candidate, &verify).unwrap());
+    build_time_verify(&candidate).unwrap();
+    assert_eq!(
+        fs::read(download_directory(&candidate).join("builder.bin")).unwrap(),
+        BUILDER_BYTES
+    );
+}
+
+#[test]
+fn offline_setup_prepares_the_builder_only_from_its_own_input() {
+    let root = Fixture::new();
+    let candidate = Candidate::discover(&root.0).unwrap();
+    let source = root.0.join("inputs");
+    state::private_directory(&source).unwrap();
+    for name in ["provider.tgz", "engine.tgz", "guest.apk", "builder-file"] {
+        fs::write(source.join(name), b"hello").unwrap();
+    }
+    fs::write(source.join("other-file"), b"wrong").unwrap();
+    let pin = FilePin {
+        url: "https://unused.example/archive.tgz".into(),
+        archive_sha256: format!("{:x}", crate::Hex(Sha256::digest(b"hello"))),
+        max_bytes: 16,
+        size_bytes: 5,
+        redirect_hosts: vec![],
+    };
+    let builder = builder_file_pin(&pin);
+    let offline = |source: BuilderSource<'_>| {
+        let binary = artifact::test_binary_pin(BUILDER_BYTES);
+        ensure_builder(
+            &candidate,
+            source,
+            &builder,
+            |candidate, file| artifact::prepare_binary(candidate, file, &binary).map(drop),
+            build_time_verify,
+            || panic!("offline setup built a network client"),
+        )
+    };
+
+    // Without the builder input offline setup works as before: three offline files, a
+    // published provider set, no builder and no download directory.
+    let provider = source.join("provider.tgz");
+    let engine = source.join("engine.tgz");
+    let without = OfflineInputs {
+        archive: &provider,
+        engine_archive: &engine,
+        network_tools: &source,
+        builder: None,
+    };
+    let result = install(
+        &candidate,
+        Some(without),
+        &fixture_pins(&pin),
+        fixture_prepare,
+        fixture_verify,
+    )
+    .unwrap()
+    .with_builder(offline(BuilderSource::select(Some(without), false)).unwrap())
+    .with_probe(serde_json::json!({"supported": true}));
+    assert_eq!(result["status"], "installed");
+    assert_eq!(result["builder"], "not_prepared");
+    assert_eq!(result["files"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        build_time_verify(&candidate).unwrap_err().code,
+        "builder_not_prepared"
+    );
+
+    // A file that is not the pinned builder is refused before anything is prepared.
+    let other = source.join("other-file");
+    let wrong = OfflineInputs {
+        builder: Some(&other),
+        ..without
+    };
+    assert_eq!(
+        offline(BuilderSource::select(Some(wrong), false))
+            .unwrap_err()
+            .code,
+        "setup_hash_mismatch"
+    );
+    assert_eq!(
+        build_time_verify(&candidate).unwrap_err().code,
+        "builder_not_prepared"
+    );
+
+    // With the pinned file, the same home gains the builder; its provider set is reused.
+    let file = source.join("builder-file");
+    let with = OfflineInputs {
+        builder: Some(&file),
+        ..without
+    };
+    let result = install(
+        &candidate,
+        Some(with),
+        &fixture_pins(&pin),
+        |_, _| panic!("a published provider set was prepared again"),
+        fixture_verify,
+    )
+    .unwrap()
+    .with_builder(offline(BuilderSource::select(Some(with), false)).unwrap())
+    .with_probe(serde_json::json!({"supported": true}));
+    assert_eq!(result["status"], "reused");
+    assert_eq!(result["builder"], "installed");
+    assert_eq!(
+        result["files"],
+        serde_json::json!([{"name": "builder.bin", "outcome": "offline", "size_bytes": 5,
+            "downloaded_bytes": 0, "reused_bytes": 5}])
+    );
+    build_time_verify(&candidate).unwrap();
+    // The caller's file is copied, never moved, and offline setup never downloads.
+    assert_eq!(fs::read(&file).unwrap(), BUILDER_BYTES);
+    assert!(!download_directory(&candidate).exists());
 }

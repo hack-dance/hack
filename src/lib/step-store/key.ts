@@ -26,6 +26,9 @@ const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const NAME = /^[a-z0-9][a-z0-9.-]{0,63}$/;
 const IDENTIFIER = /^[A-Za-z0-9._:+-]{1,128}$/;
 
+/** Maximum input count, so a key and its metadata can fit in one record. */
+export const MAX_STEP_INPUTS = 256;
+
 /**
  * A value-free identifier stored in plain text (build, boot epoch, run): 1 to 128
  * ASCII letters, digits and `.`, `_`, `:`, `+`, `-`. Same rule as `key.rs`.
@@ -54,6 +57,7 @@ export type StepKeyParts = {
   readonly class: StepClass;
   readonly inputs: Readonly<Record<string, InputDigest>>;
   readonly epoch: string | null;
+  /** Pass the build from `stepStoreBuild()`. Skip caching if it returns null. */
   readonly build: string;
 };
 
@@ -63,6 +67,9 @@ export type StepKey = StepKeyParts & { readonly digest: string };
 /** Validate the parts and derive the key digest. */
 export function stepKey(parts: StepKeyParts): StepKey {
   const names = Object.keys(parts.inputs);
+  if (names.length > MAX_STEP_INPUTS) {
+    throw new StepKeyError("Too many step inputs.");
+  }
   if (!(NAME.test(parts.step) && names.every((name) => NAME.test(name)))) {
     throw new StepKeyError("Invalid step or input name.");
   }

@@ -6,10 +6,10 @@ Already using v4? Read [3. Upgrade from v4](upgrade.md) before running v5 in a p
 ## Prerequisites
 
 v5 is in prerelease. Stable is still v4. A stable install does **not** install v5.
-The v5 prerelease supports Apple Silicon macOS (native and Compose backends).
-Starting with the first release that ships Linux assets (`5.0.0-next.22` and
-earlier have none), it also supports Linux on x86_64 and arm64 with glibc, on the
-Compose backend only. Intel Macs stay on stable v4; see
+The v5 prerelease supports Apple Silicon macOS (native and Compose backends)
+and Linux on x86_64 and arm64 with glibc (Compose backend only). Linux archives
+are published since `5.0.0-next.23`, so the release named below has them. Intel
+Macs stay on stable v4; see
 [platform support](../guides/prereleases.md).
 The [Linux host setup](../guides/linux-setup.md) and
 [Linux certificate trust](../guides/linux-certificate-trust.md) guides cover Linux
@@ -33,7 +33,7 @@ Download the installer from an exact release. Review it before running it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.24/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -45,12 +45,12 @@ Expect the version you chose and a selected bundle in the manager's report.
 Newer releases are on [GitHub](https://github.com/hack-dance/hack/releases).
 Check a release's notes before replacing the tag above.
 
-**On Linux**, run the same commands with the tag of a release that has Linux
-assets (`SHA256SUMS-linux` is in its asset list). The `5.0.0-next.22` installer
-stops on Linux. The installer needs `curl` and `sha256sum`, installs under
+**On Linux**, use the same commands above. That release publishes a Compose
+archive for Linux x86_64 and one for Linux arm64, with their checksums in
+`SHA256SUMS-linux`. The installer needs `curl` and `sha256sum`, installs under
 `~/.hack-next` without `sudo`, and ends with "Installed the Compose backend. The
 native backend is Apple Silicon macOS only." The
-[candidate install guide on `next`](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#linux-the-compose-only-candidate)
+[prerelease install guide on `next`](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#linux-the-compose-only-candidate)
 has the details.
 
 | Channel | What it installs | Project state |
@@ -92,12 +92,12 @@ hack() { "$HOME/.hack-next/bin/hack-next" "$@"; }
 hack --version
 ```
 
-The function makes `hack` mean the v5 candidate in this terminal only. It does not
+The function makes `hack` mean the v5 prerelease in this terminal only. It does not
 replace the stable executable. Keep this terminal for the next page. A new
 terminal needs these two setup lines again.
 
 **Existing v4 users:** stop here and follow [the upgrade steps](upgrade.md).
-Stable and the candidate must not run against the shared home at the same time.
+Stable and the prerelease must not run against the shared home at the same time.
 
 For a new machine, set up Compose routing once:
 
@@ -125,7 +125,7 @@ Removing an executable does not undo host DNS/trust, project files or volumes.
 To see whether a newer release exists without changing
 anything (since next.18), run `hack update --check --json --observe` through the same launcher;
 it prints the upgrade command for this install.
-For a candidate rollback or return to stable, use
+For a prerelease rollback or return to stable, use
 [the full procedure](../guides/candidate-install.md#upgrade-roll-back-and-return-to-stable).
 
 ### Lifecycle supervisor packaging
@@ -136,7 +136,8 @@ it beside `libexec/hack`. Source installs prepare it with
 `bun run build:lifecycle-supervisor` (Rust 1.97.1, locked dependencies).
 The slim runtime image includes the same sibling executable.
 
-Stable archives build it for macOS arm64/x86_64 and Linux arm64/x86_64. The macOS
+Stable archives (v4.3.1) build it for macOS arm64/x86_64 and Linux x86_64; the
+v5 prerelease adds Linux arm64 from `5.0.0-next.23`. The macOS
 prerelease bundle's supervisor is ad-hoc signed and covered by the bundle
 checksums. The Compose-only Linux prerelease bundles carry it unsigned, covered by
 the bundle checksums. Retained managers accept older bundles without this helper. Packaging does not change the lifecycle runner default.

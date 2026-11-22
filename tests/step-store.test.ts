@@ -6,6 +6,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -14,6 +15,7 @@ import {
   canonicalJson,
   STEP_RECORD_DOMAIN,
 } from "../src/lib/canonical-digest.ts";
+import { HACK_VERSION } from "../src/lib/hack-version.ts";
 import {
   inputDigest,
   StepKeyError,
@@ -22,6 +24,7 @@ import {
 } from "../src/lib/step-store/key.ts";
 import {
   canonicalPath,
+  stepStoreBuild,
   stepStoreDirectory,
   stepStoreEnabled,
   stepStoreRuntimeArgs,
@@ -31,6 +34,7 @@ import {
   encodeStepRecord,
   newStepRecord,
 } from "../src/lib/step-store/record.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 
 type KeyVector = StepKeyParts & { readonly name: string; readonly key: string };
 type RecordVector = {
@@ -274,21 +278,36 @@ describe("step records", () => {
     }
   });
 
-  test("a record too large to read back is refused when encoded", () => {
-    const inputs = Object.fromEntries(
-      Array.from({ length: 600 }, (_, index) => [
-        `input-${String(index).padStart(58, "0")}`,
-        digestOf("1"),
-      ])
-    );
-    const big = stepKey({ ...base, inputs });
-    const record = newStepRecord({
-      key: big,
-      output: { digest: `sha256:${"e".repeat(64)}`, ref: "cas" },
-      observedAt: 1,
-      run: "run-1",
+  test("a key with maximum inputs and identifiers fits in a record", () => {
+    const largestKey = stepKey({
+      step: "s".repeat(64),
+      stepVersion: 0xff_ff_ff_ff,
+      class: "file-identity",
+      inputs: manyInputs(256),
+      epoch: "e".repeat(128),
+      build: "b".repeat(128),
     });
-    expect(() => encodeStepRecord(record)).toThrow();
+    const record = newStepRecord({
+      key: largestKey,
+      output: { digest: `sha256:${"e".repeat(64)}`, ref: "cas" },
+      observedAt: Number.MAX_SAFE_INTEGER,
+      run: "r".repeat(128),
+    });
+    const encoded = encodeStepRecord(record);
+    expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(64 * 1024);
+    expect(decodeStepRecord(encoded, largestKey)).toEqual(record);
+  });
+
+  test("a key with more than 256 inputs is refused", () => {
+    expect(() => stepKey({ ...base, inputs: manyInputs(257) })).toThrow(
+      StepKeyError
+    );
+  });
+
+  test("a record too large to read back is refused when encoded", () => {
+    expect(() =>
+      encodeStepRecord({ ...record, inputs: manyInputs(600) })
+    ).toThrow();
   });
 
   test("a cas step needs a cas reference", () => {
@@ -302,6 +321,15 @@ describe("step records", () => {
     ).toThrow();
   });
 });
+
+function manyInputs(count: number) {
+  return Object.fromEntries(
+    Array.from({ length: count }, (_, index) => [
+      `input-${String(index).padStart(58, "0")}`,
+      digestOf("1"),
+    ])
+  );
+}
 
 describe("step store location and switch", () => {
   test("off unless HACK_STEP_STORE=on, and no runtime arguments when off", () => {
@@ -342,7 +370,79 @@ describe("step store location and switch", () => {
     }
   });
 
-  test("canonicalPath keeps an unresolvable path as it is", () => {
-    expect(canonicalPath("/")).toBe("/");
+  for (const kind of ["ENOTDIR", "ELOOP"]) {
+    test(`canonicalPath keeps the path unchanged on ${kind}`, () => {
+      const root = realpathSync(
+        mkdtempSync(join(tmpdir(), "step-store-path-"))
+      );
+      try {
+        const real = join(root, "real");
+        const alias = join(root, "alias");
+        mkdirSync(real);
+        symlinkSync(real, alias);
+        const entry = join(real, "entry");
+        if (kind === "ENOTDIR") {
+          writeFileSync(entry, "");
+        } else {
+          symlinkSync(entry, entry);
+        }
+        const path = join(alias, "entry", "store");
+        expect(canonicalPath(path)).toBe(path);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+describe("step store build", () => {
+  test("a source run has no build identity", () => {
+    expect(stepStoreBuild()).toBeNull();
+  });
+
+  /** Compile a one-line CLI that prints its build identity, with optional defines. */
+  async function compiledBuild(
+    define?: Record<string, string>
+  ): Promise<string> {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "step-store-build-")));
+    try {
+      const source = join(root, "build.ts");
+      const executable = join(root, "hack-build-fixture");
+      const location = resolve(
+        import.meta.dir,
+        "../src/lib/step-store/location.ts"
+      );
+      writeFileSync(
+        source,
+        `import { stepStoreBuild } from ${JSON.stringify(location)};\nconsole.log(String(stepStoreBuild()));\n`
+      );
+      const build = await Bun.build({
+        entrypoints: [source],
+        compile: { outfile: executable },
+        ...(define ? { define } : {}),
+      });
+      expect(build.success).toBe(true);
+      const child = spawnSyncBounded([executable], { timeout: 30_000 });
+      expect(child.exitCode).toBe(0);
+      return child.stdout.toString().trim();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  test("a compiled CLI with a build id names that id, not its executable file", async () => {
+    expect(
+      await compiledBuild({ __HACK_BUILD_ID__: JSON.stringify("abc123def") })
+    ).toBe(`${HACK_VERSION}+cli:abc123def`);
+  });
+
+  test("a compiled CLI without a build id does not cache", async () => {
+    expect(await compiledBuild()).toBe("null");
+  });
+
+  test("a build id outside the identifier rule does not cache", async () => {
+    expect(
+      await compiledBuild({ __HACK_BUILD_ID__: JSON.stringify("has space") })
+    ).toBe("null");
   });
 });

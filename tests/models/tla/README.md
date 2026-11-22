@@ -62,6 +62,8 @@ signal cleanup, then run three pairs of complete gates. The other checkout must
 contain the same runner revision; omit it to run both gates in this checkout.
 The check verifies separate Java temp roots, marker isolation, and removal of
 each run's scratch. It uses the same Java and pinned jar as `test:models`.
+This check runs on demand, outside `bun test` and CI; each TLC invocation retains
+the 120-second timeout.
 
 ## Native foreground recovery lease takeover
 
@@ -884,14 +886,15 @@ claim, and a model pass is not native startup qualification.
 
 `pool-start-admission/PoolStart.tla` checks the host admission of one `runtime up`
 of a pool that is not running. A Development start takes one sample before the
-startup lease and one under it, at least the admission window after the first; a
-Research start keeps three samples before the lease. The positive control explores
-58,022 states for both profiles, with the provider and engine trees rechecked and
+startup lease and one under it, at least the admission window after the first, or
+at least the window after a recorded earlier sample of the same home; a Research
+start keeps three samples before the lease. The positive control explores
+220,686 states for both profiles, with the provider and engine trees rechecked and
 the root files proven under the lease: a start without an early root files proof,
 such as the first boot of a new home.
 The clock, a host that fails and passes again once, the swapout count, another
-lease holder, a concurrent start, a changed tree or root file, a squatted HOME
-alias and a crash interleave with every step. See its
+lease holder that may record a host sample, a concurrent start, a changed tree or
+root file, a squatted HOME alias and a crash interleave with every step. See its
 [coverage](pool-start-admission/COVERAGE.md) and
 [statechart](../../../docs/pool-start-admission-statechart.md).
 
@@ -903,7 +906,7 @@ samples: it was taken on a passing host (`BootSampleOnPassingHost`) and showed
 the count it was compared against (`BootSampleMatchesBaseline`). No VM starts from a provider or
 engine tree that changed after its content proof (`NoStartFromChangedTree`). A
 refusal, a crash or a pool that a concurrent start already booted leaves no VM
-started and the lease returned. The `root-before-lease` control (73,754 states)
+started and the lease returned. The `root-before-lease` control (277,194 states)
 checks the same invariants for the other path of the implementation, a cleanly
 stopped pool's start, in which the root files are proven before the lease and
 rechecked under it.
@@ -930,6 +933,23 @@ failed between its last sample and the pre-boot observation. Nothing reads the
 host between observations except the cumulative swapout count, so such a dip
 passes; with two Development samples instead of seven it has fewer samples to
 miss. The model shows that the gap exists, not how wide it is.
+
+A home's record of an earlier passing sample (`admission/opening.rs`) may replace
+the wait between a Development start's two samples, never a sample. A start that
+skipped the wait had a record from this OS boot, at least one window and at most
+one bound old, whose swapout count equals its sample's under the lease
+(`ReusedRecordSameBoot`, `WindowRespected`, `ReusedRecordWithinBound`,
+`ReusedRecordSameSwapouts`); every record written came from a passing host
+(`RecordsFromPassingSamples`); Research reuses nothing (`ResearchNeverReuses`).
+Five more controls remove one of these each: `reuse-other-boot`,
+`reuse-too-young`, `reuse-too-old`, `reuse-changed-count` and `record-unchecked`.
+Three reachability controls require a start on a reused record
+(`reuse-start-reachable`), a start that found an unusable record and waited out
+its own window (`reuse-miss-start-reachable`), and the weakening of reuse: a host
+that failed and passed again between the recorded sample and the sample under the
+lease is admitted (`reuse-dip-start-reachable`). The record's file checks, its
+parsing and its clock are not modelled; their tests are in
+`provider/admission/opening/tests.rs`.
 
 The provider and engine trees are proven by content before the lease, inside the
 admission window, and rechecked first under it (`lifecycle/leased_trees.rs`): a

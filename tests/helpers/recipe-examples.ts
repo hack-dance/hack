@@ -143,6 +143,139 @@ export function composeIssues(opts: {
   return [...new Set(issues)];
 }
 
+/** Compose duration (`250ms`, `10s`, `1m30s`) in milliseconds, or null. */
+export function composeDurationMs(value: unknown): number | null {
+  if (typeof value !== "string" || value === "") {
+    return null;
+  }
+  const units: Record<string, number> = {
+    h: 3_600_000,
+    m: 60_000,
+    s: 1000,
+    ms: 1,
+    us: 0.001,
+  };
+  let total = 0;
+  let rest = value;
+  while (rest !== "") {
+    const match = /^(\d+(?:\.\d+)?)(ms|us|h|m|s)/.exec(rest);
+    if (!match) {
+      return null;
+    }
+    total += Number(match[1]) * (units[match[2] ?? ""] ?? 0);
+    rest = rest.slice(match[0].length);
+  }
+  return total;
+}
+
+/** Images whose server handles SIGTERM itself and may need time to stop. */
+const SELF_STOPPING_IMAGE = /^(postgres|redis|mysql|mariadb|mongo|caddy)[:@]/;
+
+/**
+ * True when a database or proxy image runs its own server: no command, or a
+ * command whose program is the image's name (`caddy file-server`).
+ */
+function runsOwnServer(service: Record<string, unknown>): boolean {
+  const image = typeof service.image === "string" ? service.image : "";
+  const match = SELF_STOPPING_IMAGE.exec(image);
+  if (!match) {
+    return false;
+  }
+  const command = service.command;
+  return command === undefined || stringList(command)[0] === match[1];
+}
+
+/** Services another service waits for with `service_completed_successfully`. */
+function oneShotServices(all: Services): Set<string> {
+  const result = new Set<string>();
+  for (const service of Object.values(all)) {
+    const dependsOn = service.depends_on;
+    if (!isRecord(dependsOn)) {
+      continue;
+    }
+    for (const [target, edge] of Object.entries(dependsOn)) {
+      if (
+        isRecord(edge) &&
+        edge.condition === "service_completed_successfully"
+      ) {
+        result.add(target);
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Startup and shutdown timing rules (docs/recipes/fast-health-checks.md):
+ * - a command health check sets `start_period` and a `start_interval` of at
+ *   most 1s, so a dependent starts soon after the service is ready, and a
+ *   steady `interval` of at least 10s;
+ * - a long-running service that is not a database or proxy image runs with
+ *   `init: true` and a `stop_grace_period` of at most 5s, so `hack down`
+ *   does not wait the default 10s for a PID 1 that ignores SIGTERM.
+ * One-shot services (waited on with `service_completed_successfully`),
+ * profile-only tools and database or proxy images running their own server
+ * are exempt from the second rule.
+ */
+export function startupTimingIssues(
+  compose: Record<string, unknown>
+): string[] {
+  const all = services(compose);
+  const oneShot = oneShotServices(all);
+  const issues: string[] = [];
+  for (const [name, service] of Object.entries(all)) {
+    issues.push(
+      ...healthTimingIssues(service.healthcheck).map(
+        (issue) => `${name}: ${issue}`
+      )
+    );
+    const exempt =
+      oneShot.has(name) ||
+      service.profiles !== undefined ||
+      runsOwnServer(service);
+    if (!exempt) {
+      issues.push(
+        ...stopTimingIssues(service).map((issue) => `${name}: ${issue}`)
+      );
+    }
+  }
+  return issues;
+}
+
+function healthTimingIssues(health: unknown): string[] {
+  if (!isRecord(health) || health.disable === true || !("test" in health)) {
+    return [];
+  }
+  const issues: string[] = [];
+  // Zero turns the start period off, and a zero start interval falls back to
+  // the steady interval in the engine, so both must be positive.
+  const startPeriod = composeDurationMs(health.start_period);
+  if (startPeriod === null || startPeriod <= 0) {
+    issues.push("health-without-start-period");
+  }
+  const startInterval = composeDurationMs(health.start_interval);
+  if (startInterval === null || startInterval <= 0 || startInterval > 1000) {
+    issues.push("health-without-fast-start-interval");
+  }
+  const interval = composeDurationMs(health.interval);
+  if (interval === null || interval < 10_000) {
+    issues.push("health-interval-under-10s");
+  }
+  return issues;
+}
+
+function stopTimingIssues(service: Record<string, unknown>): string[] {
+  const issues: string[] = [];
+  if (service.init !== true) {
+    issues.push("long-running-without-init");
+  }
+  const grace = composeDurationMs(service.stop_grace_period);
+  if (grace === null || grace > 5000) {
+    issues.push("long-running-without-short-stop-grace");
+  }
+  return issues;
+}
+
 function imageIssues(service: Record<string, unknown>): string[] {
   const image = service.image;
   if (typeof image !== "string" || !/:[^/:]+$/.test(image)) {

@@ -107,7 +107,7 @@ Usage:
   hack-local graph serve|run ... --shared-source
   hack-local runtime prepare --archive <pinned-smolvm.tar.gz>
   hack-local runtime setup [--accept-downloads] [--no-interactive] [--json]
-  hack-local runtime setup --archive <pinned-smolvm.tar.gz> --engine-archive <pinned-docker.tgz> --network-tools-directory <private-pinned-apks> [--json]
+  hack-local runtime setup --archive <pinned-smolvm.tar.gz> --engine-archive <pinned-docker.tgz> --network-tools-directory <private-pinned-apks> [--builder <pinned-docker-buildx>] [--json]
   hack-local runtime prepare-engine --archive <pinned-docker.tgz>
   hack-local runtime prepare-builder --archive <pinned-docker-buildx>
   hack-local runtime prepare-network-tools --directory <private-pinned-apk-directory>

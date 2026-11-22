@@ -10522,19 +10522,15 @@ async function handlePs({
     noticeToStderr: json,
   });
   const cfg = await readProjectConfig(project);
-  const devHost = await readProjectDevHost(project);
-  const aliasHost = devHost ? resolveBranchAliasHost({ devHost, cfg }) : null;
-  const composeYaml = await Bun.file(project.composeFile)
-    .text()
-    .catch(() => "");
-  const addresses = composeServiceAddresses({
-    composeYaml,
-    branch,
-    baseHosts: [devHost, aliasHost].filter((host): host is string =>
-      Boolean(host)
-    ),
-  });
   const native = resolveNativeRuntimeSelection();
+  const addresses = json
+    ? new Map<string, string>()
+    : await readPsServiceAddresses({
+        project,
+        cfg,
+        branch,
+        native: native !== null,
+      });
   if (native) {
     if (args.options.profile) {
       throw new CliUsageError("Native ps does not support profile filtering.");
@@ -10632,6 +10628,30 @@ async function handlePs({
     wide: args.options.wide === true,
   });
   return 0;
+}
+
+async function readPsServiceAddresses(opts: {
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly branch: string | null;
+  readonly native: boolean;
+}): Promise<ReadonlyMap<string, string>> {
+  const { project, cfg, branch } = opts;
+  const devHost = await readProjectDevHost(project);
+  const aliasHost = devHost ? resolveBranchAliasHost({ devHost, cfg }) : null;
+  const composeYaml = await Bun.file(project.composeFile)
+    .text()
+    .catch(() => "");
+  return composeServiceAddresses({
+    composeYaml,
+    branch,
+    baseHosts: [devHost, aliasHost].filter((host): host is string =>
+      Boolean(host)
+    ),
+    httpsPort: opts.native
+      ? await resolveNativeProjectHttpsPort({ project, cfg })
+      : null,
+  });
 }
 
 /**
@@ -12647,6 +12667,13 @@ async function resolveNativeOpenPort(opts: {
   ) {
     return { native: false };
   }
+  return { native: true, httpsPort: await resolveNativeProjectHttpsPort(opts) };
+}
+
+async function resolveNativeProjectHttpsPort(opts: {
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+}): Promise<number | null> {
   const host = await resolveNativeHostSettings({
     env: process.env,
     projectName: await resolveComposeProjectName({
@@ -12655,7 +12682,7 @@ async function resolveNativeOpenPort(opts: {
     }),
     projectRoot: opts.project.projectRoot,
   });
-  return { native: true, httpsPort: host.https?.httpsPort ?? null };
+  return host.https?.httpsPort ?? null;
 }
 
 /** Whether `hack open <target>` names a project host, not Grafana or a URL. */

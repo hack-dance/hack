@@ -208,6 +208,22 @@ test("native ps keeps the complete address on a narrow plain terminal", async ()
   );
 });
 
+test("native ps reports the configured HTTPS frontend port", async () => {
+  const f = await fixture({});
+  const result = await cli({
+    fixture: f,
+    args: ["ps"],
+    env: {
+      HACK_NATIVE_CADDY_BINARY: join(f.root, "caddy"),
+      HACK_NATIVE_CADDY_SHA256: "a".repeat(64),
+      HACK_NATIVE_HTTPS_PORT: "18443",
+      NO_COLOR: "1",
+    },
+  });
+  expect(result.code).toBe(0);
+  expect(result.stdout).toContain("https://sample.hack.local:18443  healthy");
+});
+
 test("native ps --json returns the ok envelope with runtime_not_running", async () => {
   const f = await fixture({ nativeCode: "runtime_not_running" });
   const result = await cli({ fixture: f, args: ["ps", "--json"] });

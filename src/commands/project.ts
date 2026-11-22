@@ -11897,12 +11897,6 @@ async function handleRun({
     allServiceNames,
     envName,
   });
-  await assertNoInactiveRemoteDependencies({
-    env: envOverrides.env,
-    files: composeFilesWithRuntimeOverrides,
-    services: [service],
-    choices: remoteChoices,
-  });
   const composeFilesWithEnv = [
     ...composeFilesWithRuntimeOverrides,
     ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
@@ -11918,17 +11912,6 @@ async function handleRun({
     background,
     services: cacheBootstrapServices,
   });
-  const bootstrapCode = await bootstrapDependencyCaches({
-    services: cacheBootstrapServices,
-    composeFiles: composeFilesWithEnv,
-    composeProject: composeProjectName,
-    profiles,
-    cwd: dirname(project.composeFile),
-    env: envOverrides.env,
-  });
-  if (bootstrapCode !== 0) {
-    return bootstrapCode;
-  }
   const stackIsRunning =
     !dependencyCache.sharingDisabledReason &&
     (await resolveCanSkipRunDependencies({
@@ -11945,6 +11928,24 @@ async function handleRun({
       env: envOverrides.env,
       service,
     }));
+  await assertNoInactiveRemoteDependencies({
+    env: envOverrides.env,
+    files: composeFilesWithRuntimeOverrides,
+    services: [service],
+    choices: remoteChoices,
+    noDeps: stackIsRunning,
+  });
+  const bootstrapCode = await bootstrapDependencyCaches({
+    services: cacheBootstrapServices,
+    composeFiles: composeFilesWithEnv,
+    composeProject: composeProjectName,
+    profiles,
+    cwd: dirname(project.composeFile),
+    env: envOverrides.env,
+  });
+  if (bootstrapCode !== 0) {
+    return bootstrapCode;
+  }
   const runOptions = {
     composeFiles: composeFilesWithEnv,
     composeProject: composeProjectName,

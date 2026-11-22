@@ -232,6 +232,19 @@ test("the six --use entry points deliver the invocation target without saving it
     expect(native.stdout + native.stderr).toContain(
       "E_NATIVE_PROJECT_UNSUPPORTED"
     );
+    await Bun.write(
+      join(stack, ".hack", "docker-compose.yml"),
+      "services:\n  api:\n    image: alpine\n    depends_on: [postgres]\n  postgres:\n    image: postgres\n"
+    );
+    await Bun.write(log, "");
+    ok(["run", ...choice, "api"]);
+    expect(await Bun.file(log).text()).toMatch(/ run .*--no-deps/);
+    const explicitInactive = hack(["run", ...choice, "postgres"]);
+    expect(explicitInactive.stdout + explicitInactive.stderr).toContain(
+      "Compose would start postgres"
+    );
+    await rm(join(root, "stack-state"));
+
     for (const dependency of [
       "links: [postgres:db]",
       "volumes_from: [postgres:ro]",

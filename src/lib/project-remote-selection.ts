@@ -359,6 +359,7 @@ export function remoteServiceTargets(
 
 export async function assertNoInactiveRemoteDependencies(opts: {
   readonly env: Readonly<Record<string, string>>;
+  readonly noDeps?: boolean;
   readonly files: readonly string[];
   readonly services: readonly string[];
   readonly choices: readonly EffectiveRemote[];
@@ -367,14 +368,15 @@ export async function assertNoInactiveRemoteDependencies(opts: {
   if (!inactive.length) {
     return;
   }
-  const interpolationEnv = await readComposeInterpolationEnv({
-    composeFiles: opts.files,
-    env: { ...process.env, ...opts.env },
-  });
-  const graph = await readComposeOneShotGraph(opts.files, {
-    includeImplicitDependencies: true,
-    interpolationEnv,
-  });
+  const graph = opts.noDeps
+    ? undefined
+    : await readComposeOneShotGraph(opts.files, {
+        includeImplicitDependencies: true,
+        interpolationEnv: await readComposeInterpolationEnv({
+          composeFiles: opts.files,
+          env: { ...process.env, ...opts.env },
+        }),
+      });
   const pending = new Set(opts.services);
   for (const service of pending) {
     if (inactive.includes(service)) {
@@ -383,7 +385,7 @@ export async function assertNoInactiveRemoteDependencies(opts: {
         message: `Compose would start ${service}, a service for an unselected remote target.`,
       });
     }
-    for (const dependency of graph.dependsOn.get(service) ?? []) {
+    for (const dependency of graph?.dependsOn.get(service) ?? []) {
       pending.add(dependency);
     }
   }

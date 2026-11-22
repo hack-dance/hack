@@ -637,7 +637,7 @@ fn restore_inputs(
     }
     receipt.startup_failure = None;
     receipt.probes = probes::fresh(&engine, &prepared.configs, prepared.probes)?;
-    receipt.phase = "restoring".into();
+    receipt.set_phase("restoring");
     if !reconciled {
         for (key, resource) in &mut receipt.resources {
             if resource.kind != Kind::Volume {
@@ -728,7 +728,7 @@ fn retain_restore_failure(
     if fresh && !admitted {
         return Ok(());
     }
-    receipt.phase = "failed-retained".into();
+    receipt.set_phase("failed-retained");
     state::write(&root.join("state.json"), receipt)
 }
 

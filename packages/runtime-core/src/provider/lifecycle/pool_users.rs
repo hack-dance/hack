@@ -139,6 +139,7 @@ const LIVE_PHASES: [(&str, &[&str]); 2] = [
         &[
             "preparing",
             "restoring",
+            "started-observed",
             "ready-observed",
             "failed-retained",
             "cleanup-intent",

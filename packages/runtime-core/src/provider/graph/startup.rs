@@ -235,6 +235,12 @@ pub(super) trait Driver {
     fn service_ready(&mut self, _service: &str, _container_id: &str) -> Result<(), CandidateError> {
         Ok(())
     }
+    /// Every service of `run` has started; the receipt is already saved in
+    /// `started-observed`. Called at most once per attempt, before `verify`, never
+    /// after a failure. The default does nothing.
+    fn all_started(&mut self, _run: &str) -> Result<(), CandidateError> {
+        Ok(())
+    }
 }
 
 /// Named routes rely on the engine-owned hosts file and the image resolver policy.

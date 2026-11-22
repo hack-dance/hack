@@ -57,7 +57,12 @@ fn selected(receipt: &Receipt) -> Result<String, CandidateError> {
 }
 pub(super) fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
     let mut value = serde_json::to_value(receipt).map_err(|_| refused())?;
-    value.as_object_mut().ok_or_else(refused)?.remove("phase");
+    {
+        // `started_from` is part of the phase (`Receipt::set_phase`).
+        let value = value.as_object_mut().ok_or_else(refused)?;
+        value.remove("phase");
+        value.remove("started_from");
+    }
     for group in ["resources", "probes"] {
         if let Some(items) = value.get_mut(group).and_then(Value::as_object_mut) {
             for item in items.values_mut() {
@@ -806,7 +811,7 @@ fn prepare(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     };
     if receipt.relay_startup.is_none()
         || receipt.relay_cleanup.is_some()
-        || (!["failed-retained", "preparing", "cleanup-intent"].contains(&receipt.phase.as_str())
+        || (!["failed-retained", "preparing", "cleanup-intent"].contains(&start_phase(&receipt))
             && one_off_sha256.is_none())
     {
         return Err(refused());

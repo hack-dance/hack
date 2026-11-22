@@ -89,7 +89,7 @@ pub fn begin(
     receipt
         .readiness
         .insert(service.clone(), Condition::Started);
-    receipt.phase = "restoring".into();
+    receipt.set_phase("restoring");
     state::write(&root.join("state.json"), &receipt)?;
     runtime.enroll_job(&engine, &mut receipt, &root, &selection.service, &service)?;
     let mut session = Session {
@@ -249,7 +249,7 @@ pub fn finish(
         startup.services.remove(&service);
     }
     receipt.environment_attached = intent.original_environment_attached;
-    receipt.phase = "ready-observed".into();
+    receipt.set_phase("ready-observed");
     state::write(&root.join("state.json"), &receipt)?;
     if intent.phase != JobPhase::Removed {
         intent.advance(&root, JobPhase::Removed, None)?;

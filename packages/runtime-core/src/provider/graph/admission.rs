@@ -94,7 +94,8 @@ fn check_using(
         if ["removed", "stopped-data-retained"].contains(&receipt.phase.as_str()) {
             continue;
         }
-        if receipt.phase != "ready-observed" {
+        // A started graph holds the same resources as a ready one.
+        if !["ready-observed", STARTED_OBSERVED].contains(&receipt.phase.as_str()) {
             return Err(error(
                 "graph_capacity_reserved",
                 "An active or uncertain graph requires recovery before admitting more work.",

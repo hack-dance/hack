@@ -3912,3 +3912,133 @@ fn receipt_loopback_intent_is_bounded_unique_and_container_only() {
         network
     )])));
 }
+
+fn receipt_in(phase: &str, started_from: Option<&str>) -> Receipt {
+    let mut receipt: Receipt = serde_json::from_value(json!({
+        "version": 1,
+        "run": "a".repeat(32),
+        "owner": "b".repeat(32),
+        "namespace": "c".repeat(64),
+        "plan_id": "d".repeat(64),
+        "phase": phase,
+        "readiness": {"web": "started"},
+        "resources": {"container:web": {
+            "key": "web",
+            "kind": "container",
+            "name": format!("hkg-{}-container-0", "a".repeat(32)),
+            "id": "e".repeat(64),
+            "phase": "started",
+            "image": format!("sha256:{}", "f".repeat(64))
+        }}
+    }))
+    .unwrap();
+    receipt.started_from = started_from.map(str::to_owned);
+    receipt
+}
+
+#[test]
+fn every_start_in_progress_moves_to_started_observed_and_remembers_its_start() {
+    for start in START_PHASES {
+        let mut receipt = receipt_in(start, None);
+        mark_started(&mut receipt).unwrap();
+        assert_eq!(receipt.phase, "started-observed");
+        assert_eq!(receipt.started_from.as_deref(), Some(start));
+        // Checks of a start in progress see the start it belongs to.
+        assert_eq!(start_phase(&receipt), start);
+    }
+    for other in [
+        "ready-observed",
+        "failed-retained",
+        "cleanup-intent",
+        "stopped-data-retained",
+        "started-observed",
+    ] {
+        let mut receipt = receipt_in(other, None);
+        assert_eq!(
+            mark_started(&mut receipt).unwrap_err().code,
+            "graph_replay_refused",
+            "{other}"
+        );
+        assert_eq!(receipt.phase, other);
+        assert_eq!(start_phase(&receipt), other);
+    }
+}
+
+#[test]
+fn a_started_observed_receipt_loads_only_with_the_start_it_belongs_to() {
+    let fixture = Fixture::new();
+    let root = fixture.0.join("graph");
+    fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+    let load = |receipt: &Receipt| {
+        let _ = fs::remove_file(root.join("state.json"));
+        state::write(&root.join("state.json"), receipt).unwrap();
+        load_at(root.clone(), &"a".repeat(32), &"b".repeat(32)).map(|(receipt, _)| receipt)
+    };
+    for start in START_PHASES {
+        let loaded = load(&receipt_in("started-observed", Some(start))).unwrap();
+        assert_eq!(start_phase(&loaded), start);
+    }
+    assert_eq!(
+        load(&receipt_in("started-observed", None))
+            .unwrap_err()
+            .code,
+        "graph_receipt"
+    );
+    assert_eq!(
+        load(&receipt_in("started-observed", Some("ready-observed")))
+            .unwrap_err()
+            .code,
+        "graph_receipt"
+    );
+    // Only a started graph carries it: a value on any other phase refuses.
+    for phase in [
+        "failed-retained",
+        "cleanup-intent",
+        "ready-observed",
+        "preparing",
+    ] {
+        assert_eq!(
+            load(&receipt_in(phase, Some("preparing")))
+                .unwrap_err()
+                .code,
+            "graph_receipt",
+            "{phase}"
+        );
+    }
+    // Without the field, the receipt is byte-for-byte what it was.
+    let text = serde_json::to_string(&receipt_in("ready-observed", None)).unwrap();
+    assert!(!text.contains("started_from"));
+}
+
+#[test]
+fn a_started_graph_moved_on_by_recovery_drops_its_start() {
+    let mut original = receipt_in("preparing", None);
+    mark_started(&mut original).unwrap();
+    assert!(
+        serde_json::to_string(&original)
+            .unwrap()
+            .contains("started_from")
+    );
+    // Cleanup (`cleanup_owned_fenced`, used by owner recovery) and every other phase
+    // change go through `set_phase`.
+    for phase in [
+        "cleanup-intent",
+        "stopped-data-retained",
+        "removed",
+        "failed-retained",
+        "ready-observed",
+    ] {
+        let mut moved = original.clone();
+        moved.set_phase(phase);
+        let text = serde_json::to_string(&moved).unwrap();
+        assert!(!text.contains("started_from"), "{phase}: {text}");
+        assert_eq!(start_phase(&moved), phase);
+        // Recovery compares receipts with their phase removed; the start goes with it.
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            super::dead_owner_cleanup::immutable(&original).unwrap(),
+            super::dead_owner_cleanup::immutable(&moved).unwrap(),
+            "{phase}"
+        );
+    }
+}

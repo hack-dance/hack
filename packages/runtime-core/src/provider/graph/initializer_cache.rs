@@ -190,12 +190,20 @@ fn quiescent(
             _ => return Err(refused()),
         }
         require_resolved(&other)?;
-        if !["removed", "stopped-data-retained", "ready-observed"].contains(&other.phase.as_str()) {
+        if ![
+            "removed",
+            "stopped-data-retained",
+            "ready-observed",
+            STARTED_OBSERVED,
+        ]
+        .contains(&other.phase.as_str())
+        {
             return Err(refused());
         }
-        // Conservatively skip other live graphs even when all their processes have
-        // just exited. Unknown foreign containers are also never treated as quiescent.
-        busy |= other.phase == "ready-observed";
+        // Conservatively skip other live graphs (ready, or started and still warming)
+        // even when all their processes have just exited. Unknown foreign containers
+        // are also never treated as quiescent.
+        busy |= ["ready-observed", STARTED_OBSERVED].contains(&other.phase.as_str());
         for resource in other
             .resources
             .values()

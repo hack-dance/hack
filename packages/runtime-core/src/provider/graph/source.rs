@@ -776,6 +776,7 @@ mod tests {
         let prepared =
             config::prepare(executable, &goals, &run, &owner, Some(&baseline_inputs)).unwrap();
         let receipt = Receipt {
+            started_from: None,
             normalized_input: None,
             version: 1,
             run,
@@ -871,6 +872,7 @@ mod tests {
         let run = "b".repeat(32);
         let owner = "c".repeat(32);
         let mut receipt = Receipt {
+            started_from: None,
             normalized_input: None,
             version: 1,
             run: run.clone(),

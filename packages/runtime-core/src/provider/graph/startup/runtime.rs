@@ -99,6 +99,9 @@ pub struct HostRelayRuntime {
     selected_run: Option<String>,
     control_generation: String,
     startup_cancelled: Option<fn() -> bool>,
+    /// `graph serve --report-started`: print the `graph_foreground_started` line
+    /// when every service has started.
+    report_started: bool,
     /// Sticky: a dependency rebind wrote its journal and did not complete. Its
     /// effects are unconfirmed, so automatic refresh must never try again.
     rebind_unconfirmed: bool,
@@ -660,11 +663,16 @@ impl HostRelayRuntime {
             selected_run: selected_run.map(str::to_owned),
             control_generation,
             startup_cancelled: None,
+            report_started: false,
             rebind_unconfirmed: false,
             dependency_reservation,
         })
     }
     /// Armed only while the foreground initial startup runs, never during cleanup.
+    /// Opt in to the `graph_foreground_started` line (`--report-started`).
+    pub fn report_started(&mut self, enabled: bool) {
+        self.report_started = enabled;
+    }
     pub(in crate::provider::graph) fn set_startup_cancellation(
         &mut self,
         check: Option<fn() -> bool>,
@@ -839,16 +847,13 @@ impl HostRelayRuntime {
         ) -> Result<(), CandidateError>,
     ) -> Result<(), CandidateError> {
         self.check(engine, receipt)?;
-        if matches!(
-            receipt.phase.as_str(),
-            "preparing" | "restoring" | "ready-observed"
-        ) {
+        // `started-observed` is checked as the start it belongs to.
+        let phase = super::super::start_phase(receipt);
+        if matches!(phase, "preparing" | "restoring" | "ready-observed") {
             rebind::require_complete(root, receipt)?;
         }
-        if matches!(
-            receipt.phase.as_str(),
-            "preparing" | "restoring" | "ready-observed"
-        ) && !self.dependencies.is_empty()
+        if matches!(phase, "preparing" | "restoring" | "ready-observed")
+            && !self.dependencies.is_empty()
         {
             verify_endpoint_generations(
                 &self.dependencies,
@@ -927,9 +932,33 @@ impl HostRelayRuntime {
         })
     }
 }
+/// The foreground owner's `graph_foreground_started` line, newline-terminated and
+/// flushed, written only with `--report-started` (`enabled`); otherwise nothing.
+fn report_all_started(
+    enabled: bool,
+    out: &mut impl std::io::Write,
+    run: &str,
+) -> Result<(), CandidateError> {
+    if !enabled {
+        return Ok(());
+    }
+    let line = serde_json::json!({
+        "kind": "graph_foreground_started",
+        "run": run,
+        "phase": super::super::STARTED_OBSERVED,
+    });
+    serde_json::to_writer(&mut *out, &line).map_err(|_| refused())?;
+    writeln!(out)
+        .and_then(|()| out.flush())
+        .map_err(|_| refused())
+}
+
 impl Driver for HostRelayRuntime {
     fn admission_started(&self) -> bool {
         self.run.is_some()
+    }
+    fn all_started(&mut self, run: &str) -> Result<(), CandidateError> {
+        report_all_started(self.report_started, &mut std::io::stdout().lock(), run)
     }
 
     fn process_services(&self) -> std::collections::BTreeSet<String> {
@@ -1790,6 +1819,26 @@ mod route_tests {
         dependencies[1].service = "unrequested".into();
         assert!(HostRelayRuntime::validate_inputs(&dependencies, &inputs).is_err());
         assert!(!candidate.state_root.exists());
+    }
+}
+
+#[cfg(test)]
+mod all_started_tests {
+    use super::*;
+    #[test]
+    fn the_started_line_is_printed_only_with_report_started() {
+        let run = "a".repeat(32);
+        let mut out = Vec::new();
+        report_all_started(false, &mut out, &run).unwrap();
+        assert!(out.is_empty(), "printed without --report-started");
+        report_all_started(true, &mut out, &run).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.ends_with('\n') && text.matches('\n').count() == 1);
+        let line: Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(
+            line,
+            json!({"kind": "graph_foreground_started", "run": run, "phase": "started-observed"})
+        );
     }
 }
 

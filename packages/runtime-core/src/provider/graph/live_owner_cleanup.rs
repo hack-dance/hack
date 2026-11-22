@@ -156,7 +156,7 @@ fn recoverable_settled(receipt: &Receipt) -> Result<(), CandidateError> {
 // recoveries; this predicate is never a readiness check for up or restore.
 fn settled_startup(receipt: &Receipt) -> Result<(), CandidateError> {
     let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
-    if !["ready-observed", "failed-retained"].contains(&receipt.phase.as_str())
+    if !["ready-observed", STARTED_OBSERVED, "failed-retained"].contains(&receipt.phase.as_str())
         || !startup.valid(receipt)
         || startup.services.values().any(|s| {
             !matches!(
@@ -171,7 +171,12 @@ fn settled_startup(receipt: &Receipt) -> Result<(), CandidateError> {
 }
 fn immutable(receipt: &Receipt) -> Result<Value, CandidateError> {
     let mut value = serde_json::to_value(receipt).map_err(|_| refused())?;
-    value.as_object_mut().ok_or_else(refused)?.remove("phase");
+    {
+        // `started_from` is part of the phase (`Receipt::set_phase`).
+        let value = value.as_object_mut().ok_or_else(refused)?;
+        value.remove("phase");
+        value.remove("started_from");
+    }
     for group in ["resources", "probes"] {
         if let Some(items) = value.get_mut(group).and_then(Value::as_object_mut) {
             for item in items.values_mut() {

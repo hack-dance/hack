@@ -1557,9 +1557,11 @@ project services, the provider VM or anything else in the home.
   process then ends at once, and the next `serve` can start).
 - **Starting it from a program.** `--notify-fd` names a pipe or socket the starter
   reads: the service writes exactly one line, `{"listening":…}`, `{"lost":true}` or
-  `{"refused":{"code":…}}`. A starter that does not read that line within a second
-  makes the service stop before it serves anyone. "Listening" is not "ready": a
-  client uses the service only after a `hello` has succeeded.
+  `{"refused":{"code":…}}`, as the first thing that can fail is checked. If the
+  `listening` line cannot be written within a second (the pipe or socket is full),
+  the service stops before it serves anyone. A written line is not proof that the
+  starter read it. "Listening" is not "ready": a client uses the service only after
+  a `hello` has succeeded.
 - **Environment.** It keeps only `PATH`, `HOME`, `TMPDIR`, `USER` and `LOGNAME`, and
   disables core dumps.
 

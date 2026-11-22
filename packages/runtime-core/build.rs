@@ -1,5 +1,12 @@
 use std::{env, path::PathBuf, process::Command};
 fn main() {
+    // Test-only service operations never reach an optimized binary, whatever
+    // the profile is called or which debug settings it keeps.
+    if env::var_os("CARGO_FEATURE_SERVICE_TEST_HOOKS").is_some()
+        && env::var("OPT_LEVEL").as_deref() != Ok("0")
+    {
+        panic!("the service-test-hooks feature is test-only and refused when OPT_LEVEL is not 0");
+    }
     build_runtime_identity();
     build_loopback_identity();
     println!("cargo:rerun-if-changed=guest/stream-relay.c");

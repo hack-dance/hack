@@ -447,3 +447,115 @@ fn a_regular_file_is_not_a_notify_transport() {
     assert!(home.socket().symlink_metadata().is_err());
     assert_eq!(std::fs::read(home.0.join("notify.txt")).unwrap(), b"");
 }
+
+/// `serve` with `args` (after the candidate root) and `notify` at descriptor 3,
+/// stderr a pipe the test reads after exit.
+fn spawn_raw(home: &Home, args: &[std::ffi::OsString], notify: i32) -> Service {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hack-native"));
+    command
+        .arg("--candidate-root")
+        .arg(&home.0)
+        .args(args)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home.0)
+        .current_dir(&home.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() < 0
+                || libc::dup2(notify, 3) < 0
+                || libc::fcntl(3, libc::F_SETFD, 0) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Service(command.spawn().unwrap())
+}
+
+#[test]
+fn refusals_before_the_command_is_parsed_still_reach_the_starter() {
+    use std::os::unix::ffi::OsStringExt;
+    let home = Home::new();
+    let os = |s: &str| std::ffi::OsString::from(s);
+    for args in [
+        // A trailing argument that is not UTF-8.
+        vec![
+            os("service"),
+            os("serve"),
+            os("--notify-fd"),
+            os("3"),
+            std::ffi::OsString::from_vec(vec![0xff, 0xfe]),
+        ],
+        // A relative step store, refused before the command is split off.
+        vec![
+            os("--step-store"),
+            os("relative"),
+            os("service"),
+            os("serve"),
+            os("--notify-fd"),
+            os("3"),
+        ],
+    ] {
+        let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+        let (reader, writer) = pipe();
+        let mut service = spawn_raw(&home, &args, writer.as_raw_fd());
+        drop(writer);
+        drop(spawning);
+        assert_eq!(service.exit().code(), Some(2), "{args:?}");
+        let mut line = String::new();
+        BufReader::new(reader).read_line(&mut line).unwrap();
+        let refused: Value = serde_json::from_str(&line).unwrap();
+        assert!(
+            refused["refused"]["code"].is_string(),
+            "{args:?}: {refused}"
+        );
+    }
+    assert!(home.socket().symlink_metadata().is_err());
+}
+
+#[test]
+fn an_error_exit_never_waits_on_a_full_stderr() {
+    // The notify pipe is full (so the service ends with an error) and stderr is
+    // a full pipe nobody reads: the error print must not keep the process.
+    let home = Home::new();
+    let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+    let (_notify_reader, notify_writer) = full_pipe(true);
+    let (_stderr_reader, stderr_writer) = full_pipe(true);
+    let mut command = command(
+        &home,
+        &[
+            "service",
+            "serve",
+            "--idle-seconds",
+            "60",
+            "--notify-fd",
+            "3",
+        ],
+    );
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr_writer);
+    let raw = notify_writer.as_raw_fd();
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() < 0 || libc::dup2(raw, 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut service = Service(command.spawn().unwrap());
+    drop(notify_writer);
+    drop(spawning);
+    assert_eq!(service.exit().code(), Some(2));
+    assert!(serves_again(&home));
+}

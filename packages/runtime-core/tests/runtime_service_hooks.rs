@@ -6,6 +6,7 @@
 mod service_support;
 
 use service_support::*;
+use std::os::fd::AsRawFd;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
 
@@ -201,4 +202,52 @@ fn a_fifo_in_place_of_the_record_never_blocks_an_exit() {
     let _ = run(&home, &["service", "stop"]);
     assert_eq!(service.exit().code(), Some(3));
     assert!(serves_again(&home));
+}
+
+#[test]
+fn a_stop_signal_before_discovery_is_answered_not_fatal() {
+    // The handlers are installed before anything else; the hook pauses right
+    // after that, before the home is looked up, and the signal arrives there.
+    let home = Home::new();
+    let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+    let (reader, writer) = pipe();
+    let mut service = spawn_serve(
+        &home,
+        writer.as_raw_fd(),
+        &[
+            "service",
+            "serve",
+            "--notify-fd",
+            "3",
+            "--test-pause-before-discovery",
+        ],
+    );
+    drop(writer);
+    drop(spawning);
+    let mut paused = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(service.0.stderr.take().unwrap()),
+        &mut paused,
+    )
+    .unwrap();
+    assert!(paused.contains("paused"), "{paused}");
+    // SAFETY: a signal to the child this test started and still owns.
+    assert_eq!(
+        unsafe { libc::kill(service.pid() as i32, libc::SIGTERM) },
+        0
+    );
+    let status = service.exit();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "{status:?} (signal {:?})",
+        status.signal()
+    );
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(reader), &mut line).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&line).unwrap(),
+        serde_json::json!({"refused": {"code": "service_signalled"}})
+    );
+    assert!(home.socket().symlink_metadata().is_err());
 }

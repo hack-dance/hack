@@ -94,8 +94,7 @@ const OPS: &[&str] = &[
     "test.hold",
     "test.env",
 ];
-#[cfg(all(feature = "service-test-hooks", not(debug_assertions)))]
-compile_error!("the service-test-hooks feature is test-only and refused in optimized builds");
+// `build.rs` refuses this feature in any optimized build (OPT_LEVEL other than 0).
 /// How long `test.hold` keeps its request in progress.
 #[cfg(feature = "service-test-hooks")]
 const TEST_HOLD: Duration = Duration::from_secs(60);
@@ -283,7 +282,12 @@ extern "C" fn on_stop_signal(_: libc::c_int) {
 
 /// Route SIGTERM, SIGINT and SIGHUP to a drained stop instead of death, once
 /// for the life of the process.
-fn install_stop_signals() -> Result<(), CandidateError> {
+/// Whether a stop signal has arrived since the handlers were installed.
+pub fn stop_signal_received() -> bool {
+    SIGNALLED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn install_stop_signals() -> Result<(), CandidateError> {
     let installed = SIGNALS_INSTALLED.get_or_init(|| {
         let Ok((read, write)) = UnixStream::pair() else {
             return false;
@@ -350,6 +354,12 @@ pub fn serve(
         if let Err(error) = install_stop_signals() {
             announce(json!({"refused": {"code": error.code}}));
             return Err(error);
+        }
+        // Asked to stop before it started (the entry point installs the
+        // handlers before anything else): bind nothing, say so, exit cleanly.
+        if SIGNALLED.load(std::sync::atomic::Ordering::SeqCst) {
+            announce(json!({"refused": {"code": "service_signalled"}}));
+            return Ok(Outcome::Signalled);
         }
     }
     let paths = paths(state_root);

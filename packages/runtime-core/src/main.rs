@@ -152,6 +152,13 @@ fn main() {
     {
         hack_runtime_core::timings::enable_argument(&argument);
     }
+    // `service serve` sets itself up before anything else can fail or wait:
+    // core dumps off, stop signals routed, the starter's notify descriptor
+    // taken, then the closed environment. From here on every refusal reaches
+    // the starter as one line, and no exit can block on a write.
+    if serve_requested() {
+        prepare_serve();
+    }
     let result = hack_runtime_core::timings::measure_candidate(
         hack_runtime_core::timings::Step::RuntimeDispatch,
         None,
@@ -159,12 +166,87 @@ fn main() {
     );
     hack_runtime_core::timings::shutdown();
     if let Err(error) = result {
+        let line = serde_json::to_string(&error).expect("error is serializable");
+        if SERVING.load(std::sync::atomic::Ordering::SeqCst) {
+            // A refusal the starter has not heard yet goes to it now. Then no
+            // write that could block stands between this and the exit.
+            if let Some(file) = early_notify().take() {
+                let refused = serde_json::json!({"refused": {"code": error.code}});
+                let _ = hack_runtime_core::service::notify(&file, &refused);
+            }
+            write_stderr_if_room(&line);
+            // SAFETY: _exit ends the process at once; nothing here relies on cleanup.
+            unsafe { libc::_exit(2) }
+        }
         // Keep errors structured even before a connection to a runtime exists.
-        eprintln!(
-            "{}",
-            serde_json::to_string(&error).expect("error is serializable")
-        );
+        eprintln!("{line}");
         hack_runtime_core::timings::exit(2);
+    }
+}
+
+/// Set once `main` has recognised `service serve`.
+static SERVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// What `prepare_serve` found, for the `serve` arm.
+static EARLY_FAILURE: std::sync::Mutex<Option<CandidateError>> = std::sync::Mutex::new(None);
+/// The starter's notify descriptor until something writes its one line.
+static EARLY_NOTIFY: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+
+fn early_notify() -> std::sync::MutexGuard<'static, Option<std::fs::File>> {
+    EARLY_NOTIFY.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Whether the raw arguments ask for `service serve`.
+fn serve_requested() -> bool {
+    let arguments: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    arguments
+        .windows(2)
+        .any(|pair| pair[0] == "service" && pair[1] == "serve")
+}
+
+/// The `service serve` prelude, in order, before argument checks can refuse.
+fn prepare_serve() {
+    SERVING.store(true, std::sync::atomic::Ordering::SeqCst);
+    let failure = disable_core_dumps()
+        .and_then(|()| hack_runtime_core::service::install_stop_signals())
+        .err();
+    *EARLY_FAILURE.lock().unwrap_or_else(|p| p.into_inner()) = failure;
+    let arguments: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let after_serve = arguments
+        .windows(2)
+        .position(|pair| pair[0] == "service" && pair[1] == "serve")
+        .map_or(arguments.len(), |at| at + 2);
+    let reserved = arguments
+        .get(1)
+        .and_then(|argument| argument.to_str())
+        .and_then(hack_runtime_core::timings::requested_fd);
+    let value = arguments[after_serve.min(arguments.len())..]
+        .windows(2)
+        .find(|pair| pair[0] == "--notify-fd")
+        .and_then(|pair| pair[1].to_str().map(str::to_owned));
+    if let Some(value) = value {
+        *early_notify() = notify_descriptor(&value, reserved);
+    }
+    keep_closed_environment();
+}
+
+/// Write `line` to stderr only if one write cannot block: a pipe that polls
+/// writable has room for at least `PIPE_BUF` (512 bytes everywhere), and a
+/// line that fits is written whole. Otherwise the line is dropped; the exit
+/// code still says what happened.
+fn write_stderr_if_room(line: &str) {
+    let bytes = format!("{line}\n").into_bytes();
+    if bytes.len() > 512 {
+        return;
+    }
+    let mut pfd = libc::pollfd {
+        fd: 2,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: one initialized pollfd, a zero timeout.
+    if unsafe { libc::poll(&mut pfd, 1, 0) } == 1 && pfd.revents & libc::POLLOUT != 0 {
+        // SAFETY: a valid buffer; stderr is open or the write simply fails.
+        unsafe { libc::write(2, bytes.as_ptr().cast(), bytes.len()) };
     }
 }
 
@@ -259,18 +341,19 @@ fn run() -> Result<(), CandidateError> {
     // (root resolution and discovery included) reaches its starter as a line.
     let mut serving = match command.as_slice() {
         ["service", "serve", rest @ ..] => {
-            // In this order: core dumps off, the closed environment, then the
-            // arguments with the notify descriptor first. From there on every
-            // refusal reaches the starter as one line.
-            let core = disable_core_dumps();
-            keep_closed_environment();
-            let reserved = std::env::args_os()
-                .nth(1)
-                .and_then(|argument| argument.into_string().ok())
-                .and_then(|argument| hack_runtime_core::timings::requested_fd(&argument));
-            let mut serving = Some(service_serve_arguments(rest, reserved)?);
-            if let Err(error) = core {
-                return Err(refuse_starter(&mut serving, error));
+            // `main` already disabled core dumps, routed stop signals, took the
+            // notify descriptor and cleared the environment; report what failed.
+            let serving = Some(service_serve_arguments(rest)?);
+            if let Some(error) = EARLY_FAILURE
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take()
+            {
+                return Err(error);
+            }
+            #[cfg(feature = "service-test-hooks")]
+            if rest.contains(&"--test-pause-before-discovery") {
+                test_pause_until_signalled();
             }
             serving
         }
@@ -295,8 +378,7 @@ fn run() -> Result<(), CandidateError> {
             _ => {}
         }
     }
-    let requested = resolve_candidate_root(Path::new(&arguments[1]))
-        .map_err(|error| refuse_starter(&mut serving, error))?;
+    let requested = resolve_candidate_root(Path::new(&arguments[1]))?;
     match command.as_slice() {
         [] | ["--help"] | ["help"] => {
             println!(
@@ -360,15 +442,12 @@ fn run() -> Result<(), CandidateError> {
             }
         }
         ["service", "serve", ..] => {
-            let candidate = discover_candidate(&requested)
-                .map_err(|error| refuse_starter(&mut serving, error))?;
-            let Serving {
-                idle,
-                drain,
-                notify,
-            } = serving
+            // A failure here returns to `main`, which tells the starter.
+            let candidate = discover_candidate(&requested)?;
+            let Serving { idle, drain } = serving
                 .take()
                 .expect("service serve arguments are parsed before dispatch");
+            let notify = early_notify().take();
             let served = hack_runtime_core::service::serve(
                 &candidate.state_root,
                 hack_runtime_core::service::Options {
@@ -1816,21 +1895,11 @@ fn image_policy(
 /// The exit code of a service whose drain ran out of time.
 const SERVICE_DRAIN_TIMEOUT_EXIT: i32 = 3;
 
-/// A parsed `service serve`.
+/// A parsed `service serve`. Its notify descriptor stays in `EARLY_NOTIFY`
+/// until `serve` takes it, so `main` can always refuse through it.
 struct Serving {
     idle: std::time::Duration,
     drain: std::time::Duration,
-    notify: Option<std::fs::File>,
-}
-
-/// Tell a `service serve` starter why this process refuses, once and without
-/// blocking, then pass the error on. A no-op for every other command.
-fn refuse_starter(serving: &mut Option<Serving>, error: CandidateError) -> CandidateError {
-    if let Some(file) = serving.as_mut().and_then(|serving| serving.notify.take()) {
-        let refused = serde_json::json!({"refused": {"code": error.code}});
-        let _ = hack_runtime_core::service::notify(&file, &refused);
-    }
-    error
 }
 
 /// Private input will pass through the service; keep it out of core dumps.
@@ -1865,58 +1934,73 @@ fn keep_closed_environment() {
 }
 
 /// `service serve [--idle-seconds <1..86400>] [--drain-seconds <1..60>] [--notify-fd <3..1023>]`.
-/// Each option at most once. The notify descriptor is taken first, so a later
-/// argument error reaches the starter as a refused line.
-fn service_serve_arguments(
-    arguments: &[&str],
-    reserved: Option<i32>,
-) -> Result<Serving, CandidateError> {
+/// Each option at most once. `main` took the notify descriptor already; a
+/// `--notify-fd` it could not use is an argument error like any other.
+fn service_serve_arguments(arguments: &[&str]) -> Result<Serving, CandidateError> {
     let invalid = || {
         CandidateError::new(
             "invalid_arguments",
             "Use service serve [--idle-seconds <1..86400>] [--drain-seconds <1..60>] [--notify-fd <3..1023>], each at most once.",
         )
     };
-    // Wherever `--notify-fd <n>` stands, even after a malformed option, so that
-    // the grammar error found in the second pass still reaches the starter.
-    let notify_values: Vec<&str> = arguments
-        .windows(2)
-        .filter(|pair| pair[0] == "--notify-fd")
-        .map(|pair| pair[1])
-        .collect();
     let mut serving = Serving {
         idle: std::time::Duration::from_secs(300),
         drain: hack_runtime_core::service::DEFAULT_DRAIN,
-        notify: None,
     };
-    if let Some(value) = notify_values.first() {
-        serving.notify = Some(notify_descriptor(value, reserved).ok_or_else(invalid)?);
-    }
-    let mut serving = Some(serving);
     let mut seen: Vec<&str> = Vec::new();
-    for pair in arguments.chunks(2) {
-        let [flag, value] = pair else {
-            return Err(refuse_starter(&mut serving, invalid()));
-        };
-        if seen.contains(flag) {
-            return Err(refuse_starter(&mut serving, invalid()));
-        }
-        seen.push(flag);
-        let parsed = serving.as_mut().expect("present until returned");
-        match *flag {
-            "--idle-seconds" => match value.parse().ok().filter(|s| (1..=86_400).contains(s)) {
-                Some(seconds) => parsed.idle = std::time::Duration::from_secs(seconds),
-                None => return Err(refuse_starter(&mut serving, invalid())),
-            },
-            "--drain-seconds" => match value.parse().ok().filter(|s| (1..=60).contains(s)) {
-                Some(seconds) => parsed.drain = std::time::Duration::from_secs(seconds),
-                None => return Err(refuse_starter(&mut serving, invalid())),
-            },
-            "--notify-fd" => {}
-            _ => return Err(refuse_starter(&mut serving, invalid())),
+    let mut rest = arguments;
+    loop {
+        match rest {
+            [] => break,
+            #[cfg(feature = "service-test-hooks")]
+            ["--test-pause-before-discovery", tail @ ..] => {
+                rest = tail;
+                continue;
+            }
+            [flag, value, tail @ ..] => {
+                if seen.contains(flag) {
+                    return Err(invalid());
+                }
+                seen.push(flag);
+                match *flag {
+                    "--idle-seconds" => {
+                        serving.idle = value
+                            .parse()
+                            .ok()
+                            .filter(|s| (1..=86_400).contains(s))
+                            .map(std::time::Duration::from_secs)
+                            .ok_or_else(invalid)?
+                    }
+                    "--drain-seconds" => {
+                        serving.drain = value
+                            .parse()
+                            .ok()
+                            .filter(|s| (1..=60).contains(s))
+                            .map(std::time::Duration::from_secs)
+                            .ok_or_else(invalid)?
+                    }
+                    "--notify-fd" if early_notify().is_some() => {}
+                    _ => return Err(invalid()),
+                }
+                rest = tail;
+            }
+            [_] => return Err(invalid()),
         }
     }
-    Ok(serving.expect("present until returned"))
+    Ok(serving)
+}
+
+/// Test only: report on stderr that the stop-signal handlers are in place,
+/// then wait (at most 30 s) for a stop signal before discovery begins.
+#[cfg(feature = "service-test-hooks")]
+fn test_pause_until_signalled() {
+    eprintln!("paused before discovery");
+    let started = std::time::Instant::now();
+    while !hack_runtime_core::service::stop_signal_received()
+        && started.elapsed() < std::time::Duration::from_secs(30)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 /// Take the starter's notify descriptor: a FIFO or a socket (the transports the

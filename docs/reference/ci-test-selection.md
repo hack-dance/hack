@@ -2,65 +2,39 @@
 
 A PR uses a light tier by default: typecheck, lint/privacy, secret scan, docs
 checks when relevant, and selected Linux unit files on five Linux shards. It runs
-no macOS jobs by default. Ready PRs that change CLI release inputs retain relocated CLI
-acceptance on both Linux compiler hosts. Changes to candidate inputs retain
-the Linux Candidate core job. Changes to model inputs select state models independently of build smoke.
-
-| Change kind (ready PR to `next`) | Tiers selected in addition to selected Linux units and required checks |
-| --- | --- |
-| Ordinary unit test or docs-site-only input | No Docker, models or build smoke; docs site when relevant |
-| `scripts/lib/tla-runtime-models.ts` or `tests/models/**` | State models; no Docker or build smoke |
-| TLA helper skill, `tests/tla-result.test.ts`, or the four Python controls bundled with the model job | State models; no Docker or build smoke |
-| Reference documents and source read by the benchmark Python controls | State models, plus other jobs that consume those files |
-| Runtime-core or guest Rust source | Linux Candidate core. Docker, models and compiler run when their own inputs also change. |
-| Config compiler or lifecycle supervisor Rust source | Docker, both Linux compiler hosts and release build smoke. Candidate and compiler Rust checks run for inputs they compile or read. |
-| Other CLI release build inputs, including the packaged root README | Build smoke and both Linux compiler hosts, plus Docker where shared with the Docker tier |
-| Compose backend, templates, E2E harness and their derived imported/executed inputs | Docker E2E, runtime images and Linux process lifetime |
-| Dockerfile definitions, copied CLI sources, and enumerated recipe examples | Docker tier. Shared release inputs also retain compiler and build smoke. |
-| Unknown input families, shared test helpers/preloads, other scripts, manifests, lockfiles, toolchain/config pins, workflows or selectors | Full Linux, Docker, state-model and build tiers |
-| `ci:e2e` label | Docker tier, independently of model/build tiers |
-| `ci:full` label | Full ordinary tiers and selected macOS/native hosts |
-| `next` integration push | Docker, models and build smoke, selected Linux/macOS pools and native checks |
-
-Docker dependencies are derived from the `docker-e2e-shard`, `runtime-images` and
-`linux-process-lifetime` workflow commands, including package/workspace scripts,
-transitive local imports, nested shell helpers and literal execution/data paths.
-Local Compose builds contribute their Dockerfiles, ignore files and local
-`COPY`/`ADD` sources. The runtime image builder uses the repository root as its
-context, with Dockerfile-specific allowlists for the CLI, workspace manifests
-and the slim image’s lifecycle supervisor. Candidate Rust and guest crates
-stay outside both image contexts. Build smoke and state models follow their own workflow commands. The
-model tier follows Python unittest discovery and literal references in those
-controls, including reference documents and source they read. Cargo
-manifests select their crate inputs and follow local dependency manifests.
-Rust include macros and manifest-relative references also retain files outside
-the crate, including the candidate guide used by its network-tool test. The
-workflow gate table in `scripts/ci-job-policy.ts` maps each skippable job and
-step group and matrix to its selector output. Tests compare those rows to the workflow
-conditions and check that every derived checkout input enables its gate. The
-unit suite and diagnostic reporting already run on PRs. Shard 8 owns the
-shared TypeScript check. The planner reads both the
-base and merge trees, so deleted inputs and both sides of a rename still count. Thus the shared-host
-fixture, real-Docker context test and configuration compiler remain Docker inputs
-without relying on a filename-prefix guess. A new registered scenario importing a
-new helper automatically brings that helper into Docker qualification. Fixture
-regressions exercise that edge; unavailable dependency evidence selects full.
-A path without a derived dependency or an explicit input rule selects the
-full Linux plan. A broad Cargo or image copy directory alone cannot classify
-an arbitrary new file as a known source input. Unit tests can establish known
-fixture inputs through literal paths or a bounded directory and filename suffix. Unit inventory expansion and job-tier expansion are separate.
-
-Unknown scripts and shared helpers remain full-tier inputs until their consumers
-are audited. In particular, this change exempts only the known model registry from
-`scripts/**`; model runner/check scripts themselves stay full. Shared CLI source
-is kept on the Docker side because a shared helper can affect Compose indirectly.
-These conservative choices are explicit review points, not claims of minimal scope.
-Changes to the workflow or selection policy cannot narrow their own qualification.
+no macOS jobs, Docker E2E shards or state-model job. Ready PRs changing CLI
+source (`src/`, `index.ts`, `packages/cli/`) retain the existing Linux x64
+Config compiler job, including its release build and relocated CLI acceptance.
+This deliberately covers activity recording, HOME writes, output envelopes and
+refusals through any shared CLI source, rather than maintaining a fragile list
+of lifecycle helpers. Changes to acceptance scripts retain that job through the
+protected-script full-tier rule. Unrelated test/docs PRs retain the lighter tier.
+Ready Rust-input PRs retain the Linux Candidate core leg and both Linux compiler
+hosts (including Rust checks); macOS stays in the heavy tier. This covers
+non-Markdown inputs under runtime-core/config-compiler (including pins, fixtures
+and generated data), plus all relay-guest inputs. Ready PRs that
+change protected CI inputs (including workflows, selectors, scripts, suite helpers,
+manifests, lockfiles and Rust toolchains) automatically run the full Linux,
+Docker, state-model and build tiers. They defer macOS to the `next` integration
+run unless labeled `ci:mac` or `ci:full`. This macOS rule applies to every PR
+whose base is not `main`, including missing diffs or unavailable base policy.
 Ready PRs targeting `main` retain the full tier, including the Intel compiler.
 Linux unit-test preflight still prepares its matching compiler. The last Linux
 shard lists selected macOS
 files in its summary as **deferred to the integration run**, before typecheck or
 tests can fail. A green test check qualifies only the tests actually run.
+
+| Ready PR into `next` | Docker qualification |
+| --- | --- |
+| Nonempty diff limited to the model registry, `tests/models/**`, `packages/runtime-core/**` and `docs/**` | Skip Docker E2E, runtime images and Linux process lifetime |
+| Any other changed path | Follow the existing scope policy |
+| `ci:e2e` or `ci:full` | Follow the label's existing qualification policy |
+
+The exception leaves the compiler, candidate, state-model, build and docs
+selections under the existing policy. The workflow checks both sides of
+renames. Integration pushes continue to qualify Docker under the existing
+push policy. The static guard tests stay selected in the Linux pool for
+ordinary PRs, including when the selector classifies them as platform-sensitive.
 
 Both required names, test and docs site, always report. The named Docker fan-in
 passes an expected out-of-scope skip. Adding ci:mac enables the selected macOS
@@ -69,15 +43,14 @@ Docker/runtime-image/lifetime tier under its usual gates. The labels combine.
 ci:full selects every unit file and ordinary native/Docker tier, state models and
 build smoke. Ordinary `next` pushes and PRs into `next` omit the Intel compiler;
 `main` PRs/pushes and explicit full dispatches retain it. Removing a label restores
-the default tier, including the input-tier and `main` exceptions. A selector
-fallback alone widens files; the independent shell guard enables full
-Linux/Docker/build tiers for protected inputs, with macOS selected separately as described above.
+the default tier, including the protected-input and `main` exceptions. A selector
+fallback alone widens files; the independent shell guard also enables full
+Linux/Docker/build tiers, with macOS selected separately as described above.
 Adding/removing labels, pushing, changing readiness or retargeting recomputes
 scope; metadata edits can cancel the active run.
 
-The `test` and `docker-e2e` fan-ins require successful runtime images and state
-models when those tiers were selected. The required `test` fan-in also depends
-on `config-compiler` and `linux-process-lifetime`. Every selected compiler host must succeed; its planned
+The required `test` fan-in also depends on `config-compiler` and
+`linux-process-lifetime`. Every selected compiler host must succeed; its planned
 out-of-scope skip passes. When native tiers are selected, the required check
 also waits for their macOS compiler hosts, including Intel on release/full-main
 runs. When that
@@ -162,7 +135,7 @@ working directory and Bun preload.
 
 The candidate job follows its crate, its config-compiler path dependency, guest, launcher, helper/toolchain and CI
 inputs. The compiler's native host matrix follows its crate/build/toolchain/CI
-inputs. CLI release inputs retain both Linux compiler hosts even when
+inputs. CLI source changes retain Linux x64 compiler acceptance even when
 macOS is deferred. These are job
 input gates, separate from the unit import graph.
 
@@ -297,19 +270,3 @@ green Linux jobs. Pending macOS/Docker jobs are listed, not awaited. The lead te
 combined heads on a Mac, merges batches, and the next push qualifies their selected
 platform/Docker integration evidence. Problems found there become follow-up PRs.
 Nothing merges between a prerelease dispatch and publish.
-
-
-## Local scope dry runs
-
-Use `bun scripts/ci-change-scope.ts --event=pull_request --dry-run
---changed-paths='["scripts/lib/tla-runtime-models.ts"]'` (one shell command).
-This reads the current tree as data, prints job switches and selected tests, and
-does not write GitHub output/summary files. The policy tests cover every row of
-the tier table and exercise the independent workflow shell against fixture diffs.
-
-
-The required fan-ins keep their existing dependency sets in this scope change:
-`test` does not aggregate state models, and `docker-e2e` does not aggregate runtime
-images. Those jobs retain their visible results; a successful whole CI run is
-required for the ready note. This PR does not change branch-protection settings
-or claim either fan-in alone proves the model/image jobs succeeded.

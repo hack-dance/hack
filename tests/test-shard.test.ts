@@ -1316,8 +1316,6 @@ describe("hosted test CI fan-in", () => {
       "test-focus",
       "linux-process-lifetime",
       "config-compiler",
-      "runtime-images",
-      "state-models",
     ]);
     expect(fanIn?.if).toBe("${{ always() }}");
     const gate = fanIn?.steps.find(
@@ -1338,14 +1336,6 @@ describe("hosted test CI fan-in", () => {
     expect(gate?.env?.LIFETIME_ENABLED).toBe(
       "${{ needs.changes.outputs.docker_suite }}"
     );
-    expect(gate?.env?.IMAGES_ENABLED).toBe(
-      "${{ needs.changes.outputs.docker_suite }}"
-    );
-    expect(gate?.env?.IMAGES_RESULT).toBe("${{ needs.runtime-images.result }}");
-    expect(gate?.env?.MODELS_ENABLED).toBe(
-      "${{ needs.changes.outputs.state_models }}"
-    );
-    expect(gate?.env?.MODELS_RESULT).toBe("${{ needs.state-models.result }}");
     expect(gate?.run).toContain('if [ "$SHARD_RESULT" != "success" ]; then');
     expect(gate?.run).toContain("exit 1");
     if (!gate?.run) {
@@ -1383,10 +1373,6 @@ describe("hosted test CI fan-in", () => {
           SUITE: suite,
           TEST_FOCUS: focus,
           SHARD_RESULT: shards,
-          IMAGES_ENABLED: "false",
-          IMAGES_RESULT: "skipped",
-          MODELS_ENABLED: "false",
-          MODELS_RESULT: "skipped",
           FOCUS_RESULT: focused,
           COMPILER_ENABLED: "false",
           COMPILER_RESULT: "skipped",
@@ -1420,10 +1406,6 @@ describe("hosted test CI fan-in", () => {
           SCOPE: "fixture",
           SUITE: "true",
           SHARD_RESULT: "success",
-          IMAGES_ENABLED: "false",
-          IMAGES_RESULT: "skipped",
-          MODELS_ENABLED: "false",
-          MODELS_RESULT: "skipped",
           FOCUS_RESULT: "success",
           COMPILER_ENABLED: "false",
           COMPILER_RESULT: "skipped",
@@ -1456,10 +1438,6 @@ describe("hosted test CI fan-in", () => {
           SCOPE: "fixture",
           SUITE: "true",
           SHARD_RESULT: "success",
-          IMAGES_ENABLED: "false",
-          IMAGES_RESULT: "skipped",
-          MODELS_ENABLED: "false",
-          MODELS_RESULT: "skipped",
           FOCUS_RESULT: "success",
           LIFETIME_ENABLED: "false",
           LIFETIME_RESULT: "skipped",

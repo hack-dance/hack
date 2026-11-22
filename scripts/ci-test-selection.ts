@@ -3,8 +3,11 @@ import { readFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import ts from "typescript";
 import { isRecord } from "../src/lib/guards.ts";
-import { touchesStateModels } from "./ci-change-scope.ts";
-import { discoverTestFiles, TEST_SUITES } from "./test-shard-plan.ts";
+import {
+  discoverTestFiles,
+  STATIC_GUARD_TESTS,
+  TEST_SUITES,
+} from "./test-shard-plan.ts";
 
 export type TestSelection = {
   readonly mode: "full" | "selected";
@@ -14,10 +17,7 @@ export type TestSelection = {
 
 /** Add exceptional tests here with a reason; contracts and source readers run automatically. */
 export const ALWAYS_RUN_TESTS: Readonly<Record<string, string>> = {
-  "tests/ci-docker-inputs.test.ts":
-    "Real-engine dependency closure and unknown-input qualification",
-  "tests/ci-job-policy.test.ts":
-    "Every scope-conditioned job must have covered inputs",
+  ...STATIC_GUARD_TESTS,
   "tests/ci-change-scope.test.ts": "CI policy and required-check wiring",
   "tests/ci-test-selection.test.ts": "Selection must verify itself on every PR",
 };
@@ -496,21 +496,6 @@ function graphInternals(graph: SelectionGraph): GraphState {
   return state;
 }
 
-/** Reuse the selector's static import resolution without executing repository code. */
-export function selectionModuleInputs(opts: {
-  readonly graph: SelectionGraph;
-  readonly file: string;
-}): {
-  readonly source: string | undefined;
-  readonly dependencies: readonly string[];
-} {
-  const state = graphInternals(opts.graph);
-  return {
-    source: state.read(opts.file),
-    dependencies: state.module(opts.file).dependencies,
-  };
-}
-
 /**
  * Graph scope is intentionally small: config, fixtures, scripts, assets and native
  * inputs force all tests. Deleted modules do too, rather than losing their old edges.
@@ -531,7 +516,7 @@ export function selectTests(opts: SelectionInputs): TestSelection {
     return full("changed paths unavailable or empty");
   }
   for (const path of opts.changed) {
-    if (DOC_PATH.test(path) || touchesStateModels(path)) {
+    if (DOC_PATH.test(path)) {
       continue;
     }
     if (

@@ -9,8 +9,8 @@ FROM oven/bun:1.4.4 AS hack-build
 
 WORKDIR /src
 COPY package.json bun.lock bunfig.toml tsconfig.json index.ts ./
-COPY packages/cli ./packages/cli
-COPY packages/db/package.json ./packages/db/package.json
+COPY apps ./apps
+COPY packages ./packages
 COPY src ./src
 RUN bun install --frozen-lockfile
 # No autoload: the working directory of this CLI is a mounted project.

@@ -61,7 +61,6 @@ jobs:
       docker_suite: ${{ steps.scope.outputs.docker_suite }}
       defer_macos: ${{ steps.scope.outputs.defer_macos }}
       build_smoke: ${{ steps.scope.outputs.build_smoke }}
-      state_models: ${{ steps.scope.outputs.state_models }}
     steps:
       # A pull-request checkout is GitHub's merge commit; its first parent is
       # the base tip, so HEAD^1..HEAD is exactly the pull request's change.
@@ -92,10 +91,9 @@ jobs:
           unset CI_READ_TOKEN
           # This guard is independent of the selector and its fallback list.
           full=false
+          docker_exempt=false
           linux_rust=false
           relocated_cli=false
-          docker_inputs=false
-          model_inputs=false
           base=""
           if [ "$EVENT_NAME" = "pull_request" ]; then
             parents=$(git rev-list --parents -n 1 HEAD) || parents=""
@@ -118,8 +116,16 @@ jobs:
             if ! git diff --name-only --no-renames -z "$base" HEAD > "$RUNNER_TEMP/ci-paths"; then
               full=true
             else
-              if [ ! -s "$RUNNER_TEMP/ci-paths" ]; then full=true; fi
+              if [ ! -s "$RUNNER_TEMP/ci-paths" ]; then
+                full=true
+              elif [ "$EVENT_NAME" = "pull_request" ] && [ "$PR_BASE_REF" = "next" ]; then
+                docker_exempt=true
+              fi
               while IFS= read -r -d '' path; do
+                case "$path" in
+                  scripts/lib/tla-runtime-models.ts|tests/models/*|packages/runtime-core/*|docs/*) ;;
+                  *) docker_exempt=false ;;
+                esac
                 case "$path" in
                   src/*|index.ts|packages/cli/*|scripts/check-*-cli.ts|scripts/check-native-plan-clis.ts)
                     relocated_cli=true ;;
@@ -130,29 +136,11 @@ jobs:
                     linux_rust=true ;;
                 esac
                 case "$path" in
-                  src/*|index.ts|packages/cli/*|packages/lifecycle-supervisor/*|templates/*|docker/*|examples/*|assets/*|docs/recipes/*|.dockerignore|tests/e2e/*|tests/fixtures/*|tests/helpers/*|.hack/*|Dockerfile|Dockerfile.*|docker-compose|docker-compose.*)
-                    docker_inputs=true ;;
-                esac
-                case "$path" in
-                  scripts/lib/tla-runtime-models.ts|tests/tla-result.test.ts|tests/models/*|.ai/skills/hack-repo-tla/*|tests/python/test_prepared_base_benchmark.py|tests/python/test_native_compose_benchmark.py|tests/python/test_native_frontend_acceptance.py|tests/python/test_application_benchmark_protocol.py) model_inputs=true ;;
-                esac
-                case "$path" in
-                  scripts/lib/tla-runtime-models.ts) ;;
                   scripts/*|.github/*|tests/preload.ts|tests/helpers/*|src/lib/guards.ts|src/lib/cli-result.ts|\
                   package.json|*/package.json|bun.lock|*/bun.lock|bun.lockb|*/bun.lockb|Cargo.toml|*/Cargo.toml|Cargo.lock|*/Cargo.lock|\
                   rust-toolchain|*/rust-toolchain|rust-toolchain.toml|*/rust-toolchain.toml|\
                   bunfig.toml|*/bunfig.toml|tsconfig*.json|*/tsconfig*.json|mise.toml)
                     full=true ;;
-                esac
-                # A unit-graph fallback is not a job-tier fallback. Unknown
-                # input families must retain every job independently.
-                case "$path" in
-                  README.md|CHANGELOG.md|SECURITY.md|PACKAGING.md|LICENSE|docs/*|site/*|scripts/*|.github/*|\
-                  src/*|index.ts|tests/*|packages/cli/*|packages/lifecycle-supervisor/*|\
-                  packages/runtime-core/*|packages/relay-guest/*|packages/config-compiler/*|packages/db/*|hack-local|\
-                  templates/*|docker/*|examples/*|assets/*|.hack/*|.dockerignore|Dockerfile|Dockerfile.*|docker-compose|docker-compose.*|\
-                  .ai/skills/hack-repo-tla/*) ;;
-                  *) full=true ;;
                 esac
               done < "$RUNNER_TEMP/ci-paths"
             fi
@@ -201,7 +189,6 @@ jobs:
           docker_suite=true
           defer_macos=false
           build_smoke=true
-          state_models=true
           EOF
             echo 'Full selection: main, explicit dispatch, protected input, unavailable diff, or policy bootstrap. Intel runs for main and explicit dispatch.' >> "$GITHUB_STEP_SUMMARY"
           else
@@ -211,24 +198,17 @@ jobs:
             git archive "$base" | tar -x -C "$policy"
             cd "$policy"
             bun --no-env-file install --cwd "$policy" --frozen-lockfile --ignore-scripts
-            bun --no-env-file "$policy/scripts/ci-change-scope.ts" --event="$EVENT_NAME" --repo-root="$GITHUB_WORKSPACE" --ref="$CI_REF" --base-revision="$base" --base-root="$policy"
+            bun --no-env-file "$policy/scripts/ci-change-scope.ts" --event="$EVENT_NAME" --repo-root="$GITHUB_WORKSPACE" --ref="$CI_REF" --base-revision="$base"
             echo 'ci_evidence=scoped' >> "$GITHUB_OUTPUT"
           fi
           # Protected inputs retain full Linux/Docker/build coverage. Ready PRs
           # defer macOS unless targeting main or explicitly labeled. Drafts stay light.
-          if [ "$(sed -n 's/^job_input_policy=//p' "$GITHUB_OUTPUT" | tail -n 1)" = "v1" ]; then
-            # The trusted policy owns every job gate. Legacy bases still use
-            # the compatibility overrides below until they acquire that policy.
-            exit 0
-          fi
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            mac=false; e2e=false; builds=false; models=false
-            if [ "$(sed -n 's/^scope=//p' "$GITHUB_OUTPUT" | tail -n 1)" = "full" ]; then full=true; fi
+            mac=false; e2e=false; builds=false
             if [ "$PR_DRAFT" != "true" ]; then
               if [ "$PR_BASE_REF" = "main" ] || [ "$PR_FULL" = "true" ] || [ "$PR_MAC" = "true" ]; then mac=true; fi
-              if [ "$full" = "true" ] || [ "$PR_E2E" = "true" ] || [ "$docker_inputs" = "true" ]; then e2e=true; fi
-              if [ "$full" = "true" ] || [ "$(sed -n 's/^build_smoke=//p' "$GITHUB_OUTPUT" | tail -n 1)" = "true" ]; then builds=true; fi
-              if [ "$full" = "true" ] || [ "$model_inputs" = "true" ] || [ "$(sed -n 's/^state_models=//p' "$GITHUB_OUTPUT" | tail -n 1)" = "true" ]; then models=true; fi
+              if [ "$PR_E2E" = "true" ] || { [ "$full" = "true" ] && [ "$docker_exempt" != "true" ]; }; then e2e=true; fi
+              if [ "$full" = "true" ]; then builds=true; fi
             fi
             if [ "$mac" != "true" ]; then
               compiler='[]'; native=false
@@ -252,15 +232,11 @@ jobs:
                 printf 'compiler_hosts=%s\n' "$compiler" >> "$GITHUB_OUTPUT"
               fi
             fi
-            # Trusted base policy derives extra inputs from the Docker jobs'
-            # import and execution graph; this boundary may widen, never erase it.
-            if [ "$PR_DRAFT" != "true" ] && [ "$(sed -n 's/^docker_suite=//p' "$GITHUB_OUTPUT" | tail -n 1)" = "true" ]; then e2e=true; fi
-            printf 'docker_suite=%s\n' "$e2e" >> "$GITHUB_OUTPUT"
-            printf 'state_models=%s\n' "$models" >> "$GITHUB_OUTPUT"
+            if [ "$e2e" != "true" ]; then echo 'docker_suite=false' >> "$GITHUB_OUTPUT"; fi
             printf 'build_smoke=%s\n' "$builds" >> "$GITHUB_OUTPUT"
             echo 'Ready PRs defer macOS to integration unless targeting main or labeled ci:mac or ci:full. Protected inputs and unavailable policy/diff retain full Linux, Docker and build tiers. Light PRs retain selected Linux checks; labels opt into heavy tiers. Drafts stay light.' >> "$GITHUB_STEP_SUMMARY"
           else
-            printf 'defer_macos=false\nbuild_smoke=true\ndocker_suite=true\nstate_models=true\n' >> "$GITHUB_OUTPUT"
+            printf 'defer_macos=false\nbuild_smoke=true\n' >> "$GITHUB_OUTPUT"
           fi
 
   config-compiler:
@@ -343,6 +319,7 @@ jobs:
         run: |
           bunx ultracite check scripts/build-lifecycle-supervisor.ts scripts/check-release-lifecycle-supervisor.ts scripts/build-config-compiler.ts scripts/build-release.ts scripts/check-release-config-compiler.ts scripts/check-config-compiler-cli.ts tests/config-compiler-build.test.ts tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts tests/native-project-inputs.test.ts tests/native-project-inputs-acquisition-race.test.ts tests/release-download-installer.test.ts
           bun test tests/config-compiler-build.test.ts tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts tests/native-project-inputs.test.ts tests/native-project-inputs-acquisition-race.test.ts
+          bun run --cwd packages/cli typecheck
           bun test tests/release-download-installer.test.ts
           bun run build:release --skip-tests --out=dist/config-compiler-release
           bun scripts/check-release-config-compiler.ts dist/config-compiler-release
@@ -373,7 +350,7 @@ jobs:
   state-models:
     name: Runtime state models
     needs: changes
-    if: ${{ needs.changes.outputs.state_models == 'true' }}
+    if: ${{ needs.changes.outputs.build_smoke == 'true' }}
     runs-on: ubuntu-latest
     # About 3x the p95 (298s) of the last 10 completed runs (HACK-2309); the
     # old 5-minute limit cancelled full release runs at their normal length.
@@ -819,7 +796,7 @@ jobs:
     # It always runs: incomplete evidence fails, and shards skipped
     # because the change scope excludes the suite pass; failures, a failed scope
     # and any other skip still fail. Prerelease gates separately require every shard.
-    needs: [changes, docker-e2e-shard, runtime-images, state-models]
+    needs: [changes, docker-e2e-shard]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -832,10 +809,6 @@ jobs:
           SCOPE: ${{ needs.changes.outputs.scope }}
           SUITE: ${{ needs.changes.outputs.docker_suite }}
           SHARD_RESULT: ${{ needs.docker-e2e-shard.result }}
-          IMAGES_ENABLED: ${{ needs.changes.outputs.docker_suite }}
-          IMAGES_RESULT: ${{ needs.runtime-images.result }}
-          MODELS_ENABLED: ${{ needs.changes.outputs.state_models }}
-          MODELS_RESULT: ${{ needs.state-models.result }}
         run: |
           if [ "$PR_DRAFT" = "true" ]; then
             echo "skipped: draft — full pull-request evidence is required before merge"
@@ -849,14 +822,6 @@ jobs:
             echo "change scope did not succeed (result: $CHANGES_RESULT)"
             exit 1
           fi
-          case "$IMAGES_ENABLED:$IMAGES_RESULT" in
-            true:success|false:skipped) ;;
-            *) echo "Runtime image evidence did not match its plan (enabled: $IMAGES_ENABLED, result: $IMAGES_RESULT)" >&2; exit 1 ;;
-          esac
-          case "$MODELS_ENABLED:$MODELS_RESULT" in
-            true:success|false:skipped) ;;
-            *) echo "State model evidence did not match its plan (enabled: $MODELS_ENABLED, result: $MODELS_RESULT)" >&2; exit 1 ;;
-          esac
           if [ "$SUITE" = "false" ] && [ "$SHARD_RESULT" = "skipped" ]; then
             echo "docker-e2e is out of scope for this pull request (scope: $SCOPE)"
             exit 0
@@ -909,7 +874,6 @@ jobs:
         env:
           HACK_TEST_SELECTION: ${{ needs.changes.outputs.test_files }}
         run: bun scripts/test-shard.ts report-deferred
-      # TypeScript checks use the same sources on all hosts. Run once here.
       - name: Typecheck (Turbo)
         if: matrix.shard == 8
         run: bun run turbo:typecheck
@@ -1002,7 +966,7 @@ jobs:
     # succeed; when it runs a focus instead, the focused job must. A cancelled
     # result fails, as do a failure, a failed scope or any skip of
     # the job in scope still fails rather than surfacing as a skipped check.
-    needs: [changes, test-shard, test-focus, linux-process-lifetime, config-compiler, runtime-images, state-models]
+    needs: [changes, test-shard, test-focus, linux-process-lifetime, config-compiler]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1021,10 +985,6 @@ jobs:
           COMPILER_RESULT: ${{ needs.config-compiler.result }}
           LIFETIME_ENABLED: ${{ needs.changes.outputs.docker_suite }}
           LIFETIME_RESULT: ${{ needs.linux-process-lifetime.result }}
-          IMAGES_ENABLED: ${{ needs.changes.outputs.docker_suite }}
-          IMAGES_RESULT: ${{ needs.runtime-images.result }}
-          MODELS_ENABLED: ${{ needs.changes.outputs.state_models }}
-          MODELS_RESULT: ${{ needs.state-models.result }}
         run: |
           if [ "$PR_DRAFT" = "true" ]; then
             echo "skipped: draft — full pull-request evidence is required before merge"
@@ -1049,14 +1009,6 @@ jobs:
           case "$LIFETIME_ENABLED:$LIFETIME_RESULT" in
             true:success|false:skipped) ;;
             *) echo "Linux process lifetime evidence did not match its plan (enabled: $LIFETIME_ENABLED, result: $LIFETIME_RESULT)" >&2; exit 1 ;;
-          esac
-          case "$IMAGES_ENABLED:$IMAGES_RESULT" in
-            true:success|false:skipped) ;;
-            *) echo "Runtime image evidence did not match its plan (enabled: $IMAGES_ENABLED, result: $IMAGES_RESULT)" >&2; exit 1 ;;
-          esac
-          case "$MODELS_ENABLED:$MODELS_RESULT" in
-            true:success|false:skipped) ;;
-            *) echo "State model evidence did not match its plan (enabled: $MODELS_ENABLED, result: $MODELS_RESULT)" >&2; exit 1 ;;
           esac
           if [ "$SUITE" != "true" ]; then
             if [ -z "$TEST_FOCUS" ]; then

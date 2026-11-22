@@ -1,17 +1,11 @@
 /** PR and next-push policy layered over the coarse change-scope classifier. */
 import {
   COMPILER_HOSTS,
-  pathKind,
   planScope,
   scopeOutputs,
+  touchesRelocatedCli,
 } from "./ci-change-scope.ts";
-import { deriveJobInputs, readsUnitFixture } from "./ci-docker-inputs.ts";
-import { JOB_TIERS, type Tier } from "./ci-job-policy.ts";
-import {
-  buildSelectionGraph,
-  selectTests,
-  type TestSelection,
-} from "./ci-test-selection.ts";
+import { selectTests, type TestSelection } from "./ci-test-selection.ts";
 import { requiresWorkflowFull } from "./ci-workflow-guard.ts";
 import { classifyTestPools } from "./test-shard-plan.ts";
 
@@ -25,8 +19,6 @@ export type PullRequestPlan = ReturnType<typeof scopeOutputs> & {
   readonly docker_suite: boolean;
   readonly defer_macos: boolean;
   readonly build_smoke: boolean;
-  readonly state_models: boolean;
-  readonly job_input_policy?: "v1";
 };
 
 function compilerHosts(
@@ -41,14 +33,24 @@ function compilerHosts(
 function selectedCompilerHosts(opts: {
   readonly draft: boolean;
   readonly mac: boolean;
-  readonly enabled: boolean;
+  readonly linuxRust: boolean;
+  readonly changed: readonly string[] | null;
   readonly releaseHosts: boolean;
+  readonly nativeHosts: boolean;
+  readonly coarseHosts: string;
 }): ReturnType<typeof compilerHosts> {
-  return opts.draft || !opts.enabled
-    ? []
-    : compilerHosts(opts.releaseHosts).filter(
-        (host) => opts.mac || host.platform === "linux"
-      );
+  if (opts.draft) {
+    return [];
+  }
+  const relocatedCli = opts.changed?.some(touchesRelocatedCli) ?? true;
+  return compilerHosts(opts.releaseHosts).filter(
+    (host) =>
+      (opts.linuxRust && host.platform === "linux") ||
+      (relocatedCli && host.os === "ubuntu-latest") ||
+      (opts.mac &&
+        (opts.nativeHosts ||
+          opts.coarseHosts.includes(JSON.stringify(host.os))))
+  );
 }
 
 /** Main and explicit release qualification retain every compiler architecture. */
@@ -65,7 +67,6 @@ export function fullPushPlan(
     docker_suite: true,
     defer_macos: false,
     build_smoke: true,
-    state_models: true,
   };
 }
 
@@ -92,44 +93,33 @@ export function touchesRustInput(path: string): boolean {
   );
 }
 
-function changedTiers(opts: {
-  readonly repoRoot: string;
-  readonly baseRoot?: string;
+function shouldRunCandidate(opts: {
+  readonly linuxRust: boolean;
+  readonly mac: boolean;
+  readonly full: boolean;
   readonly changed: readonly string[] | null;
-}) {
-  const roots = new Set([opts.repoRoot, opts.baseRoot || opts.repoRoot]);
+}): boolean {
+  return (
+    opts.linuxRust ||
+    (opts.mac && (opts.full || (opts.changed?.some(touchesCandidate) ?? true)))
+  );
+}
 
-  const inputs = JOB_TIERS.map((tier) => ({
-    tier,
-    trees: [...roots].map((repoRoot) => deriveJobInputs({ repoRoot, tier })),
-  }));
-  const selectedTiers = new Set<Tier>();
-  let full = inputs.some(({ trees }) => trees.includes(null));
-  if (!full) {
-    const testTrees = [...roots].map((repoRoot) => ({
-      repoRoot,
-      files: buildSelectionGraph({ repoRoot }).files,
-    }));
-    const unitFiles = new Set(testTrees.flatMap(({ files }) => files));
-    for (const path of opts.changed ?? []) {
-      let known = pathKind(path) === "docs" || unitFiles.has(path);
-      for (const { tier, trees } of inputs) {
-        if (trees.some((tree) => tree?.has(path))) {
-          selectedTiers.add(tier);
-          known ||= trees.some((tree) => tree?.knows(path));
-        }
-      }
-      full ||= !(
-        known || testTrees.some((tree) => readsUnitFixture({ ...tree, path }))
-      );
-    }
-  }
-  return { full, selectedTiers };
+/** Mirror the workflow’s exception for a complete, unlabeled diff into next. */
+export function isDockerExemptDiff(paths: readonly string[] | null): boolean {
+  return (
+    Boolean(paths?.length) &&
+    (paths?.every(
+      (path) =>
+        path === "scripts/lib/tla-runtime-models.ts" ||
+        /^(?:tests\/models|packages\/runtime-core|docs)\//.test(path)
+    ) ??
+      false)
+  );
 }
 
 export async function planPullRequest(opts: {
   readonly repoRoot: string;
-  readonly baseRoot?: string;
   readonly changed: readonly string[] | null;
   readonly draft: boolean;
   readonly full: boolean;
@@ -145,13 +135,7 @@ export async function planPullRequest(opts: {
   readonly selection?: TestSelection;
 }): Promise<PullRequestPlan> {
   const stablePr = opts.pullRequest !== false && opts.baseRef === "main";
-  const forcedFull =
-    opts.full ||
-    stablePr ||
-    requiresWorkflowFull(opts.changed, { deriveUnknown: true });
-  const { full, selectedTiers } = forcedFull
-    ? { full: true, selectedTiers: new Set<Tier>() }
-    : changedTiers(opts);
+  const full = opts.full || stablePr || requiresWorkflowFull(opts.changed);
   const selection =
     opts.selection ??
     selectTests({
@@ -165,43 +149,50 @@ export async function planPullRequest(opts: {
     files: selection.files,
   });
   const integration = opts.pullRequest === false;
+  const linuxRust =
+    !opts.draft && (full || opts.changed?.some(touchesRustInput) === true);
   const mac =
     !opts.draft && (integration || stablePr || opts.full || opts.mac === true);
-  const tierEnabled = (tier: Tier): boolean =>
-    !opts.draft && (full || selectedTiers.has(tier));
-  const integrationTiers = !opts.draft && integration;
+  const dockerExempt =
+    !(opts.full || integration) &&
+    opts.baseRef === "next" &&
+    isDockerExemptDiff(opts.changed);
   const e2e =
-    tierEnabled("docker") ||
-    integrationTiers ||
-    (!opts.draft && opts.e2e === true);
+    !opts.draft &&
+    (integration || (full && !dockerExempt) || opts.e2e === true);
   const macos = mac && pools.macos.length > 0 ? [1, 2, 3] : [];
   const linux = [4, 5, 6, 7, 8];
-  const compilerRust = tierEnabled("compilerRust");
+  const allJobs = full;
   const compiler = selectedCompilerHosts({
     draft: opts.draft,
     mac,
-    enabled: compilerRust || tierEnabled("compiler"),
+    linuxRust,
+    changed: opts.changed,
     releaseHosts: stablePr || opts.releaseHosts === true,
+    nativeHosts: allJobs || (opts.changed?.some(touchesCompilerHost) ?? false),
+    coarseHosts: coarse.compiler_hosts,
   });
   return {
     ...coarse,
-    job_input_policy: "v1",
     // All PRs use the selector, including docs and native-only changes. The
     // prior focused path stays available for manual use, not as a second oracle.
     suite: true,
     test_focus: "",
     test_layout: "pooled",
     compiler_hosts: JSON.stringify(compiler),
-    compiler_rust: compilerRust,
-    runtime_core: tierEnabled("candidate"),
-    docs_site: full || selectedTiers.has("docs"),
+    compiler_rust: coarse.compiler_rust || linuxRust,
+    runtime_core: shouldRunCandidate({
+      linuxRust,
+      mac,
+      full: allJobs,
+      changed: opts.changed,
+    }),
     draft: opts.draft,
     test_files: JSON.stringify(selection.files),
     test_shards: JSON.stringify([...macos, ...linux]),
     selection_mode: selection.mode,
-    docker_suite: e2e,
-    state_models: tierEnabled("models") || integrationTiers,
+    docker_suite: e2e && coarse.suite,
     defer_macos: !mac,
-    build_smoke: tierEnabled("build") || integrationTiers,
+    build_smoke: !opts.draft && (integration || full),
   };
 }

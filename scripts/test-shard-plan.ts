@@ -513,7 +513,27 @@ export const MACOS_POOL_FILES: Readonly<Record<string, string>> = {};
  * keeps the pools a partition for the exactly-once coverage check, and are
  * added to the Linux pool as well (HACK-2142).
  */
+export const STATIC_GUARD_TESTS: Readonly<Record<string, string>> = {
+  "tests/sync-spawn-bound.test.ts":
+    "Scans all tests and check scripts for unbounded synchronous processes",
+  "tests/process-exit-holds.test.ts":
+    "Scans source for long-running work without exit holds",
+  "tests/cli-spawn-env-isolation.test.ts":
+    "Scans all tests for ambient CLI environments",
+  "tests/fixture-hermeticity.test.ts":
+    "Scans fixture Git spawns for hermetic environments",
+  "tests/daemon-autostart-fixture-guard.test.ts":
+    "Scans tests for implicit daemon startup",
+  "tests/hack-ownership-labels.test.ts":
+    "Scans source and Rust ownership label namespaces",
+  "tests/onboarding-entry-parity.test.ts":
+    "Scans command entry points for onboarding parity",
+  "tests/agent-plugin-generation.test.ts":
+    "Scans generated guidance surfaces for policy drift",
+};
+
 export const BOTH_POOL_FILES: Readonly<Record<string, string>> = {
+  ...STATIC_GUARD_TESTS,
   "tests/lifecycle-fifo-retirement.test.ts":
     "FIFO retirement needs Linux process groups and macOS zombie-probe EPERM coverage",
   "tests/lifecycle-zombie-retirement.test.ts":
@@ -534,8 +554,6 @@ export const BOTH_POOL_FILES: Readonly<Record<string, string>> = {
     "daemon directory trust walks host paths (macOS /var -> /private/var)",
   "tests/local-network-hint.test.ts":
     "portable open --json subprocess contract must gate light PRs; macOS hint behavior still needs macOS",
-  "tests/sync-spawn-bound.test.ts":
-    "static scan of tests/ and scripts/check-*.ts that must gate every PR; it matches PLATFORM_SENSITIVE_SOURCE only because its doc comment says macOS",
   "tests/env-desktop-requests.test.ts":
     "portable env list/overlay refusal contracts must gate light PRs; the file matches PLATFORM_SENSITIVE_SOURCE only because it sets HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK",
 };

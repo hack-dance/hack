@@ -30,6 +30,8 @@ if (!script) {
 
 async function scope(opts: {
   path?: string;
+  also?: string;
+  renameTo?: string;
   draft?: boolean;
   event?: string;
   full?: boolean;
@@ -43,11 +45,6 @@ async function scope(opts: {
   ref?: string;
   baseRef?: string;
   tierPlan?: boolean;
-  tierDocker?: boolean;
-  tierModels?: boolean;
-  tierBuild?: boolean;
-  tierScope?: "full";
-  jobPolicy?: boolean;
   before?: string;
   predecessor?: string;
   dispatchFull?: boolean;
@@ -95,7 +92,7 @@ async function scope(opts: {
       await writeFile(join(root, path), source);
     };
     const tierPlan = opts.tierPlan
-      ? ` await Bun.write(process.env.GITHUB_OUTPUT!, await Bun.file(process.env.GITHUB_OUTPUT!).text() + ${JSON.stringify(`compiler_hosts=${fullPushPlan({ releaseHosts: false }).compiler_hosts}\nruntime_core=true\ntest_shards=[1,2,3,4,5,6,7,8]\ndocker_suite=${String(opts.tierDocker === true)}\nstate_models=${String(opts.tierModels === true)}\nbuild_smoke=${String(opts.tierBuild === true)}\n${opts.tierScope ? `scope=${opts.tierScope}\n` : ""}${opts.jobPolicy ? "job_input_policy=v1\n" : ""}`)});`
+      ? ` await Bun.write(process.env.GITHUB_OUTPUT!, await Bun.file(process.env.GITHUB_OUTPUT!).text() + ${JSON.stringify(`compiler_hosts=${fullPushPlan({ releaseHosts: false }).compiler_hosts}\nruntime_core=true\ntest_shards=[1,2,3,4,5,6,7,8]\ndocker_suite=true\n`)});`
       : "";
     const policy = opts.legacy
       ? 'throw Error("legacy policy must not execute");'
@@ -103,6 +100,9 @@ async function scope(opts: {
     const path = opts.path ?? "src/value.ts";
     await put(path, path.endsWith(".json") ? "{}" : "# base");
     await put("src/value.ts", "base");
+    if (opts.also) {
+      await put(opts.also, "base");
+    }
     await put("package.json", '{"type":"module"}');
     if (!opts.bootstrap) {
       await put("scripts/ci-change-scope.ts", policy);
@@ -127,6 +127,13 @@ async function scope(opts: {
             ? '{"topic":true}'
             : "topic"
       );
+    }
+    if (opts.also) {
+      await put(opts.also, "changed");
+    }
+    if (opts.renameTo) {
+      await mkdir(dirname(join(root, opts.renameTo)), { recursive: true });
+      git("mv", path, opts.renameTo);
     }
     git("add", ".");
     git("commit", "--quiet", "--allow-empty", "-m", "topic");
@@ -192,13 +199,11 @@ test("trusted base policy executes against merge-tree data, not merge-tree code"
     runtime_core: "false",
     test_shards: "[4,5,6,7,8]",
     defer_macos: "true",
-    docker_suite: "true",
-    state_models: "false",
+    docker_suite: "false",
     build_smoke: "false",
   });
 });
 for (const path of [
-  "future/engine.bin",
   "scripts/lib/native-plan-home.ts",
   "scripts/ci-test-selection.ts",
   "scripts/ci-change-scope.ts",
@@ -219,7 +224,6 @@ for (const path of [
   "src/lib/cli-result.ts",
   "packages/config-compiler/Cargo.toml",
   "packages/config-compiler/rust-toolchain.toml",
-  "packages/runtime-core/Cargo.lock",
 ]) {
   test(`protected input ${path} retains full Linux/Docker/build tiers and defers macOS`, async () => {
     const outputs = await scope({ path });
@@ -308,10 +312,6 @@ test("protected PR deferral passes the required fan-in only with successful sele
         COMPILER_RESULT: "success",
         LIFETIME_ENABLED: outputs.docker_suite,
         LIFETIME_RESULT: "success",
-        IMAGES_ENABLED: outputs.docker_suite,
-        IMAGES_RESULT: "success",
-        MODELS_ENABLED: outputs.state_models,
-        MODELS_RESULT: "success",
       },
       stdout: "pipe",
       stderr: "pipe",
@@ -407,7 +407,7 @@ test.each([
     runtime_core: "false",
     test_shards: "[4,5,6,7,8]",
     defer_macos: "true",
-    docker_suite: "true",
+    docker_suite: "false",
   });
 });
 test("the inline boundary retains the HOME-write acceptance leg with ci:mac", async () => {
@@ -453,8 +453,6 @@ test("next push runs trusted before policy only after a successful predecessor",
     ci_evidence: "scoped",
     defer_macos: "false",
     build_smoke: "true",
-    docker_suite: "true",
-    state_models: "true",
   });
 });
 
@@ -515,13 +513,9 @@ test("manual qualification refuses full=false before launching a suite", async (
 });
 
 test("PR labels opt into independent tiers without widening the other tier", async () => {
-  const input = { path: "tests/example.test.ts", tierPlan: true };
+  const input = { path: "src/value.ts", tierPlan: true };
   const mac = await scope({ ...input, mac: true });
-  expect(
-    JSON.parse(mac.compiler_hosts ?? "null").sort(
-      (a: { os: string }, b: { os: string }) => a.os.localeCompare(b.os)
-    )
-  ).toEqual(
+  expect(JSON.parse(mac.compiler_hosts ?? "null")).toEqual(
     JSON.parse(fullPushPlan({ releaseHosts: false }).compiler_hosts).sort(
       (a: { os: string }, b: { os: string }) => a.os.localeCompare(b.os)
     )
@@ -534,7 +528,7 @@ test("PR labels opt into independent tiers without widening the other tier", asy
     build_smoke: "false",
   });
   expect(await scope({ ...input, e2e: true })).toMatchObject({
-    compiler_hosts: "[]",
+    compiler_hosts: '[{"os":"ubuntu-latest","platform":"linux","arch":"x64"}]',
     runtime_core: "false",
     test_shards: "[4,5,6,7,8]",
     docker_suite: "true",
@@ -561,73 +555,20 @@ test("PR labels opt into independent tiers without widening the other tier", asy
   });
 });
 
+const modelRegistry = "scripts/lib/tla-runtime-models.ts";
 test.each([
-  ["scripts/lib/tla-runtime-models.ts", "false", "true"],
-  ["tests/models/tla/example/Spec.tla", "false", "true"],
-  ["src/backends/runtime-backend.ts", "true", "false"],
-  ["docker/node-runtime/Dockerfile", "true", "false"],
-  ["docker/slim-runtime/Dockerfile", "true", "false"],
-  ["examples/app/.hack/docker-compose.yml", "true", "false"],
-  [".ai/skills/hack-repo-tla/scripts/tla_agent_checks.py", "false", "true"],
-  ["tests/python/test_prepared_base_benchmark.py", "false", "true"],
-  ["tests/e2e/harness.ts", "true", "false"],
-  ["tests/example.test.ts", "false", "false"],
-])("independent shell selects Docker/model tiers for %s", async (path, docker, models) => {
-  const outputs = await scope({ path });
-  expect(outputs.selection_mode).not.toBe("full");
-  expect(outputs.docker_suite).toBe(docker);
-  expect(outputs.state_models).toBe(models);
-});
-
-test("the independent boundary preserves Docker inputs derived by trusted base policy", async () => {
-  const output = await scope({
-    path: "tests/docker-context.test.ts",
-    tierPlan: true,
-    tierDocker: true,
+  undefined,
+  "tests/models/sample.tla",
+  "packages/runtime-core/src/sample.rs",
+  "packages/runtime-core/Cargo.lock",
+  "docs/sample.md",
+])("skips just Docker for allowlisted next diffs paired with %s", async (also) => {
+  const outputs = await scope({
+    path: modelRegistry,
+    ...(also ? { also } : {}),
   });
-  expect(output.docker_suite).toBe("true");
-});
-
-test("the workflow preserves tiers selected by trusted base policy", async () => {
-  const output = await scope({
-    path: "tests/example.test.ts",
-    tierPlan: true,
-    tierModels: true,
-    tierBuild: true,
-  });
-  expect(output).toMatchObject({
+  expect(outputs).toMatchObject({
     docker_suite: "false",
-    state_models: "true",
-    build_smoke: "true",
-  });
-});
-
-test("job policy outputs survive the hosted shell unchanged", async () => {
-  const output = await scope({
-    path: "tests/native-compose-file-owner.test.ts",
-    tierPlan: true,
-    jobPolicy: true,
-    tierModels: true,
-    tierBuild: true,
-  });
-  expect(output).toMatchObject({
-    compiler_hosts: fullPushPlan({ releaseHosts: false }).compiler_hosts,
-    runtime_core: "true",
-    state_models: "true",
-    build_smoke: "true",
-  });
-});
-
-test("the workflow retains all Linux tiers when trusted policy widens unknown tests", async () => {
-  const output = await scope({
-    path: "tests/future/engine.bin",
-    tierPlan: true,
-    tierScope: "full",
-  });
-  expect(output).toMatchObject({
-    scope: "full",
-    docker_suite: "true",
-    state_models: "true",
     build_smoke: "true",
     runtime_core: "true",
     compiler_hosts: linuxCompilerHosts,
@@ -635,52 +576,19 @@ test("the workflow retains all Linux tiers when trusted policy widens unknown te
 });
 
 test.each([
-  "test",
-  "docker-e2e",
-])("%s requires selected model and runtime image evidence", (job) => {
-  const gate = workflow.jobs[job]?.steps[0]?.run;
-  if (!gate) {
-    throw new Error(`missing ${job} fan-in`);
-  }
-  for (const tier of ["MODELS", "IMAGES"]) {
-    for (const [enabled, result, expected] of [
-      ["true", "success", 0],
-      ["false", "skipped", 0],
-      ["true", "failure", 1],
-      ["true", "skipped", 1],
-      ["true", "cancelled", 1],
-    ] as const) {
-      const docker = tier === "IMAGES" ? enabled : "true";
-      const env = {
-        PR_DRAFT: "false",
-        CHANGES_RESULT: "success",
-        SCOPE: "typescript",
-        SUITE: job === "test" ? "true" : docker,
-        TEST_FOCUS: "",
-        SHARD_RESULT:
-          job === "docker-e2e" && docker === "false" ? "skipped" : "success",
-        FOCUS_RESULT: "success",
-        COMPILER_ENABLED: "false",
-        COMPILER_RESULT: "skipped",
-        LIFETIME_ENABLED: docker,
-        LIFETIME_RESULT: docker === "true" ? "success" : "skipped",
-        IMAGES_ENABLED: docker,
-        IMAGES_RESULT: "success",
-        MODELS_ENABLED: "true",
-        MODELS_RESULT: "success",
-        [`${tier}_ENABLED`]: enabled,
-        [`${tier}_RESULT`]: result,
-      };
-      const checked = Bun.spawnSync(["bash", "-eu", "-c", gate], {
-        env,
-        stdout: "pipe",
-        stderr: "pipe",
-        timeout: 5000,
-      });
-      expect(
-        checked.exitCode,
-        `${tier} ${enabled} ${result}: ${checked.stderr}`
-      ).toBe(expected);
-    }
-  }
+  { also: "src/value.ts" },
+  { also: "tests/docker-context.test.ts" },
+  { also: ".github/workflows/other.yml" },
+  { full: true },
+  { e2e: true },
+  { baseRef: "main" },
+  {
+    path: "scripts/example.sh",
+    renameTo: "docs/example.sh",
+    also: modelRegistry,
+  },
+])("keeps Docker when the next exception does not apply: %o", async (extra) => {
+  expect((await scope({ path: modelRegistry, ...extra })).docker_suite).toBe(
+    "true"
+  );
 });

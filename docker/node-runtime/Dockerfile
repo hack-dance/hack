@@ -6,8 +6,8 @@ WORKDIR /src
 COPY package.json bun.lock bunfig.toml tsconfig.json index.ts ./
 # Keep the install context aligned with root workspaces so frozen lockfile
 # validation sees the same workspace graph as the checked-in repository.
-COPY packages/cli ./packages/cli
-COPY packages/db/package.json ./packages/db/package.json
+COPY apps ./apps
+COPY packages ./packages
 COPY src ./src
 RUN bun install --frozen-lockfile
 # No autoload: the working directory of this CLI is a mounted project.

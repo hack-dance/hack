@@ -122,41 +122,6 @@ export function touchesRelocatedCli(path: string): boolean {
   );
 }
 
-/** Model artifacts and their registry do not feed the Compose backend. */
-export function touchesStateModels(path: string): boolean {
-  return (
-    path === "scripts/lib/tla-runtime-models.ts" ||
-    path.startsWith("tests/models/") ||
-    path.startsWith(".ai/skills/hack-repo-tla/") ||
-    /^tests\/python\/test_(?:prepared_base_benchmark|native_compose_benchmark|native_frontend_acceptance|application_benchmark_protocol)\.py$/.test(
-      path
-    )
-  );
-}
-
-/**
- * Compose and shared CLI inputs can affect the real-engine harness. Keep shared
- * source conservative; native-only source is not excluded without a consumer audit.
- */
-export function touchesDockerSuite(path: string): boolean {
-  return /^(?:src\/|index\.ts$|packages\/(?:cli|lifecycle-supervisor)\/|templates\/|docker\/|examples\/|assets\/|docs\/recipes\/|\.dockerignore$|tests\/(?:e2e|fixtures|helpers)\/|\.hack\/|Dockerfile(?:\.|$)|docker-compose(?:\.|$))/.test(
-    path
-  );
-}
-
-/** Unknown input families require every job, independently of unit graph fallback. */
-export function isKnownCiInput(path: string): boolean {
-  return (
-    DOCS_FILES.has(path) ||
-    DOCS_PATHS.some((pattern) => pattern.test(path)) ||
-    touchesStateModels(path) ||
-    touchesDockerSuite(path) ||
-    /^(?:packages\/(?:runtime-core|relay-guest|config-compiler|db)\/|hack-local$)/.test(
-      path
-    )
-  );
-}
-
 /** The scope of a pull request that changes `paths`; empty means `full`. */
 export function changeScope(paths: readonly string[]): ChangeScope {
   if (paths.length === 0) {
@@ -381,20 +346,15 @@ export async function main(argv: readonly string[]): Promise<number> {
   const { fullPushPlan, planPullRequest } = await import("./ci-pr-plan.ts");
   const ref = argv.find((arg) => arg.startsWith("--ref="))?.slice(6) ?? "";
   const nextPush = event === "push" && ref === "refs/heads/next";
-  // Explicit local replay only: no GitHub output or summary files are written.
-  const dryRun = argv.includes("--dry-run");
-  const changedPaths = dryRunPaths({ argv, event, dryRun });
   let outputs = fullPushPlan({
     releaseHosts: !nextPush && event !== "pull_request",
   });
   let reason = `event ${event} always runs the full matrix`;
   if (event === "pull_request" || nextPush) {
     const baseRevision = argument(argv, "--base-revision=");
-    const paths =
-      changedPaths ??
-      (nextPush
-        ? revisionPaths({ repoRoot, baseRevision })
-        : pullRequestPaths(repoRoot));
+    const paths = nextPush
+      ? revisionPaths({ repoRoot, baseRevision })
+      : pullRequestPaths(repoRoot);
     if (paths === null) {
       reason = "the pull request diff is unavailable; running the full matrix";
     } else {
@@ -408,7 +368,6 @@ export async function main(argv: readonly string[]): Promise<number> {
     }
     outputs = await planPullRequest({
       repoRoot,
-      baseRoot: argument(argv, "--base-root="),
       changed: paths,
       draft: event === "pull_request" && process.env.PR_DRAFT === "true",
       full: event === "pull_request" && process.env.PR_FULL === "true",
@@ -424,58 +383,18 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
   console.log(`change scope: ${outputs.scope}; ${reason}`);
   process.stdout.write(formatOutputs(outputs));
-  if (!dryRun) {
-    writeGithubOutputs({ outputs, reason });
-  }
-  return 0;
-}
-
-function writeGithubOutputs(opts: {
-  readonly outputs: ScopeOutputs;
-  readonly reason: string;
-}): void {
   const outputPath = process.env.GITHUB_OUTPUT;
   if (outputPath) {
-    appendFileSync(outputPath, formatOutputs(opts.outputs));
+    appendFileSync(outputPath, formatOutputs(outputs));
   }
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (summaryPath) {
     appendFileSync(
       summaryPath,
-      `Change scope: \`${opts.outputs.scope}\` (${opts.reason}).\n`
+      `Change scope: \`${outputs.scope}\` (${reason}).\n`
     );
   }
-}
-
-/** Parse explicit local replay data; ordinary CI still obtains paths from Git. */
-function dryRunPaths(opts: {
-  readonly argv: readonly string[];
-  readonly event: string;
-  readonly dryRun: boolean;
-}): string[] | undefined {
-  const changedArgument = argument(opts.argv, "--changed-paths=");
-  if (!opts.argv.some((arg) => arg.startsWith("--changed-paths="))) {
-    return;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(changedArgument);
-  } catch {
-    throw new Error("--changed-paths must be a JSON array of paths");
-  }
-  if (
-    !(
-      opts.dryRun &&
-      opts.event === "pull_request" &&
-      Array.isArray(parsed) &&
-      parsed.every((path: unknown) => typeof path === "string")
-    )
-  ) {
-    throw new Error(
-      "--changed-paths requires --dry-run --event=pull_request and a JSON array of paths"
-    );
-  }
-  return parsed;
+  return 0;
 }
 
 function argument(argv: readonly string[], prefix: string): string {

@@ -30,7 +30,7 @@ export function scopedHackCommand(
   const argv = [currentCandidateLauncher().command, action];
   for (const [name, value] of Object.entries(selection)) {
     if (value !== undefined) {
-      argv.push(`--${name}`, value);
+      argv.push(`--${name}=${value}`);
     }
   }
   return printedShellCommand([...argv, ...rest]);

@@ -250,7 +250,7 @@ test("source CLI prints one scoped blocker for a known authored before-hook exit
   expect(result.code, result.stderr).toBe(17);
   expect(result.stdout).toBe("");
   expect(result.stderr).toBe(
-    `! lifecycle  hook failed (before, exit 17)\n  fix the failing hook and retry this start. run:\n  hack up --path ${root} --detach\n`
+    `! lifecycle  hook failed (before, exit 17)\n  fix the failing hook and retry this start. run:\n  hack up --path=${root} --detach\n`
   );
   expect(await Bun.file(join(root, "docker-requests")).exists()).toBe(false);
   expect(await generations(root)).toEqual([]);

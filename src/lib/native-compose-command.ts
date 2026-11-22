@@ -737,7 +737,13 @@ async function savedCommand(opts: {
           : null));
   if (!generation) {
     if (state.beforeHooksPending) {
-      if (options.operation === "ps" && options.json) {
+      if (options.operation === "ps") {
+        if (!options.json) {
+          process.stderr.write(
+            "native before-hook completion is uncertain · recovery unavailable\n"
+          );
+          return 0;
+        }
         emitCliResult({
           result: okResult({
             data: {
@@ -2302,10 +2308,10 @@ function nativeComposeHookCommand(
       flags.push("--detach");
     }
     if (options.overlay !== undefined) {
-      flags.push("--env", options.overlay ?? "base");
+      flags.push(`--env=${options.overlay ?? "base"}`);
     }
     if (options.profiles?.length) {
-      flags.push("--profile", options.profiles.join(","));
+      flags.push(`--profile=${options.profiles.join(",")}`);
     }
     if (options.services?.length) {
       flags.push("--", ...options.services);

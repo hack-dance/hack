@@ -7441,6 +7441,38 @@ async function handleUpUnlocked({
 }
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: `up` orchestrates remote routing, lifecycle hooks, compose, and the JSON envelope in one linear flow.
+const UP_RETRY_VALUE_OPTIONS = new Set([
+  "--path",
+  "-p",
+  "--project",
+  "--branch",
+  "--env",
+  "--profile",
+  "--target",
+]);
+
+function printedUpRetry(argv: readonly string[]): string {
+  const words = [currentCandidateLauncher().command];
+  for (let index = 0; index < argv.length; index += 1) {
+    const word = argv[index];
+    if (word === undefined) {
+      break;
+    }
+    if (word === "--") {
+      words.push(...argv.slice(index));
+      break;
+    }
+    const value = argv[index + 1];
+    if (UP_RETRY_VALUE_OPTIONS.has(word) && value !== undefined) {
+      words.push(`${word === "-p" ? "--path" : word}=${value}`);
+      index += 1;
+    } else {
+      words.push(word);
+    }
+  }
+  return printedShellCommand(words);
+}
+
 async function runUpCommand({
   ctx,
   args,
@@ -7640,10 +7672,7 @@ async function runUpCommand({
     });
   let failedHook: string | undefined;
   let failedHookReason: string | undefined;
-  const retryCommand = printedShellCommand([
-    currentCandidateLauncher().command,
-    ...args.raw.argv,
-  ]);
+  const retryCommand = printedUpRetry(args.raw.argv);
   const summarizeFailure = json
     ? undefined
     : (name: string, reason?: string) => {

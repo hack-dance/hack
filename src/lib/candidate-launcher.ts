@@ -103,9 +103,10 @@ export function resolveCandidateLauncher(opts: {
 
 /** The launcher for this process, from its environment and the user's home. */
 export function currentCandidateLauncher(): CandidateLauncher {
+  const home = process.env.HOME;
   return resolveCandidateLauncher({
     env: process.env,
-    homeDir: resolveUserHomeDir(),
+    homeDir: home && isAbsolute(home) ? home : resolveUserHomeDir(),
   });
 }
 

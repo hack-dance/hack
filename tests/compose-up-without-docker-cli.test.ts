@@ -121,6 +121,6 @@ test.each([
   expect(result.code, result.all).toBe(17);
   expect(result.stdout).not.toContain("failed (exit 17)");
   expect(result.stderr).toEndWith(
-    `! lifecycle  hook failed (${phase}, check, exit 17)\n  fix the failing hook and retry this start. run:\n  hack ${args.join(" ")}\n`
+    `! lifecycle  hook failed (${phase}, check, exit 17)\n  fix the failing hook and retry this start. run:\n  hack up --detach --path=${cwd}\n`
   );
 });

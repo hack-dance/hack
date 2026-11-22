@@ -19,6 +19,7 @@ import {
   saveRemoteChoices,
 } from "../lib/project-remote-selection.ts";
 import { formatProjectRemoteAddress } from "../lib/project-remote-status.ts";
+import { isHostControlEnvKey } from "../lib/vetted-env.ts";
 import {
   resolveEffectiveBranchForCommand,
   resolveProjectForArgs,
@@ -92,7 +93,13 @@ export const useCommand = withHandler(spec, async ({ ctx, args }) => {
           envName,
         })
       ).envForCompose;
-    const env = applyRemoteEnv(managed, pending);
+    // Interpolation supplies application values. Docker and its plugin keep
+    // the process environment's executable, loader, and client settings.
+    const env = Object.fromEntries(
+      Object.entries(applyRemoteEnv(managed, pending)).filter(
+        ([key]) => !isHostControlEnvKey(key)
+      )
+    );
     const result = await readComposePs({
       redactValues: Object.values(env),
       run: () =>

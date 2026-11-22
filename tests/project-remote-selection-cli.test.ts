@@ -78,7 +78,7 @@ test("the six --use entry points deliver the invocation target without saving it
         '    case " $* " in *" --profile maintenance "*) printf "%s\\n" migrate ;; esac ;;',
         '  *" stop "*) printf "%s\\n" "$*" >> "$TEST_DELIVERY" ;;',
         '  *" down "*) test -n "${DB_HOST:-}" || exit 1; printf "down=%s\\n" "$DB_HOST" >> "$TEST_DELIVERY"; rm -f "$TEST_STACK_STATE" ;;',
-        '  *" --profile * "*" ps "*) test -n "${DB_HOST:-}" || exit 1; if [ -f "$TEST_STACK_STATE" ]; then cat "$TEST_STACK_STATE"; fi ;;',
+        '  *" --profile * "*" ps "*) test -n "${DB_HOST:-}" && test "${DOCKER_CONFIG:-}" != /project-config && test "${LD_LIBRARY_PATH:-}" != /project-loader || exit 1; if [ -f "$TEST_STACK_STATE" ]; then cat "$TEST_STACK_STATE"; fi ;;',
         '  *" ps "*) if [ -f "$TEST_STACK_STATE" ]; then cat "$TEST_STACK_STATE"; fi ;;',
         '  *" up "*|*" run "*)',
         '    printf "%s\\n" "$*" >> "$TEST_DELIVERY"',
@@ -135,9 +135,19 @@ test("the six --use entry points deliver the invocation target without saving it
       return result;
     };
 
+    const envFile = join(stack, ".hack", "hack.env.default.yaml");
+    const originalEnv = await Bun.file(envFile).text();
+    await Bun.write(
+      envFile,
+      originalEnv.replace(
+        "  host:",
+        '    PATH: "/nonexistent"\n    DOCKER_CONFIG: "/project-config"\n    LD_LIBRARY_PATH: "/project-loader"\n  host:'
+      )
+    );
     expect(ok(["use", "db=live"]).stdout).toContain("saved for this checkout");
     expect(hack(["up", "--detach"]).stderr).toContain("E_INTERACTIVE_REQUIRED");
     expect(ok(["use", "db=qa"]).stdout).toContain("saved for this checkout");
+    await Bun.write(envFile, originalEnv);
     expect(ok(["use"], other).stdout).toContain("pending: local (default)");
     expect(
       ok(["host", "exec", "--", "/usr/bin/printenv", "DB_HOST"]).stdout

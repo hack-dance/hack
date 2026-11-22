@@ -733,3 +733,35 @@ fn full_legacy_command_child() {
         f.journal.ca
     );
 }
+
+/// HACK-2550: a Caddy that just stopped leaves its side of recent connections in
+/// TIME_WAIT. The strict claim refuses then; the reuse claim with the kernel's
+/// listener list claims the port at once, because no listener is left.
+#[test]
+fn a_port_left_in_time_wait_by_a_stopped_server_is_claimed_at_once() {
+    use std::io::Read;
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+
+    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    let (server, _) = listener.accept().unwrap();
+    // The server side closes first, so its address enters TIME_WAIT.
+    drop(server);
+    let mut byte = [0_u8; 1];
+    assert_eq!(client.read(&mut byte).unwrap(), 0);
+    drop(client);
+    drop(listener);
+    assert!(
+        ports::claim(port, false).is_err(),
+        "the server's TIME_WAIT should refuse a bind without address reuse"
+    );
+    let started = Instant::now();
+    let guards = port_absent(port).unwrap();
+    assert_eq!(guards.len(), 4);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    drop(guards);
+    // A live listener still refuses, through either claim.
+    let live = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    assert!(port_absent(live.local_addr().unwrap().port()).is_err());
+}

@@ -4,13 +4,86 @@ use super::{CandidateError, refused};
 pub(in crate::provider) fn port_absent(
     port: u16,
 ) -> Result<Vec<std::os::fd::OwnedFd>, CandidateError> {
-    let mut guards = Vec::from(bind_pair(port, true)?);
+    // A Caddy that just stopped leaves its connections in TIME_WAIT (about 30 s on
+    // macOS), and a bind without address reuse fails meanwhile (HACK-2550). A reuse
+    // bind succeeds over TIME_WAIT but not over a live wildcard or loopback listener;
+    // the kernel's listener list then covers a listener on any other address. Any
+    // doubt falls back to the strict claim below.
+    #[cfg(target_os = "macos")]
+    if let Ok(guards) = claim(port, true) {
+        if listeners_are_only_ours(port) {
+            return Ok(guards);
+        }
+    }
+    claim(port, false)
+}
+pub(super) fn claim(port: u16, reuse: bool) -> Result<Vec<std::os::fd::OwnedFd>, CandidateError> {
+    let mut guards = Vec::from(bind_pair(port, true, reuse)?);
     // macOS permits a later SO_REUSEADDR loopback bind beside a wildcard listener.
     // Reserve the actual local HTTPS path too; neither guard enables SO_REUSEPORT.
-    guards.extend(bind_pair(port, false)?);
+    guards.extend(bind_pair(port, false, reuse)?);
     Ok(guards)
 }
-fn bind_pair(port: u16, wildcard: bool) -> Result<[std::os::fd::OwnedFd; 2], CandidateError> {
+
+/// The kernel's TCP listeners on `port` are exactly this process's four guards (the
+/// IPv4 and IPv6 wildcard and loopback claims just bound), read from
+/// `/usr/sbin/netstat -an -p tcp` with a clean environment and a time bound. An
+/// unreadable list, an unparsable row, a missing guard or any other listener: false.
+#[cfg(target_os = "macos")]
+fn listeners_are_only_ours(port: u16) -> bool {
+    let Ok(output) = crate::provider::process::capture(
+        crate::provider::process::clean_command(std::path::Path::new("/usr/sbin/netstat"))
+            .args(["-an", "-p", "tcp"]),
+        std::time::Duration::from_secs(5),
+    ) else {
+        return false;
+    };
+    output.status.success()
+        && std::str::from_utf8(&output.stdout)
+            .ok()
+            .and_then(|text| listeners(text, port))
+            .is_some_and(|mut found| {
+                found.sort();
+                found
+                    == [
+                        ("tcp4", "*"),
+                        ("tcp4", "127.0.0.1"),
+                        ("tcp6", "*"),
+                        ("tcp6", "::1"),
+                    ]
+            })
+}
+
+/// The `(protocol, address)` of each `LISTEN` row on `port` in macOS `netstat -an -p
+/// tcp` output; `None` for output without its header or with a row that cannot be
+/// parsed (every row must have six fields and a `<address>.<port>` local column).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn listeners(text: &str, port: u16) -> Option<Vec<(&str, &str)>> {
+    let mut lines = text.lines();
+    lines.by_ref().find(|line| line.starts_with("Proto"))?;
+    let mut found = Vec::new();
+    for line in lines.filter(|line| !line.trim().is_empty()) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let (proto, local) = match fields.as_slice() {
+            [proto, _, _, local, _, _] | [proto, _, _, local, _] => (*proto, *local),
+            _ => return None,
+        };
+        let (address, local_port) = local.rsplit_once('.')?;
+        if fields.last() != Some(&"LISTEN") || local_port != port.to_string() {
+            continue;
+        }
+        if !proto.starts_with("tcp") {
+            return None;
+        }
+        found.push((proto, address));
+    }
+    Some(found)
+}
+fn bind_pair(
+    port: u16,
+    wildcard: bool,
+    reuse: bool,
+) -> Result<[std::os::fd::OwnedFd; 2], CandidateError> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     macro_rules! failure {
         ($stage:ident, $family:expr) => {{
@@ -53,7 +126,7 @@ fn bind_pair(port: u16, wildcard: bool) -> Result<[std::os::fd::OwnedFd; 2], Can
     {
         return Err(failure!(Ipv6Only, libc::AF_INET6));
     }
-    if !wildcard {
+    if !wildcard || reuse {
         for (fd, _family) in [(&v4, libc::AF_INET), (&v6, libc::AF_INET6)] {
             // SAFETY: only is a live integer; this permits our specific loopback guard beside the wildcard guard.
             // SO_REUSEPORT is never enabled, so another listener cannot share this exact address.
@@ -165,5 +238,57 @@ pub(super) mod observation_diagnostic {
                 });
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod listener_list_tests {
+    use super::listeners;
+
+    const HEADER: &str = "Active Internet connections (including servers)\nProto Recv-Q Send-Q  Local Address          Foreign Address        (state)\n";
+
+    fn ours() -> String {
+        format!(
+            "{HEADER}tcp4       0      0  127.0.0.1.8443         *.*                    LISTEN\ntcp4       0      0  *.8443                 *.*                    LISTEN\ntcp6       0      0  ::1.8443               *.*                    LISTEN\ntcp6       0      0  *.8443                 *.*                    LISTEN\n"
+        )
+    }
+
+    #[test]
+    fn time_wait_rows_and_other_ports_are_not_listeners() {
+        let text = format!(
+            "{}tcp4       0      0  127.0.0.1.8443         127.0.0.1.51234        TIME_WAIT\ntcp4       0      0  10.0.0.5.51234         17.0.0.1.8443          ESTABLISHED\ntcp4       0      0  *.9443                 *.*                    LISTEN\n",
+            ours()
+        );
+        let mut found = listeners(&text, 8443).unwrap();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                ("tcp4", "*"),
+                ("tcp4", "127.0.0.1"),
+                ("tcp6", "*"),
+                ("tcp6", "::1")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_listener_on_a_specific_or_dual_stack_address_is_reported() {
+        for extra in [
+            "tcp4       0      0  192.168.1.20.8443      *.*                    LISTEN\n",
+            "tcp46      0      0  *.8443                 *.*                    LISTEN\n",
+        ] {
+            let text = format!("{}{extra}", ours());
+            let found = listeners(&text, 8443).unwrap();
+            assert_eq!(found.len(), 5, "{extra}");
+        }
+    }
+
+    #[test]
+    fn output_without_a_header_or_with_a_torn_row_is_unreadable() {
+        assert!(listeners("", 8443).is_none());
+        assert!(listeners("tcp4 0 0 *.8443 *.* LISTEN\n", 8443).is_none());
+        assert!(listeners(&format!("{HEADER}tcp4 0 0\n"), 8443).is_none());
+        assert!(listeners(&format!("{HEADER}tcp4 0 0 nodot *.* LISTEN\n"), 8443).is_none());
     }
 }

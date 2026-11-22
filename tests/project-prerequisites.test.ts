@@ -427,6 +427,66 @@ test("check exits and timeouts stop descendants and report distinct outcomes", a
   }
 }, 16_000);
 
+test("an interrupt during a prerequisite refuses startup with E_CANCELLED", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-prerequisite-cancel-"));
+  try {
+    const configDir = join(root, ".hack");
+    await mkdir(configDir);
+    await writeFile(
+      join(configDir, PROJECT_COMPOSE_FILENAME),
+      "services: {}\n"
+    );
+    await writeFile(
+      join(configDir, PROJECT_CONFIG_FILENAME),
+      JSON.stringify({
+        min_cli_version: HACK_VERSION,
+        requires: {
+          cloud: {
+            check: ["sh", "-c", "kill -TERM $PPID; exit 0"],
+            login: ["true"],
+          },
+        },
+        remotes: {
+          db: {
+            default: "qa",
+            targets: {
+              qa: {
+                hostname: "db.example.test",
+                port: 5432,
+                requires: ["cloud"],
+              },
+            },
+          },
+        },
+        startup: [{ name: "marker", run: "touch hook-ran", cwd: root }],
+      })
+    );
+    const result = spawnSyncBounded(
+      [
+        process.execPath,
+        resolve(import.meta.dir, "../index.ts"),
+        "up",
+        "--json",
+      ],
+      {
+        cwd: root,
+        env: privateCliEnv({ root, env: { HACK_NO_INTERACTIVE: "1" } }),
+      }
+    );
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      ok: false,
+      error: {
+        code: "E_CANCELLED",
+        message: "! cloud  sign-in check cancelled by SIGTERM",
+      },
+    });
+    expect(await Bun.file(join(root, "hook-ran")).exists()).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("failed check output stays private and noninteractive TTY does not start login", async () => {
   const root = await mkdtemp(join(tmpdir(), "hack-prerequisite-tty-"));
   try {

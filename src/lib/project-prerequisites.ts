@@ -39,6 +39,7 @@ type CheckState =
       readonly signal?: NodeJS.Signals | number;
     }
   | { readonly state: "timeout" }
+  | { readonly state: "cancelled"; readonly signal: "SIGINT" | "SIGTERM" }
   | { readonly state: "cleanup pending" };
 
 function resolveExecutable(bin: string): string | null {
@@ -128,10 +129,15 @@ async function checkPrerequisite(
     timedOut = true;
     endGroup();
   }, CHECK_TIMEOUT_MS);
-  const signals = ["SIGINT", "SIGTERM"] as const;
-  for (const signal of signals) {
-    process.once(signal, endGroup);
-  }
+  let cancelledBy: "SIGINT" | "SIGTERM" | undefined;
+  const cancel = (signal: "SIGINT" | "SIGTERM") => {
+    cancelledBy ??= signal;
+    endGroup();
+  };
+  const interrupt = () => cancel("SIGINT");
+  const terminate = () => cancel("SIGTERM");
+  process.on("SIGINT", interrupt);
+  process.on("SIGTERM", terminate);
   try {
     const exitCode = await child.exited;
     endGroup();
@@ -139,6 +145,9 @@ async function checkPrerequisite(
       !(await waitForOwnedProcessGroupSettlement({ processGroupId: child.pid }))
     ) {
       return { state: "cleanup pending" };
+    }
+    if (cancelledBy) {
+      return { state: "cancelled", signal: cancelledBy };
     }
     if (timedOut) {
       return { state: "timeout" };
@@ -149,9 +158,8 @@ async function checkPrerequisite(
       : { state: "failed", exitCode, signal };
   } finally {
     clearTimeout(deadline);
-    for (const signal of signals) {
-      process.removeListener(signal, endGroup);
-    }
+    process.removeListener("SIGINT", interrupt);
+    process.removeListener("SIGTERM", terminate);
   }
 }
 
@@ -173,6 +181,12 @@ function blocker(
     return {
       code: "E_PREREQUISITE_TOOL_MISSING",
       message: `! ${result.bin}  not found (${result.tool})\n  ${consumer} needs it.${result.hint ? ` run:\n  ${result.hint}` : ""}`,
+    };
+  }
+  if (result.state === "cancelled") {
+    return {
+      code: "E_CANCELLED",
+      message: `! ${name}  sign-in check cancelled by ${result.signal}`,
     };
   }
   if (result.state === "cleanup pending") {

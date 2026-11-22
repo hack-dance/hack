@@ -21,6 +21,41 @@ Common settings:
 - `controlPlane.tui.logs.historyTailStep` (default `200`) — history page size.
 - `controlPlane.usage.watchIntervalMs` (default `2000`) — sample interval for `hack usage --watch`.
 - `controlPlane.usage.historySize` (default `24`) — sample history for `hack usage --watch`.
+- `logging.enabled` (`true|false`; default unset) — whether Hack runs the
+  global logging stack (Loki, Alloy and Grafana). It is opt-in. While it is
+  unset, a home without `~/.hack/logging/` has it off, and a home that has that
+  directory (every earlier `hack global install` created it) keeps it. The
+  first `hack global install` or `hack global up` in such a home saves
+  `true`, so moving files aside later does not turn it off.
+  `hack global up --logging` saves `true`, writes the stack's files if needed
+  and starts it. `hack global up --no-logging` saves `false` and stops this
+  home's logging containers, found by their Compose labels (project
+  `hack-logging` and this home's `~/.hack/logging` as working directory), so
+  even a stack whose files are gone is stopped, and another Hack home's stack
+  on the same engine is not. If a save fails, the run still follows the
+  choice, routing starts, and a warning says the setting was not saved.
+  Turning it off keeps the stack's volumes (logs, Grafana state);
+  `hack global logs-reset` removes them. With logging off and no logging
+  files, `logs-reset` lists any `hack-logging` volumes Docker still has with
+  the `docker volume rm` to run, deletes none (Compose does not record which
+  home made a volume) and exits non-zero. `hack global install` rewrites the
+  logging Compose file (`~/.hack/logging/docker-compose.yml`) without asking
+  only while it is one of Hack's own renderings (an engine upgrade changes
+  its healthchecks). A file that differs (edited by hand, or written by an
+  older Hack) decides whether Loki and Grafana, which have no
+  authentication, are routed through the proxy, so install asks first
+  (default no), backs it up as `.bak-<UTC time>` before replacing it, and
+  without a terminal keeps it with a warning. The configs beside it (Loki,
+  Alloy, Grafana) also ask before an overwrite. With it off, plain
+  `hack logs` and `hack logs --since/--until` read container logs (`d` and
+  `w` units become hours, which Docker accepts), and
+  `hack logs --loki`/`--query` and `hack open logs` fail with `E_LOGGING_OFF`,
+  naming the command that turns the stack on. `hack global status` still asks
+  Docker and reports containers that run while the setting says off. A Loki
+  named by `HACK_LOKI_URL` is used whatever this says. `hack config set`
+  accepts only `true` or `false` here.
+  See [the opt-in state chart](../diagrams/global-logging-optin.svg) and the
+  model in `tests/models/tla/global-logging-optin`.
 - `proxy.bind_address` (default unset: Docker's default, every IPv4 and IPv6
   interface, for a new proxy file) — host address the global
   Caddy proxy publishes ports 80 and 443 on. Accepts one IPv4 or IPv6 address,

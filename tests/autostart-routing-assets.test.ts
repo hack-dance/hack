@@ -57,6 +57,7 @@ import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 let root = "";
 let assets: Map<string, string>;
+let loggingFiles: Map<string, string>;
 const defaultDomain = "example.test";
 const bindAddress = "127.0.0.1";
 
@@ -66,15 +67,9 @@ beforeEach(async () => {
   const caddy = join(root, GLOBAL_CADDY_DIR_NAME);
   const logging = join(root, GLOBAL_LOGGING_DIR_NAME);
   const schemas = join(root, GLOBAL_SCHEMAS_DIR_NAME);
-  assets = new Map([
-    [
-      join(caddy, GLOBAL_CADDY_COMPOSE_FILENAME),
-      renderGlobalCaddyCompose({ bindAddress }),
-    ],
-    [
-      join(caddy, GLOBAL_COREDNS_FILENAME),
-      renderGlobalCoreDnsConfig({ defaultDomain }),
-    ],
+  // A home with logging on also has these; login does not authenticate,
+  // republish or require them (it never starts the logging stack).
+  loggingFiles = new Map([
     [
       join(logging, GLOBAL_LOGGING_COMPOSE_FILENAME),
       renderGlobalLoggingCompose(),
@@ -93,6 +88,16 @@ beforeEach(async () => {
       join(logging, GLOBAL_GRAFANA_DASHBOARD_FILENAME),
       renderGlobalGrafanaLogsDashboardJson(),
     ],
+  ]);
+  assets = new Map([
+    [
+      join(caddy, GLOBAL_CADDY_COMPOSE_FILENAME),
+      renderGlobalCaddyCompose({ bindAddress }),
+    ],
+    [
+      join(caddy, GLOBAL_COREDNS_FILENAME),
+      renderGlobalCoreDnsConfig({ defaultDomain }),
+    ],
     [
       join(schemas, GLOBAL_CONFIG_SCHEMA_FILENAME),
       renderProjectConfigSchemaJson(),
@@ -107,7 +112,7 @@ beforeEach(async () => {
       renderProjectBranchesSchemaJson(),
     ],
   ]);
-  for (const [path, text] of assets) {
+  for (const [path, text] of [...assets, ...loggingFiles]) {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     await writeFile(path, text, { mode: 0o664 });
     await chmod(path, 0o664);
@@ -224,19 +229,24 @@ test("canonical nonsecret assets use fresh read-only-to-others inodes readable b
   for (const path of assets.keys()) {
     previous.set(path, (await lstat(path)).ino);
   }
+  const loggingInodes = new Map<string, number>();
+  for (const path of loggingFiles.keys()) {
+    loggingInodes.set(path, (await lstat(path)).ino);
+  }
   await secure();
   for (const [path, text] of assets) {
     expect(await readFile(path, "utf8")).toBe(text);
     expect((await lstat(path)).mode & 0o777).toBe(0o644);
     expect((await lstat(path)).ino).not.toBe(previous.get(path));
   }
+  // Not republished: login does not read them.
+  for (const [path, ino] of loggingInodes) {
+    expect((await lstat(path)).ino).toBe(ino);
+  }
 });
 
 test("publication stages outside mounted directories and preserves their exact entries throughout", async () => {
-  const mounted = [
-    join(root, GLOBAL_SCHEMAS_DIR_NAME),
-    join(root, GLOBAL_LOGGING_DIR_NAME, GLOBAL_GRAFANA_DASHBOARDS_DIR),
-  ];
+  const mounted = [join(root, GLOBAL_SCHEMAS_DIR_NAME)];
   const expected = await Promise.all(
     mounted.map(async (path) => (await readdir(path)).sort())
   );
@@ -415,7 +425,7 @@ test("a mismatched current owner cannot authenticate the installed assets", asyn
 });
 
 test("missing assets are never created and unknown mounted content is refused", async () => {
-  const missing = join(root, GLOBAL_LOGGING_DIR_NAME, GLOBAL_ALLOY_FILENAME);
+  const missing = join(root, GLOBAL_CADDY_DIR_NAME, GLOBAL_COREDNS_FILENAME);
   await rm(missing);
   await expect(secure()).rejects.toMatchObject({ code: "E_PERMISSION" });
   expect(await Bun.file(missing).exists()).toBe(false);
@@ -425,6 +435,58 @@ test("missing assets are never created and unknown mounted content is refused", 
   await rm(root, { recursive: true });
   await expect(secure()).rejects.toMatchObject({ code: "E_PERMISSION" });
   expect(await Bun.file(root).exists()).toBe(false);
+});
+
+test("login authenticates only what it runs: logging files, in any state, never refuse routing", async () => {
+  // HACK-2468: login never starts the logging stack, and install may keep
+  // an older or hand-edited logging Compose file (it asks before replacing
+  // one that is not Hack's rendering). None of that may stop routing.
+  const logging = join(root, GLOBAL_LOGGING_DIR_NAME);
+  const compose = join(logging, GLOBAL_LOGGING_COMPOSE_FILENAME);
+  const loki = join(logging, GLOBAL_LOKI_CONFIG_FILENAME);
+  const saved = process.env.HACK_GLOBAL_CONFIG_PATH;
+  process.env.HACK_GLOBAL_CONFIG_PATH = join(root, "hack.config.json");
+  try {
+    for (const enabled of [true, false]) {
+      await writeFile(
+        join(root, "hack.config.json"),
+        `${JSON.stringify({ logging: { enabled } })}\n`
+      );
+      // A file written by an older Hack (next.24 had no healthchecks) and
+      // a customised Loki config, both kept by install.
+      await writeFile(compose, "services: {} # written by an older Hack\n");
+      await writeFile(loki, "# customised\n");
+      await secure();
+      // Login neither rewrites nor republishes them.
+      expect(await readFile(compose, "utf8")).toBe(
+        "services: {} # written by an older Hack\n"
+      );
+      expect(await readFile(loki, "utf8")).toBe("# customised\n");
+      expect((await lstat(caddyCompose())).mode & 0o777).toBe(0o644);
+    }
+    // No logging directory at all, or something else in its place.
+    await rm(logging, { recursive: true });
+    await secure();
+    await writeFile(logging, "not a directory");
+    await secure();
+  } finally {
+    if (saved === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
+    } else {
+      process.env.HACK_GLOBAL_CONFIG_PATH = saved;
+    }
+  }
+});
+
+test("either healthcheck variant of the proxy file authenticates", async () => {
+  // Install renders start_interval only for Docker Engine 25+.
+  for (const startInterval of [false, true]) {
+    await writeFile(
+      caddyCompose(),
+      renderGlobalCaddyCompose({ bindAddress, startInterval })
+    );
+    await secure();
+  }
 });
 
 test("login plans routing without starting default-credential logging services", () => {

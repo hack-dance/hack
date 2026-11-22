@@ -1,30 +1,20 @@
 ---
-title: ProjectRemoteSelection · Teardown after startup
+title: ProjectRemoteSelection · Teardown hooks
 ---
 stateDiagram-v2
   direction TB
-  state "restart refused" as refused
-  [*] --> stopped
-  stopped --> starting: Begin
+  [*] --> starting
   starting --> started: Started
-  starting --> failed: Fail
-  started --> failed: Fail
-  started --> started: RemoveConfig / ObservePeer
-  started --> started: Switch / RenameBinding
-  failed --> failed: RemoveConfig / ObservePeer
-  started --> refused: Restart [declared]
-  failed --> refused: Restart [declared]
+  starting --> crashed: Crash
+  started --> started: Switch
+  started --> crashed: Crash
   started --> done: Teardown
-  failed --> done: Teardown
-  refused --> done: Teardown
-  class stopped idle
+  crashed --> done: Teardown
   class starting wait
   class started live
-  class failed fail
-  class refused fail
+  class crashed fail
   class done ok
   note right of done
-    INV Hook target is absent or was started.
-    INV Recovery needs owned rows.
+    INV Hook uses started target.
     INV Active labels win.
   end note

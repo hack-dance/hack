@@ -1,28 +1,18 @@
-# Compose remote teardown
+# Compose remote teardown hooks
 
-The model tracks one startup, a runtime record, a container label, a different
-saved preference, configuration removal, and one peer. A failed startup clears
-the record and can leave a labelled container. A declared remote project
-refuses restart before hooks. Down uses the label, then the record, while the
-target is declared. Label-based recovery preserves a failed Compose result when no owned regular containers can be
-identified. One-offs do not block recovery, while foreign regular peers do.
+The model tracks the started target, its label and runtime record, and an
+inactive backing container left by a switch. Teardown hooks use the active
+label, then the runtime record. A pending preference supplies no hook binding.
 
-TLC 1.7.4 explored 137 distinct states. The saved-choice control violates
-`TeardownUsesStartedTarget` in `Teardown` with `started = "none"`,
-`record = "none"` and `hook = "live"`. The ownership control violates
-`RecoveryRequiresOwnership` in `Teardown` with `declared = FALSE`,
-`peer = "foreign"`, `label = "local"` and `stop = "owned"`.
+TLC 1.7.4 explored 11 states. The saved-choice control violates
+`TeardownUsesStartedTarget` with `started = "none"` and `hook = "pending"`.
+The stale-label control violates `ActiveLabelWins` with `label = "qa"`,
+`stale = TRUE` and `hook = "none"`.
 
-Three more controls fail `NoGuessedEmpty`, `ActiveLabelWins`, and
-`RenamedBindingCanRecover`. The final teardown states respectively report
-`stop = "empty"` without a label, omit the hook target despite an active
-`live` label, and preserve failure despite an owned label and renamed binding.
-
-The CLI fixture covers restart admission, recovery with the config removed,
-missing interpolation with an unlabelled one-off, and refusal for a foreign
-peer. The model assumes accurate Docker observations and excludes races after
-peer enumeration, real network removal and filesystem durability. The stopped
-save checks Docker under the writer lock. Startup can begin between that check
-and publication. In that ordering the new preference is pending.
+The CLI fixture changes the saved preference after startup and removes the
+runtime record. The target-selection test covers exited, dead and created
+containers alongside an active label. The model assumes the labels and record
+belong to the instance. Compose container and network shutdown use their normal
+paths outside this model.
 
 [State chart](state.svg) · [Mermaid source](state.mmd)

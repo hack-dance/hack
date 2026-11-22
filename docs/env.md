@@ -1897,6 +1897,11 @@ requirements before starting the whole project with `hack up`. Use
 preference with `hack use db=TARGET` while the project is stopped. For projects
 with remotes, scoped `up`, `restart`, and `run` refuse until they can preserve
 remote bindings. Use `hack down` followed by whole-project `hack up` to restart.
+For Compose interpolation supplied only by a remote binding, use a default such
+as `${DB_HOST:-}` so commands like `hack down` can read the Compose file without
+the binding. If a later edit introduces a missing required variable, Compose
+can refuse `hack down` until you fix the file or supply the variable.
+
 Doctor runs preset checks and shows each declared login command. It reports
 custom checks as `not checked` after looking up their executables.
 

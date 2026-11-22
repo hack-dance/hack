@@ -1,6 +1,6 @@
 import { dirname } from "node:path";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
-import { defineCommand, withHandler } from "../cli/command.ts";
+import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optPath, optProject } from "../cli/options.ts";
 import { HackCliError } from "../lib/cli-result.ts";
@@ -71,7 +71,6 @@ export const useCommand = withHandler(spec, async ({ ctx, args }) => {
       baseProjectName: base,
       composeProject: lifecycleComposeProject,
       requestedEnvName: resolveRequestedEnvName({ envOption: undefined }),
-      choices: pending,
     });
     if (
       ["DOCKER_CONFIG", "HOME", "PATH", "COMPOSE_ENV_FILES"].some(
@@ -79,11 +78,9 @@ export const useCommand = withHandler(spec, async ({ ctx, args }) => {
           Object.hasOwn(managed, key) && managed[key] !== process.env[key]
       )
     ) {
-      throw new HackCliError({
-        code: "E_USAGE",
-        message:
-          "Cannot check whether the Compose copy is stopped with checkout-managed client settings. Use the same settings in the caller environment.",
-      });
+      throw new CliUsageError(
+        "Run hack use with the same Compose client settings in the caller environment."
+      );
     }
     const env = Object.fromEntries(
       Object.entries(managed).filter(

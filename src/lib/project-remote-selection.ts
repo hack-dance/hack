@@ -117,12 +117,35 @@ async function confirmChoice(choice: EffectiveRemote): Promise<void> {
   });
 }
 
+export function refuseRemoteStart(
+  declared: readonly SelectedProjectRemote[] | undefined,
+  command: string
+): void {
+  if (declared?.length) {
+    throw new HackCliError({
+      code: "E_REMOTE_START_UNSUPPORTED",
+      message: `${command} cannot start a project that declares remotes. Run hack up --detach for the whole project.`,
+    });
+  }
+}
+
 /** Resolve and disclose the names for this invocation before effects. */
 export async function prepareRemoteChoices(opts: {
   readonly projectDir: string;
   readonly defaults: readonly SelectedProjectRemote[];
   readonly use?: string;
+  readonly services: readonly string[];
 }): Promise<readonly EffectiveRemote[]> {
+  if (opts.services.length) {
+    refuseRemoteStart(opts.defaults, "Service-scoped hack up");
+    if (opts.use !== undefined) {
+      throw new HackCliError({
+        code: "E_USAGE",
+        message: "--use requires whole-project up.",
+      });
+    }
+    return [];
+  }
   const explicit = parseRemoteChoices(opts.use);
   if (opts.defaults.length === 0) {
     return resolveRemoteChoices(opts.defaults, {}, explicit);
@@ -133,12 +156,8 @@ export async function prepareRemoteChoices(opts: {
     explicit
   );
   for (const choice of choices) {
-    const address = formatProjectRemoteAddress({
-      ...choice.address,
-      port: choice.port,
-    });
     process.stderr.write(
-      `${choice.remote} → ${choice.target} · ${address} · ${choice.source}${choice.via ? " · tunnel not started by this version" : ""}\n`
+      `${choice.remote} → ${choice.target} · ${formatProjectRemoteAddress({ ...choice.address, port: choice.port })} · ${choice.source}${choice.via ? " · tunnel not started by this version" : ""}\n`
     );
     if (choice.confirm) {
       await confirmChoice(choice);
@@ -254,7 +273,10 @@ export function applyRemoteEnv(
     readonly missing?: (remote: string, name: string) => void;
   }
 ): Record<string, string> {
-  const result = options?.bindingsOnly ? {} : { ...env };
+  const result: Record<string, string> = Object.create(null);
+  if (!options?.bindingsOnly) {
+    Object.assign(result, env);
+  }
   for (const { remote, address, bindings, port } of choices) {
     let host: string;
     if (address.kind === "env_ref") {
@@ -284,14 +306,9 @@ export function applyRemoteEnv(
       host = HOST_LOOPBACK;
     }
     for (const [name, template] of Object.entries(bindings)) {
-      Object.defineProperty(result, name, {
-        value: template.replaceAll(/\{(host|port)\}/g, (_, key) =>
-          key === "host" ? host : String(port)
-        ),
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
+      result[name] = template.replaceAll(/\{(host|port)\}/g, (_, key) =>
+        key === "host" ? host : String(port)
+      );
     }
   }
   return result;
@@ -316,17 +333,11 @@ function backingServices(choices: readonly EffectiveRemote[]) {
   };
 }
 
-export function inactiveRemoteServices(
-  choices: readonly EffectiveRemote[] = []
-): readonly string[] {
-  return backingServices(choices).inactive;
-}
-
 export function remoteServiceTargets(
-  choices: readonly EffectiveRemote[] | undefined,
+  choices: readonly EffectiveRemote[],
   services: readonly string[]
-): readonly string[] {
-  const { selected, inactive } = backingServices(choices ?? []);
+) {
+  const { selected, inactive } = backingServices(choices);
   const targets = [
     ...new Set([
       ...services.filter((service) => !inactive.includes(service)),
@@ -339,7 +350,7 @@ export function remoteServiceTargets(
       message: "No Compose service is available with this remote selection.",
     });
   }
-  return targets;
+  return { targets, inactive };
 }
 
 export function remoteSelectionLabels(

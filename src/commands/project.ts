@@ -36,16 +36,17 @@ import {
 import { enforceProjectPrerequisites } from "../lib/project-prerequisites.ts";
 import {
   extendRemoteEnv,
+  observedRemoteChoices,
+  prepareRemoteDown,
   prepareRemoteStartup,
   recordStartedRemotes,
-  refuseRemoteStart,
   remotePrerequisites,
-  remotePsRows,
-  remoteRuntimeStatuses,
-  runtimeRemoteEnv,
-  teardownHookEnv,
-  wholeProjectRemoteChoices,
 } from "../lib/project-remote-compose.ts";
+import {
+  prepareRemoteChoices,
+  refuseRemoteStart,
+} from "../lib/project-remote-selection.ts";
+import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
 import {
   selectLifecycleAddress,
   writeLifecycleStopped,
@@ -7855,12 +7856,12 @@ async function runUpCommand({
     throw error;
   }
   const cfg = await readProjectConfig(project);
-  const choices = await wholeProjectRemoteChoices(
-    project,
-    cfg,
-    args.positionals.services,
-    args.options.use
-  );
+  const choices = await prepareRemoteChoices({
+    projectDir: project.projectDir,
+    defaults: cfg.prerequisites?.config?.selected ?? [],
+    services: args.positionals.services,
+    use: args.options.use,
+  });
   if (
     !(await enforceProjectPrerequisites(
       remotePrerequisites(cfg, choices),
@@ -8499,7 +8500,11 @@ async function runUpCommand({
         exitCode: 1,
       });
     }
-    await recordStartedRemotes(project, lifecycleComposeProject, choices);
+    await recordStartedRemotes(
+      project.projectDir,
+      lifecycleComposeProject,
+      choices
+    );
     if (!showBeforeAfter) {
       progress?.services(startup);
     }
@@ -9117,29 +9122,25 @@ async function runDownCommand({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
   });
-  const managedEnv = await resolveLifecycleEnvForProject({
+  const lifecycleEnv = await resolveLifecycleEnvForProject({
     project,
     projectName,
     envName: effectiveEnvName,
   });
 
-  const {
-    choices,
-    env: interpolationEnv,
-    recover,
-    cleanup: cleanupRemoteOverride,
-  } = await runtimeRemoteEnv(
-    { project, cfg, baseProjectName, branch },
-    effectiveEnvName
-  );
-  const lifecycleEnv = teardownHookEnv(managedEnv, choices);
+  const hookEnv = await prepareRemoteDown({
+    project,
+    cfg,
+    composeProjectName,
+    lifecycleComposeProject,
+    env: lifecycleEnv,
+  });
   const interruptionCheck = await checkOneShotInterruption({
     project,
     composeProjectName,
     profiles,
     action: "down",
     json,
-    env: interpolationEnv,
   });
   if (!interruptionCheck.proceed) {
     return 1;
@@ -9150,7 +9151,7 @@ async function runDownCommand({
     projectDir: project.projectDir,
     lifecycleComposeProject,
     cliProfiles: profiles,
-    composeEnv: interpolationEnv ?? lifecycleEnv,
+    composeEnv: lifecycleEnv,
   });
   const statesBeforeDown =
     json || (downTimeoutSeconds !== undefined && downTimeoutSeconds > 0)
@@ -9158,7 +9159,7 @@ async function runDownCommand({
           project,
           composeProjectName,
           profiles: stopSelection.profiles,
-          env: interpolationEnv ?? lifecycleEnv,
+          env: lifecycleEnv,
         })
       : [];
   const runningServicesBeforeDown =
@@ -9198,7 +9199,7 @@ async function runDownCommand({
       title: "Lifecycle (down before)",
       commands: cfg.lifecycle?.down?.before,
       projectRoot: project.projectRoot,
-      env: lifecycleEnv,
+      env: hookEnv,
       projectDir: project.projectDir,
       composeProject: lifecycleComposeProject,
     });
@@ -9220,41 +9221,26 @@ async function runDownCommand({
       composeProject: lifecycleComposeProject,
     });
     reportLifecycleProgress({ service: null, phase: "stopping" });
-    const stop = (
-      file: string,
-      name: string | null,
-      env: Readonly<Record<string, string>>
-    ) =>
-      composeRuntimeBackend.down({
-        composeFiles: [file],
-        composeProject: name,
-        profiles: stopSelection.profiles,
-        cwd: dirname(project.composeFile),
-        env,
-        routeStdoutToStderr: json,
-        timeoutSeconds: downTimeoutSeconds,
-        capMs: downCapMs,
-        onOutcome: (outcome) => {
-          downTimedOut = outcome.timedOut;
-        },
-      });
-    const stopEnv = interpolationEnv ?? lifecycleEnv;
-    code = await stop(project.composeFile, composeProjectName, stopEnv);
-    const recovery =
-      code > 0 && code < 128 && !downTimedOut ? await recover?.() : undefined;
-    if (recovery) {
-      code = await stop(recovery.path, recovery.name, stopEnv);
-    }
+    code = await composeRuntimeBackend.down({
+      composeFiles: [project.composeFile],
+      composeProject: composeProjectName,
+      profiles: stopSelection.profiles,
+      cwd: dirname(project.composeFile),
+      env: lifecycleEnv,
+      routeStdoutToStderr: json,
+      timeoutSeconds: downTimeoutSeconds,
+      capMs: downCapMs,
+      onOutcome: (outcome) => {
+        downTimedOut = outcome.timedOut;
+      },
+    });
     if (code === 0) {
       const finish = await finishInstanceStop({
-        project: recovery
-          ? { ...project, composeFile: recovery.path }
-          : project,
-        composeProjectName: recovery?.name ?? composeProjectName,
-        composeProjectLabel:
-          recovery?.name ?? composeProjectName ?? baseProjectName,
+        project,
+        composeProjectName,
+        composeProjectLabel: composeProjectName ?? baseProjectName,
         profiles: stopSelection.profiles,
-        env: stopEnv,
+        env: lifecycleEnv,
         routeStdoutToStderr: json,
         timeoutSeconds: downTimeoutSeconds,
       });
@@ -9337,7 +9323,6 @@ async function runDownCommand({
     logger.error({ message });
     return 1;
   }
-  await cleanupRemoteOverride?.();
   reportLifecycleProgress({ service: null, phase: "stopped" });
   if (helperReleaseFailures.length > 0) {
     const message = sharedHelperReleaseFailureMessage(helperReleaseFailures);
@@ -9367,7 +9352,7 @@ async function runDownCommand({
     title: "Lifecycle (down after)",
     commands: cfg.lifecycle?.down?.after,
     projectRoot: project.projectRoot,
-    env: lifecycleEnv,
+    env: hookEnv,
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
   });
@@ -10502,7 +10487,7 @@ async function runRestartCommand({
     projectOpt: args.options.project,
   });
   const cfg = await readProjectConfig(project);
-  refuseRemoteStart(cfg, "hack restart");
+  refuseRemoteStart(cfg.prerequisites?.config?.selected, "hack restart");
   if (
     !(await enforceProjectPrerequisites(
       cfg.prerequisites,
@@ -11375,28 +11360,15 @@ async function handlePs({
   // lag behind a failed startup. Both formats must observe the same containers.
   // A failed or unparsable read throws a coded error with the engine's cause
   // (envelope under --json, one line otherwise); see compose-ps-result.ts.
-  const { choices, env, rows } = await runtimeRemoteEnv({
-    project,
-    cfg,
-    baseProjectName,
-    branch,
-    quiet: true,
-  });
   const read = await readComposePs({
-    redactValues: env && Object.values(env),
-    run: async () => {
-      const result = await composeRuntimeBackend.psJson({
+    run: () =>
+      composeRuntimeBackend.psJson({
         composeFiles: [project.composeFile],
         composeProject: composeProjectName,
         profiles,
-        env,
         cwd,
         all: true,
-      });
-      return result.exitCode !== 0 && rows?.length
-        ? { ...result, exitCode: 0, stdout: JSON.stringify(remotePsRows(rows)) }
-        : result;
-    },
+      }),
   });
   if (!read.ok) {
     if (!json && read.error.code === "E_DOCKER_UNAVAILABLE") {
@@ -11439,7 +11411,10 @@ async function handlePs({
     }),
     entries,
   });
-  const remotes = remoteRuntimeStatuses(cfg, choices);
+  const remotes = projectRemoteStatuses(
+    cfg.prerequisites?.config?.selected,
+    await observedRemoteChoices(project, cfg, composeProjectName, entries)
+  );
   if (json) {
     const payload = {
       project: baseProjectName,
@@ -11614,7 +11589,7 @@ async function handleRun({
   const cmdArgs = args.positionals.cmd;
 
   const cfg = await readProjectConfig(project);
-  refuseRemoteStart(cfg, "hack run");
+  refuseRemoteStart(cfg.prerequisites?.config?.selected, "hack run");
   if (
     !(await enforceProjectPrerequisites(
       cfg.prerequisites,
@@ -11980,7 +11955,7 @@ async function handleExec({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
   });
-  const managedOverrides = await resolveComposeEnvOverrides({
+  const envOverrides = await resolveComposeEnvOverrides({
     project,
     projectName,
     targetServices: [service],
@@ -11988,26 +11963,15 @@ async function handleExec({
     envName,
     persist: false,
   });
-  const { env, bindingsMissing, recover } = await runtimeRemoteEnv(
-    { project, cfg, baseProjectName, branch },
-    envName
-  );
-  const recovery = bindingsMissing ? await recover?.() : undefined;
-  const envOverrides = {
-    ...managedOverrides,
-    env: { ...managedOverrides.env, ...env },
-  };
-  const composeFilesWithEnv = recovery
-    ? [recovery.path]
-    : [
-        ...composeFilesWithInternal,
-        ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
-        ...envOverrides.composeFiles,
-      ];
+  const composeFilesWithEnv = [
+    ...composeFilesWithInternal,
+    ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
+    ...envOverrides.composeFiles,
+  ];
   const readiness = {
     composeFiles: composeFilesWithEnv,
     composeProjectKey: lifecycleComposeProject,
-    composeProject: recovery?.name ?? composeProjectName,
+    composeProject: composeProjectName,
     project,
     profiles,
     effectiveEnvName: envOverrides.effectiveEnvName,
@@ -12029,7 +11993,7 @@ async function handleExec({
 
   const execOptions = {
     composeFiles: composeFilesWithEnv,
-    composeProject: recovery?.name ?? composeProjectName,
+    composeProject: composeProjectName,
     profiles,
     service,
     workdir: workdir.length > 0 ? workdir : undefined,

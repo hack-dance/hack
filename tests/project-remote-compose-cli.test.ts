@@ -9,30 +9,29 @@ const root = resolve(import.meta.dir, "..");
 const neutralityBase =
   process.env.HACK_NEUTRALITY_BASE_SHA ??
   "3f2f00e1b8b2bb0fe26cadf47369dbc75e693001";
+const requiredInterpolation = /\$\{([A-Za-z_][A-Za-z0-9_]*):?\?[^}]*\}/g;
 const fixtureEngine = `#!${process.execPath}
 import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import YAML from ${JSON.stringify(resolve(root, "node_modules/yaml/dist/index.js"))};
 const argv = Bun.argv.slice(2);
 const control = join(dirname(dirname(Bun.argv[1])), "control");
-const foreign = readFileSync(join(control, "peer"), "utf8");
 const state = control + "/engine.json";
 const files = argv.flatMap((arg, i) => arg === "-f" ? [argv[i+1]] : []);
 const generated = files.filter((file) => file.includes("/.internal/") || file.includes("/.branch/"))
   .map((file) => existsSync(file) ? readFileSync(file, "utf8") : null);
 appendFileSync(control + "/calls", JSON.stringify({argv, envNames: Object.keys(process.env).sort(), fixtureEnv: process.env.EXAMPLE ?? null, generated}) + "\\n");
 const command = ["up", "down", "exec", "run", "logs", "ps", "config"].find((name) => argv.includes(name));
-const requiresRemote = files.some((file) => existsSync(file) && readFileSync(file, "utf8").includes("DB_HOST:?required"));
-if (requiresRemote && ["up", "down", "config"].includes(command) && !process.env.DB_HOST) {
-  console.error("required interpolation unavailable");
+const required = files.flatMap((file) => existsSync(file)
+  ? [...readFileSync(file, "utf8").matchAll(${requiredInterpolation})]
+  : []).find((match) => !process.env[match[1]]);
+if (required) {
+  console.error("required variable " + required[1] + " is missing a value: required");
   process.exit(1);
 }
 const row = existsSync(state) ? JSON.parse(readFileSync(state, "utf8")) : null;
 if (argv.includes("version")) { console.log("2.24.4"); }
 else if (argv[0] === "network" && argv.includes("inspect")) { console.log("[]"); }
-else if (argv[0] === "network" && argv.includes("ls") && row) {
-  console.log(JSON.stringify({ Name: "remote-fixture_default", Labels: "com.docker.compose.project=remote-fixture,com.docker.compose.network=default" }));
-}
 else if (command === "config") {
   console.log(argv.includes("--services") ? "api" : JSON.stringify({ services: {api: {image: "alpine"}} }));
 } else if (command === "up") {
@@ -47,14 +46,9 @@ else if (command === "config") {
 } else if (command === "ps") {
   if (process.env.TEST_FAIL_PS === "1") process.exit(19);
   if (row) console.log(JSON.stringify(row));
-  if (foreign && argv.some((arg) => arg.startsWith("label=com.docker.compose.project="))) {
-    console.log(JSON.stringify({ ...row, ID: "b".repeat(64), Labels: "com.docker.compose.project=remote-fixture,com.docker.compose.service=foreign" + (foreign === "oneoff" ? ",com.docker.compose.oneoff=True" : "") }));
-  }
 } else if (command === "down") {
   if (process.env.TEST_FAIL_DOWN === "1") process.exit(19);
-  const recovery = files.find((file) => file.includes("/compose.remote-recovery."));
-  const networks = recovery ? JSON.parse(readFileSync(recovery, "utf8")).networks : null;
-  appendFileSync(control + "/down", JSON.stringify({networks, db: process.env.DB_HOST ?? null, daemon: process.env.DOCKER_HOST, profiles: process.env.COMPOSE_PROFILES, files}) + "\\n");
+  appendFileSync(control + "/down", JSON.stringify({db: process.env.DB_HOST ?? null, daemon: process.env.DOCKER_HOST, files}) + "\\n");
   rmSync(state, {force: true});
 }
 `;
@@ -107,7 +101,6 @@ async function fixture() {
     extra?: Record<string, string>,
     cwd = repo
   ) => {
-    await Bun.write(join(control, "peer"), extra?.TEST_FOREIGN_PEER ?? "");
     const child = Bun.spawn(
       [process.execPath, join(cliRoot, "index.ts"), ...args],
       {
@@ -268,24 +261,27 @@ test.skipIf(!base)(
   120_000
 );
 
-test("teardown after a crash preserves the observed target and tolerates missing interpolation", async () => {
+test("up requires optional remote interpolation and down binds hooks from the started target", async () => {
   const f = await fixture();
   try {
-    const remote = {
-      default: "y",
-      env: { DB_HOST: "{host}" },
-      targets: {
-        x: { hostname: { env_ref: "X_HOST" }, port: 5432 },
-        y: { hostname: "other.example.test", port: 5432 },
-      },
-    };
-    const configure = async (deleted: boolean, changed = false) => {
-      await f.configure({
+    const composeFile = join(f.project, "docker-compose.yml");
+    const compose = (operator: string, key = "DB_HOST") =>
+      Bun.write(
+        composeFile,
+        `name: remote-fixture\nservices:\n  api:\n    image: alpine\n    environment: ["DB_HOST=\${${key}${operator}}"]\n`
+      );
+    const configure = (target: string) =>
+      f.configure({
         min_cli_version: HACK_VERSION,
         remotes: {
-          db: deleted
-            ? { ...remote, targets: { y: remote.targets.y } }
-            : { ...remote, default: changed ? "y" : "x" },
+          db: {
+            default: target,
+            env: { DB_HOST: "{host}" },
+            targets: {
+              x: { hostname: "live.example.test", port: 5432 },
+              y: { hostname: "other.example.test", port: 5432 },
+            },
+          },
         },
         lifecycle: {
           down: {
@@ -293,132 +289,73 @@ test("teardown after a crash preserves the observed target and tolerates missing
               {
                 name: "remote",
                 command:
-                  'printf "%s\\n" "${DB_HOST:-absent}" > "$TEST_CONTROL/hook"; if [ "${TEST_STOP_AFTER_HOOK:-}" = 1 ]; then exit 17; fi',
+                  'printf "%s\\n" "${DB_HOST:-absent}" > "$TEST_CONTROL/hook"',
               },
             ],
           },
         },
       });
-      await Bun.write(
-        join(f.project, "docker-compose.yml"),
-        'name: remote-fixture\nservices:\n  api:\n    image: alpine\n    environment: ["DB_HOST=${DB_HOST:?required}"]\n'
+    await configure("x");
+    for (const operator of [":?required", "?required"]) {
+      await compose(operator);
+      await Bun.write(join(f.control, "calls"), "");
+      const refused = await f.cli(["up", "-d"]);
+      expect(refused.code).not.toBe(0);
+      expect(refused.stderr).toContain(
+        "Compose requires remote binding DB_HOST"
       );
-    };
-    const envFile = join(f.project, "hack.env.default.yaml");
-    for (const mode of [
-      "running",
-      "deleted",
-      "missing",
-      "removed",
-      "renamed",
-    ] as const) {
-      await configure(false);
-      await Bun.write(
-        envFile,
-        "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global:\n    X_HOST: live.example.test\n    DOCKER_HOST: tcp://fake-daemon:2375\n    COMPOSE_PROFILES: test\n"
-      );
-      const start = await f.cli(["up", "-d", "--use", "db=x"]);
-      expect(start.code, start.stdout + start.stderr).toBe(0);
-      await rm(join(f.project, ".internal", "runtime-state.json"), {
-        force: true,
-      });
-      await configure(mode === "deleted", true);
-      await Bun.write(join(f.project, ".internal", "use.json"), '{"db":"y"}\n');
-      if (mode === "missing") {
-        await Bun.write(
-          envFile,
-          "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global:\n    DOCKER_HOST: tcp://fake-daemon:2375\n    COMPOSE_PROFILES: test\n"
-        );
-      }
-      if (mode === "removed") {
-        await Bun.write(
-          join(f.project, "hack.config.json"),
-          JSON.stringify({
-            name: "remote-fixture",
-            lifecycle: {
-              down: {
-                before: [
-                  {
-                    name: "remote",
-                    command:
-                      'printf "%s\\n" "${DB_HOST:-absent}" > "$TEST_CONTROL/hook"',
-                  },
-                ],
-              },
-            },
-          })
-        );
-      }
-      if (mode === "renamed") {
-        const config = Bun.file(join(f.project, "hack.config.json"));
-        const text = await config.text();
-        await Bun.write(config, text.replace('"DB_HOST"', '"NEW_DB_HOST"'));
-      }
-      if (mode === "running" || mode === "deleted") {
-        const status = await f.cli(["ps", "--json"]);
-        expect(status.code, status.stderr).toBe(0);
-        const { remotes } = JSON.parse(status.stdout);
-        expect(remotes[0].target).toBe(mode === "running" ? "x" : "unknown");
-        expect(status.stdout).not.toContain("live.example.test");
-        expect(status.stderr).toBe("");
-      }
-      if (mode !== "removed") {
-        for (const args of [
-          ["restart"],
-          ["restart", "api"],
-          ["up", "-d", "api"],
-          ["run", "api", "true"],
-        ]) {
-          await Bun.write(join(f.control, "calls"), "");
-          const refused = await f.cli(args);
-          expect(refused.code).not.toBe(0);
-          expect(refused.stderr).toContain("E_REMOTE_START_UNSUPPORTED");
-          expect(refused.stderr).toContain("hack up --detach");
-          expect(await Bun.file(join(f.control, "calls")).text()).toBe("");
-        }
-      }
-      if (mode === "missing") {
-        const refused = await f.cli(["down"], root, {
-          TEST_FOREIGN_PEER: "1",
-        });
-        expect(refused.code).not.toBe(0);
-        expect(await Bun.file(join(f.control, "engine.json")).exists()).toBe(
-          true
-        );
-      }
-      await Bun.write(join(f.control, "down"), "");
-      const result = await f.cli(["down"], root, {
-        TEST_FOREIGN_PEER: "oneoff",
-      });
-      expect(result.code, result.stdout + result.stderr).toBe(0);
-      expect(await Bun.file(join(f.control, "hook")).text()).toBe(
-        mode === "running" ? "live.example.test\n" : "absent\n"
-      );
-      const teardown = JSON.parse(
-        (await Bun.file(join(f.control, "down")).text()).trim()
-      );
-      expect(teardown.daemon).toBe("tcp://fake-daemon:2375");
-      expect(teardown.profiles).toBe("test");
-      expect(teardown.db).toBe(mode === "running" ? "live.example.test" : null);
-      if (mode !== "running") {
-        expect(teardown.networks).toEqual({
-          default: { name: "remote-fixture_default" },
-        });
-        expect(teardown.files).toHaveLength(1);
-        expect(teardown.files[0]).toMatch(
-          /compose\.remote-recovery\.[0-9a-f]{64}\.json$/
-        );
-      }
+      expect(refused.stderr).toContain("${DB_HOST:-}");
       expect(await Bun.file(join(f.control, "engine.json")).exists()).toBe(
         false
       );
-      const repeated = await f.cli(["down"]);
-      expect(repeated.code, repeated.stderr).not.toBe(0);
-      const failedStatus = await f.cli(["ps", "--json"], root, {
-        TEST_FAIL_PS: "1",
-      });
-      expect(failedStatus.code).toBe(1);
     }
+    await compose(":-");
+    const start = await f.cli(["up", "-d", "--use", "db=x"]);
+    expect(start.code, start.stdout + start.stderr).toBe(0);
+    await rm(join(f.project, ".internal", "runtime-state.json"), {
+      force: true,
+    });
+    await configure("y");
+    await compose(":-");
+    await Bun.write(join(f.project, ".internal", "use.json"), '{"db":"y"}\n');
+    const status = await f.cli(["ps", "--json"]);
+    expect(status.code, status.stderr).toBe(0);
+    expect(JSON.parse(status.stdout).remotes[0].target).toBe("x");
+    for (const args of [
+      ["restart"],
+      ["restart", "api"],
+      ["up", "-d", "api"],
+      ["run", "api", "true"],
+    ]) {
+      await Bun.write(join(f.control, "calls"), "");
+      const refused = await f.cli(args);
+      expect(refused.code).not.toBe(0);
+      expect(refused.stderr).toContain("E_REMOTE_START_UNSUPPORTED");
+      expect(await Bun.file(join(f.control, "calls")).text()).toBe("");
+    }
+    for (const args of [["logs"], ["exec", "api", "true"]]) {
+      const result = await f.cli(args);
+      expect(result.code, result.stderr).toBe(0);
+    }
+    await compose(":?required");
+    const laterEdit = await f.cli(["down"]);
+    expect(laterEdit.code).not.toBe(0);
+    expect(await Bun.file(join(f.control, "engine.json")).exists()).toBe(true);
+    await compose(":-");
+    const down = await f.cli(["down"]);
+    expect(down.code, down.stdout + down.stderr).toBe(0);
+    expect(await Bun.file(join(f.control, "hook")).text()).toBe(
+      "live.example.test\n"
+    );
+    expect(
+      JSON.parse((await Bun.file(join(f.control, "down")).text()).trim())
+    ).toMatchObject({
+      db: null,
+      files: [composeFile],
+    });
+    const stopped = await f.cli(["ps", "--json"]);
+    expect(stopped.code, stopped.stderr).toBe(0);
+    expect(JSON.parse(stopped.stdout).remotes[0].target).toBe("unknown");
   } finally {
     await rm(f.path, { recursive: true });
   }

@@ -68,7 +68,7 @@ export function writeUpHookBlocker(
   phase: "before" | "after",
   exitCode: number,
   name: string | undefined,
-  command: string,
+  command: string | undefined,
   reason?: string
 ): void {
   writeStartBlocker({

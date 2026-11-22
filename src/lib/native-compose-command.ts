@@ -157,7 +157,10 @@ import {
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import { renderNativeEnvironmentNameError } from "./native-environment-name-error.ts";
 import { nativeFilePlanningRequired } from "./native-file-plan-protocol.ts";
-import { scopedHackCommand } from "./printed-shell-command.ts";
+import {
+  canPrintProjectSelector,
+  scopedHackCommand,
+} from "./printed-shell-command.ts";
 import type { serializeProjectAutostart } from "./project-views.ts";
 import { run } from "./shell.ts";
 
@@ -2346,7 +2349,10 @@ function assertSelectedWorkloads(inputs: AcquiredComposeInputs): void {
 function nativeComposeHookCommand(
   action: "ps" | "up",
   options: NativeComposeCommandOptions
-): string {
+): string | undefined {
+  if (!canPrintProjectSelector(options.project)) {
+    return;
+  }
   const flags: string[] = [];
   if (action === "up") {
     if (options.detach) {

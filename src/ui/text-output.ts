@@ -181,20 +181,16 @@ export function createTextOutput({
       /** Optional fourth line, printed only when stdout is a TTY. */
       readonly prompt?: string;
     }): void {
+      if (input.command !== undefined) {
+        requireCommand(input.command);
+      }
       const which = input.which ? ` (${singleLine(input.which)})` : "";
       writeRenderedLine(
         `${paint("!", "attention")} ${singleLine(input.thing)}  ${singleLine(input.problem)}${which}`
       );
       if (input.command !== undefined) {
-        if (
-          input.command.trim() &&
-          singleLine(input.command) === input.command
-        ) {
-          line(`  ${input.needs}. run:`);
-          line(`  ${input.command}`);
-        } else {
-          line("  recovery command could not be printed on one line", "faint");
-        }
+        line(`  ${input.needs}. run:`);
+        line(`  ${input.command}`);
       }
       if (tty && input.prompt) {
         line(`  ${input.prompt}`, "faint");

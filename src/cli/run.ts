@@ -30,7 +30,10 @@ import {
 import { resolveRequestedEnvName } from "./env-selection.ts";
 import { printHelpForPath } from "./help.ts";
 import { optEnv, optProject } from "./options.ts";
-import { parseProjectSelectorOption } from "./project-selector.ts";
+import {
+  parseProjectSelectorOption,
+  unknownProjectMessage,
+} from "./project-selector.ts";
 import { CLI_SPEC } from "./spec.ts";
 
 function isTruthyEnv(value: string | undefined): boolean {
@@ -281,6 +284,7 @@ export async function handleRunCliError(opts: {
       opts.handlerPath?.[0] === "up"
         ? (error.startBlocker ??
           selectedProjectBlocker(error, opts.startSelector) ??
+          nativeHookFailureBlocker(error) ??
           startRefusalBlocker(error.code))
         : undefined;
     if (blocker) {
@@ -328,11 +332,17 @@ function selectedProjectBlocker(
     return;
   }
   if (selection?.project !== undefined) {
+    const selector = parseProjectSelectorOption({
+      projectOpt: selection.project,
+    });
+    if (!selector.canonical) {
+      return { thing: "project", problem: unknownProjectMessage(selector) };
+    }
     return {
       thing: "project",
       problem:
         "selected project not registered · use a registered project name",
-      which: JSON.stringify(selection.project),
+      which: JSON.stringify(selector.name),
     };
   }
   if (selection?.path !== undefined) {
@@ -342,6 +352,19 @@ function selectedProjectBlocker(
         "no project found at the selected path · use a configured project path",
       which: JSON.stringify(selection.path),
     };
+  }
+}
+
+// The detached owner relays the same closed error as foreground startup.
+const NATIVE_BEFORE_HOOK_FAILURE =
+  /^Lifecycle \(native up before\) failed \(exit \d+\); values omitted\.$/;
+
+function nativeHookFailureBlocker(error: HackCliError) {
+  if (
+    error.code === "E_LIFECYCLE_FAILED" &&
+    NATIVE_BEFORE_HOOK_FAILURE.test(error.message)
+  ) {
+    return { thing: "lifecycle", problem: `${error.code}: ${error.message}` };
   }
 }
 

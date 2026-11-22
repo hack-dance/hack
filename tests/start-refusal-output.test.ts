@@ -4,6 +4,8 @@ import { HackCliError } from "../src/lib/cli-result.ts";
 import { printedShellCommand } from "../src/lib/printed-shell-command.ts";
 import { writeUpHookBlocker } from "../src/ui/start-refusal-output.ts";
 
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
+
 const cases = [
   [
     "E_LIFECYCLE_FAILED",
@@ -129,7 +131,9 @@ test.each([
 ])("printed recovery values round-trip through POSIX sh: %j", (value) => {
   const command = printedShellCommand(["printf", "%s", value]);
   expect(command).not.toContain("\n");
-  const result = Bun.spawnSync(["/bin/sh", "-c", command], { stdout: "pipe" });
+  const result = spawnSyncBounded(["/bin/sh", "-c", command], {
+    stdout: "pipe",
+  });
   expect(result.exitCode).toBe(0);
   expect(result.stdout.toString()).toBe(value);
 });

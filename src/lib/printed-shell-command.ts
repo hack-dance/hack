@@ -1,5 +1,6 @@
 import { currentCandidateLauncher } from "./candidate-launcher.ts";
 import { quoteShellWord } from "./logs.ts";
+import { PROJECT_NAME_PATTERN } from "./project-name.ts";
 
 const SHELL_LINE_CONTROLS = /[\p{Cc}\u2028\u2029]/u;
 
@@ -34,4 +35,9 @@ export function scopedHackCommand(
     }
   }
   return printedShellCommand([...argv, ...rest]);
+}
+
+/** Only canonical spellings of project selectors may appear in refusal text. */
+export function canPrintProjectSelector(project: string | undefined): boolean {
+  return project === undefined || PROJECT_NAME_PATTERN.test(project.trim());
 }

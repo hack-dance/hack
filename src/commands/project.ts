@@ -13,6 +13,7 @@ import { resolveLifecycleRunner } from "../lib/lifecycle-runner.ts";
 import { preflightLifecycleSupervisor } from "../lib/lifecycle-supervisor.ts";
 import { childStdoutTarget } from "../lib/machine-stdout.ts";
 import {
+  canPrintProjectSelector,
   printedShellCommand,
   scopedHackCommand,
 } from "../lib/printed-shell-command.ts";
@@ -7887,7 +7888,9 @@ async function runUpCommand({
     });
   let failedHook: string | undefined;
   let failedHookReason: string | undefined;
-  const retryCommand = printedUpRetry(args.raw.argv);
+  const retryCommand = canPrintProjectSelector(args.options.project)
+    ? printedUpRetry(args.raw.argv)
+    : undefined;
   const summarizeFailure = json
     ? undefined
     : (name: string, reason?: string) => {
@@ -7950,7 +7953,6 @@ async function runUpCommand({
     writeStartBlocker({
       thing: "lifecycle",
       problem: "setup failed",
-      which: message,
       needs: "resolve the setup failure and retry this start",
       command: retryCommand,
     });

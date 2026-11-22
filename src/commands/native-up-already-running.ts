@@ -18,7 +18,10 @@ import { getString, isRecord } from "../lib/guards.ts";
 import { resolveLifecycleComposeProjectName } from "../lib/lifecycle-runtime.ts";
 import { quoteShellWord } from "../lib/logs.ts";
 import { readNativeComposeDocument } from "../lib/native-compose-backend-features.ts";
-import { scopedHackCommand } from "../lib/printed-shell-command.ts";
+import {
+  canPrintProjectSelector,
+  scopedHackCommand,
+} from "../lib/printed-shell-command.ts";
 import { type ProjectContext, readProjectConfig } from "../lib/project.ts";
 
 /**
@@ -320,11 +323,9 @@ export async function answerNativeAlreadyRunning(opts: {
         thing: "project",
         problem: "already running with a different or unknown selection",
         needs: "this start needs the running instance stopped first",
-        command: nativeScopedCommand({
-          action: "down",
-          selection,
-          singleLine: true,
-        }),
+        command: canPrintProjectSelector(selection.project)
+          ? nativeScopedCommand({ action: "down", selection, singleLine: true })
+          : undefined,
       },
     });
   }

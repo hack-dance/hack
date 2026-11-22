@@ -334,6 +334,14 @@ function stoppedRuntimeStartup(
   return new HackCliError({
     code: "E_DOCKER_UNAVAILABLE",
     message,
+    startBlocker: {
+      thing: "native runtime",
+      problem: "not running",
+      which:
+        error.outcome === "retained" ? "startup evidence retained" : undefined,
+      needs: "this start needs a working native runtime",
+      command: "hack doctor",
+    },
     detail: {
       outcome: error.outcome,
       canceled: error.canceled,

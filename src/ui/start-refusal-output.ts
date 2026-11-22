@@ -58,12 +58,12 @@ export function startRefusalBlocker(
 
 export function writeUpHookBlocker(
   phase: "before" | "after",
-  exitCode?: number
+  exitCode: number
 ): void {
   writeStartBlocker({
     thing: "lifecycle",
     problem: "hook failed",
-    which: exitCode === undefined ? phase : `${phase}, exit ${exitCode}`,
+    which: `${phase}, exit ${exitCode}`,
     needs: "fix the failing hook and retry this start",
     command: "hack up",
   });

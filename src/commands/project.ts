@@ -26,7 +26,10 @@ import {
   stopLifecycleProcessController,
   wrapLifecyclePersistentCommand as wrapSharedLifecyclePersistentCommand,
 } from "../lib/project-lifecycle-controller.ts";
-import { writeUpHookBlocker } from "../ui/start-refusal-output.ts";
+import {
+  writeStartBlocker,
+  writeUpHookBlocker,
+} from "../ui/start-refusal-output.ts";
 
 export function wrapLifecyclePersistentCommand(
   opts: Parameters<typeof wrapSharedLifecyclePersistentCommand>[0]
@@ -7667,7 +7670,13 @@ async function runUpCommand({
         exitCode: 1,
       });
     }
-    writeUpHookBlocker("before");
+    writeStartBlocker({
+      thing: "lifecycle",
+      problem: "setup failed",
+      which: message,
+      needs: "resolve the setup failure and retry this start",
+      command: "hack up",
+    });
     return 1;
   }
 

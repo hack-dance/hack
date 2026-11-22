@@ -22,6 +22,17 @@ fn replaced_alias() -> CandidateError {
     CandidateError::new("foreign_state", "Short provider HOME alias was replaced.")
 }
 
+fn alias_creation_error(error: std::io::Error, message: &'static str) -> CandidateError {
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        CandidateError::new(
+            "temp_alias_sweep_busy",
+            "Timed out waiting for the temporary HOME alias sweep to release its lease.",
+        )
+    } else {
+        CandidateError::new("socket_alias_collision", message)
+    }
+}
+
 pub fn private_directory(path: &Path) -> Result<(), CandidateError> {
     reject_aliased_state(path)?;
     fs::DirBuilder::new()
@@ -622,9 +633,9 @@ impl Owner {
                         return Ok(());
                     }
                 }
-                Err(_) => {
-                    return Err(CandidateError::new(
-                        "socket_alias_collision",
+                Err(error) => {
+                    return Err(alias_creation_error(
+                        error,
                         "Cannot exclusively restore provider HOME alias; no existing path was replaced.",
                     ));
                 }
@@ -653,7 +664,12 @@ impl Owner {
             match super::temp_aliases::create_link(&self.home(candidate), &self.short_home) {
                 Ok(()) => return self.check_short_home(candidate, false),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(io(error)),
+                Err(error) => {
+                    return Err(alias_creation_error(
+                        error,
+                        "Cannot exclusively create a fresh provider HOME alias; receipt retained.",
+                    ));
+                }
             }
         }
         Err(CandidateError::new(
@@ -714,12 +730,10 @@ impl Owner {
                 "Provider owner changed during HOME recovery; no alias was restored.",
             ));
         }
-        super::temp_aliases::create_link(&self.home(candidate), &self.short_home).map_err(|_| {
-            CandidateError::new(
-                "socket_alias_collision",
-                "Cannot exclusively restore provider HOME alias; no existing path was replaced.",
-            )
-        })?;
+        super::temp_aliases::create_link(&self.home(candidate), &self.short_home).map_err(|error| alias_creation_error(
+            error,
+            "Cannot exclusively restore provider HOME alias; no existing path was replaced.",
+        ))?;
         self.check_short_home(candidate, false)
     }
 
@@ -818,12 +832,10 @@ impl Owner {
         };
         // Persist the intended alias before its first external effect. Collisions are never adopted.
         owner.save(candidate)?;
-        super::temp_aliases::create_link(&root.join("home"), &owner.short_home).map_err(|_| {
-            CandidateError::new(
-                "socket_alias_collision",
-                "Cannot exclusively create short provider alias; receipt retained for inspection.",
-            )
-        })?;
+        super::temp_aliases::create_link(&root.join("home"), &owner.short_home).map_err(|error| alias_creation_error(
+            error,
+            "Cannot exclusively create short provider alias; receipt retained for inspection.",
+        ))?;
         if owner
             .data_dir()
             .join("agent.sock")

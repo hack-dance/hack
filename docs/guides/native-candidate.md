@@ -796,10 +796,14 @@ that have been unchanged for at least five minutes. `hack native temp-aliases` l
 eligible names. Add `--fix` to remove them, or use `hack doctor --fix` where the native
 runtime is installed. Ordinary doctor lists the candidates. The scan stops at its time
 or entry limit and reports an incomplete scan when it cannot finish. Fix scans
-resume from the previous batch. Updating the link's timestamp with `touch -h`
+resume from the previous batch, although repeated listing timeouts can still
+leave some entries unseen. A later fix also recovers entries moved aside by an
+interrupted sweep. Updating the link's timestamp with `touch -h`
 extends its retention.
 
-Doctor and `hack native temp-aliases` list ambiguous volume entries as
+Automatic cleanup requires the recorded native home path to lie under the user's
+home or the host temporary root. Doctor and `hack native temp-aliases` list other
+paths as
 “cannot tell (volume not mounted, or home deleted).” The automatic sweep and
 `doctor --fix` keep these entries. After checking the volume yourself,
 add `--include-unverified-volumes` to either command with `--fix` to include them.

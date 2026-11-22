@@ -90,12 +90,7 @@ mod unix {
             let parent = directory.metadata()?;
             let mut lease = lock(&directory, uid)?;
             let mut report = Report::default();
-            let user_home = std::env::var_os("HOME").and_then(|home| fs::canonicalize(home).ok());
-            let home_device = user_home
-                .as_ref()
-                .and_then(|home| fs::metadata(home).ok())
-                .map(|info| info.dev());
-            let devices = [Some(parent.dev()), home_device];
+            let user_home = std::env::var_os("HOME").map(PathBuf::from);
             let system_temp = fs::canonicalize(std::env::temp_dir()).ok();
             let trusted = [Some(root), user_home.as_deref(), system_temp.as_deref()];
             let previous = if fix {
@@ -105,7 +100,9 @@ mod unix {
             };
             // A partial listing must still leave time to inspect candidates
             // and save progress under the original end-to-end deadline.
+            // A consistently slow directory can hide the same suffix on each scan.
             let mut names = BTreeSet::new();
+            let mut quarantines = Vec::new();
             let mut more = false;
             for entry in fs::read_dir(root)? {
                 if started.elapsed() >= ENUMERATION_BUDGET {
@@ -117,16 +114,41 @@ mod unix {
                     continue;
                 };
                 let name = entry.file_name();
-                let Some(name) = name.to_str().filter(|name| alias_name(name)) else {
+                let Some(name) = name.to_str() else {
                     continue;
                 };
-                if name <= previous.as_str() {
+                if name.starts_with(".hack-alias-check-") {
+                    if quarantine_name(name).is_some() && quarantines.len() < MAX_CANDIDATES {
+                        quarantines.push(name.to_owned());
+                    } else {
+                        report.incomplete = true;
+                    }
+                    continue;
+                }
+                if !alias_name(name) || name <= previous.as_str() {
                     continue;
                 }
                 names.insert(name.to_owned());
                 if names.len() > MAX_ENTRIES {
                     names.pop_last();
                     more = true;
+                }
+            }
+            for name in quarantines {
+                if !fix
+                    || started.elapsed() >= BUDGET
+                    || recover_quarantine(
+                        root,
+                        &directory,
+                        &name,
+                        uid,
+                        &trusted,
+                        include_unverified_volumes,
+                        started,
+                    )
+                    .is_err()
+                {
+                    report.incomplete = true;
                 }
             }
             let mut last = previous;
@@ -139,7 +161,7 @@ mod unix {
                 }
                 last.clone_from(&name);
                 let path = root.join(&name);
-                let alias = match orphan(&path, uid, now, &devices, &trusted) {
+                let alias = match orphan(&path, uid, now, &trusted) {
                     Ok(Some(candidate)) => candidate,
                     Ok(None) => continue,
                     Err(_) => {
@@ -156,7 +178,7 @@ mod unix {
                     continue;
                 }
                 if same_parent(root, &parent)
-                    && matches!(orphan(&path, uid, now, &devices, &trusted), Ok(Some(current)) if current == alias)
+                    && matches!(orphan(&path, uid, now, &trusted), Ok(Some(current)) if current == alias)
                     && started.elapsed() < BUDGET
                     && remove_checked(
                         root,
@@ -165,7 +187,7 @@ mod unix {
                         &alias,
                         || {},
                         || {
-                            volume_uncertain(&alias.target, &devices, &trusted)
+                            volume_uncertain(&alias.target, &trusted)
                                 .is_ok_and(|risk| risk == Some(alias.uncertain_volume))
                                 && started.elapsed() < BUDGET
                         },
@@ -227,9 +249,15 @@ mod unix {
             match lock(&directory, uid) {
                 Err(error)
                     if error.kind() == io::ErrorKind::WouldBlock
-                        && started.elapsed() < Duration::from_secs(1) =>
+                        && started.elapsed() < Duration::from_secs(10) =>
                 {
                     std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Timed out waiting for the temporary HOME alias sweep to release its lease.",
+                    ));
                 }
                 result => return result,
             }
@@ -327,7 +355,12 @@ mod unix {
         use std::os::unix::{ffi::OsStrExt, fs::DirBuilderExt};
         let mut random = [0; 12];
         File::open("/dev/urandom")?.read_exact(&mut random)?;
-        let quarantine = root.join(format!(".hack-alias-check-{:x}", crate::Hex(random)));
+        let quarantine = root.join(quarantine_label(
+            name,
+            alias.identity,
+            alias.modified,
+            random,
+        )?);
         fs::DirBuilder::new().mode(0o700).create(&quarantine)?;
         let result = (|| {
             let stage = open_directory(&quarantine)?;
@@ -377,6 +410,107 @@ mod unix {
         result
     }
 
+    fn quarantine_label(
+        alias: &str,
+        identity: (u64, u64),
+        modified: SystemTime,
+        random: [u8; 12],
+    ) -> io::Result<String> {
+        let (device, inode) = identity;
+        let age = modified
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(io::Error::other)?;
+        Ok(format!(
+            ".hack-alias-check-{alias}-{device:x}-{inode:x}-{:x}-{:x}-{:x}",
+            age.as_secs(),
+            age.subsec_nanos(),
+            crate::Hex(random)
+        ))
+    }
+
+    fn quarantine_name(value: &str) -> Option<(&str, (u64, u64), SystemTime)> {
+        let mut fields = value.strip_prefix(".hack-alias-check-")?.rsplitn(6, '-');
+        let random = fields.next()?;
+        let nanos = u32::from_str_radix(fields.next()?, 16).ok()?;
+        let seconds = u64::from_str_radix(fields.next()?, 16).ok()?;
+        let inode = u64::from_str_radix(fields.next()?, 16).ok()?;
+        let device = u64::from_str_radix(fields.next()?, 16).ok()?;
+        let alias = fields.next()?;
+        if nanos >= 1_000_000_000
+            || random.len() != 24
+            || !random.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !alias_name(alias)
+        {
+            return None;
+        }
+        let modified = SystemTime::UNIX_EPOCH.checked_add(Duration::new(seconds, nanos))?;
+        Some((alias, (device, inode), modified))
+    }
+
+    /// Resolve a rename left by an interrupted sweep, without overwriting a new alias.
+    fn recover_quarantine(
+        root: &Path,
+        parent: &File,
+        name: &str,
+        uid: u32,
+        trusted: &[Option<&Path>],
+        include_unverified_volumes: bool,
+        started: Instant,
+    ) -> io::Result<()> {
+        let (original, identity, modified) =
+            quarantine_name(name).ok_or(io::ErrorKind::InvalidInput)?;
+        let stage_path = root.join(name);
+        let stage = open_directory(&stage_path)?;
+        let metadata = stage.metadata()?;
+        if metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        let entry = stage_path.join("entry");
+        let info = match fs::symlink_metadata(&entry) {
+            Ok(info) => info,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return fs::remove_dir(&stage_path);
+            }
+            Err(error) => return Err(error),
+        };
+        let remove = if info.is_symlink()
+            && info.uid() == uid
+            && info.nlink() == 1
+            && (info.dev(), info.ino()) == identity
+            && info.modified()? == modified
+        {
+            let target = fs::read_link(&entry)?;
+            target.ends_with(".hack-local/run/smolvm/home")
+                && volume_uncertain(&target, trusted).is_ok_and(|result| {
+                    result.is_some_and(|uncertain| !uncertain || include_unverified_volumes)
+                })
+        } else {
+            false
+        };
+        if started.elapsed() >= BUDGET {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        if remove {
+            let current = fs::symlink_metadata(&entry)?;
+            if (current.dev(), current.ino()) != identity
+                || !current.is_symlink()
+                || current.uid() != uid
+                || current.nlink() != 1
+                || current.modified()? != modified
+            {
+                return Err(io::Error::other("quarantined alias changed"));
+            }
+            // SAFETY: the private stage is open and the entry name is fixed.
+            if unsafe { libc::unlinkat(stage.as_raw_fd(), c"entry".as_ptr(), 0) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        } else {
+            let original = CString::new(original).map_err(io::Error::other)?;
+            rename_exclusive(&stage, c"entry", parent, &original)?;
+        }
+        fs::remove_dir(&stage_path)
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     struct Alias {
         identity: (u64, u64),
@@ -390,7 +524,6 @@ mod unix {
         path: &Path,
         uid: u32,
         now: SystemTime,
-        devices: &[Option<u64>],
         trusted: &[Option<&Path>],
     ) -> io::Result<Option<Alias>> {
         let metadata = match fs::symlink_metadata(path) {
@@ -418,7 +551,7 @@ mod unix {
         if !target.ends_with(".hack-local/run/smolvm/home") {
             return Ok(None);
         }
-        let Some(uncertain_volume) = volume_uncertain(&target, devices, trusted)? else {
+        let Some(uncertain_volume) = volume_uncertain(&target, trusted)? else {
             return Ok(None);
         };
         Ok(Some(Alias {
@@ -430,60 +563,51 @@ mod unix {
         }))
     }
 
-    fn volume_uncertain(
-        target: &Path,
-        devices: &[Option<u64>],
-        trusted: &[Option<&Path>],
-    ) -> io::Result<Option<bool>> {
-        let Some((device, ancestor)) = missing_home_device(target, |part| {
-            fs::symlink_metadata(part).map(|entry| entry.is_dir().then(|| entry.dev()))
-        })?
-        else {
+    fn volume_uncertain(target: &Path, trusted: &[Option<&Path>]) -> io::Result<Option<bool>> {
+        if !home_absent(target, |part| {
+            fs::symlink_metadata(part).map(|entry| entry.is_dir())
+        })? {
             return Ok(None);
-        };
-        // An empty mount point exposes the backing filesystem's device, not
-        // the unmounted device. Keep empty ancestors and unfamiliar paths.
-        let uncertain = !devices.contains(&Some(device))
-            || target.starts_with("/Volumes")
-            || !trusted
-                .iter()
-                .flatten()
-                .any(|root| target.starts_with(root))
-            || fs::read_dir(ancestor)?.next().transpose()?.is_none();
-        Ok(Some(uncertain))
+        }
+        let home = target
+            .ancestors()
+            .nth(4)
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        Ok(Some(!trusted.iter().flatten().any(|root| {
+            root.is_absolute() && *root != Path::new("/") && home.starts_with(root)
+        })))
     }
 
-    /// Return the device of the nearest existing ancestor only if the owning home is
-    /// absent. Refuse links, non-directories and inaccessible components.
-    fn missing_home_device(
+    /// Check the entire path. A symlink, wrong type or inaccessible component
+    /// cannot serve as evidence that a home has disappeared.
+    fn home_absent(
         target: &Path,
-        mut directory: impl FnMut(&Path) -> io::Result<Option<u64>>,
-    ) -> io::Result<Option<(u64, PathBuf)>> {
+        mut directory: impl FnMut(&Path) -> io::Result<bool>,
+    ) -> io::Result<bool> {
         let Some(home) = target.ancestors().nth(4) else {
-            return Ok(None);
+            return Ok(false);
         };
         if !home.is_absolute() || home == Path::new("/") {
-            return Ok(None);
+            return Ok(false);
         }
         let mut path = PathBuf::new();
         let mut missing_home = false;
-        let mut ancestor = None;
         for component in target.components() {
             match component {
                 Component::RootDir => path.push(OsStr::new("/")),
                 Component::Normal(name) => path.push(name),
-                _ => return Ok(None),
+                _ => return Ok(false),
             }
             match directory(&path) {
-                Ok(Some(device)) if !missing_home => ancestor = Some((device, path.clone())),
+                Ok(true) if !missing_home => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     missing_home |= home.starts_with(&path);
                 }
                 Err(error) => return Err(error),
-                Ok(_) => return Ok(None),
+                Ok(_) => return Ok(false),
             }
         }
-        Ok(ancestor.filter(|_| missing_home))
+        Ok(missing_home)
     }
     #[cfg(test)]
     mod tests {
@@ -551,16 +675,9 @@ mod unix {
 
         fn witness(root: &Path, alias: &Path) -> Alias {
             let uid = fs::symlink_metadata(alias).unwrap().uid();
-            let device = fs::metadata(root).unwrap().dev();
-            orphan(
-                alias,
-                uid,
-                SystemTime::now() + MIN_AGE,
-                &[Some(device)],
-                &[Some(root)],
-            )
-            .unwrap()
-            .unwrap()
+            orphan(alias, uid, SystemTime::now() + MIN_AGE, &[Some(root)])
+                .unwrap()
+                .unwrap()
         }
 
         #[test]
@@ -597,11 +714,50 @@ mod unix {
                     || {},
                     || {
                         fs::create_dir_all(&target).unwrap();
-                        volume_uncertain(&target, &[], &[]).unwrap().is_some()
+                        volume_uncertain(&target, &[]).unwrap().is_some()
                     },
                 );
                 assert!(result.is_err());
                 assert_eq!(fs::read_link(&link).unwrap(), target);
+            });
+        }
+
+        #[test]
+        fn next_fix_recovers_an_interrupted_move() {
+            with_root(|root| {
+                let target = root.join("candidate/.hack-local/run/smolvm/home");
+                let name = "hkl-000000000001";
+                let link = root.join(name);
+                for restore in [true, false] {
+                    symlink(&target, &link).unwrap();
+                    let metadata = fs::symlink_metadata(&link).unwrap();
+                    let staged = root.join(
+                        quarantine_label(
+                            name,
+                            (metadata.dev(), metadata.ino()),
+                            metadata.modified().unwrap(),
+                            [0; 12],
+                        )
+                        .unwrap(),
+                    );
+                    std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o700)
+                        .create(&staged)
+                        .unwrap();
+                    fs::rename(&link, staged.join("entry")).unwrap();
+                    if restore {
+                        fs::create_dir_all(&target).unwrap();
+                    }
+                    assert!(scan(root, false, false).incomplete);
+                    assert!(!scan(root, true, false).incomplete);
+                    assert!(!staged.exists());
+                    if restore {
+                        assert_eq!(fs::read_link(&link).unwrap(), target);
+                        fs::remove_file(&link).unwrap();
+                        fs::remove_dir_all(root.join("candidate")).unwrap();
+                    } else {
+                        assert!(!link.is_symlink());
+                    }
+                }
             });
         }
 
@@ -611,13 +767,11 @@ mod unix {
                 let link = root.join("hkl-000000000001");
                 symlink(root.join("missing/.hack-local/run/smolvm/home"), &link).unwrap();
                 let uid = fs::symlink_metadata(&link).unwrap().uid();
-                let device = fs::metadata(root).unwrap().dev();
                 assert!(
                     orphan(
                         &link,
                         uid.wrapping_add(1),
                         SystemTime::now() + MIN_AGE,
-                        &[Some(device)],
                         &[Some(root)]
                     )
                     .unwrap()
@@ -636,21 +790,19 @@ mod unix {
                 let changed = SystemTime::UNIX_EPOCH
                     + Duration::new(metadata.ctime() as u64, metadata.ctime_nsec() as u32);
                 let cutoff = changed.max(metadata.modified().unwrap()) + MIN_AGE;
-                let args = &[Some(metadata.dev())];
                 let trusted = &[Some(root)];
                 assert!(
                     orphan(
                         &link,
                         metadata.uid(),
                         cutoff - Duration::from_nanos(1),
-                        args,
                         trusted
                     )
                     .unwrap()
                     .is_none()
                 );
                 assert!(
-                    orphan(&link, metadata.uid(), cutoff, args, trusted)
+                    orphan(&link, metadata.uid(), cutoff, trusted)
                         .unwrap()
                         .is_some()
                 );
@@ -681,16 +833,15 @@ mod unix {
         }
 
         #[test]
-        fn an_empty_mount_point_needs_an_explicit_override() {
+        fn a_home_outside_known_roots_needs_an_explicit_override() {
             with_root(|root| {
-                let mount = root.join("mount");
-                let target = mount.join("candidate/.hack-local/run/smolvm/home");
-                fs::create_dir_all(&target).unwrap();
                 let name = "hkl-000000000001";
                 let link = root.join(name);
-                symlink(&target, &link).unwrap();
-                fs::rename(&mount, root.join("detached")).unwrap();
-                fs::create_dir(&mount).unwrap();
+                symlink(
+                    "/Volumes/fixture-unmounted/.hack-local/run/smolvm/home",
+                    &link,
+                )
+                .unwrap();
                 let now = SystemTime::now() + MIN_AGE;
                 let automatic = scan_at(root, true, false, now);
                 assert_eq!(automatic.uncertain_volume, [name]);
@@ -698,7 +849,6 @@ mod unix {
                 assert!(link.is_symlink());
                 let explicit = scan_at(root, true, true, now);
                 assert_eq!(explicit.removed, [name]);
-                assert!(root.join("detached/candidate").is_dir());
             });
         }
 
@@ -736,7 +886,7 @@ mod unix {
                     });
                     recv.recv().unwrap();
                     assert_eq!(
-                        recv.recv_timeout(Duration::from_millis(50)),
+                        recv.recv_timeout(Duration::from_millis(1100)),
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout)
                     );
                     assert!(!path.is_symlink());
@@ -750,11 +900,11 @@ mod unix {
         #[test]
         fn access_errors_are_not_absence() {
             let target = Path::new("/fixture/deleted/.hack-local/run/smolvm/home");
-            let error = missing_home_device(target, |part| {
+            let error = home_absent(target, |part| {
                 if part.starts_with("/fixture/deleted") {
                     Err(io::Error::from(io::ErrorKind::PermissionDenied))
                 } else {
-                    Ok(Some(1))
+                    Ok(true)
                 }
             })
             .unwrap_err();

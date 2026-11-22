@@ -507,7 +507,7 @@ pub(super) fn digest(
     now: SystemTime,
     bounds: Bounds,
 ) -> Result<ContextDigest, CandidateError> {
-    let rules = ignore::Rules::parse(ignore);
+    let rules = ignore::Rules::parse(ignore)?;
     let id = context_id(context);
     let mut walk = Walk {
         bounds,
@@ -555,7 +555,7 @@ pub(super) fn digest(
             let text = std::str::from_utf8(&child).ok();
             let (excluded, child_record) = match (&record, text) {
                 (Some(record), Some(text)) => {
-                    let (excluded, child_record) = walk.rules.decide(text, record);
+                    let (excluded, child_record) = walk.rules.decide(text, record)?;
                     (excluded, Some(child_record))
                 }
                 _ => (false, None),
@@ -570,7 +570,10 @@ pub(super) fn digest(
                     mtime,
                 };
                 let enter = if excluded {
-                    let enter = text.is_some_and(|text| walk.rules.may_include_below(text));
+                    let enter = match text {
+                        Some(text) => walk.rules.may_include_below(text)?,
+                        None => false,
+                    };
                     if enter {
                         excluded_directories.insert(child.clone(), entry);
                     }

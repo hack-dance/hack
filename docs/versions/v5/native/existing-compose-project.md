@@ -73,6 +73,14 @@ the runtime. A home that an earlier build set up does not have it yet: `up` and
 ([the image builder](setup.md#the-image-builder)). Each distinct build runs once
 and is shared by the services that use it.
 
+An image is reused while its build inputs are unchanged: the Dockerfile, the ignore
+file, the target, the args, and every file in the build context the ignore file lets
+the build read. Change any of them and the next `up` builds again, also after
+`hack down`; the run's containers are then recreated from the new image and named
+volumes are kept. `hack restart` checks the same inputs before it stops anything: a
+build that fails leaves the current project running, and a rebuilt image is what the
+restarted project runs. Base image tags are looked up at most once a day.
+
 **Host aliases** (`extra_hosts` with `host-gateway`, or `internal.extra_hosts`).
 Native's VM has no route to your machine except through a binding to one host
 listener, so there is no setup-free form. Add a dependency file:

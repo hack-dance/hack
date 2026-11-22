@@ -19,8 +19,51 @@
 //! characters, non-ASCII whitespace, invalid UTF-8, over-long lines, a bare `!`) makes
 //! the whole file exclude nothing for hashing purposes, so the full context is hashed.
 
+//!
+//! ## Bounds
+//!
+//! An ignore file can come from a writable shared source, so the matching work it can
+//! cause is bounded before and during the walk (Docker sets no limits; these are far
+//! above what real projects use, typically a few dozen rules). Over a bound the build
+//! refuses `native_build_ignore_bounds`:
+//!
+//! - at most [`MAX_RULES`] effective rules and [`MAX_PATTERN_TEXT`] bytes of pattern
+//!   text after parsing, checked while parsing, so an oversized file costs no more than
+//!   reading it;
+//! - per pattern at most [`MAX_PATTERN_BYTES`] bytes, [`MAX_SEGMENTS`] path segments
+//!   and [`MAX_WILDCARDS`] wildcard tokens (`*`, `?`, `**`), which bounds the matcher's
+//!   active states and so the cost of one evaluation per path character;
+//! - a walk-wide work budget of [`WORK_BUDGET`] units: one per rule consulted for an
+//!   entry (parent-directory results included) plus one per matcher step (active
+//!   states times path characters, or the compared length for literal patterns).
+//!
+//! Patterns are compiled once; matching reuses one scratch buffer, so it allocates
+//! nothing per rule per entry beyond the per-entry record children inherit.
+
 /// `bufio.Scanner`'s default token limit; a longer line fails Docker's parser.
 const MAX_LINE_BYTES: usize = 64 * 1024;
+/// Effective rules (patterns after parsing) a file may hold.
+pub(super) const MAX_RULES: usize = 4096;
+/// Total pattern text after parsing.
+pub(super) const MAX_PATTERN_TEXT: usize = 256 * 1024;
+/// One pattern's text.
+pub(super) const MAX_PATTERN_BYTES: usize = 1024;
+/// Path segments in one pattern.
+pub(super) const MAX_SEGMENTS: usize = 64;
+/// `*`, `?` and `**` tokens in one pattern.
+pub(super) const MAX_WILDCARDS: usize = 32;
+/// Matching work units one walk may spend. A 200,000-entry context with 300 ordinary
+/// rules spends about 240 million (1,200 per entry), so the bound leaves four times
+/// that; an adversarial file at the rule limit is stopped after it, about 35,000
+/// entries and a few seconds of CPU in a release build.
+pub(super) const WORK_BUDGET: u64 = 1_000_000_000;
+
+fn over_bounds() -> crate::CandidateError {
+    crate::CandidateError::new(
+        "native_build_ignore_bounds",
+        "The build's ignore file has more rules than Hack checks; simplify it.",
+    )
+}
 
 /// Parsed ignore rules. `fallback` is true when the file used syntax this module does
 /// not reproduce; such rules exclude nothing.
@@ -28,6 +71,10 @@ const MAX_LINE_BYTES: usize = 64 * 1024;
 pub(super) struct Rules {
     patterns: Vec<Pattern>,
     pub(super) fallback: bool,
+    /// Work spent so far and the walk's budget (see the module documentation).
+    work: std::cell::Cell<u64>,
+    budget: u64,
+    scratch: std::cell::RefCell<Scratch>,
 }
 
 #[derive(Debug)]
@@ -36,6 +83,19 @@ struct Pattern {
     negated: bool,
     text: String,
     kind: Kind,
+    /// For a `!` pattern without `**`: its segments, compiled once for
+    /// [`Rules::may_include_below`].
+    segments: Vec<Vec<Token>>,
+}
+
+/// Reused matcher state: sparse state sets marked by generation.
+#[derive(Debug, Default)]
+struct Scratch {
+    current: Vec<usize>,
+    next: Vec<usize>,
+    pending: Vec<usize>,
+    mark: Vec<u32>,
+    generation: u32,
 }
 
 /// The four match strategies of `patternmatcher.Pattern.compile`.
@@ -93,26 +153,60 @@ fn clean(path: &str) -> String {
 }
 
 impl Rules {
-    pub(super) fn parse(bytes: &[u8]) -> Self {
-        match parse_patterns(bytes) {
-            Some(patterns) => Self {
-                patterns,
-                fallback: false,
-            },
-            None => Self {
-                patterns: Vec::new(),
-                fallback: true,
-            },
-        }
+    /// Parse ignore bytes. Over a bound (see the module documentation) this refuses
+    /// `native_build_ignore_bounds`; syntax not reproduced here gives rules that
+    /// exclude nothing.
+    pub(super) fn parse(bytes: &[u8]) -> Result<Self, crate::CandidateError> {
+        let (patterns, fallback) = match parse_patterns(bytes)? {
+            Some(patterns) => (patterns, false),
+            None => (Vec::new(), true),
+        };
+        Ok(Self {
+            patterns,
+            fallback,
+            work: std::cell::Cell::new(0),
+            budget: WORK_BUDGET,
+            scratch: std::cell::RefCell::default(),
+        })
     }
 
     pub(super) fn len(&self) -> usize {
         self.patterns.len()
     }
 
+    /// Work spent so far.
+    #[cfg(test)]
+    pub(super) fn work(&self) -> u64 {
+        self.work.get()
+    }
+
+    /// Replace the work budget (tests only).
+    #[cfg(test)]
+    pub(super) fn with_budget(mut self, budget: u64) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    fn spend(&self, units: u64) -> Result<(), crate::CandidateError> {
+        let total = self.work.get().saturating_add(units);
+        self.work.set(total);
+        if total > self.budget {
+            Err(over_bounds())
+        } else {
+            Ok(())
+        }
+    }
+
     /// `MatchesUsingParentResults`: whether `path` is excluded, and the per-pattern
     /// match record its children inherit. `parent` holds one entry per pattern.
-    pub(super) fn decide(&self, path: &str, parent: &[bool]) -> (bool, Vec<bool>) {
+    pub(super) fn decide(
+        &self,
+        path: &str,
+        parent: &[bool],
+    ) -> Result<(bool, Vec<bool>), crate::CandidateError> {
+        self.spend(self.patterns.len() as u64)?;
+        let mut scratch = self.scratch.borrow_mut();
+        let mut steps = 0_u64;
         let mut excluded = false;
         let mut record = vec![false; self.patterns.len()];
         for (index, pattern) in self.patterns.iter().enumerate() {
@@ -123,48 +217,63 @@ impl Rules {
                 if pattern.negated != excluded {
                     continue;
                 }
-                matched = pattern.matches(path);
+                matched = pattern.matches(path, &mut scratch, &mut steps);
+                if steps > 4096 {
+                    self.spend(steps)?;
+                    steps = 0;
+                }
             }
             record[index] = matched;
             if matched {
                 excluded = !pattern.negated;
             }
         }
-        (excluded, record)
+        self.spend(steps)?;
+        Ok((excluded, record))
     }
 
     /// Whether any `!` pattern could match a path strictly beneath directory `dir`
     /// on its own. False only when that is impossible, so an excluded directory is
     /// skipped only when nothing under it can be re-included.
-    pub(super) fn may_include_below(&self, dir: &str) -> bool {
-        let dir: Vec<&str> = dir.split('/').collect();
-        self.patterns
-            .iter()
-            .filter(|pattern| pattern.negated)
-            .any(|pattern| {
-                if pattern.text.contains("**") {
-                    return true;
-                }
-                let segments: Vec<&str> = pattern.text.split('/').collect();
-                segments.len() > dir.len()
-                    && segments
+    pub(super) fn may_include_below(&self, dir: &str) -> Result<bool, crate::CandidateError> {
+        let depth = dir.split('/').count();
+        let mut scratch = self.scratch.borrow_mut();
+        let mut steps = 0_u64;
+        let mut found = false;
+        for pattern in self.patterns.iter().filter(|pattern| pattern.negated) {
+            steps += 1;
+            if pattern.text.contains("**")
+                || (pattern.segments.len() > depth
+                    && pattern
+                        .segments
                         .iter()
-                        .zip(&dir)
-                        .all(|(segment, name)| segment_matches(segment, name))
-            })
+                        .zip(dir.split('/'))
+                        .all(|(segment, name)| run(segment, name, &mut scratch, &mut steps)))
+            {
+                found = true;
+                break;
+            }
+        }
+        self.spend(steps)?;
+        Ok(found)
     }
 }
 
-fn parse_patterns(bytes: &[u8]) -> Option<Vec<Pattern>> {
-    let text = std::str::from_utf8(bytes).ok()?;
+/// The compiled patterns, `Ok(None)` for syntax not reproduced here, or the bounds
+/// refusal as soon as a bound is crossed.
+fn parse_patterns(bytes: &[u8]) -> Result<Option<Vec<Pattern>>, crate::CandidateError> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Ok(None);
+    };
     let mut patterns = Vec::new();
+    let mut total = 0_usize;
     for (index, raw) in text.split('\n').enumerate() {
         let mut line = raw.strip_suffix('\r').unwrap_or(raw);
         if index == 0 {
             line = line.strip_prefix('\u{feff}').unwrap_or(line);
         }
         if line.len() > MAX_LINE_BYTES {
-            return None;
+            return Ok(None);
         }
         if line.starts_with('#') {
             continue;
@@ -174,7 +283,7 @@ fn parse_patterns(bytes: &[u8]) -> Option<Vec<Pattern>> {
             .any(|c| (c.is_whitespace() && !c.is_ascii()) || (c.is_control() && c != '\t'))
             && !go_trim(line).is_empty()
         {
-            return None;
+            return Ok(None);
         }
         let line = go_trim(line);
         if line.is_empty() {
@@ -208,20 +317,34 @@ fn parse_patterns(bytes: &[u8]) -> Option<Vec<Pattern>> {
         }
         let full = clean(trimmed);
         let (negated, text) = match full.strip_prefix('!') {
-            Some("") => return None,
+            Some("") => return Ok(None),
             Some(rest) => (true, rest.to_owned()),
             None => (false, full),
         };
-        patterns.push(Pattern::compile(negated, text)?);
+        if patterns.len() == MAX_RULES {
+            return Err(over_bounds());
+        }
+        total += text.len();
+        if total > MAX_PATTERN_TEXT {
+            return Err(over_bounds());
+        }
+        match Pattern::compile(negated, text)? {
+            Some(pattern) => patterns.push(pattern),
+            None => return Ok(None),
+        }
     }
-    Some(patterns)
+    Ok(Some(patterns))
 }
 
 impl Pattern {
-    /// `patternmatcher.Pattern.compile`, or `None` for syntax not reproduced here.
-    fn compile(negated: bool, text: String) -> Option<Self> {
+    /// `patternmatcher.Pattern.compile`, `None` for syntax not reproduced here, or the
+    /// bounds refusal for a pattern over its complexity bounds.
+    fn compile(negated: bool, text: String) -> Result<Option<Self>, crate::CandidateError> {
+        if text.len() > MAX_PATTERN_BYTES || text.split('/').count() > MAX_SEGMENTS {
+            return Err(over_bounds());
+        }
         if text.contains(['[', ']', '\\', '^']) {
-            return None;
+            return Ok(None);
         }
         #[derive(PartialEq)]
         enum Detected {
@@ -271,59 +394,106 @@ impl Pattern {
             }
             iteration += 1;
         }
+        if tokens
+            .iter()
+            .filter(|token| !matches!(token, Token::Literal(_)))
+            .count()
+            > MAX_WILDCARDS
+        {
+            return Err(over_bounds());
+        }
         let kind = match detected {
             Detected::Exact => Kind::Exact,
             Detected::Prefix if text.ends_with("**") => Kind::Prefix,
             Detected::Suffix if text.starts_with("**") => Kind::Suffix,
             Detected::Tokens => Kind::Tokens(tokens),
-            _ => return None,
+            _ => return Ok(None),
         };
-        Some(Self {
+        let segments = if negated && !text.contains("**") {
+            text.split('/').map(segment_tokens).collect()
+        } else {
+            Vec::new()
+        };
+        Ok(Some(Self {
             negated,
             text,
             kind,
-        })
+            segments,
+        }))
     }
 
-    fn matches(&self, path: &str) -> bool {
+    /// Match `path`, adding the work done to `steps`.
+    fn matches(&self, path: &str, scratch: &mut Scratch, steps: &mut u64) -> bool {
+        let compared = 1 + self.text.len().min(path.len()) as u64 / 32;
         match &self.kind {
-            Kind::Exact => path == self.text,
-            Kind::Prefix => path.starts_with(&self.text[..self.text.len() - 2]),
+            Kind::Exact => {
+                *steps += compared;
+                path == self.text
+            }
+            Kind::Prefix => {
+                *steps += compared;
+                path.starts_with(&self.text[..self.text.len() - 2])
+            }
             Kind::Suffix => {
+                *steps += compared;
                 let suffix = &self.text[2..];
                 path.ends_with(suffix) || suffix.strip_prefix('/') == Some(path)
             }
-            Kind::Tokens(tokens) => run(tokens, path),
+            Kind::Tokens(tokens) => run(tokens, path, scratch, steps),
         }
     }
 }
 
-/// Whether one slash-free pattern segment matches one path segment.
-fn segment_matches(segment: &str, name: &str) -> bool {
-    let tokens: Vec<Token> = segment
+/// One slash-free pattern segment as matcher tokens.
+fn segment_tokens(segment: &str) -> Vec<Token> {
+    segment
         .chars()
         .map(|c| match c {
             '*' => Token::Star,
             '?' => Token::Question,
             other => Token::Literal(other),
         })
-        .collect();
-    run(&tokens, name)
+        .collect()
 }
 
-/// Simulate the anchored expression `tokens` over `path` (an NFA, linear in both).
-/// States `0..=n` sit before token `i`; state `n + 1 + i` is inside the `.*` of an
-/// `AnyDirectories` token `i`. Go's `.` does not match a newline; `[^/]` does.
-fn run(tokens: &[Token], path: &str) -> bool {
+/// Simulate the anchored expression `tokens` over `path` (an NFA, linear in both),
+/// adding one step per active state per character to `steps`. States `0..=n` sit
+/// before token `i`; state `n + 1 + i` is inside the `.*` of an `AnyDirectories` token
+/// `i`. Go's `.` does not match a newline; `[^/]` does.
+fn run(tokens: &[Token], path: &str, scratch: &mut Scratch, steps: &mut u64) -> bool {
     let n = tokens.len();
     let size = 2 * (n + 1);
-    let close = |set: &mut Vec<bool>, start: usize| {
-        let mut pending = vec![start];
+    if scratch.mark.len() < size {
+        scratch.mark.resize(size, 0);
+    }
+    let Scratch {
+        current,
+        next,
+        pending,
+        mark,
+        generation,
+    } = scratch;
+    let mut advance = |mark: &mut Vec<u32>| {
+        if *generation == u32::MAX {
+            mark.iter_mut().for_each(|value| *value = 0);
+            *generation = 0;
+        }
+        *generation += 1;
+        *generation
+    };
+    // Add `start` and its empty-transition closure to `set` (marked `stamp`).
+    let close = |set: &mut Vec<usize>,
+                 pending: &mut Vec<usize>,
+                 mark: &mut Vec<u32>,
+                 stamp: u32,
+                 start: usize| {
+        pending.push(start);
         while let Some(state) = pending.pop() {
-            if set[state] {
+            if mark[state] == stamp {
                 continue;
             }
-            set[state] = true;
+            mark[state] = stamp;
+            set.push(state);
             if state < n {
                 match tokens[state] {
                     Token::Star | Token::AnyTail => pending.push(state + 1),
@@ -336,15 +506,14 @@ fn run(tokens: &[Token], path: &str) -> bool {
             }
         }
     };
-    let mut current = vec![false; size];
-    close(&mut current, 0);
+    current.clear();
+    let mut stamp = advance(mark);
+    close(current, pending, mark, stamp, 0);
     for c in path.chars() {
-        let mut next = vec![false; size];
-        let mut any = false;
-        for state in 0..size {
-            if !current[state] {
-                continue;
-            }
+        *steps += current.len() as u64 + 1;
+        next.clear();
+        stamp = advance(mark);
+        for &state in current.iter() {
             if state < n {
                 let target = match tokens[state] {
                     Token::Literal(literal) if c == literal => Some(state + 1),
@@ -354,25 +523,22 @@ fn run(tokens: &[Token], path: &str) -> bool {
                     _ => None,
                 };
                 if let Some(target) = target {
-                    close(&mut next, target);
-                    any = true;
+                    close(next, pending, mark, stamp, target);
                 }
             } else if state > n {
                 let token = state - n - 1;
                 if c != '\n' {
-                    close(&mut next, state);
-                    any = true;
+                    close(next, pending, mark, stamp, state);
                 }
                 if c == '/' {
-                    close(&mut next, token + 1);
-                    any = true;
+                    close(next, pending, mark, stamp, token + 1);
                 }
             }
         }
-        if !any {
+        if next.is_empty() {
             return false;
         }
-        current = next;
+        std::mem::swap(current, next);
     }
-    current[n]
+    mark[n] == stamp
 }

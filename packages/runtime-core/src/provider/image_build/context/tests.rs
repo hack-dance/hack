@@ -63,7 +63,7 @@ impl Drop for Tree {
 
 /// Whether `rules` exclude `path`, deciding each ancestor first as the walk does.
 fn excluded(rules: &str, path: &str) -> bool {
-    let rules = ignore::Rules::parse(rules.as_bytes());
+    let rules = ignore::Rules::parse(rules.as_bytes()).unwrap();
     let mut record = vec![false; rules.len()];
     let mut prefix = String::new();
     let mut result = false;
@@ -72,7 +72,7 @@ fn excluded(rules: &str, path: &str) -> bool {
             prefix.push('/');
         }
         prefix.push_str(segment);
-        let (excluded, next) = rules.decide(&prefix, &record);
+        let (excluded, next) = rules.decide(&prefix, &record).unwrap();
         result = excluded;
         record = next;
     }
@@ -173,12 +173,12 @@ fn whitespace_exposed_by_cleaning_is_trimmed_as_moby_does() {
 #[test]
 fn unsupported_syntax_excludes_nothing() {
     for rules in ["*.log\n[ab].txt", "\\*.log", "!", "a^b", "*.log\n\u{a0}x"] {
-        let parsed = ignore::Rules::parse(rules.as_bytes());
+        let parsed = ignore::Rules::parse(rules.as_bytes()).unwrap();
         assert!(parsed.fallback, "{rules:?}");
         assert!(!excluded(rules, "x.log"), "{rules:?}");
     }
-    assert!(ignore::Rules::parse(&[0xff, b'\n']).fallback);
-    assert!(!ignore::Rules::parse(b"*.log\n").fallback);
+    assert!(ignore::Rules::parse(&[0xff, b'\n']).unwrap().fallback);
+    assert!(!ignore::Rules::parse(b"*.log\n").unwrap().fallback);
 
     // The walk then hashes the full context.
     let tree = Tree::new();
@@ -192,10 +192,15 @@ fn unsupported_syntax_excludes_nothing() {
 
 #[test]
 fn excluded_directories_without_reinclusions_are_never_walked() {
-    let rules = ignore::Rules::parse(b"node_modules\n!src/keep\n");
-    assert!(!rules.may_include_below("node_modules"));
-    assert!(rules.may_include_below("src"));
-    assert!(ignore::Rules::parse(b"x\n!**/keep\n").may_include_below("x"));
+    let rules = ignore::Rules::parse(b"node_modules\n!src/keep\n").unwrap();
+    assert!(!rules.may_include_below("node_modules").unwrap());
+    assert!(rules.may_include_below("src").unwrap());
+    assert!(
+        ignore::Rules::parse(b"x\n!**/keep\n")
+            .unwrap()
+            .may_include_below("x")
+            .unwrap()
+    );
 
     let tree = Tree::new();
     fs::create_dir(tree.context().join("node_modules")).unwrap();
@@ -807,4 +812,168 @@ fn a_snapshot_never_copies_through_a_swapped_directory() {
     assert_eq!(fs::read_to_string(copy.join("sub/b.txt")).unwrap(), "b");
     assert!(!copy.join("sub/secret").exists());
     assert!(!copy.join("sub").is_symlink());
+}
+
+fn bounds_code(bytes: &[u8]) -> &'static str {
+    match ignore::Rules::parse(bytes) {
+        Ok(_) => "ok",
+        Err(error) => error.code,
+    }
+}
+
+/// Three hundred rules of the kinds real projects use.
+fn realistic_rules() -> String {
+    let mut rules = String::new();
+    for index in 0..60 {
+        rules.push_str(&format!("generated{index}\n"));
+        rules.push_str(&format!("**/cache{index}\n"));
+        rules.push_str(&format!("*.tmp{index}\n"));
+        rules.push_str(&format!("build/out{index}/**\n"));
+        rules.push_str(&format!("!build/out{index}/keep*.txt\n"));
+    }
+    rules
+}
+
+/// A synthetic relative path for entry `index`, as a walk would decide it.
+fn synthetic(index: usize) -> String {
+    format!(
+        "src/module{}/sub{}/file{index}.rs",
+        index % 97,
+        (index / 97) % 13
+    )
+}
+
+#[test]
+fn an_adversarial_ignore_file_refuses_at_parse_quickly() {
+    let started = std::time::Instant::now();
+    // About 1 MB of `??` rules (the ignore reader's limit), each a valid pattern.
+    let adversarial = "??\n".repeat(349_000);
+    assert!(adversarial.len() as u64 <= 1024 * 1024);
+    let error = ignore::Rules::parse(adversarial.as_bytes()).unwrap_err();
+    assert_eq!(error.code, "native_build_ignore_bounds");
+    // The walk refuses it the same way, before examining any entry.
+    let tree = Tree::new();
+    let error = digest(
+        &tree.context(),
+        adversarial.as_bytes(),
+        None,
+        SystemTime::now(),
+        Bounds::DEFAULT,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "native_build_ignore_bounds");
+    assert!(!error.message.contains("??"));
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn the_match_budget_stops_a_walk_with_the_most_rules() {
+    // At the rule limit the file parses, but the walk's work is bounded.
+    let rules = ignore::Rules::parse("??\n".repeat(ignore::MAX_RULES).as_bytes())
+        .unwrap()
+        .with_budget(1_000_000);
+    let started = std::time::Instant::now();
+    let record = vec![false; rules.len()];
+    let mut decided = 0;
+    let error = loop {
+        match rules.decide(&synthetic(decided), &record) {
+            Ok(_) => decided += 1,
+            Err(error) => break error,
+        }
+    };
+    assert_eq!(error.code, "native_build_ignore_bounds");
+    // It stopped within one entry's work of the budget.
+    assert!(decided > 0 && rules.work() <= 1_000_000 + 4 * 1024 * 1024);
+    assert!(
+        started.elapsed() < Duration::from_millis(900),
+        "{:?}",
+        started.elapsed()
+    );
+    // The real budget lets 4096 rules decide a small context.
+    let tree = Tree::new();
+    assert!(
+        digest(
+            &tree.context(),
+            "??\n".repeat(ignore::MAX_RULES).as_bytes(),
+            None,
+            SystemTime::now(),
+            Bounds::DEFAULT
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_realistic_ignore_file_stays_far_inside_the_budget() {
+    let rules = ignore::Rules::parse(realistic_rules().as_bytes()).unwrap();
+    assert_eq!(rules.len(), 300);
+    let mut record = vec![false; rules.len()];
+    const SAMPLE: usize = 5_000;
+    for index in 0..SAMPLE {
+        // Children inherit their parent's record, as in the walk.
+        let (_, next) = rules.decide(&synthetic(index), &record).unwrap();
+        if index % 50 == 0 {
+            record = next;
+        }
+    }
+    // Scaled to a 200,000-entry context, the work stays under a third of the budget.
+    let per_entry = rules.work() / SAMPLE as u64;
+    assert!(
+        per_entry * 200_000 * 3 < ignore::WORK_BUDGET,
+        "{per_entry} units per entry"
+    );
+}
+
+#[test]
+fn ignore_bounds_are_exact() {
+    let lines = |count: usize, rule: &str| format!("{rule}\n").repeat(count);
+    assert_eq!(bounds_code(lines(ignore::MAX_RULES, "a").as_bytes()), "ok");
+    assert_eq!(
+        bounds_code(lines(ignore::MAX_RULES + 1, "a").as_bytes()),
+        "native_build_ignore_bounds"
+    );
+    // Comments and blank lines are not rules.
+    let commented = format!("{}# note\n\n", lines(ignore::MAX_RULES, "a"));
+    assert_eq!(bounds_code(commented.as_bytes()), "ok");
+    // Pattern text: 256 rules of 1024 bytes is exactly the total.
+    let long = "a".repeat(ignore::MAX_PATTERN_BYTES);
+    let total = lines(ignore::MAX_PATTERN_TEXT / ignore::MAX_PATTERN_BYTES, &long);
+    assert_eq!(bounds_code(total.as_bytes()), "ok");
+    assert_eq!(
+        bounds_code(format!("{total}b\n").as_bytes()),
+        "native_build_ignore_bounds"
+    );
+    let longer = "a".repeat(ignore::MAX_PATTERN_BYTES + 1);
+    assert_eq!(bounds_code(long.as_bytes()), "ok");
+    assert_eq!(bounds_code(longer.as_bytes()), "native_build_ignore_bounds");
+    // Segments and wildcards per pattern.
+    let segments = |count: usize| vec!["s"; count].join("/");
+    assert_eq!(bounds_code(segments(ignore::MAX_SEGMENTS).as_bytes()), "ok");
+    assert_eq!(
+        bounds_code(segments(ignore::MAX_SEGMENTS + 1).as_bytes()),
+        "native_build_ignore_bounds"
+    );
+    let wild = |count: usize| "?".repeat(count);
+    assert_eq!(bounds_code(wild(ignore::MAX_WILDCARDS).as_bytes()), "ok");
+    assert_eq!(
+        bounds_code(wild(ignore::MAX_WILDCARDS + 1).as_bytes()),
+        "native_build_ignore_bounds"
+    );
+    // A file Hack cannot reproduce still excludes nothing rather than refusing.
+    assert!(ignore::Rules::parse(b"[ab]\n").unwrap().fallback);
+    assert_eq!(
+        (
+            ignore::MAX_RULES,
+            ignore::MAX_PATTERN_TEXT,
+            ignore::MAX_PATTERN_BYTES,
+            ignore::MAX_SEGMENTS,
+            ignore::MAX_WILDCARDS,
+            ignore::WORK_BUDGET
+        ),
+        (4096, 256 * 1024, 1024, 64, 32, 1_000_000_000)
+    );
 }

@@ -2431,13 +2431,37 @@ const contracts: readonly ModelContract[] = [
     states: 669,
     invariant: "Safe",
     action: "Record",
-    fields: ['recorded = {"first"}', 'first |-> "gated"'],
+    fields: [
+      'recorded = {"first"}',
+      'child = [first |-> "gated", second |-> "absent"]',
+    ],
+    alternativeWitnesses: [
+      {
+        action: "Record",
+        fields: [
+          'recorded = {"second"}',
+          'child = [first |-> "absent", second |-> "gated"]',
+        ],
+      },
+    ],
     additionalControls: [
       {
         name: "bind-before-commit",
         negative: true,
         action: "Bind",
-        fields: ['first |-> "uncommitted-bind"', "recorded = {}"],
+        fields: [
+          'child = [first |-> "uncommitted-bind", second |-> "absent"]',
+          "recorded = {}",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Bind",
+            fields: [
+              'child = [first |-> "absent", second |-> "uncommitted-bind"]',
+              "recorded = {}",
+            ],
+          },
+        ],
       },
       {
         name: "dead-authorization",
@@ -3336,6 +3360,17 @@ const contracts: readonly ModelContract[] = [
         invariant: "NeverHits",
         ...statKeyedHits({ withCtime: true, stale: false }),
       },
+    ],
+  },
+  {
+    name: "native-image-batch",
+    module: "ImageBatch",
+    states: 3233,
+    invariant: "Safe",
+    action: "Import",
+    fields: [
+      'phase = <<"import", "import", "queued", "queued">>',
+      "verified = {1, 2}",
     ],
   },
   {

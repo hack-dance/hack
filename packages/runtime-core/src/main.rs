@@ -154,7 +154,7 @@ fn main() {
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new("--internal-publication-child"))
     {
-        std::process::exit(
+        hack_runtime_core::timings::exit(
             if hack_runtime_core::provider::publication::run_publication_child().is_ok() {
                 0
             } else {
@@ -1272,6 +1272,32 @@ fn run() -> Result<(), CandidateError> {
                 &discover_candidate(&requested)?,
                 Path::new(archive),
             )?)?;
+        }
+        ["runtime", "ensure-images", "--json", flags @ ..] => {
+            use std::io::Read;
+            let mut input = Vec::new();
+            std::io::stdin()
+                .take(65_537)
+                .read_to_end(&mut input)
+                .map_err(|_| {
+                    CandidateError::new("invalid_arguments", "Cannot read the image batch.")
+                })?;
+            let jobs: Vec<(
+                String,
+                hack_runtime_core::provider::image_platform::PlatformPolicy,
+            )> = serde_json::from_slice(&input)
+                .map_err(|_| CandidateError::new("invalid_arguments", "Invalid image batch."))?;
+            if input.len() > 65_536 || jobs.len() > 64 {
+                return Err(CandidateError::new(
+                    "invalid_arguments",
+                    "Image batch exceeds its input bound.",
+                ));
+            }
+            print_json(&hack_runtime_core::provider::image_ensure::ensure_batch(
+                &discover_candidate(&requested)?,
+                &jobs,
+                &image_policy(flags)?,
+            ))?;
         }
         [
             "runtime",

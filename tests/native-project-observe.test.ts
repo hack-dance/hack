@@ -1135,7 +1135,7 @@ test("native image pins and resolution times appear only in wide text and JSON",
     chunks.push(String(line));
     return true;
   });
-  const result = {
+  const result: Parameters<typeof displayNativePs>[0] = {
     backend: "native",
     status: "runtime_busy",
     run: null,
@@ -1153,7 +1153,7 @@ test("native image pins and resolution times appear only in wide text and JSON",
         ],
       },
     ],
-  } as const;
+  };
   try {
     const addresses = new Map<string, readonly string[]>();
     await displayNativePs(result, false, { addresses });

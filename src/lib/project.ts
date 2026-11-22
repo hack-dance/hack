@@ -298,6 +298,8 @@ export interface ProjectComposeConfig {
   readonly startupTimeoutMs?: number;
   /** `compose.startupCeilingMs`, as `HACK_COMPOSE_STARTUP_CEILING_MS`. */
   readonly startupCeilingMs?: number;
+  /** `compose.downTimeoutSeconds`, integer 0..600 passed to `docker compose down --timeout`. */
+  readonly downTimeoutSeconds?: number;
 }
 
 /**
@@ -340,12 +342,18 @@ function parseComposeConfig(
   };
   const startupTimeoutMs = read("startupTimeoutMs");
   const startupCeilingMs = read("startupCeilingMs");
-  if (startupTimeoutMs === undefined && startupCeilingMs === undefined) {
+  const downTimeoutSeconds = read("downTimeoutSeconds");
+  if (
+    startupTimeoutMs === undefined &&
+    startupCeilingMs === undefined &&
+    downTimeoutSeconds === undefined
+  ) {
     return;
   }
   return {
     ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
     ...(startupCeilingMs === undefined ? {} : { startupCeilingMs }),
+    ...(downTimeoutSeconds === undefined ? {} : { downTimeoutSeconds }),
   };
 }
 

@@ -388,6 +388,7 @@ hack down [options]
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
+| `--timeout <seconds>` | Compose backend: container stop timeout in seconds (0-600) passed to docker compose down --timeout |
 | `--prune-caches` | After down, remove confirmed Compose-owned disposable cache volumes |
 | `--remove-data` | Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first) |
 | `--yes` | Confirm --prune-caches or --remove-data without prompting |

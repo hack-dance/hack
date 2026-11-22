@@ -19,10 +19,11 @@ import {
 } from "../src/lib/global-container-config.ts";
 import {
   containersNotRunning,
+  describeContainersNotHealthy,
   describeContainersNotRunning,
   type GlobalContainerState,
   parseComposePs,
-  watchStartedContainers,
+  waitForStartedContainers,
 } from "../src/lib/global-stack-state.ts";
 
 /*
@@ -108,61 +109,188 @@ test("only `running` counts as running, and the report names each container", ()
   ).toContain("X started, but this container is not running: ");
 });
 
-test("the watch fails as soon as a container is seen stopped, and passes only after the whole window", async () => {
+test("the readiness wait ends at the first look that shows the stack ready, fails at once on a stop or failed healthcheck, and is bounded", async () => {
+  let clock = 0;
   const sleeps: number[] = [];
   const sleep = (ms: number) => {
     sleeps.push(ms);
+    clock += ms;
     return Promise.resolve();
   };
-  // Healthy: looked at for the whole window.
+  const now = () => clock;
+  const c = (name: string, state: string, health: string | null = null) => ({
+    name,
+    service: name,
+    state,
+    exitCode: state === "exited" ? 1 : null,
+    health,
+  });
+  const reset = () => {
+    clock = 0;
+    sleeps.length = 0;
+  };
+
+  // Ready at once (no healthchecks, all running): one look, no wait. This is
+  // what replaced the fixed 2 s and 10 s windows.
   let looks = 0;
   expect(
-    await watchStartedContainers({
+    await waitForStartedContainers({
       read: () => {
         looks++;
-        return Promise.resolve([running("a"), running("b")]);
+        return Promise.resolve([c("a", "running"), c("b", "running")]);
       },
+      timeoutMs: 30_000,
       sleep,
+      now,
     })
-  ).toEqual([]);
-  expect(looks).toBe(5);
-  expect(sleeps).toEqual([500, 500, 500, 500]);
+  ).toBeNull();
+  expect(looks).toBe(1);
+  expect(sleeps).toEqual([]);
 
-  // A container that starts and exits a second later is caught then.
-  sleeps.length = 0;
-  looks = 0;
-  const stopped = await watchStartedContainers({
-    read: () => {
-      looks++;
-      return Promise.resolve([
-        running("a"),
-        looks < 3
-          ? running("b")
-          : { name: "b", service: "b", state: "exited", exitCode: 1 },
-      ]);
-    },
-    sleep,
-  });
-  expect(stopped.map((container) => container.name)).toEqual(["b"]);
-  expect(sleeps).toEqual([500, 500]);
-
-  // A longer window (the logging stack's) is watched to its end too.
-  sleeps.length = 0;
+  // A stack file with no healthcheck at all (written by an older install)
+  // keeps the old fixed watch, and still fails at the first stopped look.
+  reset();
   expect(
-    await watchStartedContainers({
-      read: () => Promise.resolve([running("a")]),
-      settleMs: 10_000,
+    await waitForStartedContainers({
+      read: () => Promise.resolve([c("a", "running"), c("b", "running")]),
+      timeoutMs: 30_000,
+      withoutHealthchecksMs: 2000,
       sleep,
+      now,
     })
-  ).toEqual([]);
-  expect(sleeps).toHaveLength(20);
+  ).toBeNull();
+  expect(clock).toBe(2000);
+  reset();
+  looks = 0;
+  expect(
+    await waitForStartedContainers({
+      read: () => {
+        looks++;
+        return Promise.resolve([
+          c("a", "running"),
+          looks < 3 ? c("b", "running") : c("b", "exited"),
+        ]);
+      },
+      timeoutMs: 30_000,
+      withoutHealthchecksMs: 10_000,
+      sleep,
+      now,
+    })
+  ).toMatchObject({ reason: "stopped", containers: [{ name: "b" }] });
+  expect(clock).toBe(500);
+  // One healthcheck in the stack is enough to use readiness instead.
+  reset();
+  expect(
+    await waitForStartedContainers({
+      read: () =>
+        Promise.resolve([c("a", "running", "healthy"), c("b", "running")]),
+      timeoutMs: 30_000,
+      withoutHealthchecksMs: 10_000,
+      sleep,
+      now,
+    })
+  ).toBeNull();
+  expect(sleeps).toEqual([]);
+
+  // A healthcheck still starting is waited for, and the wait ends when it
+  // passes.
+  reset();
+  looks = 0;
+  expect(
+    await waitForStartedContainers({
+      read: () => {
+        looks++;
+        return Promise.resolve([
+          c("caddy", "running", looks < 4 ? "starting" : "healthy"),
+          c("coredns", "running"),
+        ]);
+      },
+      timeoutMs: 30_000,
+      sleep,
+      now,
+    })
+  ).toBeNull();
+  expect(sleeps).toEqual([250, 250, 250]);
+
+  // A container that exits while another becomes healthy is caught then.
+  reset();
+  looks = 0;
+  expect(
+    await waitForStartedContainers({
+      read: () => {
+        looks++;
+        return Promise.resolve([
+          c("caddy", "running", "starting"),
+          looks < 2 ? c("coredns", "running") : c("coredns", "exited"),
+        ]);
+      },
+      timeoutMs: 30_000,
+      sleep,
+      now,
+    })
+  ).toMatchObject({ reason: "stopped", containers: [{ name: "coredns" }] });
+
+  // A failed healthcheck ends the wait at once.
+  reset();
+  expect(
+    await waitForStartedContainers({
+      read: () => Promise.resolve([c("grafana", "running", "unhealthy")]),
+      timeoutMs: 120_000,
+      sleep,
+      now,
+    })
+  ).toMatchObject({ reason: "unhealthy", containers: [{ name: "grafana" }] });
+  expect(sleeps).toEqual([]);
+
+  // One that never passes is reported after the bound, not waited on forever.
+  reset();
+  expect(
+    await waitForStartedContainers({
+      read: () =>
+        Promise.resolve([
+          c("loki", "running", "starting"),
+          c("alloy", "running", "healthy"),
+        ]),
+      timeoutMs: 1000,
+      sleep,
+      now,
+    })
+  ).toMatchObject({ reason: "timeout", containers: [{ name: "loki" }] });
+  expect(clock).toBe(1000);
 
   // No answer is not a finding, and costs no wait.
-  sleeps.length = 0;
+  reset();
   expect(
-    await watchStartedContainers({ read: () => Promise.resolve([]), sleep })
-  ).toEqual([]);
+    await waitForStartedContainers({
+      read: () => Promise.resolve([]),
+      timeoutMs: 30_000,
+      sleep,
+      now,
+    })
+  ).toBeNull();
   expect(sleeps).toEqual([]);
+
+  expect(
+    describeContainersNotHealthy({
+      stack: "The logging stack (Grafana, Loki, Alloy)",
+      reason: "timeout",
+      timeoutMs: 120_000,
+      containers: [c("hack-logging-loki-1", "running", "starting")],
+    })
+  ).toContain(
+    "this container was not ready within 120 s: hack-logging-loki-1."
+  );
+});
+
+test("compose ps Health is read when present", () => {
+  expect(
+    parseComposePs(
+      [
+        '{"Name":"a","Service":"a","State":"running","Health":"healthy"}',
+        '{"Name":"b","Service":"b","State":"running","Health":""}',
+      ].join("\n")
+    ).map((c) => c.health ?? null)
+  ).toEqual(["healthy", null]);
 });
 
 let root: string | null = null;

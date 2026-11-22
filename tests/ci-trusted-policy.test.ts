@@ -16,7 +16,7 @@ const workflow = Bun.YAML.parse(
   await Bun.file(join(repository, ".github/workflows/ci.yml")).text()
 ) as {
   concurrency: { group: string; "cancel-in-progress": string };
-  on: { pull_request: { types: string[] } };
+  on: { pull_request: { types: string[] }; merge_group: { types: string[] } };
   jobs: Record<
     string,
     { steps: { id?: string; name?: string; run?: string }[] }
@@ -426,16 +426,45 @@ test("the inline boundary keeps HOME-write acceptance deferred for drafts", asyn
     compiler_hosts: "[]",
   });
 });
-test("retargeting reclassifies through the ordinary pull_request event", () => {
-  expect(workflow.on.pull_request.types).toContain("edited");
+test("PR metadata edits do not restart CI, but readiness and pushes still qualify", () => {
+  expect(workflow.on.pull_request.types).not.toContain("edited");
+  expect(workflow.on.pull_request.types).toContain("ready_for_review");
+  expect(workflow.on.pull_request.types).toContain("synchronize");
 });
 
-test("next pushes serialize without cancelling active runs; only PRs cancel", () => {
+test("merge queue trees receive full Linux qualification without a predecessor", async () => {
+  expect(workflow.on.merge_group.types).toEqual(["checks_requested"]);
+  expect(
+    await scope({
+      event: "merge_group",
+      ref: "refs/heads/gh-readonly-queue/next/pr-1",
+      before: "",
+      noMerge: true,
+      legacy: true,
+    })
+  ).toMatchObject({
+    scope: "full",
+    selection_mode: "full",
+    ci_evidence: "scoped",
+    compiler_hosts: linuxCompilerHosts,
+    compiler_rust: "true",
+    suite: "true",
+    runtime_core: "true",
+    test_shards: "[4,5,6,7,8]",
+    defer_macos: "true",
+    docker_suite: "true",
+    draft: "false",
+    docs_site: "true",
+    build_smoke: "true",
+  });
+});
+
+test("only a new PR head cancels active CI", () => {
   expect(workflow.concurrency.group).toBe(
     "${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/next' && 'push-next') || format('push-{0}', github.run_id) }}"
   );
   expect(workflow.concurrency["cancel-in-progress"]).toBe(
-    "${{ github.event_name == 'pull_request' }}"
+    "${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}"
   );
 });
 

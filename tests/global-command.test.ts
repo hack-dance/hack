@@ -9,7 +9,15 @@ import {
   test,
 } from "bun:test";
 import { readFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -27,6 +35,11 @@ import {
 } from "../src/constants.ts";
 import { resolveGlobalConfigPath } from "../src/lib/config-paths.ts";
 import * as interactivity from "../src/lib/interactivity.ts";
+import { resetStdoutReservationForTests } from "../src/lib/machine-stdout.ts";
+import {
+  renderGlobalCaddyCompose,
+  renderGlobalLoggingCompose,
+} from "../src/templates.ts";
 import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { machineData, machineError } from "./helpers/machine-output.ts";
@@ -51,6 +64,8 @@ const ISOLATED_ENV = [
 const originalIsolatedEnv = new Map<string, string | undefined>();
 const execCalls: string[][] = [];
 const runCalls: string[][] = [];
+/** Where each `run` call sent the child's stdout. */
+const runStdoutTargets: string[] = [];
 let runExitResponder: ((cmd: readonly string[]) => number | null) | null = null;
 let execMockResponder:
   | ((
@@ -68,14 +83,23 @@ const shellMock = await registerScopedModuleMock({
       if (custom) {
         return custom;
       }
+      // The route probe's HTTPS request through the proxy: any status
+      // means the route answered (src/lib/global-route-probe.ts).
+      if (cmd.includes("--resolve")) {
+        return { exitCode: 0, stdout: "404", stderr: "" };
+      }
       return { exitCode: 0, stdout: "", stderr: "" };
     },
     execOrThrow: async (cmd: readonly string[]) => {
       execCalls.push([...cmd]);
       return { exitCode: 0, stdout: "", stderr: "" };
     },
-    run: async (cmd: readonly string[]) => {
+    run: async (
+      cmd: readonly string[],
+      opts?: { readonly stdout?: string }
+    ) => {
       runCalls.push([...cmd]);
+      runStdoutTargets.push(opts?.stdout ?? "inherit");
       return runExitResponder?.(cmd) ?? 0;
     },
     findExecutableInPath: (name?: string) =>
@@ -121,10 +145,49 @@ const linuxDnsHostMock = await registerScopedModuleMock({
   },
 });
 
+// The route probe's Docker and TLS reads (src/lib/global-route-checks.ts).
+// Unset responders answer as Docker does under the shell mock above: the
+// proxy's runtime and addresses cannot be read, so both steps are reported
+// as not checked and `up` does not wait on them.
+type ProxyRuntimeAnswer = {
+  readonly caPem: string | null;
+  readonly loopbackPorts: Readonly<Record<80 | 443, readonly string[]>> | null;
+};
+let proxyRuntimeAnswer: ProxyRuntimeAnswer | null = null;
+let caddyAddressesAnswer: string[] | null = null;
+let httpsStateAnswer: ((address: string) => string) | null = null;
+/** What the OS resolver answers for the selected name (none by default). */
+let systemAddressesAnswer: readonly string[] = [];
+const httpsProbeCalls: string[][] = [];
+/** The name each HTTPS look asked for (TLS name and Host). */
+const httpsProbeNames: string[] = [];
+const routeChecksMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/global-route-checks.ts",
+  overrides: {
+    readProxyRuntime: async () =>
+      proxyRuntimeAnswer ?? { caPem: null, loopbackPorts: null },
+    readCaddyAddresses: async () => caddyAddressesAnswer,
+    resolveSystemAddresses: async () => systemAddressesAnswer,
+    probeProxyHttpsAt: async (opts: {
+      readonly addresses: readonly string[];
+      readonly name: string;
+    }) => {
+      httpsProbeCalls.push([...opts.addresses]);
+      httpsProbeNames.push(opts.name);
+      return opts.addresses.map((address) => ({
+        address,
+        state: httpsStateAnswer?.(address) ?? "ok",
+      }));
+    },
+  },
+});
+
 beforeAll(() => {
   shellMock.activate();
   osMock.activate();
   linuxDnsHostMock.activate();
+  routeChecksMock.activate();
 });
 
 beforeEach(async () => {
@@ -172,6 +235,7 @@ afterAll(() => {
   shellMock.deactivate();
   osMock.deactivate();
   linuxDnsHostMock.deactivate();
+  routeChecksMock.deactivate();
 });
 
 async function writeComposeFile(path: string): Promise<void> {
@@ -555,6 +619,7 @@ test(
     await writeExecutable(mutagenPath);
     await mkdir(dirname(mutagenAgentBundlePath), { recursive: true });
     await writeFile(mutagenAgentBundlePath, "stub");
+    await enableLogging();
     const { runCli } = await import("../src/cli/run.ts");
     const code = await runCli(["global", "install"]);
     expect(code).toBe(0);
@@ -923,7 +988,26 @@ test("global status --json reports a proxy with no network (HACK-2056)", async (
   });
 });
 
-async function writeInstallStubs(): Promise<void> {
+/** Turns the opt-in logging stack on for this home (`logging.enabled`). */
+async function enableLogging(): Promise<void> {
+  const home = join(tempDir!, GLOBAL_HACK_DIR_NAME);
+  await mkdir(home, { recursive: true });
+  await writeFile(
+    join(home, "hack.config.json"),
+    `${JSON.stringify({ logging: { enabled: true } })}\n`
+  );
+}
+
+/**
+ * The install stubs. These install tests cover the logging stack too, so
+ * they turn it on; the opt-in default has its own tests below.
+ */
+async function writeInstallStubs(
+  opts: { readonly logging?: boolean } = {}
+): Promise<void> {
+  if (opts.logging !== false) {
+    await enableLogging();
+  }
   await writeExecutable(join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "gum"));
   await writeExecutable(join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "mutagen"));
   const bundle = join(
@@ -1094,6 +1178,9 @@ function globalCaddyComposePath(): string {
   );
 }
 
+/** Prompts `runNonInteractiveInstall` saw for the logging Compose file. */
+const loggingComposePrompts: string[] = [];
+
 /** Runs `hack global install` with no terminal, capturing stdout and stderr. */
 async function runNonInteractiveInstall(
   opts: {
@@ -1121,11 +1208,23 @@ async function runNonInteractiveInstall(
   };
   const stdout = spyOn(process.stdout, "write").mockImplementation(capture);
   const stderr = spyOn(process.stderr, "write").mockImplementation(capture);
-  // The proxy file is Hack-managed: no run may ask before replacing it.
+  // The proxy Compose file is Hack-managed: no run may ask before
+  // replacing it. (The logging one asks only when it is not Hack's own.)
   const confirm = spyOn(interactivity, "confirmSafe").mockImplementation(
     async (opts) => {
-      if (String(opts.message).includes(GLOBAL_CADDY_COMPOSE_FILENAME)) {
+      if (
+        String(opts.message).includes(
+          `${GLOBAL_CADDY_DIR_NAME}/${GLOBAL_CADDY_COMPOSE_FILENAME}`
+        )
+      ) {
         throw new Error("The proxy Compose file must not prompt");
+      }
+      if (
+        String(opts.message).includes(
+          `${GLOBAL_LOGGING_DIR_NAME}/${GLOBAL_LOGGING_COMPOSE_FILENAME}`
+        )
+      ) {
+        loggingComposePrompts.push(String(opts.message));
       }
       return overwrite;
     }
@@ -1765,3 +1864,762 @@ test(
   },
   { timeout: 60_000 }
 );
+
+describe("global up's route probe: only Hack's own proxy passes, and what cannot be checked never fails (HACK-2468)", () => {
+  const savedDockerHost = process.env.DOCKER_HOST;
+  const CADDY = "172.30.0.2";
+  const answer = (address: string) => ({
+    exitCode: 0,
+    stdout: `Server:\t\tcoredns\nAddress:\t127.0.0.11:53\n\nNon-authoritative answer:\nName:\tschemas.hack\nAddress: ${address}\n`,
+    stderr: "",
+  });
+  afterEach(() => {
+    if (savedDockerHost === undefined) {
+      Reflect.deleteProperty(process.env, "DOCKER_HOST");
+    } else {
+      process.env.DOCKER_HOST = savedDockerHost;
+    }
+    proxyRuntimeAnswer = null;
+    caddyAddressesAnswer = null;
+    httpsStateAnswer = null;
+    systemAddressesAnswer = [];
+    httpsProbeCalls.length = 0;
+    httpsProbeNames.length = 0;
+    // `runCli` reserves stdout for a `--json` run; later tests run without.
+    resetStdoutReservationForTests();
+  });
+
+  async function upWith(opts: {
+    readonly dockerHost: string;
+    readonly nslookup?: { exitCode: number; stdout: string; stderr: string };
+    readonly published443?: readonly string[];
+    readonly https?: (address: string) => string;
+    readonly args?: readonly string[];
+    /** The OS resolver's answer for the selected name; default none. */
+    readonly resolved?: readonly string[];
+  }) {
+    systemAddressesAnswer = opts.resolved ?? [];
+    process.env.DOCKER_HOST = opts.dockerHost;
+    proxyRuntimeAnswer = {
+      caPem: "PEM",
+      loopbackPorts: { 80: ["0.0.0.0"], 443: opts.published443 ?? ["0.0.0.0"] },
+    };
+    caddyAddressesAnswer = [CADDY];
+    httpsStateAnswer = opts.https ?? null;
+    const caddyCompose = globalCaddyComposePath();
+    await mkdir(dirname(caddyCompose), { recursive: true });
+    await writeFile(caddyCompose, renderGlobalCaddyCompose());
+    await writeFile(join(dirname(caddyCompose), "Corefile"), ".:53 {}\n");
+    execMockResponder = (cmd) =>
+      cmd.includes("nslookup") ? (opts.nslookup ?? answer(CADDY)) : null;
+    const out: string[] = [];
+    const err: string[] = [];
+    const outSpy = spyOn(process.stdout, "write").mockImplementation(
+      (chunk: string | Uint8Array) => {
+        out.push(String(chunk));
+        return true;
+      }
+    );
+    const errSpy = spyOn(process.stderr, "write").mockImplementation(
+      (chunk: string | Uint8Array) => {
+        err.push(String(chunk));
+        return true;
+      }
+    );
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      const code = await runCli(["global", "up", ...(opts.args ?? [])]);
+      return {
+        code,
+        stdout: out.join(""),
+        output: `${out.join("")}${err.join("")}`,
+      };
+    } finally {
+      outSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  }
+
+  test("Hack's proxy answering at doctor's loopback endpoint, with CoreDNS naming the proxy: ready", async () => {
+    const result = await upWith({ dockerHost: "unix:///var/run/docker.sock" });
+    expect(result.code).toBe(0);
+    expect(result.output).not.toContain("Not checked");
+    // The endpoint comes from the live 443 binding (0.0.0.0 → 127.0.0.1).
+    expect(httpsProbeCalls).toEqual([["127.0.0.1"]]);
+  });
+
+  test("HTTPS goes where the OS resolves the name: the proxy container's address served, loopback rejecting, is ready", async () => {
+    const result = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      resolved: [CADDY],
+      https: (address) => (address === CADDY ? "ok" : "rejected"),
+    });
+    expect(result.code).toBe(0);
+    expect(result.output).not.toContain("Not checked");
+    // Only the resolved address is probed, not loopback.
+    expect(httpsProbeCalls).toEqual([[CADDY]]);
+  });
+
+  test("no OS answer for the name: loopback rejecting is not checked, with the DNS hint, and up succeeds", async () => {
+    const result = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      https: (address) => (address === "127.0.0.1" ? "timeout" : "rejected"),
+      published443: ["0.0.0.0", "::"],
+    });
+    expect(result.code).toBe(0);
+    expect(httpsProbeCalls).toEqual([["127.0.0.1", "::1"]]);
+    expect(result.output).toContain(
+      "Not checked: schemas.hack.local has no address on this machine yet (hack global install sets up Hack's domains, and hack doctor shows the DNS checks); at the proxy's published loopback port 443 on ::1 refused TLS for schemas.hack.local"
+    );
+  });
+
+  test("an OS answer that another server holds is a refusal naming that address", async () => {
+    const result = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      resolved: ["10.9.9.9"],
+      https: () => "untrusted",
+    });
+    expect(result.code).toBe(1);
+    expect(result.output).toContain(
+      "port 443 on 10.9.9.9 answered with a certificate this home's proxy did not issue"
+    );
+  }, 60_000);
+
+  test("the HTTPS step asks for the name the DNS step resolved: the one the proxy file routes", async () => {
+    expect(
+      (await upWith({ dockerHost: "unix:///var/run/docker.sock" })).code
+    ).toBe(0);
+    const resolved = execCalls
+      .filter((call) => call.includes("nslookup"))
+      .map((call) => call[call.indexOf("nslookup") + 1]);
+    expect(resolved).toEqual(["schemas.hack.local"]);
+    expect(httpsProbeNames).toEqual(["schemas.hack.local"]);
+
+    // A v4 file routes only schemas.hack: both steps use that name.
+    execCalls.length = 0;
+    httpsProbeNames.length = 0;
+    await mkdir(dirname(globalCaddyComposePath()), { recursive: true });
+    const v4 = renderGlobalCaddyCompose().replace(
+      /caddy: schemas\.hack\.local, schemas\.hack/,
+      "caddy: schemas.hack"
+    );
+    expect(v4).toContain("caddy: schemas.hack\n");
+    execMockResponder = (cmd) =>
+      cmd.includes("nslookup")
+        ? {
+            exitCode: 0,
+            stdout: `Name:\tschemas.hack\nAddress: ${CADDY}\n`,
+            stderr: "",
+          }
+        : null;
+    await writeFile(globalCaddyComposePath(), v4);
+    const { runCli } = await import("../src/cli/run.ts");
+    const out = spyOn(process.stdout, "write").mockImplementation(() => true);
+    const err = spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(await runCli(["global", "up"])).toBe(0);
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
+    }
+    expect(httpsProbeNames).toEqual(["schemas.hack"]);
+  });
+
+  test("a TLS server that refuses the selected name (an alert) fails up with E_GLOBAL_NOT_READY", async () => {
+    const result = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      https: () => "rejected",
+      resolved: ["127.0.0.1"],
+    });
+    expect(result.code).toBe(1);
+    expect(result.output).toContain(
+      "port 443 on 127.0.0.1 refused TLS for schemas.hack.local: the server there does not serve that name"
+    );
+  }, 60_000);
+
+  test("another server answering HTTPS (a certificate the proxy's CA did not issue) fails up with E_GLOBAL_NOT_READY", async () => {
+    const result = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      https: () => "untrusted",
+      resolved: ["127.0.0.1"],
+    });
+    expect(result.code).toBe(1);
+    expect(result.output).toContain("E_GLOBAL_NOT_READY");
+    expect(result.output).toContain(
+      "port 443 on 127.0.0.1 answered with a certificate this home's proxy did not issue"
+    );
+  }, 60_000);
+
+  test("CoreDNS answering with another address fails up with E_GLOBAL_NOT_READY", async () => {
+    const result = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      nslookup: answer("192.0.2.99"),
+    });
+    expect(result.code).toBe(1);
+    expect(result.output).toContain(
+      `CoreDNS answered 192.0.2.99, not only the proxy's address (${CADDY})`
+    );
+  }, 60_000);
+
+  test("a v4 proxy image without nslookup: up succeeds and says DNS was not checked", async () => {
+    const result = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      nslookup: {
+        exitCode: 127,
+        stdout: "",
+        stderr:
+          'OCI runtime exec failed: exec: "nslookup": executable file not found in $PATH',
+      },
+    });
+    expect(result.code).toBe(0);
+    expect(result.output).toContain(
+      "Not checked: the proxy image has no nslookup"
+    );
+    expect(execCalls.filter((call) => call.includes("nslookup"))).toHaveLength(
+      1
+    );
+  });
+
+  test("loopback 443 that does not complete TLS (timeout, reset): up succeeds, not checked", async () => {
+    for (const state of ["timeout", "tls-error"]) {
+      const result = await upWith({
+        dockerHost: "unix:///var/run/docker.sock",
+        https: () => state,
+      });
+      expect(result.code).toBe(0);
+      expect(result.output).toContain(
+        `HTTPS for schemas.hack.local through port 443 on 127.0.0.1 did not complete (${state}), so it was not checked`
+      );
+    }
+  });
+
+  test("443 not published on loopback: not checked, as in doctor, and nothing is probed", async () => {
+    const result = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      published443: [],
+    });
+    expect(result.code).toBe(0);
+    expect(httpsProbeCalls).toEqual([]);
+    expect(result.output).toContain(
+      "the proxy does not publish port 443 on a loopback address"
+    );
+  });
+
+  test("a TCP engine is probed at its address; one given by host name, or an SSH engine, is not probed and says so", async () => {
+    const tcp = await upWith({ dockerHost: "tcp://10.1.2.3:2376" });
+    expect(tcp.code).toBe(0);
+    expect(httpsProbeCalls).toEqual([["10.1.2.3"]]);
+
+    httpsProbeCalls.length = 0;
+    const named = await upWith({ dockerHost: "tcp://builder.example:2376" });
+    expect(named.code).toBe(0);
+    expect(httpsProbeCalls).toEqual([]);
+    expect(named.output).toContain(
+      "the Docker engine is given by host name (builder.example), which is not resolved here"
+    );
+
+    const ssh = await upWith({ dockerHost: "ssh://builder@remote" });
+    expect(ssh.code).toBe(0);
+    expect(httpsProbeCalls).toEqual([]);
+    expect(ssh.output).toContain(
+      "the Docker engine is not local and its address is not known here"
+    );
+  });
+
+  test("global up --json sends every child's stdout (Compose, hack daemon start) to stderr; without it they inherit", async () => {
+    runStdoutTargets.length = 0;
+    expect(
+      (await upWith({ dockerHost: "unix:///var/run/docker.sock" })).code
+    ).toBe(0);
+    expect(runStdoutTargets.length).toBeGreaterThan(0);
+    expect(new Set(runStdoutTargets)).toEqual(new Set(["inherit"]));
+    runStdoutTargets.length = 0;
+    const json = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      args: ["--json"],
+    });
+    expect(json.code).toBe(0);
+    expect(runStdoutTargets.length).toBeGreaterThan(0);
+    expect(new Set(runStdoutTargets)).toEqual(new Set(["stderr"]));
+  });
+
+  test("global up --json: stdout is one envelope, with the route outcome, or the readiness code on failure", async () => {
+    const ok = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      args: ["--json"],
+    });
+    expect(ok.code).toBe(0);
+    const envelope = JSON.parse(ok.stdout);
+    expect(envelope).toMatchObject({
+      ok: true,
+      data: {
+        schema: "hack.global-up.v1",
+        failedStage: null,
+        logging: { enabled: false },
+        routes: { dns: { state: "ready" }, https: { state: "ready" } },
+      },
+    });
+
+    const failed = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      https: () => "untrusted",
+      resolved: ["127.0.0.1"],
+      args: ["--json"],
+    });
+    expect(failed.code).toBe(1);
+    expect(JSON.parse(failed.stdout)).toMatchObject({
+      ok: false,
+      error: {
+        code: "E_GLOBAL_NOT_READY",
+        detail: {
+          schema: "hack.global-up.v1",
+          failedStage: "routing",
+          routes: { https: { state: "not-ready" } },
+        },
+      },
+    });
+  }, 60_000);
+});
+
+describe("the opt-in logging stack (HACK-2468)", () => {
+  const home = () => join(tempDir!, GLOBAL_HACK_DIR_NAME);
+  const loggingCompose = () =>
+    join(home(), GLOBAL_LOGGING_DIR_NAME, GLOBAL_LOGGING_COMPOSE_FILENAME);
+  const loggingSetting = async (): Promise<unknown> => {
+    const text = await readFile(join(home(), "hack.config.json"), "utf8").catch(
+      () => null
+    );
+    return text === null ? undefined : JSON.parse(text).logging?.enabled;
+  };
+  // `docker ps --format` lines: id, then the recorded Compose working dir.
+  const psLines = (...ids: readonly string[]) =>
+    ids.map((id) => `${id}\t${dirname(loggingCompose())}\n`).join("");
+  // Another Hack home's logging stack on the same engine: never touched.
+  const otherHome = "ccc333\t/srv/other-home/.hack/logging\n";
+  const loggingCalls = (calls: readonly string[][], verb: string) =>
+    calls.filter(
+      (call) => call.includes(loggingCompose()) && call.includes(verb)
+    );
+
+  test("a fresh home's install starts the proxy only, writes no logging files and saves nothing", async () => {
+    await writeInstallStubs({ logging: false });
+    const { code, output } = await runNonInteractiveInstall();
+    expect(code).toBe(0);
+    expect(await Bun.file(globalCaddyComposePath()).exists()).toBe(true);
+    expect(await Bun.file(loggingCompose()).exists()).toBe(false);
+    expect(
+      runCalls.some(
+        (call) => call.includes(globalCaddyComposePath()) && call.includes("up")
+      )
+    ).toBe(true);
+    expect(loggingCalls(runCalls, "up")).toEqual([]);
+    expect(loggingCalls(execCalls, "stop")).toEqual([]);
+    expect(output).toContain("hack global up --logging");
+    expect(await loggingSetting()).toBeUndefined();
+  });
+
+  test("an existing home keeps its logging stack and its first start saves that choice", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    await writeComposeFile(loggingCompose());
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "up"])).toBe(0);
+    expect(loggingCalls(runCalls, "up")).toHaveLength(1);
+    // Saved, so the choice no longer hangs on the compose file.
+    expect(await loggingSetting()).toBe(true);
+  });
+
+  test("an existing home whose compose file was moved aside keeps the stack: the file is written again", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    await writeFile(
+      join(home(), GLOBAL_CADDY_DIR_NAME, "Corefile"),
+      ".:53 {}\n"
+    );
+    // The logging directory is the marker; only its compose file is gone.
+    await mkdir(join(home(), GLOBAL_LOGGING_DIR_NAME), { recursive: true });
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "up"])).toBe(0);
+    expect(await loggingSetting()).toBe(true);
+    expect(await Bun.file(loggingCompose()).exists()).toBe(true);
+    expect(loggingCalls(runCalls, "up")).toHaveLength(1);
+  });
+
+  test("global up --logging turns it on in a fresh home: saves the setting, writes the files, starts it", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    await writeFile(
+      join(home(), GLOBAL_CADDY_DIR_NAME, "Corefile"),
+      ".:53 {}\n"
+    );
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "up", "--logging"])).toBe(0);
+    expect(await loggingSetting()).toBe(true);
+    expect(await Bun.file(loggingCompose()).exists()).toBe(true);
+    expect(loggingCalls(runCalls, "up")).toHaveLength(1);
+
+    // Later runs keep it on without the flag.
+    runCalls.length = 0;
+    expect(await runCli(["global", "up"])).toBe(0);
+    expect(loggingCalls(runCalls, "up")).toHaveLength(1);
+  });
+
+  test("a failed save does not block routing: the stack stays on for this run, and the warning says it was not saved", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    await writeFile(
+      join(home(), GLOBAL_CADDY_DIR_NAME, "Corefile"),
+      ".:53 {}\n"
+    );
+    await writeComposeFile(loggingCompose());
+    // A config path under a regular file: reads find nothing, writes fail.
+    const blocker = join(tempDir!, "not-a-directory");
+    await writeFile(blocker, "");
+    const saved = process.env.HACK_GLOBAL_CONFIG_PATH;
+    process.env.HACK_GLOBAL_CONFIG_PATH = join(blocker, "hack.config.json");
+    const lines: string[] = [];
+    const capture = (chunk: string | Uint8Array) => {
+      lines.push(String(chunk));
+      return true;
+    };
+    const out = spyOn(process.stdout, "write").mockImplementation(capture);
+    const err = spyOn(process.stderr, "write").mockImplementation(capture);
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      // The decision an existing home's first start saves.
+      expect(await runCli(["global", "up"])).toBe(0);
+      expect(loggingCalls(runCalls, "up")).toHaveLength(1);
+      // An explicit flag: this run follows it.
+      runCalls.length = 0;
+      expect(await runCli(["global", "up", "--no-logging"])).toBe(0);
+      expect(loggingCalls(runCalls, "up")).toEqual([]);
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
+      if (saved === undefined) {
+        Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
+      } else {
+        process.env.HACK_GLOBAL_CONFIG_PATH = saved;
+      }
+    }
+    const text = lines.join("");
+    expect(text).toContain(
+      "so it stays on for this run, but logging.enabled=true was not saved"
+    );
+    expect(text).toContain("logging.enabled=false was not saved");
+    expect(text).toContain("This run uses it");
+    // Routing started both times.
+    expect(
+      runCalls.some(
+        (call) => call.includes(globalCaddyComposePath()) && call.includes("up")
+      )
+    ).toBe(true);
+  });
+
+  test("after an engine upgrade Hack's own logging Compose file is replaced silently; a hand edit only after a yes", async () => {
+    await writeInstallStubs();
+    // The file an older engine got (no start_interval), and now Engine 29.
+    await mkdir(dirname(loggingCompose()), { recursive: true });
+    await writeFile(loggingCompose(), renderGlobalLoggingCompose());
+    execMockResponder = (cmd) =>
+      cmd[1] === "version" && cmd.includes("{{.Server.Version}}")
+        ? { exitCode: 0, stdout: "29.0.1\n", stderr: "" }
+        : null;
+    const backups = async () =>
+      (await readdir(dirname(loggingCompose()))).filter((name) =>
+        name.startsWith(`${GLOBAL_LOGGING_COMPOSE_FILENAME}.bak-`)
+      );
+    const rendered = renderGlobalLoggingCompose({ startInterval: true });
+    loggingComposePrompts.length = 0;
+    // Hack's own rendering: replaced with no prompt, even when every prompt
+    // would be declined, and with no backup.
+    const upgraded = await runNonInteractiveInstall({ interactive: true });
+    expect(upgraded.code).toBe(0);
+    expect(readFileSync(loggingCompose(), "utf8")).toBe(rendered);
+    expect(loggingComposePrompts).toEqual([]);
+    expect(await backups()).toEqual([]);
+
+    // A hardened hand edit (here: Loki's proxy route removed) is kept
+    // without a terminal, and the warning says how to take Hack's file.
+    const edited = rendered.replace(/^\s+caddy[^\n]*\n/gm, "");
+    expect(edited).not.toBe(rendered);
+    await writeFile(loggingCompose(), edited);
+    const kept = await runNonInteractiveInstall();
+    expect(kept.code).toBe(0);
+    expect(readFileSync(loggingCompose(), "utf8")).toBe(edited);
+    expect(await backups()).toEqual([]);
+    expect(kept.output).toContain(
+      "it differs from Hack's rendering, so `hack global up` keeps its fixed waits unless it has healthchecks"
+    );
+
+    // Declined in a terminal: kept, and the question named the file.
+    const declined = await runNonInteractiveInstall({ interactive: true });
+    expect(declined.code).toBe(0);
+    expect(readFileSync(loggingCompose(), "utf8")).toBe(edited);
+    expect(loggingComposePrompts.at(-1)).toContain(loggingCompose());
+
+    // Accepted: backed up, then replaced.
+    const replaced = await runNonInteractiveInstall({
+      interactive: true,
+      overwrite: true,
+    });
+    expect(replaced.code).toBe(0);
+    expect(readFileSync(loggingCompose(), "utf8")).toBe(rendered);
+    const [backup] = await backups();
+    expect(backup).toBeDefined();
+    expect(readFileSync(join(dirname(loggingCompose()), backup!), "utf8")).toBe(
+      edited
+    );
+  });
+
+  test("global up --no-logging saves false and stops the stack, keeping its volumes", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    await writeComposeFile(loggingCompose());
+    execMockResponder = (cmd) =>
+      cmd[1] === "ps" &&
+      cmd.includes("label=com.docker.compose.project=hack-logging")
+        ? {
+            exitCode: 0,
+            stdout: psLines("aaa111", "bbb222") + otherHome,
+            stderr: "",
+          }
+        : null;
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "up", "--no-logging"])).toBe(0);
+    expect(await loggingSetting()).toBe(false);
+    expect(loggingCalls(runCalls, "up")).toEqual([]);
+    // Found by the stack's Compose labels, so even a home whose logging
+    // files are gone has its containers stopped; another home's are not.
+    expect(execCalls.filter((call) => call[1] === "stop")).toEqual([
+      ["docker", "stop", "aaa111", "bbb222"],
+    ]);
+    for (const call of [...execCalls, ...runCalls]) {
+      if (call.includes(loggingCompose())) {
+        expect(call).not.toContain("down");
+        expect(call).not.toContain("-v");
+      }
+    }
+    // The files stay, so turning it back on needs no install.
+    expect(await Bun.file(loggingCompose()).exists()).toBe(true);
+  });
+
+  test("a failed stop of the disabled stack fails global up and says the containers may still run", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    await writeComposeFile(loggingCompose());
+    execMockResponder = (cmd) => {
+      if (
+        cmd[1] === "ps" &&
+        cmd.includes("label=com.docker.compose.project=hack-logging")
+      ) {
+        return { exitCode: 0, stdout: psLines("aaa111"), stderr: "" };
+      }
+      return cmd[1] === "stop"
+        ? {
+            exitCode: 1,
+            stdout: "",
+            stderr: "Cannot connect to the Docker daemon\nsecond line\n",
+          }
+        : null;
+    };
+    const errors: string[] = [];
+    const capture = (chunk: string | Uint8Array) => {
+      errors.push(String(chunk));
+      return true;
+    };
+    const out = spyOn(process.stdout, "write").mockImplementation(capture);
+    const err = spyOn(process.stderr, "write").mockImplementation(capture);
+    let code: number;
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      code = await runCli(["global", "up", "--no-logging"]);
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
+    }
+    expect(code).toBe(1);
+    expect(await loggingSetting()).toBe(false);
+    const message = errors.join("\n");
+    expect(message).toContain(
+      "its containers could not be stopped (docker stop exited 1): Cannot connect to the Docker daemon"
+    );
+    expect(message).toContain("They may still be running.");
+    expect(message).not.toContain("second line");
+  });
+
+  test("a failed lookup of the disabled stack's containers fails global up instead of reporting it stopped", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    await writeComposeFile(loggingCompose());
+    execMockResponder = (cmd) =>
+      cmd[1] === "ps" &&
+      cmd.includes("label=com.docker.compose.project=hack-logging")
+        ? { exitCode: 1, stdout: "", stderr: "Cannot connect\n" }
+        : null;
+    const lines: string[] = [];
+    const capture = (chunk: string | Uint8Array) => {
+      lines.push(String(chunk));
+      return true;
+    };
+    const out = spyOn(process.stdout, "write").mockImplementation(capture);
+    const err = spyOn(process.stderr, "write").mockImplementation(capture);
+    let code: number;
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      code = await runCli(["global", "up", "--no-logging"]);
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
+    }
+    expect(code).toBe(1);
+    const text = lines.join("");
+    expect(text).toContain(
+      "Docker could not be asked for its containers, so none were stopped."
+    );
+    expect(text).toContain("They may still be running.");
+    expect(text).not.toContain("Logging stack (Loki, Alloy, Grafana) is off;");
+    expect(execCalls.filter((call) => call[1] === "stop")).toEqual([]);
+  });
+
+  async function statusJson(): Promise<{
+    readonly logging: {
+      readonly ok: unknown;
+      readonly enabled?: boolean;
+      readonly error: string | null;
+    };
+  }> {
+    let output = "";
+    const write = spyOn(process.stdout, "write").mockImplementation(
+      (chunk: string | Uint8Array) => {
+        output += String(chunk);
+        return true;
+      }
+    );
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      await runCli(["global", "status", "--json"]);
+    } finally {
+      write.mockRestore();
+    }
+    return JSON.parse(output.trim());
+  }
+
+  test("status with logging off still asks Docker: running containers are not reported as off", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    await enableLogging();
+    await writeFile(
+      join(home(), "hack.config.json"),
+      `${JSON.stringify({ logging: { enabled: false } })}\n`
+    );
+    let running = psLines("aaa111") + otherHome;
+    execMockResponder = (cmd) =>
+      cmd[1] === "ps" &&
+      cmd.includes("label=com.docker.compose.project=hack-logging")
+        ? { exitCode: 0, stdout: running, stderr: "" }
+        : null;
+    const busy = await statusJson();
+    expect(busy.logging).toMatchObject({ ok: false, enabled: false });
+    expect(busy.logging.error).toContain(
+      "1 logging container is still running"
+    );
+    expect(busy.logging.error).toContain("hack global up");
+    running = otherHome;
+    expect((await statusJson()).logging).toMatchObject({
+      ok: true,
+      enabled: false,
+      error: null,
+    });
+  });
+
+  test("logs-reset with logging off and no files checks Docker for the stack's volumes, and never deletes them", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    let volumes: { exitCode: number; stdout: string; stderr: string } = {
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    };
+    execMockResponder = (cmd) =>
+      cmd[1] === "volume" && cmd[2] === "ls" ? volumes : null;
+    const lines: string[] = [];
+    const capture = (chunk: string | Uint8Array) => {
+      lines.push(String(chunk));
+      return true;
+    };
+    const out = spyOn(process.stdout, "write").mockImplementation(capture);
+    const err = spyOn(process.stderr, "write").mockImplementation(capture);
+    const codes: number[] = [];
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      // None: nothing to reset.
+      codes.push(await runCli(["global", "logs-reset"]));
+      // Left over from before: listed with the command, not removed.
+      volumes = {
+        exitCode: 0,
+        stdout: "hack-logging_loki-data\nhack-logging_grafana-data\n",
+        stderr: "",
+      };
+      codes.push(await runCli(["global", "logs-reset"]));
+      // Docker could not be asked: not reported as nothing to reset.
+      volumes = { exitCode: 1, stdout: "", stderr: "Cannot connect\n" };
+      codes.push(await runCli(["global", "logs-reset"]));
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
+    }
+    expect(codes).toEqual([0, 1, 1]);
+    const text = lines.join("");
+    expect(text).toContain(
+      "with no files or volumes here, so there are no logs to reset"
+    );
+    expect(text).toContain(
+      "Docker still has 2 of its volumes: hack-logging_loki-data, hack-logging_grafana-data."
+    );
+    expect(text).toContain(
+      "docker volume rm hack-logging_loki-data hack-logging_grafana-data"
+    );
+    expect(text).toContain(
+      "Could not ask Docker for the logging stack's volumes: Cannot connect"
+    );
+    expect(
+      execCalls.filter((call) => call[1] === "volume" && call[2] === "ls")[0]
+    ).toEqual([
+      "docker",
+      "volume",
+      "ls",
+      "-q",
+      "--filter",
+      "label=com.docker.compose.project=hack-logging",
+    ]);
+    for (const call of [...runCalls, ...execCalls]) {
+      expect(call).not.toContain("down");
+      expect(call.slice(0, 3)).not.toEqual(["docker", "volume", "rm"]);
+    }
+  });
+
+  test("a fresh home's global up only looks for stray logging containers: no files, no start, no stop", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "up"])).toBe(0);
+    const logging = [...execCalls, ...runCalls].filter((call) =>
+      call.some(
+        (arg) =>
+          arg.includes(join(home(), GLOBAL_LOGGING_DIR_NAME)) ||
+          arg.includes("hack-logging")
+      )
+    );
+    // One read by Compose labels; nothing is written, started or stopped.
+    expect(logging).toEqual([
+      [
+        "docker",
+        "ps",
+        "--filter",
+        "label=com.docker.compose.project=hack-logging",
+        "--format",
+        '{{.ID}}\t{{.Label "com.docker.compose.project.working_dir"}}',
+      ],
+    ]);
+    expect(await Bun.file(loggingCompose()).exists()).toBe(false);
+  });
+
+  test("--logging and --no-logging together are refused and change nothing", async () => {
+    await writeComposeFile(globalCaddyComposePath());
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "up", "--logging", "--no-logging"])).toBe(1);
+    expect(await loggingSetting()).toBeUndefined();
+    expect(runCalls).toEqual([]);
+  });
+});

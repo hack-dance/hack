@@ -2182,6 +2182,78 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // src/lib/global-logging.ts and `hack global install/up`: the logging
+    // stack is opt-in; a home that had it keeps it, a new one never starts
+    // it unasked, and turning it off never removes its logs.
+    name: "global-logging-optin",
+    module: "LoggingOptIn",
+    states: 1014,
+    invariant: "FreshNeverStartsUnasked",
+    action: "Install",
+    fields: [
+      "existing = FALSE",
+      "asked = FALSE",
+      "running = TRUE",
+      'setting = "unset"',
+    ],
+    additionalControls: [
+      {
+        name: "legacy-unset-off",
+        negative: true,
+        invariant: "ExistingHomeKept",
+        action: "Install",
+        fields: ["existing = TRUE", 'setting = "unset"', "running = FALSE"],
+        alternativeWitnesses: [
+          {
+            action: "Up",
+            fields: ["existing = TRUE", 'setting = "unset"', "running = FALSE"],
+          },
+        ],
+      },
+      {
+        name: "off-removes-volumes",
+        negative: true,
+        invariant: "NoSurpriseDataLoss",
+        action: "UpFlag",
+        fields: ["prevData = TRUE", "data = FALSE", 'setting = "off"'],
+      },
+      {
+        // The first start does not save an existing home's choice: with its
+        // logging directory moved aside, the next start turns it off.
+        name: "decision-not-saved",
+        negative: true,
+        invariant: "ExistingHomeKept",
+        action: "Install",
+        fields: [
+          "existing = TRUE",
+          'setting = "unset"',
+          "dir = FALSE",
+          "running = FALSE",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Up",
+            fields: [
+              "existing = TRUE",
+              'setting = "unset"',
+              "dir = FALSE",
+              "running = FALSE",
+            ],
+          },
+        ],
+      },
+      {
+        // A failed save of `--logging` that is not reported: the stack runs
+        // with the setting still off, and nothing told the user.
+        name: "unsaved-silent",
+        negative: true,
+        invariant: "OffMeansStopped",
+        action: "UpFlag",
+        fields: ['setting = "off"', "unsaved = FALSE", "running = TRUE"],
+      },
+    ],
+  },
+  {
     // src/lib/process-exit.ts: the CLI never exits while held work runs or
     // before its output is flushed.
     name: "cli-process-exit",

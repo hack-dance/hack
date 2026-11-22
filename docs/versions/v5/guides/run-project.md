@@ -25,8 +25,10 @@ hack logs --loki --since 2h --pretty
 ```
 
 The first command is a finite snapshot. The second follows live output until
-Ctrl-C. Loki history needs the global logging stack running on that host and is
-unavailable in slim environments.
+Ctrl-C. Both read container logs, and so do `--since` and `--until`. Loki
+history and queries (`--loki`, `--query`) need the global logging stack, which
+is opt-in: turn it on once with `hack global up --logging`. Without it they
+fail with `E_LOGGING_OFF`; they are unavailable in slim environments.
 
 `--services api,worker` reads several services at once. For scripts,
 `hack logs --json` is a stable line-per-event stream; `--max-line-bytes <n>`

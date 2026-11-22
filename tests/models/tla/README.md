@@ -780,6 +780,24 @@ The model does not represent concurrent starts of the same instance, the startup
 marker, or image and admission work. A real VM must qualify `runtime up` booting a
 stopped pool as it was recorded.
 
+## Native run mapping release after the home is gone
+
+`native-run-mapping-release/MappingRelease.tla` checks HACK-2524. A checkout's run mapping names the native home that owns its run. When that home is deleted, its records (the proof of a clean stop) go with it. The model covers the home at its recorded path (present, deleted, moved, or replaced by another identity), whether a process of the home is alive and whether it names the recorded path, and the mapping (held or released).
+
+`NoStrandedMapping` says a held mapping whose home is gone, with no process of it alive, can always be released. `NeverReleaseLive` says no release happens while a process of the home that names the recorded path is alive.
+
+| Control | Switches | Result |
+| --- | --- | --- |
+| `positive` | the gone-home release: the path no longer holds the home and the process scan finds no process naming it | 21 states; both invariants hold |
+| `negative` | today: only the clean-stop release from the home's own records | `NoStrandedMapping` fails right after `Delete` (or `Move`) |
+| `path-only` | the gone-home release without the process scan | `NeverReleaseLive` fails: released while a process of the home lives |
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `CleanRelease` | `releaseNativeProjectRunForeignHome` (the home's frontend records show a completed lifetime) |
+| `GoneHomeRelease` | the gone-home release in `native-project-run.ts`: the recorded path is absent, not a directory, or another identity, and the runtime's process scan finds no process naming the home |
+| `StartMoved` | the residual: a moved home started from its new path has processes that do not name the recorded path, so a release then leaves that home's run without a checkout mapping (its data and its own recovery stay in that home) |
+
 ## Pool amd64 emulation
 
 `pool-emulation/Emulation.tla` checks the Rosetta 2 translation intent of one shared

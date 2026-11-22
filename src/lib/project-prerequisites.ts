@@ -58,7 +58,8 @@ function findMissingTool(
 
 async function checkPrerequisite(
   requirement: ProjectPrerequisite,
-  tools: ProjectPrerequisiteConfig["tools"]
+  tools: ProjectPrerequisiteConfig["tools"],
+  cwd: string
 ): Promise<CheckState> {
   const missing = findMissingTool(requirement, tools);
   if (missing) {
@@ -70,6 +71,7 @@ async function checkPrerequisite(
     return { state: "missing", bin, tool: bin };
   }
   const child = Bun.spawn([executable, ...args], {
+    cwd,
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",
@@ -114,7 +116,10 @@ function blocker(
   };
 }
 
-async function login(requirement: ProjectPrerequisite): Promise<boolean> {
+async function login(
+  requirement: ProjectPrerequisite,
+  cwd: string
+): Promise<boolean> {
   const [bin, ...args] = requirement.login;
   const executable = resolveExecutable(bin);
   if (!executable) {
@@ -122,6 +127,7 @@ async function login(requirement: ProjectPrerequisite): Promise<boolean> {
   }
   return (
     (await Bun.spawn([executable, ...args], {
+      cwd,
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",
@@ -153,9 +159,10 @@ async function allowPrerequisite(opts: {
   readonly tools: ProjectPrerequisiteConfig["tools"];
   readonly consumer: string;
   readonly json: boolean;
+  readonly cwd: string;
 }): Promise<boolean> {
-  const { name, requirement, consumer, json, tools } = opts;
-  let result = await checkPrerequisite(requirement, tools);
+  const { name, requirement, consumer, json, tools, cwd } = opts;
+  let result = await checkPrerequisite(requirement, tools, cwd);
   if (result.state === "ok") {
     return true;
   }
@@ -172,10 +179,10 @@ async function allowPrerequisite(opts: {
     return false;
   }
   const confirmed = await confirmLogin();
-  if (!(confirmed && (await login(requirement)))) {
+  if (!(confirmed && (await login(requirement, cwd)))) {
     return false;
   }
-  result = await checkPrerequisite(requirement, tools);
+  result = await checkPrerequisite(requirement, tools, cwd);
   if (result.state === "ok") {
     return true;
   }
@@ -187,7 +194,8 @@ async function allowPrerequisite(opts: {
 /** Check each prerequisite used by this invocation once before Compose hooks. */
 export async function enforceProjectPrerequisites(
   validation: ProjectPrerequisiteValidation | undefined,
-  json: boolean
+  json: boolean,
+  cwd: string
 ): Promise<boolean> {
   if (validation?.error) {
     throw validation.error;
@@ -209,6 +217,7 @@ export async function enforceProjectPrerequisites(
         tools: config.tools,
         consumer: `${selection.remote} (${selection.target})`,
         json,
+        cwd,
       });
       if (!allowed) {
         return false;
@@ -220,13 +229,14 @@ export async function enforceProjectPrerequisites(
 }
 
 export async function inspectProjectPrerequisites(
-  config: ProjectPrerequisiteConfig
+  config: ProjectPrerequisiteConfig,
+  cwd: string
 ): Promise<readonly { name: string; state: CheckState; login: string }[]> {
   const results: { name: string; state: CheckState; login: string }[] = [];
   for (const [name, requirement] of config.requires) {
     results.push({
       name,
-      state: await checkPrerequisite(requirement, config.tools),
+      state: await checkPrerequisite(requirement, config.tools, cwd),
       login: displayArgv(requirement.login),
     });
   }

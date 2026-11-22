@@ -87,7 +87,7 @@ Interrupting `hack autostart run` cancels the pass and waits for startup cleanup
 After upgrades that change global templates, run `hack global install` manually
 before relying on login routing.
 
-If a default remote target declares a [sign-in prerequisite](../../env.md#sign-in-prerequisites-for-compose-projects),
+If a default remote target declares a [sign-in prerequisite](https://github.com/hack-dance/hack/blob/next/docs/env.md#sign-in-prerequisites-for-compose-projects),
 Hack checks it before startup hooks. If the check fails, follow the displayed
 login command and try again. Use `hack config validate` to verify declarations
 without running the checks.

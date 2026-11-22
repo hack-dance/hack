@@ -103,7 +103,9 @@ function parseTool(value: unknown): ProjectHostTool {
   ) {
     fail("E_INVALID_HOST_TOOL", "Invalid host tool declaration.");
   }
-  for (const [, override] of entries(value.os, "E_INVALID_HOST_TOOL")) {
+  let bins = value.bins;
+  let install = value.install;
+  for (const [platform, override] of entries(value.os, "E_INVALID_HOST_TOOL")) {
     if (
       !isRecord(override) ||
       (override.bins !== undefined &&
@@ -113,8 +115,12 @@ function parseTool(value: unknown): ProjectHostTool {
     ) {
       fail("E_INVALID_HOST_TOOL", "Invalid host tool OS override.");
     }
+    if (platform === process.platform) {
+      bins = override.bins ?? bins;
+      install = override.install ?? install;
+    }
   }
-  return { bins: value.bins, install: value.install };
+  return { bins, install };
 }
 
 function toolReferences(

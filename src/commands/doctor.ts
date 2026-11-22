@@ -1301,7 +1301,10 @@ async function collectPrerequisiteChecks(
   if (!prerequisites?.config) {
     return [];
   }
-  const observed = await inspectProjectPrerequisites(prerequisites.config);
+  const observed = await inspectProjectPrerequisites(
+    prerequisites.config,
+    project.projectRoot
+  );
   return await Promise.all(
     observed.map(({ name, state, login }) => {
       const checkName = `prerequisite ${name}`;

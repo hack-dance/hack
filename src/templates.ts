@@ -546,6 +546,13 @@ export function renderProjectEnvContractJson(): string {
 }
 
 export function renderProjectConfigSchemaJson(): string {
+  const names = { type: "array", items: { type: "string" } };
+  const argv = { ...names, minItems: 1 };
+  const toolProperties = {
+    bins: argv,
+    version: { type: "string" },
+    install: { type: "string" },
+  };
   const schema = {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     title: "hack.config.json",
@@ -554,18 +561,6 @@ export function renderProjectConfigSchemaJson(): string {
     dependentRequired: {
       remotes: ["min_cli_version"],
       requires: ["min_cli_version"],
-    },
-    $defs: {
-      nameList: { type: "array", items: { type: "string", minLength: 1 } },
-      argv: { type: "array", minItems: 1, items: { type: "string" } },
-      toolOverride: {
-        type: "object",
-        properties: {
-          bins: { $ref: "#/$defs/nameList", minItems: 1 },
-          version: { type: "string", minLength: 1 },
-          install: { type: "string", minLength: 1 },
-        },
-      },
     },
     properties: {
       $schema: { type: "string" },
@@ -576,15 +571,19 @@ export function renderProjectConfigSchemaJson(): string {
       tools: {
         type: "object",
         additionalProperties: {
-          $ref: "#/$defs/toolOverride",
+          type: "object",
           required: ["bins"],
           properties: {
+            ...toolProperties,
             optional: { type: "boolean" },
             lose: { type: "string" },
             always: { type: "boolean" },
             os: {
               type: "object",
-              additionalProperties: { $ref: "#/$defs/toolOverride" },
+              additionalProperties: {
+                type: "object",
+                properties: toolProperties,
+              },
             },
           },
         },
@@ -595,21 +594,21 @@ export function renderProjectConfigSchemaJson(): string {
           type: "object",
           properties: {
             kind: { enum: ["aws-sso", "gcloud-adc"] },
-            profile: { type: "string", minLength: 1 },
-            tools: { $ref: "#/$defs/nameList" },
-            check: { $ref: "#/$defs/argv" },
-            login: { $ref: "#/$defs/argv" },
+            profile: { type: "string" },
+            tools: names,
+            check: argv,
+            login: argv,
           },
           anyOf: [
             {
               required: ["kind", "profile"],
-              properties: { kind: { const: "aws-sso" } },
+              properties: { kind: { enum: ["aws-sso"] } },
             },
             {
               required: ["kind"],
-              properties: { kind: { const: "gcloud-adc" } },
+              properties: { kind: { enum: ["gcloud-adc"] } },
             },
-            { required: ["check", "login"], not: { required: ["kind"] } },
+            { required: ["check", "login"], properties: { kind: false } },
           ],
         },
       },
@@ -619,16 +618,16 @@ export function renderProjectConfigSchemaJson(): string {
           type: "object",
           required: ["default", "targets"],
           properties: {
-            default: { type: "string", minLength: 1 },
+            default: { type: "string" },
             targets: {
               type: "object",
               additionalProperties: {
                 type: "object",
                 properties: {
-                  requires: { $ref: "#/$defs/nameList" },
+                  requires: names,
                   via: {
                     type: "object",
-                    properties: { tools: { $ref: "#/$defs/nameList" } },
+                    properties: { tools: names },
                   },
                 },
               },

@@ -7459,7 +7459,13 @@ async function runUpCommand({
     throw error;
   }
   const cfg = await readProjectConfig(project);
-  if (!(await enforceProjectPrerequisites(cfg.prerequisites, json))) {
+  if (
+    !(await enforceProjectPrerequisites(
+      cfg.prerequisites,
+      json,
+      project.projectRoot
+    ))
+  ) {
     return 1;
   }
   budgets = await withProjectComposeBudgets({ budgets, detach, project });
@@ -9840,7 +9846,13 @@ async function runRestartCommand({
     projectOpt: args.options.project,
   });
   const cfg = await readProjectConfig(project);
-  if (!(await enforceProjectPrerequisites(cfg.prerequisites, json))) {
+  if (
+    !(await enforceProjectPrerequisites(
+      cfg.prerequisites,
+      json,
+      project.projectRoot
+    ))
+  ) {
     return 1;
   }
   const budgets = await withProjectComposeBudgets({
@@ -10779,7 +10791,13 @@ async function handleRun({
   const cmdArgs = args.positionals.cmd;
 
   const cfg = await readProjectConfig(project);
-  if (!(await enforceProjectPrerequisites(cfg.prerequisites, false))) {
+  if (
+    !(await enforceProjectPrerequisites(
+      cfg.prerequisites,
+      false,
+      project.projectRoot
+    ))
+  ) {
     return 1;
   }
   const configRefusal = reviewRunConfig({ cfg, project });

@@ -66,7 +66,7 @@ test("a failed check reports its exit code without its process output", async ()
     "fixture.json"
   );
   try {
-    await enforceProjectPrerequisites(cfg.prerequisites, true);
+    await enforceProjectPrerequisites(cfg.prerequisites, true, process.cwd());
     throw new Error("Prerequisite should have blocked the command");
   } catch (error) {
     expect(error).toBeInstanceOf(HackCliError);
@@ -138,6 +138,52 @@ test("Compose lifecycle refuses before running hooks with a missing prerequisite
         );
       }
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("host tool OS overrides supply the current platform bins and hint", () => {
+  const config = parseProjectConfigRecord(
+    {
+      tools: {
+        "cloud-cli": {
+          bins: ["aws"],
+          install: "Install the base CLI.",
+          os: {
+            [process.platform]: {
+              bins: ["aws-local"],
+              install: "Install the platform CLI.",
+            },
+          },
+        },
+      },
+    },
+    "fixture.json"
+  );
+  expect(config.prerequisites?.config?.tools.get("cloud-cli")).toEqual({
+    bins: ["aws-local"],
+    install: "Install the platform CLI.",
+  });
+});
+
+test("prerequisite check resolves an argument relative to the selected project", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-prerequisite-root-"));
+  try {
+    await writeFile(join(root, "check.sh"), "exit 0\n");
+    const cfg = parseProjectConfigRecord(
+      {
+        min_cli_version: HACK_VERSION,
+        requires: { cloud: { check: ["sh", "check.sh"], login: ["true"] } },
+        remotes: {
+          db: { default: "qa", targets: { qa: { requires: ["cloud"] } } },
+        },
+      },
+      "fixture.json"
+    );
+    expect(
+      await enforceProjectPrerequisites(cfg.prerequisites, true, root)
+    ).toBe(true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

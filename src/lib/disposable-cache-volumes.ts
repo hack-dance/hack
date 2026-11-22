@@ -171,7 +171,7 @@ export async function removeDisposableCacheVolumes(opts: {
     ) {
       failed.push({
         name: candidate.name,
-        error: "Volume identity changed after preview.",
+        error: "Volume identity could not be verified after preview.",
       });
       continue;
     }
@@ -218,7 +218,7 @@ async function inspectVolume(name: string) {
   }
   const result = await exec(["docker", "volume", "inspect", name], {
     stdin: "ignore",
-    timeoutMs: 2000,
+    timeoutMs: 5000,
   });
   if (result.exitCode !== 0) {
     return result.stderr.includes(`get ${name}: no such volume`) ? false : null;
@@ -268,10 +268,10 @@ async function cacheReceipt(opts: {
 }) {
   const id = await exec(["docker", "info", "--format", "{{.ID}}"], {
     stdin: "ignore",
-    timeoutMs: 2000,
+    timeoutMs: 5000,
   });
   if (id.exitCode !== 0 || !id.stdout.trim()) {
-    return null;
+    throw new Error("Could not identify the Docker engine.");
   }
   const directory = resolve(resolveGlobalHackDir(), "compose-cache-receipts");
   const key = fingerprint(
@@ -306,9 +306,6 @@ export async function retainDownCacheMounts(
     return;
   }
   const receipt = await cacheReceipt(opts);
-  if (!receipt) {
-    return;
-  }
   const recorded: MountedNamedVolumeCandidate[] = [];
   for (const mount of mounts) {
     const identity = await volumeFingerprint(mount.name);
@@ -332,9 +329,6 @@ export async function readDownCacheMounts(
 ): Promise<readonly MountedNamedVolumeCandidate[]> {
   try {
     const receipt = await cacheReceipt(opts);
-    if (!receipt) {
-      return [];
-    }
     const text = await readBoundedPrivateFile({
       path: receipt.path,
       directories: [receipt.directory],
@@ -369,7 +363,7 @@ export function foreignCacheMounts(
           )
           .flatMap((container) =>
             container.mounts
-              .filter((mount) => mount.type === "volume")
+              .filter((mount) => mount.type.toLowerCase() === "volume")
               .map((mount) => mount.name?.trim() || mount.source.trim())
           )
       )

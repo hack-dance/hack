@@ -410,6 +410,44 @@ test("a plain down retains proof for a later cache prune of that instance", asyn
   const log = await readFile(fixture.dockerLogPath, "utf8");
   expect(log.match(/^volume rm /gm)).toHaveLength(2);
   expect(log).not.toContain("volume rm other-next");
+
+  // A plain down from the checkout that reused the same Compose project
+  // supersedes the first checkout's receipt, even for an unchanged volume.
+  await writeRuntimeFixtures({
+    fixture,
+    runtime: [
+      {
+        ...other,
+        id: "reused-runtime",
+        composeProject: "downsafe--feature-current",
+        workingDir: join(fixture.primaryRoot, ".hack"),
+        mounts: [
+          {
+            type: "volume",
+            source: "owned-claimed",
+            destination: "/app/.next",
+          },
+        ],
+      },
+    ],
+  });
+  const otherDown = [...down];
+  otherDown[2] = fixture.primaryRoot;
+  expect((await runCliWithCapturedOutput(otherDown)).exitCode).toBe(0);
+  await writeRuntimeFixtures({ fixture, runtime: [] });
+  const stale = await runCliWithCapturedOutput([
+    ...down,
+    "--prune-caches",
+    "--yes",
+  ]);
+  expect(stale.exitCode).toBe(0);
+  expect(JSON.parse(stale.stdout)).toMatchObject({
+    ok: true,
+    data: { cacheVolumesRemoved: [], cacheVolumesKept: [] },
+  });
+  expect(
+    (await readFile(fixture.dockerLogPath, "utf8")).match(/^volume rm /gm)
+  ).toHaveLength(2);
 });
 
 async function createWorktreeFixture(): Promise<{

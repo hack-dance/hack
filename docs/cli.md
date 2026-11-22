@@ -744,7 +744,13 @@ A plain `down` records the mounted volumes before removing the containers, so a
 later `down --prune-caches` can check the same checkout, instance, Docker engine
 and volume identity. Volumes detached before this record existed are kept if
 checkout ownership cannot be established. JSON reports `cacheVolumesRemoved`
-and `cacheVolumesKept`, with the reason for each observed candidate it kept.
+and `cacheVolumesKept`, with the reason for each observed candidate it kept,
+including when a different instance still mounts the volume. If another
+checkout uses the same Compose project, its plain `hack down` replaces the
+earlier receipt. A stop made directly through Docker cannot update Hack's
+receipt. Docker can refuse an attached volume but has no atomic
+identity-checked removal API, so avoid replacing the named volume concurrently
+with a prune.
 
 Interactive cleanup shows the exact volumes, services, and destinations and defaults to “no.”
 `--json` and other scripted use must add `--yes`; otherwise the command fails before down with

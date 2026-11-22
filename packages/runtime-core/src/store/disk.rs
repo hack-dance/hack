@@ -9,24 +9,29 @@
 //! repair and set-aside run only while exclusive, and no waiter is ever blocked
 //! behind that exclusive lock.
 
-use super::{Result, Store, invalid, io_error};
+use super::{MissReason, Result, Store, invalid, io_error};
 use crate::CandidateError;
-use crate::provider::state::{check_private_directory, flock, private_directory};
+use crate::provider::state::{flock, private_directory};
+use std::ffi::{CStr, CString};
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
+use std::mem::MaybeUninit;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 const VERSION: &[u8] = b"hack.store/1\n";
+pub(super) const FORMAT_DIRECTORY: &str = "hack.store-1";
 const DIRECTORIES: [&str; 5] = ["records", "cas", "files", "tags", "tmp"];
+const ARCHIVE_AGE_MILLIS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 /// How long `open` may wait for the store lock before it reports the store busy.
 pub(super) const OPEN_DEADLINE: Duration = Duration::from_secs(5);
 
-pub(super) fn open(root: &Path) -> Result<Store> {
-    open_until(root, Instant::now() + OPEN_DEADLINE)
+pub(super) fn open(base: &Path) -> Result<Store> {
+    open_until(base, Instant::now() + OPEN_DEADLINE)
 }
 
 /// Open the store, waiting for its lock no later than `deadline`.
@@ -35,8 +40,10 @@ pub(super) fn open(root: &Path) -> Result<Store> {
 /// tried without blocking and retried until the deadline, then the open fails
 /// with `step_store_busy`, which a caller treats as "run the step". A lock
 /// problem can therefore slow a command by at most the deadline, never hang it.
-pub(super) fn open_until(root: &Path, deadline: Instant) -> Result<Store> {
-    let root = store_path(root)?;
+pub(super) fn open_until(base: &Path, deadline: Instant) -> Result<Store> {
+    let base = store_path(base)?;
+    create_directory(&base)?;
+    let root = base.join(FORMAT_DIRECTORY);
     // Most opens only take a shared lock. Initialization waits for other openers
     // to finish probing, but refuses to rotate a store with live handles.
     loop {
@@ -65,17 +72,27 @@ pub(super) fn open_until(root: &Path, deadline: Instant) -> Result<Store> {
         if !is_current(&lock, &lock_path)? {
             continue;
         }
-        if read_version(&root, owner)? == Some(true) {
-            // A key that cannot be read is repaired under the exclusive lock below.
-            if let Ok(Some(key)) = read_key(&root, owner) {
-                create_layout(&root)?;
-                return Ok(Store {
-                    root,
-                    owner,
-                    key,
-                    _lock: lock,
-                });
+        if read_version(&root, owner)? == Some(true)
+            && let Ok(KeyProbe::File(metadata)) = probe_key(&root, owner)
+            && private_file(&metadata, owner)
+            && let Ok((_, key)) = read_key(&root, owner, &metadata)
+        {
+            create_layout(&root)?;
+            let directory = private_options()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_DIRECTORY)
+                .open(&root)
+                .map_err(io_error)?;
+            if !private_directory_metadata(&directory.metadata().map_err(io_error)?, owner) {
+                return Err(invalid("Unsafe step store directory."));
             }
+            return Ok(Store {
+                root,
+                directory,
+                owner,
+                key,
+                _lock: lock,
+            });
         }
 
         // Upgrade to exclusive without blocking. Linux may release the shared lock
@@ -125,41 +142,100 @@ fn store_path(root: &Path) -> Result<PathBuf> {
 
 /// Bring the store to a usable state under the exclusive lock.
 ///
-/// - Another `VERSION`: the whole store is set aside (no migrations).
-/// - `VERSION` present but the key missing or unreadable: the store is set aside
-///   too. Keyed digests made with the lost key can never be reproduced, so its
-///   records are useless; a cache rebuilds rather than refusing every open.
-/// - No `VERSION`: an initialization that never finished. A missing or torn key
-///   is replaced. The key is written, synced, and its directory synced before
-///   `VERSION` is published, so a durable `VERSION` always has a whole key.
+/// A conflicting VERSION or definitively lost key sets the format directory
+/// aside. A key that still exists can be repaired or retried. The key and its
+/// directory must be synced before publishing VERSION, including after an
+/// interruption that left a key file in place.
 fn initialize(root: &Path, owner: u32) -> Result<()> {
+    let base = root
+        .parent()
+        .ok_or_else(|| invalid("Invalid step store directory."))?;
+    cleanup_archives(base, owner);
     let version = read_version(root, owner)?;
-    let key = read_key(root, owner);
-    match (version, &key) {
-        (Some(false), _) | (Some(true), Ok(None) | Err(_)) => return set_aside(root),
-        (Some(true), Ok(Some(_))) => return Ok(()),
-        (None, _) => {}
+    if version == Some(false) {
+        return set_aside(base, root, owner);
     }
-    create_layout(root)?;
-    match key {
-        Ok(Some(_)) => {}
-        Ok(None) => create_key(root, owner)?,
-        Err(_) => {
-            remove_entry(&root.join("key"))?;
-            create_key(root, owner)?;
+    let file = match probe_key(root, owner)? {
+        KeyProbe::Missing if version.is_none() => None,
+        KeyProbe::Missing | KeyProbe::Damaged => return set_aside(base, root, owner),
+        KeyProbe::File(metadata) => {
+            if !private_file(&metadata, owner) {
+                repair_key_mode(root)?;
+            }
+            Some(read_key(root, owner, &metadata)?.0)
         }
+    };
+    if version.is_some() {
+        return Ok(());
+    }
+
+    create_layout(root)?;
+    if let Some(file) = file {
+        sync_existing_key(root, &file).map_err(|_| key_unavailable())?;
+    } else {
+        create_key(root)?;
     }
     publish(root, &root.join("VERSION"), VERSION)
 }
 
-fn set_aside(root: &Path) -> Result<()> {
-    let backup = root.with_file_name(format!("store.old-{}", unix_millis()?));
+fn set_aside(base: &Path, root: &Path, owner: u32) -> Result<()> {
+    let backup = base.join(format!("{FORMAT_DIRECTORY}.old-{}", unix_millis()?));
     match fs::symlink_metadata(&backup) {
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(io_error(error)),
         Ok(_) => return Err(invalid("Step store archive already exists.")),
     }
-    fs::rename(root, backup).map_err(io_error)
+    fs::rename(root, backup).map_err(io_error)?;
+    cleanup_archives(base, owner);
+    Ok(())
+}
+
+/// Use the timestamp in the archive name. A newly set-aside directory may
+/// have a much older modification time.
+pub(super) fn cleanup_archives(base: &Path, owner: u32) {
+    let (Ok(now), Ok(entries)) = (unix_millis(), fs::read_dir(base)) else {
+        return;
+    };
+    let mut newest: Option<(u64, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(suffix) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(FORMAT_DIRECTORY)?.strip_prefix(".old-"))
+        else {
+            continue;
+        };
+        if !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(archived_at) = suffix.parse::<u64>() else {
+            continue;
+        };
+        let path = entry.path();
+        if !owned_directory(&path, owner) {
+            continue;
+        }
+        if now.saturating_sub(archived_at) > ARCHIVE_AGE_MILLIS
+            || newest
+                .as_ref()
+                .is_some_and(|(time, _)| archived_at <= *time)
+        {
+            remove_archive(&path, owner);
+        } else if let Some((_, previous)) = newest.replace((archived_at, path)) {
+            remove_archive(&previous, owner);
+        }
+    }
+}
+
+fn owned_directory(path: &Path, owner: u32) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir() && metadata.uid() == owner)
+}
+
+fn remove_archive(path: &Path, owner: u32) {
+    if owned_directory(path, owner) {
+        // Best effort. remove_dir_all does not traverse symlinks inside an archive.
+        let _ = fs::remove_dir_all(path);
+    }
 }
 
 /// A lock attempt that another holder refused, or a signal interrupted.
@@ -198,17 +274,8 @@ fn directory_owner(path: &Path) -> Result<u32> {
     Ok(metadata.uid())
 }
 
-pub(super) fn existing_directory(path: &Path, owner: u32) -> Result<bool> {
-    match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(io_error(error)),
-        Ok(_) => {}
-    }
-    check_private_directory(path).map_err(|_| invalid("Unsafe step store directory."))?;
-    if directory_owner(path)? != owner {
-        return Err(invalid("Unsafe step store directory."));
-    }
-    Ok(true)
+fn private_directory_metadata(metadata: &Metadata, owner: u32) -> bool {
+    metadata.is_dir() && metadata.uid() == owner && metadata.mode() & 0o7777 == 0o700
 }
 
 fn open_lock(path: &Path, owner: u32) -> io::Result<File> {
@@ -241,7 +308,7 @@ fn private_file(metadata: &Metadata, owner: u32) -> bool {
     owned_file(metadata, owner) && metadata.nlink() == 1 && metadata.mode() & 0o7777 == 0o600
 }
 
-pub(super) fn read_owned_file(path: &Path, owner: u32) -> Result<Option<File>> {
+fn read_owned_file(path: &Path, owner: u32) -> Result<Option<File>> {
     match private_options().read(true).open(path) {
         Ok(file) if owned_file(&file.metadata().map_err(io_error)?, owner) => Ok(Some(file)),
         Ok(_) => Err(invalid("Unsafe step store file.")),
@@ -261,17 +328,95 @@ fn read_version(root: &Path, owner: u32) -> Result<Option<bool>> {
     Ok(Some(bytes == VERSION))
 }
 
-fn read_key(root: &Path, owner: u32) -> Result<Option<Zeroizing<[u8; 32]>>> {
-    let Some(mut file) = read_owned_file(&root.join("key"), owner)? else {
-        return Ok(None);
+enum KeyProbe {
+    Missing,
+    Damaged,
+    File(Metadata),
+}
+
+fn probe_key(root: &Path, owner: u32) -> Result<KeyProbe> {
+    let metadata = match fs::symlink_metadata(root.join("key")) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(KeyProbe::Missing),
+        Err(_) => return Err(key_unavailable()),
     };
-    let metadata = file.metadata().map_err(io_error)?;
-    if !private_file(&metadata, owner) || metadata.len() != 32 {
-        return Err(invalid("Invalid step store key file."));
+    if !metadata.is_file() {
+        return Ok(KeyProbe::Damaged);
+    }
+    if metadata.uid() != owner || metadata.nlink() != 1 {
+        return Err(invalid("Unsafe step store key file."));
+    }
+    if metadata.len() != 32 {
+        return Ok(KeyProbe::Damaged);
+    }
+    Ok(KeyProbe::File(metadata))
+}
+
+fn key_unavailable() -> CandidateError {
+    CandidateError::new(
+        "step_store_unavailable",
+        "The step store key is unavailable.",
+    )
+}
+
+fn repair_key_mode(root: &Path) -> Result<()> {
+    let path = root.join("key");
+    let path = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| key_unavailable())?;
+    // SAFETY: path is a NUL-terminated absolute path in the private, exclusively
+    // locked store. This also repairs an unreadable mode without following a symlink.
+    if unsafe {
+        libc::fchmodat(
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            0o600,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(key_unavailable());
+    }
+    Ok(())
+}
+
+fn read_key(root: &Path, owner: u32, probed: &Metadata) -> Result<(File, Zeroizing<[u8; 32]>)> {
+    let mut file = private_options()
+        .read(true)
+        .open(root.join("key"))
+        .map_err(|_| key_unavailable())?;
+    let metadata = file.metadata().map_err(|_| key_unavailable())?;
+    if !private_file(&metadata, owner)
+        || metadata.len() != 32
+        || (metadata.dev(), metadata.ino()) != (probed.dev(), probed.ino())
+    {
+        return Err(key_unavailable());
     }
     let mut key = Zeroizing::new([0; 32]);
-    file.read_exact(&mut key[..]).map_err(io_error)?;
-    Ok(Some(key))
+    read_key_bytes(&mut file, &mut key[..]).map_err(|_| key_unavailable())?;
+    Ok((file, key))
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static FAIL_CACHE_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static FAIL_KEY_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static FAIL_KEY_DIR_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn read_key_bytes(file: &mut File, key: &mut [u8]) -> io::Result<()> {
+    #[cfg(test)]
+    if FAIL_KEY_READ.get() {
+        return Err(io::Error::from_raw_os_error(libc::EIO));
+    }
+    file.read_exact(key)
+}
+
+fn sync_existing_key(root: &Path, file: &File) -> io::Result<()> {
+    file.sync_all()?;
+    #[cfg(test)]
+    if FAIL_KEY_DIR_SYNC.get() {
+        return Err(io::Error::from_raw_os_error(libc::EIO));
+    }
+    File::open(root)?.sync_all()
 }
 
 fn random(bytes: &mut [u8]) -> Result<()> {
@@ -282,14 +427,10 @@ fn random(bytes: &mut [u8]) -> Result<()> {
 
 /// Write a new key under the exclusive lock. The bytes go to `tmp/` and are
 /// renamed into place, so a crash leaves either no key or a whole one.
-fn create_key(root: &Path, owner: u32) -> Result<()> {
+fn create_key(root: &Path) -> Result<()> {
     let mut key = Zeroizing::new([0; 32]);
     random(&mut key[..])?;
-    publish_synced(root, &root.join("key"), &key[..])?;
-    if read_key(root, owner)?.is_none() {
-        return Err(invalid("Invalid step store key file."));
-    }
-    Ok(())
+    publish_synced(root, &root.join("key"), &key[..])
 }
 
 /// `publish`, made durable: the file is synced before the rename and the store
@@ -313,13 +454,6 @@ fn publish_synced(root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
         return Err(io_error(error));
     }
     Ok(())
-}
-
-fn remove_entry(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        result => result.map_err(io_error),
-    }
 }
 
 pub(super) fn publish(root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
@@ -352,29 +486,139 @@ fn is_current(file: &File, path: &Path) -> Result<bool> {
     }
 }
 
-/// Remove `path` if it is still the inode `file` was opened from.
-///
-/// A record published between the check and the unlink can still be removed; no
-/// pathname API offers a conditional unlink. For a cache that costs one spurious
-/// miss, never a wrong hit.
-pub(super) fn remove_current(file: &File, path: &Path) -> Result<()> {
-    if is_current(file, path)? {
-        match fs::remove_file(path) {
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            result => result.map_err(io_error)?,
+/// A cache file and the parent descriptor used to open it.
+pub(super) struct CacheFile {
+    pub(super) file: File,
+    entry: CacheEntry,
+}
+
+impl CacheFile {
+    pub(super) fn discard(&self) {
+        self.entry.discard();
+    }
+}
+
+struct CacheEntry {
+    parent: File,
+    name: CString,
+    stat: libc::stat,
+}
+
+impl CacheEntry {
+    fn open(&self, directory: bool) -> io::Result<File> {
+        let flags = libc::O_RDONLY
+            | libc::O_NOFOLLOW
+            | libc::O_NONBLOCK
+            | libc::O_CLOEXEC
+            | if directory { libc::O_DIRECTORY } else { 0 };
+        // SAFETY: the parent is open, and name is a NUL-terminated single component.
+        let fd = unsafe { libc::openat(self.parent.as_raw_fd(), self.name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: openat returned a fresh descriptor owned by this File.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    fn discard(&self) {
+        if self.stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
+            return;
+        }
+        if let Ok(current) = stat_at(&self.parent, &self.name)
+            && (current.st_dev, current.st_ino) == (self.stat.st_dev, self.stat.st_ino)
+        {
+            // SAFETY: parent and name are valid for the call. With flags zero,
+            // unlinkat removes only this name, never a directory or symlink target.
+            // A concurrent rename after the inode check can cost a spurious miss.
+            unsafe { libc::unlinkat(self.parent.as_raw_fd(), self.name.as_ptr(), 0) };
         }
     }
-    Ok(())
+}
+
+fn stat_at(parent: &File, name: &CStr) -> io::Result<libc::stat> {
+    let mut stat = MaybeUninit::uninit();
+    // SAFETY: parent is open, name is NUL-terminated, and stat has space for
+    // fstatat's output. It is initialized only on success.
+    if unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the successful call filled stat.
+    Ok(unsafe { stat.assume_init() })
+}
+
+/// Walk only the store's own path components, using directory descriptors so
+/// that a replaced shard cannot redirect a read or unlink through a symlink.
+pub(super) fn read_cache_file(
+    root: &File,
+    path: &Path,
+    owner: u32,
+) -> std::result::Result<CacheFile, MissReason> {
+    let mut parent = root.try_clone().map_err(|_| MissReason::TornRecord)?;
+    let mut components = path.components().peekable();
+    while let Some(Component::Normal(name)) = components.next() {
+        let name = CString::new(name.as_encoded_bytes()).map_err(|_| MissReason::TornRecord)?;
+        let stat = stat_at(&parent, &name).map_err(cache_miss)?;
+        let entry = CacheEntry { parent, name, stat };
+        let directory = components.peek().is_some();
+        let kind = if directory {
+            libc::S_IFDIR
+        } else {
+            libc::S_IFREG
+        };
+        let mode = if directory { 0o700 } else { 0o600 };
+        if stat.st_mode & libc::S_IFMT != kind
+            || stat.st_uid != owner
+            || stat.st_mode & 0o7777 != mode
+            || (!directory && stat.st_nlink > 1)
+        {
+            entry.discard();
+            return Err(MissReason::TornRecord);
+        }
+        let file = entry.open(directory).map_err(cache_miss)?;
+        let metadata = file.metadata().map_err(|_| MissReason::TornRecord)?;
+        if directory {
+            if !private_directory_metadata(&metadata, owner) {
+                return Err(MissReason::TornRecord);
+            }
+        } else {
+            // An inode that a concurrent writer unlinked after open is still
+            // readable. A hard-linked file, foreign owner or wrong mode is torn.
+            if !owned_file(&metadata, owner) || metadata.mode() & 0o7777 != 0o600 {
+                entry.discard();
+                return Err(MissReason::TornRecord);
+            }
+            return Ok(CacheFile { file, entry });
+        }
+        parent = file;
+    }
+    Err(MissReason::TornRecord)
+}
+
+fn cache_miss(error: io::Error) -> MissReason {
+    if error.kind() == ErrorKind::NotFound {
+        MissReason::NoRecord
+    } else {
+        MissReason::TornRecord
+    }
 }
 
 /// Read at most `limit` bytes; `None` when the file holds more (the caller treats
 /// it as torn or absent), so a huge or growing file is never read into memory.
-pub(super) fn read_limited(file: &mut File, limit: u64) -> Result<Option<Vec<u8>>> {
+pub(super) fn read_limited(file: &mut File, limit: u64) -> io::Result<Option<Vec<u8>>> {
+    #[cfg(test)]
+    if FAIL_CACHE_READ.get() {
+        return Err(io::Error::from_raw_os_error(libc::EIO));
+    }
     let mut bytes = Vec::new();
-    Read::by_ref(file)
-        .take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(io_error)?;
+    Read::by_ref(file).take(limit + 1).read_to_end(&mut bytes)?;
     Ok((bytes.len() as u64 <= limit).then_some(bytes))
 }
 

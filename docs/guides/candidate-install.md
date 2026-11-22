@@ -65,15 +65,14 @@ any launcher is active.
 
 ## Linux: the Compose-only candidate
 
-Starting with the first release that ships Linux assets (`SHA256SUMS-linux` is in
-its asset list; `5.0.0-next.22` and earlier have none), a release also carries a
-bundle for Linux on x86_64 and arm64 with glibc. It runs the Compose backend only. The native backend is Apple Silicon
-macOS only. musl-based systems such as Alpine and other architectures are not
+Since `5.0.0-next.23`, a release also carries a bundle for Linux on x86_64 and
+arm64 with glibc (`SHA256SUMS-linux` is in its asset list; `5.0.0-next.22` and
+earlier have none). It runs
+the Compose backend only. The native backend is Apple Silicon macOS only. musl-based systems such as Alpine and other architectures are not
 supported; the installer refuses there and names the supported platforms.
 
-Install with the same commands as above, using the tag of a release that has
-Linux assets (`SHA256SUMS-linux` is in its asset list; the `5.0.0-next.22`
-installer stops on Linux). The same `hack-next-install.sh` picks the Linux manager
+Install with the same commands as above. The release they name has Linux
+assets; the `5.0.0-next.22` installer stops on Linux. The same `hack-next-install.sh` picks the Linux manager
 from `uname`. It needs `curl`, `sha256sum` (or `shasum`), `mktemp`, `chmod`, `rm`
 and `date`. It runs without `sudo` and needs no compiler, Python or Bun, so it
 works in a dev container or an agent sandbox. It checks the manager against the
@@ -195,6 +194,9 @@ sizes, SHA-256 hashes, cache and destination, then asks once. Scripts use
 the runtime's setup result through unchanged. Completed files are verified and
 reused; interrupted downloads resume. The complete offline archive input form is
 also available; see [provider setup](native-candidate.md).
+Setup also installs the image builder that `build:` services need. A home that an
+earlier build set up gains it with `hack-next native setup --accept-downloads`,
+which downloads that one file and leaves the rest of the home in place.
 
 Preflight reports runtime installation separately from project review, in text
 and in the JSON `runtime_setup` item. A fresh or interrupted home blocks startup
@@ -324,6 +326,11 @@ launcher the command ran through:
 A Compose run also prints `HACK_RUNTIME_BACKEND=compose` in front. A custom
 `HACK_NATIVE_HOME` is the one exception: `hack-next` refuses it, so that fix
 names the selected bundle's `hack-v5` instead.
+
+Messages about the native image builder (from `up`, `native setup` and
+`doctor`) print a launcher under your home from the home, as
+`~/.hack-next/bin/hack-next native setup --accept-downloads`. It is the same
+launcher, runs as pasted, and keeps the home directory out of saved reports.
 
 ## Upgrade, roll back and return to stable
 

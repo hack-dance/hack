@@ -166,6 +166,8 @@ struct FakePool {
     /// Digests the fake registry refuses to verify.
     unverifiable: RefCell<Vec<String>>,
     now: RefCell<SystemTime>,
+    /// Verify the image builder in this home before use, as the real pool does.
+    builder_home: Option<PathBuf>,
 }
 impl FakePool {
     fn new(incarnation: &str) -> Self {
@@ -184,6 +186,7 @@ impl FakePool {
             pin: RefCell::new(PIN.into()),
             unverifiable: RefCell::new(Vec::new()),
             now: RefCell::new(SystemTime::now()),
+            builder_home: None,
         }
     }
     /// Register the image the fake client "builds", with the labels the build expects.
@@ -241,6 +244,9 @@ impl BuildPool for FakePool {
         })
     }
     fn builder(&self) -> Result<PathBuf, CandidateError> {
+        if let Some(home) = &self.builder_home {
+            artifact::verify_builder(&Candidate::discover(home)?)?;
+        }
         Ok(PathBuf::from("/bin/sh"))
     }
     fn output(&self) -> Box<dyn Write + Send> {
@@ -1116,6 +1122,27 @@ fn base_resolution_failures_run_nothing() {
             .code,
         "registry_image"
     );
+    assert_eq!(fixture.calls(&inputs), 0);
+}
+
+#[test]
+fn a_home_without_the_image_builder_refuses_by_name_and_runs_nothing() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    fixture.client(&inputs, "ok");
+    let mut pool = FakePool::new("pool-1");
+    pool.builder_home = Some(fixture.candidate.checkout.clone());
+    // The build reports the builder's own refusal unchanged: its code, and fixed text
+    // that names the fix instead of the missing file.
+    let error = run(&fixture.candidate, &pool, &inputs, &never).unwrap_err();
+    assert_eq!(error.code, "builder_not_prepared");
+    assert!(error.message_fixed);
+    assert!(
+        error
+            .message
+            .contains("hack native setup --accept-downloads")
+    );
+    assert!(!error.message.contains("os error"));
     assert_eq!(fixture.calls(&inputs), 0);
 }
 

@@ -14,7 +14,6 @@ import type {
 import { findExecutableInPath } from "./shell.ts";
 
 const UNQUOTED_ARG = /^[a-zA-Z0-9_.:/@%+=,-]+$/;
-const TOOL_KEY_PUNCTUATION = /[^A-Z0-9]/g;
 const CHECK_TIMEOUT_MS = 10_000;
 
 type CheckState =
@@ -34,14 +33,6 @@ type CheckState =
   | { readonly state: "cleanup pending" };
 
 function resolveExecutable(bin: string): string | null {
-  const key = bin.toUpperCase().replace(TOOL_KEY_PUNCTUATION, "_");
-  const override = process.env[`HACK_TOOL_${key}_PATH`];
-  if (override && isAbsolute(override)) {
-    const executable = findExecutableInPath(override);
-    if (executable) {
-      return executable;
-    }
-  }
   const path = findExecutableInPath(bin);
   return path && isAbsolute(path) ? path : null;
 }
@@ -332,6 +323,11 @@ async function selectedEnvironmentNames(
     if (!isRecord(definition)) {
       return null;
     }
+    // Compose resolves these files with its own precedence and interpolation.
+    // An inline-only scan cannot establish that a remote is unused.
+    if (definition.env_file !== undefined) {
+      return null;
+    }
     const keys = composeServiceEnvironmentKeys(definition.environment);
     const dependencies = dependencyNames(definition);
     if (!(keys && dependencies)) {
@@ -416,23 +412,41 @@ async function inspectPrerequisite(
     : { state: "missing", bin, tool: bin };
 }
 
+export interface PrerequisiteToolPath {
+  readonly bin: string;
+  readonly path: string | null;
+  readonly source: "PATH";
+}
+
+export function inspectPrerequisiteTool(bin: string): PrerequisiteToolPath {
+  return { bin, path: resolveExecutable(bin), source: "PATH" };
+}
+
+interface DoctorPrerequisite {
+  readonly name: string;
+  readonly state: DoctorPrerequisiteState;
+  readonly login: string;
+  readonly tools: readonly PrerequisiteToolPath[];
+}
+
 /** Doctor can describe custom checks without executing checkout-provided argv. */
 export async function inspectProjectPrerequisites(
   config: ProjectPrerequisiteConfig,
   cwd: string
-): Promise<
-  readonly { name: string; state: DoctorPrerequisiteState; login: string }[]
-> {
-  const results: {
-    name: string;
-    state: DoctorPrerequisiteState;
-    login: string;
-  }[] = [];
+): Promise<readonly DoctorPrerequisite[]> {
+  const results: DoctorPrerequisite[] = [];
   for (const [name, requirement] of config.requires) {
+    const bins = new Set([requirement.check[0], requirement.login[0]]);
+    for (const tool of requirement.tools) {
+      for (const bin of config.tools.get(tool)?.bins ?? []) {
+        bins.add(bin);
+      }
+    }
     results.push({
       name,
       state: await inspectPrerequisite(requirement, config.tools, cwd),
       login: displayArgv(requirement.login),
+      tools: [...bins].map(inspectPrerequisiteTool),
     });
   }
   return results;

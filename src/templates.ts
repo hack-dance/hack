@@ -548,7 +548,7 @@ export function renderProjectEnvContractJson(): string {
 export function renderProjectConfigSchemaJson(): string {
   const names = { type: "array", items: { type: "string" } };
   const argv = { ...names, minItems: 1 };
-  const port = { type: "integer", minimum: 1 };
+  const port = { type: "integer", minimum: 1, maximum: 65_535 };
   const flag = { type: "boolean" };
   const text = { type: "string" };
   const target = {

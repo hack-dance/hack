@@ -27,6 +27,7 @@ const SUPPORTED = new Set([
   "minItems",
   "uniqueItems",
   "minimum",
+  "maximum",
 ]);
 
 type Schema = Readonly<Record<string, unknown>>;
@@ -117,6 +118,13 @@ function validateAt(
     value < schema.minimum
   ) {
     issues.push({ pointer, code: "minimum" });
+  }
+  if (
+    typeof schema.maximum === "number" &&
+    typeof value === "number" &&
+    value > schema.maximum
+  ) {
+    issues.push({ pointer, code: "maximum" });
   }
   if (Array.isArray(schema.anyOf)) {
     const matched = schema.anyOf.some(

@@ -1893,9 +1893,9 @@ Declare sign-in requirements in `.hack/hack.config.json`. A remote target's
 requirements before running Compose lifecycle hooks for `up`, `restart`, or
 `run`. When you select services explicitly, Hack checks the remotes whose
 mapped env names match an `environment` entry on a selected service or its
-Compose dependencies. With
-no service selection, Hack checks every default remote. When Hack cannot
-read the selected service declarations, it checks every default remote.
+Compose dependencies. With no service selection, Hack checks every default
+remote. Hack also checks every default remote when it cannot determine the
+selected services' environment keys, including when a service uses `env_file`.
 Doctor runs preset checks and shows each declared login command. It reports
 custom checks as `not checked` after looking up their executables.
 
@@ -1904,8 +1904,8 @@ A prerequisite can use the `aws-sso` preset with a `profile`, or the
 arrays. Hack runs these directly. A prerequisite's optional `tools` array
 names entries in the same configuration's top-level `tools` block. Each
 entry supplies `bins` and can provide an `install` hint for a missing binary.
-Hack looks for an absolute override like `HACK_TOOL_AWS_PATH` before searching
-`PATH`. Use the uppercase binary name, with punctuation replaced by underscores.
+Hack resolves executables through `PATH`. Doctor shows the path and source
+for each prerequisite executable.
 
 Checks run from the project root in their own process group, discard both output
 streams, and stop the group after ten seconds. Keep secrets

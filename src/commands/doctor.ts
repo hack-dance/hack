@@ -1306,7 +1306,7 @@ async function collectPrerequisiteChecks(
     project.projectRoot
   );
   return await Promise.all(
-    observed.map(({ name, state, login }) => {
+    observed.map(({ name, state, login, tools }) => {
       const checkName = `prerequisite ${name}`;
       const label =
         state.state === "missing" ? `${state.bin} not found` : state.state;
@@ -1314,7 +1314,13 @@ async function collectPrerequisiteChecks(
         Promise.resolve({
           name: checkName,
           status: state.state === "ok" ? "ok" : "warn",
-          message: `${label} · login: ${login}`,
+          message: [
+            `${label} · login: ${login}`,
+            ...tools.map(
+              ({ bin, path, source }) =>
+                `  ${bin}  ${path ?? "not found"} · ${source}`
+            ),
+          ].join("\n"),
         })
       );
     })

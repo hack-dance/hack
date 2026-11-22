@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -248,6 +248,12 @@ test("schema and parser both refuse malformed new config blocks", () => {
     remoteConfig({ ...target, require: ["cloud"] }),
     remoteConfig({ ...target, via: 1 }),
     remoteConfig({ ...target, confirm: [] }),
+    remoteConfig({ ...target, port: 65_536 }),
+    {
+      ...base,
+      min_cli_version: HACK_VERSION,
+      requires: { cloud: { check: ["true"], login: ["true"], typo: true } },
+    },
     { ...base, tools: { cloud: { bins: ["aws"] } } },
   ]) {
     expect(
@@ -300,6 +306,17 @@ test("explicit service selection checks only remotes with matching environment k
       enforceProjectPrerequisites(cfg.prerequisites, true, root, {
         composeFile,
         services: ["api"],
+      })
+    ).rejects.toMatchObject({ code: "E_PREREQUISITE_CHECK_FAILED" });
+    await writeFile(join(root, "service.env"), "DB_HOST=db.example.test\n");
+    await writeFile(
+      composeFile,
+      "services:\n  worker:\n    env_file: [service.env]\n"
+    );
+    await expect(
+      enforceProjectPrerequisites(cfg.prerequisites, true, root, {
+        composeFile,
+        services: ["worker"],
       })
     ).rejects.toMatchObject({ code: "E_PREREQUISITE_CHECK_FAILED" });
   } finally {
@@ -456,9 +473,81 @@ test("Doctor reports a custom prerequisite without executing it", async () => {
       throw new Error("Expected a parsed prerequisite declaration.");
     }
     expect(await inspectProjectPrerequisites(config, root)).toEqual([
-      { name: "cloud", login: "true", state: { state: "not checked" } },
+      {
+        name: "cloud",
+        login: "true",
+        state: { state: "not checked" },
+        tools: ["touch", "true"].map((bin) => ({
+          bin,
+          path: Bun.which(bin),
+          source: "PATH",
+        })),
+      },
     ]);
     expect(await Bun.file(join(root, "check-ran")).exists()).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a project dotenv file cannot override the AWS preset executable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-prerequisite-dotenv-"));
+  try {
+    const checkout = join(root, "project");
+    const configDir = join(checkout, ".hack");
+    const binDir = join(root, "bin");
+    const override = join(checkout, "fake-aws");
+    await mkdir(configDir, { recursive: true });
+    await mkdir(binDir);
+    const aws = join(binDir, "aws");
+    await writeFile(aws, "#!/bin/sh\nexit 42\n");
+    await chmod(aws, 0o700);
+    await writeFile(override, "#!/bin/sh\nexit 23\n");
+    await chmod(override, 0o700);
+    await writeFile(
+      join(checkout, ".env"),
+      `HACK_TOOL_AWS_PATH="${override}"\n`
+    );
+    await writeFile(
+      join(configDir, PROJECT_COMPOSE_FILENAME),
+      "services: {}\n"
+    );
+    await writeFile(
+      join(configDir, PROJECT_CONFIG_FILENAME),
+      JSON.stringify({
+        min_cli_version: HACK_VERSION,
+        requires: { cloud: { kind: "aws-sso", profile: "example-dev" } },
+        remotes: {
+          db: {
+            default: "qa",
+            targets: {
+              qa: {
+                hostname: "db.example.test",
+                port: 5432,
+                requires: ["cloud"],
+              },
+            },
+          },
+        },
+      })
+    );
+    const env = privateCliEnv({
+      root,
+      env: {
+        HACK_NO_INTERACTIVE: "1",
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      },
+    });
+    const cli = resolve(import.meta.dir, "../index.ts");
+    const result = Bun.spawnSync([process.execPath, cli, "up", "--json"], {
+      cwd: checkout,
+      env,
+    });
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      ok: false,
+      error: { code: "E_PREREQUISITE_CHECK_FAILED", detail: { exitCode: 42 } },
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

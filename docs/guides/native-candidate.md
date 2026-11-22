@@ -2343,12 +2343,17 @@ runs, printing `Restarting the native runtime to add this project's folder, abou
 (HACK-2535; `runtime project-share add … --stop-idle-pool --json`). Idle means no
 project run whose receipt is live (running, starting, restoring, stopping, or a failed
 start that kept its services), no pending dead-owner recovery, no open interactive
-session and no image build. The runtime checks this under its provider lease and
-again right before the guest stops, so a start that begins meanwhile makes it refuse
-(`project_share_pool_in_use`) instead of being stopped. The same rule applies to a
+session and no image build. The runtime checks this under its provider lease before
+any effect and again right before the guest stops, so a start that begins meanwhile
+makes it refuse (`project_share_pool_in_use`) instead of being stopped. The host-side
+releases of a stop (the managed hostname authority and the pool's publishers) follow
+that second check, so either refusal changes nothing. The same rule applies to a
 pool started by hand with `runtime up`. A pool in use, or one still starting or
 stopping, refuses before hooks and says to stop the projects using the pool (`down` in
-each), then run `up` again. A full or conflicting share set refuses with
+each), then run `up` again. It names up to three of them, from the live run ids that
+`runtime status` reports (`live_runs`) and the run mappings of registered projects and
+their worktrees, then "and N more"; when no registered checkout maps a live run, it
+says so. A full or conflicting share set refuses with
 `project_share_limit` before anything stops. See the [idle restart chart](../diagrams/native-idle-pool-restart.svg)
 ([source](../diagrams/native-idle-pool-restart.mmd)). Remove an additional root (for
 example a deleted worktree) from a stopped pool with

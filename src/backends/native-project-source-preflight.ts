@@ -1,5 +1,6 @@
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { describeLivePoolRuns } from "./native-pool-run-names.ts";
 import {
   invokeNativeRuntime,
   NativeRuntimeRequestError,
@@ -34,6 +35,8 @@ export async function preflightNativeProjectSource(opts: {
   readonly invoke?: typeof invokeNativeRuntime;
   /** Where the idle-pool restart line goes; standard error by default. */
   readonly notice?: (line: string) => void;
+  /** Names the projects of live runs in a refusal; see `describeLivePoolRuns`. */
+  readonly describe?: (runs: readonly string[]) => Promise<string>;
 }): Promise<void> {
   const invoke = opts.invoke ?? invokeNativeRuntime;
   const check = () =>
@@ -65,6 +68,7 @@ export async function preflightNativeProjectSource(opts: {
       ...opts,
       invoke,
       notice: opts.notice ?? writeNotice,
+      describe: opts.describe ?? describeLivePoolRuns,
     });
     result = await check();
   }
@@ -85,6 +89,7 @@ async function addNativeProjectShare(opts: {
   readonly signal?: AbortSignal;
   readonly invoke: typeof invokeNativeRuntime;
   readonly notice: (line: string) => void;
+  readonly describe: (runs: readonly string[]) => Promise<string>;
 }): Promise<void> {
   const status = await opts.invoke({
     runtime: opts.runtime,
@@ -105,7 +110,7 @@ async function addNativeProjectShare(opts: {
     !running &&
     (status.phase === "running" || status.process_alive === true)
   ) {
-    throw runningPoolShareRefusal();
+    throw runningPoolShareRefusal("it is still starting or stopping");
   }
   const added = await opts
     .invoke({
@@ -125,13 +130,13 @@ async function addNativeProjectShare(opts: {
       timeoutMs: running ? 120_000 : 30_000,
       signal: opts.signal,
     })
-    .catch((error: unknown) => {
+    .catch(async (error: unknown) => {
       if (
         error instanceof NativeRuntimeRequestError &&
         (error.nativeCode === NATIVE_PROJECT_SHARE_EXTENSION_REQUIRED ||
           error.nativeCode === NATIVE_PROJECT_SHARE_POOL_IN_USE)
       ) {
-        throw runningPoolShareRefusal();
+        throw runningPoolShareRefusal(await inUseReason(opts));
       }
       throw error;
     });
@@ -156,9 +161,38 @@ function writeNotice(line: string): void {
   process.stderr.write(`${line}\n`);
 }
 
-function runningPoolShareRefusal(): ClosedCliError {
+/** Why the running pool is in use, naming the projects of its live runs. */
+async function inUseReason(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly signal?: AbortSignal;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly describe: (runs: readonly string[]) => Promise<string>;
+}): Promise<string> {
+  const status = await opts
+    .invoke({
+      runtime: opts.runtime,
+      cwd: opts.runtime.home,
+      args: ["runtime", "status", "--json"],
+      timeoutMs: 5000,
+      signal: opts.signal,
+    })
+    .catch(() => undefined);
+  const runs =
+    isRecord(status) && Array.isArray(status.live_runs)
+      ? status.live_runs.filter((run): run is string => typeof run === "string")
+      : undefined;
+  if (runs === undefined) {
+    return "it is in use, and its live runs could not be read";
+  }
+  if (runs.length === 0) {
+    return "it is in use (an open session, a pending recovery, or a start that has just begun)";
+  }
+  return `it is in use by ${await opts.describe(runs)}`;
+}
+
+function runningPoolShareRefusal(reason: string): ClosedCliError {
   return new ClosedCliError(
-    "The running native pool does not share this project root, and it is in use (a live project run, a pending recovery or an open session) or still starting or stopping, so it was not restarted to add it: a running pool's mounts never change. " +
+    `The running native pool does not share this project root, and ${reason}, so it was not restarted to add it: a running pool's mounts never change. ` +
       "Stop the native projects that use this pool (`down` in each), then run `up` here again: " +
       "the pool restarts once to add this root. Startup hooks were not run."
   );

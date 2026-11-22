@@ -31,15 +31,17 @@ stateDiagram-v2
     end note
     note left of second
         Right before the guest stops,
-        still under the provider lease.
+        under the provider lease. Host
+        releases follow it.
     end note
     note right of boot
         This up boots the pool and
         prints one line, about 30 s.
     end note
     note left of refused
-        Says: down in the other
-        projects, then up again.
+        Names up to three projects:
+        down there, then up again.
+        Nothing was released.
     end note
 
     class boot ok

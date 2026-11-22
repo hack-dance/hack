@@ -156,35 +156,55 @@ test("an idle running pool is stopped by the share update, which prints one line
   expect(lines).toEqual([NATIVE_IDLE_POOL_RESTART_NOTICE]);
 });
 
-test("a running pool in use, or one starting or stopping, never changes mounts and names the down-then-up path", async () => {
+test("a running pool in use names the projects that use it, or says why it cannot", async () => {
   const inUse = new NativeRuntimeRequestError({
     message: "Native runtime request failed (project_share_pool_in_use).",
     nativeCode: NATIVE_PROJECT_SHARE_POOL_IN_USE,
   });
   // The runtime refuses an in-use pool, or a pool another start booted meanwhile.
-  for (const refusal of [inUse, extensionRequired()]) {
+  for (const [refusal, liveRuns, says] of [
+    [inUse, ["a".repeat(32)], "in use by first-app"],
+    [extensionRequired(), ["a".repeat(32)], "in use by first-app"],
+    [inUse, [], "an open session, a pending recovery"],
+    [inUse, undefined, "its live runs could not be read"],
+  ] as const) {
     const lines: string[] = [];
+    const described: (readonly string[])[] = [];
+    let statuses = 0;
     const error = await preflightNativeProjectSource({
       runtime,
       projectRoot: "/work/second-app",
       notice: (line) => lines.push(line),
+      describe: async (runs) => {
+        described.push(runs);
+        return "first-app";
+      },
       invoke: async (request) => {
         if (request.args[1] === "check-project-share") {
           throw extensionRequired();
         }
         if (request.args[1] === "status") {
-          return { phase: "running", process_alive: true };
+          statuses += 1;
+          return {
+            phase: "running",
+            process_alive: true,
+            ...(statuses > 1 && liveRuns ? { live_runs: liveRuns } : {}),
+          };
         }
         throw refusal;
       },
     }).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ClosedCliError);
+    expect(String(error)).toContain(says);
     expect(String(error)).toContain("mounts never change");
     expect(String(error)).toContain("`down` in each");
     expect(String(error)).toContain("Startup hooks were not run");
+    expect(described).toEqual(liveRuns?.length ? [liveRuns] : []);
     expect(lines).toEqual([]);
   }
-  // Starting, stopping, or a running record whose provider is gone: no update at all.
+});
+
+test("a pool starting or stopping, or a running record whose provider is gone, is never updated", async () => {
   for (const status of [
     { phase: "process-exited", process_alive: true },
     { phase: "running", process_alive: false },
@@ -203,6 +223,7 @@ test("a running pool in use, or one starting or stopping, never changes mounts a
       },
     }).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ClosedCliError);
+    expect(String(error)).toContain("still starting or stopping");
     expect(String(error)).toContain("mounts never change");
     expect(calls.some((args) => args[1] === "project-share")).toBe(false);
   }

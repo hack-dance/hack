@@ -35,7 +35,10 @@ import {
   openNativeComposeRouteClaims,
 } from "../src/lib/native-compose-route-claims.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
-import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
+import {
+  mkdirOwnedFixture,
+  ownedFixtureCommand,
+} from "./helpers/owned-fixture.ts";
 
 const REVISION = createHash("sha256").update("synthetic input").digest("hex");
 const fixtures: string[] = [];
@@ -2411,12 +2414,15 @@ test(
   async () => {
     const root = await fixture();
     const git = async (args: readonly string[]) => {
-      const child = Bun.spawn(["git", "-C", root, ...args], {
-        env: fixtureGitEnv(),
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "pipe",
-      });
+      const child = Bun.spawn(
+        ownedFixtureCommand(["git", "-C", root, ...args]),
+        {
+          env: fixtureGitEnv(),
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "pipe",
+        }
+      );
       expect(await child.exited).toBe(0);
     };
     await git(["init", "-q"]);

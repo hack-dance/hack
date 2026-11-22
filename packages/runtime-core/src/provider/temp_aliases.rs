@@ -88,17 +88,21 @@ mod unix {
                     continue;
                 };
                 let path = root.join(name);
-                let Some((link, target)) = orphan(&path, uid, now, MIN_AGE) else {
-                    continue;
+                let (link, target) = match orphan(&path, uid, now) {
+                    Ok(Some(candidate)) => candidate,
+                    Ok(None) => continue,
+                    Err(_) => {
+                        report.incomplete = true;
+                        continue;
+                    }
                 };
                 report.dangling.push(name.to_owned());
                 if !fix {
                     continue;
                 }
                 if same_parent(root, &parent)
-                    && orphan(&path, uid, now, MIN_AGE).is_some_and(|(current, current_target)| {
-                        current == link && current_target == target
-                    })
+                    && matches!(orphan(&path, uid, now), Ok(Some((current, current_target)))
+                        if current == link && current_target == target)
                     && started.elapsed() < BUDGET
                     && unlink(&directory, name).is_ok()
                 {
@@ -177,43 +181,51 @@ mod unix {
         Ok(())
     }
 
-    fn orphan(
-        path: &Path,
-        uid: u32,
-        now: SystemTime,
-        min_age: Duration,
-    ) -> Option<((u64, u64), PathBuf)> {
-        let metadata = fs::symlink_metadata(path).ok()?;
+    type Alias = ((u64, u64), PathBuf);
+
+    fn orphan(path: &Path, uid: u32, now: SystemTime) -> io::Result<Option<Alias>> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
         if !metadata.is_symlink() || metadata.uid() != uid || metadata.nlink() != 1 {
-            return None;
+            return Ok(None);
         }
-        let changed = u64::try_from(metadata.ctime()).ok()?;
-        let modified = metadata.modified().ok()?;
-        let age = now
+        let changed = u64::try_from(metadata.ctime()).map_err(io::Error::other)?;
+        let modified = metadata.modified()?;
+        if now
             .duration_since(modified.max(SystemTime::UNIX_EPOCH + Duration::from_secs(changed)))
-            .ok()?;
-        if age < min_age {
-            return None;
+            .map_or(true, |age| age < MIN_AGE)
+        {
+            return Ok(None);
         }
-        let target = fs::read_link(path).ok()?;
+        let target = match fs::read_link(path) {
+            Ok(target) => target,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
         if !target.ends_with(".hack-local/run/smolvm/home")
             || !home_absent(&target, |part| {
                 fs::symlink_metadata(part).map(|entry| entry.is_dir())
-            })
+            })?
         {
-            return None;
+            return Ok(None);
         }
-        Some(((metadata.dev(), metadata.ino()), target))
+        Ok(Some(((metadata.dev(), metadata.ino()), target)))
     }
 
     /// Require the owner home itself to be missing. Walk the entire path without
     /// treating a symlink, non-directory or inaccessible component as absence.
-    fn home_absent(target: &Path, mut directory: impl FnMut(&Path) -> io::Result<bool>) -> bool {
+    fn home_absent(
+        target: &Path,
+        mut directory: impl FnMut(&Path) -> io::Result<bool>,
+    ) -> io::Result<bool> {
         let Some(home) = target.ancestors().nth(4) else {
-            return false;
+            return Ok(false);
         };
         if !home.is_absolute() || home == Path::new("/") {
-            return false;
+            return Ok(false);
         }
         let mut path = PathBuf::new();
         let mut missing_home = false;
@@ -221,17 +233,18 @@ mod unix {
             match component {
                 Component::RootDir => path.push(OsStr::new("/")),
                 Component::Normal(name) => path.push(name),
-                _ => return false,
+                _ => return Ok(false),
             }
             match directory(&path) {
                 Ok(true) if !missing_home => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     missing_home |= home.starts_with(&path);
                 }
-                _ => return false,
+                Err(error) => return Err(error),
+                Ok(_) => return Ok(false),
             }
         }
-        missing_home
+        Ok(missing_home)
     }
     #[cfg(test)]
     mod tests {
@@ -300,13 +313,15 @@ mod unix {
         #[test]
         fn access_errors_are_not_absence() {
             let target = Path::new("/fixture/deleted/.hack-local/run/smolvm/home");
-            assert!(!home_absent(target, |part| {
+            let error = home_absent(target, |part| {
                 if part.starts_with("/fixture/deleted") {
                     Err(io::Error::from(io::ErrorKind::PermissionDenied))
                 } else {
                     Ok(true)
                 }
-            }));
+            })
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         }
 
         #[test]

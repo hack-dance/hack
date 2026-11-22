@@ -4,7 +4,6 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
-import { reportNativeImageTagOffline } from "../lib/native-detached-up.ts";
 import {
   NATIVE_BUILDER_MISSING,
   NATIVE_BUILDER_NOT_PREPARED,
@@ -667,6 +666,8 @@ export async function buildNativeProjectImages(opts: {
   readonly invoke?: typeof invokeNativeBuild;
   /** Called once for each build the runtime actually ran (not a reused image). */
   readonly onBuilt?: () => void;
+  /** One line per distinct base-image fallback; stderr when the caller gives none. */
+  readonly onNotice?: (line: string) => void;
 }): Promise<ReadonlySet<string>> {
   const pending = pendingBuilds(opts);
   if (pending.size > 0) {
@@ -850,6 +851,7 @@ async function runPendingBuilds(opts: {
   readonly signal: AbortSignal;
   readonly invoke?: typeof invokeNativeBuild;
   readonly onBuilt?: () => void;
+  readonly onNotice?: (line: string) => void;
 }): Promise<void> {
   const invoke = opts.invoke ?? invokeNativeBuild;
   // The runtime requires the exact canonical root; it also derives the namespace.
@@ -902,7 +904,9 @@ async function runPendingBuilds(opts: {
       for (const notice of built.baseFallbacks ?? []) {
         if (!notices.has(notice)) {
           notices.add(notice);
-          if (!reportNativeImageTagOffline(notice)) {
+          if (opts.onNotice) {
+            opts.onNotice(notice);
+          } else {
             process.stderr.write(`${notice}\n`);
           }
         }

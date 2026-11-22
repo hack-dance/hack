@@ -194,6 +194,10 @@ import {
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "./native-project-run.ts";
+import {
+  nativeProjectRuntimeUpArgs,
+  nativeRuntimePoolStopped,
+} from "./native-project-runtime-up.ts";
 import { selectNativeEnvFile } from "./native-project-selection.ts";
 import { preflightNativeProjectSource } from "./native-project-source-preflight.ts";
 import {
@@ -1839,6 +1843,48 @@ async function selectNativeStartup(opts: {
   const restore = opts.restore ?? retained ?? undefined;
   return { retained, restore, selection, retainedFlags };
 }
+
+/**
+ * HACK-2456: the pool stopped (or was stopped) under a running project, so
+ * the retained preflight refuses `graph_foreground_owner_exited` and nothing
+ * can recover the run without a running pool. When `runtime status` shows the
+ * pool stopped, `recover` (`hack down --recover` for this instance) starts it
+ * and recovers the run with data retained; the selection then runs once more.
+ * A running pool, an unreadable status or any other refusal keeps the original
+ * error: its message already names `hack down --recover`, which works there.
+ */
+async function selectNativeStartupRecoveringStoppedPool(opts: {
+  readonly select: () => ReturnType<typeof selectNativeStartup>;
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly recover: (() => Promise<void>) | undefined;
+  readonly warn: (line: string) => void;
+  readonly signal?: AbortSignal;
+}): ReturnType<typeof selectNativeStartup> {
+  try {
+    return await opts.select();
+  } catch (error) {
+    if (
+      !(
+        opts.recover &&
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode === NATIVE_FOREGROUND_OWNER_EXITED &&
+        !opts.signal?.aborted &&
+        (await nativeRuntimePoolStopped(opts))
+      )
+    ) {
+      throw error;
+    }
+  }
+  await opts.recover();
+  requireActiveStartup(opts.signal);
+  opts.warn(
+    "The native runtime had stopped under this run. It was started and the run was recovered with data retained; starting it again."
+  );
+  return await opts.select();
+}
+const NATIVE_FOREGROUND_OWNER_EXITED = "graph_foreground_owner_exited";
 /**
  * Before any hook, refuse a retained run whose recorded env selection changed: its
  * env must resolve the same, and it keeps the managed env files it started with. Only
@@ -2004,9 +2050,15 @@ async function requireAcknowledgedRetainedFinalization(opts: {
       timeoutMs: 1,
     });
   } catch {
-    throw new ClosedCliError(
-      "Native retained frontend finalization is unconfirmed or its ownership changed; no hooks, runtime start or HTTPS owner were requested."
-    );
+    // HACK-2456, seen on a real VM: what is wrong, what needs it, the command.
+    throw new HackCliError({
+      code: "E_RECOVERY_REQUIRED",
+      message: [
+        "This project's last native run has no confirmed shutdown: its owner exited before finishing it, or another start of this instance replaced it.",
+        "hack up needs that cleanup to finish before it starts the project again; nothing was started.",
+        "Run hack down --recover: it finishes the cleanup with your data kept, starting the native runtime if it needs to.",
+      ].join("\n"),
+    });
   }
 }
 /** Explicit unfiltered project sharing; foreground only. Native refusal never falls back to Compose. */
@@ -2197,6 +2249,14 @@ type NativeProjectStartOptions = {
    */
   readonly startTimeoutSeconds?: number;
   readonly dependencies?: Partial<Dependencies>;
+  /**
+   * Recovers this instance's run when the pool stopped under it (HACK-2456):
+   * `hack down --recover`, which starts the pool and stops the run with data
+   * retained. Called at most once, only when the retained preflight refuses
+   * `graph_foreground_owner_exited` and the pool is stopped. Omitted keeps
+   * that refusal.
+   */
+  readonly recoverStoppedPool?: () => Promise<void>;
 };
 
 /**
@@ -2385,8 +2445,8 @@ async function startNativeProjectAttempt(
   }
   const deps = { ...DEFAULTS, ...opts.dependencies };
   await refusePendingFreshStart(opts.restore, opts.scope, deps.loadRestart);
-  const { retained, restore, selection, retainedFlags } =
-    await selectNativeStartup({
+  const select = () =>
+    selectNativeStartup({
       runtime: opts.runtime,
       scope: opts.scope,
       restore: opts.restore,
@@ -2398,6 +2458,16 @@ async function startNativeProjectAttempt(
       gcloudWithheld: opts.gcloudWithheld,
       load: deps.load,
       invoke: deps.invoke,
+      signal: opts.signal,
+    });
+  const { retained, restore, selection, retainedFlags } =
+    await selectNativeStartupRecoveringStoppedPool({
+      select,
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      invoke: deps.invoke,
+      recover: opts.recoverStoppedPool,
+      warn: deps.warn,
       signal: opts.signal,
     });
   requireActiveStartup(opts.signal);
@@ -2708,13 +2778,7 @@ async function startNativeProjectAttempt(
       runtime: opts.runtime,
       cwd: opts.scope.projectRoot,
       args: [
-        "runtime",
-        "up",
-        "--profile",
-        "development",
-        "--project-share",
-        opts.scope.projectRoot,
-        "--unfiltered-source",
+        ...nativeProjectRuntimeUpArgs(opts.scope.projectRoot),
         ...retainedFlags,
         ...(hostDependencies.length > 0
           ? [

@@ -686,6 +686,90 @@ not prove the kqueue exit delivery, timer accuracy, provider lease acquisition
 or that a replacement listener appears; it abstracts the listener as live, gone
 or replaced, and the retry delays as an ordered bound.
 
+## Native pool stop under a live run
+
+`native-pool-stop/PoolStop.tla` checks HACK-2456: a VM pool that stops (`runtime down`)
+or dies (VM or provider crash, host reboot) while a project's graph is ready. It
+models:
+
+- the pool: running, stopped or crashed, with a boot counter;
+- the run receipt: none, ready or retained, and the boot its containers belong to;
+- the foreground owner (live or dead) and its publication.
+
+The user commands are the ones the CLI names: `hack up`, `hack down` /
+`hack down --recover` and `hack native recover`. Faults are bounded to three:
+`runtime down`, a crash, an owner crash, and a boot by something else (another
+project's `hack up`, or `runtime up` by hand). A live owner notices when its guest
+is gone (the pool stopped, or a later boot replaced it) and exits without retiring its
+publication.
+
+`NoDeadEnd` says that from every reachable state some named command can act, or
+the owner is still noticing its guest is gone. `Recovers` (`[]<>Settled` under weak
+fairness of the user commands) says the project keeps reaching up or down. Up means
+ready in the current boot with a live owner; down means nothing running and no
+publication left. `BootBoundUnreached` shows the boot bound (8) never limits a command.
+
+| Control | Switches | Result |
+| --- | --- | --- |
+| `positive` | this change; nothing else boots the pool; no fault between a recovery's boot and its graph recovery | 81 states, depth 12; `NoDeadEnd`, `BootBoundUnreached` and `Recovers` hold |
+| `any-boot` | recovery from any earlier boot; every fault | 113 states; all hold |
+| `negative` | `next` before HACK-2456 | `NoDeadEnd` fails in an `OwnerCrash` or `OwnerNotices` state: stopped pool, ready run, dead owner, publication left |
+| `by-hand` | `next`, counting an unnamed `runtime up` | fails in a `RuntimeUp` state with `boot = 3`, `runBoot = 1` |
+| `strict` | this change while something else boots the pool | fails in `RecoverStopped` (or `RuntimeUp`) with `boot = 3`, `runBoot = 1` |
+| `crash-in-recovery` | this change; the pool stops between the recovery's boot and its graph recovery | fails in `RecoverStopped` with `boot = 3`, `runBoot = 1`, `recovering = TRUE` |
+| `https` | this change, for a project with HTTPS routes (`Https`) | 181 states; all hold |
+| `https-no-retire` | `https`, but the shared HTTPS owner keeps running after its boot ended | fails in `RecoverRunning` (or `RecoverStopped`): pool running, `https = "live"` bound to the old boot, `fin = TRUE` |
+| `https-archive` | `https`, but the previous-boot archive cannot prove the owner quiescent | fails with `https = "records"`, `fin = TRUE`, pool running |
+| `https-stopped` | `https`, but `hack down --recover` does not start a stopped pool for a pending finalization | fails with the pool stopped, `run = "retained"`, `fin = TRUE` |
+
+`Recovers` also fails on `next` (TLC exit 13: the behavior stutters in the dead end).
+That is checked by hand, because the runner's controls are invariant violations only.
+
+The last three controls are the known gap. Recovery of a dead owner's ready run
+accepts only the immediate predecessor boot, because it needs that boot's raw id to
+find its host-side relays, and `owner.json` keeps only the current and previous ids.
+Recovery from any earlier boot (`any-boot`) needs a boot-history record and is a
+follow-up.
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `RuntimeDown` | `provider/lifecycle.rs::down`, which reports `interrupted_runs` (`lifecycle/pool_users.rs::live_graph_runs`) |
+| `RecoverStopped` | `inspectOrStartStoppedPool` / `StoppedPoolStarted` in `native-project-down.ts`; `selectNativeStartupRecoveringStoppedPool` in `native-project-start.ts` |
+| `RecoverRunning` | `resumeSelectedOwner` → `recover-cleanup` → `retire-recovered-publisher`; `CanRecover` with `Strict` is `graph/dead_owner_cleanup.rs` `recovery_selection` / `execute` |
+| `Start` / `Stop` | ordinary `hack up` (fresh or retained) and `hack down` |
+| `PoolRecover` | `hack native recover` (`lifecycle::recover`) |
+| `OwnerRetire` | `native-https-owner-server.ts` pool-boot check (`native-https-pool-boot.ts`), which retires through `failOwner` and keeps the configuration and lease |
+| `Finalize` | the frontend finalization's `recoverNativeHttpsLease`: release through a live owner of this boot, or `runtime archive-previous-boot-shared-https` (`provider/shared_https_recovery.rs`), whose quiescence proof is `prove_quiescence` plus `await_owner_exit` |
+| `RecoverStopped` (finalization) | `deadOwnerOfLiveRun` in `native-project-down.ts`: a retained stop with no owner and an interrupted frontend lifetime |
+
+The model does not represent bridges. On a real VM, the run that recovery met had been
+stopped in one boot and restored in a later one. The first boot's bridge sidecar was still in
+its directory, two boots back. Recovery accepts a completed earlier generation with routes
+from any boot but the live one, because what proves it complete does not depend on its boot.
+That proof is the restore history's stopped receipt, plus every current route having
+launched after it (`graph/bridges/cleanup.rs` `prior_generation`). An empty sidecar keeps
+the previous boot.
+
+The shared HTTPS owner (HACK-2456, seen on a real VM) is a host process bound to one
+pool boot that holds the run's lease. `runtime down` does not stop it. Before this change it
+kept running after its boot ended, its lease could not be released (release requires the
+same boot), and the previous-boot archive could never succeed, because it required the
+frontend and runtime executables to run nowhere while the CLI asking for it ran them. A
+recovery then stopped the graph and retired the publication, failed at the lease, and
+left a retained run that `up` refused and `down --recover` could not reach once the pool
+stopped again. The three `https-*` controls each restore one of those parts. The model
+abstracts the owner's 5-second boot check and the archive's 20-second wait for a retiring
+owner as one `OwnerRetire` step; it does not represent several projects sharing one owner.
+
+The CLI tests in `tests/native-project-down.test.ts`, `tests/native-project-start.test.ts`
+and `tests/native-refusal-cli.test.ts` walk these transitions against a fake runtime.
+`tests/native-https-owner.test.ts` runs the real owner process through its boot check;
+`provider/shared_https_recovery/tests.rs` (macOS) runs the archive with the same bundle's
+CLI and runtime processes present and with a live or retiring owner invocation.
+The model does not represent concurrent starts of the same instance, the startup
+marker, or image and admission work. A real VM must qualify `runtime up` booting a
+stopped pool as it was recorded.
+
 ## Pool amd64 emulation
 
 `pool-emulation/Emulation.tla` checks the Rosetta 2 translation intent of one shared

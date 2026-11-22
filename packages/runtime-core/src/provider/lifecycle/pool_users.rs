@@ -129,10 +129,131 @@ pub(super) fn pool_idle(
     }
 }
 
+/// Receipt phases whose containers may be running or about to run in the current
+/// boot: Compose graph runs (`run/graphs`) and native-authored graph runs
+/// (`run/native-graphs`, kebab-case `journal::Phase`). `failed-retained` is
+/// included: a failed start keeps the services that did start, uncleaned.
+const LIVE_PHASES: [(&str, &[&str]); 2] = [
+    (
+        "run/graphs",
+        &[
+            "preparing",
+            "restoring",
+            "ready-observed",
+            "failed-retained",
+            "cleanup-intent",
+        ],
+    ),
+    (
+        "run/native-graphs",
+        &[
+            "preparing",
+            "ready-observed",
+            "failed-retained",
+            "stop-intent",
+        ],
+    ),
+];
+/// Graph runs, Compose and native-authored, whose receipt says they are live,
+/// sorted (HACK-2456).
+///
+/// `runtime down` names these when it stops a running pool under them: their
+/// containers stop with the guest, and `hack up` (or `hack down --recover`) in each
+/// project starts the pool again and recovers the run with its data kept. This is a
+/// report, not a refusal, and like the rest of this module it reads without a lock:
+/// `None` when an inventory or a receipt cannot be read, so the caller says it could
+/// not tell instead of naming nothing.
+pub(super) fn live_graph_runs(state_root: &Path) -> Option<Vec<String>> {
+    let mut live = Vec::new();
+    for (directory, phases) in LIVE_PHASES {
+        let parent = state_root.join(directory);
+        match fs::symlink_metadata(&parent) {
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(_) => return None,
+            Ok(metadata) if !metadata.is_dir() => return None,
+            Ok(_) => (),
+        }
+        state::check_private_directory(&parent).ok()?;
+        for (index, entry) in fs::read_dir(&parent)
+            .ok()?
+            .take(MAX_ENTRIES + 1)
+            .enumerate()
+        {
+            if index == MAX_ENTRIES {
+                return None;
+            }
+            let entry = entry.ok()?;
+            let name = entry.file_name().into_string().ok()?;
+            if !is_graph_run(&name) {
+                continue;
+            }
+            let receipt: serde_json::Value = state::read(&entry.path().join("state.json")).ok()?;
+            if receipt["phase"]
+                .as_str()
+                .is_some_and(|phase| phases.contains(&phase))
+            {
+                live.push(name);
+            }
+        }
+    }
+    live.sort();
+    Some(live)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    #[test]
+    fn runtime_down_names_only_runs_whose_receipt_is_live() {
+        let home = Home::new();
+        assert_eq!(live_graph_runs(&home.0), Some(vec![]));
+        for (run, phase) in [
+            ("a", "ready-observed"),
+            ("b", "stopped-data-retained"),
+            ("c", "restoring"),
+            ("d", "removed"),
+            ("6", "failed-retained"),
+        ] {
+            let dir = home.dir(&format!("run/graphs/{}", run.repeat(32)));
+            state::write(
+                &dir.join("state.json"),
+                &serde_json::json!({ "phase": phase }),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            live_graph_runs(&home.0),
+            Some(vec!["6".repeat(32), "a".repeat(32), "c".repeat(32)])
+        );
+        // Native-authored graphs are listed by their own phases.
+        for (run, phase) in [
+            ("f", "ready-observed"),
+            ("9", "stopped"),
+            ("8", "stop-intent"),
+            ("7", "failed-retained"),
+        ] {
+            let dir = home.dir(&format!("run/native-graphs/{}", run.repeat(32)));
+            state::write(
+                &dir.join("state.json"),
+                &serde_json::json!({ "phase": phase }),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            live_graph_runs(&home.0),
+            Some(vec![
+                "6".repeat(32),
+                "7".repeat(32),
+                "8".repeat(32),
+                "a".repeat(32),
+                "c".repeat(32),
+                "f".repeat(32)
+            ])
+        );
+        // An unreadable receipt makes the answer unknown, never "none".
+        home.dir(&format!("run/graphs/{}", "e".repeat(32)));
+        assert_eq!(live_graph_runs(&home.0), None);
+    }
 
     fn observe(root: &Path) -> PoolUsers {
         observe_with(root, |_| Some(false))

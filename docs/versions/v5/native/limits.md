@@ -7,7 +7,7 @@ unavailable on native. `hack config adopt` requires Compose even with
 
 Projects the pool was started with can run together. If a running pool does
 not share a project root, `hack up` restarts the pool to add it when nothing uses
-the pool (about 30 s, one line says so). When another project is running there, or
+the pool (one line says so). When another project is running there, or
 the pool is starting or stopping, `hack up` refuses the start and names up to three
 of those projects: run `hack down` in them first. A pool accepts up to eight project shares.
 

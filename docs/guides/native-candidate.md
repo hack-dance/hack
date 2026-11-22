@@ -129,7 +129,7 @@ The runtime checks source compatibility before startup hooks; `restart` repeats
 this check before stopping the existing graph. A running VM's mounts never change, so
 a root that a running pool does not already share needs a restart of the pool. When
 nothing uses the pool live, `up` restarts it for the root and prints one line saying
-so (about 30 s). Otherwise it refuses: stop the projects that use the pool (`down` in
+so. Otherwise it refuses: stop the projects that use the pool (`down` in
 each) and run `up` again. Projects and worktrees the pool was started with can run together; see
 [one pool, several project roots](#explicit-writable-development-source).
 
@@ -2339,7 +2339,7 @@ consent the first root gave; the share is mounted at the next boot. The explicit
 form is `runtime project-share add --project-share /absolute/other-project --unfiltered-source --json`.
 A running pool's mounts never change. When it is **running but idle**, `up` in a root
 outside the set stops it, adds the root as above and boots it again, before any hook
-runs, printing `Restarting the native runtime to add this project's folder, about 30 s.`
+runs, printing `Restarting the native runtime to add this project's folder.`
 (HACK-2535; `runtime project-share add … --stop-idle-pool --json`). Idle means no
 project run whose receipt is live (running, starting, restoring, stopping, or a failed
 start that kept its services), no pending dead-owner recovery, no open interactive

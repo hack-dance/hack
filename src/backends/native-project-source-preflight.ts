@@ -1,5 +1,6 @@
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { reportNativeImageTagOffline } from "../lib/native-detached-up.ts";
 import { describeLivePoolRuns } from "./native-pool-run-names.ts";
 import {
   invokeNativeRuntime,
@@ -14,7 +15,7 @@ export const NATIVE_PROJECT_SHARE_EXTENSION_REQUIRED =
 export const NATIVE_PROJECT_SHARE_POOL_IN_USE = "project_share_pool_in_use";
 /** The one line a start prints when it restarts an idle pool for its root. */
 export const NATIVE_IDLE_POOL_RESTART_NOTICE =
-  "Restarting the native runtime to add this project's folder, about 30 s.";
+  "Restarting the native runtime to add this project's folder.";
 
 /**
  * Reject incompatible source pools before hooks; runtime up rechecks before effects.
@@ -33,7 +34,11 @@ export async function preflightNativeProjectSource(opts: {
   readonly projectRoot: string;
   readonly signal?: AbortSignal;
   readonly invoke?: typeof invokeNativeRuntime;
-  /** Where the idle-pool restart line goes; standard error by default. */
+  /**
+   * Where the idle-pool restart line goes. By default a detached start's owner hands
+   * it to the launching CLI over the validated owner notice channel, which prints it
+   * on standard error (so `--json` output stays clean); otherwise standard error.
+   */
   readonly notice?: (line: string) => void;
   /** Names the projects of live runs in a refusal; see `describeLivePoolRuns`. */
   readonly describe?: (runs: readonly string[]) => Promise<string>;
@@ -167,7 +172,9 @@ async function addNativeProjectShare(opts: {
 }
 
 function writeNotice(line: string): void {
-  process.stderr.write(`${line}\n`);
+  if (!reportNativeImageTagOffline(line)) {
+    process.stderr.write(`${line}\n`);
+  }
 }
 
 /** Why the running pool is in use, naming the projects of its live runs. */

@@ -4,11 +4,21 @@
 //! `ExitDrained` actions. Only `hello`, `service.status` and `service.retire` are
 //! served, and nothing in the CLI calls the service yet.
 //!
-//! Ownership: the process holding the exclusive `flock` on `service.lock` is the
-//! only one that may remove a stale socket path and bind it (`OneOwner`). The lock
-//! is held until `serve` returns, which happens only after every session thread
-//! has ended, and the kernel frees it on a crash. The socket path is unlinked only
-//! while it still names this process's own socket.
+//! Ownership: the process holding both exclusive `flock`s, on the private
+//! directory `run/service/` and on `service.lock` (see `Ownership`), is the only
+//! one that may remove a stale socket path and bind it (`OneOwner`). Both are
+//! held until `serve` returns, which happens only after every session thread
+//! has ended, and the kernel frees them on a crash. The socket path is unlinked
+//! only while it still names this process's own socket.
+//!
+//! The release gap: a lock can stay held for a moment after its owner let go,
+//! while the kernel closes an exiting owner's descriptors or while a child the
+//! owner forked has not yet run `exec` (it shares every open file description
+//! until then, close-on-exec ones included). A starter that loses while no
+//! socket answers may be in that gap, or the owner may be draining. It retries
+//! within one bounded window (`RELEASE_WAIT`) and then reports `lost`; its
+//! client then runs that command on the one-shot path. A starter that loses
+//! while a socket answers reports `lost` at once.
 //!
 //! Shutdown, for idle exit and retire alike: stop accepting new requests, unlink
 //! the socket, accept what is already queued only to refuse it before admission,
@@ -47,6 +57,10 @@ const SESSION_IDLE: Duration = Duration::from_secs(30);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
 /// How long a starter probes an existing socket for a live listener.
 const LIVE_PROBE: Duration = Duration::from_millis(200);
+/// How long a starter that lost while no socket answers keeps retrying.
+const RELEASE_WAIT: Duration = Duration::from_millis(100);
+/// The pause between those retries.
+const RELEASE_POLL: Duration = Duration::from_millis(2);
 /// Attempts to lock a `service.lock` that someone keeps replacing.
 const LOCK_ATTEMPTS: usize = 8;
 /// Pause before accepting again after the process ran out of descriptors or memory.
@@ -83,6 +97,12 @@ pub struct Options {
     /// arrange its sessions without racing it.
     #[cfg(test)]
     pub(crate) hold_idle: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Tests only: replaces `RELEASE_WAIT`.
+    #[cfg(test)]
+    pub(crate) release_wait: Option<Duration>,
+    /// Tests only: told once when the first attempt lost and the retry window began.
+    #[cfg(test)]
+    pub(crate) retrying: Option<std::sync::mpsc::Sender<()>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,7 +143,7 @@ pub fn serve(
         }
     };
     let paths = paths(state_root);
-    let (listener, lock, socket_id) = match start(&paths) {
+    let (listener, lock, socket_id) = match start_or_retry(&paths, &options) {
         Ok(Some(started)) => started,
         Ok(None) => {
             announce(json!({"lost": true}));
@@ -163,6 +183,40 @@ fn settle(lock: Ownership, drained: bool) -> Result<(), CandidateError> {
         "service_drain_timeout",
         "A request or session did not finish in time; the lock is held until this process exits.",
     ))
+}
+
+/// `start`, retried within `RELEASE_WAIT` when it lost while no socket answers
+/// (the release gap in the module docs). A loss to an owner whose socket
+/// answers is final at once.
+fn start_or_retry(paths: &Paths, options: &Options) -> Result<Option<Bound>, CandidateError> {
+    if let Some(bound) = start(paths)? {
+        return Ok(Some(bound));
+    }
+    match client::connect(&paths.socket, Instant::now() + LIVE_PROBE) {
+        Err(e) if e.code == "service_absent" => {}
+        _ => return Ok(None),
+    }
+    #[cfg(test)]
+    if let Some(retrying) = &options.retrying {
+        let _ = retrying.send(());
+    }
+    #[cfg(test)]
+    let wait = options.release_wait.unwrap_or(RELEASE_WAIT);
+    #[cfg(not(test))]
+    let wait = {
+        let _ = options;
+        RELEASE_WAIT
+    };
+    let deadline = Instant::now() + wait;
+    loop {
+        std::thread::sleep(RELEASE_POLL);
+        if let Some(bound) = start(paths)? {
+            return Ok(Some(bound));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+    }
 }
 
 /// `TakeLock` then `Bind`, or `LoseRace`. Returns `None` when the lock is held.

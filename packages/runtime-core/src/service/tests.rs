@@ -39,6 +39,28 @@ fn spawn(
     let options = Options {
         idle,
         hold_idle: None,
+        release_wait: None,
+        retrying: None,
+    };
+    spawn_with(root, options)
+}
+
+/// `spawn` for a start right after an owner let go. The test thread has
+/// released the locks, but a child another test thread forked may still share
+/// them until it runs `exec` (the release gap in the module docs), so this
+/// starter keeps retrying until the locks are really free: a wait for the
+/// release itself, with only a give-up bound.
+fn spawn_after_release(
+    root: &Path,
+) -> (
+    std::thread::JoinHandle<Result<Outcome, CandidateError>>,
+    Value,
+) {
+    let options = Options {
+        idle: Duration::from_secs(30),
+        hold_idle: None,
+        release_wait: Some(Duration::from_secs(20)),
+        retrying: None,
     };
     spawn_with(root, options)
 }
@@ -255,6 +277,8 @@ fn concurrent_starts_leave_exactly_one_serving_process() {
                 let options = Options {
                     idle: Duration::from_millis(1),
                     hold_idle: Some(hold),
+                    release_wait: None,
+                    retrying: None,
                 };
                 let _ = sender.send(serve(&root, options, None).unwrap());
             });
@@ -305,7 +329,7 @@ fn a_stale_socket_is_replaced_and_a_planted_file_is_refused() {
         handle.join().unwrap().unwrap();
 
         std::fs::write(&socket, b"not a socket").unwrap();
-        let (handle, refused) = spawn(&root.0, Duration::from_secs(30));
+        let (handle, refused) = spawn_after_release(&root.0);
         assert_eq!(
             refused,
             json!({"refused": {"code": "service_socket_path_refused"}})
@@ -361,6 +385,8 @@ fn an_open_session_keeps_the_service_until_it_closes() {
         let options = Options {
             idle: Duration::from_millis(1),
             hold_idle: Some(Arc::clone(&hold)),
+            release_wait: None,
+            retrying: None,
         };
         let (handle, ready) = spawn_with(&root.0, options);
         // A client that stalls far past the 1 ms idle before it connects.
@@ -436,6 +462,8 @@ fn connections_queued_at_shutdown_are_refused_and_cannot_hold_it_open() {
             Options {
                 idle: Duration::from_secs(30),
                 hold_idle: None,
+                release_wait: None,
+                retrying: None,
             },
             id,
         )
@@ -671,6 +699,8 @@ fn a_request_queued_before_idle_expiry_gets_a_refusal_not_silence() {
         let options = Options {
             idle: Duration::from_secs(30),
             hold_idle: None,
+            release_wait: None,
+            retrying: None,
         };
         let (shared, _wake) = prepare(&paths, options, id).unwrap();
         let mut queued = connect(&root.0);
@@ -724,6 +754,8 @@ fn partial_requests_queued_at_shutdown_cannot_hold_the_lock() {
         let options = Options {
             idle: Duration::from_secs(30),
             hold_idle: None,
+            release_wait: None,
+            retrying: None,
         };
         let (shared, _wake) = prepare(&paths, options, id).unwrap();
         // Each queued peer sends one header byte and then nothing, keeping its end open.
@@ -770,6 +802,8 @@ fn a_connection_accepted_after_stop_is_refused_not_handed_to_a_worker() {
         let options = Options {
             idle: Duration::from_secs(30),
             hold_idle: None,
+            release_wait: None,
+            retrying: None,
         };
         let (shared, _wake) = prepare(&paths, options, id).unwrap();
         let mut queued = connect(&root.0);
@@ -843,6 +877,8 @@ fn a_panicking_session_or_request_still_gives_back_its_count() {
         let options = Options {
             idle: Duration::from_secs(30),
             hold_idle: None,
+            release_wait: None,
+            retrying: None,
         };
         let (shared, _wake) = prepare(&paths, options, id).unwrap();
         {
@@ -876,6 +912,8 @@ fn a_drain_that_runs_out_of_time_says_so_and_keeps_the_lock() {
         let options = Options {
             idle: Duration::from_secs(30),
             hold_idle: None,
+            release_wait: None,
+            retrying: None,
         };
         let (shared, _wake) = prepare(&paths, options, id).unwrap();
         // A request that never finishes, and a bound that has already run out.
@@ -908,7 +946,7 @@ fn a_starter_never_runs_while_another_holds_the_directory() {
         assert_eq!(handle.join().unwrap().unwrap(), Outcome::Lost);
         assert!(!paths.socket.exists());
         drop(starting);
-        let (handle, ready) = spawn(&root.0, Duration::from_secs(30));
+        let (handle, ready) = spawn_after_release(&root.0);
         assert!(ready["listening"].is_object(), "{ready}");
         call(&root.0, "service.retire", json!({})).unwrap();
         handle.join().unwrap().unwrap();
@@ -959,8 +997,64 @@ fn a_replaced_lock_file_during_a_drain_still_leaves_one_owner() {
         assert_eq!(handle.join().unwrap().unwrap(), Outcome::Lost);
         assert!(!paths.socket.exists(), "the loser bound nothing");
         drop((listener, ownership));
-        let (handle, ready) = spawn(&root.0, Duration::from_secs(30));
+        let (handle, ready) = spawn_after_release(&root.0);
         assert!(ready["listening"].is_object(), "{ready}");
+        call(&root.0, "service.retire", json!({})).unwrap();
+        handle.join().unwrap().unwrap();
+    });
+}
+
+#[test]
+fn a_starter_that_loses_in_the_release_gap_serves_once_the_owner_lets_go() {
+    within(move || {
+        // The owner drains (socket unlinked) and keeps both locks. A starter
+        // loses, sees no socket answer and enters its retry window; only then
+        // does the owner let go. The starter must serve, not report "lost".
+        let root = Root::new();
+        let paths = paths(&root.0);
+        let (listener, ownership, id) = start(&paths).unwrap().unwrap();
+        unlink_if(&paths.socket, id);
+        let (retrying, entered) = std::sync::mpsc::channel();
+        let options = Options {
+            idle: Duration::from_secs(30),
+            hold_idle: None,
+            release_wait: Some(Duration::from_secs(20)),
+            retrying: Some(retrying),
+        };
+        let (reader, writer) = pipe();
+        let starter_root = root.0.clone();
+        let handle = std::thread::spawn(move || serve(&starter_root, options, Some(writer)));
+        entered.recv().unwrap();
+        drop((listener, ownership));
+        let mut line = String::new();
+        std::io::BufReader::new(reader)
+            .read_line(&mut line)
+            .unwrap();
+        let ready: Value = serde_json::from_str(&line).unwrap();
+        assert!(ready["listening"].is_object(), "{ready}");
+        call(&root.0, "service.retire", json!({})).unwrap();
+        assert_eq!(handle.join().unwrap().unwrap(), Outcome::Retired);
+    });
+}
+
+#[test]
+fn a_starter_that_loses_to_an_answering_owner_reports_lost_at_once() {
+    within(move || {
+        // A live owner's socket answers: the loss is final, with no retry
+        // window, however long that window would be.
+        let root = Root::new();
+        let (handle, _) = spawn(&root.0, Duration::from_secs(30));
+        let (retrying, entered) = std::sync::mpsc::channel();
+        let options = Options {
+            idle: Duration::from_secs(30),
+            hold_idle: None,
+            release_wait: Some(HANG_GUARD * 2),
+            retrying: Some(retrying),
+        };
+        let (second, lost) = spawn_with(&root.0, options);
+        assert_eq!(lost, json!({"lost": true}));
+        assert_eq!(second.join().unwrap().unwrap(), Outcome::Lost);
+        assert!(entered.try_recv().is_err(), "no retry window was entered");
         call(&root.0, "service.retire", json!({})).unwrap();
         handle.join().unwrap().unwrap();
     });

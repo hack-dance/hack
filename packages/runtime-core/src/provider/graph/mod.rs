@@ -308,6 +308,24 @@ impl Receipt {
     }
 }
 
+/// `Session::record(AllStarted)`. Only a start whose driver reports it (`--report-
+/// started`) records the phase; any other start leaves the receipt untouched and saves
+/// nothing. Otherwise the phase is saved first, then the driver is told. A failed save
+/// fails the start; its caller then retains the attempt as `failed-retained`.
+fn record_all_started(
+    receipt: &mut Receipt,
+    root: &std::path::Path,
+    startup: Option<&mut (dyn startup::Driver + '_)>,
+) -> Result<(), CandidateError> {
+    let Some(startup) = startup.filter(|startup| startup.reports_started()) else {
+        return Ok(());
+    };
+    mark_started(receipt)?;
+    state::write(&root.join("state.json"), receipt)?;
+    let run = receipt.run.clone();
+    startup.all_started(&run)
+}
+
 /// Move a start in progress (`preparing`, `restoring` or `restarting`) to
 /// `started-observed`, remembering which start it is. Any other phase refuses.
 pub(super) fn mark_started(receipt: &mut Receipt) -> Result<(), CandidateError> {
@@ -1140,14 +1158,7 @@ impl Driver for Session<'_, '_> {
                 startup.service_ready(service, id)
             }
             Event::AllStarted => {
-                mark_started(&mut self.receipt)?;
-                self.save()?;
-                // Durable first: the phase is saved before anyone is told.
-                let run = self.receipt.run.clone();
-                if let Some(startup) = self.startup.as_mut() {
-                    startup.all_started(&run)?;
-                }
-                Ok(())
+                record_all_started(&mut self.receipt, &self.root, self.startup.as_deref_mut())
             }
             Event::Ready => {
                 if let Some(startup) = self.startup.as_mut() {
@@ -2470,7 +2481,13 @@ fn contains_request(expected: &Value, actual: &Value) -> bool {
     mismatch(expected, actual, "request").is_none()
 }
 
-/// Explicit restart of a previously ready graph after all containers have stopped. IDs are
+/// A receipt phase an explicit restart may start from: ready, or every service started.
+fn restartable(receipt: &Receipt) -> bool {
+    matches!(receipt.phase.as_str(), "ready-observed" | STARTED_OBSERVED)
+}
+
+/// Explicit restart of a previously ready (or, with `--report-started`, started) graph
+/// after all containers have stopped. IDs are
 /// retained; no create is issued. Any incomplete prior transition requires inspection/cleanup.
 pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, CandidateError> {
     if options.timeout.is_zero() || options.timeout > Duration::from_secs(600) {
@@ -2497,12 +2514,12 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
     environment::require_replay_supported(&receipt)?;
     if root.join("state.pending").exists()
         || root.join("state.pending").is_symlink()
-        || !["ready-observed", STARTED_OBSERVED].contains(&receipt.phase.as_str())
+        || !restartable(&receipt)
         || receipt.readiness != *options.readiness
     {
         return Err(error(
             "graph_replay_refused",
-            "Only a completely acknowledged ready graph with an unchanged plan can explicitly restart.",
+            "Only a completely acknowledged ready or started graph with an unchanged plan can explicitly restart.",
         ));
     }
     super::source_job::check_reservations(&engine)?;

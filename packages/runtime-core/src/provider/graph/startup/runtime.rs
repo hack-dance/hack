@@ -668,11 +668,12 @@ impl HostRelayRuntime {
             dependency_reservation,
         })
     }
-    /// Armed only while the foreground initial startup runs, never during cleanup.
-    /// Opt in to the `graph_foreground_started` line (`--report-started`).
+    /// Opt in to the `graph_foreground_started` line and the `started-observed`
+    /// phase (`--report-started`), for this owner's first start only.
     pub fn report_started(&mut self, enabled: bool) {
         self.report_started = enabled;
     }
+    /// Armed only while the foreground initial startup runs, never during cleanup.
     pub(in crate::provider::graph) fn set_startup_cancellation(
         &mut self,
         check: Option<fn() -> bool>,
@@ -953,12 +954,26 @@ fn report_all_started(
         .map_err(|_| refused())
 }
 
+/// Print the started line once per owner: the flag is cleared after the first
+/// print, so a later start through the same driver (a redelivery restore after
+/// ready) neither records `started-observed` nor prints the line again.
+fn announce_started(
+    armed: &mut bool,
+    out: &mut impl std::io::Write,
+    run: &str,
+) -> Result<(), CandidateError> {
+    report_all_started(std::mem::take(armed), out, run)
+}
+
 impl Driver for HostRelayRuntime {
     fn admission_started(&self) -> bool {
         self.run.is_some()
     }
+    fn reports_started(&self) -> bool {
+        self.report_started
+    }
     fn all_started(&mut self, run: &str) -> Result<(), CandidateError> {
-        report_all_started(self.report_started, &mut std::io::stdout().lock(), run)
+        announce_started(&mut self.report_started, &mut std::io::stdout().lock(), run)
     }
 
     fn process_services(&self) -> std::collections::BTreeSet<String> {
@@ -1838,6 +1853,23 @@ mod all_started_tests {
         assert_eq!(
             line,
             json!({"kind": "graph_foreground_started", "run": run, "phase": "started-observed"})
+        );
+    }
+    #[test]
+    fn a_redelivery_restore_after_ready_neither_reports_nor_prints_again() {
+        // The owner's driver is reused for a redelivery restore: the first start
+        // disarms it, so the second start reports nothing.
+        let run = "a".repeat(32);
+        let mut armed = true;
+        let mut out = Vec::new();
+        announce_started(&mut armed, &mut out, &run).unwrap();
+        assert!(!armed, "still armed after the first start");
+        announce_started(&mut armed, &mut out, &run).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(
+            text.matches("graph_foreground_started").count(),
+            1,
+            "{text}"
         );
     }
 }

@@ -173,6 +173,17 @@ fn inventory_busy(rows: &Value, initializer: &str) -> Result<bool, CandidateErro
     }
     Ok(busy)
 }
+/// Whether another graph's phase makes the pool busy for a quiescent release: live
+/// graphs (ready, or started and still warming) are skipped conservatively even when
+/// all their processes have just exited; removed or retained ones are not; any other
+/// phase refuses.
+fn other_graph_busy(phase: &str) -> Result<bool, CandidateError> {
+    match phase {
+        "removed" | "stopped-data-retained" => Ok(false),
+        "ready-observed" | STARTED_OBSERVED => Ok(true),
+        _ => Err(refused()),
+    }
+}
 fn quiescent(
     engine: &Engine<'_>,
     receipt: &Receipt,
@@ -190,20 +201,7 @@ fn quiescent(
             _ => return Err(refused()),
         }
         require_resolved(&other)?;
-        if ![
-            "removed",
-            "stopped-data-retained",
-            "ready-observed",
-            STARTED_OBSERVED,
-        ]
-        .contains(&other.phase.as_str())
-        {
-            return Err(refused());
-        }
-        // Conservatively skip other live graphs (ready, or started and still warming)
-        // even when all their processes have just exited. Unknown foreign containers
-        // are also never treated as quiescent.
-        busy |= ["ready-observed", STARTED_OBSERVED].contains(&other.phase.as_str());
+        busy |= other_graph_busy(&other.phase)?;
         for resource in other
             .resources
             .values()
@@ -371,6 +369,18 @@ impl Release for Session<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_started_graph_keeps_a_quiescent_release_busy_like_a_ready_one() {
+        for phase in ["ready-observed", "started-observed"] {
+            assert!(other_graph_busy(phase).unwrap(), "{phase}");
+        }
+        for phase in ["removed", "stopped-data-retained"] {
+            assert!(!other_graph_busy(phase).unwrap(), "{phase}");
+        }
+        for phase in ["preparing", "restoring", "restarting", "failed-retained"] {
+            assert!(other_graph_busy(phase).is_err(), "{phase}");
+        }
+    }
     fn binding() -> Binding {
         Binding {
             boot: "boot".into(),

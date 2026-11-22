@@ -214,6 +214,7 @@ mod tests {
             ("c", "restoring"),
             ("d", "removed"),
             ("6", "failed-retained"),
+            ("5", "started-observed"),
         ] {
             let dir = home.dir(&format!("run/graphs/{}", run.repeat(32)));
             state::write(
@@ -224,7 +225,12 @@ mod tests {
         }
         assert_eq!(
             live_graph_runs(&home.0),
-            Some(vec!["6".repeat(32), "a".repeat(32), "c".repeat(32)])
+            Some(vec![
+                "5".repeat(32),
+                "6".repeat(32),
+                "a".repeat(32),
+                "c".repeat(32)
+            ])
         );
         // Native-authored graphs are listed by their own phases.
         for (run, phase) in [
@@ -243,6 +249,7 @@ mod tests {
         assert_eq!(
             live_graph_runs(&home.0),
             Some(vec![
+                "5".repeat(32),
                 "6".repeat(32),
                 "7".repeat(32),
                 "8".repeat(32),

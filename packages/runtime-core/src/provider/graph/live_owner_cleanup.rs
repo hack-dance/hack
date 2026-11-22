@@ -810,6 +810,29 @@ mod tests {
     }
 
     #[test]
+    fn a_started_graph_is_recovered_on_the_same_boot_like_a_ready_one() {
+        // `settled_startup`, then the relay check `recover_live_owner` repeats
+        // before and after its cleanup moves the receipt on.
+        let mut started = receipt();
+        started.phase = "preparing".into();
+        mark_started(&mut started).unwrap();
+        recoverable_settled(&started).unwrap();
+        let fixture = super::super::tests::Fixture::new();
+        state::write(&fixture.0.join("state.json"), &started).unwrap();
+        relay::verify_receipt(&fixture.0, &started).unwrap();
+        let mut moved = started.clone();
+        moved.set_phase("cleanup-intent");
+        let _ = fs::remove_file(fixture.0.join("state.json"));
+        state::write(&fixture.0.join("state.json"), &moved).unwrap();
+        relay::verify_receipt(&fixture.0, &started).unwrap();
+        // A start still in progress stays unrecoverable here.
+        for phase in ["preparing", "restoring", "restarting"] {
+            let mut value = receipt();
+            value.phase = phase.into();
+            assert!(recoverable_settled(&value).is_err(), "{phase}");
+        }
+    }
+    #[test]
     fn ready_and_failed_receipts_require_settled_startup_bindings() {
         let fixture = super::super::tests::Fixture::new();
         let mut value = receipt();

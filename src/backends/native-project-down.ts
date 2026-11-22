@@ -108,6 +108,15 @@ const RECEIPT_SHA = /^[a-f0-9]{64}$/;
 const RECOVERY_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 const FOREGROUND_STATES = new Set(["absent", "running", "exited", "uncertain"]);
+/**
+ * Graph phases of a run whose services all started, so it has a mapping and an
+ * owner to recover when that owner exited: ready, or started with some goal still
+ * unmet (`started-observed`, written only under `--report-started`).
+ */
+const RECOVERABLE_LIVE_PHASES: ReadonlySet<string> = new Set([
+  "ready-observed",
+  "started-observed",
+]);
 
 /** What `graph foreground-owner` selected; it grants no recovery authority. */
 type ForegroundOwnerSelection = {
@@ -408,7 +417,7 @@ function requireRecoverableOwner(selection: ForegroundOwnerSelection): void {
   }
   if (
     selection.foreground === "exited" &&
-    selection.phase !== "ready-observed" &&
+    !RECOVERABLE_LIVE_PHASES.has(selection.phase) &&
     !(selection.phase === "failed-retained" && selection.failedStartRecoverable)
   ) {
     throw new ClosedCliError(
@@ -598,7 +607,7 @@ async function deadOwnerOfLiveRun(opts: {
     }
     if (
       selection.foreground === "exited" &&
-      (selection.phase === "ready-observed" ||
+      (RECOVERABLE_LIVE_PHASES.has(selection.phase) ||
         selection.deadOwnerRecovery !== null)
     ) {
       return true;

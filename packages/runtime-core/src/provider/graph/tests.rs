@@ -4042,3 +4042,148 @@ fn a_started_graph_moved_on_by_recovery_drops_its_start() {
         );
     }
 }
+
+/// A startup driver that only answers whether it reports "started", and records
+/// the phase on disk at the moment it is told.
+struct ReportingDriver {
+    reports: bool,
+    root: PathBuf,
+    told: Vec<String>,
+}
+impl startup::Driver for ReportingDriver {
+    fn validate_inputs(&self, _: &project::inputs::ExecutionInputs) -> Result<(), CandidateError> {
+        unreachable!("not part of AllStarted")
+    }
+    fn verify(&mut self, _: &Engine<'_>, _: &mut Receipt, _: &Path) -> Result<(), CandidateError> {
+        unreachable!("not part of AllStarted")
+    }
+    fn prepare(
+        &mut self,
+        _: &Engine<'_>,
+        _: &mut Receipt,
+        _: &Path,
+        _: &mut BTreeMap<String, Value>,
+    ) -> Result<(), CandidateError> {
+        unreachable!("not part of AllStarted")
+    }
+    fn started(
+        &mut self,
+        _: &Engine<'_>,
+        _: &mut Receipt,
+        _: &Path,
+        _: &Value,
+        _: &str,
+    ) -> Result<(), CandidateError> {
+        unreachable!("not part of AllStarted")
+    }
+    fn reports_started(&self) -> bool {
+        self.reports
+    }
+    fn all_started(&mut self, run: &str) -> Result<(), CandidateError> {
+        let on_disk: Receipt = state::read(&self.root.join("state.json"))?;
+        self.told.push(format!("{run} {}", on_disk.phase));
+        Ok(())
+    }
+}
+
+fn started_root() -> (Fixture, PathBuf) {
+    let fixture = Fixture::new();
+    let root = fixture.0.join("graph");
+    fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+    (fixture, root)
+}
+
+#[test]
+fn without_report_started_every_service_started_changes_nothing_on_disk() {
+    let (_fixture, root) = started_root();
+    for start in START_PHASES {
+        let mut receipt = receipt_in(start, None);
+        state::write(&root.join("state.json"), &receipt).unwrap();
+        let before = fs::read(root.join("state.json")).unwrap();
+        let modified = fs::metadata(root.join("state.json"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let mut driver = ReportingDriver {
+            reports: false,
+            root: root.clone(),
+            told: Vec::new(),
+        };
+        record_all_started(&mut receipt, &root, Some(&mut driver)).unwrap();
+        record_all_started(&mut receipt, &root, None).unwrap();
+        assert_eq!(receipt.phase, start);
+        assert!(receipt.started_from.is_none());
+        assert!(driver.told.is_empty());
+        // No save at all: same bytes, same file, no pending journal.
+        assert_eq!(fs::read(root.join("state.json")).unwrap(), before);
+        assert_eq!(
+            fs::metadata(root.join("state.json"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified
+        );
+        assert!(!root.join("state.pending").exists());
+    }
+}
+
+#[test]
+fn with_report_started_the_phase_is_saved_before_the_driver_is_told() {
+    let (_fixture, root) = started_root();
+    let mut receipt = receipt_in("restoring", None);
+    state::write(&root.join("state.json"), &receipt).unwrap();
+    let mut driver = ReportingDriver {
+        reports: true,
+        root: root.clone(),
+        told: Vec::new(),
+    };
+    record_all_started(&mut receipt, &root, Some(&mut driver)).unwrap();
+    assert_eq!(
+        driver.told,
+        [format!("{} started-observed", "a".repeat(32))]
+    );
+    let saved: Receipt = state::read(&root.join("state.json")).unwrap();
+    assert_eq!(saved.phase, "started-observed");
+    assert_eq!(saved.started_from.as_deref(), Some("restoring"));
+}
+
+#[test]
+fn a_failed_started_save_fails_the_start_before_anyone_is_told() {
+    let (_fixture, root) = started_root();
+    let mut receipt = receipt_in("preparing", None);
+    state::write(&root.join("state.json"), &receipt).unwrap();
+    let before = fs::read(root.join("state.json")).unwrap();
+    let mut driver = ReportingDriver {
+        reports: true,
+        root: root.clone(),
+        told: Vec::new(),
+    };
+    // The save cannot be written (its directory is gone): the start fails.
+    let missing = root.join("missing");
+    let error = record_all_started(&mut receipt, &missing, Some(&mut driver)).unwrap_err();
+    assert_eq!(error.code, "provider_state");
+    assert!(driver.told.is_empty(), "told before the phase was durable");
+    assert_eq!(fs::read(root.join("state.json")).unwrap(), before);
+    // The start's failure path then retains the attempt, and the start's phase goes.
+    receipt.set_phase("failed-retained");
+    state::write(&root.join("state.json"), &receipt).unwrap();
+    let retained: Receipt = state::read(&root.join("state.json")).unwrap();
+    assert_eq!(retained.phase, "failed-retained");
+    assert!(retained.started_from.is_none());
+}
+
+#[test]
+fn an_explicit_restart_starts_from_a_ready_or_started_graph_only() {
+    let mut receipt = receipt_in("ready-observed", None);
+    assert!(restartable(&receipt));
+    receipt = receipt_in("preparing", None);
+    mark_started(&mut receipt).unwrap();
+    assert!(restartable(&receipt));
+    for phase in START_PHASES.into_iter().chain([
+        "failed-retained",
+        "cleanup-intent",
+        "stopped-data-retained",
+    ]) {
+        assert!(!restartable(&receipt_in(phase, None)), "{phase}");
+    }
+}

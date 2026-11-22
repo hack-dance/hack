@@ -85,6 +85,30 @@ type ProcessOptions = {
  * acceptance; the caller must inspect ownership before publishing a run mapping.
  * Aborted/failed attempts retain native recovery state and are never replayed.
  */
+/**
+ * Test switch for the Mac recovery scenario of "up returns when started" (PR A):
+ * with `HACK_NATIVE_REPORT_STARTED=1` the owner is asked to report every service
+ * started (`--report-started`), so its receipt passes through `started-observed`.
+ * `up` still returns at ready and ignores that line. PR B makes the flag the
+ * default and removes this switch.
+ */
+export const NATIVE_REPORT_STARTED_ENV = "HACK_NATIVE_REPORT_STARTED";
+
+/** The owner's `graph_foreground_started` line for this run, before ready. */
+function startedLine(line: string, run: string): boolean {
+  try {
+    const value: unknown = JSON.parse(line);
+    return (
+      isRecord(value) &&
+      value.kind === "graph_foreground_started" &&
+      value.run === run &&
+      value.phase === "started-observed"
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function serveNativeProjectGraph(
   opts: ProcessOptions & {
     readonly args: readonly string[];
@@ -92,12 +116,14 @@ export async function serveNativeProjectGraph(
     readonly onReady: () => Promise<void>;
   }
 ): Promise<number> {
+  const reportStarted = process.env[NATIVE_REPORT_STARTED_ENV] === "1";
   return await serveGraphProcess({
     ...opts,
     command: [
       "graph",
       opts.restore ? "serve-restore" : "serve",
       ...opts.args,
+      ...(reportStarted ? ["--report-started"] : []),
       "--run-id",
       opts.run,
       "--json",
@@ -106,7 +132,8 @@ export async function serveNativeProjectGraph(
     strictReady: false,
     isolateOwner: true,
     ignoreBeforeReady: (line) =>
-      nativePublisherExitNotice(line, opts.run) !== null,
+      nativePublisherExitNotice(line, opts.run) !== null ||
+      (reportStarted && startedLine(line, opts.run)),
     onEvent: (line) => {
       const notice = nativePublisherExitNotice(line, opts.run);
       if (notice) {

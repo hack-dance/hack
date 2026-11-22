@@ -997,7 +997,12 @@ impl Driver for HostRelayRuntime {
                 startup_failure::record(receipt, name, observation)?;
                 state::write(&root.join("state.json"), receipt)
             },
-        )
+        )?;
+        #[cfg(target_os = "macos")]
+        if let Some(publications) = &mut self.early_publications {
+            publications.settle(engine, receipt)?;
+        }
+        Ok(())
     }
 
     fn prepare(

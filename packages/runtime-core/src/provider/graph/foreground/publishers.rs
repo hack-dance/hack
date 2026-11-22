@@ -58,6 +58,7 @@ pub(in crate::provider::graph) struct EarlyPublications {
     pub(super) publishers: Publishers,
     slots: BTreeMap<String, graph::RouteSlot>,
     deadline: Instant,
+    deferred: BTreeMap<String, String>,
 }
 
 impl EarlyPublications {
@@ -66,6 +67,7 @@ impl EarlyPublications {
             publishers: Publishers::default(),
             slots: slots.clone(),
             deadline,
+            deferred: BTreeMap::new(),
         }
     }
 
@@ -97,13 +99,21 @@ impl EarlyPublications {
         };
         check()?;
         self.publishers.owner.clone_from(&receipt.owner);
-        let selected = graph::bridges::admit_ready_service(
+        let selected = match graph::bridges::admit_ready_service(
             engine,
             run,
             service,
             container_id,
             self.slots.get(service).copied(),
-        )?;
+        ) {
+            Ok(selected) => selected,
+            Err(error) if error.code == "bridge_endpoint_pending" => {
+                self.deferred
+                    .insert(service.to_owned(), container_id.to_owned());
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         for (slot, assignment) in selected {
             let port = assignment.loopback_port.map(|binding| binding.host_port);
             let hostnames = if port.is_none() {
@@ -182,6 +192,25 @@ impl EarlyPublications {
                 }
                 owned.exited = Some(owned.child.wait().map_err(|_| refused())?);
                 return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    pub(in crate::provider::graph) fn settle(
+        &mut self,
+        engine: &graph::Engine<'_>,
+        receipt: &Receipt,
+    ) -> Result<(), CandidateError> {
+        while !self.deferred.is_empty() {
+            for (service, id) in std::mem::take(&mut self.deferred) {
+                self.publish(engine, receipt, &service, &id)?;
+            }
+            if !self.deferred.is_empty() {
+                std::thread::sleep(
+                    PENDING_ENDPOINT_POLL
+                        .min(self.deadline.saturating_duration_since(Instant::now())),
+                );
             }
         }
         Ok(())

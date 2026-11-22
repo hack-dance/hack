@@ -210,6 +210,7 @@ pub(super) struct Targets {
     port_endpoints: BTreeMap<String, GuestEndpoint>,
     /// Container main process, keyed by service.
     pids: BTreeMap<String, u32>,
+    pending_ports: bool,
 }
 
 impl Targets {
@@ -250,6 +251,7 @@ fn inspect_targets_scoped(
         endpoints: BTreeMap::new(),
         port_endpoints: BTreeMap::new(),
         pids: BTreeMap::new(),
+        pending_ports: false,
     };
     let receipt = &targets.receipt;
     // The startup lease holder may inspect exactly the generation reported
@@ -297,6 +299,12 @@ fn inspect_targets_scoped(
             continue;
         };
         let observation = probes::observe(engine, receipt, service, &value)?;
+        targets.pending_ports |= ready_service.is_some()
+            && !resource.loopback_ports.is_empty()
+            && observation
+                == (Observation::Running {
+                    health: Health::Starting,
+                });
         if ready_service.is_some()
             && !receipt
                 .readiness
@@ -630,6 +638,12 @@ pub(super) fn admit_ready_service(
     let scope = Some((service, container_id));
     let mut targets =
         inspect_targets_scoped(candidate, engine, run, &BTreeSet::from([service]), scope)?;
+    if targets.pending_ports {
+        return Err(error(
+            "bridge_endpoint_pending",
+            "A published port waits for its container's healthcheck; no ports were reserved.",
+        ));
+    }
     let key = format!("container:{service}");
     targets.receipt.resources.retain(|name, _| name == &key);
     let requested = BTreeMap::from_iter(route.map(|slot| (service.to_owned(), slot)));

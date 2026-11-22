@@ -111,6 +111,7 @@ success behavior stays covered by command-specific suites.
 | `hack logs --json` | NDJSON logs; finite native modes may return a legacy snapshot object |
 | `hack native recover --json` | Native runtime result passed through unchanged, with no `data` envelope (setup: `status`, `builder`, `files`, `probe`; recover: the runtime status, such as `phase`) |
 | `hack native setup --json` | Native runtime result passed through unchanged, with no `data` envelope (setup: `status`, `builder`, `files`, `probe`; recover: the runtime status, such as `phase`) |
+| `hack native temp-aliases --json` | Legacy bare object (no `data` envelope) |
 | `hack node add --json` | Legacy bare object (no `data` envelope) |
 | `hack node devcontainer attach --json` | Legacy bare object (no `data` envelope) |
 | `hack node devcontainer down --json` | Legacy bare object (no `data` envelope) |

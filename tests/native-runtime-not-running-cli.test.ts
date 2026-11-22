@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { NATIVE_RUN_SELECTION_REFUSAL } from "../src/backends/native-project-one-off.ts";
 import { saveNativeProjectRun } from "../src/backends/native-project-run.ts";
+import { nativeSetupShellReply } from "./helpers/native-setup-inspection.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
 
 /**
@@ -99,6 +100,7 @@ async function fixture(opts: { readonly nativeCode?: string }) {
     binary,
     `#!/bin/sh
 printf '%s\\n' "$*" >> "$HOME/native-calls"
+${nativeSetupShellReply()}
 ${reply}
 `,
     { mode: 0o700 }
@@ -206,6 +208,38 @@ test("native ps keeps the complete address on a narrow plain terminal", async ()
       "",
     ].join("\n")
   );
+});
+
+test("native ps observes services despite an invalid startup-only setting", async () => {
+  const f = await fixture({});
+  const value = "invalid-fixture-setting";
+  const env = { HACK_NATIVE_HOT_RELOAD: value, NO_COLOR: "1" };
+  const ps = await cli({ fixture: f, args: ["ps"], env });
+  expect(ps.code).toBe(0);
+  expect(ps.stdout).toMatch(/web +https:\/\/alpha.sample.hack +healthy/);
+  expect(ps.stdout).toContain("exited (1)");
+  const up = await cli({ fixture: f, args: ["up"], env });
+  expect(up.code).toBe(1);
+  expect(up.stdout + up.stderr).toContain(
+    "HACK_NATIVE_HOT_RELOAD must be auto, on or off."
+  );
+  expect(up.stdout + up.stderr).not.toContain(value);
+});
+
+test("native ps keeps observing when HTTPS settings cannot supply an address", async () => {
+  const f = await fixture({});
+  const value = "invalid-fixture-port";
+  const ps = await cli({
+    fixture: f,
+    args: ["ps"],
+    env: { HACK_NATIVE_HTTPS_PORT: value, NO_COLOR: "1" },
+  });
+  expect(ps.code).toBe(0);
+  expect(ps.stdout).toMatch(/web +no address +healthy/);
+  expect(ps.stdout).toContain(
+    "native https settings invalid · addresses unavailable"
+  );
+  expect(ps.stdout + ps.stderr).not.toContain(value);
 });
 
 test("native ps reports the configured HTTPS frontend port", async () => {

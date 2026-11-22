@@ -202,6 +202,13 @@ The chart shows the other gates only as exits. A run that only prepares stops
 once the set is packaged, and a failed upload keeps its tag, which is never
 replaced.
 
+After upload, the workflow lists the release assets and compares their names,
+sizes, and SHA-256 digests with the local release set. If an asset is missing,
+still uploading, or has a null digest, the workflow checks again up to five
+times, five seconds apart. A size or digest mismatch fails immediately. If
+verification fails, inspect the existing release and do not re-dispatch the
+same version.
+
 ![Prerelease publication: where the release set is checked](prerelease-publication.svg)
 
 Diagram [source](prerelease-publication.mmd); rendered with Pele 1.9.0.

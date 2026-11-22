@@ -749,6 +749,50 @@ export function prepareNativeProjectServices(
 export const NATIVE_SHARED_SOURCE_REFUSAL =
   "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 or sharedSource in the native machine settings to share this exact project, including ignored files. Grant that share and run the command again.";
 const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const PINNED_IMAGE_REFERENCE = /^[^@\s]+@sha256:[a-f0-9]{64}$/;
+/** Acquire one image and accept only a confirmed content ID for the requested policy. */
+async function ensureNativeProjectImage(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly reference: string;
+  readonly name: string;
+  readonly policy: NativeEmulationPolicy | undefined;
+  readonly invoke: typeof invokeNativeRuntime;
+}) {
+  const ensured = await opts
+    .invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: [
+        ...nativeEnsureImageArgs(opts.reference, opts.policy),
+        ...nativeImagePolicyArgs(),
+      ],
+      timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+    })
+    .catch((error: unknown) => {
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode === "registry_image_not_found"
+      ) {
+        const label = SERVICE_NAME.test(opts.name)
+          ? `service ${opts.name}`
+          : "a service";
+        throw new ClosedCliError(
+          `Native image acquisition failed for ${label} field image (registry_image_not_found); the selected registry image or tag was not found. Values omitted.`
+        );
+      }
+      throw error;
+    });
+  if (
+    !isRecord(ensured) ||
+    typeof ensured.image_id !== "string" ||
+    !IMAGE.test(ensured.image_id) ||
+    !ensuredPlatformAccepted(ensured.platform, opts.policy)
+  ) {
+    throw unconfirmed("the runtime image selection");
+  }
+  return { imageId: ensured.image_id, reference: ensured.pinned_reference };
+}
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
 async function pinNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -762,6 +806,8 @@ async function pinNativeProjectImages(opts: {
   readonly signal: AbortSignal;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<void> {
+  const pinnedImages = new Map<string, string>();
+  const immutableReferences = new Map<string, string | null>();
   for (const [name, spec] of Object.entries(opts.specs)) {
     if (opts.signal.aborted) {
       throw canceled();
@@ -786,39 +832,36 @@ async function pinNativeProjectImages(opts: {
       continue;
     }
     const policy = nativeEmulationPolicy(opts.amd64Emulation, name);
-    const ensured = await opts
-      .invoke({
-        runtime: opts.runtime,
-        cwd: opts.projectRoot,
-        args: [
-          ...nativeEnsureImageArgs(image, policy),
-          ...nativeImagePolicyArgs(),
-        ],
-        timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
-      })
-      .catch((error: unknown) => {
-        if (
-          error instanceof NativeRuntimeRequestError &&
-          error.nativeCode === "registry_image_not_found"
-        ) {
-          const label = SERVICE_NAME.test(name)
-            ? `service ${name}`
-            : "a service";
-          throw new ClosedCliError(
-            `Native image acquisition failed for ${label} field image (registry_image_not_found); the selected registry image or tag was not found. Values omitted.`
-          );
-        }
-        throw error;
-      });
-    if (
-      !isRecord(ensured) ||
-      typeof ensured.image_id !== "string" ||
-      !IMAGE.test(ensured.image_id) ||
-      !ensuredPlatformAccepted(ensured.platform, policy)
-    ) {
-      throw unconfirmed("the runtime image selection");
+    // The same tag may select different images under different platform policies.
+    const key = JSON.stringify([image, policy]);
+    const pinned = pinnedImages.get(key);
+    if (pinned !== undefined) {
+      spec.image = pinned;
+      continue;
     }
-    spec.image = ensured.image_id;
+    const immutableReference = immutableReferences.get(image);
+    if (immutableReference === null) {
+      throw unconfirmed("the runtime image reference");
+    }
+    const ensured = await ensureNativeProjectImage({
+      runtime: opts.runtime,
+      projectRoot: opts.projectRoot,
+      reference: immutableReference ?? image,
+      name,
+      policy,
+      invoke: opts.invoke,
+    });
+    if (immutableReference === undefined) {
+      const reference = ensured.reference;
+      immutableReferences.set(
+        image,
+        typeof reference === "string" && PINNED_IMAGE_REFERENCE.test(reference)
+          ? reference
+          : null
+      );
+    }
+    pinnedImages.set(key, ensured.imageId);
+    spec.image = ensured.imageId;
   }
 }
 /** Services whose review carries Hack's exact one-shot marker as `one_shot: true`. */

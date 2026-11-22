@@ -1725,7 +1725,7 @@ async function selectNativeStartup(opts: {
     const observed =
       preflight.runtimePhase === "running"
         ? await inspectNativeProjectGraph({
-            busyWaitMs: 0,
+            startupWait: true,
             runtime: opts.runtime,
             projectRoot: opts.scope.projectRoot,
             run: retained.run,
@@ -2842,7 +2842,7 @@ async function startNativeProjectAttempt(
           }
           const invokeInspect = () =>
             inspectNativeProjectGraph({
-              busyWaitMs: 0,
+              startupWait: true,
               runtime: opts.runtime,
               projectRoot: opts.scope.projectRoot,
               run,
@@ -3234,10 +3234,8 @@ function withStartupLockBlocker(error: unknown): unknown {
   ) {
     return error;
   }
-  const holder = START_LOCK_HOLDER.exec(error.nativeMessage ?? "")?.[1];
-  if (holder === undefined) {
-    return error;
-  }
+  const holder =
+    START_LOCK_HOLDER.exec(error.nativeMessage ?? "")?.[1] ?? "unavailable";
   error.message = [
     "Native startup could not acquire a runtime lock (provider_busy).",
     `Holder: ${holder}.`,

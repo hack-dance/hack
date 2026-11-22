@@ -3651,9 +3651,11 @@ mod tests {
             std::fs::write(&identity, "original").unwrap();
             let held = state::Lock::acquire(&root).unwrap();
             let calls = std::cell::Cell::new(0);
+            let immediate = Instant::now();
             assert!(
                 matches!(operation_lease(&root, None, || { calls.set(1); Ok(()) }), Err(e) if e.code == "provider_busy")
             );
+            assert!(immediate.elapsed() < Duration::from_secs(1));
             let writer = identity.clone();
             let worker = std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(100));

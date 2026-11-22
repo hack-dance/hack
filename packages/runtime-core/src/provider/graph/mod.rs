@@ -1839,6 +1839,15 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
 /// (for example a foreground start refused before admission). Every other journal
 /// state keeps the ordinary receipt validation.
 pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
+    inspect_with_startup_wait(candidate, run, false)
+}
+
+/// Inspect for a startup caller using the existing provider lease budget.
+pub fn inspect_with_startup_wait(
+    candidate: &Candidate,
+    run: &str,
+    startup_wait: bool,
+) -> Result<Snapshot, CandidateError> {
     #[cfg(target_os = "macos")]
     if unreserved(candidate, run)? {
         return Err(error(
@@ -1846,7 +1855,11 @@ pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateEr
             "No runtime state was reserved for this graph attempt: no journal exists and no foreground owner is published. Nothing was created, repaired or adopted.",
         ));
     }
-    let engine = Engine::connect_cleanup_for_start(candidate)?;
+    let engine = if startup_wait {
+        Engine::connect_cleanup_for_start(candidate)
+    } else {
+        Engine::connect_cleanup(candidate)
+    }?;
     inspect_using(candidate, &engine, run)
 }
 

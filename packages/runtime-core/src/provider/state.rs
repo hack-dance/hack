@@ -206,6 +206,10 @@ pub(super) fn wait_for_acquisition<T>(
                 std::thread::sleep(delay.min(deadline.saturating_duration_since(Instant::now())));
                 delay = (delay * 2).min(Duration::from_millis(50));
             }
+            Ok(lock) if Instant::now() >= deadline => {
+                drop(lock);
+                return Err(busy.unwrap_or_else(expired));
+            }
             result => return result,
         }
     }
@@ -242,7 +246,7 @@ fn operation_label() -> &'static str {
         match argument.to_str() {
             Some("cleanup" | "down" | "stop") => return "cleanup",
             Some("recover" | "recover-live-owner" | "recover-cleanup") => return "recovery",
-            Some("run" | "serve" | "start" | "restore" | "restart") => return "start",
+            Some("up" | "run" | "serve" | "start" | "restore" | "restart") => return "start",
             Some("inspect" | "status") => return "inspection",
             Some("retained-preflight") => return "retained_startup",
             Some("ensure-image") => return "image_acquisition",
@@ -939,7 +943,17 @@ mod tests {
         let fixture = fixture();
         let root = fixture.join("run/smolvm");
         let first = super::Lock::acquire(&root).unwrap();
-        let refused = super::Lock::acquire_until(&root, Instant::now() + Duration::from_millis(50));
+        let mut attempts = 0;
+        let refused = super::wait_for_acquisition(
+            Instant::now() + Duration::from_millis(50),
+            || {
+                attempts += 1;
+                assert!(attempts < 12, "acquisition continued beyond its deadline");
+                Ok(())
+            },
+            || super::Lock::acquire(&root),
+            super::acquisition_expired,
+        );
         assert!(
             matches!(refused, Err(error) if error.code == "provider_busy" && error.message.contains("recorded holder:"))
         );
@@ -963,6 +977,30 @@ mod tests {
             drop(first);
             drop(second.join().unwrap().unwrap());
         });
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn acquisition_after_the_deadline_releases_the_lock() {
+        use std::time::{Duration, Instant};
+        let fixture = fixture();
+        let root = fixture.join("run/smolvm");
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let mut acquired = false;
+        let refused = super::wait_for_acquisition(
+            deadline,
+            || Ok(()),
+            || {
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                let lease = super::Lock::acquire(&root)?;
+                acquired = true;
+                Ok(lease)
+            },
+            super::acquisition_expired,
+        );
+        assert!(acquired);
+        assert!(matches!(refused, Err(error) if error.code == "provider_busy"));
+        drop(super::Lock::acquire(&root).unwrap());
         std::fs::remove_dir_all(fixture).unwrap();
     }
 

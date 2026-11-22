@@ -358,6 +358,11 @@ fn update(
         Operation::Add => lifecycle::startup_lease(&lease_root, lifecycle::STARTUP_LEASE_WAIT),
         Operation::Remove => state::Lock::acquire(&lease_root),
     }?;
+    if operation == Operation::Add
+        && addition(candidate, &share.project, share.unfiltered_source)? != share
+    {
+        return Err(refused());
+    }
     network_update::require_complete(candidate)?;
     let owner = Owner::load(candidate)?;
     let path = root(candidate).join(JOURNAL);

@@ -1417,8 +1417,15 @@ fn start_pool_observed(
                 owner.additional_project_shares.clone(),
             )
         } else {
+            let (bridges, dependencies) = if profile == super::Profile::Development
+                && project_share.is_some()
+            {
+                super::socket_requests::fresh_project_capacity(bridge_request, dependency_request)?
+            } else {
+                (requested, dependencies)
+            };
             (
-                requested,
+                bridges,
                 network.clone().unwrap_or_default(),
                 dependencies,
                 project_share.clone(),
@@ -1575,7 +1582,7 @@ fn start_pool_observed(
     let mut owner = Owner::create_with_project_share(
         candidate,
         profile,
-        requested,
+        existing,
         existing_network.clone(),
         existing_dependencies,
         existing_share.clone(),

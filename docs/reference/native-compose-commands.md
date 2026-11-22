@@ -134,6 +134,16 @@ documents can contain decrypted values and remain in owned private files with
 restricted permissions. They are never part of the public plan or JSON output.
 Do not copy these documents into source control or attach them to diagnostics.
 
+## Shared pool socket capacity
+
+A fresh development pool started with a project share reserves space for eight
+application bridge sockets and four host-dependency sockets by default. The
+combined limit is 32. Project minimums take precedence over spare capacity,
+and explicit exact counts are honored. Projects and branches share the available
+slots in each direction. A new start can be refused if the live pool has too
+few free slots. The default applies at pool creation; existing pool capacities
+stay in effect.
+
 ## Owned project networks
 
 For an unchanged unrouted running instance, `up` reuses its saved generation only

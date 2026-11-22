@@ -75,6 +75,10 @@ const sshPrivateIpPattern =
 const tailscaleDomainPattern = /\b[a-z0-9-]+\.tail[a-z0-9]{5,}\.ts\.net\b/gi;
 const macosHomePathPattern = /\/Users\/(?<user>[A-Za-z0-9._-]+)/g;
 const linuxHomePathPattern = /\/home\/(?<user>[A-Za-z0-9._-]+)/g;
+// The release inventory lists quoted Git paths. A nested "home" directory in
+// one of those paths can also match the Linux absolute-path pattern.
+const quotedRelativeDirectoryPrefix =
+  /^\s*"[A-Za-z0-9_-][\w.-]*(?:\/[A-Za-z0-9_-][\w.-]*)*$/;
 const lineBreakPattern = /\r?\n/;
 
 const missionArtifactRoots = [".factory/library/", ".factory/validation/"];
@@ -263,7 +267,12 @@ function scanHomePath(input: {
   input.pattern.lastIndex = 0;
   for (const match of input.line.matchAll(input.pattern)) {
     const username = match.groups?.user?.toLowerCase() ?? "";
-    if (allowedUsernames.has(username)) {
+    if (
+      allowedUsernames.has(username) ||
+      (input.kind === "linux-home-path" &&
+        input.filePath === "scripts/docs/versions.json" &&
+        quotedRelativeDirectoryPrefix.test(input.line.slice(0, match.index)))
+    ) {
       continue;
     }
     input.findings.push({

@@ -154,7 +154,7 @@ fn main() {
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new("--internal-publication-child"))
     {
-        std::process::exit(
+        hack_runtime_core::timings::exit(
             if hack_runtime_core::provider::publication::run_publication_child().is_ok() {
                 0
             } else {

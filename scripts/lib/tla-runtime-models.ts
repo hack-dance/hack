@@ -2431,13 +2431,37 @@ const contracts: readonly ModelContract[] = [
     states: 622,
     invariant: "Safe",
     action: "Record",
-    fields: ['recorded = {"first"}', 'first |-> "gated"'],
+    fields: [
+      'recorded = {"first"}',
+      'child = [first |-> "gated", second |-> "absent"]',
+    ],
+    alternativeWitnesses: [
+      {
+        action: "Record",
+        fields: [
+          'recorded = {"second"}',
+          'child = [first |-> "absent", second |-> "gated"]',
+        ],
+      },
+    ],
     additionalControls: [
       {
         name: "bind-before-commit",
         negative: true,
         action: "Bind",
-        fields: ['first |-> "uncommitted-bind"', "recorded = {}"],
+        fields: [
+          'child = [first |-> "uncommitted-bind", second |-> "absent"]',
+          "recorded = {}",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Bind",
+            fields: [
+              'child = [first |-> "absent", second |-> "uncommitted-bind"]',
+              "recorded = {}",
+            ],
+          },
+        ],
       },
     ],
   },

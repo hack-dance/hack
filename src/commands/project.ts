@@ -8508,14 +8508,16 @@ async function runUpCommand({
       return bootstrapCode;
     }
     const upPhase = trackComposeStartupPhase();
-    await stopInactiveRemoteServices({
-      choices: remoteChoices,
-      composeFiles: composeFilesWithEnv,
-      composeProject: composeProjectName,
-      cwd: dirname(project.composeFile),
-      env: envOverrides.env,
-      timeoutMs: startupTimeoutMs,
-    });
+    if (!serviceScoped) {
+      await stopInactiveRemoteServices({
+        choices: remoteChoices,
+        composeFiles: composeFilesWithEnv,
+        composeProject: composeProjectName,
+        cwd: dirname(project.composeFile),
+        env: envOverrides.env,
+        timeoutMs: startupTimeoutMs,
+      });
+    }
     containerStartBegun = true;
     const guarded = await composeUpGuardedBySharedHelpers({
       assertCurrent: assertHelpersCurrent,

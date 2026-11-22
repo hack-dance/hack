@@ -268,7 +268,10 @@ test("the six --use entry points deliver the invocation target without saving it
     expect(await Bun.file(log).text()).toContain("down=live.example.test:5432");
     expect(await Bun.file(join(root, "stack-state")).exists()).toBe(false);
 
+    ok(["up", "--detach", "--use", "db=local"]);
+    await Bun.write(log, "");
     ok(["up", "--detach", ...choice, "api"]);
+    expect(await Bun.file(log).text()).not.toMatch(/ stop postgres/);
     await Bun.write(log, "");
     ok(["down"]);
     expect(await Bun.file(log).text()).toContain("down=live.example.test:5432");

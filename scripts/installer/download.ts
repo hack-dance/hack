@@ -82,10 +82,17 @@ export async function officialArchive(
   stage: string,
   version: string,
   budget = new TransferBudget(),
-  platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM
+  platform: BundlePlatform = DEFAULT_BUNDLE_PLATFORM,
+  request?: ReleaseFetch
 ) {
   try {
-    return await officialArchiveWithinBudget(stage, version, budget, platform);
+    return await officialArchiveWithinBudget(
+      stage,
+      version,
+      budget,
+      platform,
+      request
+    );
   } finally {
     budget.close();
   }
@@ -94,10 +101,11 @@ async function officialArchiveWithinBudget(
   stage: string,
   version: string,
   budget: TransferBudget,
-  platform: BundlePlatform
+  platform: BundlePlatform,
+  request?: ReleaseFetch
 ) {
   const transfer = (url: string, target: string, limit: number) =>
-    download(url, target, limit, budget);
+    download(url, target, limit, budget, request);
   const repository = "hack-dance/hack";
   const tag = `v${version}`;
   const api = join(stage, "release-api.json");

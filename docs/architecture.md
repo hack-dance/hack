@@ -55,11 +55,11 @@ native backend has its own explicitly prepared routing path, described below.
 
 ## Backends
 
-The CLI reads the same `.hack/` project on either backend. **Docker Compose** is the
-default and runs everywhere Hack runs. The **native backend** is opt-in and
-experimental: on Apple Silicon macOS it runs an explicitly prepared project inside
-a provider-managed Linux VM pool without Docker, with its own routing and a bounded
-command subset.
+The CLI reads the same `.hack/` project on either backend. Stable `hack` uses
+Docker Compose. The current `hack-next` prerelease defaults to native on Apple
+Silicon macOS and uses Compose on supported Linux. Native is the planned default
+for stable v5. The native beta runs prepared projects inside a Linux VM pool with
+its own routing and a bounded command set.
 
 ```mermaid
 ---
@@ -69,8 +69,8 @@ flowchart LR
   Repo[".hack/ project"]
   CLI["hack CLI"]
   Repo --> CLI
-  CLI -->|"default"| Compose
-  CLI -->|"HACK_RUNTIME_BACKEND=native"| Native
+  CLI -->|"stable or Linux candidate"| Compose
+  CLI -->|"Apple Silicon candidate default"| Native
 
   subgraph Compose["Compose backend"]
     direction TB
@@ -78,7 +78,7 @@ flowchart LR
     C1 --> GlobalCaddy["Global Caddy + CoreDNS"]
   end
 
-  subgraph Native["Native backend (opt-in, macOS arm64)"]
+  subgraph Native["Native backend (beta, macOS arm64)"]
     direction TB
     Plan["Config compiler<br/>validate / plan"] --> Exec["hack-native executor"]
     Exec --> Pool["Provider VM pool"]
@@ -1217,7 +1217,7 @@ qualify the installed binary, real filesystems or an application.
 
 ## Key design choices
 
-- Docker Compose is the default execution substrate for predictability and portability.
+- Compose provides the execution backend for stable v4 and the Linux prerelease.
 - Caddy routes by container label, so no project carries reverse-proxy config.
 - CoreDNS gives containers the same `*.hack.local` namespace as the host.
 - Logs default to `docker compose logs` for speed; Loki holds history and filtering.

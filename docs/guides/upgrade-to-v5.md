@@ -8,7 +8,9 @@ is the runtime layer underneath and the product boundary around it.
 
 ## What stays the same
 
-- Docker Compose is the ordinary CLI's default backend. Familiar command names
+- Stable `hack` uses Compose. The current `hack-next` uses Compose on supported
+  Linux and defaults to native on Apple Silicon macOS. Native is the planned
+  default for stable v5. Familiar command names
   remain, but env migration and value handling need review before upgrading.
 - Project configuration stays in `.hack/`; legacy env files can be migrated.
 - Shared local routing, `.hack.local` names and certificate trust are unchanged.
@@ -20,8 +22,9 @@ is the runtime layer underneath and the product boundary around it.
   supports a bounded command subset and is qualified project by project. See
   [the native backend overview](../native/README.md).
 - **A config compiler.** `hack config validate`, `config plan`, `config import
-  --dry-run` and `config adopt --dry-run` inspect and preview native configuration
-  without starting workloads. See [Native config import](../reference/native-config-import.md).
+  --dry-run` inspect and preview native configuration without starting workloads.
+  `hack config adopt --dry-run` requires Compose because it reads existing Compose
+  containers and volumes. See [Native config import](../reference/native-config-import.md).
 - **`hack dev`.** Runs a repository's declared development command from a committed
   `.hack/dev.json`, without Docker. It first shipped in 4.3.0; if you are coming from
   an older v4, it is new to you. See [Side-by-side development](../dev.md).

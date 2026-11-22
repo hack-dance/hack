@@ -243,6 +243,7 @@ test("each example Compose file follows the routing, image and deps rules", asyn
   ).toEqual([]);
 });
 
+const TOP_LEVEL_EXAMPLES = ["examples/basic", "examples/next-app"];
 const PATTERN_EXAMPLES = [
   "examples/patterns/p01-dependency-bootstrap",
   "examples/patterns/p02-portable-toolchain",
@@ -250,7 +251,7 @@ const PATTERN_EXAMPLES = [
 ];
 
 test("each example starts on the first passing health check and stops at once", async () => {
-  for (const dir of [...examples, ...PATTERN_EXAMPLES, "examples/basic"]) {
+  for (const dir of [...examples, ...PATTERN_EXAMPLES, ...TOP_LEVEL_EXAMPLES]) {
     const compose = await readRecord(
       join(REPO_ROOT, dir, ".hack/docker-compose.yml")
     );
@@ -320,6 +321,7 @@ test("negative controls: the startup timing rules reject slow settings", () => {
         stub: { image: "postgres:17.6-alpine", command: ["sleep", "infinity"] },
         deps: { image: "oven/bun:1.4.4-slim", command: ["bun", "install"] },
         proxy: { image: "caddy:2.10-alpine", command: ["caddy", "run"] },
+        vendored: { image: "bitnami/redis:8.2" },
         tool: { image: "oven/bun:1.4.4-slim", profiles: ["tools"] },
       },
     })
@@ -775,7 +777,7 @@ test("include markers can only name files under examples/", async () => {
 composeConfigTest(
   "docker compose config accepts every example Compose file",
   async () => {
-    for (const dir of examples) {
+    for (const dir of [...examples, ...TOP_LEVEL_EXAMPLES]) {
       const { root, project } = await copyExample(dir);
       const child = Bun.spawn({
         cmd: [

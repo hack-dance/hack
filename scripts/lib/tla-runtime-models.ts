@@ -181,6 +181,14 @@ const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
     .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
+    name: "project-prerequisites",
+    module: "ProjectPrerequisites",
+    states: 13,
+    invariant: "CheckedBeforeHooks",
+    action: "Login",
+    fields: ['phase = "allowed"', "checked = FALSE", "loggedIn = TRUE"],
+  },
+  {
     name: "autostart-start-stop",
     module: "StartStop",
     states: 41,
@@ -3042,6 +3050,45 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NeverHits",
         ...statKeyedHits({ withCtime: true, stale: false }),
+      },
+    ],
+  },
+  {
+    name: "native-image-presence",
+    module: "ImagePresence",
+    states: 315,
+    invariant: "Safe",
+    action: "Readback",
+    fields: [
+      'phase = "ready"',
+      'source = "cached"',
+      'receipt = "complete"',
+      "observed = FALSE",
+    ],
+    additionalControls: [
+      {
+        name: "eviction",
+        negative: true,
+        invariant: "NeverEvictionRefusal",
+        action: "Create",
+        fields: [
+          'phase = "create_refused"',
+          'guest = "absent"',
+          "observed = TRUE",
+        ],
+      },
+      {
+        name: "reachability",
+        negative: true,
+        invariant: "NeverSkipsRead",
+        action: "Readback",
+        fields: [
+          'phase = "ready"',
+          'receipt = "complete"',
+          'guest = "present"',
+          "verified = FALSE",
+          "observed = TRUE",
+        ],
       },
     ],
   },

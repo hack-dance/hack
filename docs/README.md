@@ -64,7 +64,7 @@ unless you select Compose, and Compose on Linux.
 
 v5 keeps the v4 project model and commands. Stable Hack runs Compose; with no
 backend selected, the `hack-next` prerelease picks native on Apple Silicon macOS
-and Compose on Linux.
+and Compose on Linux. Native is the planned default for stable v5.
 
 - [What's new in v5](guides/v5-release-notes.md) — the 5.0.0 release notes.
 - [Upgrade to v5](guides/upgrade-to-v5.md) — what changed, what was retired, how to try it.

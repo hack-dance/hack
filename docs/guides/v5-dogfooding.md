@@ -1,8 +1,8 @@
 # Qualify a project on v5 alongside v4
 
-The v5 prerelease runs on Compose by default through `hack`; the `hack-next`
-launcher selects the native backend so the candidate can be tested. Use the native
-candidate on an Apple Silicon Mac for explicitly qualified projects.
+Stable `hack` uses Compose. The current `hack-next` prerelease defaults to native
+on Apple Silicon macOS and uses Compose on supported Linux. Native is the planned
+default for stable v5. Use the native candidate for explicitly qualified projects.
 Keep stable v4 available for existing work until each project's actual workflow
 passes. Publishing a prerelease or passing hosted CI does not establish application
 compatibility, lower resource use or whole-product readiness.
@@ -38,7 +38,7 @@ These commands do not establish that an arbitrary v4 project can run natively.
    the [candidate guide](native-candidate.md), with admitted storage and an explicitly
    approved source share and network policy. A refused guard is a result to inspect,
    not permission to change host security, erase evidence or raise resource limits.
-   Test the backend the project will use. `hack-next` runs native by default;
+   Test the backend the project will use. On Apple Silicon macOS, `hack-next` defaults to native.
    `HACK_RUNTIME_BACKEND=compose hack-next` runs the same candidate on Compose with
    your own Hack home, so global routing, DNS and CA trust are checked too. See
    [Test both backends](candidate-install.md#test-both-backends), including why

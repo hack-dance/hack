@@ -31,6 +31,7 @@ import {
   stopLifecycleProcessController,
   wrapLifecyclePersistentCommand as wrapSharedLifecyclePersistentCommand,
 } from "../lib/project-lifecycle-controller.ts";
+import { enforceProjectPrerequisites } from "../lib/project-prerequisites.ts";
 import {
   writeStartBlocker,
   writeUpHookBlocker,
@@ -234,6 +235,13 @@ import {
   HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
+import {
+  buildComposeDownFailure,
+  countDistinctRunningServices,
+  parseComposeDownTimeoutFlag,
+  resolveComposeDownCapMs,
+  resolveComposeDownTimeoutSeconds,
+} from "../lib/compose-down-budget.ts";
 import {
   confirmComposeDownStopped,
   describeUnconfirmedComposeDown,
@@ -725,6 +733,14 @@ const downOptions = [
   optBranch,
   optProfile,
   optTarget,
+  defineOption({
+    name: "timeout",
+    type: "string",
+    long: "--timeout",
+    valueHint: "<seconds>",
+    description:
+      "Compose backend: container stop timeout in seconds (0-600) passed to docker compose down --timeout",
+  } as const),
   optPruneCaches,
   defineOption({
     name: "removeData",
@@ -1347,7 +1363,7 @@ async function readComposeServiceStates(opts: {
     if (res.exitCode !== 0) {
       return [];
     }
-    entries = parseJsonLines(res.stdout);
+    entries = parseBestEffortComposePsJson(res.stdout);
   }
   const serviceFilter = opts.services ? new Set(opts.services) : null;
   return entries
@@ -1362,6 +1378,27 @@ async function readComposeServiceStates(opts: {
         entry.service.length > 0 &&
         (serviceFilter === null || serviceFilter.has(entry.service))
     );
+}
+
+function parseBestEffortComposePsJson(
+  stdout: string
+): Record<string, unknown>[] {
+  const parsed = parseComposePsJson(stdout);
+  if (parsed !== null) {
+    return parsed;
+  }
+  const trimmed = stdout.trim();
+  if (trimmed.startsWith("[")) {
+    try {
+      const value: unknown = JSON.parse(trimmed);
+      if (Array.isArray(value)) {
+        return value.filter(isRecord);
+      }
+    } catch {
+      // Fall through to best-effort JSON lines parsing.
+    }
+  }
+  return parseJsonLines(stdout);
 }
 
 function startupSnapshotIsIncomplete(opts: {
@@ -7042,6 +7079,7 @@ async function restartNativeImageProject({
             env: undefined,
             profile: undefined,
             target: undefined,
+            timeout: undefined,
             json: false,
             pruneCaches: false,
             removeData: false,
@@ -7510,6 +7548,17 @@ async function runUpCommand({
     }
     throw error;
   }
+  const cfg = await readProjectConfig(project);
+  if (
+    !(await enforceProjectPrerequisites(
+      cfg.prerequisites,
+      json,
+      project.projectRoot,
+      { composeFile: project.composeFile, services: args.positionals.services }
+    ))
+  ) {
+    return 1;
+  }
   budgets = await withProjectComposeBudgets({ budgets, detach, project });
   const { startupTimeoutMs } = budgets;
   const envName = resolveRequestedEnvName({
@@ -7560,7 +7609,6 @@ async function runUpCommand({
   // the committed .hack/.gitignore (HACK-1278).
   await ensureHackGitInfoExclude({ projectDir: project.projectDir });
 
-  const cfg = await readProjectConfig(project);
   // Refused before the parse warning, which carries the same message.
   const localDirectoriesRefusal = refuseInvalidLocalDirectories({ cfg, json });
   if (localDirectoriesRefusal !== null) {
@@ -8222,14 +8270,15 @@ function refuseNativeDownOptions(options: DownArgs["options"]): void {
       options.env,
       options.profile,
       options.target,
+      options.timeout !== undefined,
       options.pruneCaches,
       !removeData && options.yes,
     ].some(Boolean)
   ) {
     throw new CliUsageError(
       removeData
-        ? "Native down --remove-data does not support --env, --profile, --target or --prune-caches."
-        : "Native down preserves data and does not support --env, --profile, --target, --prune-caches or --yes (--yes confirms --remove-data)."
+        ? "Native down --remove-data does not support --env, --profile, --target, --timeout or --prune-caches."
+        : "Native down preserves data and does not support --env, --profile, --target, --timeout, --prune-caches or --yes (--yes confirms --remove-data)."
     );
   }
 }
@@ -8238,34 +8287,41 @@ async function handleDown(
   input: Parameters<typeof handleDownUnlocked>[0]
 ): Promise<number> {
   parseRequestedTarget({ raw: input.args.options.target });
+  const isNativeBackend = resolveInitComposeBackend(process.env) === "native";
+  if (isNativeBackend && input.args.options.timeout !== undefined) {
+    refuseNativeDownOptions(input.args.options);
+  }
+  const flagTimeoutSeconds = isNativeBackend
+    ? undefined
+    : parseComposeDownTimeoutFlag(input.args.options.timeout);
   // Publish stop intent before waiting for an earlier start to release its lock.
-  const resolvedDownTarget =
-    process.env.HACK_RUNTIME_BACKEND === "native"
-      ? undefined
-      : await resolveFinalAutostartDownTarget(
-          {
-            cwd: input.ctx.cwd,
-            path: input.args.options.path,
-            project: input.args.options.project,
-            branch: input.args.options.branch,
-            writeNotice: (notice) =>
-              writeDownNotice({
-                json: input.args.options.json === true,
-                ...notice,
-              }),
-          },
-          {
-            isLocalTarget: async (project) =>
-              (
-                await resolveProjectLifecycleTarget({
-                  project,
-                  requestedTarget: input.args.options.target,
-                })
-              ).resolvedTarget === "local",
-          }
-        );
+  const resolvedDownTarget = isNativeBackend
+    ? undefined
+    : await resolveFinalAutostartDownTarget(
+        {
+          cwd: input.ctx.cwd,
+          path: input.args.options.path,
+          project: input.args.options.project,
+          branch: input.args.options.branch,
+          writeNotice: (notice) =>
+            writeDownNotice({
+              json: input.args.options.json === true,
+              ...notice,
+            }),
+        },
+        {
+          isLocalTarget: async (project) =>
+            (
+              await resolveProjectLifecycleTarget({
+                project,
+                requestedTarget: input.args.options.target,
+              })
+            ).resolvedTarget === "local",
+        }
+      );
   const pinned = {
     ...input,
+    flagTimeoutSeconds,
     args: { ...input.args, resolvedAutostartBranch: resolvedDownTarget },
   };
   await updateAutostartIntent({
@@ -8289,12 +8345,14 @@ async function handleDownUnlocked({
   args,
   deferFinalization,
   invoke,
+  flagTimeoutSeconds,
 }: {
   readonly ctx: CliContext;
   readonly args: DownArgs;
   readonly deferFinalization?: boolean;
   /** The native runtime requests of this down; a restart starts them in their own process group. */
   readonly invoke?: typeof invokeNativeRuntime;
+  readonly flagTimeoutSeconds?: number;
 }): Promise<number> {
   prepareLifecycleProgress({
     action: "down",
@@ -8319,6 +8377,7 @@ async function handleDownUnlocked({
     recover: args.options.recoverNativeCompose,
     unsupportedOptions: [
       args.options.target,
+      args.options.timeout !== undefined,
       args.options.pruneCaches,
       args.options.removeData,
       args.options.yes,
@@ -8444,14 +8503,20 @@ async function handleDownUnlocked({
   refuseLegacyNativeRecovery(args.options.recoverNativeCompose);
   const json = args.options.json === true;
   if (!json) {
-    return await runDownCommand({ ctx, args, json: false });
+    return await runDownCommand({ ctx, args, json: false, flagTimeoutSeconds });
   }
 
   // `--json`: keep stdout reserved for the result envelope.
   setLoggerBackendOverride({ backend: "console" });
   const startedAtMs = Date.now();
   try {
-    return await runDownCommand({ ctx, args, json: true, startedAtMs });
+    return await runDownCommand({
+      ctx,
+      args,
+      json: true,
+      startedAtMs,
+      flagTimeoutSeconds,
+    });
   } catch (error: unknown) {
     if (error instanceof MissingProjectContextError) {
       return emitLifecycleResult({
@@ -8475,11 +8540,13 @@ async function runDownCommand({
   args,
   json,
   startedAtMs,
+  flagTimeoutSeconds,
 }: {
   readonly ctx: CliContext;
   readonly args: DownArgs;
   readonly json: boolean;
   readonly startedAtMs?: number;
+  readonly flagTimeoutSeconds?: number;
 }): Promise<number> {
   const project = await resolveProjectForArgs({
     ctx,
@@ -8555,6 +8622,10 @@ async function runDownCommand({
   if (sharedHelperRefusal !== null) {
     return sharedHelperRefusal;
   }
+  const downTimeoutSeconds = resolveComposeDownTimeoutSeconds({
+    flagTimeoutSeconds,
+    projectValue: cfg.compose?.downTimeoutSeconds,
+  });
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   let runtime: readonly RuntimeProject[] | null = null;
@@ -8635,14 +8706,23 @@ async function runDownCommand({
     cliProfiles: profiles,
     composeEnv: lifecycleEnv,
   });
-  const statesBeforeDown = json
-    ? await readComposeServiceStates({
-        project,
-        composeProjectName,
-        profiles: stopSelection.profiles,
-        env: lifecycleEnv,
-      })
-    : [];
+  const statesBeforeDown =
+    json || (downTimeoutSeconds !== undefined && downTimeoutSeconds > 0)
+      ? await readComposeServiceStates({
+          project,
+          composeProjectName,
+          profiles: stopSelection.profiles,
+          env: lifecycleEnv,
+        })
+      : [];
+  const runningServicesBeforeDown =
+    classifyComposeStartupState(statesBeforeDown).running;
+  const downCapMs = resolveComposeDownCapMs({
+    timeoutSeconds: downTimeoutSeconds,
+    runningServiceCount: countDistinctRunningServices(
+      runningServicesBeforeDown
+    ),
+  });
 
   // Holders are released only once Compose confirmed the containers
   // stopped; an interrupted or failed shutdown keeps them for the next down.
@@ -8663,6 +8743,7 @@ async function runDownCommand({
     },
   });
   let code: number;
+  let downTimedOut = false;
   let stopObservation: DownObservation = { complete: true };
   let helperReleaseFailures: readonly string[] = [];
   try {
@@ -8699,6 +8780,11 @@ async function runDownCommand({
       cwd: dirname(project.composeFile),
       env: lifecycleEnv,
       routeStdoutToStderr: json,
+      timeoutSeconds: downTimeoutSeconds,
+      capMs: downCapMs,
+      onOutcome: (outcome) => {
+        downTimedOut = outcome.timedOut;
+      },
     });
     if (code === 0) {
       stopObservation = await finishInstanceStop({
@@ -8707,6 +8793,7 @@ async function runDownCommand({
         profiles: stopSelection.profiles,
         env: lifecycleEnv,
         routeStdoutToStderr: json,
+        timeoutSeconds: downTimeoutSeconds,
       });
     }
     helperReleaseFailures = await lifecycleDownCleanup(
@@ -8722,12 +8809,20 @@ async function runDownCommand({
   }
 
   if (code !== 0) {
+    const failure = buildComposeDownFailure({
+      exitCode: code,
+      timedOut: downTimedOut,
+      capMs: downCapMs,
+    });
+    if (failure.capWarning && !json) {
+      logger.warn({ message: failure.capWarning });
+    }
     if (json) {
       return emitLifecycleResult({
         result: errorResult({
           code: "E_COMPOSE_FAILED",
-          message: `docker compose down failed (exit ${code})`,
-          detail: { exitCode: code },
+          message: failure.message,
+          detail: failure.detail,
         }),
         exitCode: code,
       });
@@ -8840,7 +8935,7 @@ async function runDownCommand({
         project: baseProjectName,
         branch,
         composeProject: composeProjectName ?? baseProjectName,
-        stopped: classifyComposeStartupState(statesBeforeDown).running,
+        stopped: runningServicesBeforeDown,
         cacheVolumesRemoved: cacheRemoval.removed,
         interruption: interruptionCheck.interruption,
         durationMs: Date.now() - (startedAtMs ?? Date.now()),
@@ -9913,6 +10008,17 @@ async function runRestartCommand({
     pathOpt: args.options.path,
     projectOpt: args.options.project,
   });
+  const cfg = await readProjectConfig(project);
+  if (
+    !(await enforceProjectPrerequisites(
+      cfg.prerequisites,
+      json,
+      project.projectRoot,
+      { composeFile: project.composeFile, services: args.positionals.services }
+    ))
+  ) {
+    return 1;
+  }
   const budgets = await withProjectComposeBudgets({
     budgets: resolveDetachedComposeBudgets(true),
     detach: true,
@@ -9956,7 +10062,6 @@ async function runRestartCommand({
     }
     return remoteRestartCode;
   }
-  const cfg = await readProjectConfig(project);
   // Refused before the parse warning, which carries the same message.
   const localDirectoriesRefusal = refuseInvalidLocalDirectories({ cfg, json });
   if (localDirectoriesRefusal !== null) {
@@ -10433,6 +10538,7 @@ async function finishInstanceStop(opts: {
   readonly profiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
   readonly routeStdoutToStderr: boolean;
+  readonly timeoutSeconds?: number;
 }): Promise<DownObservation> {
   const leftovers = await listInstanceContainers(opts);
   if (leftovers.ok) {
@@ -10444,10 +10550,22 @@ async function finishInstanceStop(opts: {
       const ids = owned.map((container) => container.id);
       // The same env Compose ran with, so a managed DOCKER_HOST or
       // DOCKER_CONTEXT targets the same daemon.
-      await exec(["docker", "stop", ...ids], {
+      const stopCmd =
+        opts.timeoutSeconds === undefined
+          ? ["docker", "stop", ...ids]
+          : ["docker", "stop", "-t", String(opts.timeoutSeconds), ...ids];
+      await exec(stopCmd, {
         stdin: "ignore",
         env: { ...opts.env },
-        timeoutMs: INSTANCE_STOP_GRACE_CAP_MS,
+        timeoutMs: Math.max(
+          INSTANCE_STOP_GRACE_CAP_MS,
+          resolveComposeDownCapMs({
+            timeoutSeconds: opts.timeoutSeconds,
+            runningServiceCount: countDistinctRunningServices(
+              owned.map((container) => container.service || container.id)
+            ),
+          })
+        ),
       });
       await exec(["docker", "rm", ...ids], {
         stdin: "ignore",
@@ -10461,6 +10579,7 @@ async function finishInstanceStop(opts: {
         cwd: dirname(opts.project.composeFile),
         env: opts.env,
         routeStdoutToStderr: opts.routeStdoutToStderr,
+        timeoutSeconds: opts.timeoutSeconds,
       });
     }
   }
@@ -10870,6 +10989,16 @@ async function handleRun({
   const cmdArgs = args.positionals.cmd;
 
   const cfg = await readProjectConfig(project);
+  if (
+    !(await enforceProjectPrerequisites(
+      cfg.prerequisites,
+      background?.json === true,
+      project.projectRoot,
+      { composeFile: project.composeFile, services: [service] }
+    ))
+  ) {
+    return 1;
+  }
   const configRefusal = reviewRunConfig({ cfg, project });
   if (configRefusal !== null) {
     return configRefusal;

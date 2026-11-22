@@ -149,6 +149,7 @@ Runtime commands affect only the candidate pool. Graph commands support a bounde
 The installed hack and its state are never used as a fallback.";
 
 fn main() {
+    hack_runtime_core::raise_open_file_limit();
     if let Some(argument) = std::env::args_os()
         .nth(1)
         .and_then(|value| value.into_string().ok())

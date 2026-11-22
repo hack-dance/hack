@@ -469,6 +469,10 @@ With it:
   interpolation, a list item without `=` (host variable inheritance), `null`, other
   build keys (`secrets`, `ssh`, `cache_from`, `platforms`, `network` and the rest),
   remote contexts and `image` together with `build` refuse. Values are never shown.
+  With `HACK_NATIVE_BUILDS=1`, `up` names the first such service and the field in the
+  three-line form, for example `! build  web uses build.ssh (SSH agent forwarding into
+  a native build is not supported)`, then the Compose-backend command. Only Compose's
+  own build field names are printed; any other key is not.
 - Build args are not secrets: as with Docker, the image records them in its history.
   A build arg whose value equals a `hack env` secret value of this project and
   environment refuses before any hook or VM effect, naming the service and the
@@ -1528,7 +1532,8 @@ JSON file (a singly linked, mode-`0600` file owned by you):
 replaced. For each build declaration (project root and branch, context, Dockerfile and
 target) it keeps the image of the most recently built or reused key (`current`) and of
 the one before it (`previous`, for a quick revert). It also keeps every image that any
-retained run's saved state mentions, every image a container still uses (the engine
+retained run's saved state mentions, apart from its restore history (a diagnostic
+record recovery only compares against; nothing starts a container from it), every image a container still uses (the engine
 refuses those), every image of a receipt written before this rule, and every image
 whose ownership labels are not exactly this runtime's. An `up` that built an image runs
 it with `--best-effort` once the project is ready: that form never fails, reports a
@@ -2533,6 +2538,11 @@ reports the original startup failure. A retained or restored run, and a run whos
 mapping write was attempted (its reply may have been lost), keep their data. When
 removal is not confirmed, `up` prints one line naming the run and the explicit
 `graph cleanup --run-id RUN --remove-data --json` request, and keeps the graph.
+
+Ctrl-C during startup exits with status 130 once the frontend's existing cleanup
+checks confirm the interruption. The CLI reports that startup was interrupted.
+An image fetch or a before hook can be interrupted before a graph is reserved.
+Any existing retained data stays subject to the usual ownership and cleanup rules.
 
 Ctrl-C (or SIGTERM) on a ready graph whose `up.after` completed stops the project the
 way `hack down` does on the Compose backend: `down.before` runs first, then graph

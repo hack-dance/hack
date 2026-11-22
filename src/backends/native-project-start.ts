@@ -413,7 +413,7 @@ export function reviewedNativeHttpsRoutes(
 }
 type Hooks = {
   readonly cleanup: () => Promise<void>;
-  readonly ready?: () => Promise<void>;
+  readonly ready?: (signal: AbortSignal) => Promise<void>;
   /**
    * The project's `down.before`/`down.after` commands, present only when it
    * declares them. Each resolves to the exit status after its child exited;
@@ -1176,6 +1176,39 @@ export async function verifyHttpsRoutes(
 
 const PRINTABLE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const PRINTABLE_HOST = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/;
+function nativeReadyRouteHosts(opts: {
+  readonly plan: unknown;
+  readonly routed: ReadonlySet<string>;
+}): readonly { readonly service: string; readonly hosts: readonly string[] }[] {
+  const services =
+    isRecord(opts.plan) && isRecord(opts.plan.services)
+      ? opts.plan.services
+      : {};
+  return [...opts.routed].sort().flatMap((service) => {
+    const entry = services[service];
+    const hosts =
+      isRecord(entry) &&
+      isRecord(entry.routing) &&
+      Array.isArray(entry.routing.hostnames)
+        ? entry.routing.hostnames.filter(
+            (host): host is string =>
+              typeof host === "string" && PRINTABLE_HOST.test(host)
+          )
+        : [];
+    return PRINTABLE_NAME.test(service) && hosts.length > 0
+      ? [{ service, hosts }]
+      : [];
+  });
+}
+
+function nativeReadyRouteUrls(
+  hosts: readonly string[],
+  httpsPort: number
+): string[] {
+  const suffix = httpsPort === 443 ? "" : `:${httpsPort}`;
+  return hosts.map((host) => `https://${host}${suffix}`);
+}
+
 /**
  * What a ready foreground graph serves on this host, from the reviewed plan
  * only: each routed service's reviewed hostnames as HTTPS URLs when the
@@ -1187,39 +1220,16 @@ export function nativeReadySummary(opts: {
   readonly routed: ReadonlySet<string>;
   readonly httpsPort: number | null;
 }): string[] {
-  const lines: string[] = [];
-  const services =
-    isRecord(opts.plan) && isRecord(opts.plan.services)
-      ? opts.plan.services
-      : {};
-  const suffix =
-    opts.httpsPort === null || opts.httpsPort === 443
-      ? ""
-      : `:${opts.httpsPort}`;
-  let unserved = false;
-  for (const name of [...opts.routed].sort()) {
-    const service = services[name];
-    const hostnames =
-      isRecord(service) &&
-      isRecord(service.routing) &&
-      Array.isArray(service.routing.hostnames)
-        ? service.routing.hostnames.filter(
-            (host): host is string =>
-              typeof host === "string" && PRINTABLE_HOST.test(host)
-          )
-        : [];
-    if (!PRINTABLE_NAME.test(name) || hostnames.length === 0) {
-      continue;
-    }
-    if (opts.httpsPort === null) {
-      unserved = true;
-      continue;
-    }
-    lines.push(
-      `  ${name}: ${hostnames.map((host) => `https://${host}${suffix}`).join(" ")}`
-    );
-  }
-  if (unserved) {
+  const routes = nativeReadyRouteHosts(opts);
+  const port = opts.httpsPort;
+  const lines =
+    port === null
+      ? []
+      : routes.map(
+          ({ service, hosts }) =>
+            `  ${service}: ${nativeReadyRouteUrls(hosts, port).join(" ")}`
+        );
+  if (port === null && routes.length > 0) {
     lines.push(
       "  Routes are not served on this host: the native HTTPS frontend is not selected (HACK_NATIVE_CADDY_BINARY, HACK_NATIVE_CADDY_SHA256 and HACK_NATIVE_HTTPS_PORT)."
     );
@@ -2185,10 +2195,13 @@ type NativeProjectStartOptions = {
   readonly sharedSource: boolean;
   readonly imageTagMode?: "refresh" | "offline";
   readonly restore?: NativeProjectRun;
-  readonly onReady?: (services: {
-    readonly started: readonly string[];
-    readonly completed: readonly string[];
-  }) => void | Promise<void>;
+  readonly onReady?: (
+    services: {
+      readonly started: readonly string[];
+      readonly completed: readonly string[];
+    },
+    addresses: readonly string[]
+  ) => void | Promise<void>;
   readonly dependencyFile?: string;
   /** Per-env dependency files; the entry for the run's effective env replaces `dependencyFile`. */
   readonly dependencyFileByEnv?: Readonly<Record<string, string>>;
@@ -2224,7 +2237,10 @@ type NativeProjectStartOptions = {
   readonly gcloudWithheld?: boolean;
   /** Public instance identity delivered as runtime host metadata; omitted delivers none. */
   readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
-  readonly before: (input: NativeProjectInput) => Promise<Hooks>;
+  readonly before: (
+    input: NativeProjectInput,
+    signal: AbortSignal
+  ) => Promise<Hooks>;
   /**
    * Advisory stale-env bookkeeping (HACK-1140): after the run mapping is
    * published, receives the run id and value-free digests of the env
@@ -2673,7 +2689,8 @@ async function startNativeProjectAttempt(
   try {
     stopSignals.admitPending();
     requireActiveStartup(controller.signal);
-    hooks = await opts.before(input);
+    hooks = await opts.before(input, controller.signal);
+    requireActiveStartup(controller.signal);
     const credentials = await adaptNativeCredentials({
       input,
       selection,
@@ -2889,6 +2906,7 @@ async function startNativeProjectAttempt(
       warn: deps.warn,
       invoke: deps.invoke,
     });
+    requireActiveStartup(controller.signal);
     // Image work is done: what follows counts against a detached start's
     // budget again (HACK-2351).
     progress({ phase: "plan" });
@@ -3213,7 +3231,8 @@ async function startNativeProjectAttempt(
                     })
                     .catch(() => undefined);
                 }
-                await hooks?.ready?.();
+                await hooks?.ready?.(controller.signal);
+                requireActiveStartup(controller.signal);
                 stopWatching = watchServiceExits({
                   runtime: opts.runtime,
                   projectRoot: opts.scope.projectRoot,
@@ -3230,14 +3249,25 @@ async function startNativeProjectAttempt(
                 // detached launcher. A journal failure is still startup failure.
                 await stop?.owe(() => controller.signal.aborted);
                 requireActiveStartup(controller.signal);
-                await opts.onReady?.(readyServiceSummary(readinessArgs));
+                const httpsPort = servedHttpsPort(https, opts.https);
+                await opts.onReady?.(
+                  readyServiceSummary(readinessArgs),
+                  httpsPort === null
+                    ? []
+                    : nativeReadyRouteHosts({
+                        plan: review.report.plan,
+                        routed: routes.services,
+                      }).flatMap(({ hosts }) =>
+                        nativeReadyRouteUrls(hosts, httpsPort)
+                      )
+                );
                 progress(
                   readyProgress({
                     services,
                     run,
                     plan: review.report.plan,
                     routed: routes.services,
-                    httpsPort: servedHttpsPort(https, opts.https),
+                    httpsPort,
                   })
                 );
                 // Superseded build images go once the new ones run; this never
@@ -3283,6 +3313,13 @@ async function startNativeProjectAttempt(
                 processRefusals: nativeProcessRefusals,
               });
               graphCleanupConfirmed = settled.nothingReserved;
+              if (
+                graphCleanupConfirmed &&
+                controller.signal.aborted &&
+                !httpsFailure
+              ) {
+                return stopSignals.interruptedExit();
+              }
               throw settled.error;
             }
             const confirmed = await confirmCleanupOrRecordOwner({

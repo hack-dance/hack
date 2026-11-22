@@ -1291,11 +1291,18 @@ async function ensureManagedMutagen(opts: {
   }
 }
 
-function brewInstallConsentError(formulas: readonly string[]): HackCliError {
+function brewInstallConsentError(): HackCliError {
   return new HackCliError({
     code: "E_INTERACTIVE_REQUIRED",
-    message: `Homebrew install requires consent. Run: brew install ${formulas.join(" ")}. Then rerun hack global install, or run: hack global install --install-brew-deps`,
+    message: "Homebrew install requires consent. Run: brew install dnsmasq",
   });
+}
+
+async function needsMacHostDns(domains: readonly string[]): Promise<boolean> {
+  const existing = await Promise.all(
+    domains.map((domain) => pathExists(`/etc/resolver/${domain}`))
+  );
+  return existing.includes(false);
 }
 
 async function requireGlobalBrewInstallConsent(
@@ -1304,30 +1311,26 @@ async function requireGlobalBrewInstallConsent(
   if (allowed || !isMac() || canPrompt() || !(await resolveBrewPath())) {
     return;
   }
-  const missing: string[] = [];
-  for (const formula of ["chafa", "mkcert", "dnsmasq"]) {
-    if (!(await isBrewFormulaInstalled({ formula }))) {
-      missing.push(formula);
-    }
-  }
-  if (missing.length > 0) {
-    throw brewInstallConsentError(missing);
+  if (
+    !(await isBrewFormulaInstalled({ formula: "dnsmasq" })) &&
+    (await needsMacHostDns(managedLocalDomains(await resolveDefaultDomain())))
+  ) {
+    throw brewInstallConsentError();
   }
 }
 
 async function confirmGlobalBrewInstall(opts: {
   readonly allowed?: boolean;
-  readonly formula: string;
   readonly message: string;
   readonly initialValue: boolean;
 }): Promise<boolean> {
-  if (opts.allowed === true) {
-    return true;
-  }
-  if (opts.allowed === false && !canPrompt()) {
-    throw brewInstallConsentError([opts.formula]);
-  }
-  return await confirmSafe({ ...opts, nonInteractive: "accept-default" });
+  return (
+    opts.allowed === true ||
+    (await confirmSafe({
+      ...opts,
+      nonInteractive: "decline",
+    }))
+  );
 }
 
 async function ensureMacInstallDependencies(
@@ -5050,7 +5053,7 @@ async function ensureMacHackDns(opts: {
     return;
   }
 
-  const dnsmasqOk = await ensureDnsmasqInstalled(opts.installBrewDeps);
+  const dnsmasqOk = await ensureDnsmasqInstalled(opts.installBrewDeps, domains);
   if (!dnsmasqOk) {
     return;
   }
@@ -5122,16 +5125,23 @@ async function ensureBrewForDnsmasq(): Promise<boolean> {
 }
 
 async function ensureDnsmasqInstalled(
-  installBrewDeps: boolean
+  installBrewDeps: boolean,
+  domains: readonly string[]
 ): Promise<boolean> {
   const hasDnsmasq = await isBrewFormulaInstalled({ formula: "dnsmasq" });
   if (hasDnsmasq) {
     return true;
   }
 
+  if (!(installBrewDeps || canPrompt())) {
+    if (await needsMacHostDns(domains)) {
+      throw brewInstallConsentError();
+    }
+    return false;
+  }
+
   const ok = await confirmGlobalBrewInstall({
     allowed: installBrewDeps,
-    formula: "dnsmasq",
     message: "Install dnsmasq via Homebrew? (required for *.hack DNS)",
     initialValue: true,
   });
@@ -5468,14 +5478,12 @@ async function ensureMacChafa(installBrewDeps: boolean): Promise<void> {
 
   const ok = await confirmGlobalBrewInstall({
     allowed: installBrewDeps,
-    formula: "chafa",
     message: "Install chafa via Homebrew? (used for hack the planet)",
     initialValue: true,
   });
   if (!ok) {
     logger.warn({
-      message:
-        "Skipping chafa install; hack the planet will use the fallback renderer.",
+      message: "Skipping chafa install. Run: brew install chafa",
     });
     return;
   }
@@ -5505,13 +5513,12 @@ async function ensureMacMkcert(installBrewDeps?: boolean): Promise<void> {
 
   const ok = await confirmGlobalBrewInstall({
     allowed: installBrewDeps,
-    formula: "mkcert",
     message: "Install mkcert via Homebrew? (used for hack global cert)",
     initialValue: false,
   });
   if (!ok) {
     logger.warn({
-      message: "Skipping mkcert install; hack global cert will be unavailable.",
+      message: "Skipping mkcert install. Run: brew install mkcert",
     });
     return;
   }

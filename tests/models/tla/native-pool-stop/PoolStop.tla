@@ -57,8 +57,10 @@
 \* overListener - an archive ran while a listener held the port.
 \*   ReuseBind       - the archive's port claim binds with address reuse, so TIME_WAIT
 \*                     does not block it (HACK-2550); FALSE: it waits for "free".
-\*   ListenerCheck   - with ReuseBind, the kernel's listener list must show no other
-\*                     listener; FALSE is the broken control `reuse-no-check`.
+\*   ListenerCheck   - with ReuseBind, the claim also binds every local address
+\*                     exactly (wildcard, loopback, each interface address), so any
+\*                     other listener refuses it; FALSE (a reuse bind of the wildcard
+\*                     alone) is the broken control `reuse-no-check`.
 EXTENDS Naturals
 CONSTANTS Fixed, Strict, ByHand, OtherBoots, RecoveryFaults, MaxBoot, MaxFaults,
           Https, OwnerRetires, ArchiveWorks, FinalizeStopped, FinishAnyBoot,

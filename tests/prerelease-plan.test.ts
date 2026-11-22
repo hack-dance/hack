@@ -1526,7 +1526,14 @@ test("packages a verified MCP selection with exact nested checksums and inventor
         .map((entry) => entry.name)
         .sort()
     ).toEqual([...names, "SHA256SUMS"].sort());
-    await verifyReleaseAssets({ plan, output });
+    const publishable = verifyReleaseAssets({ plan, output });
+    if (process.platform === "darwin" && process.arch === "arm64") {
+      await publishable;
+    } else {
+      await expect(publishable).rejects.toThrow(
+        "Incompatible MCP protocol or host."
+      );
+    }
     await writeFile(join(mcp.directory, "extra"), "foreign");
     await expect(
       packagePrerelease({ plan, bundle, output: join(root, "extra") })

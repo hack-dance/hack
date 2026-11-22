@@ -1,12 +1,17 @@
 import { dirname } from "node:path";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import { defineCommand, withHandler } from "../cli/command.ts";
+import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optPath, optProject } from "../cli/options.ts";
 import { HackCliError } from "../lib/cli-result.ts";
+import { readIncludedComposeServiceNames } from "../lib/compose-oneshot-progress.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { readComposePs } from "../lib/compose-ps-result.ts";
-import { readProjectConfig } from "../lib/project.ts";
+import { resolveHackEnv } from "../lib/hack-env.ts";
+import { readProjectConfig, sanitizeProjectSlug } from "../lib/project.ts";
+import { resolveProjectEnvConfig } from "../lib/project-env-config.ts";
 import {
+  applyRemoteEnv,
   parseRemoteChoices,
   readRemoteChoices,
   resolveRemoteChoices,
@@ -17,6 +22,8 @@ import { formatProjectRemoteAddress } from "../lib/project-remote-status.ts";
 import {
   resolveEffectiveBranchForCommand,
   resolveProjectForArgs,
+  resolveRestartTarget,
+  resolveStoredRuntimeEnvName,
 } from "./project.ts";
 
 const spec = defineCommand({
@@ -60,12 +67,39 @@ export const useCommand = withHandler(spec, async ({ ctx, args }) => {
     branchOption: undefined,
   });
   const base = await resolveComposeProjectName({ project, cfg });
+  const { composeProjectName, lifecycleComposeProject } = resolveRestartTarget({
+    baseProjectName: base,
+    branch,
+  });
   const readActive = async () => {
+    const envName = await resolveStoredRuntimeEnvName({
+      requestedEnvName: resolveRequestedEnvName({ envOption: undefined }),
+      projectDir: project.projectDir,
+      composeProject: lifecycleComposeProject,
+    });
+    const modern = await resolveProjectEnvConfig({
+      projectDir: project.projectDir,
+      projectRoot: project.projectRoot,
+      envName,
+      serviceNames: await readIncludedComposeServiceNames(project.composeFile),
+    });
+    const managed =
+      modern?.globalEnv ??
+      (
+        await resolveHackEnv({
+          projectDir: project.projectDir,
+          projectName: sanitizeProjectSlug(base),
+          envName,
+        })
+      ).envForCompose;
+    const env = applyRemoteEnv(managed, pending);
     const result = await readComposePs({
+      redactValues: Object.values(env),
       run: () =>
         composeRuntimeBackend.psJson({
           composeFiles: [project.composeFile],
-          composeProject: branch ? `${base}--${branch}` : null,
+          composeProject: composeProjectName,
+          env,
           profiles: ["*"],
           cwd: dirname(project.composeFile),
           all: true,

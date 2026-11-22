@@ -21,7 +21,7 @@ test("the six --use entry points deliver the invocation target without saving it
       await mkdir(hack, { recursive: true });
       await Bun.write(
         join(hack, "docker-compose.yml"),
-        "include: [worker.yml]\nservices:\n  api:\n    image: alpine\n    depends_on: [worker]\n  postgres:\n    image: postgres\n  migrate:\n    image: alpine\n    profiles: [maintenance]\n"
+        'include: [worker.yml]\nservices:\n  api:\n    image: alpine\n    depends_on: [worker]\n    environment: ["DB_HOST=${DB_HOST:?required}"]\n  postgres:\n    image: postgres\n  migrate:\n    image: alpine\n    profiles: [maintenance]\n'
       );
       await Bun.write(
         join(hack, "worker.yml"),
@@ -78,6 +78,7 @@ test("the six --use entry points deliver the invocation target without saving it
         '    case " $* " in *" --profile maintenance "*) printf "%s\\n" migrate ;; esac ;;',
         '  *" stop "*) printf "%s\\n" "$*" >> "$TEST_DELIVERY" ;;',
         '  *" down "*) rm -f "$TEST_STACK_STATE" ;;',
+        '  *" --profile * "*" ps "*) test -n "${DB_HOST:-}" || exit 1; if [ -f "$TEST_STACK_STATE" ]; then cat "$TEST_STACK_STATE"; fi ;;',
         '  *" ps "*) if [ -f "$TEST_STACK_STATE" ]; then cat "$TEST_STACK_STATE"; fi ;;',
         '  *" up "*|*" run "*)',
         '    printf "%s\\n" "$*" >> "$TEST_DELIVERY"',

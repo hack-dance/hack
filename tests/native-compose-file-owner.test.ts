@@ -184,7 +184,7 @@ beforeEach(async () => {
   parent = await realpath(await mkdtemp(join(tmpdir(), "native-file-owner-")));
   root = join(parent, "checkout");
   materialRoot = join(parent, "material");
-  await mkdir(join(root, ".hack"), { recursive: true });
+  await mkdir(join(root, ".hack"), { recursive: true, mode: 0o755 });
   await writeFile(
     join(root, ".hack/hack.project.json"),
     JSON.stringify(SOURCE)
@@ -198,7 +198,7 @@ beforeEach(async () => {
       values: { global: { EMPTY: "" } },
     })
   );
-  await writeFile(join(root, "settings.bin"), BYTES);
+  await writeFile(join(root, "settings.bin"), BYTES, { mode: 0o644 });
   process.env.HACK_HOME = join(parent, "home");
   process.env.HACK_CONFIG_COMPILER_BINARY = compiler;
   store = await openNativeComposeGenerationStore({

@@ -24,7 +24,9 @@ import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
   resolveNativeRuntimeSelection,
+  resolveNativeSetupSelection,
 } from "../backends/native-runtime-client.ts";
+import { inspectTempAliases } from "../backends/native-temp-aliases.ts";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -873,6 +875,13 @@ async function runDoctorAudit(
     )
   );
 
+  results.push(
+    ...(await checkTempAliasesOnMac({
+      progress: s,
+      fix: args.options.fix === true,
+    }))
+  );
+
   // Tools
   results.push(
     await runCheck(s, "bun", () =>
@@ -1588,6 +1597,13 @@ async function handleNativeDoctor(opts: {
       )
     );
   }
+  results.push(
+    ...(await checkTempAliasesOnMac({
+      progress,
+      fix: opts.fix,
+      runtime: opts.runtime,
+    }))
+  );
   // The pool belongs to the native home: a machine check, in project runs too.
   results.push(
     await runCheck(
@@ -1732,6 +1748,67 @@ async function appendNativeMachineChecks(opts: {
  * by its timeout; any failure warns that status is unavailable, never claims idle.
  * Never stops the pool.
  */
+async function checkTempAliasesOnMac(opts: {
+  readonly progress: Parameters<typeof runCheck>[0];
+  readonly fix: boolean;
+  readonly runtime?: NativeRuntimeSelection;
+}): Promise<TimedCheckResult[]> {
+  if (!isMac()) {
+    return [];
+  }
+  let runtime: NativeRuntimeSelection;
+  try {
+    runtime = opts.runtime ?? resolveNativeSetupSelection();
+  } catch {
+    return [];
+  }
+  return [
+    await runCheck(
+      opts.progress,
+      "native temporary aliases",
+      () => checkNativeTempAliases({ runtime, fix: opts.fix }),
+      { timeoutMs: 4000 }
+    ),
+  ];
+}
+
+async function checkNativeTempAliases(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly fix: boolean;
+}): Promise<CheckResult> {
+  const name = "native temporary aliases";
+  try {
+    const report = await inspectTempAliases({ ...opts, cwd: process.cwd() });
+    const retained = report.dangling.filter(
+      (alias) => !report.removed.includes(alias)
+    );
+    const messages: string[] = [];
+    if (retained.length > 0) {
+      messages.push(`Dangling: ${retained.join(", ")}`);
+    }
+    if (report.removed.length > 0) {
+      messages.push(`Removed: ${report.removed.join(", ")}`);
+    }
+    if (report.incomplete) {
+      messages.push("Scan incomplete.");
+    }
+    return {
+      name,
+      scope: "machine",
+      status: report.incomplete || retained.length > 0 ? "warn" : "ok",
+      message:
+        messages.join(" ") || "No old dangling provider HOME aliases found.",
+    };
+  } catch {
+    return {
+      name,
+      scope: "machine",
+      status: "warn",
+      message: "Temporary alias scan unavailable.",
+    };
+  }
+}
+
 async function checkNativePoolIdle(opts: {
   readonly runtime: NativeRuntimeSelection;
 }): Promise<CheckResult> {

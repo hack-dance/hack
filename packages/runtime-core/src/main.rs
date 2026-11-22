@@ -127,6 +127,7 @@ Usage:
   hack-local runtime up --profile development --internet --json
   hack-local runtime network extend --allow-host <hostname> [--allow-host <hostname>] --json
   hack-local runtime up|status|down|recover [--json]
+  hack-local runtime temp-aliases [--fix] --json
   hack-local runtime repair-provider-tree [--json]
   hack-local runtime host-filesystem-recovery [--json]
   hack-local runtime recover-host-filesystem --expect-sha256 <sha256> --accept-legacy-device-rebind [--json]
@@ -251,6 +252,14 @@ fn run() -> Result<(), CandidateError> {
     let all: Vec<&str> = arguments[2..].iter().map(String::as_str).collect();
     // HACK-2461: an optional `--step-store <dir>` follows the candidate root.
     let command: Vec<&str> = hack_runtime_core::store::take_step_store_argument(&all)?.to_vec();
+    if matches!(
+        command.as_slice(),
+        ["runtime", "temp-aliases", "--json"] | ["runtime", "temp-aliases", "--fix", "--json"]
+    ) {
+        return print_json(&hack_runtime_core::provider::temp_aliases::sweep(
+            command.contains(&"--fix"),
+        ));
+    }
     // First-use observation/setup must work before installed-home discovery:
     // an absent home is an ordinary installation state, not provider_state.
     if installed_entrypoint() {
@@ -265,7 +274,9 @@ fn run() -> Result<(), CandidateError> {
                 return print_json(&hack_runtime_core::provider::setup::inspect_home(home)?);
             }
             ["runtime", "setup", arguments @ ..] => {
-                return runtime_setup_cli::run_home(home, arguments);
+                runtime_setup_cli::run_home(home, arguments)?;
+                hack_runtime_core::provider::temp_aliases::sweep(true);
+                return Ok(());
             }
             _ => {}
         }
@@ -558,7 +569,9 @@ fn run() -> Result<(), CandidateError> {
                     retained,
                 )
             };
-            print_json(&started?)?;
+            let started = started?;
+            sweep_running_pool(&started.phase, started.process_alive);
+            print_json(&started)?;
         }
         ["runtime", action @ ("probe" | "up"), "--profile", profile]
         | [
@@ -583,7 +596,9 @@ fn run() -> Result<(), CandidateError> {
             if *action == "probe" {
                 print_json(&provider::probe_with_profile(&candidate, profile)?)?;
             } else {
-                print_json(&provider::up_with_profile(&candidate, profile)?)?;
+                let started = provider::up_with_profile(&candidate, profile)?;
+                sweep_running_pool(&started.phase, started.process_alive);
+                print_json(&started)?;
             }
         }
         ["runtime", "hostname-authority", "--socket", socket]
@@ -1019,6 +1034,7 @@ fn run() -> Result<(), CandidateError> {
         }
         ["runtime", "setup", arguments @ ..] => {
             runtime_setup_cli::run(&discover_candidate(&requested)?, arguments)?;
+            hack_runtime_core::provider::temp_aliases::sweep(true);
         }
         ["runtime", "prepare", "--archive", archive] => {
             print_json(&hack_runtime_core::provider::prepare(
@@ -1200,11 +1216,20 @@ fn run() -> Result<(), CandidateError> {
                 "recover" => hack_runtime_core::provider::recover(&candidate),
                 _ => return Err(CandidateError::new("unsupported_command", HELP)),
             }?;
+            if *action == "up" {
+                sweep_running_pool(&result.phase, result.process_alive);
+            }
             print_json(&result)?;
         }
         _ => return Err(CandidateError::new("unsupported_command", HELP)),
     }
     Ok(())
+}
+
+fn sweep_running_pool(phase: &str, process_alive: Option<bool>) {
+    if phase == "running" && process_alive == Some(true) {
+        hack_runtime_core::provider::temp_aliases::sweep(true);
+    }
 }
 
 fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), CandidateError> {

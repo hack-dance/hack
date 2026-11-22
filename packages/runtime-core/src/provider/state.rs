@@ -558,8 +558,8 @@ impl Owner {
                 "Provider owner identity does not match this checkout.",
             ));
         }
-        // A clean stop's alias may be absent. The next start restores it under the
-        // pool lock before using it.
+        // A clean stop's alias may be absent, after host cleanup of `/private/tmp`; the next
+        // mutating operation restores it under the pool lock before using it.
         let released = owner.short_home_releasable() && no_pending_update;
         match owner.alias(candidate)? {
             Alias::Owned => {}
@@ -587,54 +587,9 @@ impl Owner {
         self.phase == "stopped" && self.clean_stop.is_some()
     }
 
-    /// Release the exact HOME alias after a clean stop, under the pool lock.
-    pub(super) fn release_stopped_short_home(
-        &self,
-        candidate: &Candidate,
-    ) -> Result<(), CandidateError> {
-        // Dependency socket paths cannot be moved if another entry claims the alias.
-        if !self.short_home_releasable() || self.dependency_sockets.is_some() {
-            return Ok(());
-        }
-        if Self::load_for_short_home_recovery(candidate)? != *self {
-            return Err(replaced_alias());
-        }
-        if self
-            .process
-            .as_ref()
-            .map(|process| super::identity::alive(process.pid))
-            .transpose()?
-            == Some(true)
-        {
-            return Err(CandidateError::new(
-                "stop_uncertain",
-                "Provider process absence is not established; HOME alias was retained.",
-            ));
-        }
-        self.unlink_owned_short_home(candidate)
-    }
-
-    pub(super) fn unlink_owned_short_home(
-        &self,
-        candidate: &Candidate,
-    ) -> Result<(), CandidateError> {
-        match self.alias(candidate)? {
-            Alias::Missing => return Ok(()),
-            Alias::Foreign => return Err(replaced_alias()),
-            Alias::Owned => {}
-        }
-        // The sticky temp directory excludes replacement by other users.
-        // Same-pool writers hold the pool lock. A process running as the
-        // same user outside that protocol can still race the pathname.
-        match fs::remove_file(&self.short_home) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(io(error)),
-        }
-    }
-
     /// Restore the HOME alias of a clean stop before a mutating operation uses it. Called
-    /// under the pool lock. This also handles an alias removed by a clean `down`:
+    /// under the pool lock. A clean `down` keeps its alias, so this acts only after host
+    /// cleanup removed it, or when another entry took its path:
     ///
     /// - the exact owned alias is kept as it is;
     /// - an absent alias is created exclusively after the durable receipt is rechecked;

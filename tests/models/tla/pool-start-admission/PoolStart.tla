@@ -90,7 +90,7 @@ RecordUsable == /\ recBoot # "none"
                 /\ (EnforceRecordMinAge => recAge # "young")
                 /\ (EnforceRecordMaxAge => recAge # "old")
                 /\ (EnforceRecordChain => recSwap = swapouts)
-InitWithAlias(initialAlias) == /\ profile \in {"development", "research"}
+Init == /\ profile \in {"development", "research"}
         /\ pc = "Idle" /\ lease = "free" /\ elapsed = 0
         /\ hostOk = TRUE /\ swapouts = 0 /\ dips = 0
         /\ failedSince = FALSE /\ acrossDip = FALSE
@@ -104,9 +104,7 @@ InitWithAlias(initialAlias) == /\ profile \in {"development", "research"}
         /\ reusedBoot = "none" /\ reusedAge = "young" /\ reusedSwap = 0
         /\ reusedDip = FALSE /\ missed = FALSE
         /\ treeOk = TRUE /\ treeProved = FALSE /\ rootOk = TRUE /\ rootProved = FALSE
-        /\ alias = initialAlias /\ selected = 0 /\ poolRunning = FALSE /\ vm = FALSE
-
-Init == InitWithAlias("owned")
+        /\ alias = "owned" /\ selected = 0 /\ poolRunning = FALSE /\ vm = FALSE
 
 \* ---- Environment ----
 \* A monotonic clock, saturating at the window: only "at least Window" matters,
@@ -142,7 +140,6 @@ OtherRelease == /\ pc \notin Terminal /\ lease = "other" /\ lease' = "free"
                                 owner, poolRunning, vm>>
 \* A concurrent start wins the lease and boots the pool itself.
 OtherStart == /\ pc \notin Terminal /\ lease = "other" /\ ~poolRunning
-              /\ alias # "missing"
               /\ poolRunning' = TRUE
               /\ UNCHANGED <<profile, pc, lease, elapsed, host, samples, kept,
                               proofs, owner, vm>>
@@ -275,8 +272,7 @@ Qualify == /\ pc = "Leased" /\ Len(samples) = Quota /\ pc' = "Qualified"
            /\ UNCHANGED <<profile, lease, elapsed, host, samples, kept, proofs,
                            owner, poolRunning, vm>>
 \* restore_released_short_home, under the lease and after the sample.
-RestoreAliasLeased == /\ pc = "Qualified" /\ alias \in {"foreign", "missing"}
-                      /\ alias' = (IF alias = "missing" THEN "owned" ELSE "moved")
+RestoreAliasLeased == /\ pc = "Qualified" /\ alias = "foreign" /\ alias' = "moved"
                       /\ UNCHANGED <<profile, pc, lease, elapsed, host, samples,
                                       kept, proofs, selected, poolRunning, vm>>
 \* leased_trees::recheck, first under the lease after the sample: each tree is
@@ -294,7 +290,7 @@ RecordOpening ==
     ELSE UNCHANGED rec
 \* admission_pool::settle and the owner checks: the selection still names the
 \* owner record, and no concurrent start made the pool running.
-Settle == /\ pc = "Qualified" /\ alias \in {"owned", "moved"} /\ ~poolRunning
+Settle == /\ pc = "Qualified" /\ alias # "foreign" /\ ~poolRunning
           /\ SameOwner
           /\ TreesStillProven
           /\ pc' = "Settled" /\ RecordOpening
@@ -363,8 +359,6 @@ Next == \/ Tick \/ Degrade \/ Recover \/ Swapout
         \/ RecheckRoot \/ RefuseRoot \/ AdmitBoot \/ RefuseBoot \/ Start
         \/ RefuseOther \/ Crash
 Spec == Init /\ [][Next]_vars
-ReleasedAliasSpec == InitWithAlias("missing") /\ [][Next]_vars
-BootHasAlias == (poolRunning \/ vm) => alias # "missing"
 
 TypeOK == /\ profile \in {"development", "research"}
           /\ pc \in BeforeLease \cup LeasedSteps \cup Terminal
@@ -383,7 +377,7 @@ TypeOK == /\ profile \in {"development", "research"}
           /\ bootAcrossDip \in BOOLEAN
           /\ treeOk \in BOOLEAN /\ treeProved \in BOOLEAN
           /\ rootOk \in BOOLEAN /\ rootProved \in BOOLEAN
-          /\ alias \in {"owned", "foreign", "missing", "moved"} /\ selected \in 0..2
+          /\ alias \in {"owned", "foreign", "moved"} /\ selected \in 0..2
           /\ poolRunning \in BOOLEAN /\ vm \in BOOLEAN
           /\ recBoot \in {"none", "this", "other"}
           /\ recAge \in {"young", "ok", "old"} /\ recSwap \in 0..MaxSwapouts

@@ -785,12 +785,17 @@ complete bundle to change the candidate.
 
 The provider runs with a short temporary HOME alias, `/private/tmp/hkl-<owner>`, a
 symlink to `<home>/.hack-local/run/smolvm/home` that keeps its Unix socket paths
-within the macOS length limit. A clean `runtime down` removes provider sockets it
-proved closed, then releases the alias. A repeated `runtime down` finishes socket
-cleanup if the first stop was interrupted after writing the stopped receipt.
-An alias unlink failure after socket cleanup emits a warning. Pools with pinned dependency socket paths
-keep the alias because those paths cannot move to a different name. The next start
-restores a released alias under the pool lock.
+within the macOS length limit. A clean `runtime down` keeps this alias, so no other
+local user can take its name while the pool is stopped. It removes only the provider
+socket files the stop proved closed, through the real data directory.
+
+On macOS, successful native setup and runtime startup check for old dangling provider
+HOME links. The check keeps links to existing homes, including stopped homes and homes
+with interrupted updates. It removes only this user's verified links for absent homes
+that have been unchanged for at least five minutes. `hack native temp-aliases` lists
+eligible names. Add `--fix` to remove them, or use `hack doctor --fix` where the native
+runtime is installed. Ordinary doctor lists the candidates. The scan stops at its time
+or entry limit and reports an incomplete scan when it cannot finish.
 
 On a fresh pool boot or a boot after stopping the pool, native waits up to 10 seconds
 plus 1 second per bridge slot (20 seconds for 10 slots, at most 42) for every declared

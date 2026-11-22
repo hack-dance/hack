@@ -414,8 +414,10 @@ fn vm_lock_release_child() {
     }
 }
 
-/// A clean stop can release the alias. The next start restores it or records a fresh
-/// alias if another entry took the name and no dependency sockets pin the original.
+/// HACK-1916: a clean `down` keeps its temporary HOME alias reserved, so no other user can
+/// take the name while the pool is stopped. Host cleanup can still remove it; then the next
+/// mutating operation restores it, and a path another entry took meanwhile is never used:
+/// the receipt moves to a fresh alias instead.
 impl Pool {
     /// The receipt `down` writes after a quiesced stop: `stopped` plus the clean-stop marker.
     fn cleanly_stopped(mut self) -> Self {
@@ -477,85 +479,6 @@ impl Squatter {
             fs::remove_file(path).unwrap();
         }
     }
-}
-
-#[test]
-fn a_clean_stop_releases_its_alias_and_restart_restores_it() {
-    let pool = Pool::new().cleanly_stopped();
-    let before = pool.receipt();
-    let listener = UnixListener::bind(pool.owner.data_dir().join("agent.sock")).unwrap();
-    assert_eq!(
-        super::super::down(&pool.candidate).unwrap_err().code,
-        "stop_uncertain"
-    );
-    assert!(pool.data().join("agent.sock").exists());
-    assert!(!pool.alias_absent());
-    drop(listener);
-    for _ in 0..2 {
-        assert_eq!(
-            super::super::down(&pool.candidate).unwrap().phase,
-            "stopped"
-        );
-        assert!(pool.alias_absent());
-        assert!(!pool.data().join("agent.sock").exists());
-    }
-    assert_eq!(status(&pool.candidate).unwrap().phase, "stopped");
-    let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
-    super::super::restore_released_short_home(&pool.candidate).unwrap();
-    drop(lock);
-    assert_eq!(
-        fs::read_link(&pool.owner.short_home).unwrap(),
-        root(&pool.candidate).join("home")
-    );
-    assert_eq!(pool.receipt(), before);
-}
-
-#[test]
-fn clean_stop_preserves_a_same_user_alias_to_a_different_target() {
-    let pool = Pool::new().cleanly_stopped();
-    let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
-    assert_eq!(Owner::load(&pool.candidate).unwrap(), pool.owner);
-    pool.remove_alias();
-    let decoy = Squatter::Link.place(&pool);
-    let inode = pool.alias_inode();
-    assert!(pool.owner.unlink_owned_short_home(&pool.candidate).is_err());
-    drop(lock);
-    Squatter::Link.untouched(&pool.owner.short_home, inode, &decoy);
-    Squatter::remove(&pool.owner.short_home);
-}
-
-#[test]
-fn share_update_restores_the_released_alias_before_staging() {
-    let mut pool = Pool::new().cleanly_stopped();
-    let project = pool.directory.join("project");
-    state::private_directory(&project).unwrap();
-    std::fs::write(project.join("package.json"), "{}").unwrap();
-    pool.owner.project_share =
-        Some(crate::provider::project_share::ProjectShareIntent::approve(&project, true).unwrap());
-    pool.owner.save(&pool.candidate).unwrap();
-    pool.remove_alias();
-
-    // An already registered share returns before any VM work. It still takes
-    // the update path that must recreate the alias before owner staging.
-    crate::provider::share_update::add_project_share(&pool.candidate, &project, true).unwrap();
-    assert_eq!(
-        fs::read_link(&pool.owner.short_home).unwrap(),
-        root(&pool.candidate).join("home")
-    );
-}
-
-#[test]
-fn stopped_pool_with_pinned_dependency_paths_keeps_its_alias() {
-    let mut pool = Pool::new();
-    pool.owner.dependency_sockets = Some(crate::provider::DependencySocketIntent::new(1).unwrap());
-    let pool = pool.cleanly_stopped();
-    let inode = pool.alias_inode();
-    let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
-    pool.owner
-        .release_stopped_short_home(&pool.candidate)
-        .unwrap();
-    drop(lock);
-    assert_eq!(pool.alias_inode(), inode);
 }
 
 #[test]

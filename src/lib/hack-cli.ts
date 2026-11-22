@@ -7,6 +7,11 @@ export interface HackInvocation {
   readonly args: readonly string[];
 }
 
+/** Whether Bun is running a compiled executable with a virtual script path. */
+export function isCompiledHack(main = Bun.main): boolean {
+  return main.startsWith("/$bunfs/") || main.includes("~BUN");
+}
+
 export async function resolveHackInvocation(opts?: {
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly cwd?: string;
@@ -33,7 +38,7 @@ export async function resolveHackInvocation(opts?: {
   // (HACK-2329).
   // On Linux `process.execPath` is the resolved real path, so a unit or MCP
   // config written in this case names that exact (possibly versioned) file.
-  if (main.startsWith("/$bunfs/") || main.includes("~BUN")) {
+  if (isCompiledHack(main)) {
     return { bin: opts?.execPath ?? process.execPath, args: [] };
   }
 

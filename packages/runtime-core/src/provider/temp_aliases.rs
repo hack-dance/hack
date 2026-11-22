@@ -67,6 +67,7 @@ mod unix {
 
     const MIN_AGE: Duration = Duration::from_secs(300);
     const BUDGET: Duration = Duration::from_millis(200);
+    const ENUMERATION_BUDGET: Duration = Duration::from_millis(100);
     const MAX_ENTRIES: usize = 8192;
     const MAX_CANDIDATES: usize = 128;
 
@@ -102,10 +103,12 @@ mod unix {
             } else {
                 String::new()
             };
+            // A partial listing must still leave time to inspect candidates
+            // and save progress under the original end-to-end deadline.
             let mut names = BTreeSet::new();
             let mut more = false;
             for entry in fs::read_dir(root)? {
-                if started.elapsed() >= BUDGET {
+                if started.elapsed() >= ENUMERATION_BUDGET {
                     report.incomplete = true;
                     break;
                 }

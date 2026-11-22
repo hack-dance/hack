@@ -333,7 +333,7 @@ if (
   throw new Error("Upgrade checklist missing from guide navigation");
 }
 
-/** v5 leads with the default Compose backend and names native as opt-in. */
+/** v5 explains the Compose examples and the candidate backend selection. */
 for (const [file, facts] of [
   ["getting-started.md", ["hack up --detach", "Compose", "native"]],
   [

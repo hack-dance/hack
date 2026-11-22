@@ -35,13 +35,7 @@ pub fn run_home(home: &Path, arguments: &[&str]) -> Result<(), CandidateError> {
         ));
     }
     let candidate = setup::create_home(home)?;
-    let inputs = options
-        .offline
-        .map(|(archive, engine, packages)| setup::OfflineInputs {
-            archive: Path::new(archive),
-            engine_archive: Path::new(engine),
-            network_tools: Path::new(packages),
-        });
+    let inputs = options.offline_inputs();
     let result = setup::run(&candidate, inputs, inputs.is_none())?;
     writeln!(
         io::stdout().lock(),
@@ -54,7 +48,10 @@ pub fn run_home(home: &Path, arguments: &[&str]) -> Result<(), CandidateError> {
 fn execute(
     candidate: &Candidate,
     arguments: &[&str],
-    reuse: impl FnOnce(&Candidate) -> Result<Option<serde_json::Value>, CandidateError>,
+    reuse: impl FnOnce(
+        &Candidate,
+        setup::BuilderSource<'_>,
+    ) -> Result<Option<serde_json::Value>, CandidateError>,
     install: impl FnOnce(
         &Candidate,
         Option<setup::OfflineInputs<'_>>,
@@ -63,7 +60,13 @@ fn execute(
     output: &mut impl Write,
 ) -> Result<(), CandidateError> {
     let options = parse(arguments)?;
-    if let Some(result) = reuse(candidate)? {
+    let offline = options.offline_inputs();
+    // A complete home is reused without a prompt. Its image builder is added only on
+    // advance consent (--accept-downloads) or from the offline builder file.
+    if let Some(result) = reuse(
+        candidate,
+        setup::BuilderSource::select(offline, options.accept),
+    )? {
         writeln!(
             output,
             "{}",
@@ -72,16 +75,8 @@ fn execute(
         .map_err(|_| CandidateError::new("setup_output", "Cannot write setup result."))?;
         return Ok(());
     }
-    if let Some((archive, engine, packages)) = options.offline {
-        let result = install(
-            candidate,
-            Some(setup::OfflineInputs {
-                archive: Path::new(archive),
-                engine_archive: Path::new(engine),
-                network_tools: Path::new(packages),
-            }),
-            false,
-        )?;
+    if offline.is_some() {
+        let result = install(candidate, offline, false)?;
         writeln!(
             output,
             "{}",
@@ -173,17 +168,31 @@ fn truthy_env(value: Option<&str>) -> bool {
 struct Options<'a> {
     accept: bool,
     no_interactive: bool,
-    offline: Option<(&'a str, &'a str, &'a str)>,
+    /// Provider archive, engine archive, guest package directory, and the optional
+    /// image builder file.
+    offline: Option<(&'a str, &'a str, &'a str, Option<&'a str>)>,
+}
+impl<'a> Options<'a> {
+    fn offline_inputs(&self) -> Option<setup::OfflineInputs<'a>> {
+        self.offline.map(
+            |(archive, engine, packages, builder)| setup::OfflineInputs {
+                archive: Path::new(archive),
+                engine_archive: Path::new(engine),
+                network_tools: Path::new(packages),
+                builder: builder.map(Path::new),
+            },
+        )
+    }
 }
 fn parse<'a>(arguments: &[&'a str]) -> Result<Options<'a>, CandidateError> {
     let invalid = || {
         CandidateError::new(
             "invalid_arguments",
-            "runtime setup accepts --accept-downloads, --no-interactive, --json; offline setup needs --archive, --engine-archive and --network-tools-directory together.",
+            "runtime setup accepts --accept-downloads, --no-interactive, --json; offline setup needs --archive, --engine-archive and --network-tools-directory together, and may add --builder.",
         )
     };
     let mut options = Options::default();
-    let (mut archive, mut engine, mut packages) = (None, None, None);
+    let (mut archive, mut engine, mut packages, mut builder) = (None, None, None, None);
     let mut seen = std::collections::BTreeSet::new();
     let mut args = arguments.iter();
     while let Some(flag) = args.next() {
@@ -197,12 +206,13 @@ fn parse<'a>(arguments: &[&'a str]) -> Result<Options<'a>, CandidateError> {
             "--archive" => archive = args.next().copied(),
             "--engine-archive" => engine = args.next().copied(),
             "--network-tools-directory" => packages = args.next().copied(),
+            "--builder" => builder = args.next().copied(),
             _ => return Err(invalid()),
         }
         if matches!(
             *flag,
-            "--archive" | "--engine-archive" | "--network-tools-directory"
-        ) && [archive, engine, packages]
+            "--archive" | "--engine-archive" | "--network-tools-directory" | "--builder"
+        ) && [archive, engine, packages, builder]
             .into_iter()
             .flatten()
             .any(|v| v.starts_with("--"))
@@ -210,15 +220,20 @@ fn parse<'a>(arguments: &[&'a str]) -> Result<Options<'a>, CandidateError> {
             return Err(invalid());
         }
     }
+    // A flag without its value, and the builder without the offline set, are refused.
+    if seen.contains("--builder") && builder.is_none() {
+        return Err(invalid());
+    }
     options.offline = match (archive, engine, packages) {
         (None, None, None)
             if !seen.contains("--archive")
                 && !seen.contains("--engine-archive")
-                && !seen.contains("--network-tools-directory") =>
+                && !seen.contains("--network-tools-directory")
+                && !seen.contains("--builder") =>
         {
             None
         }
-        (Some(a), Some(e), Some(p)) if !options.accept => Some((a, e, p)),
+        (Some(a), Some(e), Some(p)) if !options.accept => Some((a, e, p, builder)),
         _ => return Err(invalid()),
     };
     Ok(options)
@@ -242,7 +257,9 @@ mod tests {
         execute(
             &candidate,
             &["--no-interactive"],
-            |_| {
+            |_, builder| {
+                // No consent and no offline file: the builder is only observed.
+                assert!(matches!(builder, setup::BuilderSource::Absent));
                 verified = true;
                 Ok(Some(serde_json::json!({"status": "reused"})))
             },
@@ -317,6 +334,88 @@ mod tests {
             assert!(parse(&args).is_err(), "{args:?}");
         }
     }
+    const OFFLINE: [&str; 6] = [
+        "--archive",
+        "/input/provider",
+        "--engine-archive",
+        "/input/engine",
+        "--network-tools-directory",
+        "/input/packages",
+    ];
+    #[test]
+    fn the_offline_builder_is_optional_and_needs_the_offline_set() {
+        // Without it, offline setup parses exactly as before and offers no builder.
+        let inputs = parse(&OFFLINE).unwrap().offline_inputs().unwrap();
+        assert!(inputs.builder.is_none());
+        assert!(matches!(
+            setup::BuilderSource::select(Some(inputs), false),
+            setup::BuilderSource::Absent
+        ));
+        let with_builder = [&OFFLINE[..], &["--builder", "/input/builder"]].concat();
+        let inputs = parse(&with_builder).unwrap().offline_inputs().unwrap();
+        assert_eq!(inputs.archive, Path::new("/input/provider"));
+        assert_eq!(inputs.builder, Some(Path::new("/input/builder")));
+        assert!(matches!(
+            setup::BuilderSource::select(Some(inputs), false),
+            setup::BuilderSource::File(file) if file == Path::new("/input/builder")
+        ));
+        // Consent is the only thing that selects a download; offline never does.
+        assert!(matches!(
+            setup::BuilderSource::select(None, true),
+            setup::BuilderSource::Download
+        ));
+        assert!(matches!(
+            setup::BuilderSource::select(None, false),
+            setup::BuilderSource::Absent
+        ));
+        for args in [
+            vec!["--builder", "/input/builder"],
+            vec!["--builder", "/input/builder", "--accept-downloads"],
+            [&OFFLINE[..], &["--builder"]].concat(),
+            [&OFFLINE[..], &["--builder", "--json"]].concat(),
+            [&OFFLINE[..], &["--builder", "/a", "--builder", "/b"]].concat(),
+            [&OFFLINE[..], &["--builder", "/a", "--accept-downloads"]].concat(),
+        ] {
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
+    }
+    #[test]
+    fn a_complete_home_gets_the_builder_source_the_arguments_selected() {
+        let candidate = Candidate::discover(&std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let reused = serde_json::json!({"status": "reused", "builder": "installed"});
+        // Advance consent reaches the reuse path: nothing prompts on a complete home.
+        let mut output = Vec::new();
+        execute(
+            &candidate,
+            &["--no-interactive", "--accept-downloads", "--json"],
+            |_, builder| {
+                assert!(matches!(builder, setup::BuilderSource::Download));
+                Ok(Some(reused.clone()))
+            },
+            |_, _, _| panic!("a complete home was installed again"),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output).unwrap(),
+            reused
+        );
+        let with_builder = [&OFFLINE[..], &["--builder", "/input/builder"]].concat();
+        execute(
+            &candidate,
+            &with_builder,
+            |_, builder| {
+                assert!(matches!(
+                    builder,
+                    setup::BuilderSource::File(file) if file == Path::new("/input/builder")
+                ));
+                Ok(Some(reused.clone()))
+            },
+            |_, _, _| panic!("a complete home was installed again"),
+            &mut Vec::new(),
+        )
+        .unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -345,13 +444,14 @@ mod output_tests {
                 "--network-tools-directory",
                 "/input/packages",
             ],
-            |_| Ok(None),
+            |_, _| Ok(None),
             |_, inputs, accepted| {
                 assert!(!accepted);
                 let inputs = inputs.unwrap();
                 assert_eq!(inputs.archive, Path::new("/input/provider"));
                 assert_eq!(inputs.engine_archive, Path::new("/input/engine"));
                 assert_eq!(inputs.network_tools, Path::new("/input/packages"));
+                assert!(inputs.builder.is_none());
                 Ok(result.clone())
             },
             &mut output,
@@ -366,7 +466,7 @@ mod output_tests {
         execute(
             &candidate,
             &["--json", "--no-interactive"],
-            |_| Ok(Some(reused.clone())),
+            |_, _| Ok(Some(reused.clone())),
             |_, _, _| panic!("reuse prepared"),
             &mut output,
         )

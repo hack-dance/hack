@@ -528,6 +528,40 @@ fixtureTest(
 );
 
 fixtureTest(
+  "publication checks native payload sums even when the outer sum matches",
+  async () => {
+    const root = scratch();
+    const output = await fullSet(root);
+    const bundle = join(root, "native-bundle");
+    writeFileSync(join(bundle, "hack-native"), "changed payload\n");
+    const child = Bun.spawn(
+      [
+        "tar",
+        "--format=ustar",
+        "-czf",
+        join(output, plan.archive),
+        "-C",
+        bundle,
+        ...PRERELEASE_PAYLOAD,
+        "SHA256SUMS",
+      ],
+      {
+        env: { ...process.env, COPYFILE_DISABLE: "1" },
+        timeout: 10_000,
+      }
+    );
+    expect(await child.exited).toBe(0);
+    writeFileSync(
+      join(output, "SHA256SUMS"),
+      await renderChecksums({ root: output, names: [plan.archive] })
+    );
+    await expect(
+      verifyReleaseAssets({ plan, output, linux: true })
+    ).rejects.toThrow("Candidate checksum mismatch: hack-native");
+  }
+);
+
+fixtureTest(
   "packaging refuses a Linux archive whose own metadata names another platform",
   async () => {
     const root = scratch();

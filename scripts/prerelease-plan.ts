@@ -26,14 +26,13 @@ import {
   MANAGER_ASSET,
   renderBootstrap,
 } from "./installer/bootstrap.ts";
-import { extractArchive } from "./installer/bundle.ts";
+import { extractArchive, verifyArchivePayload } from "./installer/bundle.ts";
 import { LINUX_SUMS, linuxSumsNames } from "./installer/download.ts";
 import {
   archiveEntries,
   BUNDLE_PLATFORMS,
   type BundlePlatform,
   bundleArchiveName,
-  metadata as bundleMetadata,
   COMPOSE_PAYLOAD,
   composeOnly,
   digest,
@@ -1339,11 +1338,11 @@ async function requireReleasePlatformMetadata({
     await Bun.file(join(output, plan.archive)).bytes(),
     PRERELEASE_PLATFORM
   );
-  const identity = bundleMetadata(
-    native.get("prerelease.json") ?? new Uint8Array(),
-    plan.version,
-    PRERELEASE_PLATFORM
-  );
+  const { identity } = verifyArchivePayload({
+    entries: native,
+    version: plan.version,
+    platform: PRERELEASE_PLATFORM,
+  });
   if (identity.source_revision !== plan.source_revision) {
     throw new Error(
       `Native archive for ${PRERELEASE_PLATFORM} was built from another source revision`

@@ -7238,6 +7238,15 @@ async function handlePull({
   }
   const cfg = await readProjectConfig(project);
   const composeProject = await resolveComposeProjectName({ project, cfg });
+  const allServiceNames = await readComposeServiceNames(project.composeFile);
+  const envOverrides = await resolveComposeEnvOverrides({
+    project,
+    projectName: sanitizeProjectSlug(composeProject),
+    targetServices: allServiceNames,
+    allServiceNames,
+    envName,
+    persist: false,
+  });
   return await runShell(
     [
       ...buildComposeArgs({
@@ -7248,7 +7257,11 @@ async function handlePull({
       }),
       "pull",
     ],
-    { cwd: dirname(project.composeFile), forwardSignals: true }
+    {
+      cwd: dirname(project.composeFile),
+      env: envOverrides.env,
+      forwardSignals: true,
+    }
   );
 }
 
@@ -10666,7 +10679,10 @@ async function handlePs({
       projectRoot: project.projectRoot,
       composeFile: project.composeFile,
     });
-    await displayNativePs({ ...result, imageTags }, json);
+    await displayNativePs(
+      imageTags.length ? { ...result, imageTags } : result,
+      json
+    );
     return 0;
   }
   const profiles = parseCsvList(args.options.profile);

@@ -618,6 +618,7 @@ async function runNativeStatus(opts: {
         projectRoot: project.projectRoot,
         composeFile: project.composeFile,
       });
+  const withImageTags = imageTags.length ? { ...result, imageTags } : result;
   const registry = await (opts.readRegistry ?? readProjectsRegistry)();
   const registration = registry.projects.find(
     (entry) =>
@@ -635,11 +636,11 @@ async function runNativeStatus(opts: {
   if (opts.json) {
     emitCliResult({
       result: okResult({
-        data: { ...result, imageTags, autostart, autostart_global: global },
+        data: { ...withImageTags, autostart, autostart_global: global },
       }),
     });
   } else {
-    await displayNativePs({ ...result, imageTags }, false);
+    await displayNativePs(withImageTags, false);
     if (registration?.autostart) {
       const policy = registration.autostart;
       await display.kv({

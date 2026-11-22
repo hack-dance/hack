@@ -253,7 +253,8 @@ export async function nativeImageTagStatuses(
       isRecord(service) && isTag(service.image) ? [service.image] : []
     )
   );
-  return await readTagStatuses(opts, [...references]);
+  // Tag metadata is supplemental to the independently observed project status.
+  return await readTagStatuses(opts, [...references]).catch(() => []);
 }
 
 type RetainedTagSelection = ReadTagStatuses & {

@@ -228,6 +228,18 @@ fn system_lookup(host: &str) -> std::io::Result<Vec<IpAddr>> {
         .collect())
 }
 
+/// A lookup could not obtain addresses for a registry host.
+#[derive(Debug)]
+struct RegistryDnsUnavailable;
+
+impl std::fmt::Display for RegistryDnsUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("registry host lookup failed")
+    }
+}
+
+impl std::error::Error for RegistryDnsUnavailable {}
+
 /// A resolution refused because the name resolved to a local or private address.
 #[derive(Debug)]
 struct LocalAddressRefused;
@@ -263,9 +275,11 @@ impl Resolve for GuardedResolver {
         let allowed = self.allowed_host.as_deref() == Some(host.as_str());
         let lookup = self.lookup.clone();
         Box::pin(async move {
-            let addresses = tokio::task::spawn_blocking(move || lookup(&host)).await??;
+            let addresses = tokio::task::spawn_blocking(move || lookup(&host))
+                .await?
+                .map_err(|_| RegistryDnsUnavailable)?;
             if addresses.is_empty() {
-                return Err("registry host has no addresses".into());
+                return Err(Box::new(RegistryDnsUnavailable) as _);
             }
             if !allowed && !addresses.iter().all(|ip| public_ip(*ip)) {
                 return Err(Box::new(LocalAddressRefused) as _);
@@ -302,6 +316,9 @@ fn registry_unreachable(failure: &reqwest::Error) -> bool {
     }
     let mut source = std::error::Error::source(failure);
     while let Some(cause) = source {
+        if cause.is::<RegistryDnsUnavailable>() {
+            return true;
+        }
         if let Some(io) = cause.downcast_ref::<std::io::Error>()
             && matches!(
                 io.kind(),

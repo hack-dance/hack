@@ -896,8 +896,10 @@ stateDiagram-v2
     crashed --> orphaned : hack native recover
     orphaned --> recover : hack up, down --recover
     state recover <<choice>>
-    recover --> retained : [a recorded earlier boot]
-    recover --> stranded : [boot not recorded]
+    recover --> retained : [boot known, no HTTPS lease]
+    recover --> finalizing : [boot known, HTTPS lease]
+    recover --> stranded : [boot not known]
+    finalizing --> retained : lease released or archived
 
     note left of orphaned
         Receipt still ready-observed,
@@ -914,6 +916,12 @@ stateDiagram-v2
         boot left the 16-boot history,
         or its evidence is ambiguous.
     end note
+    note right of finalizing
+        Graph stopped, HTTPS lease held.
+        The old owner retires when its
+        boot ends; up refuses until
+        down --recover finishes.
+    end note
     note left of retained
         INV NoDeadEnd: some named
         command always acts.
@@ -923,6 +931,7 @@ stateDiagram-v2
     class ready ok
     class orphaned wait
     class crashed wait
+    class finalizing wait
     class stranded fail
 ```
 
@@ -2248,6 +2257,15 @@ pool running and say so; run `runtime down` to stop it. A run whose owner is sti
 or that is already stopped with data retained, keeps the refusal above, and so does one
 whose only recovery needs the boot it ran in (a failed start, or an interrupted
 same-boot recovery): starting the pool begins a new boot, so it would not help.
+
+A project with HTTPS routes also holds a lease on the shared HTTPS owner, a host
+process bound to the pool boot it started in. `runtime down` does not stop it; the
+owner retires on its own within a few seconds once its boot has ended (the pool
+stopped, crashed or booted again), keeping its records. The recovery then archives
+those records and releases the run's lease, waiting up to 20 seconds for an owner
+that is still retiring. If a recovery stopped the run but could not finish that step,
+`hack up` refuses with `E_RECOVERY_REQUIRED` and names `hack down --recover`, which
+starts a stopped pool to finish it, with data kept.
 Status reads take no provider lease and never reap publishers or write journals.
 A journal change during a read is an ordinary transitional state: `ps` exits 0
 and reports `runtime_busy` (no phase, no service rows). Status is presentation,

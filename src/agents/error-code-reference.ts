@@ -97,6 +97,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "After start or restart, a service is neither running nor a successful one-shot.",
     readFirst: "`hack ps --json`",
   },
+  E_RECOVERY_REQUIRED: {
+    meaning:
+      "The last native run of this instance has no confirmed shutdown (its owner exited before finishing it, or another start replaced it), so `up` started nothing. `hack down --recover` finishes that cleanup with data kept, starting the native runtime if it needs to.",
+    readFirst: "`hack down --recover`",
+  },
   E_DOWN_INCOMPLETE: {
     meaning:
       "After down, a container of the instance may still run. `error.detail.running` names this checkout's services, `error.detail.foreign` another checkout's containers and their working dir (stop them from there), and `error.detail.unknown` means the containers could not be listed.",

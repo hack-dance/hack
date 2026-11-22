@@ -3793,9 +3793,10 @@ test("retained startup refuses missing, unacknowledged or changed finalization b
       https: httpsSelection,
       adaptationFile: join(opts.scope.projectRoot, "unread-adaptation.json"),
     });
-    await expect(attempt).rejects.toThrow(
-      "frontend finalization is unconfirmed"
-    );
+    await expect(attempt).rejects.toMatchObject({
+      code: "E_RECOVERY_REQUIRED",
+      message: expect.stringContaining("Run hack down --recover"),
+    });
     try {
       await attempt;
     } catch (error) {
@@ -4018,9 +4019,7 @@ test("retained acknowledgement cannot authorize a newer or concurrently changed 
       };
     }
     await expect(startNativeProject(opts)).rejects.toThrow(
-      fault === "newer-run"
-        ? "frontend finalization is unconfirmed"
-        : "mapping changed"
+      fault === "newer-run" ? "has no confirmed shutdown" : "mapping changed"
     );
     expect(events).toEqual(["graph retained-preflight", "graph inspect"]);
   }

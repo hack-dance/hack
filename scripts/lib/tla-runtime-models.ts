@@ -2843,6 +2843,58 @@ const contracts: readonly ModelContract[] = [
           "recovering = TRUE",
         ],
       },
+      // The shared HTTPS owner (HACK-2456, seen on a real VM). `https` is this
+      // change for a project with HTTPS routes. Each control turns one part off:
+      // the owner never retires when its boot ends, the previous-boot archive
+      // cannot prove quiescence, or down --recover does not start a stopped pool
+      // for a pending finalization. Each strands the recovered run's lease.
+      { name: "https", negative: false, states: 284 },
+      {
+        name: "https-no-retire",
+        negative: true,
+        action: "RecoverRunning",
+        fields: ['https = "live"', "fin = TRUE", 'pool = "running"'],
+        // TLC's two workers may report the recovery's own boot instead.
+        alternativeWitnesses: [
+          {
+            action: "RecoverStopped",
+            fields: ['https = "live"', "fin = TRUE", 'pool = "running"'],
+          },
+        ],
+      },
+      {
+        name: "https-archive",
+        negative: true,
+        action: "RecoverRunning",
+        fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+        // The owner may retire before or after the graph recovery.
+        alternativeWitnesses: [
+          {
+            action: "OwnerRetire",
+            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+          },
+          {
+            action: "RecoverStopped",
+            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+          },
+        ],
+      },
+      {
+        name: "https-stopped",
+        negative: true,
+        action: "OwnerRetire",
+        fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+        alternativeWitnesses: [
+          {
+            action: "RuntimeDown",
+            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+          },
+          {
+            action: "PoolRecover",
+            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+          },
+        ],
+      },
     ],
   },
   {

@@ -1895,9 +1895,15 @@ async function requireAcknowledgedRetainedFinalization(opts: {
       timeoutMs: 1,
     });
   } catch {
-    throw new ClosedCliError(
-      "Native retained frontend finalization is unconfirmed or its ownership changed; no hooks, runtime start or HTTPS owner were requested."
-    );
+    // HACK-2456, seen on a real VM: what is wrong, what needs it, the command.
+    throw new HackCliError({
+      code: "E_RECOVERY_REQUIRED",
+      message: [
+        "This project's last native run has no confirmed shutdown: its owner exited before finishing it, or another start of this instance replaced it.",
+        "hack up needs that cleanup to finish before it starts the project again; nothing was started.",
+        "Run hack down --recover: it finishes the cleanup with your data kept, starting the native runtime if it needs to.",
+      ].join("\n"),
+    });
   }
 }
 /** Explicit unfiltered project sharing; foreground only. Native refusal never falls back to Compose. */

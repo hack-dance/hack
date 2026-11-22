@@ -364,6 +364,8 @@ import {
 
 type CheckStatus = "ok" | "warn" | "error";
 
+const NATIVE_TEMP_ALIASES_CHECK = "native temporary aliases";
+
 interface CheckResult {
   readonly name: string;
   readonly status: CheckStatus;
@@ -896,15 +898,6 @@ async function runDoctorAudit(
     )
   );
 
-  results.push(
-    ...(await checkTempAliasesOnMac({
-      progress: s,
-      machine: args.options.machine === true,
-      fix: args.options.fix === true,
-      includeUnverifiedVolumes,
-    }))
-  );
-
   // Tools
   results.push(
     await runCheck(s, "bun", () =>
@@ -1198,6 +1191,15 @@ async function runDoctorAudit(
   }
 
   await appendDoctorScopeChecks({ args, progress: s, adopted, results });
+
+  results.push(
+    ...(await checkTempAliasesOnMac({
+      progress: s,
+      machine: args.options.machine === true,
+      fix: args.options.fix === true,
+      includeUnverifiedVolumes,
+    }))
+  );
 
   s.stop(`Doctor checks complete (${results.length} checks)`);
 
@@ -1675,15 +1677,6 @@ async function handleNativeDoctor(opts: {
       )
     );
   }
-  results.push(
-    ...(await checkTempAliasesOnMac({
-      progress,
-      machine: opts.machine,
-      fix: opts.fix,
-      includeUnverifiedVolumes: opts.includeUnverifiedVolumes,
-      runtime: opts.runtime,
-    }))
-  );
   // The pool belongs to the native home: a machine check, in project runs too.
   results.push(
     await runCheck(
@@ -1786,6 +1779,16 @@ async function handleNativeDoctor(opts: {
     );
   }
   await appendNativeMachineChecks({ ...opts, progress, results });
+  results.push(
+    ...(await checkTempAliasesOnMac({
+      progress,
+      machine: opts.machine,
+      fix: opts.fix,
+      includeUnverifiedVolumes: opts.includeUnverifiedVolumes,
+      runtime: opts.runtime,
+    }))
+  );
+
   progress.stop(`Native doctor checks complete (${results.length} checks)`);
   const hasError = results.some((result) => result.status === "error");
   const reported = await reportDoctorResults({
@@ -1861,7 +1864,7 @@ async function checkTempAliasesOnMac(opts: {
   return [
     await runCheck(
       opts.progress,
-      "native temporary aliases",
+      NATIVE_TEMP_ALIASES_CHECK,
       () =>
         checkNativeTempAliases({
           runtime,
@@ -1878,46 +1881,46 @@ async function checkNativeTempAliases(opts: {
   readonly fix: boolean;
   readonly includeUnverifiedVolumes: boolean;
 }): Promise<CheckResult> {
-  const name = "native temporary aliases";
+  const name = NATIVE_TEMP_ALIASES_CHECK;
   try {
     const report = await inspectTempAliases({ ...opts, cwd: process.cwd() });
-    const retained = report.dangling.filter(
-      (alias) => !report.removed.includes(alias)
-    );
+    const removed = new Set(report.removed);
     const uncertain = report.uncertainVolume.filter(
-      (alias) => !report.removed.includes(alias)
-    );
-    const messages: string[] = [];
-    if (retained.length > 0) {
-      messages.push(`Dangling: ${retained.join(", ")}`);
-    }
-    if (report.removed.length > 0) {
-      messages.push(`Removed: ${report.removed.join(", ")}`);
-    }
-    if (uncertain.length > 0) {
-      messages.push(
-        `Cannot tell (volume not mounted, or home deleted): ${uncertain.join(", ")}. Review with hack native temp-aliases.`
-      );
+      (alias) => !removed.has(alias)
+    ).length;
+    const retained = report.dangling.filter(
+      (alias) => !removed.has(alias)
+    ).length;
+    const count = retained + uncertain;
+    const subject = (total: number) =>
+      `${total} temporary ${total === 1 ? "alias" : "aliases"}`;
+    let summary = "No old dangling provider HOME aliases found";
+    if (count > 0) {
+      summary =
+        uncertain === count
+          ? `${subject(count)} cannot be attributed`
+          : `${subject(count)} to inspect`;
+    } else if (removed.size > 0) {
+      summary = `${subject(removed.size)} removed`;
     }
     if (report.incomplete) {
-      messages.push("Scan incomplete.");
+      summary =
+        count > 0 || removed.size > 0
+          ? `${summary} (scan incomplete)`
+          : "Temporary alias scan incomplete";
     }
     return {
       name,
       scope: "machine",
-      status:
-        report.incomplete || retained.length + uncertain.length > 0
-          ? "warn"
-          : "ok",
-      message:
-        messages.join(" ") || "No old dangling provider HOME aliases found.",
+      status: report.incomplete ? "warn" : "ok",
+      message: `${summary} · hack native temp-aliases`,
     };
   } catch {
     return {
       name,
       scope: "machine",
       status: "warn",
-      message: "Temporary alias scan unavailable.",
+      message: "Temporary alias scan unavailable · hack native temp-aliases",
     };
   }
 }
@@ -6154,6 +6157,7 @@ export function buildDoctorSummaryLines(input: {
 
   const ungrouped = input.results.filter(
     (result) =>
+      result.name !== NATIVE_TEMP_ALIASES_CHECK &&
       !DOCTOR_SUMMARY_GROUPS.some((group) => group.checks.has(result.name))
   );
   if (ungrouped.length > 0) {
@@ -6166,6 +6170,13 @@ export function buildDoctorSummaryLines(input: {
         ? "Other checks: ok"
         : `Other checks: warn - ${summarizeDoctorIssues(issues)}`
     );
+  }
+
+  const aliases = input.results.find(
+    (result) => result.name === NATIVE_TEMP_ALIASES_CHECK
+  );
+  if (aliases) {
+    lines.push(aliases.message);
   }
 
   return lines;
@@ -6188,6 +6199,7 @@ export function buildDoctorSummaryStatusItems(input: {
 
   const ungrouped = input.results.filter(
     (result) =>
+      result.name !== NATIVE_TEMP_ALIASES_CHECK &&
       !DOCTOR_SUMMARY_GROUPS.some((group) => group.checks.has(result.name))
   );
   if (ungrouped.length > 0) {
@@ -6197,6 +6209,16 @@ export function buildDoctorSummaryStatusItems(input: {
         members: ungrouped,
       })
     );
+  }
+
+  const aliases = input.results.find(
+    (result) => result.name === NATIVE_TEMP_ALIASES_CHECK
+  );
+  if (aliases) {
+    items.push({
+      label: aliases.message,
+      status: aliases.status === "ok" ? "info" : aliases.status,
+    });
   }
 
   return items;

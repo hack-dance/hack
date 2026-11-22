@@ -947,6 +947,7 @@ async function pinNativeImageBatch(
             !(
               reference &&
               (reference === "image-cache" ||
+                reference === "image-reclaim" ||
                 wave.some((job) => job.reference === reference))
             )
           ) {

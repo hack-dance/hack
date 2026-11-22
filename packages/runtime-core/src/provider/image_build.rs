@@ -760,9 +760,21 @@ pub(super) fn image_fence(
     })
 }
 
+/// Take the shared fence before asking for the provider lease.
+pub(super) fn wait_for_image_fence(
+    candidate: &Candidate,
+    policy: &super::image_policy::ImagePolicy,
+) -> Result<impl Drop, CandidateError> {
+    let limit = Duration::from_secs(60);
+    state::wait_for_image_lock(
+        policy.image_wait(limit)?.min(limit),
+        "image-reclaim",
+        || image_fence(candidate, libc::LOCK_SH),
+    )
+}
+
 /// Refuse to stop the engine while a build operation is admitted. The caller holds the
-/// provider lease: a build takes its shared fence only under that lease, so a build
-/// cannot start between this check and the caller's effect.
+/// provider lease, which prevents further build admission while it stops the engine.
 pub(super) fn require_no_active_build(candidate: &Candidate) -> Result<(), CandidateError> {
     let path = builds_root(candidate).join("active.lock");
     if !path.try_exists().map_err(state::io)? {
@@ -1989,18 +2001,8 @@ pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome
         candidate,
         build_deadline: Some(deadline),
     };
+    let _acquisition_fence = wait_for_image_fence(candidate, &policy)?;
     let (lease, _) = pool.lease()?;
-    let root = builds_root(candidate);
-    state::private_directory(&root)?;
-    let _acquisition_fence =
-        Flock::try_lock(Flock::open(&root.join("active.lock"))?, libc::LOCK_SH)?.ok_or_else(
-            || {
-                refusal(
-                    "provider_busy",
-                    "The runtime is stopping; no build was admitted.",
-                )
-            },
-        )?;
     drop(lease);
     let tag_mode = policy.tag_mode;
     let BaseSelections {

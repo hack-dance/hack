@@ -523,7 +523,7 @@ pub fn ensure_with(
     policy: &ImagePolicy,
     platform: PlatformPolicy,
 ) -> Result<EnsuredImage, CandidateError> {
-    let _fence = super::image_build::image_fence(candidate, libc::LOCK_SH)?;
+    let _fence = super::image_build::wait_for_image_fence(candidate, policy)?;
     timed_acquire(
         Step::ImageEnsure,
         candidate,
@@ -543,7 +543,7 @@ pub fn ensure_batch(
     jobs: &[(String, PlatformPolicy)],
     policy: &ImagePolicy,
 ) -> Result<Vec<ImageBatchEntry>, CandidateError> {
-    let _fence = super::image_build::image_fence(candidate, libc::LOCK_SH)?;
+    let _fence = super::image_build::wait_for_image_fence(candidate, policy)?;
     let cache = ImageCache::default();
     let queue = std::sync::atomic::AtomicUsize::new(0);
     let finished = Mutex::new(Vec::with_capacity(jobs.len()));
@@ -1167,6 +1167,33 @@ mod tests {
             platform: platform.candidates()[0],
         })
     }
+    #[test]
+    fn ensure_waits_out_reclaim_without_taking_the_provider_lease() {
+        let f = Fixture::new();
+        let candidate = &f.1;
+        let exclusive = super::super::image_build::image_fence(candidate, libc::LOCK_EX).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let result = ensure(candidate, "invalid reference", &ImagePolicy::default());
+                send.send(result.unwrap_err().code).unwrap();
+            });
+            assert!(matches!(
+                receive.recv_timeout(std::time::Duration::from_millis(150)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            let provider = state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
+            drop(exclusive);
+            assert_eq!(
+                receive
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap(),
+                "registry_image"
+            );
+            drop(provider);
+        });
+    }
+
     #[test]
     fn disk_budget_waits_for_the_current_fetch_and_refuses_an_oversized_archive() {
         let cache = ImageCache::default();

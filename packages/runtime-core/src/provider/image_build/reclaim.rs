@@ -346,8 +346,8 @@ pub(super) fn run<P: ReclaimPool>(
     candidate: &Candidate,
     pool: &P,
 ) -> Result<ReclaimReport, CandidateError> {
-    let (lease, identity) = pool.lease()?;
     let _fence = image_fence(candidate, libc::LOCK_EX)?;
+    let (lease, identity) = pool.lease()?;
     super::aliases::sweep_stranded(
         &builds_root(candidate),
         pool,

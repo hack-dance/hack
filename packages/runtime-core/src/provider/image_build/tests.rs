@@ -2168,9 +2168,15 @@ fn reclaim_keeps_only_two_of_ten_base_keepers_for_one_build() {
     )
     .unwrap();
     let fence = image_fence(&fixture.candidate, libc::LOCK_SH).unwrap();
+    let leases = *pool.leases.borrow();
     assert_eq!(
         reclaim::run(&fixture.candidate, &pool).unwrap_err().code,
         "provider_busy"
+    );
+    assert_eq!(
+        *pool.leases.borrow(),
+        leases,
+        "reclaim took the provider lease"
     );
     assert_eq!(pool.base_images(&()).unwrap().len(), 11);
     drop(fence);

@@ -215,7 +215,8 @@ fn service_pins(candidate: &Candidate) -> std::path::PathBuf {
 }
 
 /// Immutable service inputs have no mutable tag record. Record the verified ID
-/// under the shared fence before returning it to the caller.
+/// under the shared fence before returning it to the caller. The pin store grows by
+/// one empty directory per immutable service image. Eviction owns removal (HACK-2569).
 pub(super) fn protect_service_image(candidate: &Candidate, id: &str) -> Result<(), CandidateError> {
     if !matches!(normalize(id), Ok(ImageReference::ImageId(_))) {
         return Err(invalid());

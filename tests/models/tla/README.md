@@ -1909,8 +1909,8 @@ recovery, and the classic worker wire count exercises registry isolation.
 `native-keeper-reclaim/KeeperReclaim.tla` models a superseded base whose keeper
 is its last engine tag. `BeginPin` takes the shared image fence in
 `image_ensure`; `PublishPin` publishes a tag resolution or immutable service ID
-before the shared fence drops. `Reclaim` represents exclusive fence acquisition,
-the protected-ID scan, and keeper removal under the provider lease. The negative
+before the shared fence drops. `Reclaim` represents exclusive fence acquisition before taking the provider lease, followed by the
+protected-ID scan and keeper removal. The negative
 control removes the fence guard and can remove the base while pinning. The model
 abstracts failed requests, multiple IDs, graph and build receipts, and Docker's
 last-tag deletion behavior.

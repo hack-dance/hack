@@ -38,7 +38,7 @@ import {
   PRERELEASE_PAYLOAD,
   PRERELEASE_PLATFORM,
   packageLinuxPrerelease,
-  packagePrerelease,
+  packagePrerelease as packagePrereleaseActual,
   prereleaseMetadata,
   releaseAssets,
   renderChecksums,
@@ -59,6 +59,12 @@ import { metadata as next17Metadata } from "./fixtures/prerelease-manager-next17
  * second file, `prerelease-platforms.json`, that names every platform in the
  * set, and packaging and publication refuse a set it does not describe.
  */
+
+function packagePrerelease(
+  options: Parameters<typeof packagePrereleaseActual>[0]
+) {
+  return packagePrereleaseActual({ ...options, nativeSignatures: () => {} });
+}
 
 function verifyReleaseAssets(
   options: Parameters<typeof verifyReleaseAssetsActual>[0]
@@ -520,9 +526,7 @@ fixtureTest(
       join(output, "SHA256SUMS"),
       await renderChecksums({ root: output, names: [plan.archive] })
     );
-    await refuses(
-      "Native archive for darwin-arm64 was built from another source revision"
-    );
+    await refuses("Archive metadata differs from the pinned release.");
     writeFileSync(join(output, plan.archive), savedArchive);
     writeFileSync(join(output, "SHA256SUMS"), savedSums);
     // Missing altogether: the set is not the planned twelve assets.
@@ -532,6 +536,57 @@ fixtureTest(
     );
     write(good);
     await verifyReleaseAssets({ plan, output, linux: true });
+  }
+);
+
+fixtureTest(
+  "publication applies the manager's release metadata limits and canonical bytes",
+  async () => {
+    const output = await fullSet(scratch());
+    const path = join(output, "prerelease.json");
+    const canonical = readFileSync(path, "utf8");
+    for (const [bytes, message] of [
+      [
+        canonical.replace("{", '{ "schema": "hack.prerelease/v1",'),
+        "Duplicate JSON field",
+      ],
+      [canonical + " ".repeat(65_536), "exceeds"],
+      [
+        canonical.trim(),
+        "Release asset metadata does not match the approved plan",
+      ],
+    ] as const) {
+      writeFileSync(path, bytes);
+      await expect(
+        verifyReleaseAssets({ plan, output, linux: true })
+      ).rejects.toThrow(message);
+    }
+  }
+);
+
+fixtureTest(
+  "packaging refuses duplicate fields in finished native archive metadata",
+  async () => {
+    const root = scratch();
+    const bundle = await nativeBundle(root);
+    const path = join(bundle, "prerelease.json");
+    const metadata = readFileSync(path, "utf8");
+    writeFileSync(
+      path,
+      metadata.replace("{", '{ "schema": "hack.prerelease/v1",')
+    );
+    writeFileSync(
+      join(bundle, "SHA256SUMS"),
+      await renderChecksums({ root: bundle, names: PRERELEASE_PAYLOAD })
+    );
+    await expect(
+      packagePrerelease({
+        plan,
+        bundle,
+        output: join(root, "assets"),
+        buildManager: fixtureManager,
+      })
+    ).rejects.toThrow("Duplicate JSON field");
   }
 );
 

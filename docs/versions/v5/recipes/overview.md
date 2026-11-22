@@ -12,7 +12,7 @@ tested and what was not.
 
 They all use the supported building blocks: lifecycle hooks and processes,
 managed env and overlays, `hack run`, `hack exec` and `hack host exec`. They
-run on the default Compose backend.
+run on the Compose backend.
 
 ## Other tools
 

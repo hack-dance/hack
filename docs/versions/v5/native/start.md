@@ -121,18 +121,12 @@ launchers if requested. After an uncertain outcome, inspect
 `"$CANDIDATE" exec-sessions` and follow the
 [recovery instructions](https://github.com/hack-dance/hack/blob/5002cf87bb50686b17ceae8a4c835f524ee1b3a5/docs/guides/native-candidate.md#normal-native-exec).
 
-A detached start (`up --detach`, and `up --json`, which is always detached on
-native) waits for the background start to report ready. Image builds and loads
-do not count against its 15-minute budget while they are in progress, because
-their length depends on the project and host load; everything else does, and a
-60-minute ceiling bounds the whole start. Raise them with
-`HACK_NATIVE_DETACHED_START_TIMEOUT_MS` and `HACK_NATIVE_DETACHED_START_CEILING_MS`
-(milliseconds, at least 1000). When one runs out, `up` fails with
-`E_STARTUP_TIMEOUT`, names the phase it reached, asks the start to stop and waits
-up to two minutes for it. Run `down` next: while that start is still alive and has
-published nothing, `down` waits for it (up to two minutes) and stops what it
-published, or fails with `E_DOWN_INCOMPLETE` ("nothing was stopped") instead of
-reporting success. Then run `up --detach` again.
+Native `up --detach` and `up --json` wait for the background owner to report ready.
+See [native command forms and startup limits](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md) for the
+separate detached and graph readiness limits. If detached startup times out,
+run `down` next. It waits up to two minutes for a pending owner and stops what
+the owner published, or reports `E_DOWN_INCOMPLETE` if it cannot prove the stop.
+Retry after the stop is confirmed.
 
 Stop with the **same version and native home**:
 

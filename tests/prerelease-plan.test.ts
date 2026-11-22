@@ -11,8 +11,6 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractArchive } from "../scripts/installer/bundle.ts";
-import { digest } from "../scripts/installer/integrity.ts";
 import { CLI_COMPILE_DEFINE_ARGS } from "../scripts/lib/cli-compile-define.ts";
 import { packageNativeStorageTool } from "../scripts/package-native-storage-tool.ts";
 import {
@@ -46,31 +44,23 @@ import { packageMcpBundle } from "../src/mcp/bundle.ts";
 import { nativeCandidateMcpPayload } from "../src/mcp/candidate-payload.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
-// Packaging fixtures qualify inventories and binding; standalone execution has its own isolated test.
 function verifyReleaseAssets(
   options: Parameters<typeof verifyReleaseAssetsActual>[0]
 ) {
   return verifyReleaseAssetsActual({ ...options, nativeSignatures: () => {} });
 }
 
-const packagePrerelease = async (
+// Synthetic fixture executables do not carry macOS signatures.
+const packagePrerelease = (
   options: Parameters<typeof packagePrereleaseActual>[0]
-) => {
-  await packagePrereleaseActual({
+) =>
+  packagePrereleaseActual({
     ...options,
+    nativeSignatures: () => {},
     buildManager: async (output) => {
       await writeFile(output, "standalone-manager-fixture", { mode: 0o500 });
     },
   });
-  const archive = join(options.output, options.plan.archive);
-  extractArchive({
-    archive,
-    checksum: digest(archive),
-    destination: `${options.output}-installer-fixture`,
-    version: options.plan.version,
-    signatures: () => {},
-  });
-};
 
 const sha = "a".repeat(40);
 const input = {

@@ -27,7 +27,11 @@ import {
   renderBootstrap,
 } from "./installer/bootstrap.ts";
 import { extractArchive } from "./installer/bundle.ts";
-import { LINUX_SUMS, linuxSumsNames } from "./installer/download.ts";
+import {
+  LINUX_SUMS,
+  linuxSumsNames,
+  officialArchive,
+} from "./installer/download.ts";
 import {
   BUNDLE_PLATFORMS,
   type BundlePlatform,
@@ -807,12 +811,19 @@ function configCompilerPayload(entries: readonly string[]) {
   return compilerPayload;
 }
 
+function renderReleaseMetadata(
+  metadata: ReturnType<typeof prereleaseMetadata>
+) {
+  return `${JSON.stringify(metadata, null, 2)}\n`;
+}
+
 export async function packagePrerelease({
   plan,
   bundle,
   output,
   buildManager = buildPrereleaseManager,
   linux,
+  nativeSignatures,
 }: {
   readonly plan: PrereleasePlan;
   readonly bundle: string;
@@ -826,6 +837,8 @@ export async function packagePrerelease({
    * other than the installer are the same bytes either way.
    */
   readonly linux?: string;
+  /** Fixture seam for synthetic unsigned native archives. */
+  readonly nativeSignatures?: (bundle: string) => void;
 }) {
   if (!(await lstat(bundle)).isDirectory()) {
     throw new Error("Native bundle root must be a directory, not an alias");
@@ -904,7 +917,7 @@ export async function packagePrerelease({
   );
   await Bun.write(
     join(output, "prerelease.json"),
-    `${JSON.stringify(metadata, null, 2)}\n`
+    renderReleaseMetadata(metadata)
   );
   await Bun.write(
     join(output, "SHA256SUMS"),
@@ -940,6 +953,12 @@ export async function packagePrerelease({
     // The finished set must be the one the platforms metadata describes.
     await requireReleasePlatformMetadata({ plan, output });
   }
+  await requireInstallableArchive({
+    plan,
+    platform: PRERELEASE_PLATFORM,
+    directory: output,
+    signatures: nativeSignatures,
+  });
 }
 
 /** The digests the installer embeds for the Linux managers in `output`. */
@@ -1331,6 +1350,83 @@ async function requireReleasePlatformMetadata({
   });
 }
 
+/** Exercise the installed manager's reader without opening a network connection. */
+async function verifyLocalRelease({
+  plan,
+  output,
+  assets,
+  platform,
+  signatures,
+}: {
+  plan: PrereleasePlan;
+  output: string;
+  assets: readonly string[];
+  platform: BundlePlatform;
+  signatures?: (bundle: string) => void;
+}) {
+  const api = "https://api.github.com/repos/hack-dance/hack";
+  const releaseUrl = `${api}/releases/tags/${plan.tag}`;
+  const tagUrl = `${api}/git/ref/tags/${plan.tag}`;
+  const entries = assets.map((name) => ({
+    name,
+    browser_download_url: `https://github.com/hack-dance/hack/releases/download/${plan.tag}/${name}`,
+  }));
+  const files = new Map(
+    entries.map(({ name, browser_download_url }) => [
+      browser_download_url,
+      name,
+    ])
+  );
+  const stage = await mkdtemp(join(tmpdir(), "hack-release-reader-"));
+  try {
+    const download = await officialArchive(
+      stage,
+      plan.version,
+      undefined,
+      platform,
+      (url) => {
+        if (url === releaseUrl) {
+          return Promise.resolve(
+            Response.json({
+              tag_name: plan.tag,
+              prerelease: true,
+              draft: false,
+              assets: entries,
+            })
+          );
+        }
+        if (url === tagUrl) {
+          return Promise.resolve(
+            Response.json({
+              ref: `refs/tags/${plan.tag}`,
+              object: { type: "commit", sha: plan.source_revision },
+            })
+          );
+        }
+        const name = files.get(url);
+        if (name === undefined) {
+          throw new Error("Unexpected local release asset request");
+        }
+        const file = Bun.file(join(output, name));
+        return Promise.resolve(
+          new Response(file.stream(), {
+            headers: { "Content-Length": String(file.size) },
+          })
+        );
+      }
+    );
+    extractArchive({
+      ...download,
+      destination: join(stage, "bundle"),
+      version: plan.version,
+      platform,
+      signatures,
+    });
+  } finally {
+    await rm(stage, { recursive: true, force: true });
+  }
+}
+
 export async function verifyReleaseAssets({
   plan,
   output,
@@ -1373,7 +1469,10 @@ export async function verifyReleaseAssets({
       throw new Error("Linux assets do not match their checksum manifest");
     }
     for (const platform of PRERELEASE_LINUX_PLATFORMS) {
-      await requireLinuxAssets({ plan, platform, directory: output });
+      await requireLinuxManagerElf({
+        path: join(output, managerAssetName(platform)),
+        platform,
+      });
     }
   }
   if (
@@ -1396,12 +1495,6 @@ export async function verifyReleaseAssets({
     sourceRevision: plan.source_revision,
     base: plan.base,
   });
-  const metadata: unknown = await Bun.file(
-    join(output, "prerelease.json")
-  ).json();
-  if (JSON.stringify(metadata) !== JSON.stringify(expected)) {
-    throw new Error("Release asset metadata does not match the approved plan");
-  }
   if (
     (await Bun.file(join(output, "SHA256SUMS")).text()) !==
     (await renderChecksums({ root: output, names: [plan.archive] }))
@@ -1411,12 +1504,24 @@ export async function verifyReleaseAssets({
   if (linux) {
     await requireReleasePlatformMetadata({ plan, output });
   }
-  await requireInstallableArchive({
-    plan,
-    platform: PRERELEASE_PLATFORM,
-    directory: output,
-    signatures: nativeSignatures,
-  });
+  const platforms: readonly BundlePlatform[] = linux
+    ? BUNDLE_PLATFORMS
+    : [PRERELEASE_PLATFORM];
+  for (const platform of platforms) {
+    await verifyLocalRelease({
+      plan,
+      output,
+      assets,
+      platform,
+      signatures: composeOnly(platform) ? undefined : nativeSignatures,
+    });
+  }
+  const canonical = Buffer.from(renderReleaseMetadata(expected));
+  if (
+    !canonical.equals(await Bun.file(join(output, "prerelease.json")).bytes())
+  ) {
+    throw new Error("Release asset metadata does not match the approved plan");
+  }
 }
 
 function object(value: unknown): Record<string, unknown> {

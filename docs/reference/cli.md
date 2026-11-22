@@ -3612,7 +3612,7 @@ hack the planet [options]
 
 ## Experimental (unsupported)
 
-These commands are source-available but outside the supported v3 product contract. They are hidden from default `hack --help` (see them with `hack help --all`) and print a warning when invoked.
+These commands are source-available but outside the supported Hack CLI contract. They are hidden from default `hack --help` (see them with `hack help --all`) and print a warning when invoked.
 
 - `hack dispatch` — Unsupported: run branch-scoped jobs on remote nodes
 - `hack gateway` — Unsupported: manage the remote control plane entrypoint

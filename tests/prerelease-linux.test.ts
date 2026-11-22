@@ -60,7 +60,7 @@ import {
   PRERELEASE_LINUX_PLATFORMS,
   PRERELEASE_PAYLOAD,
   packageLinuxPrerelease,
-  packagePrerelease,
+  packagePrerelease as packagePrereleaseActual,
   prereleaseMetadata,
   prereleaseNotes,
   releaseAssets,
@@ -83,6 +83,12 @@ import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
  * is exact; the installer and manager choose it only on Linux; and the macOS
  * asset set stays what every published macOS manager accepts.
  */
+
+function packagePrerelease(
+  options: Parameters<typeof packagePrereleaseActual>[0]
+) {
+  return packagePrereleaseActual({ ...options, nativeSignatures: () => {} });
+}
 
 function verifyReleaseAssets(
   options: Parameters<typeof verifyReleaseAssetsActual>[0]

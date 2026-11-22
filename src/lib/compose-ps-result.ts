@@ -311,6 +311,15 @@ export function dockerEngineFailureError(opts: {
   if (ENGINE_UNREACHABLE_MARKERS.some((m) => lower.includes(m))) {
     return new HackCliError({
       code: "E_DOCKER_UNAVAILABLE",
+      startBlocker: {
+        thing: "docker engine",
+        problem:
+          "unreachable · start docker or point your context at a running engine",
+        which:
+          said(CLIENT_UNREACHABLE_OPENINGS)
+            .slice(" Engine said: ".length)
+            .trim() || undefined,
+      },
       message: `The Docker engine is not reachable. Start Docker, or check \`docker context ls\` and DOCKER_HOST point at a running engine, then retry.${said(CLIENT_UNREACHABLE_OPENINGS)}`,
     });
   }

@@ -10,11 +10,23 @@
 //!
 //! Authority and ownership:
 //!
-//! - The build key binds the local inputs: namespace (project root and branch), context
-//!   and Dockerfile paths, the Dockerfile and `.dockerignore` bytes, target, salted
-//!   argument hashes, platform, and the builder and engine versions. Context file
-//!   contents are not hashed, as with Compose: an existing image is reused until an
-//!   explicit rebuild. Base-image tags resolve only when a build runs.
+//! - The build key (version 2) binds the local inputs: namespace (project root and
+//!   branch), context and Dockerfile paths, the Dockerfile and `.dockerignore` bytes,
+//!   target, salted argument hashes, platform, the builder and engine versions, and a
+//!   digest of every context entry the effective ignore rules let the build read
+//!   (paths, kinds, permission bits, file contents and symlink targets; see
+//!   [`context`]). Editing a copied file therefore builds a new image; editing an
+//!   ignored one does not. A private stat cache keeps an unchanged context cheap to
+//!   hash; [`context`] documents the change it can miss. Key version 1 lacked the
+//!   context digest, so no receipt written under it can match a version-2 key.
+//! - BuildKit builds from the bytes that were keyed: a build that runs the client first
+//!   copies every recorded context entry into a private snapshot, hashing each file as
+//!   it copies it, and points the client at the snapshot only ([`context::snapshot`]).
+//!   A copy that differs from the key walk refuses `native_build_context_changed`
+//!   before any receipt is written. Edits made while BuildKit runs cannot reach the
+//!   image, so no context case remains in which the image holds bytes other than the
+//!   keyed ones; a reused image's key misses only what the stat cache can miss (see
+//!   [`context`]). Base images are pinned by digest.
 //! - Every image the Dockerfile can pull (see [`super::build_scan`]) resolves to a digest
 //!   before BuildKit runs and is handed to it as a named build context, so BuildKit pulls
 //!   only those exact manifests. Base images with stored `ONBUILD` triggers refuse.
@@ -67,10 +79,11 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 mod client_relay;
+mod context;
 mod output;
 pub mod reclaim;
 #[cfg(test)]
@@ -94,6 +107,8 @@ const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
 const MAX_METADATA_BYTES: u64 = 1024 * 1024;
 const MAX_IGNORE_BYTES: u64 = 1024 * 1024;
 const MAX_ARGS: usize = 64;
+/// The build key document version; 2 added the context digest.
+const KEY_VERSION: u32 = 2;
 const MAX_ARG_BYTES: usize = 64 * 1024;
 const GIB: u64 = 1024 * 1024 * 1024;
 /// A cold build needs this much free guest storage, or twice the key's last verified
@@ -215,6 +230,14 @@ pub(super) struct Receipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     image_bytes: Option<u64>,
     base_pins: BTreeMap<String, String>,
+    /// The build declaration this key is a revision of (see [`Inputs::declaration`]).
+    /// Receipts from before this field have none and are never reclaimed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    declaration: Option<String>,
+    /// When this key last became the declaration's image in use: larger is more
+    /// recent within its namespace (see [`next_sequence`]). Absent on old receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sequence: Option<u64>,
 }
 
 /// The pool identity a build is admitted against and must find unchanged at adoption.
@@ -279,6 +302,16 @@ pub(super) struct Inputs {
     images: Vec<BaseImage>,
     policy: Policy,
     timeout: Duration,
+    /// Every included context entry the key walk hashed; a build copies exactly these
+    /// into its private snapshot.
+    recorded: Vec<context::Entry>,
+    /// The build declaration this key revises: namespace, context, Dockerfile and
+    /// target, so successive edits of one service's build share it while its key
+    /// changes. Reclamation keeps a declaration's current and previous images only.
+    declaration: String,
+    /// The document hashed into `key`.
+    #[cfg(test)]
+    key_input: Value,
 }
 
 impl Inputs {
@@ -461,12 +494,16 @@ struct IgnoreFiles {
     dockerfile: Option<Vec<u8>>,
 }
 impl IgnoreFiles {
-    fn read(context: &Path, dockerfile: &Path) -> Result<Self, CandidateError> {
+    fn read(
+        project: &context::ProjectRoot,
+        context: &Path,
+        dockerfile: &Path,
+    ) -> Result<Self, CandidateError> {
         let mut specific = dockerfile.as_os_str().to_owned();
         specific.push(".dockerignore");
         Ok(Self {
-            context: read_bounded_file(&context.join(".dockerignore"), MAX_IGNORE_BYTES)?,
-            dockerfile: read_bounded_file(Path::new(&specific), MAX_IGNORE_BYTES)?,
+            context: project.read(&context.join(".dockerignore"), MAX_IGNORE_BYTES)?,
+            dockerfile: project.read(Path::new(&specific), MAX_IGNORE_BYTES)?,
         })
     }
     fn digests(&self) -> Value {
@@ -487,8 +524,10 @@ impl IgnoreFiles {
 }
 
 /// Validate the request, resolve paths inside the project without following symlinks,
-/// read and scan the Dockerfile and derive the build key. Pure local reads.
-pub(super) fn prepare(request: BuildRequest) -> Result<Inputs, CandidateError> {
+/// read and scan the Dockerfile, hash the build context and derive the build key.
+/// Local reads only, apart from the context stat cache under `builds` (the
+/// `run/image-builds` state directory), which is best effort.
+pub(super) fn prepare(request: BuildRequest, builds: &Path) -> Result<Inputs, CandidateError> {
     validate_request(&request)?;
     let root = fs::canonicalize(&request.project_root).map_err(|_| {
         refusal(
@@ -510,7 +549,10 @@ pub(super) fn prepare(request: BuildRequest) -> Result<Inputs, CandidateError> {
         ));
     }
     let dockerfile = crate::project::resolve_source(&root, &context, &request.dockerfile, false)?;
-    let bytes = read_bounded_file(&dockerfile, build_scan::MAX_DOCKERFILE_BYTES as u64)?
+    // Every input file is read through descriptors held from the project root down.
+    let project = context::ProjectRoot::open(&root)?;
+    let bytes = project
+        .read(&dockerfile, build_scan::MAX_DOCKERFILE_BYTES as u64)?
         .ok_or_else(|| {
             refusal(
                 "native_build_source",
@@ -544,14 +586,25 @@ pub(super) fn prepare(request: BuildRequest) -> Result<Inputs, CandidateError> {
             )
         })
         .collect();
-    let ignore = IgnoreFiles::read(&context, &dockerfile)?;
+    let ignore = IgnoreFiles::read(&project, &context, &dockerfile)?;
+    let ignore_digests = ignore.digests();
+    let ignore = ignore.effective();
+    let cache = builds.join(&namespace).join(context::cache_name(&context));
+    let context_digest = context::digest(
+        &context,
+        &ignore,
+        Some(&cache),
+        SystemTime::now(),
+        context::Bounds::DEFAULT,
+    )?;
     let key_input = serde_json::json!({
-        "v": 1,
+        "v": KEY_VERSION,
         "namespace": namespace,
         "context": relative(&context, &root),
         "dockerfile": relative(&dockerfile, &context),
         "dockerfile_sha256": sha256_hex(&bytes),
-        "dockerignore": ignore.digests(),
+        "dockerignore": ignore_digests,
+        "context_sha256": context_digest.digest,
         "target": request.target,
         "args": salted_args,
         "platform": "linux/arm64",
@@ -560,17 +613,31 @@ pub(super) fn prepare(request: BuildRequest) -> Result<Inputs, CandidateError> {
     let key = sha256_hex(
         &serde_json::to_vec(&key_input).map_err(|_| invalid("Cannot encode the build key."))?,
     );
+    let declaration = sha256_hex(
+        &serde_json::to_vec(&serde_json::json!({
+            "v": 1,
+            "namespace": key_input["namespace"],
+            "context": key_input["context"],
+            "dockerfile": key_input["dockerfile"],
+            "target": key_input["target"],
+        }))
+        .map_err(|_| invalid("Cannot encode the build declaration."))?,
+    );
     Ok(Inputs {
         namespace,
         key,
         context,
         dockerfile: bytes,
-        ignore: ignore.effective(),
+        ignore,
         target: request.target,
         args: request.args,
         images: scan.images,
         policy: request.policy,
         timeout: Duration::from_secs(request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS)),
+        recorded: context_digest.recorded,
+        declaration,
+        #[cfg(test)]
+        key_input,
     })
 }
 
@@ -775,26 +842,17 @@ pub(super) fn run<P: BuildPool>(
             && previous.checkout == candidate.checkout
             && previous.provider_incarnation == identity.incarnation
             && previous.engine_id == identity.engine_id
+            && let Some(id) = previous.image_id.as_deref().filter(|id| image_id(id))
+            && let Some(inspected) = pool.inspect(&lease, id)?
+            && owned_image(&inspected, id, &expected).is_ok()
         {
-            if let Some(id) = previous.image_id.as_deref().filter(|id| image_id(id)) {
-                if let Some(inspected) = pool.inspect(&lease, id)? {
-                    if owned_image(&inspected, id, &expected).is_ok() {
-                        if previous.provider_boot_id != identity.boot_id {
-                            let mut current = previous.clone();
-                            current.provider_boot_id = identity.boot_id.clone();
-                            state::write(&receipt_path, &current)?;
-                        }
-                        return Ok(BuildOutcome {
-                            image_id: id.to_owned(),
-                            build_key: inputs.key.clone(),
-                            tag: inputs.tag(),
-                            reused: true,
-                            base_pins: previous.base_pins.clone(),
-                            cache_reclaimed_bytes: None,
-                        });
-                    }
-                }
-            }
+            // The reused key becomes its declaration's image in use again.
+            let mut current = previous.clone();
+            current.provider_boot_id = identity.boot_id.clone();
+            current.declaration = Some(inputs.declaration.clone());
+            current.sequence = Some(next_sequence(&directory));
+            state::write(&receipt_path, &current)?;
+            return Ok(reused(inputs, id, &previous.base_pins));
         }
         if previous.phase == Phase::Building {
             // The key lock proves no live holder: that attempt died mid-build.
@@ -805,6 +863,8 @@ pub(super) fn run<P: BuildPool>(
     }
     let previous_bytes = previous.as_ref().and_then(|receipt| receipt.image_bytes);
     drop(lease);
+    // Snapshots other attempts in this namespace stranded when they were killed.
+    remove_stranded_snapshots(&directory);
 
     // Step 2, unleased: resolve every base image to a pinned manifest.
     let mut pins = BTreeMap::new();
@@ -835,6 +895,29 @@ pub(super) fn run<P: BuildPool>(
     if Instant::now() >= deadline {
         return Err(expired_early());
     }
+    // Copy exactly the keyed context bytes into a private snapshot, the only context
+    // BuildKit is given. Unleased.
+    let scratch = directory.join(format!("{}.client", inputs.key));
+    state::private_directory(&scratch)?;
+    let stop = context::snapshot::stop_check(canceled, deadline);
+    let snapshot = match context::snapshot::Snapshot::create(
+        &inputs.context,
+        &scratch.join("snapshot"),
+        &inputs.recorded,
+        &stop,
+    ) {
+        Ok(Ok(snapshot)) => snapshot,
+        Ok(Err(context::snapshot::Stopped::Canceled)) => return Err(canceled_early()),
+        Ok(Err(context::snapshot::Stopped::Expired)) => return Err(expired_early()),
+        Err(error) => {
+            if error.code == "native_build_context_changed" {
+                // The stat cache may hold the stale hash (its documented miss); drop
+                // it so the next attempt reads every file.
+                let _ = fs::remove_file(directory.join(context::cache_name(&inputs.context)));
+            }
+            return Err(error);
+        }
+    };
 
     // Step 3, under the lease: same pool, then record the attempt.
     let (lease, current) = pool.lease()?;
@@ -864,13 +947,14 @@ pub(super) fn run<P: BuildPool>(
         // retry is admitted against it rather than the floor.
         image_bytes: previous_bytes,
         base_pins: pins.clone(),
+        declaration: Some(inputs.declaration.clone()),
+        // Kept from the last verified image of this key until this attempt verifies.
+        sequence: previous.as_ref().and_then(|receipt| receipt.sequence),
     };
     state::write(&receipt_path, &receipt)?;
     drop(lease);
 
     // Step 4, unleased: run the client in its own process group.
-    let scratch = directory.join(format!("{}.client", inputs.key));
-    state::private_directory(&scratch)?;
     let metadata = scratch.join("metadata.json");
     match fs::remove_file(&metadata) {
         Ok(()) => {}
@@ -887,8 +971,8 @@ pub(super) fn run<P: BuildPool>(
     let mut client = command(
         &builder,
         &scratch,
-        &metadata,
         inputs,
+        &snapshot.context(),
         relay.socket(),
         &pins,
         &expected,
@@ -912,7 +996,14 @@ pub(super) fn run<P: BuildPool>(
         }
     };
     match ended {
-        Ended::Exited(true) => {}
+        Ended::Exited(true) => {
+            // A cancellation or deadline reached while the client finished still wins.
+            if canceled() || Instant::now() >= deadline {
+                receipt.phase = Phase::Canceled;
+                state::write(&receipt_path, &receipt)?;
+                return Err(late_stop(canceled()));
+            }
+        }
         Ended::Exited(false) => {
             receipt.phase = Phase::Failed;
             state::write(&receipt_path, &receipt)?;
@@ -939,6 +1030,7 @@ pub(super) fn run<P: BuildPool>(
         }
     }
 
+    drop(snapshot);
     // Step 5, under the lease: the same pool and engine, then adopt by content ID.
     let (lease, current) = pool.lease()?;
     if current != identity {
@@ -973,8 +1065,15 @@ pub(super) fn run<P: BuildPool>(
             return Err(error);
         }
     };
+    // The last point a cancellation or the deadline can still stop adoption.
+    if canceled() || Instant::now() >= deadline {
+        receipt.phase = Phase::Canceled;
+        state::write(&receipt_path, &receipt)?;
+        return Err(late_stop(canceled()));
+    }
     receipt.phase = Phase::ContentIdVerified;
     receipt.image_id = Some(id.clone());
+    receipt.sequence = Some(next_sequence(&directory));
     receipt.image_bytes = image_bytes.or(receipt.image_bytes);
     state::write(&receipt_path, &receipt)?;
     // The verified image is recorded first; a failed prune leaves only extra cache.
@@ -988,6 +1087,105 @@ pub(super) fn run<P: BuildPool>(
         base_pins: pins,
         cache_reclaimed_bytes,
     })
+}
+
+/// The refusal for a cancellation or deadline reached after the client ran.
+fn late_stop(canceled: bool) -> CandidateError {
+    if canceled {
+        refusal(
+            "native_build_canceled",
+            "The image build was canceled; no image was adopted.",
+        )
+    } else {
+        refusal(
+            "native_build_timeout",
+            "The image build exceeded its time budget and was stopped; no image was adopted.",
+        )
+    }
+}
+
+fn reused(inputs: &Inputs, id: &str, pins: &BTreeMap<String, String>) -> BuildOutcome {
+    BuildOutcome {
+        image_id: id.to_owned(),
+        build_key: inputs.key.clone(),
+        tag: inputs.tag(),
+        reused: true,
+        base_pins: pins.clone(),
+        cache_reclaimed_bytes: None,
+    }
+}
+
+/// Remove the build snapshots in one namespace `directory` whose owning process is
+/// provably gone. Checks run in this order, and the key lock is touched last:
+///
+/// 1. only `<key>.client/snapshot` trees, where `<key>.client` is a real private
+///    directory of this user (never a symlink);
+/// 2. the owner record proves the owner gone ([`context::snapshot::owner_gone`]);
+/// 3. a non-blocking attempt on that key's lock succeeds (a live attempt, or a build
+///    client that outlived its coordinator, holds it; the tree is then skipped);
+/// 4. under the lock the owner is proved gone again, and only then the tree and its
+///    record are removed; the lock is released right after.
+///
+/// So the probe can only coincide with an attempt of the same, already stranded key,
+/// which then refuses `native_build_busy` and can retry. Failures leave the tree for
+/// later. Returns how many trees were removed.
+fn remove_stranded_snapshots(directory: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        let Some(key) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".client"))
+            .filter(|key| hex64(key))
+        else {
+            continue;
+        };
+        let scratch = entry.path();
+        // SAFETY: geteuid has no preconditions.
+        let ours = fs::symlink_metadata(&scratch).is_ok_and(|metadata| {
+            metadata.is_dir()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o077 == 0
+        });
+        let snapshot = scratch.join("snapshot");
+        if !ours || !context::snapshot::owner_gone(&snapshot) {
+            continue;
+        }
+        let lock = directory.join(format!("{key}.lock"));
+        let Ok(Some(held)) =
+            Flock::open(&lock).and_then(|file| Flock::try_lock(file, libc::LOCK_EX))
+        else {
+            continue;
+        };
+        if context::snapshot::owner_gone(&snapshot) && context::snapshot::remove_stranded(&snapshot)
+        {
+            removed += 1;
+        }
+        drop(held);
+    }
+    removed
+}
+
+/// The next reuse order for `directory` (one namespace): one more than any sequence its
+/// receipts record. Unreadable receipts are skipped; they are never reclaimed anyway.
+/// Two builds of different keys may race to the same number; reclamation then keeps
+/// both (see `reclaim`).
+fn next_sequence(directory: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return 1;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("json"))
+        .filter_map(|path| state::read_bounded::<Receipt>(&path, MAX_RECEIPT_BYTES).ok())
+        .filter_map(|receipt| receipt.sequence)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
 }
 
 /// Hold the shared build fence as an admitted build does, for the macOS-only lifecycle
@@ -1100,6 +1298,7 @@ fn bake_strings(value: Value) -> Value {
 /// included. It is written mode 0600 in the client's private scratch directory.
 fn bake_definition(
     inputs: &Inputs,
+    context: &Path,
     dockerfile: &Path,
     pins: &BTreeMap<String, String>,
     labels: &BTreeMap<&'static str, String>,
@@ -1109,7 +1308,7 @@ fn bake_definition(
         .map(|(name, reference)| (name.as_str(), format!("docker-image://{reference}")))
         .collect();
     let mut target = serde_json::json!({
-        "context": inputs.context.to_string_lossy(),
+        "context": context.to_string_lossy(),
         "dockerfile": dockerfile.to_string_lossy(),
         "args": inputs.args,
         "contexts": contexts,
@@ -1127,11 +1326,12 @@ fn bake_definition(
 /// The client command: `buildx bake` with the private definition. Argv carries only
 /// paths and fixed flags, and the environment is cleared to a fixed allowlist: argument
 /// values travel only in the definition, never in argv or the client's environment.
+/// The client reports to `<scratch>/metadata.json` and reads the context at `context`.
 fn command(
     builder: &Path,
     scratch: &Path,
-    metadata: &Path,
     inputs: &Inputs,
+    context: &Path,
     engine: &Path,
     pins: &BTreeMap<String, String>,
     labels: &BTreeMap<&'static str, String>,
@@ -1144,7 +1344,8 @@ fn command(
     state::private_directory(&bake)?;
     let dockerfile = stage_dockerfile(scratch, inputs)?;
     let definition = bake.join(BAKE_DEFINITION);
-    let encoded = serde_json::to_vec(&bake_definition(inputs, &dockerfile, pins, labels))
+    let metadata = scratch.join("metadata.json");
+    let encoded = serde_json::to_vec(&bake_definition(inputs, context, &dockerfile, pins, labels))
         .map_err(|_| invalid("Cannot encode the build definition."))?;
     write_private(&definition, &encoded)?;
     // The policy allows exactly the pinned references the definition names as
@@ -1179,10 +1380,10 @@ fn command(
         .arg("--file")
         .arg(&definition)
         .arg("--metadata-file")
-        .arg(metadata)
+        .arg(&metadata)
         // Bake requires explicit read access outside its working directory.
         .arg("--allow")
-        .arg(format!("fs.read={}", inputs.context.display()))
+        .arg(format!("fs.read={}", context.display()))
         .arg("--allow")
         .arg(format!("fs.read={}", bake_parent(&dockerfile).display()))
         .arg(BAKE_TARGET)
@@ -1529,7 +1730,7 @@ fn interruptible<T: Send + 'static>(
 /// `runtime build-image --request <private-file>`: build or reuse one native image.
 pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome, CandidateError> {
     let request: BuildRequest = state::read_bounded(request, MAX_REQUEST_BYTES)?;
-    let inputs = prepare(request)?;
+    let inputs = prepare(request, &builds_root(candidate))?;
     let _signals = CancelSignals::install()?;
     run(candidate, &LivePool { candidate }, &inputs, &|| {
         CANCEL_REQUESTED.load(Ordering::Acquire)

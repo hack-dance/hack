@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { CliUsageError } from "../cli/command.ts";
 import { parseProjectSelectorOption } from "../cli/project-selector.ts";
 import { HackCliError } from "./cli-result.ts";
+import { UnregisteredProjectError } from "./missing-project-error.ts";
 import {
   discoverProjectInputs,
   inspectProjectInputsAtRoot,
@@ -54,10 +55,7 @@ async function selectRegisteredNativeInputs(opts: {
     name,
   });
   if (!registered) {
-    throw new HackCliError({
-      code: "E_PROJECT_NOT_FOUND",
-      message: "The selected project is not registered.",
-    });
+    throw new UnregisteredProjectError();
   }
   return await inspectProjectInputsAtRoot({
     projectRoot: registered.repoRoot,

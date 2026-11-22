@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -342,6 +343,7 @@ for (const denyLeaf of [false, true]) {
         await chmod(layer, 0o000);
       }
       try {
+        const root = await realpath(repo.root);
         const proc = Bun.spawn(
           [
             process.execPath,
@@ -349,8 +351,8 @@ for (const denyLeaf of [false, true]) {
               import.meta.dir,
               "fixtures/project-env-case-path-worker.ts"
             ),
-            repo.projectRoot,
-            resolve(repo.root, "PROJ"),
+            resolve(root, "proj"),
+            resolve(root, "PROJ"),
             ...(denyLeaf ? ["deny-leaf"] : []),
           ],
           {

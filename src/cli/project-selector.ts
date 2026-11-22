@@ -63,6 +63,12 @@ export function unknownProjectMessage(selector: ProjectSelector): string {
     : `Unknown project. ${UNKNOWN_PROJECT_HINT}`;
 }
 
+export class UnknownProjectUsageError extends CliUsageError {
+  constructor(selector: ProjectSelector) {
+    super(unknownProjectMessage(selector));
+  }
+}
+
 /**
  * Resolve `--project` to a registered project, or throw a usage error that
  * follows the echo rule above. Malformed arguments are refused before the
@@ -78,7 +84,7 @@ export async function resolveRegisteredProjectOption(input: {
     name: selector.name,
   });
   if (!project) {
-    throw new CliUsageError(unknownProjectMessage(selector));
+    throw new UnknownProjectUsageError(selector);
   }
   return project;
 }

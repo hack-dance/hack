@@ -5,6 +5,7 @@ import type { RuntimeBaseOptions } from "../backends/runtime-backend.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { psServiceState, renderPs } from "../ui/ps-output.ts";
+import { writeUpHookBlocker } from "../ui/start-refusal-output.ts";
 import type { AutostartGlobalView } from "./autostart-view.ts";
 import {
   emitCliResult,
@@ -156,6 +157,10 @@ import {
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import { renderNativeEnvironmentNameError } from "./native-environment-name-error.ts";
 import { nativeFilePlanningRequired } from "./native-file-plan-protocol.ts";
+import {
+  canPrintStartSelection,
+  scopedHackCommand,
+} from "./printed-shell-command.ts";
 import type { serializeProjectAutostart } from "./project-views.ts";
 import { run } from "./shell.ts";
 
@@ -768,7 +773,13 @@ async function savedCommand(opts: {
           : null));
   if (!generation) {
     if (state.beforeHooksPending) {
-      if (options.operation === "ps" && options.json) {
+      if (options.operation === "ps") {
+        if (!options.json) {
+          process.stderr.write(
+            "native before-hook completion is uncertain · recovery unavailable\n"
+          );
+          return 0;
+        }
         emitCliResult({
           result: okResult({
             data: {
@@ -983,7 +994,7 @@ async function savedCommand(opts: {
         run: async () => {
           const assertImageOnly = async () => {
             const current = await store.loadCurrent();
-            assertStartupAvailable(current);
+            assertStartupAvailable(current, options);
             if (
               current.stopped ||
               current.generation?.generationId !== generation.generationId ||
@@ -1008,7 +1019,7 @@ async function savedCommand(opts: {
     }
     return await store.withMutation(async (mutation) => {
       const before = await store.loadCurrent();
-      assertStartupAvailable(before);
+      assertStartupAvailable(before, options);
       if (
         before.stopped ||
         before.generation?.generationId !== generation.generationId
@@ -1026,7 +1037,7 @@ async function savedCommand(opts: {
         proof: NativeComposeCommandStorageVerifyOptions
       ) => {
         const latest = await store.loadCurrent();
-        assertStartupAvailable(latest);
+        assertStartupAvailable(latest, options);
         if (
           latest.stopped ||
           latest.generation?.generationId !== generation.generationId
@@ -1177,7 +1188,7 @@ async function prepareSavedStop(opts: {
     )
   ) {
     // This check precedes compiler/environment acquisition and cannot replay an interrupted phase.
-    assertStartupAvailable(current);
+    assertStartupAvailable(current, options);
     if (current.generation?.generationId !== generation.generationId) {
       return invalid();
     }
@@ -2079,7 +2090,7 @@ async function prepareCommand(opts: {
     }
     return await store.withMutation(async (mutation) => {
       const current = await store.loadCurrent();
-      assertStartupAvailable(current);
+      assertStartupAvailable(current, options);
       const previous = current.stopped ? [] : await savedRouteDocuments(store);
       assertNativeComposeFileRunSupported({
         operation: options.operation,
@@ -2335,8 +2346,59 @@ function assertSelectedWorkloads(inputs: AcquiredComposeInputs): void {
   }
 }
 
+function nativeComposeHookCommand(
+  action: "ps" | "up",
+  options: NativeComposeCommandOptions
+): string | undefined {
+  if (
+    !canPrintStartSelection({
+      path: options.path,
+      project: options.project,
+      branch: options.instance,
+      services: options.services,
+    })
+  ) {
+    return;
+  }
+  const flags: string[] = [];
+  if (action === "up") {
+    if (options.detach) {
+      flags.push("--detach");
+    }
+    if (options.overlay !== undefined) {
+      flags.push(`--env=${options.overlay ?? "base"}`);
+    }
+    if (options.profiles?.length) {
+      flags.push(`--profile=${options.profiles.join(",")}`);
+    }
+    if (options.services?.length) {
+      flags.push("--", ...options.services);
+    }
+  }
+  return scopedHackCommand(
+    action,
+    {
+      path: options.path,
+      project: options.project,
+      branch: options.instance,
+    },
+    flags
+  );
+}
+
+function uncertainNativeHookBlocker(options: NativeComposeCommandOptions) {
+  return {
+    thing: "lifecycle",
+    problem: "native hook may have run",
+    which: "recovery unavailable",
+    needs: "startup is blocked without replay · inspect the saved state",
+    command: nativeComposeHookCommand("ps", options),
+  };
+}
+
 function assertStartupAvailable(
-  current: Awaited<ReturnType<NativeComposeGenerationStore["loadCurrent"]>>
+  current: Awaited<ReturnType<NativeComposeGenerationStore["loadCurrent"]>>,
+  options: NativeComposeCommandOptions
 ) {
   if (current.storageWitnessesPending) {
     throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
@@ -2346,6 +2408,7 @@ function assertStartupAvailable(
       code: "E_LIFECYCLE_FAILED",
       message:
         "Native host hook completion remains uncertain; startup is blocked without replay. Hook recovery is not supported in this slice. Values omitted.",
+      startBlocker: uncertainNativeHookBlocker(options),
     });
   }
   if (current.pending !== null) {
@@ -2404,6 +2467,7 @@ async function prepareBeforeHooks(opts: {
       code: "E_LIFECYCLE_FAILED",
       message:
         "Native host hook completion is uncertain; startup is blocked without replay. Hook recovery is not supported in this slice. Values omitted.",
+      startBlocker: uncertainNativeHookBlocker(options),
     });
   }
   if (result.value !== 0) {
@@ -2414,7 +2478,12 @@ async function prepareBeforeHooks(opts: {
         result: errorResult({ code: "E_LIFECYCLE_FAILED", message }),
       });
     } else {
-      process.stderr.write(`${message}\n`);
+      writeUpHookBlocker(
+        "before",
+        result.value,
+        undefined,
+        nativeComposeHookCommand("up", options)
+      );
     }
     return { inputs, code: result.value };
   }

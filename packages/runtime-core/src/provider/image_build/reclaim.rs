@@ -5,7 +5,13 @@
 //!
 //! - it carries exactly this pool's build ownership labels (kind, owner digest of the
 //!   current incarnation, a namespace and a build key) and no other reserved labels;
-//! - no build receipt of any namespace names it as its verified image;
+//! - no build receipt protects it: per namespace (project root and branch) and build
+//!   declaration (context, Dockerfile and target, recorded in the receipt), the
+//!   verified image of the key in use most recently (the largest receipt `sequence`)
+//!   and of the one before it are kept, so one edit can be reverted without a
+//!   rebuild; ties keep every tied key. Older keys' images become removable. A
+//!   verified receipt without a declaration or sequence (written before they existed)
+//!   always protects its image;
 //! - no retained graph state (`run/graphs`, `run/native-graphs`, `run/graph-archive`)
 //!   mentions its content ID anywhere, whatever the graph's phase or branch;
 //! - the engine agrees to remove it without force, which it refuses while any
@@ -42,8 +48,11 @@ const MAX_BUILD_IMAGES: usize = 4096;
 pub enum Retained {
     /// Its labels are not exactly this pool's build ownership labels.
     NotOwned,
-    /// A build receipt names it as a key's current image.
+    /// A build receipt names it as its declaration's image in use (or it predates
+    /// declarations, which always protects it).
     Current,
+    /// A build receipt names it as its declaration's previous image.
+    Previous,
     /// Retained graph state references it.
     Referenced,
     /// The engine refused removal (in use by a container) or the outcome is unknown.
@@ -159,13 +168,14 @@ fn scan_directory(
     Ok(())
 }
 
-/// Image IDs that build receipts of every namespace record as verified.
-fn current_images(candidate: &Candidate) -> Result<BTreeSet<String>, CandidateError> {
+/// The images build receipts protect, with why: per namespace and declaration, the
+/// most recent and the previous verified key (see the module documentation).
+fn current_images(candidate: &Candidate) -> Result<BTreeMap<String, Retained>, CandidateError> {
     let root = builds_root(candidate);
-    let mut current = BTreeSet::new();
+    let mut protected = BTreeMap::new();
     let namespaces = match fs::read_dir(&root) {
         Ok(namespaces) => namespaces,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(current),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(protected),
         Err(_) => return Err(unprovable()),
     };
     for namespace in namespaces {
@@ -178,6 +188,8 @@ fn current_images(candidate: &Candidate) -> Result<BTreeSet<String>, CandidateEr
         if !hex64(name) || !metadata.is_dir() {
             return Err(unprovable());
         }
+        // Declaration to its verified keys' (sequence, image).
+        let mut declarations: BTreeMap<String, Vec<(u64, String)>> = BTreeMap::new();
         for entry in fs::read_dir(&namespace).map_err(|_| unprovable())? {
             let path = entry.map_err(|_| unprovable())?.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -186,14 +198,42 @@ fn current_images(candidate: &Candidate) -> Result<BTreeSet<String>, CandidateEr
             let receipt: Receipt =
                 crate::provider::state::read_bounded(&path, super::MAX_RECEIPT_BYTES)
                     .map_err(|_| unprovable())?;
-            if receipt.phase == Phase::ContentIdVerified
-                && let Some(id) = receipt.image_id
-            {
-                current.insert(id);
+            if receipt.phase != Phase::ContentIdVerified {
+                continue;
+            }
+            let Some(id) = receipt.image_id else { continue };
+            match (receipt.declaration, receipt.sequence) {
+                (Some(declaration), Some(sequence)) => declarations
+                    .entry(declaration)
+                    .or_default()
+                    .push((sequence, id)),
+                _ => {
+                    protected.insert(id, Retained::Current);
+                }
+            }
+        }
+        for mut keys in declarations.into_values() {
+            keys.sort_by_key(|key| std::cmp::Reverse(key.0));
+            let mut sequences = keys
+                .iter()
+                .map(|(sequence, _)| *sequence)
+                .collect::<Vec<_>>();
+            sequences.dedup();
+            for (sequence, id) in keys {
+                let reason = if Some(&sequence) == sequences.first() {
+                    Retained::Current
+                } else if Some(&sequence) == sequences.get(1) {
+                    Retained::Previous
+                } else {
+                    continue;
+                };
+                // An image two keys share keeps its strongest reason.
+                let slot = protected.entry(id).or_insert(reason);
+                *slot = (*slot).min(reason);
             }
         }
     }
-    Ok(current)
+    Ok(protected)
 }
 
 /// Whether listed labels are exactly this pool's build ownership labels.
@@ -225,7 +265,7 @@ fn owned_by(labels: &Value, owner: &str) -> bool {
 pub(super) fn plan(
     images: &[Value],
     owner: &str,
-    current: &BTreeSet<String>,
+    current: &BTreeMap<String, Retained>,
     referenced: &BTreeSet<String>,
 ) -> Result<(Vec<String>, BTreeMap<String, Retained>), CandidateError> {
     if images.len() > MAX_BUILD_IMAGES {
@@ -249,8 +289,8 @@ pub(super) fn plan(
             .to_owned();
         let reason = if !owned_by(&image["Labels"], owner) {
             Some(Retained::NotOwned)
-        } else if current.contains(&id) {
-            Some(Retained::Current)
+        } else if let Some(reason) = current.get(&id) {
+            Some(*reason)
         } else if referenced.contains(&id) {
             Some(Retained::Referenced)
         } else {
@@ -335,6 +375,57 @@ pub fn reclaim_build_images(candidate: &Candidate) -> Result<ReclaimReport, Cand
     run(candidate, &LivePool { candidate })
 }
 
+/// Why a best-effort reclamation removed nothing.
+#[derive(Debug, Serialize)]
+pub struct Skipped {
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// The outcome of `runtime reclaim-build-images --best-effort`: a [`ReclaimReport`],
+/// plus `skipped` when reclamation could not run (a build is admitted, the runtime is
+/// busy or stopped, or the retained state could not be read) and nothing was removed.
+#[derive(Debug, Serialize)]
+pub struct BestEffortReport {
+    #[serde(flatten)]
+    pub report: ReclaimReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<Skipped>,
+}
+
+/// Reclaim for a caller that must not fail on it (`up` after readiness): every refusal
+/// or error becomes `skipped` in the report instead. Bounded like [`run`]: a
+/// non-blocking lease, bounded scans and one removal call per candidate image.
+pub(super) fn best_effort<P: ReclaimPool>(candidate: &Candidate, pool: &P) -> BestEffortReport {
+    match run(candidate, pool) {
+        Ok(report) => BestEffortReport {
+            report,
+            skipped: None,
+        },
+        Err(error) => BestEffortReport {
+            report: ReclaimReport {
+                removed: Vec::new(),
+                retained: BTreeMap::new(),
+                cache_reclaimed_bytes: None,
+            },
+            skipped: Some(Skipped {
+                code: error.code,
+                // Only fixed messages are safe to show; others may hold runtime values.
+                message: if error.message_fixed {
+                    error.message
+                } else {
+                    "Build image reclamation did not run; nothing was removed.".to_owned()
+                },
+            }),
+        },
+    }
+}
+
+/// `runtime reclaim-build-images --best-effort`: see [`best_effort`].
+pub fn reclaim_build_images_best_effort(candidate: &Candidate) -> BestEffortReport {
+    best_effort(candidate, &LivePool { candidate })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,7 +459,7 @@ mod tests {
                 &owner_label("other-pool"),
             ),
         ];
-        let current = BTreeSet::from([B.to_owned()]);
+        let current = BTreeMap::from([(B.to_owned(), Retained::Current)]);
         let referenced = BTreeSet::from([C.to_owned()]);
         let (remove, retained) = plan(&images, &owner, &current, &referenced).unwrap();
         assert_eq!(remove, vec![A.to_owned()]);

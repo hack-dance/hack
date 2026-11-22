@@ -71,7 +71,10 @@ command, and the image builder, which `native setup` installs with the rest of
 the runtime. A home that an earlier build set up does not have it yet: `up` and
 `hack doctor` say so, and `native setup --accept-downloads` adds it
 ([the image builder](setup.md#the-image-builder)). Each distinct build runs once
-and is shared by the services that use it.
+and is shared by the services that use it. A build may use `context`, `dockerfile`,
+`target` and literal `args`. Any other build field, such as `additional_contexts`,
+`ssh` or `dockerfile_inline`, keeps the project on the Compose backend: `up` names
+the service and the field, and prints the command that runs it there.
 
 An image is reused while its build inputs are unchanged: the Dockerfile, the ignore
 file, the target, the args, and every file in the build context the ignore file lets

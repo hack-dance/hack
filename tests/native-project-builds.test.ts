@@ -153,6 +153,29 @@ test.each([
   expect(message).not.toContain("HACK_RUNTIME_BACKEND");
 });
 
+test("admission names a known unsupported build field, never an unknown key", () => {
+  const message = (build: Record<string, unknown>) => {
+    try {
+      admit({ build: { context: "..", ...build } });
+    } catch (error) {
+      return (error as Error).message;
+    }
+    throw new Error("expected a refusal");
+  };
+  expect(message({ additional_contexts: { extra: "synthetic-canary" } })).toBe(
+    "Native foreground up cannot build service app: build.additional_contexts is not supported by native builds (native builds read one context directory); only build context, dockerfile, target and literal args are supported. Values were omitted; no hook, VM or build was started."
+  );
+  expect(message({ secrets: ["synthetic-canary"] })).toContain(
+    "build.secrets is not supported by native builds; only build context"
+  );
+  const unknown = message({ "private-key-name": "synthetic-canary" });
+  expect(unknown).toContain(
+    "cannot build service app: only build context, dockerfile, target and literal args are supported."
+  );
+  expect(unknown).not.toContain("private-key-name");
+  expect(unknown).not.toContain("synthetic-canary");
+});
+
 test("builds refuse unless explicitly enabled, and projects without builds are unaffected", () => {
   const services = { web: { build: "." }, db: { image: "postgres:17" } };
   expect(() =>

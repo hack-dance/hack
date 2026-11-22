@@ -1,6 +1,9 @@
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
-import { NATIVE_BUILD_FIELDS } from "../backends/native-project-builds.ts";
+import {
+  NATIVE_BUILD_FIELDS,
+  unsupportedNativeBuildField,
+} from "../backends/native-project-builds.ts";
 import {
   type NativePlatformMode,
   selectNativePlatformModes,
@@ -674,11 +677,88 @@ export function projectSelectorArgs(opts: {
  * `E_NATIVE_PROJECT_UNSUPPORTED`, one line, and a `detail` that lists only the
  * closed feature names.
  */
+const LINE_BREAK = /[\r\n]/;
+/** Compose service names that a refusal may print as they are. */
+const PRINTABLE_SERVICE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+
+/**
+ * What keeps a native build on the Compose backend, for the refusal: the first
+ * service (in name order) whose build declares a field native builds lack, the
+ * field from a fixed list, and how many other services also need the Compose
+ * backend for their build. Authored keys outside the list are never printed, and
+ * a service name only when it is plain.
+ */
+export interface UnsupportedNativeBuild {
+  readonly service?: string;
+  /** `build.<field>`, or `image together with build`; absent for unknown keys. */
+  readonly what?: string;
+  readonly reason?: string;
+  readonly others: number;
+}
+
+/** The {@link UnsupportedNativeBuild} of a Compose document, with builds enabled. */
+export function unsupportedNativeBuild(
+  compose: unknown
+): UnsupportedNativeBuild | undefined {
+  if (!(isRecord(compose) && isRecord(compose.services))) {
+    return;
+  }
+  const refused = Object.entries(compose.services)
+    .filter(
+      (entry): entry is [string, Record<string, unknown>] =>
+        isRecord(entry[1]) && isUnsupportedBuild(entry[1], true)
+    )
+    .sort(([a], [b]) => codeUnitOrder(a, b));
+  const first = refused[0];
+  if (!first) {
+    return;
+  }
+  const [name, service] = first;
+  return {
+    ...(PRINTABLE_SERVICE.test(name) ? { service: name } : {}),
+    ...unsupportedBuildWhat(service),
+    others: refused.length - 1,
+  };
+}
+
+/** Plain code-unit order, independent of the locale. */
+function codeUnitOrder(a: string, b: string): number {
+  if (a === b) {
+    return 0;
+  }
+  return a < b ? -1 : 1;
+}
+
+function unsupportedBuildWhat(
+  service: Record<string, unknown>
+): Pick<UnsupportedNativeBuild, "what" | "reason"> {
+  if (Object.hasOwn(service, "image")) {
+    return { what: "image together with build" };
+  }
+  const field = isRecord(service.build)
+    ? unsupportedNativeBuildField(service.build)
+    : undefined;
+  return field ? { what: field.field, reason: field.reason } : {};
+}
+
+function unsupportedBuildSentence(build: UnsupportedNativeBuild): string {
+  const who = build.service ? `Service ${build.service}` : "A service";
+  const what = build.what ?? "a build field native builds lack";
+  const why = build.reason ? `: ${build.reason}` : "";
+  const more =
+    build.others > 0
+      ? ` ${build.others} other service${build.others === 1 ? "" : "s"} also need${build.others === 1 ? "s" : ""} the Compose backend for their build.`
+      : "";
+  return ` ${who} uses ${what}${why}.${more}`;
+}
+
 export function composeBackendRefusal(
   opts: {
     readonly features: readonly ComposeBackendFeature[];
     readonly restart: boolean;
     readonly foreignNetworks?: readonly string[];
+    /** With builds enabled: which build needs the Compose backend, if known. */
+    readonly build?: UnsupportedNativeBuild;
     /** The selected project's root, printed as `--path` in the fallback. */
     readonly projectRoot?: string;
     /** The `--branch` the refused command was given, if any. */
@@ -691,11 +771,44 @@ export function composeBackendRefusal(
   const names = opts.foreignNetworks?.length
     ? ` Foreign external networks: ${opts.foreignNetworks.join(", ")}.`
     : "";
+  const fallback = composeBackendCommand([
+    opts.restart ? "restart" : "up",
+    ...projectSelectorArgs(opts),
+  ]);
+  const build =
+    opts.build &&
+    opts.buildsEnabled === true &&
+    opts.features.includes("unsupported_build")
+      ? opts.build
+      : undefined;
   return new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
-    message: `Native \`${command}\` does not support ${describeComposeBackendFeatures(opts.features, opts)}; this project runs on the Compose backend. To run it there: ${composeBackendCommand([opts.restart ? "restart" : "up", ...projectSelectorArgs(opts)])}. Nothing was started or stopped.${names}`,
+    message: `Native \`${command}\` does not support ${describeComposeBackendFeatures(opts.features, opts)}; this project runs on the Compose backend. To run it there: ${fallback}. Nothing was started or stopped.${names}${build ? unsupportedBuildSentence(build) : ""}`,
     detail: { backend: "compose", features: [...opts.features] },
+    ...(build && opts.features.length === 1
+      ? { startBlocker: unsupportedBuildBlocker(build, fallback) }
+      : {}),
   });
+}
+
+/** The three-line start blocker when an unsupported build field is the only reason. */
+function unsupportedBuildBlocker(
+  build: UnsupportedNativeBuild,
+  fallback: string
+) {
+  const what = build.what ?? "a build field native builds lack";
+  const printable = !LINE_BREAK.test(fallback);
+  return {
+    thing: "build",
+    problem: `${build.service ?? "a service"} uses ${what}${build.others > 0 ? ` (and ${build.others} more)` : ""}`,
+    ...(build.reason ? { which: build.reason } : {}),
+    ...(printable
+      ? {
+          needs: `remove ${build.what ?? "that field"} for native builds, or run this project on the Compose backend`,
+          command: fallback,
+        }
+      : {}),
+  };
 }
 
 /**
@@ -725,11 +838,18 @@ export async function refuseNativeComposeBackendFeatures(
     buildsEnabled: opts.buildsEnabled,
   });
   if (features.length > 0) {
+    const document =
+      features.includes("external_network") ||
+      (opts.buildsEnabled === true && features.includes("unsupported_build"))
+        ? await readNativeComposeDocument(opts.composeFile)
+        : undefined;
     const foreignNetworks = features.includes("external_network")
-      ? foreignComposeNetworkNames(
-          await readNativeComposeDocument(opts.composeFile)
-        )
+      ? foreignComposeNetworkNames(document)
       : [];
-    throw composeBackendRefusal({ ...opts, features, foreignNetworks });
+    const build =
+      opts.buildsEnabled === true && features.includes("unsupported_build")
+        ? unsupportedNativeBuild(document)
+        : undefined;
+    throw composeBackendRefusal({ ...opts, features, foreignNetworks, build });
   }
 }

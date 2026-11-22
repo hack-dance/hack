@@ -469,6 +469,10 @@ With it:
   interpolation, a list item without `=` (host variable inheritance), `null`, other
   build keys (`secrets`, `ssh`, `cache_from`, `platforms`, `network` and the rest),
   remote contexts and `image` together with `build` refuse. Values are never shown.
+  With `HACK_NATIVE_BUILDS=1`, `up` names the first such service and the field in the
+  three-line form, for example `! build  web uses build.ssh (SSH agent forwarding into
+  a native build is not supported)`, then the Compose-backend command. Only Compose's
+  own build field names are printed; any other key is not.
 - Build args are not secrets: as with Docker, the image records them in its history.
   A build arg whose value equals a `hack env` secret value of this project and
   environment refuses before any hook or VM effect, naming the service and the

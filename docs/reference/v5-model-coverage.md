@@ -147,7 +147,7 @@ liveness/reachability controls have their own documented assumptions.
 | [service-restart-policy](../../tests/models/tla/service-restart-policy/RestartPolicy.tla) | 134 | 6 |
 | [relay-fence](../../tests/models/tla/relay-fence/RelayFence.tla) | 16 | 2 |
 | [pool-emulation](../../tests/models/tla/pool-emulation/Emulation.tla) | 13 | 3 |
-| [native-pool-stop](../../tests/models/tla/native-pool-stop/PoolStop.tla) | 210 | 10 |
+| [native-pool-stop](../../tests/models/tla/native-pool-stop/PoolStop.tla) | 210 | 11 |
 | [start-graph](../../tests/models/tla/start-graph/COVERAGE.md) | 1,656,372 + 81,534 two-boot | 10 |
 | [probe-readiness](../../tests/models/tla/probe-readiness/ProbeReadiness.tla) | 175,757 | 7 |
 | [native-build-retention](../../tests/models/tla/native-build-retention/BuildRetention.tla) | 6,181 | 4 |

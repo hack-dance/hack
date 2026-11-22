@@ -128,7 +128,7 @@ test.each([
   "a\r\t b",
 ])("printed recovery values round-trip through POSIX sh: %j", (value) => {
   const command = printedShellCommand(["printf", "%s", value]);
-  expect(command).toBe(command.split("\n")[0]);
+  expect(command).not.toContain("\n");
   const result = Bun.spawnSync(["/bin/sh", "-c", command], { stdout: "pipe" });
   expect(result.exitCode).toBe(0);
   expect(result.stdout.toString()).toBe(value);

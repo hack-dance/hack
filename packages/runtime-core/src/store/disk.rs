@@ -227,18 +227,54 @@ struct Archive {
 
 impl Archive {
     fn remove(self) {
-        if lock_for_cleanup(&self.lock, &self.path)
-            && is_current(&self.directory, &self.path).unwrap_or(false)
+        if !(lock_for_cleanup(&self.lock, &self.path)
+            && is_current(&self.directory, &self.path).unwrap_or(false))
         {
-            // The lock descriptor stays open until recursive removal returns.
-            // remove_dir_all does not follow symlinks in the tree.
-            let _ = fs::remove_dir_all(&self.path);
+            return;
         }
+        // An archive can itself have been opened as another store's base: that
+        // store holds `hack.store-1/lock` inside it. Take that lock too, without
+        // waiting; if it is held, or the inner directory is not a plain one, keep
+        // the archive.
+        let Ok(inner_lock) = lock_inner_store(&self.directory) else {
+            return;
+        };
+        // Both lock descriptors stay open until recursive removal returns.
+        // remove_dir_all does not follow symlinks in the tree.
+        let _ = fs::remove_dir_all(&self.path);
+        drop(inner_lock);
     }
+}
+
+/// The lock a store opened with this directory as its base would hold, taken
+/// exclusively without waiting. `Ok(None)` when no such store exists inside.
+fn lock_inner_store(directory: &File) -> io::Result<Option<File>> {
+    let name =
+        CString::new(FORMAT_DIRECTORY).map_err(|_| io::Error::from(ErrorKind::InvalidInput))?;
+    let inner = match open_at(directory, &name, libc::O_RDONLY | libc::O_DIRECTORY) {
+        Ok(inner) => inner,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let lock = match open_at(&inner, c"lock", libc::O_RDWR) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !lock.metadata()?.is_file() {
+        return Err(ErrorKind::InvalidData.into());
+    }
+    flock(&lock, libc::LOCK_EX | libc::LOCK_NB)?;
+    Ok(Some(lock))
 }
 
 /// Use the timestamp in the archive name. A newly set-aside directory may
 /// have a much older modification time.
+///
+/// Only a directory with this base's `SET_ASIDE` marker is ever removed. An
+/// archive that lost its marker (for example a crash between writing the marker
+/// and the rename, which leaves the marker in the live root, where it is removed)
+/// is kept indefinitely rather than guessed at.
 pub(super) fn cleanup_archives(base: &Path, owner: u32) {
     #[cfg(test)]
     assert_cleanup_shared_lock(base);
@@ -333,26 +369,50 @@ fn cleanup_legacy_layout(base: &Path, owner: u32) {
     }
 }
 
+/// The name `VERSION` takes while the flat layout is being removed. It is the
+/// last entry removed, so an interrupted migration is finished by a later open.
+const FLAT_MIGRATING: &str = "VERSION.migrating";
+
+/// Remove the flat P1 layout from `base`, holding its own lock.
+///
+/// Order, chosen so any interruption is retried and a P1 process never sees a
+/// flat store it would mistake for a damaged one:
+/// 1. the flat directories; if any remains, or `key` is not a plain removable
+///    file, nothing else is touched;
+/// 2. `VERSION` is renamed to `VERSION.migrating` in one step: from then on a
+///    P1 opener finds no published flat store (at most an unfinished one, whose
+///    key it reuses), never `VERSION` without its key;
+/// 3. `key`, then `lock`;
+/// 4. `VERSION.migrating` last, the marker that tells a later open to finish.
+///
+/// When another process holds the flat lock, the open still succeeds and the
+/// flat layout is left for a later open (best effort).
 fn cleanup_flat_layout(base: &Path, owner: u32) {
     let Ok(directory) = open_owned_directory(base, owner) else {
         return;
     };
-    let Ok(lock) = open_cleanup_lock(&directory, owner) else {
-        return;
-    };
-    if !lock_for_cleanup(&lock, base) || !has_legacy_version(&directory, owner).unwrap_or(false) {
+    let migrating = CString::new(FLAT_MIGRATING)
+        .ok()
+        .is_some_and(|name| has_marker(&directory, &name, owner, VERSION_1).unwrap_or(false));
+    if !migrating && !has_marker(&directory, c"VERSION", owner, VERSION_1).unwrap_or(false) {
         return;
     }
-    // Directories first. While any of them remains, nothing else is touched: a P1
-    // process that opens the base later must find VERSION, key and lock together,
-    // or it would treat a lone VERSION as a lost key and set the whole base aside,
-    // moving the live hack.store-1 with it.
+    // While VERSION is published the flat lock must exist and be taken; once
+    // the migration is under way it may already be gone.
+    let lock = match open_cleanup_lock(&directory, owner) {
+        Ok(lock) => Some(lock),
+        Err(error) if migrating && error.kind() == ErrorKind::NotFound => None,
+        Err(_) => return,
+    };
+    if let Some(lock) = &lock
+        && !lock_for_cleanup(lock, base)
+    {
+        return;
+    }
     let mut removed = true;
     for name in DIRECTORIES {
         removed &= remove_owned_directory(&base.join(name), owner);
     }
-    // The key must be removable once VERSION is gone (absent, or a regular file of
-    // this user); anything else keeps the whole flat store for a later retry.
     let key_path = base.join("key");
     let key_removable = match fs::symlink_metadata(&key_path) {
         Err(error) => error.kind() == ErrorKind::NotFound,
@@ -361,21 +421,39 @@ fn cleanup_flat_layout(base: &Path, owner: u32) {
     if !(removed && key_removable) {
         return;
     }
-    // Then VERSION, while the lock is still held: once it is gone a P1 opener finds
-    // no flat store to adopt. Only then the key, and the lock name last, so no P1
-    // process can lock a fresh inode while VERSION still names the flat store.
-    let version_path = base.join("VERSION");
-    if !(remove_file_if_present(&version_path).is_ok() && absent(&version_path)) {
+    let marker_path = base.join(FLAT_MIGRATING);
+    if !migrating {
+        if fs::rename(base.join("VERSION"), &marker_path).is_err() {
+            return;
+        }
+        if flat_step("VERSION.migrating") {
+            return;
+        }
+    }
+    if !(remove_file_if_present(&key_path).is_ok() && absent(&key_path)) || flat_step("key") {
         return;
     }
+    let lock_path = base.join("lock");
+    if !(remove_file_if_present(&lock_path).is_ok() && absent(&lock_path)) || flat_step("lock") {
+        return;
+    }
+    let _ = remove_file_if_present(&marker_path);
+    flat_step("marker");
+}
+
+/// Record a finished migration step; in tests, `true` stops the migration there
+/// (as a crash would). Always `false` outside tests.
+fn flat_step(step: &'static str) -> bool {
     #[cfg(test)]
-    FLAT_FINAL_REMOVALS.with_borrow_mut(|order| order.push("VERSION"));
-    let _ = remove_file_if_present(&key_path);
-    #[cfg(test)]
-    FLAT_FINAL_REMOVALS.with_borrow_mut(|order| order.push("key"));
-    let _ = remove_file_if_present(&base.join("lock"));
-    #[cfg(test)]
-    FLAT_FINAL_REMOVALS.with_borrow_mut(|order| order.push("lock"));
+    {
+        FLAT_FINAL_REMOVALS.with_borrow_mut(|order| order.push(step));
+        STOP_FLAT_AFTER.get() == Some(step)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = step;
+        false
+    }
 }
 
 fn open_cleanup_lock(directory: &File, owner: u32) -> io::Result<File> {
@@ -615,8 +693,10 @@ fn read_key(root: &Path, owner: u32, probed: &Metadata) -> Result<(File, Zeroizi
 thread_local! {
     pub(super) static CHECK_CLEANUP_LOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static LEGACY_VERSION_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// The order in which the flat migration removed VERSION and lock.
+    /// The steps the flat migration finished, in order.
     pub(super) static FLAT_FINAL_REMOVALS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Stop the flat migration after this step, as a crash would.
+    pub(super) static STOP_FLAT_AFTER: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
     pub(super) static FAIL_CACHE_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static FAIL_KEY_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static FAIL_KEY_DIR_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };

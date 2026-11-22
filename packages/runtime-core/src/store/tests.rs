@@ -1967,11 +1967,10 @@ fn the_current_build_uses_the_running_images_embedded_identity() {
     );
 }
 
-/// The flat migration removes VERSION, then the key, then the lock, while holding it:
-/// a P1 process opening the base afterwards finds no flat store, and no P1 process
-/// can lock a fresh `lock` while VERSION still names the flat store as live.
+/// The flat migration renames VERSION to its migrating marker, removes the key and
+/// the lock, and removes the marker last.
 #[test]
-fn flat_migration_removes_version_before_the_lock() {
+fn flat_migration_removes_its_marker_last() {
     let fixture = Fixture::new();
     drop(fixture.open());
     let base = fixture.base();
@@ -1981,10 +1980,98 @@ fn flat_migration_removes_version_before_the_lock() {
     drop(fixture.open());
     assert_eq!(
         disk::FLAT_FINAL_REMOVALS.with_borrow(Clone::clone),
-        ["VERSION", "key", "lock"]
+        ["VERSION.migrating", "key", "lock", "marker"]
     );
-    assert!(!base.join("VERSION").exists());
-    assert!(!base.join("lock").exists());
+    for name in ["VERSION", "VERSION.migrating", "key", "lock"] {
+        assert!(!base.join(name).exists(), "{name} left behind");
+    }
+}
+
+/// A migration interrupted after any step is finished by the next open, and at
+/// no point does a P1 opener see a published VERSION without its key and lock.
+#[test]
+fn an_interrupted_flat_migration_is_finished_by_a_later_open() {
+    for stop in ["VERSION.migrating", "key", "lock"] {
+        let fixture = Fixture::new();
+        drop(fixture.open());
+        let base = fixture.base();
+        write_legacy_markers(&base);
+        fs::write(base.join("key"), b"legacy").unwrap();
+        fs::create_dir(base.join("records")).unwrap();
+        disk::STOP_FLAT_AFTER.set(Some(stop));
+        drop(fixture.open());
+        disk::STOP_FLAT_AFTER.set(None);
+        if base.join("VERSION").exists() {
+            assert!(
+                base.join("key").exists() && base.join("lock").exists(),
+                "after {stop}"
+            );
+        }
+        assert!(
+            base.join("VERSION.migrating").exists(),
+            "marker missing after {stop}"
+        );
+        drop(fixture.open());
+        for name in ["VERSION", "VERSION.migrating", "key", "lock", "records"] {
+            assert!(!base.join(name).exists(), "{name} left after {stop}");
+        }
+    }
+}
+
+/// A genuine archive opened as another store's base, in another process that holds
+/// that store's lock (`hack.store-1/lock` inside the archive), is kept by cleanup.
+#[test]
+fn an_archive_opened_as_another_stores_base_is_kept() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    // Make a genuine archive of the first store, then open a second store inside it.
+    let archived_at = disk::unix_millis().unwrap();
+    disk::set_aside(&fixture.base(), &fixture.root(), archived_at).unwrap();
+    let archive = fixture
+        .base()
+        .join(format!("{}.old-{archived_at}", disk::FORMAT_DIRECTORY));
+    assert!(archive.join("SET_ASIDE").is_file());
+    // Age it past seven days so cleanup would otherwise remove it.
+    let aged = archive.with_file_name(format!("{}.old-1", disk::FORMAT_DIRECTORY));
+    fs::rename(&archive, &aged).unwrap();
+    let marker = fs::read_to_string(aged.join("SET_ASIDE")).unwrap();
+    fs::write(
+        aged.join("SET_ASIDE"),
+        marker.replace(&format!("at={archived_at}"), "at=1"),
+    )
+    .unwrap();
+    fs::set_permissions(aged.join("SET_ASIDE"), fs::Permissions::from_mode(0o600)).unwrap();
+    // Another process opens a store with the archive as its base and keeps it
+    // open: it holds `hack.store-1/lock` inside the archive.
+    let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "store::tests::child_store_opener",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("HACK_STORE_TEST_ROOT", &aged)
+        .env("HACK_STORE_TEST_HOLD_MS", "4000")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // Wait until the child has opened its store (it prints its digest then).
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !aged.join(disk::FORMAT_DIRECTORY).join("VERSION").is_file() {
+        assert!(
+            Instant::now() < deadline,
+            "the holder did not open its store"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    drop(fixture.open());
+    let kept = aged.join(disk::FORMAT_DIRECTORY).is_dir();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert!(kept, "cleanup removed an archive holding a live store");
 }
 
 /// A flat directory that cannot be removed (here a symlinked `records`) keeps

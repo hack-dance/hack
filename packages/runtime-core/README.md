@@ -2142,12 +2142,20 @@ format in a separate subdirectory, currently `hack.store-1/`.
 Rotation publishes a `SET_ASIDE` marker with the canonical base and timestamp
 before renaming the root, and reopening a live root clears a stray marker.
 After opening, best-effort cleanup keeps the newest marked archive for up to
-seven days and removes older or expired copies only from owned directories
-with the matching marker and their own nonblocking exclusive lock.
+seven days and removes older or expired copies. It removes only owned
+directories with the matching marker, and only when both the archive's own
+`lock` and the `hack.store-1/lock` a store opened inside it would hold can be
+taken without waiting. An archive without its marker is kept indefinitely
+rather than guessed at.
+
 Cleanup checks ownership and avoids symlinks before probing the P1 `VERSION`
-marker in the old flat layout or a `store.old-<digits>` sibling, takes each
-layout's own nonblocking exclusive lock before removing entries, and removes
-flat `VERSION` only after the other flat entries are gone.
+in the old flat layout or a `store.old-<digits>` sibling, and takes that
+layout's own lock without waiting. If another process holds it, the open still
+succeeds and the flat layout is left for a later open. Migration removes the flat
+directories first; renames `VERSION` to `VERSION.migrating`, after which a P1
+process sees no published flat store; then removes `key` and `lock`; and
+removes `VERSION.migrating` last, so any interruption is finished by a later
+open.
 
 `record()` and `put_cas()` can fail if a directory sits at the write path or
 a shard has the wrong mode or is a symlink. Writes leave that damage in place.

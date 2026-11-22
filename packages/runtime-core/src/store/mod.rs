@@ -5,10 +5,14 @@
 //! subdirectory, currently `hack.store-1/`. Rotation writes a `SET_ASIDE` marker
 //! with the canonical base and archive timestamp before renaming the root, and
 //! reopening a live root clears a stray marker. After a successful open, best-effort
-//! cleanup keeps the newest marked archive for up to seven days and removes owned
-//! archives only with their own nonblocking exclusive lock. The old flat layout
-//! and P1 sibling archives require the P1 `VERSION` marker and their own nonblocking
-//! exclusive lock, and the flat `VERSION` is removed after the other entries are gone.
+//! cleanup keeps the newest marked archive for up to seven days. It removes an owned
+//! archive only when both its own `lock` and the `hack.store-1/lock` a store opened
+//! inside it would hold are taken without waiting; an archive without its marker is
+//! kept indefinitely. The old flat layout and P1 sibling archives require the P1
+//! `VERSION` and their own lock, taken without waiting. A held flat lock leaves the
+//! flat layout for a later open; the open still succeeds. The flat migration renames
+//! `VERSION` to `VERSION.migrating` once the flat directories are gone, then removes
+//! `key` and `lock`, and removes the marker last, so a later open finishes it.
 //!
 //! `record()` and `put_cas()` can fail on a directory at the write path or a
 //! wrong-mode or symlinked shard. Writes leave that damage in place. Callers must

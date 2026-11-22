@@ -18,6 +18,7 @@ import {
   scopedHackCommand,
 } from "../lib/printed-shell-command.ts";
 import { withProcessDeadline } from "../lib/process-deadline.ts";
+import { discoverProjectInputs } from "../lib/project-input-selection.ts";
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
@@ -464,6 +465,7 @@ import {
   findRepoRootForInit,
   type ProjectLifecycleCommand,
   readProjectConfig,
+  readProjectConfigFiles,
   readProjectDevHost,
   resolveProjectOauthAliasHost,
   resolveProjectRouteBaseHosts,
@@ -4124,6 +4126,54 @@ function resolveInternalSettings(
   };
 }
 
+async function refuseNativeRemoteCommand(
+  ctx: CliContext,
+  options: {
+    readonly path: string | undefined;
+    readonly project: string | undefined;
+    readonly use: string | undefined;
+  }
+): Promise<void> {
+  if (process.env.HACK_RUNTIME_BACKEND !== "native") {
+    return;
+  }
+  if (options.use === undefined) {
+    const selected =
+      options.project === undefined
+        ? await discoverProjectInputs({
+            startDir: resolveStartDir(ctx, options.path),
+          })
+        : undefined;
+    const directory =
+      selected?.kind === "legacy" ? selected.composeDirectories[0] : undefined;
+    const discoveredDir =
+      selected && directory
+        ? resolve(selected.projectRoot, directory)
+        : undefined;
+    const projectDir =
+      options.project === undefined
+        ? discoveredDir
+        : (
+            await resolveRegisteredProjectOption({
+              projectOpt: options.project,
+            })
+          ).projectDir;
+    if (
+      !(
+        projectDir &&
+        (await readProjectConfigFiles(projectDir)).prerequisites?.config
+          ?.selected.length
+      )
+    ) {
+      return;
+    }
+  }
+  throw new HackCliError({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message: "Remote selection currently requires the Compose backend.",
+  });
+}
+
 async function resolveRemoteStartupServices(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly composeProjectName: string | null;
@@ -7674,16 +7724,8 @@ async function handleUpUnlocked({
       target: args.options.target,
       services: args.positionals.services,
     });
-    const remoteProject =
-      args.options.project === undefined
-        ? await findProjectContext(resolveStartDir(ctx, args.options.path))
-        : await resolveRegisteredProjectOption({
-            projectOpt: args.options.project,
-          });
-    if (remoteProject) {
-      await prepareProjectRemoteChoices(remoteProject, args.options.use);
-    }
   }
+  await refuseNativeRemoteCommand(ctx, args.options);
   if (resolveNativeRuntimeSelection()) {
     // Once per `hack up`, whichever native start path follows (HACK-2026).
     noteNativeBackendBeta({ json: args.options.json === true });
@@ -10494,17 +10536,7 @@ async function handleRestart({
   });
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
-  if (process.env.HACK_RUNTIME_BACKEND === "native") {
-    const remoteProject =
-      args.options.project === undefined
-        ? await findProjectContext(resolveStartDir(ctx, args.options.path))
-        : await resolveRegisteredProjectOption({
-            projectOpt: args.options.project,
-          });
-    if (remoteProject) {
-      await prepareProjectRemoteChoices(remoteProject, args.options.use);
-    }
-  }
+  await refuseNativeRemoteCommand(ctx, args.options);
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,
@@ -11693,17 +11725,7 @@ async function handleRun({
 }): Promise<number> {
   refuseEmptyNativeRunSelection(args);
   const background = parseBackgroundRequest(args.options);
-  if (process.env.HACK_RUNTIME_BACKEND === "native") {
-    const remoteProject =
-      args.options.project === undefined
-        ? await findProjectContext(resolveStartDir(ctx, args.options.path))
-        : await resolveRegisteredProjectOption({
-            projectOpt: args.options.project,
-          });
-    if (remoteProject) {
-      await prepareProjectRemoteChoices(remoteProject, args.options.use);
-    }
-  }
+  await refuseNativeRemoteCommand(ctx, args.options);
   const authored = await startNativeBackgroundIfRequested({
     ctx,
     args,

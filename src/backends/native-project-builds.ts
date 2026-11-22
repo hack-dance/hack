@@ -18,8 +18,10 @@ import {
  * closed, coded refusal. After the runtime is up, each distinct build runs once
  * through `runtime build-image`; the service is then pinned to the returned content
  * ID, so review, graph admission, receipts and restore treat it as an image
- * service. Restore and restart never build: they use the retained content ID or
- * refuse before any graph effect.
+ * service. Every `up`, including one that restores a stopped run, asks the runtime
+ * for each build: an unchanged build key reuses its image without building, a changed
+ * one (Dockerfile, ignore file, target, arguments) builds (HACK-2533). Restart reuses
+ * containers, so it refuses when a build would change an image.
  */
 
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
@@ -522,20 +524,13 @@ export function refuseManagedSecretBuildArguments(opts: {
   }
 }
 
-/** A refusal when a retained run's built image is gone: restore never builds. */
-function retainedMissing(service: string): ClosedCliError {
-  return new ClosedCliError(
-    `The retained built image for ${service} was removed; start fresh instead of restoring. Nothing was built.`
-  );
-}
-
 /**
  * Build (or reuse) every admitted build service in the selected profiles and pin it to
- * its content ID. As with Compose `up`, a build service outside the selected profiles
- * is neither built nor pinned: it keeps its `build` declaration, which review accepts
- * for inactive services, so restore and restart never need an image for it. Identical
- * declarations build once. Retained content IDs always win, and a restore with a
- * missing retained image refuses instead of building.
+ * its content ID; returns the pinned services. As with Compose `up`, a build service
+ * outside the selected profiles is neither built nor pinned: it keeps its `build`
+ * declaration, which review accepts for inactive services. Identical declarations build
+ * once. A retained run's image never stands in for a build: the runtime reuses it only
+ * while its build key is unchanged, so an edited Dockerfile is built after `down` too.
  */
 export async function buildNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -544,28 +539,66 @@ export async function buildNativeProjectImages(opts: {
   readonly profiles: readonly string[];
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;
   readonly specs: Record<string, Record<string, unknown>>;
-  readonly retainedImages: ReadonlyMap<string, string>;
-  readonly restore: boolean;
   readonly rebuild: boolean;
   readonly signal: AbortSignal;
   readonly invoke?: typeof invokeNativeBuild;
-}): Promise<void> {
+}): Promise<ReadonlySet<string>> {
   const pending = pendingBuilds(opts);
-  if (pending.size === 0) {
-    return;
+  if (pending.size > 0) {
+    await runPendingBuilds({ ...opts, pending });
   }
-  await runPendingBuilds({ ...opts, pending });
+  return new Set([...pending.values()].flatMap((entry) => entry.services));
+}
+
+/**
+ * Restart reuses the current or retained containers, so it cannot take a rebuilt image.
+ * Ask the runtime for each active build (an unchanged build key reuses its image without
+ * building) and refuse, before anything is stopped, when one resolves to an image other
+ * than the one the graph runs.
+ */
+export async function requireUnchangedNativeBuilds(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly branch: string | null | undefined;
+  readonly profiles: readonly string[];
+  readonly builds: ReadonlyMap<string, NativeBuildRequest>;
+  readonly specs: Record<string, Record<string, unknown>>;
+  readonly images: ReadonlyMap<string, string>;
+  readonly signal: AbortSignal;
+  readonly invoke?: typeof invokeNativeBuild;
+}): Promise<void> {
+  const copies: Record<string, Record<string, unknown>> = {};
+  for (const service of opts.builds.keys()) {
+    const spec = opts.specs[service];
+    if (spec && opts.images.has(service)) {
+      copies[service] = { ...spec };
+    }
+  }
+  const builds = new Map(
+    [...opts.builds].filter(([service]) => service in copies)
+  );
+  const pinned = await buildNativeProjectImages({
+    ...opts,
+    builds,
+    specs: copies,
+    rebuild: false,
+  });
+  for (const service of pinned) {
+    if (copies[service]?.image !== opts.images.get(service)) {
+      throw new ClosedCliError(
+        `The build inputs of ${service} changed since this graph started, and hack restart reuses its containers. Run hack down, then hack up, to recreate it from the new image; nothing was stopped.`
+      );
+    }
+  }
 }
 
 type PendingBuild = { request: NativeBuildRequest; services: string[] };
 
-/** Pin retained images, refuse a restore without one, and group identical builds. */
+/** Group identical builds of the active build services. */
 function pendingBuilds(opts: {
   readonly profiles: readonly string[];
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;
   readonly specs: Record<string, Record<string, unknown>>;
-  readonly retainedImages: ReadonlyMap<string, string>;
-  readonly restore: boolean;
 }): Map<string, PendingBuild> {
   const pending = new Map<string, PendingBuild>();
   for (const [service, request] of opts.builds) {
@@ -577,16 +610,6 @@ function pendingBuilds(opts: {
     }
     if (!nativeServiceActive(spec, opts.profiles)) {
       continue;
-    }
-    const retained = opts.retainedImages.get(service);
-    if (retained !== undefined) {
-      pin(spec, retained);
-      continue;
-    }
-    // A retained run selects retained images only while its configuration is
-    // unchanged; then a build service without one refuses instead of building.
-    if (opts.restore && opts.retainedImages.size > 0) {
-      throw retainedMissing(service);
     }
     const identity = JSON.stringify([
       request.context,

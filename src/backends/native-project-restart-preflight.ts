@@ -15,8 +15,10 @@ import {
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   admitNativeProjectBuilds,
+  invokeNativeBuild,
   nativeBuildsEnabled,
   nativeServiceActive,
+  requireUnchangedNativeBuilds,
 } from "./native-project-builds.ts";
 import {
   compileNativeHostDependencySelection,
@@ -106,6 +108,7 @@ const DEFAULTS = {
   retainedImages: selectNativeRetainedImages,
   activeImages: selectNativeActiveImages,
   sourceSize: requireNativeSourceWithinLimit,
+  build: invokeNativeBuild,
 };
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const SHA = /^[a-f0-9]{64}$/;
@@ -346,7 +349,7 @@ async function pinRestartImages(opts: {
         continue;
       }
       throw new ClosedCliError(
-        `Native restart reuses built images and never builds; no running or retained image was found for ${name}. Run hack up to build it; nothing was stopped.`
+        `Native restart reuses built images; no running or retained image was found for ${name}. Run hack up to build it; nothing was stopped.`
       );
     }
     // As at startup, an image service outside the selected profiles is not
@@ -534,25 +537,24 @@ export async function preflightNativeRestart(opts: {
       })
     : undefined;
   input = metadata?.input ?? input;
-  // Restart never builds: an admitted build service must resolve to the image the
-  // current or retained graph already runs (see pinRestartImages).
+  // Restart reuses containers: an admitted build service must still resolve to the
+  // image the current or retained graph runs (see requireUnchangedNativeBuilds).
+  const builds = admitNativeProjectBuilds({
+    services: Object.fromEntries(
+      Object.entries(
+        JSON.parse(input.normalizedComposeJson).services ?? {}
+      ).filter((entry): entry is [string, Record<string, unknown>] =>
+        isRecord(entry[1])
+      )
+    ),
+    projectRoot: opts.scope.projectRoot,
+    composeFile: opts.composeFile,
+    enabled: nativeBuildsEnabled(),
+  });
   const specs = prepareNativeProjectServices(
     input,
     dependencyFile !== undefined,
-    new Set(
-      admitNativeProjectBuilds({
-        services: Object.fromEntries(
-          Object.entries(
-            JSON.parse(input.normalizedComposeJson).services ?? {}
-          ).filter((entry): entry is [string, Record<string, unknown>] =>
-            isRecord(entry[1])
-          )
-        ),
-        projectRoot: opts.scope.projectRoot,
-        composeFile: opts.composeFile,
-        enabled: nativeBuildsEnabled(),
-      }).keys()
-    )
+    new Set(builds.keys())
   );
   // The replacement startup measures captured source before its hooks; refuse an
   // oversized one before the current graph is stopped. Image-only graphs skip it.
@@ -632,6 +634,17 @@ export async function preflightNativeRestart(opts: {
         invoke: deps.invoke,
       })
     : (activeImages?.images ?? new Map<string, string>());
+  await requireUnchangedNativeBuilds({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    branch: opts.scope.branch,
+    profiles: selected.profiles ?? [],
+    builds,
+    specs,
+    images: retainedImages,
+    signal: new AbortController().signal,
+    invoke: deps.build,
+  });
   await pinRestartImages({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,

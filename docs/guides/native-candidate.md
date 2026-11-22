@@ -487,9 +487,13 @@ With it:
 - An existing image for the same build inputs is reused without building. Set
   `HACK_NATIVE_REBUILD=1` to build again; base-image tags then resolve again too.
   Edits to other files in the context do not trigger a rebuild, as with Compose.
-- Restoring an unchanged retained run uses the retained images and never builds; if
-  one is missing, `up` refuses and asks you to start fresh. `hack restart` also never
-  builds: it reuses the running or retained image, or refuses before stopping anything.
+- Every `up` asks the runtime for each build, including an `up` that restores a run
+  stopped with `hack down`. The retained image is reused only while its build inputs
+  are unchanged (Dockerfile, ignore file, target, args); an edited Dockerfile builds a
+  new image and the run's containers are recreated from it, keeping named volumes.
+  `hack restart` reuses the running or retained containers, so it checks the same build
+  inputs first and refuses, before stopping anything, when an image would change: run
+  `hack down` and then `hack up` to recreate it from the new image.
 - "Unchanged" means the same Compose bytes. A run that mounts no project source and
   uses no dependency cache still restores after its Compose file was edited and put
   back, or after any project file was touched; build-context edits do not rebuild it.

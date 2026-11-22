@@ -2627,15 +2627,15 @@ async function startNativeProjectAttempt(
       observed: resumed,
     });
     progress({ phase: "images" });
-    await buildNativeProjectImages({
+    // A restore asks the runtime too: its image is reused only under an unchanged
+    // build key, so a Dockerfile edited after `down` is built (HACK-2533).
+    const built = await buildNativeProjectImages({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       branch: opts.scope.branch,
       profiles,
       builds,
       specs,
-      retainedImages,
-      restore: Boolean(restore),
       rebuild: nativeRebuildRequested(),
       signal: controller.signal,
       invoke: deps.build,
@@ -2644,7 +2644,9 @@ async function startNativeProjectAttempt(
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       specs,
-      retainedImages,
+      retainedImages: new Map(
+        [...retainedImages].filter(([service]) => !built.has(service))
+      ),
       profiles,
       amd64Emulation: input.amd64Emulation,
       signal: controller.signal,

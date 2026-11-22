@@ -21,12 +21,14 @@ import {
   nativeServiceActive,
   refuseEmulatedBuilds,
   refuseManagedSecretBuildArguments,
+  requireUnchangedNativeBuilds,
 } from "../src/backends/native-project-builds.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 
 const IMAGE = `sha256:${"a".repeat(64)}`;
 const RETAINED = `sha256:${"b".repeat(64)}`;
+const REBUILT = `sha256:${"d".repeat(64)}`;
 const KEY = "c".repeat(64);
 const VALUE = "synthetic-literal-value";
 
@@ -214,8 +216,6 @@ test("identical builds run once, pin every service and keep the request private"
       ["other", { ...request(), target: "dev" }],
     ]),
     specs,
-    retainedImages: new Map(),
-    restore: false,
     rebuild: false,
     signal: new AbortController().signal,
     invoke: async ({ requestFile }) => {
@@ -245,12 +245,17 @@ test("identical builds run once, pin every service and keep the request private"
   }
 });
 
-test("retained images win, and restore never builds a missing one", async () => {
+test("every up asks the runtime for each build, a restore too (HACK-2533)", async () => {
   const project = await root();
-  const calls: string[] = [];
-  const invoke = async () => {
-    calls.push("build");
-    return { imageId: IMAGE, buildKey: KEY, reused: true };
+  const keys: string[] = [];
+  // The runtime reuses an image only under an unchanged build key: the fake
+  // answers with the image for whatever key the request's target stands for.
+  const invoke = async ({ requestFile }: { requestFile: string }) => {
+    const target = JSON.parse(await readFile(requestFile, "utf8")).target;
+    keys.push(target ?? "same");
+    return target === "changed"
+      ? { imageId: REBUILT, buildKey: KEY, reused: false }
+      : { imageId: RETAINED, buildKey: KEY, reused: true };
   };
   const base = {
     runtime,
@@ -261,36 +266,67 @@ test("retained images win, and restore never builds a missing one", async () => 
     signal: new AbortController().signal,
     invoke,
   };
-  const specs = { web: { build: "app" } as Record<string, unknown> };
-  await buildNativeProjectImages({
+  const unchanged = { web: { build: "app" } as Record<string, unknown> };
+  const pinned = await buildNativeProjectImages({
     ...base,
     builds: new Map([["web", request()]]),
-    specs,
-    retainedImages: new Map([["web", RETAINED]]),
-    restore: true,
+    specs: unchanged,
   });
-  expect(specs.web).toEqual({ image: RETAINED });
-  expect(calls).toEqual([]);
+  expect([...pinned]).toEqual(["web"]);
+  expect(unchanged.web).toEqual({ image: RETAINED });
 
-  const missing = await buildNativeProjectImages({
-    ...base,
-    builds: new Map([["worker", request()]]),
-    specs: { worker: { build: "app" } },
-    retainedImages: new Map([["web", RETAINED]]),
-    restore: true,
-  }).catch((error: unknown) => error);
-  expect(String(missing)).toContain("Nothing was built");
-  expect(calls).toEqual([]);
-
-  // A retained run whose configuration changed selects no retained images and builds.
+  const changed = { web: { build: "app" } as Record<string, unknown> };
   await buildNativeProjectImages({
     ...base,
-    builds: new Map([["worker", request()]]),
-    specs: { worker: { build: "app" } },
-    retainedImages: new Map(),
-    restore: true,
+    builds: new Map([["web", { ...request(), target: "changed" }]]),
+    specs: changed,
   });
-  expect(calls).toEqual(["build"]);
+  expect(changed.web).toEqual({ image: REBUILT });
+  expect(keys).toEqual(["same", "changed"]);
+});
+
+test("restart refuses before stopping when a build would change the running image", async () => {
+  const project = await root();
+  let calls = 0;
+  const base = {
+    runtime,
+    projectRoot: project,
+    branch: null,
+    profiles: [],
+    signal: new AbortController().signal,
+  };
+  const specs = {
+    web: { build: "app" } as Record<string, unknown>,
+    tools: { build: "app", profiles: ["tools"] } as Record<string, unknown>,
+  };
+  const builds = new Map([
+    ["web", request()],
+    ["tools", request()],
+  ]);
+  await requireUnchangedNativeBuilds({
+    ...base,
+    builds,
+    specs,
+    images: new Map([["web", RETAINED]]),
+    invoke: async () => {
+      calls += 1;
+      return { imageId: RETAINED, buildKey: KEY, reused: true };
+    },
+  });
+  // Only the running service is checked, and the caller's specs are untouched.
+  expect(calls).toBe(1);
+  expect(specs.web).toEqual({ build: "app" });
+  const refused = await requireUnchangedNativeBuilds({
+    ...base,
+    builds,
+    specs,
+    images: new Map([["web", RETAINED]]),
+    invoke: async () => ({ imageId: REBUILT, buildKey: KEY, reused: false }),
+  }).catch((error: unknown) => error);
+  expect(String(refused)).toContain(
+    "The build inputs of web changed since this graph started"
+  );
+  expect(String(refused)).toContain("nothing was stopped");
 });
 
 test("only build services in the selected profiles are built and pinned, as with Compose up", async () => {
@@ -322,26 +358,22 @@ test("only build services in the selected profiles are built and pinned, as with
     ...base,
     profiles: [],
     specs,
-    retainedImages: new Map(),
-    restore: false,
   });
   expect(built).toEqual([""]);
   expect(specs.web).toEqual({ image: IMAGE });
   // The inactive service keeps its declaration: no image, no build, no pin.
   expect(specs.tools).toEqual({ build: "app", profiles: ["tools"] });
 
-  // Restoring that run needs no image for the inactive service.
+  // Restoring that run asks again only for the active service.
   built.length = 0;
   const restored = declared();
   await buildNativeProjectImages({
     ...base,
     profiles: [],
     specs: restored,
-    retainedImages: new Map([["web", RETAINED]]),
-    restore: true,
   });
-  expect(built).toEqual([]);
-  expect(restored.web).toEqual({ image: RETAINED });
+  expect(built).toEqual([""]);
+  expect(restored.web).toEqual({ image: IMAGE });
   expect(restored.tools).toEqual({ build: "app", profiles: ["tools"] });
 
   // Selecting the profile later builds that service then.
@@ -350,10 +382,8 @@ test("only build services in the selected profiles are built and pinned, as with
     ...base,
     profiles: ["tools"],
     specs: selected,
-    retainedImages: new Map(),
-    restore: false,
   });
-  expect(built).toEqual(["", "tools"]);
+  expect(built).toEqual(["", "", "tools"]);
   expect(selected.tools).toEqual({ image: IMAGE, profiles: ["tools"] });
 });
 
@@ -425,8 +455,6 @@ test("an explicit rebuild asks the runtime to build again", async () => {
     profiles: [],
     builds: new Map([["web", request()]]),
     specs: { web: { build: "app" } },
-    retainedImages: new Map(),
-    restore: false,
     rebuild: true,
     signal: new AbortController().signal,
     invoke: async ({ requestFile }) => {
@@ -516,8 +544,6 @@ test("runtime build refusals name the services and the build source policy", asy
         ["worker", request()],
       ]),
       specs: { web: { build: "app" }, worker: { build: "app" } },
-      retainedImages: new Map(),
-      restore: false,
       rebuild: false,
       signal: new AbortController().signal,
       invoke,

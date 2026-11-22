@@ -34,7 +34,7 @@
 //!   `native_build_base_pin`. A Dockerfile's own digest is never replaced. Otherwise,
 //!   with policy `missing`, a fresh receipt's pin or a shared record
 //!   (`run/image-builds/<namespace>/bases/<reference digest>.json`, written atomically
-//!   whenever a tag resolves or a passed pin is verified, trusted for
+//!   only when a tag resolves, never by a by-digest check of a passed pin, trusted for
 //!   [`BASE_RESOLUTION_TTL`], 24 hours) is used before the registry; `rebuild` resolves. A receipt is reused only when every pin chosen for the request equals
 //!   its recorded pin, and a receipt's pins are trusted for 24 hours after they were
 //!   resolved (an unknown time counts as expired).
@@ -215,9 +215,13 @@ pub struct BuildRequest {
     /// A passed pin binds: a Dockerfile base found here builds on exactly that digest
     /// under either policy, or the build refuses `native_build_base_pin`; another digest
     /// is never substituted. It is used directly when this namespace's fresh shared
-    /// resolution record (which only a verified resolution writes) holds exactly that pin,
+    /// resolution record (which only a verified tag resolution writes) holds exactly that pin,
     /// taking that record's resolution time; otherwise the resolver verifies that exact
-    /// digest (manifest by digest, platform, size bounds, no `ONBUILD`) and records it.
+    /// digest (manifest by digest, platform, size bounds, no `ONBUILD`). That check never
+    /// writes the shared tag record (it says nothing about where the tag points now);
+    /// the receipt carries the time of the resolution that produced the pin when known
+    /// (an older record or this key's receipt holding it), else an unknown time, which
+    /// counts as expired.
     /// A base the Dockerfile itself pins by digest always uses its own digest and
     /// ignores a passed pin. Entries for other references are ignored. At most
     /// [`MAX_PINS`] entries, each reference and value at most 512 printable ASCII bytes
@@ -961,8 +965,15 @@ pub(super) fn run<P: BuildPool>(
         .as_ref()
         .map(|(_, receipt)| receipt)
         .filter(|receipt| resolution_fresh(receipt.bases_resolved_at, pool.now()));
-    let (pins, resolved_at) =
-        choose_pins(pool, inputs, &directory, fresh_receipt, deadline, canceled)?;
+    let (pins, resolved_at) = choose_pins(
+        pool,
+        inputs,
+        &directory,
+        previous.as_ref(),
+        fresh_receipt,
+        deadline,
+        canceled,
+    )?;
     let reusable = reusable.filter(|(_, previous)| previous.base_pins == pins);
     // A reuse needs no builder; it is verified under the lease if the reuse falls through.
     let builder = if reusable.is_some() {
@@ -1021,7 +1032,7 @@ pub(super) fn run<P: BuildPool>(
     {
         let mut current = previous;
         current.provider_boot_id = identity.boot_id.clone();
-        current.bases_resolved_at = Some(resolved_at);
+        current.bases_resolved_at = resolved_at;
         state::write(&receipt_path, &current)?;
         return Ok(reused(inputs, &id, &pins));
     }
@@ -1066,7 +1077,7 @@ pub(super) fn run<P: BuildPool>(
         // retry is admitted against it rather than the floor.
         image_bytes: previous_bytes,
         base_pins: pins.clone(),
-        bases_resolved_at: Some(resolved_at),
+        bases_resolved_at: resolved_at,
     };
     state::write(&receipt_path, &receipt)?;
     drop(lease);
@@ -1237,13 +1248,19 @@ fn base_record_path(directory: &Path, reference: &str) -> PathBuf {
         .join(format!("{:x}.json", crate::Hex(digest.finalize())))
 }
 
-fn read_base_record(path: &Path, reference: &str, now: SystemTime) -> Option<BaseRecord> {
+/// A well-formed record of `reference`, whatever its age.
+fn valid_base_record(path: &Path, reference: &str) -> Option<BaseRecord> {
     let record: BaseRecord = state::read_bounded(path, MAX_BASE_RECORD_BYTES).ok()?;
     (record.version == BASE_RECORD_VERSION
         && record.reference == reference
-        && pinned_manifest(&record.pinned_reference, &record.source_digest)
-        && resolution_fresh(Some(record.resolved_at), now))
+        && pinned_manifest(&record.pinned_reference, &record.source_digest))
     .then_some(record)
+}
+
+/// A well-formed record of `reference` resolved within [`BASE_RESOLUTION_TTL`].
+fn read_base_record(path: &Path, reference: &str, now: SystemTime) -> Option<BaseRecord> {
+    valid_base_record(path, reference)
+        .filter(|record| resolution_fresh(Some(record.resolved_at), now))
 }
 
 /// Publish a record by rename from a per-process pending file, so concurrent builds
@@ -1349,17 +1366,20 @@ fn verify_passed_pin<P: BuildPool>(
 /// pin, which binds (see [`BuildRequest::pins`]);
 /// under policy `missing`, the fresh receipt's pin or a fresh shared record;
 /// otherwise a registry resolution (recorded for later builds). Returns the pins by
-/// named build context and the oldest resolution time among them.
+/// named build context and the oldest resolution time among them, `None` when one is
+/// unknown. `previous` is this key's receipt, whatever its phase.
 fn choose_pins<P: BuildPool>(
     pool: &P,
     inputs: &Inputs,
     directory: &Path,
+    previous: Option<&Receipt>,
     fresh_receipt: Option<&Receipt>,
     deadline: Instant,
     canceled: &dyn Fn() -> bool,
-) -> Result<(BTreeMap<String, String>, u64), CandidateError> {
+) -> Result<(BTreeMap<String, String>, Option<u64>), CandidateError> {
     let now = pool.now();
     let mut oldest: Option<u64> = None;
+    let mut unknown = false;
     let mut pins = BTreeMap::new();
     for base in &inputs.images {
         if canceled() {
@@ -1387,21 +1407,26 @@ fn choose_pins<P: BuildPool>(
             match read_base_record(&record, &reference, now)
                 .filter(|known| &known.pinned_reference == passed)
             {
-                Some(known) => (known.pinned_reference, known.resolved_at),
+                Some(known) => (known.pinned_reference, Some(known.resolved_at)),
                 None => {
+                    // Verified by digest only: this says nothing about where the tag
+                    // points now, so the shared tag record is left alone, and the time
+                    // carried is the one of the resolution that produced this pin, when
+                    // known (an expired record or this key's earlier receipt holding
+                    // it), else unknown (expired for later reuse).
                     let pinned = verify_passed_pin(pool, base, passed, deadline, canceled)?;
-                    let at = unix_seconds(now);
-                    write_base_record(
-                        &record,
-                        &BaseRecord {
-                            version: BASE_RECORD_VERSION,
-                            reference,
-                            pinned_reference: pinned.pinned_reference.clone(),
-                            source_digest: pinned.source_digest,
-                            resolved_at: at,
-                        },
-                    );
-                    (pinned.pinned_reference, at)
+                    let evidence = valid_base_record(&record, &reference)
+                        .filter(|known| known.pinned_reference == pinned.pinned_reference)
+                        .map(|known| known.resolved_at)
+                        .or_else(|| {
+                            previous
+                                .filter(|receipt| {
+                                    receipt.base_pins.get(&base.context_name)
+                                        == Some(&pinned.pinned_reference)
+                                })
+                                .and_then(|receipt| receipt.bases_resolved_at)
+                        });
+                    (pinned.pinned_reference, evidence)
                 }
             }
         } else if let Some((pin, at)) = fresh_receipt.filter(|_| missing).and_then(|receipt| {
@@ -1410,10 +1435,10 @@ fn choose_pins<P: BuildPool>(
                 receipt.bases_resolved_at?,
             ))
         }) {
-            (pin, at)
+            (pin, Some(at))
         } else if let Some(shared) = read_base_record(&record, &reference, now).filter(|_| missing)
         {
-            (shared.pinned_reference, shared.resolved_at)
+            (shared.pinned_reference, Some(shared.resolved_at))
         } else {
             let resolved = pool.resolve(base, deadline, canceled)?;
             if !pinned_manifest(&resolved.pinned_reference, &resolved.source_digest) {
@@ -1433,13 +1458,19 @@ fn choose_pins<P: BuildPool>(
                     resolved_at: at,
                 },
             );
-            (resolved.pinned_reference, at)
+            (resolved.pinned_reference, Some(at))
         };
-        oldest = Some(oldest.map_or(at, |oldest| oldest.min(at)));
+        match at {
+            Some(at) => oldest = Some(oldest.map_or(at, |oldest| oldest.min(at))),
+            None => unknown = true,
+        }
         pins.insert(base.context_name.clone(), pinned);
     }
-    // The receipt's resolution time is its oldest pin's.
-    Ok((pins, oldest.unwrap_or_else(|| unix_seconds(now))))
+    // The receipt's resolution time is its oldest pin's; unknown if any pin's is.
+    Ok((
+        pins,
+        (!unknown).then(|| oldest.unwrap_or_else(|| unix_seconds(now))),
+    ))
 }
 
 /// Hold the shared build fence as an admitted build does, for the macOS-only lifecycle

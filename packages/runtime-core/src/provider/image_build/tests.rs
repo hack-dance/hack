@@ -1811,9 +1811,17 @@ fn passed_pins_are_hints_used_only_when_a_shared_record_backs_them() {
         .join(&first.namespace)
         .join("bases");
     fs::remove_dir_all(&bases).unwrap();
-    let verified = build(&second_build(&fixture, Policy::Rebuild, passed.clone()));
+    let second = second_build(&fixture, Policy::Rebuild, passed.clone());
+    let verified = build(&second);
     assert_eq!(resolves(), 2);
     assert_eq!(verified.base_pins, passed);
+    // The check wrote no tag record, and the receipt carries the time of the earlier
+    // resolution its own previous receipt recorded for this pin, not now.
+    assert!(!bases.exists());
+    assert_eq!(
+        fixture.receipt(&second).bases_resolved_at,
+        Some(unix_seconds(start))
+    );
     // A record naming another pin (the moved tag) does not replace the passed pin.
     let moved = BTreeMap::from([(
         "docker.io/library/alpine:3.20".to_owned(),
@@ -1873,6 +1881,7 @@ fn a_passed_pin_binds_even_against_another_fresh_receipt() {
         .unwrap()
         .base_pins;
     assert_ne!(x, y);
+    let y_resolved_at = unix_seconds(*pool.now.borrow());
     assert!(build(&a).unwrap().reused, "A's fast path keeps X");
     // With no pin passed, B keeps its own fresh receipt, as before.
     let b = second_build(&fixture, Policy::Missing, BTreeMap::new());
@@ -1893,12 +1902,30 @@ fn a_passed_pin_binds_even_against_another_fresh_receipt() {
         bake["target"]["build"]["contexts"]["alpine:3.20"],
         format!("docker-image://docker.io/library/alpine@{PIN}")
     );
+    // Verifying X by digest left the shared tag record alone: it still says Y, with
+    // the time of the lookup that found Y.
+    let record = base_record_path(
+        &builds_root(&fixture.candidate).join(&b.namespace),
+        "docker.io/library/alpine:3.20",
+    );
+    let shared =
+        read_base_record(&record, "docker.io/library/alpine:3.20", *pool.now.borrow()).unwrap();
+    assert_eq!(shared.pinned_reference, y["docker.io/library/alpine:3.20"]);
+    assert_eq!(shared.resolved_at, y_resolved_at);
+    // No evidence dates X for B (the record and B's receipt held Y), so its time is
+    // unknown and never fresh.
+    assert_eq!(fixture.receipt(&b).bases_resolved_at, None);
+    // A later independent command (no pins) for B follows the registry's Y again.
+    let later = build(&second_build(&fixture, Policy::Missing, BTreeMap::new())).unwrap();
+    assert!(!later.reused);
+    assert_eq!(later.base_pins, y);
+    assert_eq!(fixture.calls(&b), calls + 2);
     // When X cannot be verified (and no record backs it), B refuses instead of using Y.
     build(&second_build(&fixture, Policy::Rebuild, BTreeMap::new())).unwrap();
     pool.unverifiable.borrow_mut().push(PIN.into());
     let error = build(&second_build(&fixture, Policy::Missing, x.clone())).unwrap_err();
     assert_eq!(error.code, "native_build_base_pin");
-    assert_eq!(fixture.calls(&b), calls + 2);
+    assert_eq!(fixture.calls(&b), calls + 3);
 }
 
 #[test]

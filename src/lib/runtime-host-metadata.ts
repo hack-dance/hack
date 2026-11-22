@@ -302,9 +302,9 @@ export function composeServiceAddresses(opts: {
           baseHosts: opts.baseHosts,
         }).value
       : entry.caddy;
-    const host = splitCaddySites(label).flatMap((value) =>
-      extractCaddyLabelHosts({ value })
-    )[0];
+    const host = splitCaddySites(label)
+      .filter((site) => !site.toLowerCase().startsWith("http://"))
+      .flatMap((value) => extractCaddyLabelHosts({ value }))[0];
     if (host) {
       addresses.set(
         service,

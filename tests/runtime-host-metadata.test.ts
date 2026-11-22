@@ -243,7 +243,10 @@ services:
       caddy: external.example
   api:
     labels:
-      caddy: api.sample.hack.local other.example
+      caddy: http://plain.sample.hack.local api.sample.hack.local other.example
+  insecure:
+    labels:
+      caddy: http://only.sample.hack.local
 `;
   const baseHosts = ["sample.hack.local"];
   expect(

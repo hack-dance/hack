@@ -12,7 +12,7 @@ import { basename, dirname, join } from "node:path";
 
 import { resolveGlobalHackDir } from "../config-paths.ts";
 import { HACK_VERSION } from "../hack-version.ts";
-import { validStepIdentifier } from "./key.ts";
+import { type StepBuild, validStepIdentifier } from "./key.ts";
 
 /**
  * A build identity compiled into the CLI (`bun build --define __HACK_BUILD_ID__="…"`).
@@ -26,14 +26,14 @@ declare const __HACK_BUILD_ID__: string | undefined;
  * The CLI build for step keys, or null, which tells the caller not to cache.
  * Null unless the build defines `__HACK_BUILD_ID__` (source runs never do).
  */
-export function stepStoreBuild(): string | null {
+export function stepStoreBuild(): StepBuild | null {
   const id =
     typeof __HACK_BUILD_ID__ === "string" ? __HACK_BUILD_ID__ : undefined;
   if (id === undefined) {
     return null;
   }
   const build = `${HACK_VERSION}+cli:${id}`;
-  return validStepIdentifier(build) ? build : null;
+  return validStepIdentifier(build) ? (build as StepBuild) : null;
 }
 
 /** Whether this process uses the step store. Off unless `HACK_STEP_STORE=on`. */

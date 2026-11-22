@@ -117,6 +117,49 @@ fn record_at(state_root: &Path, owner: &Owner) -> Result<(), CandidateError> {
     )
 }
 
+/// Add `boot`, an earlier boot that a dead owner's recovery matched from the run's own
+/// evidence rather than from this history (a run stranded before the history existed,
+/// whose bridge slots still name its boot), so the recovery's later steps (resume,
+/// publisher retirement, bridge cleanup) find it here like any recorded boot. It goes
+/// first: only membership matters, and the next boot keeps it ahead of older entries.
+///
+/// Called under the provider lease before the recovery writes its intent. A boot needs
+/// a stopped pool, and stopping it takes that lease, so no `record` runs meanwhile.
+/// The current boot is never added; an invalid history refuses (recovery fails closed).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn adopt(candidate: &Candidate, owner: &Owner, boot: &str) -> Result<(), CandidateError> {
+    adopt_at(&candidate.state_root, owner, boot)
+}
+
+fn adopt_at(state_root: &Path, owner: &Owner, boot: &str) -> Result<(), CandidateError> {
+    if !valid_boot(boot) || owner.guest_boot_id.as_deref() == Some(boot) {
+        return Err(invalid());
+    }
+    let known = load(state_root, &owner.token)?;
+    if known.iter().any(|known| known == boot)
+        || owner.previous_guest_boot_id.as_deref() == Some(boot)
+    {
+        return Ok(());
+    }
+    let mut boots = vec![boot.to_owned()];
+    boots.extend(known);
+    boots.truncate(LIMIT);
+    match std::fs::remove_file(path(state_root).with_extension("pending")) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(state::io(error));
+        }
+        _ => {}
+    }
+    state::write(
+        &path(state_root),
+        &History {
+            version: VERSION,
+            owner: owner.token.clone(),
+            boots,
+        },
+    )
+}
+
 /// The earlier boots of this pool a dead owner's run may belong to: the previous boot
 /// (when recorded), then the sidecar's entries, deduplicated, never the current boot.
 /// An unreadable or invalid sidecar is an error (recovery fails closed).
@@ -215,6 +258,57 @@ mod tests {
         )
         .unwrap();
         assert_eq!(earlier_boots_at(&root.0, &pool).unwrap(), ["b3", "b2"]);
+    }
+
+    /// A run stranded before the history existed: its boot is adopted once, first,
+    /// and then found by every later step exactly like a recorded boot.
+    #[test]
+    fn adopts_a_proven_earlier_boot_once_and_never_the_current_boot() {
+        let root = root();
+        let mut pool = owner("token", Some("b1"), None);
+        boot(&root.0, &mut pool, "b2");
+        boot(&root.0, &mut pool, "b3");
+        adopt_at(&root.0, &pool, "b0").unwrap();
+        assert_eq!(
+            earlier_boots_at(&root.0, &pool).unwrap(),
+            ["b2", "b0", "b1"]
+        );
+        let once = std::fs::read(path(&root.0)).unwrap();
+        // Already known (recorded, adopted or previous): unchanged.
+        adopt_at(&root.0, &pool, "b0").unwrap();
+        adopt_at(&root.0, &pool, "b1").unwrap();
+        adopt_at(&root.0, &pool, "b2").unwrap();
+        assert_eq!(std::fs::read(path(&root.0)).unwrap(), once);
+        // The current boot and an invalid id are refused without a write.
+        assert!(adopt_at(&root.0, &pool, "b3").is_err());
+        assert!(adopt_at(&root.0, &pool, "").is_err());
+        assert_eq!(std::fs::read(path(&root.0)).unwrap(), once);
+        // The next boot keeps it.
+        boot(&root.0, &mut pool, "b4");
+        assert!(earlier_boots_at(&root.0, &pool).unwrap().contains(&"b0".to_owned()));
+    }
+
+    #[test]
+    fn adoption_refuses_an_invalid_history_and_starts_one_for_a_new_owner() {
+        let root = root();
+        let pool = owner("token", Some("b2"), Some("b1"));
+        std::fs::write(path(&root.0), b"not json").unwrap();
+        assert!(adopt_at(&root.0, &pool, "b0").is_err());
+        assert_eq!(std::fs::read(path(&root.0)).unwrap(), b"not json");
+        state::write(
+            &path(&root.0),
+            &History {
+                version: 1,
+                owner: "other".into(),
+                boots: vec!["x1".into()],
+            },
+        )
+        .unwrap();
+        adopt_at(&root.0, &pool, "b0").unwrap();
+        assert_eq!(
+            stored(&root.0),
+            serde_json::json!({"version":1,"owner":"token","boots":["b0"]})
+        );
     }
 
     #[test]

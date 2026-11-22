@@ -136,7 +136,8 @@ pub(super) fn recovery_selection(
     if owner.phase != "running" {
         return Ok(None);
     }
-    let earlier = crate::provider::boot_history::earlier_boots(candidate, owner)?;
+    // Hints grant no authority: an unreadable bridge registry only drops its boots.
+    let earlier = candidate_boots(candidate, owner, &receipt.run, false)?;
     if earlier.is_empty() {
         return Ok(None);
     }
@@ -178,6 +179,30 @@ pub(super) fn recovery_selection(
         .map(|_| selected(receipt))
         .transpose()
 }
+/// The boots a dead owner's run may belong to: the pool's earlier boots, then the boots
+/// its own bridge slots record (a run stranded before boot history was installed; seen
+/// on a real VM, HACK-2456). The current boot is never a candidate. `strict` makes an
+/// unreadable bridge registry an error, as recovery itself requires.
+fn candidate_boots(
+    candidate: &Candidate,
+    owner: &Owner,
+    run: &str,
+    strict: bool,
+) -> Result<Vec<String>, CandidateError> {
+    let mut boots = crate::provider::boot_history::earlier_boots(candidate, owner)?;
+    let slots = match super::bridges::run_boots(candidate, owner, run) {
+        Ok(slots) => slots,
+        Err(error) if strict => return Err(error),
+        Err(_) => Vec::new(),
+    };
+    for boot in slots {
+        if owner.guest_boot_id.as_deref() != Some(boot.as_str()) && !boots.contains(&boot) {
+            boots.push(boot);
+        }
+    }
+    Ok(boots)
+}
+
 fn no_pending(root: &std::path::Path) -> Result<(), CandidateError> {
     match fs::symlink_metadata(root.join("state.pending")) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -903,7 +928,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         // boot is the one earlier boot its receipt evidence names. No additional
         // restart is requested or inferred here.
         let owner = Owner::load(candidate)?;
-        let earlier = crate::provider::boot_history::earlier_boots(candidate, &owner)?;
+        let earlier = candidate_boots(candidate, &owner, &receipt.run, true)?;
         let old_boot = super::boot_match::receipt_boot(
             candidate,
             &root,
@@ -912,6 +937,11 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
             engine.guest().boot_id(),
         )?
         .ok_or_else(refused)?;
+        // A boot proven only through the run's bridge slots joins the history before
+        // the intent, so every later step sees the same earlier boot.
+        if !crate::provider::boot_history::earlier_boots(candidate, &owner)?.contains(&old_boot) {
+            crate::provider::boot_history::adopt(candidate, &owner, &old_boot)?;
+        }
         let one_off_sha256 = if exists(&root.join("one-off.json"))? {
             Some(one_off::recovery_selection(&root, &receipt, &old_boot)?)
         } else {

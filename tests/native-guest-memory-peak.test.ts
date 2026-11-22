@@ -363,16 +363,24 @@ test("a balloon that moves during one sample is subtracted at its larger reading
         await rm(pipe);
         expect(spawnSyncBounded(["mkfifo", pipe]).exitCode).toBe(0);
       }
-      const steps: string[] = [];
-      for (const [index, [pipe, text]] of feeds.entries()) {
-        const feed = join(root, `feed.${index}`);
-        await writeFile(feed, text);
-        steps.push(`cat '${feed}' > '${pipe}'`);
-      }
-      writer = Bun.spawn(["sh", "-c", steps.join(" && ")], {
-        stdout: "ignore",
-        stderr: "ignore",
+      // The writer is one shell that runs only builtins. Each redirection is opened by
+      // that shell itself, so a blocked open is in that one process, it has no child,
+      // and killing it is a complete cleanup. Contents and pipes are its arguments.
+      const steps = feeds.map((_, index) => {
+        const text = `\${${2 * index + 1}}`;
+        const pipe = `\${${2 * index + 2}}`;
+        return `{ printf '%s' "${text}"; } > "${pipe}"`;
       });
+      writer = Bun.spawn(
+        [
+          "sh",
+          "-c",
+          steps.join(" && "),
+          "feed",
+          ...feeds.flatMap(([pipe, text]) => [text, pipe]),
+        ],
+        { stdout: "ignore", stderr: "ignore" }
+      );
       const result = await run({ paths, rounds: 1 });
       expect(result.exitCode, before).toBe(0);
       const fed = await Promise.race([
@@ -387,6 +395,7 @@ test("a balloon that moves during one sample is subtracted at its larger reading
       );
     } finally {
       // A sampler that stopped early leaves the writer blocked on a pipe nobody opens.
+      // The writer has no child process (see above), so this ends all it started.
       writer?.kill("SIGKILL");
       await writer?.exited;
       await rm(root, { recursive: true, force: true });

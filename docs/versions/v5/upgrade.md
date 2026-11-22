@@ -7,7 +7,8 @@ This is a backup-first, manual path. The upgrade assistant (`hack upgrade check`
 `review`, `apply`, `snapshot`, `rollback`; since next.17) checks the machine and
 repairs selected files. Env migration and the runtime trial remain manual. Keep stable v4
 installed and try one Compose project at a time. Native is a separate trial.
-The published v5 candidate bundle requires an Apple Silicon Mac.
+The published v5 prerelease runs on Apple Silicon macOS and, on the Compose
+backend only, on Linux x86_64 and arm64; see [Install](install.md#prerequisites).
 
 In builds with `hack upgrade check`, its native finding covers configuration
 only; runtime setup and admission are not checked. For a native trial, follow
@@ -64,7 +65,7 @@ offered as Run. Host changes and decisions still need review.
 
    The last command must print nothing before you continue. On macOS uninstall
    removes the launchd service so it cannot restart the daemon during the trial.
-   Run no stable commands while the candidate uses the shared home.
+   Run no stable commands while the prerelease uses the shared home.
 4. **Install v5 beside stable**, following [Install](install.md). Use a fresh
    terminal for the trial, select Compose, and check the chosen version:
 
@@ -97,7 +98,7 @@ the detail pages say which prerelease each change needs.
 
 ## Roll back
 
-Stop the candidate with `hack down` in its Compose terminal. Restore the project
+Stop the prerelease with `hack down` in its Compose terminal. Restore the project
 and machine files, including the **original** project key, from the backup;
 follow the [full restore procedure](guides/upgrade-from-v4.md#7-return-to-v4).
 Restore project state after any migration. Selecting an older binary alone does
@@ -136,26 +137,26 @@ stale launchd plist with Hack's label, including one an earlier Hack wrote.
 hackd is running. A hand-written unit, a unit that sets its own Hack home, or a
 service that points at another existing executable is reported instead: use the
 chosen install's `hack daemon install`. Add `--json` for one machine-readable result. Keep this
-outside the shared-home candidate trial;
+outside the shared-home prerelease trial;
 [daemon and service details](guides/upgrade-from-v4.md#daemon-old-lock-and-missing-checkouts)
 explain the difference.
 
 ## A candidate's own daemon
 
-A candidate run (`hack-next` or the bundle's `hack-v5`) starts and stops only its
+A prerelease run (`hack-next` or the bundle's `hack-v5`) starts and stops only its
 own hackd. `daemon start` and `daemon restart` start the running bundle through its
 own `hack-v5` launcher, never a `hack` found on PATH, and never through the login
 service, which runs stable `hack`. `daemon start`, `restart` and `stop` change
 nothing and print one sentence when hackd for this Hack home is not positively
-this candidate's: it reports another version, its API does not answer, or a hackd
+this prerelease's: it reports another version, its API does not answer, or a hackd
 process holds the home without its pid file. `start` and `restart` also refuse
 before anything is stopped when they cannot prove which hackd they would start,
 for example a source run with the candidate marker set by hand. `daemon install`
-and `daemon uninstall` refuse in a candidate run.
+and `daemon uninstall` refuse in a prerelease run.
 
 ```mermaid
 flowchart TD
-  Start[candidate daemon start] --> Running{hackd running here?}
+  Start[prerelease daemon start] --> Running{hackd running here?}
   Running -->|same version| Already[already running]
   Running -->|other or unknown| Refuse1[refuse, nothing stopped]
   Running -->|no| Launcher{hack-v5 next to hack-cli?}
@@ -166,7 +167,7 @@ flowchart TD
   Check -->|no| Fail[error, not started]
 ```
 
-Any direct start, candidate or stable, reports "hackd started" only when the new
+Any direct start, prerelease or stable, reports "hackd started" only when the new
 hackd's API answers with this CLI's version. The CLI and hackd read the version from
 one place, so a prerelease's hackd reports the release version (for example
 `5.0.0-next.18`), the same string as `hack version --json`. `daemon status --json`

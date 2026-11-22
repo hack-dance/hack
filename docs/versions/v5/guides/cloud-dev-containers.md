@@ -3,8 +3,8 @@
 > **Dev container: verified on 2026-11-19** with the Dev Container CLI 0.90.0
 > on Linux x86_64 and `hack` built from `next` at `6447491b33`.
 > `devcontainer up` with the files below started the project with no other
-> command. The install step copied in that built binary, since v5 has no Linux
-> release yet.
+> command. The install step copied in that built binary; no Linux archive was
+> published at that time.
 >
 > **GitHub Codespaces: not run yet.** It reads the same `devcontainer.json`.
 
@@ -42,7 +42,14 @@ The `docker-in-docker` feature gives the container its own Docker Engine and
 Compose. `postStartCommand` runs on every start, so the project comes back
 after a stop.
 
-`.devcontainer/install-hack.sh` installs `hack`. Until a Linux release exists it
+`.devcontainer/install-hack.sh` installs `hack`. `5.0.0-next.24` publishes
+Linux archives, so the script can install the prerelease as described in
+[Install](../install.md); that variant has not been run in a dev container.
+The installer puts the launcher at `$HOME/.hack-next/bin/hack-next` and does not
+change `PATH`, and each lifecycle command runs in a new shell. With that
+variant, call the launcher by that path in place of each `hack` in
+`postStartCommand`.
+The script from the verified run is shown here. It
 copies a `hack` binary you built (see
 [Any Linux machine with Docker](cloud-linux-docker.md#steps)) and committed as a
 gzip file, because GitHub refuses files over 100 MB and the binary is about
@@ -82,7 +89,7 @@ codespace created from a pull request branch in a fork (see GitHub's
 Locally (verified):
 
 ```sh
-devcontainer up --workspace-folder . --secrets-file ~/secrets/project.json
+devcontainer up --workspace-folder . --secrets-file <secrets-file>
 ```
 
 In Codespaces (not run yet): create a codespace on the branch;
@@ -115,5 +122,6 @@ and the key did not appear in the CLI's output.
 
 ## What does not work yet
 
-- No published Linux install, so `install-hack.sh` needs a binary you supply.
+- The published Linux prerelease has not been run in a dev container; the
+  verified `install-hack.sh` uses a binary you supply.
 - Browser preview through forwarded ports (see Addresses).

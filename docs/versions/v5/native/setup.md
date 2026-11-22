@@ -1,10 +1,10 @@
 # Prepare the native runtime
 
-Use the candidate frontend's `native setup` command. Setup success does not
+Use the prerelease frontend's `native setup` command. Setup success does not
 establish real-VM or application acceptance. Use an Apple Silicon Mac, a
 disposable project and synthetic data. Read [the limits](limits.md) first.
 
-After [installing the candidate](../install.md), use the same frontend for setup
+After [installing the prerelease](../install.md), use the same frontend for setup
 and project commands. Its launcher selects the version's private native home:
 
 ```sh

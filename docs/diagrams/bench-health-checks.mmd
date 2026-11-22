@@ -1,0 +1,21 @@
+---
+title: Which health check a lane runs
+---
+flowchart TD
+    N([Native lane]) --> X{x-hack-http declared?}
+    X -->|yes| D[Declared route probe]
+    X -->|no| R{Routed? caddy and reverse_proxy}
+    R -->|yes| K{healthcheck key}
+    K -->|absent| I[Inferred GET / probe]
+    K -->|enabled test| IR[Inferred probe replaces check<br/>listed as uneven]
+    K -->|disabled or no test| F[Native refuses]
+    R -->|no| T{test in Compose file?}
+    C([Compose lane]) --> T
+    T -->|yes| E[Engine command check<br/>native fills start defaults]
+    T -->|disabled| O[No check]
+    T -->|no test| U[Image's own check<br/>listed as unknown]
+    class D,I,E ok
+    class IR,U wait
+    class F fail
+    class O idle
+    class N,C live

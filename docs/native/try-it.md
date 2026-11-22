@@ -15,7 +15,7 @@ run it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.24/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -46,7 +46,7 @@ support the manual alternatives. Set `V` to your installed version; an installed
 next.16 needs this older command:
 
 ```sh
-V=5.0.0-next.22   # the version you installed; `hack-next --manager status` shows it
+V=5.0.0-next.24   # the version you installed; `hack-next --manager status` shows it
 NATIVE="$HOME/.hack-next/versions/$V/bundle/hack-native"
 NATIVE_HOME="$HOME/.hack-next/versions/$V/native-home"
 ```
@@ -56,8 +56,8 @@ NATIVE_HOME="$HOME/.hack-next/versions/$V/native-home"
 ```
 
 Setup lists each file, its exact compressed byte length, source host, pinned SHA-256 and
-destination, then asks once. It downloads the pinned SmolVM, engine and guest
-packages, verifies every hash before preparation, and ends with the development
+destination, then asks once. It downloads the pinned SmolVM, engine, guest
+packages and image builder, verifies every hash before preparation, and ends with the development
 profile probe. It needs no administrator password or keychain access. Rerun after
 an interrupted download to resume or restart safely. A complete matching install
 is verified before consent and reused without prompting, downloading or preparing again.
@@ -67,9 +67,14 @@ older executor, use `runtime setup --no-interactive --accept-downloads`. Without
 `--accept-downloads`, a noninteractive run needing preparation fails with
 `E_INTERACTIVE_REQUIRED`. Complete matching installs need no flag.
 Add `--json` for per-file `downloaded`, `resumed`, `reused` or `offline` outcomes and exact
-`size_bytes`, `downloaded_bytes` and `reused_bytes` counts, alongside `status` and
-`probe`. Offline inputs report zero downloaded bytes. A verified complete
+`size_bytes`, `downloaded_bytes` and `reused_bytes` counts, alongside `status`,
+`builder` and `probe`. Offline inputs report zero downloaded bytes. A verified complete
 installation reports `status: "reused"` and an empty `files` list: no archive was read.
+`builder` is `not_prepared` for a home that an earlier build set up without the
+image builder; rerun setup with `--accept-downloads` to add it, which downloads
+that one file ([the image builder](../versions/v5/native/setup.md#the-image-builder)).
+`builder` is `changed`, still with exit 0, when the builder in the home does not
+match the pinned release; setup leaves it alone and says what to remove.
 Connections time out after 15 seconds, each read after 60 seconds, and each file
 has a 30-minute overall deadline including redirects. A `setup_pin_unavailable`
 error means upstream returned 404 or 410; update Hack or use offline archives.
@@ -134,7 +139,8 @@ Ask Hack whether the project can run on native before you start it:
 "$HOME/.hack-next/bin/hack-next" doctor --path /absolute/project
 ```
 
-`hack-next` selects the native backend by default. If the project uses a Compose
+Native is the planned default for stable v5. On Apple Silicon macOS, the current
+`hack-next` already selects native by default. If the project uses a Compose
 feature that native does not support, `doctor` names it. Starting the project would
 refuse with `E_NATIVE_PROJECT_UNSUPPORTED` and change nothing. Both print the
 command that runs it on Compose instead, with the full `hack-next` path. See

@@ -109,8 +109,8 @@ success behavior stays covered by command-specific suites.
 | `hack global trust --plan --json` | Envelope; versioned `data.schema`: `hack.global-admin-plan.v1` |
 | `hack host ps --json` | Legacy bare object (no `data` envelope) |
 | `hack logs --json` | NDJSON logs; finite native modes may return a legacy snapshot object |
-| `hack native recover --json` | Native runtime result passed through unchanged, with no `data` envelope (setup: `status`, `files`, `probe`; recover: the runtime status, such as `phase`) |
-| `hack native setup --json` | Native runtime result passed through unchanged, with no `data` envelope (setup: `status`, `files`, `probe`; recover: the runtime status, such as `phase`) |
+| `hack native recover --json` | Native runtime result passed through unchanged, with no `data` envelope (setup: `status`, `builder`, `files`, `probe`; recover: the runtime status, such as `phase`) |
+| `hack native setup --json` | Native runtime result passed through unchanged, with no `data` envelope (setup: `status`, `builder`, `files`, `probe`; recover: the runtime status, such as `phase`) |
 | `hack native temp-aliases --json` | Legacy bare object (no `data` envelope) |
 | `hack node add --json` | Legacy bare object (no `data` envelope) |
 | `hack node devcontainer attach --json` | Legacy bare object (no `data` envelope) |
@@ -182,3 +182,6 @@ Additive fields keep a command's row and shape above; consumers ignore keys they
   services, project-relative files and lines, and architectures. `hack doctor --fix --only
   'polling watchers' --json` adds `data.fix` with `id`, `applied`, `changed`, `confirmed`,
   `removed` and `diff`.
+- Compose `hack down --json`: when the overall down cap ends `docker compose down`
+  (exit `124`), `error.message` explains the cap and `error.detail` adds `timedOut: true`
+  and `capMs`.

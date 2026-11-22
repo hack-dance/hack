@@ -16,7 +16,7 @@ when `.hack/` exists (project name and dev host come from its config),
 
 | You have | Use |
 | --- | --- |
-| A fresh repo + an agent CLI installed | `hack init --with claude\|codex\|both` |
+| A fresh repo + an agent CLI installed | `hack init --with claude` or `hack init --with codex` |
 | An existing hack project | `hack agent onboard` (prints the prompt) |
 | An agent session with the `hack` plugin installed | `/hack-init` |
 | A no-shell client with Hack MCP explicitly installed (`hack-mcp` plugin or `hack setup mcp`) | the `hack-init` MCP prompt |
@@ -25,7 +25,7 @@ when `.hack/` exists (project name and dev host come from its config),
 
 ```bash
 cd /path/to/repo
-hack init --auto --with claude   # or codex, or both
+hack init --auto --with claude   # or: --with codex
 ```
 
 - Runs the normal init, then launches the agent CLI interactively with the full

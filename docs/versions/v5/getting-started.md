@@ -87,6 +87,11 @@ Interrupting `hack autostart run` cancels the pass and waits for startup cleanup
 After upgrades that change global templates, run `hack global install` manually
 before relying on login routing.
 
+If a default remote target declares a [sign-in prerequisite](https://github.com/hack-dance/hack/blob/next/docs/env.md#sign-in-prerequisites-for-compose-projects),
+Hack checks it before startup hooks. If the check fails, follow the displayed
+login command and try again. Use `hack config validate` to verify declarations
+without running the checks.
+
 Expect the declared services in `ps` and the app's local URL from `open`.
 If a project has several URLs, choose the app's route. A worker-only project may
 have no URL. Sign in or load a page that reads data to check the app itself.
@@ -152,8 +157,22 @@ HACK_COMPOSE_STARTUP_TIMEOUT_MS=300000 hack up -d
 ```
 
 ```json
-{ "compose": { "startupTimeoutMs": 180000, "startupCeilingMs": 3600000 } }
+{
+  "compose": {
+    "startupTimeoutMs": 180000,
+    "startupCeilingMs": 3600000,
+    "downTimeoutSeconds": 5
+  }
+}
 ```
+
+`compose.downTimeoutSeconds` (whole seconds, `0` to `600`) sets the stop grace
+period passed to `docker compose down --timeout` in `hack down` (invalid values
+refuse with `E_CONFIG_INVALID`), and `hack down --timeout <seconds>` overrides
+it for one run. Leaving both unset keeps Docker Compose's default grace period
+and the 90-second overall cap (which does not inspect per-service
+`stop_grace_period` settings in Compose); setting a timeout scales the cap to
+`max(90s, timeout × distinct running services + 30s)`.
 
 If the start stops at the ceiling while a one-shot still runs, the
 `E_STARTUP_TIMEOUT` error names that service. The one-shot keeps running, but
@@ -169,11 +188,9 @@ mid-run, and a half-applied migration is hard to repair. In a terminal, they ask
 first and the default answer is no. With `--json` or `--no-interactive` they go
 on, and report the service in `data.interrupted` and `data.warnings`.
 
-These limits apply to detached Compose starts. Foreground `hack up` has no start
-limit. The native backend has one plain start limit,
-`HACK_COMPOSE_STARTUP_TIMEOUT_MS`, of at most 300000 ms (5 minutes). Native
-image builds use `HACK_COMPOSE_IMAGE_TIMEOUT_MS`. Native has no one-shot ceiling
-and does not read the project settings.
+These limits apply to detached Compose starts. Foreground Compose `hack up`
+has no start limit. Native has separate detached and readiness settings.
+See [native startup limits](../native/limits.md#native-startup-limits).
 
 A failed startup prints a reason. Read it before retrying; use
 [troubleshooting](troubleshooting.md) and `hack doctor` for setup problems.

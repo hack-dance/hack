@@ -24,14 +24,14 @@ guessing a port or hostname.
 
 ## Backends
 
-A **backend** is what actually runs the containers. The **Compose backend** is the
-default. It runs services with Docker Compose behind
-shared local routing. General project examples use Compose unless they explicitly
-select native.
+A **backend** runs the containers. Stable `hack` uses the Compose backend with
+shared local routing. The general project examples here also use Compose.
 
-The **native backend** is beta and opt-in. On Apple Silicon macOS it runs an
-explicitly prepared project without Docker Desktop or OrbStack, with a bounded
-command subset. Select it with `HACK_RUNTIME_BACKEND=native`.
+Native is the planned default for stable v5. The current `hack-next` prerelease
+defaults to native on Apple Silicon macOS and uses Compose on supported Linux.
+On macOS, set `HACK_RUNTIME_BACKEND=compose` for the Compose examples. Set
+`HACK_RUNTIME_BACKEND=native` to select the native backend explicitly on Apple
+Silicon. The beta runs prepared projects without Docker Desktop or OrbStack.
 Read [the native backend overview](native/overview.md)
 before using it; a Compose example does not imply native support for the same flag.
 
@@ -66,7 +66,7 @@ project instead of in a spare terminal tab.
 
 In a linked git worktree, `hack up` defaults to a branch instance named after the
 branch. The secret key is inherited from the primary checkout. A detached worktree
-needs an explicit `--branch <name>`. See [Run a branch or worktree beside main](guides/parallel-work.md)
+needs an explicit `--branch <name>` unless you set `worktree.auto_branch=false` to select the base instance. See [Run a branch or worktree beside main](guides/parallel-work.md)
 and [Worktrees and watchers](../guides/development-runtime-safety.md).
 
 ## Use Hack from an agent or script

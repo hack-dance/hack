@@ -128,8 +128,7 @@ worktree when its exact source root can be shared with a fresh or matching pool.
 The runtime checks source compatibility before startup hooks; `restart` repeats
 this check before stopping the existing graph. A root that a running pool does not
 already share is refused, because a running VM's mounts never change. Stop the pool
-and run `up` again: the root joins at the next boot. One pool can then serve several
-project roots and worktrees at once; see
+and run `up` again: the root joins at the next boot. Projects and worktrees the pool was started with can run together; see
 [one pool, several project roots](#explicit-writable-development-source).
 
 Unfiltered writable source sharing still requires `HACK_NATIVE_SHARED_SOURCE=1`.
@@ -1072,9 +1071,9 @@ truthy `HACK_NO_INTERACTIVE` values `1`, `true`, `yes` or `on`, ignoring case an
 surrounding whitespace) refuses with `E_INTERACTIVE_REQUIRED` unless
 `--accept-downloads` explicitly consents. Interactive `up` can offer setup with
 the same explicit consent; noninteractive `up` refuses until setup is complete.
-The installer and probe never download provider files. The optional BuildKit client
-is still prepared separately below.
-Setup lists the pinned SmolVM, Docker engine and four Alpine guest packages,
+The installer and probe never download provider files.
+Setup lists the pinned SmolVM, Docker engine, four Alpine guest packages and the
+BuildKit client (the image builder),
 including exact compressed sizes, hosts, hashes, private cache and destinations.
 
 Manual bundle frontends use `$HACK_HOME/native-runtime` or
@@ -1143,15 +1142,23 @@ hashes decide acceptance, and the existing SmolVM prepare step also checks its
 code signature. The qualification script's optional upstream checksum comparison
 remains a separate check.
 
-Successful `runtime setup --json` output includes `status`, `probe` and a `files`
-array. Each archive read has `name`, `outcome` (`downloaded`, `resumed`, `reused` or `offline`),
+Successful `runtime setup --json` output includes `status`, `builder`, `probe` and a `files`
+array. `status` and the archive entries describe the provider set (SmolVM, engine
+and guest packages). `builder` describes the image builder: `installed` when this
+run prepared it, `reused` when it was already prepared and verified,
+`not_prepared` when the home has none and this run had neither download consent
+nor the offline builder file, and `changed` when a builder is there that does not
+verify against the pinned release. The builder's own file joins `files` when this run
+read it.
+Each archive read has `name`, `outcome` (`downloaded`, `resumed`, `reused` or `offline`),
 `size_bytes`, `downloaded_bytes` and `reused_bytes`. The counts account for pinned
 artifacts this invocation, excluding HTTP headers and discarded prefixes.
 A resumed file counts only its new suffix as downloaded; a server that ignores
 Range restarts the download and counts the whole file as downloaded. Offline
 inputs report `offline`; verified cache files report `reused`. Both have zero
 downloaded bytes. Complete-home reuse verifies the installed tree without reading
-archives and returns `status: "reused"` with an empty `files` list.
+archives and returns `status: "reused"` with an empty `files` list, or with the
+image builder's file alone when this run added it.
 If another process finishes installation after this run read archives, the result
 keeps those actual archive entries even though its final status is `reused`.
 No input paths appear in these entries.
@@ -1161,7 +1168,29 @@ verifies the complete provider set, syncs it, then publishes the provider direct
 under the lifecycle lock. Interrupted staging is rebuilt on rerun. A complete
 matching install is verified before consent and reused without a prompt, consent
 flag, network or preparation; setup
-ends with `runtime probe --profile development`. An existing incomplete, changed
+ends with `runtime probe --profile development`.
+
+After the provider set is published or reused, setup adds the image builder with
+the manual `prepare-builder` function, under the lock that function takes. This
+step is additive: it writes the builder's own directory and record and the
+download cache, and never stages, publishes or prepares the provider set again,
+which a running pool may be executing from. A builder that is already prepared is
+verified and left alone. A complete home that has no image builder (a home set up
+by an earlier build, or offline without `--builder`) is never refused and never
+downloaded to without consent: `--accept-downloads` or the offline `--builder`
+file adds the builder and nothing else, and without either the result is
+`builder: "not_prepared"` with the home unchanged. `hack native setup` then prints
+one line naming `native setup --accept-downloads`.
+
+A builder that is there but does not verify never fails setup. The result is
+`builder: "changed"` with exit 0 and the provider set reported as before, with or
+without consent or `--builder`: setup never deletes or overwrites it. Builds and
+`runtime probe` keep refusing it with `artifact_digest_mismatch`. `hack native setup`
+prints one warning that names the builder's directory and record by their paths
+under the native home (`.hack-local/providers/buildx-<version>-darwin-arm64` and
+`.hack-local/providers/buildx.json`). To replace the builder, remove those two and
+run setup with `--accept-downloads` (or the offline `--builder` file). Removing only
+the directory works too: the stale record is replaced. An existing incomplete, changed
 or differently pinned provider directory is preserved and refused as
 `setup_existing_invalid`: finish the manual steps, repair a changed tree, or use
 a fresh home. Setup never upgrades a home's provider pin in place.
@@ -1179,6 +1208,12 @@ network client:
   --engine-archive /absolute/docker-archive.tgz \
   --network-tools-directory /absolute/private/pinned-apks
 ```
+
+Add `--builder /absolute/docker-buildx` (the pinned `buildx` release file) to
+prepare the image builder in the same run. It is optional and accepted only with
+the three inputs above; without it, offline setup works as before and reports
+`builder: "not_prepared"`. On a home whose provider set is already installed, the
+three archive inputs are not read again.
 
 Or obtain the exact archives identified in `provider-pins.json` and run the
 unchanged individual manual commands (also supported by earlier prereleases):
@@ -1267,8 +1302,9 @@ An intact tree is reported with `repaired: false`. A repair that fails a check c
 no tree and keeps its private `-repairing-` staging directory. Without a kept archive the repair
 refuses (`provider_repair_unavailable`); prepare a fresh candidate home instead.
 
-The pins also name a BuildKit client (`buildx`, `darwin-arm64`) for native image
-builds. Prepare it before using `HACK_NATIVE_BUILDS=1`; it is optional otherwise:
+The pins also name a BuildKit client (`buildx`, `darwin-arm64`), the image builder
+for native image builds (`HACK_NATIVE_BUILDS=1`). `runtime setup` installs it, as
+described above. The manual command stays for offline and manual homes:
 
 ```sh
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare-builder --archive /absolute/docker-buildx
@@ -1277,8 +1313,50 @@ builds. Prepare it before using `HACK_NATIVE_BUILDS=1`; it is optional otherwise
 The command takes the exact release file named in `provider-pins.json`. It checks
 the SHA-256 before it changes any state, then copies the file into private candidate
 state and checks its code signature. If a prepared client exists, the command checks
-it again and does not replace it. If the prepared tree changes, `runtime probe`
-refuses; it reports `builder_prepared` when the client is present and unchanged.
+it again and does not replace it. The record always carries the tree digest that the
+pin describes (one executable with that name, mode 0700 and the pinned bytes), never
+a digest read back from disk, so a file replaced after its check can never be
+recorded as good.
+
+A preparation that stopped after publishing the client's directory and before writing
+its record is finished by running the command (or setup) again. The record is written
+only when the directory is what preparation publishes: a real directory of yours with
+mode 0700 that holds exactly the pinned executable. Any other directory without a
+record is refused as changed, and its permissions and contents are left alone. A
+record write that stopped halfway leaves `buildx.pending` beside the record; the next
+preparation removes it under the provider lock when it is the private regular file
+that write creates (yours, mode 0600, one link), and refuses with `foreign_state`
+and leaves it in place when it is anything else, such as a symlink or a directory.
+
+If the prepared tree changes, `runtime probe` and every build
+refuse with `artifact_digest_mismatch`. `runtime probe` reports `builder_prepared`:
+`true` when the client is present and unchanged, `false` for a home without it.
+
+A home without the image builder refuses a build with `builder_not_prepared`:
+"The image builder is not installed in this native home", with the setup command
+that adds it, instead of a missing-file error. `hack up` prints that refusal with
+the command for the launcher you ran. A home that an earlier build set up is in
+this state until `native setup --accept-downloads` (or the offline `--builder`
+file, or the manual command above) adds the builder; nothing else in the home
+changes. `runtime setup inspect --json` reports the builder apart from readiness,
+as `builder.state` (`prepared`, `not_prepared` or `changed`) with the builder's
+`directory` and `record` paths under the native home. That state is read from the
+record without hashing the builder, so bytes changed under an intact record still
+read as `prepared` there; setup and builds verify the bytes. `hack doctor` on
+the native backend adds a `native image builder` check: a warning with the same
+remedy when the project has a `build:` service and the home has no image builder,
+or one whose record does not match the pinned release.
+Doctor never installs or downloads it, with `--fix` either.
+
+Every message about the image builder names one setup command: the `hack up`
+refusal, the `hack native setup` hint and warning, and doctor's message with its
+JSON `detail`. A stable install prints `hack native setup --accept-downloads`. A
+candidate launcher under your home prints its path from the home,
+`~/.hack-next/bin/hack-next native setup --accept-downloads`, which runs as pasted
+and shows no home directory, so a saved doctor report carries none. A launcher
+outside the home, or one whose path needs shell quoting, keeps its full quoted
+path. Other printed commands are unchanged and name a candidate launcher by its
+full path ([printed commands](candidate-install.md#printed-commands-name-your-launcher)).
 
 `runtime build-image --request <file> --json` builds one image in the running
 runtime's engine with that client. Native `up` calls it for `build:` services when
@@ -1701,7 +1779,7 @@ the container's own namespaces or cgroup limits: `NET_ADMIN` and `NET_BROADCAST`
 often declared for database images), `IPC_LOCK` (memory locking, still charged to
 the memory limit) and `IPC_OWNER` (the container's own IPC namespace). Plan review
 refuses every other addition with `capability_refused`, including `cap_add: [ALL]`.
-One VM can host several projects and worktrees, and Hack runs its own helpers
+Projects and worktrees the pool was started with can run together. Hack runs its own helpers
 inside service containers. These refused capabilities would act on that shared
 kernel or on those helpers:
 
@@ -2037,6 +2115,22 @@ configuration must confirm. An amd64 archive is cached under its own address, ne
 reused for arm64, and imports only into a pool booted with translation; see
 [amd64 emulation with Rosetta 2](#amd64-emulation-with-rosetta-2).
 
+A completed load receipt bound to the requested registry pin lets
+`ensure-image` check the running guest by exact image ID and platform without
+a provider mutation lease or an archive read. A digest reference hashes the
+stored registry manifest against the requested pin, then checks the configuration
+digest. For indexes it also verifies the selected child manifest and platform.
+A cache entry without the metadata fetches it once to establish the binding. A guest miss hashes the entire archive before taking the import
+lease and checks the guest again before upload. Explicit `load-image` verifies
+its input even if the guest already has that image. Mutable tags are resolved
+on each `ensure-image` invocation.
+
+
+During native project startup, active services with the same canonical image reference
+and platform policy share one validated image selection. If services request
+different platforms for the same tag, their selections use the same immutable
+registry digest. A later start resolves the tag again.
+
 ### Explicit writable development source
 
 An isolated development pool can opt into a direct host project mount with
@@ -2048,8 +2142,8 @@ unfiltered mode for a checkout whose local files must remain hidden from its ser
 Only the exact canonical project root is accepted; home/credential directories,
 aliased roots, and changes to a running pool's mount intent are refused.
 
-One development pool can host several project roots and linked worktrees, so one
-installed native home serves every project on the machine. The first root is the
+Projects and linked worktrees the development pool was started with can run
+together in one native home. The first root is the
 pool's primary share. Native `up` in another root adds that root itself when the
 pool is **stopped**, before any lifecycle hook runs, with the same unfiltered-source
 consent the first root gave; the share is mounted at the next boot. The explicit

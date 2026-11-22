@@ -7,7 +7,9 @@
  *
  * - `io.hack-local.`: native runtime graph ownership (`owner`, `graph`,
  *   `namespace`, `plan`, `kind`, `resource`, `job`, cache and probe labels),
- *   which the runtime-core provider writes and verifies before cleanup.
+ *   which the runtime-core provider writes and verifies before cleanup, and
+ *   `spec`, the container specification digest, checked only when a container
+ *   is created (containers made before it existed carry none).
  * - `io.hack.native-config.`: native-config Compose ownership (`version`,
  *   `instance`, `owner`, `generation`, `workload`, `storage`), which the
  *   native-config renderer writes and its generation inventory, route owner

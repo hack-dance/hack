@@ -169,11 +169,9 @@ mid-run, and a half-applied migration is hard to repair. In a terminal, they ask
 first and the default answer is no. With `--json` or `--no-interactive` they go
 on, and report the service in `data.interrupted` and `data.warnings`.
 
-These limits apply to detached Compose starts. Foreground `hack up` has no start
-limit. The native backend has one plain start limit,
-`HACK_COMPOSE_STARTUP_TIMEOUT_MS`, of at most 300000 ms (5 minutes). Native
-image builds use `HACK_COMPOSE_IMAGE_TIMEOUT_MS`. Native has no one-shot ceiling
-and does not read the project settings.
+These limits apply to detached Compose starts. Foreground Compose `hack up`
+has no start limit. Native has separate detached and readiness settings.
+See [native startup limits](../native/limits.md#native-startup-limits).
 
 A failed startup prints a reason. Read it before retrying; use
 [troubleshooting](troubleshooting.md) and `hack doctor` for setup problems.

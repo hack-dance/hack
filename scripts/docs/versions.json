@@ -5546,6 +5546,13 @@
         "sourceFile": "docs/native/try-it.md"
       },
       {
+        "slug": "native/limits",
+        "title": "What works and known limits",
+        "sourceRevision": "e2069e72b222c1c0d7cf0dfc070a9dadded5bc48",
+        "sourceLabel": "Current v5 command audit",
+        "sourceFile": "docs/native/limits.md"
+      },
+      {
         "slug": "native/log-follow",
         "title": "Follow native service logs (under verification)",
         "sourceRevision": "b21c3b189841c1a3cbb8af2b76414fa347dc7057",

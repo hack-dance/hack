@@ -11,7 +11,7 @@ path copies data, creates replacement volumes, relabels resources or changes eng
 `hack config adopt`, including `--dry-run`, requires the Compose backend: the
 preview reads the Compose backend's existing containers and volumes, and adoption
 hands them to native configuration on that backend. With another
-`HACK_RUNTIME_BACKEND` (such as the `hack-next` default, `native`), both refuse
+`HACK_RUNTIME_BACKEND` (such as the `hack-next` default on Apple Silicon macOS, `native`), both refuse
 with `E_NATIVE_PROJECT_UNSUPPORTED` before reading anything and name the rerun,
 for example `HACK_RUNTIME_BACKEND=compose hack config adopt --dry-run`. The
 selected runtime is not changed.

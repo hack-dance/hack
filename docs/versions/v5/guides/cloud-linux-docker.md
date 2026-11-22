@@ -81,10 +81,10 @@ is missing it prints one error with a code and what to do; see
 [When `hack up` cannot start the project here](cloud-environments.md#when-hack-up-cannot-start-the-project-here).
 
 **4. Check it.** Use the project's host from `.hack/hack.config.json`
-(`hello.hack` here):
+(`hello.hack.local` for a fresh project using the default suffix):
 
 ```sh
-curl --noproxy hello.hack --resolve hello.hack:443:127.0.0.1 -k https://hello.hack/
+curl --noproxy hello.hack.local --resolve hello.hack.local:443:127.0.0.1 -k https://hello.hack.local/
 ```
 
 You should see your app's page. `--noproxy` keeps an inherited HTTPS proxy

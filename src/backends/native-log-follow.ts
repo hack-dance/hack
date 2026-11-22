@@ -751,7 +751,7 @@ async function readSelectedLogs({
           ...(selection.native ? ["--native"] : []),
           ...(input.timestamps ? ["--timestamps"] : []),
           ...(resumed ? ["--from-start"] : []),
-          ...(input.noFollow ? ["--no-follow"] : []),
+          ...noFollowArgs(input.noFollow),
           ...(opts.since === undefined ? [] : ["--since", String(opts.since)]),
         ],
         {
@@ -829,4 +829,9 @@ function closedOutput(error: unknown): boolean {
     "code" in error &&
     (error.code === "EPIPE" || error.code === "ERR_STREAM_DESTROYED")
   );
+}
+
+/** `--no-follow` for a finite lock-free read, only when asked. */
+function noFollowArgs(noFollow: boolean | undefined): readonly string[] {
+  return noFollow ? ["--no-follow"] : [];
 }

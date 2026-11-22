@@ -584,7 +584,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
           "up",
           "-d",
           "--no-build",
-          ...(opts.wait ? ["--wait"] : []),
+          ...waitArgs(opts.wait),
           ...(opts.unattended ? ["--pull", "never"] : []),
           ...scope,
         ]);
@@ -764,4 +764,9 @@ function mergeSpawnEnv(
   override: Record<string, string> | undefined
 ): Record<string, string> {
   return childEnvironment(process.env, override);
+}
+
+/** `--wait` for `docker compose up -d`, only when asked. */
+function waitArgs(wait: boolean | undefined): readonly string[] {
+  return wait ? ["--wait"] : [];
 }

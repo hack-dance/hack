@@ -1533,6 +1533,36 @@ overlays is unsupported. Neither command persists application output in runtime
 receipts; output can contain sensitive application values and should be handled
 accordingly.
 
+## The runtime service
+
+One native home can run one runtime service: a small control process that later
+releases will use to answer `hack` commands without starting a new runtime process
+for each one. Today no `hack` command uses it, it never starts by itself, and it
+serves only `hello`, `service.status` and `service.retire`. Stopping it does not stop
+project services, the provider VM or anything else in the home.
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home service serve [--idle-seconds <1..86400>] [--drain-seconds <1..60>] [--notify-fd <3..1023>]
+./hack-native --candidate-root /absolute/private/candidate-home service status
+./hack-native --candidate-root /absolute/private/candidate-home service stop
+```
+
+- **One per home.** It listens on `run/service/hack-runtime.sock` (mode 0600) and holds
+  locks on `run/service/` and `run/service/service.lock`; a second `serve` on the same
+  home reports `lost` and exits. Only the same user can connect.
+- **Ending.** It exits after `--idle-seconds` (default 300) with no session, on
+  `service stop`, or on SIGTERM, SIGINT or SIGHUP. Each finishes requests in progress
+  for up to `--drain-seconds` (default 10) and removes the socket. Exit codes: `0`
+  after one of those, `2` on an error, `3` when requests did not finish in time (the
+  process then ends at once, and the next `serve` can start).
+- **Starting it from a program.** `--notify-fd` names a pipe or socket the starter
+  reads: the service writes exactly one line, `{"listening":…}`, `{"lost":true}` or
+  `{"refused":{"code":…}}`. A starter that does not read that line within a second
+  makes the service stop before it serves anyone. "Listening" is not "ready": a
+  client uses the service only after a `hello` has succeeded.
+- **Environment.** It keeps only `PATH`, `HOME`, `TMPDIR`, `USER` and `LOGNAME`, and
+  disables core dumps.
+
 ## Explicit normalized public Compose input
 
 A frontend can pass a reviewed public Compose document without replacing the

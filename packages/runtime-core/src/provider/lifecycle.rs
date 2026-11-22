@@ -336,7 +336,6 @@ pub(super) struct ObservedGuest<'a> {
 }
 
 impl<'a> ObservedGuest<'a> {
-    #[cfg(target_os = "macos")]
     pub(super) fn boot_id(&self) -> Result<&str, CandidateError> {
         self.owner.guest_boot_id.as_deref().ok_or_else(|| {
             CandidateError::new("runtime_changed", "Observed guest boot is unavailable.")
@@ -398,13 +397,16 @@ impl<'a> ObservedGuest<'a> {
         verify_live(self.candidate, &current)
     }
 
+    pub(super) fn amd64_emulation(&self) -> bool {
+        self.owner.amd64_emulation
+    }
+
     pub(super) fn engine_socket(&self) -> Result<std::path::PathBuf, CandidateError> {
         self.verify()?;
         socket(self.candidate, &self.owner, "docker.sock")
     }
 
     /// The observed runtime incarnation; receipts name the incarnation that owns them.
-    #[cfg(target_os = "macos")]
     pub(super) fn incarnation(&self) -> &str {
         &self.owner.token
     }

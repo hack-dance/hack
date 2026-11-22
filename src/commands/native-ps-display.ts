@@ -27,13 +27,7 @@ export async function displayNativePs(
   }
 ): Promise<void> {
   if (json) {
-    const items = ps
-      ? result.items.map((item) => ({
-          ...item,
-          address: ps.addresses.get(item.service) ?? null,
-        }))
-      : result.items;
-    emitCliResult({ result: okResult({ data: { ...result, items } }) });
+    emitCliResult({ result: okResult({ data: result }) });
     return;
   }
   if (result.status === "pending") {

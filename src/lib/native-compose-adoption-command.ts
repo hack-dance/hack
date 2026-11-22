@@ -279,9 +279,6 @@ async function reportAdoptedPs({
     service: container.service,
     status:
       states.find((state) => state.id === container.id)?.status ?? "unknown",
-    ...(options.psWide !== undefined
-      ? { address: addresses.get(container.service) ?? null }
-      : {}),
   }));
   if (!options.json && options.psWide !== undefined) {
     renderPs({

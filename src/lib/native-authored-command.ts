@@ -428,15 +428,7 @@ async function showStatus(options: {
   if (options.json) {
     emitCliResult({
       result: okResult({
-        data: {
-          ...result,
-          ...(options.psWide !== undefined
-            ? {
-                items: result.items.map((item) => ({ ...item, address: null })),
-              }
-            : {}),
-          ...(await options.statusMetadata?.()),
-        },
+        data: { ...result, ...(await options.statusMetadata?.()) },
       }),
     });
     return;

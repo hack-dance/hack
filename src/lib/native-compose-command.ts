@@ -1080,9 +1080,6 @@ async function savedCommand(opts: {
                     exitCode,
                     health,
                     oneoff,
-                    ...(options.psWide !== undefined
-                      ? { address: addresses.get(service) ?? null }
-                      : {}),
                   })
                 ),
                 ...(await options.statusMetadata?.()),

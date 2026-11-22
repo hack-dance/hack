@@ -92,6 +92,7 @@ test("Compose ps shows failed and completed services after failed up", async () 
             HACK_RUNTIME_BACKEND: "compose",
             HACK_NO_INTERACTIVE: "1",
             NO_COLOR: "1",
+            COLUMNS: "20",
             ...extra,
           },
         }),
@@ -130,13 +131,11 @@ test("Compose ps shows failed and completed services after failed up", async () 
       expect.objectContaining({
         Service: "web",
         State: "running",
-        address: "https://sample.hack.local",
       }),
       expect.objectContaining({
         Service: "worker",
         State: "exited",
         ExitCode: 127,
-        address: null,
       }),
       expect.objectContaining({
         Service: "install",

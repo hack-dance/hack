@@ -10619,12 +10619,7 @@ async function handlePs({
       project: baseProjectName,
       branch,
       composeProject: composeProjectName ?? baseProjectName,
-      items: (await annotateEmulatedPsItems({ items: entries })).map(
-        (item) => ({
-          ...item,
-          address: addresses.get(getString(item, "Service") ?? "") ?? null,
-        })
-      ),
+      items: await annotateEmulatedPsItems({ items: entries }),
       waiting,
     };
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);

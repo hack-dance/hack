@@ -41,8 +41,10 @@ import {
   type EffectiveRemote,
   inactiveRemoteServices,
   prepareProjectRemoteChoices,
+  readRemoteChoices,
   remoteSelectionLabels,
   remoteServiceTargets,
+  resolveRemoteChoices,
   runningRemoteChoice,
 } from "../lib/project-remote-selection.ts";
 import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
@@ -8213,6 +8215,7 @@ async function runUpCommand({
     });
   } else {
     await persistProjectRuntimeEnvSelection({
+      remoteChoices,
       projectDir: project.projectDir,
       composeProject: lifecycleComposeProject,
       envName: envOverrides.effectiveEnvName,
@@ -9317,11 +9320,47 @@ async function runDownCommand({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
   });
-  const lifecycleEnv = await resolveLifecycleEnvForProject({
-    project,
-    projectName,
-    envName: effectiveEnvName,
-  });
+  const defaults = cfg.prerequisites?.config?.selected ?? [];
+  let remoteEnv:
+    | Awaited<ReturnType<typeof resolveComposeEnvOverrides>>
+    | undefined;
+  if (defaults.length) {
+    const runtime = await readProjectRuntimeStateEntry({
+      projectDir: project.projectDir,
+      composeProject: lifecycleComposeProject,
+    });
+    const recorded = runtime?.remoteTargets
+      ? Object.fromEntries(
+          defaults.flatMap(({ remote, targets }) => {
+            const name = runtime.remoteTargets?.[remote];
+            return name && targets.has(name) ? [[remote, name]] : [];
+          })
+        )
+      : undefined;
+    const remoteChoices = resolveRemoteChoices(
+      defaults,
+      recorded ?? (await readRemoteChoices(project.projectDir)),
+      {}
+    );
+    const services = await readIncludedComposeServiceNames(project.composeFile);
+    remoteEnv = await resolveComposeEnvOverrides({
+      project,
+      projectName,
+      targetServices: services,
+      allServiceNames: services,
+      envName: effectiveEnvName,
+      remoteChoices,
+      persist: false,
+    });
+  }
+  const lifecycleEnv =
+    remoteEnv?.lifecycleEnv ??
+    (await resolveLifecycleEnvForProject({
+      project,
+      projectName,
+      envName: effectiveEnvName,
+    }));
+  const composeEnv = remoteEnv?.env ?? lifecycleEnv;
 
   const interruptionCheck = await checkOneShotInterruption({
     project,
@@ -9329,6 +9368,7 @@ async function runDownCommand({
     profiles,
     action: "down",
     json,
+    env: remoteEnv?.env,
   });
   if (!interruptionCheck.proceed) {
     return 1;
@@ -9339,7 +9379,7 @@ async function runDownCommand({
     projectDir: project.projectDir,
     lifecycleComposeProject,
     cliProfiles: profiles,
-    composeEnv: lifecycleEnv,
+    composeEnv,
   });
   const statesBeforeDown =
     json || (downTimeoutSeconds !== undefined && downTimeoutSeconds > 0)
@@ -9347,7 +9387,7 @@ async function runDownCommand({
           project,
           composeProjectName,
           profiles: stopSelection.profiles,
-          env: lifecycleEnv,
+          env: composeEnv,
         })
       : [];
   const runningServicesBeforeDown =
@@ -9414,7 +9454,7 @@ async function runDownCommand({
       composeProject: composeProjectName,
       profiles: stopSelection.profiles,
       cwd: dirname(project.composeFile),
-      env: lifecycleEnv,
+      env: composeEnv,
       routeStdoutToStderr: json,
       timeoutSeconds: downTimeoutSeconds,
       capMs: downCapMs,
@@ -9428,7 +9468,7 @@ async function runDownCommand({
         composeProjectName,
         composeProjectLabel: composeProjectName ?? baseProjectName,
         profiles: stopSelection.profiles,
-        env: lifecycleEnv,
+        env: composeEnv,
         routeStdoutToStderr: json,
         timeoutSeconds: downTimeoutSeconds,
       });
@@ -10006,6 +10046,7 @@ async function runRestartUpPhase(opts: {
   });
 
   await persistProjectRuntimeEnvSelection({
+    remoteChoices: opts.remoteChoices,
     projectDir: opts.project.projectDir,
     composeProject: opts.lifecycleComposeProject,
     envName: envOverrides.effectiveEnvName,
@@ -11124,6 +11165,7 @@ export function resolveRestartTarget(opts: {
  * enable them. A complete `down` removes the entry, which clears them.
  */
 async function persistProjectRuntimeEnvSelection(opts: {
+  readonly remoteChoices?: readonly EffectiveRemote[];
   readonly projectDir: string;
   readonly composeProject: string;
   readonly envName: string | null;
@@ -11144,6 +11186,13 @@ async function persistProjectRuntimeEnvSelection(opts: {
       composeProject: opts.composeProject,
       envName: opts.envName,
       updatedAt: new Date().toISOString(),
+      ...(opts.remoteChoices?.length
+        ? {
+            remoteTargets: Object.fromEntries(
+              opts.remoteChoices.map(({ remote, target }) => [remote, target])
+            ),
+          }
+        : {}),
       envFingerprint: withComposeServiceEnvFingerprints({
         existing: undefined,
         services: opts.services,

@@ -77,7 +77,7 @@ test("the six --use entry points deliver the invocation target without saving it
         '    printf "%s\\n" api postgres worker',
         '    case " $* " in *" --profile maintenance "*) printf "%s\\n" migrate ;; esac ;;',
         '  *" stop "*) printf "%s\\n" "$*" >> "$TEST_DELIVERY" ;;',
-        '  *" down "*) rm -f "$TEST_STACK_STATE" ;;',
+        '  *" down "*) test -n "${DB_HOST:-}" || exit 1; printf "down=%s\\n" "$DB_HOST" >> "$TEST_DELIVERY"; rm -f "$TEST_STACK_STATE" ;;',
         '  *" --profile * "*" ps "*) test -n "${DB_HOST:-}" || exit 1; if [ -f "$TEST_STACK_STATE" ]; then cat "$TEST_STACK_STATE"; fi ;;',
         '  *" ps "*) if [ -f "$TEST_STACK_STATE" ]; then cat "$TEST_STACK_STATE"; fi ;;',
         '  *" up "*|*" run "*)',
@@ -253,7 +253,10 @@ test("the six --use entry points deliver the invocation target without saving it
     expect(explicitInactive.stdout + explicitInactive.stderr).toContain(
       "Compose would start postgres"
     );
-    await rm(join(root, "stack-state"));
+    await Bun.write(log, "");
+    ok(["down"]);
+    expect(await Bun.file(log).text()).toContain("down=live.example.test:5432");
+    expect(await Bun.file(join(root, "stack-state")).exists()).toBe(false);
 
     for (const dependency of [
       "links: [postgres:db]",

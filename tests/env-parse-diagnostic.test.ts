@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { envParseDiagnostic } from "../src/lib/env-parse-diagnostic.ts";
@@ -113,7 +113,7 @@ for (const layer of [
       ]);
       expect(code).not.toBe(0);
       expect(stdout + stderr).not.toContain(SENTINEL);
-      expect(stdout + stderr).toContain(path);
+      expect(stdout + stderr).toContain(await realpath(path));
       if (json) {
         expect(() => JSON.parse(stdout)).not.toThrow();
       }

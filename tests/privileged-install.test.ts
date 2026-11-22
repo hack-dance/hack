@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  realpath,
   rm,
   stat,
   symlink,
@@ -39,7 +40,9 @@ async function sandbox(opts?: {
   /** Replace `find` with one that fails without output. */
   readonly failingFind?: boolean;
 }) {
-  const root = await mkdtemp(join(tmpdir(), "hack-stdin-install-"));
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-stdin-install-"))
+  );
   dirs.push(root);
   const bin = join(root, "bin");
   const dest = join(root, "etc");

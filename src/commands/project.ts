@@ -11,6 +11,7 @@ import {
 import { resolveLifecycleRunner } from "../lib/lifecycle-runner.ts";
 import { preflightLifecycleSupervisor } from "../lib/lifecycle-supervisor.ts";
 import { childStdoutTarget } from "../lib/machine-stdout.ts";
+import { scopedHackCommand } from "../lib/printed-shell-command.ts";
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
@@ -27,6 +28,7 @@ import {
   wrapLifecyclePersistentCommand as wrapSharedLifecyclePersistentCommand,
 } from "../lib/project-lifecycle-controller.ts";
 import { enforceProjectPrerequisites } from "../lib/project-prerequisites.ts";
+import { createTextOutput } from "../ui/text-output.ts";
 
 export function wrapLifecyclePersistentCommand(
   opts: Parameters<typeof wrapSharedLifecyclePersistentCommand>[0]
@@ -118,6 +120,7 @@ import {
   nativeAdaptationCandidates,
   resolveNativeAdaptationSelection,
   resolveNativeHostSettings,
+  resolveNativeStatusHttpsPort,
 } from "../backends/native-project-settings.ts";
 import { preflightNativeProjectSource } from "../backends/native-project-source-preflight.ts";
 import {
@@ -258,10 +261,13 @@ import {
 } from "../lib/compose-env-at-rest.ts";
 import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
 import {
+  buildComposeDownRetryFailure,
+  type ComposeDownRetryFailure,
   classifyDownObservation,
   type DownObservation,
   downIncompleteMessage,
   type InstanceContainerListing,
+  type InstanceNetworkListing,
   parseComposePsInstanceContainers,
   resolveInstanceStopProfiles,
   selectOwnedInstanceContainers,
@@ -334,6 +340,12 @@ import {
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { ensureHackGitInfoExclude } from "../lib/git-info-exclude.ts";
+import {
+  LOGGING_OFF_CODE,
+  lokiBaseUrl,
+  renderLoggingOffMessage,
+  resolveGlobalLoggingForHome,
+} from "../lib/global-logging.ts";
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -497,6 +509,7 @@ import {
 } from "../lib/running-env-selection.ts";
 import {
   buildRuntimeHostMetadataOverride,
+  composeServiceAddresses,
   runtimeHostUrl,
 } from "../lib/runtime-host-metadata.ts";
 import {
@@ -537,6 +550,10 @@ import {
   startNativeBackgroundCommand,
   withBackgroundSweep,
 } from "./background-command-start.ts";
+import {
+  displayComposePs,
+  parseComposeExitCode,
+} from "./compose-ps-display.ts";
 import { withActivity } from "./lifecycle-activity.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
@@ -785,6 +802,13 @@ const restartOptions = [
   optExpectFrontendPid,
 ] as const;
 const psOptions = [
+  defineOption({
+    name: "wide",
+    type: "boolean",
+    long: "--wide",
+    description:
+      "Include container, exit code, port and native image pin details",
+  }),
   optPath,
   optProject,
   optBranch,
@@ -986,7 +1010,7 @@ export const restartCommand = withHandler(
 
 const psSpec = defineCommand({
   name: "ps",
-  summary: "Show project status (docker compose ps)",
+  summary: "Show project services",
   group: "Project",
   options: psOptions,
   positionals: [],
@@ -1425,17 +1449,6 @@ function parseBestEffortComposePsJson(
     }
   }
   return parseJsonLines(stdout);
-}
-
-function parseComposeExitCode(value: unknown): number | null {
-  if (typeof value === "number" && Number.isInteger(value)) {
-    return value;
-  }
-  if (typeof value !== "string" || value.trim().length === 0) {
-    return null;
-  }
-  const parsed = Number.parseInt(value, 10);
-  return Number.isInteger(parsed) ? parsed : null;
 }
 
 function startupSnapshotIsIncomplete(opts: {
@@ -8830,6 +8843,7 @@ async function runDownCommand({
   let code: number;
   let downTimedOut = false;
   let stopObservation: DownObservation = { complete: true };
+  let retryFailure: ComposeDownRetryFailure | null = null;
   let helperReleaseFailures: readonly string[] = [];
   try {
     const beforeCode = await runLifecycleCommands({
@@ -8872,14 +8886,21 @@ async function runDownCommand({
       },
     });
     if (code === 0) {
-      stopObservation = await finishInstanceStop({
+      const finish = await finishInstanceStop({
         project,
         composeProjectName,
+        composeProjectLabel: composeProjectName ?? baseProjectName,
         profiles: stopSelection.profiles,
         env: lifecycleEnv,
         routeStdoutToStderr: json,
         timeoutSeconds: downTimeoutSeconds,
       });
+      if (finish.ok) {
+        stopObservation = finish.observation;
+      } else {
+        code = finish.exitCode;
+        retryFailure = finish;
+      }
     }
     helperReleaseFailures = await lifecycleDownCleanup(
       await confirmComposeDownForHelpers({
@@ -8894,12 +8915,16 @@ async function runDownCommand({
   }
 
   if (code !== 0) {
-    const failure = buildComposeDownFailure({
-      exitCode: code,
-      timedOut: downTimedOut,
-      capMs: downCapMs,
-    });
-    if (failure.capWarning && !json) {
+    const failure =
+      retryFailure ??
+      buildComposeDownFailure({
+        exitCode: code,
+        timedOut: downTimedOut,
+        capMs: downCapMs,
+      });
+    if (!json && retryFailure) {
+      logger.error({ message: failure.message });
+    } else if (!json && "capWarning" in failure && failure.capWarning) {
       logger.warn({ message: failure.capWarning });
     }
     if (json) {
@@ -8929,9 +8954,18 @@ async function runDownCommand({
               service: entry.service,
               workingDir: entry.workingDir,
             })),
+            ...(stopObservation.networks && stopObservation.networks.length > 0
+              ? { networks: [...stopObservation.networks] }
+              : {}),
             ...(stopObservation.unknownReason === undefined
               ? {}
               : { unknown: true, reason: stopObservation.unknownReason }),
+            ...(stopObservation.networksUnknownReason === undefined
+              ? {}
+              : {
+                  networksUnknown: true,
+                  networksUnknownReason: stopObservation.networksUnknownReason,
+                }),
           },
         }),
         exitCode: 1,
@@ -10616,21 +10650,62 @@ async function listInstanceContainers(opts: {
   return parseComposePsInstanceContainers(res.stdout);
 }
 
+/** Docker networks labelled with this Compose project; failed/timed-out read is unknown. */
+async function listInstanceNetworks(opts: {
+  readonly composeProject: string;
+  readonly env: Readonly<Record<string, string>>;
+}): Promise<InstanceNetworkListing> {
+  const res = await exec(
+    [
+      "docker",
+      "network",
+      "ls",
+      "--filter",
+      `label=com.docker.compose.project=${opts.composeProject}`,
+      "--format",
+      "{{.Name}}",
+    ],
+    {
+      stdin: "ignore",
+      env: { ...opts.env },
+      timeoutMs: INSTANCE_STOP_DOCKER_TIMEOUT_MS,
+    }
+  ).catch(() => null);
+  if (res === null || res.exitCode !== 0) {
+    const reason =
+      res?.exitCode === 124
+        ? "docker network ls timed out"
+        : `docker network ls failed${res ? ` (exit ${res.exitCode})` : ""}`;
+    return { ok: false, reason };
+  }
+  return {
+    ok: true,
+    networks: res.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean),
+  };
+}
+
 /**
  * After `docker compose down`: stop and remove the containers of the
  * instance that this checkout owns and Compose left behind (a profile the
  * down did not enable, an orphan), run down once more so the network goes
- * too, and report what was observed. Containers of another checkout are
- * never stopped; while they run, the down is incomplete.
+ * too, and carry its outcome together with what was observed. Containers of
+ * another checkout are never stopped; while they run, the down is incomplete.
  */
 async function finishInstanceStop(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly composeProjectName: string | null;
+  readonly composeProjectLabel: string;
   readonly profiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
   readonly routeStdoutToStderr: boolean;
   readonly timeoutSeconds?: number;
-}): Promise<DownObservation> {
+}): Promise<
+  | { readonly ok: true; readonly observation: DownObservation }
+  | ({ readonly ok: false } & ComposeDownRetryFailure)
+> {
   const leftovers = await listInstanceContainers(opts);
   if (leftovers.ok) {
     const owned = selectOwnedInstanceContainers({
@@ -10663,7 +10738,11 @@ async function finishInstanceStop(opts: {
         env: { ...opts.env },
         timeoutMs: INSTANCE_STOP_DOCKER_TIMEOUT_MS,
       });
-      await composeRuntimeBackend.down({
+      const retryCapMs = resolveComposeDownCapMs({
+        timeoutSeconds: opts.timeoutSeconds,
+      });
+      let retryTimedOut = false;
+      const retryExitCode = await composeRuntimeBackend.down({
         composeFiles: [opts.project.composeFile],
         composeProject: opts.composeProjectName,
         profiles: opts.profiles,
@@ -10671,13 +10750,48 @@ async function finishInstanceStop(opts: {
         env: opts.env,
         routeStdoutToStderr: opts.routeStdoutToStderr,
         timeoutSeconds: opts.timeoutSeconds,
+        capMs: retryCapMs,
+        onOutcome: (outcome) => {
+          retryTimedOut = outcome.timedOut;
+        },
       });
+      const [listing, networks] = await Promise.all([
+        listInstanceContainers(opts),
+        listInstanceNetworks({
+          composeProject: opts.composeProjectLabel,
+          env: opts.env,
+        }),
+      ]);
+      if (retryExitCode !== 0) {
+        return {
+          ok: false,
+          ...buildComposeDownRetryFailure({
+            exitCode: retryExitCode,
+            timedOut: retryTimedOut,
+            capMs: retryCapMs,
+            listing,
+            networks,
+            projectDir: opts.project.projectDir,
+          }),
+        };
+      }
+      return {
+        ok: true,
+        observation: classifyDownObservation({
+          listing,
+          networks,
+          projectDir: opts.project.projectDir,
+        }),
+      };
     }
   }
-  return classifyDownObservation({
-    listing: await listInstanceContainers(opts),
-    projectDir: opts.project.projectDir,
-  });
+  return {
+    ok: true,
+    observation: classifyDownObservation({
+      listing: await listInstanceContainers(opts),
+      projectDir: opts.project.projectDir,
+    }),
+  };
 }
 
 async function maybeManageProjectLogsAfterDown(opts: {
@@ -10702,7 +10816,7 @@ async function maybeManageProjectLogsAfterDown(opts: {
     return;
   }
 
-  const baseUrl = (process.env.HACK_LOKI_URL ?? "http://127.0.0.1:3100").trim();
+  const baseUrl = lokiBaseUrl();
   const lokiReachable = await canReachLoki({ baseUrl });
   if (!lokiReachable) {
     return;
@@ -10774,7 +10888,6 @@ async function maybeManageProjectLogsAfterDown(opts: {
   });
 }
 
-/** Compose-style state cell: an exited container shows its exit code. */
 async function handlePs({
   ctx,
   args,
@@ -10793,6 +10906,7 @@ async function handlePs({
         ? undefined
         : parseCsvList(args.options.profile),
     json: args.options.json,
+    psWide: args.options.wide === true,
   });
   if (authored !== null) {
     return authored;
@@ -10809,7 +10923,29 @@ async function handlePs({
     branchOption: args.options.branch,
     noticeToStderr: json,
   });
+  const cfg = await readProjectConfig(project);
   const native = resolveNativeRuntimeSelection();
+  let addressUnavailable = false;
+  const addresses = json
+    ? new Map<string, readonly string[]>()
+    : await readPsServiceAddresses({
+        project,
+        cfg,
+        branch,
+        native: native !== null,
+      }).catch((error: unknown) => {
+        if (
+          !(
+            native &&
+            error instanceof HackCliError &&
+            (error.code === "E_CONFIG_INVALID" || error.code === "E_PERMISSION")
+          )
+        ) {
+          throw error;
+        }
+        addressUnavailable = true;
+        return new Map<string, readonly string[]>();
+      });
   if (native) {
     if (args.options.profile) {
       throw new CliUsageError("Native ps does not support profile filtering.");
@@ -10823,20 +10959,37 @@ async function handlePs({
         branch,
       },
     });
-    const imageTags = await nativeImageTagStatuses({
-      runtime: native,
-      projectRoot: project.projectRoot,
-      composeFile: project.composeFile,
-    });
+    const imageTags =
+      json || args.options.wide
+        ? await nativeImageTagStatuses({
+            runtime: native,
+            projectRoot: project.projectRoot,
+            composeFile: project.composeFile,
+          })
+        : [];
     await displayNativePs(
       imageTags.length ? { ...result, imageTags } : result,
-      json
+      json,
+      {
+        addresses,
+        wide: args.options.wide,
+        recoveryCommand: scopedHackCommand("down", {
+          path: args.options.path,
+          project: args.options.project,
+          branch: branch ?? undefined,
+        }),
+      }
     );
+    if (addressUnavailable) {
+      createTextOutput().line(
+        "native https settings invalid · addresses unavailable",
+        "faint"
+      );
+    }
     return 0;
   }
   const profiles = parseCsvList(args.options.profile);
 
-  const cfg = await readProjectConfig(project);
   if (cfg.parseError) {
     const configPath = cfg.configPath ?? project.configFile;
     logger.warn({
@@ -10853,7 +11006,6 @@ async function handlePs({
   // lag behind a failed startup. Both formats must observe the same containers.
   // A failed or unparsable read throws a coded error with the engine's cause
   // (envelope under --json, one line otherwise); see compose-ps-result.ts.
-  // Text mode keeps the plain `ps` fallback for Compose without JSON output.
   const read = await readComposePs({
     run: () =>
       composeRuntimeBackend.psJson({
@@ -10865,16 +11017,23 @@ async function handlePs({
       }),
   });
   if (!read.ok) {
-    if (json || !composePsTextFallbackAllowed(read.error)) {
-      throw read.error;
+    if (!json && read.error.code === "E_DOCKER_UNAVAILABLE") {
+      process.stderr.write("E_DOCKER_UNAVAILABLE: docker engine unavailable\n");
+      return 1;
     }
-    return await composeRuntimeBackend.ps({
-      composeFiles: [project.composeFile],
-      composeProject: composeProjectName,
-      profiles,
-      cwd,
-      all: true,
-    });
+    if (!json && read.error.code === "E_PERMISSION") {
+      process.stderr.write(
+        "E_PERMISSION: access denied while reading compose status\n"
+      );
+      return 1;
+    }
+    if (!json && composePsTextFallbackAllowed(read.error)) {
+      process.stderr.write(
+        `${read.error.code}: docker compose did not return a formatted service list\n`
+      );
+      return 1;
+    }
+    throw read.error;
   }
   const entries = read.entries;
   // A Created service whose one-shot dependency is still running starts only
@@ -10909,39 +11068,41 @@ async function handlePs({
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
     return 0;
   }
-  const rows = entries.map((e) => [
-    getString(e, "Service") ?? "",
-    getString(e, "Name") ?? "",
-    psStateLabel({ entry: e, waiting }),
-    (getString(e, "State") ?? "").toLowerCase() === "exited"
-      ? String(parseComposeExitCode(e.ExitCode) ?? "")
-      : "",
-    getString(e, "Status") ?? "",
-    getString(e, "Ports") ?? "",
-  ]);
-
-  await display.table({
-    columns: ["SERVICE", "NAME", "STATE", "EXIT CODE", "STATUS", "PORTS"],
-    rows,
+  displayComposePs({
+    entries,
+    addresses,
+    waiting,
+    wide: args.options.wide === true,
   });
-
   return 0;
 }
 
-/** STATE column: Compose's state, plus the one-shots a Created service waits on. */
-function psStateLabel(opts: {
-  readonly entry: Record<string, unknown>;
-  readonly waiting: Readonly<Record<string, readonly string[]>>;
-}): string {
-  const state = getString(opts.entry, "State") ?? "";
-  const service = getString(opts.entry, "Service") ?? "";
-  // Own entries only: a service named like an Object member is not waiting.
-  const blockers = Object.hasOwn(opts.waiting, service)
-    ? opts.waiting[service]
-    : undefined;
-  return blockers && state.toLowerCase() === "created"
-    ? `${state} (waiting for ${blockers.join(", ")})`
-    : state;
+async function readPsServiceAddresses(opts: {
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly branch: string | null;
+  readonly native: boolean;
+}): Promise<ReadonlyMap<string, readonly string[]>> {
+  const { project, cfg, branch } = opts;
+  const devHost = await readProjectDevHost(project);
+  const aliasHost = devHost ? resolveBranchAliasHost({ devHost, cfg }) : null;
+  const composeYaml = await Bun.file(project.composeFile)
+    .text()
+    .catch(() => "");
+  return composeServiceAddresses({
+    composeYaml,
+    branch,
+    baseHosts: devHost
+      ? resolveProjectRouteBaseHosts({ devHost, aliasHost })
+      : [],
+    httpsPort: opts.native
+      ? await resolveNativeStatusHttpsPort({
+          env: process.env,
+          projectName: await resolveComposeProjectName({ project, cfg }),
+          projectRoot: project.projectRoot,
+        })
+      : null,
+  });
 }
 
 /**
@@ -12028,9 +12189,59 @@ function resolveLokiQuery(opts: {
   });
 }
 
+/**
+ * Whether `hack logs` can use Loki. The local logging stack is opt-in: with
+ * it off there is nothing to probe, and the logs come from the containers. A
+ * Loki named by `HACK_LOKI_URL` is the user's own, so the setting does not
+ * apply to it.
+ */
+/**
+ * The backend for `hack logs`. With the opt-in logging stack off, a request
+ * that only asks for a time range (`--since`/`--until`) reads container logs,
+ * which take both; `--loki` and `--query` still need Loki and say so.
+ */
+async function decideLogsBackend(opts: {
+  readonly shouldTryLoki: boolean;
+  readonly baseUrl: string;
+  readonly forceCompose: boolean;
+  readonly wantsLokiExplicit: boolean;
+  readonly onlyTimeRange: boolean;
+}): Promise<{
+  readonly loggingOff: boolean;
+  readonly lokiReachable: boolean;
+  readonly useLoki: boolean;
+}> {
+  const availability = await resolveLokiAvailability(opts);
+  const useLoki =
+    resolveUseLoki({ ...opts, lokiReachable: availability.lokiReachable }) &&
+    !(availability.loggingOff && opts.onlyTimeRange);
+  return { ...availability, useLoki };
+}
+
+async function resolveLokiAvailability(opts: {
+  readonly shouldTryLoki: boolean;
+  readonly baseUrl: string;
+}): Promise<{ readonly loggingOff: boolean; readonly lokiReachable: boolean }> {
+  if (!opts.shouldTryLoki) {
+    return { loggingOff: false, lokiReachable: false };
+  }
+  if (
+    process.env.HACK_LOKI_URL === undefined &&
+    !(await resolveGlobalLoggingForHome()).enabled
+  ) {
+    return { loggingOff: true, lokiReachable: false };
+  }
+  return {
+    loggingOff: false,
+    lokiReachable: await lokiLogBackend.isAvailable({ baseUrl: opts.baseUrl }),
+  };
+}
+
 async function runLogsWithLoki(opts: {
   readonly baseUrl: string;
   readonly lokiReachable: boolean;
+  /** The global logging stack is turned off (it is opt-in). */
+  readonly loggingOff: boolean;
   readonly projectNameForPrefix: string;
   readonly branch: string | null;
   readonly json: boolean;
@@ -12065,6 +12276,13 @@ async function runLogsWithLoki(opts: {
     return 1;
   }
 
+  if (opts.loggingOff) {
+    // Thrown so that `--json` gets the `{ ok: false }` envelope.
+    throw new HackCliError({
+      code: LOGGING_OFF_CODE,
+      message: `${renderLoggingOffMessage({ feature: "Loki-backed logs (--loki, --query)" })}. Plain \`hack logs\` (with or without --since/--until) reads container logs without it.`,
+    });
+  }
   if (!opts.lokiReachable) {
     process.stderr.write(`Loki is not reachable at ${opts.baseUrl}.\n`);
     process.stderr.write(
@@ -12199,6 +12417,8 @@ async function runLogsWithCompose(opts: {
         : undefined,
     composeProject: opts.composeProject,
     profiles: opts.profiles,
+    since: opts.since,
+    until: opts.until,
     format: opts.format,
     streamContext,
     lifecycle: selection.lifecycle,
@@ -12513,7 +12733,7 @@ async function handleLogs({
     servicesOpt: parseCsvList(args.options.services),
     positionalService: typeof service === "string" ? service : undefined,
   });
-  const baseUrl = (process.env.HACK_LOKI_URL ?? "http://127.0.0.1:3100").trim();
+  const baseUrl = lokiBaseUrl();
   const cfg = await readProjectConfig(project);
   if (cfg.parseError) {
     const configPath = cfg.configPath ?? project.configFile;
@@ -12536,15 +12756,14 @@ async function handleLogs({
     snapshotBackend,
   });
 
-  const lokiReachable = shouldTryLoki
-    ? await lokiLogBackend.isAvailable({ baseUrl })
-    : false;
-
-  const useLoki = resolveUseLoki({
+  const { loggingOff, lokiReachable, useLoki } = await decideLogsBackend({
+    shouldTryLoki,
+    baseUrl,
     forceCompose: args.options.compose === true,
     wantsLokiExplicit,
-    shouldTryLoki,
-    lokiReachable,
+    // --since/--until alone can be served from container logs.
+    onlyTimeRange:
+      args.options.loki !== true && args.options.query === undefined,
   });
 
   const runCompose = async (): Promise<number> =>
@@ -12568,6 +12787,7 @@ async function handleLogs({
     return await runLogsWithLoki({
       baseUrl,
       lokiReachable,
+      loggingOff,
       projectNameForPrefix,
       branch,
       json,
@@ -12920,6 +13140,12 @@ async function resolveOpenGrafanaHost(
   if (target !== "logs") {
     return undefined;
   }
+  if (!(await resolveGlobalLoggingForHome()).enabled) {
+    throw new HackCliError({
+      code: LOGGING_OFF_CODE,
+      message: renderLoggingOffMessage({ feature: "Grafana (hack open logs)" }),
+    });
+  }
   const host = await resolveInstalledGrafanaHost();
   if (!host) {
     throw new CliUsageError(
@@ -12967,6 +13193,13 @@ async function resolveNativeOpenPort(opts: {
   ) {
     return { native: false };
   }
+  return { native: true, httpsPort: await resolveNativeProjectHttpsPort(opts) };
+}
+
+async function resolveNativeProjectHttpsPort(opts: {
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+}): Promise<number | null> {
   const host = await resolveNativeHostSettings({
     env: process.env,
     projectName: await resolveComposeProjectName({
@@ -12975,7 +13208,7 @@ async function resolveNativeOpenPort(opts: {
     }),
     projectRoot: opts.project.projectRoot,
   });
-  return { native: true, httpsPort: host.https?.httpsPort ?? null };
+  return host.https?.httpsPort ?? null;
 }
 
 /** Whether `hack open <target>` names a project host, not Grafana or a URL. */

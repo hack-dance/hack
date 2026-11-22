@@ -69,6 +69,10 @@ hack ps
 hack open
 ```
 
+`hack ps` lists services with their primary address and current state. An
+address followed by `+1` has one more configured address. Use `hack ps --wide`
+for all addresses, container names, exit codes and port details.
+
 To start this project at future logins, use `hack up -d --always` and install
 the per-user daemon with `hack daemon install`. `hack down` pauses its marker;
 `hack up` resumes it. See [Always-on projects](https://github.com/hack-dance/hack/blob/next/docs/always-on-projects.md) for
@@ -229,8 +233,8 @@ log history and restarts. When this Compose run works, try native only on a
 [disposable project](native/start.md).
 
 Always-on login restores Caddy/CoreDNS routing only. Logging (Grafana, Loki and
-Alloy) starts through manual `hack global up`; login leaves existing logging
-containers running. Change default Grafana credentials before network exposure.
+Alloy) is opt-in (`hack global up --logging`) and starts through manual
+`hack global up`; login leaves existing logging containers running. Change default Grafana credentials before network exposure.
 
 Login requires a non-SSH Docker transport and already-prepared DNS. It skips
 macOS dnsmasq startup and passwordless DNS recovery; use manual `hack global up`

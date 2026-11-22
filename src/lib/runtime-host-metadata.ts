@@ -1,6 +1,11 @@
 import { YAML } from "bun";
 
-import { applyBranchToHost } from "./branch-hosts.ts";
+import {
+  applyBranchToHost,
+  isCaddySiteLabel,
+  rewriteCaddyLabelForBranch,
+  splitCaddySites,
+} from "./branch-hosts.ts";
 import { isRecord } from "./guards.ts";
 
 export const RUNTIME_HOST_METADATA_KEYS = {
@@ -275,6 +280,93 @@ function readEffectiveServices(opts: {
     }
   }
   return services;
+}
+
+/** Concrete HTTP and HTTPS routes for each service in Compose declaration order. */
+export function composeServiceAddresses(opts: {
+  readonly composeYaml: string;
+  readonly branch: string | null;
+  readonly baseHosts: readonly string[];
+  readonly httpsPort?: number | null;
+}): ReadonlyMap<string, readonly string[]> {
+  const addresses = new Map<string, readonly string[]>();
+  const services = parseComposeYaml({ text: opts.composeYaml })?.services;
+  if (!isRecord(services)) {
+    return addresses;
+  }
+  for (const [service, entry] of Object.entries(services)) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const sites = readCaddySiteLabels(entry.labels)
+      .map((label) => label.replaceAll(UNRESOLVED_SITE_EXPRESSION, "{}"))
+      .join(", ");
+    const label = opts.branch
+      ? rewriteCaddyLabelForBranch({
+          value: sites,
+          branch: opts.branch,
+          baseHosts: opts.baseHosts,
+        }).value
+      : sites;
+    const urls = new Set(
+      splitCaddySites(label).flatMap((site) => {
+        const url = composeSiteUrl(site, opts.httpsPort);
+        return url ? [url] : [];
+      })
+    );
+    if (urls.size > 0) {
+      addresses.set(service, [...urls]);
+    }
+  }
+  return addresses;
+}
+
+const UNRESOLVED_SITE_EXPRESSION = /\{\{[\s\S]*?\}\}|\$\{[^}]*\}/g;
+const SITE_TEMPLATE = /[*{}$]/;
+const SITE_SCHEME = /^[a-z][a-z\d+.-]*:\/\//i;
+
+function composeSiteUrl(
+  site: string,
+  httpsPort?: number | null
+): string | null {
+  if (SITE_TEMPLATE.test(site)) {
+    return null;
+  }
+  const url = URL.parse(SITE_SCHEME.test(site) ? site : `https://${site}`);
+  if (
+    !url ||
+    url.username ||
+    url.password ||
+    !["http:", "https:"].includes(url.protocol)
+  ) {
+    return null;
+  }
+  if (url.protocol === "https:" && !url.port && httpsPort) {
+    url.port = String(httpsPort);
+  }
+  return url.pathname === "/" && !url.search && !url.hash
+    ? url.origin
+    : url.href;
+}
+
+function readCaddySiteLabels(labels: unknown): string[] {
+  if (isRecord(labels)) {
+    return Object.entries(labels).flatMap(([key, value]) =>
+      isCaddySiteLabel(key) && typeof value === "string" ? [value] : []
+    );
+  }
+  if (!Array.isArray(labels)) {
+    return [];
+  }
+  return labels.flatMap((label: unknown) => {
+    if (typeof label !== "string") {
+      return [];
+    }
+    const separator = label.indexOf("=");
+    return separator > 0 && isCaddySiteLabel(label.slice(0, separator).trim())
+      ? [label.slice(separator + 1)]
+      : [];
+  });
 }
 
 function applyBranchIfNeeded(opts: {

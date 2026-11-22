@@ -777,6 +777,27 @@ test("doctor status summary separates health, counts, and wrapped detail", () =>
   ]);
 });
 
+test("temporary aliases appear after warnings without folding the image builder warning", () => {
+  const message =
+    "23 temporary aliases cannot be attributed · hack native temp-aliases";
+  const results = [
+    { name: "native temporary aliases", status: "ok", message },
+    { name: "another advisory", status: "warn", message: "Check the setup" },
+    {
+      name: "native image builder",
+      status: "warn",
+      message: "Image builder is missing",
+    },
+  ] as const;
+  const lines = buildDoctorSummaryLines({ results });
+  expect(lines.at(-1)).toBe(message);
+  expect(lines.join("\n")).toContain("Image builder is missing");
+  expect(lines.join("\n")).not.toContain("+1 more");
+  const items = buildDoctorSummaryStatusItems({ results });
+  expect(items.at(-1)).toEqual({ label: message, status: "info" });
+  expect(items[0]?.detail).toContain("Image builder is missing");
+});
+
 test("recovery next steps quote repo paths for copy-paste safety", () => {
   const nextSteps = buildRecoveryNextSteps({
     guidance: {

@@ -4,7 +4,7 @@ use super::{
     engine, image_load,
     image_policy::{ARCHIVE_CEILING, CACHE_CEILING, ImagePolicy, ImageTagMode},
     image_tag_store::{self, TagSource},
-    registry_image, state,
+    lifecycle, registry_image, state,
 };
 use crate::timings::{Step, measure, measure_attributed};
 use crate::{Candidate, CandidateError, reject_aliased_state};
@@ -42,7 +42,7 @@ impl ImageCache {
     fn enter(&self, root: &Path) -> Result<MutexGuard<'_, CacheState>, CandidateError> {
         let mut cache = self.state.lock().unwrap();
         if cache.lease.is_none() {
-            let lease = state::Lock::acquire(root)?;
+            let lease = lifecycle::startup_lease(root, lifecycle::STARTUP_LEASE_WAIT)?;
             let staging = root.with_file_name("image-staging");
             if staging.try_exists().map_err(state::io)? {
                 state::check_private_directory(&staging)?;

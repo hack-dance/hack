@@ -424,7 +424,6 @@ fn resolve_pending(
     // resolution another process just published.
     let lock = match state::Lock::acquire(&root) {
         Err(error) if error.code == "provider_busy" => {
-            // Replace with the shared startup wait helper from HACK-2535.
             let report_wait = std::env::var_os("HACK_INTERNAL_REPORT_IMAGE_WAIT")
                 .is_some_and(|value| value == "1");
             if report_wait {

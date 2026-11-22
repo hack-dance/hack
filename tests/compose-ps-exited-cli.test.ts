@@ -79,7 +79,7 @@ test("Compose ps shows failed and completed services after failed up", async () 
     );
     await writeFile(
       join(hack, "docker-compose.yml"),
-      "services:\n  web:\n    image: alpine:3.22\n  worker:\n    image: alpine:3.22\n  install:\n    image: alpine:3.22\n"
+      "services:\n  web:\n    image: alpine:3.22\n    labels:\n      caddy: sample.hack.local\n  worker:\n    image: alpine:3.22\n  install:\n    image: alpine:3.22\n"
     );
     async function cli(args: string[], extra: Record<string, string> = {}) {
       const child = Bun.spawn([process.execPath, CLI, ...args], {
@@ -92,6 +92,7 @@ test("Compose ps shows failed and completed services after failed up", async () 
             HACK_RUNTIME_BACKEND: "compose",
             HACK_NO_INTERACTIVE: "1",
             NO_COLOR: "1",
+            COLUMNS: "20",
             ...extra,
           },
         }),
@@ -109,14 +110,33 @@ test("Compose ps shows failed and completed services after failed up", async () 
     expect((await cli(["up", "--detach", "--json"])).exitCode).toBe(1);
     const text = await cli(["ps"]);
     expect(text.exitCode).toBe(0);
-    expect(text.stdout).toContain("STATE");
-    expect(text.stdout).toContain("EXIT CODE");
-    expect(text.stdout).toMatch(/worker\s+sample-worker-1\s+exited\s+127/);
-    expect(text.stdout).toMatch(/install\s+sample-install-1\s+exited\s+0/);
+    expect(text.stdout).toBe(
+      [
+        "SERVICE  ADDRESS                    STATE",
+        "web      https://sample.hack.local  running",
+        "worker   no address                 exited (127)",
+        "install  no address                 exited (0)",
+        "",
+        "3 services",
+        "",
+      ].join("\n")
+    );
+    const wide = await cli(["ps", "--wide"]);
+    expect(wide.exitCode).toBe(0);
+    expect(wide.stdout).toContain("EXIT CODE");
+    expect(wide.stdout).toMatch(
+      /worker\s+no address\s+exited \(127\)\s+sample-worker-1\s+127/
+    );
+    expect(wide.stdout).toMatch(
+      /install\s+no address\s+exited \(0\)\s+sample-install-1\s+0/
+    );
     const json = await cli(["ps", "--json"]);
     expect(json.exitCode).toBe(0);
     expect(JSON.parse(json.stdout).items).toEqual([
-      expect.objectContaining({ Service: "web", State: "running" }),
+      expect.objectContaining({
+        Service: "web",
+        State: "running",
+      }),
       expect.objectContaining({
         Service: "worker",
         State: "exited",
@@ -129,9 +149,9 @@ test("Compose ps shows failed and completed services after failed up", async () 
       }),
     ]);
     const fallback = await cli(["ps"], { STUB_FAIL_JSON: "1" });
-    expect(fallback.exitCode).toBe(0);
-    expect(fallback.stdout).toContain("worker exited 127");
-    expect(fallback.stdout).toContain("install exited 0");
+    expect(fallback.exitCode).toBe(1);
+    expect(fallback.stdout).toBe("");
+    expect(fallback.stderr).toContain("E_COMPOSE_FAILED");
     const failedJson = await cli(["ps", "--json"], { STUB_FAIL_JSON: "1" });
     expect(failedJson.exitCode).toBe(1);
     expect(JSON.parse(failedJson.stdout)).toEqual({
@@ -225,7 +245,12 @@ test("Compose ps reports the engine's cause with a stable code (HACK-2068)", asy
       const text = await cli(["ps"], mode);
       expect(text.exitCode).toBe(1);
       expect(`${text.stdout}${text.stderr}`).toContain(`${code}:`);
-      expect(`${text.stdout}${text.stderr}`).toContain(engineLine[mode] ?? "");
+      expect(text.stderr).toBe(
+        mode === "permission"
+          ? "E_PERMISSION: access denied while reading compose status\n"
+          : "E_DOCKER_UNAVAILABLE: docker engine unavailable\n"
+      );
+      expect(text.stdout).toBe("");
       expect(`${text.stdout}${text.stderr}`).not.toMatch(STACK_FRAME);
       const calls = (await readFile(join(root, "ps-args"), "utf8"))
         .trim()

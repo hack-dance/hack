@@ -1,3 +1,5 @@
+import type { StartBlocker } from "../ui/start-refusal-output.ts";
+
 /**
  * Machine-readable CLI result envelope.
  *
@@ -160,16 +162,19 @@ export function exitCodeForResult(opts: {
 export class HackCliError extends Error {
   readonly code: HackErrorCode;
   readonly detail?: unknown;
+  readonly startBlocker?: StartBlocker;
 
   constructor(opts: {
     readonly code: HackErrorCode;
     readonly message: string;
     readonly detail?: unknown;
+    readonly startBlocker?: StartBlocker;
   }) {
     super(opts.message);
     this.name = "HackCliError";
     this.code = opts.code;
     this.detail = opts.detail;
+    this.startBlocker = opts.startBlocker;
   }
 }
 

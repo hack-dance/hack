@@ -1,6 +1,7 @@
 import { dirname, resolve } from "node:path";
 import { CliUsageError } from "../cli/command.ts";
 import { parseProjectSelectorOption } from "../cli/project-selector.ts";
+import { psServiceState, renderPs } from "../ui/ps-output.ts";
 import { assertAutostartAdoptionAllowed } from "./autostart-refusal.ts";
 import { HackCliError } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
@@ -19,6 +20,7 @@ import { runLegacyComposeRetainedRoutingOperation } from "./native-compose-adopt
 import { inspectLegacyComposeContainerStates } from "./native-compose-adoption-runtime.ts";
 import type { NativeComposeCommandOptions } from "./native-compose-command.ts";
 import { requireNativeComposeBackend } from "./native-compose-selection.ts";
+import type { NativeRoutingResolution } from "./native-routing-plan-protocol.ts";
 import { inspectProjectInputsAtRoot } from "./project-input-selection.ts";
 import {
   readProjectsRegistry,
@@ -249,12 +251,64 @@ async function logs(opts: {
     }
   );
 }
+async function reportAdoptedPs({
+  options,
+  containers,
+  states,
+  routingResolution,
+}: {
+  readonly options: NativeComposeCommandOptions;
+  readonly containers: LegacyComposeVerifiedBinding["containers"];
+  readonly states: Awaited<
+    ReturnType<typeof inspectLegacyComposeContainerStates>
+  >;
+  readonly routingResolution?: NativeRoutingResolution;
+}): Promise<void> {
+  const addresses = new Map<string, string>();
+  if (options.psWide !== undefined) {
+    for (const route of Object.values(routingResolution?.routes ?? {})) {
+      if (
+        route.origin.startsWith("https://") &&
+        !addresses.has(route.service)
+      ) {
+        addresses.set(route.service, route.origin);
+      }
+    }
+  }
+  const report = containers.map((container) => ({
+    service: container.service,
+    status:
+      states.find((state) => state.id === container.id)?.status ?? "unknown",
+    ...(options.psWide !== undefined
+      ? { address: addresses.get(container.service) ?? null }
+      : {}),
+  }));
+  if (!options.json && options.psWide !== undefined) {
+    renderPs({
+      wide: options.psWide,
+      rows: containers.map((container, index) => ({
+        service: container.service,
+        state: psServiceState({ state: report[index]?.status ?? "unknown" }),
+        address: addresses.get(container.service) ?? null,
+        container: container.name,
+      })),
+    });
+    return;
+  }
+  process.stdout.write(
+    options.json
+      ? `${JSON.stringify({ owner: "legacy-compose", services: report, ...(await options.statusMetadata?.()) })}\n`
+      : report.map((entry) => `${entry.service}\t${entry.status}\n`).join("")
+  );
+}
+
 async function observe(opts: {
   readonly options: NativeComposeCommandOptions;
   readonly binding: LegacyComposeVerifiedBinding;
   readonly signal: AbortSignal;
   readonly timeoutMs: number;
   readonly deadline: number;
+  readonly routingResolution?: NativeRoutingResolution;
 }) {
   const { options, binding, signal, timeoutMs } = opts;
   cancelled(signal);
@@ -268,16 +322,12 @@ async function observe(opts: {
         now: Date.now(),
       }),
     });
-    const report = containers.map((container) => ({
-      service: container.service,
-      status:
-        states.find((state) => state.id === container.id)?.status ?? "unknown",
-    }));
-    process.stdout.write(
-      options.json
-        ? `${JSON.stringify({ owner: "legacy-compose", services: report, ...(await options.statusMetadata?.()) })}\n`
-        : report.map((entry) => `${entry.service}\t${entry.status}\n`).join("")
-    );
+    await reportAdoptedPs({
+      options,
+      containers,
+      states,
+      routingResolution: opts.routingResolution,
+    });
     return 0;
   }
   const container = containers[0];
@@ -422,6 +472,7 @@ export async function tryLegacyComposeAdoptedCommand(
           await observe({
             options,
             binding: privateInput.binding,
+            routingResolution: privateInput.routingResolution,
             signal,
             timeoutMs,
             deadline,

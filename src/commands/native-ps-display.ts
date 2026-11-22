@@ -3,6 +3,7 @@ import { NATIVE_PROVIDER_PIN_MESSAGE } from "../backends/native-runtime-client.t
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
+import { psServiceState, renderPs } from "../ui/ps-output.ts";
 
 export function nativePsState(
   item: NativeProjectPsResult["items"][number]
@@ -19,10 +20,20 @@ export function nativePsState(
  */
 export async function displayNativePs(
   result: NativeProjectPsResult,
-  json: boolean
+  json: boolean,
+  ps?: {
+    readonly addresses: ReadonlyMap<string, string>;
+    readonly wide?: boolean;
+  }
 ): Promise<void> {
   if (json) {
-    emitCliResult({ result: okResult({ data: result }) });
+    const items = ps
+      ? result.items.map((item) => ({
+          ...item,
+          address: ps.addresses.get(item.service) ?? null,
+        }))
+      : result.items;
+    emitCliResult({ result: okResult({ data: { ...result, items } }) });
     return;
   }
   if (result.status === "pending") {
@@ -55,6 +66,24 @@ export async function displayNativePs(
       message:
         "Native graph owner reported a degraded runtime. Service rows do not prove usable readiness. Run hack down to stop this project with data retained.",
     });
+  }
+  if (ps) {
+    renderPs({
+      wide: ps.wide,
+      rows: result.items.map((item) => ({
+        service: item.service,
+        address: ps.addresses.get(item.service) ?? null,
+        container: item.container,
+        exitCode: item.exitCode,
+        ports:
+          result.ports
+            ?.filter((port) => port.service === item.service)
+            .map((port) => `127.0.0.1:${port.port} (${port.state})`)
+            .join(", ") || null,
+        state: psServiceState(item),
+      })),
+    });
+    return;
   }
   await display.table({
     columns: ["NATIVE SERVICE", "CONTAINER", "STATE", "HEALTH"],

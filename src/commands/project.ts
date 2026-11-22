@@ -481,6 +481,7 @@ import {
 } from "../lib/running-env-selection.ts";
 import {
   buildRuntimeHostMetadataOverride,
+  composeServiceAddresses,
   runtimeHostUrl,
 } from "../lib/runtime-host-metadata.ts";
 import {
@@ -521,6 +522,10 @@ import {
   startNativeBackgroundCommand,
   withBackgroundSweep,
 } from "./background-command-start.ts";
+import {
+  displayComposePs,
+  parseComposeExitCode,
+} from "./compose-ps-display.ts";
 import { withActivity } from "./lifecycle-activity.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
@@ -744,6 +749,12 @@ const restartOptions = [
   optExpectFrontendPid,
 ] as const;
 const psOptions = [
+  defineOption({
+    name: "wide",
+    type: "boolean",
+    long: "--wide",
+    description: "Include container, exit code and port details",
+  }),
   optPath,
   optProject,
   optBranch,
@@ -924,7 +935,7 @@ export const restartCommand = withHandler(
 
 const psSpec = defineCommand({
   name: "ps",
-  summary: "Show project status (docker compose ps)",
+  summary: "Show project services",
   group: "Project",
   options: psOptions,
   positionals: [],
@@ -1342,17 +1353,6 @@ async function readComposeServiceStates(opts: {
         entry.service.length > 0 &&
         (serviceFilter === null || serviceFilter.has(entry.service))
     );
-}
-
-function parseComposeExitCode(value: unknown): number | null {
-  if (typeof value === "number" && Number.isInteger(value)) {
-    return value;
-  }
-  if (typeof value !== "string" || value.trim().length === 0) {
-    return null;
-  }
-  const parsed = Number.parseInt(value, 10);
-  return Number.isInteger(parsed) ? parsed : null;
 }
 
 function startupSnapshotIsIncomplete(opts: {
@@ -10486,7 +10486,6 @@ async function maybeManageProjectLogsAfterDown(opts: {
   });
 }
 
-/** Compose-style state cell: an exited container shows its exit code. */
 async function handlePs({
   ctx,
   args,
@@ -10505,6 +10504,7 @@ async function handlePs({
         ? undefined
         : parseCsvList(args.options.profile),
     json: args.options.json,
+    psWide: args.options.wide === true,
   });
   if (authored !== null) {
     return authored;
@@ -10521,6 +10521,19 @@ async function handlePs({
     branchOption: args.options.branch,
     noticeToStderr: json,
   });
+  const cfg = await readProjectConfig(project);
+  const devHost = await readProjectDevHost(project);
+  const aliasHost = devHost ? resolveBranchAliasHost({ devHost, cfg }) : null;
+  const composeYaml = await Bun.file(project.composeFile)
+    .text()
+    .catch(() => "");
+  const addresses = composeServiceAddresses({
+    composeYaml,
+    branch,
+    baseHosts: [devHost, aliasHost].filter((host): host is string =>
+      Boolean(host)
+    ),
+  });
   const native = resolveNativeRuntimeSelection();
   if (native) {
     if (args.options.profile) {
@@ -10535,12 +10548,11 @@ async function handlePs({
         branch,
       },
     });
-    await displayNativePs(result, json);
+    await displayNativePs(result, json, { addresses, wide: args.options.wide });
     return 0;
   }
   const profiles = parseCsvList(args.options.profile);
 
-  const cfg = await readProjectConfig(project);
   if (cfg.parseError) {
     const configPath = cfg.configPath ?? project.configFile;
     logger.warn({
@@ -10607,45 +10619,24 @@ async function handlePs({
       project: baseProjectName,
       branch,
       composeProject: composeProjectName ?? baseProjectName,
-      items: await annotateEmulatedPsItems({ items: entries }),
+      items: (await annotateEmulatedPsItems({ items: entries })).map(
+        (item) => ({
+          ...item,
+          address: addresses.get(getString(item, "Service") ?? "") ?? null,
+        })
+      ),
       waiting,
     };
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
     return 0;
   }
-  const rows = entries.map((e) => [
-    getString(e, "Service") ?? "",
-    getString(e, "Name") ?? "",
-    psStateLabel({ entry: e, waiting }),
-    (getString(e, "State") ?? "").toLowerCase() === "exited"
-      ? String(parseComposeExitCode(e.ExitCode) ?? "")
-      : "",
-    getString(e, "Status") ?? "",
-    getString(e, "Ports") ?? "",
-  ]);
-
-  await display.table({
-    columns: ["SERVICE", "NAME", "STATE", "EXIT CODE", "STATUS", "PORTS"],
-    rows,
+  displayComposePs({
+    entries,
+    addresses,
+    waiting,
+    wide: args.options.wide === true,
   });
-
   return 0;
-}
-
-/** STATE column: Compose's state, plus the one-shots a Created service waits on. */
-function psStateLabel(opts: {
-  readonly entry: Record<string, unknown>;
-  readonly waiting: Readonly<Record<string, readonly string[]>>;
-}): string {
-  const state = getString(opts.entry, "State") ?? "";
-  const service = getString(opts.entry, "Service") ?? "";
-  // Own entries only: a service named like an Object member is not waiting.
-  const blockers = Object.hasOwn(opts.waiting, service)
-    ? opts.waiting[service]
-    : undefined;
-  return blockers && state.toLowerCase() === "created"
-    ? `${state} (waiting for ${blockers.join(", ")})`
-    : state;
 }
 
 /**

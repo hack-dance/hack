@@ -144,7 +144,7 @@ test("native ps reports a stopped runtime as a status, not a failure", async () 
   expect(output).toContain(
     "Native runtime is not running; no services are running."
   );
-  expect(output).toContain("NATIVE SERVICE");
+  expect(output).toContain("SERVICE  ADDRESS  STATE");
   expect(output).not.toContain("Native runtime request failed");
   expect(output).not.toMatch(STACK_FRAME);
   // The read reached the runtime exactly once (graph status for the mapping).

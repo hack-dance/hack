@@ -277,6 +277,32 @@ function readEffectiveServices(opts: {
   return services;
 }
 
+/** First concrete HTTPS route for each service in Compose declaration order. */
+export function composeServiceAddresses(opts: {
+  readonly composeYaml: string;
+  readonly branch: string | null;
+  readonly baseHosts: readonly string[];
+  readonly httpsPort?: number | null;
+}): ReadonlyMap<string, string> {
+  const addresses = new Map<string, string>();
+  for (const [service, entry] of readEffectiveServices({
+    composeYamls: [opts.composeYaml],
+  })) {
+    const host =
+      entry.caddy && extractCaddyLabelHosts({ value: entry.caddy })[0];
+    if (host) {
+      addresses.set(
+        service,
+        runtimeHostUrl({
+          host: applyBranchIfNeeded({ ...opts, host }),
+          httpsPort: opts.httpsPort,
+        })
+      );
+    }
+  }
+  return addresses;
+}
+
 function applyBranchIfNeeded(opts: {
   readonly host: string;
   readonly branch: string | null;

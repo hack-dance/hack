@@ -4,6 +4,7 @@ import { NATIVE_RUN_EMPTY_SELECTION_REFUSAL } from "../backends/native-project-o
 import type { RuntimeBaseOptions } from "../backends/runtime-backend.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
+import { psServiceState, renderPs } from "../ui/ps-output.ts";
 import type { AutostartGlobalView } from "./autostart-view.ts";
 import {
   emitCliResult,
@@ -160,6 +161,8 @@ import { run } from "./shell.ts";
 
 type Operation = "up" | "restart" | "down" | "ps" | "logs" | "exec" | "run";
 export type NativeComposeCommandOptions = {
+  /** Set by the service view; status callers omit it. */
+  readonly psWide?: boolean;
   /** Add machine policy only for status callers; ordinary ps keeps its existing shape. */
   readonly statusMetadata?: () => Promise<{
     readonly autostart: ReturnType<typeof serializeProjectAutostart>;
@@ -715,6 +718,39 @@ async function runSavedProcess(opts: {
   );
 }
 
+function nativeComposePsAddresses(input: {
+  readonly document: PrivateDocument;
+  readonly generationId: string;
+}): ReadonlyMap<string, string> {
+  const addresses = new Map<string, string>();
+  const routing = readNativeComposeRouteMetadata(input);
+  for (const route of routing?.routes ?? []) {
+    const address = route.origins.find((origin) =>
+      origin.startsWith("https://")
+    );
+    if (address && !addresses.has(route.service)) {
+      addresses.set(route.service, address);
+    }
+  }
+  return addresses;
+}
+
+function warnSavedPsPending(state: {
+  readonly beforeHooksPending: boolean;
+  readonly storageWitnessesPending: boolean;
+}): void {
+  if (state.beforeHooksPending) {
+    process.stderr.write(
+      "Native host hook completion remains uncertain; hook recovery is not supported in this slice.\n"
+    );
+  }
+  if (state.storageWitnessesPending) {
+    process.stderr.write(
+      "Native storage continuity or helper completion remains uncertain; saved recovery retains its anchors. Values omitted.\n"
+    );
+  }
+}
+
 async function savedCommand(opts: {
   readonly options: NativeComposeCommandOptions;
   readonly store: NativeComposeGenerationStore;
@@ -1020,6 +1056,13 @@ async function savedCommand(opts: {
           ? await observeSavedNativeComposeOwned(selection)
           : await assertNativeComposeOwned(selection);
       if (options.operation === "ps") {
+        const addresses =
+          options.psWide === undefined
+            ? new Map<string, string>()
+            : nativeComposePsAddresses({
+                document,
+                generationId: generation.generationId,
+              });
         if (options.json) {
           emitCliResult({
             result: okResult({
@@ -1037,6 +1080,9 @@ async function savedCommand(opts: {
                     exitCode,
                     health,
                     oneoff,
+                    ...(options.psWide !== undefined
+                      ? { address: addresses.get(service) ?? null }
+                      : {}),
                   })
                 ),
                 ...(await options.statusMetadata?.()),
@@ -1045,15 +1091,19 @@ async function savedCommand(opts: {
           });
           return 0;
         }
-        if (state.beforeHooksPending) {
-          process.stderr.write(
-            "Native host hook completion remains uncertain; hook recovery is not supported in this slice.\n"
-          );
-        }
-        if (state.storageWitnessesPending) {
-          process.stderr.write(
-            "Native storage continuity or helper completion remains uncertain; saved recovery retains its anchors. Values omitted.\n"
-          );
+        warnSavedPsPending(state);
+        if (options.psWide !== undefined) {
+          renderPs({
+            wide: options.psWide,
+            rows: observed.containers.map((item) => ({
+              service: item.service,
+              address: addresses.get(item.service) ?? null,
+              container: item.name,
+              exitCode: item.state === "exited" ? item.exitCode : null,
+              state: psServiceState(item),
+            })),
+          });
+          return 0;
         }
         return await run([...composeArgs(generation), "ps"], {
           cwd: base.cwd,

@@ -69,6 +69,9 @@ hack ps
 hack open
 ```
 
+`hack ps` lists services with their HTTPS address and current state. Use
+`hack ps --wide` for container, exit code and port details.
+
 To start this project at future logins, use `hack up -d --always` and install
 the per-user daemon with `hack daemon install`. `hack down` pauses its marker;
 `hack up` resumes it. See [Always-on projects](https://github.com/hack-dance/hack/blob/next/docs/always-on-projects.md) for

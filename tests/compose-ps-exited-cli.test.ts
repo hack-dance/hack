@@ -79,7 +79,7 @@ test("Compose ps shows failed and completed services after failed up", async () 
     );
     await writeFile(
       join(hack, "docker-compose.yml"),
-      "services:\n  web:\n    image: alpine:3.22\n  worker:\n    image: alpine:3.22\n  install:\n    image: alpine:3.22\n"
+      "services:\n  web:\n    image: alpine:3.22\n    labels:\n      caddy: sample.hack.local\n  worker:\n    image: alpine:3.22\n  install:\n    image: alpine:3.22\n"
     );
     async function cli(args: string[], extra: Record<string, string> = {}) {
       const child = Bun.spawn([process.execPath, CLI, ...args], {
@@ -110,17 +110,33 @@ test("Compose ps shows failed and completed services after failed up", async () 
     const text = await cli(["ps"]);
     expect(text.exitCode).toBe(0);
     expect(text.stdout).toContain("STATE");
-    expect(text.stdout).toContain("EXIT CODE");
-    expect(text.stdout).toMatch(/worker\s+sample-worker-1\s+exited\s+127/);
-    expect(text.stdout).toMatch(/install\s+sample-install-1\s+exited\s+0/);
+    expect(text.stdout).toMatch(/SERVICE +ADDRESS +STATE/);
+    expect(text.stdout).toMatch(/web +https:\/\/sample.hack.local +running/);
+    expect(text.stdout).toMatch(/worker +no address +exited \(127\)/);
+    expect(text.stdout).toMatch(/install +no address +exited \(0\)/);
+    expect(text.stdout).not.toContain("sample-worker-1");
+    const wide = await cli(["ps", "--wide"]);
+    expect(wide.exitCode).toBe(0);
+    expect(wide.stdout).toContain("EXIT CODE");
+    expect(wide.stdout).toMatch(
+      /worker\s+no address\s+exited \(127\)\s+sample-worker-1\s+127/
+    );
+    expect(wide.stdout).toMatch(
+      /install\s+no address\s+exited \(0\)\s+sample-install-1\s+0/
+    );
     const json = await cli(["ps", "--json"]);
     expect(json.exitCode).toBe(0);
     expect(JSON.parse(json.stdout).items).toEqual([
-      expect.objectContaining({ Service: "web", State: "running" }),
+      expect.objectContaining({
+        Service: "web",
+        State: "running",
+        address: "https://sample.hack.local",
+      }),
       expect.objectContaining({
         Service: "worker",
         State: "exited",
         ExitCode: 127,
+        address: null,
       }),
       expect.objectContaining({
         Service: "install",

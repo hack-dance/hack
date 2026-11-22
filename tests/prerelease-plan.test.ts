@@ -35,7 +35,7 @@ import {
   stableReleaseVersion,
   verifyPrereleaseCi,
   verifyPublishGate,
-  verifyReleaseAssets,
+  verifyReleaseAssets as verifyReleaseAssetsActual,
 } from "../scripts/prerelease-plan.ts";
 import {
   NATIVE_STORAGE_TOOL_FILE,
@@ -47,6 +47,12 @@ import { nativeCandidateMcpPayload } from "../src/mcp/candidate-payload.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 // Packaging fixtures qualify inventories and binding; standalone execution has its own isolated test.
+function verifyReleaseAssets(
+  options: Parameters<typeof verifyReleaseAssetsActual>[0]
+) {
+  return verifyReleaseAssetsActual({ ...options, nativeSignatures: () => {} });
+}
+
 const packagePrerelease = async (
   options: Parameters<typeof packagePrereleaseActual>[0]
 ) => {

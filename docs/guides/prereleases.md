@@ -140,7 +140,8 @@ architecture, and packaging accepts exactly the files and order it checksums.
 
 ### Release metadata files
 
-A release with Linux assets has twelve assets. Three of them describe the release:
+A release with Linux assets has twelve assets, including two release metadata
+files. Each archive also contains its own metadata file.
 
 | Asset | What it says | Who reads it |
 | --- | --- | --- |

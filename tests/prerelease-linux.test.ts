@@ -66,7 +66,7 @@ import {
   releaseAssets,
   renderChecksums,
   requireLinuxManagerElf,
-  verifyReleaseAssets,
+  verifyReleaseAssets as verifyReleaseAssetsActual,
   writeRehearsalInstaller,
 } from "../scripts/prerelease-plan.ts";
 import {
@@ -83,6 +83,12 @@ import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
  * is exact; the installer and manager choose it only on Linux; and the macOS
  * asset set stays what every published macOS manager accepts.
  */
+
+function verifyReleaseAssets(
+  options: Parameters<typeof verifyReleaseAssetsActual>[0]
+) {
+  return verifyReleaseAssetsActual({ ...options, nativeSignatures: () => {} });
+}
 
 const fixtureTest = (name: string, run: () => void | Promise<void>) =>
   test(name, run, 30_000);
@@ -1700,10 +1706,11 @@ test("the prerelease workflow builds, installs and gates Linux before the macOS 
     )
   ).toBe(true);
 
-  // Publication is unchanged: same approval environment, same single command.
+  // Publication uses macOS signature verification and keeps the same approval gate.
   const publish = workflow.jobs.publish as Job;
   expect(publish.needs).toEqual(["plan", "build"]);
   expect(publish.environment).toBe("v5-prerelease");
+  expect(publish["runs-on"]).toBe("macos-15");
   expect(publish.if).toContain("inputs.publish");
   expect(
     publish.steps.filter((step) => step.run !== undefined).map((s) => s.run)

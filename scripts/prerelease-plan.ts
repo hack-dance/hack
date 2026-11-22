@@ -26,10 +26,9 @@ import {
   MANAGER_ASSET,
   renderBootstrap,
 } from "./installer/bootstrap.ts";
-import { extractArchive, verifyArchivePayload } from "./installer/bundle.ts";
+import { extractArchive } from "./installer/bundle.ts";
 import { LINUX_SUMS, linuxSumsNames } from "./installer/download.ts";
 import {
-  archiveEntries,
   BUNDLE_PLATFORMS,
   type BundlePlatform,
   bundleArchiveName,
@@ -951,27 +950,20 @@ function linuxManagerDigests(output: string): LinuxManagerDigests {
   };
 }
 
-/**
- * A Linux archive and its manager must be this release's for `platform`. The
- * archive is verified in full with the installer's own extraction: the exact
- * member list, every member against the archive's `SHA256SUMS`, and metadata
- * naming the planned version, source revision and platform. The manager gets
- * a structural check (`requireLinuxManagerElf`). The host that packages and
- * the host that publishes both run this; neither relies on the build job's
- * check. This establishes consistency, not provenance: the files' origin is
- * the workflow's own artifact from the Linux jobs.
- */
-async function requireLinuxAssets({
+/** Extract and verify with the same admission checks as the installer. */
+async function requireInstallableArchive({
   plan,
   platform,
   directory,
+  signatures,
 }: {
   readonly plan: PrereleasePlan;
   readonly platform: BundlePlatform;
   readonly directory: string;
+  readonly signatures?: (bundle: string) => void;
 }) {
   const archive = join(directory, bundleArchiveName(plan.version, platform));
-  const probe = await mkdtemp(join(tmpdir(), "hack-linux-asset-"));
+  const probe = await mkdtemp(join(tmpdir(), "hack-release-archive-"));
   try {
     const { identity } = extractArchive({
       archive,
@@ -979,15 +971,25 @@ async function requireLinuxAssets({
       destination: join(probe, "bundle"),
       version: plan.version,
       platform,
+      signatures,
     });
     if (identity.source_revision !== plan.source_revision) {
       throw new Error(
-        `Linux archive for ${platform} was built from another source revision`
+        `${composeOnly(platform) ? "Linux" : "Native"} archive for ${platform} was built from another source revision`
       );
     }
   } finally {
     await rm(probe, { recursive: true, force: true });
   }
+}
+
+async function requireLinuxAssets(options: {
+  readonly plan: PrereleasePlan;
+  readonly platform: BundlePlatform;
+  readonly directory: string;
+}) {
+  const { directory, platform } = options;
+  await requireInstallableArchive(options);
   await requireLinuxManagerElf({
     path: join(directory, managerAssetName(platform)),
     platform,
@@ -1313,14 +1315,7 @@ export function releaseAssets(plan: PrereleasePlan): string[] {
   return [...plan.assets, ...plan.linuxAssets, plan.platformsAsset];
 }
 
-/**
- * The release must say which platforms it holds, and say it truthfully:
- * `prerelease-platforms.json` must list exactly the platforms that have an
- * archive or a manager in `output`, with their asset names, and each
- * archive's own `prerelease.json` must name that platform, the planned
- * version and the planned source revision. The Linux archives are opened by
- * `requireLinuxAssets`; the native archive is opened here.
- */
+/** Verify that the manifest describes exactly the assets in the release. */
 async function requireReleasePlatformMetadata({
   plan,
   output,
@@ -1334,26 +1329,13 @@ async function requireReleasePlatformMetadata({
     sourceRevision: plan.source_revision,
     assetNames: await readdir(output),
   });
-  const native = archiveEntries(
-    await Bun.file(join(output, plan.archive)).bytes(),
-    PRERELEASE_PLATFORM
-  );
-  const { identity } = verifyArchivePayload({
-    entries: native,
-    version: plan.version,
-    platform: PRERELEASE_PLATFORM,
-  });
-  if (identity.source_revision !== plan.source_revision) {
-    throw new Error(
-      `Native archive for ${PRERELEASE_PLATFORM} was built from another source revision`
-    );
-  }
 }
 
 export async function verifyReleaseAssets({
   plan,
   output,
   linux = false,
+  nativeSignatures,
 }: {
   readonly plan: PrereleasePlan;
   readonly output: string;
@@ -1362,6 +1344,8 @@ export async function verifyReleaseAssets({
    * directory must hold exactly the macOS set, as a macOS-only package does.
    */
   readonly linux?: boolean;
+  /** Fixture seam for unsigned synthetic native archives. */
+  readonly nativeSignatures?: (bundle: string) => void;
 }) {
   const assets = linux ? releaseAssets(plan) : plan.assets;
   if (
@@ -1425,9 +1409,14 @@ export async function verifyReleaseAssets({
     throw new Error("Release archive does not match its outer checksum");
   }
   if (linux) {
-    // Last, once every file is known to be the planned one.
     await requireReleasePlatformMetadata({ plan, output });
   }
+  await requireInstallableArchive({
+    plan,
+    platform: PRERELEASE_PLATFORM,
+    directory: output,
+    signatures: nativeSignatures,
+  });
 }
 
 function object(value: unknown): Record<string, unknown> {

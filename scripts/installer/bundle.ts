@@ -200,44 +200,6 @@ export function verifySignatures(
     "Candidate code signature failed or verification unavailable."
   );
 }
-/** Verify the archive inventory, identity, and every payload checksum. */
-export function verifyArchivePayload({
-  entries,
-  version,
-  platform,
-  releaseMetadata,
-}: {
-  entries: ReadonlyMap<string, Uint8Array>;
-  version: string;
-  platform: BundlePlatform;
-  releaseMetadata?: Record<string, unknown>;
-}) {
-  const payload = inventory([...entries.keys()], platform);
-  const get = (name: string) => {
-    const bytes = entries.get(name);
-    requireThat(bytes, "Missing archive entry.");
-    return bytes;
-  };
-  requireThat(
-    get("prerelease.json").length <= 64 * 1024 &&
-      get("SHA256SUMS").length <= 64 * 1024,
-    "Oversized archive metadata."
-  );
-  const identity = metadata(get("prerelease.json"), version, platform);
-  requireThat(
-    !releaseMetadata || sameJson(identity, releaseMetadata),
-    "Archive metadata differs from the pinned release."
-  );
-  const manifest = checksums(get("SHA256SUMS"), payload);
-  for (const name of payload) {
-    requireThat(
-      hash(get(name)) === manifest[name],
-      `Candidate checksum mismatch: ${name}`
-    );
-  }
-  return { identity, payload };
-}
-
 export function extractArchive({
   archive,
   checksum,
@@ -263,12 +225,29 @@ export function extractArchive({
     readPinnedArchive(archive, checksum, afterArchiveOpen),
     platform
   );
-  const { payload } = verifyArchivePayload({
-    entries,
-    version,
-    platform,
-    releaseMetadata,
-  });
+  const payload = inventory([...entries.keys()], platform);
+  const get = (name: string) => {
+    const bytes = entries.get(name);
+    requireThat(bytes, "Missing archive entry.");
+    return bytes;
+  };
+  requireThat(
+    get("prerelease.json").length <= 64 * 1024 &&
+      get("SHA256SUMS").length <= 64 * 1024,
+    "Oversized archive metadata."
+  );
+  const identity = metadata(get("prerelease.json"), version, platform);
+  requireThat(
+    !releaseMetadata || sameJson(identity, releaseMetadata),
+    "Archive metadata differs from the pinned release."
+  );
+  const manifest = checksums(get("SHA256SUMS"), payload);
+  for (const name of payload) {
+    requireThat(
+      hash(get(name)) === manifest[name],
+      `Candidate checksum mismatch: ${name}`
+    );
+  }
   mkdirSync(destination, { mode: 0o700 });
   const nested = payload.find((name) => MCP.test(name));
   if (nested) {

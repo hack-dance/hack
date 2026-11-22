@@ -4,13 +4,13 @@ title: Prerelease publication · where the release set is checked
 stateDiagram-v2
   direction TB
   [*] --> Planned
-  Planned --> LinuxBuilt : CI green; Linux jobs pass
+  Planned --> LinuxBuilt : CI and Linux jobs pass
   LinuxBuilt --> NativeBuilt : native bundle built
   NativeBuilt --> packageCheck : package
   state packageCheck <<choice>>
   packageCheck --> Packaged : [set matches metadata]
   packageCheck --> Refused : [mismatch]
-  Packaged --> Approved : approval; CI, head rechecked
+  Packaged --> Approved : approval and head recheck
   Packaged --> Refused : upgrade gate fails
   Packaged --> [*] : prepare only
   Approved --> Refused : publish gate fails

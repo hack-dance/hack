@@ -12,12 +12,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { extractArchive } from "../scripts/installer/bundle.ts";
 import { officialArchive } from "../scripts/installer/download.ts";
 import {
   BUNDLE_PLATFORMS,
   type BundlePlatform,
   bundleArchiveName,
   COMPOSE_PAYLOAD,
+  digest,
   jsonBytes,
   managerAssetName,
   metadata,
@@ -40,7 +42,7 @@ import {
   prereleaseMetadata,
   releaseAssets,
   renderChecksums,
-  verifyReleaseAssets,
+  verifyReleaseAssets as verifyReleaseAssetsActual,
 } from "../scripts/prerelease-plan.ts";
 import {
   NATIVE_STORAGE_TOOL_FILE,
@@ -57,6 +59,12 @@ import { metadata as next17Metadata } from "./fixtures/prerelease-manager-next17
  * second file, `prerelease-platforms.json`, that names every platform in the
  * set, and packaging and publication refuse a set it does not describe.
  */
+
+function verifyReleaseAssets(
+  options: Parameters<typeof verifyReleaseAssetsActual>[0]
+) {
+  return verifyReleaseAssetsActual({ ...options, nativeSignatures: () => {} });
+}
 
 const fixtureTest = (name: string, run: () => void | Promise<void>) =>
   test(name, run, 30_000);
@@ -528,36 +536,68 @@ fixtureTest(
 );
 
 fixtureTest(
-  "publication checks native payload sums even when the outer sum matches",
+  "publication and the installer reject the same native archive corruption",
   async () => {
     const root = scratch();
     const output = await fullSet(root);
     const bundle = join(root, "native-bundle");
-    writeFileSync(join(bundle, "hack-native"), "changed payload\n");
-    const child = Bun.spawn(
-      [
-        "tar",
-        "--format=ustar",
-        "-czf",
-        join(output, plan.archive),
-        "-C",
-        bundle,
-        ...PRERELEASE_PAYLOAD,
-        "SHA256SUMS",
-      ],
-      {
-        env: { ...process.env, COPYFILE_DISABLE: "1" },
-        timeout: 10_000,
+    const archive = join(output, plan.archive);
+    const executable = join(bundle, "hack-native");
+    const original = readFileSync(executable);
+    const storageManifest = join(bundle, NATIVE_STORAGE_TOOL_MANIFEST);
+    const refusals = [
+      "Candidate checksum mismatch: hack-native",
+      "Storage tool fingerprint or identity mismatch",
+    ];
+    for (const [index, error] of refusals.entries()) {
+      if (index === 0) {
+        writeFileSync(executable, "changed payload\n");
+      } else {
+        writeFileSync(executable, original);
+        const tool = JSON.parse(readFileSync(storageManifest, "utf8"));
+        writeFileSync(
+          storageManifest,
+          JSON.stringify({ ...tool, sourceRevision: "b".repeat(40) })
+        );
+        writeFileSync(
+          join(bundle, "SHA256SUMS"),
+          await renderChecksums({ root: bundle, names: PRERELEASE_PAYLOAD })
+        );
       }
-    );
-    expect(await child.exited).toBe(0);
-    writeFileSync(
-      join(output, "SHA256SUMS"),
-      await renderChecksums({ root: output, names: [plan.archive] })
-    );
-    await expect(
-      verifyReleaseAssets({ plan, output, linux: true })
-    ).rejects.toThrow("Candidate checksum mismatch: hack-native");
+      const child = Bun.spawn(
+        [
+          "tar",
+          "--format=ustar",
+          "-czf",
+          archive,
+          "-C",
+          bundle,
+          ...PRERELEASE_PAYLOAD,
+          "SHA256SUMS",
+        ],
+        {
+          env: { ...process.env, COPYFILE_DISABLE: "1" },
+          timeout: 10_000,
+        }
+      );
+      expect(await child.exited).toBe(0);
+      writeFileSync(
+        join(output, "SHA256SUMS"),
+        await renderChecksums({ root: output, names: [plan.archive] })
+      );
+      expect(() =>
+        extractArchive({
+          archive,
+          checksum: digest(archive),
+          destination: join(root, `probe-${index}`),
+          version: plan.version,
+          signatures: () => {},
+        })
+      ).toThrow(error);
+      await expect(
+        verifyReleaseAssets({ plan, output, linux: true })
+      ).rejects.toThrow(error);
+    }
   }
 );
 

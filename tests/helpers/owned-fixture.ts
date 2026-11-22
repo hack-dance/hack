@@ -6,7 +6,10 @@ export async function mkdirOwnedFixture(path: string, recursive = false) {
 }
 
 /** Preserve the requested permissions of an existing fixture entry. */
-export async function writeOwnedFixture(path: string, content: string) {
+export async function writeOwnedFixture(
+  path: string,
+  content: string | Uint8Array
+) {
   await writeFile(path, content, { mode: 0o600 });
 }
 

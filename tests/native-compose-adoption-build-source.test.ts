@@ -2,7 +2,6 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import {
   chmod,
   link,
-  mkdir,
   mkdtemp,
   readFile,
   realpath,
@@ -27,6 +26,7 @@ import {
   mapLegacyNativeStorageAdoption,
 } from "../src/lib/native-config-import-plan.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 
 const CANARY = "synthetic-private-build-source";
 let root: string;
@@ -43,9 +43,9 @@ beforeEach(async () => {
   root = await realpath(
     await mkdtemp(join(tmpdir(), "retained-build-source-"))
   );
-  await mkdir(join(root, ".hack"));
-  await mkdir(join(root, ".git"));
-  await mkdir(join(root, "src"));
+  await mkdirOwnedFixture(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".git"));
+  await mkdirOwnedFixture(join(root, "src"));
   await writeFile(join(root, "src/marker"), CANARY);
   await writeFile(join(root, "Dockerfile"), "FROM scratch\nCOPY src /source\n");
   await writeFile(join(root, ".dockerignore"), "**\n!Dockerfile\n!src\n");
@@ -385,7 +385,7 @@ test.each([
 });
 test("creation and edits inside actually ignored owned outputs do not invalidate included source", async () => {
   const captured = await acquire();
-  await mkdir(join(root, ".hack/.internal"));
+  await mkdirOwnedFixture(join(root, ".hack/.internal"));
   await writeFile(join(root, ".hack/.internal/private-output"), CANARY);
   await captured.assertFresh();
   await writeFile(
@@ -469,12 +469,12 @@ test.each([
 test("a held root or included directory replacement cannot match same bytes", async () => {
   const captured = await acquire();
   await rename(join(root, "src"), join(root, "old-src"));
-  await mkdir(join(root, "src"));
+  await mkdirOwnedFixture(join(root, "src"));
   await writeFile(join(root, "src/marker"), CANARY);
   await red(captured.assertFresh());
 });
 test("parents of an excluded Dockerfile remain identity-bound special builder inputs", async () => {
-  await mkdir(join(root, "definitions"));
+  await mkdirOwnedFixture(join(root, "definitions"));
   await rename(join(root, "Dockerfile"), join(root, "definitions/Dockerfile"));
   await writeFile(join(root, ".dockerignore"), "**\n!src\n");
   composeText = JSON.stringify({
@@ -490,7 +490,7 @@ test("parents of an excluded Dockerfile remain identity-bound special builder in
   await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
   const captured = await acquire();
   await rename(join(root, "definitions"), join(root, "old-definitions"));
-  await mkdir(join(root, "definitions"));
+  await mkdirOwnedFixture(join(root, "definitions"));
   await rename(
     join(root, "old-definitions/Dockerfile"),
     join(root, "definitions/Dockerfile")
@@ -518,7 +518,7 @@ test("an ignored symlink cannot become a included input or leak its target", asy
   await captured.assertFresh();
 });
 test("a disjoint context without ignore files pins absent ignore presence", async () => {
-  await mkdir(join(root, ".hack/build"));
+  await mkdirOwnedFixture(join(root, ".hack/build"));
   await writeFile(join(root, ".hack/build/Dockerfile"), "FROM scratch\n");
   composeText = composeText.replace('"build":".."', '"build":"build"');
   await writeFile(join(root, ".hack/docker-compose.yml"), composeText);

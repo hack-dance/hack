@@ -30,6 +30,7 @@ import {
   expectClosedRefusal,
   expectCodedRefusal,
 } from "./helpers/closed-refusal.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 
 /**
  * HACK-1952: each launcher version has its own native home, and the project's run
@@ -66,7 +67,7 @@ async function fixture(branch: string | null = null) {
   const projectDir = join(projectRoot, ".hack");
   const homeA = join(root, "versions", "one", "native-home");
   const homeB = join(root, "versions", "two", "native-home");
-  await mkdir(projectDir, { recursive: true });
+  await mkdirOwnedFixture(projectDir, true);
   await mkdir(homeA, { recursive: true, mode: 0o700 });
   await mkdir(homeB, { recursive: true, mode: 0o700 });
   const a = { projectRoot, projectDir, nativeHome: homeA, branch };

@@ -3657,12 +3657,12 @@ async function resolveBranchComposeFiles(opts: {
 
   await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
   const overrideDir = resolve(opts.project.projectDir, ".branch");
-  await ensureDir(overrideDir);
+  await ensureDir(overrideDir, 0o700);
   const overridePath = resolve(
     overrideDir,
     `compose.${opts.branch}.override.yml`
   );
-  await writeTextFileIfChanged(overridePath, override);
+  await writeTextFileIfChanged(overridePath, override, 0o600);
   return [opts.project.composeFile, overridePath];
 }
 
@@ -3698,14 +3698,14 @@ export async function resolveRuntimeHostMetadataOverride(opts: {
     opts.project.projectDir,
     opts.branch ? ".branch" : ".internal"
   );
-  await ensureDir(overrideDir);
+  await ensureDir(overrideDir, 0o700);
   const overridePath = resolve(
     overrideDir,
     opts.branch
       ? `compose.${opts.branch}.runtime.override.yml`
       : "compose.runtime.override.yml"
   );
-  await writeTextFileIfChanged(overridePath, override);
+  await writeTextFileIfChanged(overridePath, override, 0o600);
   return overridePath;
 }
 
@@ -4738,7 +4738,7 @@ export async function handleInit({
     },
   });
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
-  await ensureDir(hackDir);
+  await ensureDir(hackDir, 0o755);
 
   // Committed, hack-owned ignore file for machine-local generated files
   // (.internal/, .branch/, .env, env state, env-local overrides).
@@ -4915,7 +4915,7 @@ async function handleInitAuto({
         backend,
       });
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
-  await ensureDir(hackDir);
+  await ensureDir(hackDir, 0o755);
 
   // Committed, hack-owned ignore file for machine-local generated files
   // (.internal/, .branch/, .env, env state, env-local overrides).
@@ -5018,12 +5018,13 @@ async function writeInitScaffoldFile(opts: {
   await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
   if (basename(opts.file) === PROJECT_ENV_CONFIG_DEFAULT_FILENAME) {
     await writeTextFileAtomicIfChanged(opts.file, opts.content, {
+      createMode: 0o644,
       validatePath: async (path) =>
         await assertProjectEnvLayerPath({ projectRoot: opts.repoRoot, path }),
     });
     return;
   }
-  await writeTextFileIfChanged(opts.file, opts.content);
+  await writeTextFileIfChanged(opts.file, opts.content, 0o644);
 }
 
 /**

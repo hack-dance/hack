@@ -30,6 +30,7 @@ import {
 } from "../src/lib/native-config-import-inputs.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { managedEnvCompilerFixture } from "./helpers/managed-env-compiler.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 
 const CANARY = "synthetic-typed-local-private-canary";
 const KEYS = [
@@ -49,7 +50,7 @@ beforeEach(async () => {
     Reflect.deleteProperty(process.env, key);
   }
   root = await realpath(await mkdtemp(join(tmpdir(), "adoption-local-")));
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   await writeFile(
     join(root, ".hack/hack.config.json"),
     '{"name":"fixture","env":{"default_overlay":"qa"}}'

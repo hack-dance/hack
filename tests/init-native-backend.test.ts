@@ -1,5 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { YAML } from "bun";
@@ -216,9 +223,11 @@ async function runInitAuto(opts: {
   /** Let init discover services (default: --no-discovery). */
   readonly discovery?: boolean;
   readonly name?: string;
+  readonly sharedUmask?: boolean;
 }): Promise<{ exitCode: number; output: string }> {
   const proc = Bun.spawn({
     cmd: [
+      ...(opts.sharedUmask ? ["sh", "-c", 'umask 002; exec "$@"', "init"] : []),
       process.execPath,
       join(REPO_ROOT, "index.ts"),
       "init",
@@ -256,11 +265,24 @@ test("hack init --auto on the native backend writes a native-startable scaffold 
   const repo = join(root, "repo");
   await mkdir(repo, { recursive: true });
 
-  const result = await runInitAuto({ root, repo, backend: "native" });
+  const result = await runInitAuto({
+    root,
+    repo,
+    backend: "native",
+    sharedUmask: true,
+  });
   expect(result.exitCode).toBe(0);
   expect(result.output).toContain("HACK_NATIVE_SHARED_SOURCE=1 hack up");
   expect(result.output).not.toContain("--detach");
   expect(result.output).not.toContain("global install");
+
+  for (const path of [
+    ".hack",
+    ".hack/hack.config.json",
+    ".hack/docker-compose.yml",
+  ]) {
+    expect((await stat(join(repo, path))).mode & 0o022).toBe(0);
+  }
 
   const parsed = parseCompose(
     await Bun.file(join(repo, ".hack", "docker-compose.yml")).text()

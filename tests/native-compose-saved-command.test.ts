@@ -20,6 +20,7 @@ import {
 } from "../src/lib/native-compose-route-owner.ts";
 import type { NativeRoutingResolution } from "../src/lib/native-routing-plan-protocol.ts";
 import { composeFixture } from "./helpers/native-compose.ts";
+import { mkdirOwnedFixture } from "./helpers/owned-fixture.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
@@ -44,7 +45,7 @@ async function savedFixture(
     await mkdtemp(join(tmpdir(), "native-saved-command-"))
   );
   roots.push(root);
-  await mkdir(join(root, ".hack"));
+  await mkdirOwnedFixture(join(root, ".hack"));
   await Bun.write(
     join(root, ".hack/hack.project.json"),
     "invalid authored input must not be parsed on saved operations"

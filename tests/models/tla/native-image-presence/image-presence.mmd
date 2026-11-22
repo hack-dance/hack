@@ -16,12 +16,16 @@ stateDiagram-v2
     verified --> refused: Reconcile [refusal]
     verified --> upload: Reconcile [absent]
     upload --> ready: Upload [readback observed]
-    ready --> [*]
+    ready --> ready: Evict [present]
+    ready --> created: Create [present]
+    ready --> create_refused: Create [absent]
+    created --> [*]
+    create_refused --> [*]
     refused --> [*]
     class begin idle
     class readback,verify,verified,upload live
-    class ready ok
-    class refused fail
+    class ready,created ok
+    class refused,create_refused fail
     note right of ready
         INV: success observed the exact image.
         Upload requires a verified archive.

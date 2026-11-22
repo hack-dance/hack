@@ -3048,7 +3048,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-image-presence",
     module: "ImagePresence",
-    states: 230,
+    states: 315,
     invariant: "Safe",
     action: "Readback",
     fields: [
@@ -3058,6 +3058,17 @@ const contracts: readonly ModelContract[] = [
       "observed = FALSE",
     ],
     additionalControls: [
+      {
+        name: "eviction",
+        negative: true,
+        invariant: "NeverEvictionRefusal",
+        action: "Create",
+        fields: [
+          'phase = "create_refused"',
+          'guest = "absent"',
+          "observed = TRUE",
+        ],
+      },
       {
         name: "reachability",
         negative: true,

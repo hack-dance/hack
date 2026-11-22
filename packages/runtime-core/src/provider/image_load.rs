@@ -7,7 +7,7 @@
 //! cannot complete an import. Memory use is bounded by small metadata members, not by
 //! archive size.
 use super::{
-    engine::Engine,
+    engine::{Engine, Observer},
     go_json::{GoJson, Unreadable},
     image_platform::ImagePlatform,
     image_policy::ImagePolicy,
@@ -581,6 +581,8 @@ pub struct ImageReceipt {
     pub archive_sha256: String,
     pub image_id: String,
     pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_pin: Option<String>,
 }
 
 fn reusable_validation(previous: &ImageReceipt, requested: &ImageReceipt) -> bool {
@@ -593,13 +595,11 @@ fn reusable_validation(previous: &ImageReceipt, requested: &ImageReceipt) -> boo
 }
 
 fn inspect(
-    engine: &Engine<'_>,
     image: &str,
     platform: ImagePlatform,
+    read: impl FnOnce() -> Result<Value, CandidateError>,
 ) -> Result<bool, CandidateError> {
-    match measure(Step::ImageInspect, None, |_| {
-        engine.request(Method::GET, &format!("/v1.53/images/{image}/json"), None)
-    }) {
+    measure(Step::ImageInspect, None, |_| match read() {
         Ok(value)
             if value["Id"] == image
                 && value["Architecture"] == platform.architecture()
@@ -610,6 +610,44 @@ fn inspect(
         Ok(_) => Err(error("Loaded image identity or architecture differs.")),
         Err(e) if e.code == "engine_not_found" => Ok(false),
         Err(e) => Err(e),
+    })
+}
+
+struct ImageGuest<'a> {
+    incarnation: &'a str,
+    boot: &'a str,
+    emulated: bool,
+}
+
+trait ImportTarget {
+    fn identity(&self) -> ImageGuest<'_>;
+    fn image(&self, image: &str) -> Result<Value, CandidateError>;
+    fn load_archive(
+        &self,
+        body: reqwest::blocking::Body,
+        timeout: Duration,
+    ) -> Result<(), CandidateError>;
+}
+
+impl ImportTarget for Engine<'_> {
+    fn identity(&self) -> ImageGuest<'_> {
+        ImageGuest {
+            incarnation: self.guest().incarnation(),
+            boot: self.guest().boot_id(),
+            emulated: self.guest().amd64_emulation(),
+        }
+    }
+
+    fn image(&self, image: &str) -> Result<Value, CandidateError> {
+        self.request(Method::GET, &format!("/v1.53/images/{image}/json"), None)
+    }
+
+    fn load_archive(
+        &self,
+        body: reqwest::blocking::Body,
+        timeout: Duration,
+    ) -> Result<(), CandidateError> {
+        self.load_image_archive(body, timeout)
     }
 }
 
@@ -662,7 +700,7 @@ pub fn load_with(
 ) -> Result<ImageReceipt, CandidateError> {
     load_waiting(
         candidate,
-        ArchiveSource::Explicit(path),
+        path,
         expected_sha,
         image,
         policy,
@@ -671,36 +709,77 @@ pub fn load_with(
     )
 }
 
-/// Ensure a cache entry whose acquisition receipt and file metadata were checked under
-/// the cache lock. A completed load receipt permits live readback before opening the archive.
+pub(super) struct CachedArchive<'a> {
+    pub path: &'a Path,
+    pub sha: &'a str,
+    pub image: &'a str,
+    pub bytes: u64,
+    pub pin: &'a str,
+    pub platform: ImagePlatform,
+}
+
 pub(super) fn load_cached(
     candidate: &Candidate,
-    path: &Path,
-    expected_sha: &str,
-    image: &str,
-    archive_bytes: u64,
+    archive: &CachedArchive<'_>,
     policy: &ImagePolicy,
-    platform: ImagePlatform,
+    observer: &Observer<'_>,
+    resolved_config: impl FnOnce() -> Result<String, CandidateError>,
 ) -> Result<ImageReceipt, CandidateError> {
-    if archive_bytes > policy.archive_limit {
+    let guest = observer.guest();
+    let identity = ImageGuest {
+        incarnation: guest.incarnation(),
+        boot: guest.boot_id()?,
+        emulated: guest.amd64_emulation(),
+    };
+    load_cached_with(
+        candidate,
+        archive,
+        policy,
+        &identity,
+        || observer.image(archive.image),
+        resolved_config,
+        |file| {
+            let engine = measure(Step::ImageImportConnect, None, |_| {
+                connect_for_import(candidate, IMPORT_LEASE_WAIT)
+            })?;
+            import(candidate, archive, Some(archive.pin), policy, file, &engine)
+        },
+    )
+}
+
+fn load_cached_with(
+    candidate: &Candidate,
+    archive: &CachedArchive<'_>,
+    policy: &ImagePolicy,
+    guest: &ImageGuest<'_>,
+    read_image: impl FnOnce() -> Result<Value, CandidateError>,
+    resolved_config: impl FnOnce() -> Result<String, CandidateError>,
+    load: impl FnOnce((File, u64)) -> Result<ImageReceipt, CandidateError>,
+) -> Result<ImageReceipt, CandidateError> {
+    check_hashes(archive.sha, archive.image)?;
+    if archive.bytes > policy.archive_limit {
         return Err(error(
             "Image input must be a singly linked regular file within the configured image budget.",
         ));
     }
-    load_waiting(
-        candidate,
-        ArchiveSource::Cached(path),
-        expected_sha,
-        image,
-        policy,
-        IMPORT_LEASE_WAIT,
-        platform,
-    )
-}
-
-enum ArchiveSource<'a> {
-    Explicit(&'a Path),
-    Cached(&'a Path),
+    check_emulation(archive.platform, guest)?;
+    let requested = receipt(candidate, archive, Some(archive.pin), guest);
+    let path = receipt_path(candidate, archive.sha);
+    if let Some(old) = read_receipt(&path, &requested)?
+        && reusable_validation(&old, &requested)
+        && old.source_pin.as_deref() == Some(archive.pin)
+    {
+        if inspect(archive.image, archive.platform, read_image)? {
+            return Ok(old);
+        }
+    } else if resolved_config()? != archive.image {
+        return Err(error(
+            "Cached image differs from the verified registry configuration.",
+        ));
+    }
+    // Image is absent, or a legacy receipt has no verified source pin. Read
+    // the entire archive before taking a mutation lease in either case.
+    load(open_verified(archive.path, archive.sha, policy)?)
 }
 
 fn open_verified(
@@ -732,62 +811,130 @@ fn open_verified(
 
 fn load_waiting(
     candidate: &Candidate,
-    source: ArchiveSource<'_>,
+    path: &Path,
     expected_sha: &str,
     image: &str,
     policy: &ImagePolicy,
     lease_wait: Duration,
     platform: ImagePlatform,
 ) -> Result<ImageReceipt, CandidateError> {
-    if !hex(expected_sha) || !image.strip_prefix("sha256:").is_some_and(hex) {
-        return Err(error("Expected archive and image hashes are required."));
-    }
-    let (archive_path, verified) = match source {
-        ArchiveSource::Explicit(path) => (path, Some(open_verified(path, expected_sha, policy)?)),
-        ArchiveSource::Cached(path) => (path, None),
-    };
+    check_hashes(expected_sha, image)?;
+    let file = open_verified(path, expected_sha, policy)?;
     let engine = measure(Step::ImageImportConnect, None, |_| {
         connect_for_import(candidate, lease_wait)
     })?;
-    if platform.emulated() && !engine.guest().amd64_emulation() {
+    let archive = CachedArchive {
+        path,
+        sha: expected_sha,
+        image,
+        bytes: file.1,
+        pin: "",
+        platform,
+    };
+    import(candidate, &archive, None, policy, file, &engine)
+}
+
+fn check_hashes(expected_sha: &str, image: &str) -> Result<(), CandidateError> {
+    if !hex(expected_sha) || !image.strip_prefix("sha256:").is_some_and(hex) {
+        return Err(error("Expected archive and image hashes are required."));
+    }
+    Ok(())
+}
+
+fn check_emulation(platform: ImagePlatform, guest: &ImageGuest<'_>) -> Result<(), CandidateError> {
+    if platform.emulated() && !guest.emulated {
         return Err(super::lifecycle::amd64_emulation_not_enabled());
     }
-    let directory = candidate.state_root.join("run/image-loads");
-    state::private_directory(&directory)?;
-    let path = directory.join(format!("{expected_sha}.json"));
-    let mut receipt = ImageReceipt {
+    Ok(())
+}
+
+fn receipt(
+    candidate: &Candidate,
+    archive: &CachedArchive<'_>,
+    source_pin: Option<&str>,
+    guest: &ImageGuest<'_>,
+) -> ImageReceipt {
+    ImageReceipt {
         validation_version: 1,
         checkout: candidate.checkout.clone(),
-        provider_incarnation: engine.guest().incarnation().into(),
-        provider_boot_id: engine.guest().boot_id().into(),
-        archive_sha256: expected_sha.into(),
-        image_id: image.into(),
+        provider_incarnation: guest.incarnation.into(),
+        provider_boot_id: guest.boot.into(),
+        archive_sha256: archive.sha.into(),
+        image_id: archive.image.into(),
         phase: "loading".into(),
-    };
-    if path.try_exists().map_err(state::io)? {
-        let old: ImageReceipt = state::read(&path)?;
-        if old.checkout != receipt.checkout
-            || old.provider_incarnation != receipt.provider_incarnation
-            || old.archive_sha256 != expected_sha
-            || old.image_id != image
-            || !["loading", "content-id-verified"].contains(&old.phase.as_str())
-        {
-            return Err(error("Foreign image-load intent."));
-        }
-        // Only this validator's completed, identity-bound receipt permits reuse. The
-        // guest must report the exact config digest and platform under this provider lease.
-        // Any path leading to upload still verifies the archive in full.
-        if reusable_validation(&old, &receipt) && inspect(&engine, image, platform)? {
-            if old.provider_boot_id == receipt.provider_boot_id {
-                return Ok(old);
+        source_pin: source_pin.map(str::to_owned),
+    }
+}
+
+fn receipt_path(candidate: &Candidate, archive_sha: &str) -> PathBuf {
+    candidate
+        .state_root
+        .join("run/image-loads")
+        .join(format!("{archive_sha}.json"))
+}
+
+fn read_receipt(
+    path: &Path,
+    requested: &ImageReceipt,
+) -> Result<Option<ImageReceipt>, CandidateError> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| error("Image receipt directory is missing."))?;
+    crate::reject_aliased_state(directory)?;
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(state::io(e)),
+        Ok(_) => state::check_private_directory(directory)?,
+    }
+    let old: ImageReceipt = state::read(path)?;
+    if old.checkout != requested.checkout
+        || old.provider_incarnation != requested.provider_incarnation
+        || old.archive_sha256 != requested.archive_sha256
+        || old.image_id != requested.image_id
+        || !["loading", "content-id-verified"].contains(&old.phase.as_str())
+    {
+        return Err(error("Foreign image-load intent."));
+    }
+    Ok(Some(old))
+}
+
+fn import(
+    candidate: &Candidate,
+    archive: &CachedArchive<'_>,
+    source_pin: Option<&str>,
+    policy: &ImagePolicy,
+    (mut file, file_length): (File, u64),
+    engine: &impl ImportTarget,
+) -> Result<ImageReceipt, CandidateError> {
+    let guest = engine.identity();
+    let platform = archive.platform;
+    check_emulation(platform, &guest)?;
+    let image = archive.image;
+    let expected_sha = archive.sha;
+    let path = receipt_path(candidate, expected_sha);
+    let directory = path
+        .parent()
+        .ok_or_else(|| error("Image receipt directory is missing."))?;
+    state::private_directory(directory)?;
+    let mut receipt = receipt(candidate, archive, source_pin, &guest);
+    let present = || inspect(image, platform, || engine.image(image));
+    if let Some(old) = read_receipt(&path, &receipt)? {
+        if reusable_validation(&old, &receipt) {
+            // An explicit load preserves the verified registry binding it did
+            // not itself check, including when refreshing the boot ID.
+            receipt.source_pin = receipt.source_pin.or(old.source_pin.clone());
+            if present()? {
+                if old.provider_boot_id == receipt.provider_boot_id
+                    && old.source_pin == receipt.source_pin
+                {
+                    return Ok(old);
+                }
+                receipt.phase = "content-id-verified".into();
+                state::write(&path, &receipt)?;
+                return Ok(receipt);
             }
-            receipt.phase = "content-id-verified".into();
-            state::write(&path, &receipt)?;
-            return Ok(receipt);
         }
-        if old.phase == "loading"
-            && old.provider_boot_id == receipt.provider_boot_id
-            && !inspect(&engine, image, platform)?
+        if old.phase == "loading" && old.provider_boot_id == receipt.provider_boot_id && !present()?
         {
             return Err(CandidateError::new(
                 "image_load_indeterminate",
@@ -795,10 +942,6 @@ fn load_waiting(
             ));
         }
     }
-    let (mut file, file_length) = match verified {
-        Some(verified) => verified,
-        None => open_verified(archive_path, expected_sha, policy)?,
-    };
     // Validate exactly the bytes that hash to the expected value, then stream the same file;
     // the upload releases only re-read blocks that match the validated ones, and its final
     // block only once the re-read stream hashes identically.
@@ -816,19 +959,19 @@ fn load_waiting(
     if length != file_length {
         return Err(error("Image archive size changed during verification."));
     }
-    if !inspect(&engine, image, platform)? {
+    if !present()? {
         file.rewind()
             .map_err(|_| error("Cannot rewind the image archive."))?;
         let upload = file
             .try_clone()
             .map_err(|_| error("Cannot read the image archive."))?;
         state::write(&path, &receipt)?;
-        let result = engine.load_image_archive(
+        let result = engine.load_archive(
             reqwest::blocking::Body::sized(HeldTail::new(upload, &validated, expected_sha), length),
             load_timeout(length),
         );
         // A lost response is reconciled only by independent content-ID readback.
-        if !inspect(&engine, image, platform)? {
+        if !present()? {
             result?;
             return Err(error("The expected image is absent after load."));
         }
@@ -1427,7 +1570,7 @@ pub(super) mod tests {
         let started = Instant::now();
         let refused = load_waiting(
             &pool.candidate,
-            ArchiveSource::Explicit(&path),
+            &path,
             &sha,
             &image,
             &ImagePolicy::default(),
@@ -1451,7 +1594,7 @@ pub(super) mod tests {
         let started = Instant::now();
         let admitted = load_waiting(
             &pool.candidate,
-            ArchiveSource::Explicit(&path),
+            &path,
             &sha,
             &image,
             &ImagePolicy::default(),
@@ -1467,33 +1610,193 @@ pub(super) mod tests {
         assert!(!loads.exists());
     }
 
-    #[test]
-    fn an_oversized_cached_archive_refuses_before_guest_readback() {
-        let root = crate::unique_test_root(&std::env::temp_dir(), "hkl-image-budget");
-        let candidate = Candidate::discover(&root).unwrap();
-        let (bytes, image) = fixture("arm64", false, false);
-        let path = root.join("image.tar");
-        std::fs::write(&path, &bytes).unwrap();
-        let archive_bytes = bytes.len() as u64;
-        let policy = ImagePolicy {
-            archive_limit: archive_bytes - 1,
-            ..ImagePolicy::default()
-        };
+    struct CacheFixture {
+        candidate: Candidate,
+        path: PathBuf,
+        sha: String,
+        image: String,
+        bytes: u64,
+        pin: String,
+    }
 
-        let refusal = load_cached(
-            &candidate,
-            &path,
-            &hash(&bytes),
-            &image,
-            archive_bytes,
+    impl CacheFixture {
+        fn new(wrong_diff: bool) -> Self {
+            let root = crate::unique_test_root(&std::env::temp_dir(), "image-cache");
+            let candidate = Candidate::discover(&root).unwrap();
+            let (bytes, image) = fixture("arm64", false, wrong_diff);
+            let path = root.join("image.tar");
+            std::fs::write(&path, &bytes).unwrap();
+            Self {
+                candidate,
+                path,
+                sha: hash(&bytes),
+                image,
+                bytes: bytes.len() as u64,
+                pin: format!("docker.io/fixture/image@sha256:{}", "a".repeat(64)),
+            }
+        }
+
+        fn archive(&self) -> CachedArchive<'_> {
+            CachedArchive {
+                path: &self.path,
+                sha: &self.sha,
+                image: &self.image,
+                bytes: self.bytes,
+                pin: &self.pin,
+                platform: ImagePlatform::LinuxArm64,
+            }
+        }
+
+        fn completed(&self, pin: &str) {
+            let mut old = receipt(&self.candidate, &self.archive(), Some(pin), &test_guest());
+            old.phase = "content-id-verified".into();
+            let path = receipt_path(&self.candidate, &self.sha);
+            state::private_directory(path.parent().unwrap()).unwrap();
+            state::write(&path, &old).unwrap();
+        }
+    }
+
+    impl Drop for CacheFixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.candidate.checkout).unwrap();
+        }
+    }
+
+    fn test_guest() -> ImageGuest<'static> {
+        ImageGuest {
+            incarnation: "guest-a",
+            boot: "boot-a",
+            emulated: false,
+        }
+    }
+
+    fn no_image() -> Result<Value, CandidateError> {
+        Err(CandidateError::new("engine_not_found", "Image is absent."))
+    }
+
+    struct AbsentGuest;
+
+    impl ImportTarget for AbsentGuest {
+        fn identity(&self) -> ImageGuest<'_> {
+            test_guest()
+        }
+        fn image(&self, _: &str) -> Result<Value, CandidateError> {
+            no_image()
+        }
+        fn load_archive(
+            &self,
+            _: reqwest::blocking::Body,
+            _: Duration,
+        ) -> Result<(), CandidateError> {
+            panic!("invalid input must be refused before upload")
+        }
+    }
+
+    #[test]
+    fn completed_cache_hit_requires_live_exact_architecture_and_no_import_lease() {
+        let fixture = CacheFixture::new(false);
+        fixture.completed(&fixture.pin);
+        // No archive file can be opened on this hit.
+        std::fs::remove_file(&fixture.path).unwrap();
+        let checked = std::cell::Cell::new(0);
+        let observe = |architecture: &str| {
+            load_cached_with(
+                &fixture.candidate,
+                &fixture.archive(),
+                &ImagePolicy::default(),
+                &test_guest(),
+                || {
+                    checked.set(checked.get() + 1);
+                    Ok(
+                        serde_json::json!({"Id":fixture.image,"Architecture":architecture,"Os":"linux"}),
+                    )
+                },
+                || panic!("verified pin needs no registry"),
+                |_| panic!("a live hit must not take the mutation lease"),
+            )
+        };
+        assert_eq!(observe("arm64").unwrap().image_id, fixture.image);
+        assert_eq!(checked.get(), 1);
+        assert_eq!(observe("amd64").err().unwrap().code, "image_archive");
+        assert_eq!(checked.get(), 2);
+    }
+
+    #[test]
+    fn another_pins_completed_receipt_cannot_authorize_the_requested_image() {
+        let fixture = CacheFixture::new(false);
+        fixture.completed(&format!(
+            "docker.io/fixture/other@sha256:{}",
+            "b".repeat(64)
+        ));
+        let refusal = load_cached_with(
+            &fixture.candidate,
+            &fixture.archive(),
+            &ImagePolicy::default(),
+            &test_guest(),
+            || panic!("wrong pin cannot use a guest hit"),
+            || Ok(format!("sha256:{}", "c".repeat(64))),
+            |_| panic!("wrong config cannot enter import"),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            refusal.message,
+            "Cached image differs from the verified registry configuration."
+        );
+    }
+
+    #[test]
+    fn cache_miss_checks_layers_before_submitting_to_the_owned_guest() {
+        let fixture = CacheFixture::new(true);
+        fixture.completed(&fixture.pin);
+        let archive = fixture.archive();
+        let policy = ImagePolicy::default();
+        let refusal = load_cached_with(
+            &fixture.candidate,
+            &archive,
             &policy,
-            ImagePlatform::LinuxArm64,
+            &test_guest(),
+            no_image,
+            || panic!("existing pin is already verified"),
+            |file| {
+                import(
+                    &fixture.candidate,
+                    &archive,
+                    Some(archive.pin),
+                    &policy,
+                    file,
+                    &AbsentGuest,
+                )
+            },
         )
         .err()
         .unwrap();
         assert_eq!(refusal.code, "image_archive");
-        assert!(!candidate.state_root.exists());
-        std::fs::remove_dir_all(root).unwrap();
+        let old: ImageReceipt =
+            state::read(&receipt_path(&fixture.candidate, archive.sha)).unwrap();
+        assert_eq!(old.phase, "content-id-verified");
+    }
+
+    #[test]
+    fn an_oversized_cached_archive_refuses_before_guest_readback() {
+        let fixture = CacheFixture::new(false);
+        let policy = ImagePolicy {
+            archive_limit: fixture.bytes - 1,
+            ..ImagePolicy::default()
+        };
+        let refusal = load_cached_with(
+            &fixture.candidate,
+            &fixture.archive(),
+            &policy,
+            &test_guest(),
+            || panic!("exceeds budget before readback"),
+            || panic!("exceeds budget before resolution"),
+            |_| panic!("exceeds budget before import"),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(refusal.code, "image_archive");
+        assert!(!fixture.candidate.state_root.exists());
     }
 
     #[test]

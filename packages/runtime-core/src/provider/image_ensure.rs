@@ -237,16 +237,22 @@ pub fn ensure_with(
     } else {
         registry_image::tagged(reference, policy)?;
     }
-    measure(Step::ImageEnginePreflight, None, |_| {
-        engine::info(candidate)
-    })?;
-    let (pinned, platform) = if reference.contains('@') {
+    let observer = measure(
+        Step::ImageEnginePreflight,
+        None,
+        |_| -> Result<_, CandidateError> {
+            let observer = engine::Observer::connect(candidate)?;
+            observer.info()?;
+            Ok(observer)
+        },
+    )?;
+    let (pinned, platform, resolved_config) = if reference.contains('@') {
         (
             registry_image::pinned(reference, policy)?.canonical(),
             platform,
+            None,
         )
     } else {
-        // A tag resolves to one platform; the pinned entry is then that exact platform.
         let resolved = measure(Step::ImageTagResolve, None, |_| {
             registry_image::resolve_with(reference, policy, platform)
         })?;
@@ -254,7 +260,7 @@ pub fn ensure_with(
             "linux/amd64" => PlatformPolicy::Amd64,
             _ => PlatformPolicy::Native,
         };
-        (resolved.pinned_reference, exact)
+        (resolved.pinned_reference, exact, Some(resolved.image_id))
     };
     ensure_pinned_resolving(
         candidate,
@@ -265,16 +271,35 @@ pub fn ensure_with(
         |reference, path, platform, limit| {
             registry_image::acquire_with(reference, path, policy, limit, platform)
         },
-        |candidate, path, receipt| {
-            image_load::load_cached(
-                candidate,
+        |candidate, path, receipt, reused| {
+            if resolved_config
+                .as_ref()
+                .is_some_and(|id| *id != receipt.image_id)
+            {
+                return Err(refused(
+                    "Cached image differs from the verified registry configuration.",
+                ));
+            }
+            let archive = image_load::CachedArchive {
                 path,
-                &receipt.archive_sha256,
-                &receipt.image_id,
-                receipt.archive_bytes,
-                policy,
-                receipt.platform,
-            )
+                sha: &receipt.archive_sha256,
+                image: &receipt.image_id,
+                bytes: receipt.archive_bytes,
+                pin: &receipt.reference,
+                platform: receipt.platform,
+            };
+            image_load::load_cached(candidate, &archive, policy, &observer, || {
+                if let Some(config) = resolved_config {
+                    return Ok(config);
+                }
+                if !reused {
+                    // The acquisition just verified this pin's manifest and config.
+                    return Ok(receipt.image_id.clone());
+                }
+                measure(Step::ImagePinVerify, None, |_| {
+                    registry_image::pinned_config_id(&receipt.reference, policy, receipt.platform)
+                })
+            })
             .map(|_| ())
         },
     )
@@ -302,7 +327,7 @@ fn ensure_pinned(
         platform,
         |_, _| panic!("must not resolve the published platform"),
         acquire,
-        |candidate, path, receipt| {
+        |candidate, path, receipt, _| {
             load(
                 candidate,
                 path,
@@ -328,7 +353,7 @@ fn ensure_pinned_resolving(
         PlatformPolicy,
         u64,
     ) -> Result<registry_image::AcquiredImage, CandidateError>,
-    load: impl FnOnce(&Candidate, &Path, &CacheReceipt) -> Result<(), CandidateError>,
+    load: impl FnOnce(&Candidate, &Path, &CacheReceipt, bool) -> Result<(), CandidateError>,
 ) -> Result<EnsuredImage, CandidateError> {
     let reference = canonical(reference)?;
     let root = candidate.state_root.join("artifacts/images");
@@ -424,7 +449,7 @@ fn ensure_pinned_resolving(
         (dir, receipt)
     };
     // The loader checks the owned guest even when the acquisition receipt is reusable.
-    load(candidate, &dir.join("image.tar"), &receipt)?;
+    load(candidate, &dir.join("image.tar"), &receipt, reused)?;
     Ok(EnsuredImage {
         pinned_reference: reference,
         image_id: receipt.image_id,
@@ -511,6 +536,32 @@ mod tests {
         assert_eq!(acquired.get(), 1);
         assert_eq!(loaded.get(), 2);
     }
+    #[test]
+    fn cache_receipt_at_the_wrong_platform_address_is_rejected() {
+        let f = Fixture::new();
+        let reference = pin(1);
+        ensure_pinned(
+            &f.1,
+            &reference,
+            &ImagePolicy::default(),
+            PlatformPolicy::Amd64,
+            acquire,
+            |_, _, _, _, _| Ok(()),
+        )
+        .unwrap();
+        let root = f.1.state_root.join("artifacts/images");
+        let correct = root.join(entry_key(&reference, ImagePlatform::LinuxAmd64));
+        let wrong = root.join(entry_key(&reference, ImagePlatform::LinuxArm64));
+        fs::rename(correct, &wrong).unwrap();
+        let failure = inspect_entry(&f.1, &wrong, &reference, ImagePlatform::LinuxArm64)
+            .err()
+            .unwrap();
+        assert_eq!(
+            failure.message,
+            "Image cache entry platform differs from its address."
+        );
+    }
+
     #[test]
     fn cache_count_budget_refuses_without_deleting_existing_archives() {
         let f = Fixture::new();
@@ -832,7 +883,7 @@ mod tests {
                 asked.set(Some(policy));
                 acquire(reference, path, policy, limit)
             },
-            |_, _, receipt| {
+            |_, _, receipt, _| {
                 assert_eq!(receipt.platform, ImagePlatform::LinuxArm64);
                 Ok(())
             },
@@ -873,7 +924,7 @@ mod tests {
             PlatformPolicy::PreferNative,
             |_, _| Ok(ImagePlatform::LinuxAmd64),
             |_, _, _, _| panic!("reuse complete archive"),
-            |_, _, receipt| {
+            |_, _, receipt, _| {
                 assert_eq!(receipt.platform, ImagePlatform::LinuxAmd64);
                 Ok(())
             },
@@ -890,7 +941,7 @@ mod tests {
                 PlatformPolicy::PreferNative,
                 |_, _| Err(refused("synthetic resolution failure")),
                 |_, _, _, _| panic!("no acquire"),
-                |_, _, _| panic!("no load"),
+                |_, _, _, _| panic!("no load"),
             )
             .is_err()
         );

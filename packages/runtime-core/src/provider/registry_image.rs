@@ -1653,6 +1653,26 @@ pub fn resolve_with(
     })
 }
 
+/// Verify the pinned manifest (and selected manifest descriptor for an index),
+/// then verify its config descriptor against the config bytes.
+pub(super) fn pinned_config_id(
+    reference: &str,
+    policy: &ImagePolicy,
+    platform: ImagePlatform,
+) -> Result<String, CandidateError> {
+    let pin = pinned(reference, policy)?;
+    let mut fetch = Fetch::new(&pin.registry, &pin.path, policy)?;
+    let initial = fetch.manifest(&pin.digest)?;
+    let requested = PlatformPolicy::exact(platform);
+    let (manifest, _, indexed) = select(&mut fetch, &initial, &pin.digest, requested)?;
+    let config = manifest
+        .config
+        .ok_or_else(|| error("Image config descriptor is missing."))?;
+    let config_bytes = fetch.object("blobs", &config)?;
+    config_platform(&config_bytes, requested, indexed)?;
+    Ok(config.digest)
+}
+
 /// The platform the actual image configuration targets. An index selection must be
 /// confirmed by the configuration; a single manifest is admitted only for a platform the
 /// policy allows.

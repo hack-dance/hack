@@ -6,7 +6,7 @@ vars == <<phase, source, receipt, guest, archive, verified, uploaded, observed>>
 Init ==
     /\ phase = "begin"
     /\ source \in {"cached", "explicit"}
-    /\ receipt \in {"complete", "loading", "none", "foreign"}
+    /\ receipt \in {"complete", "loading", "none", "foreign", "wrong-pin"}
     /\ guest \in {"present", "absent", "wrong", "unknown"}
     /\ archive \in {"clean", "changed"}
     /\ verified = FALSE
@@ -14,7 +14,7 @@ Init ==
     /\ observed = FALSE
 
 Evict ==
-    /\ phase = "begin"
+    /\ phase \in {"begin", "ready"}
     /\ guest = "present"
     /\ guest' = "absent"
     /\ UNCHANGED <<phase, source, receipt, archive, verified, uploaded, observed>>
@@ -26,7 +26,7 @@ Begin ==
 
 Readback ==
     /\ phase = "readback"
-    /\ phase' = CASE receipt = "foreign" -> "refused"
+    /\ phase' = CASE receipt \in {"foreign", "wrong-pin"} -> "refused"
                    [] receipt = "complete" /\ (guest = "present" \/ TrustReceipt) -> "ready"
                    [] receipt \in {"complete", "loading"} /\ guest \in {"wrong", "unknown"} -> "refused"
                    [] receipt = "loading" /\ guest = "absent" -> "refused"
@@ -42,11 +42,11 @@ Verify ==
 
 Reconcile ==
     /\ phase = "verified"
-    /\ phase' = CASE receipt = "foreign" \/ guest \in {"wrong", "unknown"} -> "refused"
+    /\ phase' = CASE receipt \in {"foreign", "wrong-pin"} \/ guest \in {"wrong", "unknown"} -> "refused"
                    [] receipt = "loading" /\ guest = "absent" -> "refused"
                    [] guest = "present" -> "ready"
                    [] OTHER -> "upload"
-    /\ observed' = (receipt # "foreign" /\ guest = "present")
+    /\ observed' = (receipt \notin {"foreign", "wrong-pin"} /\ guest = "present")
     /\ UNCHANGED <<source, receipt, guest, archive, verified, uploaded>>
 
 Upload ==
@@ -57,13 +57,21 @@ Upload ==
     /\ observed' = TRUE
     /\ UNCHANGED <<source, receipt, archive, verified>>
 
-Done == /\ phase \in {"ready", "refused"} /\ UNCHANGED vars
+Create ==
+    /\ phase = "ready"
+    /\ phase' = IF guest = "present" THEN "created" ELSE "create_refused"
+    /\ UNCHANGED <<source, receipt, guest, archive, verified, uploaded, observed>>
 
-Spec == Init /\ [][Evict \/ Begin \/ Readback \/ Verify \/ Reconcile \/ Upload \/ Done]_vars
+Done == /\ phase \in {"created", "refused", "create_refused"} /\ UNCHANGED vars
+
+Spec == Init /\ [][Evict \/ Begin \/ Readback \/ Verify \/ Reconcile \/ Upload \/ Create \/ Done]_vars
 
 Safe == /\ (phase = "ready" => observed)
         /\ (uploaded => verified /\ archive = "clean")
+        /\ (phase = "created" => observed /\ guest = "present")
         /\ (phase = "ready" /\ source = "explicit" => verified)
+
+NeverEvictionRefusal == phase # "create_refused"
 
 NeverSkipsRead == ~(phase = "ready" /\ ~verified)
 =============================================================================

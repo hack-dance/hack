@@ -2863,6 +2863,14 @@ const contracts: readonly ModelContract[] = [
     fields: ["retired = <<1>>", "alive = 1"],
   },
   {
+    name: "native-pool-capacity",
+    module: "PoolCapacityUpdate",
+    states: 11,
+    invariant: "CoherentBoot",
+    action: "Boot",
+    fields: ["receipt = 1", "config = 2", "journal = TRUE", "bootSize = 2"],
+  },
+  {
     // HACK-2456: a pool that stops or dies under a live run. Positive: the
     // stopped-pool recovery plus recovery from any earlier boot of the pool,
     // with every fault (other boots, a stop between a recovery's boot and its

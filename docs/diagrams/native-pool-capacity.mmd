@@ -1,0 +1,13 @@
+stateDiagram-v2
+    [*] --> Running
+    Running --> Stopped: idle at both checks
+    Running --> Running: active use refuses
+    Stopped --> Running: boot existing size
+    Stopped --> Journaled: sync resize intent
+    Journaled --> ProviderWritten: provider compare and swap
+    ProviderWritten --> OwnerWritten: save matching owner
+    OwnerWritten --> Resized: retire journal
+    Resized --> Running: boot expanded size
+    Journaled --> Journaled: crash and retry
+    ProviderWritten --> ProviderWritten: crash and retry
+    OwnerWritten --> OwnerWritten: crash and retry

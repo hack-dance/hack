@@ -420,6 +420,7 @@ fn update_network(
     let _lock = state::Lock::acquire(&root(candidate))?;
     // Stopped-pool updates never interleave: one journal owns the provider record at a time.
     super::share_update::require_complete(candidate)?;
+    super::socket_update::require_complete(candidate)?;
     // The update stages owner writes, which need the alias a clean stop released.
     lifecycle::restore_released_short_home(candidate)?;
     let owner = Owner::load(candidate)?;

@@ -255,6 +255,19 @@ fn records(directory: &Path, owner: &str, capacity: u8) -> Result<Vec<Record>, C
     }
     Ok(result)
 }
+pub(in crate::provider) fn socket_counts(
+    candidate: &Candidate,
+    owner: &state::Owner,
+) -> Result<BTreeMap<String, usize>, CandidateError> {
+    let Some(intent) = owner.dependency_sockets else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(records(&root(candidate), &owner.token, intent.slots)?
+        .into_iter()
+        .map(|record| (record.run, record.slots.len()))
+        .collect())
+}
+
 fn select(
     requested: &BTreeSet<u8>,
     unavailable: &BTreeSet<u8>,

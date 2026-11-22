@@ -1362,7 +1362,9 @@ fn start_pool_observed(
     let admission_reuse = admission::opening::Reuse::from_environment()?;
     // A clean stop whose alias path another entry holds is moved to a fresh alias before
     // any strict owner read below refuses it.
-    restore_released_short_home_before_use(candidate)?;
+    if !super::socket_update::pending(candidate)? {
+        restore_released_short_home_before_use(candidate)?;
+    }
     let retained = start.retained;
     if start.amd64_emulation {
         require_host_translation()?;
@@ -1411,7 +1413,68 @@ fn start_pool_observed(
             .try_exists()
             .map_err(io)?
         {
-            let owner = Owner::load(candidate)?;
+            let mut owner = Owner::load(candidate)?;
+            if profile == super::Profile::Development && owner.profile == profile {
+                let target =
+                    super::socket_update::target(&owner, bridge_request, dependency_request)?;
+                if super::socket_update::pending(candidate)?
+                    || super::socket_update::changed(&owner, target)
+                {
+                    let mut after = owner.clone();
+                    target.apply(&mut after);
+                    if after.application_bridge.is_some() && !cfg!(feature = "native-stream-relay")
+                    {
+                        return Err(CandidateError::new(
+                            "bridge_unavailable",
+                            "Application bridges require a native-stream-relay build.",
+                        ));
+                    }
+                    request.check(
+                        &after,
+                        emulation_pool_alive(candidate, &owner, request.amd64_emulation)?,
+                    )?;
+                    if owner.phase == "running" {
+                        super::socket_update::require_complete(candidate)?;
+                        let token = &owner.token;
+                        stop_idle_pool_checked(candidate, &|| {
+                            super::socket_update::require_complete(candidate)?;
+                            super::network_update::require_complete(candidate)?;
+                            super::share_update::require_complete(candidate)?;
+                            let current = Owner::load(candidate)?;
+                            if &current.token != token
+                                || current.application_bridge != owner.application_bridge
+                                || current.dependency_sockets != owner.dependency_sockets
+                            {
+                                return Err(CandidateError::new(
+                                    "runtime_changed",
+                                    "The native pool changed before the capacity stop. Retry startup.",
+                                ));
+                            }
+                            let alive =
+                                emulation_pool_alive(candidate, &current, request.amd64_emulation)?;
+                            let mut current = current;
+                            target.apply(&mut current);
+                            request.check(&current, alive)
+                        }).map_err(|error| {
+                            if error.code == pool_users::POOL_IN_USE {
+                                CandidateError::new("pool_socket_in_use", "The pool is in use, so its capacity was not changed.")
+                            } else {
+                                error
+                            }
+                        })?;
+                        let stopped = Owner::load(candidate)?;
+                        if stopped.token != owner.token {
+                            return Err(CandidateError::new(
+                                "runtime_changed",
+                                "The native pool changed after the capacity stop. Retry startup.",
+                            ));
+                        }
+                        owner = stopped;
+                    }
+                    owner = super::socket_update::update(candidate, &owner, target)?;
+                }
+            }
+            super::socket_update::require_complete(candidate)?;
             request.check(
                 &owner,
                 emulation_pool_alive(candidate, &owner, request.amd64_emulation)?,
@@ -1432,6 +1495,7 @@ fn start_pool_observed(
                 Vec::new(),
             )
         };
+    super::socket_update::require_complete(candidate)?;
     super::dependency_socket::check_capacity(existing, existing_dependencies)?;
     if existing.is_some() && !cfg!(feature = "native-stream-relay") {
         return Err(CandidateError::new(
@@ -1569,6 +1633,7 @@ fn start_pool_observed(
     }
     super::network_update::require_complete(candidate)?;
     super::share_update::require_complete(candidate)?;
+    super::socket_update::require_complete(candidate)?;
     let fresh_owner = match fs::symlink_metadata(root(candidate).join("owner.json")) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
         Ok(_) => false,
@@ -2686,10 +2751,29 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
 /// stopped. The second check is a second guard, should a receipt ever turn live
 /// without the lease; it costs one read of the receipts.
 pub(super) fn stop_idle_pool(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
+    stop_idle_pool_checked(candidate, &|| Ok(()))
+}
+
+pub(super) fn live_socket_pool_runs(candidate: &Candidate) -> Result<Vec<String>, CandidateError> {
+    pool_users::live_graph_runs(&candidate.state_root).ok_or_else(|| {
+        CandidateError::new(
+            "pool_socket_usage",
+            "The live pool usage could not be verified.",
+        )
+    })
+}
+
+fn stop_idle_pool_checked(
+    candidate: &Candidate,
+    check: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<RuntimeStatus, CandidateError> {
     crate::timings::measure(crate::timings::Step::VmStop, None, |_| {
         down_observed(
             candidate,
-            Some(&|| pool_users::require_idle(&candidate.state_root)),
+            Some(&|| {
+                check()?;
+                pool_users::require_idle(&candidate.state_root)
+            }),
         )
     })
 }

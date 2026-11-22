@@ -132,6 +132,7 @@ pub(super) fn resume(
     verify_retained()?;
     super::super::network_update::require_complete(candidate)?;
     super::super::share_update::require_complete(candidate)?;
+    super::super::socket_update::require_complete(candidate)?;
     let owner = Owner::load(candidate)?;
     if owner != running.owner {
         return Err(changed());

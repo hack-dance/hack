@@ -413,6 +413,7 @@ fn update(
         return Err(refused());
     }
     network_update::require_complete(candidate)?;
+    super::socket_update::require_complete(candidate)?;
     let owner = Owner::load(candidate)?;
     let path = root(candidate).join(JOURNAL);
     let journal_present = match fs::symlink_metadata(&path) {

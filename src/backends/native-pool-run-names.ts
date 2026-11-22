@@ -103,24 +103,40 @@ async function mappedRuns(projectDir: string): Promise<string[]> {
  */
 export async function describeLivePoolRuns(
   runs: readonly string[],
-  opts: { readonly registry?: () => Promise<ProjectsRegistry> } = {}
+  opts: {
+    readonly registry?: () => Promise<ProjectsRegistry>;
+    readonly sockets?: ReadonlyMap<
+      string,
+      { bridges: number; dependencies: number }
+    >;
+  } = {}
 ): Promise<string> {
   const registry = await (opts.registry ?? readProjectsRegistry)().catch(
     () => ({ version: 1, projects: [] }) as ProjectsRegistry
   );
   const live = new Set(runs);
-  const names: string[] = [];
+  const counts = new Map<string, { bridges: number; dependencies: number }>();
   const named = new Set<string>();
   for (const checkout of checkouts(registry)) {
     for (const run of await mappedRuns(checkout.projectDir)) {
       if (live.has(run) && !named.has(run)) {
         named.add(run);
-        if (!names.includes(checkout.label)) {
-          names.push(checkout.label);
-        }
+        const count = counts.get(checkout.label) ?? {
+          bridges: 0,
+          dependencies: 0,
+        };
+        const sockets = opts.sockets?.get(run);
+        count.bridges += sockets?.bridges ?? 0;
+        count.dependencies += sockets?.dependencies ?? 0;
+        counts.set(checkout.label, count);
       }
     }
   }
+  const names = [...counts].map(([name, count]) =>
+    opts.sockets
+      ? `${name} (${count.bridges} bridge, ${count.dependencies} dependency)`
+      : name
+  );
   const unnamed = live.size - named.size;
   if (names.length === 0) {
     return `${live.size} live project run${live.size === 1 ? "" : "s"} that no registered project's run mapping names`;

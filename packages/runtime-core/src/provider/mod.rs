@@ -144,6 +144,8 @@ pub use source_probe::{ProbeReceipt, verify as verify_source};
 pub use source_sync::{SyncReceipt, SyncSession, sync_status};
 pub mod setup;
 mod socket_requests;
+mod socket_update;
+pub use socket_update::socket_usage;
 pub(crate) mod state;
 mod tree_witness;
 pub use lifecycle::{

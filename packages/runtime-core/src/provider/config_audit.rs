@@ -260,15 +260,10 @@ pub(super) fn read_database(path: &Path, machine: &str) -> Result<Value, Candida
     Ok(record)
 }
 
-fn verify_record(
-    record: &Value,
-    machine: &str,
-    token: &str,
+pub(super) fn socket_mappings(
     bridge: Option<super::BridgeIntent>,
     dependencies: Option<(super::DependencySocketIntent, &Path)>,
-    network: super::NetworkIntent,
-) -> Result<(), CandidateError> {
-    network.verify(record)?;
+) -> Result<Value, CandidateError> {
     super::dependency_socket::check_capacity(bridge, dependencies.map(|(intent, _)| intent))
         .map_err(|_| invalid())?;
     let mut mappings = super::BridgeIntent::mappings(bridge);
@@ -283,6 +278,19 @@ fn verify_record(
     if mappings.as_array().ok_or_else(invalid)?.len() > 32 {
         return Err(invalid());
     }
+    Ok(mappings)
+}
+
+fn verify_record(
+    record: &Value,
+    machine: &str,
+    token: &str,
+    bridge: Option<super::BridgeIntent>,
+    dependencies: Option<(super::DependencySocketIntent, &Path)>,
+    network: super::NetworkIntent,
+) -> Result<(), CandidateError> {
+    network.verify(record)?;
+    let mappings = socket_mappings(bridge, dependencies)?;
     if record["name"] != machine
         || record["labels"] != json!({"hack-local.owner": token})
         || record["ssh_agent"] != false

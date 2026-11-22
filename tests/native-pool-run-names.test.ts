@@ -151,3 +151,23 @@ test("live runs are named by the registered checkout that maps them, three at mo
     })
   ).toBe("1 live project run that no registered project's run mapping names");
 });
+
+test("a capacity refusal totals each named project's slot reservations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-pool-capacity-names-"));
+  scratch.push(root);
+  const app = await checkout(root, "app", [run("1"), run("2")]);
+  const neighbor = await checkout(root, "neighbor", [run("3")]);
+  expect(
+    await describeLivePoolRuns([run("1"), run("2"), run("3")], {
+      registry: registry([
+        { name: "app", projectDir: app },
+        { name: "neighbor", projectDir: neighbor },
+      ]),
+      sockets: new Map([
+        [run("1"), { bridges: 2, dependencies: 1 }],
+        [run("2"), { bridges: 1, dependencies: 0 }],
+        [run("3"), { bridges: 0, dependencies: 0 }],
+      ]),
+    })
+  ).toBe("app (3 bridge, 1 dependency), neighbor (0 bridge, 0 dependency)");
+});

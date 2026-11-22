@@ -68,6 +68,7 @@ import {
   nativeImageRegistryReason,
 } from "./native-image-policy.ts";
 import { nativeImageBlocker, offlineTagNotice } from "./native-image-tags.ts";
+import { describeLivePoolRuns } from "./native-pool-run-names.ts";
 import {
   type NativePreparedBase,
   preparedBaseArguments,
@@ -3624,6 +3625,64 @@ function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
   }
 }
 
+async function poolSocketRefusal(
+  error: unknown,
+  opts: {
+    runtime: NativeRuntimeSelection;
+    signal?: AbortSignal;
+    invoke: typeof invokeNativeRuntime;
+  }
+): Promise<never> {
+  if (
+    !(
+      error instanceof NativeRuntimeRequestError &&
+      [error.nativeCode, error.nativeCauseCode].some(
+        (code) =>
+          code === "pool_socket_in_use" ||
+          code === "bridge_capacity_exhausted" ||
+          code === "dependency_capacity_exhausted"
+      )
+    )
+  ) {
+    throw error;
+  }
+  const usage = await opts
+    .invoke({
+      runtime: opts.runtime,
+      cwd: opts.runtime.home,
+      args: ["runtime", "socket-usage", "--json"],
+      timeoutMs: 5000,
+      signal: opts.signal,
+    })
+    .catch(() => undefined);
+  const sockets = new Map<string, { bridges: number; dependencies: number }>();
+  if (isRecord(usage) && Array.isArray(usage.reservations)) {
+    for (const row of usage.reservations) {
+      if (
+        isRecord(row) &&
+        typeof row.run === "string" &&
+        typeof row.bridges === "number" &&
+        typeof row.dependencies === "number"
+      ) {
+        sockets.set(row.run, {
+          bridges: row.bridges,
+          dependencies: row.dependencies,
+        });
+      }
+    }
+  }
+  const holders =
+    sockets.size === 0
+      ? "The project reservations could not be identified."
+      : `Reservations by project: ${await describeLivePoolRuns([...sockets.keys()], { sockets })}.`;
+  const reason =
+    error.nativeCode === "pool_socket_in_use"
+      ? "The native pool is in use, so its socket capacity was not changed."
+      : "The native pool has too few free sockets for this start.";
+  error.message = `${reason} ${holders} Run hack down in the projects holding slots before retrying.`;
+  throw error;
+}
+
 const START_LOCK_HOLDER =
   /^Provider lease acquisition refused; recorded holder: ([a-z ]+); no operation was admitted\.$/;
 
@@ -3667,7 +3726,11 @@ export async function startNativeProject(
       finish = await beginNativeProjectStartupObservation(opts.scope);
     });
   } catch (error) {
-    throw withStartupLockBlocker(error);
+    return await poolSocketRefusal(withStartupLockBlocker(error), {
+      runtime: opts.runtime,
+      signal: opts.signal,
+      invoke: opts.dependencies?.invoke ?? invokeNativeRuntime,
+    });
   } finally {
     stopPoolWatch?.();
     await finish?.();

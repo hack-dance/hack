@@ -130,6 +130,70 @@ fn initialize_registry(
     state::write(&directory.join("state.json"), &store)
 }
 
+/// A resize journal can introduce the first bridge registry only when its
+/// before receipt had no bridge capacity. Accept a replay of this exact empty
+/// registry, including a crash between creating the directory and its receipt.
+pub(in crate::provider) fn initialize_resize_registry(
+    candidate: &Candidate,
+    before: &state::Owner,
+    after: &state::Owner,
+) -> Result<(), CandidateError> {
+    let Some(intent) = after.application_bridge else {
+        return Ok(());
+    };
+    if before.application_bridge.is_some() {
+        return verify_owner_registry(candidate, after);
+    }
+    let directory = root(candidate);
+    let expected = Store {
+        version: 1,
+        owner: before.token.clone(),
+        next_launch_serial: 0,
+        slots: BTreeMap::new(),
+    };
+    match fs::symlink_metadata(&directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            initialize_registry(candidate, &before.token, intent.slots)?;
+        }
+        Err(error) => return Err(state::io(error)),
+        Ok(_) => {
+            state::check_private_directory(&directory)?;
+            let path = directory.join("state.json");
+            let pending = directory.join("state.pending");
+            match fs::symlink_metadata(&pending) {
+                Ok(_) => {
+                    super::super::network_update::file_identity_with(&pending, invalid)?;
+                    let staged = fs::read(&pending).map_err(state::io)?;
+                    let bytes = serde_json::to_vec_pretty(&expected).map_err(|_| invalid())?;
+                    if !bytes.starts_with(&staged) || path.try_exists().map_err(state::io)? {
+                        return Err(invalid());
+                    }
+                    fs::remove_file(&pending).map_err(state::io)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(state::io(error)),
+            }
+            if !path.try_exists().map_err(state::io)? {
+                if fs::read_dir(&directory)
+                    .map_err(state::io)?
+                    .next()
+                    .is_some()
+                {
+                    return Err(invalid());
+                }
+                state::write(&path, &expected)?;
+            }
+        }
+    }
+    let recorded = read_owner_registry(candidate, &before.token, intent.slots, false)?;
+    if recorded.next_launch_serial != 0 || !recorded.slots.is_empty() {
+        return Err(invalid());
+    }
+    fs::File::open(directory.parent().ok_or_else(invalid)?)
+        .and_then(|parent| parent.sync_all())
+        .map_err(state::io)
+}
+
 /// The guest boot ids this run's slots record, from the pool's validated registry
 /// (none without a bridge intent). Selection evidence only: dead-owner recovery still
 /// matches each against the run's own receipt evidence (`boot_match::receipt_boot`).
@@ -160,6 +224,20 @@ pub(in crate::provider) fn verify_owner_registry(
         read_owner_registry(candidate, &owner.token, intent.slots, false)?;
     }
     Ok(())
+}
+
+pub(in crate::provider) fn socket_counts(
+    candidate: &Candidate,
+    owner: &state::Owner,
+) -> Result<BTreeMap<String, usize>, CandidateError> {
+    let mut counts = BTreeMap::new();
+    if let Some(intent) = owner.application_bridge {
+        let store = read_owner_registry(candidate, &owner.token, intent.slots, false)?;
+        for assignment in store.slots.into_values() {
+            *counts.entry(assignment.run).or_default() += 1;
+        }
+    }
+    Ok(counts)
 }
 
 fn read_owner_registry(

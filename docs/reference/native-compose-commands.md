@@ -134,6 +134,17 @@ documents can contain decrypted values and remain in owned private files with
 restricted permissions. They are never part of the public plan or JSON output.
 Do not copy these documents into source control or attach them to diagnostics.
 
+## Growing an existing native pool
+
+When a project needs more sockets than this development pool was configured
+with, `hack up` can add sockets up to the shared 32-slot limit. The pool
+must be stopped or idle. An idle pool stops once and starts again with its
+disks retained. If a live project prevents the stop, the refusal names
+registered projects and their recorded slot reservations when available.
+Run `hack down` in those projects before retrying. A capacity increase
+preserves both recorded counts and never takes slots from the other
+direction.
+
 ## Owned project networks
 
 For an unchanged unrouted running instance, `up` reuses its saved generation only

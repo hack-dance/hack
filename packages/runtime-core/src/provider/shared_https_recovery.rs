@@ -551,6 +551,25 @@ fn capture_socket(
     }
 }
 
+/// How long the archive waits for the HTTPS port to become free. A Caddy that just
+/// stopped leaves its recent connections in TIME_WAIT (about 30 s on macOS); the
+/// port check binds without address reuse, so it fails meanwhile (HACK-2550, seen
+/// on a real VM once the earlier start stopped waiting minutes before recovery).
+const PORT_FREE_WAIT: std::time::Duration = std::time::Duration::from_secs(35);
+
+/// The HTTPS port claimed as free, retried for a bounded time; a listener that
+/// stays refuses as before.
+fn port_free_within(port: u16) -> Result<Vec<std::os::fd::OwnedFd>, CandidateError> {
+    let deadline = std::time::Instant::now() + PORT_FREE_WAIT;
+    loop {
+        match https_recovery::port_absent(port) {
+            Ok(guards) => return Ok(guards),
+            Err(error) if std::time::Instant::now() >= deadline => return Err(error),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
+        }
+    }
+}
+
 /// Wait, bounded, for an owner that is retiring itself after its pool boot ended. Only
 /// a running owner is waited for; every other check refuses at once.
 fn await_owner_exit(config: &Configuration, home: &Path) -> Result<(), CandidateError> {
@@ -784,7 +803,7 @@ pub fn archive(
         }
         await_owner_exit(&config, home)?;
         prove_quiescence(&config, home, socket.as_deref())?;
-        let _ports = https_recovery::port_absent(config.binding.https_port)?;
+        let _ports = port_free_within(config.binding.https_port)?;
         if !intent_written {
             let current = Journal {
                 current_boot: graph.current_boot().into(),

@@ -753,10 +753,18 @@ fn prior_generation(
     } else {
         !previous.is_empty() && !prior.boot.is_empty() && prior.boot != current.boot
     };
+    // A completed dead-owner recovery's own selection also records the boot it selected
+    // from (`capture_previous_boot`). A run recovered, restored and stranded again leaves
+    // it (HACK-2550, seen on a real VM). Only that recovery's retired intent, naming these
+    // exact bridges for the stopped receipt, proves it complete; neither of its boots
+    // may be the live one.
+    let recovered = prior.previous_boot.is_some();
     prior.version == 1
         && prior.owner == current.owner
         && earlier
-        && prior.previous_boot.is_none()
+        && (!recovered
+            || (!prior.selected.is_empty()
+                && prior.previous_boot.as_deref() != Some(current.boot.as_str())))
         && prior.predecessor_owner.is_none()
         && prior.predecessor_absence.is_none()
         && prior.run == current.run
@@ -771,7 +779,14 @@ fn prior_generation(
                 .is_some_and(|relay| relay.launch_serial > prior.serial)
         })
         && (prior.selected.is_empty()
-            || stopped.is_some_and(|receipt| stopped_prior_bindings(root, prior, receipt)))
+            || stopped.is_some_and(|receipt| {
+                stopped_prior_bindings(root, prior, receipt)
+                    && (!recovered
+                        || super::super::dead_owner_cleanup::retired_prior_bridges(
+                            root, receipt, prior,
+                        )
+                        .unwrap_or(false))
+            }))
 }
 
 fn stopped_prior_bindings(root: &std::path::Path, prior: &Selection, receipt: &Receipt) -> bool {
@@ -781,7 +796,7 @@ fn stopped_prior_bindings(root: &std::path::Path, prior: &Selection, receipt: &R
         }) || super::super::dead_owner_cleanup::retired_prior_bridges(root, receipt, prior)
             .unwrap_or(false);
     acknowledged
-        && validate_bindings(receipt, prior, None).is_ok()
+        && validate_bindings(receipt, prior, prior.previous_boot.as_deref()).is_ok()
         && prior.selected.values().all(|selected| {
             let assignment = &selected.assignment;
             receipt

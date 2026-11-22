@@ -1738,6 +1738,90 @@ mod tests {
         state::write(&path, &proof).unwrap();
         assert!(retired_prior_bridges(&fixture.0, &stopped, &selection).is_err());
     }
+    /// HACK-2550, seen on a real VM: `hack up` recovered a run whose pool had stopped
+    /// (recovery of generation 1 from boot A, run in boot B) and restored it in boot B;
+    /// the pool then stopped again. The second recovery, in boot C, finds the first
+    /// recovery's own bridge selection, which records both boots. It is a completed
+    /// earlier generation only with that recovery's retired intent naming exactly these
+    /// bridges for the stopped receipt, and never when a boot it names is the live one.
+    #[test]
+    fn a_completed_recovery_selection_is_a_prior_generation_of_a_restored_run() {
+        let fixture = super::super::tests::Fixture::new();
+        let (a, b, c) = (
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+            "33333333-3333-3333-3333-333333333333",
+        );
+        let receipt = |phase: &str, container: &str, network: &str, resource: &str| -> Receipt {
+            serde_json::from_value(json!({
+            "version":1,"run":"a".repeat(32),"owner":"b".repeat(32),
+            "namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":phase,
+            "readiness":{},"resources":{
+                "container:web":{"kind":"container","key":"web","name":"owned-web",
+                    "id":container,"image":null,"phase":resource},
+                "network:default":{"kind":"network","key":"default","name":"owned-net",
+                    "id":network,"image":null,"phase":resource}
+            }}))
+            .unwrap()
+        };
+        let slot = |boot: &str, container: &str, network: &str, serial: u64| {
+            json!({"assignment":{
+                "reservation":"e".repeat(32),"run":"a".repeat(32),"service":"web",
+                "generation":"f".repeat(64),"container_id":container,"network_id":network,
+                "boot_id":boot,"phase":"running",
+                "relay":{"transport":"reservation-v1","launch_serial":serial,
+                    "binary_sha256":"2".repeat(64),"target_pid":10,"target_start":10,"port":8080}}})
+        };
+        let (old_container, old_network) = ("3".repeat(64), "4".repeat(64));
+        let (new_container, new_network) = ("5".repeat(64), "6".repeat(64));
+        let stopped = receipt(
+            "stopped-data-retained",
+            &old_container,
+            &old_network,
+            "absent",
+        );
+        let original = receipt("ready-observed", &old_container, &old_network, "started");
+        let selection = |boot: &str, previous: &str, serial: u64, slot: Value| -> Value {
+            json!({"version":1,"owner":"b".repeat(32),"boot":boot,"previous_boot":previous,
+                "run":"a".repeat(32),"plan":"d".repeat(64),"capacity":1,"serial":serial,
+                "selected":{"0":slot}})
+        };
+        let prior_value = selection(b, a, 1, slot(a, &old_container, &old_network, 1));
+        let prior: bridges::cleanup::Selection =
+            serde_json::from_value(prior_value.clone()).unwrap();
+        let current: bridges::cleanup::Selection =
+            serde_json::from_value(selection(c, b, 2, slot(b, &new_container, &new_network, 2)))
+                .unwrap();
+        let active = receipt("ready-observed", &new_container, &new_network, "started");
+        state::write(&fixture.0.join("relay-cleanup-bridges.json"), &prior).unwrap();
+        restore_history::retain(&fixture.0, &stopped).unwrap();
+        let capture = || bridges::cleanup::capture_prior_generation(&fixture.0, &current, &active);
+        // Without the first recovery's retired intent nothing proves it complete.
+        assert!(capture().is_err());
+        let mut proof = intent(&original);
+        proof.old_boot = a.into();
+        proof.new_boot = Some(b.into());
+        proof.complete_sha256 = Some(selected(&stopped).unwrap());
+        proof.bridges = Some(prior.clone());
+        let retired = fixture.0.join(format!(
+            "dead-owner-cleanup-retired-{}.json",
+            selected(&stopped).unwrap()
+        ));
+        state::write(&retired, &proof).unwrap();
+        assert_eq!(capture().unwrap(), Some(prior_value.clone()));
+        // A retired intent naming other bridges does not prove this selection.
+        let mut changed = prior_value.clone();
+        changed["selected"]["0"]["assignment"]["relay"]["port"] = json!(8081);
+        let changed: bridges::cleanup::Selection = serde_json::from_value(changed).unwrap();
+        state::write(&fixture.0.join("relay-cleanup-bridges.json"), &changed).unwrap();
+        assert!(capture().is_err());
+        // A recovery selection naming the live boot is never an earlier generation.
+        let live: bridges::cleanup::Selection =
+            serde_json::from_value(selection(b, c, 1, slot(c, &old_container, &old_network, 1)))
+                .unwrap();
+        state::write(&fixture.0.join("relay-cleanup-bridges.json"), &live).unwrap();
+        assert!(capture().is_err());
+    }
     #[test]
     fn normalized_completion_preserves_original_proof_and_rejects_altered_job() {
         use one_off::normalization::{Normalization, Phase};

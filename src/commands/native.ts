@@ -261,16 +261,29 @@ const tempAliasesSpec = defineCommand({
       long: "--fix",
       description: "Remove verified dangling aliases",
     } as const),
+    defineOption({
+      name: "includeUnverifiedVolumes",
+      type: "boolean",
+      long: "--include-unverified-volumes",
+      description: "With --fix, include aliases whose volume may be unmounted",
+    } as const),
   ],
   positionals: [],
   subcommands: [],
 } as const);
 
 const tempAliases = withHandler(tempAliasesSpec, async ({ ctx, args }) => {
+  if (args.options.includeUnverifiedVolumes && !args.options.fix) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: "--include-unverified-volumes requires --fix.",
+    });
+  }
   const report = await inspectTempAliases({
     runtime: resolveNativeSetupSelection(),
     cwd: ctx.cwd,
     fix: args.options.fix === true,
+    includeUnverifiedVolumes: args.options.includeUnverifiedVolumes === true,
   });
   if (args.options.json) {
     process.stdout.write(`${JSON.stringify(report)}\n`);
@@ -281,9 +294,16 @@ const tempAliases = withHandler(tempAliasesSpec, async ({ ctx, args }) => {
       `${report.removed.includes(name) ? "Removed" : "Dangling"} ${name}\n`
     );
   }
+  for (const name of report.uncertainVolume) {
+    process.stdout.write(
+      report.removed.includes(name)
+        ? `Removed ${name}\n`
+        : `Cannot tell for ${name} (volume not mounted, or home deleted).\n`
+    );
+  }
   if (report.incomplete) {
     process.stdout.write("Temporary alias scan was incomplete.\n");
-  } else if (report.dangling.length === 0) {
+  } else if (report.dangling.length + report.uncertainVolume.length === 0) {
     process.stdout.write("No old dangling provider HOME aliases found.\n");
   }
   return 0;

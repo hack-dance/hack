@@ -5,11 +5,12 @@ use serde::Serialize;
 pub struct Report {
     pub dangling: Vec<String>,
     pub removed: Vec<String>,
+    pub uncertain_volume: Vec<String>,
     pub incomplete: bool,
 }
 
 /// Inspect the current user's old, dangling aliases. Maintenance must never fail setup or up.
-pub fn sweep(fix: bool) -> Report {
+pub fn sweep(fix: bool, include_unverified_volumes: bool) -> Report {
     #[cfg(target_os = "macos")]
     {
         // A target can live on an unavailable mount. Limit how long the
@@ -18,7 +19,11 @@ pub fn sweep(fix: bool) -> Report {
         let _ = std::thread::Builder::new()
             .name("home-alias-sweep".to_owned())
             .spawn(move || {
-                let _ = send.send(unix::scan(std::path::Path::new("/private/tmp"), fix));
+                let _ = send.send(unix::scan(
+                    std::path::Path::new("/private/tmp"),
+                    fix,
+                    include_unverified_volumes,
+                ));
             });
         receive
             .recv_timeout(std::time::Duration::from_millis(250))
@@ -29,18 +34,29 @@ pub fn sweep(fix: bool) -> Report {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = fix;
+        let _ = (fix, include_unverified_volumes);
         Report::default()
     }
+}
+
+/// Serialize managed alias publication with cleanup in the shared temp directory.
+pub(super) fn create_link(
+    target: &std::path::Path,
+    alias: &std::path::Path,
+) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let _lease = unix::creation_lock(alias.parent().ok_or(std::io::ErrorKind::InvalidInput)?)?;
+    std::os::unix::fs::symlink(target, alias)
 }
 
 #[cfg(any(target_os = "macos", test))]
 mod unix {
     use super::Report;
     use std::{
-        ffi::{CString, OsStr},
+        collections::BTreeSet,
+        ffi::{CStr, CString, OsStr},
         fs::{self, File, Metadata, OpenOptions},
-        io,
+        io::{self, Read, Seek, Write},
         os::{
             fd::{AsRawFd, FromRawFd},
             unix::fs::{MetadataExt, OpenOptionsExt},
@@ -54,28 +70,42 @@ mod unix {
     const MAX_ENTRIES: usize = 8192;
     const MAX_CANDIDATES: usize = 128;
 
-    pub(super) fn scan(root: &Path, fix: bool) -> Report {
-        scan_at(root, fix, SystemTime::now())
+    pub(super) fn scan(root: &Path, fix: bool, include_unverified_volumes: bool) -> Report {
+        scan_at(root, fix, include_unverified_volumes, SystemTime::now())
     }
 
-    fn scan_at(root: &Path, fix: bool, now: SystemTime) -> Report {
+    fn scan_at(
+        root: &Path,
+        fix: bool,
+        include_unverified_volumes: bool,
+        now: SystemTime,
+    ) -> Report {
         let mut report = Report::default();
         let started = Instant::now();
         // SAFETY: geteuid has no preconditions.
         let uid = unsafe { libc::geteuid() };
         let run = || -> io::Result<Report> {
-            let directory = OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-                .open(root)?;
+            let directory = open_directory(root)?;
             let parent = directory.metadata()?;
-            let _lock = lock(&directory, uid)?;
+            let mut lease = lock(&directory, uid)?;
             let mut report = Report::default();
-            for (index, entry) in fs::read_dir(root)?.enumerate() {
-                if index == MAX_ENTRIES
-                    || started.elapsed() >= BUDGET
-                    || report.dangling.len() == MAX_CANDIDATES
-                {
+            let user_home = std::env::var_os("HOME").and_then(|home| fs::canonicalize(home).ok());
+            let home_device = user_home
+                .as_ref()
+                .and_then(|home| fs::metadata(home).ok())
+                .map(|info| info.dev());
+            let devices = [Some(parent.dev()), home_device];
+            let system_temp = fs::canonicalize(std::env::temp_dir()).ok();
+            let trusted = [Some(root), user_home.as_deref(), system_temp.as_deref()];
+            let previous = if fix {
+                read_cursor(&mut lease)?
+            } else {
+                String::new()
+            };
+            let mut names = BTreeSet::new();
+            let mut more = false;
+            for entry in fs::read_dir(root)? {
+                if started.elapsed() >= BUDGET {
                     report.incomplete = true;
                     break;
                 }
@@ -87,8 +117,26 @@ mod unix {
                 let Some(name) = name.to_str().filter(|name| alias_name(name)) else {
                     continue;
                 };
-                let path = root.join(name);
-                let (link, target) = match orphan(&path, uid, now) {
+                if name <= previous.as_str() {
+                    continue;
+                }
+                names.insert(name.to_owned());
+                if names.len() > MAX_ENTRIES {
+                    names.pop_last();
+                    more = true;
+                }
+            }
+            let mut last = previous;
+            for name in names {
+                if started.elapsed() >= BUDGET
+                    || report.dangling.len() + report.uncertain_volume.len() == MAX_CANDIDATES
+                {
+                    more = true;
+                    break;
+                }
+                last.clone_from(&name);
+                let path = root.join(&name);
+                let alias = match orphan(&path, uid, now, &devices, &trusted) {
                     Ok(Some(candidate)) => candidate,
                     Ok(None) => continue,
                     Err(_) => {
@@ -96,21 +144,43 @@ mod unix {
                         continue;
                     }
                 };
-                report.dangling.push(name.to_owned());
-                if !fix {
+                if alias.uncertain_volume {
+                    report.uncertain_volume.push(name.clone());
+                } else {
+                    report.dangling.push(name.clone());
+                }
+                if !fix || (alias.uncertain_volume && !include_unverified_volumes) {
                     continue;
                 }
                 if same_parent(root, &parent)
-                    && matches!(orphan(&path, uid, now), Ok(Some((current, current_target)))
-                        if current == link && current_target == target)
+                    && matches!(orphan(&path, uid, now, &devices, &trusted), Ok(Some(current)) if current == alias)
                     && started.elapsed() < BUDGET
-                    && unlink(&directory, name).is_ok()
+                    && remove_checked(
+                        root,
+                        &directory,
+                        &name,
+                        &alias,
+                        || {},
+                        || {
+                            volume_uncertain(&alias.target, &devices, &trusted)
+                                .is_ok_and(|risk| risk == Some(alias.uncertain_volume))
+                                && started.elapsed() < BUDGET
+                        },
+                    )
+                    .is_ok()
                 {
-                    report.removed.push(name.to_owned());
+                    report.removed.push(name);
                 } else {
                     report.incomplete = true;
                 }
             }
+            if fix {
+                more |= report.incomplete;
+                if write_cursor(&mut lease, if more { &last } else { "" }).is_err() {
+                    report.incomplete = true;
+                }
+            }
+            report.incomplete |= more;
             Ok(report)
         };
         match run() {
@@ -137,6 +207,47 @@ mod unix {
         })
     }
 
+    fn open_directory(root: &Path) -> io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(root)
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    pub(super) fn creation_lock(root: &Path) -> io::Result<File> {
+        let directory = open_directory(root)?;
+        // SAFETY: geteuid has no preconditions.
+        let uid = unsafe { libc::geteuid() };
+        let started = Instant::now();
+        loop {
+            match lock(&directory, uid) {
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        && started.elapsed() < Duration::from_secs(1) =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn read_cursor(file: &mut File) -> io::Result<String> {
+        let mut bytes = String::new();
+        file.take(17).read_to_string(&mut bytes)?;
+        if !alias_name(&bytes) {
+            bytes.clear();
+        }
+        Ok(bytes)
+    }
+
+    fn write_cursor(file: &mut File, name: &str) -> io::Result<()> {
+        file.rewind()?;
+        file.write_all(name.as_bytes())?;
+        file.set_len(name.len() as u64)
+    }
+
     fn lock(directory: &File, uid: u32) -> io::Result<File> {
         let name =
             CString::new(format!(".hack-home-alias-sweep-{uid}.lock")).map_err(io::Error::other)?;
@@ -146,7 +257,7 @@ mod unix {
                 directory.as_raw_fd(),
                 name.as_ptr(),
                 libc::O_CREAT
-                    | libc::O_RDONLY
+                    | libc::O_RDWR
                     | libc::O_CLOEXEC
                     | libc::O_NOFOLLOW
                     | libc::O_NONBLOCK,
@@ -172,18 +283,113 @@ mod unix {
         Ok(file)
     }
 
-    fn unlink(directory: &File, name: &str) -> io::Result<()> {
-        let name = CString::new(name).map_err(io::Error::other)?;
-        // SAFETY: name is a single NUL-terminated component, and directory owns the fd.
-        if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
-            return Err(io::Error::last_os_error());
+    fn rename_exclusive(from: &File, name: &CStr, to: &File, target: &CStr) -> io::Result<()> {
+        // SAFETY: both descriptors and C strings remain valid for this call.
+        #[cfg(target_os = "macos")]
+        let rc = unsafe {
+            libc::renameatx_np(
+                from.as_raw_fd(),
+                name.as_ptr(),
+                to.as_raw_fd(),
+                target.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        // SAFETY: the descriptors and strings remain valid for this call.
+        #[cfg(target_os = "linux")]
+        let rc = unsafe {
+            libc::renameat2(
+                from.as_raw_fd(),
+                name.as_ptr(),
+                to.as_raw_fd(),
+                target.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
         }
-        Ok(())
     }
 
-    type Alias = ((u64, u64), PathBuf);
+    fn remove_checked(
+        root: &Path,
+        parent: &File,
+        name: &str,
+        alias: &Alias,
+        before_move: impl FnOnce(),
+        still_orphan: impl FnOnce() -> bool,
+    ) -> io::Result<()> {
+        use std::os::unix::{ffi::OsStrExt, fs::DirBuilderExt};
+        let mut random = [0; 12];
+        File::open("/dev/urandom")?.read_exact(&mut random)?;
+        let quarantine = root.join(format!(".hack-alias-check-{:x}", crate::Hex(random)));
+        fs::DirBuilder::new().mode(0o700).create(&quarantine)?;
+        let result = (|| {
+            let stage = open_directory(&quarantine)?;
+            let name = CString::new(name).map_err(io::Error::other)?;
+            let entry = c"entry";
+            before_move();
+            rename_exclusive(parent, &name, &stage, entry)?;
+            // SAFETY: fstatat writes through a valid pointer and does not follow the link.
+            let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+            let rc = unsafe {
+                libc::fstatat(
+                    stage.as_raw_fd(),
+                    entry.as_ptr(),
+                    info.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            let matches = if rc == 0 {
+                // SAFETY: fstatat initialized the structure on success.
+                let info = unsafe { info.assume_init() };
+                #[allow(clippy::unnecessary_cast)]
+                let identity = (info.st_dev as u64, info.st_ino as u64);
+                let staged_path = quarantine.join(OsStr::from_bytes(entry.to_bytes()));
+                identity == alias.identity
+                    && info.st_mode & libc::S_IFMT == libc::S_IFLNK
+                    && info.st_uid == alias.uid
+                    && info.st_nlink == 1
+                    && fs::symlink_metadata(&staged_path)
+                        .and_then(|metadata| metadata.modified())
+                        .is_ok_and(|modified| modified == alias.modified)
+                    && fs::read_link(staged_path).is_ok_and(|target| target == alias.target)
+            } else {
+                false
+            };
+            if matches && still_orphan() {
+                // SAFETY: entry is NUL-terminated and stage holds an open private directory.
+                if unsafe { libc::unlinkat(stage.as_raw_fd(), entry.as_ptr(), 0) } == 0 {
+                    return Ok(());
+                }
+            }
+            // Never overwrite a new alias. If restoration cannot publish, keep
+            // the entry in quarantine and report the incomplete scan.
+            rename_exclusive(&stage, entry, parent, &name)?;
+            Err(io::Error::other("alias identity or unlink changed"))
+        })();
+        let _ = fs::remove_dir(&quarantine);
+        result
+    }
 
-    fn orphan(path: &Path, uid: u32, now: SystemTime) -> io::Result<Option<Alias>> {
+    #[derive(Debug, PartialEq, Eq)]
+    struct Alias {
+        identity: (u64, u64),
+        target: PathBuf,
+        uid: u32,
+        modified: SystemTime,
+        uncertain_volume: bool,
+    }
+
+    fn orphan(
+        path: &Path,
+        uid: u32,
+        now: SystemTime,
+        devices: &[Option<u64>],
+        trusted: &[Option<&Path>],
+    ) -> io::Result<Option<Alias>> {
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -193,9 +399,10 @@ mod unix {
             return Ok(None);
         }
         let changed = u64::try_from(metadata.ctime()).map_err(io::Error::other)?;
+        let nanos = u32::try_from(metadata.ctime_nsec()).map_err(io::Error::other)?;
         let modified = metadata.modified()?;
         if now
-            .duration_since(modified.max(SystemTime::UNIX_EPOCH + Duration::from_secs(changed)))
+            .duration_since(modified.max(SystemTime::UNIX_EPOCH + Duration::new(changed, nanos)))
             .map_or(true, |age| age < MIN_AGE)
         {
             return Ok(None);
@@ -205,46 +412,75 @@ mod unix {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        if !target.ends_with(".hack-local/run/smolvm/home")
-            || !home_absent(&target, |part| {
-                fs::symlink_metadata(part).map(|entry| entry.is_dir())
-            })?
-        {
+        if !target.ends_with(".hack-local/run/smolvm/home") {
             return Ok(None);
         }
-        Ok(Some(((metadata.dev(), metadata.ino()), target)))
+        let Some(uncertain_volume) = volume_uncertain(&target, devices, trusted)? else {
+            return Ok(None);
+        };
+        Ok(Some(Alias {
+            identity: (metadata.dev(), metadata.ino()),
+            uid,
+            modified,
+            uncertain_volume,
+            target,
+        }))
     }
 
-    /// Require the owner home itself to be missing. Walk the entire path without
-    /// treating a symlink, non-directory or inaccessible component as absence.
-    fn home_absent(
+    fn volume_uncertain(
         target: &Path,
-        mut directory: impl FnMut(&Path) -> io::Result<bool>,
-    ) -> io::Result<bool> {
+        devices: &[Option<u64>],
+        trusted: &[Option<&Path>],
+    ) -> io::Result<Option<bool>> {
+        let Some((device, ancestor)) = missing_home_device(target, |part| {
+            fs::symlink_metadata(part).map(|entry| entry.is_dir().then(|| entry.dev()))
+        })?
+        else {
+            return Ok(None);
+        };
+        // An empty mount point exposes the backing filesystem's device, not
+        // the unmounted device. Keep empty ancestors and unfamiliar paths.
+        let uncertain = !devices.contains(&Some(device))
+            || target.starts_with("/Volumes")
+            || !trusted
+                .iter()
+                .flatten()
+                .any(|root| target.starts_with(root))
+            || fs::read_dir(ancestor)?.next().transpose()?.is_none();
+        Ok(Some(uncertain))
+    }
+
+    /// Return the device of the nearest existing ancestor only if the owning home is
+    /// absent. Refuse links, non-directories and inaccessible components.
+    fn missing_home_device(
+        target: &Path,
+        mut directory: impl FnMut(&Path) -> io::Result<Option<u64>>,
+    ) -> io::Result<Option<(u64, PathBuf)>> {
         let Some(home) = target.ancestors().nth(4) else {
-            return Ok(false);
+            return Ok(None);
         };
         if !home.is_absolute() || home == Path::new("/") {
-            return Ok(false);
+            return Ok(None);
         }
         let mut path = PathBuf::new();
         let mut missing_home = false;
+        let mut ancestor = None;
         for component in target.components() {
             match component {
                 Component::RootDir => path.push(OsStr::new("/")),
                 Component::Normal(name) => path.push(name),
-                _ => return Ok(false),
+                _ => return Ok(None),
             }
             match directory(&path) {
-                Ok(true) if !missing_home => {}
+                Ok(Some(device)) if !missing_home => ancestor = Some((device, path.clone())),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     missing_home |= home.starts_with(&path);
                 }
                 Err(error) => return Err(error),
-                Ok(_) => return Ok(false),
+                Ok(_) => return Ok(None),
             }
         }
-        Ok(missing_home)
+        Ok(ancestor.filter(|_| missing_home))
     }
     #[cfg(test)]
     mod tests {
@@ -293,14 +529,14 @@ mod unix {
                 .unwrap();
                 symlink(root.join("deleted/arbitrary"), root.join(invalid_target)).unwrap();
 
-                assert!(scan(root, true).dangling.is_empty());
+                assert!(scan(root, true, false).dangling.is_empty());
                 let later = SystemTime::now() + MIN_AGE + Duration::from_secs(1);
-                let preview = scan_at(root, false, later);
+                let preview = scan_at(root, false, false, later);
                 assert_eq!(preview.dangling, [old]);
                 assert!(preview.removed.is_empty());
                 assert!(root.join(old).is_symlink());
 
-                let fixed = scan_at(root, true, later);
+                let fixed = scan_at(root, true, false, later);
                 assert_eq!(fixed.removed, [old]);
                 assert!(!root.join(old).is_symlink());
                 assert!(root.join(live).is_symlink());
@@ -310,14 +546,212 @@ mod unix {
             });
         }
 
+        fn witness(root: &Path, alias: &Path) -> Alias {
+            let uid = fs::symlink_metadata(alias).unwrap().uid();
+            let device = fs::metadata(root).unwrap().dev();
+            orphan(
+                alias,
+                uid,
+                SystemTime::now() + MIN_AGE,
+                &[Some(device)],
+                &[Some(root)],
+            )
+            .unwrap()
+            .unwrap()
+        }
+
+        #[test]
+        fn changed_entry_and_returning_home_both_survive_the_final_windows() {
+            with_root(|root| {
+                let name = "hkl-000000000001";
+                let link = root.join(name);
+                let target = root.join("absent/.hack-local/run/smolvm/home");
+                symlink(&target, &link).unwrap();
+                let alias = witness(root, &link);
+                let directory = open_directory(root).unwrap();
+                let original = root.join("original");
+                let result = remove_checked(
+                    root,
+                    &directory,
+                    name,
+                    &alias,
+                    || {
+                        fs::rename(&link, &original).unwrap();
+                        fs::write(&link, "replacement").unwrap();
+                    },
+                    || true,
+                );
+                assert!(result.is_err());
+                assert_eq!(fs::read_to_string(&link).unwrap(), "replacement");
+                fs::remove_file(&link).unwrap();
+                fs::rename(&original, &link).unwrap();
+
+                let result = remove_checked(
+                    root,
+                    &directory,
+                    name,
+                    &alias,
+                    || {},
+                    || {
+                        fs::create_dir_all(&target).unwrap();
+                        volume_uncertain(&target, &[], &[]).unwrap().is_some()
+                    },
+                );
+                assert!(result.is_err());
+                assert_eq!(fs::read_link(&link).unwrap(), target);
+            });
+        }
+
+        #[test]
+        fn foreign_uid_cannot_authorize_an_unlink() {
+            with_root(|root| {
+                let link = root.join("hkl-000000000001");
+                symlink(root.join("missing/.hack-local/run/smolvm/home"), &link).unwrap();
+                let uid = fs::symlink_metadata(&link).unwrap().uid();
+                let device = fs::metadata(root).unwrap().dev();
+                assert!(
+                    orphan(
+                        &link,
+                        uid.wrapping_add(1),
+                        SystemTime::now() + MIN_AGE,
+                        &[Some(device)],
+                        &[Some(root)]
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+                assert!(link.is_symlink());
+            });
+        }
+
+        #[test]
+        fn age_uses_the_full_change_timestamp() {
+            with_root(|root| {
+                let link = root.join("hkl-000000000001");
+                symlink(root.join("missing/.hack-local/run/smolvm/home"), &link).unwrap();
+                let metadata = fs::symlink_metadata(&link).unwrap();
+                let changed = SystemTime::UNIX_EPOCH
+                    + Duration::new(metadata.ctime() as u64, metadata.ctime_nsec() as u32);
+                let cutoff = changed.max(metadata.modified().unwrap()) + MIN_AGE;
+                let args = &[Some(metadata.dev())];
+                let trusted = &[Some(root)];
+                assert!(
+                    orphan(
+                        &link,
+                        metadata.uid(),
+                        cutoff - Duration::from_nanos(1),
+                        args,
+                        trusted
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+                assert!(
+                    orphan(&link, metadata.uid(), cutoff, args, trusted)
+                        .unwrap()
+                        .is_some()
+                );
+            });
+        }
+
+        #[test]
+        fn fix_resumes_after_an_unverified_volume_page() {
+            with_root(|root| {
+                for index in 0..=MAX_CANDIDATES {
+                    let name = format!("hkl-{index:012x}");
+                    let target = PathBuf::from(format!(
+                        "/Volumes/unmounted/fixture-{index}/.hack-local/run/smolvm/home"
+                    ));
+                    symlink(target, root.join(name)).unwrap();
+                }
+                let now = SystemTime::now() + MIN_AGE;
+                let first = scan_at(root, true, false, now);
+                assert_eq!(first.uncertain_volume.len(), MAX_CANDIDATES);
+                assert!(first.removed.is_empty());
+                let second = scan_at(root, true, false, now);
+                assert_eq!(
+                    second.uncertain_volume,
+                    [format!("hkl-{MAX_CANDIDATES:012x}")]
+                );
+                assert!(second.removed.is_empty());
+            });
+        }
+
+        #[test]
+        fn an_empty_mount_point_needs_an_explicit_override() {
+            with_root(|root| {
+                let mount = root.join("mount");
+                let target = mount.join("candidate/.hack-local/run/smolvm/home");
+                fs::create_dir_all(&target).unwrap();
+                let name = "hkl-000000000001";
+                let link = root.join(name);
+                symlink(&target, &link).unwrap();
+                fs::rename(&mount, root.join("detached")).unwrap();
+                fs::create_dir(&mount).unwrap();
+                let now = SystemTime::now() + MIN_AGE;
+                let automatic = scan_at(root, true, false, now);
+                assert_eq!(automatic.uncertain_volume, [name]);
+                assert!(automatic.removed.is_empty());
+                assert!(link.is_symlink());
+                let explicit = scan_at(root, true, true, now);
+                assert_eq!(explicit.removed, [name]);
+                assert!(root.join("detached/candidate").is_dir());
+            });
+        }
+
+        #[test]
+        fn unrelated_names_do_not_consume_the_entry_budget() {
+            with_root(|root| {
+                for index in 0..=MAX_ENTRIES {
+                    fs::write(root.join(format!("unrelated-{index:05}")), b"").unwrap();
+                }
+                let name = "hkl-000000000001";
+                symlink(
+                    root.join("absent/.hack-local/run/smolvm/home"),
+                    root.join(name),
+                )
+                .unwrap();
+                let report = scan_at(root, true, false, SystemTime::now() + MIN_AGE);
+                assert_eq!(report.removed, [name]);
+            });
+        }
+
+        #[test]
+        fn creation_waits_for_the_sweep_lease() {
+            with_root(|root| {
+                let directory = open_directory(root).unwrap();
+                let lease = lock(&directory, fs::metadata(root).unwrap().uid()).unwrap();
+                let path = root.join("hkl-000000000001");
+                std::thread::scope(|scope| {
+                    let (send, recv) = std::sync::mpsc::channel();
+                    let alias_path = &path;
+                    let creator = scope.spawn(move || {
+                        send.send(()).unwrap();
+                        let _lease = creation_lock(root).unwrap();
+                        symlink(root.join("target"), alias_path).unwrap();
+                        send.send(()).unwrap();
+                    });
+                    recv.recv().unwrap();
+                    assert_eq!(
+                        recv.recv_timeout(Duration::from_millis(50)),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    );
+                    assert!(!path.is_symlink());
+                    drop(lease);
+                    creator.join().unwrap();
+                });
+                assert!(path.is_symlink());
+            });
+        }
+
         #[test]
         fn access_errors_are_not_absence() {
             let target = Path::new("/fixture/deleted/.hack-local/run/smolvm/home");
-            let error = home_absent(target, |part| {
+            let error = missing_home_device(target, |part| {
                 if part.starts_with("/fixture/deleted") {
                     Err(io::Error::from(io::ErrorKind::PermissionDenied))
                 } else {
-                    Ok(true)
+                    Ok(Some(1))
                 }
             })
             .unwrap_err();
@@ -331,11 +765,14 @@ mod unix {
                 // SAFETY: geteuid has no preconditions.
                 let held = lock(&directory, unsafe { libc::geteuid() }).unwrap();
                 assert!(
-                    std::thread::scope(|scope| scope.spawn(|| scan(root, true)).join().unwrap())
-                        .incomplete
+                    std::thread::scope(|scope| scope
+                        .spawn(|| scan(root, true, false))
+                        .join()
+                        .unwrap())
+                    .incomplete
                 );
                 drop(held);
-                assert!(!scan(root, true).incomplete);
+                assert!(!scan(root, true, false).incomplete);
             });
         }
     }

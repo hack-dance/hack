@@ -795,7 +795,15 @@ with interrupted updates. It removes only this user's verified links for absent 
 that have been unchanged for at least five minutes. `hack native temp-aliases` lists
 eligible names. Add `--fix` to remove them, or use `hack doctor --fix` where the native
 runtime is installed. Ordinary doctor lists the candidates. The scan stops at its time
-or entry limit and reports an incomplete scan when it cannot finish.
+or entry limit and reports an incomplete scan when it cannot finish. Fix scans
+resume from the previous batch. Updating the link's timestamp with `touch -h`
+extends its retention.
+
+Doctor and `hack native temp-aliases` list ambiguous volume entries as
+“cannot tell (volume not mounted, or home deleted).” The automatic sweep and
+`doctor --fix` keep these entries. After checking the volume yourself, use
+`hack native temp-aliases --fix --include-unverified-volumes` to include them.
+The command still checks age, owner, identity and target absence.
 
 On a fresh pool boot or a boot after stopping the pool, native waits up to 10 seconds
 plus 1 second per bridge slot (20 seconds for 10 slots, at most 42) for every declared

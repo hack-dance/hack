@@ -614,7 +614,7 @@ impl Owner {
             ));
         }
         if alias == Alias::Missing {
-            match std::os::unix::fs::symlink(self.home(candidate), &self.short_home) {
+            match super::temp_aliases::create_link(&self.home(candidate), &self.short_home) {
                 Ok(()) => return self.check_short_home(candidate, false),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     // Another entry took the path between the check and the creation.
@@ -650,7 +650,7 @@ impl Owner {
             }
             next.save(candidate)?;
             *self = next;
-            match std::os::unix::fs::symlink(self.home(candidate), &self.short_home) {
+            match super::temp_aliases::create_link(&self.home(candidate), &self.short_home) {
                 Ok(()) => return self.check_short_home(candidate, false),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(io(error)),
@@ -714,7 +714,7 @@ impl Owner {
                 "Provider owner changed during HOME recovery; no alias was restored.",
             ));
         }
-        std::os::unix::fs::symlink(self.home(candidate), &self.short_home).map_err(|_| {
+        super::temp_aliases::create_link(&self.home(candidate), &self.short_home).map_err(|_| {
             CandidateError::new(
                 "socket_alias_collision",
                 "Cannot exclusively restore provider HOME alias; no existing path was replaced.",
@@ -818,7 +818,7 @@ impl Owner {
         };
         // Persist the intended alias before its first external effect. Collisions are never adopted.
         owner.save(candidate)?;
-        std::os::unix::fs::symlink(root.join("home"), &owner.short_home).map_err(|_| {
+        super::temp_aliases::create_link(&root.join("home"), &owner.short_home).map_err(|_| {
             CandidateError::new(
                 "socket_alias_collision",
                 "Cannot exclusively create short provider alias; receipt retained for inspection.",

@@ -1789,13 +1789,21 @@ async function checkNativeTempAliases(opts: {
     if (report.removed.length > 0) {
       messages.push(`Removed: ${report.removed.join(", ")}`);
     }
+    if (report.uncertainVolume.length > 0) {
+      messages.push(
+        `Cannot tell (volume not mounted, or home deleted): ${report.uncertainVolume.join(", ")}. Review with hack native temp-aliases.`
+      );
+    }
     if (report.incomplete) {
       messages.push("Scan incomplete.");
     }
     return {
       name,
       scope: "machine",
-      status: report.incomplete || retained.length > 0 ? "warn" : "ok",
+      status:
+        report.incomplete || retained.length + report.uncertainVolume.length > 0
+          ? "warn"
+          : "ok",
       message:
         messages.join(" ") || "No old dangling provider HOME aliases found.",
     };

@@ -1834,6 +1834,7 @@ List old aliases whose native home is gone, or remove them with --fix.
 | --- | --- |
 | `--json` | Output JSON (machine-readable) |
 | `--fix` | Remove verified dangling aliases |
+| `--include-unverified-volumes` | With --fix, include aliases whose volume may be unmounted |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

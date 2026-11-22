@@ -29,7 +29,8 @@ const MAX_LOCAL_REGISTRIES: usize = 16;
 /// Mutable tags retain a verified resolution for one day by default.
 pub const DEFAULT_TAG_TTL_SECONDS: u64 = 24 * 60 * 60;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ImageTagMode {
     #[default]
     Normal,

@@ -661,6 +661,7 @@ export async function buildNativeProjectImages(opts: {
   readonly profiles: readonly string[];
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;
   readonly specs: Record<string, Record<string, unknown>>;
+  readonly imageTagMode?: "refresh" | "offline";
   readonly rebuild: boolean;
   readonly signal: AbortSignal;
   readonly invoke?: typeof invokeNativeBuild;
@@ -847,6 +848,7 @@ async function runPendingBuilds(opts: {
   readonly branch: string | null | undefined;
   readonly pending: ReadonlyMap<string, PendingBuild>;
   readonly specs: Record<string, Record<string, unknown>>;
+  readonly imageTagMode?: "refresh" | "offline";
   readonly rebuild: boolean;
   readonly signal: AbortSignal;
   readonly invoke?: typeof invokeNativeBuild;
@@ -883,6 +885,7 @@ async function runPendingBuilds(opts: {
           policy: opts.rebuild ? "rebuild" : "missing",
           timeout_seconds: BUILD_TIMEOUT_SECONDS,
           image_policy_args: imagePolicyArgs,
+          image_tag_mode: opts.imageTagMode,
           ...(selections.size
             ? { command_base_pins: Object.fromEntries(selections) }
             : {}),

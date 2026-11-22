@@ -63,6 +63,7 @@ impl Fixture {
             policy,
             timeout_seconds: Some(30),
             image_policy_args: Vec::new(),
+            image_tag_mode: Default::default(),
             command_base_pins: BTreeMap::new(),
         }
     }

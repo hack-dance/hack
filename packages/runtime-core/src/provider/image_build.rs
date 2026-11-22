@@ -184,6 +184,8 @@ pub struct BuildRequest {
     #[serde(default)]
     pub image_policy_args: Vec<String>,
     #[serde(default)]
+    pub image_tag_mode: super::image_policy::ImageTagMode,
+    #[serde(default)]
     pub command_base_pins: BTreeMap<String, String>,
 }
 fn default_dockerfile() -> String {
@@ -1878,6 +1880,7 @@ pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome
     // Dockerfile admission allows Docker Hub only, even when service images
     // are allowed to use local registries.
     policy.local_registries.clear();
+    policy.tag_mode = request.image_tag_mode;
     let prior_pins = request.command_base_pins.clone();
     let mut inputs = prepare(request, &builds_root(candidate))?;
     let _signals = CancelSignals::install()?;

@@ -779,6 +779,7 @@ async function resolveNativeBuildImages(opts: {
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;
   readonly specs: Record<string, Record<string, unknown>>;
   readonly verified: ReadonlyMap<string, NativeVerifiedBuild> | undefined;
+  readonly imageTagMode?: "refresh" | "offline";
   readonly signal: AbortSignal;
   readonly invoke: typeof invokeNativeBuild | undefined;
   readonly onBuilt: () => void;
@@ -3058,6 +3059,7 @@ async function startNativeProjectAttempt(
       builds,
       specs,
       verified: opts.verifiedBuildImages,
+      imageTagMode: opts.imageTagMode,
       signal: controller.signal,
       invoke: deps.build,
       onBuilt: () => {

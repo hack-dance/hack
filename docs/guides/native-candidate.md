@@ -503,11 +503,12 @@ With it:
   an unchanged context is not read again. The cache misses only a change that keeps the
   size, inode, modification time and change time identical, which needs a deliberate
   clock or timestamp manipulation; set `HACK_NATIVE_REBUILD=1` after one.
-- Only those inputs count. A changed network response (a download in a `RUN` step),
-  the contents of a cache mount (`RUN --mount=type=cache`), anything outside the build
-  context and a base-image tag that moved do not trigger a rebuild: a reused image keeps
-  the base-image digests it was built from. Set `HACK_NATIVE_REBUILD=1` on `up` or
-  `hack restart` to build every image again; base-image tags then resolve again too.
+- A changed network response in a `RUN` step or changed cache mount contents do
+  not trigger a rebuild. Native checks base-image tags according to the image tag
+  policy and rebuilds when the selected base digest changes. `hack up --offline`
+  uses locally recorded selections even after they expire. `hack up --refresh-images`
+  checks the registry for current tags. `HACK_NATIVE_REBUILD=1` forces BuildKit to
+  run on `up` or `hack restart` and keeps the usual base tag freshness policy.
 - When an image is actually built, BuildKit reads a private copy of the included
   context, made and checked against the build key right before it runs, so edits during
   a build never reach the image. The copy keeps hard links as links and gives every

@@ -242,6 +242,7 @@ test("identical builds run once, pin every service and keep the request private"
       ["other", { ...request(), target: "dev" }],
     ]),
     specs,
+    imageTagMode: "offline",
     rebuild: false,
     signal: new AbortController().signal,
     invoke: async ({ requestFile }) => {
@@ -260,6 +261,7 @@ test("identical builds run once, pin every service and keep the request private"
     branch: "feature",
     context: "app",
     policy: "missing",
+    image_tag_mode: "offline",
     args: { A: VALUE },
   });
   expect(seen[1]?.body.target).toBe("dev");

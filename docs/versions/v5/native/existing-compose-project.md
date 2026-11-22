@@ -82,9 +82,11 @@ the build read. Change any of them and the next `up` builds again, also after
 `hack down`; the run's containers are then recreated from the new image and named
 volumes are kept. `hack restart` checks the same inputs before it stops anything: a
 build that fails leaves the current project running, and a rebuilt image is what the
-restarted project runs. A download in a `RUN` step, a cache mount and a moved base
-image tag do not count; `HACK_NATIVE_REBUILD=1` on `up` or `hack restart` builds every
-image again and looks the tags up now. After an `up` that built, native removes the
+restarted project runs. A changed download in a `RUN` step or changed cache mount
+contents do not trigger a rebuild. A changed base digest does. Use
+`hack up --refresh-images` to check base tags now or `hack up --offline` to use
+locally recorded selections even after they expire. `HACK_NATIVE_REBUILD=1` forces
+a build with the usual base tag freshness policy. After an `up` that built, native removes the
 older images of each build, keeping the current one, the one before it and any image
 a run still uses.
 

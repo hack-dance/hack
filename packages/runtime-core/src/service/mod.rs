@@ -583,6 +583,7 @@ fn prepare(
             shutdown_wait: options.drain,
             last_activity: Instant::now(),
             streams: HashMap::new(),
+            closing: false,
             next_session: 0,
         }),
         changed: Condvar::new(),
@@ -803,6 +804,8 @@ struct State {
     last_activity: Instant,
     /// A handle to every live session's socket, to shut it down at exit.
     streams: HashMap<u64, UnixStream>,
+    /// Set by shutdown when it closes the sessions; no reply starts after it.
+    closing: bool,
     next_session: u64,
 }
 
@@ -960,12 +963,33 @@ fn shut_down(shared: &Arc<Shared>, listener: UnixListener) -> (Outcome, bool) {
     // Both waits are bounded: a request or a session thread that never finishes
     // cannot keep the lock. Past the bound the process exits regardless.
     let deadline = Instant::now() + shared.state().shutdown_wait;
-    let idle = shared.wait_until_by(|s| s.busy == 0, deadline);
-    // A session whose next request was not read yet sees a close; nothing it
-    // sent was admitted.
-    for stream in shared.state().streams.values() {
-        let _ = stream.shutdown(Shutdown::Both);
-    }
+    // Wait for every reply in progress (answers and refusals alike), then, in
+    // the same critical section, mark the sessions closing and shut their
+    // sockets: no reply can start between the wait and the close. A session
+    // whose next request was not read yet sees a close; nothing it sent was
+    // admitted.
+    let idle = {
+        let mut state = shared.state();
+        let idle = loop {
+            if state.busy == 0 {
+                break true;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break false;
+            }
+            state = shared
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
+        };
+        state.closing = true;
+        for stream in state.streams.values() {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+        idle
+    };
     let closed = shared.wait_until_by(|s| s.sessions == 0, deadline);
     (
         shared.state().stopping.unwrap_or(Outcome::Idle),
@@ -1182,9 +1206,20 @@ fn session(shared: &Shared, mut stream: UnixStream) {
         {
             let mut state = shared.state();
             if state.stopping.is_some() {
+                // Once shutdown has closed the sessions, write nothing: the
+                // client sees a close at a frame boundary, never a cut frame.
+                if state.closing {
+                    return;
+                }
+                // The refusal counts as a reply in progress, so shutdown waits
+                // for it before it closes this session's socket.
+                state.busy += 1;
                 drop(state);
+                let refusing = Busy(shared);
                 let refused = Err(("E_SERVICE_DRAINING", "The service is stopping."));
-                if reply(&mut stream, &id, refused).is_err() {
+                let written = reply(&mut stream, &id, refused);
+                drop(refusing);
+                if written.is_err() {
                     return;
                 }
                 continue;

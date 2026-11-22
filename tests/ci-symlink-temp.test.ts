@@ -72,6 +72,7 @@ test.skipIf(process.platform !== "linux")(
       }
       actual.push(...plan([...args, "--route-symlink-temp=true"]));
     }
+    expect(actual).toContain("tests/ci-symlink-temp.test.ts");
     expect(actual.sort()).toEqual([...expected].sort());
   },
   20_000

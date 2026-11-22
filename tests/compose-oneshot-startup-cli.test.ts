@@ -565,9 +565,17 @@ test("a migration dependency declared in an included file keeps the wait", async
 test("Compose closes a confirmed start and stop with plain lifecycle lines", async () => {
   const file = join(project, ".hack", "docker-compose.yml");
   await writeFile(
+    join(project, ".hack", "hack.config.json"),
+    JSON.stringify({
+      name: "shop",
+      dev_host: "SAMPLE.hack.local",
+      internal: { dns: false, tls: false },
+    })
+  );
+  await writeFile(
     file,
     `${ONE_SHOT_COMPOSE}    labels:
-      caddy: https://sample.hack.local, http://alias.hack.local
+      caddy: http://alias.hack.local, https://sample.hack.local
   dormant:
     image: alpine:3.22
     profiles: ["extra"]

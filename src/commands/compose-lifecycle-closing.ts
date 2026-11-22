@@ -11,8 +11,9 @@ export function writeComposeStarted(opts: {
       opts.running.flatMap((service) => opts.addresses.get(service) ?? [])
     ),
   ];
+  const primaryHost = opts.primaryHost?.toLowerCase();
   const url =
-    urls.find((address) => URL.parse(address)?.hostname === opts.primaryHost) ??
+    urls.find((address) => URL.parse(address)?.hostname === primaryHost) ??
     urls[0];
   // Container observations do not establish HTTP readiness. Counting these
   // routes leaves the first request to the user instead of warming it here.

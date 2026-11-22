@@ -301,14 +301,15 @@ fn reopening_reuses_key_and_other_stores_use_distinct_keys() {
 #[test]
 fn incompatible_version_sets_aside_entire_store_and_starts_fresh() {
     let fixture = Fixture::new();
+    drop(fixture.open());
+    let previous_archive = set_aside_at(&fixture, disk::unix_millis().unwrap() - 1000);
     let old = fixture.open();
+    assert!(previous_archive.is_dir());
     let key = example_key(StepClass::Slot);
     old.record(&key, output(None), "run-1").unwrap();
     let old_digest = old.keyed_digest(STEP, &json!(42)).unwrap();
     drop(old);
     fs::write(fixture.root().join("VERSION"), b"hack.store/2\n").unwrap();
-    let previous_archive = archive_path(&fixture, disk::unix_millis().unwrap() - 1000);
-    fs::create_dir(&previous_archive).unwrap();
     let fresh = fixture.open();
     assert!(!previous_archive.exists());
     assert_ne!(fresh.keyed_digest(STEP, &json!(42)).unwrap(), old_digest);
@@ -330,6 +331,21 @@ fn incompatible_version_sets_aside_entire_store_and_starts_fresh() {
                 .starts_with("hack.store-1.old-")
         })
         .unwrap();
+    let millis = archive
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .rsplit_once('-')
+        .unwrap()
+        .1;
+    let marker = archive.join("SET_ASIDE");
+    assert!(fs::symlink_metadata(&marker).unwrap().is_file());
+    assert_eq!(mode(&marker), 0o600);
+    assert_eq!(
+        fs::read(&marker).unwrap(),
+        archive_marker(&fixture.base(), millis)
+    );
     assert_eq!(
         fs::read(archive.join("VERSION")).unwrap(),
         b"hack.store/2\n"
@@ -519,22 +535,55 @@ fn archive_path(fixture: &Fixture, time: u64) -> PathBuf {
     fixture.base().join(format!("hack.store-1.old-{time}"))
 }
 
+fn archive_marker(base: &Path, millis: &str) -> Vec<u8> {
+    format!(
+        "hack.store-set-aside/1\nbase={}\nat={millis}\n",
+        base.display()
+    )
+    .into_bytes()
+}
+
+fn make_archive(fixture: &Fixture, time: u64) -> PathBuf {
+    let path = archive_path(fixture, time);
+    fs::create_dir(&path).unwrap();
+    fs::write(
+        path.join("SET_ASIDE"),
+        archive_marker(&fixture.base(), &time.to_string()),
+    )
+    .unwrap();
+    File::create(path.join("lock")).unwrap();
+    path
+}
+
+fn set_aside_at(fixture: &Fixture, time: u64) -> PathBuf {
+    let lock = File::open(fixture.root().join("lock")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while let Err(error) = flock(&lock, libc::LOCK_EX | libc::LOCK_NB) {
+        // A child spawned by another test can briefly inherit the old shared lock.
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(Instant::now() < deadline, "shared lock outlived its handle");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    disk::set_aside(&fixture.base(), &fixture.root(), time).unwrap();
+    archive_path(fixture, time)
+}
+
 #[test]
-fn open_keeps_only_the_newest_owned_archive_and_preserves_other_entries() {
+fn open_keeps_only_the_newest_marked_archive_and_preserves_other_entries() {
     let fixture = Fixture::new();
     fs::DirBuilder::new()
         .mode(0o700)
         .create(fixture.base())
         .unwrap();
     let now = disk::unix_millis().unwrap();
-    let older = archive_path(&fixture, now - 2);
-    let newest = archive_path(&fixture, now - 1);
+    let older = make_archive(&fixture, now - 2);
+    let newest = make_archive(&fixture, now - 1);
     let file = archive_path(&fixture, now);
     let alias = archive_path(&fixture, now + 1);
     let outside = fixture.0.join("outside");
     let invalid_name = fixture.base().join("hack.store-1.old-1-extra");
     let other_format = fixture.base().join("hack.store-2.old-1");
-    for directory in [&older, &newest, &outside, &invalid_name, &other_format] {
+    for directory in [&outside, &invalid_name, &other_format] {
         fs::create_dir(directory).unwrap();
     }
     let sentinel = outside.join("sentinel");
@@ -559,8 +608,7 @@ fn open_removes_even_the_newest_archive_after_seven_days() {
     drop(fixture.open());
     let eight_days = Duration::from_secs(8 * 24 * 60 * 60);
     let then = disk::unix_millis().unwrap() - u64::try_from(eight_days.as_millis()).unwrap();
-    let archive = archive_path(&fixture, then);
-    fs::create_dir(&archive).unwrap();
+    let archive = set_aside_at(&fixture, then);
     let uid = fs::metadata(&archive).unwrap().uid();
     disk::cleanup_archives(&fixture.base(), uid ^ 1);
     assert!(archive.is_dir());
@@ -574,15 +622,119 @@ fn opening_a_healthy_store_removes_old_archives_and_keeps_the_newest_young_one()
     let live = fixture.open();
     let expected = live.keyed_digest(STEP, &json!(42)).unwrap();
     let now = disk::unix_millis().unwrap();
-    let old = archive_path(&fixture, now - 8 * 24 * 60 * 60 * 1_000);
-    let young = archive_path(&fixture, now - 1_000);
-    fs::create_dir(&old).unwrap();
-    fs::create_dir(&young).unwrap();
+    let old = make_archive(&fixture, now - 8 * 24 * 60 * 60 * 1_000);
+    let young = make_archive(&fixture, now - 1_000);
 
     let reopened = fixture.open();
     assert_eq!(reopened.keyed_digest(STEP, &json!(42)).unwrap(), expected);
     assert!(!old.exists());
     assert!(young.is_dir());
+}
+
+#[test]
+fn a_live_store_at_an_archive_pattern_path_survives_a_healthy_reopen() {
+    let fixture = Fixture::new();
+    let _live = fixture.open();
+    let then = disk::unix_millis().unwrap() - 8 * 24 * 60 * 60 * 1_000;
+    let other_base = archive_path(&fixture, then);
+    let other = Store::open(&other_base).unwrap();
+    let key = example_key(StepClass::Slot);
+    let record = other.record(&key, output(None), "run-1").unwrap();
+
+    drop(fixture.open());
+    assert!(other_base.is_dir());
+    assert_eq!(
+        Store::open(&other_base).unwrap().lookup(&key, |_| true),
+        Lookup::Hit(record)
+    );
+}
+
+#[test]
+fn archive_cleanup_leaves_unverified_or_busy_archives_in_place() {
+    let fixture = Fixture::new();
+    let _live = fixture.open();
+    let then = disk::unix_millis().unwrap() - 8 * 24 * 60 * 60 * 1_000;
+    let wrong_base = make_archive(&fixture, then);
+    fs::write(
+        wrong_base.join("SET_ASIDE"),
+        archive_marker(&fixture.0, &then.to_string()),
+    )
+    .unwrap();
+    let wrong_time = make_archive(&fixture, then + 1);
+    fs::write(
+        wrong_time.join("SET_ASIDE"),
+        archive_marker(&fixture.base(), &then.to_string()),
+    )
+    .unwrap();
+    let missing_lock = make_archive(&fixture, then + 2);
+    fs::remove_file(missing_lock.join("lock")).unwrap();
+    let busy = make_archive(&fixture, then + 3);
+    let lock = File::open(busy.join("lock")).unwrap();
+    flock(&lock, libc::LOCK_SH | libc::LOCK_NB).unwrap();
+    let linked_marker = make_archive(&fixture, then + 4);
+    let marker = fixture.0.join("marker");
+    fs::rename(linked_marker.join("SET_ASIDE"), &marker).unwrap();
+    symlink(marker, linked_marker.join("SET_ASIDE")).unwrap();
+    let linked_lock = make_archive(&fixture, then + 5);
+    fs::remove_file(linked_lock.join("lock")).unwrap();
+    symlink(fixture.root().join("lock"), linked_lock.join("lock")).unwrap();
+
+    drop(fixture.open());
+    for path in [
+        &wrong_base,
+        &wrong_time,
+        &missing_lock,
+        &busy,
+        &linked_marker,
+        &linked_lock,
+    ] {
+        assert!(path.is_dir(), "removed {path:?}");
+    }
+    drop(lock);
+    drop(fixture.open());
+    assert!(!busy.exists());
+}
+
+#[test]
+fn reopening_clears_a_marker_left_before_the_archive_rename() {
+    for needs_initialization in [false, true] {
+        let fixture = Fixture::new();
+        let live = fixture.open();
+        let expected = live.keyed_digest(STEP, &json!(42)).unwrap();
+        let before = fs::metadata(fixture.root()).unwrap();
+        drop(live);
+        let marker = fixture.root().join("SET_ASIDE");
+        let millis = disk::unix_millis().unwrap().to_string();
+        disk::publish(
+            &fixture.root(),
+            &marker,
+            &archive_marker(&fixture.base(), &millis),
+        )
+        .unwrap();
+        if needs_initialization {
+            fs::remove_file(fixture.root().join("VERSION")).unwrap();
+        }
+
+        let reopened = fixture.open();
+        assert!(!marker.exists());
+        assert_eq!(fs::metadata(fixture.root()).unwrap().ino(), before.ino());
+        assert_eq!(reopened.keyed_digest(STEP, &json!(42)).unwrap(), expected);
+        assert_eq!(fs::read_dir(fixture.base()).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn cleanup_runs_outside_the_live_stores_exclusive_lock() {
+    let fixture = Fixture::new();
+    disk::CHECK_CLEANUP_LOCK.set(true);
+    let result = Store::open(&fixture.base());
+    disk::CHECK_CLEANUP_LOCK.set(false);
+    drop(result.unwrap());
+}
+
+fn write_legacy_markers(path: &Path) {
+    fs::write(path.join("VERSION"), b"hack.store/1\n").unwrap();
+    File::create(path.join("lock")).unwrap();
 }
 
 #[test]
@@ -592,10 +744,8 @@ fn open_removes_the_legacy_flat_layout_and_its_sibling_archives() {
     let key = example_key(StepClass::Slot);
     let record = live.record(&key, output(None), "run-1").unwrap();
     let base = fixture.base();
-    fs::write(base.join("VERSION"), b"hack.store/1\n").unwrap();
-    for name in ["key", "lock"] {
-        fs::write(base.join(name), b"legacy").unwrap();
-    }
+    write_legacy_markers(&base);
+    fs::write(base.join("key"), b"legacy").unwrap();
     for name in ["records", "cas", "files", "tags", "tmp"] {
         fs::create_dir(base.join(name)).unwrap();
         fs::write(base.join(name).join("legacy"), b"legacy").unwrap();
@@ -607,7 +757,7 @@ fn open_removes_the_legacy_flat_layout_and_its_sibling_archives() {
     for directory in [&archive, &colocated, &unrelated, &empty_suffix] {
         fs::create_dir(directory).unwrap();
     }
-    fs::write(archive.join("VERSION"), b"hack.store/1\n").unwrap();
+    write_legacy_markers(&archive);
 
     let reopened = fixture.open();
     let mut entries: Vec<_> = fs::read_dir(&base)
@@ -625,12 +775,84 @@ fn open_removes_the_legacy_flat_layout_and_its_sibling_archives() {
     // removed when its VERSION holds the P1 format, and a directory that only has
     // the name (no P1 VERSION inside) is left alone.
     fs::create_dir(&archive).unwrap();
-    fs::write(archive.join("VERSION"), b"hack.store/1\n").unwrap();
+    write_legacy_markers(&archive);
     drop(fixture.open());
     assert!(!archive.exists());
     fs::create_dir(&archive).unwrap();
     drop(fixture.open());
     assert!(archive.is_dir());
+}
+
+#[test]
+fn legacy_cleanup_leaves_the_flat_layout_untouched_while_its_lock_is_held() {
+    let fixture = Fixture::new();
+    let _live = fixture.open();
+    let base = fixture.base();
+    write_legacy_markers(&base);
+    fs::write(base.join("key"), b"legacy").unwrap();
+    let records = base.join("records");
+    fs::create_dir(&records).unwrap();
+    fs::write(records.join("entry"), b"legacy").unwrap();
+    let lock = File::open(base.join("lock")).unwrap();
+    flock(&lock, libc::LOCK_SH | libc::LOCK_NB).unwrap();
+
+    drop(fixture.open());
+    assert_eq!(fs::read(base.join("VERSION")).unwrap(), disk::VERSION);
+    assert_eq!(
+        fs::metadata(base.join("lock")).unwrap().ino(),
+        lock.metadata().unwrap().ino()
+    );
+    assert_eq!(fs::read(base.join("key")).unwrap(), b"legacy");
+    assert_eq!(fs::read(records.join("entry")).unwrap(), b"legacy");
+    drop(lock);
+    drop(fixture.open());
+    assert_eq!(fs::read_dir(&base).unwrap().count(), 1);
+}
+
+#[test]
+fn legacy_cleanup_retries_after_a_flat_entry_cannot_be_removed() {
+    let fixture = Fixture::new();
+    let _live = fixture.open();
+    let base = fixture.base();
+    write_legacy_markers(&base);
+    // remove_file cannot unlink a directory, regardless of the test user's privileges.
+    let key = base.join("key");
+    fs::create_dir(&key).unwrap();
+    fs::create_dir(base.join("records")).unwrap();
+
+    drop(fixture.open());
+    assert!(key.is_dir());
+    assert!(base.join("lock").is_file());
+    assert_eq!(fs::read(base.join("VERSION")).unwrap(), disk::VERSION);
+    assert!(!base.join("records").exists());
+
+    fs::remove_dir(&key).unwrap();
+    fs::write(&key, b"legacy").unwrap();
+    drop(fixture.open());
+    assert_eq!(fs::read_dir(&base).unwrap().count(), 1);
+}
+
+#[test]
+fn legacy_cleanup_skips_sibling_archives_with_a_busy_or_missing_lock() {
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    let busy = fixture.0.join("store.old-1");
+    let missing = fixture.0.join("store.old-2");
+    for path in [&busy, &missing] {
+        fs::create_dir(path).unwrap();
+        write_legacy_markers(path);
+    }
+    fs::remove_file(missing.join("lock")).unwrap();
+    let lock = File::open(busy.join("lock")).unwrap();
+    flock(&lock, libc::LOCK_EX | libc::LOCK_NB).unwrap();
+
+    drop(fixture.open());
+    assert!(busy.is_dir());
+    assert!(missing.is_dir());
+    drop(lock);
+    drop(fixture.open());
+    assert!(!busy.exists());
+    assert!(missing.is_dir());
 }
 
 #[test]
@@ -640,6 +862,7 @@ fn a_different_or_symlinked_legacy_version_leaves_flat_entries_in_place() {
     let base = fixture.base();
     let version = base.join("VERSION");
     let records = base.join("records");
+    write_legacy_markers(&base);
     fs::create_dir(&records).unwrap();
     fs::write(base.join("key"), b"keep").unwrap();
     fs::write(&version, b"hack.store/1\nextra").unwrap();
@@ -661,7 +884,7 @@ fn legacy_cleanup_does_not_follow_symlinks() {
     let value = json!(42);
     let expected = live.keyed_digest(STEP, &value).unwrap();
     let base = fixture.base();
-    fs::write(base.join("VERSION"), b"hack.store/1\n").unwrap();
+    write_legacy_markers(&base);
     symlink(fixture.root().join("key"), base.join("key")).unwrap();
     let directory_link = base.join("records");
     symlink(fixture.root().join("records"), &directory_link).unwrap();
@@ -675,7 +898,31 @@ fn legacy_cleanup_does_not_follow_symlinks() {
     );
     assert!(fs::symlink_metadata(directory_link).unwrap().is_symlink());
     assert!(fs::symlink_metadata(archive_link).unwrap().is_symlink());
+    assert_eq!(fs::read(base.join("VERSION")).unwrap(), disk::VERSION);
+    assert!(base.join("lock").is_file());
     assert_eq!(reopened.keyed_digest(STEP, &value).unwrap(), expected);
+}
+
+#[test]
+fn legacy_cleanup_never_probes_version_through_a_sibling_symlink() {
+    let fixture = Fixture::new();
+    let target = fixture.0.join("legacy-target");
+    fs::create_dir(&target).unwrap();
+    write_legacy_markers(&target);
+    let alias = fixture.0.join("store.old-123");
+    symlink(&target, &alias).unwrap();
+
+    let probes = disk::LEGACY_VERSION_PROBES.get();
+    drop(fixture.open());
+    assert_eq!(disk::LEGACY_VERSION_PROBES.get(), probes);
+    assert!(fs::symlink_metadata(&alias).unwrap().is_symlink());
+    assert_eq!(fs::read(target.join("VERSION")).unwrap(), disk::VERSION);
+
+    fs::remove_file(&alias).unwrap();
+    fs::rename(&target, &alias).unwrap();
+    drop(fixture.open());
+    assert_eq!(disk::LEGACY_VERSION_PROBES.get(), probes + 1);
+    assert!(!alias.exists());
 }
 
 #[test]

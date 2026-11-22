@@ -2,9 +2,13 @@
 //!
 //! The CLI follows symlinks to resolve the base to its canonical path. The runtime
 //! refuses symlinked ancestors of the path it receives. Each format has its own
-//! subdirectory, currently `hack.store-1/`. After a successful open, best-effort
-//! cleanup keeps only the newest owned set-aside copy of this format for up to
-//! seven days and removes remnants of the old flat layout.
+//! subdirectory, currently `hack.store-1/`. Rotation writes a `SET_ASIDE` marker
+//! with the canonical base and archive timestamp before renaming the root, and
+//! reopening a live root clears a stray marker. After a successful open, best-effort
+//! cleanup keeps the newest marked archive for up to seven days and removes owned
+//! archives only with their own nonblocking exclusive lock. The old flat layout
+//! and P1 sibling archives require the P1 `VERSION` marker and their own nonblocking
+//! exclusive lock, and the flat `VERSION` is removed after the other entries are gone.
 //!
 //! `record()` and `put_cas()` can fail on a directory at the write path or a
 //! wrong-mode or symlinked shard. Writes leave that damage in place. Callers must

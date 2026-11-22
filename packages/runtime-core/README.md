@@ -2137,18 +2137,17 @@ the pin. To measure a build, run
 
 The CLI resolves the store base to a canonical path, following symlinks. The
 runtime refuses symlinked ancestors of the path it receives and keeps its
-format in a separate subdirectory, currently `hack.store-1/`. After each
-successful open, best-effort cleanup keeps at most the newest
-`hack.store-1.old-*` directory owned by this user and removes it too once the
-timestamp in its name is more than seven days old.
+format in a separate subdirectory, currently `hack.store-1/`.
 
-Cleanup also removes the previous flat layout if the base has a regular
-`VERSION` file owned by this user containing exactly `hack.store/1\n`. It
-removes the flat `VERSION`, `key`, and `lock` files and the owned `records`,
-`cas`, `files`, `tags`, and `tmp` directories. It also removes owned
-`store.old-<digits>` directories next to the base whose `VERSION` holds that P1
-format; a directory that only shares the name is left alone. Cleanup leaves the live
-format directory in place and never traverses symlinks.
+Rotation publishes a `SET_ASIDE` marker with the canonical base and timestamp
+before renaming the root, and reopening a live root clears a stray marker.
+After opening, best-effort cleanup keeps the newest marked archive for up to
+seven days and removes older or expired copies only from owned directories
+with the matching marker and their own nonblocking exclusive lock.
+Cleanup checks ownership and avoids symlinks before probing the P1 `VERSION`
+marker in the old flat layout or a `store.old-<digits>` sibling, takes each
+layout's own nonblocking exclusive lock before removing entries, and removes
+flat `VERSION` only after the other flat entries are gone.
 
 `record()` and `put_cas()` can fail if a directory sits at the write path or
 a shard has the wrong mode or is a symlink. Writes leave that damage in place.

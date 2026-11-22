@@ -33,6 +33,10 @@ steps! {
     ImageCacheInventory => "image.cache.inventory",
     ImageArchiveDigest => "image.archive.digest", ImageImportConnect => "image.import.connect",
     ImageInspect => "image.inspect",
+    PublicationProbe => "publication.probe",
+    PublicationReserve => "publication.reserve",
+    PublicationStartBridges => "publication.start_bridges",
+    PublicationObserve => "publication.observe",
     Truncated => "timings.truncated",
 }
 

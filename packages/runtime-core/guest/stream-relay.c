@@ -277,6 +277,10 @@ static int read_control_token(int fd, unsigned char token[32]) {
 }
 
 int main(int argc, char **argv) {
+#if defined(__APPLE__)
+    /* Exercise the executable loader without binding a publication endpoint. */
+    if (argc == 2 && !strcmp(argv[1], "--prime")) return 0;
+#endif
     char *publish_args[8];
     int ephemeral_port = 0;
     struct sockaddr_un control = {0};

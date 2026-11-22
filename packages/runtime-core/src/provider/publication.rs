@@ -1138,6 +1138,9 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
     save(c, &entries)?;
     file.write_all(bytes).map_err(state::io)?;
     file.sync_all().map_err(state::io)?;
+    // The earlier directory sync persisted this name and inode. Writing bytes
+    // does not change either, and the file sync persists the changed contents.
+    #[cfg(not(target_os = "macos"))]
     File::open(&dir)
         .map_err(state::io)?
         .sync_all()
@@ -1160,6 +1163,20 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
 mod port_probe_tests {
     use super::*;
     use std::net::{Ipv4Addr, TcpListener};
+
+    #[cfg(all(target_os = "macos", feature = "native-stream-relay"))]
+    #[test]
+    fn host_relay_can_prime_without_publication_arguments() {
+        let mut command = Command::new(concat!(env!("OUT_DIR"), "/stream-relay-host"));
+        command
+            .arg("--prime")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = super::super::process::spawn_child(&mut command).unwrap();
+        assert!(child.wait().unwrap().success());
+    }
 
     #[test]
     fn loopback_probe_refuses_exact_and_wildcard_listeners_and_accepts_a_free_port() {

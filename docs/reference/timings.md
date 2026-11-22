@@ -93,6 +93,12 @@ created/recreated services use `ok` without `cached`. Dependency-blocked work us
 `skipped` with `attrs.blocked:true`. A still-warming service has no completed
 `container.ready` span until readiness is observed; the owner may outlive the CLI.
 
+Foreground publication spans cover probe supervision (`publication.probe`),
+reservation including endpoint retries (`publication.reserve`), guest bridge
+startup (`publication.start_bridges`), and the wait for the owner to observe
+all initial publications (`publication.observe`). The observation span starts
+after the publisher children have been spawned.
+
 Numeric keys include `service_index`, `attempt`, `engine_requests`, `dropped`,
 `services`, `wave`, `syncs`, `waited_on_index`, and `generation`. Boolean keys include
 `blocked`, `waited_on_cap`, `admission_reused`, `reason_spec`, `reason_unhealthy`, `reason_exited`,

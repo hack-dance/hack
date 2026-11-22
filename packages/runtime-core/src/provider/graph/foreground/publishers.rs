@@ -3,6 +3,7 @@
 use super::super::owner_loop::PublisherReadiness;
 use super::{Candidate, CandidateError, Receipt, signals};
 use crate::provider::{graph, publication};
+use crate::timings::{Step, measure_candidate};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -163,25 +164,29 @@ impl Publishers {
         }
         let executable = std::env::current_exe().map_err(|_| refused())?;
         self.probe_generations.clear();
-        graph::bridges::supervise_probes(
-            candidate,
-            &receipt.run,
-            &mut self.probe_generations,
-            true,
-            &BTreeSet::new(),
-            &|| check_deadline(signals, deadline),
-        )?;
+        measure_candidate(Step::PublicationProbe, None, |_| {
+            graph::bridges::supervise_probes(
+                candidate,
+                &receipt.run,
+                &mut self.probe_generations,
+                true,
+                &BTreeSet::new(),
+                &|| check_deadline(signals, deadline),
+            )
+        })?;
         check_deadline(signals, deadline)?;
         // One snapshot and one registry update reserve every route and port.
         // `started` readiness can finish while an image healthcheck is still
         // starting; wait for those endpoints within the same startup deadline.
-        let reserved = retry_pending_endpoint(
-            || super::super::bridges::reserve_publications(candidate, receipt, slots),
-            || {
-                std::thread::sleep(PENDING_ENDPOINT_POLL);
-                check_deadline(signals, deadline)
-            },
-        )?;
+        let reserved = measure_candidate(Step::PublicationReserve, None, |_| {
+            retry_pending_endpoint(
+                || super::super::bridges::reserve_publications(candidate, receipt, slots),
+                || {
+                    std::thread::sleep(PENDING_ENDPOINT_POLL);
+                    check_deadline(signals, deadline)
+                },
+            )
+        })?;
         let mut launches = Vec::new();
         for (service, route) in &routes {
             let selected = reserved.routes.get(*service).ok_or_else(refused)?;
@@ -202,7 +207,9 @@ impl Publishers {
             .iter()
             .map(|(selected, _)| (selected.slot, selected.assignment.reservation.as_str()))
             .collect::<Vec<_>>();
-        super::super::bridges::start_bridges(candidate, &receipt.run, &batch)?;
+        measure_candidate(Step::PublicationStartBridges, None, |_| {
+            super::super::bridges::start_bridges(candidate, &receipt.run, &batch)
+        })?;
         // Every child is owned (and watched) as soon as it exists; they take the
         // provider lease in turn while this owner observes all of them together.
         let first = self.children.len();
@@ -236,13 +243,15 @@ impl Publishers {
             });
             signals.watch_child(&self.children.last().expect("pushed").child)?;
         }
-        self.await_published(
-            candidate,
-            signals,
-            deadline,
-            first,
-            PublisherReadiness::Startup,
-        )?;
+        measure_candidate(Step::PublicationObserve, None, |_| {
+            self.await_published(
+                candidate,
+                signals,
+                deadline,
+                first,
+                PublisherReadiness::Startup,
+            )
+        })?;
         self.verify_live(candidate)
     }
 

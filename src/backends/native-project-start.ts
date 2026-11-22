@@ -88,6 +88,7 @@ import {
   invokeNativeBuild,
   NativeBuildRegistryError,
   type NativeBuildRequest,
+  type NativeBuildSettlement,
   type NativeVerifiedBuild,
   nativeBuildsEnabled,
   nativeRebuildRequested,
@@ -781,6 +782,8 @@ async function resolveNativeBuildImages(opts: {
   readonly verified: ReadonlyMap<string, NativeVerifiedBuild> | undefined;
   readonly imageTagMode?: "refresh" | "offline";
   readonly signal: AbortSignal;
+  readonly guestCpus?: number;
+  readonly onBuildSettled?: (settlement: NativeBuildSettlement) => void;
   readonly invoke: typeof invokeNativeBuild | undefined;
   readonly onBuilt: () => void;
   readonly onImageWait: (reference: string | null) => void;
@@ -2291,7 +2294,8 @@ export type NativeStartupProgress =
       /** Indented route, unserved-route and published-port lines. */
       readonly endpoints: readonly string[];
     }
-  | ({ readonly phase: "service-exited" } & NativeServiceExit);
+  | ({ readonly phase: "service-exited" } & NativeServiceExit)
+  | ({ readonly phase: "build-settled" } & NativeBuildSettlement);
 
 function progressReporter(
   observe: ((event: NativeStartupProgress) => void) | undefined
@@ -2515,6 +2519,19 @@ function emitNativeLeftOutNotice(opts: {
     },
     opts.warn
   );
+}
+
+/** Guest CPU allocation is fixed by the runtime profile (provider/profile.rs). */
+function nativePoolBuildCpus(pool: unknown): number {
+  if (isRecord(pool)) {
+    if (pool.profile === "development") {
+      return 4;
+    }
+    if (pool.profile === "research") {
+      return 2;
+    }
+  }
+  return 1;
 }
 
 /**
@@ -3070,6 +3087,9 @@ async function startNativeProjectAttempt(
       specs,
       verified: opts.verifiedBuildImages,
       imageTagMode: opts.imageTagMode,
+      guestCpus: nativePoolBuildCpus(pool),
+      onBuildSettled: (settled) =>
+        progress({ phase: "build-settled", ...settled }),
       signal: controller.signal,
       invoke: deps.build,
       onBuilt: () => {

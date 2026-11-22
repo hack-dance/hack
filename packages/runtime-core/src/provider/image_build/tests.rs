@@ -66,6 +66,7 @@ impl Fixture {
             image_policy_args: Vec::new(),
             image_tag_mode: Default::default(),
             command_base_pins: BTreeMap::new(),
+            share_command_base_pins: false,
         }
     }
     fn inputs(&self, policy: Policy) -> Inputs {
@@ -2372,4 +2373,44 @@ fn legacy_reuse_requires_the_original_context_and_a_verified_image() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn concurrent_builds_refresh_a_shared_base_only_once() {
+    let fixture = Fixture::new();
+    let batch = fixture.root.join("batch");
+    let reference = "docker.io/library/alpine:latest";
+    let pinned = format!("docker.io/library/alpine@{PIN}");
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let rendezvous = std::sync::Barrier::new(2);
+    let policy = super::super::image_policy::ImagePolicy {
+        tag_mode: super::super::image_policy::ImageTagMode::Refresh,
+        ..Default::default()
+    };
+    let run = || {
+        rendezvous.wait();
+        share_command_base(&batch, reference, &policy, |selected| {
+            if selected == reference {
+                assert_eq!(calls.fetch_add(1, Ordering::Relaxed), 0);
+            } else {
+                assert_eq!(selected, pinned);
+            }
+            Ok((
+                BuildBase {
+                    pinned_reference: pinned.clone(),
+                    source_digest: PIN.into(),
+                    image_id: IMAGE.into(),
+                },
+                None,
+            ))
+        })
+        .unwrap()
+        .0
+    };
+    std::thread::scope(|scope| {
+        let a = scope.spawn(run);
+        let b = scope.spawn(run);
+        assert_eq!(a.join().unwrap(), b.join().unwrap());
+    });
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
 }

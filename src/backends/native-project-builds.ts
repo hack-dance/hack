@@ -1,6 +1,14 @@
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  posix,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
@@ -38,6 +46,7 @@ import {
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 const BUILD_KEY = /^[a-f0-9]{64}$/;
 const ARGUMENT = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const TRAILING_SLASH = /\/$/;
 const TARGET = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 /**
  * The Compose `build` fields native builds implement. The Compose-backend feature
@@ -675,6 +684,15 @@ export function refuseManagedSecretBuildArguments(opts: {
   }
 }
 
+/** Leave a CPU for other guest work on the four-CPU development pool. */
+const MAX_CONCURRENT_PROJECT_BUILDS = 3;
+
+export type NativeBuildSettlement = {
+  readonly services: readonly string[];
+  readonly durationMs: number;
+  readonly outcome: "built" | "reused" | "failed" | "cancelled";
+};
+
 /**
  * Build (or reuse) every admitted build service in the selected profiles and pin it to
  * its content ID; returns the pinned services. As with Compose `up`, a build service
@@ -693,6 +711,8 @@ export async function buildNativeProjectImages(opts: {
   readonly imageTagMode?: "refresh" | "offline";
   readonly rebuild: boolean;
   readonly signal: AbortSignal;
+  readonly guestCpus?: number;
+  readonly onBuildSettled?: (settlement: NativeBuildSettlement) => void;
   readonly invoke?: typeof invokeNativeBuild;
   /** Called once for each build the runtime actually ran (not a reused image). */
   readonly onBuilt?: () => void;
@@ -806,9 +826,20 @@ type PendingBuild = { request: NativeBuildRequest; services: string[] };
 
 /** The declaration a build request stands for: identical ones build once. */
 export function nativeBuildIdentity(request: NativeBuildRequest): string {
+  const { context, dockerfile } = request;
+  // Match the runtime's lexical source resolution for valid relative paths.
+  // Keep the authored path in the request so the runtime still validates it.
+  const keyPath =
+    dockerfile.length > 0 &&
+    !posix.isAbsolute(dockerfile) &&
+    !dockerfile.includes("$") &&
+    !dockerfile.includes("~") &&
+    !dockerfile.includes("\0")
+      ? [posix.join(context, dockerfile).replace(TRAILING_SLASH, "")]
+      : [dockerfile, "invalid"];
   return JSON.stringify([
-    request.context,
-    request.dockerfile,
+    context,
+    keyPath,
     request.target,
     Object.entries(request.args).sort(([a], [b]) => (a < b ? -1 : 1)),
   ]);
@@ -883,6 +914,8 @@ async function runPendingBuilds(opts: {
   readonly imageTagMode?: "refresh" | "offline";
   readonly rebuild: boolean;
   readonly signal: AbortSignal;
+  readonly guestCpus?: number;
+  readonly onBuildSettled?: (settlement: NativeBuildSettlement) => void;
   readonly invoke?: typeof invokeNativeBuild;
   readonly onBuilt?: () => void;
   readonly onImageWait?: (reference: string | null) => void;
@@ -893,18 +926,111 @@ async function runPendingBuilds(opts: {
   // The runtime requires the exact canonical root; it also derives the namespace.
   const projectRoot = await realpath(opts.projectRoot);
   const directory = await mkdtemp(join(tmpdir(), "hack-native-build-"));
+  const cpus = opts.guestCpus ?? 1;
+  const cap =
+    Number.isSafeInteger(cpus) && cpus > 0
+      ? Math.min(MAX_CONCURRENT_PROJECT_BUILDS, cpus)
+      : 1;
+  const parallel = cap > 1 && opts.pending.size > 1;
+  const onBuildSettled = parallel ? opts.onBuildSettled : undefined;
+  const controller = new AbortController();
+  const running = new Set<Promise<void>>();
+  const interrupt = () =>
+    controller.abort(
+      new ClosedCliError("Native foreground up was canceled; values omitted.")
+    );
+  opts.signal.addEventListener("abort", interrupt, { once: true });
+  if (opts.signal.aborted) {
+    interrupt();
+  }
+
+  const notices = new Set<string>();
+  const selections = new Map<string, string>();
+  const waits = new Map<string, string>();
+  const reportWait = (file: string, reference: string | null) => {
+    if (reference === null) {
+      waits.delete(file);
+    } else {
+      waits.set(file, reference);
+    }
+    opts.onImageWait?.(waits.values().next().value ?? null);
+  };
+
+  const runBuild = async (requestFile: string, services: readonly string[]) => {
+    const started = performance.now();
+    let outcome: NativeBuildSettlement["outcome"] = "failed";
+    try {
+      const built = await invoke({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        requestFile,
+        signal: controller.signal,
+        onImageWait: opts.onImageWait
+          ? (reference) => reportWait(requestFile, reference)
+          : undefined,
+        ...(parallel
+          ? {
+              write: (line: string) =>
+                process.stderr.write(`[${services.join(", ")}] ${line}`),
+            }
+          : {}),
+      });
+      if (controller.signal.aborted) {
+        outcome = "cancelled";
+        return;
+      }
+      for (const [reference, pin] of Object.entries(
+        built.baseSelections ?? {}
+      )) {
+        selections.set(reference, pin);
+      }
+      for (const notice of built.baseFallbacks ?? []) {
+        if (notices.has(notice)) {
+          continue;
+        }
+        notices.add(notice);
+        if (opts.onNotice) {
+          opts.onNotice(notice);
+        } else {
+          process.stderr.write(`${notice}\n`);
+        }
+      }
+      outcome = built.reused ? "reused" : "built";
+      if (!built.reused) {
+        opts.onBuilt?.();
+      }
+      for (const service of services) {
+        const spec = opts.specs[service];
+        if (spec) {
+          pin(spec, built.imageId);
+        }
+      }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        outcome = "cancelled";
+      } else {
+        controller.abort(nameBuildFailure(services, error, parallel));
+      }
+    } finally {
+      onBuildSettled?.({
+        services,
+        outcome,
+        durationMs: performance.now() - started,
+      });
+      await rm(requestFile, { force: true });
+    }
+  };
+
   try {
     let index = 0;
-    const notices = new Set<string>();
-    const selections = new Map<string, string>();
     for (const { request, services } of opts.pending.values()) {
-      if (opts.signal.aborted) {
-        throw new ClosedCliError(
-          "Native foreground up was canceled; values omitted."
-        );
+      if (running.size >= cap) {
+        await Promise.race(running);
       }
-      const requestFile = join(directory, `request-${index}.json`);
-      index += 1;
+      if (controller.signal.aborted) {
+        break;
+      }
+      const requestFile = join(directory, `request-${index++}.json`);
       await writeFile(
         requestFile,
         JSON.stringify({
@@ -919,51 +1045,34 @@ async function runPendingBuilds(opts: {
           timeout_seconds: BUILD_TIMEOUT_SECONDS,
           image_policy_args: imagePolicyArgs,
           image_tag_mode: opts.imageTagMode,
+          ...(parallel ? { share_command_base_pins: true } : {}),
           ...(selections.size
             ? { command_base_pins: Object.fromEntries(selections) }
             : {}),
         }),
         { mode: 0o600, flag: "wx" }
       );
-      const built = await invoke({
-        runtime: opts.runtime,
-        cwd: opts.projectRoot,
-        requestFile,
-        onImageWait: opts.onImageWait,
-        signal: opts.signal,
-      }).catch((error: unknown) => {
-        throw nameBuildFailure(services, error);
-      });
-      for (const [reference, pin] of Object.entries(
-        built.baseSelections ?? {}
-      )) {
-        selections.set(reference, pin);
+      // Stage sequentially so the runtime calls start in authored order.
+      if (controller.signal.aborted) {
+        break;
       }
-      for (const notice of built.baseFallbacks ?? []) {
-        if (!notices.has(notice)) {
-          notices.add(notice);
-          if (opts.onNotice) {
-            opts.onNotice(notice);
-          } else {
-            process.stderr.write(`${notice}\n`);
-          }
-        }
-      }
-      // The request carries argument values; remove it as soon as it is consumed.
-      await rm(requestFile, { force: true });
-      if (!built.reused) {
-        opts.onBuilt?.();
-      }
-      for (const service of services) {
-        const spec = opts.specs[service];
-        if (spec) {
-          pin(spec, built.imageId);
-        }
-      }
+      const task = runBuild(requestFile, services)
+        .catch((error: unknown) => controller.abort(error))
+        .finally(() => {
+          running.delete(task);
+        });
+      running.add(task);
     }
+  } catch (error) {
+    controller.abort(error);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await Promise.all(running);
+    opts.signal.removeEventListener("abort", interrupt);
+    await rm(directory, { recursive: true, force: true }).catch(
+      (error: unknown) => controller.abort(error)
+    );
   }
+  controller.signal.throwIfAborted();
 }
 
 /**
@@ -1060,15 +1169,20 @@ export async function nativeBuildBases(opts: {
  */
 function nameBuildFailure(
   services: readonly string[],
-  error: unknown
+  error: unknown,
+  parallel: boolean
 ): unknown {
-  if (
-    !(error instanceof NativeRuntimeRequestError) ||
-    error instanceof NativeBuildRegistryError
-  ) {
+  if (error instanceof NativeBuildRegistryError) {
     return error;
   }
   const which = serviceList(services);
+  if (!(error instanceof NativeRuntimeRequestError)) {
+    return parallel
+      ? new ClosedCliError(
+          `Native foreground up could not build ${which}. ${error instanceof ClosedCliError ? error.message : "Build result unavailable; values omitted."}`
+        )
+      : error;
+  }
   const code = error.nativeCode;
   const change =
     code !== undefined && Object.hasOwn(BUILD_SOURCE_POLICY, code)

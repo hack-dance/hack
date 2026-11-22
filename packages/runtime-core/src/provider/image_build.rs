@@ -187,6 +187,8 @@ pub struct BuildRequest {
     pub image_tag_mode: super::image_policy::ImageTagMode,
     #[serde(default)]
     pub command_base_pins: BTreeMap<String, String>,
+    #[serde(default)]
+    pub share_command_base_pins: bool,
 }
 fn default_dockerfile() -> String {
     "Dockerfile".into()
@@ -1900,6 +1902,46 @@ fn ensure_build_base(
     Ok((resolved, ensured.tag_resolution))
 }
 
+/// Serialize selection only for this reference within the caller's build batch.
+fn share_command_base(
+    batch: &Path,
+    reference: &str,
+    policy: &super::image_policy::ImagePolicy,
+    ensure: impl FnOnce(&str) -> Result<EnsuredBase, CandidateError>,
+) -> Result<EnsuredBase, CandidateError> {
+    if reference.contains('@') {
+        return ensure(reference);
+    }
+    let root = batch.join(sha256_hex(reference.as_bytes()));
+    let _lock = state::wait_for_image_lock(
+        policy.image_wait(Duration::from_secs(60))?,
+        reference,
+        || state::Lock::acquire(&root),
+    )?;
+    let pin = root.join("pin.json");
+    if pin.try_exists().map_err(state::io)? {
+        let selected: String = state::read_bounded(&pin, 1024)?;
+        // Use the immutable reference so a separate command refreshing the tag
+        // cannot redirect this batch after its first selection.
+        let (selected, _) = registry_image::pinned_syntax(&selected)?;
+        let repo = reference
+            .rsplit_once(':')
+            .map_or(reference, |(repo, _)| repo);
+        if !selected
+            .strip_prefix(repo)
+            .is_some_and(|suffix| suffix.starts_with('@'))
+        {
+            return Err(invalid(
+                "The command base pin belongs to another repository.",
+            ));
+        }
+        return ensure(&selected);
+    }
+    let result = ensure(reference)?;
+    state::write(&pin, &result.0.pinned_reference)?;
+    Ok(result)
+}
+
 struct BaseSelections {
     selected: BTreeMap<String, BuildBase>,
     fallbacks: Vec<super::image_ensure::EnsuredTag>,
@@ -1982,7 +2024,18 @@ fn recover_base_error(
 
 /// `runtime build-image --request <private-file>`: build or reuse one native image.
 pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome, CandidateError> {
-    let request: BuildRequest = state::read_bounded(request, MAX_REQUEST_BYTES)?;
+    let request_path = request;
+    let request: BuildRequest = state::read_bounded(request_path, MAX_REQUEST_BYTES)?;
+    let batch = if request.share_command_base_pins {
+        let parent = request_path
+            .parent()
+            .ok_or_else(|| invalid("Missing build batch directory."))?;
+        crate::reject_aliased_state(parent)?;
+        state::check_private_directory(parent)?;
+        Some(parent.join("base-pins"))
+    } else {
+        None
+    };
     let flags: Vec<_> = request
         .image_policy_args
         .iter()
@@ -2013,7 +2066,13 @@ pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome
         &inputs,
         &prior_pins,
         policy,
-        |reference, policy| ensure_build_base(candidate, reference, policy),
+        |reference, policy| {
+            let ensure = |selected: &str| ensure_build_base(candidate, selected, policy);
+            match &batch {
+                Some(batch) => share_command_base(batch, reference, policy, ensure),
+                None => ensure(reference),
+            }
+        },
         deadline,
     ) {
         Ok(bases) => bases,

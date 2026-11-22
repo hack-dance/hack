@@ -2849,6 +2849,23 @@ const contracts: readonly ModelContract[] = [
     fields: ['fence = "pinning"', "keeper = FALSE"],
   },
   {
+    name: "native-build-batch",
+    module: "BuildBatch",
+    states: 296,
+    invariant: "NoLiveReturn",
+    action: "Return",
+    fields: ["result = -2"],
+    additionalControls: [
+      {
+        name: "cancel-wins",
+        negative: true,
+        invariant: "FirstOutcome",
+        action: "Return",
+        fields: ["active = {}"],
+      },
+    ],
+  },
+  {
     name: "native-build-retention",
     module: "BuildRetention",
     states: 6181,

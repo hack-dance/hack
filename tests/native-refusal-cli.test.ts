@@ -95,6 +95,14 @@ async function fixture(compose = COMPOSE) {
     binary,
     `#!/bin/sh
 ${nativeSetupShellReply()}
+if [ "$3-$4" = runtime-build-image ] && [ -f '${stub}/runtime-build-image.hold' ]; then
+  request="${"$"}{6##*/}"
+  trap '' INT
+  trap 'printf settled > "$request.settled"; exit 1' TERM
+  printf '%s' ready > "$request.ready"
+  for i in $(seq 1 400); do sleep 0.05; done
+  exit 99
+fi
 if [ -f '${stub}/'"$3-$4"'.hold' ]; then
   printf '%s' ready > './interrupt-ready'
   exec sleep 20
@@ -883,10 +891,23 @@ test(
 const REGISTRY_COMPOSE = JSON.stringify({
   services: { web: { image: "localhost:5000/example/app:1" } },
 });
-test.each(["fetch", "graph", "hook"] as const)(
+const BUILD_COMPOSE = JSON.stringify({
+  services: {
+    web: { build: { context: "..", target: "web" } },
+    worker: { build: { context: "..", target: "worker" } },
+    tools: { build: { context: "..", target: "tools" } },
+  },
+});
+test.each(["fetch", "graph", "hook", "build"] as const)(
   "Ctrl-C during native startup %s reports one interruption and exits 130",
   async (stage) => {
-    const f = await fixture(stage === "fetch" ? REGISTRY_COMPOSE : COMPOSE);
+    const f = await fixture(
+      stage === "fetch"
+        ? REGISTRY_COMPOSE
+        : stage === "build"
+          ? BUILD_COMPOSE
+          : COMPOSE
+    );
     await scriptUpThroughReview(f);
     if (stage === "fetch") {
       await f.reply("runtime admit-image", {
@@ -897,6 +918,9 @@ test.each(["fetch", "graph", "hook"] as const)(
     } else if (stage === "graph") {
       await f.hold("graph serve");
       await f.fail("graph inspect", { code: "graph_unreserved" });
+    } else if (stage === "build") {
+      await f.reply("runtime up", { profile: "development" });
+      await f.hold("runtime build-image");
     } else {
       await Bun.write(
         join(f.projectDir, "hack.config.json"),
@@ -917,7 +941,7 @@ test.each(["fetch", "graph", "hook"] as const)(
       [process.execPath, entrypoint, "--path", f.project, "up"],
       {
         cwd: f.project,
-        env: f.env(SHARED),
+        env: f.env({ ...SHARED, HACK_NATIVE_BUILDS: "1" }),
         detached: true,
         stdout: "pipe",
         stderr: "pipe",
@@ -927,14 +951,30 @@ test.each(["fetch", "graph", "hook"] as const)(
     const stdout = new Response(child.stdout).text();
     const stderr = new Response(child.stderr).text();
     try {
-      await waitForFileContent({
-        path: join(f.project, "interrupt-ready"),
-        complete: (value) => (value === "ready" ? value : undefined),
-        what: stage,
-        budgetMs: 10_000,
-      });
+      const barriers =
+        stage === "build"
+          ? ["request-0.json", "request-1.json", "request-2.json"]
+          : [];
+      await Promise.all(
+        (barriers.length > 0
+          ? barriers.map((request) => `${request}.ready`)
+          : ["interrupt-ready"]
+        ).map((barrier) =>
+          waitForFileContent({
+            path: join(f.project, barrier),
+            complete: (value) => (value === "ready" ? value : undefined),
+            what: stage,
+            budgetMs: 10_000,
+          })
+        )
+      );
       process.kill(-child.pid, "SIGINT");
       expect(await child.exited).toBe(130);
+      for (const request of barriers) {
+        expect(
+          await Bun.file(join(f.project, `${request}.settled`)).text()
+        ).toBe("settled");
+      }
       const output = (await stdout) + (await stderr);
       expect(
         output.split("\n").filter((line) => /interrupted/i.test(line))

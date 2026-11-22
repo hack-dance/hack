@@ -334,3 +334,35 @@ test("authored Compose copies match the generated base and branch inventory", as
     await rm(f.root, { recursive: true, force: true });
   }
 });
+
+test("copies uses live worktree branches instead of stale registration branches", async () => {
+  const f = await fixture(2);
+  try {
+    await writeFile(
+      join(f.root, "git"),
+      `#!/bin/sh
+cat <<'WORKTREES'
+worktree ${f.checkout(0)}
+branch refs/heads/main
+
+worktree ${f.checkout(1)}
+branch refs/heads/changed/branch
+
+WORKTREES
+`,
+      { mode: 0o700 }
+    );
+    const result = await f.run(["--json"]);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout).data.copies).toMatchObject([
+      { branch: "main", instance: null },
+      {
+        branch: "changed/branch",
+        checkout: { name: "changed/branch" },
+        instance: "changed-branch",
+      },
+    ]);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});

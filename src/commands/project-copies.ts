@@ -12,9 +12,10 @@ import {
   listRegistrationCheckouts,
 } from "../lib/branch-instance-identity.ts";
 import { readBranchUsage } from "../lib/branch-usage.ts";
+import { autoWorktreeBranch } from "../lib/branches.ts";
 import { emitCliResult, HackCliError, okResult } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
-import { resolveGitCurrentBranch } from "../lib/git-worktree.ts";
+import { listGitWorktrees } from "../lib/git-worktree.ts";
 import { isRecord } from "../lib/guards.ts";
 import { expectedNativeComposeProject } from "../lib/native-compose-generation.ts";
 import { jsonPrivate } from "../lib/native-compose-private-state.ts";
@@ -25,7 +26,6 @@ import {
   type ProjectContext,
   readProjectConfig,
   resolveWorktreeAutoBranch,
-  sanitizeBranchSlug,
 } from "../lib/project.ts";
 import { inspectProjectInputsAtRoot } from "../lib/project-input-selection.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
@@ -353,14 +353,19 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
   const recoveries: string[] = [];
   const names = new Map<string, number>();
 
+  const worktrees = await listGitWorktrees({
+    repoRoot: checkouts[0]?.root ?? opts.cwd,
+  });
+  const gitByRoot = new Map(worktrees?.map((entry) => [entry.path, entry]));
   for (const checkout of checkouts) {
+    const root = await canonical(checkout.root);
     const registeredBranch =
       registration?.worktrees?.find((item) => item.path === checkout.root)
         ?.branch ?? null;
+    const current = gitByRoot.get(root);
+    const gitBranch = current ? current.branch : registeredBranch;
     const label =
-      checkout.kind === "primary"
-        ? "primary"
-        : (registeredBranch ?? "worktree");
+      checkout.kind === "primary" ? "primary" : (gitBranch ?? "worktree");
     const count = (names.get(label) ?? 0) + 1;
     names.set(label, count);
     const name = count === 1 ? label : `${label} (${count})`;
@@ -374,13 +379,15 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
     const authored = family?.kind === "native";
     const cfg = await readProjectConfig(context).catch(() => undefined);
     const automatic =
-      registeredBranch && !authored && resolveWorktreeAutoBranch(cfg)
-        ? sanitizeBranchSlug(registeredBranch)
+      checkout.kind === "worktree" &&
+      gitBranch &&
+      !authored &&
+      resolveWorktreeAutoBranch(cfg)
+        ? autoWorktreeBranch(gitBranch, worktrees)
         : null;
     const usage = await readBranchUsage({
       projectDir: checkout.projectDir,
     }).catch(() => new Map());
-    const root = await canonical(checkout.root);
     const dir = await canonical(checkout.projectDir);
     const base = native
       ? ""
@@ -402,11 +409,6 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
         })
       : [];
     const instances = [...new Set([automatic, ...containers.keys(), ...saved])];
-    const gitBranch =
-      checkout.kind === "primary"
-        ? await resolveGitCurrentBranch({ repoRoot: root }).catch(() => null)
-        : registeredBranch;
-
     const observe = async (branch: string | null) => {
       if (!family || family.kind === "none" || family.kind === "conflict") {
         return unknownCopy;
@@ -439,7 +441,7 @@ export async function runProjectCopies(opts: CopiesOptions): Promise<number> {
             instance === null
               ? gitBranch
               : (usage.get(instance)?.name ??
-                (instance === automatic ? registeredBranch : null) ??
+                (instance === automatic ? gitBranch : null) ??
                 instance);
           const row: Copy = {
             branch,

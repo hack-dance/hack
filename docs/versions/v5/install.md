@@ -33,7 +33,7 @@ Download the installer from an exact release. Review it before running it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.22/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.24/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -45,9 +45,8 @@ Expect the version you chose and a selected bundle in the manager's report.
 Newer releases are on [GitHub](https://github.com/hack-dance/hack/releases).
 Check a release's notes before replacing the tag above.
 
-**On Linux**, run the same commands with the tag of a release that has Linux
-assets (`SHA256SUMS-linux` is in its asset list). The `5.0.0-next.22` installer
-stops on Linux. The installer needs `curl` and `sha256sum`, installs under
+**On Linux**, use the same commands above. This release includes both Linux
+Compose bundles and `SHA256SUMS-linux`. The installer needs `curl` and `sha256sum`, installs under
 `~/.hack-next` without `sudo`, and ends with "Installed the Compose backend. The
 native backend is Apple Silicon macOS only." The
 [candidate install guide on `next`](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#linux-the-compose-only-candidate)

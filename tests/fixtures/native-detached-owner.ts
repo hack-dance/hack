@@ -1,4 +1,5 @@
 import { ChildProcess, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -257,6 +258,14 @@ const [role, root, mode] = Bun.argv.slice(2);
 if (!(root && mode)) {
   process.exit(2);
 }
+
+const rootPoll = setInterval(() => {
+  if (!existsSync(root)) {
+    process.exit(0);
+  }
+}, 100);
+rootPoll.unref();
+await publish(join(root, `${role}.fixture-pid`), String(process.pid));
 
 /** Exercise the valid exit-before-buffered-IPC order in this isolated launcher. */
 function deliverExitBeforeMessages(): () => void {

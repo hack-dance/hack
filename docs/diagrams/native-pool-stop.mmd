@@ -16,8 +16,10 @@ stateDiagram-v2
     crashed --> orphaned : hack native recover
     orphaned --> recover : hack up, down --recover
     state recover <<choice>>
-    recover --> retained : [same or previous boot]
+    recover --> retained : [boot ok, no HTTPS lease]
+    recover --> finalizing : [boot ok, HTTPS lease]
     recover --> stranded : [older boot]
+    finalizing --> retained : lease released or archived
 
     note left of orphaned
         Receipt still ready-observed,
@@ -34,6 +36,12 @@ stateDiagram-v2
         stop mid-recovery, came first.
         Follow-up: any-boot.
     end note
+    note right of finalizing
+        Graph stopped, HTTPS lease held.
+        The old owner retires when its
+        boot ends; up refuses until
+        down --recover finishes.
+    end note
     note left of retained
         INV NoDeadEnd: some named
         command always acts.
@@ -43,4 +51,5 @@ stateDiagram-v2
     class ready ok
     class orphaned wait
     class crashed wait
+    class finalizing wait
     class stranded fail

@@ -490,25 +490,32 @@ With it:
   the build read: paths, file contents, permission bits and symlink targets. Editing a
   copied file builds a new image; editing an ignored file does not. An ignore file with
   syntax Hack does not reproduce exactly (character classes or `\` escapes) counts as
-  excluding nothing, which can only cause extra rebuilds. A context with more than
+  excluding nothing: that never misses a change, but it can cause extra rebuilds, and
+  it can refuse the build when an otherwise ignored entry is unreadable, special or
+  pushes the context over its bounds. A context with more than
   200,000 included entries or 4 GiB of included file content, or with an unreadable
   entry or a socket, FIFO or device the ignore file does not exclude, refuses.
 - Hack remembers each context file's size, timestamps and inode in a private cache, so
   an unchanged context is not read again. The cache misses only a change that keeps the
   size, inode, modification time and change time identical, which needs a deliberate
   clock or timestamp manipulation; set `HACK_NATIVE_REBUILD=1` after one.
-- A reused image keeps its base-image digests for at most 24 hours. After that the
-  next `up` resolves the tags again, once (this needs registry access): unchanged
-  digests keep the image, a moved tag builds a new one. Set `HACK_NATIVE_REBUILD=1` to build again now; base-image
-  tags then resolve again too.
+- A base-image tag is resolved at most once a day per project and branch, and every
+  build of one `up` uses the same digest for it. A reused image keeps its base-image
+  digests for at most 24 hours; after that the next `up` resolves the tags again (this
+  needs registry access): unchanged digests keep the image, a moved tag builds a new one. Set `HACK_NATIVE_REBUILD=1` to build
+  again now; base-image tags then resolve again too.
+- If a copied file changes while its image is being built, the build is not recorded
+  for those inputs and `up` refuses; run it again.
 - Every `up` asks the runtime for each build, including an `up` that restores a run
   stopped with `hack down`. The retained image is reused only while its build inputs
   are unchanged (Dockerfile, ignore file, target, args, build context); an edited
   Dockerfile or copied file builds a new image and the run's containers are recreated
-  from it, keeping named volumes.
-  `hack restart` reuses the running or retained containers, so it checks the same build
-  inputs first and refuses, before stopping anything, when an image would change: run
-  `hack down` and then `hack up` to recreate it from the new image.
+  from it, keeping named volumes when the stopped run can be restored.
+- `hack restart` resolves every build before it stops anything: a failed build, or a
+  rebuilt image the retained run could not take, refuses while the current graph keeps
+  running. It then stops the graph and starts it again on exactly the images it
+  resolved, rebuilt ones included; nothing is built after the stop, and a build
+  service added or changed in the meantime refuses instead.
 - "Unchanged" means the same Compose bytes. A run that mounts no project source and
   uses no dependency cache still restores after its Compose file was edited and put
   back, or after any project file was touched that its builds do not read.

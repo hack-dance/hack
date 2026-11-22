@@ -569,7 +569,7 @@ export async function resolveNativeRestartBuilds(opts: {
   readonly managedSecretValues: readonly string[];
   readonly signal: AbortSignal;
   readonly invoke?: typeof invokeNativeBuild;
-}): Promise<ReadonlyMap<string, string>> {
+}): Promise<ReadonlyMap<string, NativeVerifiedBuild>> {
   refuseManagedSecretBuildArguments({
     builds: opts.builds,
     managedSecretValues: opts.managedSecretValues,
@@ -590,15 +590,19 @@ export async function resolveNativeRestartBuilds(opts: {
     specs: copies,
     rebuild: false,
   });
-  const resolved = new Map<string, string>();
+  const resolved = new Map<string, NativeVerifiedBuild>();
   for (const service of pinned) {
     const image = copies[service]?.image;
-    if (typeof image !== "string" || !IMAGE_ID.test(image)) {
+    const request = builds.get(service);
+    if (typeof image !== "string" || !IMAGE_ID.test(image) || !request) {
       throw new ClosedCliError(
         "Native restart build selection is invalid; nothing was stopped."
       );
     }
-    resolved.set(service, image);
+    resolved.set(service, {
+      imageId: image,
+      identity: nativeBuildIdentity(request),
+    });
   }
   return resolved;
 }
@@ -606,25 +610,55 @@ export async function resolveNativeRestartBuilds(opts: {
 /**
  * Pin build services to the images a restart preflight resolved, so the replacement
  * start runs exactly those images and builds nothing after the old graph stopped.
- * Returns the builds that still need the runtime.
+ * Every active build service must be covered by an image resolved for the same
+ * declaration; a build service added or changed between preflight and start refuses
+ * instead of building. Returns the builds that still need the runtime: the inactive
+ * ones (never built), or all of them when there is no restart selection.
  */
 export function pinVerifiedNativeBuilds(opts: {
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;
   readonly specs: Record<string, Record<string, unknown>>;
-  readonly images: ReadonlyMap<string, string>;
+  readonly profiles: readonly string[];
+  readonly verified: ReadonlyMap<string, NativeVerifiedBuild> | undefined;
 }): ReadonlyMap<string, NativeBuildRequest> {
-  const remaining = new Map(opts.builds);
-  for (const [service, image] of opts.images) {
+  if (opts.verified === undefined) {
+    return opts.builds;
+  }
+  const remaining = new Map<string, NativeBuildRequest>();
+  for (const [service, request] of opts.builds) {
     const spec = opts.specs[service];
-    if (spec && remaining.has(service)) {
-      pin(spec, image);
-      remaining.delete(service);
+    if (!(spec && nativeServiceActive(spec, opts.profiles))) {
+      remaining.set(service, request);
+      continue;
     }
+    const verified = opts.verified.get(service);
+    if (verified?.identity !== nativeBuildIdentity(request)) {
+      throw new ClosedCliError(
+        `The build declaration of ${service} changed during the restart; nothing was built after the old graph stopped. Run hack up to start it.`
+      );
+    }
+    pin(spec, verified.imageId);
   }
   return remaining;
 }
 
 type PendingBuild = { request: NativeBuildRequest; services: string[] };
+
+/** The declaration a build request stands for: identical ones build once. */
+export function nativeBuildIdentity(request: NativeBuildRequest): string {
+  return JSON.stringify([
+    request.context,
+    request.dockerfile,
+    request.target,
+    Object.entries(request.args).sort(([a], [b]) => (a < b ? -1 : 1)),
+  ]);
+}
+
+/** A restart's resolved build image, bound to the declaration it was resolved for. */
+export interface NativeVerifiedBuild {
+  readonly imageId: string;
+  readonly identity: string;
+}
 
 /** Group identical builds of the active build services. */
 function pendingBuilds(opts: {
@@ -643,12 +677,7 @@ function pendingBuilds(opts: {
     if (!nativeServiceActive(spec, opts.profiles)) {
       continue;
     }
-    const identity = JSON.stringify([
-      request.context,
-      request.dockerfile,
-      request.target,
-      Object.entries(request.args).sort(([a], [b]) => (a < b ? -1 : 1)),
-    ]);
+    const identity = nativeBuildIdentity(request);
     const entry = pending.get(identity) ?? { request, services: [] };
     entry.services.push(service);
     pending.set(identity, entry);

@@ -180,7 +180,8 @@ fn parse_patterns(bytes: &[u8]) -> Option<Vec<Pattern>> {
         if line.is_empty() {
             continue;
         }
-        // ignorefile.ReadAll: clean the body, drop one leading slash, keep the `!`.
+        // ignorefile.ReadAll: trim the body after a `!`, clean it, drop one leading
+        // slash, then put the `!` back.
         let (invert, body) = match line.strip_prefix('!') {
             Some(rest) => (true, go_trim(rest)),
             None => (false, line),
@@ -193,12 +194,19 @@ fn parse_patterns(bytes: &[u8]) -> Option<Vec<Pattern>> {
         if cleaned.len() > 1 && cleaned.starts_with('/') {
             cleaned.remove(0);
         }
-        // patternmatcher.New cleans again with the `!` still attached.
-        let full = clean(&if invert {
+        let read_all = if invert {
             format!("!{cleaned}")
         } else {
             cleaned
-        });
+        };
+        // patternmatcher.New: trim the whole pattern again (so `/ foo` becomes `foo`,
+        // while `!/ foo` keeps ` foo`), skip an empty one, clean it with any `!` still
+        // attached, then split off the `!`.
+        let trimmed = go_trim(&read_all);
+        if trimmed.is_empty() {
+            continue;
+        }
+        let full = clean(trimmed);
         let (negated, text) = match full.strip_prefix('!') {
             Some("") => return None,
             Some(rest) => (true, rest.to_owned()),

@@ -17,6 +17,7 @@ import {
   admitNativeProjectBuilds,
   invokeNativeBuild,
   type NativeBuildRequest,
+  type NativeVerifiedBuild,
   nativeBuildsEnabled,
   nativeServiceActive,
   resolveNativeRestartBuilds,
@@ -32,6 +33,7 @@ import {
 } from "./native-project-dependencies.ts";
 import {
   mergeNativeShellEnvironment,
+  type NativeProjectInput,
   prepareNativeProjectInput,
   requireNativeShellDeliveryFits,
   selectActiveNativeProjectInput,
@@ -338,7 +340,7 @@ async function pinRestartImages(opts: {
   readonly build: typeof invokeNativeBuild;
   readonly managedSecretValues: readonly string[] | undefined;
   readonly signal: AbortSignal | undefined;
-}): Promise<ReadonlyMap<string, string>> {
+}): Promise<ReadonlyMap<string, NativeVerifiedBuild>> {
   // Resolve builds before anything stops; the review below still sees the images
   // the graph runs, and the replacement start pins the resolved ones (HACK-2533).
   const resolved = await resolveNativeRestartBuilds({
@@ -445,7 +447,7 @@ export async function preflightNativeRestart(opts: {
   /** The restart's stop request: it cancels a build check before anything is stopped. */
   readonly signal?: AbortSignal;
   readonly dependencies?: Partial<typeof DEFAULTS>;
-}): Promise<ReadonlyMap<string, string>> {
+}): Promise<ReadonlyMap<string, NativeVerifiedBuild>> {
   const deps = { ...DEFAULTS, ...opts.dependencies };
   const selected = nativeRestartSelection({ run: opts.run });
   const runtimeMetadata = nativeRuntimeMetadataSelected({
@@ -459,6 +461,7 @@ export async function preflightNativeRestart(opts: {
     recoverStopped,
     invoke: deps.invoke,
   });
+  const retainedMode = stoppedRetry ? "stopped" : "active";
   requireNativeRestartNetwork(
     await deps.invoke({
       runtime: opts.runtime,
@@ -539,7 +542,7 @@ export async function preflightNativeRestart(opts: {
     profiles: selected.profiles,
     input,
     retained: opts.run,
-    retainedMode: stoppedRetry ? "stopped" : "active",
+    retainedMode,
     invoke: deps.invoke,
     select: deps.selectReview,
   });
@@ -680,7 +683,7 @@ export async function preflightNativeRestart(opts: {
     profiles: selected.profiles,
     branch: opts.scope.branch,
     retained: opts.run,
-    retainedMode: stoppedRetry ? "stopped" : "active",
+    retainedMode,
     reviewIdentity,
     invoke: deps.invoke,
     input: { ...input, normalizedComposeJson: JSON.stringify(compose) },
@@ -755,5 +758,85 @@ export async function preflightNativeRestart(opts: {
       }
     },
   });
+  await verifyNativeRestartReplacement({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    composeFile: opts.composeFile,
+    profiles: selected.profiles,
+    branch: opts.scope.branch,
+    run: opts.run,
+    retainedMode,
+    reviewIdentity,
+    input,
+    specs,
+    resolved: verifiedBuilds,
+    running: retainedImages,
+    review: deps.review,
+    invoke: deps.invoke,
+  });
   return verifiedBuilds;
+}
+
+/**
+ * A rebuilt image changes the plan the replacement start reviews after `down`. Before
+ * anything is stopped, review that replacement plan and prove it with the same
+ * source-compatibility check a restore makes, so a replacement the retained run could
+ * not take refuses while the old graph still runs (HACK-2533).
+ */
+async function verifyNativeRestartReplacement(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly composeFile: string;
+  readonly profiles: readonly string[] | undefined;
+  readonly branch: string | null | undefined;
+  readonly run: NativeProjectRun;
+  readonly retainedMode: "stopped" | "active";
+  readonly reviewIdentity: Parameters<
+    typeof withNativeProjectReview
+  >[0]["reviewIdentity"];
+  readonly input: NativeProjectInput;
+  readonly specs: Record<string, Record<string, unknown>>;
+  readonly resolved: ReadonlyMap<string, NativeVerifiedBuild>;
+  readonly running: ReadonlyMap<string, string>;
+  readonly review: typeof withNativeProjectReview;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<void> {
+  const changed = [...opts.resolved]
+    .map(([service, build]) => [service, build.imageId] as const)
+    .filter(([service, image]) => opts.running.get(service) !== image);
+  if (changed.length === 0) {
+    return;
+  }
+  const services = { ...opts.specs };
+  for (const [service, image] of changed) {
+    services[service] = { ...services[service], image };
+  }
+  const compose = JSON.parse(opts.input.normalizedComposeJson);
+  compose.services = services;
+  await opts.review({
+    runtime: opts.runtime,
+    projectRoot: opts.projectRoot,
+    composeFile: opts.composeFile,
+    profiles: opts.profiles,
+    branch: opts.branch,
+    retained: opts.run,
+    retainedMode: opts.retainedMode,
+    reviewIdentity: opts.reviewIdentity,
+    invoke: opts.invoke,
+    input: { ...opts.input, normalizedComposeJson: JSON.stringify(compose) },
+    run: async (review) => {
+      if (review.namespace !== opts.run.namespace) {
+        throw new ClosedCliError(
+          "Native restart configuration changed; the current graph was not stopped."
+        );
+      }
+      await verifyNativeSourceCompatibility({
+        runtime: opts.runtime,
+        projectRoot: opts.projectRoot,
+        saved: opts.run,
+        review,
+        invoke: opts.invoke,
+      });
+    },
+  });
 }

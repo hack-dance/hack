@@ -7,7 +7,7 @@
 use super::*;
 use std::{
     cell::RefCell,
-    os::unix::fs::PermissionsExt,
+    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
     sync::{Arc, Mutex},
 };
 
@@ -105,6 +105,9 @@ cat dockerfile/Dockerfile > seen-dockerfile
 cat dockerfile/Dockerfile.dockerignore > seen-dockerignore
 case {mode} in
   ok) printf '{{"build":{{"containerimage.config.digest":"{IMAGE}"}}}}' > "$meta" ;;
+  edit)
+    printf 'edited during the build' > "$(cat edit-target)"
+    printf '{{"build":{{"containerimage.config.digest":"{IMAGE}"}}}}' > "$meta" ;;
   leak)
     printf '#5 0.1 value=%s\n\033[31mred\033[0m\033]0;title\007\n' '{SECRET}' >&2
     printf '{{"build":{{"containerimage.config.digest":"{IMAGE}"}}}}' > "$meta" ;;
@@ -694,7 +697,12 @@ fn the_client_builds_the_scanned_dockerfile_and_ignore_rules_not_later_edits() {
     let pool = FakePool::new("pool-1");
     fixture.client(&inputs, "ok");
     pool.built(&inputs, "pool-1", serde_json::json!({}));
-    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    // Those files are context entries too, so the post-build check refuses to adopt;
+    // the client still ran with the scanned bytes.
+    assert_eq!(
+        changed_during_build(&fixture, &pool, &inputs),
+        "native_build_context_changed"
+    );
     let scratch = fixture.scratch(&inputs);
     assert_eq!(fs::read(scratch.join("seen-dockerfile")).unwrap(), scanned);
     assert_eq!(
@@ -712,7 +720,10 @@ fn the_client_builds_the_scanned_dockerfile_and_ignore_rules_not_later_edits() {
     fs::remove_file(app.join("Dockerfile.dockerignore")).unwrap();
     fixture.client(&inputs, "ok");
     pool.built(&inputs, "pool-1", serde_json::json!({}));
-    run(&fixture.candidate, &pool, &inputs, &never).unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(
+        changed_during_build(&fixture, &pool, &inputs),
+        "native_build_context_changed"
+    );
     assert_eq!(
         fs::read_to_string(fixture.scratch(&inputs).join("seen-dockerignore")).unwrap(),
         "main.txt\n"
@@ -722,11 +733,20 @@ fn the_client_builds_the_scanned_dockerfile_and_ignore_rules_not_later_edits() {
     fs::write(app.join(".dockerignore"), "*\n").unwrap();
     fixture.client(&inputs, "ok");
     pool.built(&inputs, "pool-1", serde_json::json!({}));
-    run(&fixture.candidate, &pool, &inputs, &never).unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(
+        changed_during_build(&fixture, &pool, &inputs),
+        "native_build_context_changed"
+    );
     assert_eq!(
         fs::read(fixture.scratch(&inputs).join("seen-dockerignore")).unwrap(),
         b""
     );
+}
+
+fn changed_during_build(fixture: &Fixture, pool: &FakePool, inputs: &Inputs) -> &'static str {
+    run(&fixture.candidate, pool, inputs, &never)
+        .unwrap_err()
+        .code
 }
 
 #[test]
@@ -1538,8 +1558,14 @@ fn base_resolutions_are_trusted_for_a_day_then_checked_once() {
         Some(unix_seconds(at(50)))
     );
 
-    // A receipt from before the field (unknown age) or from the future is expired.
+    // A receipt from before the field (unknown age) or from the future is expired;
+    // with the shared records removed, its tags resolve again.
     for recorded in [None, Some(unix_seconds(at(60)))] {
+        let _ = fs::remove_dir_all(
+            builds_root(&fixture.candidate)
+                .join(&inputs.namespace)
+                .join("bases"),
+        );
         let path = builds_root(&fixture.candidate)
             .join(&inputs.namespace)
             .join(format!("{}.json", inputs.key));
@@ -1593,5 +1619,113 @@ fn context_edits_rebuild_and_ignored_edits_reuse() {
         .join(&inputs.namespace)
         .join(context::cache_name(&app));
     assert!(cache.exists());
+    assert!(reclaim::run(&fixture.candidate, &pool).is_ok());
+}
+
+#[test]
+fn a_context_edited_during_the_build_is_not_adopted() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "edit");
+    // The seam: the fake client edits a copied file after BuildKit "read" it.
+    let main = fixture.project.join("app/main.txt");
+    fs::write(
+        fixture.scratch(&inputs).join("edit-target"),
+        main.as_os_str().as_bytes(),
+    )
+    .unwrap();
+    let error = run(&fixture.candidate, &pool, &inputs, &never).unwrap_err();
+    assert_eq!(error.code, "native_build_context_changed");
+    assert!(!error.message.contains("main"));
+    assert_eq!(fixture.calls(&inputs), 1);
+    let receipt = fixture.receipt(&inputs);
+    assert_eq!(receipt.phase, Phase::Indeterminate);
+    assert!(receipt.image_id.is_none());
+    // The old key is never reused for that image; the new contents get their own key.
+    let again = fixture.inputs(Policy::Missing);
+    assert_ne!(again.key, inputs.key);
+    fixture.client(&again, "ok");
+    pool.built(&again, "pool-1", serde_json::json!({}));
+    let outcome = run(&fixture.candidate, &pool, &again, &never).unwrap();
+    assert!(!outcome.reused);
+    assert_eq!(fixture.receipt(&again).phase, Phase::ContentIdVerified);
+}
+
+#[test]
+fn base_resolutions_are_shared_across_builds_of_a_namespace_for_a_day() {
+    const MOVED: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let fixture = Fixture::new();
+    let first = fixture.inputs(Policy::Missing);
+    let mut request = fixture.request(Policy::Missing);
+    request.args.insert("OTHER".into(), "x".into());
+    let second = prepare(request, &builds_root(&fixture.candidate)).unwrap();
+    assert_ne!(first.key, second.key);
+    assert_eq!(first.namespace, second.namespace);
+    let pool = FakePool::new("pool-1");
+    let start = UNIX_EPOCH + Duration::from_secs(1_900_000_000);
+    *pool.now.borrow_mut() = start;
+    let resolves = || pool.resolve_deadlines.borrow().len();
+    for inputs in [&first, &second] {
+        fixture.client(inputs, "ok");
+    }
+    // The fake engine holds one image ID; label it for the key about to build.
+    let build = |inputs: &Inputs| {
+        pool.built(inputs, "pool-1", serde_json::json!({}));
+        run(&fixture.candidate, &pool, inputs, &never).unwrap()
+    };
+    build(&first);
+    assert_eq!(resolves(), 1);
+    // The tag moves upstream; the second build of the same command keeps the first pin.
+    *pool.pin.borrow_mut() = MOVED.into();
+    *pool.now.borrow_mut() = start + Duration::from_secs(60);
+    let outcome = build(&second);
+    assert_eq!(resolves(), 1, "a fresh shared resolution was repeated");
+    assert_eq!(
+        outcome.base_pins["alpine:3.20"],
+        format!("docker.io/library/alpine@{PIN}")
+    );
+    // Its receipt carries the record's time, not this build's.
+    assert_eq!(
+        fixture.receipt(&second).bases_resolved_at,
+        Some(unix_seconds(start))
+    );
+    let record = base_record_path(
+        &builds_root(&fixture.candidate).join(&first.namespace),
+        "docker.io/library/alpine:3.20",
+    );
+    let mode = fs::metadata(&record).unwrap().mode();
+    assert_eq!(mode & 0o777, 0o600);
+
+    // After 24 hours one build resolves and records; the next one reuses that.
+    *pool.now.borrow_mut() = start + BASE_RESOLUTION_TTL + Duration::from_secs(1);
+    let rebuilt = build(&first);
+    assert!(!rebuilt.reused);
+    assert_eq!(resolves(), 2);
+    let rebuilt = build(&second);
+    assert!(!rebuilt.reused);
+    assert_eq!(resolves(), 2);
+    assert_eq!(
+        rebuilt.base_pins["alpine:3.20"],
+        format!("docker.io/library/alpine@{MOVED}")
+    );
+
+    // An explicit rebuild always asks the registry; a malformed record is ignored.
+    build(&fixture.inputs(Policy::Rebuild));
+    assert_eq!(resolves(), 3);
+    fs::write(&record, b"{not json").unwrap();
+    fs::remove_file(
+        builds_root(&fixture.candidate)
+            .join(&second.namespace)
+            .join(format!("{}.json", second.key)),
+    )
+    .unwrap();
+    build(&second);
+    assert_eq!(resolves(), 4);
+    let read = read_base_record(&record, "docker.io/library/alpine:3.20", *pool.now.borrow());
+    assert!(read.is_some(), "the malformed record was not rewritten");
+    assert!(read_base_record(&record, "docker.io/library/busybox:1", *pool.now.borrow()).is_none());
+    // Reclamation still reads the namespace directory.
     assert!(reclaim::run(&fixture.candidate, &pool).is_ok());
 }

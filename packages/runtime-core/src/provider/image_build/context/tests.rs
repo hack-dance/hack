@@ -141,6 +141,32 @@ fn patterns_are_parsed_and_cleaned_like_dockerignore() {
 }
 
 #[test]
+fn whitespace_exposed_by_cleaning_is_trimmed_as_moby_does() {
+    // ReadAll strips the slash and exposes a space; New trims it before compiling.
+    assert!(excluded("/ foo", "foo"));
+    assert!(!excluded("/ foo", " foo"));
+    // After a `!`, New's trim sees the `!` first, so the space stays.
+    assert!(excluded("*\n!/ foo", "foo"));
+    assert!(!excluded("*\n!/ foo", " foo"));
+    // A `!` exposed by cleaning becomes a re-include in New.
+    assert!(!excluded("*\n/ !foo", "foo"));
+    assert!(excluded("*\n/ !foo", "!foo"));
+    // Trailing whitespace exposed by cleaning is trimmed for both kinds.
+    assert!(excluded("foo /", "foo"));
+    assert!(!excluded("*\n!foo /", "foo"));
+
+    // The walk agrees, with both names present.
+    let tree = Tree::new();
+    tree.write(" foo", "spaced");
+    tree.write("foo", "plain");
+    let before = tree.digest("/ foo\n");
+    tree.write("foo", "plain edited");
+    assert_eq!(before, tree.digest("/ foo\n"), "Docker ignores `foo`");
+    tree.write(" foo", "spaced edited");
+    assert_ne!(before, tree.digest("/ foo\n"), "Docker sends ` foo`");
+}
+
+#[test]
 fn unsupported_syntax_excludes_nothing() {
     for rules in ["*.log\n[ab].txt", "\\*.log", "!", "a^b", "*.log\n\u{a0}x"] {
         let parsed = ignore::Rules::parse(rules.as_bytes());
@@ -297,6 +323,83 @@ fn a_walk_through_ignored_directories_is_bounded_too() {
     .unwrap_err();
     assert_eq!(error.code, "native_build_context_bounds");
     assert!(error.message.contains("1000000 entries to examine"));
+}
+
+#[test]
+fn a_flat_directory_over_the_visit_budget_refuses_while_listing() {
+    let tree = Tree::new();
+    let flat = tree.context().join("flat");
+    fs::create_dir(&flat).unwrap();
+    for index in 0..50 {
+        fs::write(flat.join(format!("f{index}")), "x").unwrap();
+    }
+    let bounds = |visited| Bounds {
+        entries: 1_000,
+        bytes: GIB,
+        visited,
+    };
+    // Root (4 names) + sub (1) + flat (50) = 55 names in all.
+    let error = digest(&tree.context(), b"", None, SystemTime::now(), bounds(20)).unwrap_err();
+    assert_eq!(error.code, "native_build_context_bounds");
+    assert!(!error.message.contains("flat"));
+    assert!(digest(&tree.context(), b"", None, SystemTime::now(), bounds(55)).is_ok());
+    assert!(digest(&tree.context(), b"", None, SystemTime::now(), bounds(54)).is_err());
+}
+
+/// Walk with `hook` run on every file between open and read.
+fn walk_with_hook(
+    tree: &Tree,
+    hook: impl FnMut(&Path) + 'static,
+) -> Result<ContextDigest, CandidateError> {
+    AFTER_OPEN.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    let result = digest(
+        &tree.context(),
+        b"",
+        None,
+        SystemTime::now(),
+        Bounds::DEFAULT,
+    );
+    AFTER_OPEN.with(|slot| *slot.borrow_mut() = None);
+    result
+}
+
+#[test]
+fn a_file_that_changes_while_it_is_read_refuses() {
+    let tree = Tree::new();
+    // Grows: more bytes than listed are never hashed.
+    let error = walk_with_hook(&tree, |path| {
+        if path.ends_with("main.txt") {
+            let mut file = OpenOptions::new().append(true).open(path).unwrap();
+            file.write_all(&[b'x'; 200_000]).unwrap();
+        }
+    })
+    .unwrap_err();
+    assert_eq!(error.code, "native_build_context_changed");
+    assert!(!error.message.contains("main"));
+    // Rewritten at the same size: the final status differs from the listing.
+    let error = walk_with_hook(&tree, |path| {
+        if path.ends_with("sub/a.txt") {
+            std::thread::sleep(Duration::from_millis(20));
+            fs::write(path, "b").unwrap();
+        }
+    })
+    .unwrap_err();
+    assert_eq!(error.code, "native_build_context_changed");
+    // Shrinks: fewer bytes than listed.
+    let error = walk_with_hook(&tree, |path| {
+        if path.ends_with("notes.log") {
+            OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_len(1)
+                .unwrap();
+        }
+    })
+    .unwrap_err();
+    assert_eq!(error.code, "native_build_context_changed");
+    // Untouched files walk cleanly.
+    assert!(walk_with_hook(&tree, |_| {}).is_ok());
 }
 
 #[test]

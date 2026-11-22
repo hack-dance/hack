@@ -19,6 +19,10 @@ import {
 import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
 import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-policy.ts";
 import { selectNativeProfiles } from "../src/backends/native-profile-selection.ts";
+import {
+  admitNativeProjectBuilds,
+  nativeBuildIdentity,
+} from "../src/backends/native-project-builds.ts";
 import { nativeProjectDown } from "../src/backends/native-project-down.ts";
 import { discardUnpublishedNativeStart } from "../src/backends/native-project-failed-start.ts";
 import {
@@ -5405,8 +5409,25 @@ test("retained startup asks the runtime for each build, and a restart's resolved
   const previous = process.env.HACK_NATIVE_BUILDS;
   process.env.HACK_NATIVE_BUILDS = "1";
   try {
-    for (const verified of [undefined, new Map([["web", rebuilt]])]) {
+    for (const restart of [false, true]) {
       const { opts } = await fixture(false);
+      const request = admitNativeProjectBuilds({
+        services: { web: { build: "." } },
+        projectRoot: opts.scope.projectRoot,
+        composeFile: opts.composeFile,
+        enabled: true,
+      }).get("web");
+      if (!request) {
+        throw new Error("the fixture's build service was not admitted");
+      }
+      const verified = restart
+        ? new Map([
+            [
+              "web",
+              { imageId: rebuilt, identity: nativeBuildIdentity(request) },
+            ],
+          ])
+        : undefined;
       const stopped = stoppedGraph(saved);
       const observed = {
         ...stopped,

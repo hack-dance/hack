@@ -16,9 +16,11 @@ import {
   buildNativeProjectImages,
   invokeNativeBuild,
   type NativeBuildRequest,
+  nativeBuildIdentity,
   nativeBuildsDisabledRefusal,
   nativeBuildsEnabled,
   nativeServiceActive,
+  pinVerifiedNativeBuilds,
   refuseEmulatedBuilds,
   refuseManagedSecretBuildArguments,
   resolveNativeRestartBuilds,
@@ -315,9 +317,60 @@ test("restart resolves its builds before stopping: a rebuilt image is what it ru
     },
   });
   // Only the running, active service is resolved; the caller's specs are untouched.
-  expect([...resolved]).toEqual([["web", REBUILT]]);
+  expect([...resolved]).toEqual([
+    ["web", { imageId: REBUILT, identity: nativeBuildIdentity(request()) }],
+  ]);
   expect(calls).toBe(1);
   expect(specs.web).toEqual({ build: "app" });
+});
+
+test("a restart's replacement start pins only images resolved for the same declarations", () => {
+  const verified = new Map([
+    ["web", { imageId: REBUILT, identity: nativeBuildIdentity(request()) }],
+  ]);
+  const specs = {
+    web: { build: "app" } as Record<string, unknown>,
+    tools: { build: "app", profiles: ["tools"] } as Record<string, unknown>,
+  };
+  const remaining = pinVerifiedNativeBuilds({
+    builds: new Map([
+      ["web", request()],
+      ["tools", request()],
+    ]),
+    specs,
+    profiles: [],
+    verified,
+  });
+  expect(specs.web).toEqual({ image: REBUILT });
+  // The inactive service is neither pinned nor built.
+  expect([...remaining.keys()]).toEqual(["tools"]);
+  // A declaration changed, or a build service added, after preflight refuses.
+  for (const builds of [
+    new Map([["web", { ...request(), target: "other" }]]),
+    new Map([
+      ["web", request()],
+      ["worker", request()],
+    ]),
+  ]) {
+    expect(() =>
+      pinVerifiedNativeBuilds({
+        builds,
+        specs: { web: { build: "app" }, worker: { build: "app" } },
+        profiles: [],
+        verified,
+      })
+    ).toThrow("changed during the restart");
+  }
+  // Without a restart selection every build still goes to the runtime.
+  const all = new Map([["web", request()]]);
+  expect(
+    pinVerifiedNativeBuilds({
+      builds: all,
+      specs: {},
+      profiles: [],
+      verified: undefined,
+    })
+  ).toBe(all);
 });
 
 test("restart refuses a managed secret build argument before any build runs", async () => {

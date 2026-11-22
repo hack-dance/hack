@@ -19,10 +19,20 @@
 //!   ignored one does not. A private stat cache keeps an unchanged context cheap to
 //!   hash; [`context`] documents the change it can miss. Key version 1 lacked the
 //!   context digest, so no receipt written under it can match a version-2 key.
-//! - Base-image tags resolve before every build. A reused image keeps its recorded pins
-//!   for at most [`BASE_RESOLUTION_TTL`] (24 hours) after they were resolved; an older or
-//!   unrecorded resolution resolves the tags again, once per operation: unchanged
-//!   digests keep the image and refresh the resolution time, a moved digest builds.
+//! - BuildKit reads the live context directory, so the context is hashed again after
+//!   the client exits and before the image is adopted: a different digest records the
+//!   attempt `indeterminate`, adopts nothing and refuses `native_build_context_changed`.
+//!   A file changed and changed back while the build ran (equal digests at both ends)
+//!   is not detected; the image may then hold the intermediate contents.
+//! - Base-image resolutions are shared per namespace through private records
+//!   `run/image-builds/<namespace>/bases/<reference digest>.json` (tag, pin, time), each
+//!   trusted for [`BASE_RESOLUTION_TTL`] (24 hours). With policy `missing`, a build uses
+//!   a fresh record instead of asking the registry, so every build of one command gets
+//!   the same pin unless the 24-hour boundary falls inside the command; `rebuild` always
+//!   resolves again and refreshes the records. A reused image keeps its recorded pins
+//!   for 24 hours after they were resolved; after that its tags resolve again (or come
+//!   from a fresh record): unchanged digests keep the image and record the resolution
+//!   time, a moved digest builds.
 //! - Every image the Dockerfile can pull (see [`super::build_scan`]) resolves to a digest
 //!   before BuildKit runs and is handed to it as a named build context, so BuildKit pulls
 //!   only those exact manifests. Base images with stored `ONBUILD` triggers refuse.
@@ -314,6 +324,8 @@ pub(super) struct Inputs {
     images: Vec<BaseImage>,
     policy: Policy,
     timeout: Duration,
+    /// The context digest bound into `key`, checked again after the build.
+    context_sha256: String,
     /// The document hashed into `key`.
     #[cfg(test)]
     key_input: Value,
@@ -602,7 +614,7 @@ pub(super) fn prepare(request: BuildRequest, builds: &Path) -> Result<Inputs, Ca
         "dockerfile": relative(&dockerfile, &context),
         "dockerfile_sha256": sha256_hex(&bytes),
         "dockerignore": ignore_digests,
-        "context_sha256": context_digest.digest,
+        "context_sha256": context_digest.digest.clone(),
         "target": request.target,
         "args": salted_args,
         "platform": "linux/arm64",
@@ -622,6 +634,7 @@ pub(super) fn prepare(request: BuildRequest, builds: &Path) -> Result<Inputs, Ca
         images: scan.images,
         policy: request.policy,
         timeout: Duration::from_secs(request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS)),
+        context_sha256: context_digest.digest,
         #[cfg(test)]
         key_input,
     })
@@ -859,8 +872,10 @@ pub(super) fn run<P: BuildPool>(
     let previous_bytes = previous.as_ref().and_then(|receipt| receipt.image_bytes);
     drop(lease);
 
-    // Step 2, unleased: resolve every base image to a pinned manifest, once.
-    let resolved_at = unix_seconds(pool.now());
+    // Step 2, unleased: pin every base image, from a fresh shared record or by
+    // resolving it (then recording it).
+    let now = pool.now();
+    let mut oldest: Option<u64> = None;
     let mut pins = BTreeMap::new();
     for base in &inputs.images {
         if canceled() {
@@ -869,19 +884,41 @@ pub(super) fn run<P: BuildPool>(
         if Instant::now() >= deadline {
             return Err(expired_early());
         }
-        let resolved = pool.resolve(base, deadline, canceled)?;
-        if !image_id(&resolved.source_digest)
-            || !resolved
-                .pinned_reference
-                .ends_with(&format!("@{}", resolved.source_digest))
-        {
-            return Err(refusal(
-                "native_build_base_image",
-                "A build base image did not resolve to a pinned manifest.",
-            ));
-        }
-        pins.insert(base.context_name.clone(), resolved.pinned_reference);
+        let reference = base.reference.canonical();
+        let record = base_record_path(&directory, &reference);
+        let shared = match inputs.policy {
+            Policy::Missing => read_base_record(&record, &reference, now),
+            Policy::Rebuild => None,
+        };
+        let (pinned, at) = match shared {
+            Some(shared) => (shared.pinned_reference, shared.resolved_at),
+            None => {
+                let resolved = pool.resolve(base, deadline, canceled)?;
+                if !pinned_manifest(&resolved.pinned_reference, &resolved.source_digest) {
+                    return Err(refusal(
+                        "native_build_base_image",
+                        "A build base image did not resolve to a pinned manifest.",
+                    ));
+                }
+                let at = unix_seconds(now);
+                write_base_record(
+                    &record,
+                    &BaseRecord {
+                        version: BASE_RECORD_VERSION,
+                        reference,
+                        pinned_reference: resolved.pinned_reference.clone(),
+                        source_digest: resolved.source_digest,
+                        resolved_at: at,
+                    },
+                );
+                (resolved.pinned_reference, at)
+            }
+        };
+        oldest = Some(oldest.map_or(at, |oldest| oldest.min(at)));
+        pins.insert(base.context_name.clone(), pinned);
     }
+    // The receipt's resolution time is its oldest pin's.
+    let resolved_at = oldest.unwrap_or_else(|| unix_seconds(now));
     let stale = stale.filter(|(_, previous)| previous.base_pins == pins);
     // A reuse needs no builder; it is verified under the lease if the reuse falls through.
     let builder = if stale.is_some() {
@@ -988,7 +1025,31 @@ pub(super) fn run<P: BuildPool>(
         }
     };
     match ended {
-        Ended::Exited(true) => {}
+        Ended::Exited(true) => {
+            // BuildKit read the live context: adopt only what the key describes.
+            let unchanged = context::digest(
+                &inputs.context,
+                &inputs.ignore,
+                Some(&directory.join(context::cache_name(&inputs.context))),
+                SystemTime::now(),
+                context::Bounds::DEFAULT,
+            )
+            .and_then(|after| {
+                if after.digest == inputs.context_sha256 {
+                    Ok(())
+                } else {
+                    Err(refusal(
+                        "native_build_context_changed",
+                        "The build context changed while it was built; run the build again. No image was adopted.",
+                    ))
+                }
+            });
+            if let Err(error) = unchanged {
+                receipt.phase = Phase::Indeterminate;
+                state::write(&receipt_path, &receipt)?;
+                return Err(error);
+            }
+        }
         Ended::Exited(false) => {
             receipt.phase = Phase::Failed;
             state::write(&receipt_path, &receipt)?;
@@ -1064,6 +1125,70 @@ pub(super) fn run<P: BuildPool>(
         base_pins: pins,
         cache_reclaimed_bytes,
     })
+}
+
+const BASE_RECORD_VERSION: u32 = 1;
+const MAX_BASE_RECORD_BYTES: u64 = 4 * 1024;
+
+/// One shared base-image resolution (see the module documentation). It is only a
+/// consistency and rate aid: a missing, malformed, foreign or expired record resolves
+/// again, and the pin it names is still enforced by the build's source policy.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BaseRecord {
+    version: u32,
+    /// The canonical reference that was resolved.
+    reference: String,
+    pinned_reference: String,
+    source_digest: String,
+    /// Unix seconds.
+    resolved_at: u64,
+}
+
+fn pinned_manifest(pinned_reference: &str, source_digest: &str) -> bool {
+    image_id(source_digest) && pinned_reference.ends_with(&format!("@{source_digest}"))
+}
+
+fn base_record_path(directory: &Path, reference: &str) -> PathBuf {
+    let mut digest = Sha256::new();
+    digest.update(b"hack-native-build-base-v1\0");
+    digest.update(reference.as_bytes());
+    directory
+        .join("bases")
+        .join(format!("{:x}.json", crate::Hex(digest.finalize())))
+}
+
+fn read_base_record(path: &Path, reference: &str, now: SystemTime) -> Option<BaseRecord> {
+    let record: BaseRecord = state::read_bounded(path, MAX_BASE_RECORD_BYTES).ok()?;
+    (record.version == BASE_RECORD_VERSION
+        && record.reference == reference
+        && pinned_manifest(&record.pinned_reference, &record.source_digest)
+        && resolution_fresh(Some(record.resolved_at), now))
+    .then_some(record)
+}
+
+/// Publish a record by rename from a per-process pending file, so concurrent builds
+/// never share one. Best effort: a failure only means a later build resolves again.
+fn write_base_record(path: &Path, record: &BaseRecord) {
+    let Some(parent) = path.parent() else { return };
+    if state::private_directory(parent).is_err() {
+        return;
+    }
+    let Ok(bytes) = serde_json::to_vec(record) else {
+        return;
+    };
+    let pending = path.with_extension(format!("{}.pending", std::process::id()));
+    let _ = fs::remove_file(&pending);
+    let written = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&pending)
+        .and_then(|mut file| file.write_all(&bytes).and_then(|()| file.sync_all()));
+    if written.is_err() || fs::rename(&pending, path).is_err() {
+        let _ = fs::remove_file(&pending);
+    }
 }
 
 fn reused(inputs: &Inputs, id: &str, base_pins: BTreeMap<String, String>) -> BuildOutcome {

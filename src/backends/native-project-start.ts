@@ -79,6 +79,7 @@ import {
   buildNativeProjectImages,
   invokeNativeBuild,
   type NativeBuildRequest,
+  type NativeVerifiedBuild,
   nativeBuildsEnabled,
   nativeRebuildRequested,
   nativeServiceActive,
@@ -762,23 +763,19 @@ async function resolveNativeBuildImages(opts: {
   readonly profiles: readonly string[];
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;
   readonly specs: Record<string, Record<string, unknown>>;
-  readonly verified: ReadonlyMap<string, string> | undefined;
+  readonly verified: ReadonlyMap<string, NativeVerifiedBuild> | undefined;
   readonly signal: AbortSignal;
   readonly invoke: typeof invokeNativeBuild | undefined;
 }): Promise<ReadonlySet<string>> {
-  const verified = opts.verified ?? new Map<string, string>();
+  const remaining = pinVerifiedNativeBuilds(opts);
   const built = await buildNativeProjectImages({
     ...opts,
-    builds: pinVerifiedNativeBuilds({
-      builds: opts.builds,
-      specs: opts.specs,
-      images: verified,
-    }),
+    builds: remaining,
     rebuild: nativeRebuildRequested(),
   });
   return new Set([
     ...built,
-    ...[...verified.keys()].filter((service) => opts.builds.has(service)),
+    ...[...opts.builds.keys()].filter((service) => !remaining.has(service)),
   ]);
 }
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
@@ -1987,7 +1984,7 @@ type NativeProjectStartOptions = {
    * Build images a restart preflight verified before it stopped the old graph:
    * those services are pinned as they are and never built again (HACK-2533).
    */
-  readonly verifiedBuildImages?: ReadonlyMap<string, string>;
+  readonly verifiedBuildImages?: ReadonlyMap<string, NativeVerifiedBuild>;
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;

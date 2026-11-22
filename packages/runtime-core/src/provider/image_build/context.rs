@@ -273,10 +273,19 @@ fn decode_hash(hex: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
+/// Test seam type: a hook run on each file after it is opened and before it is read.
+#[cfg(test)]
+pub(super) type AfterOpen = std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>>;
+#[cfg(test)]
+thread_local! {
+    pub(super) static AFTER_OPEN: AfterOpen = const { std::cell::RefCell::new(None) };
+}
+
 /// Read one regular file without following a symlink, checking it is the entry that
-/// was listed.
+/// was listed. At most the listed size plus one byte is read: a file that yields more,
+/// or whose final status differs from the listing, changed during the walk.
 fn hash_file(path: &Path, listed: &fs::Metadata) -> Result<[u8; 32], CandidateError> {
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
@@ -285,22 +294,52 @@ fn hash_file(path: &Path, listed: &fs::Metadata) -> Result<[u8; 32], CandidateEr
     if !opened.is_file() || (opened.dev(), opened.ino()) != (listed.dev(), listed.ino()) {
         return Err(changed());
     }
+    #[cfg(test)]
+    AFTER_OPEN.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(path);
+        }
+    });
+    let limit = listed.size();
+    let mut reader = (&file).take(limit.saturating_add(1));
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; READ_BUFFER];
+    let mut total = 0_u64;
     loop {
-        let read = file.read(&mut buffer).map_err(|_| unreadable())?;
+        let read = reader.read(&mut buffer).map_err(|_| unreadable())?;
         if read == 0 {
             break;
         }
+        total += read as u64;
+        if total > limit {
+            return Err(changed());
+        }
         digest.update(&buffer[..read]);
+    }
+    let after = file.metadata().map_err(|_| unreadable())?;
+    if total != limit || Stat::of(&after) != Stat::of(listed) {
+        return Err(changed());
     }
     let mut out = [0_u8; 32];
     out.copy_from_slice(digest.finalize().as_slice());
     Ok(out)
 }
 
+fn too_many_visited() -> CandidateError {
+    refusal(
+        "native_build_context_bounds",
+        "The build context has more than 1000000 entries to examine; exclude generated or dependency directories without re-including files under them.",
+    )
+}
+
 /// The directory entries of `path`, after checking it is still the listed directory.
-fn list(path: &Path, listed: &fs::Metadata) -> Result<Vec<std::ffi::OsString>, CandidateError> {
+/// Each name counts against `visited`; enumeration stops at the budget.
+fn list(
+    path: &Path,
+    listed: &fs::Metadata,
+    visited: &mut usize,
+    budget: usize,
+) -> Result<Vec<std::ffi::OsString>, CandidateError> {
     let directory = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
@@ -312,6 +351,10 @@ fn list(path: &Path, listed: &fs::Metadata) -> Result<Vec<std::ffi::OsString>, C
     }
     let mut names = Vec::new();
     for entry in fs::read_dir(path).map_err(|_| unreadable())? {
+        *visited += 1;
+        if *visited > budget {
+            return Err(too_many_visited());
+        }
         names.push(entry.map_err(|_| unreadable())?.file_name());
     }
     Ok(names)
@@ -372,14 +415,7 @@ pub(super) fn digest(
         Some(vec![false; rules.len()]),
     )];
     while let Some((directory, relative, listed, record)) = stack.pop() {
-        for name in list(&directory, &listed)? {
-            visited += 1;
-            if visited > walk.bounds.visited {
-                return Err(refusal(
-                    "native_build_context_bounds",
-                    "The build context has more than 1000000 entries to examine; exclude generated or dependency directories without re-including files under them.",
-                ));
-            }
+        for name in list(&directory, &listed, &mut visited, walk.bounds.visited)? {
             let mut child = relative.clone();
             if !child.is_empty() {
                 child.push(b'/');

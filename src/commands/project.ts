@@ -6940,7 +6940,9 @@ async function restartNativeImageProject({
     }
     reportNativeStartupProgress(event);
   };
-  let verifiedBuildImages: ReadonlyMap<string, string> | undefined;
+  let verifiedBuildImages:
+    | Awaited<ReturnType<typeof preflightNativeRestart>>
+    | undefined;
   return await restartNativeProject({
     scope: startup.scope,
     envName: startup.envName,

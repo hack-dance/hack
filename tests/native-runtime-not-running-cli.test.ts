@@ -147,9 +147,10 @@ test("native ps reports a stopped runtime as a status, not a failure", async () 
   expect(output).toContain("NATIVE SERVICE");
   expect(output).not.toContain("Native runtime request failed");
   expect(output).not.toMatch(STACK_FRAME);
-  // The read reached the runtime exactly once (graph status for the mapping).
+  // The graph is read once. A failed supplemental tag lookup leaves its status intact.
   expect(await nativeCalls(f.root)).toEqual([
     `--candidate-root ${join(f.root, "native-home")} graph status --run-id ${run.run} --json`,
+    `--candidate-root ${join(f.root, "native-home")} runtime image-tag-status --json docker.io/library/busybox:1.37`,
   ]);
 });
 

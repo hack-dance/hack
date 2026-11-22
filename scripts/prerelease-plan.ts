@@ -27,7 +27,11 @@ import {
   renderBootstrap,
 } from "./installer/bootstrap.ts";
 import { extractArchive } from "./installer/bundle.ts";
-import { LINUX_SUMS, linuxSumsNames } from "./installer/download.ts";
+import {
+  LINUX_SUMS,
+  linuxSumsNames,
+  officialArchive,
+} from "./installer/download.ts";
 import {
   BUNDLE_PLATFORMS,
   type BundlePlatform,
@@ -40,6 +44,11 @@ import {
   managerAssetName,
   VERSION,
 } from "./installer/integrity.ts";
+import {
+  PLATFORMS_ASSET,
+  renderReleasePlatforms,
+  requireReleasePlatforms,
+} from "./installer/release-platforms.ts";
 
 export const PRERELEASE_ENVIRONMENT = "v5-prerelease";
 /**
@@ -77,8 +86,12 @@ export const PAYLOAD_MODES: Readonly<Record<string, number>> = {
 };
 /**
  * The native candidate platform, and the platform the release-level
- * `prerelease.json` records. Published macOS managers require exactly this
- * value there, so it does not change when Linux bundles are added.
+ * `prerelease.json` records. There it means "the native bundle's platform,
+ * kept for published managers", not "the only platform in the release":
+ * every published manager, macOS and Linux, requires exactly this value and
+ * exactly five keys in that file, so it does not change when other platforms
+ * are added. `prerelease-platforms.json` names every platform in a release
+ * (see `scripts/installer/release-platforms.ts`, HACK-2419).
  */
 export const PRERELEASE_PLATFORM = "darwin-arm64";
 /** The Compose-only Linux bundle platforms a release also ships. */
@@ -178,6 +191,8 @@ export function createPrereleasePlan({
     // Linux assets are listed apart: `assets` stays exactly the set every
     // published macOS manager and installer was written against.
     linuxAssets: [...linuxSumsNames(version), LINUX_SUMS],
+    // Names every platform in the set. Present whenever the Linux assets are.
+    platformsAsset: PLATFORMS_ASSET,
   };
 }
 
@@ -796,12 +811,19 @@ function configCompilerPayload(entries: readonly string[]) {
   return compilerPayload;
 }
 
+function renderReleaseMetadata(
+  metadata: ReturnType<typeof prereleaseMetadata>
+) {
+  return `${JSON.stringify(metadata, null, 2)}\n`;
+}
+
 export async function packagePrerelease({
   plan,
   bundle,
   output,
   buildManager = buildPrereleaseManager,
   linux,
+  nativeSignatures,
 }: {
   readonly plan: PrereleasePlan;
   readonly bundle: string;
@@ -815,6 +837,8 @@ export async function packagePrerelease({
    * other than the installer are the same bytes either way.
    */
   readonly linux?: string;
+  /** Fixture seam for synthetic unsigned native archives. */
+  readonly nativeSignatures?: (bundle: string) => void;
 }) {
   if (!(await lstat(bundle)).isDirectory()) {
     throw new Error("Native bundle root must be a directory, not an alias");
@@ -893,7 +917,7 @@ export async function packagePrerelease({
   );
   await Bun.write(
     join(output, "prerelease.json"),
-    `${JSON.stringify(metadata, null, 2)}\n`
+    renderReleaseMetadata(metadata)
   );
   await Bun.write(
     join(output, "SHA256SUMS"),
@@ -902,6 +926,13 @@ export async function packagePrerelease({
   await buildManager(join(output, MANAGER_ASSET));
   if (linux !== undefined) {
     await addLinuxAssets({ plan, linux, output });
+    await Bun.write(
+      join(output, PLATFORMS_ASSET),
+      renderReleasePlatforms({
+        version: plan.version,
+        sourceRevision: plan.source_revision,
+      })
+    );
   }
   await Bun.write(
     join(output, BOOTSTRAP_ASSET),
@@ -918,6 +949,16 @@ export async function packagePrerelease({
       names: [MANAGER_ASSET, BOOTSTRAP_ASSET],
     })
   );
+  if (linux !== undefined) {
+    // The finished set must be the one the platforms metadata describes.
+    await requireReleasePlatformMetadata({ plan, output });
+  }
+  await requireInstallableArchive({
+    plan,
+    platform: PRERELEASE_PLATFORM,
+    directory: output,
+    signatures: nativeSignatures,
+  });
 }
 
 /** The digests the installer embeds for the Linux managers in `output`. */
@@ -928,27 +969,20 @@ function linuxManagerDigests(output: string): LinuxManagerDigests {
   };
 }
 
-/**
- * A Linux archive and its manager must be this release's for `platform`. The
- * archive is verified in full with the installer's own extraction: the exact
- * member list, every member against the archive's `SHA256SUMS`, and metadata
- * naming the planned version, source revision and platform. The manager gets
- * a structural check (`requireLinuxManagerElf`). The host that packages and
- * the host that publishes both run this; neither relies on the build job's
- * check. This establishes consistency, not provenance: the files' origin is
- * the workflow's own artifact from the Linux jobs.
- */
-async function requireLinuxAssets({
+/** Extract and verify with the same admission checks as the installer. */
+async function requireInstallableArchive({
   plan,
   platform,
   directory,
+  signatures,
 }: {
   readonly plan: PrereleasePlan;
   readonly platform: BundlePlatform;
   readonly directory: string;
+  readonly signatures?: (bundle: string) => void;
 }) {
   const archive = join(directory, bundleArchiveName(plan.version, platform));
-  const probe = await mkdtemp(join(tmpdir(), "hack-linux-asset-"));
+  const probe = await mkdtemp(join(tmpdir(), "hack-release-archive-"));
   try {
     const { identity } = extractArchive({
       archive,
@@ -956,15 +990,25 @@ async function requireLinuxAssets({
       destination: join(probe, "bundle"),
       version: plan.version,
       platform,
+      signatures,
     });
     if (identity.source_revision !== plan.source_revision) {
       throw new Error(
-        `Linux archive for ${platform} was built from another source revision`
+        `${composeOnly(platform) ? "Linux" : "Native"} archive for ${platform} was built from another source revision`
       );
     }
   } finally {
     await rm(probe, { recursive: true, force: true });
   }
+}
+
+async function requireLinuxAssets(options: {
+  readonly plan: PrereleasePlan;
+  readonly platform: BundlePlatform;
+  readonly directory: string;
+}) {
+  const { directory, platform } = options;
+  await requireInstallableArchive(options);
   await requireLinuxManagerElf({
     path: join(directory, managerAssetName(platform)),
     platform,
@@ -1282,15 +1326,112 @@ export async function renderChecksums({
   return `${lines.join("\n")}\n`;
 }
 
-/** Every asset a release uploads: the macOS set, then the Linux set. */
+/**
+ * Every asset a release uploads: the macOS set, the Linux set, then the
+ * metadata that names every platform in both.
+ */
 export function releaseAssets(plan: PrereleasePlan): string[] {
-  return [...plan.assets, ...plan.linuxAssets];
+  return [...plan.assets, ...plan.linuxAssets, plan.platformsAsset];
+}
+
+/** Verify that the manifest describes exactly the assets in the release. */
+async function requireReleasePlatformMetadata({
+  plan,
+  output,
+}: {
+  readonly plan: PrereleasePlan;
+  readonly output: string;
+}) {
+  requireReleasePlatforms({
+    raw: await Bun.file(join(output, PLATFORMS_ASSET)).bytes(),
+    version: plan.version,
+    sourceRevision: plan.source_revision,
+    assetNames: await readdir(output),
+  });
+}
+
+/** Exercise the installed manager's reader without opening a network connection. */
+async function verifyLocalRelease({
+  plan,
+  output,
+  assets,
+  platform,
+  signatures,
+}: {
+  plan: PrereleasePlan;
+  output: string;
+  assets: readonly string[];
+  platform: BundlePlatform;
+  signatures?: (bundle: string) => void;
+}) {
+  const api = "https://api.github.com/repos/hack-dance/hack";
+  const releaseUrl = `${api}/releases/tags/${plan.tag}`;
+  const tagUrl = `${api}/git/ref/tags/${plan.tag}`;
+  const entries = assets.map((name) => ({
+    name,
+    browser_download_url: `https://github.com/hack-dance/hack/releases/download/${plan.tag}/${name}`,
+  }));
+  const files = new Map(
+    entries.map(({ name, browser_download_url }) => [
+      browser_download_url,
+      name,
+    ])
+  );
+  const stage = await mkdtemp(join(tmpdir(), "hack-release-reader-"));
+  try {
+    const download = await officialArchive(
+      stage,
+      plan.version,
+      undefined,
+      platform,
+      (url) => {
+        if (url === releaseUrl) {
+          return Promise.resolve(
+            Response.json({
+              tag_name: plan.tag,
+              prerelease: true,
+              draft: false,
+              assets: entries,
+            })
+          );
+        }
+        if (url === tagUrl) {
+          return Promise.resolve(
+            Response.json({
+              ref: `refs/tags/${plan.tag}`,
+              object: { type: "commit", sha: plan.source_revision },
+            })
+          );
+        }
+        const name = files.get(url);
+        if (name === undefined) {
+          throw new Error("Unexpected local release asset request");
+        }
+        const file = Bun.file(join(output, name));
+        return Promise.resolve(
+          new Response(file.stream(), {
+            headers: { "Content-Length": String(file.size) },
+          })
+        );
+      }
+    );
+    extractArchive({
+      ...download,
+      destination: join(stage, "bundle"),
+      version: plan.version,
+      platform,
+      signatures,
+    });
+  } finally {
+    await rm(stage, { recursive: true, force: true });
+  }
 }
 
 export async function verifyReleaseAssets({
   plan,
   output,
   linux = false,
+  nativeSignatures,
 }: {
   readonly plan: PrereleasePlan;
   readonly output: string;
@@ -1299,6 +1440,8 @@ export async function verifyReleaseAssets({
    * directory must hold exactly the macOS set, as a macOS-only package does.
    */
   readonly linux?: boolean;
+  /** Fixture seam for unsigned synthetic native archives. */
+  readonly nativeSignatures?: (bundle: string) => void;
 }) {
   const assets = linux ? releaseAssets(plan) : plan.assets;
   if (
@@ -1326,7 +1469,10 @@ export async function verifyReleaseAssets({
       throw new Error("Linux assets do not match their checksum manifest");
     }
     for (const platform of PRERELEASE_LINUX_PLATFORMS) {
-      await requireLinuxAssets({ plan, platform, directory: output });
+      await requireLinuxManagerElf({
+        path: join(output, managerAssetName(platform)),
+        platform,
+      });
     }
   }
   if (
@@ -1349,17 +1495,32 @@ export async function verifyReleaseAssets({
     sourceRevision: plan.source_revision,
     base: plan.base,
   });
-  const metadata: unknown = await Bun.file(
-    join(output, "prerelease.json")
-  ).json();
-  if (JSON.stringify(metadata) !== JSON.stringify(expected)) {
-    throw new Error("Release asset metadata does not match the approved plan");
-  }
   if (
     (await Bun.file(join(output, "SHA256SUMS")).text()) !==
     (await renderChecksums({ root: output, names: [plan.archive] }))
   ) {
     throw new Error("Release archive does not match its outer checksum");
+  }
+  if (linux) {
+    await requireReleasePlatformMetadata({ plan, output });
+  }
+  const platforms: readonly BundlePlatform[] = linux
+    ? BUNDLE_PLATFORMS
+    : [PRERELEASE_PLATFORM];
+  for (const platform of platforms) {
+    await verifyLocalRelease({
+      plan,
+      output,
+      assets,
+      platform,
+      signatures: composeOnly(platform) ? undefined : nativeSignatures,
+    });
+  }
+  const canonical = Buffer.from(renderReleaseMetadata(expected));
+  if (
+    !canonical.equals(await Bun.file(join(output, "prerelease.json")).bytes())
+  ) {
+    throw new Error("Release asset metadata does not match the approved plan");
   }
 }
 

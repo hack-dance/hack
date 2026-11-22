@@ -4,10 +4,9 @@
 //! exclusive `flock` wakes only one blocked waiter and queues the rest behind it, so
 //! a woken opener that keeps its shared lock (as a store handle does) would strand
 //! every other blocked opener with no bound. Every lock attempt here is therefore
-//! non-blocking: a failed one closes its descriptor, sleeps 1 to 5 ms and retries
-//! until a time deadline, then `open` reports the store busy. Initialization, key
-//! repair and set-aside run only while exclusive, and no waiter is ever blocked
-//! behind that exclusive lock.
+//! non-blocking. Opening the live store retries after 1 to 5 ms until its deadline.
+//! Initialization, key repair and set-aside run under its exclusive lock. Cleanup
+//! runs under the live store's shared lock and skips any old lock it cannot take.
 
 use super::{MissReason, Result, Store, invalid, io_error};
 use crate::CandidateError;
@@ -17,14 +16,22 @@ use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
-const VERSION: &[u8] = b"hack.store/1\n";
-pub(super) const FORMAT_DIRECTORY: &str = "hack.store-1";
+macro_rules! format_v1 {
+    () => {
+        "1"
+    };
+}
+
+const VERSION_1: &[u8] = concat!("hack.store/", format_v1!(), "\n").as_bytes();
+pub(super) const VERSION: &[u8] = VERSION_1;
+pub(super) const FORMAT_DIRECTORY: &str = concat!("hack.store-", format_v1!());
 const DIRECTORIES: [&str; 5] = ["records", "cas", "files", "tags", "tmp"];
+const SET_ASIDE: &str = "SET_ASIDE";
 const ARCHIVE_AGE_MILLIS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 /// How long `open` may wait for the store lock before it reports the store busy.
@@ -38,11 +45,19 @@ pub(super) fn open(base: &Path) -> Result<Store> {
 ///
 /// Every wait is bounded: no `flock` here blocks. Shared and exclusive locks are
 /// tried without blocking and retried until the deadline, then the open fails
-/// with `step_store_busy`, which a caller treats as "run the step". A lock
-/// problem can therefore slow a command by at most the deadline, never hang it.
+/// with `step_store_busy`, which a caller treats as "run the step". The deadline
+/// bounds lock waits. Cleanup of old copies runs after the store opens, outside
+/// that deadline.
 pub(super) fn open_until(base: &Path, deadline: Instant) -> Result<Store> {
     let base = store_path(base)?;
     create_directory(&base)?;
+    let store = open_locked(&base, deadline)?;
+    cleanup_archives(&base, store.owner);
+    cleanup_legacy_layout(&base, store.owner);
+    Ok(store)
+}
+
+fn open_locked(base: &Path, deadline: Instant) -> Result<Store> {
     let root = base.join(FORMAT_DIRECTORY);
     // Most opens only take a shared lock. Initialization waits for other openers
     // to finish probing, but refuses to rotate a store with live handles.
@@ -78,6 +93,9 @@ pub(super) fn open_until(base: &Path, deadline: Instant) -> Result<Store> {
             && let Ok((_, key)) = read_key(&root, owner, &metadata)
         {
             create_layout(&root)?;
+            // A crash can leave the marker before the rename. Holding the shared
+            // lock keeps another opener from marking this root while we clear it.
+            remove_file_if_present(&root.join(SET_ASIDE)).map_err(io_error)?;
             let directory = private_options()
                 .read(true)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_DIRECTORY)
@@ -112,7 +130,7 @@ pub(super) fn open_until(base: &Path, deadline: Instant) -> Result<Store> {
         if !is_current(&lock, &lock_path)? {
             continue;
         }
-        initialize(&root, owner)?;
+        initialize(base, &root, owner)?;
         // Reopen under a shared lock, possibly on the newly created root.
     }
 }
@@ -146,18 +164,14 @@ fn store_path(root: &Path) -> Result<PathBuf> {
 /// aside. A key that still exists can be repaired or retried. The key and its
 /// directory must be synced before publishing VERSION, including after an
 /// interruption that left a key file in place.
-fn initialize(root: &Path, owner: u32) -> Result<()> {
-    let base = root
-        .parent()
-        .ok_or_else(|| invalid("Invalid step store directory."))?;
-    cleanup_archives(base, owner);
+fn initialize(base: &Path, root: &Path, owner: u32) -> Result<()> {
     let version = read_version(root, owner)?;
     if version == Some(false) {
-        return set_aside(base, root, owner);
+        return set_aside(base, root, unix_millis()?);
     }
     let file = match probe_key(root, owner)? {
         KeyProbe::Missing if version.is_none() => None,
-        KeyProbe::Missing | KeyProbe::Damaged => return set_aside(base, root, owner),
+        KeyProbe::Missing | KeyProbe::Damaged => return set_aside(base, root, unix_millis()?),
         KeyProbe::File(metadata) => {
             if !private_file(&metadata, owner) {
                 repair_key_mode(root)?;
@@ -178,25 +192,96 @@ fn initialize(root: &Path, owner: u32) -> Result<()> {
     publish(root, &root.join("VERSION"), VERSION)
 }
 
-fn set_aside(base: &Path, root: &Path, owner: u32) -> Result<()> {
-    let backup = base.join(format!("{FORMAT_DIRECTORY}.old-{}", unix_millis()?));
+pub(super) fn set_aside(base: &Path, root: &Path, archived_at: u64) -> Result<()> {
+    let millis = archived_at.to_string();
+    let backup = base.join(format!("{FORMAT_DIRECTORY}.old-{millis}"));
     match fs::symlink_metadata(&backup) {
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(io_error(error)),
         Ok(_) => return Err(invalid("Step store archive already exists.")),
     }
-    fs::rename(root, backup).map_err(io_error)?;
-    cleanup_archives(base, owner);
-    Ok(())
+    // The root can be damaged or only partly initialized, including its tmp/.
+    publish_in(
+        root,
+        &root.join(SET_ASIDE),
+        &set_aside_marker(base, &millis),
+        Some(fs::Permissions::from_mode(0o600)),
+    )?;
+    fs::rename(root, backup).map_err(io_error)
+}
+
+fn set_aside_marker(base: &Path, millis: &str) -> Vec<u8> {
+    let mut marker = b"hack.store-set-aside/1\nbase=".to_vec();
+    marker.extend_from_slice(base.as_os_str().as_encoded_bytes());
+    marker.extend_from_slice(b"\nat=");
+    marker.extend_from_slice(millis.as_bytes());
+    marker.push(b'\n');
+    marker
+}
+
+struct Archive {
+    path: PathBuf,
+    directory: File,
+    lock: File,
+}
+
+impl Archive {
+    fn remove(self) {
+        if !(lock_for_cleanup(&self.lock, &self.path)
+            && is_current(&self.directory, &self.path).unwrap_or(false))
+        {
+            return;
+        }
+        // An archive can itself have been opened as another store's base: that
+        // store holds `hack.store-1/lock` inside it. Take that lock too, without
+        // waiting; if it is held, or the inner directory is not a plain one, keep
+        // the archive.
+        let Ok(inner_lock) = lock_inner_store(&self.directory) else {
+            return;
+        };
+        // Both lock descriptors stay open until recursive removal returns.
+        // remove_dir_all does not follow symlinks in the tree.
+        let _ = fs::remove_dir_all(&self.path);
+        drop(inner_lock);
+    }
+}
+
+/// The lock a store opened with this directory as its base would hold, taken
+/// exclusively without waiting. `Ok(None)` when no such store exists inside.
+fn lock_inner_store(directory: &File) -> io::Result<Option<File>> {
+    let name =
+        CString::new(FORMAT_DIRECTORY).map_err(|_| io::Error::from(ErrorKind::InvalidInput))?;
+    let inner = match open_at(directory, &name, libc::O_RDONLY | libc::O_DIRECTORY) {
+        Ok(inner) => inner,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let lock = match open_at(&inner, c"lock", libc::O_RDWR) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !lock.metadata()?.is_file() {
+        return Err(ErrorKind::InvalidData.into());
+    }
+    flock(&lock, libc::LOCK_EX | libc::LOCK_NB)?;
+    Ok(Some(lock))
 }
 
 /// Use the timestamp in the archive name. A newly set-aside directory may
 /// have a much older modification time.
+///
+/// Only a directory with this base's `SET_ASIDE` marker is ever removed. An
+/// archive that lost its marker (for example a crash between writing the marker
+/// and the rename, which leaves the marker in the live root, where it is removed)
+/// is kept indefinitely rather than guessed at.
 pub(super) fn cleanup_archives(base: &Path, owner: u32) {
+    #[cfg(test)]
+    assert_cleanup_shared_lock(base);
     let (Ok(now), Ok(entries)) = (unix_millis(), fs::read_dir(base)) else {
         return;
     };
-    let mut newest: Option<(u64, PathBuf)> = None;
+    let mut newest: Option<(u64, Archive)> = None;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(suffix) = name
@@ -212,30 +297,236 @@ pub(super) fn cleanup_archives(base: &Path, owner: u32) {
             continue;
         };
         let path = entry.path();
-        if !owned_directory(&path, owner) {
+        let Ok(directory) = open_owned_directory(&path, owner) else {
+            continue;
+        };
+        if !has_marker(
+            &directory,
+            c"SET_ASIDE",
+            owner,
+            &set_aside_marker(base, suffix),
+        )
+        .unwrap_or(false)
+        {
             continue;
         }
+        let Ok(lock) = open_cleanup_lock(&directory, owner) else {
+            continue;
+        };
+        let archive = Archive {
+            path,
+            directory,
+            lock,
+        };
         if now.saturating_sub(archived_at) > ARCHIVE_AGE_MILLIS
             || newest
                 .as_ref()
                 .is_some_and(|(time, _)| archived_at <= *time)
         {
-            remove_archive(&path, owner);
-        } else if let Some((_, previous)) = newest.replace((archived_at, path)) {
-            remove_archive(&previous, owner);
+            archive.remove();
+        } else if let Some((_, previous)) = newest.replace((archived_at, archive)) {
+            previous.remove();
         }
     }
+}
+
+/// Remove the flat v1 layout and its sibling archives left by the opt-in P1 store.
+fn cleanup_legacy_layout(base: &Path, owner: u32) {
+    #[cfg(test)]
+    assert_cleanup_shared_lock(base);
+    cleanup_flat_layout(base, owner);
+
+    // A P1 rotation could leave an archive even when the flat store is absent.
+    let Some(entries) = base.parent().and_then(|parent| fs::read_dir(parent).ok()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(suffix) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("store.old-"))
+        else {
+            continue;
+        };
+        let path = entry.path();
+        // These archives sit in the user's global Hack directory, beside other
+        // state: remove one only if it is recognisably a P1 store (its VERSION
+        // holds the P1 format), never on the name alone.
+        if path == base || suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(directory) = open_owned_directory(&path, owner)
+            && has_legacy_version(&directory, owner).unwrap_or(false)
+            && let Ok(lock) = open_cleanup_lock(&directory, owner)
+        {
+            Archive {
+                path,
+                directory,
+                lock,
+            }
+            .remove();
+        }
+    }
+}
+
+/// The name `VERSION` takes while the flat layout is being removed. It is the
+/// last entry removed, so an interrupted migration is finished by a later open.
+const FLAT_MIGRATING: &str = "VERSION.migrating";
+
+/// Remove the flat P1 layout from `base`, holding its own lock.
+///
+/// Order, chosen so any interruption is retried and a P1 process never sees a
+/// flat store it would mistake for a damaged one:
+/// 1. the flat directories; if any remains, or `key` is not a plain removable
+///    file, nothing else is touched;
+/// 2. `VERSION` is renamed to `VERSION.migrating` in one step: from then on a
+///    P1 opener finds no published flat store (at most an unfinished one, whose
+///    key it reuses), never `VERSION` without its key;
+/// 3. `key`, then `lock`;
+/// 4. `VERSION.migrating` last, the marker that tells a later open to finish.
+///
+/// When another process holds the flat lock, the open still succeeds and the
+/// flat layout is left for a later open (best effort).
+fn cleanup_flat_layout(base: &Path, owner: u32) {
+    let Ok(directory) = open_owned_directory(base, owner) else {
+        return;
+    };
+    let migrating = CString::new(FLAT_MIGRATING)
+        .ok()
+        .is_some_and(|name| has_marker(&directory, &name, owner, VERSION_1).unwrap_or(false));
+    if !migrating && !has_marker(&directory, c"VERSION", owner, VERSION_1).unwrap_or(false) {
+        return;
+    }
+    // While VERSION is published the flat lock must exist and be taken; once
+    // the migration is under way it may already be gone.
+    let lock = match open_cleanup_lock(&directory, owner) {
+        Ok(lock) => Some(lock),
+        Err(error) if migrating && error.kind() == ErrorKind::NotFound => None,
+        Err(_) => return,
+    };
+    if let Some(lock) = &lock
+        && !lock_for_cleanup(lock, base)
+    {
+        return;
+    }
+    let mut removed = true;
+    for name in DIRECTORIES {
+        removed &= remove_owned_directory(&base.join(name), owner);
+    }
+    let key_path = base.join("key");
+    let key_removable = match fs::symlink_metadata(&key_path) {
+        Err(error) => error.kind() == ErrorKind::NotFound,
+        Ok(metadata) => metadata.is_file() && metadata.uid() == owner,
+    };
+    if !(removed && key_removable) {
+        return;
+    }
+    let marker_path = base.join(FLAT_MIGRATING);
+    if !migrating {
+        if fs::rename(base.join("VERSION"), &marker_path).is_err() {
+            return;
+        }
+        if flat_step("VERSION.migrating") {
+            return;
+        }
+    }
+    if !(remove_file_if_present(&key_path).is_ok() && absent(&key_path)) || flat_step("key") {
+        return;
+    }
+    let lock_path = base.join("lock");
+    if !(remove_file_if_present(&lock_path).is_ok() && absent(&lock_path)) || flat_step("lock") {
+        return;
+    }
+    let _ = remove_file_if_present(&marker_path);
+    flat_step("marker");
+}
+
+/// Record a finished migration step; in tests, `true` stops the migration there
+/// (as a crash would). Always `false` outside tests.
+fn flat_step(step: &'static str) -> bool {
+    #[cfg(test)]
+    {
+        FLAT_FINAL_REMOVALS.with_borrow_mut(|order| order.push(step));
+        STOP_FLAT_AFTER.get() == Some(step)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = step;
+        false
+    }
+}
+
+fn open_cleanup_lock(directory: &File, owner: u32) -> io::Result<File> {
+    let lock = open_at(directory, c"lock", libc::O_RDWR)?;
+    let metadata = lock.metadata()?;
+    if !metadata.is_file() || metadata.uid() != owner {
+        return Err(ErrorKind::PermissionDenied.into());
+    }
+    Ok(lock)
+}
+
+fn lock_for_cleanup(lock: &File, root: &Path) -> bool {
+    flock(lock, libc::LOCK_EX | libc::LOCK_NB).is_ok()
+        && is_current(lock, &root.join("lock")).unwrap_or(false)
+}
+
+fn has_legacy_version(directory: &File, owner: u32) -> io::Result<bool> {
+    #[cfg(test)]
+    LEGACY_VERSION_PROBES.set(LEGACY_VERSION_PROBES.get() + 1);
+    has_marker(directory, c"VERSION", owner, VERSION_1)
+}
+
+fn has_marker(directory: &File, name: &CStr, owner: u32, expected: &[u8]) -> io::Result<bool> {
+    let file = open_at(directory, name, libc::O_RDONLY)?;
+    let metadata = file.metadata()?;
+    Ok(metadata.is_file() && metadata.uid() == owner && marker_matches(file, expected)?)
+}
+
+fn open_owned_directory(path: &Path, owner: u32) -> io::Result<File> {
+    if !owned_directory(path, owner) {
+        return Err(ErrorKind::PermissionDenied.into());
+    }
+    let directory = private_options()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_DIRECTORY)
+        .open(path)?;
+    if directory.metadata()?.uid() != owner {
+        return Err(ErrorKind::PermissionDenied.into());
+    }
+    Ok(directory)
 }
 
 fn owned_directory(path: &Path, owner: u32) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir() && metadata.uid() == owner)
 }
 
-fn remove_archive(path: &Path, owner: u32) {
+fn remove_owned_directory(path: &Path, owner: u32) -> bool {
     if owned_directory(path, owner) {
-        // Best effort. remove_dir_all does not traverse symlinks inside an archive.
-        let _ = fs::remove_dir_all(path);
+        // Best effort. remove_dir_all does not traverse symlinks inside the directory.
+        return fs::remove_dir_all(path).is_ok() && absent(path);
     }
+    absent(path)
+}
+
+fn absent(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_err_and(|error| error.kind() == ErrorKind::NotFound)
+}
+
+fn remove_file_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+#[cfg(test)]
+fn assert_cleanup_shared_lock(base: &Path) {
+    if !CHECK_CLEANUP_LOCK.get() {
+        return;
+    }
+    let probe = File::open(base.join(FORMAT_DIRECTORY).join("lock")).unwrap();
+    flock(&probe, libc::LOCK_SH | libc::LOCK_NB)
+        .expect("cleanup must run outside the live store's exclusive lock");
 }
 
 /// A lock attempt that another holder refused, or a signal interrupted.
@@ -321,11 +612,14 @@ fn read_version(root: &Path, owner: u32) -> Result<Option<bool>> {
     let Some(file) = read_owned_file(&root.join("VERSION"), owner)? else {
         return Ok(None);
     };
+    marker_matches(file, VERSION).map(Some).map_err(io_error)
+}
+
+fn marker_matches(file: File, expected: &[u8]) -> io::Result<bool> {
     let mut bytes = Vec::new();
-    file.take(VERSION.len() as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(io_error)?;
-    Ok(Some(bytes == VERSION))
+    file.take(expected.len() as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes == expected)
 }
 
 enum KeyProbe {
@@ -397,6 +691,12 @@ fn read_key(root: &Path, owner: u32, probed: &Metadata) -> Result<(File, Zeroizi
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static CHECK_CLEANUP_LOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static LEGACY_VERSION_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The steps the flat migration finished, in order.
+    pub(super) static FLAT_FINAL_REMOVALS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Stop the flat migration after this step, as a crash would.
+    pub(super) static STOP_FLAT_AFTER: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
     pub(super) static FAIL_CACHE_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static FAIL_KEY_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static FAIL_KEY_DIR_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -457,9 +757,18 @@ fn publish_synced(root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 pub(super) fn publish(root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+    publish_in(&root.join("tmp"), path, bytes, None)
+}
+
+fn publish_in(
+    temporary_directory: &Path,
+    path: &Path,
+    bytes: &[u8],
+    permissions: Option<fs::Permissions>,
+) -> Result<()> {
     let mut suffix = [0; 16];
     random(&mut suffix)?;
-    let temporary = root.join("tmp").join(format!("{:x}", crate::Hex(suffix)));
+    let temporary = temporary_directory.join(format!("{:x}", crate::Hex(suffix)));
     let mut file = private_options()
         .write(true)
         .create_new(true)
@@ -467,10 +776,14 @@ pub(super) fn publish(root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
         .map_err(io_error)?;
     // The cache can forget writes on a crash. The rename commits complete bytes
     // for concurrent readers without requiring durability.
-    if let Err(error) = file
-        .write_all(bytes)
-        .and_then(|()| fs::rename(&temporary, path))
-    {
+    let written = (|| {
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.write_all(bytes)?;
+        fs::rename(&temporary, path)
+    })();
+    if let Err(error) = written {
         let _ = fs::remove_file(&temporary);
         return Err(io_error(error));
     }
@@ -506,18 +819,8 @@ struct CacheEntry {
 
 impl CacheEntry {
     fn open(&self, directory: bool) -> io::Result<File> {
-        let flags = libc::O_RDONLY
-            | libc::O_NOFOLLOW
-            | libc::O_NONBLOCK
-            | libc::O_CLOEXEC
-            | if directory { libc::O_DIRECTORY } else { 0 };
-        // SAFETY: the parent is open, and name is a NUL-terminated single component.
-        let fd = unsafe { libc::openat(self.parent.as_raw_fd(), self.name.as_ptr(), flags) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: openat returned a fresh descriptor owned by this File.
-        Ok(unsafe { File::from_raw_fd(fd) })
+        let flags = libc::O_RDONLY | if directory { libc::O_DIRECTORY } else { 0 };
+        open_at(&self.parent, &self.name, flags)
     }
 
     fn discard(&self) {
@@ -533,6 +836,18 @@ impl CacheEntry {
             unsafe { libc::unlinkat(self.parent.as_raw_fd(), self.name.as_ptr(), 0) };
         }
     }
+}
+
+fn open_at(parent: &File, name: &CStr, flags: libc::c_int) -> io::Result<File> {
+    let flags = flags | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+    // SAFETY: the parent is open, and callers supply a NUL-terminated single
+    // component and flags that do not create a file.
+    let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a fresh descriptor owned by this File.
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 fn stat_at(parent: &File, name: &CStr) -> io::Result<libc::stat> {

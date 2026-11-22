@@ -554,6 +554,7 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | Command | Selectors | Resolution timing | Refresh path | Native and compose limits |
 | --- | --- | --- | --- | --- |
 | `hack up` | `--env`, `--target` | Once, when services are created; values go into Compose containers and lifecycle hooks/processes, and the selection is recorded for the running stack. | `hack restart` or `hack env apply --service <service>`; editing env files does not change running containers. | Authored native projects receive the same selection before dispatch. |
+| `hack pull` | `--env` | Selects the environment used to interpolate image references before pulling. | Rerun `hack pull` to refresh images. | Applies to Compose and native projects. |
 | `hack down` | `--env`, `--target` | At teardown, for lifecycle down hooks and for Compose itself (interpolation and `COMPOSE_PROFILES`); omitted reuses the selection recorded for the running stack (base included), else the configured default. Down also enables every profile the stack's last `up` activated, so a profiled service started through `COMPOSE_PROFILES` is stopped even after the env changed. | None; nothing is delivered to containers. | The native runtime backend refuses `--env`. |
 | `hack restart` | `--env`, `--target` | When services are recreated; omitted reuses the selection recorded for the running stack (base included), else the configured default, and an explicit `--env` (including `base`) wins. | This is the refresh path for the whole stack or the named services. | Authored native projects receive the same selection before dispatch. |
 | `hack run` | `--env` | Per invocation, for the new one-off container; omitted reuses the selection recorded for the running stack, else the configured default, so the run can use the running dependencies. | Each run resolves again. | The native backend accepts only the running selection: an `--env` that differs, or an empty one, is refused; restart with the selection first. An authored `.hack/hack.project.json` project (experimental, a bounded subset) on the Compose backend does not yet reuse the recorded selection: omitted `--env` resolves the configured default, so pass the running overlay explicitly. |
@@ -1886,3 +1887,39 @@ with an in-memory backend. Tests that exercise keychain behavior can temporarily
 clear the flag; the preload still prevents native keychain access. Child CLI
 processes inherit the flag, so tests must pass it through when supplying a custom
 process environment. The in-memory backend is cleared after each test.
+
+## Sign-in prerequisites for Compose projects
+
+Declare sign-in requirements in `.hack/hack.config.json`. A remote target's
+`requires` array names those requirements. Hack checks the default target's
+requirements before running Compose lifecycle hooks for `up`, `restart`, or
+`run`. When you select services explicitly, Hack checks the remotes whose
+mapped env names match an `environment` key or a Compose interpolation
+reference in a selected service or its dependencies. With no service selection, Hack checks every default
+remote. Hack also checks every default remote when it cannot determine the
+selected services' environment keys, including when a service uses `env_file`
+or the checkout has managed env layers.
+Doctor runs preset checks and shows each declared login command. It reports
+custom checks as `not checked` after looking up their executables.
+
+A prerequisite can use the `aws-sso` preset with a `profile`, or the
+`gcloud-adc` preset. For other providers, give `check` and `login` as argv
+arrays. Hack runs these directly. A prerequisite's optional `tools` array
+names entries in the same configuration's top-level `tools` block. Each
+entry supplies `bins` and can provide an `install` hint for a missing binary.
+Hack resolves executables through `PATH`. Doctor shows the path and source
+for each prerequisite executable. Doctor shows the full custom check and login
+commands, and marks executables found inside the project. Startup prints a
+notice the first time it uses such an executable.
+
+Checks run from the project root in their own process group, discard both output
+streams, and stop the group after ten seconds. Keep secrets
+out of command arguments. Hack can offer to run a login in an interactive
+terminal after a failed check. With `--no-interactive`, use the displayed
+command yourself and retry.
+
+A config with `requires`, `remotes`, or `tools` needs `min_cli_version`. Set it to the
+first Hack release that supports the declarations the project uses. Upgrade
+all earlier Hack installations before adopting this configuration. Versions
+released before `min_cli_version` enforcement can silently ignore these
+declarations.

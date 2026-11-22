@@ -142,7 +142,7 @@ impl Lock {
         )
     }
 
-    #[cfg(target_os = "macos")]
+    /// Retry acquisition without creating the lock file.
     pub fn acquire_existing_waiting(root: &Path, wait: Duration) -> Result<Self, CandidateError> {
         wait_for_acquisition(
             Instant::now() + wait,

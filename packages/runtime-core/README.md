@@ -2150,9 +2150,34 @@ the pin. To measure a build, run
 
 The CLI resolves the store base to a canonical path, following symlinks. The
 runtime refuses symlinked ancestors of the path it receives and keeps its
-format in a separate subdirectory, currently `hack.store-1/`. Initialization
-keeps at most the newest `hack.store-1.old-*` directory owned by this user and
-removes it too once it is older than seven days.
+format in a separate subdirectory, currently `hack.store-1/`.
+
+Rotation publishes a `SET_ASIDE` marker with the canonical base and timestamp
+before renaming the root, and reopening a live root clears a stray marker.
+After opening, best-effort cleanup keeps the newest marked archive for up to
+seven days and removes older or expired copies. It removes only owned
+directories with the matching marker, and only when both the archive's own
+`lock` and the `hack.store-1/lock` a store opened inside it would hold can be
+taken without waiting. An archive without its marker is kept indefinitely
+rather than guessed at.
+
+Cleanup checks ownership and avoids symlinks before probing the P1 `VERSION`
+in the old flat layout or a `store.old-<digits>` sibling, and takes that
+layout's own lock without waiting. If another process holds it, the open still
+succeeds and the flat layout is left for a later open. Migration removes the flat
+directories first; renames `VERSION` to `VERSION.migrating`, after which a P1
+process sees no published flat store; then removes `key` and `lock`; and
+removes `VERSION.migrating` last, so any interruption is finished by a later
+open.
+
+`record()` and `put_cas()` can fail if a directory sits at the write path or
+a shard has the wrong mode or is a symlink. Writes leave that damage in place.
+Callers must ignore cache write errors and keep the step's result. A CAS lookup
+reads the whole object (up to 16 MiB) to verify it.
+
+Some damage makes every open fail until a person fixes it. This includes a
+damaged top-level layout entry (such as a non-directory `records`), a
+wrong-mode `lock`, a mode-000 `VERSION`, and a foreign-owned or hard-linked key.
 
 The store has no eviction yet. Files left in `tmp/` by a crashed writer stay
 until garbage collection (slice P8).
@@ -2163,7 +2188,9 @@ On macOS, releasing an exclusive `flock` wakes only one blocked waiter and queue
 the others behind it, so a woken waiter that keeps a shared lock strands the rest
 with no bound. The step store (`src/store/`) therefore never blocks in `flock`: it
 tries every lock with `LOCK_NB`, closes and retries 1 to 5 ms later until a time
-deadline, and then reports the store busy. Every other `flock` in this crate is
+deadline, and then reports the store busy. The deadline bounds lock waits.
+Cleanup of old copies runs after the store opens under a shared lock, outside
+that deadline. Every other `flock` in this crate is
 non-blocking too; keep it that way for any lock that several openers may wait for.
 
 ### Extending a stopped pool's approved hosts

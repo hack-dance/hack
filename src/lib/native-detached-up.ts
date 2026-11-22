@@ -6,6 +6,11 @@ import {
   renderNativeHotReloadNotice,
 } from "../backends/native-hot-reload-notice.ts";
 import {
+  NativeImageBlocker,
+  type NativeImageBlockerDetail,
+  nativeImageBlockerDetail,
+} from "../backends/native-image-policy.ts";
+import {
   type NativeProfileNotice,
   parseNativeProfileNotice,
   renderNativeProfileNotice,
@@ -57,6 +62,11 @@ type Ready = {
   readonly completed?: readonly string[];
 };
 let publishReady: ((ready: Ready) => void) | undefined;
+let publishImageBlocker:
+  | ((detail: NativeImageBlockerDetail) => Promise<void>)
+  | undefined;
+let publishImageDownloadWait: ((reference: string | null) => void) | undefined;
+let publishImageTagOffline: ((notice: string) => void) | undefined;
 let publishProfileNotice: ((notice: NativeProfileNotice) => void) | undefined;
 let publishBranchDropped: ((details: BranchDroppedSites) => void) | undefined;
 let publishHotReload: ((notice: NativeHotReloadNotice) => void) | undefined;
@@ -341,6 +351,10 @@ export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
   if (!publishFailure) {
     return;
   }
+  if (error instanceof NativeImageBlocker) {
+    await publishImageBlocker?.(error.observation);
+    return;
+  }
   const { nativeRuntimeFailure } = await import(
     "../backends/native-runtime-client.ts"
   );
@@ -567,9 +581,41 @@ function writeHotReload(value: unknown): boolean {
   return true;
 }
 
+export function reportNativeImageDownloadWait(reference: string | null): void {
+  publishImageDownloadWait?.(reference);
+}
+
+export function reportNativeImageTagOffline(notice: string): boolean {
+  if (!publishImageTagOffline) {
+    return false;
+  }
+  publishImageTagOffline(notice);
+  return true;
+}
+
+function writeImageTagOffline(value: unknown): boolean {
+  if (
+    !(
+      isRecord(value) &&
+      value.kind === "image-tag-offline" &&
+      typeof value.notice === "string" &&
+      value.notice.length <= 512 &&
+      [...value.notice].every((character) => {
+        const code = character.charCodeAt(0);
+        return code >= 32 && code !== 127;
+      })
+    )
+  ) {
+    return false;
+  }
+  process.stderr.write(`${value.notice}\n`);
+  return true;
+}
+
 /** Prints any validated owner notice; true when `value` was one. */
 function writeOwnerNotice(value: unknown): boolean {
   return (
+    writeImageTagOffline(value) ||
     writeProfileNotice(value) ||
     writeBranchDropped(value) ||
     writeHotReload(value)
@@ -674,6 +720,15 @@ export async function runNativeDetachedOwner(opts: {
           readonly kind: "hot-reload";
           readonly notice: NativeHotReloadNotice;
         }
+      | {
+          readonly kind: "image-blocker";
+          readonly detail: NativeImageBlockerDetail;
+        }
+      | {
+          readonly kind: "image-download-wait";
+          readonly reference: string | null;
+        }
+      | { readonly kind: "image-tag-offline"; readonly notice: string }
       | { readonly kind: "prestart-refusal"; readonly data: PrestartRefusal }
       | {
           readonly kind: "progress";
@@ -727,6 +782,21 @@ export async function runNativeDetachedOwner(opts: {
       });
     }
   };
+  publishImageBlocker = async (detail) => {
+    if (!(ready || stopping)) {
+      await send({ kind: "image-blocker", detail });
+    }
+  };
+  publishImageDownloadWait = (reference) => {
+    if (!(ready || stopping)) {
+      void send({ kind: "image-download-wait", reference });
+    }
+  };
+  publishImageTagOffline = (notice) => {
+    if (!stopping) {
+      send({ kind: "image-tag-offline", notice });
+    }
+  };
   publishProfileNotice = (notice) => {
     if (!stopping) {
       send({ kind: "profile-notice", notice });
@@ -770,6 +840,9 @@ export async function runNativeDetachedOwner(opts: {
     publishReady = undefined;
     publishShellVariables = undefined;
     publishProfileNotice = undefined;
+    publishImageTagOffline = undefined;
+    publishImageDownloadWait = undefined;
+    publishImageBlocker = undefined;
     publishBranchDropped = undefined;
     publishHotReload = undefined;
     publishFailure = undefined;
@@ -816,6 +889,8 @@ export function nativeDetachedOwnerArgs(opts: {
     readonly branch?: string;
     readonly env?: string;
     readonly profile?: string;
+    readonly refreshImages?: boolean;
+    readonly offline?: boolean;
   };
 }): string[] {
   const args: string[] = [opts.action];
@@ -824,6 +899,12 @@ export function nativeDetachedOwnerArgs(opts: {
     if (value !== undefined) {
       args.push(`--${name}=${value}`);
     }
+  }
+  if (opts.options.refreshImages) {
+    args.push("--refresh-images");
+  }
+  if (opts.options.offline) {
+    args.push("--offline");
   }
   return args;
 }
@@ -841,7 +922,7 @@ function watchStartDeadline(opts: {
   readonly child: ReturnType<typeof spawn>;
   readonly limits: NativeDetachedStartLimits;
   readonly heartbeatStaleMs: number | undefined;
-  readonly expire: (error: HackCliError) => void;
+  readonly expire: (error: HackCliError | NativeImageBlocker) => void;
 }): ReturnType<typeof setInterval> {
   // One monotonic clock: a wall clock change must not move either limit.
   const deadline = new NativeDetachedStartDeadline({
@@ -849,7 +930,16 @@ function watchStartDeadline(opts: {
     now: performance.now(),
     heartbeatStaleMs: opts.heartbeatStaleMs,
   });
+  let waiting: NativeImageBlockerDetail | undefined;
   opts.child.on("message", (value: unknown) => {
+    if (isRecord(value) && value.kind === "image-download-wait") {
+      const detail = {
+        missing: value.reference,
+        present: null,
+        downloading: true,
+      };
+      waiting = nativeImageBlockerDetail(detail) ? detail : undefined;
+    }
     if (
       isRecord(value) &&
       Object.keys(value).length === 2 &&
@@ -864,7 +954,11 @@ function watchStartDeadline(opts: {
       const now = performance.now();
       const expiry = deadline.check(now);
       if (expiry) {
-        opts.expire(deadline.timeoutError(expiry, now));
+        opts.expire(
+          waiting
+            ? new NativeImageBlocker(waiting)
+            : deadline.timeoutError(expiry, now)
+        );
       }
     },
     Math.min(1000, Math.max(50, Math.floor(opts.limits.budgetMs / 20)))
@@ -999,7 +1093,14 @@ export async function startNativeDetachedUp(opts: {
     if (failed) {
       return;
     }
-    const refused = ready ? undefined : startupRefusal(value);
+    const imageBlocked =
+      !ready &&
+      isRecord(value) &&
+      value.kind === "image-blocker" &&
+      nativeImageBlockerDetail(value.detail)
+        ? new NativeImageBlocker(value.detail)
+        : undefined;
+    const refused = ready ? undefined : (imageBlocked ?? startupRefusal(value));
     if (refused) {
       failed = true;
       result.reject(refused);

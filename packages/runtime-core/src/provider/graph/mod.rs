@@ -1070,6 +1070,21 @@ impl Driver for Session<'_, '_> {
                 self.save()
             }
             Event::Observed { .. } => Ok(()),
+            Event::ServiceReady { service } => {
+                let Some(startup) = self.startup.as_mut() else {
+                    return Ok(());
+                };
+                let id = self.receipt.resources[&format!("container:{service}")]
+                    .id
+                    .as_deref()
+                    .ok_or_else(|| {
+                        error(
+                            "graph_resource_identity",
+                            "A ready service has no confirmed container ID.",
+                        )
+                    })?;
+                startup.service_ready(service, id)
+            }
             Event::Ready => {
                 if let Some(startup) = self.startup.as_mut() {
                     startup.verify(&self.engine, &mut self.receipt, &self.root)?;

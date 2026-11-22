@@ -145,6 +145,7 @@ success behavior stays covered by command-specific suites.
 | `hack projects --json` | Legacy bare object (no `data` envelope) |
 | `hack projects prune --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack ps --json` | Backend-dependent: envelope or legacy bare object |
+| `hack pull --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack restart --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack run --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack session capture --json` | NDJSON events / terminal event, not a single envelope |
@@ -181,3 +182,6 @@ Additive fields keep a command's row and shape above; consumers ignore keys they
   services, project-relative files and lines, and architectures. `hack doctor --fix --only
   'polling watchers' --json` adds `data.fix` with `id`, `applied`, `changed`, `confirmed`,
   `removed` and `diff`.
+- Compose `hack down --json`: when the overall down cap ends `docker compose down`
+  (exit `124`), `error.message` explains the cap and `error.detail` adds `timedOut: true`
+  and `capMs`.

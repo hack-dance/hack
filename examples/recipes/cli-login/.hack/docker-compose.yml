@@ -2,6 +2,8 @@ name: cli-login
 services:
   app:
     image: alpine:3.22
+    init: true
+    stop_grace_period: 2s
     command: ["sh", "/app/scripts/show-credentials.sh"]
     environment:
       EDGE_API_TOKEN_FILE: /run/secrets/edge_token

@@ -527,7 +527,33 @@ an issue by themselves, and an open issue is not closed while availability is
 unknown. Size mismatches and refused redirects are reported as invalid pins.
 Availability alone never authorizes archive use or changes pins. Alpine package
 revisions may be retired upstream.
-The pinned host BuildKit client (`runtime prepare-builder`) and the pure Dockerfile
+`runtime setup` (`provider/setup.rs`) installs the three provider artifacts and then
+the pinned host BuildKit client, the image builder. The provider, the engine and the
+guest network tools are prepared in a private staging home and published together
+with one rename. The image builder is not part of that tree: after the provider set
+is published or reused, setup adds it with the manual preparation function
+(`artifact::prepare_builder`), which writes only the builder's own directory and
+record under the provider lock. A home that is already complete therefore gains the
+builder without its provider or engine being staged, published or prepared again; a
+pool may be running from them. Setup adds the builder only with download consent or
+the offline `--builder` file. Without either, a complete home is left unchanged and
+the result says `builder: "not_prepared"`; with it the result says `installed`, and
+`reused` when the builder was already prepared. A builder that is there but does not
+verify is reported as `builder: "changed"` and never touched: setup still exits 0 for
+a complete home, and never deletes or overwrites the builder, with or without a
+source. The user removes its directory and record and runs setup with consent. The
+builder's record always carries the tree digest the pin describes
+(`artifact::pinned_tree_digest`), not a digest read back from disk, and preparation
+finishes an interrupted run (a published directory without its record, or a leftover
+`buildx.pending`) only for exactly what it would have written itself.
+`runtime prepare-builder` stays for
+offline and manual use. A build in a home without the builder refuses with
+`builder_not_prepared` and names the setup command; the read-only
+`runtime setup inspect --json` reports `builder.state` so the CLI's setup and doctor
+can say so before a build does. The setup tests (`provider/setup/tests.rs`) use a
+local server and fixture pins and never reach the network.
+
+The image builder and the pure Dockerfile
 image-reference scanner (`provider/build_scan.rs`) back `runtime build-image`
 (`provider/image_build.rs`), which builds one Compose-style image in the guest engine
 from a private request file. Its build key, receipts, leases, the `runtime down`
@@ -1724,10 +1750,23 @@ A fresh boot starts a second best-effort guest job
 ([`guest-memory-peak.sh`](src/provider/guest-memory-peak.sh)) at the same point and under
 the same rules: background mode, result ignored, owner token and boot ID checked first, at
 most once per boot, nothing written under `/storage`. Every five seconds it reads memory in
-use (`MemTotal` minus `MemAvailable`) and keeps the highest value for the boot in one line
-at `/run/hack-local/memory-peak.status`, together with counters the kernel keeps since
-boot: memory stall time (`/proc/pressure/memory`), OOM kills and major page faults. A
-sample can miss a short peak; those counters cannot miss a guest that ran short of memory.
+use (`MemTotal` minus `MemAvailable`, minus the memory balloon) and keeps the highest value
+for the boot in one line at `/run/hack-local/memory-peak.status`, together with counters
+the kernel keeps since boot: memory stall time (`/proc/pressure/memory`), OOM kills and
+major page faults. A sample can miss a short peak; those counters cannot miss a guest that
+ran short of memory.
+
+The balloon is subtracted because the provider inflates it to most of the guest once the
+pool has been idle for a while and releases it seconds later. Balloon pages are not
+available to the guest, so an idle guest using 0.2 GiB used to record a peak near its
+whole size. The size comes from `nr_balloon_pages` in `/proc/vmstat` (or, on a kernel
+without it, inflations minus deflations), in the kernel's base pages. Their size is read
+once from the sampler's own memory map (`KernelPageSize` in `/proc/self/smaps`); on a
+kernel that does not report it, a sample taken while the balloon holds anything counts
+as taken but cannot raise the peak, so the pressure counters are still recorded. The
+balloon is read before and after the memory figures and the larger reading is
+used, so a balloon that moves during a sample can only lower that sample. A reading that
+is not a plausible page count is ignored, and one larger than the sample caps at it.
 A sample is read with shell builtins, so the loop starts one process every five seconds
 (`sleep`).
 
@@ -1802,7 +1841,7 @@ waits for the scan and hot reload works; above it the boot does not wait and hot
 - **The setting.** `HACK_NATIVE_HOT_RELOAD` is `auto` (the default), `on` or `off`, read by
   `runtime up`; any other value is refused before any effect. `on` keeps the notifications
   whatever the size; `off` drops them whatever the size. The CLI gives runtime subprocesses
-  a closed environment, so it hands this one setting to `runtime up` explicitly and refuses
+  a closed environment, so it hands this setting to `runtime up` explicitly and refuses
   a mistyped value itself, before the runtime starts.
 - **The record.** The choice is made at every boot and written to the owner receipt
   (`hot_reload`) only when it is not the plain default: off, or forced on over a large share.
@@ -2014,8 +2053,12 @@ already leave, stretched to the bound.
 the default is 60 and `0` turns reuse off (records are still written). Any other value,
 including one above 600, refuses `runtime up` with `admission_reuse_setting` before
 anything else happens; a larger value is not reduced to 600. The runtime
-reads it from its own environment. The CLI gives the runtime a closed environment and
-does not pass this variable yet, so a start through the CLI uses the default.
+reads it from its own environment. The CLI gives runtime subprocesses a closed
+environment, so it hands this setting to `runtime up` explicitly, `0` included, and to no
+other command. It applies the same rule itself: a value the runtime would refuse is
+refused by the CLI with `E_CONFIG_INVALID`, before the runtime starts and before a
+restart stops anything. Unset or empty in the CLI's environment hands over nothing, so
+the default applies.
 
 Research is unchanged. It keeps its three samples fifteen seconds apart before the
 lease, never reads the record, and neither its start nor its stop writes one.
@@ -2102,6 +2145,17 @@ instructions and the build would not use them. Both rest on how `sha2` 0.11.1 se
 backend, so the dependency is pinned exactly; read its `src/sha256.rs` again before moving
 the pin. To measure a build, run
 `cargo test --release --lib sha256_rate_of_this_build -- --ignored --nocapture`.
+
+### Step store
+
+The CLI resolves the store base to a canonical path, following symlinks. The
+runtime refuses symlinked ancestors of the path it receives and keeps its
+format in a separate subdirectory, currently `hack.store-1/`. Initialization
+keeps at most the newest `hack.store-1.old-*` directory owned by this user and
+removes it too once it is older than seven days.
+
+The store has no eviction yet. Files left in `tmp/` by a crashed writer stay
+until garbage collection (slice P8).
 
 ### Never wait in a blocking `flock`
 

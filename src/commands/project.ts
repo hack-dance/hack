@@ -56,6 +56,7 @@ import {
 } from "../agents/onboarding-handoff.ts";
 import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
+import { nativeAdmissionReuseEnvironment } from "../backends/native-admission-reuse.ts";
 import { createNativeDependencyOwnerResolver } from "../backends/native-dependency-owners.ts";
 import { nativeHotReloadEnvironment } from "../backends/native-hot-reload-notice.ts";
 import {
@@ -9824,9 +9825,11 @@ async function handleRestart({
     // home owns is refused here, with its code and release command, as plain
     // restart and `up --detach` do (HACK-2339), and an unconfirmed start is
     // explained by that mapping afterwards.
-    // Likewise a mistyped hot-reload setting: the owner would refuse it before
-    // stopping anything, but its message would not reach this launcher.
+    // Likewise a mistyped hot-reload setting or admission reuse bound: the
+    // owner would refuse it before stopping anything, but its message would
+    // not reach this launcher.
     nativeHotReloadEnvironment(["runtime", "up"], process.env);
+    nativeAdmissionReuseEnvironment(["runtime", "up"], process.env);
     const scope = await resolveNativeRestartLaunchScope({ ctx, args, native });
     const foreign = await nativeForeignHomeRefusal(scope);
     if (foreign) {

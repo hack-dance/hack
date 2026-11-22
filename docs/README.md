@@ -1,13 +1,16 @@
 # Hack documentation
 
-Hack runs your whole project on your own machine, and runs every project, branch
-and git worktree side by side, each at its own HTTPS address. One command
-starts a repo. Nothing is hosted.
+Hack runs your whole project from one folder committed with the code: the
+services, the settings and encrypted secrets, and the helpers around them.
+Branches run side by side, each at its own HTTPS address, and a git worktree on
+a branch gets its own running copy by default. The same folder starts the
+project on another machine with Docker. Nothing is hosted.
 
-That one command starts the project's services, loads its settings and secrets,
-and gives it a local web address with working HTTPS. The project's setup lives in
-a `.hack/` folder committed with the code, so teammates, coding agents and other
-worktrees all run it the same way. The public site is [hack.foo](https://hack.foo).
+That folder is `.hack/`. One command, `hack up`, starts the project's services,
+loads its settings and secrets, and gives it a local web address with working
+HTTPS. Teammates, coding agents and other worktrees all run it the same way, and
+each gets its own running copy, which these pages call an instance. The public
+site is [hack.foo](https://hack.foo).
 
 ## Run your first project
 
@@ -27,7 +30,8 @@ Already have a project? Follow [Project setup](guides/init-project.md), or use
 - [Sessions](sessions.md) — persistent terminal workspaces per project.
 - [Worktrees and watchers](guides/development-runtime-safety.md) — run branches side by side.
 - [Side-by-side development](dev.md) — `hack dev` runs a repository's declared dev command.
-- [Managed environments](guides/codex-managed-environments.md) — reuse a project on another machine or in a cloud agent.
+- [Another machine or a cloud agent](versions/v5/guides/cloud-environments.md) — start the project on another machine with Docker; the page says where that has been run.
+- [Managed environments](guides/codex-managed-environments.md) — settings and host commands on another machine, without containers.
 - [Agent integrations](integrations.md) — the optional `hack` plugin and the separate MCP server.
 - [Recipes](recipes/README.md) — step-by-step setups for other tools and everyday workflows, and [copy-paste config examples](recipes/config-examples.md).
 
@@ -47,8 +51,9 @@ repair touches before `hack doctor --fix`.
 
 The native backend (beta, Apple Silicon macOS) is a second way to run the same
 project: Hack starts its own Linux virtual machine instead of using a Docker
-app. It is opt-in and ships only through the `hack-next` channel, not in stable
-Hack. Compose stays the default.
+app. It ships only through the `hack-next` prerelease channel, not in stable
+Hack. Stable Hack runs Compose. `hack-next` runs native on an Apple Silicon Mac
+unless you select Compose, and Compose on Linux.
 
 - [Overview](native/README.md) — what it is, what it is not, and why to try it.
 - [Try it](native/try-it.md) — install, run one project on native, switch back.
@@ -57,7 +62,9 @@ Hack. Compose stays the default.
 
 ## v5
 
-v5 keeps the v4 project model and commands, and Compose stays the default backend.
+v5 keeps the v4 project model and commands. Stable Hack runs Compose; with no
+backend selected, the `hack-next` prerelease picks native on Apple Silicon macOS
+and Compose on Linux.
 
 - [What's new in v5](guides/v5-release-notes.md) — the 5.0.0 release notes.
 - [Upgrade to v5](guides/upgrade-to-v5.md) — what changed, what was retired, how to try it.

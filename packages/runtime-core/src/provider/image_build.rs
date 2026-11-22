@@ -1279,7 +1279,7 @@ fn supervise(
     filter: output::Filter,
     sink: Box<dyn Write + Send>,
 ) -> Result<Ended, CandidateError> {
-    let mut child = command.spawn().map_err(|_| {
+    let mut child = super::process::spawn_child(&mut command).map_err(|_| {
         refusal(
             "native_build_client",
             "The pinned build client could not be started.",

@@ -125,6 +125,8 @@ decides how a hook can pass a token on:
    services:
      app:
        image: alpine:3.22
+       init: true
+       stop_grace_period: 2s
        command: ["sh", "/app/scripts/show-credentials.sh"]
        environment:
          EDGE_API_TOKEN_FILE: /run/secrets/edge_token

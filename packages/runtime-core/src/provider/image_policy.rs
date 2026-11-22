@@ -63,6 +63,7 @@ pub struct ImagePolicy {
     /// Override the ordinary tag lookup for an explicit refresh or an offline command.
     pub tag_mode: ImageTagMode,
     pub(crate) short_tag_refresh: bool,
+    pub(crate) command_image_pin: Option<String>,
     /// Registries that are refused as local unless named here.
     pub local_registries: Vec<LocalRegistry>,
     /// Docker configuration directory for read-only credential lookup. `None` means
@@ -84,6 +85,7 @@ impl Default for ImagePolicy {
             tag_ttl_seconds: DEFAULT_TAG_TTL_SECONDS,
             tag_mode: ImageTagMode::Normal,
             short_tag_refresh: false,
+            command_image_pin: None,
             local_registries: Vec::new(),
             docker_config: None,
             helper_path: None,
@@ -172,6 +174,9 @@ impl ImagePolicy {
                         "offline" => ImageTagMode::Offline,
                         _ => return Err(invalid("Use image tag mode normal, refresh or offline.")),
                     };
+                }
+                "--command-image-pin" if policy.command_image_pin.is_none() => {
+                    policy.command_image_pin = Some(super::registry_image::pinned_syntax(value)?.0);
                 }
                 "--docker-config" if !config => {
                     config = true;

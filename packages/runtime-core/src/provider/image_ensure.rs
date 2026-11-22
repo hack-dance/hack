@@ -353,12 +353,16 @@ fn acquire_for_use(
     platform: PlatformPolicy,
     import: bool,
 ) -> Result<EnsuredImage, CandidateError> {
+    let content_id = reference.strip_prefix("sha256:").is_some_and(hex);
+    if content_id && !import {
+        return Err(refused("A local image ID requires live guest observation."));
+    }
     // Validate input, including registry admission, before touching runtime state; tags
     // are resolved after the engine preflight, and pinned references never make a
     // mutable resolution call.
     if reference.contains('@') {
         registry_image::pinned(reference, policy)?;
-    } else {
+    } else if !content_id {
         registry_image::tagged(reference, policy)?;
     }
     let observer = if import {
@@ -374,6 +378,28 @@ fn acquire_for_use(
     } else {
         None
     };
+    if let Some(observer) = observer.as_ref().filter(|_| content_id) {
+        let actual = observer.image(reference)?;
+        let selected = platform
+            .candidates()
+            .iter()
+            .find(|selected| {
+                actual["Id"] == reference
+                    && actual["Os"] == "linux"
+                    && actual["Architecture"] == selected.architecture()
+                    && (!selected.emulated() || observer.guest().amd64_emulation())
+            })
+            .ok_or_else(|| refused("Loaded image identity or architecture differs."))?;
+        return Ok(EnsuredImage {
+            pinned_reference: reference.to_owned(),
+            image_id: reference.to_owned(),
+            archive_sha256: None,
+            archive_reused: false,
+            tag_resolution: None,
+            phase: "content-id-verified",
+            platform: *selected,
+        });
+    }
     let mut tag = if reference.contains('@') {
         None
     } else {
@@ -420,6 +446,41 @@ fn acquire_selection(
     import: bool,
     observer: Option<&engine::Observer<'_>>,
     mut tag: Option<image_tag_store::TagResolution>,
+) -> Result<EnsuredImage, CandidateError> {
+    let mut ensured = match tag.as_mut() {
+        Some(tag) if import => tag.confirm(|tag| {
+            confirm_selection(candidate, reference, policy, platform, observer, Some(tag))
+        })?,
+        _ => confirm_selection(
+            candidate,
+            reference,
+            policy,
+            platform,
+            observer,
+            tag.as_ref(),
+        )?,
+    };
+    if !import {
+        ensured.phase = "archive-verified";
+    }
+    ensured.tag_resolution = tag.map(|tag| EnsuredTag {
+        reference: tag.record.reference,
+        registry: tag.record.registry,
+        source_digest: tag.source_digest,
+        resolved_at_unix_seconds: tag.resolved_at_unix_seconds,
+        source: tag.source,
+        fallback_reason: tag.fallback_reason,
+    });
+    Ok(ensured)
+}
+
+fn confirm_selection(
+    candidate: &Candidate,
+    reference: &str,
+    policy: &ImagePolicy,
+    platform: PlatformPolicy,
+    observer: Option<&engine::Observer<'_>>,
+    tag: Option<&image_tag_store::TagResolution>,
 ) -> Result<EnsuredImage, CandidateError> {
     let requested_platform = platform;
     let (pinned, platform) = match &tag {
@@ -473,7 +534,7 @@ fn acquire_selection(
         _ => false,
     };
     let acquired_proof = std::cell::RefCell::new(None);
-    let mut ensured = if let Some((selected, config)) = selection.as_ref().filter(|_| guest_hit) {
+    let ensured = if let Some((selected, config)) = selection.as_ref().filter(|_| guest_hit) {
         let receipt_path = candidate
             .state_root
             .join("artifacts/images")
@@ -497,7 +558,7 @@ fn acquire_selection(
             platform: *selected,
         }
     } else {
-        if offline && import {
+        if offline && observer.is_some() {
             return Err(no_archive());
         }
         ensure_pinned_resolving(
@@ -571,21 +632,6 @@ fn acquire_selection(
             },
         )?
     };
-    if import {
-        if let Some(tag) = &mut tag {
-            tag.publish()?;
-        }
-    } else {
-        ensured.phase = "archive-verified";
-    }
-    ensured.tag_resolution = tag.map(|tag| EnsuredTag {
-        reference: tag.record.reference,
-        registry: tag.record.registry,
-        source_digest: tag.record.source_digest,
-        resolved_at_unix_seconds: tag.record.resolved_at_unix_seconds,
-        source: tag.source,
-        fallback_reason: tag.fallback_reason,
-    });
     Ok(ensured)
 }
 /// [`ensure_pinned_resolving`] for a cache that must never need to resolve the published

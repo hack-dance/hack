@@ -315,7 +315,7 @@ fn tls_failure(failure: &reqwest::Error) -> bool {
     let mut source = std::error::Error::source(failure);
     while let Some(error) = source {
         let text = error.to_string().to_ascii_lowercase();
-        if text.contains("certificate") || text.contains("tls alert") {
+        if text.contains("certificate") || text.contains("alert") {
             return true;
         }
         source = error.source();
@@ -570,7 +570,8 @@ fn canonical_manifest(bytes: &[u8]) -> Result<(), CandidateError> {
 
 fn parse_manifest(bytes: &[u8], expected: &str) -> Result<Manifest, CandidateError> {
     if bytes.len() > MAX_METADATA || digest(bytes) != expected {
-        return Err(error("Registry manifest digest or size mismatch."));
+        return Err(error("Registry manifest digest or size mismatch.")
+            .with_cause_code("registry_digest_mismatch".into()));
     }
     canonical_manifest(bytes)?;
     let m: Manifest =
@@ -643,7 +644,13 @@ fn bounded(mut reader: impl Read, limit: usize) -> Result<Vec<u8>, CandidateErro
         .by_ref()
         .take(limit as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| error("Registry transfer failed or timed out."))?;
+        .map_err(|failure| {
+            let cause = match read_failure(&failure) {
+                NetworkFailureReason::Timeout => "registry_timeout",
+                _ => "registry_transfer_failed",
+            };
+            error("Registry transfer failed or timed out.").with_cause_code(cause.into())
+        })?;
     if bytes.len() > limit {
         return Err(error("Registry response exceeds its byte limit."));
     }
@@ -936,7 +943,9 @@ impl<'a> Fetch<'a> {
         timeout: Duration,
         retry: bool,
     ) -> Result<Response, CandidateError> {
-        let attempts = if self.policy.short_tag_refresh {
+        let attempts = if self.policy.short_tag_refresh
+            || self.policy.tag_mode == super::image_policy::ImageTagMode::Refresh
+        {
             1
         } else {
             ATTEMPTS
@@ -1097,7 +1106,10 @@ impl<'a> Fetch<'a> {
                     .headers()
                     .get(WWW_AUTHENTICATE)
                     .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| error("Registry requires authentication without a challenge."))
+                    .ok_or_else(|| {
+                        error("Registry requires authentication without a challenge.")
+                            .with_cause_code("registry_http_401".into())
+                    })
                     .and_then(parse_challenge)?;
                 self.authorize(&challenge)?;
                 continue;
@@ -1587,7 +1599,8 @@ fn refusal(response: Response) -> Result<Response, CandidateError> {
 
 fn verify_object(descriptor: &Descriptor, bytes: &[u8]) -> Result<(), CandidateError> {
     if bytes.len() as u64 != descriptor.size || digest(bytes) != descriptor.digest {
-        return Err(error("Registry object digest or size mismatch."));
+        return Err(error("Registry object digest or size mismatch.")
+            .with_cause_code("registry_digest_mismatch".into()));
     }
     Ok(())
 }
@@ -2022,7 +2035,8 @@ pub fn resolve_build_base(
     let initial = fetch.manifest(reference)?;
     let source_digest = digest(&initial);
     if expected.is_some_and(|expected| expected != source_digest) {
-        return Err(error("Registry manifest digest or size mismatch."));
+        return Err(error("Registry manifest digest or size mismatch.")
+            .with_cause_code("registry_digest_mismatch".into()));
     }
     let (manifest, _, indexed, _) =
         select(&mut fetch, &initial, &source_digest, PlatformPolicy::Native)?;

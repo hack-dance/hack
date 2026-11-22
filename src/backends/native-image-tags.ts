@@ -6,6 +6,7 @@ import {
   NativeImageBlocker,
   nativeImageBlockerDetail,
   nativeImagePolicyArgs,
+  nativeImageRegistryReason,
 } from "./native-image-policy.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import { nativeServiceActive } from "./native-project-builds.ts";
@@ -23,6 +24,7 @@ import { selectNativeEnvFile } from "./native-project-selection.ts";
 import { resolveNativeAdaptationSelection } from "./native-project-settings.ts";
 import {
   invokeNativeRuntime,
+  NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
@@ -49,9 +51,10 @@ export function offlineTagNotice(reply: unknown): string | undefined {
     return;
   }
   const reason =
-    typeof tag.fallback_reason === "string"
-      ? tag.fallback_reason
-      : "registry lookup disabled";
+    tag.fallback_reason === undefined
+      ? "registry lookup disabled"
+      : (nativeImageRegistryReason(tag.fallback_reason) ??
+        "registry refresh failed");
   const time =
     typeof tag.resolved_at_unix_seconds === "number"
       ? new Date(tag.resolved_at_unix_seconds * 1000)
@@ -104,7 +107,7 @@ export async function pullNativeProjectImages(opts: {
   });
 
   for (const [name, spec] of specs) {
-    if (typeof spec.image !== "string" || IMAGE_ID.test(spec.image)) {
+    if (typeof spec.image !== "string") {
       continue;
     }
     const reference = canonical.get(spec.image) ?? spec.image;
@@ -114,12 +117,30 @@ export async function pullNativeProjectImages(opts: {
       continue;
     }
     const pin = pins.get(reference);
-    const args = nativeEnsureImageArgs(pin ?? reference, policy);
+    const args = nativeEnsureImageArgs(reference, policy);
     const result = await invoke({
       runtime: opts.runtime,
       cwd: opts.project.projectRoot,
-      args: [...args, ...policyArgs, "--image-tag-mode", "refresh"],
+      args: [
+        ...args,
+        ...policyArgs,
+        "--image-tag-mode",
+        "refresh",
+        ...(pin ? ["--command-image-pin", pin] : []),
+      ],
       timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+    }).catch((error: unknown) => {
+      if (error instanceof NativeRuntimeRequestError) {
+        const reason =
+          nativeImageRegistryReason(error.nativeCauseCode) ??
+          (error.nativeCode === "registry_image_not_found"
+            ? nativeImageRegistryReason("registry_http_404")
+            : undefined);
+        throw new ClosedCliError(
+          `Native pull could not confirm ${reference}: ${reason ?? error.message}`
+        );
+      }
+      throw error;
     });
     if (
       !isRecord(result) ||
@@ -133,7 +154,7 @@ export async function pullNativeProjectImages(opts: {
         "Native pull did not confirm the requested image in the guest."
       );
     }
-    if (!(reference.includes("@") || pin)) {
+    if (!(IMAGE_ID.test(reference) || reference.includes("@") || pin)) {
       pins.set(reference, result.pinned_reference);
     }
     seen.add(selection);
@@ -148,7 +169,13 @@ export type NativeImageTagStatus = {
   source_digest: string;
   resolved_at_unix_seconds: number;
   aliases: readonly string[];
-  selections: readonly { policy: string; platform: string; image_id: string }[];
+  selections: readonly {
+    policy: string;
+    platform: string;
+    image_id: string;
+    source_digest?: string;
+    resolved_at_unix_seconds?: number;
+  }[];
 };
 
 function status(value: unknown): value is NativeImageTagStatus {
@@ -170,7 +197,15 @@ function status(value: unknown): value is NativeImageTagStatus {
         typeof selection.policy === "string" &&
         typeof selection.platform === "string" &&
         typeof selection.image_id === "string" &&
-        IMAGE_ID.test(selection.image_id)
+        IMAGE_ID.test(selection.image_id) &&
+        (selection.source_digest === undefined ||
+          (typeof selection.source_digest === "string" &&
+            IMAGE_ID.test(selection.source_digest))) &&
+        (selection.resolved_at_unix_seconds === undefined ||
+          (typeof selection.resolved_at_unix_seconds === "number" &&
+            Number.isSafeInteger(selection.resolved_at_unix_seconds) &&
+            selection.resolved_at_unix_seconds >= 0 &&
+            selection.resolved_at_unix_seconds <= 8_640_000_000_000))
     )
   );
 }
@@ -212,6 +247,8 @@ async function readTagStatuses(
 export async function nativeImageBlocker(
   opts: ReadTagStatuses & {
     readonly missing: string;
+    readonly downloading?: boolean;
+    readonly reason?: string;
     readonly references: readonly string[];
     readonly confirmed: ReadonlySet<string>;
   }
@@ -237,7 +274,12 @@ export async function nativeImageBlocker(
   ) {
     present = [...new Set([...opts.confirmed, ...result])].slice(0, 32);
   }
-  const observation = { missing: opts.missing, present };
+  const observation = {
+    missing: opts.missing,
+    present,
+    ...(opts.downloading ? { downloading: true as const } : {}),
+    ...(nativeImageRegistryReason(opts.reason) ? { reason: opts.reason } : {}),
+  };
   return new NativeImageBlocker(
     nativeImageBlockerDetail(observation)
       ? observation

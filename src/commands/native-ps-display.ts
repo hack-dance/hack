@@ -80,10 +80,13 @@ export async function displayNativePs(
       rows: result.imageTags.flatMap((tag) =>
         tag.selections.map((selection) => [
           tag.reference,
-          tag.source_digest,
+          selection.source_digest ?? tag.source_digest,
           selection.image_id,
           selection.platform,
-          new Date(tag.resolved_at_unix_seconds * 1000).toISOString(),
+          new Date(
+            (selection.resolved_at_unix_seconds ??
+              tag.resolved_at_unix_seconds) * 1000
+          ).toISOString(),
         ])
       ),
     });

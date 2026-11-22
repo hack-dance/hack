@@ -37,6 +37,10 @@ struct Selection {
     policy: PlatformPolicy,
     platform: ImagePlatform,
     image_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved_at_unix_seconds: Option<u64>,
 }
 
 pub(super) struct TagResolution {
@@ -45,6 +49,8 @@ pub(super) struct TagResolution {
     pub platform: ImagePlatform,
     pub proof_policy: PlatformPolicy,
     pub image_id: String,
+    pub source_digest: String,
+    pub resolved_at_unix_seconds: u64,
     pub source: TagSource,
     pending: Option<PendingPublication>,
     pub fallback_reason: Option<String>,
@@ -59,7 +65,16 @@ struct PendingPublication {
 }
 
 impl TagResolution {
-    pub fn publish(&mut self) -> Result<(), CandidateError> {
+    pub fn confirm<T>(
+        &mut self,
+        verify: impl FnOnce(&Self) -> Result<T, CandidateError>,
+    ) -> Result<T, CandidateError> {
+        let output = verify(self)?;
+        self.publish()?;
+        Ok(output)
+    }
+
+    fn publish(&mut self) -> Result<(), CandidateError> {
         if let Some(pending) = self.pending.take() {
             write_record(
                 &self.record,
@@ -122,6 +137,10 @@ impl TagRecord {
                 normalize(&selection.image_id),
                 Ok(ImageReference::ImageId(_))
             ) || !selection.policy.candidates().contains(&selection.platform)
+                || selection.source_digest.is_some() != selection.resolved_at_unix_seconds.is_some()
+                || selection.source_digest.as_ref().is_some_and(|digest| {
+                    registry_image::pinned_syntax(&pin(named, digest)).is_err()
+                })
                 || self.selections[..i]
                     .iter()
                     .any(|prior| prior.policy == selection.policy)
@@ -138,9 +157,16 @@ impl TagRecord {
             .find(|selection| selection.policy == policy)
     }
 
-    fn fresh(&self, now: u64, ttl_seconds: u64) -> bool {
-        now.checked_sub(self.resolved_at_unix_seconds)
-            .is_some_and(|age| age < ttl_seconds)
+    fn selection_identity<'a>(&'a self, selected: &'a Selection) -> (&'a str, u64) {
+        (
+            selected
+                .source_digest
+                .as_deref()
+                .unwrap_or(&self.source_digest),
+            selected
+                .resolved_at_unix_seconds
+                .unwrap_or(self.resolved_at_unix_seconds),
+        )
     }
 
     fn resolution(
@@ -150,8 +176,11 @@ impl TagRecord {
         source: TagSource,
     ) -> Result<TagResolution, CandidateError> {
         let selection = self.selection(policy).ok_or_else(offline_missing)?;
+        let (source_digest, resolved_at_unix_seconds) = self.selection_identity(selection);
         Ok(TagResolution {
-            pinned_reference: pin(named, &self.source_digest),
+            pinned_reference: pin(named, source_digest),
+            source_digest: source_digest.into(),
+            resolved_at_unix_seconds,
             platform: selection.platform,
             proof_policy: selection.policy,
             image_id: selection.image_id.clone(),
@@ -234,7 +263,7 @@ pub fn present(candidate: &Candidate, references: &[&str]) -> Result<Vec<String>
                 ImageReference::Named(named) => named,
                 _ => return Err(invalid()),
             };
-            let pin = pin(&named, &status.record.source_digest);
+            let pin = pin(&named, status.record.selection_identity(selection).0);
             let Some(proof) =
                 super::image_ensure::recorded_proof(candidate, &pin, selection.policy)?
             else {
@@ -335,21 +364,11 @@ fn resolve_with(
 }
 
 pub(super) fn fallback_reason(error: &CandidateError) -> String {
-    match error.cause_code.as_deref() {
-        Some("registry_unreachable") => "registry unreachable".into(),
-        Some("registry_timeout") => "registry request timed out".into(),
-        Some("registry_http_429") => "registry rate limit reached".into(),
-        Some("registry_http_404") => "tag no longer exists in the registry (404)".into(),
-        Some("registry_http_401") => "registry refused access (401)".into(),
-        Some("registry_http_403") => "registry refused access (403)".into(),
-        Some(code) if code.starts_with("registry_http_") => {
-            format!("registry request failed ({})", &code[14..])
-        }
-        Some("registry_digest_mismatch") => "registry layer digest mismatch".into(),
-        Some("registry_tls") => "registry TLS verification failed".into(),
-        _ if error.message_fixed => error.message.clone(),
-        _ => "registry refresh failed".into(),
-    }
+    error
+        .cause_code
+        .as_deref()
+        .unwrap_or("registry_refresh_failed")
+        .into()
 }
 
 fn resolve_pending(
@@ -368,19 +387,34 @@ fn resolve_pending(
     crate::reject_aliased_state(&root)?;
     let read_record = || measure(Step::ImageTagRecord, None, |_| read(&path, &named));
     let previous = read_record()?;
+    let command_pin = policy.command_image_pin.as_deref();
     if policy.tag_mode == ImageTagMode::Offline {
-        return previous.ok_or_else(offline_missing)?.resolution(
+        let resolution = previous.ok_or_else(offline_missing)?.resolution(
             &named,
             platform,
             TagSource::Offline,
-        );
+        )?;
+        if command_pin.is_some_and(|pin| resolution.pinned_reference != pin) {
+            return Err(offline_missing());
+        }
+        return Ok(resolution);
     }
     let opened_at = now()?;
-    let is_fresh = |entry: &TagRecord, at| {
-        policy.tag_mode == ImageTagMode::Normal && entry.fresh(at, policy.tag_ttl_seconds)
+    let is_fresh = |at: u64, resolved_at| {
+        policy.tag_mode == ImageTagMode::Normal
+            && at
+                .checked_sub(resolved_at)
+                .is_some_and(|age| age < policy.tag_ttl_seconds)
     };
-    let matching =
-        |entry: &TagRecord, at| is_fresh(entry, at) && entry.selection(platform).is_some();
+    let matching = |entry: &TagRecord, at| {
+        entry.selection(platform).is_some_and(|selection| {
+            let (digest, resolved_at) = entry.selection_identity(selection);
+            match command_pin {
+                Some(expected) => pin(&named, digest) == expected,
+                None => is_fresh(at, resolved_at),
+            }
+        })
+    };
     if let Some(entry) = previous.filter(|entry| matching(entry, opened_at)) {
         return entry.resolution(&named, platform, TagSource::Recorded);
     }
@@ -390,7 +424,18 @@ fn resolve_pending(
     // resolution another process just published.
     let lock = match state::Lock::acquire(&root) {
         Err(error) if error.code == "provider_busy" => {
-            state::Lock::acquire_existing_waiting(&root, std::time::Duration::from_secs(30))?
+            // Replace with the shared startup wait helper from HACK-2535.
+            state::Lock::acquire_existing_waiting(&root, std::time::Duration::from_secs(590))
+                .map_err(|error| {
+                    if error.code == "provider_busy" {
+                        CandidateError::new(
+                            "image_tag_download_busy",
+                            "Another start is downloading this image.",
+                        )
+                    } else {
+                        error
+                    }
+                })?
         }
         result => result?,
     };
@@ -404,18 +449,36 @@ fn resolve_pending(
             .clone()
             .resolution(&named, platform, TagSource::Recorded);
     }
-    let fresh = previous
-        .as_ref()
-        .filter(|entry| is_fresh(entry, checked_at));
+    let fresh = previous.as_ref().and_then(|entry| match command_pin {
+        Some(expected) => entry
+            .selections
+            .iter()
+            .map(|selection| entry.selection_identity(selection))
+            .filter(|(digest, _)| pin(&named, digest) == expected)
+            .max_by_key(|(_, time)| *time),
+        None if entry.selection(platform).is_none()
+            && is_fresh(checked_at, entry.resolved_at_unix_seconds) =>
+        {
+            Some((entry.source_digest.as_str(), entry.resolved_at_unix_seconds))
+        }
+        None => None,
+    });
+    if command_pin.is_some() && fresh.is_none() {
+        return Err(CandidateError::new(
+            "image_tag_selection_changed",
+            "The tag resolution changed during this command.",
+        ));
+    }
     let mut fallback = previous.as_ref().and_then(|entry| {
         entry
             .clone()
             .resolution(&named, platform, TagSource::Offline)
             .ok()
+            .filter(|tag| command_pin.is_none_or(|pin| tag.pinned_reference == pin))
     });
     let use_fallback = policy.tag_mode == ImageTagMode::Normal && loaded(fallback.as_ref())?;
     let resolved = measure(Step::ImageTagResolve, None, |_| match fresh {
-        Some(entry) => lookup(&pin(&named, &entry.source_digest), true, use_fallback),
+        Some((digest, _)) => lookup(&pin(&named, digest), true, use_fallback),
         None => lookup(&canonical, false, use_fallback),
     });
     let resolved = match resolved {
@@ -432,30 +495,40 @@ fn resolve_pending(
                         || matches!(code, "registry_unreachable" | "registry_timeout")
                 })) =>
         {
-            return Err(offline_missing());
+            return Err(offline_missing().with_cause_code(fallback_reason(&error)));
         }
         Err(error) => return Err(error),
     };
 
+    let resolved_at = match fresh {
+        Some((_, time)) => time,
+        None => now()?,
+    };
+    let mut selections = previous.map_or_else(Vec::new, |mut record| {
+        for selection in &mut record.selections {
+            selection
+                .source_digest
+                .get_or_insert_with(|| record.source_digest.clone());
+            selection
+                .resolved_at_unix_seconds
+                .get_or_insert(record.resolved_at_unix_seconds);
+        }
+        record.selections
+    });
+    selections.retain(|selection| selection.policy != platform);
+    let selection = Selection {
+        source_digest: Some(resolved.source_digest.clone()),
+        resolved_at_unix_seconds: Some(resolved_at),
+        ..selected(&resolved, platform)?
+    };
     let mut entry = TagRecord {
         version: 1,
         reference: canonical,
         registry: named.domain.clone(),
-        resolved_at_unix_seconds: if let Some(record) = fresh {
-            record.resolved_at_unix_seconds
-        } else {
-            now()?
-        },
-        selections: previous
-            .filter(|record| record.source_digest == resolved.source_digest)
-            .map(|record| record.selections)
-            .unwrap_or_default(),
+        resolved_at_unix_seconds: resolved_at,
+        selections,
         source_digest: resolved.source_digest.clone(),
     };
-    entry
-        .selections
-        .retain(|selection| selection.policy != platform);
-    let selection = selected(&resolved, platform)?;
     super::image_ensure::publish_proof(
         candidate,
         &resolved.pinned_reference,
@@ -520,6 +593,8 @@ fn selected(resolved: &ResolvedImage, policy: PlatformPolicy) -> Result<Selectio
         policy,
         platform,
         image_id: resolved.image_id.clone(),
+        source_digest: None,
+        resolved_at_unix_seconds: None,
     })
 }
 
@@ -582,7 +657,15 @@ mod tests {
             .unwrap()
         };
         pending(1, 'a').publish().unwrap();
-        let unconfirmed = pending(2, 'b');
+        let mut unconfirmed = pending(2, 'b');
+        let failed = unconfirmed.confirm(|_| {
+            assert_eq!(
+                status(&f.0, &[TAG]).unwrap()[0].record.source_digest,
+                digest('a')
+            );
+            Err::<(), _>(CandidateError::new("fixture", "Guest load failed."))
+        });
+        assert!(failed.is_err());
         drop(unconfirmed);
         assert_eq!(
             status(&f.0, &[TAG]).unwrap()[0].record.source_digest,
@@ -593,6 +676,85 @@ mod tests {
             status(&f.0, &[TAG]).unwrap()[0].record.source_digest,
             digest('c')
         );
+    }
+
+    #[test]
+    fn a_second_platform_keeps_its_tag_selection_when_the_first_moves() {
+        let f = Fixture::new();
+        let policy = ImagePolicy::default();
+        let first = resolve_with(
+            &f.0,
+            TAG,
+            &policy,
+            PlatformPolicy::Native,
+            || Ok(1),
+            |_, _| Ok(result('a')),
+        )
+        .unwrap();
+        let additional = ImagePolicy {
+            command_image_pin: Some(first.pinned_reference),
+            tag_mode: ImageTagMode::Refresh,
+            ..policy.clone()
+        };
+        resolve_with(
+            &f.0,
+            TAG,
+            &additional,
+            PlatformPolicy::Amd64,
+            || Ok(2),
+            |pin, pinned| {
+                assert!(pinned);
+                assert!(pin.ends_with(&digest('a')));
+                Ok(ResolvedImage {
+                    platform: "linux/amd64",
+                    ..result('a')
+                })
+            },
+        )
+        .unwrap();
+        let refresh = ImagePolicy {
+            tag_mode: ImageTagMode::Refresh,
+            ..policy.clone()
+        };
+        resolve_with(
+            &f.0,
+            TAG,
+            &refresh,
+            PlatformPolicy::Native,
+            || Ok(3),
+            |_, pinned| {
+                assert!(!pinned);
+                Ok(result('b'))
+            },
+        )
+        .unwrap();
+
+        let preferred = resolve_with(
+            &f.0,
+            TAG,
+            &policy,
+            PlatformPolicy::Amd64,
+            || Ok(4),
+            |_, _| panic!("fresh AMD64 policy must not contact the registry"),
+        )
+        .unwrap();
+        assert_eq!(preferred.platform, ImagePlatform::LinuxAmd64);
+        assert_eq!(preferred.source_digest, digest('a'));
+        assert_eq!(preferred.resolved_at_unix_seconds, 1);
+        let offline = ImagePolicy {
+            tag_mode: ImageTagMode::Offline,
+            ..policy
+        };
+        let native = resolve_with(
+            &f.0,
+            TAG,
+            &offline,
+            PlatformPolicy::Native,
+            || Ok(4),
+            |_, _| panic!("offline native policy must not contact the registry"),
+        )
+        .unwrap();
+        assert_eq!(native.source_digest, digest('b'));
     }
 
     #[test]
@@ -690,7 +852,7 @@ mod tests {
                     CandidateError::new("registry_image_not_found", "Fixture tag not found.")
                         .with_cause_code("registry_http_404".into())
                 }) as fn() -> CandidateError,
-                "tag no longer exists in the registry (404)",
+                "registry_http_404",
             ),
             (
                 || {
@@ -698,8 +860,9 @@ mod tests {
                         "registry_image",
                         "Registry object digest or size mismatch.",
                     )
+                    .with_cause_code("registry_digest_mismatch".into())
                 },
-                "Registry object digest or size mismatch.",
+                "registry_digest_mismatch",
             ),
         ] {
             let fallback = resolve_with(
@@ -908,7 +1071,7 @@ mod tests {
         assert_eq!(removed.image_id, first.image_id);
         assert_eq!(
             removed.fallback_reason.as_deref(),
-            Some("tag no longer exists in the registry (404)")
+            Some("registry_http_404")
         );
         assert_eq!(requests, 1);
         policy.tag_mode = ImageTagMode::Refresh;

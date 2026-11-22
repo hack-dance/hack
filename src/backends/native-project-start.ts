@@ -60,6 +60,7 @@ import { reportNativeIgnoredSettingNotices } from "./native-ignored-setting-noti
 import {
   NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
   nativeImagePolicyArgs,
+  nativeImageRegistryReason,
 } from "./native-image-policy.ts";
 import { nativeImageBlocker, offlineTagNotice } from "./native-image-tags.ts";
 import {
@@ -759,6 +760,7 @@ async function ensureNativeProjectImage(opts: {
   readonly reference: string;
   readonly imageTagMode?: "refresh" | "offline";
   readonly affectedServices: () => readonly string[];
+  readonly commandPin?: string;
   readonly policy: NativeEmulationPolicy | undefined;
   readonly invoke: typeof invokeNativeRuntime;
 }) {
@@ -769,6 +771,7 @@ async function ensureNativeProjectImage(opts: {
       args: [
         ...nativeEnsureImageArgs(opts.reference, opts.policy),
         ...nativeImagePolicyArgs(),
+        ...(opts.commandPin ? ["--command-image-pin", opts.commandPin] : []),
         ...(opts.imageTagMode ? ["--image-tag-mode", opts.imageTagMode] : []),
       ],
       timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
@@ -786,7 +789,7 @@ async function ensureNativeProjectImage(opts: {
             ? `service ${names[0]}`
             : `services ${names.join(", ")}`;
         throw new ClosedCliError(
-          `Native image acquisition failed for ${label} field image (registry_image_not_found); the selected registry image or tag was not found. Values omitted.`
+          `Native image acquisition failed for ${label} field image (registry_image_not_found); the selected image ${opts.reference} was not found.`
         );
       }
       throw error;
@@ -867,7 +870,8 @@ async function pinNativeProjectImages(opts: {
     const ensured = await ensureNativeProjectImage({
       runtime: opts.runtime,
       projectRoot: opts.projectRoot,
-      reference: immutableReference ?? image,
+      reference: image,
+      commandPin: reference.includes("@") ? undefined : immutableReference,
       affectedServices: () =>
         Object.entries(opts.specs)
           .filter(
@@ -886,17 +890,28 @@ async function pinNativeProjectImages(opts: {
     }).catch(async (error: unknown) => {
       if (
         error instanceof NativeRuntimeRequestError &&
-        (error.nativeCode === "image_tag_offline_missing" ||
+        (error.nativeCode === "image_tag_download_busy" ||
+          error.nativeCode === "image_tag_offline_missing" ||
           error.nativeCode === "image_archive_offline_missing")
       ) {
         throw await nativeImageBlocker({
           runtime: opts.runtime,
           projectRoot: opts.projectRoot,
           missing: reference,
+          downloading: error.nativeCode === "image_tag_download_busy",
+          reason: error.nativeCauseCode,
           references,
           confirmed,
           invoke: opts.invoke,
         });
+      }
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode?.startsWith("registry_")
+      ) {
+        const reason =
+          nativeImageRegistryReason(error.nativeCauseCode) ?? error.message;
+        throw new ClosedCliError(`Image unavailable: ${reference}: ${reason}`);
       }
       throw error;
     });

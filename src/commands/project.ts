@@ -369,6 +369,7 @@ import {
   LOKI_FOLLOW_EMPTY_NOTICE_DELAY_MS,
   type LogsCommandSelectors,
   type LogsCommandTarget,
+  quoteShellWord,
   renderEmptyLokiFollowNotice,
   resolveShouldTryLoki,
   resolveUseLoki,
@@ -7499,8 +7500,14 @@ async function handleUpUnlocked({
       },
       notifyRunning: async (saved, project) => {
         if (args.options.refreshImages) {
+          const selection = [
+            `--path=${quoteShellWord(project.projectRoot)}`,
+            ...(launchBranch
+              ? [`--branch=${quoteShellWord(launchBranch)}`]
+              : []),
+          ].join(" ");
           throw new CliUsageError(
-            "Stop the running project with hack down, then run hack up --refresh-images."
+            `Stop the running project with hack down ${selection}, then run hack up ${selection} --refresh-images.`
           );
         }
         await trackNativeLocalDirectories({

@@ -19,6 +19,7 @@ import {
   readNativeConfigurationRefusals,
 } from "./native-configuration-refusals.ts";
 import { nativeHotReloadEnvironment } from "./native-hot-reload-notice.ts";
+import { nativeImageRegistryReason } from "./native-image-policy.ts";
 import {
   type NativePlanChange,
   nativePlanChangeGuidance,
@@ -1268,6 +1269,13 @@ function nativeFailureCause(input: {
 }): string | undefined {
   if (typeof input.cause !== "string" || !ERROR_CODE.test(input.cause)) {
     return undefined;
+  }
+  if (
+    (input.code.startsWith("registry_") ||
+      input.code === "image_tag_offline_missing") &&
+    nativeImageRegistryReason(input.cause)
+  ) {
+    return input.cause;
   }
   return ["graph_one_off_failed", "graph_owner_recovery"].includes(
     input.code

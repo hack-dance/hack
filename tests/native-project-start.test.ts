@@ -5362,7 +5362,15 @@ test("opted-in amd64 services boot a translation pool and pin with their own pla
       "prefer-native",
       "--json",
     ],
-    ["runtime", "ensure-image", "--reference", immutable, "--json"],
+    [
+      "runtime",
+      "ensure-image",
+      "--reference",
+      sharedTag,
+      "--json",
+      "--command-image-pin",
+      immutable,
+    ],
   ]);
   // Only opted-in services carry the reviewed runtime opt-in.
   expect(reviewed.legacy?.["x-hack-amd64-emulation"]).toBe("amd64");
@@ -5390,6 +5398,41 @@ test("without an emulation selection the runtime pool and image pins stay arm64-
   expect(await startNativeProject(opts)).toBe(0);
   expect(calls.flat()).not.toContain("--amd64-emulation");
   expect(calls.flat()).not.toContain("--emulation");
+});
+
+test("a loaded 404 fallback reports the registry reason exactly once", async () => {
+  const { opts } = await fixture(false);
+  const notices: string[] = [];
+  opts.dependencies.warn = (notice) => notices.push(notice);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: { web: { image: "alpine:latest" } },
+    }),
+  });
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "ensure-image") {
+      return {
+        image_id: `sha256:${"a".repeat(64)}`,
+        pinned_reference: `docker.io/library/alpine@sha256:${"b".repeat(64)}`,
+        platform: "linux/arm64",
+        tag_resolution: {
+          source: "offline",
+          fallback_reason: "registry_http_404",
+          resolved_at_unix_seconds: 1,
+        },
+      };
+    }
+    return await invoke(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(
+    notices.filter((line) => line.includes("using the loaded image"))
+  ).toEqual([
+    "tag no longer exists in the registry (404), using the loaded image resolved 1970-01-01T00:00:01.000Z.",
+  ]);
 });
 
 test("retained startup asks the runtime to confirm the tag before review", async () => {
@@ -6465,7 +6508,7 @@ test("invalid HTTP retries name the service and field before hooks or runtime ef
   expect(events).not.toContain("runtime ensure-image");
 });
 
-test("a missing shared tag names every affected active service without echoing image values", async () => {
+test("a missing shared tag names the requested image and every affected active service", async () => {
   const { opts } = await fixture(false);
   const prepare = opts.dependencies.prepare!;
   opts.dependencies.prepare = async (request) => {
@@ -6509,7 +6552,7 @@ test("a missing shared tag names every affected active service without echoing i
   );
   expect((error as Error).message).not.toContain("inactive");
   expect((error as Error).message).not.toContain("unrelated");
-  expect((error as Error).message).not.toContain("synthetic:missing");
+  expect((error as Error).message).toContain("synthetic:missing");
   expect((error as Error).message).not.toContain("private registry detail");
 });
 

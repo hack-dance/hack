@@ -8,16 +8,45 @@ const MAX_CACHE_MIB = 262_144;
 const MAX_LOCAL_REGISTRIES = 16;
 const DEFAULT_BUDGET_MIB = 2048;
 const DEFAULT_CACHE_MIB = 16_384;
+const REGISTRY_HTTP_STATUS = /^registry_http_[45][0-9]{2}$/;
 const SECONDS = /^[0-9]+$/;
 const MEBIBYTES = /^[0-9]{1,8}$/;
 const LOCAL_REGISTRY = /^(?:http:\/\/)?[a-z0-9.-]+(?::[0-9]{1,5})?$/;
 
-export const NATIVE_IMAGE_OFFLINE_NOTICE =
-  "Registry unavailable or offline mode selected. Using recorded image tag resolutions.";
+export function nativeImageRegistryReason(code: unknown): string | undefined {
+  switch (code) {
+    case "registry_unreachable":
+      return "registry unreachable";
+    case "registry_timeout":
+      return "registry request timed out";
+    case "registry_tls":
+      return "registry TLS verification failed";
+    case "registry_transfer_failed":
+      return "registry transfer failed";
+    case "registry_digest_mismatch":
+      return "registry digest mismatch";
+    case "registry_http_429":
+      return "registry rate limit reached";
+    case "registry_http_404":
+      return "tag no longer exists in the registry (404)";
+    case "registry_http_401":
+      return "registry refused access (401)";
+    case "registry_http_403":
+      return "registry refused access (403)";
+    case "registry_refresh_failed":
+      return "registry refresh failed";
+    default:
+      return typeof code === "string" && REGISTRY_HTTP_STATUS.test(code)
+        ? `registry request failed (${code.slice(14)})`
+        : undefined;
+  }
+}
 
 const DISPLAY_REFERENCE = /^[A-Za-z0-9._:/@-]{1,512}$/;
 export type NativeImageBlockerDetail = {
   readonly missing: string;
+  readonly downloading?: true;
+  readonly reason?: string;
   readonly present: readonly string[] | null;
 };
 
@@ -32,6 +61,9 @@ export function nativeImageBlockerDetail(
     return false;
   }
   return (
+    (!("downloading" in value) || value.downloading === true) &&
+    (!("reason" in value) ||
+      nativeImageRegistryReason(value.reason) !== undefined) &&
     typeof value.missing === "string" &&
     DISPLAY_REFERENCE.test(value.missing) &&
     (value.present === null ||
@@ -49,15 +81,20 @@ export class NativeImageBlocker extends ClosedCliError {
 
   constructor(observation: NativeImageBlockerDetail) {
     const { missing, present } = observation;
+    const registryReason = nativeImageRegistryReason(observation.reason);
     const known =
       present === null
         ? "could not verify"
         : present.join(", ") || "none confirmed";
     super(
       [
-        `Image unavailable: ${missing} has no usable recorded resolution in the running guest.`,
+        observation.downloading
+          ? `Image unavailable: another start is downloading ${missing}.`
+          : `Image unavailable: ${missing} has no usable recorded resolution in the running guest${registryReason ? ` (${registryReason})` : ""}.`,
         `Already present: ${known}.`,
-        "Run hack pull when the registry is reachable, then retry hack up.",
+        observation.downloading
+          ? "Run hack up again after the download finishes."
+          : "Run hack pull when the registry is reachable, then retry hack up.",
       ].join("\n")
     );
     this.observation = observation;

@@ -200,3 +200,29 @@ test("--skip-plugin-check accepts only known clients", () => {
   expect(() => parseSkipPluginCheck("vscode")).toThrow(CliUsageError);
   expect(() => parseSkipPluginCheck(",")).toThrow(CliUsageError);
 });
+
+test(
+  "preview suggests applying the same scopes, clients and plugin checks",
+  async () => {
+    const global = await runCli(["--global", "--codex"]);
+    expect(global.exitCode).toBe(0);
+    expect(global.stdout.trimEnd().split("\n").at(-1)).toEndWith(
+      "hack setup migrate --apply --global --codex"
+    );
+    await mkdir(join(repo(), "other project", ".git"), { recursive: true });
+    const all = await runCli([
+      "--all-scopes",
+      "--claude",
+      "--codex",
+      "--path",
+      "other project",
+      "--skip-plugin-check",
+      "claude,codex",
+    ]);
+    expect(all.exitCode).toBe(0);
+    expect(all.stdout.trimEnd().split("\n").at(-1)).toEndWith(
+      "hack setup migrate --apply --all-scopes --claude --codex --path 'other project' --skip-plugin-check claude,codex"
+    );
+  },
+  CLI_TEST_TIMEOUT_MS
+);

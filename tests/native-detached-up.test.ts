@@ -58,6 +58,7 @@ for (const mode of [
   "unsafe-failure",
   "unsafe-prestart-refusal",
   "fail",
+  "builder-missing",
   "provider-pin",
   "wrapped-provider-pin",
   "timeout",
@@ -153,6 +154,25 @@ for (const mode of [
           ok: false,
           error: { code: "E_CANCELLED" },
         });
+      } else if (mode === "builder-missing") {
+        // A detached owner reports the code only; the launcher must still tell the
+        // user what is wrong and the one command that fixes it.
+        expect(code).toBe(1);
+        const result = JSON.parse(stdout);
+        expect(result).toMatchObject({
+          ok: false,
+          error: { code: "E_STARTUP_INCOMPLETE" },
+        });
+        expect(result.error.message).toContain("(builder_not_prepared)");
+        expect(result.error.message).toContain(
+          "the image builder is not installed in this native home"
+        );
+        expect(result.error.message).toContain(
+          "native setup --accept-downloads"
+        );
+        expect(result.error.message).toContain("--builder");
+        expect(result.error.message).not.toContain("os error");
+        expect(stdout).not.toContain("synthetic-private-value");
       } else if (["provider-pin", "wrapped-provider-pin"].includes(mode)) {
         expect(code).toBe(1);
         const result = JSON.parse(stdout);
@@ -167,7 +187,14 @@ for (const mode of [
         expect(code).not.toBe(0);
         expect(stdout).toBe("");
       }
-      if (!["fail", "provider-pin", "wrapped-provider-pin"].includes(mode)) {
+      if (
+        ![
+          "fail",
+          "builder-missing",
+          "provider-pin",
+          "wrapped-provider-pin",
+        ].includes(mode)
+      ) {
         expect(await waitForFile(join(root, "stopped"))).toBe(
           "down.before\nprocess.stop\ndown.after\n"
         );

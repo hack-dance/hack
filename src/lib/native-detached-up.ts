@@ -40,6 +40,10 @@ import {
   resolveNativeDetachedStartLimits,
 } from "./native-detached-start-deadline.ts";
 import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "./native-environment-notices.ts";
+import {
+  NATIVE_BUILDER_NOT_PREPARED,
+  nativeBuilderMissingDetachedRefusal,
+} from "./native-image-builder.ts";
 
 export const NATIVE_DETACHED_OWNER_ARGUMENT =
   "--internal-native-detached-owner";
@@ -422,6 +426,14 @@ function startupFailureError(failure: StartupFailure): HackCliError {
     return new HackCliError({
       code: "E_STARTUP_INCOMPLETE",
       message: `Native detached startup refused (provider_pin_changed); ${NATIVE_PROVIDER_PIN_MESSAGE}`,
+    });
+  }
+  if (failure.code === NATIVE_BUILDER_NOT_PREPARED) {
+    // A detached owner passes only the code; the remedy is the same sentence
+    // the foreground refusal, setup and doctor print.
+    return new HackCliError({
+      code: "E_STARTUP_INCOMPLETE",
+      message: `${nativeBuilderMissingDetachedRefusal()} ${NATIVE_IDLE_POOL_NOTE}`,
     });
   }
   let detail = "";

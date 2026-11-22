@@ -68,10 +68,13 @@ fn serve_refuses_bad_arguments_and_an_unusable_notify_descriptor() {
     ] {
         let output = run(&home, args);
         assert!(!output.status.success(), "{args:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("invalid_arguments"),
-            "{args:?}"
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if args.contains(&"--notify-fd") {
+            // A starter waits on the notify line: the exit writes nothing else.
+            assert_eq!(stderr, "", "{args:?}");
+        } else {
+            assert!(stderr.contains("invalid_arguments"), "{args:?}: {stderr}");
+        }
     }
     // A descriptor that is closed in the child, and one open only for reading.
     let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
@@ -109,7 +112,10 @@ fn serve_refuses_bad_arguments_and_an_unusable_notify_descriptor() {
             .unwrap()
             .read_to_string(&mut stderr)
             .unwrap();
-        assert!(stderr.contains("invalid_arguments"), "{fd:?}: {stderr}");
+        assert_eq!(
+            stderr, "",
+            "{fd:?}: a starter-mode exit writes no diagnostic"
+        );
     }
     assert!(home.socket().symlink_metadata().is_err());
 }
@@ -152,7 +158,7 @@ fn serve_refuses_a_notify_descriptor_open_for_neither_reading_nor_writing() {
         .unwrap()
         .read_to_string(&mut stderr)
         .unwrap();
-    assert!(stderr.contains("invalid_arguments"), "{stderr}");
+    assert_eq!(stderr, "", "a starter-mode exit writes no diagnostic");
     assert!(home.socket().symlink_metadata().is_err());
 }
 
@@ -211,7 +217,7 @@ fn serve_never_takes_the_timings_descriptor_as_its_notify_descriptor() {
         .unwrap()
         .read_to_string(&mut stderr)
         .unwrap();
-    assert!(stderr.contains("invalid_arguments"), "{stderr}");
+    assert_eq!(stderr, "", "a starter-mode exit writes no diagnostic");
     assert!(home.socket().symlink_metadata().is_err());
 }
 
@@ -441,9 +447,11 @@ fn a_regular_file_is_not_a_notify_transport() {
     );
     drop(spawning);
     assert!(!service.exit().success());
-    // Refused by the argument check, before any service starts.
-    let stderr = stderr_of(&mut service);
-    assert!(stderr.contains("invalid_arguments"), "{stderr}");
+    assert_eq!(
+        stderr_of(&mut service),
+        "",
+        "a starter-mode exit writes no diagnostic"
+    );
     assert!(home.socket().symlink_metadata().is_err());
     assert_eq!(std::fs::read(home.0.join("notify.txt")).unwrap(), b"");
 }
@@ -558,4 +566,60 @@ fn an_error_exit_never_waits_on_a_full_stderr() {
     drop(spawning);
     assert_eq!(service.exit().code(), Some(2));
     assert!(serves_again(&home));
+}
+
+#[test]
+fn a_notify_number_the_starter_left_closed_is_never_one_of_ours() {
+    // Descriptor 3 is closed at exec. The service's own signal channel must
+    // not be taken as the notify descriptor: the number is refused instead.
+    let home = Home::new();
+    let mut command = command(
+        &home,
+        &[
+            "service",
+            "serve",
+            "--idle-seconds",
+            "60",
+            "--notify-fd",
+            "3",
+        ],
+    );
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            libc::close(3);
+            Ok(())
+        });
+    }
+    let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+    let mut service = Service(command.spawn().unwrap());
+    drop(spawning);
+    assert_eq!(service.exit().code(), Some(2));
+    assert!(home.socket().symlink_metadata().is_err());
+}
+
+#[test]
+fn the_words_service_serve_inside_another_command_are_not_the_command() {
+    // `info` followed by those words fails as `info`, without the service
+    // prelude: nothing claims or writes descriptor 3.
+    let home = Home::new();
+    let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+    let (reader, writer) = pipe();
+    let args: Vec<std::ffi::OsString> = ["info", "service", "serve", "--notify-fd", "3"]
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+    let mut service = spawn_raw(&home, &args, writer.as_raw_fd());
+    drop(writer);
+    drop(spawning);
+    assert!(!service.exit().success());
+    let stderr = stderr_of(&mut service);
+    assert!(!stderr.is_empty(), "the ordinary error path still reports");
+    let mut rest = String::new();
+    BufReader::new(reader).read_to_string(&mut rest).unwrap();
+    assert_eq!(rest, "", "nothing was written to descriptor 3");
 }

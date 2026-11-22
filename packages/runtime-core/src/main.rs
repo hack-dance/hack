@@ -174,7 +174,12 @@ fn main() {
                 let refused = serde_json::json!({"refused": {"code": error.code}});
                 let _ = hack_runtime_core::service::notify(&file, &refused);
             }
-            write_stderr_if_room(&line);
+            // With a starter waiting, nothing more is written: no write to
+            // stderr (a full pipe, a stalled file) can be bounded without
+            // changing a descriptor others share. Run by hand, it says why.
+            if !STARTER.load(std::sync::atomic::Ordering::SeqCst) {
+                eprintln!("{line}");
+            }
             // SAFETY: _exit ends the process at once; nothing here relies on cleanup.
             unsafe { libc::_exit(2) }
         }
@@ -184,6 +189,8 @@ fn main() {
     }
 }
 
+/// Set when `service serve` was given a `--notify-fd`: a starter waits on it.
+static STARTER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Set once `main` has recognised `service serve`.
 static SERVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// What `prepare_serve` found, for the `serve` arm.
@@ -195,59 +202,66 @@ fn early_notify() -> std::sync::MutexGuard<'static, Option<std::fs::File>> {
     EARLY_NOTIFY.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Whether the raw arguments ask for `service serve`.
-fn serve_requested() -> bool {
-    let arguments: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    arguments
-        .windows(2)
-        .any(|pair| pair[0] == "service" && pair[1] == "serve")
+/// Where `service serve` stands in the raw arguments, if that is the command:
+/// only at the command position, after the optional leading timings argument,
+/// `--candidate-root <dir>` and `--step-store <dir>`. The same words inside
+/// another command's arguments (a forwarded command, say) are not it.
+fn serve_position(arguments: &[std::ffi::OsString]) -> Option<usize> {
+    let mut at = 1;
+    if arguments
+        .get(at)
+        .and_then(|argument| argument.to_str())
+        .is_some_and(|value| value.starts_with(hack_runtime_core::timings::REQUEST_PREFIX))
+    {
+        at += 1;
+    }
+    if arguments.get(at)? != "--candidate-root" {
+        return None;
+    }
+    at += 2;
+    if arguments
+        .get(at)
+        .is_some_and(|argument| argument == "--step-store")
+    {
+        at += 2;
+    }
+    (arguments.get(at)? == "service" && arguments.get(at + 1)? == "serve").then_some(at)
 }
 
-/// The `service serve` prelude, in order, before argument checks can refuse.
+/// Whether the raw arguments ask for `service serve`.
+fn serve_requested() -> bool {
+    serve_position(&std::env::args_os().collect::<Vec<_>>()).is_some()
+}
+
+/// The `service serve` prelude, before argument checks can refuse. The notify
+/// descriptor is claimed before this process opens any descriptor of its own
+/// (the signal channel is a socket pair), so a number the starter left closed
+/// can never turn out to be ours.
 fn prepare_serve() {
     SERVING.store(true, std::sync::atomic::Ordering::SeqCst);
-    let failure = disable_core_dumps()
-        .and_then(|()| hack_runtime_core::service::install_stop_signals())
-        .err();
-    *EARLY_FAILURE.lock().unwrap_or_else(|p| p.into_inner()) = failure;
+    let core = disable_core_dumps();
     let arguments: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    let after_serve = arguments
-        .windows(2)
-        .position(|pair| pair[0] == "service" && pair[1] == "serve")
-        .map_or(arguments.len(), |at| at + 2);
+    let after_serve = serve_position(&arguments).map_or(arguments.len(), |at| at + 2);
     let reserved = arguments
         .get(1)
         .and_then(|argument| argument.to_str())
         .and_then(hack_runtime_core::timings::requested_fd);
-    let value = arguments[after_serve.min(arguments.len())..]
+    let value = arguments[after_serve..]
         .windows(2)
         .find(|pair| pair[0] == "--notify-fd")
-        .and_then(|pair| pair[1].to_str().map(str::to_owned));
+        .map(|pair| pair[1].to_str().map(str::to_owned));
     if let Some(value) = value {
-        *early_notify() = notify_descriptor(&value, reserved);
+        // A starter is waiting on a line: its exit never writes to stderr.
+        STARTER.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(value) = value {
+            *early_notify() = notify_descriptor(&value, reserved);
+        }
     }
+    let failure = core
+        .and_then(|()| hack_runtime_core::service::install_stop_signals())
+        .err();
+    *EARLY_FAILURE.lock().unwrap_or_else(|p| p.into_inner()) = failure;
     keep_closed_environment();
-}
-
-/// Write `line` to stderr only if one write cannot block: a pipe that polls
-/// writable has room for at least `PIPE_BUF` (512 bytes everywhere), and a
-/// line that fits is written whole. Otherwise the line is dropped; the exit
-/// code still says what happened.
-fn write_stderr_if_room(line: &str) {
-    let bytes = format!("{line}\n").into_bytes();
-    if bytes.len() > 512 {
-        return;
-    }
-    let mut pfd = libc::pollfd {
-        fd: 2,
-        events: libc::POLLOUT,
-        revents: 0,
-    };
-    // SAFETY: one initialized pollfd, a zero timeout.
-    if unsafe { libc::poll(&mut pfd, 1, 0) } == 1 && pfd.revents & libc::POLLOUT != 0 {
-        // SAFETY: a valid buffer; stderr is open or the write simply fails.
-        unsafe { libc::write(2, bytes.as_ptr().cast(), bytes.len()) };
-    }
 }
 
 fn installed_entrypoint() -> bool {

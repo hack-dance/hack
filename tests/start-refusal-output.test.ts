@@ -5,7 +5,6 @@ import {
   canPrintStartSelection,
   printedShellCommand,
 } from "../src/lib/printed-shell-command.ts";
-import { logger } from "../src/ui/logger.ts";
 import { writeUpHookBlocker } from "../src/ui/start-refusal-output.ts";
 
 import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
@@ -165,44 +164,46 @@ test("retry text excludes pasted assignments and noncanonical project aliases", 
   ).toBe(true);
 });
 
-test("generic start blockers retain multiline messages and the original detail summary", async () => {
-  const lines: string[] = [];
-  const stderr = spyOn(process.stderr, "write").mockImplementation((line) => {
-    lines.push(String(line));
-    return true;
-  });
-  const diagnostics = spyOn(logger, "error").mockImplementation(() => {});
-  try {
-    expect(
-      await handleRunCliError({
-        error: new HackCliError({
-          code: "E_DOCKER_UNAVAILABLE",
-          message: "Engine connection failed.\nSecond line of the diagnostic.",
-          detail: {
-            native_compose_effect_refusal: {
-              stage: "effect-entry",
-              reason: "private-state",
-            },
+test("generic start blockers retain multiline messages and the original detail summary", () => {
+  const run = new URL("../src/cli/run.ts", import.meta.url);
+  const errors = new URL("../src/lib/cli-result.ts", import.meta.url);
+  const program = `
+    import { handleRunCliError } from ${JSON.stringify(run.href)};
+    import { HackCliError } from ${JSON.stringify(errors.href)};
+    process.exitCode = await handleRunCliError({
+      error: new HackCliError({
+        code: "E_DOCKER_UNAVAILABLE",
+        message: "Engine connection failed.\\nSecond line of the diagnostic.",
+        detail: {
+          native_compose_effect_refusal: {
+            stage: "effect-entry",
+            reason: "private-state",
           },
-        }),
-        jsonRequested: false,
-        handlerPath: ["up"],
-      })
-    ).toBe(1);
-    expect(lines.join("")).toBe(
-      "! docker  E_DOCKER_UNAVAILABLE: Engine connection failed.\n"
-    );
-    expect(diagnostics.mock.calls).toEqual([
-      [{ message: "Second line of the diagnostic." }],
-      [
-        {
-          message:
-            "Refusal boundary: effect-entry (private-state); values omitted.",
         },
-      ],
-    ]);
-  } finally {
-    diagnostics.mockRestore();
-    stderr.mockRestore();
-  }
+      }),
+      jsonRequested: false,
+      handlerPath: ["up"],
+    });
+  `;
+  const result = spawnSyncBounded([process.execPath, "--eval", program], {
+    env: {
+      ...process.env,
+      HACK_LOGGER: "console",
+      HACK_DEBUG: "0",
+      NO_COLOR: "1",
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stdout.toString()).toBe("");
+  expect(result.stderr.toString()).toBe(
+    [
+      "! docker  E_DOCKER_UNAVAILABLE: Engine connection failed.",
+      "ERROR: Second line of the diagnostic.",
+      "ERROR: Refusal boundary: effect-entry (private-state); values omitted.",
+      "",
+    ].join("\n")
+  );
 });

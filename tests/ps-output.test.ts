@@ -68,3 +68,7 @@ test("replicas are named and multiple routes stay copyable", () => {
     "http://sample.hack.local, https://secure.sample.hack.local"
   );
 });
+
+test("running services without health probes keep their lifecycle state", () => {
+  expect(psServiceState({ state: "running", health: "none" })).toBe("running");
+});

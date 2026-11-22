@@ -25,7 +25,8 @@ export function psServiceState(item: {
   if (state === "exited" && item.exitCode != null) {
     return `exited (${item.exitCode})`;
   }
-  return state === "running" ? item.health?.toLowerCase() || state : state;
+  const health = item.health?.toLowerCase();
+  return state === "running" && health && health !== "none" ? health : state;
 }
 
 function psAddressText(row: PsRow, wide?: boolean): string | undefined {

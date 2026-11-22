@@ -345,8 +345,14 @@ test("a balloon that moves during one sample is subtracted at its larger reading
   // Each of its writes blocks until the sampler opens that pipe, and the sampler opens the
   // next pipe only after it has read the one before to its end, so every read gets
   // exactly the contents meant for it without any timing.
-  const growing = ["nr_balloon_pages 0\n", "nr_balloon_pages 1000000\n"];
-  const shrinking = ["nr_balloon_pages 1000000\n", "nr_balloon_pages 0\n"];
+  const growing = [
+    "nr_balloon_pages 0\n",
+    "nr_balloon_pages 1000000\n",
+  ] as const;
+  const shrinking = [
+    "nr_balloon_pages 1000000\n",
+    "nr_balloon_pages 0\n",
+  ] as const;
   for (const [before, after] of [growing, shrinking]) {
     const { root, paths } = await fixture();
     let writer: ReturnType<typeof Bun.spawn> | undefined;

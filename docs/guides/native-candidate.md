@@ -2106,6 +2106,12 @@ lease and checks the guest again before upload. Explicit `load-image` verifies
 its input even if the guest already has that image. Mutable tags are resolved
 on each `ensure-image` invocation.
 
+
+During native project startup, active services with the same canonical image reference
+and platform policy share one validated image selection. If services request
+different platforms for the same tag, their selections use the same immutable
+registry digest. A later start resolves the tag again.
+
 ### Explicit writable development source
 
 An isolated development pool can opt into a direct host project mount with

@@ -8,7 +8,9 @@ on:
     tags-ignore:
       - "v*"
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
     inputs:
       full:
@@ -23,13 +25,12 @@ on:
         default: "1"
 
 concurrency:
-  # Let the active next run finish, including jobs waiting for macOS capacity.
-  # New next pushes replace only the pending run. PRs still cancel stale runs;
-  # main pushes and explicit release qualification keep unique groups.
+  # Let active PR and next runs finish. A newer event can replace the pending
+  # run. Main pushes, merge groups and dispatches have independent groups.
   # The lead waits for a completed next run between batches unless its batch
   # verifier ran the same checks: pending revisions may still be replaced.
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/next' && 'push-next') || format('push-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 jobs:
   changes:
@@ -169,6 +170,13 @@ jobs:
             native=true
             shards='[1,2,3,4,5,6,7,8]'
             draft=false
+            defer_macos=false
+            # Qualify the exact queue tree with the full Linux tiers.
+            if [ "$EVENT_NAME" = "merge_group" ]; then
+              compiler='[{"os":"ubuntu-latest","platform":"linux","arch":"x64"},{"os":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"}]'
+              shards='[4,5,6,7,8]'
+              defer_macos=true
+            fi
             if [ "$EVENT_NAME" = "pull_request" ] && [ "$PR_DRAFT" = "true" ]; then
               draft=true; compiler='[]'; native=false; shards='[4,5,6,7,8]'
             fi
@@ -187,7 +195,7 @@ jobs:
           selection_mode=full
           ci_evidence=$evidence
           docker_suite=true
-          defer_macos=false
+          defer_macos=$defer_macos
           build_smoke=true
           EOF
             echo 'Full selection: main, explicit dispatch, protected input, unavailable diff, or policy bootstrap. Intel runs for main and explicit dispatch.' >> "$GITHUB_STEP_SUMMARY"
@@ -235,7 +243,7 @@ jobs:
             if [ "$e2e" != "true" ]; then echo 'docker_suite=false' >> "$GITHUB_OUTPUT"; fi
             printf 'build_smoke=%s\n' "$builds" >> "$GITHUB_OUTPUT"
             echo 'Ready PRs defer macOS to integration unless targeting main or labeled ci:mac or ci:full. Protected inputs and unavailable policy/diff retain full Linux, Docker and build tiers. Light PRs retain selected Linux checks; labels opt into heavy tiers. Drafts stay light.' >> "$GITHUB_STEP_SUMMARY"
-          else
+          elif [ "$EVENT_NAME" != "merge_group" ]; then
             printf 'defer_macos=false\nbuild_smoke=true\n' >> "$GITHUB_OUTPUT"
           fi
 
@@ -900,7 +908,17 @@ jobs:
           HACK_TEST_SELECTION: ${{ needs.changes.outputs.test_files }}
           HACK_TEST_DRAFT: ${{ needs.changes.outputs.draft }}
           HACK_TEST_DEFER_MACOS: ${{ needs.changes.outputs.defer_macos }}
-        run: bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD" --layout="$HACK_TEST_LAYOUT" --durations-out="$RUNNER_TEMP/test-shard-durations.json"
+          HACK_TEST_SYMLINK_TMP: ${{ matrix.shard == 8 && runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          if [ "$HACK_TEST_SYMLINK_TMP" = "true" ]; then
+            root=$(mktemp -d "$RUNNER_TEMP/symlink-tmp.XXXXXX")
+            trap 'rm -rf -- "$root"' EXIT
+            mkdir "$root/physical"
+            ln -s "$root/physical" "$root/linked"
+            export TMPDIR="$root/linked"
+          fi
+          bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD" --layout="$HACK_TEST_LAYOUT" --durations-out="$RUNNER_TEMP/test-shard-durations.json"
       - name: Preserve measured file durations
         # Per-file seconds only; refresh scripts/test-shard-durations.json with
         # `bun scripts/test-shard.ts update-durations`.

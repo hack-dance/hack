@@ -108,8 +108,15 @@ models and build smoke. macOS requires a main base or ci:mac/ci:full label;
 draft fan-ins fail and keep heavy tiers disabled.
 No PR install script executes while computing scope. The base archive supplies
 the working directory, Bun configuration and dependency lockfile for the policy.
-Retargeting (`edited`) recomputes scope; other PR metadata edits also cancel
-any in-progress PR run and start a new run.
+PR metadata edits do not start CI. After retargeting, push a new revision or
+close and reopen the PR to qualify it against the new base. Readiness and
+push events still start runs. An active PR run finishes while GitHub keeps
+at most one pending run per PR.
+
+Merge queue requests qualify GitHub’s combined commit with the full Linux
+unit pool, compiler hosts, candidate, Docker, build smoke, models and docs.
+macOS coverage stays with the PR and integration policies. Linux unit shard
+8 runs the assigned files through a symlinked `TMPDIR` on all CI events.
 
 Config, lockfiles, manifests, workflows, scripts, fixtures, scenario/model data,
 Rust/guest inputs, unknown paths and deleted modules select the full unit set.
@@ -176,9 +183,7 @@ could leave acceptance without matching platform evidence.
 Integration retains all selected macOS coverage. Deferring unlabeled PR macOS
 jobs reduces competition for the same hosted runner pool; it does not reserve
 macOS slots or guarantee a queue wait bound.
-PRs still cancel stale runs for the same PR. `main` pushes retain unique,
-non-cancelling groups. Manual full runs have unique groups and cannot be cancelled
-by a later `next` push.
+`main` pushes, manual runs and merge queue requests each use a unique group.
 
 ## Historical replay
 

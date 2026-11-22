@@ -25,7 +25,7 @@ mod boot_match;
 mod cache_provenance;
 mod dependency_hosts;
 #[cfg(target_os = "macos")]
-mod dependency_slots;
+pub(in crate::provider) mod dependency_slots;
 #[cfg(target_os = "macos")]
 mod host_pin_recovery;
 #[cfg(target_os = "macos")]
@@ -80,7 +80,7 @@ pub use startup::{Dependency, HostRelayRuntime, RefreshPolicy};
 mod archive;
 pub use archive::archive;
 mod bridge_recovery;
-mod bridges;
+pub(in crate::provider) mod bridges;
 pub use bridge_recovery::{export_bridge_recovery, inspect_bridge_recovery};
 pub(in crate::provider) use bridges::{initialize_owner_registry, verify_owner_registry};
 #[cfg(target_os = "macos")]

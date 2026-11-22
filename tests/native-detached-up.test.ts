@@ -3,6 +3,7 @@ import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderNativeHotReloadNotice } from "../src/backends/native-hot-reload-notice.ts";
+import { poolCapacityMessage } from "../src/backends/native-pool-capacity-refusal.ts";
 import { NATIVE_PROVIDER_PIN_MESSAGE } from "../src/backends/native-runtime-client.ts";
 import {
   NATIVE_HOOK_OUTPUT_TERMINAL_ONLY,
@@ -282,6 +283,37 @@ for (const mode of [
     }
   }, 15_000);
 }
+
+test("detached pool exhaustion prints the same refusal as attached startup", async () => {
+  const root = await fixtureRoot(join(tmpdir(), "native-detached-capacity-"));
+  const launcher = Bun.spawn(
+    [process.execPath, fixture, "launcher", root, "pool-capacity-failure"],
+    { env: fixtureEnv(root), stdin: "ignore", stdout: "pipe", stderr: "pipe" }
+  );
+  try {
+    const [code, stdout] = await Promise.all([
+      launcher.exited,
+      new Response(launcher.stdout).text(),
+    ]);
+    expect(code).toBe(1);
+    expect(JSON.parse(stdout)).toMatchObject({
+      ok: false,
+      error: {
+        message: poolCapacityMessage({
+          kind: "occupied",
+          holders: "demo (3 bridge, 1 dependency)",
+        }),
+      },
+    });
+  } finally {
+    await stop(root);
+    if (launcher.exitCode === null) {
+      launcher.kill("SIGTERM");
+      await launcher.exited;
+    }
+    await removeFixture(root);
+  }
+}, 15_000);
 
 for (const phase of ["static-preflight", "after-start"] as const) {
   test(`detached ${phase} failure keeps validated runtime detail through cleanup wrappers, never their text`, async () => {

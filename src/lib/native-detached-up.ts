@@ -11,6 +11,12 @@ import {
   nativeImageBlockerDetail,
 } from "../backends/native-image-policy.ts";
 import {
+  isPoolCapacityDetail,
+  type PoolCapacityDetail,
+  PoolCapacityRefusal,
+  poolCapacityMessage,
+} from "../backends/native-pool-capacity-refusal.ts";
+import {
   type NativeProfileNotice,
   parseNativeProfileNotice,
   renderNativeProfileNotice,
@@ -76,6 +82,7 @@ let publishShellVariables:
   | ((names: readonly string[], ignoredRootDotenv?: boolean) => void)
   | undefined;
 type StartupFailure = {
+  readonly capacity?: PoolCapacityDetail;
   readonly code: string;
   readonly message?: string;
   readonly service?: string;
@@ -353,6 +360,13 @@ export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
   if (!publishFailure) {
     return;
   }
+  if (error instanceof PoolCapacityRefusal) {
+    await publishFailure({
+      code: "pool_capacity_refused",
+      capacity: error.capacity,
+    });
+    return;
+  }
   if (error instanceof NativeImageBlocker) {
     await publishImageBlocker?.(error.observation);
     return;
@@ -381,12 +395,20 @@ function isStartupFailure(value: unknown): value is StartupFailure {
   return (
     isRecord(value) &&
     Object.keys(value).every((key) =>
-      ["code", "message", "service", "failedServices", "startupPhase"].includes(
-        key
-      )
+      [
+        "code",
+        "message",
+        "service",
+        "failedServices",
+        "startupPhase",
+        "capacity",
+      ].includes(key)
     ) &&
     typeof value.code === "string" &&
     FAILURE_CODE.test(value.code) &&
+    (value.code === "pool_capacity_refused"
+      ? isPoolCapacityDetail(value.capacity)
+      : value.capacity === undefined) &&
     (value.message === undefined ||
       (typeof value.message === "string" &&
         FAILURE_MESSAGE.test(value.message))) &&
@@ -434,6 +456,12 @@ function startupFailureMessage(value: unknown): StartupFailure | undefined {
 }
 
 function startupFailureError(failure: StartupFailure): HackCliError {
+  if (failure.capacity) {
+    return new HackCliError({
+      code: "E_STARTUP_INCOMPLETE",
+      message: poolCapacityMessage(failure.capacity),
+    });
+  }
   noteActivityFailedServices([
     ...(failure.failedServices ?? []),
     failure.service,

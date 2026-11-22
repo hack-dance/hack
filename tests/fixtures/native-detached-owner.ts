@@ -2,6 +2,7 @@ import { ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { PoolCapacityRefusal } from "../../src/backends/native-pool-capacity-refusal.ts";
 import {
   NativeRuntimeRequestError,
   retainNativeRuntimeFailure,
@@ -407,6 +408,7 @@ if (role === "channel-holder") {
     });
   } catch (error) {
     process.exitCode = [
+      "pool-capacity-failure",
       "wrapped-failure",
       "wrapped-static-failure",
       "builder-missing",
@@ -513,6 +515,17 @@ if (role === "channel-holder") {
           "wrapped-provider-pin",
         ].includes(mode)
       ) {
+        server.stop(true);
+        process.off("SIGTERM", terminate);
+        return 1;
+      }
+      if (mode === "pool-capacity-failure") {
+        await nativeDetachedUpFailure(
+          new PoolCapacityRefusal({
+            kind: "occupied",
+            holders: "demo (3 bridge, 1 dependency)",
+          })
+        );
         server.stop(true);
         process.off("SIGTERM", terminate);
         return 1;

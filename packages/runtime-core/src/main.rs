@@ -1417,6 +1417,11 @@ fn run() -> Result<(), CandidateError> {
                 &discover_candidate(&requested)?,
             )?)?;
         }
+        ["runtime", "socket-usage", "--json"] => {
+            print_json(&hack_runtime_core::provider::socket_usage(
+                &discover_candidate(&requested)?,
+            )?)?;
+        }
         ["runtime", action] | ["runtime", action, "--json"] => {
             let candidate = discover_candidate(&requested)?;
             let result = match *action {

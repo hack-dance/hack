@@ -134,6 +134,18 @@ documents can contain decrypted values and remain in owned private files with
 restricted permissions. They are never part of the public plan or JSON output.
 Do not copy these documents into source control or attach them to diagnostics.
 
+## Native pool socket capacity
+
+Native projects and branch instances share the application's bridge sockets
+and the host-dependency sockets in their native home. If a start needs slots
+another project holds, run `hack down` in that project to release them.
+
+If the pool was created with fewer sockets than a single project requires,
+stopping other projects cannot increase the pool's configured capacity.
+Choose a new private directory for `HACK_NATIVE_HOME` and use that setting
+for the project's subsequent native commands. Existing data stays in the
+original native home. The new home starts with separate runtime state and data.
+
 ## Owned project networks
 
 For an unchanged unrouted running instance, `up` reuses its saved generation only

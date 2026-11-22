@@ -162,6 +162,20 @@ pub(in crate::provider) fn verify_owner_registry(
     Ok(())
 }
 
+pub(in crate::provider) fn socket_counts(
+    candidate: &Candidate,
+    owner: &state::Owner,
+) -> Result<BTreeMap<String, usize>, CandidateError> {
+    let mut counts = BTreeMap::new();
+    if let Some(intent) = owner.application_bridge {
+        let store = read_owner_registry(candidate, &owner.token, intent.slots, false)?;
+        for assignment in store.slots.into_values() {
+            *counts.entry(assignment.run).or_default() += 1;
+        }
+    }
+    Ok(counts)
+}
+
 fn read_owner_registry(
     candidate: &Candidate,
     owner: &str,

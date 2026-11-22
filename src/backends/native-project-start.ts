@@ -65,6 +65,7 @@ import {
   nativeImageRegistryReason,
 } from "./native-image-policy.ts";
 import { nativeImageBlocker, offlineTagNotice } from "./native-image-tags.ts";
+import { nativePoolCapacityRefusal } from "./native-pool-capacity-refusal.ts";
 import {
   type NativePreparedBase,
   preparedBaseArguments,
@@ -3490,7 +3491,12 @@ export async function startNativeProject(
       finish = await beginNativeProjectStartupObservation(opts.scope);
     });
   } catch (error) {
-    throw withStartupLockBlocker(error);
+    const refusal = await nativePoolCapacityRefusal(error, {
+      runtime: opts.runtime,
+      invoke: opts.dependencies?.invoke ?? invokeNativeRuntime,
+      signal: opts.signal,
+    });
+    throw refusal ?? withStartupLockBlocker(error);
   } finally {
     stopPoolWatch?.();
     await finish?.();

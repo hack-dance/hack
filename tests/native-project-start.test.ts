@@ -5584,7 +5584,12 @@ test("a parallel build registry refusal keeps its blocker after the sibling sett
     };
     const result = startNativeProject(opts);
     try {
-      await Promise.race([siblingAborted.promise, result, Bun.sleep(2000)]);
+      const aborted = await Promise.race([
+        siblingAborted.promise.then(() => true),
+        result.then(() => false),
+        Bun.sleep(2000).then(() => false),
+      ]);
+      expect(aborted).toBe(true);
       expect(starts).toBe(2);
       expect(siblingSettled).toBe(false);
     } finally {

@@ -5134,7 +5134,8 @@ export async function materializeProjectEnv(opts: {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await writeTextFile(
     resolveProjectEnvStatePath({ projectDir: opts.projectDir }),
-    stateText
+    stateText,
+    0o600
   );
   return {
     envPath,

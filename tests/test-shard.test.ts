@@ -1286,15 +1286,28 @@ describe("hosted test CI fan-in", () => {
     }
   });
 
-  test("the focus job always reports and runs only for a focused scope", async () => {
+  test("the focus job always checks Doctor classifications and scopes the remaining tests", async () => {
     const focus = (await ciWorkflow()).jobs["test-focus"];
     expect(focus?.name).toBe("test focus");
     expect(focus?.needs).toBe("changes");
     // No job-level condition: a push run must show it as a success, not a skip.
     expect(focus?.if).toBeUndefined();
     const steps = focus?.steps ?? [];
-    expect(steps[0]?.if).toBeUndefined();
-    for (const step of steps.slice(1)) {
+    // CLI-only changes can add Doctor IDs even when no focused suite runs.
+    const always = steps.slice(0, 4);
+    expect(always.map((step) => step.name)).toEqual([
+      "Report scope",
+      "Checkout",
+      "Setup Bun",
+      "Check Desktop Doctor classifications",
+    ]);
+    for (const step of always) {
+      expect(step.if).toBeUndefined();
+    }
+    expect(always[3]?.run).toBe(
+      "bun test --config /dev/null tests/doctor-desktop-check-ids.test.ts"
+    );
+    for (const step of steps.slice(always.length)) {
       expect(step.if).toBe("${{ needs.changes.outputs.test_focus != '' }}");
     }
     const run = steps.find((step) => step.name === "Focused tests");

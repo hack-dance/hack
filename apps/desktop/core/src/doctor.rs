@@ -86,8 +86,7 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
         | "caddy"
         | "caddy (optional)"
         | "asdf"
-        | "asdf (optional)"
-        | "lifecycle supervisor" => (Engine, Machine),
+        | "asdf (optional)" => (Engine, Machine),
         // Dev performance (doctor-dev-performance.ts): image architecture
         // against the engine's, and the Compose file's own settings.
         "compose backend features" | "emulated services" | "shared volume architectures" => {
@@ -120,8 +119,7 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
         | "secret integrity"
         | "secrets hygiene"
         | "compose env at rest"
-        | "env override coverage"
-        | "prerequisites" => (EnvSecrets, Project),
+        | "env override coverage" => (EnvSecrets, Project),
         "project"
         | "runtime hygiene"
         | "lifecycle hygiene"
@@ -132,7 +130,9 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
         | "sessions mux"
         | "polling watchers"
         | "dev image tags"
-        | "shared source installs" => (ProjectFiles, Project),
+        | "shared source installs"
+        | "prerequisites"
+        | "lifecycle supervisor" => (ProjectFiles, Project),
         "native host dns"
         | "native hack.local route"
         | "native hack.local repair"
@@ -163,7 +163,7 @@ fn prefixed(id: &str) -> Option<(Area, Scope)> {
         return Some((Area::RoutingDns, Scope::Machine));
     }
     if id.starts_with("prerequisite ") {
-        return Some((Area::EnvSecrets, Scope::Project));
+        return Some((Area::ProjectFiles, Scope::Project));
     }
     if id.starts_with("native ") {
         return Some((Area::Native, Scope::Project));
@@ -2046,8 +2046,9 @@ mod tests {
         for (id, area, scope) in [
             ("shared source installs", Area::ProjectFiles, Scope::Project),
             ("env override coverage", Area::EnvSecrets, Scope::Project),
-            ("prerequisites", Area::EnvSecrets, Scope::Project),
-            ("prerequisite example", Area::EnvSecrets, Scope::Project),
+            ("prerequisites", Area::ProjectFiles, Scope::Project),
+            ("prerequisite example", Area::ProjectFiles, Scope::Project),
+            ("lifecycle supervisor", Area::ProjectFiles, Scope::Project),
             ("native temporary aliases", Area::Native, Scope::Machine),
             ("native pool idle", Area::Native, Scope::Machine),
             ("native image builder", Area::Native, Scope::Project),

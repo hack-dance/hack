@@ -140,6 +140,7 @@ function randomToken(): string {
 /** The caller-supplied options of `hack exec|run` that define a request. */
 export type CallerOptions = {
   readonly env?: string;
+  readonly use?: string;
   readonly workdir?: string;
   readonly profile?: string;
 };
@@ -159,7 +160,7 @@ export function callerIdentity(opts: {
   readonly options: CallerOptions;
 }): Record<string, unknown> {
   const workdir = (opts.options.workdir ?? "").trim();
-  return requestIdentity({
+  const identity = requestIdentity({
     request: opts.request,
     operation: opts.operation,
     projectRoot: opts.projectRoot,
@@ -170,6 +171,9 @@ export function callerIdentity(opts: {
     overlay: opts.options.env ?? null,
     profiles: opts.options.profile ?? null,
   });
+  return opts.options.use === undefined
+    ? identity
+    : { ...identity, use: opts.options.use };
 }
 
 /** Background form of the final `composeRuntimeBackend.exec|run` call. */

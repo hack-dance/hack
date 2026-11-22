@@ -17,3 +17,9 @@ TLC explored 22 distinct states. The negative control violated
 `ReaderSeesWholeChoice` with `saved = "partial"` at `Claim`.
 
 [State chart](state.svg) · [Mermaid source](state.mmd)
+
+`prepareProjectRemoteChoices` implements the snapshot before startup effects.
+Compose applies target and source labels with each recreated container.
+`runningRemoteChoice` reports a target only when the observed containers agree.
+The test in `tests/project-remote-selection-cli.test.ts` exercises a start
+with an invocation override and checks the separate checkout preference.

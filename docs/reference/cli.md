@@ -356,6 +356,7 @@ hack up [services...] [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
+| `--use <remote=target[,remote=target...]>` | Select remote targets for this invocation |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--detach, -d` | Run in background (docker compose up -d) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
@@ -425,6 +426,7 @@ hack restart [services...] [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
+| `--use <remote=target[,remote=target...]>` | Select remote targets for this invocation |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
@@ -570,6 +572,7 @@ Everything from `<cmd>` on is passed to the command unchanged, including flags s
 | `--timeout-ms <ms>` | With --detach: stop the command after this long (default 1800000, maximum 21600000) |
 | `--stall-after-ms <ms>` | With --detach: report an advisory stall after this long without output (default 120000, 0 turns it off) |
 | `--capture <full|metadata>` | With --detach: store output (full, the default) or only events and the outcome (metadata) |
+| `--use <remote=target[,remote=target...]>` | Select remote targets for this invocation |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1217,6 +1220,7 @@ Reuse the default project workspace when it already exists, or create an isolate
 | `--detach, -d` | Create or reuse the workspace without attaching (for GUI/non-TTY use) |
 | `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
 | `--service <global|service>` | Inject env for the selected scope (global or a service name) |
+| `--use <remote=target[,remote=target...]>` | Select remote targets for this invocation |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -3574,6 +3578,7 @@ Run a one-off command on the host with the selected Hack env overlay injected. U
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
+| `--use <remote=target[,remote=target...]>` | Select remote targets for this invocation |
 | `--scope <global|service>` | Resolve values for one env scope while still running the command on the host |
 | `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
 | `--shell <command>` | Run a shell command string via /bin/sh -lc after env injection so `$VAR` expansion happens inside the child shell |
@@ -3602,6 +3607,7 @@ Start an interactive host shell with the selected Hack env overlay injected. Use
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--env <name|base|default>` | Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior |
+| `--use <remote=target[,remote=target...]>` | Select remote targets for this invocation |
 | `--scope <global|service>` | Resolve values for one env scope while still running the command on the host |
 | `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |

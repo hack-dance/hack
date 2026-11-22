@@ -279,3 +279,17 @@ Project JSON rows and hackd project snapshots share `backend`, `state`,
 Unavailable evidence stays unknown/null. A zero exit is a completed job only
 with a declared completion role. Default `projects --json --observe` still
 contacts no runtime; live observations require `--runtime`.
+
+## Choose a remote service target
+
+When the project declares remote services, run `hack use` to see the targets
+observed on running containers and the choices for the next start. With the
+Compose copy stopped, `hack use db=qa` saves the choice in this checkout.
+Use `hack up --use db=qa` to choose a target for one command. The same flag
+works on `restart`, `run`, `host exec`, `host shell`, and `session start`.
+Hack uses the flag first, then the checkout choice, then the project default.
+
+Hack asks before using a target that requires confirmation. On a noninteractive
+run, name that target with `--use` on the command itself. The output names
+managed hostname references without printing their values. A target with
+`via` can be selected and reports that this version does not start its tunnel.

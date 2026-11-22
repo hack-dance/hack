@@ -176,11 +176,15 @@ export function renderComposeEnvReferenceOverride(opts: {
   readonly serviceEnv: Readonly<
     Record<string, Readonly<Record<string, string>>>
   >;
+  readonly labels?: Readonly<Record<string, string>>;
   readonly effectiveScopes?: ComposeEnvEffectiveScopes;
 }): ComposeEnvReferenceOverride | null {
   const services: Record<
     string,
-    { readonly environment: Readonly<Record<string, string>> }
+    {
+      readonly environment: Readonly<Record<string, string>>;
+      readonly labels?: Readonly<Record<string, string>>;
+    }
   > = {};
   const env: Record<string, string> = {};
   const sharing = opts.effectiveScopes !== undefined;
@@ -209,8 +213,11 @@ export function renderComposeEnvReferenceOverride(opts: {
       environment[key] = `\${${name}}`;
       env[name] = value;
     }
-    if (Object.keys(environment).length > 0) {
-      services[service] = { environment };
+    if (Object.keys(environment).length > 0 || opts.labels) {
+      services[service] = {
+        environment,
+        ...(opts.labels ? { labels: opts.labels } : {}),
+      };
     }
   }
   if (Object.keys(services).length === 0) {

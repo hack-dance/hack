@@ -2,12 +2,15 @@ import { lstat, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { HackCliError } from "./cli-result.ts";
+import { readComposeOneShotGraph } from "./compose-oneshot-progress.ts";
 import {
   readAtomicWriteTargetText,
   writeTextFileAtomicIfChanged,
 } from "./fs.ts";
+import { ensureHackGitInfoExclude } from "./git-info-exclude.ts";
 import { isRecord } from "./guards.ts";
 import { canPrompt } from "./interactivity.ts";
+import { type ProjectContext, readProjectConfig } from "./project.ts";
 import { formatProjectRemoteAddress } from "./project-remote-status.ts";
 import type { SelectedProjectRemote } from "./project-remotes-config.ts";
 import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
@@ -77,6 +80,7 @@ export function resolveRemoteChoices(
     return {
       ...entry,
       ...selected,
+      via: selected.via,
       target,
       source: flag === undefined ? savedSource : "--use",
     };
@@ -221,6 +225,7 @@ export async function saveRemoteChoices(opts: {
       const saved = { ...readChoices(previous), ...opts.changes };
       resolveRemoteChoices(opts.defaults, saved, {});
       await opts.assertStopped();
+      await ensureHackGitInfoExclude({ projectDir: opts.projectDir });
       await writeTextFileAtomicIfChanged(
         path,
         `${JSON.stringify(saved, null, 2)}\n`,
@@ -234,4 +239,177 @@ export async function saveRemoteChoices(opts: {
       );
     },
   });
+}
+
+export async function prepareProjectRemoteChoices(
+  project: ProjectContext,
+  use: string | undefined
+): Promise<readonly EffectiveRemote[]> {
+  const { prerequisites } = await readProjectConfig(project);
+  if (prerequisites?.error) {
+    throw prerequisites.error;
+  }
+  const defaults = prerequisites?.config?.selected ?? [];
+  if (
+    process.env.HACK_RUNTIME_BACKEND === "native" &&
+    (defaults.length || use !== undefined)
+  ) {
+    throw new HackCliError({
+      code: "E_NATIVE_PROJECT_UNSUPPORTED",
+      message: "Remote selection currently requires the Compose backend.",
+    });
+  }
+  return await prepareRemoteChoices({
+    projectDir: project.projectDir,
+    defaults,
+    use,
+  });
+}
+
+export function applyRemoteEnv(
+  env: Readonly<Record<string, string>>,
+  choices: readonly EffectiveRemote[] = [],
+  bindingsOnly = false
+): Record<string, string> {
+  const result = bindingsOnly ? {} : { ...env };
+  for (const { address, bindings, port } of choices) {
+    let host: string;
+    if (address.kind === "env_ref") {
+      const value = Object.hasOwn(env, address.name)
+        ? env[address.name]
+        : undefined;
+      if (!value) {
+        throw new HackCliError({
+          code: "E_CONFIG_INVALID",
+          message: `Missing managed environment value for ${address.name}.`,
+        });
+      }
+      host = value;
+    } else {
+      host = address.kind === "service" ? address.service : address.hostname;
+    }
+    for (const [name, template] of Object.entries(bindings)) {
+      Object.defineProperty(result, name, {
+        value: template.replaceAll(/\{(host|port)\}/g, (_, key) =>
+          key === "host" ? host : String(port)
+        ),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+  }
+  return result;
+}
+
+function backingServices(choices: readonly EffectiveRemote[]) {
+  const selected = new Set<string>();
+  const declared = new Set<string>();
+  for (const choice of choices) {
+    for (const target of choice.targets.values()) {
+      if (target.address.kind === "service") {
+        declared.add(target.address.service);
+      }
+    }
+    if (choice.address.kind === "service") {
+      selected.add(choice.address.service);
+    }
+  }
+  return {
+    selected,
+    inactive: [...declared].filter((service) => !selected.has(service)),
+  };
+}
+
+export function inactiveRemoteServices(
+  choices: readonly EffectiveRemote[] = []
+): readonly string[] {
+  return backingServices(choices).inactive;
+}
+
+export function remoteServiceTargets(
+  choices: readonly EffectiveRemote[] | undefined,
+  services: readonly string[],
+  scoped = false
+): readonly string[] {
+  if (!choices?.length) {
+    return services;
+  }
+  const { selected, inactive } = backingServices(choices);
+  const included = services.filter((service) => !inactive.includes(service));
+  if (
+    (scoped && included.length !== services.length) ||
+    included.length + selected.size === 0
+  ) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message:
+        "No requested Compose service is available with this remote selection.",
+    });
+  }
+  return [...new Set([...included, ...selected])];
+}
+
+export async function assertNoInactiveRemoteDependencies(opts: {
+  readonly files: readonly string[];
+  readonly services: readonly string[];
+  readonly choices: readonly EffectiveRemote[];
+}): Promise<void> {
+  const inactive = inactiveRemoteServices(opts.choices);
+  if (!inactive.length) {
+    return;
+  }
+  const graph = await readComposeOneShotGraph(opts.files);
+  const pending = new Set(opts.services);
+  for (const service of pending) {
+    if (inactive.includes(service)) {
+      throw new HackCliError({
+        code: "E_CONFIG_INVALID",
+        message: `Compose would start ${service}, a service for an unselected remote target.`,
+      });
+    }
+    for (const dependency of graph.dependsOn.get(service) ?? []) {
+      pending.add(dependency);
+    }
+  }
+}
+export function remoteSelectionLabels(
+  choices: readonly EffectiveRemote[] = []
+): Record<string, string> {
+  return Object.fromEntries(
+    choices.map(({ remote, target, source }) => [
+      `dev.hack.remote.${remote}`,
+      `${target}:${source}`,
+    ])
+  );
+}
+
+export function runningRemoteChoice(
+  entries: readonly Record<string, unknown>[],
+  remote: SelectedProjectRemote
+): { target: string; source: EffectiveRemote["source"] } | null {
+  const prefix = `dev.hack.remote.${remote.remote}=`;
+  const labels = new Set(
+    entries.flatMap(({ State, Labels }) => {
+      if (State !== "running") {
+        return [];
+      }
+      const fields = typeof Labels === "string" ? Labels.split(",") : [];
+      if (fields.includes("com.docker.compose.oneoff=True")) {
+        return [];
+      }
+      return [
+        fields.find((label) => label.startsWith(prefix))?.slice(prefix.length),
+      ];
+    })
+  );
+  if (labels.size !== 1) {
+    return null;
+  }
+  const [target, source] = ([...labels][0] ?? "").split(":");
+  return target &&
+    remote.targets.has(target) &&
+    (source === "--use" || source === "checkout" || source === "default")
+    ? { target, source }
+    : null;
 }

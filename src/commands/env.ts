@@ -21,7 +21,13 @@ import {
   parseMaterializeScopeOption,
 } from "../cli/env-arguments.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
-import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
+import {
+  optEnv,
+  optJson,
+  optPath,
+  optProject,
+  optUse,
+} from "../cli/options.ts";
 import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { emitCliResult, HackCliError } from "../lib/cli-result.ts";
@@ -125,6 +131,10 @@ import {
   parseProjectEnvKeyOverride,
   runWithProjectEnvKeyOverride,
 } from "../lib/project-env-key-override.ts";
+import {
+  applyRemoteEnv,
+  prepareProjectRemoteChoices,
+} from "../lib/project-remote-selection.ts";
 import {
   formatSecretStoreDescriptor,
   provisionEncryptedFileKey,
@@ -493,6 +503,7 @@ const hostExecSpec = defineCommand({
     optPath,
     optProject,
     optEnv,
+    optUse,
     optScope,
     optTarget,
     optShellCommand,
@@ -511,7 +522,7 @@ const hostShellSpec = defineCommand({
   group: "Project",
   description:
     "Start an interactive host shell with the selected Hack env overlay injected. Use --scope when you want service-scoped values without running inside that service container.",
-  options: [optPath, optProject, optEnv, optScope, optTarget],
+  options: [optPath, optProject, optEnv, optUse, optScope, optTarget],
   positionals: [],
   subcommands: [],
 } as const);
@@ -869,6 +880,7 @@ async function loadModernProjectEnv(input: {
 }
 
 async function resolveEnvInjection(input: {
+  readonly use?: string;
   readonly project: ProjectContext;
   readonly projectName: string;
   readonly envName: string | null | undefined;
@@ -878,6 +890,7 @@ async function resolveEnvInjection(input: {
   readonly env: Record<string, string>;
   readonly effectiveEnvName: string | null;
 }> {
+  const choices = await prepareProjectRemoteChoices(input.project, input.use);
   await maybeMigrateLegacyProjectEnv({
     project: input.project,
     projectName: input.projectName,
@@ -899,7 +912,7 @@ async function resolveEnvInjection(input: {
     });
     return {
       env: await adaptEnvForHostExecution({
-        env,
+        env: applyRemoteEnv(env, choices),
         target: input.target,
         serviceNames,
       }),
@@ -921,10 +934,13 @@ async function resolveEnvInjection(input: {
   });
   return {
     env: await adaptEnvForHostExecution({
-      env: selectHackEnvValues({
-        resolved,
-        serviceName: input.serviceName,
-      }),
+      env: applyRemoteEnv(
+        selectHackEnvValues({
+          resolved,
+          serviceName: input.serviceName,
+        }),
+        choices
+      ),
       target: input.target,
       serviceNames,
     }),
@@ -2556,6 +2572,7 @@ function resolveShellCommandCommand(input: {
 }
 
 async function runHostCommandWithInjectedEnv(input: {
+  readonly use?: string;
   readonly ctx: CliContext;
   readonly pathOpt: string | undefined;
   readonly projectOpt: string | undefined;
@@ -2620,6 +2637,7 @@ async function runHostCommandWithInjectedEnv(input: {
   }
 
   const envState = await resolveEnvInjection({
+    use: input.use,
     project,
     projectName,
     envName,
@@ -2646,6 +2664,7 @@ async function runHostCommandWithInjectedEnv(input: {
 }
 
 async function openHostShellWithInjectedEnv(input: {
+  readonly use?: string;
   readonly ctx: CliContext;
   readonly pathOpt: string | undefined;
   readonly projectOpt: string | undefined;
@@ -2671,6 +2690,7 @@ async function openHostShellWithInjectedEnv(input: {
   });
   const projectName = await resolveProjectName(project);
   const envState = await resolveEnvInjection({
+    use: input.use,
     project,
     projectName,
     envName,
@@ -2722,6 +2742,7 @@ const handleHostExec: CommandHandlerFor<typeof hostExecSpec> = async ({
   args,
 }): Promise<number> => {
   return await runHostCommandWithInjectedEnv({
+    use: args.options.use,
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
@@ -2740,6 +2761,7 @@ const handleHostShell: CommandHandlerFor<typeof hostShellSpec> = async ({
   args,
 }): Promise<number> => {
   return await openHostShellWithInjectedEnv({
+    use: args.options.use,
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,

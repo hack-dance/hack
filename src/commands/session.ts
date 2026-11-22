@@ -12,7 +12,7 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
-import { optEnv, optJson, optPretty } from "../cli/options.ts";
+import { optEnv, optJson, optPretty, optUse } from "../cli/options.ts";
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
   assertEnvMigrationFinished,
@@ -40,6 +40,11 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValues,
 } from "../lib/project-env-config.ts";
+import {
+  applyRemoteEnv,
+  type EffectiveRemote,
+  prepareProjectRemoteChoices,
+} from "../lib/project-remote-selection.ts";
 import type { RegisteredProject } from "../lib/projects-registry.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { exec, run } from "../lib/shell.ts";
@@ -60,6 +65,7 @@ import {
 } from "../mux/session-names.ts";
 import { attachTmuxSession } from "../mux/tmux-backend.ts";
 import { logger } from "../ui/logger.ts";
+import { startComposeForSession } from "./project.ts";
 import {
   buildSessionPanesEndEvent,
   buildSessionPanesErrorEvent,
@@ -167,7 +173,7 @@ const startSpec = defineCommand({
   group: "Project",
   description:
     "Reuse the default project workspace when it already exists, or create an isolated long-running workspace with --new or --name. Use --detach when another tool should keep the workspace alive without attaching your terminal.",
-  options: [optUp, optNew, optName, optDetach, optEnv, optService],
+  options: [optUp, optNew, optName, optDetach, optEnv, optService, optUse],
   positionals: [
     { name: "project", description: "Project name or path", required: false },
   ],
@@ -556,8 +562,8 @@ async function maybeReuseExistingWorkspace(opts: {
   readonly project: RegisteredProject;
   readonly projectContext: ProjectContext | null;
   readonly detach: boolean;
-  readonly runUp: boolean;
-  readonly envName: string | null | undefined;
+  readonly runUp?: () => Promise<void>;
+  readonly hasRemoteChoices: boolean;
   readonly forceNew: boolean;
   readonly customName: string | undefined;
 }): Promise<number | null> {
@@ -581,12 +587,12 @@ async function maybeReuseExistingWorkspace(opts: {
     });
   }
 
-  if (opts.runUp) {
-    await runHackUp({
-      projectPath: resolveRunUpCwd({ project: opts.project }),
-      envName: opts.envName,
+  if (opts.hasRemoteChoices) {
+    logger.info({
+      message: "The existing workspace keeps its starting environment.",
     });
   }
+  await opts.runUp?.();
 
   if (opts.detach) {
     return 0;
@@ -1082,6 +1088,7 @@ async function maybeMigrateLegacySessionEnv(opts: {
 }
 
 async function resolveSessionInjectedEnv(opts: {
+  readonly remoteChoices?: readonly EffectiveRemote[];
   readonly project: ProjectContext;
   readonly projectName: string;
   readonly envName: string | null | undefined;
@@ -1105,10 +1112,13 @@ async function resolveSessionInjectedEnv(opts: {
   await reportLooseEnvLayerModes({ projectDir: opts.project.projectDir });
   if (modern) {
     return await appendHackHostTrustEnvironment(
-      selectProjectEnvValues({
-        resolved: modern,
-        scopeName: opts.serviceName,
-      })
+      applyRemoteEnv(
+        selectProjectEnvValues({
+          resolved: modern,
+          scopeName: opts.serviceName,
+        }),
+        opts.remoteChoices
+      )
     );
   }
 
@@ -1118,10 +1128,13 @@ async function resolveSessionInjectedEnv(opts: {
     envName: opts.envName,
   });
   return await appendHackHostTrustEnvironment(
-    selectHackEnvValues({
-      resolved,
-      serviceName: opts.serviceName,
-    })
+    applyRemoteEnv(
+      selectHackEnvValues({
+        resolved,
+        serviceName: opts.serviceName,
+      }),
+      opts.remoteChoices
+    )
   );
 }
 
@@ -1179,13 +1192,14 @@ const handleList: CommandHandlerFor<
 
 const handleStart = async ({
   args,
+  ctx,
 }: {
   readonly ctx: CliContext;
   readonly args: StartArgs;
 }): Promise<number> => {
   const projectNameOrPath = args.positionals.project;
   const forceNew = args.options.new === true;
-  const runUp = args.options.up === true;
+
   const customName = args.options.name;
   const detach = args.options.detach === true;
   const project = await resolveProjectForSessionStart({ projectNameOrPath });
@@ -1218,19 +1232,45 @@ const handleStart = async ({
     logger.error({ message: `Project not found: ${project.repoRoot}` });
     return 1;
   }
+  const remoteChoices = await prepareProjectRemoteChoices(
+    projectContext,
+    args.options.use
+  );
+  const projectPath = resolveRunUpCwd({ project });
+  const runUp = args.options.up
+    ? async () => {
+        if (!remoteChoices.length) {
+          await runHackUp({ projectPath, envName });
+          return;
+        }
+        const code = await startComposeForSession({
+          ctx,
+          cwd: projectPath,
+          envName,
+          use: args.options.use,
+          remoteChoices,
+        });
+        if (code) {
+          throw new CliUsageError(
+            "Could not start the project for this session."
+          );
+        }
+      }
+    : undefined;
   const projectEnv = await resolveSessionInjectedEnv({
+    remoteChoices,
     project: projectContext,
     projectName: project.name,
     envName,
     serviceName,
   });
   const reused = await maybeReuseExistingWorkspace({
+    hasRemoteChoices: remoteChoices.length > 0,
     baseName,
     project,
     projectContext,
     detach,
     runUp,
-    envName,
     forceNew,
     customName,
   });
@@ -1256,13 +1296,7 @@ const handleStart = async ({
     return 1;
   }
 
-  // Run hack up if requested
-  if (runUp) {
-    await runHackUp({
-      projectPath: resolveRunUpCwd({ project }),
-      envName,
-    });
-  }
+  await runUp?.();
 
   // Use repoRoot (project root), not projectDir (.hack/)
   if (detach) {

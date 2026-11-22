@@ -34,6 +34,16 @@ import {
   wrapLifecyclePersistentCommand as wrapSharedLifecyclePersistentCommand,
 } from "../lib/project-lifecycle-controller.ts";
 import { enforceProjectPrerequisites } from "../lib/project-prerequisites.ts";
+import {
+  applyRemoteEnv,
+  assertNoInactiveRemoteDependencies,
+  type EffectiveRemote,
+  inactiveRemoteServices,
+  prepareProjectRemoteChoices,
+  remoteSelectionLabels,
+  remoteServiceTargets,
+  runningRemoteChoice,
+} from "../lib/project-remote-selection.ts";
 import { projectRemoteStatuses } from "../lib/project-remote-status.ts";
 import {
   writeStartBlocker,
@@ -163,6 +173,8 @@ import {
   CliUsageError,
   defineCommand,
   defineOption,
+  parseOptionsForCommand,
+  parsePositionalsForCommand,
   withHandler,
 } from "../cli/command.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
@@ -181,6 +193,7 @@ import {
   optSince,
   optTail,
   optUntil,
+  optUse,
 } from "../cli/options.ts";
 import {
   parseProjectSelectorOption,
@@ -760,6 +773,7 @@ const upOptions = [
   optPath,
   optProject,
   optEnv,
+  optUse,
   optBranch,
   optDetach,
   optProfile,
@@ -813,6 +827,7 @@ const restartOptions = [
   optPath,
   optProject,
   optEnv,
+  optUse,
   optBranch,
   optProfile,
   optTarget,
@@ -852,6 +867,7 @@ const runOptions = [
   optProfile,
   ...backgroundCommandOptions,
 ] as const;
+const composeRunOptions = [...runOptions, optUse] as const;
 const runPositionals = [
   { name: "service", required: true },
   { name: "cmd", required: false, multiple: true, passthrough: true },
@@ -950,7 +966,7 @@ type RestartArgs = CommandArgs<
   typeof serviceLifecyclePositionals
 >;
 type PsArgs = CommandArgs<typeof psOptions, readonly []>;
-type RunArgs = CommandArgs<typeof runOptions, typeof runPositionals>;
+type RunArgs = CommandArgs<typeof composeRunOptions, typeof runPositionals>;
 type ExecArgs = CommandArgs<typeof runOptions, typeof runPositionals>;
 type LogsArgs = CommandArgs<typeof logsOptions, typeof logsPositionals>;
 type OpenArgs = CommandArgs<typeof openOptions, typeof openPositionals>;
@@ -1045,7 +1061,7 @@ const runSpec = defineCommand({
   summary:
     "Run a one-off command in a service container (docker compose run --rm)",
   group: "Project",
-  options: runOptions,
+  options: composeRunOptions,
   positionals: runPositionals,
   subcommands: [],
 } as const);
@@ -2039,6 +2055,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly targetServices: readonly string[];
   readonly allServiceNames: readonly string[];
+  readonly remoteChoices?: readonly EffectiveRemote[];
   readonly envName?: string | null;
   /** See resolveComposeEnvOverrides. */
   readonly persist?: boolean;
@@ -2072,15 +2089,30 @@ export async function resolveModernComposeEnvOverrides(opts: {
       message: `This checkout ${describeUnmigratedLegacyDotenv(unmigrated)} in its legacy .hack/.env files, and the env layers don't deliver those values, so services that rely on them may not get them. Run \`hack doctor --migrate-env-config\`, which moves them to this checkout's local layers or says what to change first.`,
     });
   }
-  const lifecycleEnv = selectProjectEnvValuesForExecutionTarget({
-    resolved: modern,
-    scopeName: "global",
-    target: "host",
-  });
+  const globalEnv = applyRemoteEnv(modern.globalEnv, opts.remoteChoices);
+  const lifecycleEnv = {
+    ...selectProjectEnvValuesForExecutionTarget({
+      resolved: modern,
+      scopeName: "global",
+      target: "host",
+    }),
+    ...applyRemoteEnv(modern.globalEnv, opts.remoteChoices, true),
+  };
+  const serviceEnv = opts.remoteChoices?.length
+    ? Object.fromEntries(
+        composeEnvOverrideServices(opts).map((service) => [
+          service,
+          applyRemoteEnv(
+            modern.serviceEnv[service] ?? modern.globalEnv,
+            opts.remoteChoices
+          ),
+        ])
+      )
+    : modern.serviceEnv;
   const preflightEnvByService = Object.fromEntries(
     opts.targetServices.map((service) => [
       service,
-      modern.serviceEnv[service] ?? modern.globalEnv,
+      serviceEnv[service] ?? globalEnv,
     ])
   );
 
@@ -2097,14 +2129,15 @@ export async function resolveModernComposeEnvOverrides(opts: {
   // The file always covers the whole graph (HACK-2325), whatever the command
   // targets: see composeEnvOverrideServices.
   const override = renderComposeEnvReferenceOverride({
+    labels: opts.remoteChoices?.length
+      ? remoteSelectionLabels(opts.remoteChoices)
+      : undefined,
     targetServices: composeEnvOverrideServices(opts),
-    globalEnv: modern.globalEnv,
-    serviceEnv: modern.serviceEnv,
+    globalEnv,
+    serviceEnv,
     effectiveScopes: modern.effectiveMetadata,
   });
-  const composeEnv = override
-    ? { ...modern.globalEnv, ...override.env }
-    : modern.globalEnv;
+  const composeEnv = override ? { ...globalEnv, ...override.env } : globalEnv;
   // Fail closed before any write or spawn when Compose could not start.
   assertComposeSpawnEnvFits({ env: composeEnv });
   if (override === null) {
@@ -2115,7 +2148,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
     }
     return {
       composeFiles: [],
-      env: modern.globalEnv,
+      env: globalEnv,
       lifecycleEnv,
       preflightEnvByService,
       effectiveEnvName: modern.selection.effectiveEnv,
@@ -2183,6 +2216,7 @@ async function resolveComposeEnvOverrides(opts: {
   readonly projectName: string;
   readonly targetServices: readonly string[];
   readonly allServiceNames: readonly string[];
+  readonly remoteChoices?: readonly EffectiveRemote[];
   readonly envName?: string | null;
   /**
    * False for `exec`: resolve the values but neither write nor clear the
@@ -2236,7 +2270,7 @@ async function resolveComposeEnvOverrides(opts: {
     })
   );
 
-  if (resolved.contract.vars.length === 0) {
+  if (resolved.contract.vars.length === 0 && !opts.remoteChoices?.length) {
     if (opts.persist !== false) {
       await clearComposeEnvOverride({
         projectDir: opts.project.projectDir,
@@ -2261,6 +2295,49 @@ async function resolveComposeEnvOverrides(opts: {
     return await resolveComposeEnvOverrides(opts);
   }
 
+  if (opts.remoteChoices?.length) {
+    const lifecycleEnv = applyRemoteEnv(
+      selectHackEnvValues({ resolved }),
+      opts.remoteChoices
+    );
+    const serviceEnv = Object.fromEntries(
+      composeEnvOverrideServices(opts).map((service) => [
+        service,
+        applyRemoteEnv(
+          selectHackEnvValues({ resolved, serviceName: service }),
+          opts.remoteChoices
+        ),
+      ])
+    );
+    const override = renderComposeEnvReferenceOverride({
+      labels: opts.remoteChoices?.length
+        ? remoteSelectionLabels(opts.remoteChoices)
+        : undefined,
+      targetServices: composeEnvOverrideServices(opts),
+      globalEnv: lifecycleEnv,
+      serviceEnv,
+    });
+    const env = {
+      ...resolved.envForCompose,
+      ...lifecycleEnv,
+      ...override?.env,
+    };
+    assertComposeSpawnEnvFits({ env });
+    return {
+      composeFiles: override
+        ? await settleComposeEnvOverride({
+            projectDir: opts.project.projectDir,
+            text: override.text,
+            persist: opts.persist,
+            serviceNames: opts.allServiceNames,
+          })
+        : [],
+      env,
+      lifecycleEnv,
+      preflightEnvByService: serviceEnv,
+      effectiveEnvName: resolved.envSelection.effectiveEnv,
+    };
+  }
   const overrideServices: Record<string, Record<string, unknown>> = {};
   for (const service of composeEnvOverrideServices(opts)) {
     const env: Record<string, string> = {};
@@ -7535,9 +7612,11 @@ async function resolveNativeRestartLaunchScope(opts: {
 async function handleUpUnlocked({
   ctx,
   args,
+  remoteChoices,
 }: {
   readonly ctx: CliContext;
   readonly args: UpArgs;
+  readonly remoteChoices?: readonly EffectiveRemote[];
 }): Promise<number> {
   prepareLifecycleProgress({
     action: "up",
@@ -7547,6 +7626,17 @@ async function handleUpUnlocked({
   });
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
+  if (process.env.HACK_RUNTIME_BACKEND === "native") {
+    const remoteProject =
+      args.options.project === undefined
+        ? await findProjectContext(resolveStartDir(ctx, args.options.path))
+        : await resolveRegisteredProjectOption({
+            projectOpt: args.options.project,
+          });
+    if (remoteProject) {
+      await prepareProjectRemoteChoices(remoteProject, args.options.use);
+    }
+  }
   if (resolveNativeRuntimeSelection()) {
     // Once per `hack up`, whichever native start path follows (HACK-2026).
     noteNativeBackendBeta({ json: args.options.json === true });
@@ -7710,14 +7800,20 @@ async function handleUpUnlocked({
   }
   const json = args.options.json === true;
   if (!json) {
-    return await runUpCommand({ ctx, args, json: false });
+    return await runUpCommand({ ctx, args, remoteChoices, json: false });
   }
 
   // `--json`: keep stdout reserved for the result envelope.
   setLoggerBackendOverride({ backend: "console" });
   const startedAtMs = Date.now();
   try {
-    return await runUpCommand({ ctx, args, json: true, startedAtMs });
+    return await runUpCommand({
+      ctx,
+      args,
+      remoteChoices,
+      json: true,
+      startedAtMs,
+    });
   } catch (error: unknown) {
     return emitLifecycleResult({
       result: buildLifecycleJsonErrorResult({ error }),
@@ -7726,12 +7822,44 @@ async function handleUpUnlocked({
   }
 }
 
+export async function startComposeForSession(opts: {
+  readonly ctx: CliContext;
+  readonly cwd: string;
+  readonly use: string | undefined;
+  readonly envName: string | null | undefined;
+  readonly remoteChoices: readonly EffectiveRemote[];
+}): Promise<number> {
+  const env = opts.envName === null ? "base" : opts.envName;
+  return await handleUp({
+    ctx: { ...opts.ctx, cwd: opts.cwd },
+    args: {
+      options: parseOptionsForCommand(upOptions, {
+        detach: true,
+        env,
+        use: opts.use,
+      }),
+      positionals: parsePositionalsForCommand(serviceLifecyclePositionals, []),
+      raw: {
+        argv: [
+          "up",
+          "--detach",
+          ...(env === undefined ? [] : [`--env=${env}`]),
+          ...(opts.use === undefined ? [] : [`--use=${opts.use}`]),
+        ],
+        positionals: [],
+      },
+    },
+    remoteChoices: opts.remoteChoices,
+  });
+}
+
 const UP_RETRY_VALUE_OPTIONS = new Set([
   "--path",
   "-p",
   "--project",
   "--branch",
   "--env",
+  "--use",
   "--profile",
   "--target",
 ]);
@@ -7764,11 +7892,13 @@ async function runUpCommand({
   args,
   json,
   startedAtMs,
+  remoteChoices: preparedChoices,
 }: {
   readonly ctx: CliContext;
   readonly args: UpArgs;
   readonly json: boolean;
   readonly startedAtMs?: number;
+  readonly remoteChoices?: readonly EffectiveRemote[];
 }): Promise<number> {
   const detach = args.options.detach || json;
   const startedAt = performance.now();
@@ -7795,9 +7925,14 @@ async function runUpCommand({
     throw error;
   }
   const cfg = await readProjectConfig(project);
+  const remoteChoices =
+    preparedChoices ??
+    (await prepareProjectRemoteChoices(project, args.options.use));
   if (
     !(await enforceProjectPrerequisites(
-      cfg.prerequisites,
+      cfg.prerequisites?.config
+        ? { config: { ...cfg.prerequisites.config, selected: remoteChoices } }
+        : cfg.prerequisites,
       json,
       project.projectRoot,
       { composeFile: project.composeFile, services: args.positionals.services }
@@ -7903,7 +8038,18 @@ async function runUpCommand({
         composeFile: project.composeFile,
       })
     : null;
-  const targetServices = serviceScoped ? requestedServices : allServiceNames;
+  const targetServices = remoteServiceTargets(
+    remoteChoices,
+    serviceScoped ? requestedServices : allServiceNames,
+    serviceScoped
+  );
+  if (!serviceScoped) {
+    await assertNoInactiveRemoteDependencies({
+      files: [project.composeFile],
+      services: targetServices,
+      choices: remoteChoices,
+    });
+  }
   const cacheBootstrapServices = scopedDependencyCache
     ? await resolveDependencyCacheBootstrapServices({
         composeFile: project.composeFile,
@@ -7915,6 +8061,7 @@ async function runUpCommand({
     ...new Set([...targetServices, ...cacheBootstrapServices]),
   ];
   const envOverrides = await resolveComposeEnvOverrides({
+    remoteChoices,
     project,
     projectName,
     targetServices: preparedServices,
@@ -8187,6 +8334,33 @@ async function runUpCommand({
       return bootstrapCode;
     }
     const upPhase = trackComposeStartupPhase();
+    const inactive = inactiveRemoteServices(remoteChoices);
+    if (inactive.length) {
+      const stopped = await exec(
+        [
+          ...buildComposeArgs({
+            composeFiles: composeFilesWithEnv,
+            composeProject: composeProjectName,
+            profiles: ["*"],
+            cwd: dirname(project.composeFile),
+          }),
+          "stop",
+          ...inactive,
+        ],
+        {
+          cwd: dirname(project.composeFile),
+          env: envOverrides.env,
+          timeoutMs: startupTimeoutMs,
+          forwardSignals: true,
+        }
+      );
+      if (stopped.exitCode !== 0) {
+        throw new HackCliError({
+          code: "E_COMPOSE_FAILED",
+          message: "Could not stop services for unselected remote targets.",
+        });
+      }
+    }
     containerStartBegun = true;
     const guarded = await composeUpGuardedBySharedHelpers({
       assertCurrent: assertHelpersCurrent,
@@ -8227,7 +8401,8 @@ async function runUpCommand({
           cwd: dirname(project.composeFile),
           env: envOverrides.env,
           routeStdoutToStderr: json,
-          services: serviceScoped ? targetServices : undefined,
+          services:
+            serviceScoped || remoteChoices.length ? targetServices : undefined,
           noDeps: serviceScoped,
         }),
     });
@@ -9684,6 +9859,7 @@ async function runRestartUpPhase(opts: {
   readonly lifecycleComposeProject: string;
   readonly profiles: readonly string[];
   readonly branch: string | null;
+  readonly remoteChoices?: readonly EffectiveRemote[];
   readonly envName?: string | null;
   readonly detach?: boolean;
   readonly routeStdoutToStderr?: boolean;
@@ -9702,14 +9878,19 @@ async function runRestartUpPhase(opts: {
   });
   const aliasHost = resolveBranchAliasHost({ devHost, cfg: opts.cfg });
 
-  const targetServices = await readComposeServiceNames(
+  const allServiceNames = await readComposeServiceNames(
     opts.project.composeFile
   );
+  const targetServices = remoteServiceTargets(
+    opts.remoteChoices,
+    allServiceNames
+  );
   const envOverrides = await resolveComposeEnvOverrides({
+    remoteChoices: opts.remoteChoices,
     project: opts.project,
     projectName: opts.projectName,
     targetServices,
-    allServiceNames: targetServices,
+    allServiceNames,
     envName: opts.envName,
   });
   await assertRegistryCredentialsAvailable({
@@ -9867,6 +10048,7 @@ async function runRestartUpPhase(opts: {
           env: envOverrides.env,
           routeStdoutToStderr: opts.routeStdoutToStderr === true,
           forceRecreate: true,
+          services: opts.remoteChoices?.length ? targetServices : undefined,
         }),
     });
     if ("superseded" in guarded) {
@@ -9905,6 +10087,7 @@ async function runRestartUpPhase(opts: {
             composeProject: opts.composeProjectName,
             profiles: opts.profiles,
             detach: true,
+            services: opts.remoteChoices?.length ? targetServices : undefined,
             cwd: dirname(opts.project.composeFile),
             env: envOverrides.env,
             routeStdoutToStderr: opts.routeStdoutToStderr === true,
@@ -9986,6 +10169,7 @@ async function runTargetedServiceRestart(opts: {
   readonly composeProjectName: string | null;
   readonly profiles: readonly string[];
   readonly branch: string | null;
+  readonly remoteChoices?: readonly EffectiveRemote[];
   readonly envName?: string | null;
   readonly services: readonly string[];
   readonly allServiceNames: readonly string[];
@@ -10030,6 +10214,7 @@ async function runTargetedServiceRestart(opts: {
     ...new Set([...opts.services, ...cacheBootstrapServices]),
   ];
   const envOverrides = await resolveComposeEnvOverrides({
+    remoteChoices: opts.remoteChoices,
     project: opts.project,
     projectName: opts.projectName,
     targetServices: preparedServices,
@@ -10255,6 +10440,17 @@ async function handleRestart({
   });
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
+  if (process.env.HACK_RUNTIME_BACKEND === "native") {
+    const remoteProject =
+      args.options.project === undefined
+        ? await findProjectContext(resolveStartDir(ctx, args.options.path))
+        : await resolveRegisteredProjectOption({
+            projectOpt: args.options.project,
+          });
+    if (remoteProject) {
+      await prepareProjectRemoteChoices(remoteProject, args.options.use);
+    }
+  }
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,
@@ -10392,9 +10588,15 @@ async function runRestartCommand({
     projectOpt: args.options.project,
   });
   const cfg = await readProjectConfig(project);
+  const remoteChoices = await prepareProjectRemoteChoices(
+    project,
+    args.options.use
+  );
   if (
     !(await enforceProjectPrerequisites(
-      cfg.prerequisites,
+      cfg.prerequisites?.config
+        ? { config: { ...cfg.prerequisites.config, selected: remoteChoices } }
+        : cfg.prerequisites,
       json,
       project.projectRoot,
       { composeFile: project.composeFile, services: args.positionals.services }
@@ -10488,6 +10690,7 @@ async function runRestartCommand({
   });
   if (requestedServices.length > 0) {
     const result = await runTargetedServiceRestart({
+      remoteChoices,
       budgets,
       project,
       cfg,
@@ -10497,7 +10700,7 @@ async function runRestartCommand({
       profiles,
       branch,
       envName: effectiveEnvName,
-      services: requestedServices,
+      services: remoteServiceTargets(remoteChoices, requestedServices, true),
       allServiceNames,
       routeStdoutToStderr: json,
       json,
@@ -10534,12 +10737,13 @@ async function runRestartCommand({
       exitCode: 0,
     });
   }
-  const lifecycleEnv = await resolveLifecycleEnvForProject({
-    project,
-    projectName,
-    envName: effectiveEnvName,
+  await assertNoInactiveRemoteDependencies({
+    files: [project.composeFile],
+    services: remoteServiceTargets(remoteChoices, allServiceNames),
+    choices: remoteChoices,
   });
   const preflightEnv = await resolveComposeEnvOverrides({
+    remoteChoices,
     project,
     projectName,
     targetServices: allServiceNames,
@@ -10574,7 +10778,7 @@ async function runRestartCommand({
     lifecycleComposeProject,
     profiles,
     branch,
-    envForCompose: lifecycleEnv,
+    envForCompose: preflightEnv.lifecycleEnv,
     routeStdoutToStderr: json,
     preserveComposeRuntime: true,
   });
@@ -10618,6 +10822,7 @@ async function runRestartCommand({
   });
 
   const upOutcome = await runRestartUpPhase({
+    remoteChoices,
     budgets,
     project,
     cfg,
@@ -11315,7 +11520,18 @@ async function handlePs({
     }),
     entries,
   });
-  const remotes = projectRemoteStatuses(cfg.prerequisites?.config?.selected);
+  const remotes = projectRemoteStatuses(
+    cfg.prerequisites?.config?.selected?.map((remote) => {
+      const running = runningRemoteChoice(
+        entries.filter(({ State }) => State === "running"),
+        remote
+      );
+      const target = running && remote.targets.get(running.target);
+      return target && running
+        ? { ...remote, ...target, via: target.via, target: running.target }
+        : remote;
+    })
+  );
   if (json) {
     const payload = {
       project: baseProjectName,
@@ -11375,7 +11591,7 @@ async function readProjectServiceAddresses(opts: {
  */
 function runBackendSelection(
   native: boolean,
-  args: RunArgs
+  args: ExecArgs
 ): NativeRunSelection | undefined {
   if (!native) {
     requireComposeOperationAvailable("run");
@@ -11416,6 +11632,17 @@ async function handleRun({
 }): Promise<number> {
   refuseEmptyNativeRunSelection(args);
   const background = parseBackgroundRequest(args.options);
+  if (process.env.HACK_RUNTIME_BACKEND === "native") {
+    const remoteProject =
+      args.options.project === undefined
+        ? await findProjectContext(resolveStartDir(ctx, args.options.path))
+        : await resolveRegisteredProjectOption({
+            projectOpt: args.options.project,
+          });
+    if (remoteProject) {
+      await prepareProjectRemoteChoices(remoteProject, args.options.use);
+    }
+  }
   const authored = await startNativeBackgroundIfRequested({
     ctx,
     args,
@@ -11490,9 +11717,15 @@ async function handleRun({
   const cmdArgs = args.positionals.cmd;
 
   const cfg = await readProjectConfig(project);
+  const remoteChoices = await prepareProjectRemoteChoices(
+    project,
+    args.options.use
+  );
   if (
     !(await enforceProjectPrerequisites(
-      cfg.prerequisites,
+      cfg.prerequisites?.config
+        ? { config: { ...cfg.prerequisites.config, selected: remoteChoices } }
+        : cfg.prerequisites,
       background?.json === true,
       project.projectRoot,
       { composeFile: project.composeFile, services: [service] }
@@ -11566,7 +11799,13 @@ async function handleRun({
   });
   const preparedServices = [...new Set([service, ...cacheBootstrapServices])];
   const allServiceNames = await readComposeServiceNames(project.composeFile);
+  await assertNoInactiveRemoteDependencies({
+    files: composeFilesWithRuntimeOverrides,
+    services: [service],
+    choices: remoteChoices,
+  });
   const envOverrides = await resolveComposeEnvOverrides({
+    remoteChoices,
     project,
     projectName,
     targetServices: preparedServices,
@@ -11919,7 +12158,7 @@ async function handleExec({
 
 async function answerExistingBackgroundRequest(opts: {
   readonly ctx: CliContext;
-  readonly args: RunArgs;
+  readonly args: ExecArgs;
   readonly background: NonNullable<ReturnType<typeof parseBackgroundRequest>>;
   readonly operation: "exec" | "run";
 }): Promise<number | null> {
@@ -11958,7 +12197,7 @@ async function answerExistingBackgroundRequest(opts: {
  */
 async function startNativeBackgroundIfRequested(opts: {
   readonly ctx: CliContext;
-  readonly args: RunArgs;
+  readonly args: ExecArgs;
   readonly background: ReturnType<typeof parseBackgroundRequest>;
   readonly operation: "exec" | "run";
   /** The ordinary authored/adopted dispatch, run when this does not apply. */

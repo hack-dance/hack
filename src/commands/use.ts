@@ -1,5 +1,4 @@
 import { dirname } from "node:path";
-import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import { defineCommand, withHandler } from "../cli/command.ts";
 import { optPath, optProject } from "../cli/options.ts";
@@ -11,6 +10,7 @@ import {
   parseRemoteChoices,
   readRemoteChoices,
   resolveRemoteChoices,
+  runningRemoteChoice,
   saveRemoteChoices,
 } from "../lib/project-remote-selection.ts";
 import { formatProjectRemoteAddress } from "../lib/project-remote-status.ts";
@@ -29,7 +29,7 @@ const spec = defineCommand({
 } as const);
 
 export const useCommand = withHandler(spec, async ({ ctx, args }) => {
-  if (resolveNativeRuntimeSelection()) {
+  if (process.env.HACK_RUNTIME_BACKEND === "native") {
     throw new HackCliError({
       code: "E_NATIVE_PROJECT_UNSUPPORTED",
       message: "Remote selection currently requires the Compose backend.",
@@ -52,43 +52,53 @@ export const useCommand = withHandler(spec, async ({ ctx, args }) => {
     await readRemoteChoices(project.projectDir),
     changes
   );
-  if (args.positionals.selection === undefined) {
-    for (const choice of pending) {
-      process.stdout.write(
-        `${choice.remote} · running: unknown · pending: ${choice.target} (${choice.source}) · ${formatProjectRemoteAddress({ ...choice.address, port: choice.port })}${choice.via ? " · tunnel not started by this version" : ""}\n`
-      );
-    }
+  if (!pending.length) {
     return 0;
   }
-
   const branch = await resolveEffectiveBranchForCommand({
     project,
     branchOption: undefined,
   });
   const base = await resolveComposeProjectName({ project, cfg });
+  const readActive = async () => {
+    const result = await readComposePs({
+      run: () =>
+        composeRuntimeBackend.psJson({
+          composeFiles: [project.composeFile],
+          composeProject: branch ? `${base}--${branch}` : null,
+          profiles: ["*"],
+          cwd: dirname(project.composeFile),
+          all: true,
+        }),
+    });
+    if (!result.ok) {
+      throw result.error;
+    }
+    return result.entries.filter(
+      ({ State }) => State !== "exited" && State !== "dead"
+    );
+  };
+  if (args.positionals.selection === undefined) {
+    const active = await readActive().catch(() => null);
+    for (const choice of pending) {
+      const running = active && runningRemoteChoice(active, choice);
+      const fallback = active?.length === 0 ? "stopped" : "unknown";
+      const description = running
+        ? `${running.target} (${running.source})`
+        : fallback;
+      process.stdout.write(
+        `${choice.remote} · running: ${description} · pending: ${choice.target} (${choice.source}) · ${formatProjectRemoteAddress({ ...choice.address, port: choice.port })}${choice.via ? " · tunnel not started by this version" : ""}\n`
+      );
+    }
+    return 0;
+  }
+
   await saveRemoteChoices({
     projectDir: project.projectDir,
     defaults,
     changes,
     assertStopped: async () => {
-      const result = await readComposePs({
-        run: () =>
-          composeRuntimeBackend.psJson({
-            composeFiles: [project.composeFile],
-            composeProject: branch ? `${base}--${branch}` : base,
-            profiles: ["*"],
-            cwd: dirname(project.composeFile),
-            all: true,
-          }),
-      });
-      if (!result.ok) {
-        throw result.error;
-      }
-      if (
-        result.entries.some(
-          (entry) => entry.State !== "exited" && entry.State !== "dead"
-        )
-      ) {
+      if ((await readActive()).length) {
         throw new HackCliError({
           code: "E_USAGE",
           message:

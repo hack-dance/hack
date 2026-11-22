@@ -7,7 +7,7 @@ use serde_json::Value;
 use service_support::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, Stdio};
@@ -123,6 +123,7 @@ fn serve_refuses_bad_arguments_and_an_unusable_notify_descriptor() {
 #[cfg(target_os = "linux")]
 #[test]
 fn serve_refuses_a_notify_descriptor_open_for_neither_reading_nor_writing() {
+    use std::os::fd::FromRawFd;
     let home = Home::new();
     let spawning = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
     // Access mode 3: Linux opens it for ioctl only, no read and no write.

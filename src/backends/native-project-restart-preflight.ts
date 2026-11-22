@@ -19,7 +19,7 @@ import {
   type NativeBuildRequest,
   nativeBuildsEnabled,
   nativeServiceActive,
-  requireUnchangedNativeBuilds,
+  resolveNativeRestartBuilds,
 } from "./native-project-builds.ts";
 import {
   compileNativeHostDependencySelection,
@@ -336,10 +336,12 @@ async function pinRestartImages(opts: {
   readonly amd64Emulation?: Readonly<Record<string, NativeEmulationPolicy>>;
   readonly invoke: typeof invokeNativeRuntime;
   readonly build: typeof invokeNativeBuild;
-}): Promise<void> {
-  // Restart reuses containers: a build service must still resolve, under its
-  // current build key, to the image the graph runs (HACK-2533).
-  await requireUnchangedNativeBuilds({
+  readonly managedSecretValues: readonly string[] | undefined;
+  readonly signal: AbortSignal | undefined;
+}): Promise<ReadonlyMap<string, string>> {
+  // Resolve builds before anything stops; the review below still sees the images
+  // the graph runs, and the replacement start pins the resolved ones (HACK-2533).
+  const resolved = await resolveNativeRestartBuilds({
     runtime: opts.runtime,
     projectRoot: opts.projectRoot,
     branch: opts.branch,
@@ -347,7 +349,8 @@ async function pinRestartImages(opts: {
     builds: opts.builds,
     specs: opts.specs,
     images: opts.retainedImages,
-    signal: new AbortController().signal,
+    managedSecretValues: opts.managedSecretValues ?? [],
+    signal: opts.signal ?? new AbortController().signal,
     invoke: opts.build,
   });
   for (const [name, spec] of Object.entries(opts.specs)) {
@@ -401,6 +404,7 @@ async function pinRestartImages(opts: {
     }
     spec.image = pinned.image_id;
   }
+  return resolved;
 }
 
 /** Review the same public graph before stopping anything; never run startup hooks here. */
@@ -438,8 +442,10 @@ export async function preflightNativeRestart(opts: {
   /** Same public metadata selection the replacement startup will review. */
   readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
   readonly httpsPort?: number | null;
+  /** The restart's stop request: it cancels a build check before anything is stopped. */
+  readonly signal?: AbortSignal;
   readonly dependencies?: Partial<typeof DEFAULTS>;
-}) {
+}): Promise<ReadonlyMap<string, string>> {
   const deps = { ...DEFAULTS, ...opts.dependencies };
   const selected = nativeRestartSelection({ run: opts.run });
   const runtimeMetadata = nativeRuntimeMetadataSelected({
@@ -555,7 +561,7 @@ export async function preflightNativeRestart(opts: {
     : undefined;
   input = metadata?.input ?? input;
   // Restart reuses containers: an admitted build service must still resolve to the
-  // image the current or retained graph runs (see requireUnchangedNativeBuilds).
+  // image the current or retained graph runs (see resolveNativeRestartBuilds).
   const builds = admitNativeProjectBuilds({
     services: Object.fromEntries(
       Object.entries(
@@ -651,7 +657,7 @@ export async function preflightNativeRestart(opts: {
         invoke: deps.invoke,
       })
     : (activeImages?.images ?? new Map<string, string>());
-  await pinRestartImages({
+  const verifiedBuilds = await pinRestartImages({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
     branch: opts.scope.branch,
@@ -662,6 +668,8 @@ export async function preflightNativeRestart(opts: {
     amd64Emulation: input.amd64Emulation,
     invoke: deps.invoke,
     build: deps.build,
+    managedSecretValues: input.managedSecretValues,
+    signal: opts.signal,
   });
   const compose = JSON.parse(input.normalizedComposeJson);
   compose.services = specs;
@@ -747,4 +755,5 @@ export async function preflightNativeRestart(opts: {
       }
     },
   });
+  return verifiedBuilds;
 }

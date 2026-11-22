@@ -21,7 +21,7 @@ import {
   nativeServiceActive,
   refuseEmulatedBuilds,
   refuseManagedSecretBuildArguments,
-  requireUnchangedNativeBuilds,
+  resolveNativeRestartBuilds,
 } from "../src/backends/native-project-builds.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
@@ -285,7 +285,7 @@ test("every up asks the runtime for each build, a restore too (HACK-2533)", asyn
   expect(keys).toEqual(["same", "changed"]);
 });
 
-test("restart refuses before stopping when a build would change the running image", async () => {
+test("restart resolves its builds before stopping: a rebuilt image is what it runs", async () => {
   const project = await root();
   let calls = 0;
   const base = {
@@ -293,7 +293,7 @@ test("restart refuses before stopping when a build would change the running imag
     projectRoot: project,
     branch: null,
     profiles: [],
-    signal: new AbortController().signal,
+    managedSecretValues: [],
   };
   const specs = {
     web: { build: "app" } as Record<string, unknown>,
@@ -303,30 +303,74 @@ test("restart refuses before stopping when a build would change the running imag
     ["web", request()],
     ["tools", request()],
   ]);
-  await requireUnchangedNativeBuilds({
+  const resolved = await resolveNativeRestartBuilds({
     ...base,
     builds,
     specs,
     images: new Map([["web", RETAINED]]),
+    signal: new AbortController().signal,
+    invoke: async () => {
+      calls += 1;
+      return { imageId: REBUILT, buildKey: KEY, reused: false };
+    },
+  });
+  // Only the running, active service is resolved; the caller's specs are untouched.
+  expect([...resolved]).toEqual([["web", REBUILT]]);
+  expect(calls).toBe(1);
+  expect(specs.web).toEqual({ build: "app" });
+});
+
+test("restart refuses a managed secret build argument before any build runs", async () => {
+  const project = await root();
+  let calls = 0;
+  const refused = await resolveNativeRestartBuilds({
+    runtime,
+    projectRoot: project,
+    branch: null,
+    profiles: [],
+    builds: new Map([["web", request({ TOKEN: VALUE })]]),
+    specs: { web: { build: "app" } },
+    images: new Map([["web", RETAINED]]),
+    managedSecretValues: [VALUE],
+    signal: new AbortController().signal,
     invoke: async () => {
       calls += 1;
       return { imageId: RETAINED, buildKey: KEY, reused: true };
     },
-  });
-  // Only the running service is checked, and the caller's specs are untouched.
-  expect(calls).toBe(1);
-  expect(specs.web).toEqual({ build: "app" });
-  const refused = await requireUnchangedNativeBuilds({
-    ...base,
-    builds,
-    specs,
-    images: new Map([["web", RETAINED]]),
-    invoke: async () => ({ imageId: REBUILT, buildKey: KEY, reused: false }),
   }).catch((error: unknown) => error);
-  expect(String(refused)).toContain(
-    "The build inputs of web changed since this graph started"
-  );
-  expect(String(refused)).toContain("nothing was stopped");
+  expect(refused).toBeInstanceOf(Error);
+  expect(String(refused)).not.toContain(VALUE);
+  expect(calls).toBe(0);
+});
+
+test("a restart's stop request reaches its build and no later build starts", async () => {
+  const project = await root();
+  const controller = new AbortController();
+  const seen: boolean[] = [];
+  const result = await resolveNativeRestartBuilds({
+    runtime,
+    projectRoot: project,
+    branch: null,
+    profiles: [],
+    builds: new Map([
+      ["web", request()],
+      ["worker", { ...request(), target: "worker" }],
+    ]),
+    specs: { web: { build: "app" }, worker: { build: "app" } },
+    images: new Map([
+      ["web", RETAINED],
+      ["worker", RETAINED],
+    ]),
+    managedSecretValues: [],
+    signal: controller.signal,
+    invoke: async ({ signal }) => {
+      seen.push(signal?.aborted ?? false);
+      controller.abort();
+      return { imageId: RETAINED, buildKey: KEY, reused: true };
+    },
+  }).catch((error: unknown) => error);
+  expect(seen).toEqual([false]);
+  expect(String(result)).toContain("canceled");
 });
 
 test("only build services in the selected profiles are built and pinned, as with Compose up", async () => {

@@ -20,8 +20,8 @@ import {
  * ID, so review, graph admission, receipts and restore treat it as an image
  * service. Every `up`, including one that restores a stopped run, asks the runtime
  * for each build: an unchanged build key reuses its image without building, a changed
- * one (Dockerfile, ignore file, target, arguments) builds (HACK-2533). Restart reuses
- * containers, so it refuses when a build would change an image.
+ * one builds (HACK-2533). Restart resolves its builds the same way before it stops the
+ * old graph, and its replacement start runs the resolved images.
  */
 
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
@@ -551,12 +551,14 @@ export async function buildNativeProjectImages(opts: {
 }
 
 /**
- * Restart reuses the current or retained containers, so it cannot take a rebuilt image.
- * Ask the runtime for each active build (an unchanged build key reuses its image without
- * building) and refuse, before anything is stopped, when one resolves to an image other
- * than the one the graph runs.
+ * Resolve a restart's builds before anything is stopped: refuse a build argument equal
+ * to a managed secret (as startup does), then ask the runtime for each active build of
+ * a running service (an unchanged build key reuses its image without building; a
+ * changed one builds, so a failed build refuses while the old graph still runs).
+ * Returns the resolved images; the replacement start pins exactly these, so nothing is
+ * built after the old graph stopped and a rebuilt image is what the new graph runs.
  */
-export async function requireUnchangedNativeBuilds(opts: {
+export async function resolveNativeRestartBuilds(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   readonly branch: string | null | undefined;
@@ -564,9 +566,14 @@ export async function requireUnchangedNativeBuilds(opts: {
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;
   readonly specs: Record<string, Record<string, unknown>>;
   readonly images: ReadonlyMap<string, string>;
+  readonly managedSecretValues: readonly string[];
   readonly signal: AbortSignal;
   readonly invoke?: typeof invokeNativeBuild;
-}): Promise<void> {
+}): Promise<ReadonlyMap<string, string>> {
+  refuseManagedSecretBuildArguments({
+    builds: opts.builds,
+    managedSecretValues: opts.managedSecretValues,
+  });
   const copies: Record<string, Record<string, unknown>> = {};
   for (const service of opts.builds.keys()) {
     const spec = opts.specs[service];
@@ -583,13 +590,38 @@ export async function requireUnchangedNativeBuilds(opts: {
     specs: copies,
     rebuild: false,
   });
+  const resolved = new Map<string, string>();
   for (const service of pinned) {
-    if (copies[service]?.image !== opts.images.get(service)) {
+    const image = copies[service]?.image;
+    if (typeof image !== "string" || !IMAGE_ID.test(image)) {
       throw new ClosedCliError(
-        `The build inputs of ${service} changed since this graph started, and hack restart reuses its containers. Run hack down, then hack up, to recreate it from the new image; nothing was stopped.`
+        "Native restart build selection is invalid; nothing was stopped."
       );
     }
+    resolved.set(service, image);
   }
+  return resolved;
+}
+
+/**
+ * Pin build services to the images a restart preflight resolved, so the replacement
+ * start runs exactly those images and builds nothing after the old graph stopped.
+ * Returns the builds that still need the runtime.
+ */
+export function pinVerifiedNativeBuilds(opts: {
+  readonly builds: ReadonlyMap<string, NativeBuildRequest>;
+  readonly specs: Record<string, Record<string, unknown>>;
+  readonly images: ReadonlyMap<string, string>;
+}): ReadonlyMap<string, NativeBuildRequest> {
+  const remaining = new Map(opts.builds);
+  for (const [service, image] of opts.images) {
+    const spec = opts.specs[service];
+    if (spec && remaining.has(service)) {
+      pin(spec, image);
+      remaining.delete(service);
+    }
+  }
+  return remaining;
 }
 
 type PendingBuild = { request: NativeBuildRequest; services: string[] };

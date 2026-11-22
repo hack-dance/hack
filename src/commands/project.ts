@@ -6940,6 +6940,7 @@ async function restartNativeImageProject({
     }
     reportNativeStartupProgress(event);
   };
+  let verifiedBuildImages: ReadonlyMap<string, string> | undefined;
   return await restartNativeProject({
     scope: startup.scope,
     envName: startup.envName,
@@ -6978,12 +6979,15 @@ async function restartNativeImageProject({
             }),
         }
       : undefined,
-    preflight: async (run, { cleanedRetry, preparedRetry }) => {
+    preflight: async (run, { cleanedRetry, preparedRetry, signal }) => {
       await preflightNativeProjectSource({
         runtime: native,
         projectRoot: startup.scope.projectRoot,
       });
-      await preflightNativeRestart({
+      // The replacement start pins exactly the build images checked here,
+      // so nothing is built after the old graph stopped (HACK-2533).
+      verifiedBuildImages = await preflightNativeRestart({
+        signal,
         runtime: native,
         scope: startup.scope,
         composeFile: startup.composeFile,
@@ -7046,6 +7050,7 @@ async function restartNativeImageProject({
         ...startup,
         ...nativeRestartSelection({ run }),
         restore: run,
+        verifiedBuildImages,
         // The restart's own bookkeeping first, then the startup's ready
         // report: a detached owner (`restart --json`) tells its launcher here.
         onReady: async (services) => {

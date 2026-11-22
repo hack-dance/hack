@@ -264,7 +264,13 @@ test("HACK-1953: a prepared intent left by an interrupted stop resumes through t
   // Preflight may confirm a stopped graph; the down then only confirms the
   // stop (it requests none for a stopped graph) and the exact old frontend
   // finalization is still awaited before the replacement starts.
-  expect(seen).toEqual([{ cleanedRetry: false, preparedRetry: true }]);
+  expect(seen).toEqual([
+    {
+      cleanedRetry: false,
+      preparedRetry: true,
+      signal: expect.any(AbortSignal),
+    },
+  ]);
   expect(f.events).toEqual([
     "preflight",
     "down",

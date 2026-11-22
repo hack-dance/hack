@@ -2,34 +2,20 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import { lstat, open, readdir, rename, unlink } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import {
-  GLOBAL_ALLOY_FILENAME,
   GLOBAL_BRANCHES_SCHEMA_FILENAME,
   GLOBAL_CADDY_COMPOSE_FILENAME,
   GLOBAL_CADDY_DIR_NAME,
   GLOBAL_CONFIG_SCHEMA_FILENAME,
   GLOBAL_COREDNS_FILENAME,
   GLOBAL_ENV_SCHEMA_FILENAME,
-  GLOBAL_GRAFANA_DASHBOARD_FILENAME,
-  GLOBAL_GRAFANA_DASHBOARDS_DIR,
-  GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
-  GLOBAL_GRAFANA_DATASOURCE_FILENAME,
-  GLOBAL_LOGGING_COMPOSE_FILENAME,
-  GLOBAL_LOGGING_DIR_NAME,
-  GLOBAL_LOKI_CONFIG_FILENAME,
   GLOBAL_MANAGED_ENV_SCHEMA_FILENAME,
   GLOBAL_SCHEMAS_DIR_NAME,
 } from "../constants.ts";
 import {
-  renderGlobalAlloyConfig,
   renderGlobalCaddyCompose,
   renderGlobalCoreDnsConfig,
-  renderGlobalGrafanaDashboardsProvisioningYaml,
-  renderGlobalGrafanaDatasourceYaml,
-  renderGlobalGrafanaLogsDashboardJson,
-  renderGlobalLoggingCompose,
-  renderGlobalLokiConfigYaml,
   renderProjectBranchesSchemaJson,
   renderProjectConfigSchemaJson,
   renderProjectEnvSchemaJson,
@@ -38,7 +24,6 @@ import {
 import { assertAutostartPathAclsTrusted } from "./autostart-path-acl.ts";
 import { HackCliError } from "./cli-result.ts";
 import { parseDefaultDomain } from "./default-domain.ts";
-import { resolveGlobalLogging } from "./global-logging.ts";
 import { checkReplaceableChain } from "./path-trust.ts";
 import { parseProxyBindAddress } from "./proxy-bind.ts";
 
@@ -68,10 +53,12 @@ const MAX_ASSET_BYTES = 1024 * 1024;
  * read-only; publication replaces matching nonsecret bytes on fresh 0644 inodes so an
  * older writable descriptor cannot change what the upcoming Compose run reads.
  * Missing/custom assets refuse; this is neither installation nor migration.
- * The one exception is the opt-in logging stack: a home with no logging
- * directory at all never turned it on, and login never starts it, so its
- * files are not part of the set. A logging directory that exists is checked
- * in full, as before.
+ * The logging stack's files are not part of the set: login never starts that
+ * stack (`globalLoggingUpArguments` is null at login), so they are not what
+ * the upcoming Compose run reads. Install may keep an older or hand-edited
+ * logging file (it asks before replacing one that is not Hack's rendering),
+ * and that must not stop automatic routing. A manual `hack global up` starts
+ * logging from its own files.
  */
 export async function secureAutostartRoutingAssets(
   opts: AutostartRoutingAssetsOptions
@@ -81,13 +68,7 @@ export async function secureAutostartRoutingAssets(
       throw new Error("Unavailable owner");
     }
     const uid = process.getuid();
-    // Login never starts the logging stack: its files are checked only when
-    // it is on, so an existing home with logging off is not refused over
-    // files install no longer rewrites.
-    const logging =
-      (await loggingDirectoryPresent(opts.root)) &&
-      (await loggingOnForLogin(opts.root));
-    const assets = routingAssets({ ...opts, logging });
+    const assets = routingAssets(opts);
     for (const asset of assets) {
       await assertSafeAssetParent({ root: opts.root, path: asset.path, uid });
     }
@@ -100,16 +81,6 @@ export async function secureAutostartRoutingAssets(
         GLOBAL_BRANCHES_SCHEMA_FILENAME,
       ],
     });
-    if (logging) {
-      await assertMountedDirectory({
-        path: resolve(
-          opts.root,
-          GLOBAL_LOGGING_DIR_NAME,
-          GLOBAL_GRAFANA_DASHBOARDS_DIR
-        ),
-        names: [basename(GLOBAL_GRAFANA_DASHBOARD_FILENAME)],
-      });
-    }
     const observed: ObservedAsset[] = [];
     for (const asset of assets) {
       observed.push(await readCurrentAsset({ asset, uid }));
@@ -130,54 +101,19 @@ export async function secureAutostartRoutingAssets(
     throw new HackCliError({
       code: "E_PERMISSION",
       message:
-        "Automatic routing startup refused untrusted or outdated installed assets. Review and move unexpected schema/dashboard files aside before running hack global install manually, then retry. Values omitted.",
+        "Automatic routing startup refused untrusted or outdated installed assets. Review and move unexpected Compose or schema files aside before running hack global install manually, then retry. Values omitted.",
       detail: { reason: "routing_assets_untrusted" },
     });
   }
 }
 
-/** The logging setting for the home at `root`; an unreadable one is off here. */
-async function loggingOnForLogin(root: string): Promise<boolean> {
-  try {
-    return (
-      await resolveGlobalLogging({
-        loggingCompose: resolve(
-          root,
-          GLOBAL_LOGGING_DIR_NAME,
-          GLOBAL_LOGGING_COMPOSE_FILENAME
-        ),
-      })
-    ).enabled;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Whether `<root>/logging` exists at all. Only a missing path (`ENOENT`) means
- * "no logging stack"; anything else there, a file or a link included, is
- * checked as a logging directory and refused if it is not a safe one.
- */
-async function loggingDirectoryPresent(root: string): Promise<boolean> {
-  try {
-    await lstat(resolve(root, GLOBAL_LOGGING_DIR_NAME));
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return false;
-    }
-    throw error;
-  }
-}
-
 function routingAssets(
-  opts: AutostartRoutingAssetsOptions & { readonly logging: boolean }
+  opts: AutostartRoutingAssetsOptions
 ): readonly RoutingAsset[] {
   const bindAddress =
     opts.bindAddress === null ? null : parseProxyBindAddress(opts.bindAddress);
   const defaultDomain = parseDefaultDomain(opts.defaultDomain);
   const caddy = resolve(opts.root, GLOBAL_CADDY_DIR_NAME);
-  const logging = resolve(opts.root, GLOBAL_LOGGING_DIR_NAME);
   const schemas = resolve(opts.root, GLOBAL_SCHEMAS_DIR_NAME);
   const compose: string[] = [];
   for (const useStaticCoreDnsIp of [false, true]) {
@@ -203,34 +139,6 @@ function routingAssets(
         renderGlobalCoreDnsConfig({ useStaticCaddyIp, defaultDomain })
       ),
     },
-    ...(opts.logging
-      ? ([
-          [
-            GLOBAL_LOGGING_COMPOSE_FILENAME,
-            [false, true].map((startInterval) =>
-              renderGlobalLoggingCompose({ startInterval })
-            ),
-          ],
-          [GLOBAL_ALLOY_FILENAME, [renderGlobalAlloyConfig()]],
-          [GLOBAL_LOKI_CONFIG_FILENAME, [renderGlobalLokiConfigYaml()]],
-          [
-            GLOBAL_GRAFANA_DATASOURCE_FILENAME,
-            [renderGlobalGrafanaDatasourceYaml()],
-          ],
-          [
-            GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
-            [renderGlobalGrafanaDashboardsProvisioningYaml()],
-          ],
-          [
-            GLOBAL_GRAFANA_DASHBOARD_FILENAME,
-            [renderGlobalGrafanaLogsDashboardJson()],
-          ],
-        ] as const)
-      : []
-    ).map(([name, accepted]) => ({
-      path: resolve(logging, name),
-      accepted,
-    })),
     ...(
       [
         [GLOBAL_CONFIG_SCHEMA_FILENAME, renderProjectConfigSchemaJson()],

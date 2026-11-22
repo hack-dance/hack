@@ -146,7 +146,7 @@ run is still live or its stop cannot be proven, stop it with the old version fir
 
 ## Back to Compose
 
-Once the native stop is confirmed, use the same candidate on Compose:
+Once the native stop is confirmed, use the same prerelease on Compose:
 
 ```sh
 HACK_RUNTIME_BACKEND=compose "$CANDIDATE" up --detach --path /absolute/project

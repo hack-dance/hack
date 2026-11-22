@@ -139,8 +139,9 @@ repository. They are unsupported.
 
 ## Platforms
 
-The v5 prerelease installs on Apple Silicon macOS. Stable v4 remains the
-release for Intel Macs and Linux until 5.0.0 is published. See
+The v5 prerelease installs on Apple Silicon macOS and, with the Compose
+backend only, on Linux x86_64 and arm64 (`5.0.0-next.24` publishes both Linux
+archives). Stable v4 remains the release for Intel Macs. See
 [Install v5](install.md).
 
 ## More detail

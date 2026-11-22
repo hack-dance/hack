@@ -721,16 +721,13 @@ async function runSavedProcess(opts: {
 function nativeComposePsAddresses(input: {
   readonly document: PrivateDocument;
   readonly generationId: string;
-}): ReadonlyMap<string, string> {
-  const addresses = new Map<string, string>();
+}): ReadonlyMap<string, readonly string[]> {
+  const addresses = new Map<string, readonly string[]>();
   const routing = readNativeComposeRouteMetadata(input);
   for (const route of routing?.routes ?? []) {
-    const address = route.origins.find((origin) =>
-      origin.startsWith("https://")
-    );
-    if (address && !addresses.has(route.service)) {
-      addresses.set(route.service, address);
-    }
+    addresses.set(route.service, [
+      ...new Set([...(addresses.get(route.service) ?? []), ...route.origins]),
+    ]);
   }
   return addresses;
 }
@@ -1058,7 +1055,7 @@ async function savedCommand(opts: {
       if (options.operation === "ps") {
         const addresses =
           options.psWide === undefined
-            ? new Map<string, string>()
+            ? new Map<string, readonly string[]>()
             : nativeComposePsAddresses({
                 document,
                 generationId: generation.generationId,
@@ -1094,7 +1091,8 @@ async function savedCommand(opts: {
             wide: options.psWide,
             rows: observed.containers.map((item) => ({
               service: item.service,
-              address: addresses.get(item.service) ?? null,
+              address: null,
+              addresses: addresses.get(item.service),
               container: item.name,
               exitCode: item.state === "exited" ? item.exitCode : null,
               state: psServiceState(item),
@@ -2557,9 +2555,15 @@ async function dispatchNativeComposeCommand(
   requireNativeComposeBackend({ backend: process.env.HACK_RUNTIME_BACKEND });
   const prepare = validateNativeOptions(options);
   const controller = new AbortController();
-  const cancel = () => controller.abort();
-  process.on("SIGINT", cancel);
-  process.on("SIGTERM", cancel);
+  let signalExit: number | undefined;
+  const cancel = (code: number) => {
+    signalExit ??= code;
+    controller.abort();
+  };
+  const interrupt = () => cancel(130);
+  const terminate = () => cancel(143);
+  process.on("SIGINT", interrupt);
+  process.on("SIGTERM", terminate);
   try {
     if (prepare) {
       return await prepareCommand({
@@ -2579,10 +2583,18 @@ async function dispatchNativeComposeCommand(
       await store.close();
     }
   } catch (error: unknown) {
+    if (
+      signalExit !== undefined &&
+      options.operation === "ps" &&
+      options.psWide !== undefined &&
+      !options.json
+    ) {
+      return signalExit;
+    }
     return throwNativeComposeCommandError(error);
   } finally {
-    process.off("SIGINT", cancel);
-    process.off("SIGTERM", cancel);
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", terminate);
   }
 }
 

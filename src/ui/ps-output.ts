@@ -4,6 +4,7 @@ export type PsRow = {
   readonly service: string;
   readonly state: string;
   readonly address: string | null;
+  readonly addresses?: readonly string[];
   readonly container?: string | null;
   readonly exitCode?: number | null;
   readonly ports?: string | null;
@@ -27,6 +28,17 @@ export function psServiceState(item: {
   return state === "running" ? item.health?.toLowerCase() || state : state;
 }
 
+function psAddressText(row: PsRow, wide?: boolean): string | undefined {
+  const addresses = row.addresses ?? (row.address ? [row.address] : []);
+  if (wide) {
+    return addresses.join(", ");
+  }
+  const first = addresses[0];
+  return first && addresses.length > 1
+    ? `${first} +${addresses.length - 1}`
+    : first;
+}
+
 export function renderPs(input: {
   readonly rows: readonly PsRow[];
   readonly wide?: boolean;
@@ -41,20 +53,30 @@ export function renderPs(input: {
   if (input.wide) {
     columns.push("container", "exit code", "ports");
   }
+  const totals = new Map<string, number>();
+  const replicas = new Map<string, number>();
+  for (const row of input.rows) {
+    totals.set(row.service, (totals.get(row.service) ?? 0) + 1);
+  }
   const rows = input.rows.map((row) => {
-    const address = row.address
-      ? { text: row.address, role: "identity" as const }
+    const n = (replicas.get(row.service) ?? 0) + 1;
+    replicas.set(row.service, n);
+    const total = totals.get(row.service) ?? 1;
+    const service = total > 1 ? `${row.service} (${n}/${total})` : row.service;
+    const addressText = psAddressText(row, input.wide);
+    const address = addressText
+      ? { text: addressText, role: "identity" as const }
       : { text: "no address", role: "faint" as const };
     const cells: TableCell[] = input.hasRemotes
       ? [
-          row.service,
+          service,
           row.remote?.kind ?? "local",
           row.remote?.use ?? null,
-          row.remote?.pointsAt ?? row.address,
+          row.remote?.pointsAt ?? addressText ?? null,
           row.remote?.via ?? null,
           row.state,
         ]
-      : [row.service, address, row.state];
+      : [service, address, row.state];
     if (input.wide) {
       cells.push(
         row.container ?? null,
@@ -64,7 +86,7 @@ export function renderPs(input: {
     }
     return cells;
   });
-  const count = rows.length;
+  const count = totals.size;
   output.table({
     columns,
     rows,

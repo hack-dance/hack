@@ -264,15 +264,12 @@ async function reportAdoptedPs({
   >;
   readonly routingResolution?: NativeRoutingResolution;
 }): Promise<void> {
-  const addresses = new Map<string, string>();
+  const addresses = new Map<string, readonly string[]>();
   if (options.psWide !== undefined) {
     for (const route of Object.values(routingResolution?.routes ?? {})) {
-      if (
-        route.origin.startsWith("https://") &&
-        !addresses.has(route.service)
-      ) {
-        addresses.set(route.service, route.origin);
-      }
+      addresses.set(route.service, [
+        ...new Set([...(addresses.get(route.service) ?? []), route.origin]),
+      ]);
     }
   }
   const report = containers.map((container) => ({
@@ -283,12 +280,19 @@ async function reportAdoptedPs({
   if (!options.json && options.psWide !== undefined) {
     renderPs({
       wide: options.psWide,
-      rows: containers.map((container, index) => ({
-        service: container.service,
-        state: psServiceState({ state: report[index]?.status ?? "unknown" }),
-        address: addresses.get(container.service) ?? null,
-        container: container.name,
-      })),
+      rows: containers.map((container) => {
+        const observed = states.find((state) => state.id === container.id);
+        const state = observed?.status ?? "unknown";
+        const exitCode = state === "exited" ? observed?.exitCode : undefined;
+        return {
+          service: container.service,
+          state: psServiceState({ state, exitCode }),
+          address: null,
+          addresses: addresses.get(container.service),
+          container: container.name,
+          exitCode,
+        };
+      }),
     });
     return;
   }
@@ -313,6 +317,7 @@ async function observe(opts: {
   if (options.operation === "ps") {
     const states = await inspectLegacyComposeContainerStates({
       binding,
+      includeExitCode: !options.json && options.psWide === true,
       signal,
       timeoutMs: legacyAdoptionProbePhaseMs({
         deadline: opts.deadline,

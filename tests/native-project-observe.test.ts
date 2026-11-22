@@ -383,7 +383,12 @@ test.each([
   } else {
     expect(stdout).not.toContain("127.0.0.1:18080");
   }
-  expect(stdout + stderr).toContain("Run hack down");
+  if (command === "ps") {
+    expect(stdout).toMatch(/web +no address +port-down/);
+    expect(stdout).toContain(`hack down --path ${opts.scope.projectRoot}`);
+  } else {
+    expect(stdout + stderr).toContain("Run hack down");
+  }
 }, 20_000);
 test("bounded logs verify current container before and after using exact CLI contract", async () => {
   const opts = await fixture();
@@ -687,8 +692,9 @@ exit 2
     ]);
     expect(code).toBe(0);
     expect(stdout).toContain("web");
-    expect(stderr).toContain("owner is unconfirmed");
-    expect(stderr).toContain("not usable readiness");
+    expect(stdout).toContain("owner is unconfirmed");
+    expect(stdout).toContain(`hack down --path ${opts.scope.projectRoot}`);
+    expect(stderr).not.toContain("owner is unconfirmed");
   } finally {
     clearTimeout(timer);
     child.kill("SIGKILL");

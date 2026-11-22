@@ -14,7 +14,7 @@ export function parseComposeExitCode(value: unknown): number | null {
 
 export function displayComposePs(opts: {
   readonly entries: readonly Record<string, unknown>[];
-  readonly addresses: ReadonlyMap<string, string>;
+  readonly addresses: ReadonlyMap<string, readonly string[]>;
   readonly waiting: Readonly<Record<string, readonly string[]>>;
   readonly wide: boolean;
 }): void {
@@ -38,7 +38,8 @@ export function displayComposePs(opts: {
       });
       return {
         service,
-        address: opts.addresses.get(service) ?? null,
+        address: null,
+        addresses: opts.addresses.get(service),
         container: getString(entry, "Name"),
         exitCode,
         ports: getString(entry, "Ports"),

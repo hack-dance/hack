@@ -43,3 +43,28 @@ test("a known empty service list ends with a start hint", () => {
     "SERVICE  ADDRESS  STATE\n\n0 services\nnothing running. try: hack up\n"
   );
 });
+
+test("replicas are named and multiple routes stay copyable", () => {
+  const chunks: string[] = [];
+  const output = createTextOutput({
+    tty: false,
+    write: (line) => {
+      chunks.push(line);
+    },
+  });
+  const row = {
+    service: "web",
+    state: "running",
+    address: null,
+    addresses: ["http://sample.hack.local", "https://secure.sample.hack.local"],
+  };
+  renderPs({ rows: [row, { ...row, state: "exited (1)" }], output });
+  expect(chunks.join("")).toContain("web (1/2)  http://sample.hack.local +1");
+  expect(chunks.join("")).toContain("web (2/2)  http://sample.hack.local +1");
+  expect(chunks.join("")).toEndWith("\n1 service\n");
+  chunks.length = 0;
+  renderPs({ rows: [row], wide: true, output });
+  expect(chunks.join("")).toContain(
+    "http://sample.hack.local, https://secure.sample.hack.local"
+  );
+});

@@ -260,21 +260,49 @@ services:
     composeServiceAddresses({ composeYaml, baseHosts, branch: null })
   ).toEqual(
     new Map([
-      ["web", "https://shared.example"],
-      ["external", "https://external.example"],
-      ["api", "https://api.sample.hack.local"],
-      ["numbered-map", "https://map.sample.hack.local"],
-      ["numbered-list", "https://list.sample.hack.local"],
+      [
+        "web",
+        [
+          "https://shared.example",
+          "https://sample.hack.local",
+          "https://api.sample.hack.local",
+        ],
+      ],
+      ["external", ["https://external.example"]],
+      [
+        "api",
+        [
+          "http://plain.sample.hack.local",
+          "https://api.sample.hack.local",
+          "https://other.example",
+        ],
+      ],
+      ["insecure", ["http://only.sample.hack.local"]],
+      ["numbered-map", ["https://map.sample.hack.local"]],
+      ["numbered-list", ["https://list.sample.hack.local"]],
     ])
   );
   expect(
     composeServiceAddresses({ composeYaml, baseHosts, branch: "feature-x" })
   ).toEqual(
     new Map([
-      ["web", "https://feature-x.sample.hack.local"],
-      ["api", "https://api.feature-x.sample.hack.local"],
-      ["numbered-map", "https://map.feature-x.sample.hack.local"],
-      ["numbered-list", "https://list.feature-x.sample.hack.local"],
+      [
+        "web",
+        [
+          "https://feature-x.sample.hack.local",
+          "https://api.feature-x.sample.hack.local",
+        ],
+      ],
+      [
+        "api",
+        [
+          "http://plain.feature-x.sample.hack.local",
+          "https://api.feature-x.sample.hack.local",
+        ],
+      ],
+      ["insecure", ["http://only.feature-x.sample.hack.local"]],
+      ["numbered-map", ["https://map.feature-x.sample.hack.local"]],
+      ["numbered-list", ["https://list.feature-x.sample.hack.local"]],
     ])
   );
 });

@@ -532,6 +532,7 @@ import { displayNativePs } from "./native-ps-display.ts";
 import {
   answerNativeAlreadyRunning,
   explainUnconfirmedNativeDetachedStart,
+  nativeScopedCommand,
 } from "./native-up-already-running.ts";
 import {
   assertAutostartEnvironment,
@@ -10524,7 +10525,7 @@ async function handlePs({
   const cfg = await readProjectConfig(project);
   const native = resolveNativeRuntimeSelection();
   const addresses = json
-    ? new Map<string, string>()
+    ? new Map<string, readonly string[]>()
     : await readPsServiceAddresses({
         project,
         cfg,
@@ -10544,7 +10545,18 @@ async function handlePs({
         branch,
       },
     });
-    await displayNativePs(result, json, { addresses, wide: args.options.wide });
+    await displayNativePs(result, json, {
+      addresses,
+      wide: args.options.wide,
+      recoveryCommand: nativeScopedCommand({
+        action: "down",
+        selection: {
+          path: args.options.path,
+          project: args.options.project,
+          branch: branch ?? undefined,
+        },
+      }),
+    });
     return 0;
   }
   const profiles = parseCsvList(args.options.profile);
@@ -10565,7 +10577,6 @@ async function handlePs({
   // lag behind a failed startup. Both formats must observe the same containers.
   // A failed or unparsable read throws a coded error with the engine's cause
   // (envelope under --json, one line otherwise); see compose-ps-result.ts.
-  // Text mode keeps the plain `ps` fallback for Compose without JSON output.
   const read = await readComposePs({
     run: () =>
       composeRuntimeBackend.psJson({
@@ -10577,16 +10588,13 @@ async function handlePs({
       }),
   });
   if (!read.ok) {
-    if (json || !composePsTextFallbackAllowed(read.error)) {
-      throw read.error;
+    if (!json && composePsTextFallbackAllowed(read.error)) {
+      process.stderr.write(
+        `${read.error.code}: docker compose did not return a formatted service list\n`
+      );
+      return 1;
     }
-    return await composeRuntimeBackend.ps({
-      composeFiles: [project.composeFile],
-      composeProject: composeProjectName,
-      profiles,
-      cwd,
-      all: true,
-    });
+    throw read.error;
   }
   const entries = read.entries;
   // A Created service whose one-shot dependency is still running starts only
@@ -10635,7 +10643,7 @@ async function readPsServiceAddresses(opts: {
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly branch: string | null;
   readonly native: boolean;
-}): Promise<ReadonlyMap<string, string>> {
+}): Promise<ReadonlyMap<string, readonly string[]>> {
   const { project, cfg, branch } = opts;
   const devHost = await readProjectDevHost(project);
   const aliasHost = devHost ? resolveBranchAliasHost({ devHost, cfg }) : null;

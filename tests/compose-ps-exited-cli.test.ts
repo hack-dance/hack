@@ -149,9 +149,9 @@ test("Compose ps shows failed and completed services after failed up", async () 
       }),
     ]);
     const fallback = await cli(["ps"], { STUB_FAIL_JSON: "1" });
-    expect(fallback.exitCode).toBe(0);
-    expect(fallback.stdout).toContain("worker exited 127");
-    expect(fallback.stdout).toContain("install exited 0");
+    expect(fallback.exitCode).toBe(1);
+    expect(fallback.stdout).toBe("");
+    expect(fallback.stderr).toContain("E_COMPOSE_FAILED");
     const failedJson = await cli(["ps", "--json"], { STUB_FAIL_JSON: "1" });
     expect(failedJson.exitCode).toBe(1);
     expect(JSON.parse(failedJson.stdout)).toEqual({

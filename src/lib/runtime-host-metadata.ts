@@ -282,14 +282,14 @@ function readEffectiveServices(opts: {
   return services;
 }
 
-/** First concrete HTTPS route for each service in Compose declaration order. */
+/** Concrete HTTP and HTTPS routes for each service in Compose declaration order. */
 export function composeServiceAddresses(opts: {
   readonly composeYaml: string;
   readonly branch: string | null;
   readonly baseHosts: readonly string[];
   readonly httpsPort?: number | null;
-}): ReadonlyMap<string, string> {
-  const addresses = new Map<string, string>();
+}): ReadonlyMap<string, readonly string[]> {
+  const addresses = new Map<string, readonly string[]>();
   const services = parseComposeYaml({ text: opts.composeYaml })?.services;
   if (!isRecord(services)) {
     return addresses;
@@ -306,17 +306,44 @@ export function composeServiceAddresses(opts: {
           baseHosts: opts.baseHosts,
         }).value
       : sites;
-    const host = splitCaddySites(label)
-      .filter((site) => !site.toLowerCase().startsWith("http://"))
-      .flatMap((value) => extractCaddyLabelHosts({ value }))[0];
-    if (host) {
-      addresses.set(
-        service,
-        runtimeHostUrl({ host, httpsPort: opts.httpsPort })
-      );
+    const urls = new Set(
+      splitCaddySites(label).flatMap((site) => {
+        const url = composeSiteUrl(site, opts.httpsPort);
+        return url ? [url] : [];
+      })
+    );
+    if (urls.size > 0) {
+      addresses.set(service, [...urls]);
     }
   }
   return addresses;
+}
+
+const SITE_TEMPLATE = /[*{}$]/;
+const SITE_SCHEME = /^[a-z][a-z\d+.-]*:\/\//i;
+
+function composeSiteUrl(
+  site: string,
+  httpsPort?: number | null
+): string | null {
+  if (SITE_TEMPLATE.test(site)) {
+    return null;
+  }
+  const url = URL.parse(SITE_SCHEME.test(site) ? site : `https://${site}`);
+  if (
+    !url ||
+    url.username ||
+    url.password ||
+    !["http:", "https:"].includes(url.protocol)
+  ) {
+    return null;
+  }
+  if (url.protocol === "https:" && !url.port && httpsPort) {
+    url.port = String(httpsPort);
+  }
+  return url.pathname === "/" && !url.search && !url.hash
+    ? url.origin
+    : url.href;
 }
 
 function readCaddySiteLabels(labels: unknown): string[] {

@@ -4,6 +4,7 @@ import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
 import { psServiceState, renderPs } from "../ui/ps-output.ts";
+import { createTextOutput } from "../ui/text-output.ts";
 
 export function nativePsState(
   item: NativeProjectPsResult["items"][number]
@@ -22,8 +23,9 @@ export async function displayNativePs(
   result: NativeProjectPsResult,
   json: boolean,
   ps?: {
-    readonly addresses: ReadonlyMap<string, string>;
+    readonly addresses: ReadonlyMap<string, readonly string[]>;
     readonly wide?: boolean;
+    readonly recoveryCommand?: string;
   }
 ): Promise<void> {
   if (json) {
@@ -50,12 +52,12 @@ export async function displayNativePs(
     });
   } else if (result.status === "provider_pin_changed") {
     logger.warn({ message: NATIVE_PROVIDER_PIN_MESSAGE });
-  } else if (result.status === "owner_unconfirmed") {
+  } else if (result.status === "owner_unconfirmed" && !ps) {
     logger.warn({
       message:
         "Native graph owner is unconfirmed. Service rows are observations, not usable readiness; explicit retaining recovery is required.",
     });
-  } else if (result.status === "runtime_degraded") {
+  } else if (result.status === "runtime_degraded" && !ps) {
     logger.warn({
       message:
         "Native graph owner reported a degraded runtime. Service rows do not prove usable readiness. Run hack down to stop this project with data retained.",
@@ -67,7 +69,8 @@ export async function displayNativePs(
       hintWhenEmpty: result.status === "not_started",
       rows: result.items.map((item) => ({
         service: item.service,
-        address: ps.addresses.get(item.service) ?? null,
+        address: null,
+        addresses: ps.addresses.get(item.service),
         container: item.container,
         exitCode: item.exitCode,
         ports:
@@ -75,9 +78,27 @@ export async function displayNativePs(
             ?.filter((port) => port.service === item.service)
             .map((port) => `127.0.0.1:${port.port} (${port.state})`)
             .join(", ") || null,
-        state: psServiceState(item),
+        state: result.ports?.some(
+          (port) => port.service === item.service && port.state === "down"
+        )
+          ? "port-down"
+          : psServiceState(item),
       })),
     });
+    if (
+      result.status === "owner_unconfirmed" ||
+      result.status === "runtime_degraded" ||
+      result.ports?.some((port) => port.state === "down")
+    ) {
+      const reason =
+        result.status === "owner_unconfirmed"
+          ? "owner is unconfirmed"
+          : "runtime is degraded";
+      createTextOutput().line(
+        `${reason} · retain data and stop with ${ps.recoveryCommand ?? "hack down"}`,
+        "faint"
+      );
+    }
     return;
   }
   await display.table({

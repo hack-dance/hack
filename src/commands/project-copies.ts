@@ -127,6 +127,9 @@ async function readNativeCopy(
   }
 }
 
+// Docker's inventory appends the health status to the uptime display.
+const INVENTORY_HEALTH = /\((?:health: )?(healthy|unhealthy|starting)\)$/;
+
 function readComposeCopy(
   runtime: RuntimeProject | undefined,
   available: boolean
@@ -137,7 +140,14 @@ function readComposeCopy(
   const states = new Map(
     [...runtime.services.values()].map(({ service, containers }) => [
       service,
-      copyState(containers.map(psServiceState)),
+      copyState(
+        containers.map(({ state, status }) =>
+          psServiceState({
+            state,
+            health: INVENTORY_HEALTH.exec(status.trim())?.[1],
+          })
+        )
+      ),
     ])
   );
   return { states, state: copyState([...states.values()]) };

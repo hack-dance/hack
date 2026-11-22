@@ -114,6 +114,7 @@ test("copies attributes an instance to its worktree using one Compose inventory"
       `${JSON.stringify({
         ID: "abcdef",
         State: "running",
+        Status: "Up 7 seconds (unhealthy)",
         Labels: [
           "com.docker.compose.project=sample--feature-1",
           "com.docker.compose.service=web",
@@ -126,7 +127,7 @@ test("copies attributes an instance to its worktree using one Compose inventory"
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("BRANCH");
     expect(result.stdout).toContain("CHECKOUT");
-    expect(result.stdout).toContain("2 copies · 1 stopped · 1 running");
+    expect(result.stdout).toContain("2 copies · 1 stopped · 1 unhealthy");
     expect(result.stdout).toContain("https://feature-1.sample.hack.local");
     expect(result.stdout).not.toContain(f.root);
     expect((await readFile(f.calls, "utf8")).trim().split("\n")).toEqual([
@@ -151,7 +152,7 @@ test("copies attributes an instance to its worktree using one Compose inventory"
             branch: "feature-1",
             checkout: { kind: "worktree", name: "feature-1" },
             instance: "feature-1",
-            state: "running",
+            state: "unhealthy",
             address: "https://feature-1.sample.hack.local",
           },
         ],
@@ -308,6 +309,9 @@ test("authored Compose copies match the generated base and branch inventory", as
         JSON.stringify({
           ID: instance ?? "base",
           State: "running",
+          Status: instance
+            ? "Up 1 second (health: starting)"
+            : "Up 1 minute (healthy)",
           Labels: [
             `com.docker.compose.project=${composeProject}`,
             "com.docker.compose.service=web",
@@ -321,7 +325,7 @@ test("authored Compose copies match the generated base and branch inventory", as
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("feature/example");
-    expect(result.stdout).toContain("2 copies · 2 running");
+    expect(result.stdout).toContain("2 copies · 1 healthy · 1 starting");
     expect(result.stdout).not.toContain("hack-nc-");
     expect((await readFile(f.calls, "utf8")).trim().split("\n")).toHaveLength(
       1

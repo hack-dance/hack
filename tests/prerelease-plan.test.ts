@@ -17,6 +17,7 @@ import { CLI_COMPILE_DEFINE_ARGS } from "../scripts/lib/cli-compile-define.ts";
 import { packageNativeStorageTool } from "../scripts/package-native-storage-tool.ts";
 import {
   CONFIG_COMPILER_PAYLOAD,
+  createAndVerifyPrerelease,
   createPrereleasePlan,
   PAYLOAD_MODES,
   PRERELEASE_BASE,
@@ -26,6 +27,7 @@ import {
   packagePrerelease as packagePrereleaseActual,
   prereleaseMetadata,
   prereleaseNotes,
+  releaseAssets,
   renderChecksums,
   requireExactHeadCi,
   requireHumanApproval,
@@ -35,7 +37,7 @@ import {
   stableReleaseVersion,
   verifyPrereleaseCi,
   verifyPublishGate,
-  verifyReleaseAssets,
+  verifyReleaseAssets as verifyReleaseAssetsActual,
 } from "../scripts/prerelease-plan.ts";
 import {
   NATIVE_STORAGE_TOOL_FILE,
@@ -46,25 +48,23 @@ import { packageMcpBundle } from "../src/mcp/bundle.ts";
 import { nativeCandidateMcpPayload } from "../src/mcp/candidate-payload.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
-// Packaging fixtures qualify inventories and binding; standalone execution has its own isolated test.
-const packagePrerelease = async (
+function verifyReleaseAssets(
+  options: Parameters<typeof verifyReleaseAssetsActual>[0]
+) {
+  return verifyReleaseAssetsActual({ ...options, nativeSignatures: () => {} });
+}
+
+// Synthetic fixture executables do not carry macOS signatures.
+const packagePrerelease = (
   options: Parameters<typeof packagePrereleaseActual>[0]
-) => {
-  await packagePrereleaseActual({
+) =>
+  packagePrereleaseActual({
     ...options,
+    nativeSignatures: () => {},
     buildManager: async (output) => {
       await writeFile(output, "standalone-manager-fixture", { mode: 0o500 });
     },
   });
-  const archive = join(options.output, options.plan.archive);
-  extractArchive({
-    archive,
-    checksum: digest(archive),
-    destination: `${options.output}-installer-fixture`,
-    version: options.plan.version,
-    signatures: () => {},
-  });
-};
 
 const sha = "a".repeat(40);
 const input = {
@@ -174,7 +174,7 @@ const scopedJobs = jobs.map((job) => ({
   })),
 }));
 
-function gateApi(overrides: Record<string, unknown> = {}) {
+function gateResponses(overrides: Record<string, unknown> = {}) {
   const data: Record<string, unknown> = {
     "branches/next": branch,
     "environments/v5-prerelease": environment,
@@ -204,6 +204,11 @@ function gateApi(overrides: Record<string, unknown> = {}) {
   };
   data[`commits/${sha}/check-runs?filter=latest&per_page=100&page=1`] ??=
     data[checkPath];
+  return data;
+}
+
+function gateApi(overrides: Record<string, unknown> = {}) {
+  const data = gateResponses(overrides);
   return (path: string): Promise<unknown> => {
     if (!(path in data)) {
       throw new Error(`Unexpected API request ${path}`);
@@ -1068,10 +1073,17 @@ test("packages and extracts the supervisor extension with executable mode", asyn
       bundle,
       output,
     });
+    const archive = join(output, plan.archive);
+    const extracted = join(root, "extracted");
+    extractArchive({
+      archive,
+      checksum: digest(archive),
+      destination: extracted,
+      version: plan.version,
+      signatures: () => {},
+    });
     expect(
-      await Bun.file(
-        join(`${output}-installer-fixture`, "hack-lifecycle-supervisor")
-      ).text()
+      await Bun.file(join(extracted, "hack-lifecycle-supervisor")).text()
     ).toBe("synthetic supervisor\n");
     await chmod(join(bundle, "hack-lifecycle-supervisor"), 0o644);
     await expect(
@@ -1515,7 +1527,14 @@ test("packages a verified MCP selection with exact nested checksums and inventor
         .map((entry) => entry.name)
         .sort()
     ).toEqual([...names, "SHA256SUMS"].sort());
-    await verifyReleaseAssets({ plan, output });
+    const publishable = verifyReleaseAssets({ plan, output });
+    if (process.platform === "darwin" && process.arch === "arm64") {
+      await publishable;
+    } else {
+      await expect(publishable).rejects.toThrow(
+        "Incompatible MCP protocol or host."
+      );
+    }
     await writeFile(join(mcp.directory, "extra"), "foreign");
     await expect(
       packagePrerelease({ plan, bundle, output: join(root, "extra") })
@@ -1575,6 +1594,195 @@ test("local dry-run has no publishing effects and refuses SHA mismatch and injec
         expect(JSON.parse(text).publish).toBe(false);
       }
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("publish refuses an invalid release set before tag creation or upload", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-prerelease-publish-"));
+  try {
+    const gh = join(root, "gh");
+    const effects = join(root, "effects");
+    const preload = join(root, "github-fixture.ts");
+    const output = join(root, "invalid-assets");
+    await mkdir(output);
+    await writeFile(
+      gh,
+      '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PUBLISH_EFFECTS"\n',
+      { mode: 0o700 }
+    );
+    await Bun.write(
+      preload,
+      `const responses = ${JSON.stringify(gateResponses())};
+globalThis.fetch = async (input, options) => {
+  const url = new URL(input);
+  const prefix = "/repos/hack-dance/hack/";
+  const key = url.pathname.slice(prefix.length) + url.search;
+  if (url.origin !== "https://api.github.com" || !url.pathname.startsWith(prefix) ||
+      (options?.method ?? "GET") !== "GET" || !Object.hasOwn(responses, key)) {
+    throw new Error("Unexpected GitHub fixture request");
+  }
+  return responses[key] === null
+    ? new Response(null, { status: 404 })
+    : Response.json(responses[key]);
+};
+`
+    );
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "--no-env-file",
+        "--preload",
+        preload,
+        "scripts/prerelease-plan.ts",
+        "publish",
+      ],
+      {
+        env: privateCliEnv({
+          root,
+          env: {
+            PATH: root,
+            GH_TOKEN: "synthetic-fixture-value",
+            GITHUB_ACTIONS: "true",
+            GITHUB_REPOSITORY: "hack-dance/hack",
+            GITHUB_REF: input.ref,
+            GITHUB_SHA: sha,
+            GITHUB_EVENT_NAME: input.eventName,
+            GITHUB_RUN_ID: "99",
+            GITHUB_RUN_ATTEMPT: "1",
+            RELEASE_CHANNEL: input.channel,
+            HACK_PRERELEASE_VERSION: input.version,
+            HACK_PRERELEASE_SOURCE_REVISION: sha,
+            HACK_PRERELEASE_PUBLISH: "true",
+            HACK_PRERELEASE_OUTPUT: output,
+            PUBLISH_EFFECTS: effects,
+          },
+        }),
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 10_000,
+      }
+    );
+    const [stderr, exit] = await Promise.all([
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(await Bun.file(effects).exists()).toBe(false);
+    expect(exit).toBe(1);
+    expect(stderr).toContain(
+      "Expected exactly the candidate and standalone installer release assets"
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("publication reads back assets and refuses a partial fake gh upload", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-release-readback-"));
+  try {
+    const assets = await Promise.all(
+      releaseAssets(plan).map(async (name) => {
+        const path = join(root, name);
+        const size = await Bun.write(path, `fixture for ${name}\n`);
+        return {
+          name,
+          size,
+          digest: `sha256:${digest(path)}`,
+          state: "uploaded",
+        };
+      })
+    );
+    const listing = join(root, "listing.json");
+    const release = join(root, "release.json");
+    await Bun.write(release, JSON.stringify({ id: 321, tag_name: plan.tag }));
+    await writeFile(
+      join(root, "gh"),
+      `#!/bin/sh
+case "$1 $2" in
+  "api --method") printf '%s\\n' tag >> "$EFFECTS" ;;
+  "release create") printf '%s\\n' create >> "$EFFECTS" ;;
+  "api repos/hack-dance/hack/releases/tags/${plan.tag}")
+    /bin/cat "$RELEASE_FIXTURE" ;;
+  "api --paginate")
+    [ "$3" = "--slurp" ] || exit 96
+    [ "$4" = "repos/hack-dance/hack/releases/321/assets?per_page=100" ] || exit 97
+    printf '%s\\n' list >> "$EFFECTS"
+    /bin/cat "$ASSET_FIXTURE" ;;
+  *) exit 98 ;;
+esac
+`,
+      { mode: 0o700 }
+    );
+    const effects = join(root, "effects");
+    const options = {
+      plan,
+      output: root,
+      env: privateCliEnv({
+        root,
+        env: {
+          PATH: root,
+          EFFECTS: effects,
+          ASSET_FIXTURE: listing,
+          RELEASE_FIXTURE: release,
+        },
+      }),
+    };
+    const last = assets.at(-1);
+    const other = assets.slice(0, -1);
+    const elapsed: number[] = [];
+    const writeListing = (entries: unknown[]) =>
+      Bun.write(listing, JSON.stringify([entries]));
+    const clock =
+      (next?: (retry: number) => Promise<unknown>) =>
+      async (milliseconds: number) => {
+        elapsed.push(milliseconds);
+        await next?.(elapsed.length);
+      };
+
+    await writeListing(other);
+    await createAndVerifyPrerelease({
+      ...options,
+      sleep: clock((retry) =>
+        writeListing([
+          ...other,
+          ...[
+            { ...last, state: "starter" },
+            { ...last, digest: null },
+            last,
+          ].slice(retry - 1, retry),
+        ])
+      ),
+    });
+    expect(elapsed.splice(0)).toEqual([5000, 5000, 5000]);
+
+    await writeListing(other);
+    await expect(
+      createAndVerifyPrerelease({ ...options, sleep: clock() })
+    ).rejects.toThrow(
+      `The release exists at ${plan.tag}. Inspect it and do not re-dispatch the same version.`
+    );
+    expect(elapsed.splice(0)).toEqual([5000, 5000, 5000, 5000, 5000]);
+
+    for (const mismatch of [
+      { size: 0, state: "starter" },
+      { digest: "sha256:wrong", state: "starter" },
+    ]) {
+      await writeListing([...other, { ...last, ...mismatch }]);
+      await expect(
+        createAndVerifyPrerelease({ ...options, sleep: clock() })
+      ).rejects.toThrow(
+        `Published prerelease asset does not match the local set: ${last?.name}`
+      );
+      expect(elapsed).toEqual([]);
+    }
+    expect(await Bun.file(effects).text()).toBe(
+      "tag\ncreate\n" +
+        "list\n".repeat(4) +
+        "tag\ncreate\n" +
+        "list\n".repeat(6) +
+        "tag\ncreate\nlist\n".repeat(2)
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

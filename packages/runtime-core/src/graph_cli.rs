@@ -725,12 +725,20 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let mut live_source = false;
     let mut shared_source = false;
     let mut json = false;
+    let mut startup_wait = false;
     let mut unix = false;
     let mut hostnames = Vec::new();
     let mut index = 0;
     while index < args.len() {
         let key = args[index];
         index += 1;
+        if key == "--startup-wait" {
+            if *action != "inspect" || startup_wait {
+                return Err(invalid());
+            }
+            startup_wait = true;
+            continue;
+        }
         if key == "--shared-source" {
             if shared_source
                 || live_source
@@ -1018,8 +1026,12 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "reconcile-bridges" => graph::reconcile_bridges(candidate, run),
         "prune" => graph::prune(candidate, run),
         "reconcile-export" => graph::reconcile_export(candidate, run),
-        "inspect" => serde_json::to_value(graph::inspect(candidate, run)?)
-            .map_err(|_| CandidateError::new("graph_output", "Cannot encode graph snapshot.")),
+        "inspect" => serde_json::to_value(graph::inspect_with_startup_wait(
+            candidate,
+            run,
+            startup_wait,
+        )?)
+        .map_err(|_| CandidateError::new("graph_output", "Cannot encode graph snapshot.")),
         "status" => {
             #[cfg(target_os = "macos")]
             {

@@ -31,6 +31,10 @@ import {
 } from "./project-input-selection.ts";
 import { normalizeProjectName } from "./project-name.ts";
 import {
+  type ProjectPrerequisiteValidation,
+  validateProjectPrerequisites,
+} from "./project-remotes-config.ts";
+import {
   type ProjectSharedHelperConfig,
   parseProjectSharedHelpers,
 } from "./project-shared-helpers.ts";
@@ -251,6 +255,7 @@ export async function readProjectDefaultEnvConfig(opts: {
 }
 
 export interface ProjectConfig {
+  readonly prerequisites?: ProjectPrerequisiteValidation;
   readonly name?: string;
   readonly devHost?: string;
   readonly defaultEnvConfig?: string;
@@ -298,6 +303,8 @@ export interface ProjectComposeConfig {
   readonly startupTimeoutMs?: number;
   /** `compose.startupCeilingMs`, as `HACK_COMPOSE_STARTUP_CEILING_MS`. */
   readonly startupCeilingMs?: number;
+  /** `compose.downTimeoutSeconds`, integer 0..600 passed to `docker compose down --timeout`. */
+  readonly downTimeoutSeconds?: number;
 }
 
 /**
@@ -340,12 +347,18 @@ function parseComposeConfig(
   };
   const startupTimeoutMs = read("startupTimeoutMs");
   const startupCeilingMs = read("startupCeilingMs");
-  if (startupTimeoutMs === undefined && startupCeilingMs === undefined) {
+  const downTimeoutSeconds = read("downTimeoutSeconds");
+  if (
+    startupTimeoutMs === undefined &&
+    startupCeilingMs === undefined &&
+    downTimeoutSeconds === undefined
+  ) {
     return;
   }
   return {
     ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
     ...(startupCeilingMs === undefined ? {} : { startupCeilingMs }),
+    ...(downTimeoutSeconds === undefined ? {} : { downTimeoutSeconds }),
   };
 }
 
@@ -691,6 +704,15 @@ export function parseProjectConfigRecord(
     };
   }
 
+  const hasPrerequisites = [
+    "requires",
+    "remotes",
+    "min_cli_version",
+    "tools",
+  ].some((key) => value[key] !== undefined);
+  const prerequisites = hasPrerequisites
+    ? validateProjectPrerequisites(value)
+    : undefined;
   const name = getString(value, "name");
   const devHost = getString(value, "dev_host");
   const envConfig = getRecord(value, "env");
@@ -744,6 +766,7 @@ export function parseProjectConfigRecord(
       ? normalizeEnvConfigName(envDefaultOverlayRaw)
       : null;
   const parseErrors = [
+    ...(prerequisites?.error ? [prerequisites.error.message] : []),
     ...(defaultEnvConfigRaw && defaultEnvConfig === null
       ? [
           "Project defaultEnvConfig/default_env_config must be a non-empty env name.",
@@ -764,6 +787,7 @@ export function parseProjectConfigRecord(
   ];
 
   return {
+    ...(prerequisites ? { prerequisites } : {}),
     ...(name ? { name } : {}),
     ...(devHost ? { devHost } : {}),
     ...(defaultEnvConfig ? { defaultEnvConfig } : {}),

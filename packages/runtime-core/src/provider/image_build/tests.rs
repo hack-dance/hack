@@ -7,7 +7,8 @@
 use super::*;
 use std::{
     cell::RefCell,
-    os::unix::fs::PermissionsExt,
+    collections::BTreeSet,
+    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
     sync::{Arc, Mutex},
 };
 
@@ -64,7 +65,7 @@ impl Fixture {
         }
     }
     fn inputs(&self, policy: Policy) -> Inputs {
-        prepare(self.request(policy)).unwrap()
+        prepare(self.request(policy), &builds_root(&self.candidate)).unwrap()
     }
     fn scratch(&self, inputs: &Inputs) -> PathBuf {
         builds_root(&self.candidate)
@@ -103,8 +104,17 @@ done
 cat "$file" > seen-bake.json
 cat dockerfile/Dockerfile > seen-dockerfile
 cat dockerfile/Dockerfile.dockerignore > seen-dockerignore
+ls -A snapshot/context > seen-entries
 case {mode} in
   ok) printf '{{"build":{{"containerimage.config.digest":"{IMAGE}"}}}}' > "$meta" ;;
+  given) printf '{{"build":{{"containerimage.config.digest":"%s"}}}}' "$(cat image-id)" > "$meta" ;;
+  edit)
+    target=$(cat edit-target)
+    original=$(cat "$target")
+    printf 'edited during the build' > "$target"
+    cat snapshot/context/main.txt > seen-during
+    printf '%s' "$original" > "$target"
+    printf '{{"build":{{"containerimage.config.digest":"{IMAGE}"}}}}' > "$meta" ;;
   leak)
     printf '#5 0.1 value=%s\n\033[31mred\033[0m\033]0;title\007\n' '{SECRET}' >&2
     printf '{{"build":{{"containerimage.config.digest":"{IMAGE}"}}}}' > "$meta" ;;
@@ -152,6 +162,8 @@ struct FakePool {
     resolve_delay: Duration,
     resolve_deadlines: RefCell<Vec<Instant>>,
     output: Arc<Mutex<Vec<u8>>>,
+    /// Verify the image builder in this home before use, as the real pool does.
+    builder_home: Option<PathBuf>,
 }
 impl FakePool {
     fn new(incarnation: &str) -> Self {
@@ -167,7 +179,17 @@ impl FakePool {
             resolve_delay: Duration::ZERO,
             resolve_deadlines: RefCell::new(Vec::new()),
             output: Arc::default(),
+            builder_home: None,
         }
+    }
+    /// Register `id` as the image the fake client in mode `given` "builds" for `inputs`.
+    fn built_as(&self, inputs: &Inputs, incarnation: &str, id: &str) {
+        let labels = serde_json::to_value(labels(inputs, &identity(incarnation))).unwrap();
+        self.images.borrow_mut().insert(
+            id.into(),
+            serde_json::json!({"Id": id, "Architecture": "arm64", "Os": "linux",
+                "Size": GIB, "Config": {"Labels": labels, "Volumes": null}}),
+        );
     }
     /// Register the image the fake client "builds", with the labels the build expects.
     fn built(&self, inputs: &Inputs, incarnation: &str, extra: Value) {
@@ -215,6 +237,9 @@ impl BuildPool for FakePool {
         })
     }
     fn builder(&self) -> Result<PathBuf, CandidateError> {
+        if let Some(home) = &self.builder_home {
+            artifact::verify_builder(&Candidate::discover(home)?)?;
+        }
         Ok(PathBuf::from("/bin/sh"))
     }
     fn output(&self) -> Box<dyn Write + Send> {
@@ -239,6 +264,15 @@ impl Write for Captured {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+fn target_context(scratch: &Path) -> String {
+    let bake: Value =
+        serde_json::from_slice(&fs::read(scratch.join("seen-bake.json")).unwrap()).unwrap();
+    bake["target"]["build"]["context"]
+        .as_str()
+        .unwrap()
+        .to_owned()
 }
 
 fn never() -> bool {
@@ -270,7 +304,20 @@ fn cold_build_passes_values_only_through_the_private_definition_and_records_the_
     assert_eq!(lines.last(), Some(&"build"));
     assert!(lines.contains(&"--provenance=false") && lines.contains(&"--sbom=false"));
     assert!(lines.windows(2).any(|w| w[0] == "--allow"
-        && w[1] == format!("fs.read={}", fixture.project.join("app").display())));
+        && w[1] == format!("fs.read={}", scratch.join("snapshot/context").display())));
+    // BuildKit was pointed at the private snapshot, which is gone after the run.
+    assert_eq!(
+        Path::new(target_context(&scratch).as_str()),
+        scratch.join("snapshot/context")
+    );
+    assert!(
+        !scratch.join("snapshot").exists(),
+        "the snapshot outlived the run"
+    );
+    assert_eq!(
+        fs::read_to_string(scratch.join("seen-entries")).unwrap(),
+        "Dockerfile\nmain.txt\n"
+    );
     assert!(
         !argv.contains("pool-1"),
         "the pool incarnation reached argv"
@@ -351,7 +398,7 @@ fn environment_names_are_plain_arguments_that_never_reach_the_client_environment
             .args
             .insert(name.to_owned(), format!("{SECRET}-{name}"));
     }
-    let inputs = prepare(request).unwrap();
+    let inputs = prepare(request, &builds_root(&fixture.candidate)).unwrap();
     let pool = FakePool::new("pool-1");
     fixture.client(&inputs, "ok");
     pool.built(&inputs, "pool-1", serde_json::json!({}));
@@ -456,6 +503,8 @@ fn receipts_with_the_most_and_longest_accepted_pins_stay_readable() {
         image_id: Some(IMAGE.into()),
         image_bytes: Some(5 * GIB),
         base_pins: BTreeMap::new(),
+        declaration: None,
+        sequence: None,
     };
     // The scanner's bounds: 32 images, Docker Hub paths up to 200 bytes, tags up to
     // 128, each with a digest; the pinned reference keeps the name and adds the pin.
@@ -486,7 +535,11 @@ fn remote_add_sources_refuse_before_any_build_effect() {
         "FROM alpine:3.20 AS base\nONBUILD ADD https://example.test/a /a\n",
     ] {
         fs::write(fixture.project.join("app/Dockerfile"), dockerfile).unwrap();
-        let error = prepare(fixture.request(Policy::Missing)).unwrap_err();
+        let error = prepare(
+            fixture.request(Policy::Missing),
+            &builds_root(&fixture.candidate),
+        )
+        .unwrap_err();
         assert_eq!(error.code, "native_build_dockerfile", "{dockerfile}");
         assert!(!error.message.contains("100.96.0.1") && !error.message.contains("example.test"));
     }
@@ -495,7 +548,13 @@ fn remote_add_sources_refuse_before_any_build_effect() {
         "FROM alpine:3.20\nADD main.txt /main.txt\n",
     )
     .unwrap();
-    assert!(prepare(fixture.request(Policy::Missing)).is_ok());
+    assert!(
+        prepare(
+            fixture.request(Policy::Missing),
+            &builds_root(&fixture.candidate)
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -634,9 +693,10 @@ fn bake_definitions_never_evaluate_project_text() {
     request
         .args
         .insert("TEMPLATE".into(), "${HOME}%{ if true }".into());
-    let inputs = prepare(request).unwrap();
+    let inputs = prepare(request, &builds_root(&fixture.candidate)).unwrap();
     let definition = bake_definition(
         &inputs,
+        Path::new("/s/context"),
         Path::new("/s/Dockerfile"),
         &BTreeMap::new(),
         &BTreeMap::new(),
@@ -665,12 +725,19 @@ fn the_client_builds_the_scanned_dockerfile_and_ignore_rules_not_later_edits() {
     let fixture = Fixture::new();
     let app = fixture.project.join("app");
     let scanned = fs::read(app.join("Dockerfile")).unwrap();
-    fs::write(app.join(".dockerignore"), "*.txt\n").unwrap();
+    // The build files themselves are excluded, so editing them later leaves the
+    // keyed context set unchanged.
+    let rules = "*.txt\nDockerfile*\n.dockerignore\n";
+    fs::write(app.join(".dockerignore"), rules).unwrap();
     let inputs = fixture.inputs(Policy::Missing);
     // Edits after the scan (while bases resolve) must not reach the client.
     fs::write(app.join("Dockerfile"), "FROM unpinned:latest\nRUN id\n").unwrap();
     fs::write(app.join(".dockerignore"), "!*\n").unwrap();
-    fs::write(app.join("Dockerfile.dockerignore"), "main.txt\n").unwrap();
+    fs::write(
+        app.join("Dockerfile.dockerignore"),
+        "main.txt\nDockerfile*\n",
+    )
+    .unwrap();
     let pool = FakePool::new("pool-1");
     fixture.client(&inputs, "ok");
     pool.built(&inputs, "pool-1", serde_json::json!({}));
@@ -679,7 +746,7 @@ fn the_client_builds_the_scanned_dockerfile_and_ignore_rules_not_later_edits() {
     assert_eq!(fs::read(scratch.join("seen-dockerfile")).unwrap(), scanned);
     assert_eq!(
         fs::read_to_string(scratch.join("seen-dockerignore")).unwrap(),
-        "*.txt\n"
+        rules
     );
     let bake: Value =
         serde_json::from_slice(&fs::read(scratch.join("seen-bake.json")).unwrap()).unwrap();
@@ -692,20 +759,25 @@ fn the_client_builds_the_scanned_dockerfile_and_ignore_rules_not_later_edits() {
     fs::remove_file(app.join("Dockerfile.dockerignore")).unwrap();
     fixture.client(&inputs, "ok");
     pool.built(&inputs, "pool-1", serde_json::json!({}));
-    run(&fixture.candidate, &pool, &inputs, &never).unwrap_or_else(|e| panic!("{e:?}"));
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
     assert_eq!(
         fs::read_to_string(fixture.scratch(&inputs).join("seen-dockerignore")).unwrap(),
-        "main.txt\n"
+        "main.txt\nDockerfile*\n"
     );
     fs::remove_file(app.join(".dockerignore")).unwrap();
     let inputs = fixture.inputs(Policy::Rebuild);
     fs::write(app.join(".dockerignore"), "*\n").unwrap();
     fixture.client(&inputs, "ok");
     pool.built(&inputs, "pool-1", serde_json::json!({}));
-    run(&fixture.candidate, &pool, &inputs, &never).unwrap_or_else(|e| panic!("{e:?}"));
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
     assert_eq!(
         fs::read(fixture.scratch(&inputs).join("seen-dockerignore")).unwrap(),
         b""
+    );
+    // The snapshot holds only entries recorded before the late ignore file appeared.
+    assert_eq!(
+        fs::read_to_string(fixture.scratch(&inputs).join("seen-entries")).unwrap(),
+        "Dockerfile\nmain.txt\n"
     );
 }
 
@@ -883,7 +955,7 @@ fn timeout_and_cancellation_stop_the_whole_client_group() {
     let fixture = Fixture::new();
     let mut request = fixture.request(Policy::Missing);
     request.timeout_seconds = Some(1);
-    let inputs = prepare(request).unwrap();
+    let inputs = prepare(request, &builds_root(&fixture.candidate)).unwrap();
     let pool = FakePool::new("pool-1");
     fixture.client(&inputs, "sleep");
     let started = Instant::now();
@@ -935,6 +1007,8 @@ fn a_dead_attempt_is_recorded_indeterminate_and_built_again() {
         image_id: None,
         image_bytes: None,
         base_pins: BTreeMap::new(),
+        declaration: None,
+        sequence: None,
     };
     state::write(&path, &leftover).unwrap();
     // Even with an adoptable image present, the dead attempt's receipt is not trusted.
@@ -1037,8 +1111,31 @@ fn base_resolution_failures_run_nothing() {
     assert_eq!(fixture.calls(&inputs), 0);
 }
 
-fn code(request: BuildRequest) -> &'static str {
-    prepare(request).unwrap_err().code
+#[test]
+fn a_home_without_the_image_builder_refuses_by_name_and_runs_nothing() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    fixture.client(&inputs, "ok");
+    let mut pool = FakePool::new("pool-1");
+    pool.builder_home = Some(fixture.candidate.checkout.clone());
+    // The build reports the builder's own refusal unchanged: its code, and fixed text
+    // that names the fix instead of the missing file.
+    let error = run(&fixture.candidate, &pool, &inputs, &never).unwrap_err();
+    assert_eq!(error.code, "builder_not_prepared");
+    assert!(error.message_fixed);
+    assert!(
+        error
+            .message
+            .contains("hack native setup --accept-downloads")
+    );
+    assert!(!error.message.contains("os error"));
+    assert_eq!(fixture.calls(&inputs), 0);
+}
+
+fn code(fixture: &Fixture, request: BuildRequest) -> &'static str {
+    prepare(request, &builds_root(&fixture.candidate))
+        .unwrap_err()
+        .code
 }
 
 #[test]
@@ -1048,36 +1145,36 @@ fn requests_refuse_unsafe_paths_arguments_and_bounds() {
 
     let mut request = base();
     request.version = 2;
-    assert_eq!(code(request), "native_build_request");
+    assert_eq!(code(&fixture, request), "native_build_request");
     let mut request = base();
     request.project_root = PathBuf::from("relative");
-    assert_eq!(code(request), "native_build_request");
+    assert_eq!(code(&fixture, request), "native_build_request");
     let mut request = base();
     request.project_root = fixture.project.join("app/..");
-    assert_eq!(code(request), "native_build_source");
+    assert_eq!(code(&fixture, request), "native_build_source");
     let mut request = base();
     request.context = "../outside".into();
-    assert_eq!(code(request), "source_escape");
+    assert_eq!(code(&fixture, request), "source_escape");
     let mut request = base();
     request.dockerfile = "../../Dockerfile".into();
-    assert_eq!(code(request), "source_escape");
+    assert_eq!(code(&fixture, request), "source_escape");
     std::os::unix::fs::symlink(fixture.project.join("app"), fixture.project.join("link")).unwrap();
     let mut request = base();
     request.context = "link".into();
-    assert_eq!(code(request), "source_symlink");
+    assert_eq!(code(&fixture, request), "source_symlink");
     let mut request = base();
     request.context = "missing".into();
-    assert_eq!(code(request), "missing_source");
+    assert_eq!(code(&fixture, request), "missing_source");
     let mut request = base();
     request.branch = Some("Not_A_Label".into());
-    assert_eq!(code(request), "native_build_request");
+    assert_eq!(code(&fixture, request), "native_build_request");
     let mut request = base();
     request.target = Some("-bad".into());
-    assert_eq!(code(request), "native_build_request");
+    assert_eq!(code(&fixture, request), "native_build_request");
     for timeout in [0, MAX_TIMEOUT_SECONDS + 1] {
         let mut request = base();
         request.timeout_seconds = Some(timeout);
-        assert_eq!(code(request), "native_build_request");
+        assert_eq!(code(&fixture, request), "native_build_request");
     }
     for name in [
         "BUILDX_CONFIG",
@@ -1091,41 +1188,52 @@ fn requests_refuse_unsafe_paths_arguments_and_bounds() {
     ] {
         let mut request = base();
         request.args = BTreeMap::from([(name.to_owned(), "x".to_owned())]);
-        assert_eq!(code(request), "native_build_argument", "{name}");
+        assert_eq!(code(&fixture, request), "native_build_argument", "{name}");
     }
     let mut request = base();
     request.args = BTreeMap::from([("GREETING".to_owned(), "a\0b".to_owned())]);
-    assert_eq!(code(request), "native_build_argument");
+    assert_eq!(code(&fixture, request), "native_build_argument");
     let mut request = base();
     request.args = (0..=MAX_ARGS)
         .map(|i| (format!("A{i}"), "x".into()))
         .collect();
-    assert_eq!(code(request), "native_build_argument");
+    assert_eq!(code(&fixture, request), "native_build_argument");
     let mut request = base();
     request.args = BTreeMap::from([("BIG".to_owned(), "x".repeat(MAX_ARG_BYTES))]);
-    assert_eq!(code(request), "native_build_argument");
+    assert_eq!(code(&fixture, request), "native_build_argument");
     // Refusals never echo argument values.
     let mut request = base();
     request.args = BTreeMap::from([("BUILDKIT_SYNTAX".to_owned(), SECRET.to_owned())]);
-    assert!(!prepare(request).unwrap_err().message.contains(SECRET));
+    assert!(
+        !prepare(request, &builds_root(&fixture.candidate))
+            .unwrap_err()
+            .message
+            .contains(SECRET)
+    );
 }
 
 #[test]
-fn the_build_key_binds_local_inputs_but_not_context_contents() {
+fn the_build_key_binds_local_inputs_and_context_contents() {
     let fixture = Fixture::new();
-    let key = |request: BuildRequest| prepare(request).unwrap().key;
+    let key = |request: BuildRequest| {
+        prepare(request, &builds_root(&fixture.candidate))
+            .unwrap()
+            .key
+    };
     let original = key(fixture.request(Policy::Missing));
     assert_eq!(original, key(fixture.request(Policy::Rebuild)));
 
     fs::write(fixture.project.join("app/main.txt"), "two").unwrap();
-    assert_eq!(original, key(fixture.request(Policy::Missing)));
+    let edited = key(fixture.request(Policy::Missing));
+    assert_ne!(original, edited, "a copied file edit kept the key");
+    let original = edited;
 
     let mut request = fixture.request(Policy::Missing);
     request.args.insert("GREETING".into(), "other".into());
     assert_ne!(original, key(request));
     let mut request = fixture.request(Policy::Missing);
     request.branch = Some("feature".into());
-    let branched = prepare(request).unwrap();
+    let branched = prepare(request, &builds_root(&fixture.candidate)).unwrap();
     assert_ne!(original, branched.key);
     assert_ne!(
         branched.namespace,
@@ -1164,7 +1272,7 @@ fn dockerfile_and_ignore_inputs_must_be_plain_files() {
     )
     .unwrap();
     assert_eq!(
-        code(fixture.request(Policy::Missing)),
+        code(&fixture, fixture.request(Policy::Missing)),
         "native_build_source"
     );
     fs::remove_file(fixture.project.join("app/.dockerignore")).unwrap();
@@ -1174,7 +1282,7 @@ fn dockerfile_and_ignore_inputs_must_be_plain_files() {
     )
     .unwrap();
     assert_eq!(
-        code(fixture.request(Policy::Missing)),
+        code(&fixture, fixture.request(Policy::Missing)),
         "native_build_source"
     );
 }
@@ -1383,4 +1491,480 @@ fn reclamation_keeps_current_referenced_in_use_and_foreign_images() {
             .values()
             .all(|r| *r == reclaim::Retained::NotOwned)
     );
+}
+
+#[test]
+fn the_key_is_version_two_and_version_one_receipts_are_never_reused() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    assert_eq!(inputs.key_input["v"], 2);
+    assert!(
+        inputs.key_input["context_sha256"]
+            .as_str()
+            .is_some_and(hex64)
+    );
+    // The same inputs under the version-1 document, which had no context digest.
+    let mut old = inputs.key_input.clone();
+    old["v"] = 1.into();
+    old.as_object_mut().unwrap().remove("context_sha256");
+    let old_key = sha256_hex(&serde_json::to_vec(&old).unwrap());
+    assert_ne!(old_key, inputs.key);
+
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "ok");
+    let directory = builds_root(&fixture.candidate).join(&inputs.namespace);
+    state::private_directory(&directory).unwrap();
+    let old_receipt = Receipt {
+        version: 1,
+        checkout: fixture.candidate.checkout.clone(),
+        namespace: inputs.namespace.clone(),
+        build_key: old_key.clone(),
+        provider_incarnation: "pool-1".into(),
+        provider_boot_id: "boot-1".into(),
+        engine_id: "engine-1".into(),
+        phase: Phase::ContentIdVerified,
+        image_id: Some(IMAGE.into()),
+        image_bytes: None,
+        base_pins: BTreeMap::new(),
+        declaration: None,
+        sequence: None,
+    };
+    // At its own path it is never read: the version-2 key builds.
+    state::write(&directory.join(format!("{old_key}.json")), &old_receipt).unwrap();
+    assert!(
+        !run(&fixture.candidate, &pool, &inputs, &never)
+            .unwrap()
+            .reused
+    );
+    assert_eq!(fixture.calls(&inputs), 1);
+    // At the version-2 path it refuses rather than being adopted.
+    let path = directory.join(format!("{}.json", inputs.key));
+    fs::remove_file(&path).unwrap();
+    state::write(&path, &old_receipt).unwrap();
+    assert_eq!(
+        run(&fixture.candidate, &pool, &inputs, &never)
+            .unwrap_err()
+            .code,
+        "native_build_receipt"
+    );
+    assert_eq!(fixture.calls(&inputs), 1);
+}
+
+#[test]
+fn context_edits_rebuild_and_ignored_edits_reuse() {
+    let fixture = Fixture::new();
+    let app = fixture.project.join("app");
+    fs::write(app.join(".dockerignore"), "*.log\n").unwrap();
+    fs::write(app.join("debug.log"), "1").unwrap();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "ok");
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    fs::write(app.join("debug.log"), "2").unwrap();
+    let ignored = fixture.inputs(Policy::Missing);
+    assert_eq!(ignored.key, inputs.key);
+    assert!(
+        run(&fixture.candidate, &pool, &ignored, &never)
+            .unwrap()
+            .reused
+    );
+    fs::write(app.join("main.txt"), "changed").unwrap();
+    let edited = fixture.inputs(Policy::Missing);
+    assert_ne!(edited.key, inputs.key);
+    // The context cache lives beside the receipts and is not one.
+    let cache = builds_root(&fixture.candidate)
+        .join(&inputs.namespace)
+        .join(context::cache_name(&app));
+    assert!(cache.exists());
+    assert!(reclaim::run(&fixture.candidate, &pool).is_ok());
+}
+
+#[test]
+fn edits_during_the_build_never_reach_it_even_when_undone() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "edit");
+    // The seam: the fake client changes a copied file and changes it back while it
+    // "builds" (A -> B -> A), which no walk before or after could see.
+    let main = fixture.project.join("app/main.txt");
+    fs::write(
+        fixture.scratch(&inputs).join("edit-target"),
+        main.as_os_str().as_bytes(),
+    )
+    .unwrap();
+    let outcome = run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    assert!(!outcome.reused);
+    assert_eq!(fs::read_to_string(&main).unwrap(), "one");
+    // BuildKit's context held the keyed bytes the whole time.
+    assert_eq!(
+        fs::read_to_string(fixture.scratch(&inputs).join("seen-during")).unwrap(),
+        "one"
+    );
+    assert_eq!(fixture.receipt(&inputs).phase, Phase::ContentIdVerified);
+}
+
+#[test]
+fn a_context_edited_after_its_key_refuses_before_the_client_runs() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "ok");
+    let cache = builds_root(&fixture.candidate)
+        .join(&inputs.namespace)
+        .join(context::cache_name(&fixture.project.join("app")));
+    assert!(cache.exists());
+    fs::write(fixture.project.join("app/main.txt"), "two").unwrap();
+    let error = run(&fixture.candidate, &pool, &inputs, &never).unwrap_err();
+    assert_eq!(error.code, "native_build_context_changed");
+    assert!(!error.message.contains("main"));
+    assert_eq!(fixture.calls(&inputs), 0, "the client ran on unkeyed bytes");
+    assert!(!fixture.scratch(&inputs).join("snapshot").exists());
+    // No attempt was recorded, and the possibly stale stat cache is gone.
+    assert!(
+        !builds_root(&fixture.candidate)
+            .join(&inputs.namespace)
+            .join(format!("{}.json", inputs.key))
+            .exists()
+    );
+    assert!(!cache.exists());
+}
+
+#[test]
+fn cancellation_during_the_snapshot_adopts_nothing_and_leaves_no_copy() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "ok");
+    let snapshot = fixture.scratch(&inputs).join("snapshot");
+    // Requested once the copy has begun (its root exists).
+    let marker = snapshot.join("context");
+    let cancel = move || marker.exists();
+    let error = run(&fixture.candidate, &pool, &inputs, &cancel).unwrap_err();
+    assert_eq!(error.code, "native_build_canceled");
+    assert_eq!(fixture.calls(&inputs), 0);
+    assert!(!snapshot.exists(), "the snapshot outlived a canceled copy");
+    assert!(
+        !builds_root(&fixture.candidate)
+            .join(&inputs.namespace)
+            .join(format!("{}.json", inputs.key))
+            .exists()
+    );
+}
+
+#[test]
+fn a_cancellation_during_adoption_never_records_a_verified_image() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "ok");
+    let scratch = fixture.scratch(&inputs);
+    // True only once the client has run and the snapshot is gone: after every earlier
+    // check, while the image is adopted.
+    let cancel = move || scratch.join("calls").exists() && !scratch.join("snapshot").exists();
+    let error = run(&fixture.candidate, &pool, &inputs, &cancel).unwrap_err();
+    assert_eq!(error.code, "native_build_canceled");
+    assert_eq!(fixture.calls(&inputs), 1);
+    let receipt = fixture.receipt(&inputs);
+    assert_eq!(receipt.phase, Phase::Canceled);
+    assert!(receipt.image_id.is_none());
+}
+
+#[test]
+fn preparation_never_reads_inputs_through_a_swapped_directory() {
+    let fixture = Fixture::new();
+    let app = fixture.project.join("app");
+    fs::write(app.join(".dockerignore"), "*.log\n").unwrap();
+    let outside = fixture.root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    let foreign = "FROM busybox:1.36\nRUN echo outside\n";
+    fs::write(outside.join("Dockerfile"), foreign).unwrap();
+    fs::write(outside.join(".dockerignore"), "outside-rules\n").unwrap();
+    fs::write(outside.join("Dockerfile.dockerignore"), "outside-rules\n").unwrap();
+    let original = fs::read(app.join("Dockerfile")).unwrap();
+    // The swap happens after the request's paths were validated, as the input reads
+    // enter `app`, once for each kind of input in turn.
+    for (fires_on, label) in [(1, "Dockerfile"), (2, "ignore files")] {
+        let (hook_app, hook_outside) = (app.clone(), outside.clone());
+        let mut seen = 0;
+        context::BEFORE_DESCEND.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |relative: &[u8]| {
+                if relative == b"app" {
+                    seen += 1;
+                    if seen == fires_on {
+                        fs::rename(&hook_app, hook_app.with_file_name("app-moved")).unwrap();
+                        std::os::unix::fs::symlink(&hook_outside, &hook_app).unwrap();
+                    }
+                }
+            }))
+        });
+        let prepared = prepare(
+            fixture.request(Policy::Missing),
+            &builds_root(&fixture.candidate),
+        );
+        context::BEFORE_DESCEND.with(|slot| *slot.borrow_mut() = None);
+        assert!(app.is_symlink(), "{label}: the swap never happened");
+        match prepared {
+            Err(error) => {
+                assert!(
+                    matches!(
+                        error.code,
+                        "native_build_source" | "native_build_context_changed"
+                    ),
+                    "{label}: {}",
+                    error.code
+                );
+                assert!(!error.message.contains("outside"));
+            }
+            Ok(inputs) => {
+                assert_eq!(inputs.dockerfile, original, "{label}");
+                assert_ne!(inputs.ignore, b"outside-rules\n", "{label}");
+            }
+        }
+        // Put the project back for the next case.
+        fs::remove_file(&app).unwrap();
+        fs::rename(app.with_file_name("app-moved"), &app).unwrap();
+    }
+}
+
+/// Build `inputs` with the fake client reporting image `id`.
+fn build_as(fixture: &Fixture, pool: &FakePool, inputs: &Inputs, id: &str) -> BuildOutcome {
+    fixture.client(inputs, "given");
+    fs::write(fixture.scratch(inputs).join("image-id"), id).unwrap();
+    pool.built_as(inputs, "pool-1", id);
+    run(&fixture.candidate, pool, inputs, &never).unwrap()
+}
+
+fn numbered(index: usize) -> String {
+    format!("sha256:{index:064x}")
+}
+
+#[test]
+fn ten_edits_of_one_build_leave_its_current_and_previous_images() {
+    let fixture = Fixture::new();
+    let pool = FakePool::new("pool-1");
+    let mut keys = Vec::new();
+    for edit in 1..=10 {
+        fs::write(fixture.project.join("app/main.txt"), format!("edit {edit}")).unwrap();
+        let inputs = fixture.inputs(Policy::Missing);
+        let outcome = build_as(&fixture, &pool, &inputs, &numbered(edit));
+        assert!(!outcome.reused);
+        keys.push(inputs.key.clone());
+    }
+    keys.dedup();
+    assert_eq!(keys.len(), 10, "every edit had its own key");
+    assert_eq!(pool.images.borrow().len(), 10);
+    // A retained run still references the image of edit 3.
+    let graphs = fixture.candidate.state_root.join("run/graphs/0123");
+    state::private_directory(&graphs).unwrap();
+    fs::write(
+        graphs.join("receipt.json"),
+        format!("{{\"image\":\"{}\"}}", numbered(3)),
+    )
+    .unwrap();
+    let report = reclaim::run(&fixture.candidate, &pool).unwrap();
+    let left: BTreeSet<String> = pool.images.borrow().keys().cloned().collect();
+    assert_eq!(
+        left,
+        BTreeSet::from([numbered(3), numbered(9), numbered(10)])
+    );
+    assert_eq!(report.removed.len(), 7);
+    assert_eq!(report.retained[&numbered(10)], reclaim::Retained::Current);
+    assert_eq!(report.retained[&numbered(9)], reclaim::Retained::Previous);
+    assert_eq!(report.retained[&numbered(3)], reclaim::Retained::Referenced);
+
+    // Without the reference, exactly the current and previous images remain.
+    fs::remove_dir_all(fixture.candidate.state_root.join("run/graphs")).unwrap();
+    reclaim::run(&fixture.candidate, &pool).unwrap();
+    let left: BTreeSet<String> = pool.images.borrow().keys().cloned().collect();
+    assert_eq!(left, BTreeSet::from([numbered(9), numbered(10)]));
+
+    // Reverting to edit 9 reuses it and makes it current; edit 10 becomes previous.
+    fs::write(fixture.project.join("app/main.txt"), "edit 9").unwrap();
+    let reverted = fixture.inputs(Policy::Missing);
+    assert!(
+        run(&fixture.candidate, &pool, &reverted, &never)
+            .unwrap()
+            .reused
+    );
+    fs::write(fixture.project.join("app/main.txt"), "edit 11").unwrap();
+    let eleventh = fixture.inputs(Policy::Missing);
+    build_as(&fixture, &pool, &eleventh, &numbered(11));
+    let report = reclaim::run(&fixture.candidate, &pool).unwrap();
+    assert_eq!(report.removed, vec![numbered(10)]);
+    let left: BTreeSet<String> = pool.images.borrow().keys().cloned().collect();
+    assert_eq!(left, BTreeSet::from([numbered(9), numbered(11)]));
+}
+
+#[test]
+fn receipts_without_a_declaration_and_other_declarations_keep_their_images() {
+    let fixture = Fixture::new();
+    let pool = FakePool::new("pool-1");
+    // Two builds of another target are another declaration, kept on their own.
+    let mut request = fixture.request(Policy::Missing);
+    request.target = Some("other".into());
+    fs::write(
+        fixture.project.join("app/Dockerfile"),
+        "FROM alpine:3.20 AS other\nRUN echo hi\n",
+    )
+    .unwrap();
+    let other = prepare(request, &builds_root(&fixture.candidate)).unwrap();
+    build_as(&fixture, &pool, &other, &numbered(1));
+    for edit in 2..=4 {
+        fs::write(fixture.project.join("app/main.txt"), format!("edit {edit}")).unwrap();
+        build_as(
+            &fixture,
+            &pool,
+            &fixture.inputs(Policy::Missing),
+            &numbered(edit),
+        );
+    }
+    // A receipt from before declarations existed protects its image.
+    let old = fixture.inputs(Policy::Missing);
+    let directory = builds_root(&fixture.candidate).join(&old.namespace);
+    let path = directory.join(format!("{}.json", "0".repeat(64)));
+    let mut receipt = fixture.receipt(&old);
+    receipt.build_key = "0".repeat(64);
+    receipt.image_id = Some(numbered(2));
+    receipt.declaration = None;
+    receipt.sequence = None;
+    state::write(&path, &receipt).unwrap();
+    let report = reclaim::run(&fixture.candidate, &pool).unwrap();
+    assert_eq!(report.retained[&numbered(1)], reclaim::Retained::Current);
+    assert_eq!(report.retained[&numbered(2)], reclaim::Retained::Current);
+    assert_eq!(report.retained[&numbered(3)], reclaim::Retained::Previous);
+    assert_eq!(report.retained[&numbered(4)], reclaim::Retained::Current);
+    assert!(report.removed.is_empty());
+}
+
+#[test]
+fn best_effort_reclamation_reports_instead_of_refusing() {
+    let fixture = Fixture::new();
+    let pool = FakePool::new("pool-1");
+    let build = Flock::try_lock(
+        Flock::open(&builds_root(&fixture.candidate).join("active.lock")).unwrap_or_else(|_| {
+            state::private_directory(&builds_root(&fixture.candidate)).unwrap();
+            Flock::open(&builds_root(&fixture.candidate).join("active.lock")).unwrap()
+        }),
+        libc::LOCK_SH,
+    )
+    .unwrap()
+    .unwrap();
+    let busy = reclaim::best_effort(&fixture.candidate, &pool);
+    let value = serde_json::to_value(&busy).unwrap();
+    assert_eq!(value["skipped"]["code"], "provider_busy");
+    assert_eq!(value["removed"], serde_json::json!([]));
+    drop(build);
+    let value = serde_json::to_value(reclaim::best_effort(&fixture.candidate, &pool)).unwrap();
+    assert!(value.get("skipped").is_none());
+    assert!(value["retained"].is_object());
+}
+
+/// A snapshot tree under `<key>.client` in `namespace`, owned per `owner`.
+fn stranded_tree(namespace: &Path, key: &str, owner: Option<&crate::node::ProcessIdentity>) {
+    let scratch = namespace.join(format!("{key}.client"));
+    let tree = scratch.join("snapshot/context");
+    state::private_directory(&tree).unwrap();
+    fs::write(tree.join("big.bin"), vec![b'x'; 4096]).unwrap();
+    if let Some(owner) = owner {
+        state::write(&scratch.join("snapshot.owner"), owner).unwrap();
+    }
+}
+
+fn own_identity() -> crate::node::ProcessIdentity {
+    match crate::node::inspect_process(i32::try_from(std::process::id()).unwrap()).unwrap() {
+        crate::node::Observed::Present(identity) => identity,
+        crate::node::Observed::Gone => panic!("this process is gone"),
+    }
+}
+
+#[test]
+fn snapshots_of_dead_owners_are_removed_at_the_next_build_of_any_key() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let namespace = builds_root(&fixture.candidate).join(&inputs.namespace);
+    state::private_directory(&namespace).unwrap();
+    let live = own_identity();
+    // A process that has exited and been reaped: its pid has no live process.
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    let dead_pid = i32::try_from(child.id()).unwrap();
+    child.wait().unwrap();
+    let dead = crate::node::ProcessIdentity {
+        pid: dead_pid,
+        ..live.clone()
+    };
+    let reused = crate::node::ProcessIdentity {
+        start: live.start + 1,
+        ..live.clone()
+    };
+    let key = |c: char| c.to_string().repeat(64);
+    stranded_tree(&namespace, &key('1'), Some(&dead));
+    stranded_tree(&namespace, &key('2'), Some(&live));
+    stranded_tree(&namespace, &key('3'), Some(&reused));
+    stranded_tree(&namespace, &key('4'), None);
+    // A foreign tree: a symlinked `.client` pointing outside, with a dead owner.
+    let outside = fixture.root.join("outside");
+    stranded_tree(&outside, &key('5'), Some(&dead));
+    std::os::unix::fs::symlink(
+        outside.join(format!("{}.client", key('5'))),
+        namespace.join(format!("{}.client", key('5'))),
+    )
+    .unwrap();
+    // A dead owner whose key is still locked (a surviving client) keeps its tree.
+    stranded_tree(&namespace, &key('6'), Some(&dead));
+    let held = Flock::try_lock(
+        Flock::open(&namespace.join(format!("{}.lock", key('6')))).unwrap(),
+        libc::LOCK_EX,
+    )
+    .unwrap()
+    .unwrap();
+
+    fixture.client(&inputs, "ok");
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    drop(held);
+
+    let tree = |base: &Path, c: char| base.join(format!("{}.client/snapshot", key(c)));
+    assert!(
+        !tree(&namespace, '1').exists(),
+        "a dead owner's tree was kept"
+    );
+    assert!(
+        !namespace
+            .join(format!("{}.client/snapshot.owner", key('1')))
+            .exists()
+    );
+    assert!(
+        tree(&namespace, '2').exists(),
+        "a live owner's tree was removed"
+    );
+    assert!(
+        !tree(&namespace, '3').exists(),
+        "a reused pid kept the tree"
+    );
+    assert!(
+        tree(&namespace, '4').exists(),
+        "an unknown owner's tree was removed"
+    );
+    assert!(
+        tree(&outside, '5').join("context/big.bin").exists(),
+        "a foreign tree was touched"
+    );
+    assert!(
+        tree(&namespace, '6').exists(),
+        "a locked key's tree was removed"
+    );
+    // The build's own snapshot is gone too, and its owner record with it.
+    assert!(!fixture.scratch(&inputs).join("snapshot").exists());
+    assert!(!fixture.scratch(&inputs).join("snapshot.owner").exists());
 }

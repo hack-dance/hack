@@ -17,6 +17,8 @@ import {
   nativeDetachedUpProfileNotice,
   nativeDetachedUpShellVariables,
   nativeShellForwardingNotice,
+  reportNativeImageDownloadWait,
+  reportNativeImageTagOffline,
 } from "../lib/native-detached-up.ts";
 import {
   describeNativeProcessRefusals,
@@ -59,7 +61,9 @@ import { reportNativeIgnoredSettingNotices } from "./native-ignored-setting-noti
 import {
   NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
   nativeImagePolicyArgs,
+  nativeImageRegistryReason,
 } from "./native-image-policy.ts";
+import { nativeImageBlocker, offlineTagNotice } from "./native-image-tags.ts";
 import {
   type NativePreparedBase,
   preparedBaseArguments,
@@ -79,9 +83,12 @@ import {
   buildNativeProjectImages,
   invokeNativeBuild,
   type NativeBuildRequest,
+  type NativeVerifiedBuild,
   nativeBuildsEnabled,
   nativeRebuildRequested,
   nativeServiceActive,
+  pinVerifiedNativeBuilds,
+  reclaimNativeBuildImagesAfterRebuild,
   refuseEmulatedBuilds,
   refuseManagedSecretBuildArguments,
 } from "./native-project-builds.ts";
@@ -749,25 +756,122 @@ export function prepareNativeProjectServices(
 export const NATIVE_SHARED_SOURCE_REFUSAL =
   "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 or sharedSource in the native machine settings to share this exact project, including ignored files. Grant that share and run the command again.";
 const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+/**
+ * Pin every active build service: to the image a restart preflight verified, or to
+ * what the runtime returns for its build (an unchanged build key reuses its image).
+ * Returns the pinned services; retained images never stand in for them (HACK-2533).
+ */
+async function resolveNativeBuildImages(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly branch: string | null | undefined;
+  readonly profiles: readonly string[];
+  readonly builds: ReadonlyMap<string, NativeBuildRequest>;
+  readonly specs: Record<string, Record<string, unknown>>;
+  readonly verified: ReadonlyMap<string, NativeVerifiedBuild> | undefined;
+  readonly signal: AbortSignal;
+  readonly invoke: typeof invokeNativeBuild | undefined;
+  readonly onBuilt: () => void;
+}): Promise<ReadonlySet<string>> {
+  const remaining = pinVerifiedNativeBuilds(opts);
+  const built = await buildNativeProjectImages({
+    ...opts,
+    builds: remaining,
+    rebuild: nativeRebuildRequested(),
+  });
+  return new Set([
+    ...built,
+    ...[...opts.builds.keys()].filter((service) => !remaining.has(service)),
+  ]);
+}
+const PINNED_IMAGE_REFERENCE = /^[^@\s]+@sha256:[a-f0-9]{64}$/;
+/** Acquire one image and accept only a confirmed content ID for the requested policy. */
+async function ensureNativeProjectImage(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly reference: string;
+  readonly imageTagMode?: "refresh" | "offline";
+  readonly affectedServices: () => readonly string[];
+  readonly commandPin?: string;
+  readonly waitReference: string;
+  readonly policy: NativeEmulationPolicy | undefined;
+  readonly invoke: typeof invokeNativeRuntime;
+}) {
+  const ensured = await opts
+    .invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: [
+        ...nativeEnsureImageArgs(opts.reference, opts.policy),
+        ...nativeImagePolicyArgs(),
+        ...(opts.commandPin ? ["--command-image-pin", opts.commandPin] : []),
+        ...(opts.imageTagMode ? ["--image-tag-mode", opts.imageTagMode] : []),
+      ],
+      timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+      onImageWait: (waiting) =>
+        reportNativeImageDownloadWait(waiting ? opts.waitReference : null),
+    })
+    .catch((error: unknown) => {
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode === "registry_image_not_found"
+      ) {
+        const names = opts
+          .affectedServices()
+          .map((name) => (SERVICE_NAME.test(name) ? name : "(name omitted)"));
+        const label =
+          names.length === 1
+            ? `service ${names[0]}`
+            : `services ${names.join(", ")}`;
+        throw new ClosedCliError(
+          `Native image acquisition failed for ${label} field image (registry_image_not_found); the selected image ${opts.reference} was not found.`
+        );
+      }
+      throw error;
+    });
+  if (
+    !isRecord(ensured) ||
+    typeof ensured.image_id !== "string" ||
+    !IMAGE.test(ensured.image_id) ||
+    !ensuredPlatformAccepted(ensured.platform, opts.policy)
+  ) {
+    throw unconfirmed("the runtime image selection");
+  }
+  return {
+    imageId: ensured.image_id,
+    reference: ensured.pinned_reference,
+    offline: offlineTagNotice(ensured),
+  };
+}
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
 async function pinNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   readonly specs: Record<string, Record<string, unknown>>;
   readonly retainedImages: ReadonlyMap<string, string>;
+  readonly canonicalImages: ReadonlyMap<string, string>;
   /** The selected Compose profiles: a service outside them is never pulled. */
   readonly profiles: readonly string[];
   /** Opted-in services' platform policies; every other service resolves Linux arm64. */
   readonly amd64Emulation?: Readonly<Record<string, NativeEmulationPolicy>>;
   readonly signal: AbortSignal;
+  readonly imageTagMode?: "refresh" | "offline";
+  readonly warn: (line: string) => void;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<void> {
+  const reportedOffline = new Set<string>();
+  const confirmed = new Set<string>();
+  const references = [...new Set(opts.canonicalImages.values())];
+  const offlineReferences = new Set<string>();
+  const pinnedImages = new Map<string, string>();
+  const immutableReferences = new Map<string, string | null>();
+  const canonical = (image: string) => opts.canonicalImages.get(image) ?? image;
   for (const [name, spec] of Object.entries(opts.specs)) {
     if (opts.signal.aborted) {
       throw canceled();
     }
     const retainedImage = opts.retainedImages.get(name);
-    if (retainedImage) {
+    if (retainedImage && spec.build !== undefined) {
       spec.image = retainedImage;
       continue;
     }
@@ -786,39 +890,89 @@ async function pinNativeProjectImages(opts: {
       continue;
     }
     const policy = nativeEmulationPolicy(opts.amd64Emulation, name);
-    const ensured = await opts
-      .invoke({
-        runtime: opts.runtime,
-        cwd: opts.projectRoot,
-        args: [
-          ...nativeEnsureImageArgs(image, policy),
-          ...nativeImagePolicyArgs(),
-        ],
-        timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
-      })
-      .catch((error: unknown) => {
-        if (
-          error instanceof NativeRuntimeRequestError &&
-          error.nativeCode === "registry_image_not_found"
-        ) {
-          const label = SERVICE_NAME.test(name)
-            ? `service ${name}`
-            : "a service";
-          throw new ClosedCliError(
-            `Native image acquisition failed for ${label} field image (registry_image_not_found); the selected registry image or tag was not found. Values omitted.`
-          );
-        }
-        throw error;
-      });
-    if (
-      !isRecord(ensured) ||
-      typeof ensured.image_id !== "string" ||
-      !IMAGE.test(ensured.image_id) ||
-      !ensuredPlatformAccepted(ensured.platform, policy)
-    ) {
-      throw unconfirmed("the runtime image selection");
+    // The same tag may select different images under different platform policies.
+    const reference = canonical(image);
+    const key = JSON.stringify([reference, policy]);
+    const pinned = pinnedImages.get(key);
+    if (pinned !== undefined) {
+      spec.image = pinned;
+      continue;
     }
-    spec.image = ensured.image_id;
+    const immutableReference = immutableReferences.get(reference);
+    if (immutableReference === null) {
+      throw unconfirmed("the runtime image reference");
+    }
+    const ensured = await ensureNativeProjectImage({
+      runtime: opts.runtime,
+      projectRoot: opts.projectRoot,
+      reference: image,
+      waitReference: reference,
+      commandPin: reference.includes("@") ? undefined : immutableReference,
+      affectedServices: () =>
+        Object.entries(opts.specs)
+          .filter(
+            ([service, candidate]) =>
+              !opts.retainedImages.has(service) &&
+              nativeServiceActive(candidate, opts.profiles) &&
+              typeof candidate.image === "string" &&
+              canonical(candidate.image) === reference
+          )
+          .map(([service]) => service),
+      policy,
+      imageTagMode: offlineReferences.has(reference)
+        ? "offline"
+        : opts.imageTagMode,
+      invoke: opts.invoke,
+    }).catch(async (error: unknown) => {
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        (error.nativeCode === "image_tag_download_busy" ||
+          error.nativeCode === "image_tag_offline_missing" ||
+          error.nativeCode === "image_archive_offline_missing")
+      ) {
+        throw await nativeImageBlocker({
+          runtime: opts.runtime,
+          projectRoot: opts.projectRoot,
+          missing: reference,
+          downloading: error.nativeCode === "image_tag_download_busy",
+          reason: error.nativeCauseCode,
+          references,
+          confirmed,
+          invoke: opts.invoke,
+        });
+      }
+      if (
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode?.startsWith("registry_")
+      ) {
+        const reason =
+          nativeImageRegistryReason(error.nativeCauseCode) ?? error.message;
+        throw new ClosedCliError(`Image unavailable: ${reference}: ${reason}`);
+      }
+      throw error;
+    });
+    confirmed.add(reference);
+    if (ensured.offline) {
+      offlineReferences.add(reference);
+    }
+    const noticeKey = `${reference}\n${ensured.imageId}`;
+    if (ensured.offline && !reportedOffline.has(noticeKey)) {
+      if (!reportNativeImageTagOffline(ensured.offline)) {
+        opts.warn(ensured.offline);
+      }
+      reportedOffline.add(noticeKey);
+    }
+    if (immutableReference === undefined) {
+      immutableReferences.set(
+        reference,
+        typeof ensured.reference === "string" &&
+          PINNED_IMAGE_REFERENCE.test(ensured.reference)
+          ? ensured.reference
+          : null
+      );
+    }
+    pinnedImages.set(key, ensured.imageId);
+    spec.image = ensured.imageId;
   }
 }
 /** Services whose review carries Hack's exact one-shot marker as `one_shot: true`. */
@@ -1666,6 +1820,7 @@ async function selectNativeStartup(opts: {
     const observed =
       preflight.runtimePhase === "running"
         ? await inspectNativeProjectGraph({
+            startupWait: true,
             runtime: opts.runtime,
             projectRoot: opts.scope.projectRoot,
             run: retained.run,
@@ -1951,6 +2106,11 @@ function reportStopped(opts: {
 }
 
 type NativeProjectStartOptions = {
+  /**
+   * Build images a restart preflight verified before it stopped the old graph:
+   * those services are pinned as they are and never built again (HACK-2533).
+   */
+  readonly verifiedBuildImages?: ReadonlyMap<string, NativeVerifiedBuild>;
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
@@ -1966,6 +2126,7 @@ type NativeProjectStartOptions = {
     envName: string | null | undefined
   ) => Promise<NativeProfileSelection>;
   readonly sharedSource: boolean;
+  readonly imageTagMode?: "refresh" | "offline";
   readonly restore?: NativeProjectRun;
   readonly onReady?: (services: {
     readonly started: readonly string[];
@@ -2388,7 +2549,7 @@ async function startNativeProjectAttempt(
     check: deps.sourceSize,
   });
   // Refuse malformed or unacquirable references before hooks, VM or provider start.
-  await admitNativeProjectImages({
+  const canonicalImages = await admitNativeProjectImages({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
     specs,
@@ -2627,27 +2788,36 @@ async function startNativeProjectAttempt(
       observed: resumed,
     });
     progress({ phase: "images" });
-    await buildNativeProjectImages({
+    // A restore asks the runtime too: its image is reused only under an unchanged
+    // build key, so a Dockerfile edited after `down` is built (HACK-2533).
+    let rebuilt = false;
+    const built = await resolveNativeBuildImages({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       branch: opts.scope.branch,
       profiles,
       builds,
       specs,
-      retainedImages,
-      restore: Boolean(restore),
-      rebuild: nativeRebuildRequested(),
+      verified: opts.verifiedBuildImages,
       signal: controller.signal,
       invoke: deps.build,
+      onBuilt: () => {
+        rebuilt = true;
+      },
     });
     await pinNativeProjectImages({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       specs,
-      retainedImages,
+      retainedImages: new Map(
+        [...retainedImages].filter(([service]) => !built.has(service))
+      ),
+      canonicalImages,
       profiles,
       amd64Emulation: input.amd64Emulation,
       signal: controller.signal,
+      imageTagMode: opts.imageTagMode,
+      warn: deps.warn,
       invoke: deps.invoke,
     });
     // Image work is done: what follows counts against a detached start's
@@ -2781,6 +2951,7 @@ async function startNativeProjectAttempt(
           }
           const invokeInspect = () =>
             inspectNativeProjectGraph({
+              startupWait: true,
               runtime: opts.runtime,
               projectRoot: opts.scope.projectRoot,
               run,
@@ -3000,6 +3171,14 @@ async function startNativeProjectAttempt(
                     httpsPort: servedHttpsPort(https, opts.https),
                   })
                 );
+                // Superseded build images go once the new ones run; this never
+                // fails or delays the start (HACK-2533).
+                void reclaimNativeBuildImagesAfterRebuild({
+                  rebuilt,
+                  runtime: opts.runtime,
+                  projectRoot: opts.scope.projectRoot,
+                  invoke: deps.invoke,
+                });
               },
             });
           } catch (error) {
@@ -3162,6 +3341,26 @@ function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
   }
 }
 
+const START_LOCK_HOLDER =
+  /^Provider lease acquisition refused; recorded holder: ([a-z ]+); no operation was admitted\.$/;
+
+function withStartupLockBlocker(error: unknown): unknown {
+  if (
+    !(error instanceof NativeRuntimeRequestError) ||
+    error.nativeCode !== "provider_busy"
+  ) {
+    return error;
+  }
+  const holder =
+    START_LOCK_HOLDER.exec(error.nativeMessage ?? "")?.[1] ?? "unavailable";
+  error.message = [
+    "Native startup could not acquire a runtime lock (provider_busy).",
+    `Holder: ${holder}.`,
+    "Run hack up again after the holder finishes.",
+  ].join("\n");
+  return error;
+}
+
 /** Publish advisory startup evidence until this foreground invocation settles. */
 export async function startNativeProject(
   opts: NativeProjectStartOptions
@@ -3171,6 +3370,8 @@ export async function startNativeProject(
     return await startNativeProjectAttempt(opts, async () => {
       finish = await beginNativeProjectStartupObservation(opts.scope);
     });
+  } catch (error) {
+    throw withStartupLockBlocker(error);
   } finally {
     await finish?.();
   }

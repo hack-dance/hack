@@ -103,3 +103,5 @@ export const GLOBAL_BRANCHES_SCHEMA_FILENAME =
 
 /** Compose project name of Hack's global proxy stack (`~/.hack/caddy`). */
 export const GLOBAL_CADDY_PROJECT_NAME = "hack-dev-proxy";
+/** Compose project name of the global logging stack (Loki, Alloy, Grafana). */
+export const GLOBAL_LOGGING_PROJECT_NAME = "hack-logging" as const;

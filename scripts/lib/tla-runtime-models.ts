@@ -172,6 +172,13 @@ const restartPolicyStaleUses = [
   { engine: "restarting", bound: 3 },
   { engine: "exited", bound: 3 },
 ] as const;
+// StartGraph's ghost flags: the whole record names every unsafe step taken,
+// so a control cannot pass on a violation its guard removal did not cause.
+type StartGraphFlag = "start" | "publish" | "replace" | "return";
+const startGraphBad = (...flags: readonly StartGraphFlag[]): string =>
+  `bad = [${(["start", "publish", "replace", "return"] as const)
+    .map((key) => `${key} |-> ${flags.includes(key) ? "TRUE" : "FALSE"}`)
+    .join(", ")}]`;
 const contracts: readonly ModelContract[] = [
   {
     name: "guest-execution",
@@ -196,6 +203,14 @@ const contracts: readonly ModelContract[] = [
         fields: ['belief = "running"', 'saved = "running"'],
       },
     ],
+  },
+  {
+    name: "project-prerequisites",
+    module: "ProjectPrerequisites",
+    states: 13,
+    invariant: "CheckedBeforeHooks",
+    action: "Login",
+    fields: ['phase = "allowed"', "checked = FALSE", "loggedIn = TRUE"],
   },
   {
     name: "autostart-start-stop",
@@ -1230,13 +1245,10 @@ const contracts: readonly ModelContract[] = [
     states: 1943,
     invariant: "CacheNeverStale",
     action: "CacheHit",
-    fields: [
-      "staleHit = TRUE",
-      "cache = <<1, 1, 1>>",
-      "content = 2",
-      "ctime = 1",
-      "clock = 1",
-    ],
+    // Only CacheHit sets staleHit, and only from phase "idle", so these two
+    // fields hold in every first violation, whichever tick the two-worker search
+    // reaches first (it found the same stale hit at tick 1 and at tick 2).
+    fields: ["staleHit = TRUE", 'phase = "idle"'],
   },
   {
     name: "native-status-start",
@@ -1795,6 +1807,34 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-start-lock-wait",
+    module: "LeaseWait",
+    states: 19,
+    invariant: "NoEffectWhileHeld",
+    action: "Acquire",
+    fields: ['holder = "second"', 'waiter = "acquired"', "earlyEffect = TRUE"],
+    additionalControls: [
+      {
+        name: "acquisition-reachable",
+        negative: true,
+        invariant: "NeverAcquired",
+        action: "Acquire",
+        fields: [
+          'holder = "second"',
+          'waiter = "acquired"',
+          "earlyEffect = FALSE",
+        ],
+      },
+      {
+        name: "expiry-reachable",
+        negative: true,
+        invariant: "NeverExpired",
+        action: "Expire",
+        fields: ['waiter = "expired"', "elapsed = 5", "earlyEffect = FALSE"],
+      },
+    ],
+  },
+  {
     name: "stopped-pool-startup",
     module: "Resume",
     states: 71,
@@ -1828,20 +1868,22 @@ const contracts: readonly ModelContract[] = [
   {
     // One start of a pool that is not running: two chained Development samples
     // (the second under the startup lease, a window after the first), Research's
-    // three pre-lease samples, the content proofs and the pre-boot check.
+    // three pre-lease samples, the content proofs, the tree recheck under the
+    // lease and the pre-boot check, on a host that can fail and recover once,
+    // and the recorded earlier sample that may replace Development's wait.
+    // This configuration proves the root files under the lease: a start
+    // without an early root files proof.
     name: "pool-start-admission",
     module: "PoolStart",
-    states: 21_400,
+    states: 220_686,
     // Development's second sample taken before the startup lease.
     invariant: "SecondSampleUnderLease",
     action: "Recheck",
     fields: ['pc = "Proven"', 'profile = "development"'],
     additionalControls: [
-      // The follow-up ordering: root files proven in the window, rechecked
-      // under the lease.
-      { name: "root-before-lease", negative: false, states: 27_304 },
-      // Hypothetical: a tree recheck under the lease, which no code performs.
-      { name: "tree-recheck", negative: false, states: 21_076 },
+      // The implementation's other path, a cleanly stopped pool's start: root files
+      // proven in the window, rechecked under the lease.
+      { name: "root-before-lease", negative: false, states: 277_194 },
       {
         name: "window-not-enforced",
         negative: true,
@@ -1877,8 +1919,8 @@ const contracts: readonly ModelContract[] = [
         action: "RecheckRoot",
         fields: ['pc = "RootProven"', "rootOk = FALSE", "rootProved = TRUE"],
       },
-      // The remaining gap, kept explicit: the trees are proven before the
-      // lease and not rechecked under it.
+      // Without the tree recheck under the lease, a tree that changed after
+      // its proof before the lease is booted from.
       {
         name: "changed-tree-start",
         negative: true,
@@ -1911,6 +1953,164 @@ const contracts: readonly ModelContract[] = [
         invariant: "NeverStartsOnMovedAlias",
         action: "Start",
         fields: ['alias = "moved"', "selected = 2", "vm = TRUE"],
+      },
+      // The first sample recorded without its predicate check.
+      {
+        name: "first-sample-unchecked",
+        negative: true,
+        invariant: "SamplesTakenOnPassingHost",
+        action: "Open",
+        fields: ['pc = "Opened"', "hostOk = FALSE"],
+      },
+      // The same for Development's sample under the lease ...
+      {
+        name: "second-sample-unchecked",
+        negative: true,
+        invariant: "SamplesTakenOnPassingHost",
+        action: "Recheck",
+        fields: [
+          'pc = "Qualified"',
+          'profile = "development"',
+          "hostOk = FALSE",
+        ],
+      },
+      // ... and for Research's second and third samples.
+      {
+        name: "research-sample-unchecked",
+        negative: true,
+        invariant: "SamplesTakenOnPassingHost",
+        action: "ResearchSample",
+        fields: ['pc = "Opened"', 'profile = "research"', "hostOk = FALSE"],
+      },
+      // What few samples do not see, as reachable facts: a start admitted
+      // although the host failed between two of its accepted samples.
+      {
+        name: "development-dip-start-reachable",
+        negative: true,
+        invariant: "NeverStartsDevelopmentAcrossADip",
+        action: "Start",
+        fields: [
+          'profile = "development"',
+          "acrossDip = TRUE",
+          "dips = 1",
+          "vm = TRUE",
+        ],
+      },
+      {
+        name: "research-dip-start-reachable",
+        negative: true,
+        invariant: "NeverStartsResearchAcrossADip",
+        action: "Start",
+        fields: [
+          'profile = "research"',
+          "acrossDip = TRUE",
+          "dips = 1",
+          "vm = TRUE",
+        ],
+      },
+      // The same between the last sample and the pre-boot observation.
+      {
+        name: "boot-dip-start-reachable",
+        negative: true,
+        invariant: "NeverStartsAcrossADipBeforeBoot",
+        action: "Start",
+        fields: ["bootAcrossDip = TRUE", "dips = 1", "vm = TRUE"],
+      },
+      // The pre-boot observation admitted without its predicate check ...
+      {
+        name: "boot-host-unchecked",
+        negative: true,
+        invariant: "BootSampleOnPassingHost",
+        action: "AdmitBoot",
+        fields: ['pc = "BootAdmitted"', "hostOk = FALSE"],
+      },
+      // ... or without comparing its swapout count with the baseline.
+      {
+        name: "boot-swapouts-unchecked",
+        negative: true,
+        invariant: "BootSampleMatchesBaseline",
+        action: "AdmitBoot",
+        fields: ['pc = "BootAdmitted"', "baseline = <<0>>", "swapouts = 1"],
+      },
+      // The record of an earlier passing sample that may replace the
+      // admission wait. One control for each condition of its reuse ...
+      {
+        name: "reuse-other-boot",
+        negative: true,
+        invariant: "ReusedRecordSameBoot",
+        action: "Reuse",
+        fields: ['pc = "Qualified"', 'reusedBoot = "other"'],
+      },
+      {
+        name: "reuse-too-young",
+        negative: true,
+        invariant: "WindowRespected",
+        action: "Reuse",
+        fields: [
+          'pc = "Qualified"',
+          'reusedBoot = "this"',
+          'reusedAge = "young"',
+        ],
+      },
+      {
+        name: "reuse-too-old",
+        negative: true,
+        invariant: "ReusedRecordWithinBound",
+        action: "Reuse",
+        fields: [
+          'pc = "Qualified"',
+          'reusedBoot = "this"',
+          'reusedAge = "old"',
+        ],
+      },
+      {
+        name: "reuse-changed-count",
+        negative: true,
+        invariant: "ReusedRecordSameSwapouts",
+        action: "Reuse",
+        fields: [
+          'pc = "Qualified"',
+          'reusedBoot = "this"',
+          "reusedSwap = 0",
+          "swapouts = 1",
+        ],
+      },
+      // ... and one for its writer: a failing sample recorded.
+      {
+        name: "record-unchecked",
+        negative: true,
+        invariant: "RecordsFromPassingSamples",
+        action: "OtherRecords",
+        fields: ['recBoot = "this"', "recOk = FALSE", "hostOk = FALSE"],
+      },
+      // Reachable: a start that replaced its wait with a record, one that
+      // found an unusable record and waited as before, and the weakening of
+      // reuse (the host failed between the recorded sample and the leased one).
+      {
+        name: "reuse-start-reachable",
+        negative: true,
+        invariant: "NeverStartsOnReuse",
+        action: "Start",
+        fields: ['reusedBoot = "this"', 'reusedAge = "ok"', "vm = TRUE"],
+      },
+      {
+        name: "reuse-miss-start-reachable",
+        negative: true,
+        invariant: "NeverStartsPastAnUnusableRecord",
+        action: "Start",
+        fields: ['reusedBoot = "none"', "missed = TRUE", "vm = TRUE"],
+      },
+      {
+        name: "reuse-dip-start-reachable",
+        negative: true,
+        invariant: "NeverStartsOnReuseAcrossADip",
+        action: "Start",
+        fields: [
+          'reusedBoot = "this"',
+          "reusedDip = TRUE",
+          "dips = 1",
+          "vm = TRUE",
+        ],
       },
     ],
   },
@@ -2002,6 +2202,122 @@ const contracts: readonly ModelContract[] = [
           "reviewed = TRUE",
           "admitted = FALSE",
         ],
+      },
+    ],
+  },
+  {
+    // src/lib/global-logging.ts and `hack global install/up`: the logging
+    // stack is opt-in; a home that had it keeps it, a new one never starts
+    // it unasked, and turning it off never removes its logs.
+    name: "global-logging-optin",
+    module: "LoggingOptIn",
+    states: 1014,
+    invariant: "FreshNeverStartsUnasked",
+    action: "Install",
+    fields: [
+      "existing = FALSE",
+      "asked = FALSE",
+      "running = TRUE",
+      'setting = "unset"',
+    ],
+    additionalControls: [
+      {
+        name: "legacy-unset-off",
+        negative: true,
+        invariant: "ExistingHomeKept",
+        action: "Install",
+        fields: ["existing = TRUE", 'setting = "unset"', "running = FALSE"],
+        alternativeWitnesses: [
+          {
+            action: "Up",
+            fields: ["existing = TRUE", 'setting = "unset"', "running = FALSE"],
+          },
+        ],
+      },
+      {
+        name: "off-removes-volumes",
+        negative: true,
+        invariant: "NoSurpriseDataLoss",
+        action: "UpFlag",
+        fields: ["prevData = TRUE", "data = FALSE", 'setting = "off"'],
+      },
+      {
+        // The first start does not save an existing home's choice: with its
+        // logging directory moved aside, the next start turns it off.
+        name: "decision-not-saved",
+        negative: true,
+        invariant: "ExistingHomeKept",
+        action: "Install",
+        fields: [
+          "existing = TRUE",
+          'setting = "unset"',
+          "dir = FALSE",
+          "running = FALSE",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Up",
+            fields: [
+              "existing = TRUE",
+              'setting = "unset"',
+              "dir = FALSE",
+              "running = FALSE",
+            ],
+          },
+        ],
+      },
+      {
+        // A failed save of `--logging` that is not reported: the stack runs
+        // with the setting still off, and nothing told the user.
+        name: "unsaved-silent",
+        negative: true,
+        invariant: "OffMeansStopped",
+        action: "UpFlag",
+        fields: ['setting = "off"', "unsaved = FALSE", "running = TRUE"],
+      },
+    ],
+  },
+  {
+    // src/lib/process-exit.ts: the CLI never exits while held work runs or
+    // before its output is flushed.
+    name: "cli-process-exit",
+    module: "ProcessExit",
+    states: 298,
+    invariant: "NoExitWithPendingHold",
+    action: "SnapshotSettled",
+    fields: ['phase = "flushing"', "snap = {}", "buffered = FALSE"],
+    additionalControls: [
+      {
+        name: "no-end",
+        negative: true,
+        invariant: "NoLostOutput",
+        action: "Exit",
+        fields: ['phase = "exited"', "buffered = TRUE"],
+      },
+    ],
+  },
+  {
+    // src/lib/proxy-ingress-addresses.ts: a record `hack run` trusts names
+    // the running address unless an outside change followed its read.
+    name: "ingress-address-record",
+    module: "IngressRecord",
+    states: 922_875,
+    invariant: "TrustedRecordIsCurrent",
+    action: "Write",
+    // Addresses and changers are symmetric, so a two-worker search may end
+    // on either; the pinned fields are the ones every first witness shares.
+    fields: ["gen = 1", "settled = FALSE", "extSinceWrite = FALSE"],
+    additionalControls: [
+      {
+        name: "unsettled",
+        negative: true,
+      },
+      {
+        // Overlapping changes: one settles while the other still moves the
+        // containers, and a read in between is trusted.
+        name: "unlocked",
+        negative: true,
+        fields: ["gen = 3", "settled = TRUE", "extSinceWrite = FALSE"],
       },
     ],
   },
@@ -2644,6 +2960,273 @@ const contracts: readonly ModelContract[] = [
       },
     ],
   },
+  // The CI tier bounds one VM boot with two specs; positive-reboot covers two
+  // boots with one spec. Witnesses omit `cur` and `intents`: the initial spec
+  // value is free and two-worker TLC reports either one.
+  {
+    name: "start-graph",
+    module: "StartGraph",
+    states: 1_656_372,
+    invariant: "NoEffectWithoutIntent",
+    action: "Create",
+    fields: ["intents = {}", "acted = TRUE", 'up = "running"'],
+    additionalControls: [
+      { name: "positive-reboot", negative: false, states: 81_534 },
+      {
+        name: "ignore-deps",
+        negative: true,
+        invariant: "DepsBeforeStart",
+        action: "Start",
+        fields: [
+          startGraphBad("start"),
+          "rgen = [a |-> 0, b |-> 1]",
+          'up = "running"',
+        ],
+      },
+      {
+        name: "no-publish-fence",
+        negative: true,
+        invariant: "NoPublishToReplaced",
+        action: "Publish",
+        fields: [startGraphBad("publish"), "route = [a |-> 1, b |-> 0]"],
+      },
+      {
+        name: "reuse-by-name",
+        negative: true,
+        invariant: "ReturnIsCurrent",
+        action: "Return",
+        fields: [startGraphBad("return"), "boot = 1", 'up = "returned"'],
+      },
+      {
+        name: "no-unpublish",
+        negative: true,
+        invariant: "NoReplaceWhileRouted",
+        action: "RemoveOld",
+        fields: [
+          startGraphBad("replace"),
+          "route = [a |-> 1, b |-> 0]",
+          "nextGen = [a |-> 3, b |-> 1]",
+        ],
+      },
+      {
+        name: "keep-across-boot",
+        negative: true,
+        invariant: "ReturnIsCurrent",
+        action: "Return",
+        // Without the boot fence a dependent may also start on a stale
+        // dependency, so both flags are set.
+        fields: [
+          startGraphBad("start", "return"),
+          "boot = 2",
+          'up = "returned"',
+        ],
+        alternativeWitnesses: [
+          {
+            action: "Return",
+            fields: [startGraphBad("return"), "boot = 2", 'up = "returned"'],
+          },
+        ],
+      },
+      {
+        name: "blind-retry",
+        negative: true,
+        invariant: "OneContainerPerService",
+        action: "Create",
+        fields: ["rgen = [a |-> 2, b |-> 0]", "nextGen = [a |-> 3, b |-> 1]"],
+        alternativeWitnesses: [
+          {
+            action: "Create",
+            fields: [
+              "rgen = [a |-> 0, b |-> 2]",
+              "nextGen = [a |-> 1, b |-> 3]",
+            ],
+          },
+        ],
+      },
+      {
+        // Reachability: an `up` that began on a current, ready and routed
+        // project (`base`) returns without planning anything.
+        name: "reachable-noop",
+        negative: true,
+        invariant: "NeverNoOpUp",
+        action: "Return",
+        fields: ["base = TRUE", "acted = FALSE", 'up = "returned"'],
+      },
+    ],
+  },
+  {
+    // HACK-2461: when a stored step result may replace the work, when garbage
+    // collection may delete it, and which digest a command uses for a tag.
+    // `positive` is the boot class with drift; the slot and cas classes are
+    // the two other positives. Each control removes one guard, except
+    // `no-epoch`, which removes the boot id together with the observation (the
+    // observation alone keeps boot skips sound). A `bad` flag is set only by the
+    // action that breaks its invariant, so the flag and the action pin the
+    // failure; `no-epoch` also pins the second boot to tell it from no-verify.
+    name: "step-store",
+    module: "StepStore",
+    states: 1_082_240,
+    invariant: "NoUnsoundSkip",
+    action: "Skip",
+    fields: [
+      "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+      "done = TRUE",
+    ],
+    additionalControls: [
+      { name: "positive-slot", negative: false, states: 284_160 },
+      { name: "positive-cas", negative: false, states: 184_320 },
+      {
+        name: "no-verify-slot",
+        negative: true,
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+          "done = TRUE",
+        ],
+      },
+      {
+        name: "no-verify-boot",
+        negative: true,
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+          "done = TRUE",
+        ],
+      },
+      {
+        name: "no-epoch",
+        negative: true,
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+          "boot = 2",
+          "world = {}",
+        ],
+      },
+      {
+        name: "late-key",
+        negative: true,
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+          "done = TRUE",
+        ],
+      },
+      {
+        name: "no-pin",
+        negative: true,
+        invariant: "NoPruneInUse",
+        action: "PruneFinish",
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> FALSE, use |-> TRUE, mixed |-> FALSE, stale |-> FALSE]",
+          "pruning = <<0, 0>>",
+        ],
+      },
+      {
+        name: "object-first",
+        negative: true,
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> TRUE, use |-> FALSE, mixed |-> FALSE, stale |-> FALSE]",
+          "done = TRUE",
+        ],
+      },
+      {
+        name: "ignore-ttl",
+        negative: true,
+        invariant: "NoSilentStaleTag",
+        action: "UseTag",
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> FALSE, use |-> FALSE, mixed |-> FALSE, stale |-> TRUE]",
+          "resolved = FALSE",
+          "offline = FALSE",
+        ],
+      },
+      {
+        name: "resolve-per-use",
+        negative: true,
+        invariant: "OneDigestPerCommand",
+        action: "UseTag",
+        fields: [
+          "bad = [pull |-> FALSE, skip |-> FALSE, use |-> FALSE, mixed |-> TRUE, stale |-> FALSE]",
+          'cmd = "running"',
+        ],
+      },
+    ],
+  },
+  {
+    // HACK-2461: a file hash reused by stat key under the racy rule. `negative`
+    // drops the racy check; `reachability` shows a reused hash is reachable.
+    // Witnesses are the violating states themselves (see statKeyedHits).
+    name: "stat-keyed-hash",
+    module: "StatKeyedHash",
+    states: 108_942,
+    invariant: "HitIsFresh",
+    ...statKeyedHits({ withCtime: true, stale: true }),
+    additionalControls: [
+      {
+        name: "mtime-only",
+        negative: true,
+        ...statKeyedHits({ withCtime: false, stale: true }),
+      },
+      {
+        name: "racy-at-store",
+        negative: true,
+        ...statKeyedHits({ withCtime: true, stale: true }),
+      },
+      {
+        name: "reachability",
+        negative: true,
+        invariant: "NeverHits",
+        ...statKeyedHits({ withCtime: true, stale: false }),
+      },
+    ],
+  },
+  {
+    name: "native-image-presence",
+    module: "ImagePresence",
+    states: 7712,
+    invariant: "Safe",
+    action: "Readback",
+    fields: [
+      'phase = "ready"',
+      'source = "cached"',
+      'receipt = "complete"',
+      "observed = FALSE",
+    ],
+    additionalControls: [
+      {
+        name: "expired-tag",
+        negative: true,
+        invariant: "TagSafe",
+        action: "ResolveTag",
+        fields: [
+          'mode = "normal"',
+          'recorded = "expired"',
+          'chose = "recorded"',
+        ],
+      },
+      {
+        name: "eviction",
+        negative: true,
+        invariant: "NeverEvictionRefusal",
+        action: "Create",
+        fields: [
+          'phase = "create_refused"',
+          'guest = "absent"',
+          "observed = TRUE",
+        ],
+      },
+      {
+        name: "reachability",
+        negative: true,
+        invariant: "NeverSkipsRead",
+        action: "Readback",
+        fields: [
+          'phase = "ready"',
+          'receipt = "complete"',
+          'guest = "present"',
+          "verified = FALSE",
+          "observed = TRUE",
+        ],
+      },
+    ],
+  },
   {
     // HACK-2460. One runtime service per native home. The negative control
     // binds the socket without holding service.lock.
@@ -2758,6 +3341,50 @@ const contracts: readonly ModelContract[] = [
     ],
   },
 ];
+
+/**
+ * StatKeyedHash witnesses: every state in which a lookup would hit, written out
+ * over the controls' finite bounds (times 0..4, contents "A"/"B"). A hit is a
+ * valid entry whose key equals the current stat key; with `stale` its hash also
+ * differs from the content, which is exactly a `HitIsFresh` violation. Only
+ * `HashStore`, `Write` and `SetMtime` change the entry, the content or the times,
+ * so the first violating state follows one of them. Matching the violating state
+ * itself keeps the check independent of which content TLC's search reaches first.
+ */
+function statKeyedHits(opts: {
+  readonly withCtime: boolean;
+  readonly stale: boolean;
+}): {
+  readonly action: string;
+  readonly fields: readonly string[];
+  readonly alternativeWitnesses: readonly ModelWitness[];
+} {
+  const times = [0, 1, 2, 3, 4];
+  const other = (hash: string): string => (hash === "A" ? "B" : "A");
+  const witnesses = ["HashStore", "Write", "SetMtime"].flatMap((action) =>
+    times.flatMap((mtime) =>
+      (opts.withCtime ? times : [0]).flatMap((ctime) =>
+        ["A", "B"].map(
+          (hash): ModelWitness => ({
+            action,
+            fields: [
+              `entry = [valid |-> TRUE, key |-> <<${mtime}, ${ctime}>>, hash |-> "${hash}"]`,
+              `mtime = ${mtime}`,
+              ...(opts.withCtime ? [`ctime = ${ctime}`] : []),
+              ...(opts.stale ? [`content = "${other(hash)}"`] : []),
+            ],
+          })
+        )
+      )
+    )
+  );
+  const [first, ...rest] = witnesses as [ModelWitness, ...ModelWitness[]];
+  return {
+    action: first.action,
+    fields: first.fields,
+    alternativeWitnesses: rest,
+  };
+}
 
 export const runtimeModels = contracts.map((contract) => ({
   ...contract,

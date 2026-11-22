@@ -498,35 +498,37 @@ impl<'a> Engine<'a> {
         deadline: std::time::Instant,
         cancelled: impl Fn() -> bool,
     ) -> Result<Self, CandidateError> {
-        let mut holder = None;
-        loop {
-            if cancelled() {
-                return Err(CandidateError::new(
-                    "provider_acquisition_cancelled",
-                    "Provider acquisition was cancelled before admission.",
-                ));
-            }
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(holder.unwrap_or_else(|| {
-                    CandidateError::new(
-                        "provider_busy",
-                        "Provider lease acquisition expired before admission.",
-                    )
-                }));
-            }
-            match Self::connect(candidate) {
-                Err(error) if error.code == "provider_busy" => {
-                    holder = Some(error);
-                    std::thread::sleep(remaining.min(Duration::from_millis(50)))
+        super::state::wait_for_acquisition(
+            deadline,
+            || {
+                if cancelled() {
+                    return Err(CandidateError::new(
+                        "provider_acquisition_cancelled",
+                        "Provider acquisition was cancelled before admission.",
+                    ));
                 }
-                result => return result,
-            }
-        }
+                Ok(())
+            },
+            || Self::connect(candidate),
+            || {
+                CandidateError::new(
+                    "provider_busy",
+                    "Provider lease acquisition expired before admission.",
+                )
+            },
+        )
     }
 
     pub(super) fn connect_cleanup(candidate: &'a Candidate) -> Result<Self, CandidateError> {
         Self::connect_mode(candidate, true)
+    }
+
+    /// Startup's read/proof operations can wait for the existing provider
+    /// lease. All ownership and engine checks still run after acquisition.
+    pub(super) fn connect_cleanup_for_start(
+        candidate: &'a Candidate,
+    ) -> Result<Self, CandidateError> {
+        Self::from_guest(OwnedGuest::connect_cleanup_for_start(candidate)?, true)
     }
 
     /// Read-only operations share one fixed budget across connection and every query.
@@ -643,7 +645,6 @@ pub(super) struct Observer<'a> {
     transport: Transport,
 }
 impl<'a> Observer<'a> {
-    #[cfg(target_os = "macos")]
     pub(in crate::provider) fn guest(&self) -> &ObservedGuest<'a> {
         &self.guest
     }
@@ -668,6 +669,17 @@ impl<'a> Observer<'a> {
         Ok(value)
     }
 
+    /// Fixed read-only image endpoint. Recheck ownership on both success and
+    /// 404 so an absence after a guest change cannot authorize a load.
+    pub(super) fn image(&self, image: &str) -> Result<Value, CandidateError> {
+        self.guest.verify()?;
+        let result =
+            self.transport
+                .request(Method::GET, &format!("/v1.53/images/{image}/json"), None);
+        self.guest.verify()?;
+        result
+    }
+
     /// Recheck after failures too: a new-boot 404 cannot prove old-boot absence.
     #[cfg(target_os = "macos")]
     pub(super) fn get_until(&self, path: &str, deadline: Instant) -> Result<Value, CandidateError> {
@@ -690,7 +702,7 @@ impl<'a> Observer<'a> {
         Ok(value)
     }
 
-    fn info(&self) -> Result<EngineInfo, CandidateError> {
+    pub(super) fn info(&self) -> Result<EngineInfo, CandidateError> {
         self.guest.verify()?;
         let value = self.transport.request(Method::GET, "/version", None)?;
         self.guest.verify()?;

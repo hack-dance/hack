@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { sanitizeProjectSlug } from "../lib/project.ts";
+import { nativeAdmissionReuseEnvironment } from "./native-admission-reuse.ts";
 import { isNativeAwsSelector } from "./native-aws-environment.ts";
 import {
   type NativeGcloudSelection,
@@ -630,6 +631,43 @@ function pick<T>(opts: {
   return { value: opts.machine, origin: opts.machineSet ? "machine" : "unset" };
 }
 
+function nativeHttpsSetting(
+  env: Environment,
+  machine: NativeHttpsSelection | undefined
+) {
+  return pick({
+    envSet:
+      set(env, "HACK_NATIVE_CADDY_BINARY") ||
+      set(env, "HACK_NATIVE_CADDY_SHA256") ||
+      set(env, "HACK_NATIVE_HTTPS_PORT"),
+    fromEnv: () => parseNativeHttpsSelection(env),
+    machineSet: machine !== undefined,
+    machine,
+  });
+}
+
+/** Resolve the HTTPS display port without consulting startup-only settings. */
+export async function resolveNativeStatusHttpsPort(opts: {
+  readonly env: Environment;
+  readonly projectName: string;
+  readonly projectRoot: string;
+}): Promise<number | null> {
+  const machine = await readMachineSettings({
+    ...opts,
+    uid: typeof process.getuid === "function" ? process.getuid() : undefined,
+  });
+  if (machine && !(isRecord(machine.value) && machine.value.version === 1)) {
+    throw machineRefused("require version 1");
+  }
+  const https =
+    machine && isRecord(machine.value) ? machine.value.https : undefined;
+  const selected = nativeHttpsSetting(
+    opts.env,
+    https === undefined ? undefined : machineHttps(https)
+  );
+  return selected.value?.httpsPort ?? null;
+}
+
 /**
  * Resolve grants and host authority for native `up` and `restart`. Every machine value
  * is validated here even when a variable overrides it, so a broken file never waits for
@@ -646,8 +684,10 @@ export async function resolveNativeHostSettings(opts: {
   const env = opts.env;
   // Checked with the other variables, before any hook, stop or runtime
   // request: a mistyped value must not stop a running project first. The
-  // value itself travels to `runtime up` at that request (HACK-2409).
+  // value itself travels to `runtime up` at that request (HACK-2409). The
+  // admission reuse bound travels and is checked the same way.
   nativeHotReloadEnvironment(["runtime", "up"], env);
+  nativeAdmissionReuseEnvironment(["runtime", "up"], env);
   const machine = await readMachineSettings({
     env,
     projectName: opts.projectName,
@@ -688,15 +728,7 @@ export async function resolveNativeHostSettings(opts: {
     machineSet: values.preparedBaseSet,
     machine: values.preparedBase,
   });
-  const https = pick({
-    envSet:
-      set(env, "HACK_NATIVE_CADDY_BINARY") ||
-      set(env, "HACK_NATIVE_CADDY_SHA256") ||
-      set(env, "HACK_NATIVE_HTTPS_PORT"),
-    fromEnv: () => parseNativeHttpsSelection(env),
-    machineSet: values.https !== undefined,
-    machine: values.https,
-  });
+  const https = nativeHttpsSetting(env, values.https);
   const aws = pick<NativeHostSettings["aws"]>({
     envSet: nonEmpty(env, "HACK_NATIVE_AWS_PROFILE"),
     fromEnv: () => envAws(env),

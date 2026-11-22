@@ -13,7 +13,14 @@ committed SVGs for GitHub; after changing their adjacent `.mmd` sources or the
 house theme, run `bun run docs:readme-diagrams`. `docs:check` re-renders and rejects
 stale pictures in either theme.
 
-Use the repository's pinned Bun. Site dependencies and `site/bun.lock` are
+From a linked worktree, pick a unique instance name, such as `docs-preview`.
+Run `hack up --branch docs-preview --detach`, then
+`hack open docs --branch docs-preview --json` to get its URL. Edit site
+components or editorial pages under `docs/versions/` to reload the preview.
+Stop it with `hack down --branch docs-preview`. In the main checkout you can
+omit `--branch` from all three commands. See [the contributor runtime](../.hack/README.md).
+
+For standalone verification, use the repository's pinned Bun. Site dependencies and `site/bun.lock` are
 independent of the CLI workspace; Next.js also needs Node.js 20.9 or newer.
 
 From the repository root:
@@ -24,7 +31,6 @@ bun run docs:prepare      # stage the versioned corpus into site/content and sit
 bun run docs:check        # corpus, link-boundary and framing checks
 bun run docs:typecheck
 bun run docs:build
-bun run docs:dev          # http://127.0.0.1:3000
 ```
 
 With a production build served by `bun run --cwd site start`, run the HTTP smoke
@@ -36,10 +42,6 @@ bun run docs:smoke http://127.0.0.1:3000
 
 It checks every versioned route, canonical URLs, search isolation, the LLM
 exports, legacy redirects and unknown-version handling.
-
-For a Hack-routed preview, `hack up docs --profile docs --branch docs-preview
---detach` builds and serves the site in a container at a local HTTPS URL; stop it
-with `hack down --profile docs --branch docs-preview`.
 
 ## Content model
 
@@ -57,7 +59,7 @@ with `hack down --profile docs --branch docs-preview`.
 To move v5 to a newer prerelease:
 
 ```bash
-bun run docs:pin -- --version v5 --ref v5.0.0-next.22 --label "v5 (next.22)" --dir next22
+bun run docs:pin -- --version v5 --ref v5.0.0-next.24 --label "v5 (next.24)" --dir next24
 ```
 
 Then update the release tag in `docs/versions/v5/install.md`, re-read the

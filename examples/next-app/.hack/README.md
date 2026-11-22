@@ -70,7 +70,8 @@ networks:
 
 ## Adding Postgres / Redis (optional)
 
-Postgres (default network only):
+Postgres (default network only). The health check lets dependents start as soon as it
+accepts connections; see [Fast, correct health checks and shutdown](../../../docs/recipes/fast-health-checks.md):
 
 ```yaml
 db:
@@ -81,6 +82,15 @@ db:
     POSTGRES_DB: mydb
   volumes:
     - postgres-data:/var/lib/postgresql/data
+  # Healthy about 250 ms after Postgres is ready; checked every 10 s after that.
+  healthcheck:
+    test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "mydb"]
+    start_period: 30s
+    # Requires Docker Engine 25+. On older engines, remove start_interval to check at interval.
+    start_interval: 250ms
+    interval: 10s
+    timeout: 3s
+    retries: 3
   networks:
     - default
 ```
@@ -121,8 +131,11 @@ db-ops:
     - ..:/app
   environment:
     DATABASE_URL: postgres://postgres:postgres@db:5432/mydb
+  # Wait until Postgres accepts connections, not just until it started, so a
+  # migration never needs a sleep in front of it.
   depends_on:
-    - db
+    db:
+      condition: service_healthy
   networks:
     - default
   profiles: ["ops"]
@@ -177,4 +190,3 @@ Then install once inside the container volume:
 ```bash
 hack run --workdir /app www -- bun install
 ```
-

@@ -4,14 +4,13 @@
 > `5.0.0-next.N` prereleases through `hack-next`, a separate channel that
 > installs beside stable. Stable is still v4. See [Install v5](install.md).
 >
-> Everything on this page is in `5.0.0-next.22`. The migration wait, overlay
+> Everything on this page is in `5.0.0-next.24`. The migration wait, overlay
 > reuse, the slow-project checks, `hack env overlay` and the `--json` stdout rule
 > arrived in next.21; an installed next.20 or earlier does not have them.
 
 Hack 5 keeps the v4 project model. Your `.hack/` folder, your encrypted env
-values, branch instances and lifecycle processes carry over. Docker Compose is
-still the default way to run services. This page lists what changed for a user,
-starting with what you will meet first.
+values, branch instances and lifecycle processes carry over. Stable v4 uses
+Compose. Native is the planned default for stable v5.
 
 In short:
 
@@ -21,7 +20,7 @@ In short:
   `exec` and `run` keep the overlay.
 - **New:** an upgrade assistant, single repairs in `hack doctor`, a history of
   starts and stops, and background commands.
-- **Opt-in:** the agent plugin and the native backend (beta).
+- **Optional:** the agent plugin. Native backend selection depends on the launcher and platform.
 - **Gone:** hosted accounts, the dashboard, Hack Tickets and zellij.
 
 ```mermaid
@@ -118,10 +117,11 @@ most commands have `--json`, and every command takes `--no-interactive`. See
 [Agent integrations](integrations.md).
 
 **The native backend (beta).** On an Apple Silicon Mac, prepared projects can
-run in a small Linux virtual machine without a Docker app. It ships only through
-`hack-next`. Nothing selects it for you, and it does not claim to match Compose
-for every project. See [Try native](native/start.md) and
-[What works and known limits](native/limits.md).
+run in a Linux virtual machine without a Docker app. The current `hack-next`
+and manual `hack-v5` launchers select native by default on Apple Silicon macOS.
+Use `HACK_RUNTIME_BACKEND=compose` for Compose. Supported Linux candidates
+are Compose-only. See [Try native](native/start.md) and
+[What works and known limits](https://github.com/hack-dance/hack/blob/next/docs/native/limits.md).
 
 ## 6. What is gone
 
@@ -139,8 +139,9 @@ repository. They are unsupported.
 
 ## Platforms
 
-The v5 prerelease installs on Apple Silicon macOS. Stable v4 remains the
-release for Intel Macs and Linux until 5.0.0 is published. See
+The v5 prerelease installs on Apple Silicon macOS and, with the Compose
+backend only, on Linux x86_64 and arm64 (`5.0.0-next.24` publishes both Linux
+archives). Stable v4 remains the release for Intel Macs. See
 [Install v5](install.md).
 
 ## More detail

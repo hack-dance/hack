@@ -51,8 +51,19 @@ https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
 `JAVA_BIN` may select an explicit Java executable. The runner does not install tools
 or change global Java settings. CI's Runtime state models job supplies Java and the
 pinned artifact. Each check has a 120-second timeout, 512 MiB Java heap, two workers
-and bounded output; temporary TLC metadata is removed after success or failure.
+and bounded output. Every gate owns a private directory for TLC metadata, copied
+models, and Java standard-module extraction (`java.io.tmpdir`). The runner waits
+for Java to exit before removing that directory after success, failure, SIGINT,
+or SIGTERM. Concurrent worktrees therefore do not share unpacked standard modules.
 No credentials or running VM are needed.
+
+Run `bun run test:models:concurrent <other-worktree>` to check failure and
+signal cleanup, then run three pairs of complete gates. The other checkout must
+contain the same runner revision; omit it to run both gates in this checkout.
+The check verifies separate Java temp roots, marker isolation, and removal of
+each run's scratch. It uses the same Java and pinned jar as `test:models`.
+This check runs on demand, outside `bun test` and CI; each TLC invocation retains
+the 120-second timeout.
 
 ## Native foreground recovery lease takeover
 
@@ -875,39 +886,86 @@ claim, and a model pass is not native startup qualification.
 
 `pool-start-admission/PoolStart.tla` checks the host admission of one `runtime up`
 of a pool that is not running. A Development start takes one sample before the
-startup lease and one under it, at least the admission window after the first; a
-Research start keeps three samples before the lease. The positive control explores
-21,400 states for both profiles, with the root files proven under the lease.
-The clock, host pressure, the swapout count, another lease holder, a concurrent
-start, a changed tree or root file, a squatted HOME alias and a crash interleave
-with every step. See its [coverage](pool-start-admission/COVERAGE.md) and
+startup lease and one under it, at least the admission window after the first, or
+at least the window after a recorded earlier sample of the same home; a Research
+start keeps three samples before the lease. The positive control explores
+220,686 states for both profiles, with the provider and engine trees rechecked and
+the root files proven under the lease: a start without an early root files proof,
+such as the first boot of a new home.
+The clock, a host that fails and passes again once, the swapout count, another
+lease holder that may record a host sample, a concurrent start, a changed tree or
+root file, a squatted HOME alias and a crash interleave with every step. See its
+[coverage](pool-start-admission/COVERAGE.md) and
 [statechart](../../../docs/pool-start-admission-statechart.md).
 
-A VM starts only on the qualifying samples of its profile, with one unbroken
-swapout count from the first sample to the pre-boot check, and the pre-boot check
-compares against the last qualifying sample. A refusal, a crash or a pool that a
-concurrent start already booted leaves no VM started and the lease returned. The
-`root-before-lease` control (27,304 states) checks the same invariants for the
-follow-up ordering, in which the root files are proven before the lease and their
-metadata is rechecked under it.
+A VM starts only on the qualifying samples of its profile, each taken on a
+passing host (`SamplesTakenOnPassingHost`), with one unbroken swapout count from
+the first sample to the pre-boot check, and the pre-boot check compares against
+the last qualifying sample. The pre-boot observation is recorded apart from the
+samples: it was taken on a passing host (`BootSampleOnPassingHost`) and showed
+the count it was compared against (`BootSampleMatchesBaseline`). No VM starts from a provider or
+engine tree that changed after its content proof (`NoStartFromChangedTree`). A
+refusal, a crash or a pool that a concurrent start already booted leaves no VM
+started and the lease returned. The `root-before-lease` control (277,194 states)
+checks the same invariants for the other path of the implementation, a cleanly
+stopped pool's start, in which the root files are proven before the lease and
+rechecked under it.
 
-Six controls remove one mechanism each and must fail the named invariant: the
+Twelve controls remove one mechanism each and must fail the named invariant: the
 second sample before the lease (`negative`, `SecondSampleUnderLease`), no window
 (`window-not-enforced`), no swapout comparison at the second sample
 (`unchained-recheck`) or at the pre-boot check (`unchained-boot`), two Research
-samples (`research-two-samples`) and no root recheck in the follow-up ordering
-(`root-unchecked`). Three more show that a Development start, a Research start and
-a start after an alias rewrite are reachable.
+samples (`research-two-samples`), no root files recheck after a proof before the
+lease (`root-unchecked`), no tree recheck under the lease (`changed-tree-start`,
+`NoStartFromChangedTree`), no predicate check of the first sample
+(`first-sample-unchecked`), of Development's sample under the lease
+(`second-sample-unchecked`) or of Research's later samples
+(`research-sample-unchecked`), and a pre-boot check that admits without its
+predicate check (`boot-host-unchecked`) or without its swapout comparison
+(`boot-swapouts-unchecked`). Three more show that a Development start, a Research
+start and a start after an alias rewrite are reachable.
 
-`changed-tree-start` keeps one gap explicit. The provider and engine trees are
-proven by content before the lease and not rechecked under it, so a tree that
-changes between its proof and the lease is booted once; the boot's tree witness
-makes the next command prove it by content again. `tree-recheck` (21,076 states)
-models a recheck under the lease that no code performs and holds
-`NoStartFromChangedTree`. A sample is one atomic observation, pressure that comes
-and goes between samples is invisible, tree and root changes are assumed absent
-while the lease is held, and nothing after `machine start` is modelled. There is no
-fairness or eventual-start claim, and a model pass is not a measured boot.
+Three reachability controls state what the observations do not see:
+`development-dip-start-reachable` and `research-dip-start-reachable` require a
+start that is admitted although the host failed at some moment between two of its
+accepted samples, and `boot-dip-start-reachable` one admitted although the host
+failed between its last sample and the pre-boot observation. Nothing reads the
+host between observations except the cumulative swapout count, so such a dip
+passes; with two Development samples instead of seven it has fewer samples to
+miss. The model shows that the gap exists, not how wide it is.
+
+A home's record of an earlier passing sample (`admission/opening.rs`) may replace
+the wait between a Development start's two samples, never a sample. A start that
+skipped the wait had a record from this OS boot, at least one window and at most
+one bound old, whose swapout count equals its sample's under the lease
+(`ReusedRecordSameBoot`, `WindowRespected`, `ReusedRecordWithinBound`,
+`ReusedRecordSameSwapouts`); every record written came from a passing host
+(`RecordsFromPassingSamples`); Research reuses nothing (`ResearchNeverReuses`).
+Five more controls remove one of these each: `reuse-other-boot`,
+`reuse-too-young`, `reuse-too-old`, `reuse-changed-count` and `record-unchecked`.
+Three reachability controls require a start on a reused record
+(`reuse-start-reachable`), a start that found an unusable record and waited out
+its own window (`reuse-miss-start-reachable`), and the weakening of reuse: a host
+that failed and passed again between the recorded sample and the sample under the
+lease is admitted (`reuse-dip-start-reachable`). The record's file checks, its
+parsing and its clock are not modelled; their tests are in
+`provider/admission/opening/tests.rs`.
+
+The provider and engine trees are proven by content before the lease, inside the
+admission window, and rechecked first under it (`lifecycle/leased_trees.rs`): a
+tree whose metadata digest and content anchor equal its proof's keeps the proof,
+any other tree is proven by content again, and a changed tree refuses the start.
+`changed-tree-start` is the start without that recheck: a tree that changes
+between its proof and the lease is booted once, and only the next command's
+witness check refuses it. The model keeps one bit for the trees, so the metadata
+comparison and the second proof are one guard in it. A cleanly stopped pool's
+root files are held to the same rule (`lifecycle/rootfs_proof.rs`): proven in the
+window, rechecked as the step after the tree recheck and compared once more where
+their digest is used, with one bit and one recheck action in the model. A sample is one atomic
+observation, pressure that comes and goes between samples is invisible, tree and
+root changes are assumed absent while the lease is held, and nothing after
+`machine start` is modelled. There is no fairness or eventual-start claim, and a
+model pass is not a measured boot.
 
 ## Retained-data handoff across plan changes
 
@@ -1544,6 +1602,64 @@ pending coordinator's directory; it does not acknowledge or roll over that
 coordinator. Directory derivation and a real coordinator start/stop regression
 cover this restored-owner boundary outside the finite publisher model.
 
+## CLI process exit
+
+`cli-process-exit/ProcessExit.tla` checks how the CLI process ends
+(`src/lib/process-exit.ts`, `index.ts`): the command returns, `exitWhenDone`
+waits for registered holds, ends stdout and stderr, then exits. Invariants:
+`NoExitWithPendingHold` (the process never ends while held work runs, including
+a hold registered while waiting) and `NoLostOutput` (everything written before
+the exit was delivered).
+
+| Model operation | Source boundary |
+| --- | --- |
+| `Register` / `Settle` | `holdProcessUntil`: the stdio MCP session and each tool call, the foreground daemon, TUI and remote monitor renderer `closed`, TUI action child plus its stderr drain. |
+| `CommandReturns` / `SnapshotSettled` | `runCli` resolves; `waitForHolds` awaits a snapshot and loops while holds remain. |
+| `EndStreams` / `Exit` | `endStream` on stdout and stderr (`end` callback), then `process.exit`. |
+
+Bounds: three holds. The positive configuration exhausts 298 distinct states at
+depth 11. Controls: `negative` (wait for one snapshot, no re-check) fails
+`NoExitWithPendingHold` at `SnapshotSettled`; `no-end` (exit after
+`write("", cb)` instead of `end`) fails `NoLostOutput` at `Exit`. The second
+matches a measurement: with `write("", cb)` only 950 KB of a 2 MiB pipe write
+arrived. `tests/process-exit.test.ts` walks both against real processes. Not
+covered: whether every command that outlives `runCli` registers a hold (an
+audit, listed in the PR), and a reader that never drains (the exit waits, as
+the event loop did before).
+
+## Global proxy address record
+
+`ingress-address-record/IngressRecord.tla` checks the record `hack run` trusts
+instead of asking Docker for the global proxy and DNS addresses
+(`src/lib/proxy-ingress-addresses.ts`). Invariant `TrustedRecordIsCurrent`: a
+record a run would trust names the running address, unless a change made
+outside Hack followed the observation it came from.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `HackBegin` / `HackApply` / `HackEnd` | `withIngressChange` around `hack global up` (`runGlobalUpChange`), the proxy `down` in `hack global down`, and the doctor proxy repair: under the `ingress-change.lock` cross-process lock, an unsettled new token, the Compose effect, a settled new token (also after a failure). |
+| `Crash` | The changer's process dies: the lock is reclaimed from a dead owner only, and the token stays unsettled until the next change settles it. |
+| `ReadToken` / `Inspect` / `Write` | `resolveIngressAddresses(..., "fresh")`: the token is read before the one `docker inspect`; a read that finds both containers writes the record with that token; one that reaches the engine and finds a container gone removes it. |
+| `Valid` | `resolveIngressAddresses(..., "recorded")`: trusted only when the record's token is the current one and settled. |
+| `External` | A container recreated outside Hack. Not detected; a failed `hack run` checks once and refreshes. |
+
+Bounds: two concurrent readers, two changers that each run once and may
+crash at any step, addresses {stopped, 1, 2}, `MaxGen = 4`. The positive
+configuration exhausts 922,875 distinct states at depth 19 (about 12 s with
+two workers). Negative controls, all failing `TrustedRecordIsCurrent` at
+`Write`: `negative` (no generation check) and `unsettled` (validity ignores the
+settled flag), where a reader inspects while a change is in progress and the
+change stops the stack; and `unlocked` (changes not serialized), where one
+change settles the token while the other is still moving the containers. The same interleavings are walked
+against the real record and token files in `tests/proxy-ingress-addresses.test.ts`.
+Not covered: atomicity of the file writes themselves (each is an atomic rename),
+Docker's own answers, and the stored per-instance override file, which is
+rendered from whatever addresses the command resolved. The model has one
+Docker engine; in the code a record is also trusted only for the engine it
+was read from (`engine`: `DOCKER_HOST`, else the Docker context), which
+`tests/proxy-ingress-addresses.test.ts` and
+`tests/compose-exec-run-probes-cli.test.ts` cover.
+
 ## Runtime service per native home
 
 `runtime-service/RuntimeService.tla` is the design model for HACK-2460: one
@@ -1614,3 +1730,52 @@ idle-exit race between closing the listener and a queued connection (atomic
 here); socket path attacks, uid checks and frame parsing; the version order
 (any skewed client may retire any service); and durability of the intent write
 itself.
+
+## Global logging opt-in
+
+`global-logging-optin/LoggingOptIn.tla` checks when Hack runs the global
+logging stack (Loki, Alloy, Grafana): `src/lib/global-logging.ts` and
+`hack global install` / `up` / `down` in `src/commands/global.ts`.
+`logging.enabled` decides when set; unset is on only for a home that has the
+stack's directory (`~/.hack/logging/`), which every install before opt-in
+wrote, and the first manual install or up in such a home saves `on`.
+Any save may fail (`SaveMayFail`): the run then uses its choice anyway, so
+routing is not blocked, and warns that it was not saved; `unsaved` records
+that warning until a later save.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `On` | `resolveGlobalLogging`: the config value, else whether `logging/` exists. |
+| `Saved` | `resolveAndSaveGlobalLogging` (via `settleGlobalLoggingSetting`): an existing home's first manual install or up writes `logging.enabled: true`; login only reads. |
+| `SaveOrReport` | The same save, and the `--logging`/`--no-logging` save in the `global up` handler: a failure keeps the setting, warns "was not saved", and the run follows the choice (`saveError`, `loggingOverride`). |
+| `Install` | `globalInstall`: `materializeGlobalInstallFiles` writes the logging files only when on, then `runGlobalUp`. |
+| `Up` / `UpWith` | `runGlobalUp`: on writes missing files (`materializeGlobalLoggingFiles`) and starts the stack; off stops its containers found by their Compose project label (`stopDisabledLoggingStack`), with or without its files. |
+| `UpFlag` | `hack global up --logging` / `--no-logging`: saves `logging.enabled`, then `runGlobalUp`. |
+| `Set` | `hack config set|unset --global logging.enabled` (no Docker effect). |
+| `MoveFiles` / `MoveDir` | The compose file, or the whole directory after a first start, moved aside by hand. |
+| `Down` / `Reset` | `hack global down` (`compose down`, volumes kept) and `hack global logs-reset` (`down -v`). |
+
+Invariants:
+- `FreshNeverStartsUnasked`: a new home runs the stack only after someone turned it on.
+- `ExistingHomeKept`: after a start, a home that had the stack still has it unless someone turned it off or cleared the setting, even with its files moved aside.
+- `OffMeansStopped` and `NoOrphanedStack`: after any start, a running stack is one the setting says is on.
+- These three hold unless Hack warned that this home's choice was not saved (`unsaved`): then the run followed a choice the setting does not hold yet.
+- `NoSurpriseDataLoss`: logs disappear only in a `logs-reset` step. `prevData` is `data` before the step, so this step property is an invariant.
+
+Bounds: one home that is either from before opt-in (directory, compose file, logs, running or not) or new; every command, setting change and move, in any order. Every save may fail. The positive configuration exhausts 1,014 distinct states at depth 7.
+
+Controls:
+- `negative` (install writes the logging files whatever the setting) fails `FreshNeverStartsUnasked` at a new home's first `Install`.
+- `legacy-unset-off` (unset means off) fails `ExistingHomeKept` at `Install` or `Up`.
+- `off-removes-volumes` (off is `down -v`) fails `NoSurpriseDataLoss` at `UpFlag`.
+- `decision-not-saved` (the first start does not save `on`) fails `ExistingHomeKept` once the logging directory is moved aside.
+- `unsaved-silent` (a failed save is not reported) fails `OffMeansStopped` at `UpFlag`: `--logging` ran the stack while the setting stayed off, and nothing said so.
+
+Writing the model found two code gaps, fixed with it: stopping only when the compose file existed, and keying the decision on that file rather than on the directory.
+
+Tied to the code: `tests/global-command.test.ts` ("the opt-in logging stack") walks the same paths with a stub Docker, and `tests/global-logging.test.ts` the resolution and save rules.
+
+Not covered:
+- readiness (healthchecks, their bounds and the end-to-end route probe are in `tests/global-stack-state.test.ts` and `tests/global-readiness.test.ts`);
+- the login path, which only reads the setting and starts routing;
+- a home whose whole logging directory is removed before its first manual start, which then counts as new.

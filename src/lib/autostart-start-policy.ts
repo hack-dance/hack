@@ -155,7 +155,7 @@ function present(value: unknown): boolean {
 }
 
 function hasHostCommands(raw: Record<string, unknown>): boolean {
-  if (present(raw.startup)) {
+  if (present(raw.startup) || present(raw.requires)) {
     return true;
   }
   if (!isRecord(raw.lifecycle)) {

@@ -5,7 +5,8 @@ new CLI, then run the diagnostic and explicit env migration for each checkout:
 
 ```sh
 hack doctor
-hack doctor --migrate-env-config
+hack env migrate --json
+hack env migrate --apply
 ```
 
 Migration refuses to change tracked env files without explicit consent. Review

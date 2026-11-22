@@ -1,5 +1,7 @@
+import { dirname } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
+import { resolveComposeDownCapMs } from "../lib/compose-down-budget.ts";
 import {
   effectiveComposeProfiles,
   readComposeInterpolationEnv,
@@ -11,7 +13,6 @@ import {
 import { parseComposePsJson } from "../lib/compose-ps-result.ts";
 import {
   type ComposeStartupPhase,
-  DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
   resolveComposeImageTimeoutMs,
   resolveComposeStartupCeilingMs,
   resolveComposeStartupTimeoutMs,
@@ -101,7 +102,25 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
   readonly forceRecreate?: boolean;
 }
 
-export interface RuntimeDownOptions extends RuntimeBaseOptions {}
+export interface RuntimeDownOptions extends RuntimeBaseOptions {
+  /**
+   * Optional per-container stop grace period in seconds (0..600) passed to
+   * `docker compose down --timeout`. When omitted, `--timeout` is not passed.
+   */
+  readonly timeoutSeconds?: number;
+  /**
+   * Optional precomputed overall subprocess cap (ms) for `docker compose down`.
+   */
+  readonly capMs?: number;
+  /**
+   * Optional callback invoked once `docker compose down` exits with its exit
+   * code and whether the subprocess timeout timer actually fired.
+   */
+  readonly onOutcome?: (outcome: {
+    readonly exitCode: number;
+    readonly timedOut: boolean;
+  }) => void;
+}
 
 export interface RuntimePsOptions extends RuntimeBaseOptions {
   readonly all?: boolean;
@@ -126,15 +145,37 @@ function shouldDisableExecTty(): boolean {
   return !(process.stdin.isTTY === true && process.stdout.isTTY === true);
 }
 
+/**
+ * `docker compose` with the project, files and profiles. `--project-directory`
+ * names the first file's folder, which Compose would choose anyway; it is
+ * explicit because Hack's generated overrides live outside the project (in
+ * Hack's home) and must never become the base for relative paths.
+ */
 export function buildComposeArgs(opts: RuntimeBaseOptions): string[] {
+  const first = opts.composeFiles[0];
   return [
     "docker",
     "compose",
     ...(opts.composeProject ? ["-p", opts.composeProject] : []),
+    ...(first ? ["--project-directory", dirname(first)] : []),
     ...opts.composeFiles.flatMap((file) => ["-f", file] as const),
     ...(opts.profiles
       ? opts.profiles.flatMap((profile) => ["--profile", profile] as const)
       : []),
+  ];
+}
+
+/**
+ * `docker compose down` argv. Passes `--timeout <seconds>` only when explicitly
+ * configured so unset keeps Docker Compose's default behaviour unchanged.
+ */
+export function buildComposeDownCommand(opts: RuntimeDownOptions): string[] {
+  return [
+    ...buildComposeArgs(opts),
+    "down",
+    ...(opts.timeoutSeconds === undefined
+      ? []
+      : ["--timeout", String(opts.timeoutSeconds)]),
   ];
 }
 
@@ -380,6 +421,31 @@ async function pollComposePs(input: {
   }
 }
 
+/**
+ * Waits `ms` or until `finished` settles, whichever comes first. The timer is
+ * cleared either way, so a start that ends mid-wait leaves nothing that
+ * holds the process open (a losing `Bun.sleep` kept it alive for up to 1 s).
+ */
+export async function waitOrFinish(
+  ms: number,
+  finished: Promise<unknown>
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      finished.then(
+        () => undefined,
+        () => undefined
+      ),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Poll one-shot progress until the start ends or the watchdog decides to stop. */
 async function watchStartProgress(input: {
   readonly options: RuntimeUpOptions;
@@ -396,7 +462,7 @@ async function watchStartProgress(input: {
   let lastProgressAt = startedAt;
   let lastSeen: readonly string[] = [];
   for (;;) {
-    await Promise.race([input.finished, Bun.sleep(START_WATCH_POLL_MS)]);
+    await waitOrFinish(START_WATCH_POLL_MS, input.finished);
     if (input.isDone()) {
       return { stopped: false, lastSeen };
     }
@@ -625,12 +691,24 @@ export const composeRuntimeBackend: RuntimeBackend = {
     }
   },
   async down(opts) {
-    const cmd = [...buildComposeArgs(opts), "down"];
+    const cmd = buildComposeDownCommand(opts);
+    const timeoutMs =
+      opts.capMs ??
+      resolveComposeDownCapMs({ timeoutSeconds: opts.timeoutSeconds });
     return await run(cmd, {
       cwd: opts.cwd,
       env: opts.env,
       stdout: childStdoutTarget(opts.routeStdoutToStderr),
-      timeoutMs: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+      timeoutMs,
+      onExit: opts.onOutcome
+        ? (event) => {
+            opts.onOutcome?.({
+              exitCode: event.exitCode,
+              timedOut: event.timedOut,
+            });
+            return Promise.resolve();
+          }
+        : undefined,
     });
   },
   async psJson(opts) {

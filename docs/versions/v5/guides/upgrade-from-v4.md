@@ -3,7 +3,7 @@
 This is a working upgrade checklist with a limited real-project trial record. It was
 audited against `next` at `26a142921c` and the v4.3.0 reference on `main` at
 `b36275575c`, with the merged Linux daemon service update at `5e017fddd3`.
-The site is pinned to **next.22**. The trials recorded below ran on next.16. The first reported trials used three existing
+The site is pinned to **next.24**. The trials recorded below ran on next.16. The first reported trials used three existing
 Compose projects on macOS, previously running v4.3.0. Start, restart, stop and
 lifecycle hooks worked without changes to their `.hack/` configuration, after
 one project's own cloud credentials were refreshed and with the reruns noted
@@ -54,12 +54,11 @@ a key already removed by an older cleanup.
 
 Try v5 on a project whose application data you can restore and whose important
 workflows you can exercise. Wait if you need a stable-only release, depend on a
-retired integration, or cannot qualify recovery. Compose remains the ordinary
-CLI's default backend. Native is an opt-in beta for Apple Silicon macOS through
-`hack-next`, with a bounded command and configuration surface.
+retired integration, or cannot qualify recovery. Stable `hack` uses Compose.
 
-There is an important launcher exception: **`hack-next` defaults to native**.
-Use `HACK_RUNTIME_BACKEND=compose` explicitly for the first Compose trial. Keep
+Native is the planned default for stable v5. Today `hack-next` defaults to
+native on Apple Silicon macOS and uses Compose on supported Linux. On macOS,
+set `HACK_RUNTIME_BACKEND=compose` for the first Compose trial. Keep
 stable `hack` installed. See [Install](../install.md) and
 [native limits](../native/limits.md).
 
@@ -396,7 +395,8 @@ Sources: [global path resolution](https://github.com/hack-dance/hack/blob/26a142
 ## 3. Choose the version and installation path
 
 `V5` below means the absolute path to the reviewed v5 executable. On Apple
-Silicon this can be `$HOME/.hack-next/bin/hack-next`; a current-source Linux
+Silicon, and on Linux x86_64 or arm64 with the published Compose-only
+prerelease, this can be `$HOME/.hack-next/bin/hack-next`; a current-source Linux
 trial needs a separately prepared executable. Do not replace stable `hack` just
 to try the prerelease.
 
@@ -406,7 +406,7 @@ to try the prerelease.
 | Older 4.x, including 4.2.1 | Use the same backup and isolated-candidate sequence; inspect legacy env before any env-consuming command. Do not assume every project needs the same migration. | Direct 4.2.1 upgrade, or any need for an intermediate version: **to be confirmed in the dogfood run**. |
 | Homebrew install | Keep the installed v4 formula during the trial. `brew upgrade hack-dance/tap/hack` is the stable-release path, not the native-candidate installer. | Stable v5 formula availability and replacement/rollback: **to be confirmed in the dogfood run**. |
 | Script install | Use the separate reviewed candidate bootstrap on supported Macs. For stable software, the release downloader accepts `HACK_INSTALL_TAG` or `HACK_INSTALL_VERSION`. | Replacing an installed v4 with a stable v5 archive: **to be confirmed in the dogfood run**. |
-| Linux 4.x or a fresh Linux host | No prerelease publishes a Linux bundle. Keep stable Compose, or agree on a separately built current-source CLI before testing newer Linux setup. | Published v5 Linux install and full host migration: **to be confirmed in the dogfood run**. |
+| Linux 4.x or a fresh Linux host | `5.0.0-next.24` publishes Compose-only Linux x86_64 and arm64 archives; install the prerelease as described in [Install](../install.md). The trials recorded on this page did not use them. Keep stable v4 installed during the trial. | Published v5 Linux install and full host migration: **to be confirmed in the dogfood run**. |
 | Intel macOS or a fresh host | Native is unavailable. A fresh stable installation uses the normal Homebrew/release installer and Compose; use the candidate only on its supported host. | First stable v5 install and project initialization: **to be confirmed in the dogfood run**. |
 
 After backups and stable-daemon quiescence, read the migration section below
@@ -435,8 +435,8 @@ after restart. Record what failed, not just a green health endpoint.
 For a **current-source** Linux CLI, DNS and CA trust setup are implemented. Follow
 the [Linux DNS setup source](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/linux-setup.md)
 and [Linux trust guide](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/linux-certificate-trust.md).
-These sources are included in next.16; its published candidate bundle is still
-Apple Silicon only. DNS host integration is bounded to a rootful Linux Docker
+These sources are included in next.16, whose published bundle was Apple Silicon
+only; Linux archives are published since `5.0.0-next.23`. DNS host integration is bounded to a rootful Linux Docker
 bridge/systemd-resolved setup; trust has separate host and browser handling.
 Review the printed privileged steps and confirm them yourself.
 
@@ -778,7 +778,8 @@ Software upgrades do not opt you into agent integrations. `hack setup` is
 explicit. Existing agent files need their own review; do not regenerate or delete
 them as part of an upgrade. `hack setup migrate` defaults to a read-only preview;
 its explicit apply backs up selected legacy files and has a manifest-based
-rollback. Client loading on the upgraded machine is **to be confirmed in the
+rollback. The text summary aligns counts by scope and prints the undo command
+after apply. Client loading on the upgraded machine is **to be confirmed in the
 dogfood run**.
 
 Sources: [explicit setup](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/setup.ts),
@@ -892,7 +893,7 @@ and follow its runtime-stop/quiescence procedure. Select Compose explicitly:
 HACK_RUNTIME_BACKEND=compose "$V5" up --path /absolute/project
 ```
 
-Do not just unset the selector on `hack-next`: that returns to its native default.
+On Apple Silicon macOS, unsetting the selector on `hack-next` returns to native.
 Native and Compose data are not automatically transferred. Native setup, retained
 data and the switch-back on the real machine are **to be confirmed in the dogfood run**.
 

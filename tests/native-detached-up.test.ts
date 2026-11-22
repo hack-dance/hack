@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { afterAll, expect, test } from "bun:test";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderNativeHotReloadNotice } from "../src/backends/native-hot-reload-notice.ts";
@@ -13,6 +13,58 @@ import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../src/lib/native-environment
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const fixture = join(import.meta.dir, "fixtures", "native-detached-owner.ts");
+
+const fixtureProcesses = new Map<number, string>();
+const fixtureRoots = new Set<string>();
+async function fixtureRoot(prefix: string): Promise<string> {
+  const root = await realpath(await mkdtemp(prefix));
+  fixtureRoots.add(root);
+  return root;
+}
+
+async function recordFixturePids(root: string): Promise<void> {
+  for (const role of ["launcher", "owner", "channel-holder"]) {
+    const marker = Bun.file(join(root, `${role}.fixture-pid`));
+    if (await marker.exists()) {
+      const pid = Number(await marker.text());
+      fixtureProcesses.set(pid, root);
+    }
+  }
+}
+
+async function removeFixture(root: string): Promise<void> {
+  await recordFixturePids(root);
+  await rm(root, { recursive: true, force: true });
+  fixtureRoots.delete(root);
+}
+function liveFixturePids(): number[] {
+  const snapshot = Bun.spawnSync(["/bin/ps", "-wwaxo", "pid=,stat=,args="], {
+    timeout: 1000,
+  });
+  expect(snapshot.exitCode).toBe(0);
+  return snapshot.stdout
+    .toString()
+    .split("\n")
+    .flatMap((line) => {
+      const fields = line.trim().split(/\s+/, 3);
+      const pid = Number(fields[0]);
+      const root = fixtureProcesses.get(pid);
+      return root && !fields[1]?.startsWith("Z") && line.includes(` ${root} `)
+        ? [pid]
+        : [];
+    });
+}
+
+afterAll(async () => {
+  await Promise.all([...fixtureRoots].map(recordFixturePids));
+  const deadline = performance.now() + 2000;
+  let alive = liveFixturePids();
+  while (alive.length > 0 && performance.now() < deadline) {
+    await Bun.sleep(25);
+    alive = liveFixturePids();
+  }
+  expect(alive, "Fixture processes still alive").toEqual([]);
+}, 5000);
 
 function fixtureEnv(root: string) {
   return privateCliEnv({
@@ -42,6 +94,7 @@ async function waitForFile(path: string): Promise<string> {
 async function stop(root: string): Promise<void> {
   await fetch("http://localhost/stop", {
     unix: join(root, "control.sock"),
+    signal: AbortSignal.timeout(1000),
   }).catch(() => undefined);
 }
 
@@ -58,6 +111,7 @@ for (const mode of [
   "unsafe-failure",
   "unsafe-prestart-refusal",
   "fail",
+  "builder-missing",
   "provider-pin",
   "wrapped-provider-pin",
   "timeout",
@@ -68,7 +122,7 @@ for (const mode of [
   "launcher-terminate",
 ] as const) {
   test(`native detached owner: ${mode}`, async () => {
-    const root = await mkdtemp(join(tmpdir(), "native-detached-"));
+    const root = await fixtureRoot(join(tmpdir(), "native-detached-"));
     const launcher = Bun.spawn(
       [process.execPath, fixture, "launcher", root, mode],
       {
@@ -153,6 +207,25 @@ for (const mode of [
           ok: false,
           error: { code: "E_CANCELLED" },
         });
+      } else if (mode === "builder-missing") {
+        // A detached owner reports the code only; the launcher must still tell the
+        // user what is wrong and the one command that fixes it.
+        expect(code).toBe(1);
+        const result = JSON.parse(stdout);
+        expect(result).toMatchObject({
+          ok: false,
+          error: { code: "E_STARTUP_INCOMPLETE" },
+        });
+        expect(result.error.message).toContain("(builder_not_prepared)");
+        expect(result.error.message).toContain(
+          "the image builder is not installed in this native home"
+        );
+        expect(result.error.message).toContain(
+          "native setup --accept-downloads"
+        );
+        expect(result.error.message).toContain("--builder");
+        expect(result.error.message).not.toContain("os error");
+        expect(stdout).not.toContain("synthetic-private-value");
       } else if (["provider-pin", "wrapped-provider-pin"].includes(mode)) {
         expect(code).toBe(1);
         const result = JSON.parse(stdout);
@@ -167,7 +240,14 @@ for (const mode of [
         expect(code).not.toBe(0);
         expect(stdout).toBe("");
       }
-      if (!["fail", "provider-pin", "wrapped-provider-pin"].includes(mode)) {
+      if (
+        ![
+          "fail",
+          "builder-missing",
+          "provider-pin",
+          "wrapped-provider-pin",
+        ].includes(mode)
+      ) {
         expect(await waitForFile(join(root, "stopped"))).toBe(
           "down.before\nprocess.stop\ndown.after\n"
         );
@@ -195,14 +275,14 @@ for (const mode of [
         launcher.kill("SIGTERM");
         await launcher.exited;
       }
-      await rm(root, { recursive: true, force: true });
+      await removeFixture(root);
     }
   }, 15_000);
 }
 
 for (const phase of ["static-preflight", "after-start"] as const) {
   test(`detached ${phase} failure keeps validated runtime detail through cleanup wrappers, never their text`, async () => {
-    const root = await mkdtemp(join(tmpdir(), "native-detached-failure-"));
+    const root = await fixtureRoot(join(tmpdir(), "native-detached-failure-"));
     const launcher = Bun.spawn(
       [
         process.execPath,
@@ -252,7 +332,7 @@ for (const phase of ["static-preflight", "after-start"] as const) {
         launcher.kill("SIGTERM");
         await launcher.exited;
       }
-      await rm(root, { recursive: true, force: true });
+      await removeFixture(root);
     }
   });
 }
@@ -281,7 +361,7 @@ test("the detached owner gets only the command and its selection options", () =>
 });
 
 test("detached failure names the services that failed during startup and how to see their output, never the output", async () => {
-  const root = await mkdtemp(
+  const root = await fixtureRoot(
     join(tmpdir(), "native-detached-failed-services-")
   );
   const launcher = Bun.spawn(
@@ -317,7 +397,7 @@ test("detached failure names the services that failed during startup and how to 
       launcher.kill("SIGTERM");
       await launcher.exited;
     }
-    await rm(root, { recursive: true, force: true });
+    await removeFixture(root);
   }
 });
 
@@ -327,7 +407,7 @@ test("detached immediate exit drains its fixed failure before reporting an uncon
     ...new Array<string>(8).fill("immediate-failure"),
   ];
   for (const mode of modes) {
-    const root = await mkdtemp(join(tmpdir(), "native-detached-exit-"));
+    const root = await fixtureRoot(join(tmpdir(), "native-detached-exit-"));
     const launcher = Bun.spawn(
       [process.execPath, fixture, "launcher", root, mode],
       {
@@ -358,13 +438,13 @@ test("detached immediate exit drains its fixed failure before reporting an uncon
         launcher.kill("SIGTERM");
         await launcher.exited;
       }
-      await rm(root, { recursive: true, force: true });
+      await removeFixture(root);
     }
   }
 }, 30_000);
 
 test("detached owner exit has a short grace even when its descendant holds the IPC descriptor", async () => {
-  const root = await mkdtemp(join(tmpdir(), "native-detached-channel-"));
+  const root = await fixtureRoot(join(tmpdir(), "native-detached-channel-"));
   const started = performance.now();
   const launcher = Bun.spawn(
     [process.execPath, fixture, "launcher", root, "held-channel"],
@@ -399,7 +479,7 @@ test("detached owner exit has a short grace even when its descendant holds the I
     if (await Bun.file(join(root, "holder-ready")).exists()) {
       await waitForFile(join(root, "holder-stopped"));
     }
-    await rm(root, { recursive: true, force: true });
+    await removeFixture(root);
   }
 }, 12_000);
 
@@ -409,7 +489,7 @@ test("HACK-2339: a refusal before VM work reaches the launcher as the foreground
     "prestart-after-runtime",
     "prestart-plain-error",
   ]) {
-    const root = await mkdtemp(join(tmpdir(), "native-detached-prestart-"));
+    const root = await fixtureRoot(join(tmpdir(), "native-detached-prestart-"));
     const launcher = Bun.spawn(
       [process.execPath, fixture, "launcher", root, mode],
       {
@@ -449,17 +529,31 @@ test("HACK-2339: a refusal before VM work reaches the launcher as the foreground
         launcher.kill("SIGTERM");
         await launcher.exited;
       }
-      await rm(root, { recursive: true, force: true });
+      await removeFixture(root);
     }
   }
 }, 30_000);
+
+test("a detached fixture owner exits when its root disappears", async () => {
+  const root = await fixtureRoot(join(tmpdir(), "native-detached-root-"));
+  const launcher = Bun.spawn(
+    [process.execPath, fixture, "launcher", root, "ready"],
+    { env: fixtureEnv(root), stdout: "ignore", stderr: "ignore", timeout: 8000 }
+  );
+  try {
+    expect(await launcher.exited).toBe(0);
+    expect(await Bun.file(join(root, "owner.fixture-pid")).exists()).toBe(true);
+  } finally {
+    await removeFixture(root);
+  }
+}, 15_000);
 
 /** The fixture's `prestart-long` refusal (the fixture runs on import, so it is not imported). */
 const PRESTART_LONG_MESSAGE = `Selected source is too large. ${"assets/deeply/nested/".repeat(2100)}`;
 
 /** Run one HACK-2339 fixture mode through a real launcher and owner. */
 async function prestartRun(mode: string, terminal = false) {
-  const root = await mkdtemp(join(tmpdir(), "native-detached-prestart-"));
+  const root = await fixtureRoot(join(tmpdir(), "native-detached-prestart-"));
   const launcher = Bun.spawn(
     [process.execPath, fixture, "launcher", root, mode],
     {
@@ -484,7 +578,14 @@ async function prestartRun(mode: string, terminal = false) {
       launcher.kill("SIGTERM");
       await launcher.exited;
     }
-    await rm(root, { recursive: true, force: true });
+    try {
+      await stop(root);
+      if (launcher.exitCode === 0) {
+        await waitForFile(join(root, "stopped"));
+      }
+    } finally {
+      await removeFixture(root);
+    }
   }
 }
 
@@ -557,9 +658,9 @@ test("HACK-2351: image work longer than the budget, with heartbeats, still compl
   });
 }, 30_000);
 
-for (const mode of ["slow-runtime", "images-ceiling"]) {
+for (const mode of ["slow-runtime", "images-ceiling", "images-wait-ceiling"]) {
   test(`HACK-2351: ${mode} times out naming its phase, and its owner has stopped when the launcher returns`, async () => {
-    const root = await mkdtemp(join(tmpdir(), "native-detached-deadline-"));
+    const root = await fixtureRoot(join(tmpdir(), "native-detached-deadline-"));
     const launcher = Bun.spawn(
       [process.execPath, fixture, "launcher", root, mode],
       {
@@ -576,13 +677,21 @@ for (const mode of ["slow-runtime", "images-ceiling"]) {
       ]);
       expect(code).toBe(1);
       const error = JSON.parse(stdout).error;
-      expect(error.code).toBe("E_STARTUP_TIMEOUT");
-      expect(error.message).toContain(
-        mode === "slow-runtime"
-          ? "it was starting the native runtime when its 1 s budget"
-          : "it was building and loading service images when its 2 s ceiling"
-      );
-      expect(error.message).toContain("Run hack down for this instance next");
+      if (mode === "images-wait-ceiling") {
+        expect(error.message.split("\n")).toEqual([
+          "Image unavailable: another start is downloading docker.io/fixture/image:stable.",
+          "Already present: could not verify.",
+          "Run hack up again after the download finishes.",
+        ]);
+      } else {
+        expect(error.code).toBe("E_STARTUP_TIMEOUT");
+        expect(error.message).toContain(
+          mode === "slow-runtime"
+            ? "it was starting the native runtime when its 1 s budget"
+            : "it was building and loading service images when its 2 s ceiling"
+        );
+        expect(error.message).toContain("Run hack down for this instance next");
+      }
       // The launcher waited for the owner to stop before it returned.
       expect(await readFile(join(root, "stopped"), "utf8")).toBe(
         "down.before\nprocess.stop\ndown.after\n"
@@ -593,7 +702,7 @@ for (const mode of ["slow-runtime", "images-ceiling"]) {
         launcher.kill("SIGTERM");
         await launcher.exited;
       }
-      await rm(root, { recursive: true, force: true });
+      await removeFixture(root);
     }
   }, 30_000);
 }

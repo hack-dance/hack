@@ -122,6 +122,8 @@ flowchart LR
      app:
        # Stand-in for your service: a Postgres client that stays running.
        image: postgres:17.6-alpine
+       init: true
+       stop_grace_period: 2s
        command: ["sleep", "infinity"]
        # Lets the container reach the proxy that runs on the host.
        extra_hosts:

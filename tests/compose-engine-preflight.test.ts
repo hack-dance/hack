@@ -69,6 +69,10 @@ describe("preflightComposeEngine", () => {
     expect(error?.code).toBe("E_DOCKER_UNAVAILABLE");
     expect(error?.message).toContain("no `docker` command");
     expect(error?.message).toContain("Docker Compose v2");
+    expect(error?.startBlocker).toEqual({
+      thing: "docker",
+      problem: "cli missing · install docker engine with compose v2",
+    });
     expect(calls).toEqual([]);
   });
 
@@ -150,6 +154,12 @@ describe("preflightComposeEngine", () => {
     const error = await preflightComposeEngine({ deps });
     expect(error?.code).toBe("E_DOCKER_UNAVAILABLE");
     expect(error?.message).toContain("not reachable");
+    expect(error?.startBlocker).toMatchObject({
+      thing: "docker engine",
+      problem:
+        "unreachable · start docker or point your context at a running engine",
+      which: expect.stringContaining("Cannot connect to the Docker daemon"),
+    });
     expect(error?.message).toContain(
       "Engine said: Cannot connect to the Docker daemon at unix:///tmp/none.sock."
     );
@@ -182,6 +192,11 @@ describe("preflightComposeEngine", () => {
     const error = await preflightComposeEngine({ deps });
     expect(error?.code).toBe("E_DOCKER_UNAVAILABLE");
     expect(error?.message).toContain("Docker Compose v2 plugin");
+    expect(error?.startBlocker).toEqual({
+      thing: "docker compose",
+      problem:
+        "v2 plugin missing · install docker-compose-v2 or docker-compose-plugin on debian or ubuntu",
+    });
   });
 
   test("a working engine and plugin pass", async () => {

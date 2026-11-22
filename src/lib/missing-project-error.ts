@@ -19,3 +19,13 @@ export class MissingProjectContextError extends HackCliError {
     this.name = "MissingProjectContextError";
   }
 }
+
+/** The registry has no entry for the selected project. */
+export class UnregisteredProjectError extends HackCliError {
+  constructor() {
+    super({
+      code: "E_PROJECT_NOT_FOUND",
+      message: "The selected project is not registered.",
+    });
+  }
+}

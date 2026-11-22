@@ -1,7 +1,110 @@
 //! Released provider command transport. Lifecycle policy stays with the caller.
+use super::{FreshCreate, MachineSpec, StartPermit, VmBackend};
 use crate::provider::{artifact, process, state::Owner};
 use crate::{Candidate, CandidateError};
 use std::{path::Path, time::Duration};
+
+/// Released CLI bound to the lifecycle owner's existing machine and launch environment.
+/// The receipt is an implementation detail, never part of the backend trait.
+pub(in crate::provider::lifecycle) struct SmolvmCli<'a> {
+    candidate: &'a Candidate,
+    owner: &'a Owner,
+}
+
+impl<'a> SmolvmCli<'a> {
+    pub(in crate::provider::lifecycle) fn new(candidate: &'a Candidate, owner: &'a Owner) -> Self {
+        Self { candidate, owner }
+    }
+
+    fn invoke(&self, arguments: &[&str]) -> Result<(), CandidateError> {
+        invoke(self.candidate, self.owner, arguments).map(drop)
+    }
+}
+
+impl VmBackend for SmolvmCli<'_> {
+    fn create(&self, spec: &MachineSpec, _fresh: FreshCreate) -> Result<(), CandidateError> {
+        let arguments = create_arguments(&self.owner.machine, &self.owner.token, spec)?;
+        self.invoke(&arguments.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    fn start(&self, _permit: StartPermit) -> Result<(), CandidateError> {
+        self.invoke(&["machine", "start", "--name", &self.owner.machine])
+    }
+
+    fn stop(&self) -> Result<(), CandidateError> {
+        self.invoke(&["machine", "stop", "--name", &self.owner.machine])
+    }
+
+    fn delete_forced(&self) -> Result<(), CandidateError> {
+        self.invoke(&[
+            "machine",
+            "delete",
+            "--name",
+            &self.owner.machine,
+            "--force",
+        ])
+    }
+
+    fn enable_translation(&self) -> Result<(), CandidateError> {
+        self.invoke(&[
+            "machine",
+            "update",
+            "--name",
+            &self.owner.machine,
+            "--rosetta",
+        ])
+    }
+}
+
+// BEGIN provider create arguments
+fn create_arguments(
+    machine: &str,
+    token: &str,
+    spec: &MachineSpec,
+) -> Result<Vec<String>, CandidateError> {
+    let mut arguments = vec![
+        "machine".to_owned(),
+        "create".into(),
+        "--name".into(),
+        machine.into(),
+        "--label".into(),
+        format!("hack-local.owner={token}"),
+        "--cpus".into(),
+        spec.cpus.to_string(),
+        "--mem".into(),
+        spec.memory_mib.to_string(),
+        "--storage".into(),
+        spec.storage_gib.to_string(),
+        "--overlay".into(),
+        spec.overlay_gib.to_string(),
+    ];
+    if let Some(engine) = &spec.engine_share {
+        arguments.extend([
+            "--docker-socket".into(),
+            "--volume".into(),
+            format!("{}:/opt/hack-engine:ro", engine.display()),
+        ]);
+    }
+    if spec.amd64_translation {
+        arguments.push("--rosetta".into());
+    }
+    for share in &spec.project_shares {
+        share.validate()?;
+        arguments.extend(["--volume".into(), share.argument()]);
+    }
+    arguments.extend(spec.network.arguments());
+    for path in &spec.exposed_sockets {
+        arguments.extend(["--expose-socket".into(), path.clone()]);
+    }
+    for (host, guest) in &spec.mounted_sockets {
+        arguments.extend([
+            "--mount-socket".into(),
+            format!("{}:{guest}", host.display()),
+        ]);
+    }
+    Ok(arguments)
+}
+// END provider create arguments
 
 pub(in crate::provider::lifecycle) fn root(candidate: &Candidate) -> std::path::PathBuf {
     candidate.state_root.join("run/smolvm")
@@ -51,11 +154,7 @@ fn command(candidate: &Candidate, owner: &Owner) -> std::process::Command {
     command
 }
 // END provider command environment
-pub(in crate::provider::lifecycle) fn invoke(
-    candidate: &Candidate,
-    owner: &Owner,
-    args: &[&str],
-) -> Result<String, CandidateError> {
+fn invoke(candidate: &Candidate, owner: &Owner, args: &[&str]) -> Result<String, CandidateError> {
     let output = process::capture(
         command(candidate, owner).args(args),
         Duration::from_secs(60),
@@ -97,13 +196,14 @@ pub(in crate::provider::lifecycle) fn spawn_exec(
     arguments: &[&str],
 ) -> std::io::Result<std::process::Child> {
     use std::process::Stdio;
-    command(candidate, owner)
-        .args(["machine", "exec", "--name", &owner.machine, "--"])
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    process::spawn_child(
+        command(candidate, owner)
+            .args(["machine", "exec", "--name", &owner.machine, "--"])
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
 }
 
 #[cfg(test)]

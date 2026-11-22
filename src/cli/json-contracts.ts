@@ -1,6 +1,7 @@
 /** Canonical --json inventory. New command paths require an explicit shape decision. */
 export const JSON_COMMAND_SHAPES = {
   "global install": "schema-envelope",
+  "global up": "schema-envelope",
   "global dns preview": "envelope",
   "global status": "legacy-object",
   "global trust": "schema-envelope",
@@ -13,6 +14,7 @@ export const JSON_COMMAND_SHAPES = {
   "project task list": "envelope",
   "project task inspect": "envelope",
   up: "envelope",
+  pull: "envelope",
   down: "backend-dependent",
   restart: "envelope",
   ps: "backend-dependent",
@@ -59,6 +61,7 @@ export const JSON_COMMAND_SHAPES = {
   "setup migrate": "envelope",
   "native setup": "runtime-passthrough",
   "native recover": "runtime-passthrough",
+  "native temp-aliases": "legacy-object",
   "session panes": "ndjson",
   "session capture": "ndjson",
   "session tail": "ndjson",
@@ -118,6 +121,7 @@ export const SCHEMA_JSON_VARIANTS = [
     flags: ["--observe"],
     schema: "hack.global-status.observe.v1",
   },
+  { command: "global up", flags: [], schema: "hack.global-up.v1" },
   {
     command: "global install",
     flags: ["--plan"],

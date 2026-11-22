@@ -877,7 +877,7 @@ impl<B: Backend> Driver for Session<'_, B> {
                 self.receipt.failed(service, observation);
                 self.save()
             }
-            Event::Observed { .. } => Ok(()),
+            Event::Observed { .. } | Event::ServiceReady { .. } => Ok(()),
             Event::Ready => {
                 self.check_cancelled()?;
                 self.receipt.phase = Phase::ReadyObserved;
@@ -932,8 +932,10 @@ impl<B: Backend> Driver for Session<'_, B> {
         self.check_cancelled()?;
         self.backend.verify_private(service)?;
         project_networks(&self.backend, &self.receipt, None)?;
-        self.backend
-            .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+        crate::timings::measure(crate::timings::Step::ContainerStart, None, |_| {
+            self.backend
+                .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)
+        })?;
         self.check_cancelled()?;
         Ok(())
     }
@@ -1411,6 +1413,13 @@ fn service_observations(
 /// by locked inspection and mutation, never inferred from service health here.
 #[cfg(target_os = "macos")]
 pub(super) fn status(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
+    crate::timings::measure(crate::timings::Step::ProjectStatus, None, |_| {
+        status_observed(candidate, run)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn status_observed(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
     use crate::provider::engine::inspection::Inspection;
     struct StatusBackend<'a>(crate::provider::engine::Observer<'a>);
     impl ReadBackend for StatusBackend<'_> {

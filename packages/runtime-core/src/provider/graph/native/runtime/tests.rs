@@ -686,6 +686,7 @@ struct FakeState {
     stop_batches: usize,
     observed_phases: Vec<Phase>,
     fail_create: bool,
+    image_evicted: bool,
     fail_start: bool,
     fail_delete: bool,
     fail_stop: bool,
@@ -883,6 +884,10 @@ impl Backend for Fake {
                 return Err(error("fake_create_uncertain", "once"));
             }
             let config = body.unwrap();
+            if state.image_evicted {
+                assert_eq!(config["Image"], image());
+                return Err(error("engine_not_found", "The selected image is absent."));
+            }
             assert!(!config.to_string().contains("private-native-canary"));
             let id = format!("{:064x}", state.containers.len() + 1);
             let mut process = config.clone();
@@ -1347,6 +1352,23 @@ fn create_and_start_uncertainty_are_retained_once_without_replay_or_adoption() {
         assert!(execution::run(&graph, &mut session, RUN_BUDGET).is_err());
         assert_eq!(session.backend.state.borrow().effects.len(), count);
     }
+}
+
+#[test]
+fn an_evicted_image_refuses_create_with_no_tag_fallback() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    session.backend.state.borrow_mut().image_evicted = true;
+
+    let failure = execution::run(&graph, &mut session, RUN_BUDGET)
+        .err()
+        .unwrap();
+    assert_eq!(failure.code, "engine_not_found");
+    assert_eq!(failure.message, "The selected image is absent.");
+    let state = session.backend.state.borrow();
+    assert_eq!(state.effects, ["create:network", "create:web"]);
+    assert!(state.containers.is_empty());
 }
 
 #[test]

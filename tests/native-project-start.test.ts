@@ -5098,28 +5098,39 @@ test("an invalid image reference is refused before hooks, VM, provider or image 
   expect(served).toBe(false);
 });
 
-test("Docker Hub shorthand is admitted once per distinct reference before the runtime starts", async () => {
+test("startup admits each reference once and reuses validated pins for shared service images", async () => {
   const { opts, events } = await fixture(false);
   const id = `sha256:${"e".repeat(64)}`;
+  const cacheId = `sha256:${"f".repeat(64)}`;
+  const canonical = "docker.io/library/alpine:3.21";
   withImages(opts, {
     web: "alpine:3.21",
-    worker: "alpine:3.21",
+    worker: canonical,
     cache: "redis",
     pinned: id,
   });
-  opts.dependencies.review = async (request) =>
-    request.run({
+  opts.dependencies.review = async (request) => {
+    const { services } = JSON.parse(request.input.normalizedComposeJson);
+    expect(services.web.image).toBe(id);
+    expect(services.worker.image).toBe(id);
+    expect(services.cache.image).toBe(cacheId);
+    expect(services.pinned.image).toBe(id);
+    return await request.run({
       planId: "a".repeat(64),
       namespace: "b".repeat(64),
       projectArgs: ["--project", request.projectRoot],
       report: { plan: { enrollment_compatible: true, services: {} } },
     });
+  };
   const invoke = opts.dependencies.invoke!;
   const order: string[] = [];
   opts.dependencies.invoke = async (request) => {
     if (request.args[1] === "admit-image") {
       order.push(`admit ${request.args[3]}`);
       expect(request.timeoutMs).toBeLessThanOrEqual(10_000);
+      if (request.args[3] === "alpine:3.21") {
+        return { reference: canonical, kind: "docker_hub" };
+      }
     }
     if (request.args[0] === "runtime" && request.args[1] === "up") {
       order.push("runtime up");
@@ -5135,16 +5146,16 @@ test("Docker Hub shorthand is admitted once per distinct reference before the ru
         String(request.args[3]),
         "--json",
       ]);
-      return { image_id: id };
+      return { image_id: request.args[3] === "alpine:3.21" ? id : cacheId };
     }
     return await invoke(request);
   };
   expect(await startNativeProject(opts)).toBe(0);
   expect(order).toEqual([
     "admit alpine:3.21",
+    `admit ${canonical}`,
     "admit redis",
     "runtime up",
-    "ensure alpine:3.21",
     "ensure alpine:3.21",
     "ensure redis",
   ]);
@@ -5240,10 +5251,12 @@ test("a runtime failure during image admission keeps its own diagnostic and star
 test("opted-in amd64 services boot a translation pool and pin with their own platform policy", async () => {
   const { opts } = await fixture(false);
   const id = `sha256:${"e".repeat(64)}`;
+  const sharedTag = "example/shared-image:2";
+  const immutable = `docker.io/example/shared-image@${id}`;
   withImages(opts, {
     legacy: "example/amd64-only:1",
-    tool: "example/multi-arch:2",
-    cache: "redis",
+    tool: sharedTag,
+    cache: sharedTag,
   });
   const adaptationFile = join(opts.scope.projectRoot, "adaptation.json");
   await writeFile(
@@ -5277,6 +5290,7 @@ test("opted-in amd64 services boot a translation pool and pin with their own pla
       ensured.push([...request.args]);
       return {
         image_id: id,
+        pinned_reference: immutable,
         platform: request.args.includes("amd64")
           ? "linux/amd64"
           : "linux/arm64",
@@ -5301,12 +5315,12 @@ test("opted-in amd64 services boot a translation pool and pin with their own pla
       "runtime",
       "ensure-image",
       "--reference",
-      "example/multi-arch:2",
+      sharedTag,
       "--emulation",
       "prefer-native",
       "--json",
     ],
-    ["runtime", "ensure-image", "--reference", "redis", "--json"],
+    ["runtime", "ensure-image", "--reference", immutable, "--json"],
   ]);
   // Only opted-in services carry the reviewed runtime opt-in.
   expect(reviewed.legacy?.["x-hack-amd64-emulation"]).toBe("amd64");
@@ -6479,7 +6493,7 @@ test("invalid HTTP retries name the service and field before hooks or runtime ef
   expect(events).not.toContain("runtime ensure-image");
 });
 
-test("missing registry tags name the service and image field without echoing values", async () => {
+test("a missing shared tag names every affected active service without echoing image values", async () => {
   const { opts } = await fixture(false);
   const prepare = opts.dependencies.prepare!;
   opts.dependencies.prepare = async (request) => {
@@ -6487,12 +6501,26 @@ test("missing registry tags name the service and image field without echoing val
     return {
       ...input,
       normalizedComposeJson: JSON.stringify({
-        services: { web: { image: "synthetic:missing" } },
+        services: {
+          web: { image: "synthetic:missing" },
+          worker: { image: "docker.io/library/synthetic:missing" },
+          inactive: { image: "synthetic:missing", profiles: ["jobs"] },
+          unrelated: { image: "another:latest" },
+        },
       }),
     };
   };
   const invoke = opts.dependencies.invoke!;
   opts.dependencies.invoke = async (request) => {
+    if (
+      request.args[1] === "admit-image" &&
+      request.args[3] === "synthetic:missing"
+    ) {
+      return {
+        reference: "docker.io/library/synthetic:missing",
+        kind: "docker_hub",
+      };
+    }
     if (request.args[1] === "ensure-image") {
       throw new NativeRuntimeRequestError({
         nativeCode: "registry_image_not_found",
@@ -6505,8 +6533,10 @@ test("missing registry tags name the service and image field without echoing val
     (failure: unknown) => failure
   );
   expect((error as Error).message).toContain(
-    "service web field image (registry_image_not_found)"
+    "services web, worker field image (registry_image_not_found)"
   );
+  expect((error as Error).message).not.toContain("inactive");
+  expect((error as Error).message).not.toContain("unrelated");
   expect((error as Error).message).not.toContain("synthetic:missing");
   expect((error as Error).message).not.toContain("private registry detail");
 });

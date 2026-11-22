@@ -1026,6 +1026,33 @@ impl Session<'_, '_> {
         Ok(())
     }
 }
+
+fn restart_health_cadence(
+    context: &spec::Context<'_>,
+    config: &mut Value,
+    default_period: bool,
+    inspected: &Value,
+) -> Result<(), CandidateError> {
+    let volumes = context
+        .resources
+        .values()
+        .filter(|r| r.kind == Kind::Volume)
+        .map(|r| r.name.clone())
+        .collect();
+    let mut authored = config.clone();
+    config::use_authored_health_cadence(&mut authored, default_period, &volumes);
+    if authored == *config {
+        return Ok(());
+    }
+    let authored_spec = spec::of(&authored, context)?;
+    // Only the exact create spec can select omitted timing fields; an
+    // inherited image value alone cannot distinguish a cold create.
+    if spec::verify_label(inspected, &authored_spec).is_ok() {
+        *config = authored;
+    }
+    Ok(())
+}
+
 impl Driver for Session<'_, '_> {
     fn service_failure(&self, name: &str, observation: Observation) -> CandidateError {
         probes::service_failure_finding(
@@ -2507,6 +2534,28 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         cache_provenance::verify(&engine, &receipt, resource)?;
         if resource.kind == Kind::Container {
             admission::unchanged(&value, &prepared.configs[&resource.key])?;
+            if let Some(default_period) = prepared.default_health_cadence.get(&resource.key) {
+                restart_health_cadence(
+                    &spec::Context {
+                        resources: &receipt.resources,
+                        probe: receipt.probes.get(&resource.key),
+                        managed: false,
+                        relay: receipt
+                            .relay_startup
+                            .as_ref()
+                            .and_then(|startup| startup.services.get(&resource.key))
+                            .map(|selected| selected.bindings.keys().cloned().collect())
+                            .unwrap_or_default(),
+                        amd64_emulation: resource.amd64_emulation,
+                    },
+                    prepared
+                        .configs
+                        .get_mut(&resource.key)
+                        .expect("compiled service"),
+                    *default_period,
+                    &value,
+                )?;
+            }
         }
         if resource.kind == Kind::Container
             && (resource.phase != "started"

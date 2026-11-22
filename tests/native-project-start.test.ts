@@ -5400,7 +5400,7 @@ test("without an emulation selection the runtime pool and image pins stay arm64-
   expect(calls.flat()).not.toContain("--emulation");
 });
 
-test("a loaded 404 fallback reports the registry reason exactly once", async () => {
+test("a start reports the fallback reason once for each distinct image", async () => {
   const { opts } = await fixture(false);
   const notices: string[] = [];
   opts.dependencies.warn = (notice) => notices.push(notice);
@@ -5408,19 +5408,26 @@ test("a loaded 404 fallback reports the registry reason exactly once", async () 
   opts.dependencies.prepare = async (request) => ({
     ...(await prepare(request)),
     normalizedComposeJson: JSON.stringify({
-      services: { web: { image: "alpine:latest" } },
+      services: {
+        web: { image: "alpine:latest" },
+        worker: { image: "redis:latest" },
+        another: { image: "alpine:latest" },
+      },
     }),
   });
   const invoke = opts.dependencies.invoke!;
   opts.dependencies.invoke = async (request) => {
     if (request.args[1] === "ensure-image") {
+      const rateLimited = request.args.includes("redis:latest");
       return {
         image_id: `sha256:${"a".repeat(64)}`,
         pinned_reference: `docker.io/library/alpine@sha256:${"b".repeat(64)}`,
         platform: "linux/arm64",
         tag_resolution: {
           source: "offline",
-          fallback_reason: "registry_http_404",
+          fallback_reason: rateLimited
+            ? "registry_http_429"
+            : "registry_http_404",
           resolved_at_unix_seconds: 1,
         },
       };
@@ -5431,7 +5438,8 @@ test("a loaded 404 fallback reports the registry reason exactly once", async () 
   expect(
     notices.filter((line) => line.includes("using the loaded image"))
   ).toEqual([
-    "tag no longer exists in the registry (404), using the loaded image resolved 1970-01-01T00:00:01.000Z.",
+    "tag no longer exists in the registry (404), using the loaded image resolved 1970-01-01T00:00:01.000Z",
+    "registry rate limit reached, using the loaded image resolved 1970-01-01T00:00:01.000Z",
   ]);
 });
 

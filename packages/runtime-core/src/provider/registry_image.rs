@@ -311,16 +311,22 @@ fn transport_error(failure: &reqwest::Error, message: &'static str) -> Candidate
 
 /// Failure to establish a route to the registry is distinct from authentication,
 /// TLS verification and an authoritative rejection by the registry.
-fn tls_failure(failure: &reqwest::Error) -> bool {
+fn tls_failure(failure: &reqwest::Error) -> Option<(&'static str, &'static str)> {
     let mut source = std::error::Error::source(failure);
     while let Some(error) = source {
         let text = error.to_string().to_ascii_lowercase();
-        if text.contains("certificate") || text.contains("alert") {
-            return true;
+        if text.contains("certificate") {
+            return Some((
+                "registry_certificate",
+                "Registry certificate was not trusted.",
+            ));
+        }
+        if text.contains("alert") {
+            return Some(("registry_tls_handshake", "Registry TLS handshake failed."));
         }
         source = error.source();
     }
-    false
+    None
 }
 
 fn registry_unreachable(failure: &reqwest::Error) -> bool {
@@ -646,7 +652,7 @@ fn bounded(mut reader: impl Read, limit: usize) -> Result<Vec<u8>, CandidateErro
         .read_to_end(&mut bytes)
         .map_err(|failure| {
             let cause = match read_failure(&failure) {
-                NetworkFailureReason::Timeout => "registry_timeout",
+                NetworkFailureReason::Timeout => "registry_body_stalled",
                 _ => "registry_transfer_failed",
             };
             error("Registry transfer failed or timed out.").with_cause_code(cause.into())
@@ -983,13 +989,10 @@ impl<'a> Fetch<'a> {
                         || attempt == attempts
                         || self.remaining().unwrap_or_default() <= delay
                     {
-                        if tls_failure(&failure) {
-                            return Err(CandidateError::new(
-                                "registry_image",
-                                "Registry TLS verification failed.",
-                            )
-                            .with_network_request(url.host_str().unwrap_or("unknown"), attempt)
-                            .with_cause_code("registry_tls".into()));
+                        if let Some((cause, message)) = tls_failure(&failure) {
+                            return Err(CandidateError::new("registry_image", message)
+                                .with_network_request(url.host_str().unwrap_or("unknown"), attempt)
+                                .with_cause_code(cause.into()));
                         }
                         let error = CandidateError::new(
                             classified.code,
@@ -1001,7 +1004,7 @@ impl<'a> Fetch<'a> {
                         )
                         .with_network_request(url.host_str().unwrap_or("unknown"), attempt);
                         return Err(if failure.is_timeout() {
-                            error.with_cause_code("registry_timeout".into())
+                            error.with_cause_code("registry_headers_stalled".into())
                         } else if classified.code == "registry_image"
                             && registry_unreachable(&failure)
                         {
@@ -1525,7 +1528,7 @@ fn layer_failure(
             failure.with_cause_code("registry_digest_mismatch".into())
         }
         (NetworkFailureReason::Timeout | NetworkFailureReason::Deadline, _) => {
-            failure.with_cause_code("registry_timeout".into())
+            failure.with_cause_code("registry_body_stalled".into())
         }
         (NetworkFailureReason::HttpStatus, Some(code)) => {
             failure.with_cause_code(format!("registry_http_{code}"))

@@ -18,6 +18,7 @@ import {
   nativeDetachedUpProgress,
   nativeDetachedUpReady,
   nativeDetachedUpShellVariables,
+  reportNativeImageDownloadWait,
   runNativeDetachedOwner,
   setNativeDetachedHeartbeatIntervalForTests,
   startNativeDetachedUp,
@@ -76,11 +77,19 @@ function publishFixtureHotReload(fixtureMode: string): void {
 }
 
 /** HACK-2351 modes: phase reports against short launcher limits. */
-const DEADLINE_MODES = ["slow-images", "slow-runtime", "images-ceiling"];
+const DEADLINE_MODES = [
+  "slow-images",
+  "slow-runtime",
+  "images-ceiling",
+  "images-wait-ceiling",
+];
 
 /** The launcher's limits for a fixture mode. */
 function fixtureLimits(fixtureMode: string) {
-  if (fixtureMode === "images-ceiling") {
+  if (
+    fixtureMode === "images-ceiling" ||
+    fixtureMode === "images-wait-ceiling"
+  ) {
     return { budgetMs: 1000, ceilingMs: 2000 };
   }
   if (["timeout", "late-ready", ...DEADLINE_MODES].includes(fixtureMode)) {
@@ -111,6 +120,9 @@ async function reportFixturePhases(fixtureMode: string): Promise<void> {
     return;
   }
   nativeDetachedUpProgress("images");
+  if (fixtureMode === "images-wait-ceiling") {
+    reportNativeImageDownloadWait("docker.io/fixture/image:stable");
+  }
   if (fixtureMode === "slow-images") {
     await Bun.sleep(2500);
     nativeDetachedUpProgress("services");
@@ -402,6 +414,7 @@ if (role === "channel-holder") {
       "prestart-persistent-hook",
       "slow-runtime",
       "images-ceiling",
+      "images-wait-ceiling",
     ].includes(mode)
       ? await handleRunCliError({ error, jsonRequested: true })
       : 1;

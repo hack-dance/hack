@@ -425,17 +425,26 @@ fn resolve_pending(
     let lock = match state::Lock::acquire(&root) {
         Err(error) if error.code == "provider_busy" => {
             // Replace with the shared startup wait helper from HACK-2535.
-            state::Lock::acquire_existing_waiting(&root, std::time::Duration::from_secs(590))
-                .map_err(|error| {
-                    if error.code == "provider_busy" {
-                        CandidateError::new(
-                            "image_tag_download_busy",
-                            "Another start is downloading this image.",
-                        )
-                    } else {
-                        error
-                    }
-                })?
+            let report_wait = std::env::var_os("HACK_INTERNAL_REPORT_IMAGE_WAIT")
+                .is_some_and(|value| value == "1");
+            if report_wait {
+                eprintln!("hack.image-wait:begin");
+            }
+            let lock =
+                state::Lock::acquire_existing_waiting(&root, std::time::Duration::from_secs(590));
+            if report_wait {
+                eprintln!("hack.image-wait:end");
+            }
+            lock.map_err(|error| {
+                if error.code == "provider_busy" {
+                    CandidateError::new(
+                        "image_tag_download_busy",
+                        "Another start is downloading this image.",
+                    )
+                } else {
+                    error
+                }
+            })?
         }
         result => result?,
     };
@@ -492,7 +501,12 @@ fn resolve_pending(
             if policy.tag_mode == ImageTagMode::Normal
                 && (error.cause_code.as_deref().is_some_and(|code| {
                     code.starts_with("registry_http_")
-                        || matches!(code, "registry_unreachable" | "registry_timeout")
+                        || matches!(
+                            code,
+                            "registry_unreachable"
+                                | "registry_headers_stalled"
+                                | "registry_body_stalled"
+                        )
                 })) =>
         {
             return Err(offline_missing().with_cause_code(fallback_reason(&error)));

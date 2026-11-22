@@ -28,6 +28,7 @@ import {
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
+const DISPLAY_IDENTITY = /^[A-Za-z0-9._:/@-]{1,512}$/;
 const TAG_REFERENCE = /^[A-Za-z0-9._:/-]{1,512}$/;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 
@@ -60,9 +61,9 @@ export function offlineTagNotice(reply: unknown): string | undefined {
       ? new Date(tag.resolved_at_unix_seconds * 1000)
       : undefined;
   if (!(time && Number.isFinite(time.getTime()))) {
-    return "Registry lookup unavailable; using the loaded image.";
+    return "Registry lookup unavailable; using the loaded image";
   }
-  return `${reason}, using the loaded image resolved ${time.toISOString()}.`;
+  return `${reason}, using the loaded image resolved ${time.toISOString()}`;
 }
 
 export async function pullNativeProjectImages(opts: {
@@ -152,6 +153,21 @@ export async function pullNativeProjectImages(opts: {
     ) {
       throw new ClosedCliError(
         "Native pull did not confirm the requested image in the guest."
+      );
+    }
+    const expected = pin ?? reference;
+    const actual = IMAGE_ID.test(reference)
+      ? result.image_id
+      : result.pinned_reference;
+    if (
+      (IMAGE_ID.test(reference) || expected.includes("@")) &&
+      actual !== expected
+    ) {
+      const reported = DISPLAY_IDENTITY.test(actual)
+        ? actual
+        : "(invalid identity)";
+      throw new ClosedCliError(
+        `Native pull requested ${expected} but the guest confirmed ${reported}.`
       );
     }
     if (!(IMAGE_ID.test(reference) || reference.includes("@") || pin)) {

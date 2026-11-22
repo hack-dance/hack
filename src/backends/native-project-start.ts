@@ -17,6 +17,7 @@ import {
   nativeDetachedUpProfileNotice,
   nativeDetachedUpShellVariables,
   nativeShellForwardingNotice,
+  reportNativeImageDownloadWait,
   reportNativeImageTagOffline,
 } from "../lib/native-detached-up.ts";
 import {
@@ -761,6 +762,7 @@ async function ensureNativeProjectImage(opts: {
   readonly imageTagMode?: "refresh" | "offline";
   readonly affectedServices: () => readonly string[];
   readonly commandPin?: string;
+  readonly waitReference: string;
   readonly policy: NativeEmulationPolicy | undefined;
   readonly invoke: typeof invokeNativeRuntime;
 }) {
@@ -775,6 +777,8 @@ async function ensureNativeProjectImage(opts: {
         ...(opts.imageTagMode ? ["--image-tag-mode", opts.imageTagMode] : []),
       ],
       timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+      onImageWait: (waiting) =>
+        reportNativeImageDownloadWait(waiting ? opts.waitReference : null),
     })
     .catch((error: unknown) => {
       if (
@@ -824,7 +828,7 @@ async function pinNativeProjectImages(opts: {
   readonly warn: (line: string) => void;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<void> {
-  let reportedOffline = false;
+  const reportedOffline = new Set<string>();
   const confirmed = new Set<string>();
   const references = [...new Set(opts.canonicalImages.values())];
   const offlineReferences = new Set<string>();
@@ -871,6 +875,7 @@ async function pinNativeProjectImages(opts: {
       runtime: opts.runtime,
       projectRoot: opts.projectRoot,
       reference: image,
+      waitReference: reference,
       commandPin: reference.includes("@") ? undefined : immutableReference,
       affectedServices: () =>
         Object.entries(opts.specs)
@@ -919,11 +924,12 @@ async function pinNativeProjectImages(opts: {
     if (ensured.offline) {
       offlineReferences.add(reference);
     }
-    if (ensured.offline && !reportedOffline) {
+    const noticeKey = `${reference}\n${ensured.imageId}`;
+    if (ensured.offline && !reportedOffline.has(noticeKey)) {
       if (!reportNativeImageTagOffline(ensured.offline)) {
         opts.warn(ensured.offline);
       }
-      reportedOffline = true;
+      reportedOffline.add(noticeKey);
     }
     if (immutableReference === undefined) {
       immutableReferences.set(

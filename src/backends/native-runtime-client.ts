@@ -778,6 +778,7 @@ export async function invokeNativeRuntime(opts: {
   readonly cwd: string;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  readonly onImageWait?: (waiting: boolean) => void;
   readonly privateInput?: Uint8Array;
   /** Graph exec and run-service return command exit status alongside JSON. */
   readonly serviceExecResponse?: boolean;
@@ -857,6 +858,9 @@ export async function invokeNativeRuntime(opts: {
   // subprocess exists.
   Object.assign(env, nativeHotReloadEnvironment(opts.args));
   Object.assign(env, nativeAdmissionReuseEnvironment(opts.args));
+  if (opts.onImageWait) {
+    env.HACK_INTERNAL_REPORT_IMAGE_WAIT = "1";
+  }
   const child = Bun.spawn(
     [
       opts.runtime.binary,
@@ -886,7 +890,13 @@ export async function invokeNativeRuntime(opts: {
       drainTimer = setTimeout(() => drain.abort(), exitDrainBoundMs);
     });
   }
-  const failureDetails = readNativeFailure(child.stderr, drain?.signal);
+  const failureDetails = readNativeFailure(
+    child.stderr,
+    drain?.signal,
+    undefined,
+    false,
+    opts.onImageWait
+  );
   let timedOut = false;
   let canceled = false;
   const cancel = () => {
@@ -1343,7 +1353,8 @@ async function readNativeFailure(
   stream: ReadableStream<Uint8Array>,
   signal?: AbortSignal,
   limit = MAX_NATIVE_FAILURE_BYTES,
-  startupLogs = false
+  startupLogs = false,
+  onImageWait?: (waiting: boolean) => void
 ): Promise<NativeFailure | undefined> {
   const reader = stream.getReader();
   const cancel = () => {
@@ -1353,6 +1364,7 @@ async function readNativeFailure(
   if (signal?.aborted) {
     cancel();
   }
+  let waiting = false;
   let bytes = 0;
   let text = "";
   const decoder = new TextDecoder();
@@ -1365,6 +1377,25 @@ async function readNativeFailure(
       bytes += result.value.byteLength;
       if (bytes <= limit) {
         text += decoder.decode(result.value, { stream: true });
+        if (onImageWait) {
+          while (text.startsWith("hack.image-wait:")) {
+            const newline = text.indexOf("\n");
+            if (newline === -1) {
+              break;
+            }
+            const state = text.slice(0, newline);
+            if (
+              state === "hack.image-wait:begin" ||
+              state === "hack.image-wait:end"
+            ) {
+              waiting = state.endsWith(":begin");
+              onImageWait(waiting);
+            } else {
+              break;
+            }
+            text = text.slice(newline + 1);
+          }
+        }
       }
     }
     if (bytes > limit) {
@@ -1377,6 +1408,9 @@ async function readNativeFailure(
   } catch {
     return;
   } finally {
+    if (waiting) {
+      onImageWait?.(false);
+    }
     signal?.removeEventListener("abort", cancel);
     reader.releaseLock();
   }

@@ -65,6 +65,7 @@ let publishReady: ((ready: Ready) => void) | undefined;
 let publishImageBlocker:
   | ((detail: NativeImageBlockerDetail) => Promise<void>)
   | undefined;
+let publishImageDownloadWait: ((reference: string | null) => void) | undefined;
 let publishImageTagOffline: ((notice: string) => void) | undefined;
 let publishProfileNotice: ((notice: NativeProfileNotice) => void) | undefined;
 let publishBranchDropped: ((details: BranchDroppedSites) => void) | undefined;
@@ -580,6 +581,10 @@ function writeHotReload(value: unknown): boolean {
   return true;
 }
 
+export function reportNativeImageDownloadWait(reference: string | null): void {
+  publishImageDownloadWait?.(reference);
+}
+
 export function reportNativeImageTagOffline(notice: string): boolean {
   if (!publishImageTagOffline) {
     return false;
@@ -719,6 +724,10 @@ export async function runNativeDetachedOwner(opts: {
           readonly kind: "image-blocker";
           readonly detail: NativeImageBlockerDetail;
         }
+      | {
+          readonly kind: "image-download-wait";
+          readonly reference: string | null;
+        }
       | { readonly kind: "image-tag-offline"; readonly notice: string }
       | { readonly kind: "prestart-refusal"; readonly data: PrestartRefusal }
       | {
@@ -778,6 +787,11 @@ export async function runNativeDetachedOwner(opts: {
       await send({ kind: "image-blocker", detail });
     }
   };
+  publishImageDownloadWait = (reference) => {
+    if (!(ready || stopping)) {
+      void send({ kind: "image-download-wait", reference });
+    }
+  };
   publishImageTagOffline = (notice) => {
     if (!stopping) {
       send({ kind: "image-tag-offline", notice });
@@ -827,6 +841,7 @@ export async function runNativeDetachedOwner(opts: {
     publishShellVariables = undefined;
     publishProfileNotice = undefined;
     publishImageTagOffline = undefined;
+    publishImageDownloadWait = undefined;
     publishImageBlocker = undefined;
     publishBranchDropped = undefined;
     publishHotReload = undefined;
@@ -907,7 +922,7 @@ function watchStartDeadline(opts: {
   readonly child: ReturnType<typeof spawn>;
   readonly limits: NativeDetachedStartLimits;
   readonly heartbeatStaleMs: number | undefined;
-  readonly expire: (error: HackCliError) => void;
+  readonly expire: (error: HackCliError | NativeImageBlocker) => void;
 }): ReturnType<typeof setInterval> {
   // One monotonic clock: a wall clock change must not move either limit.
   const deadline = new NativeDetachedStartDeadline({
@@ -915,7 +930,16 @@ function watchStartDeadline(opts: {
     now: performance.now(),
     heartbeatStaleMs: opts.heartbeatStaleMs,
   });
+  let waiting: NativeImageBlockerDetail | undefined;
   opts.child.on("message", (value: unknown) => {
+    if (isRecord(value) && value.kind === "image-download-wait") {
+      const detail = {
+        missing: value.reference,
+        present: null,
+        downloading: true,
+      };
+      waiting = nativeImageBlockerDetail(detail) ? detail : undefined;
+    }
     if (
       isRecord(value) &&
       Object.keys(value).length === 2 &&
@@ -930,7 +954,11 @@ function watchStartDeadline(opts: {
       const now = performance.now();
       const expiry = deadline.check(now);
       if (expiry) {
-        opts.expire(deadline.timeoutError(expiry, now));
+        opts.expire(
+          waiting
+            ? new NativeImageBlocker(waiting)
+            : deadline.timeoutError(expiry, now)
+        );
       }
     },
     Math.min(1000, Math.max(50, Math.floor(opts.limits.budgetMs / 20)))

@@ -584,7 +584,7 @@ test("HACK-2351: image work longer than the budget, with heartbeats, still compl
   });
 }, 30_000);
 
-for (const mode of ["slow-runtime", "images-ceiling"]) {
+for (const mode of ["slow-runtime", "images-ceiling", "images-wait-ceiling"]) {
   test(`HACK-2351: ${mode} times out naming its phase, and its owner has stopped when the launcher returns`, async () => {
     const root = await mkdtemp(join(tmpdir(), "native-detached-deadline-"));
     const launcher = Bun.spawn(
@@ -603,13 +603,21 @@ for (const mode of ["slow-runtime", "images-ceiling"]) {
       ]);
       expect(code).toBe(1);
       const error = JSON.parse(stdout).error;
-      expect(error.code).toBe("E_STARTUP_TIMEOUT");
-      expect(error.message).toContain(
-        mode === "slow-runtime"
-          ? "it was starting the native runtime when its 1 s budget"
-          : "it was building and loading service images when its 2 s ceiling"
-      );
-      expect(error.message).toContain("Run hack down for this instance next");
+      if (mode === "images-wait-ceiling") {
+        expect(error.message.split("\n")).toEqual([
+          "Image unavailable: another start is downloading docker.io/fixture/image:stable.",
+          "Already present: could not verify.",
+          "Run hack up again after the download finishes.",
+        ]);
+      } else {
+        expect(error.code).toBe("E_STARTUP_TIMEOUT");
+        expect(error.message).toContain(
+          mode === "slow-runtime"
+            ? "it was starting the native runtime when its 1 s budget"
+            : "it was building and loading service images when its 2 s ceiling"
+        );
+        expect(error.message).toContain("Run hack down for this instance next");
+      }
       // The launcher waited for the owner to stop before it returned.
       expect(await readFile(join(root, "stopped"), "utf8")).toBe(
         "down.before\nprocess.stop\ndown.after\n"

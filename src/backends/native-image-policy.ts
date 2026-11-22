@@ -17,10 +17,14 @@ export function nativeImageRegistryReason(code: unknown): string | undefined {
   switch (code) {
     case "registry_unreachable":
       return "registry unreachable";
-    case "registry_timeout":
-      return "registry request timed out";
-    case "registry_tls":
-      return "registry TLS verification failed";
+    case "registry_headers_stalled":
+      return "registry did not answer";
+    case "registry_body_stalled":
+      return "registry download stalled";
+    case "registry_tls_handshake":
+      return "registry TLS handshake failed";
+    case "registry_certificate":
+      return "registry certificate was not trusted";
     case "registry_transfer_failed":
       return "registry transfer failed";
     case "registry_digest_mismatch":

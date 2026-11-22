@@ -2697,7 +2697,7 @@ fn down_observed(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError>
     super::hostname_authority::managed::stop(candidate, &owner)?;
     super::publication::release(candidate, &owner.token, None)?;
     if stopped {
-        owner.release_stopped_short_home(candidate)?;
+        cleanup_clean_stop(candidate, &owner)?;
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
@@ -3001,8 +3001,7 @@ sync"#,
         finish_quiesced_stop(candidate, owner)?;
         // Commit the clean stop before dropping any temporary paths. A retry can
         // release the alias using the same durable pool receipt.
-        remove_closed_sockets(candidate, owner)?;
-        owner.release_stopped_short_home(candidate)?;
+        cleanup_clean_stop(candidate, owner)?;
     }
     Ok(())
 }
@@ -3086,6 +3085,33 @@ fn remove_closed_sockets(candidate: &Candidate, owner: &Owner) -> Result<(), Can
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(io(error)),
             _ => {}
         }
+    }
+    Ok(())
+}
+
+/// Retry socket cleanup under the same pool lock before releasing the alias.
+fn cleanup_clean_stop(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
+    if !owner.short_home_releasable() {
+        return Ok(());
+    }
+    if owner
+        .process
+        .as_ref()
+        .map(|process| identity::alive(process.pid))
+        .transpose()?
+        == Some(true)
+    {
+        return Err(CandidateError::new(
+            "stop_uncertain",
+            "Provider process absence is not established.",
+        ));
+    }
+    sockets_absent(owner)?;
+    remove_closed_sockets(candidate, owner)?;
+    if owner.release_stopped_short_home(candidate).is_err() {
+        eprintln!(
+            "Warning: the pool stopped cleanly, but its temporary HOME alias could not be released."
+        );
     }
     Ok(())
 }

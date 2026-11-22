@@ -611,10 +611,26 @@ impl Owner {
                 "Provider process absence is not established; HOME alias was retained.",
             ));
         }
-        if self.alias(candidate)? == Alias::Owned {
-            fs::remove_file(&self.short_home).map_err(io)?;
+        self.unlink_owned_short_home(candidate)
+    }
+
+    pub(super) fn unlink_owned_short_home(
+        &self,
+        candidate: &Candidate,
+    ) -> Result<(), CandidateError> {
+        match self.alias(candidate)? {
+            Alias::Missing => return Ok(()),
+            Alias::Foreign => return Err(replaced_alias()),
+            Alias::Owned => {}
         }
-        Ok(())
+        // The sticky temp directory excludes replacement by other users.
+        // Same-pool writers hold the pool lock. A process running as the
+        // same user outside that protocol can still race the pathname.
+        match fs::remove_file(&self.short_home) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(io(error)),
+        }
     }
 
     /// Restore the HOME alias of a clean stop before a mutating operation uses it. Called
@@ -705,13 +721,14 @@ impl Owner {
             Err(error) => return Err(io(error)),
         };
         // SAFETY: geteuid has no preconditions.
-        if alias.file_type().is_symlink()
-            && alias.uid() == unsafe { libc::geteuid() }
-            && fs::read_link(&self.short_home).map_err(io)? == self.home(candidate)
-        {
-            Ok(Alias::Owned)
-        } else {
-            Ok(Alias::Foreign)
+        if !alias.file_type().is_symlink() || alias.uid() != unsafe { libc::geteuid() } {
+            return Ok(Alias::Foreign);
+        }
+        match fs::read_link(&self.short_home) {
+            Ok(target) if target == self.home(candidate) => Ok(Alias::Owned),
+            Ok(_) => Ok(Alias::Foreign),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Alias::Missing),
+            Err(error) => Err(io(error)),
         }
     }
 

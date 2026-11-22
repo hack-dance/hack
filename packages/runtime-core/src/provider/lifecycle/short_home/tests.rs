@@ -483,12 +483,21 @@ impl Squatter {
 fn a_clean_stop_releases_its_alias_and_restart_restores_it() {
     let pool = Pool::new().cleanly_stopped();
     let before = pool.receipt();
+    let listener = UnixListener::bind(pool.owner.data_dir().join("agent.sock")).unwrap();
+    assert_eq!(
+        super::super::down(&pool.candidate).unwrap_err().code,
+        "stop_uncertain"
+    );
+    assert!(pool.data().join("agent.sock").exists());
+    assert!(!pool.alias_absent());
+    drop(listener);
     for _ in 0..2 {
         assert_eq!(
             super::super::down(&pool.candidate).unwrap().phase,
             "stopped"
         );
         assert!(pool.alias_absent());
+        assert!(!pool.data().join("agent.sock").exists());
     }
     assert_eq!(status(&pool.candidate).unwrap().phase, "stopped");
     let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
@@ -499,6 +508,40 @@ fn a_clean_stop_releases_its_alias_and_restart_restores_it() {
         root(&pool.candidate).join("home")
     );
     assert_eq!(pool.receipt(), before);
+}
+
+#[test]
+fn clean_stop_preserves_a_same_user_alias_to_a_different_target() {
+    let pool = Pool::new().cleanly_stopped();
+    let lock = state::Lock::acquire(&root(&pool.candidate)).unwrap();
+    assert_eq!(Owner::load(&pool.candidate).unwrap(), pool.owner);
+    pool.remove_alias();
+    let decoy = Squatter::Link.place(&pool);
+    let inode = pool.alias_inode();
+    assert!(pool.owner.unlink_owned_short_home(&pool.candidate).is_err());
+    drop(lock);
+    Squatter::Link.untouched(&pool.owner.short_home, inode, &decoy);
+    Squatter::remove(&pool.owner.short_home);
+}
+
+#[test]
+fn share_update_restores_the_released_alias_before_staging() {
+    let mut pool = Pool::new().cleanly_stopped();
+    let project = pool.directory.join("project");
+    state::private_directory(&project).unwrap();
+    std::fs::write(project.join("package.json"), "{}").unwrap();
+    pool.owner.project_share =
+        Some(crate::provider::project_share::ProjectShareIntent::approve(&project, true).unwrap());
+    pool.owner.save(&pool.candidate).unwrap();
+    pool.remove_alias();
+
+    // An already registered share returns before any VM work. It still takes
+    // the update path that must recreate the alias before owner staging.
+    crate::provider::share_update::add_project_share(&pool.candidate, &project, true).unwrap();
+    assert_eq!(
+        fs::read_link(&pool.owner.short_home).unwrap(),
+        root(&pool.candidate).join("home")
+    );
 }
 
 #[test]

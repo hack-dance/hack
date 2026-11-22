@@ -786,7 +786,9 @@ complete bundle to change the candidate.
 The provider runs with a short temporary HOME alias, `/private/tmp/hkl-<owner>`, a
 symlink to `<home>/.hack-local/run/smolvm/home` that keeps its Unix socket paths
 within the macOS length limit. A clean `runtime down` removes provider sockets it
-proved closed, then releases the alias. Pools with pinned dependency socket paths
+proved closed, then releases the alias. A repeated `runtime down` finishes socket
+cleanup if the first stop was interrupted after writing the stopped receipt.
+An alias unlink failure after socket cleanup emits a warning. Pools with pinned dependency socket paths
 keep the alias because those paths cannot move to a different name. The next start
 restores a released alias under the pool lock.
 

@@ -1789,6 +1789,14 @@ const contracts: readonly ModelContract[] = [
       "locked = TRUE",
     ],
     additionalControls: [
+      { name: "alias-cleanup", negative: false, states: 199 },
+      {
+        name: "alias-cleanup-early",
+        negative: true,
+        invariant: "NoPrematureUnlink",
+        action: "ReleaseAlias",
+        fields: ['homeAlias = "missing"', "socketCleanupOwed = TRUE"],
+      },
       {
         name: "uncertain-replay",
         negative: true,
@@ -1821,6 +1829,7 @@ const contracts: readonly ModelContract[] = [
     action: "Recheck",
     fields: ['pc = "Proven"', 'profile = "development"'],
     additionalControls: [
+      { name: "released-alias", negative: false, states: 56_838 },
       // The implementation's other path, a cleanly stopped pool's start: root files
       // proven in the window, rechecked under the lease.
       { name: "root-before-lease", negative: false, states: 277_194 },

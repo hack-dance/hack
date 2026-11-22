@@ -326,7 +326,6 @@ pub fn remove_project_share(
         return Err(refused());
     }
     reject_aliased_state(&root(candidate))?;
-    let owner = Owner::load(candidate)?;
     let share = match fs::symlink_metadata(root(candidate).join(JOURNAL)) {
         // An interrupted removal names its own share; resume exactly that one.
         Ok(_) => {
@@ -336,7 +335,7 @@ pub fn remove_project_share(
             }
             j.share
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => owner
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Owner::load(candidate)?
             .additional_project_shares
             .iter()
             .find(|s| s.project == project)
@@ -355,6 +354,7 @@ fn update(
     reject_aliased_state(&root(candidate))?;
     let _lock = state::Lock::acquire(&root(candidate))?;
     network_update::require_complete(candidate)?;
+    super::lifecycle::restore_released_short_home(candidate)?;
     let owner = Owner::load(candidate)?;
     let path = root(candidate).join(JOURNAL);
     let journal_present = match fs::symlink_metadata(&path) {

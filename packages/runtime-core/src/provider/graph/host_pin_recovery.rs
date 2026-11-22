@@ -326,7 +326,8 @@ pub(super) fn acquire_for_cleanup(
     if digest(&bytes) != witness.provider_sha256
         || owner.token != witness.owner
         || owner.guest_boot_id.as_deref() != Some(&witness.current_guest_boot)
-        || owner.previous_guest_boot_id.as_deref() != Some(&witness.previous_guest_boot)
+        || !crate::provider::boot_history::earlier_boots(candidate, &owner)?
+            .contains(&witness.previous_guest_boot)
         || engine.guest().incarnation() != witness.owner
         || engine.guest().boot_id() != witness.current_guest_boot
         || owner
@@ -461,14 +462,18 @@ fn select_content(
     verify_guest_identity(engine)?;
     let host_boot_micros = lifecycle::host_filesystem::host_boot_micros()?;
     let current_guest_boot = owner.guest_boot_id.clone().ok_or_else(refused)?;
-    let previous_guest_boot = owner.previous_guest_boot_id.clone().ok_or_else(refused)?;
-    if current_guest_boot == previous_guest_boot
-        || current_guest_boot != engine.guest().boot_id()
-        || owner.token != engine.guest().incarnation()
+    if current_guest_boot != engine.guest().boot_id() || owner.token != engine.guest().incarnation()
     {
         return Err(refused());
     }
     let (receipt, root) = load(candidate, engine, run)?;
+    // The run's boot: the one earlier boot of the pool its receipt names, never the
+    // current one. `provider_sha256` pins owner.json, and the boot history changes only
+    // with a new boot, which changes owner.json too.
+    let earlier = crate::provider::boot_history::earlier_boots(candidate, &owner)?;
+    let previous_guest_boot =
+        super::boot_match::receipt_boot(candidate, &root, &receipt, &earlier, &current_guest_boot)?
+            .ok_or_else(refused)?;
     for name in [
         "state.pending",
         "dead-owner-cleanup.pending",

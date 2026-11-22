@@ -69,7 +69,8 @@ hack ps
 hack open
 ```
 
-On Compose, a successful detached `hack up` ends with the primary address,
+Detached Compose `hack up` reports completed hooks by name and lists services
+after confirming startup. A successful start ends with the primary address,
 startup time, and count of configured routes for running services whose HTTP
 readiness has yet to be checked. The command makes no HTTP request to warm the
 routes. A successful `hack down` ends with a stopped line and the elapsed time.

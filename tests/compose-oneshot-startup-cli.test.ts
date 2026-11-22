@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
+import { runPrivateTtyCli } from "./helpers/private-cli-tty.ts";
 
 /*
  * HACK-2310: a detached start keeps waiting while a one-shot dependency
@@ -116,23 +117,27 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+function fixtureEnv(extra: Readonly<Record<string, string>> = {}) {
+  return privateCliEnv({
+    root,
+    env: {
+      PATH: `${bin}:/usr/bin:/bin`,
+      HACK_RUNTIME_BACKEND: "compose",
+      HACK_NO_INTERACTIVE: "1",
+      NO_COLOR: "1",
+      STUB_STATE: state,
+      ...extra,
+    },
+  });
+}
+
 async function cli(
   args: readonly string[],
   extra: Readonly<Record<string, string>> = {}
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const child = Bun.spawn([process.execPath, CLI, ...args], {
     cwd: project,
-    env: privateCliEnv({
-      root,
-      env: {
-        PATH: `${bin}:/usr/bin:/bin`,
-        HACK_RUNTIME_BACKEND: "compose",
-        HACK_NO_INTERACTIVE: "1",
-        NO_COLOR: "1",
-        STUB_STATE: state,
-        ...extra,
-      },
-    }),
+    env: fixtureEnv(extra),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -569,6 +574,12 @@ test("Compose closes a confirmed start and stop with plain lifecycle lines", asy
     JSON.stringify({
       name: "shop",
       dev_host: "SAMPLE.hack.local",
+      lifecycle: {
+        up: {
+          before: [{ name: "prepare", command: "printf 'before output\\n'" }],
+          after: [{ name: "verify", command: "printf 'after output\\n'" }],
+        },
+      },
       internal: { dns: false, tls: false },
     })
   );
@@ -589,6 +600,27 @@ test("Compose closes a confirmed start and stop with plain lifecycle lines", asy
     /https:\/\/sample\.hack\.local {2}up in \d+\.\ds · compose · 2 routes warming\n$/
   );
   expect(up.stdout).not.toContain("dormant.hack.local");
+  expect(up.stdout).not.toContain("printf");
+  const output = up.stdout.split("\n");
+  const before = output.findIndex((line) =>
+    /^✓ before +prepare +done · \d+\.\ds$/.test(line)
+  );
+  const after = output.findIndex((line) =>
+    /^✓ after +verify +done · \d+\.\ds$/.test(line)
+  );
+  const migration = output.findIndex((line) =>
+    /^✓ services +migrate +completed$/.test(line)
+  );
+  const service = output.findIndex((line) =>
+    /^✓ services +api +up$/.test(line)
+  );
+  expect(output.indexOf("before output")).toBeGreaterThanOrEqual(0);
+  expect(before).toBeGreaterThan(output.indexOf("before output"));
+  expect(migration).toBeGreaterThan(before);
+  expect(service).toBeGreaterThan(migration);
+  expect(output.indexOf("after output")).toBeGreaterThan(service);
+  expect(after).toBeGreaterThan(output.indexOf("after output"));
+  expect(up.stdout).not.toContain(" ...");
 
   const down = await cli(["down"]);
   expect(down.exitCode).toBe(0);
@@ -623,3 +655,39 @@ test("a detached Compose branch prefers its branch-qualified primary route", asy
     /^https:\/\/feature\.sample\.hack\.local {2}up in \d+\.\ds · compose · 2 routes warming$/m
   );
 }, 60_000);
+
+test("detached Compose up clears its transient hook and service waits on a TTY", async () => {
+  await writeFile(
+    join(project, ".hack", "hack.config.json"),
+    JSON.stringify({
+      name: "shop",
+      internal: { dns: false, tls: false },
+      lifecycle: {
+        up: {
+          before: [
+            { name: "prepare", command: "sleep 0.1; echo before-output" },
+          ],
+          after: [{ name: "verify", command: "sleep 0.1" }],
+        },
+      },
+    })
+  );
+  const result = await runPrivateTtyCli({
+    cwd: project,
+    args: ["up", "--detach"],
+    env: fixtureEnv({ TERM: "xterm", STUB_UP_SECONDS: "0" }),
+  });
+  expect(result.exitCode).toBe(0);
+  const erase = "\r\x1b[2K";
+  expect(result.stdout).toContain(
+    `${erase}before prepare ...${erase}before-output`
+  );
+  expect(result.stdout).toContain(`${erase}services ...${erase}✓ services`);
+  expect(result.stdout).toContain(`${erase}after verify ...${erase}✓ after`);
+  expect(result.stdout.indexOf("before prepare ...")).toBeLessThan(
+    result.stdout.indexOf("services ...")
+  );
+  expect(result.stdout.indexOf("✓ services")).toBeLessThan(
+    result.stdout.indexOf("after verify ...")
+  );
+}, 20_000);

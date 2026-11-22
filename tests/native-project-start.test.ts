@@ -3797,9 +3797,10 @@ test("retained startup refuses missing, unacknowledged or changed finalization b
       https: httpsSelection,
       adaptationFile: join(opts.scope.projectRoot, "unread-adaptation.json"),
     });
-    await expect(attempt).rejects.toThrow(
-      "frontend finalization is unconfirmed"
-    );
+    await expect(attempt).rejects.toMatchObject({
+      code: "E_RECOVERY_REQUIRED",
+      message: expect.stringContaining("Run hack down --recover"),
+    });
     try {
       await attempt;
     } catch (error) {
@@ -4022,9 +4023,7 @@ test("retained acknowledgement cannot authorize a newer or concurrently changed 
       };
     }
     await expect(startNativeProject(opts)).rejects.toThrow(
-      fault === "newer-run"
-        ? "frontend finalization is unconfirmed"
-        : "mapping changed"
+      fault === "newer-run" ? "has no confirmed shutdown" : "mapping changed"
     );
     expect(events).toEqual(["graph retained-preflight", "graph inspect"]);
   }
@@ -7013,6 +7012,87 @@ for (const [name, hotReload, expected] of [
     ).toEqual(expected ? [renderNativeHotReloadNotice(expected)] : []);
   });
 }
+
+// HACK-2456: the pool stopped under the run while its foreground owner died.
+function ownerExitedRefusal() {
+  return new NativeRuntimeRequestError({
+    nativeCode: "graph_foreground_owner_exited",
+    message: "The run's foreground owner exited.",
+  });
+}
+async function stoppedPoolUnderRunFixture(poolPhase: "stopped" | "running") {
+  const { opts, events } = await retainedFinalizationFixture();
+  const saved = await opts.dependencies.load!(opts.scope);
+  await acknowledgeRetainedFrontend(opts.scope, saved!);
+  let recovered = false;
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "retained-preflight" && !recovered) {
+      events.push("graph retained-preflight refused");
+      throw ownerExitedRefusal();
+    }
+    if (request.args[0] === "runtime" && request.args[1] === "status") {
+      events.push("runtime status");
+      return poolPhase === "running"
+        ? { phase: "running", process_alive: true }
+        : { phase: "stopped", process_alive: false };
+    }
+    return await invoke(request);
+  };
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
+  const start = {
+    ...opts,
+    recoverStoppedPool: async () => {
+      events.push("down --recover");
+      recovered = true;
+    },
+  };
+  return { start, events, notices };
+}
+
+test("up on a stopped pool whose run's owner died recovers the run with data retained, then starts it", async () => {
+  const { start, events, notices } =
+    await stoppedPoolUnderRunFixture("stopped");
+  expect(await startNativeProject(start)).toBe(0);
+  expect(events.slice(0, 5)).toEqual([
+    "graph retained-preflight refused",
+    "runtime status",
+    "down --recover",
+    "graph retained-preflight",
+    "graph inspect",
+  ]);
+  expect(events.filter((event) => event === "down --recover")).toHaveLength(1);
+  expect(events.indexOf("down --recover")).toBeLessThan(
+    events.indexOf("runtime up")
+  );
+  expect(events).toContain("save");
+  expect(notices.join("\n")).toContain("recovered with data retained");
+});
+
+test("up keeps the owner-exited refusal on a running pool without recovery or runtime up", async () => {
+  const { start, events } = await stoppedPoolUnderRunFixture("running");
+  const error = await startNativeProject(start).catch(
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+  expect((error as NativeRuntimeRequestError).nativeCode).toBe(
+    "graph_foreground_owner_exited"
+  );
+  expect(events).toEqual([
+    "graph retained-preflight refused",
+    "runtime status",
+  ]);
+});
+
+test("up without a recovery callback keeps the owner-exited refusal and reads no status", async () => {
+  const { start, events } = await stoppedPoolUnderRunFixture("stopped");
+  const { recoverStoppedPool: _omitted, ...plain } = start;
+  await expect(startNativeProject(plain)).rejects.toBeInstanceOf(
+    NativeRuntimeRequestError
+  );
+  expect(events).toEqual(["graph retained-preflight refused"]);
+});
 
 test.each([
   [

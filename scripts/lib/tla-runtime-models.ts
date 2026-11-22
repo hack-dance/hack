@@ -2871,6 +2871,149 @@ const contracts: readonly ModelContract[] = [
     fields: ["retired = <<1>>", "alive = 1"],
   },
   {
+    // HACK-2456: a pool that stops or dies under a live run. Positive: the
+    // stopped-pool recovery plus recovery from any earlier boot of the pool,
+    // with every fault (other boots, a stop between a recovery's boot and its
+    // graph recovery). The failing controls document the old predecessor-only
+    // rule: `negative` is `next` before HACK-2456, `by-hand` adds an unnamed
+    // `runtime up`, `strict` keeps predecessor-only recovery while something
+    // else boots the pool, `crash-in-recovery` lets the pool stop between the
+    // recovery's boot and its graph recovery: each reaches a dead end.
+    name: "native-pool-stop",
+    module: "PoolStop",
+    states: 113,
+    invariant: "NoDeadEnd",
+    action: "OwnerCrash",
+    fields: [
+      'pool = "stopped"',
+      'run = "ready"',
+      'owner = "dead"',
+      "pub = TRUE",
+    ],
+    alternativeWitnesses: [
+      {
+        action: "OwnerNotices",
+        fields: [
+          'pool = "stopped"',
+          'run = "ready"',
+          'owner = "dead"',
+          "pub = TRUE",
+        ],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "by-hand",
+        negative: true,
+        action: "RuntimeUp",
+        fields: [
+          'pool = "running"',
+          "runBoot = 1",
+          "boot = 3",
+          'owner = "dead"',
+        ],
+        // TLC's two workers may report the same dead end one boot later, after
+        // an extra `runtime up` and stop before the start (fault bound 3).
+        alternativeWitnesses: [
+          {
+            action: "RuntimeUp",
+            fields: [
+              'pool = "running"',
+              "runBoot = 2",
+              "boot = 4",
+              'owner = "dead"',
+            ],
+          },
+        ],
+      },
+      {
+        name: "strict",
+        negative: true,
+        action: "RecoverStopped",
+        fields: [
+          'pool = "running"',
+          "runBoot = 1",
+          "boot = 3",
+          'owner = "dead"',
+        ],
+        alternativeWitnesses: [
+          {
+            action: "RuntimeUp",
+            fields: [
+              'pool = "running"',
+              "runBoot = 1",
+              "boot = 3",
+              'owner = "dead"',
+            ],
+          },
+        ],
+      },
+      {
+        name: "crash-in-recovery",
+        negative: true,
+        action: "RecoverStopped",
+        fields: [
+          'pool = "running"',
+          "runBoot = 1",
+          "boot = 3",
+          "recovering = TRUE",
+        ],
+      },
+      // The shared HTTPS owner (HACK-2456, seen on a real VM). `https` is this
+      // change for a project with HTTPS routes. Each control turns one part off:
+      // the owner never retires when its boot ends, the previous-boot archive
+      // cannot prove quiescence, or down --recover does not start a stopped pool
+      // for a pending finalization. Each strands the recovered run's lease.
+      { name: "https", negative: false, states: 284 },
+      {
+        name: "https-no-retire",
+        negative: true,
+        action: "RecoverRunning",
+        fields: ['https = "live"', "fin = TRUE", 'pool = "running"'],
+        // TLC's two workers may report the recovery's own boot instead.
+        alternativeWitnesses: [
+          {
+            action: "RecoverStopped",
+            fields: ['https = "live"', "fin = TRUE", 'pool = "running"'],
+          },
+        ],
+      },
+      {
+        name: "https-archive",
+        negative: true,
+        action: "RecoverRunning",
+        fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+        // The owner may retire before or after the graph recovery.
+        alternativeWitnesses: [
+          {
+            action: "OwnerRetire",
+            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+          },
+          {
+            action: "RecoverStopped",
+            fields: ['https = "records"', "fin = TRUE", 'pool = "running"'],
+          },
+        ],
+      },
+      {
+        name: "https-stopped",
+        negative: true,
+        action: "OwnerRetire",
+        fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+        alternativeWitnesses: [
+          {
+            action: "RuntimeDown",
+            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+          },
+          {
+            action: "PoolRecover",
+            fields: ['pool = "stopped"', "fin = TRUE", 'run = "retained"'],
+          },
+        ],
+      },
+    ],
+  },
+  {
     // HACK-2440 (c, d), HACK-2416: a patient first request, no failure on one
     // doubtful reading, and a host-side bound on "starting". Slow, refusing and
     // hanging apps; `legacy` runs the steady cadence before the first success.

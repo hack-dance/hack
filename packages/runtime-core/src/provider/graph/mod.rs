@@ -20,6 +20,8 @@ pub use normalized::{
 #[cfg(target_os = "macos")]
 mod absent_publication_cleanup;
 mod admission;
+#[cfg(any(target_os = "macos", test))]
+mod boot_match;
 mod cache_provenance;
 mod dependency_hosts;
 #[cfg(target_os = "macos")]

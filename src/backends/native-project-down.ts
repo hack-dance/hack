@@ -12,6 +12,7 @@ import {
 import { openNativeDownHookSession } from "./native-project-down-hooks.ts";
 import {
   captureNativeProjectFinalization,
+  inspectNativeProjectFinalizationLifetime,
   type NativeProjectFinalizationToken,
   recoverNativeProjectFinalization,
   waitNativeProjectFinalization,
@@ -38,8 +39,10 @@ import {
   nativeRunEnvironmentChange,
   removeNativeProjectRun,
 } from "./native-project-run.ts";
+import { nativeProjectRuntimeUpArgs } from "./native-project-runtime-up.ts";
 import {
   invokeNativeRuntime,
+  isNativeRuntimeNotRunning,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
@@ -514,10 +517,19 @@ async function awaitPendingStartup(opts: {
    * again, stop waiting and stop it (see {@link RetainedRunResumed}).
    */
   readonly resumed?: () => Promise<boolean>;
+  /** Where the one-line wait notice goes; stderr by default. */
+  readonly notice?: (line: string) => void;
 }): Promise<boolean> {
-  const deadline = performance.now() + (opts.waitMs ?? 120_000);
+  const waitMs = opts.waitMs ?? 120_000;
+  const deadline = performance.now() + waitMs;
   let waited = false;
   while (await nativeProjectStartupPending(opts.scope)) {
+    if (!waited) {
+      // Say what this command waits for, once (HACK-2550).
+      (opts.notice ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+        `Waiting up to ${Math.ceil(waitMs / 1000)} s for an earlier start of this instance to end; a start whose native runtime stopped ends on its own within about 15 s.`
+      );
+    }
     waited = true;
     if (opts.untilPublished && (await loadNativeProjectRun(opts.scope))) {
       return true;
@@ -543,6 +555,109 @@ async function awaitPendingStartup(opts: {
  * begins once more from the mapping and stops the resumed graph.
  */
 class RetainedRunResumed extends Error {}
+
+/**
+ * Raised inside a down that found the pool stopped under a run whose
+ * foreground owner is dead, after it started the pool (HACK-2456):
+ * {@link nativeProjectDown} begins once more, never starting it again, and
+ * the ordinary dead-owner recovery then stops the run with data retained.
+ */
+class StoppedPoolStarted extends Error {}
+
+/** Shown after a down started the pool to recover its run (HACK-2456). */
+export const NATIVE_RECOVERY_RUNTIME_STARTED_NOTE =
+  "The native runtime was started to recover this run and is still running; run `runtime down` to stop it.";
+
+/**
+ * Whether the lock-free `graph foreground-owner` selection (host files only;
+ * it needs no running pool) shows an exited owner whose run the recovery after a
+ * boot can still recover. Starting the pool begins a new boot, so only the
+ * cross-boot dead-owner recovery applies: a ready run, or an interrupted
+ * dead-owner recovery resuming by its own selection. The same-boot recoveries
+ * (`recover-live-owner`, which a recoverable failed start and an interrupted
+ * live-owner recovery use) need the original boot's relay identity and cannot run
+ * after it, so those cases, an exited owner of a start that was never confirmed
+ * (`preparing`, `restoring`), a live, absent or uncertain owner, a retained stop
+ * (whose unadmitted owner is retired without the pool) and an unreadable
+ * selection are all false: the caller keeps its refusal and never starts a pool
+ * it could not then use.
+ */
+async function deadOwnerOfLiveRun(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly scope: NativeProjectRunScope;
+  readonly projectRoot: string;
+  readonly run: NativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<boolean> {
+  try {
+    const selection = await selectForegroundOwner(opts);
+    // A pending same-boot recovery is resumed by its own selection after the
+    // boot too, through recover-live-owner, which a new boot refuses.
+    if (selection.liveOwnerRecovery !== null) {
+      return false;
+    }
+    if (
+      selection.foreground === "exited" &&
+      (selection.phase === "ready-observed" ||
+        selection.deadOwnerRecovery !== null)
+    ) {
+      return true;
+    }
+    // A recovery that stopped the graph and retired the owner's publication,
+    // then failed in its frontend finalization (the shared HTTPS lease, HACK-2456
+    // seen on a real VM), leaves a retained stop with no owner and an
+    // interrupted frontend lifetime. Finishing it needs a running pool.
+    return (
+      selection.foreground === "absent" &&
+      selection.phase === "stopped-data-retained" &&
+      (
+        await inspectNativeProjectFinalizationLifetime({
+          scope: opts.scope,
+          run: opts.run,
+        })
+      ).state === "interrupted"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The first inspection of a down. When it finds the pool stopped and
+ * `startStoppedPool` allows it, a dead owner of a live run (see
+ * {@link deadOwnerOfLiveRun}) gets the pool started with the arguments every
+ * start sends, then {@link StoppedPoolStarted} makes the down begin again.
+ * Anything else keeps the inspection's refusal.
+ */
+async function inspectOrStartStoppedPool(opts: {
+  readonly inspect: () => Promise<unknown>;
+  readonly startStoppedPool: boolean;
+  readonly scope: NativeProjectRunScope;
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: NativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<unknown> {
+  try {
+    return await opts.inspect();
+  } catch (error) {
+    if (
+      !(
+        opts.startStoppedPool &&
+        isNativeRuntimeNotRunning(error) &&
+        (await deadOwnerOfLiveRun(opts))
+      )
+    ) {
+      throw error;
+    }
+  }
+  await opts.invoke({
+    runtime: opts.runtime,
+    cwd: opts.projectRoot,
+    args: [...nativeProjectRuntimeUpArgs(opts.projectRoot), "--json"],
+  });
+  throw new StoppedPoolStarted();
+}
 
 /** Whether an inspected graph is stopped with its data retained. */
 function stoppedRetained(snapshot: unknown): boolean {
@@ -617,6 +732,11 @@ async function nativeProjectDownOnce(opts: {
   readonly finalizationTimeoutMs?: number;
   /** How long to wait for an unpublished start to end (tests shorten it). */
   readonly startupWaitMs?: number;
+  /**
+   * Set by {@link nativeProjectDown} on the first attempt only: a stopped pool
+   * under a dead owner's live run may be started once (HACK-2456).
+   */
+  readonly startStoppedPool?: boolean;
 }) {
   const run = await downRun(opts);
   if (!run) {
@@ -634,7 +754,15 @@ async function nativeProjectDownOnce(opts: {
       run: run.run,
       invoke,
     });
-  let initial = await inspect();
+  let initial = await inspectOrStartStoppedPool({
+    inspect,
+    startStoppedPool: opts.startStoppedPool === true,
+    scope: opts.scope,
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    run,
+    invoke,
+  });
   verify(initial, run, false);
   const finalization = opts.deferFinalization
     ? undefined
@@ -850,17 +978,42 @@ async function nativeProjectDownOnce(opts: {
  * Stop an instance's native run. See {@link nativeProjectDownOnce}. A down
  * that waited on a start resuming the retained run begins once more, with no
  * further startup wait, so it stops the resumed graph under its new owner.
+ *
+ * A down that found the pool stopped under a run whose foreground owner is
+ * dead starts the pool and begins once more (HACK-2456); it never starts the
+ * pool twice, leaves it running and reports `runtimeStarted`. The restart
+ * coordinator (`deferFinalization`) never starts it.
  */
 export async function nativeProjectDown(
-  opts: Parameters<typeof nativeProjectDownOnce>[0]
-): ReturnType<typeof nativeProjectDownOnce> {
-  try {
-    return await nativeProjectDownOnce(opts);
-  } catch (error) {
-    if (!(error instanceof RetainedRunResumed)) {
+  opts: Omit<Parameters<typeof nativeProjectDownOnce>[0], "startStoppedPool">
+): Promise<
+  Awaited<ReturnType<typeof nativeProjectDownOnce>> & {
+    readonly runtimeStarted?: true;
+  }
+> {
+  let started = false;
+  let startupWaitMs = opts.startupWaitMs;
+  let resumed = false;
+  for (;;) {
+    try {
+      const result = await nativeProjectDownOnce({
+        ...opts,
+        startStoppedPool: opts.deferFinalization !== true && !started,
+        startupWaitMs,
+      });
+      return started ? { ...result, runtimeStarted: true } : result;
+    } catch (error) {
+      if (error instanceof StoppedPoolStarted && !started) {
+        started = true;
+        continue;
+      }
+      if (error instanceof RetainedRunResumed && !resumed) {
+        resumed = true;
+        startupWaitMs = 0;
+        continue;
+      }
       throw error;
     }
-    return await nativeProjectDownOnce({ ...opts, startupWaitMs: 0 });
   }
 }
 

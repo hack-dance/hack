@@ -96,10 +96,18 @@ fn validate_selection_with_absence(
     {
         return Err(invalid());
     }
-    let previous = if selection.previous_boot.is_some() {
-        crate::provider::state::Owner::load(engine.guest().candidate())?.previous_guest_boot_id
-    } else {
-        None
+    // A recorded earlier boot is admitted only while the pool still knows it as one
+    // of its earlier boots (never the current one); `validate_bindings` then binds the
+    // selection to exactly that boot.
+    let previous = match &selection.previous_boot {
+        Some(recorded) => {
+            let candidate = engine.guest().candidate();
+            let owner = crate::provider::state::Owner::load(candidate)?;
+            crate::provider::boot_history::earlier_boots(candidate, &owner)?
+                .into_iter()
+                .find(|boot| boot == recorded && boot != &selection.boot)
+        }
+        None => None,
     };
     validate_bindings(receipt, selection, previous.as_deref())?;
     if let Some(expected) = &selection.predecessor_owner {
@@ -404,7 +412,8 @@ fn pending_interrupted(receipt: &Receipt, previous: &str) -> bool {
 }
 
 /// Explicit dead-owner recovery only: guest helper absence follows the audited
-/// immediate boot transition, never a fabricated live-helper observation.
+/// boot transition since the run's earlier boot (guest tmpfs does not survive any
+/// reboot), never a fabricated live-helper observation.
 pub(crate) fn capture_previous_boot(
     candidate: &Candidate,
     engine: &Engine<'_>,
@@ -461,7 +470,7 @@ pub(crate) fn capture_previous_boot(
             if prior.selected.is_empty() {
                 // Zero ingress is still an enrolled graph cleanup. The prior
                 // empty sidecar alone cannot authorize it: require the exact
-                // dead pinned predecessor from the immediate old boot.
+                // dead pinned predecessor from the run's earlier boot.
                 selection.predecessor_owner = Some(predecessor_owner(receipt, previous, host_pin)?);
             } else {
                 selection.selected = prior
@@ -731,10 +740,31 @@ fn prior_generation(
     if interrupted_release(prior, current, receipt) {
         return true;
     }
+    // A completed earlier generation with routes may have stopped in any boot before the
+    // one the run died in: a run stopped in boot A and restored in boot B after the pool
+    // restarted leaves A's sidecar (HACK-2456, seen on a real VM). What proves it complete
+    // does not depend on its boot: every current route was launched after it, and the
+    // restore history holds its stopped receipt with its containers absent and its bridges
+    // retired (`stopped_prior_bindings`). It is never the live boot. An empty one has no
+    // such proof, so it keeps the previous boot, as does the interrupted release above.
+    let previous = current.previous_boot.as_deref().unwrap_or_default();
+    let earlier = if prior.selected.is_empty() {
+        prior.boot == previous
+    } else {
+        !previous.is_empty() && !prior.boot.is_empty() && prior.boot != current.boot
+    };
+    // A completed dead-owner recovery's own selection also records the boot it selected
+    // from (`capture_previous_boot`). A run recovered, restored and stranded again leaves
+    // it (HACK-2550, seen on a real VM). Only that recovery's retired intent, naming these
+    // exact bridges for the stopped receipt, proves it complete; neither of its boots
+    // may be the live one.
+    let recovered = prior.previous_boot.is_some();
     prior.version == 1
         && prior.owner == current.owner
-        && prior.boot == current.previous_boot.as_deref().unwrap_or_default()
-        && prior.previous_boot.is_none()
+        && earlier
+        && (!recovered
+            || (!prior.selected.is_empty()
+                && prior.previous_boot.as_deref() != Some(current.boot.as_str())))
         && prior.predecessor_owner.is_none()
         && prior.predecessor_absence.is_none()
         && prior.run == current.run
@@ -749,7 +779,14 @@ fn prior_generation(
                 .is_some_and(|relay| relay.launch_serial > prior.serial)
         })
         && (prior.selected.is_empty()
-            || stopped.is_some_and(|receipt| stopped_prior_bindings(root, prior, receipt)))
+            || stopped.is_some_and(|receipt| {
+                stopped_prior_bindings(root, prior, receipt)
+                    && (!recovered
+                        || super::super::dead_owner_cleanup::retired_prior_bridges(
+                            root, receipt, prior,
+                        )
+                        .unwrap_or(false))
+            }))
 }
 
 fn stopped_prior_bindings(root: &std::path::Path, prior: &Selection, receipt: &Receipt) -> bool {
@@ -759,7 +796,7 @@ fn stopped_prior_bindings(root: &std::path::Path, prior: &Selection, receipt: &R
         }) || super::super::dead_owner_cleanup::retired_prior_bridges(root, receipt, prior)
             .unwrap_or(false);
     acknowledged
-        && validate_bindings(receipt, prior, None).is_ok()
+        && validate_bindings(receipt, prior, prior.previous_boot.as_deref()).is_ok()
         && prior.selected.values().all(|selected| {
             let assignment = &selected.assignment;
             receipt
@@ -1537,6 +1574,104 @@ mod tests {
         stopped.resources.get_mut("container:web").unwrap().id = Some(assignment.container_id);
         stopped.resources.get_mut("container:web").unwrap().phase = "started".into();
         super::super::restore_history::retain(&fixture.0, &stopped).unwrap();
+        assert!(capture_prior_generation(&fixture.0, &current, &active).is_err());
+    }
+    /// HACK-2456, as seen on a real VM: the run was stopped in boot A (which left its
+    /// bridge sidecar), restored in boot B after the pool restarted, and stranded when the
+    /// pool stopped under it. Recovery in boot C finds A's sidecar, two boots back. It is
+    /// accepted once the restore history proves that generation stopped, and refused when
+    /// it names the live boot.
+    #[test]
+    fn prior_generation_from_a_boot_before_the_runs_own_is_accepted() {
+        let fixture = Fixture::new();
+        let stopped_boot = "00000000-0000-0000-0000-000000000000";
+        let old_boot = "11111111-1111-1111-1111-111111111111";
+        let new_boot = "22222222-2222-2222-2222-222222222222";
+        let mut current = selection(2);
+        current.boot = new_boot.into();
+        current.previous_boot = Some(old_boot.into());
+        current.capacity = 1;
+        let assignment = Assignment {
+            loopback_port: None,
+            reservation: "d".repeat(32),
+            run: current.run.clone(),
+            service: "web".into(),
+            generation: "e".repeat(64),
+            container_id: "f".repeat(64),
+            network_id: "1".repeat(64),
+            boot_id: stopped_boot.into(),
+            phase: "running".into(),
+            relay: Some(relay::Relay {
+                transport: relay::Transport::ReservationV1,
+                launch_serial: 1,
+                binary_sha256: "2".repeat(64),
+                target_pid: 10,
+                target_start: 10,
+                port: 8080,
+            }),
+        };
+        let mut prior = selection(1);
+        prior.boot = stopped_boot.into();
+        prior.capacity = 1;
+        prior.selected.insert(
+            0,
+            Selected {
+                assignment: assignment.clone(),
+                helper: Some(
+                    serde_json::from_value(json!({
+                        "pid":10,"start":10,"executable_device":1,"executable_inode":1,
+                        "socket_device":1,"socket_inode":1,"kernel_socket_inode":1
+                    }))
+                    .unwrap(),
+                ),
+            },
+        );
+        let mut newer = assignment.clone();
+        newer.container_id = "a".repeat(64);
+        newer.network_id = "b".repeat(64);
+        newer.boot_id = old_boot.into();
+        newer.relay.as_mut().unwrap().launch_serial = 2;
+        current.selected.insert(
+            0,
+            Selected {
+                assignment: newer,
+                helper: None,
+            },
+        );
+        let stopped: Receipt = serde_json::from_value(json!({
+            "version":1,"run":current.run,"owner":current.owner,
+            "namespace":"3".repeat(64),"plan_id":current.plan,
+            "phase":"stopped-data-retained","readiness":{},"resources":{
+                "container:web":{"kind":"container","key":"web","name":"old-web",
+                    "id":assignment.container_id,"image":null,"phase":"absent"},
+                "network:default":{"kind":"network","key":"default","name":"old-network",
+                    "id":assignment.network_id,"image":null,"phase":"absent"}
+            },
+            "relay_cleanup":{"version":1,"runtime":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "boot":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "operation":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "effect":vec![1;32],
+                "control_root":"/private/old","phase":"confirmed"}
+        }))
+        .unwrap();
+        state::write(&fixture.0.join("relay-cleanup-bridges.json"), &prior).unwrap();
+        let mut active = stopped.clone();
+        active.phase = "ready-observed".into();
+        active.relay_cleanup = None;
+        active.resources.get_mut("container:web").unwrap().id = Some("a".repeat(64));
+        active.resources.get_mut("network:default").unwrap().id = Some("b".repeat(64));
+        // Without the restore history nothing proves the older generation stopped.
+        assert!(capture_prior_generation(&fixture.0, &current, &active).is_err());
+        super::super::restore_history::retain(&fixture.0, &stopped).unwrap();
+        assert!(
+            capture_prior_generation(&fixture.0, &current, &active)
+                .unwrap()
+                .is_some()
+        );
+        // A sidecar naming the live boot is never a completed earlier generation.
+        let mut live = prior.clone();
+        live.boot = new_boot.into();
+        state::write(&fixture.0.join("relay-cleanup-bridges.json"), &live).unwrap();
         assert!(capture_prior_generation(&fixture.0, &current, &active).is_err());
     }
     #[test]

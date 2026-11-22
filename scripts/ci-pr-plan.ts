@@ -105,6 +105,19 @@ function shouldRunCandidate(opts: {
   );
 }
 
+/** Mirror the workflow’s exception for a complete, unlabeled diff into next. */
+export function isDockerExemptDiff(paths: readonly string[] | null): boolean {
+  return (
+    Boolean(paths?.length) &&
+    (paths?.every(
+      (path) =>
+        path === "scripts/lib/tla-runtime-models.ts" ||
+        /^(?:tests\/models|packages\/runtime-core|docs)\//.test(path)
+    ) ??
+      false)
+  );
+}
+
 export async function planPullRequest(opts: {
   readonly repoRoot: string;
   readonly changed: readonly string[] | null;
@@ -140,7 +153,13 @@ export async function planPullRequest(opts: {
     !opts.draft && (full || opts.changed?.some(touchesRustInput) === true);
   const mac =
     !opts.draft && (integration || stablePr || opts.full || opts.mac === true);
-  const e2e = !opts.draft && (integration || full || opts.e2e === true);
+  const dockerExempt =
+    !(opts.full || integration) &&
+    opts.baseRef === "next" &&
+    isDockerExemptDiff(opts.changed);
+  const e2e =
+    !opts.draft &&
+    (integration || (full && !dockerExempt) || opts.e2e === true);
   const macos = mac && pools.macos.length > 0 ? [1, 2, 3] : [];
   const linux = [4, 5, 6, 7, 8];
   const allJobs = full;

@@ -24,6 +24,20 @@ shard lists selected macOS
 files in its summary as **deferred to the integration run**, before typecheck or
 tests can fail. A green test check qualifies only the tests actually run.
 
+| Ready PR into `next` | Docker qualification |
+| --- | --- |
+| Nonempty diff limited to the model registry, `tests/models/**`, `packages/runtime-core/**` and `docs/**` | Skip Docker E2E, runtime images and Linux process lifetime |
+| Any other changed path | Follow the existing scope policy |
+| `ci:e2e` or `ci:full` | Follow the label's existing qualification policy |
+
+The exception leaves the compiler, candidate, state-model, build and docs
+selections under the existing policy. The workflow checks both sides of
+renames. Integration pushes continue to qualify Docker under the existing
+push policy. The static guard tests stay selected in the Linux pool for
+ordinary PRs, including when the selector classifies them as platform-sensitive.
+The task-catalog guard checks recipe provenance digests in `.hack/tasks.json`
+against the checkout.
+
 Both required names, test and docs site, always report. The named Docker fan-in
 passes an expected out-of-scope skip. Adding ci:mac enables the selected macOS
 unit pool and native host jobs under their usual input gates; ci:e2e enables the

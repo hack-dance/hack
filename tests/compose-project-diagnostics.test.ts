@@ -201,6 +201,19 @@ test.skipIf(process.platform !== "linux")(
       expect(repair.message).not.toContain("entry-");
       expect(repair.message).toContain('sudo chown -hR -- "$(id -u):$(id -g)"');
       expect(repair.message).not.toContain("Set user:");
+      const composeFile = join(root, "compose.yml");
+      await writeFile(
+        composeFile,
+        "services:\n  app:\n    volumes: [./dist/cache:/x]\n"
+      );
+      const attributed = await checkRootOwnedCheckout(
+        { projectRoot: root, composeFile },
+        process.getuid?.() ?? -1
+      );
+      expect(attributed.message).toContain('"dist" (possible services: app)');
+      expect(attributed.message).toMatch(
+        /Set user: .* on app in the Compose file/
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

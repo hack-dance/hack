@@ -132,7 +132,7 @@ export async function checkRootOwnedCheckout(
       ? Object.entries(compose.services)
       : [];
   const servicesToFix = new Set<string>();
-  const paths = observed.paths.map(({ path }) => {
+  const paths = observed.paths.map(({ path, directory }) => {
     const owners = services
       .filter(
         ([, spec]) =>
@@ -143,7 +143,9 @@ export async function checkRootOwnedCheckout(
               mount.type === "bind" &&
               !mount.readOnly &&
               mount.source !== undefined &&
-              (path === mount.source || path.startsWith(`${mount.source}/`))
+              (path === mount.source ||
+                path.startsWith(`${mount.source}/`) ||
+                (directory && mount.source.startsWith(`${path}/`)))
           )
       )
       .map(([name]) => name);

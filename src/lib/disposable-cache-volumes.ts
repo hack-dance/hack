@@ -1,7 +1,13 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { resolveGlobalHackDir } from "./config-paths.ts";
+import { writeTextFileAtomicIfChanged } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
+import {
+  ensurePrivateDirectory,
+  readBoundedPrivateFile,
+} from "./private-file.ts";
 import type { RuntimeProject } from "./runtime-projects.ts";
 import { exec } from "./shell.ts";
 
@@ -14,6 +20,7 @@ export type MountedNamedVolumeCandidate = {
   readonly name: string;
   readonly destinations: readonly string[];
   readonly services: readonly string[];
+  readonly fingerprint?: string;
 };
 
 export type DisposableCacheVolumeCandidate = MountedNamedVolumeCandidate & {
@@ -80,7 +87,10 @@ function collectProjectCacheVolumes(opts: {
     for (const container of service.containers) {
       if (
         container.labels?.[COMPOSE_PROJECT_LABEL] !== opts.composeProject ||
-        container.labels[COMPOSE_SERVICE_LABEL] !== service.service
+        container.labels[COMPOSE_SERVICE_LABEL] !== service.service ||
+        container.workingDir === null ||
+        canonicalPath(container.workingDir) !==
+          canonicalPath(opts.project.workingDir ?? "")
       ) {
         continue;
       }
@@ -109,34 +119,34 @@ function collectProjectCacheVolumes(opts: {
 export async function verifyDisposableCacheVolumes(opts: {
   readonly composeProject: string;
   readonly candidates: readonly MountedNamedVolumeCandidate[];
+  readonly kept?: CacheVolumeKept[];
 }): Promise<readonly DisposableCacheVolumeCandidate[]> {
   const verified: DisposableCacheVolumeCandidate[] = [];
 
   for (const candidate of opts.candidates) {
-    const result = await exec(["docker", "volume", "inspect", candidate.name], {
-      stdin: "ignore",
-    });
-    if (result.exitCode !== 0) {
-      continue;
-    }
-
-    const labels = parseVolumeLabels(result.stdout);
+    const proof = await inspectVolume(candidate.name);
+    const labels = proof?.labels;
     if (
       labels?.[COMPOSE_PROJECT_LABEL] !== opts.composeProject ||
-      (labels[COMPOSE_VOLUME_LABEL] ?? "").trim().length === 0
+      (getString(labels, COMPOSE_VOLUME_LABEL) ?? "").trim().length === 0 ||
+      (candidate.fingerprint && candidate.fingerprint !== proof?.fingerprint)
     ) {
+      opts.kept?.push({ name: candidate.name, reason: "ownership-unverified" });
       continue;
     }
     const explicitlyDisposable =
-      labels[DISPOSABLE_CACHE_LABEL]?.trim().toLowerCase() === "true";
+      getString(labels, DISPOSABLE_CACHE_LABEL)?.trim().toLowerCase() ===
+      "true";
     const nextDestinationOnly =
       candidate.destinations.length > 0 &&
       candidate.destinations.every(isNextCacheDestination);
     if (!(explicitlyDisposable || nextDestinationOnly)) {
+      opts.kept?.push({ name: candidate.name, reason: "not-disposable" });
       continue;
     }
     verified.push({
       ...candidate,
+      fingerprint: proof?.fingerprint,
       reason: explicitlyDisposable ? "explicit-label" : "next-destination",
     });
   }
@@ -152,6 +162,17 @@ export async function removeDisposableCacheVolumes(opts: {
   const failed: Array<{ readonly name: string; readonly error: string }> = [];
 
   for (const candidate of opts.candidates) {
+    if (
+      candidate.fingerprint &&
+      (await inspectVolume(candidate.name))?.fingerprint !==
+        candidate.fingerprint
+    ) {
+      failed.push({
+        name: candidate.name,
+        error: "Volume identity changed after preview.",
+      });
+      continue;
+    }
     const result = await exec(["docker", "volume", "rm", candidate.name], {
       stdin: "ignore",
     });
@@ -176,32 +197,134 @@ function isNextCacheDestination(destination: string): boolean {
   return normalized === ".next" || normalized.endsWith("/.next");
 }
 
-function parseVolumeLabels(stdout: string): Record<string, string> | null {
-  let parsed: unknown;
+export type CacheVolumeKept = {
+  readonly name: string;
+  readonly reason: "ownership-unverified" | "not-disposable";
+};
+
+const VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+const RECEIPT_LIMIT = 128 * 1024;
+const fingerprint = (text: string) =>
+  new Bun.CryptoHasher("sha256").update(text).digest("hex");
+
+async function inspectVolume(name: string) {
+  if (!VOLUME_NAME.test(name)) {
+    return null;
+  }
+  const result = await exec(["docker", "volume", "inspect", name], {
+    stdin: "ignore",
+  });
+  if (result.exitCode !== 0) {
+    return null;
+  }
   try {
-    parsed = JSON.parse(stdout);
+    const parsed: unknown = JSON.parse(result.stdout);
+    if (
+      !(
+        Array.isArray(parsed) &&
+        parsed.length === 1 &&
+        isRecord(parsed[0]) &&
+        parsed[0].Name === name &&
+        isRecord(parsed[0].Labels)
+      )
+    ) {
+      return null;
+    }
+    return {
+      labels: parsed[0].Labels,
+      fingerprint: getString(parsed[0], "CreatedAt")
+        ? fingerprint(result.stdout)
+        : undefined,
+    };
   } catch {
     return null;
   }
-  if (!(Array.isArray(parsed) && isRecord(parsed[0]))) {
+}
+
+async function cacheReceipt(opts: {
+  composeProject: string;
+  currentProjectDir: string;
+}) {
+  const id = await exec(["docker", "info", "--format", "{{.ID}}"], {
+    stdin: "ignore",
+  });
+  if (id.exitCode !== 0 || !id.stdout.trim()) {
     return null;
   }
-  const labels = parsed[0].Labels;
-  if (!isRecord(labels)) {
-    return null;
+  const directory = resolve(resolveGlobalHackDir(), "compose-cache-receipts");
+  const key = fingerprint(
+    JSON.stringify([
+      id.stdout.trim(),
+      canonicalPath(opts.currentProjectDir),
+      opts.composeProject,
+    ])
+  );
+  return { directory, path: resolve(directory, `${key}.json`) };
+}
+
+function isRecordedMount(value: unknown): value is MountedNamedVolumeCandidate {
+  return (
+    isRecord(value) &&
+    typeof value.name === "string" &&
+    VOLUME_NAME.test(value.name) &&
+    typeof value.fingerprint === "string" &&
+    [value.services, value.destinations].every(
+      (list) =>
+        Array.isArray(list) && list.every((item) => typeof item === "string")
+    )
+  );
+}
+
+/** Persist fresh mounted-volume observations before Compose removes their containers. */
+export async function retainDownCacheMounts(
+  opts: Parameters<typeof findMountedNamedVolumeCandidates>[0]
+): Promise<void> {
+  const mounts = findMountedNamedVolumeCandidates(opts);
+  if (!mounts.length) {
+    return;
   }
-  const out: Record<string, string> = {};
-  for (const key of [
-    COMPOSE_PROJECT_LABEL,
-    COMPOSE_VOLUME_LABEL,
-    DISPOSABLE_CACHE_LABEL,
-  ]) {
-    const value = getString(labels, key);
-    if (value) {
-      out[key] = value;
+  const receipt = await cacheReceipt(opts);
+  if (!receipt) {
+    return;
+  }
+  const recorded: MountedNamedVolumeCandidate[] = [];
+  for (const mount of mounts) {
+    const proof = await inspectVolume(mount.name);
+    if (proof?.fingerprint) {
+      recorded.push({ ...mount, fingerprint: proof.fingerprint });
     }
   }
-  return out;
+  const text = JSON.stringify(recorded);
+  if (Buffer.byteLength(text) <= RECEIPT_LIMIT) {
+    await ensurePrivateDirectory(receipt.directory);
+    await writeTextFileAtomicIfChanged(receipt.path, text, {
+      createMode: 0o600,
+      noFollowTarget: true,
+      tightenExisting: true,
+    });
+  }
+}
+
+export async function readDownCacheMounts(
+  opts: Parameters<typeof cacheReceipt>[0]
+): Promise<readonly MountedNamedVolumeCandidate[]> {
+  try {
+    const receipt = await cacheReceipt(opts);
+    if (!receipt) {
+      return [];
+    }
+    const text = await readBoundedPrivateFile({
+      path: receipt.path,
+      directories: [receipt.directory],
+      canonical: false,
+      maxBytes: RECEIPT_LIMIT,
+      refusal: () => new Error("Cache receipt could not be verified."),
+    });
+    const recorded: unknown = text ? JSON.parse(text) : null;
+    return Array.isArray(recorded) ? recorded.filter(isRecordedMount) : [];
+  } catch {
+    return [];
+  }
 }
 
 function canonicalPath(path: string): string {

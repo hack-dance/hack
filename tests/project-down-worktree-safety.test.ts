@@ -297,6 +297,85 @@ test("cache pruning is confirmation-gated and never selects application data mou
   expect(log).not.toContain("volume rm database-data");
 });
 
+test("a plain down retains proof for a later cache prune of that instance", async () => {
+  const fixture = await createWorktreeFixture();
+  const other = {
+    composeProject: "downsafe--other",
+    id: "other-runtime",
+    state: "running",
+    workingDir: join(fixture.worktreeRoot, ".hack"),
+    mounts: [
+      { type: "volume", source: "other-next", destination: "/app/.next" },
+    ],
+  };
+  await writeRuntimeFixtures({
+    fixture,
+    runtime: [
+      other,
+      {
+        composeProject: "downsafe--feature-current",
+        id: "current-runtime",
+        state: "running",
+        workingDir: join(fixture.worktreeRoot, ".hack"),
+        mounts: [
+          { type: "volume", source: "owned-next", destination: "/app/.next" },
+          { type: "volume", source: "owned-turbo", destination: "/app/.turbo" },
+          {
+            type: "volume",
+            source: "owned-next-foreign",
+            destination: "/other/.next",
+          },
+          {
+            type: "volume",
+            source: "database-data",
+            destination: "/var/lib/data",
+          },
+        ],
+      },
+    ],
+  });
+  const down = [
+    "down",
+    "--path",
+    fixture.worktreeRoot,
+    "--branch",
+    "feature-current",
+    "--json",
+  ];
+  expect((await runCliWithCapturedOutput(down)).exitCode).toBe(0);
+  // The fake engine retains the volumes after Compose removes the containers.
+  await writeRuntimeFixtures({ fixture, runtime: [other] });
+  const prune = await runCliWithCapturedOutput([
+    ...down,
+    "--prune-caches",
+    "--yes",
+  ]);
+  expect(prune.exitCode).toBe(0);
+  expect(JSON.parse(prune.stdout)).toMatchObject({
+    ok: true,
+    data: {
+      cacheVolumesRemoved: ["owned-next", "owned-turbo"],
+      cacheVolumesKept: [
+        { name: "database-data", reason: "not-disposable" },
+        { name: "owned-next-foreign", reason: "ownership-unverified" },
+      ],
+    },
+  });
+  const again = await runCliWithCapturedOutput([
+    ...down,
+    "--prune-caches",
+    "--yes",
+  ]);
+  expect(again.exitCode).toBe(0);
+  expect(JSON.parse(again.stdout)).toMatchObject({
+    ok: true,
+    data: { cacheVolumesRemoved: [] },
+  });
+  const log = await readFile(fixture.dockerLogPath, "utf8");
+  expect(log.match(/^volume rm /gm)).toHaveLength(2);
+  expect(log).not.toContain("volume rm other-next");
+});
+
 async function createWorktreeFixture(): Promise<{
   readonly dockerInspectPath: string;
   readonly dockerLogPath: string;
@@ -361,18 +440,21 @@ async function createWorktreeFixture(): Promise<{
       `  cat "${dockerInspectPath}"`,
       "  exit 0",
       "fi",
-      'if [ "$1 $2 $3" = "volume inspect owned-next" ]; then',
-      '  printf \'[{"Name":"owned-next","Labels":{"com.docker.compose.project":"downsafe--feature-current","com.docker.compose.volume":"next"}}]\\n\'',
+      'if [ "$1" = info ]; then echo fixture-engine; exit 0; fi',
+      'if [ "$1 $2" = "volume inspect" ]; then',
+      `  [ ! -e "${tempDir}/removed-$3" ] || exit 1`,
+      '  case "$3" in',
+      '    owned-next) key=next; project=downsafe--feature-current; extra="" ;;',
+      `    owned-turbo) key=turbo; project=downsafe--feature-current; extra=',"hack.cache.disposable":"true"' ;;`,
+      '    owned-next-foreign) key=next; project=downsafe--foreign; extra="" ;;',
+      '    database-data) key=data; project=downsafe--feature-current; extra="" ;;',
+      "    *) exit 1 ;;",
+      "  esac",
+      `  printf '[{"Name":"%s","CreatedAt":"2026-01-01T00:00:00Z","Labels":{"com.docker.compose.project":"%s","com.docker.compose.volume":"%s"%s}}]\\n' "$3" "$project" "$key" "$extra"`,
       "  exit 0",
       "fi",
-      'if [ "$1 $2 $3" = "volume inspect owned-turbo" ]; then',
-      '  printf \'[{"Name":"owned-turbo","Labels":{"com.docker.compose.project":"downsafe--feature-current","com.docker.compose.volume":"turbo","hack.cache.disposable":"true"}}]\\n\'',
-      "  exit 0",
-      "fi",
-      'if [ "$1 $2 $3" = "volume rm owned-next" ]; then',
-      "  exit 0",
-      "fi",
-      'if [ "$1 $2 $3" = "volume rm owned-turbo" ]; then',
+      'if [ "$1 $2" = "volume rm" ]; then',
+      `  touch "${tempDir}/removed-$3"`,
       "  exit 0",
       "fi",
       "exit 0",

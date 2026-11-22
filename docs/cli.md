@@ -740,6 +740,12 @@ these are true:
 - every observed destination's final path segment is `.next`, or the volume itself has
   `hack.cache.disposable=true`.
 
+A plain `down` records the mounted volumes before removing the containers, so a
+later `down --prune-caches` can check the same checkout, instance, Docker engine
+and volume identity. Volumes detached before this record existed are kept if
+checkout ownership cannot be established. JSON reports `cacheVolumesRemoved`
+and `cacheVolumesKept`, with the reason for each observed candidate it kept.
+
 Interactive cleanup shows the exact volumes, services, and destinations and defaults to “no.”
 `--json` and other scripted use must add `--yes`; otherwise the command fails before down with
 `E_INTERACTIVE_REQUIRED`. Postgres, Redis, dependency, application-data, bind, external, unlabeled

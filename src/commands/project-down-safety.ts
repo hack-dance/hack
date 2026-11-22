@@ -1,8 +1,10 @@
 import { CliUsageError } from "../cli/command.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import {
+  type CacheVolumeKept,
   type DisposableCacheVolumeCandidate,
   findMountedNamedVolumeCandidates,
+  readDownCacheMounts,
   verifyDisposableCacheVolumes,
 } from "../lib/disposable-cache-volumes.ts";
 import { confirmSafe } from "../lib/interactivity.ts";
@@ -57,6 +59,7 @@ export async function prepareDisposableCachePrune(opts: {
   readonly runtime: readonly RuntimeProject[];
   readonly writeNotice: (notice: DownSafetyNotice) => void;
   readonly yes: boolean;
+  readonly kept: CacheVolumeKept[];
 }): Promise<readonly DisposableCacheVolumeCandidate[]> {
   const observed = findMountedNamedVolumeCandidates({
     composeProject: opts.composeProject,
@@ -65,7 +68,13 @@ export async function prepareDisposableCachePrune(opts: {
   });
   const verified = await verifyDisposableCacheVolumes({
     composeProject: opts.composeProject,
-    candidates: observed,
+    candidates: observed.length
+      ? observed
+      : await readDownCacheMounts({
+          composeProject: opts.composeProject,
+          currentProjectDir: opts.projectDir,
+        }),
+    kept: opts.kept,
   });
   if (verified.length === 0) {
     opts.writeNotice({

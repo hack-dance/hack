@@ -150,6 +150,7 @@ import {
 } from "../lib/local-ca.ts";
 import { inspectMacCaEligibility } from "../lib/mac-ca-trust.ts";
 import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
+import { childStdoutTarget } from "../lib/machine-stdout.ts";
 import {
   isHackRenderedLoggingCompose,
   removeUnstartedProxyContainers,
@@ -200,7 +201,12 @@ import {
   detectDockerBackend,
   formatDockerConnectionGuidance,
 } from "../lib/runtime-guidance.ts";
-import { exec, execOrThrow, findExecutableInPath, run } from "../lib/shell.ts";
+import {
+  exec,
+  execOrThrow,
+  findExecutableInPath,
+  run as runShell,
+} from "../lib/shell.ts";
 import { createTrustedDockerExec } from "../lib/trusted-docker.ts";
 import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
@@ -286,6 +292,22 @@ import {
 } from "./global-status-observe-host.ts";
 
 /** Regex to split strings on whitespace. */
+
+/**
+ * `run` for this file's commands: while stdout is reserved for a `--json`
+ * envelope (set by `runCli` from Hack's own argv), a child's stdout goes to
+ * stderr, so `hack daemon start`, Compose and the rest cannot print into
+ * the envelope. Without `--json` it is inherited, as before.
+ */
+function run(
+  cmd: readonly string[],
+  opts: Parameters<typeof runShell>[1] = {}
+): ReturnType<typeof runShell> {
+  return runShell(cmd, {
+    ...opts,
+    stdout: opts.stdout ?? childStdoutTarget(undefined),
+  });
+}
 const WHITESPACE_PATTERN = /\s+/;
 const MAC_DNS_SUDOERS_PATH = "/etc/sudoers.d/dance.hack-dns-recovery";
 const MAC_DNS_SUDOERS_TEMP_FILENAME = "dance.hack-dns-recovery.sudoers";

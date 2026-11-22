@@ -202,9 +202,9 @@ export function parseNslookupAnswers(output: string): string[] {
 
 /**
  * `nslookup` exit and output, as one look at the DNS step. An answer counts
- * only when it is one of `expected`, the proxy container's own addresses
- * (CoreDNS answers routed names with Caddy's address); any other address is
- * a wrong answer. With `expected` unknown the answer cannot be compared.
+ * only when it is not empty and every address in it is one of `expected`,
+ * the proxy container's own addresses (CoreDNS answers routed names with
+ * Caddy's address); any other address in it is a wrong answer. With `expected` unknown the answer cannot be compared.
  */
 export function classifyNslookup(opts: {
   readonly exitCode: number;
@@ -221,12 +221,16 @@ export function classifyNslookup(opts: {
         retry: false,
       };
     }
-    if (answers.some((address) => opts.expected?.includes(address))) {
+    // Every address must be the proxy's: a client may pick any of them.
+    if (
+      answers.length > 0 &&
+      answers.every((address) => opts.expected?.includes(address))
+    ) {
       return { kind: "answered" };
     }
     return {
       kind: "refused",
-      detail: `CoreDNS answered ${answers.length > 0 ? answers.join(", ") : "with no address"}, not the proxy's address (${opts.expected.join(", ")})`,
+      detail: `CoreDNS answered ${answers.length > 0 ? answers.join(", ") : "with no address"}, not only the proxy's address (${opts.expected.join(", ")})`,
     };
   }
   // 126/127: the image has no runnable nslookup (a v4 proxy file's image).

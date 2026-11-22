@@ -35,6 +35,7 @@ import {
 } from "../src/constants.ts";
 import { resolveGlobalConfigPath } from "../src/lib/config-paths.ts";
 import * as interactivity from "../src/lib/interactivity.ts";
+import { resetStdoutReservationForTests } from "../src/lib/machine-stdout.ts";
 import {
   renderGlobalCaddyCompose,
   renderGlobalLoggingCompose,
@@ -63,6 +64,8 @@ const ISOLATED_ENV = [
 const originalIsolatedEnv = new Map<string, string | undefined>();
 const execCalls: string[][] = [];
 const runCalls: string[][] = [];
+/** Where each `run` call sent the child's stdout. */
+const runStdoutTargets: string[] = [];
 let runExitResponder: ((cmd: readonly string[]) => number | null) | null = null;
 let execMockResponder:
   | ((
@@ -91,8 +94,12 @@ const shellMock = await registerScopedModuleMock({
       execCalls.push([...cmd]);
       return { exitCode: 0, stdout: "", stderr: "" };
     },
-    run: async (cmd: readonly string[]) => {
+    run: async (
+      cmd: readonly string[],
+      opts?: { readonly stdout?: string }
+    ) => {
       runCalls.push([...cmd]);
+      runStdoutTargets.push(opts?.stdout ?? "inherit");
       return runExitResponder?.(cmd) ?? 0;
     },
     findExecutableInPath: (name?: string) =>
@@ -1869,6 +1876,8 @@ describe("global up's route probe: only Hack's own proxy passes, and what cannot
     caddyAddressesAnswer = null;
     httpsStateAnswer = null;
     httpsProbeCalls.length = 0;
+    // `runCli` reserves stdout for a `--json` run; later tests run without.
+    resetStdoutReservationForTests();
   });
 
   async function upWith(opts: {
@@ -1946,7 +1955,7 @@ describe("global up's route probe: only Hack's own proxy passes, and what cannot
     });
     expect(result.code).toBe(1);
     expect(result.output).toContain(
-      `CoreDNS answered 192.0.2.99, not the proxy's address (${CADDY})`
+      `CoreDNS answered 192.0.2.99, not only the proxy's address (${CADDY})`
     );
   }, 60_000);
 
@@ -2013,6 +2022,23 @@ describe("global up's route probe: only Hack's own proxy passes, and what cannot
     expect(ssh.output).toContain(
       "Not checked: the Docker engine is not local and its address is not known here"
     );
+  });
+
+  test("global up --json sends every child's stdout (Compose, hack daemon start) to stderr; without it they inherit", async () => {
+    runStdoutTargets.length = 0;
+    expect(
+      (await upWith({ dockerHost: "unix:///var/run/docker.sock" })).code
+    ).toBe(0);
+    expect(runStdoutTargets.length).toBeGreaterThan(0);
+    expect(new Set(runStdoutTargets)).toEqual(new Set(["inherit"]));
+    runStdoutTargets.length = 0;
+    const json = await upWith({
+      dockerHost: "unix:///var/run/docker.sock",
+      args: ["--json"],
+    });
+    expect(json.code).toBe(0);
+    expect(runStdoutTargets.length).toBeGreaterThan(0);
+    expect(new Set(runStdoutTargets)).toEqual(new Set(["stderr"]));
   });
 
   test("global up --json: stdout is one envelope, with the route outcome, or the readiness code on failure", async () => {

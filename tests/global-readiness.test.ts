@@ -213,7 +213,21 @@ test("nslookup: only the proxy's own address answers; a wrong address is a refus
     classifyNslookup({ exitCode: 0, output: NSLOOKUP("192.0.2.99"), expected })
   ).toEqual({
     kind: "refused",
-    detail: "CoreDNS answered 192.0.2.99, not the proxy's address (10.0.0.2)",
+    detail:
+      "CoreDNS answered 192.0.2.99, not only the proxy's address (10.0.0.2)",
+  });
+  // A client may pick any address in the answer: one that is not Caddy's
+  // fails even next to Caddy's.
+  expect(
+    classifyNslookup({
+      exitCode: 0,
+      output: `${NSLOOKUP("10.0.0.2")}Address: 192.0.2.99\n`,
+      expected,
+    })
+  ).toEqual({
+    kind: "refused",
+    detail:
+      "CoreDNS answered 10.0.0.2, 192.0.2.99, not only the proxy's address (10.0.0.2)",
   });
   // The proxy's address cannot be read: the answer cannot be compared.
   expect(

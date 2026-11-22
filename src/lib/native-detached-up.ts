@@ -1069,7 +1069,7 @@ export async function startNativeDetachedUp(opts: {
       new HackCliError({
         code: "E_CANCELLED",
         message:
-          "Native detached startup canceled; ordinary owned stop was requested. Inspect hack ps before retrying.",
+          "Native detached startup interrupted; ordinary owned stop was requested. Inspect hack ps before retrying.",
       })
     );
   };

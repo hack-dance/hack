@@ -145,6 +145,7 @@ import {
 } from "../backends/native-project-settings.ts";
 import { preflightNativeProjectSource } from "../backends/native-project-source-preflight.ts";
 import {
+  NativeStartupCanceledError,
   type NativeStartupProgress,
   startNativeProject,
 } from "../backends/native-project-start.ts";
@@ -2539,6 +2540,8 @@ export async function runLifecycleCommands(opts: {
    * result is then 130.
    */
   readonly signal?: AbortSignal;
+  /** Report a stop during native startup after the attached hook settles. */
+  readonly startupSignal?: AbortSignal;
 }): Promise<number> {
   const commands = opts.commands ?? [];
   assertAutostartHostCommandsAllowed({ hasCommands: commands.length > 0 });
@@ -2563,6 +2566,9 @@ export async function runLifecycleCommands(opts: {
           })
           .finally(clear);
       } catch (error: unknown) {
+        if (opts.startupSignal?.aborted) {
+          return 130;
+        }
         const message =
           error instanceof Error
             ? error.message
@@ -2640,6 +2646,9 @@ export async function runLifecycleCommands(opts: {
       message: `[end] ${opts.title}: exit ${exitCode}`,
     });
 
+    if (opts.startupSignal?.aborted) {
+      return 130;
+    }
     if (exitCode !== 0) {
       const failure = `${opts.title} failed (exit ${exitCode}): ${label}`;
       if (opts.summarizeFailure) {
@@ -2766,6 +2775,7 @@ function hasPersistentLifecycleCommands(
 
 async function runLifecycleUpBeforeAndProcesses(opts: {
   readonly title: string;
+  readonly startupSignal?: AbortSignal;
   readonly onHookStart?: HookStart;
   readonly onHookComplete?: HookCompletion;
   readonly summarizeFailure?: (name: string, reason?: string) => void;
@@ -2839,6 +2849,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
       onHookStart: opts.onHookStart,
       onHookComplete: opts.onHookComplete,
       commands: beforeCommands,
+      startupSignal: opts.startupSignal,
       projectRoot: opts.project.projectRoot,
       env: opts.env,
       projectDir: opts.project.projectDir,
@@ -2901,6 +2912,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     onHookStart: opts.onHookStart,
     onHookComplete: opts.onHookComplete,
     commands: beforeCommands,
+    startupSignal: opts.startupSignal,
     projectRoot: opts.project.projectRoot,
     env: opts.env,
     projectDir: opts.project.projectDir,
@@ -6857,6 +6869,7 @@ async function handleNativeUp({
     createNativeEnvFingerprintSession(envFingerprintScope);
   const { hosts: internalExtraHosts, sources: internalExtraHostSources } =
     await resolveNativeInternalExtraHostSelection({ project, cfg });
+  let ready = false;
   const startup: Parameters<typeof startNativeProject>[0] = {
     runtime: native,
     scope: {
@@ -6954,11 +6967,17 @@ async function handleNativeUp({
       }
       // A detached launcher's clocks follow these phases (HACK-2351).
       nativeDetachedUpProgress(event.phase);
-      reportNativeStartupProgress(event);
+      if (event.phase === "ready") {
+        ready = true;
+      }
+      if (restart || ready || event.phase !== "stopped") {
+        reportNativeStartupProgress(event);
+      }
     },
-    before: async (input) => {
+    before: async (input, signal) => {
       const lifecycle = await runLifecycleUpBeforeAndProcesses({
         title: "Lifecycle (native up before)",
+        startupSignal: signal,
         project,
         cfg,
         projectName,
@@ -7005,7 +7024,7 @@ async function handleNativeUp({
         ...(down?.before?.length || down?.after?.length
           ? { stop: { before: stopPhase("before"), after: stopPhase("after") } }
           : {}),
-        ready: async () => {
+        ready: async (readySignal: AbortSignal) => {
           await assertNativeSharedHelpersCurrent({
             lifecycle,
             cleanup,
@@ -7013,12 +7032,16 @@ async function handleNativeUp({
           });
           const code = await runLifecycleCommands({
             title: "Lifecycle (native up after)",
+            startupSignal: readySignal,
             commands: cfg.lifecycle?.up?.after,
             projectRoot: project.projectRoot,
             env: input.lifecycleHostEnvironment,
             projectDir: project.projectDir,
             composeProject,
           });
+          if (readySignal.aborted) {
+            return;
+          }
           if (code !== 0) {
             throw new HackCliError({
               code: "E_LIFECYCLE_FAILED",
@@ -7046,7 +7069,16 @@ async function handleNativeUp({
   };
   if (!restart) {
     try {
-      return await startNativeProject(startup);
+      const code = await startNativeProject(startup).catch((error: unknown) => {
+        if (error instanceof NativeStartupCanceledError) {
+          return error.interruptedExit;
+        }
+        throw error;
+      });
+      if (code === 130 && !ready) {
+        process.stderr.write("Native project startup interrupted.\n");
+      }
+      return code;
     } finally {
       await envFingerprints.release();
     }

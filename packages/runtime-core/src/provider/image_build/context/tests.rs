@@ -977,3 +977,48 @@ fn ignore_bounds_are_exact() {
         (4096, 256 * 1024, 1024, 64, 32, 1_000_000_000)
     );
 }
+
+#[test]
+fn rules_after_an_unsupported_pattern_still_count_against_the_bounds() {
+    // BuildKit matches every rule, so the fallback must not lift any bound.
+    for unsupported in ["[ab].txt", "\\*.log", "!", "x\u{a0}y"] {
+        let over_rules = format!("{unsupported}\n{}", "a\n".repeat(ignore::MAX_RULES));
+        assert_eq!(
+            bounds_code(over_rules.as_bytes()),
+            "native_build_ignore_bounds",
+            "{unsupported:?} + rules"
+        );
+        let long = "a".repeat(ignore::MAX_PATTERN_BYTES);
+        let over_text = format!(
+            "{unsupported}\n{}b\n",
+            format!("{long}\n").repeat(ignore::MAX_PATTERN_TEXT / ignore::MAX_PATTERN_BYTES)
+        );
+        assert_eq!(
+            bounds_code(over_text.as_bytes()),
+            "native_build_ignore_bounds",
+            "{unsupported:?} + text"
+        );
+        let over_wild = format!("{unsupported}\n{}\n", "?".repeat(ignore::MAX_WILDCARDS + 1));
+        assert_eq!(
+            bounds_code(over_wild.as_bytes()),
+            "native_build_ignore_bounds",
+            "{unsupported:?} + wildcards"
+        );
+        // A small rule set after it still takes the fallback (excludes nothing).
+        let small = format!("{unsupported}\n*.log\nbuild\n!build/keep\n");
+        let rules = ignore::Rules::parse(small.as_bytes()).unwrap();
+        assert!(rules.fallback, "{unsupported:?}");
+        assert_eq!(rules.len(), 0);
+    }
+    // The unsupported pattern itself counts too, and so does invalid UTF-8.
+    let at_limit = format!("[ab]\n{}", "a\n".repeat(ignore::MAX_RULES - 1));
+    assert!(ignore::Rules::parse(at_limit.as_bytes()).unwrap().fallback);
+    let mut invalid = vec![0xff, b'\n'];
+    invalid.extend("a\n".repeat(ignore::MAX_RULES).as_bytes());
+    assert_eq!(bounds_code(&invalid), "native_build_ignore_bounds");
+    // A wildcard-heavy unsupported pattern is bounded like any other.
+    assert_eq!(
+        bounds_code(format!("[{}]\n", "*".repeat(ignore::MAX_WILDCARDS)).as_bytes()),
+        "native_build_ignore_bounds"
+    );
+}

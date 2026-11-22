@@ -29,9 +29,11 @@
 //!
 //! - at most [`MAX_RULES`] effective rules and [`MAX_PATTERN_TEXT`] bytes of pattern
 //!   text after parsing, checked while parsing, so an oversized file costs no more than
-//!   reading it;
+//!   reading it. Every rule counts, including ones Hack cannot compile and ones after
+//!   such a rule (BuildKit still matches them all), so the fallback never lifts a bound;
 //! - per pattern at most [`MAX_PATTERN_BYTES`] bytes, [`MAX_SEGMENTS`] path segments
-//!   and [`MAX_WILDCARDS`] wildcard tokens (`*`, `?`, `**`), which bounds the matcher's
+//!   and [`MAX_WILDCARDS`] wildcards (counted as `*`, `?` and `[` characters, so `**`
+//!   counts twice; compiled patterns are also checked by token), which bounds the matcher's
 //!   active states and so the cost of one evaluation per path character;
 //! - a walk-wide work budget of [`WORK_BUDGET`] units: one per rule consulted for an
 //!   entry (parent-directory results included) plus one per matcher step (active
@@ -262,28 +264,50 @@ impl Rules {
 /// The compiled patterns, `Ok(None)` for syntax not reproduced here, or the bounds
 /// refusal as soon as a bound is crossed.
 fn parse_patterns(bytes: &[u8]) -> Result<Option<Vec<Pattern>>, crate::CandidateError> {
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        return Ok(None);
-    };
+    // BuildKit matches every rule of the file whether or not Hack can compile it, so
+    // the file-wide and per-pattern bounds apply to every line; a line Hack cannot
+    // reproduce only selects the fallback (exclude nothing) and counting goes on.
+    let text = String::from_utf8_lossy(bytes);
+    let mut fallback = matches!(text, std::borrow::Cow::Owned(_));
     let mut patterns = Vec::new();
+    let mut rules = 0_usize;
     let mut total = 0_usize;
+    let mut count = |pattern: &str| -> Result<(), crate::CandidateError> {
+        rules += 1;
+        total += pattern.len();
+        if rules > MAX_RULES
+            || total > MAX_PATTERN_TEXT
+            || pattern.len() > MAX_PATTERN_BYTES
+            || pattern.split('/').count() > MAX_SEGMENTS
+            || pattern
+                .chars()
+                .filter(|c| matches!(c, '*' | '?' | '['))
+                .count()
+                > MAX_WILDCARDS
+        {
+            Err(over_bounds())
+        } else {
+            Ok(())
+        }
+    };
     for (index, raw) in text.split('\n').enumerate() {
         let mut line = raw.strip_suffix('\r').unwrap_or(raw);
         if index == 0 {
             line = line.strip_prefix('\u{feff}').unwrap_or(line);
         }
-        if line.len() > MAX_LINE_BYTES {
-            return Ok(None);
-        }
         if line.starts_with('#') {
             continue;
         }
-        if line
-            .chars()
-            .any(|c| (c.is_whitespace() && !c.is_ascii()) || (c.is_control() && c != '\t'))
-            && !go_trim(line).is_empty()
+        if line.len() > MAX_LINE_BYTES
+            || (line
+                .chars()
+                .any(|c| (c.is_whitespace() && !c.is_ascii()) || (c.is_control() && c != '\t'))
+                && !go_trim(line).is_empty())
         {
-            return Ok(None);
+            // Docker rejects or reads such a line differently; counted as written.
+            fallback = true;
+            count(go_trim(line))?;
+            continue;
         }
         let line = go_trim(line);
         if line.is_empty() {
@@ -317,32 +341,30 @@ fn parse_patterns(bytes: &[u8]) -> Result<Option<Vec<Pattern>>, crate::Candidate
         }
         let full = clean(trimmed);
         let (negated, text) = match full.strip_prefix('!') {
-            Some("") => return Ok(None),
+            Some("") => {
+                fallback = true;
+                count("")?;
+                continue;
+            }
             Some(rest) => (true, rest.to_owned()),
             None => (false, full),
         };
-        if patterns.len() == MAX_RULES {
-            return Err(over_bounds());
-        }
-        total += text.len();
-        if total > MAX_PATTERN_TEXT {
-            return Err(over_bounds());
+        count(&text)?;
+        if fallback {
+            continue;
         }
         match Pattern::compile(negated, text)? {
             Some(pattern) => patterns.push(pattern),
-            None => return Ok(None),
+            None => fallback = true,
         }
     }
-    Ok(Some(patterns))
+    Ok((!fallback).then_some(patterns))
 }
 
 impl Pattern {
     /// `patternmatcher.Pattern.compile`, `None` for syntax not reproduced here, or the
     /// bounds refusal for a pattern over its complexity bounds.
     fn compile(negated: bool, text: String) -> Result<Option<Self>, crate::CandidateError> {
-        if text.len() > MAX_PATTERN_BYTES || text.split('/').count() > MAX_SEGMENTS {
-            return Err(over_bounds());
-        }
         if text.contains(['[', ']', '\\', '^']) {
             return Ok(None);
         }

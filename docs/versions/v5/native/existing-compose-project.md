@@ -79,7 +79,8 @@ the build read. Change any of them and the next `up` builds again, also after
 `hack down`; the run's containers are then recreated from the new image and named
 volumes are kept. `hack restart` checks the same inputs before it stops anything: a
 build that fails leaves the current project running, and a rebuilt image is what the
-restarted project runs. Base image tags are looked up at most once a day.
+restarted project runs. A base image tag's looked-up digest is reused for at most
+24 hours; `HACK_NATIVE_REBUILD=1` builds again and looks the tags up now.
 
 **Host aliases** (`extra_hosts` with `host-gateway`, or `internal.extra_hosts`).
 Native's VM has no route to your machine except through a binding to one host

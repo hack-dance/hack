@@ -3032,8 +3032,9 @@ const contracts: readonly ModelContract[] = [
       },
       {
         // HACK-2550: the archive's port claim binds with address reuse so the
-        // retired Caddy's TIME_WAIT does not block it; without the kernel's
-        // listener check it would archive over a live specific-address listener.
+        // retired Caddy's TIME_WAIT does not block it; binding the wildcard alone,
+        // without the exact claim of every local address, it would archive over
+        // a live specific-address listener.
         name: "reuse-no-check",
         negative: true,
         invariant: "NoArchiveOverListener",

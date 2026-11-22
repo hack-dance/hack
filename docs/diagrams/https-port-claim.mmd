@@ -9,11 +9,11 @@ stateDiagram-v2
 
     [*] --> reuse : macOS
     [*] --> strict : other hosts
-    reuse --> list : four guards bound
+    reuse --> relist : every address bound
     reuse --> strict : a bind failed
-    state list <<choice>>
-    list --> claimed : [only our 4 listeners]
-    list --> strict : [other listener, no list]
+    state relist <<choice>>
+    relist --> claimed : [addresses unchanged]
+    relist --> strict : [addresses changed]
     strict --> claimed : [port free]
     strict --> retry : [bind refused]
     retry --> strict : every 500 ms, 35 s
@@ -21,13 +21,15 @@ stateDiagram-v2
     claimed --> [*]
 
     note right of reuse
-        SO_REUSEADDR, never
-        SO_REUSEPORT: TIME_WAIT
-        does not block the bind.
+        SO_REUSEADDR, no SO_REUSEPORT:
+        wildcard, loopback and each
+        interface address, exactly.
+        TIME_WAIT does not block it;
+        another listener does.
     end note
-    note right of list
-        netstat -an -p tcp, fixed
-        path, clean env, 5 s bound.
+    note right of relist
+        getifaddrs again after
+        binding; it must match.
     end note
     note left of retry
         Old path: waits out the

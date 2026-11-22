@@ -273,7 +273,8 @@ export interface NativeBuiltImage {
    */
   readonly basePins?: Readonly<Record<string, string>>;
 }
-const MAX_BASE_PINS = 64;
+/** The runtime's own bound on a request's `pins`. */
+const MAX_BASE_PINS = 1024;
 const MAX_REFERENCE = 512;
 
 function parseBuilt(value: unknown): NativeBuiltImage {
@@ -760,7 +761,9 @@ async function runPendingBuilds(opts: {
           target: request.target,
           args: request.args,
           policy: opts.rebuild ? "rebuild" : "missing",
-          pins,
+          // Sent only once a build returned pins: the runtime ships with this CLI,
+          // and a request without the field stays the version-1 shape.
+          ...(Object.keys(pins).length > 0 ? { pins } : {}),
           timeout_seconds: BUILD_TIMEOUT_SECONDS,
         }),
         { mode: 0o600, flag: "wx" }

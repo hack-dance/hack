@@ -116,6 +116,8 @@ const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
 const MAX_METADATA_BYTES: u64 = 1024 * 1024;
 const MAX_IGNORE_BYTES: u64 = 1024 * 1024;
 const MAX_ARGS: usize = 64;
+/// Passed base-image pins a request accepts (see [`BuildRequest::pins`]).
+pub const MAX_PINS: usize = 1024;
 /// How long a reused image's recorded base-image resolution is trusted.
 pub(super) const BASE_RESOLUTION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// The build key document version; 2 added the context digest.
@@ -193,9 +195,14 @@ pub struct BuildRequest {
     pub timeout_seconds: Option<u64>,
     /// Base-image pins this command already chose, keyed by canonical reference (for
     /// example `docker.io/library/alpine:3.20`), each `docker.io/<repository>@sha256:<hex>`
-    /// as an earlier outcome's `base_pins` reported it. A Dockerfile base found here
-    /// uses that pin under either policy, with no registry call and no shared record;
-    /// entries for other references are ignored. At most 64 entries.
+    /// as an earlier outcome's `base_pins` reported it. A passed pin is a hint, never
+    /// evidence: a Dockerfile base found here uses it, under either policy and with no
+    /// registry call, only when this namespace's fresh shared resolution record (which
+    /// only a verified resolution writes) holds exactly that pin, and takes that
+    /// record's resolution time. Otherwise, and always for a base the Dockerfile pins by
+    /// digest, the pin is ignored and the base is pinned as if none were passed.
+    /// Entries for other references are ignored. At most [`MAX_PINS`] entries, each key
+    /// and value at most 512 bytes.
     #[serde(default)]
     pub pins: BTreeMap<String, String>,
 }
@@ -473,7 +480,7 @@ fn validate_request(request: &BuildRequest) -> Result<(), CandidateError> {
             "Build arguments exceed 64 KiB in total.",
         ));
     }
-    if request.pins.len() > MAX_ARGS
+    if request.pins.len() > MAX_PINS
         || request.pins.iter().any(|(reference, pin)| {
             reference.is_empty()
                 || reference.len() > 512
@@ -485,7 +492,7 @@ fn validate_request(request: &BuildRequest) -> Result<(), CandidateError> {
         })
     {
         return Err(invalid(
-            "Passed base-image pins must be at most 64 `docker.io/<repository>@sha256:<hex>` references.",
+            "Passed base-image pins must be at most 1024 `docker.io/<repository>@sha256:<hex>` references.",
         ));
     }
     let timeout = request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS);
@@ -1071,17 +1078,7 @@ pub(super) fn run<P: BuildPool>(
             if canceled() || Instant::now() >= deadline {
                 receipt.phase = Phase::Canceled;
                 state::write(&receipt_path, &receipt)?;
-                return Err(if canceled() {
-                    refusal(
-                        "native_build_canceled",
-                        "The image build was canceled; no image was adopted.",
-                    )
-                } else {
-                    refusal(
-                        "native_build_timeout",
-                        "The image build exceeded its time budget and was stopped; no image was adopted.",
-                    )
-                });
+                return Err(late_stop(canceled()));
             }
         }
         Ended::Exited(false) => {
@@ -1145,6 +1142,12 @@ pub(super) fn run<P: BuildPool>(
             return Err(error);
         }
     };
+    // The last point a cancellation or the deadline can still stop adoption.
+    if canceled() || Instant::now() >= deadline {
+        receipt.phase = Phase::Canceled;
+        state::write(&receipt_path, &receipt)?;
+        return Err(late_stop(canceled()));
+    }
     receipt.phase = Phase::ContentIdVerified;
     receipt.image_id = Some(id.clone());
     receipt.image_bytes = image_bytes.or(receipt.image_bytes);
@@ -1226,6 +1229,21 @@ fn write_base_record(path: &Path, record: &BaseRecord) {
     }
 }
 
+/// The refusal for a cancellation or deadline reached after the client ran.
+fn late_stop(canceled: bool) -> CandidateError {
+    if canceled {
+        refusal(
+            "native_build_canceled",
+            "The image build was canceled; no image was adopted.",
+        )
+    } else {
+        refusal(
+            "native_build_timeout",
+            "The image build exceeded its time budget and was stopped; no image was adopted.",
+        )
+    }
+}
+
 fn reused(inputs: &Inputs, id: &str, pins: &BTreeMap<String, String>) -> BuildOutcome {
     BuildOutcome {
         image_id: id.to_owned(),
@@ -1249,15 +1267,9 @@ fn reference_pins(inputs: &Inputs, pins: &BTreeMap<String, String>) -> BTreeMap<
         .collect()
 }
 
-/// Whether `pin` is a digest pin of `base`'s own repository, the only form a passed pin
-/// may take.
-fn pin_of(base: &BaseImage, pin: &str) -> bool {
-    pin.strip_prefix(&format!("docker.io/{}@", base.repository()))
-        .is_some_and(image_id)
-}
-
 /// Choose one pin per base image of this request, in order of preference: a passed
-/// pin; under policy `missing`, the fresh receipt's pin or a fresh shared record;
+/// pin backed by a fresh shared record holding exactly it (see [`BuildRequest::pins`]);
+/// under policy `missing`, the fresh receipt's pin or a fresh shared record;
 /// otherwise a registry resolution (recorded for later builds). Returns the pins by
 /// named build context and the oldest resolution time among them.
 fn choose_pins<P: BuildPool>(
@@ -1287,18 +1299,19 @@ fn choose_pins<P: BuildPool>(
         let reference = base.reference.canonical();
         let record = base_record_path(directory, &reference);
         let missing = inputs.policy == Policy::Missing;
-        let (pinned, at) = if let Some(passed) = inputs.pins.get(&reference) {
-            if !pin_of(base, passed) {
-                return Err(invalid(
-                    "A passed base-image pin does not pin its own base image by digest.",
-                ));
-            }
-            // Its resolution time is the shared record's when that names the same pin.
-            let at = state::read_bounded::<BaseRecord>(&record, MAX_BASE_RECORD_BYTES)
-                .ok()
-                .filter(|known| known.reference == reference && &known.pinned_reference == passed)
-                .map_or_else(|| unix_seconds(now), |known| known.resolved_at);
-            (passed.clone(), at)
+        // A passed pin is only a hint: it is used when this runtime's own fresh record
+        // of a verified resolution holds exactly that pin, and never for a base the
+        // Dockerfile already pins by digest.
+        let backed = inputs
+            .pins
+            .get(&reference)
+            .filter(|_| base.reference.digest.is_none())
+            .and_then(|passed| {
+                read_base_record(&record, &reference, now)
+                    .filter(|known| &known.pinned_reference == passed)
+            });
+        let (pinned, at) = if let Some(known) = backed {
+            (known.pinned_reference, known.resolved_at)
         } else if let Some((pin, at)) = fresh_receipt.filter(|_| missing).and_then(|receipt| {
             Some((
                 receipt.base_pins.get(&base.context_name)?.clone(),

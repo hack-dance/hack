@@ -14,6 +14,8 @@
 //!   since the key walk are not copied, and a recorded entry that vanished refuses;
 //! - sources are opened without following symlinks and without blocking, and must still
 //!   be regular files, so a swapped-in symlink, FIFO or device is refused, never read;
+//! - every created file and directory's mode is read back and must equal the record
+//!   (`chmod` may silently drop a setgid bit), else `native_build_context_copy`;
 //! - modification times are carried over so image layers keep the project's times;
 //!   owners are not (BuildKit `COPY` assigns its own unless told otherwise).
 //!
@@ -21,7 +23,7 @@
 //! takes the recorded root mode. [`Snapshot`] removes the whole tree when dropped (on
 //! every exit path); a tree a killed process left behind is removed by the next attempt
 //! under the same key lock. The copy observes the operation's cancellation and
-//! deadline between entries.
+//! deadline before every entry and every chunk of a file.
 use super::{Entry, Kind, changed, unreadable};
 use crate::{CandidateError, provider::state};
 use sha2::{Digest, Sha256};
@@ -107,7 +109,11 @@ impl Snapshot {
                         .map_err(state::io)?;
                 }
                 Kind::File(hash, size) => {
-                    copy_file(&from, &to, entry.mode, *hash, *size, entry.mtime)?;
+                    if let Err(stopped) =
+                        copy_file(&from, &to, entry.mode, *hash, *size, entry.mtime, stop)?
+                    {
+                        return Ok(Err(stopped));
+                    }
                 }
             }
         }
@@ -115,6 +121,7 @@ impl Snapshot {
         for (path, mode, mtime) in directories.iter().rev() {
             fs::set_permissions(path, fs::Permissions::from_mode(*mode)).map_err(state::io)?;
             set_mtime(path, *mtime)?;
+            require_mode(path, *mode)?;
         }
         Ok(Ok(snapshot))
     }
@@ -124,6 +131,35 @@ impl Drop for Snapshot {
     fn drop(&mut self) {
         let _ = remove_tree(&self.holder);
     }
+}
+
+#[cfg(test)]
+pub(super) type AfterMode = std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>>;
+#[cfg(test)]
+thread_local! {
+    /// Test seam: runs on each created file or directory just before its mode is read
+    /// back, so a test can drop a bit as a filesystem might.
+    pub(super) static BEFORE_MODE_CHECK: AfterMode = const { std::cell::RefCell::new(None) };
+}
+
+/// Read back a created entry's mode (without following a symlink): `chmod` can succeed
+/// while dropping bits (setgid for a group the user is not in, or a filesystem that
+/// does not keep them), and BuildKit must see exactly the keyed mode.
+fn require_mode(path: &Path, mode: u32) -> Result<(), CandidateError> {
+    #[cfg(test)]
+    BEFORE_MODE_CHECK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(path);
+        }
+    });
+    let metadata = fs::symlink_metadata(path).map_err(state::io)?;
+    if metadata.mode() & 0o7777 != mode {
+        return Err(crate::CandidateError::new(
+            "native_build_context_copy",
+            "The build context's file permissions cannot be reproduced in the build copy; no image was built.",
+        ));
+    }
+    Ok(())
 }
 
 fn time(mtime: (i64, i64)) -> SystemTime {
@@ -143,7 +179,8 @@ fn set_mtime(path: &Path, mtime: (i64, i64)) -> Result<(), CandidateError> {
 }
 
 /// Copy one regular file in a single pass, hashing exactly the bytes written, and
-/// require them to match the record.
+/// require them and the copy's mode to match the record. `stop` is polled before every
+/// chunk, so one large file cannot defer a cancellation or the deadline.
 fn copy_file(
     from: &Path,
     to: &Path,
@@ -151,7 +188,8 @@ fn copy_file(
     hash: [u8; 32],
     size: u64,
     mtime: (i64, i64),
-) -> Result<(), CandidateError> {
+    stop: &dyn Fn() -> Option<Stopped>,
+) -> Result<Result<(), Stopped>, CandidateError> {
     let source = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -173,6 +211,9 @@ fn copy_file(
     let mut buffer = vec![0_u8; COPY_BUFFER];
     let mut total = 0_u64;
     loop {
+        if let Some(stopped) = stop() {
+            return Ok(Err(stopped));
+        }
         let read = reader.read(&mut buffer).map_err(|_| unreadable())?;
         if read == 0 {
             break;
@@ -192,7 +233,10 @@ fn copy_file(
         .map_err(state::io)?;
     target
         .set_times(FileTimes::new().set_modified(time(mtime)))
-        .map_err(state::io)
+        .map_err(state::io)?;
+    drop(target);
+    require_mode(to, mode)?;
+    Ok(Ok(()))
 }
 
 /// Remove a snapshot tree, first making every directory in it writable (a recorded

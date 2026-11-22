@@ -313,7 +313,8 @@ test("one command pins each base tag once: later builds receive earlier pins", a
       };
     },
   });
-  expect(sent).toEqual([{}, { "docker.io/library/node:22": pin }]);
+  // The first request omits the field; later ones carry the command's pins.
+  expect(sent).toEqual([undefined, { "docker.io/library/node:22": pin }]);
 });
 
 test("restart resolves its builds before stopping: a rebuilt image is what it runs", async () => {

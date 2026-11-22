@@ -609,3 +609,49 @@ fn a_snapshot_refuses_any_difference_from_the_record() {
     assert_eq!(stopped, snapshot::Stopped::Canceled);
     assert!(!holder.exists());
 }
+
+#[test]
+fn a_copy_whose_mode_cannot_be_reproduced_refuses() {
+    let tree = Tree::new();
+    let keyed = tree.walk("", None, SystemTime::now());
+    let holder = tree.root.join("snapshot");
+    for target in ["main.txt", "sub"] {
+        snapshot::BEFORE_MODE_CHECK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |path: &Path| {
+                if path.ends_with(target) {
+                    let mode = fs::symlink_metadata(path).unwrap().mode() & 0o7777;
+                    fs::set_permissions(path, fs::Permissions::from_mode(mode & !0o004)).unwrap();
+                }
+            }));
+        });
+        let error = snapshot::Snapshot::create(&tree.context(), &holder, &keyed.recorded, &|| None)
+            .unwrap_err();
+        snapshot::BEFORE_MODE_CHECK.with(|slot| *slot.borrow_mut() = None);
+        assert_eq!(error.code, "native_build_context_copy", "{target}");
+        assert!(!error.message.contains(target));
+        assert!(!holder.exists());
+    }
+}
+
+#[test]
+fn a_large_file_copy_stops_between_chunks() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap();
+    let root = crate::test_root::private_test_root(&tmp, "hack-snapshot-chunks");
+    let context = root.join("context");
+    fs::create_dir(&context).unwrap();
+    fs::write(context.join("big"), vec![b'x'; 4 * 1024 * 1024]).unwrap();
+    let keyed = digest(&context, b"", None, SystemTime::now(), Bounds::DEFAULT).unwrap();
+    assert_eq!(keyed.recorded.len(), 2);
+    // Two entries poll twice; the third poll can only come from inside the file copy.
+    let polls = std::cell::Cell::new(0);
+    let holder = root.join("snapshot");
+    let stopped = snapshot::Snapshot::create(&context, &holder, &keyed.recorded, &|| {
+        polls.set(polls.get() + 1);
+        (polls.get() >= 3).then_some(snapshot::Stopped::Expired)
+    })
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(stopped, snapshot::Stopped::Expired);
+    assert!(!holder.exists());
+    fs::remove_dir_all(&root).unwrap();
+}

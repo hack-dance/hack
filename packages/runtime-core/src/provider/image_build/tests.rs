@@ -1734,36 +1734,30 @@ fn second_build(fixture: &Fixture, policy: Policy, pins: BTreeMap<String, String
 }
 
 #[test]
-fn passed_pins_give_every_build_of_a_command_the_same_base() {
+fn passed_pins_are_hints_used_only_when_a_shared_record_backs_them() {
     const MOVED: &str = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
     let fixture = Fixture::new();
-    let first = fixture.inputs(Policy::Missing);
     let pool = FakePool::new("pool-1");
-    pool.built(&first, "pool-1", serde_json::json!({}));
-    fixture.client(&first, "ok");
-    let outcome = run(&fixture.candidate, &pool, &first, &never).unwrap();
-    assert_eq!(pool.resolve_deadlines.borrow().len(), 1);
-    let passed = outcome.base_pins.clone();
-    // The tag moves and no shared record exists: only the passed pin can agree.
+    let start = UNIX_EPOCH + Duration::from_secs(1_900_000_000);
+    *pool.now.borrow_mut() = start;
+    let resolves = || pool.resolve_deadlines.borrow().len();
+    let build = |inputs: &Inputs| {
+        pool.built(inputs, "pool-1", serde_json::json!({}));
+        fixture.client(inputs, "ok");
+        run(&fixture.candidate, &pool, inputs, &never).unwrap()
+    };
+    let first = fixture.inputs(Policy::Missing);
+    let passed = build(&first).base_pins;
+    assert_eq!(resolves(), 1);
+    // The tag moves upstream. The shared record of the first resolution backs the
+    // passed pin, so the second Dockerfile gets the same base under either policy.
     *pool.pin.borrow_mut() = MOVED.into();
-    fs::remove_dir_all(
-        builds_root(&fixture.candidate)
-            .join(&first.namespace)
-            .join("bases"),
-    )
-    .unwrap();
     for policy in [Policy::Missing, Policy::Rebuild] {
         let second = second_build(&fixture, policy, passed.clone());
         assert_ne!(second.key, first.key);
-        pool.built(&second, "pool-1", serde_json::json!({}));
-        fixture.client(&second, "ok");
-        let built = run(&fixture.candidate, &pool, &second, &never).unwrap();
+        let built = build(&second);
         assert_eq!(built.base_pins, passed, "{policy:?}");
-        assert_eq!(
-            pool.resolve_deadlines.borrow().len(),
-            1,
-            "{policy:?} resolved"
-        );
+        assert_eq!(resolves(), 1, "{policy:?} resolved");
         let bake: Value = serde_json::from_slice(
             &fs::read(fixture.scratch(&second).join("seen-bake.json")).unwrap(),
         )
@@ -1773,48 +1767,144 @@ fn passed_pins_give_every_build_of_a_command_the_same_base() {
             format!("docker-image://docker.io/library/alpine@{PIN}")
         );
     }
+    // A backed pin carries the record's time: 23 hours later it is still the first
+    // resolution's time, not now.
+    *pool.now.borrow_mut() = start + Duration::from_secs(23 * 60 * 60);
+    let late = second_build(&fixture, Policy::Rebuild, passed.clone());
+    build(&late);
+    assert_eq!(resolves(), 1);
+    assert_eq!(
+        fixture.receipt(&late).bases_resolved_at,
+        Some(unix_seconds(start))
+    );
 
-    // A fresh receipt whose pin differs from the passed one builds instead of reusing.
+    // No record: the passed pin is ignored and the base resolves (to the moved tag).
+    let bases = builds_root(&fixture.candidate)
+        .join(&first.namespace)
+        .join("bases");
+    fs::remove_dir_all(&bases).unwrap();
+    let unbacked = build(&second_build(&fixture, Policy::Rebuild, passed.clone()));
+    assert_eq!(resolves(), 2);
     let moved = BTreeMap::from([(
         "docker.io/library/alpine:3.20".to_owned(),
         format!("docker.io/library/alpine@{MOVED}"),
     )]);
+    assert_eq!(unbacked.base_pins, moved);
+    // A record naming another pin (now the moved one) does not back the old pin.
+    build(&second_build(&fixture, Policy::Rebuild, passed.clone()));
+    assert_eq!(resolves(), 3);
+
+    // A fresh receipt whose pin differs from a backed passed pin builds.
     let mut request = fixture.request(Policy::Missing);
     request.pins = moved.clone();
     let repinned = prepare(request, &builds_root(&fixture.candidate)).unwrap();
     assert_eq!(repinned.key, first.key);
-    pool.built(&repinned, "pool-1", serde_json::json!({}));
-    let rebuilt = run(&fixture.candidate, &pool, &repinned, &never).unwrap();
+    let calls = fixture.calls(&first);
+    let rebuilt = build(&repinned);
     assert!(!rebuilt.reused);
     assert_eq!(rebuilt.base_pins, moved);
-    assert_eq!(fixture.calls(&first), 2);
-    assert_eq!(pool.resolve_deadlines.borrow().len(), 1);
-    // Passing the pin it now records reuses it.
-    let mut request = fixture.request(Policy::Missing);
-    request.pins = moved;
-    let same = prepare(request, &builds_root(&fixture.candidate)).unwrap();
-    assert!(
-        run(&fixture.candidate, &pool, &same, &never)
-            .unwrap()
-            .reused
-    );
-
-    // A passed pin must pin its own base image's repository by digest.
+    assert_eq!(fixture.calls(&first), calls + 1);
+    assert_eq!(resolves(), 3);
+    // An unbacked pin never forces a build: it is ignored and the receipt is reused.
     let mut request = fixture.request(Policy::Missing);
     request.pins = BTreeMap::from([(
         "docker.io/library/alpine:3.20".to_owned(),
-        format!("docker.io/library/busybox@{MOVED}"),
+        format!("docker.io/library/busybox@{PIN}"),
     )]);
     let foreign = prepare(request, &builds_root(&fixture.candidate)).unwrap();
-    assert_eq!(
+    assert!(
         run(&fixture.candidate, &pool, &foreign, &never)
-            .unwrap_err()
-            .code,
-        "native_build_request"
+            .unwrap()
+            .reused
     );
+    assert_eq!(resolves(), 3);
+}
+
+#[test]
+fn a_dockerfile_digest_is_never_replaced_by_a_passed_pin() {
+    const OTHER: &str = "sha256:9999999999999999999999999999999999999999999999999999999999999999";
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.project.join("app/Dockerfile"),
+        format!("FROM alpine@{PIN}\nRUN echo hi\n"),
+    )
+    .unwrap();
+    let probe = fixture.inputs(Policy::Rebuild);
+    let reference = probe.images[0].reference.canonical();
+    assert!(reference.ends_with(PIN));
+    // Even a record that holds the passed pin does not back it for a digest base.
+    let forged = format!("docker.io/library/alpine@{OTHER}");
+    let pool = FakePool::new("pool-1");
+    write_base_record(
+        &base_record_path(
+            &builds_root(&fixture.candidate).join(&probe.namespace),
+            &reference,
+        ),
+        &BaseRecord {
+            version: BASE_RECORD_VERSION,
+            reference: reference.clone(),
+            pinned_reference: forged.clone(),
+            source_digest: OTHER.into(),
+            resolved_at: unix_seconds(*pool.now.borrow()),
+        },
+    );
+    let mut request = fixture.request(Policy::Rebuild);
+    request.pins = BTreeMap::from([(reference.clone(), forged.clone())]);
+    let inputs = prepare(request, &builds_root(&fixture.candidate)).unwrap();
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "ok");
+    let outcome = run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    assert_eq!(
+        pool.resolve_deadlines.borrow().len(),
+        1,
+        "the digest was not resolved"
+    );
+    assert_ne!(outcome.base_pins[&reference], forged);
+}
+
+#[test]
+fn requests_accept_up_to_1024_pins() {
+    let fixture = Fixture::new();
+    let pins = |count: usize| -> BTreeMap<String, String> {
+        (0..count)
+            .map(|index| {
+                (
+                    format!("docker.io/library/image{index}:1"),
+                    format!("docker.io/library/image{index}@{PIN}"),
+                )
+            })
+            .collect()
+    };
+    let mut request = fixture.request(Policy::Missing);
+    request.pins = pins(MAX_PINS);
+    assert_eq!(MAX_PINS, 1024);
+    // Entries for other references are ignored.
+    assert!(prepare(request, &builds_root(&fixture.candidate)).is_ok());
+    let mut request = fixture.request(Policy::Missing);
+    request.pins = pins(MAX_PINS + 1);
+    assert_eq!(code(&fixture, request), "native_build_request");
     let mut request = fixture.request(Policy::Missing);
     request.pins = BTreeMap::from([("docker.io/library/alpine:3.20".to_owned(), "alpine".into())]);
     assert_eq!(code(&fixture, request), "native_build_request");
+}
+
+#[test]
+fn a_cancellation_during_adoption_never_records_a_verified_image() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "ok");
+    let scratch = fixture.scratch(&inputs);
+    // True only once the client has run and the snapshot is gone: after every earlier
+    // check, while the image is adopted.
+    let cancel = move || scratch.join("calls").exists() && !scratch.join("snapshot").exists();
+    let error = run(&fixture.candidate, &pool, &inputs, &cancel).unwrap_err();
+    assert_eq!(error.code, "native_build_canceled");
+    assert_eq!(fixture.calls(&inputs), 1);
+    let receipt = fixture.receipt(&inputs);
+    assert_eq!(receipt.phase, Phase::Canceled);
+    assert!(receipt.image_id.is_none());
 }
 
 #[test]

@@ -83,6 +83,7 @@ import {
   admitNativeProjectBuilds,
   buildNativeProjectImages,
   invokeNativeBuild,
+  NativeBuildRegistryError,
   type NativeBuildRequest,
   type NativeVerifiedBuild,
   nativeBuildsEnabled,
@@ -2890,6 +2891,27 @@ async function startNativeProjectAttempt(
       onBuilt: () => {
         rebuilt = true;
       },
+    }).catch(async (error: unknown) => {
+      if (!(error instanceof NativeBuildRegistryError)) {
+        throw error;
+      }
+      const references = Object.entries(specs).flatMap(([name, spec]) =>
+        nativeServiceActive(spec, profiles) &&
+        !builds.has(name) &&
+        typeof spec.image === "string"
+          ? [spec.image]
+          : []
+      );
+      throw await nativeImageBlocker({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        missing: error.reference,
+        buildBase: true,
+        reason: error.nativeCauseCode,
+        references: [...new Set([error.reference, ...references])],
+        confirmed: new Set(),
+        invoke: deps.invoke,
+      });
     });
     await pinNativeProjectImages({
       runtime: opts.runtime,

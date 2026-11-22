@@ -21,6 +21,7 @@ import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-pol
 import { selectNativeProfiles } from "../src/backends/native-profile-selection.ts";
 import {
   admitNativeProjectBuilds,
+  NativeBuildRegistryError,
   nativeBuildIdentity,
 } from "../src/backends/native-project-builds.ts";
 import { nativeProjectDown } from "../src/backends/native-project-down.ts";
@@ -5522,6 +5523,46 @@ test("retained startup asks the runtime to confirm the tag before review", async
     return await review(request);
   };
   expect(await startNativeProject({ ...opts, restore: saved })).toBe(0);
+});
+
+test("a registry refusal during the build lists proven images and the retry command", async () => {
+  const previous = process.env.HACK_NATIVE_BUILDS;
+  process.env.HACK_NATIVE_BUILDS = "1";
+  try {
+    const { opts } = await fixture(false);
+    const base = "docker.io/library/python:3.12-alpine";
+    const loaded = "docker.io/library/alpine:3.22";
+    const prepare = opts.dependencies.prepare!;
+    opts.dependencies.prepare = async (request) => ({
+      ...(await prepare(request)),
+      normalizedComposeJson: JSON.stringify({
+        services: { web: { build: "." }, other: { image: loaded } },
+      }),
+    });
+    opts.dependencies.build = async () => {
+      throw new NativeBuildRegistryError(base, "registry_http_429");
+    };
+    const invoke = opts.dependencies.invoke!;
+    opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "image-tag-status") {
+        expect(request.args).toEqual([
+          "runtime",
+          "image-tag-status",
+          "--present",
+          "--json",
+          base,
+          loaded,
+        ]);
+        return [loaded];
+      }
+      return await invoke(request);
+    };
+    await expect(startNativeProject(opts)).rejects.toThrow(
+      `Image unavailable: could not resolve build base ${base} (registry rate limit reached).\nAlready present: ${loaded}.\nRetry hack up when the registry is reachable.`
+    );
+  } finally {
+    process.env.HACK_NATIVE_BUILDS = previous;
+  }
 });
 
 test("retained startup asks the runtime for each build, a restart's resolved images are used as they are, and a rebuild reclaims superseded images (HACK-2533)", async () => {

@@ -112,6 +112,7 @@ for (const mode of [
   "unsafe-prestart-refusal",
   "fail",
   "builder-missing",
+  "build-registry-limit",
   "provider-pin",
   "wrapped-provider-pin",
   "timeout",
@@ -210,6 +211,11 @@ for (const mode of [
           ok: false,
           error: { code: "E_CANCELLED" },
         });
+      } else if (mode === "build-registry-limit") {
+        expect(code).toBe(1);
+        expect(JSON.parse(stdout).error.message).toBe(
+          "Image unavailable: could not resolve build base docker.io/library/python:3.12-alpine (registry rate limit reached).\nAlready present: docker.io/library/alpine:3.22.\nRetry hack up when the registry is reachable."
+        );
       } else if (mode === "builder-missing") {
         // A detached owner reports the code only; the launcher must still tell the
         // user what is wrong and the one command that fixes it.
@@ -247,6 +253,7 @@ for (const mode of [
         ![
           "fail",
           "builder-missing",
+          "build-registry-limit",
           "provider-pin",
           "wrapped-provider-pin",
         ].includes(mode)

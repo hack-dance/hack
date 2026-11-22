@@ -50,6 +50,7 @@ const DISPLAY_REFERENCE = /^[A-Za-z0-9._:/@-]{1,512}$/;
 export type NativeImageBlockerDetail = {
   readonly missing: string;
   readonly downloading?: true;
+  readonly buildBase?: true;
   readonly reason?: string;
   readonly present: readonly string[] | null;
 };
@@ -66,6 +67,7 @@ export function nativeImageBlockerDetail(
   }
   return (
     (!("downloading" in value) || value.downloading === true) &&
+    (!("buildBase" in value) || value.buildBase === true) &&
     (!("reason" in value) ||
       nativeImageRegistryReason(value.reason) !== undefined) &&
     typeof value.missing === "string" &&
@@ -90,16 +92,19 @@ export class NativeImageBlocker extends ClosedCliError {
       present === null
         ? "could not verify"
         : present.join(", ") || "none confirmed";
+    const reason = registryReason ? ` (${registryReason})` : "";
+    let problem = `${missing} has no usable recorded resolution in the running guest${reason}`;
+    let recovery =
+      "Run hack pull when the registry is reachable, then retry hack up.";
+    if (observation.downloading) {
+      problem = `another start is downloading ${missing}`;
+      recovery = "Run hack up again after the download finishes.";
+    } else if (observation.buildBase) {
+      problem = `could not resolve build base ${missing}${reason}`;
+      recovery = "Retry hack up when the registry is reachable.";
+    }
     super(
-      [
-        observation.downloading
-          ? `Image unavailable: another start is downloading ${missing}.`
-          : `Image unavailable: ${missing} has no usable recorded resolution in the running guest${registryReason ? ` (${registryReason})` : ""}.`,
-        `Already present: ${known}.`,
-        observation.downloading
-          ? "Run hack up again after the download finishes."
-          : "Run hack pull when the registry is reachable, then retry hack up.",
-      ].join("\n")
+      `Image unavailable: ${problem}.\nAlready present: ${known}.\n${recovery}`
     );
     this.observation = observation;
   }

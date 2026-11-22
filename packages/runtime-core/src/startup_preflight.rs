@@ -210,6 +210,12 @@ fn send(output: &mut impl Write, reply: &[u8]) -> Result<(), CandidateError> {
 }
 
 pub(super) fn run(root: &Path) -> Result<(), CandidateError> {
+    run_with(|request, output| request.execute(root, output))
+}
+
+fn run_with(
+    mut execute: impl FnMut(Request, &mut Vec<u8>) -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
     let start = Instant::now();
     let deadline = Arc::new(AtomicU64::new(SESSION_MS));
     let watched = Arc::clone(&deadline);
@@ -242,7 +248,7 @@ pub(super) fn run(root: &Path) -> Result<(), CandidateError> {
         }
         let prefix = format!(r#"{{"id":{last_id},"value":"#);
         let mut reply = prefix.as_bytes().to_vec();
-        let result = request.execute(root, &mut reply);
+        let result = execute(request, &mut reply);
         // Only this pipe worker uses process cwd. Its watchdog observes stdin
         // and never uses paths. A future socket worker can resolve the same
         // request's paths without changing process cwd.
@@ -273,4 +279,99 @@ pub(super) fn run(root: &Path) -> Result<(), CandidateError> {
         deadline.store(SESSION_MS, Ordering::Relaxed);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs::File,
+        io::{BufRead, BufReader},
+        os::fd::AsRawFd,
+        process::{Command, Stdio},
+    };
+
+    const ROLE: &str = "HACK_PREFLIGHT_LOCK_TEST_ROLE";
+    const FIXTURE: &str = "HACK_PREFLIGHT_LOCK_TEST_ROOT";
+    const TEST: &str = "startup_preflight::tests::lease_released_between_worker_replies";
+
+    fn fixture_lease(root: &Path) -> io::Result<File> {
+        let file = File::open(root.join("operation.lock"))?;
+        // SAFETY: the descriptor is owned by this file and remains live.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(file)
+    }
+
+    #[test]
+    fn lease_released_between_worker_replies() {
+        if let Some(role) = std::env::var_os(ROLE) {
+            let root = PathBuf::from(std::env::var_os(FIXTURE).unwrap());
+            if role == "contender" {
+                drop(fixture_lease(&root).expect("lease still held after a worker reply"));
+            } else {
+                println!("worker frames follow");
+                run_with(|_, reply| {
+                    let lease = fixture_lease(&root).unwrap();
+                    write_json(reply, &true)?;
+                    drop(lease);
+                    Ok(())
+                })
+                .unwrap();
+            }
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("preflight-lease-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        File::create(root.join("operation.lock")).unwrap();
+        let command = |role: &str| {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", TEST, "--nocapture"]).env_clear();
+            child.env(ROLE, role).env(FIXTURE, &root);
+            child
+        };
+        let mut worker = command("worker")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = worker.stdin.take().unwrap();
+        let mut output = BufReader::new(worker.stdout.take().unwrap());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert_ne!(output.read_line(&mut line).unwrap(), 0);
+            if line.ends_with("worker frames follow\n") {
+                break;
+            }
+        }
+        assert_eq!(frame(&mut output).unwrap().unwrap(), br#"{"version":1}"#);
+        let message = |id| {
+            serde_json::to_vec(&serde_json::json!({
+                "id":id, "timeout_ms":5000, "cwd":root, "environment":{},
+                "intent":{"operation":"inspect","run":"fixture"},
+            }))
+            .unwrap()
+        };
+        send(&mut input, &message(1)).unwrap();
+        let first = frame(&mut output).unwrap().unwrap();
+        let contender = command("contender").output().unwrap();
+        if contender.status.success() {
+            send(&mut input, &message(2)).unwrap();
+            assert_eq!(
+                frame(&mut output).unwrap().unwrap(),
+                b"{\"id\":2,\"value\":true\n}"
+            );
+        }
+        drop(input);
+        assert!(worker.wait().unwrap().success());
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(first, b"{\"id\":1,\"value\":true\n}");
+        assert!(
+            contender.status.success(),
+            "{}",
+            String::from_utf8_lossy(&contender.stderr)
+        );
+    }
 }

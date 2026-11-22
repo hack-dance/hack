@@ -512,6 +512,9 @@ fn startup_preflight_matches_one_shot_bytes_and_launches_once() {
         "services:\n  web:\n    image: alpine:3.21\n",
     )
     .unwrap();
+    fs::create_dir(cwd.join("nested")).unwrap();
+    symlink(cwd.join("nested"), fixture.0.join("linked")).unwrap();
+    let linked_parent = fixture.0.join("linked/..");
     let project = cwd.to_str().unwrap();
     let run = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let oversized_image = "a".repeat(131_040);
@@ -521,12 +524,12 @@ fn startup_preflight_matches_one_shot_bytes_and_launches_once() {
                 "project",
                 "plan",
                 "--project",
-                project,
+                ".",
                 "--file",
                 "compose.yml",
                 "--json",
             ],
-            json!({"operation":"plan","options":["--project",project,"--file","compose.yml","--json"]}),
+            json!({"operation":"plan","options":["--project",".","--file","compose.yml","--json"]}),
         ),
         (
             vec![
@@ -617,8 +620,16 @@ fn startup_preflight_matches_one_shot_bytes_and_launches_once() {
     ];
     let expected: Vec<_> = cases
         .iter()
-        .map(|(args, _)| command().args(args).output().unwrap())
+        .enumerate()
+        .map(|(index, (args, _))| {
+            command()
+                .current_dir(if index == 0 { &linked_parent } else { &cwd })
+                .args(args)
+                .output()
+                .unwrap()
+        })
         .collect();
+    assert!(expected[0].status.success(), "{:?}", expected[0]);
     assert_eq!(fs::metadata(&count).unwrap().len(), cases.len() as u64);
     fs::write(&count, b"").unwrap();
 
@@ -634,7 +645,8 @@ fn startup_preflight_matches_one_shot_bytes_and_launches_once() {
     assert_eq!(read_startup_frame(&mut output), br#"{"version":1}"#);
     for (index, ((_, intent), old)) in cases.iter().zip(expected).enumerate() {
         let id = u32::try_from(index + 1).unwrap();
-        let request = startup_request(id, &cwd, intent);
+        let working_directory = if index == 0 { &linked_parent } else { &cwd };
+        let request = startup_request(id, working_directory, intent);
         input
             .write_all(&u32::try_from(request.len()).unwrap().to_be_bytes())
             .unwrap();

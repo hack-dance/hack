@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-type WorkerMode = "framed" | "older" | "crash" | "context";
+type WorkerMode = "framed" | "older" | "crash" | "context" | "surrogate";
 
 const client = new URL(
   "../src/backends/native-runtime-client.ts",
@@ -15,14 +15,15 @@ async function runPreflight(mode: WorkerMode) {
     await mkdtemp(join(tmpdir(), "hack-startup-preflight-"))
   );
   try {
-    await mkdir(join(root, "different-cwd"));
+    await mkdir(join(root, "different-cwd", "nested"), { recursive: true });
+    await symlink("different-cwd/nested", join(root, "linked"));
     const binary = join(root, "runtime");
     const launches = join(root, "launches");
     const frontend = join(root, "frontend.ts");
     await Bun.write(
       binary,
       `#!${process.execPath}
-import { appendFileSync, readSync, writeSync } from "node:fs";
+import { appendFileSync, readSync, realpathSync, writeSync } from "node:fs";
 appendFileSync(${JSON.stringify(launches)}, "x");
 const value = Object.keys(process.env).sort();
 const error = { code: "registry_image", message: "Reference refused." };
@@ -50,7 +51,7 @@ if (process.argv.includes("preflight")) {
     if (!read(request)) process.exit(2);
     const { id, intent, cwd, step_store } = JSON.parse(request);
     if (${JSON.stringify(mode)} === "context") {
-      const reply = Buffer.from(JSON.stringify({id, value: [cwd, step_store]}));
+      const reply = Buffer.from(JSON.stringify({id, value: [realpathSync.native(cwd), step_store]}));
       header.writeUInt32BE(reply.length);
       writeSync(1, header);
       writeSync(1, reply);
@@ -68,7 +69,7 @@ if (process.argv.includes("preflight")) {
 } else if (${JSON.stringify(mode)} === "context") {
   const index = process.argv.indexOf("--step-store");
   console.log(JSON.stringify([process.cwd(), index < 0 ? null : process.argv[index + 1]]));
-} else if (process.argv.includes("broken")) {
+} else if (process.argv.includes("broken") || process.argv.includes("\uFFFD")) {
   console.error(JSON.stringify(error));
   process.exit(2);
 } else {
@@ -86,7 +87,7 @@ const session = nativeStartupPreflight({ runtime });
 const result = [];
 try {
   for (const invoke of [invokeNativeRuntime, session.invoke]) {
-    for (const reference of ["alpine", "busybox", "broken"]) {
+    for (const reference of ["alpine", "busybox", ${JSON.stringify(mode === "surrogate" ? "\uD800" : "broken")}]) {
       if (${JSON.stringify(mode)} === "context") {
         process.env.HACK_STEP_STORE = reference === "busybox" ? "on" : "off";
         if (reference === "busybox") await Bun.sleep(1200);
@@ -94,7 +95,7 @@ try {
       try {
         result.push(await invoke({
           runtime, cwd: ${JSON.stringify(mode)} === "context" && reference === "busybox"
-            ? projectRoot + "/different-cwd" : projectRoot,
+            ? projectRoot + "/linked/.." : projectRoot,
           args: ["runtime", "admit-image", "--reference", reference, "--json"],
           timeoutMs: ${JSON.stringify(mode)} === "context" && reference === "broken"
             ? 600001 : (${JSON.stringify(mode)} === "context" ? 1000 : undefined),
@@ -173,4 +174,11 @@ test("each staged request carries its working directory and current step-store s
   ]);
   expect(replies[2]).toMatchObject({ code: "E_CONFIG_INVALID" });
   expect(launches).toBe("xxx");
+});
+
+test("a lone surrogate keeps the native image refusal", async () => {
+  const { replies, launches } = await runPreflight("surrogate");
+  expect(replies.slice(0, 3)).toEqual(replies.slice(3));
+  expect(replies[2]).toMatchObject({ code: "registry_image" });
+  expect(launches).toBe("xxxxx");
 });

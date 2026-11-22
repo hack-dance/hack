@@ -1,6 +1,6 @@
 import { accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
@@ -1074,8 +1074,10 @@ export function nativeStartupPreflight(opts: {
       });
     }
     if (
+      !(isAbsolute(request.cwd) && request.cwd.isWellFormed()) ||
       request.args.some(
         (arg) =>
+          !arg.isWellFormed() ||
           arg.includes("\0") ||
           (process.platform === "linux" && Buffer.byteLength(arg) >= 128 * 1024)
       )
@@ -1084,7 +1086,7 @@ export function nativeStartupPreflight(opts: {
     }
     const operation: StartupOperation = {
       intent,
-      cwd: resolve(request.cwd),
+      cwd: request.cwd,
       environment: closedRuntimeEnvironment(),
       step_store: stepStoreRuntimeArgs()[1] ?? null,
       timeout_ms: timeout,

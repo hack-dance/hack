@@ -15,7 +15,9 @@ watchdog observing pipe closure and exiting, which releases process-owned
 descriptors. The negative control removes retirement at EOF. Weak fairness
 assumes the OS schedules the watchdog and delivers EOF when the sole writer
 closes. The installed candidate contract kills the frontend while the runtime
-is reading a partial frame. The model abstracts handler internals, partial
+is reading a partial frame. The worker loop test uses a stand-in handler and
+a separate process to acquire its lease after the first reply and before the
+next request. The model abstracts handler internals, partial
 I/O, wall-clock deadlines, diagnostics and provider repair durability.
 
 The positive run explores 13 distinct states. The negative run reaches

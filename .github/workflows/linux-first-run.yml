@@ -14,10 +14,17 @@ on:
       - 'scripts/build-*-candidate.sh'
       - 'scripts/build-config-compiler.ts'
       - 'scripts/build-lifecycle-supervisor.ts'
-      - 'scripts/install*.sh'
+      - 'scripts/install*'
+      - 'scripts/installer/**'
+      - 'scripts/build-prerelease-manager.ts'
+      - 'src/lib/release-install.ts'
       - 'scripts/prerelease-*.ts'
       - 'scripts/hack-v5.sh'
       - 'install*.sh'
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [next]
   workflow_dispatch:
     inputs:
       full:
@@ -32,12 +39,20 @@ permissions:
 jobs:
   first-run:
     name: Linux first-run check (advisory)
-    if: github.event_name != 'workflow_dispatch' || inputs.full
+    # A successful CI dispatch has already required full=true. Keep the
+    # advisory in a separate run so its result cannot affect release evidence.
+    if: >-
+      github.event_name == 'push' || github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.full) ||
+      (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.event == 'workflow_dispatch' &&
+        github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@v1
         with:

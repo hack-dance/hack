@@ -2,7 +2,6 @@ import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmod,
-  mkdir,
   mkdtemp,
   readdir,
   readFile,
@@ -58,7 +57,7 @@ async function fixture(mode: Mode = "ordinary") {
   );
   roots.push(root);
   await mkdirOwnedFixture(join(root, ".hack"));
-  await mkdir(join(root, "home"));
+  await mkdirOwnedFixture(join(root, "home"));
   const input = composeFixture();
   input.plan.worktree.auto_branch = false;
   const web = input.plan.services.web;

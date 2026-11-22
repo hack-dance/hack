@@ -2093,17 +2093,14 @@ export async function resolveModernComposeEnvOverrides(opts: {
     });
   }
   const globalEnv = applyRemoteEnv(modern.globalEnv, opts.remoteChoices);
-  const lifecycleEnv = {
-    ...selectProjectEnvValuesForExecutionTarget({
-      resolved: modern,
-      scopeName: "global",
-      target: "host",
-    }),
-    ...applyRemoteEnv(modern.globalEnv, opts.remoteChoices, {
-      bindingsOnly: true,
-      host: true,
-    }),
-  };
+  const hostEnv = selectProjectEnvValuesForExecutionTarget({
+    resolved: modern,
+    scopeName: "global",
+    target: "host",
+  });
+  const lifecycleEnv = applyRemoteEnv(hostEnv, opts.remoteChoices, {
+    host: true,
+  });
   const serviceEnv = opts.remoteChoices?.length
     ? Object.fromEntries(
         composeEnvOverrideServices(opts).map((service) => [
@@ -4211,6 +4208,7 @@ async function resolveRemoteStartupServices(opts: {
     .filter(Boolean);
   const services = remoteServiceTargets(opts.choices, active);
   await assertNoInactiveRemoteDependencies({
+    env: opts.env,
     files: [opts.project.composeFile],
     services,
     choices: opts.choices,
@@ -11887,11 +11885,6 @@ async function handleRun({
   const allServiceNames = await (remoteChoices.length
     ? readIncludedComposeServiceNames
     : readComposeServiceNames)(project.composeFile);
-  await assertNoInactiveRemoteDependencies({
-    files: composeFilesWithRuntimeOverrides,
-    services: [service],
-    choices: remoteChoices,
-  });
   const envOverrides = await resolveComposeEnvOverrides({
     remoteChoices,
     project,
@@ -11899,6 +11892,12 @@ async function handleRun({
     targetServices: preparedServices,
     allServiceNames,
     envName,
+  });
+  await assertNoInactiveRemoteDependencies({
+    env: envOverrides.env,
+    files: composeFilesWithRuntimeOverrides,
+    services: [service],
+    choices: remoteChoices,
   });
   const composeFilesWithEnv = [
     ...composeFilesWithRuntimeOverrides,

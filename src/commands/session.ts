@@ -39,6 +39,7 @@ import {
   projectEnvConfigExists,
   resolveProjectEnvConfig,
   selectProjectEnvValues,
+  selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
 import {
   applyRemoteEnv,
@@ -1111,16 +1112,21 @@ async function resolveSessionInjectedEnv(opts: {
   // After a successful read, so a refusal stays one line.
   await reportLooseEnvLayerModes({ projectDir: opts.project.projectDir });
   if (modern) {
-    return await appendHackHostTrustEnvironment(
-      applyRemoteEnv(
-        selectProjectEnvValues({
+    return await appendHackHostTrustEnvironment({
+      ...selectProjectEnvValues({
+        resolved: modern,
+        scopeName: opts.serviceName,
+      }),
+      ...applyRemoteEnv(
+        selectProjectEnvValuesForExecutionTarget({
           resolved: modern,
           scopeName: opts.serviceName,
+          target: "host",
         }),
         opts.remoteChoices,
-        { host: true }
-      )
-    );
+        { bindingsOnly: true, host: true }
+      ),
+    });
   }
 
   const resolved = await resolveHackEnv({

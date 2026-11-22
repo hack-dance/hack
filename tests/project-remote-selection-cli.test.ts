@@ -3,7 +3,6 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { HACK_VERSION } from "../src/lib/hack-version.ts";
-import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -35,6 +34,16 @@ test("the six --use entry points deliver the invocation target without saving it
           min_cli_version: HACK_VERSION,
           internal: { dns: false, tls: false },
           sessions: { mux: "tmux" },
+          lifecycle: {
+            up: {
+              before: [
+                {
+                  name: "binding",
+                  command: 'printf "hook=%s\\n" "$DB_HOST" >> "$TEST_DELIVERY"',
+                },
+              ],
+            },
+          },
           remotes: {
             db: {
               default: "local",
@@ -52,15 +61,10 @@ test("the six --use entry points deliver the invocation target without saving it
           },
         })
       );
-      await setProjectEnvValue({
-        projectRoot: dir,
-        projectDir: hack,
-        envName: null,
-        scope: "global",
-        key: "LIVE_HOST",
-        value: "live.example.test",
-        secret: false,
-      });
+      await Bun.write(
+        join(hack, "hack.env.default.yaml"),
+        "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global:\n    LIVE_HOST: live.example.test\n  host:\n    LIVE_HOST: host.example.test\n"
+      );
     }
     const script = (name: string, body: string) =>
       writeFile(join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o700 });
@@ -141,9 +145,9 @@ test("the six --use entry points deliver the invocation target without saving it
     expect(
       ok(["host", "exec", ...choice, "--", "/usr/bin/printenv", "DB_HOST"])
         .stdout
-    ).toBe("live.example.test:5432\n");
+    ).toBe("host.example.test:5432\n");
     expect(ok(["host", "shell", ...choice]).stdout).toBe(
-      "live.example.test:5432\n"
+      "host.example.test:5432\n"
     );
     expect(ok(["host", "shell", "--use", "db=local"]).stdout).toBe(
       "127.0.0.1:5432\n"
@@ -175,6 +179,7 @@ test("the six --use entry points deliver the invocation target without saving it
     await Bun.write(log, "");
     ok(["up", "--detach", ...choice]);
     const defaultStartup = await Bun.file(log).text();
+    expect(defaultStartup).toContain("hook=host.example.test:5432");
     expect(defaultStartup).toMatch(/ up .* worker/);
     expect(defaultStartup).not.toMatch(/ up .* migrate/);
     await Bun.write(log, "");
@@ -186,7 +191,7 @@ test("the six --use entry points deliver the invocation target without saving it
     await Bun.write(log, "");
     ok(["session", "start", ...choice, "--detach", "remote-stack"]);
     expect(await Bun.file(log).text()).toContain(
-      "DB_HOST=live.example.test:5432"
+      "DB_HOST=host.example.test:5432"
     );
     await Bun.write(log, "");
     ok([
@@ -211,7 +216,7 @@ test("the six --use entry points deliver the invocation target without saving it
     ]);
     expect(withUp.stderr.match(/db → live/g)).toHaveLength(1);
     expect(await Bun.file(log).text()).toContain(
-      "DB_HOST=live.example.test:5432"
+      "DB_HOST=host.example.test:5432"
     );
     expect(
       await Bun.file(join(stack, ".hack", ".internal", "use.json")).json()
@@ -222,6 +227,28 @@ test("the six --use entry points deliver the invocation target without saving it
     expect(native.stdout + native.stderr).toContain(
       "E_NATIVE_PROJECT_UNSUPPORTED"
     );
+    for (const dependency of [
+      "links: [postgres:db]",
+      "volumes_from: [postgres:ro]",
+      "network_mode: service:postgres",
+    ]) {
+      await Bun.write(
+        join(stack, ".hack", "docker-compose.yml"),
+        `services:\n  api:\n    image: alpine\n    ${dependency}\n  postgres:\n    image: postgres\n`
+      );
+      for (const args of [
+        ["up", "--detach", ...choice],
+        ["run", ...choice, "api"],
+      ]) {
+        await Bun.write(log, "");
+        const refused = hack(args);
+        expect(refused.code).toBe(1);
+        expect(refused.stdout + refused.stderr).toContain(
+          "Compose would start postgres"
+        );
+        expect(await Bun.file(log).text()).toBe("");
+      }
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

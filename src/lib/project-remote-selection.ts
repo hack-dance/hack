@@ -2,7 +2,10 @@ import { lstat, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { HackCliError } from "./cli-result.ts";
-import { readComposeOneShotGraph } from "./compose-oneshot-progress.ts";
+import {
+  readComposeInterpolationEnv,
+  readComposeOneShotGraph,
+} from "./compose-oneshot-progress.ts";
 import {
   readAtomicWriteTargetText,
   writeTextFileAtomicIfChanged,
@@ -353,6 +356,7 @@ export function remoteServiceTargets(
 }
 
 export async function assertNoInactiveRemoteDependencies(opts: {
+  readonly env: Readonly<Record<string, string>>;
   readonly files: readonly string[];
   readonly services: readonly string[];
   readonly choices: readonly EffectiveRemote[];
@@ -361,7 +365,14 @@ export async function assertNoInactiveRemoteDependencies(opts: {
   if (!inactive.length) {
     return;
   }
-  const graph = await readComposeOneShotGraph(opts.files);
+  const interpolationEnv = await readComposeInterpolationEnv({
+    composeFiles: opts.files,
+    env: { ...process.env, ...opts.env },
+  });
+  const graph = await readComposeOneShotGraph(opts.files, {
+    includeImplicitDependencies: true,
+    interpolationEnv,
+  });
   const pending = new Set(opts.services);
   for (const service of pending) {
     if (inactive.includes(service)) {

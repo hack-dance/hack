@@ -290,6 +290,7 @@ function readQuoted(
 
 /** Which services' `depends_on` count: all, or those active under these profiles. */
 export type OneShotGraphOptions = {
+  readonly includeImplicitDependencies?: boolean;
   readonly activeProfiles?: readonly string[];
   /**
    * The environment Compose interpolates the files with (the command's
@@ -333,10 +334,22 @@ export function mergeOneShotGraphs(
       continue;
     }
     for (const [name, service] of Object.entries(document.services)) {
-      effective.set(
-        name,
-        mergeConditions(effective.get(name), service, options.interpolationEnv)
+      const conditions = mergeConditions(
+        effective.get(name),
+        service,
+        options.interpolationEnv
       );
+      if (options.includeImplicitDependencies) {
+        for (const dependency of implicitServiceDependencies(
+          service,
+          options.interpolationEnv
+        )) {
+          if (!conditions.has(dependency)) {
+            conditions.set(dependency, STARTED);
+          }
+        }
+      }
+      effective.set(name, conditions);
       const profiles = declaredProfiles(service, options.interpolationEnv);
       if (profiles !== null) {
         // Compose merges `profiles` across files: the union, in order.
@@ -353,6 +366,40 @@ export function mergeOneShotGraphs(
     activeProfiles: options.activeProfiles,
     presentServices: options.presentServices,
   });
+}
+
+const SERVICE_NAMESPACE_KEYS = ["network_mode", "ipc", "pid"] as const;
+const IMPLICIT_SERVICE_KEYS = [
+  "links",
+  "volumes_from",
+  ...SERVICE_NAMESPACE_KEYS,
+] as const;
+
+function implicitServiceDependencies(
+  service: unknown,
+  env: OneShotGraphOptions["interpolationEnv"]
+): readonly string[] {
+  if (!isRecord(service)) {
+    return [];
+  }
+  const interpolate = (value: unknown) =>
+    typeof value === "string"
+      ? (interpolateComposeValue(value, env ?? {}) ?? value)
+      : "";
+  const links = Array.isArray(service.links) ? service.links : [];
+  const volumes = Array.isArray(service.volumes_from)
+    ? service.volumes_from
+    : [];
+  return [
+    ...links.map(interpolate).map((value) => value.split(":")[0]),
+    ...volumes
+      .map(interpolate)
+      .filter((value) => !value.startsWith("container:"))
+      .map((value) => value.split(":")[0]),
+    ...SERVICE_NAMESPACE_KEYS.map((key) => interpolate(service[key]))
+      .filter((value) => value.startsWith("service:"))
+      .map((value) => value.slice("service:".length)),
+  ].filter((value): value is string => Boolean(value));
 }
 
 /**
@@ -820,6 +867,11 @@ async function resolveServiceExtends(input: {
     return service;
   }
   return {
+    ...Object.fromEntries(
+      IMPLICIT_SERVICE_KEYS.filter((key) => base[key] !== undefined).map(
+        (key) => [key, base[key]]
+      )
+    ),
     ...service,
     depends_on: mergeDependsOn(base, service),
     ...(service.profiles === undefined && base.profiles !== undefined

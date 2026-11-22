@@ -5,6 +5,11 @@ pub(super) const DOMAIN: &str = "127.0.0.1:1";
 const ATTEMPT: &str = "hack-build-attempt";
 const CACHE: &str = "hack-build-cache";
 
+pub(super) fn keeper(id: &str) -> Option<String> {
+    let digest = id.strip_prefix("sha256:").filter(|digest| hex64(digest))?;
+    Some(format!("{DOMAIN}/{CACHE}:{digest}"))
+}
+
 fn parse(reference: &str) -> Option<(&str, &str)> {
     let value = reference.strip_prefix("127.0.0.1:1/hack-build-attempt/")?;
     let (namespace, key) = value.split_once('/')?;

@@ -70,7 +70,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::fd::AsRawFd,
@@ -242,6 +242,8 @@ pub(super) struct Receipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     image_bytes: Option<u64>,
     base_pins: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    base_image_ids: BTreeSet<String>,
     /// The build declaration this key is a revision of (see [`Inputs::declaration`]).
     /// Receipts from before this field have none and are never reclaimed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1103,6 +1105,10 @@ fn run_with_bases<P: BuildPool>(
         // retry is admitted against it rather than the floor.
         image_bytes: previous_bytes,
         base_pins: pins.clone(),
+        base_image_ids: selected
+            .into_iter()
+            .flat_map(|bases| bases.values().map(|base| base.image_id.clone()))
+            .collect(),
         declaration: Some(inputs.declaration.clone()),
         // Kept from the last verified image of this key until this attempt verifies.
         sequence: previous.as_ref().and_then(|receipt| receipt.sequence),
@@ -1954,6 +1960,17 @@ pub fn build_image(candidate: &Candidate, request: &Path) -> Result<BuildOutcome
     let deadline = Instant::now() + inputs.timeout;
     let pool = LivePool { candidate };
     let (lease, _) = pool.lease()?;
+    let root = builds_root(candidate);
+    state::private_directory(&root)?;
+    let _acquisition_fence =
+        Flock::try_lock(Flock::open(&root.join("active.lock"))?, libc::LOCK_SH)?.ok_or_else(
+            || {
+                refusal(
+                    "provider_busy",
+                    "The runtime is stopping; no build was admitted.",
+                )
+            },
+        )?;
     drop(lease);
     let mut selected = BTreeMap::new();
     let mut fallbacks = Vec::new();

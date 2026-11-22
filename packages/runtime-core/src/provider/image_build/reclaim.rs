@@ -76,6 +76,8 @@ pub struct ReclaimReport {
 pub(super) trait ReclaimPool: BuildPool {
     /// Images labeled `io.hack-local.kind=build-image`, as the engine lists them.
     fn build_images(&self, lease: &Self::Lease) -> Result<Vec<Value>, CandidateError>;
+    /// Engine image records with private build-base keeper tags.
+    fn base_images(&self, lease: &Self::Lease) -> Result<Vec<Value>, CandidateError>;
     /// Remove one image by content ID without force. `Ok(false)` when the engine refuses.
     fn remove(&self, lease: &Self::Lease, image: &str) -> Result<bool, CandidateError>;
 }
@@ -193,9 +195,15 @@ fn scan_directory(
 
 /// The images build receipts protect, with why: per namespace and declaration, the
 /// most recent and the previous verified key (see the module documentation).
-fn current_images(candidate: &Candidate) -> Result<BTreeMap<String, Retained>, CandidateError> {
+#[derive(Default)]
+struct CurrentImages {
+    builds: BTreeMap<String, Retained>,
+    bases: BTreeSet<String>,
+}
+
+fn current_images(candidate: &Candidate) -> Result<CurrentImages, CandidateError> {
     let root = builds_root(candidate);
-    let mut protected = BTreeMap::new();
+    let mut protected = CurrentImages::default();
     let namespaces = match fs::read_dir(&root) {
         Ok(namespaces) => namespaces,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(protected),
@@ -212,7 +220,8 @@ fn current_images(candidate: &Candidate) -> Result<BTreeMap<String, Retained>, C
             return Err(unprovable());
         }
         // Declaration to its verified keys' (sequence, image).
-        let mut declarations: BTreeMap<String, Vec<(u64, String)>> = BTreeMap::new();
+        let mut declarations: BTreeMap<String, Vec<(u64, String, BTreeSet<String>)>> =
+            BTreeMap::new();
         for entry in fs::read_dir(&namespace).map_err(|_| unprovable())? {
             let path = entry.map_err(|_| unprovable())?.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -229,9 +238,10 @@ fn current_images(candidate: &Candidate) -> Result<BTreeMap<String, Retained>, C
                 (Some(declaration), Some(sequence)) => declarations
                     .entry(declaration)
                     .or_default()
-                    .push((sequence, id)),
+                    .push((sequence, id, receipt.base_image_ids)),
                 _ => {
-                    protected.insert(id, Retained::Current);
+                    protected.builds.insert(id, Retained::Current);
+                    protected.bases.extend(receipt.base_image_ids);
                 }
             }
         }
@@ -239,10 +249,10 @@ fn current_images(candidate: &Candidate) -> Result<BTreeMap<String, Retained>, C
             keys.sort_by_key(|key| std::cmp::Reverse(key.0));
             let mut sequences = keys
                 .iter()
-                .map(|(sequence, _)| *sequence)
+                .map(|(sequence, _, _)| *sequence)
                 .collect::<Vec<_>>();
             sequences.dedup();
-            for (sequence, id) in keys {
+            for (sequence, id, bases) in keys {
                 let reason = if Some(&sequence) == sequences.first() {
                     Retained::Current
                 } else if Some(&sequence) == sequences.get(1) {
@@ -251,7 +261,8 @@ fn current_images(candidate: &Candidate) -> Result<BTreeMap<String, Retained>, C
                     continue;
                 };
                 // An image two keys share keeps its strongest reason.
-                let slot = protected.entry(id).or_insert(reason);
+                protected.bases.extend(bases);
+                let slot = protected.builds.entry(id).or_insert(reason);
                 *slot = (*slot).min(reason);
             }
         }
@@ -351,7 +362,7 @@ pub(super) fn run<P: ReclaimPool>(
     let (candidates, mut retained) = plan(
         &images,
         &owner_label(&identity.incarnation),
-        &current,
+        &current.builds,
         &referenced,
     )?;
     let mut removed = Vec::new();
@@ -361,6 +372,24 @@ pub(super) fn run<P: ReclaimPool>(
             Ok(false) | Err(_) => {
                 retained.insert(id, Retained::EngineRefused);
             }
+        }
+    }
+    for image in pool.base_images(&lease)? {
+        let Some(id) = image["Id"].as_str() else {
+            continue;
+        };
+        let Some(keeper) = super::aliases::keeper(id) else {
+            continue;
+        };
+        if !current.bases.contains(id)
+            && image["RepoTags"]
+                .as_array()
+                .is_some_and(|tags| tags.iter().any(|tag| tag == &keeper))
+            && pool
+                .inspect(&lease, &keeper)?
+                .is_some_and(|image| image["Id"] == id)
+        {
+            let _ = pool.untag_base(&lease, &keeper);
         }
     }
     let cache_reclaimed_bytes = pool.prune_cache(&lease, CACHE_BUDGET).ok();
@@ -383,6 +412,17 @@ impl ReclaimPool for LivePool<'_> {
             .as_array()
             .cloned()
             .ok_or_else(|| refusal("engine_protocol", "The engine image list is not an array."))
+    }
+    fn base_images(&self, lease: &Self::Lease) -> Result<Vec<Value>, CandidateError> {
+        // Docker's reference filter matches only the private keeper repository.
+        lease.request(
+            reqwest::Method::GET,
+            "/v1.53/images/json?all=true&filters=%7B%22reference%22%3A%5B%22127.0.0.1%3A1%2Fhack-build-cache%3A%2A%22%5D%7D",
+            None,
+        )?
+        .as_array()
+        .cloned()
+        .ok_or_else(|| refusal("engine_protocol", "The engine image list is not an array."))
     }
     fn remove(&self, lease: &Self::Lease, image: &str) -> Result<bool, CandidateError> {
         match lease.request(reqwest::Method::DELETE, &removal_path(image), None) {
@@ -502,7 +542,7 @@ mod tests {
             plan(
                 &[serde_json::json!({"Id": "bad"})],
                 &owner,
-                &current,
+                &current.builds,
                 &referenced
             )
             .is_err()

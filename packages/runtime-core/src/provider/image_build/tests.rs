@@ -519,6 +519,7 @@ fn receipts_with_the_most_and_longest_accepted_pins_stay_readable() {
         image_id: Some(IMAGE.into()),
         image_bytes: Some(5 * GIB),
         base_pins: BTreeMap::new(),
+        base_image_ids: BTreeSet::new(),
         declaration: None,
         sequence: None,
     };
@@ -1023,6 +1024,7 @@ fn a_dead_attempt_is_recorded_indeterminate_and_built_again() {
         image_id: None,
         image_bytes: None,
         base_pins: BTreeMap::new(),
+        base_image_ids: BTreeSet::new(),
         declaration: None,
         sequence: None,
     };
@@ -1438,6 +1440,18 @@ impl reclaim::ReclaimPool for FakePool {
             )
             .collect())
     }
+    fn base_images(&self, _: &()) -> Result<Vec<Value>, CandidateError> {
+        Ok(self
+            .images
+            .borrow()
+            .iter()
+            .filter_map(|(tag, image)| {
+                let id = image["Id"].as_str()?;
+                (aliases::keeper(id).as_deref() == Some(tag))
+                    .then(|| serde_json::json!({"Id": id, "RepoTags": [tag]}))
+            })
+            .collect())
+    }
     fn remove(&self, _: &(), image: &str) -> Result<bool, CandidateError> {
         let allowed = self.removable.borrow().get(image).copied().unwrap_or(true);
         if allowed {
@@ -1543,6 +1557,7 @@ fn the_key_is_version_two_and_version_one_receipts_are_never_reused() {
         image_id: Some(IMAGE.into()),
         image_bytes: None,
         base_pins: BTreeMap::new(),
+        base_image_ids: BTreeSet::new(),
         declaration: None,
         sequence: None,
     };
@@ -2093,4 +2108,43 @@ fn a_verified_base_selects_the_build_key_and_only_a_local_worker_source() {
             .is_none()
     );
     assert!(pool.inspect(&(), PIN).unwrap().is_some());
+}
+
+#[test]
+fn reclaim_keeps_only_two_of_ten_base_keepers_for_one_build() {
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Policy::Missing);
+    let pool = FakePool::new("pool-1");
+    pool.built(&inputs, "pool-1", serde_json::json!({}));
+    fixture.client(&inputs, "ok");
+    run(&fixture.candidate, &pool, &inputs, &never).unwrap();
+    let receipt = fixture.receipt(&inputs);
+    let directory = builds_root(&fixture.candidate).join(&inputs.namespace);
+
+    for revision in 1..=10 {
+        let mut receipt = receipt.clone();
+        receipt.sequence = Some(revision + 1);
+        receipt.build_key = format!("{revision:064x}");
+        let base = format!("sha256:{revision:064x}");
+        receipt.base_image_ids.insert(base.clone());
+        pool.images.borrow_mut().insert(
+            aliases::keeper(&base).unwrap(),
+            serde_json::json!({"Id": base}),
+        );
+        state::write(
+            &directory.join(format!("{}.json", receipt.build_key)),
+            &receipt,
+        )
+        .unwrap();
+    }
+    reclaim::run(&fixture.candidate, &pool).unwrap();
+    use reclaim::ReclaimPool;
+    let kept = pool.base_images(&()).unwrap();
+    assert_eq!(kept.len(), 2);
+    for revision in [9, 10] {
+        assert!(
+            kept.iter()
+                .any(|image| image["Id"] == format!("sha256:{revision:064x}"))
+        );
+    }
 }

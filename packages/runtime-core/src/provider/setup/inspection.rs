@@ -50,6 +50,42 @@ pub struct Inspection {
     pub pins: Vec<FilePin>,
     /// Narrow manager upgrade predicate, independent of installation readiness.
     pub setup_only: bool,
+    /// The image builder, which is not part of `installation_state`: a home is ready
+    /// without it and only image builds need it. Absent when it could not be observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builder: Option<BuilderInspection>,
+}
+
+/// Record-level observation of the image builder; no lease and no hashing.
+#[derive(Debug, Serialize)]
+pub struct BuilderInspection {
+    pub state: artifact::BuilderState,
+    /// The file name of the builder's entry in `pins`.
+    pub file: String,
+    /// The builder's prepared directory, as a path under the native home.
+    pub directory: String,
+    /// The builder's record, as a path under the native home.
+    pub record: String,
+}
+
+/// A home that does not exist yet has no builder; an existing one is looked at.
+fn observe_builder(
+    candidate: Option<&Candidate>,
+    installation_state: InstallationState,
+) -> Option<BuilderInspection> {
+    let state = match (installation_state, candidate) {
+        (InstallationState::NotSetUp, _) => artifact::BuilderState::NotPrepared,
+        (_, Some(candidate)) => artifact::builder_state(candidate).ok()?,
+        (_, None) => return None,
+    };
+    let file = super::builder_pin().ok()?.name().ok()?.to_owned();
+    let [directory, record] = artifact::builder_paths();
+    Some(BuilderInspection {
+        state,
+        file,
+        directory,
+        record,
+    })
 }
 
 /// Validate a possibly absent selected home without creating or resolving it.
@@ -119,18 +155,26 @@ pub fn inspect_candidate(candidate: &Candidate) -> Result<Inspection, CandidateE
         installation_state,
         false,
         cfg!(all(target_os = "macos", target_arch = "aarch64")),
+        observe_builder(Some(candidate), installation_state),
     )
 }
 
 fn inspect(home: &Path, supported_host: bool) -> Result<Inspection, CandidateError> {
     let (installation_state, setup_only) = classify(home);
-    result(installation_state, setup_only, supported_host)
+    let candidate = Candidate::discover_installed(home).ok();
+    result(
+        installation_state,
+        setup_only,
+        supported_host,
+        observe_builder(candidate.as_ref(), installation_state),
+    )
 }
 
 fn result(
     installation_state: InstallationState,
     setup_only: bool,
     supported_host: bool,
+    builder: Option<BuilderInspection>,
 ) -> Result<Inspection, CandidateError> {
     let state = if !supported_host
         && !matches!(
@@ -150,6 +194,7 @@ fn result(
         code,
         pins: pins()?,
         setup_only,
+        builder,
     })
 }
 
@@ -383,13 +428,66 @@ pub(super) mod tests {
         }
     }
 
+    /// A ready home stays ready, and its pins stay this release's pins, with or without
+    /// the image builder; only the `builder` field tells the two apart.
+    fn builder_is_reported_apart_from_readiness(home: &Path, candidate: &Candidate) {
+        let builder_file = format!("buildx-v{}.darwin-arm64", artifact::BUILDER_VERSION);
+        let ready = |expected: &str| {
+            let inspection = inspect(home, true).unwrap();
+            assert_eq!(inspection.state, InstallationState::Ready);
+            assert_eq!(inspection.installation_state, InstallationState::Ready);
+            assert_eq!(inspection.code, "native_setup_ready");
+            assert_eq!(inspection.pins.len(), 7);
+            assert_eq!(inspection.pins[6].name().unwrap(), builder_file);
+            assert_eq!(
+                serde_json::to_value(&inspection).unwrap()["builder"],
+                serde_json::json!({
+                    "state": expected,
+                    "file": builder_file,
+                    "directory": format!(
+                        ".hack-local/providers/buildx-{}-darwin-arm64",
+                        artifact::BUILDER_VERSION
+                    ),
+                    "record": ".hack-local/providers/buildx.json"
+                })
+            );
+        };
+        // A home set up before setup installed the builder.
+        ready("not_prepared");
+        // A home set up by this build.
+        artifact::recorded_builder_fixture(candidate);
+        ready("prepared");
+        // A builder record from another pin is the builder's own state; the home is not
+        // reported as differing from this release.
+        let record = candidate.state_root.join("providers/buildx.json");
+        fs::remove_file(&record).unwrap();
+        state::write(
+            &record,
+            &serde_json::json!({"version": "0.0.1", "archive_sha256": "b".repeat(64), "tree_sha256": "a".repeat(64)}),
+        )
+        .unwrap();
+        ready("changed");
+        fs::remove_file(&record).unwrap();
+        ready("not_prepared");
+        artifact::recorded_builder_fixture(candidate);
+    }
+
     #[test]
     fn absent_partial_ready_and_held_lease_are_read_only() {
         let fixture = Fixture::new();
         let absent = fixture.0.join("absent");
+        let not_set_up = inspect(&absent, true).unwrap();
+        assert_eq!(not_set_up.state, InstallationState::NotSetUp);
+        // Nothing is installed yet, the builder included, and it is listed for consent.
         assert_eq!(
-            inspect(&absent, true).unwrap().state,
-            InstallationState::NotSetUp
+            not_set_up.builder.as_ref().unwrap().state,
+            artifact::BuilderState::NotPrepared
+        );
+        assert!(
+            not_set_up
+                .pins
+                .iter()
+                .any(|pin| pin.name().unwrap() == not_set_up.builder.as_ref().unwrap().file)
         );
         assert!(!absent.exists());
         let candidate = create_home(&absent).unwrap();
@@ -410,6 +508,7 @@ pub(super) mod tests {
             inspect(&absent, true).unwrap().state,
             InstallationState::Ready
         );
+        builder_is_reported_apart_from_readiness(&absent, &candidate);
         assert!(!inspect_home_quiescence(&absent).unwrap().setup_only);
         drop(_lease);
         let setup_lease = state::Lock::acquire(&candidate.state_root.join("setup")).unwrap();

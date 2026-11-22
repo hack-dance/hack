@@ -201,7 +201,8 @@ jobs:
   publish:
     if: ${{ inputs.publish }}
     needs: [plan, build]
-    runs-on: ubuntu-latest
+    # The native installer verifies signatures using macOS codesign.
+    runs-on: macos-15
     timeout-minutes: 10
     # The plan checks that this already exists with real required-reviewer protection.
     environment: v5-prerelease

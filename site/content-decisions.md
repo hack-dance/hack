@@ -16,11 +16,26 @@ Every performance and resource figure it shows is recorded in
 another product is published without a measurement: the comparisons on the home
 page stay off until `COMPARISONS_MEASURED` in that file is set.
 
-The rest of this section is about the documentation pages. Hack runs your whole
-project on your own machine, and runs every project, branch and git worktree side
-by side, each at its own HTTPS address. One command starts a repo. Nothing is
-hosted. The root `README.md` carries this story in full; the v5 documentation
-index repeats it briefly and links out.
+The rest of this section is about the root `README.md` and the documentation
+pages. They share the home page's headline and open with one sentence: "Hack
+runs your whole project from one folder committed with the code: the services,
+the settings and encrypted secrets, and the helpers around them. Branches run
+side by side, each at its own HTTPS address, and a git worktree on a branch gets
+its own running copy by default. The same folder starts the project on another
+machine with Docker." The sentence says "on a branch" and "by default" because a
+detached worktree needs `--branch`, and `worktree.auto_branch=false` turns the
+automatic copy off. The README puts the headline
+on the first line under its title, then that sentence. The documentation indexes
+(`docs/versions/v5/index.md` and `docs/README.md`) open with the sentence, then
+"Nothing is hosted." The README carries the story in full; the indexes repeat it
+briefly and link out.
+
+Unlike the home page, the README and the documentation describe only what works
+in the current prerelease and in stable v4. A feature planned for 5.0 that the
+pinned prerelease does not have stays out of them until a release has it.
+`docs/reference/cli.md` is generated and decides whether a command or flag
+exists. They make no speed or memory claim, and use no client, project, person
+or host name.
 
 The native backend is a proof point, not a headline. It is labelled beta and has
 its own section: it runs the same project in a lightweight Linux VM that Hack
@@ -28,13 +43,17 @@ manages, without Docker Desktop. Documentation pages never call it a sandbox or 
 microVM, and make no speed, memory or battery claim for it.
 
 Documentation pages say "backend" for Compose and native, "instance" for a running
-copy of a project, and "prerelease" for a `5.0.0-next.N` build. They do not use
+copy of a project, and "prerelease" for a `5.0.0-next.N` build. A page's first
+mention may say "running copy" and then name the instance; the glossary in
+`docs/core.md` defines the term. They do not use
 "engine", "provider", "pool" or "candidate" for these in user-facing text.
 "Isolated" is always qualified: say what a branch instance gets of its own
 (containers, addresses, logs) and what it still shares.
 
-v5 is the same CLI and project model as v4 with a new way to run services. Docker Compose
-stays the default backend; the native backend is beta: opt-in, Apple Silicon macOS, `hack-next` channel only. Pages
+v5 is the same CLI and project model as v4 with a new way to run services. Stable Hack
+runs Docker Compose. The native backend is beta: Apple Silicon macOS, `hack-next` channel only, where the launcher
+selects it on a Mac unless Compose is selected (Linux prereleases run Compose). Name the channel when a page says
+which backend is the default. Pages
 write `hack` for the v5 CLI and tell prerelease users once, on Install, how to map
 that to `hack-next`.
 

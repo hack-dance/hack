@@ -10,7 +10,7 @@ use std::fs::File;
 use std::path::PathBuf;
 
 const VERSION: u8 = 1;
-/// A record holds a handful of digests and identifiers; anything larger is torn.
+/// A record holds bounded digests and identifiers; anything larger is torn.
 pub(super) const MAX_RECORD_BYTES: u64 = 64 * 1024;
 /// The largest time a record may carry: 2^53 - 1, the TypeScript safe integer.
 const MAX_SAFE_MILLIS: u64 = (1 << 53) - 1;
@@ -162,7 +162,7 @@ impl Store {
                 run: run.to_owned(),
             },
         };
-        let shard = self.record_shard(key);
+        let shard = self.root.join(record_shard(key));
         disk::create_directory(&shard)?;
         let path = shard.join(format!("{:x}.json", crate::Hex(key.digest().0)));
         let bytes = record.encode()?;
@@ -177,32 +177,28 @@ impl Store {
     pub(super) fn read_record(
         &self,
         key: &StepKey,
-    ) -> Result<std::result::Result<(Record, File), MissReason>> {
-        let path = self
-            .record_shard(key)
-            .join(format!("{:x}.json", crate::Hex(key.digest().0)));
-        let Some(mut file) = self.read_file(&path)? else {
-            return Ok(Err(MissReason::NoRecord));
-        };
-        let decoded = match disk::read_limited(&mut file, MAX_RECORD_BYTES)? {
-            Some(bytes) => Record::decode(&bytes, key),
-            None => Err(MissReason::TornRecord),
+    ) -> std::result::Result<(Record, File), MissReason> {
+        let path = record_shard(key).join(format!("{:x}.json", crate::Hex(key.digest().0)));
+        let mut entry = disk::read_cache_file(&self.directory, &path, self.owner)?;
+        let decoded = match disk::read_limited(&mut entry.file, MAX_RECORD_BYTES) {
+            Ok(Some(bytes)) => Record::decode(&bytes, key),
+            Ok(None) => Err(MissReason::TornRecord),
+            Err(_) => return Err(MissReason::TornRecord),
         };
         match decoded {
-            Ok(record) => Ok(Ok((record, file))),
+            Ok(record) => Ok((record, entry.file)),
             Err(reason) => {
                 // Best effort: the record is a miss either way.
-                let _ = disk::remove_current(&file, &path);
-                Ok(Err(reason))
+                entry.discard();
+                Err(reason)
             }
         }
     }
+}
 
-    fn record_shard(&self, key: &StepKey) -> PathBuf {
-        let digest = key.digest();
-        self.root
-            .join("records")
-            .join(&key.step)
-            .join(format!("{:x}", crate::Hex(&digest.0[..1])))
-    }
+fn record_shard(key: &StepKey) -> PathBuf {
+    let digest = key.digest();
+    PathBuf::from("records")
+        .join(&key.step)
+        .join(format!("{:x}", crate::Hex(&digest.0[..1])))
 }

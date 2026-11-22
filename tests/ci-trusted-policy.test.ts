@@ -44,6 +44,9 @@ async function scope(opts: {
   baseRef?: string;
   tierPlan?: boolean;
   tierDocker?: boolean;
+  tierModels?: boolean;
+  tierBuild?: boolean;
+  tierScope?: "full";
   before?: string;
   predecessor?: string;
   dispatchFull?: boolean;
@@ -91,7 +94,7 @@ async function scope(opts: {
       await writeFile(join(root, path), source);
     };
     const tierPlan = opts.tierPlan
-      ? ` await Bun.write(process.env.GITHUB_OUTPUT!, await Bun.file(process.env.GITHUB_OUTPUT!).text() + ${JSON.stringify(`compiler_hosts=${fullPushPlan({ releaseHosts: false }).compiler_hosts}\nruntime_core=true\ntest_shards=[1,2,3,4,5,6,7,8]\ndocker_suite=${String(opts.tierDocker === true)}\n`)});`
+      ? ` await Bun.write(process.env.GITHUB_OUTPUT!, await Bun.file(process.env.GITHUB_OUTPUT!).text() + ${JSON.stringify(`compiler_hosts=${fullPushPlan({ releaseHosts: false }).compiler_hosts}\nruntime_core=true\ntest_shards=[1,2,3,4,5,6,7,8]\ndocker_suite=${String(opts.tierDocker === true)}\nstate_models=${String(opts.tierModels === true)}\nbuild_smoke=${String(opts.tierBuild === true)}\n${opts.tierScope ? `scope=${opts.tierScope}\n` : ""}`)});`
       : "";
     const policy = opts.legacy
       ? 'throw Error("legacy policy must not execute");'
@@ -304,6 +307,10 @@ test("protected PR deferral passes the required fan-in only with successful sele
         COMPILER_RESULT: "success",
         LIFETIME_ENABLED: outputs.docker_suite,
         LIFETIME_RESULT: "success",
+        IMAGES_ENABLED: outputs.docker_suite,
+        IMAGES_RESULT: "success",
+        MODELS_ENABLED: outputs.state_models,
+        MODELS_RESULT: "success",
       },
       stdout: "pipe",
       stderr: "pipe",
@@ -578,4 +585,85 @@ test("the independent boundary preserves Docker inputs derived by trusted base p
     tierDocker: true,
   });
   expect(output.docker_suite).toBe("true");
+});
+
+test("the workflow preserves tiers selected by trusted base policy", async () => {
+  const output = await scope({
+    path: "tests/example.test.ts",
+    tierPlan: true,
+    tierModels: true,
+    tierBuild: true,
+  });
+  expect(output).toMatchObject({
+    docker_suite: "false",
+    state_models: "true",
+    build_smoke: "true",
+  });
+});
+
+test("the workflow retains all Linux tiers when trusted policy widens unknown tests", async () => {
+  const output = await scope({
+    path: "tests/future/engine.bin",
+    tierPlan: true,
+    tierScope: "full",
+  });
+  expect(output).toMatchObject({
+    scope: "full",
+    docker_suite: "true",
+    state_models: "true",
+    build_smoke: "true",
+    runtime_core: "true",
+    compiler_hosts: linuxCompilerHosts,
+  });
+});
+
+test.each([
+  "test",
+  "docker-e2e",
+])("%s requires selected model and runtime image evidence", (job) => {
+  const gate = workflow.jobs[job]?.steps[0]?.run;
+  if (!gate) {
+    throw new Error(`missing ${job} fan-in`);
+  }
+  for (const tier of ["MODELS", "IMAGES"]) {
+    for (const [enabled, result, expected] of [
+      ["true", "success", 0],
+      ["false", "skipped", 0],
+      ["true", "failure", 1],
+      ["true", "skipped", 1],
+      ["true", "cancelled", 1],
+    ] as const) {
+      const docker = tier === "IMAGES" ? enabled : "true";
+      const env = {
+        PR_DRAFT: "false",
+        CHANGES_RESULT: "success",
+        SCOPE: "typescript",
+        SUITE: job === "test" ? "true" : docker,
+        TEST_FOCUS: "",
+        SHARD_RESULT:
+          job === "docker-e2e" && docker === "false" ? "skipped" : "success",
+        FOCUS_RESULT: "success",
+        COMPILER_ENABLED: "false",
+        COMPILER_RESULT: "skipped",
+        LIFETIME_ENABLED: docker,
+        LIFETIME_RESULT: docker === "true" ? "success" : "skipped",
+        IMAGES_ENABLED: docker,
+        IMAGES_RESULT: "success",
+        MODELS_ENABLED: "true",
+        MODELS_RESULT: "success",
+        [`${tier}_ENABLED`]: enabled,
+        [`${tier}_RESULT`]: result,
+      };
+      const checked = Bun.spawnSync(["bash", "-eu", "-c", gate], {
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 5000,
+      });
+      expect(
+        checked.exitCode,
+        `${tier} ${enabled} ${result}: ${checked.stderr}`
+      ).toBe(expected);
+    }
+  }
 });

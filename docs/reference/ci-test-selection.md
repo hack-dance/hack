@@ -4,14 +4,16 @@ A PR uses a light tier by default: typecheck, lint/privacy, secret scan, docs
 checks when relevant, and selected Linux unit files on five Linux shards. It runs
 no macOS jobs by default. Ready CLI-source PRs retain Linux x64 relocated CLI
 acceptance; Rust-input PRs retain Linux Candidate core and both Linux compiler
-hosts. Model changes now enable the state-model job independently of build smoke.
+hosts. Changes to model inputs select state models independently of build smoke.
 
 | Change kind (ready PR to `next`) | Tiers selected in addition to selected Linux units and required checks |
 | --- | --- |
-| Ordinary test or documentation | No Docker or model tier; docs site when relevant |
+| Ordinary unit test or docs-site-only input | No Docker, models or build smoke; docs site when relevant |
 | `scripts/lib/tla-runtime-models.ts` or `tests/models/**` | State models; no Docker or build smoke |
-| TLA helper skill or the four Python controls bundled with the model job | State models; no Docker or build smoke |
-| Runtime Rust source, including a model registry edit | Linux candidate/compiler checks; models when changed; no Docker |
+| TLA helper skill, `tests/tla-result.test.ts`, or the four Python controls bundled with the model job | State models; no Docker or build smoke |
+| Runtime-core or guest Rust source | Linux candidate/compiler checks and Docker tier because the runtime images copy `packages/`; models when a model input also changes |
+| Config compiler or lifecycle supervisor Rust source | Docker and release build smoke; Linux Rust checks where applicable |
+| Other CLI release build inputs, including the packaged root README | Build smoke, plus Docker where shared with the Docker tier |
 | Compose backend, templates, E2E harness and their derived imported/executed inputs | Docker E2E, runtime images and Linux process lifetime |
 | Shared CLI source (`src/**`, `index.ts`, `packages/cli/**`), `.hack/**`, Docker definitions, lifecycle supervisor, examples/assets and recipe snippets | Docker tier conservatively; CLI source also retains relocated acceptance |
 | Unknown input families, shared test helpers/preloads, other scripts, manifests, lockfiles, toolchain/config pins, workflows or selectors | Full Linux, Docker, state-model and build tiers |
@@ -21,14 +23,18 @@ hosts. Model changes now enable the state-model job independently of build smoke
 
 Docker dependencies are derived from the `docker-e2e-shard`, `runtime-images` and
 `linux-process-lifetime` workflow commands, including package/workspace scripts,
-transitive local imports, literal file paths and joined execution/data paths.
-Cargo manifests select their compiled crate directories. Thus the shared-host
+transitive local imports, nested shell helpers and literal execution/data paths.
+Local Compose builds contribute their Dockerfiles, ignore files and local
+`COPY`/`ADD` sources. The runtime image builder uses the repository root as its
+context. Build smoke and state models follow their own workflow commands. Cargo
+manifests select their compiled crate directories. The planner reads both the
+base and merge trees, so deleted inputs and both sides of a rename still count. Thus the shared-host
 fixture, real-Docker context test and configuration compiler remain Docker inputs
 without relying on a filename-prefix guess. A new registered scenario importing a
 new helper automatically brings that helper into Docker qualification. Fixture
 regressions exercise that edge; unavailable dependency evidence selects full.
-Unknown path families select every job even if the unit graph already fell back
-to every test file. Unit inventory expansion and job-tier expansion are separate.
+A path outside explicit scope rules, discovered unit tests and derived tier
+inputs selects every job. This applies inside `tests/`, too. Unit inventory expansion and job-tier expansion are separate.
 
 Unknown scripts and shared helpers remain full-tier inputs until their consumers
 are audited. In particular, this change exempts only the known model registry from
@@ -55,8 +61,9 @@ Linux/Docker/build tiers for protected inputs, with macOS selected separately as
 Adding/removing labels, pushing, changing readiness or retargeting recomputes
 scope; metadata edits can cancel the active run.
 
-The required `test` fan-in also depends on `config-compiler` and
-`linux-process-lifetime`. Every selected compiler host must succeed; its planned
+The `test` and `docker-e2e` fan-ins require successful runtime images and state
+models when those tiers were selected. The required `test` fan-in also depends
+on `config-compiler` and `linux-process-lifetime`. Every selected compiler host must succeed; its planned
 out-of-scope skip passes. When native tiers are selected, the required check
 also waits for their macOS compiler hosts, including Intel on release/full-main
 runs. When that

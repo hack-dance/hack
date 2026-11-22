@@ -255,7 +255,18 @@ describe("pull request diff", () => {
     await mkdir(join(root, ".github/workflows"), { recursive: true });
     await writeFile(
       join(root, ".github/workflows/ci.yml"),
-      "jobs:\n  docker-e2e-shard:\n    steps:\n      - run: echo fixture\n"
+      `jobs:
+  docker-e2e-shard:
+    steps:
+      - run: echo fixture
+  state-models:
+    steps:
+      - run: echo fixture
+  test-shard:
+    steps:
+      - if: matrix.shard == 8 && needs.changes.outputs.build_smoke == 'true'
+        run: echo fixture
+`
     );
     const result = Bun.spawnSync(
       [

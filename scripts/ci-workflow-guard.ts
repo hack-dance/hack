@@ -2,12 +2,19 @@
 import { isKnownCiInput, touchesStateModels } from "./ci-change-scope.ts";
 
 /** Unknown scripts and shared setup stay full until their consumers are bounded. */
-export function requiresWorkflowFull(paths: readonly string[] | null): boolean {
+export function requiresWorkflowFull(
+  paths: readonly string[] | null,
+  opts: { readonly deriveUnknown?: boolean } = {}
+): boolean {
   return (
     !paths?.length ||
     paths.some(
       (path) =>
-        !isKnownCiInput(path) ||
+        !(
+          opts.deriveUnknown ||
+          isKnownCiInput(path) ||
+          path.startsWith("tests/")
+        ) ||
         (!touchesStateModels(path) && /^scripts\//.test(path)) ||
         /^(?:\.github\/|tests\/helpers\/)/.test(path) ||
         [

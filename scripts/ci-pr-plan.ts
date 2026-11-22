@@ -1,14 +1,19 @@
 /** PR and next-push policy layered over the coarse change-scope classifier. */
 import {
   COMPILER_HOSTS,
+  isKnownCiInput,
   planScope,
   scopeOutputs,
   touchesDockerSuite,
   touchesRelocatedCli,
   touchesStateModels,
 } from "./ci-change-scope.ts";
-import { dockerJobInputs, matchesDockerJobInput } from "./ci-docker-inputs.ts";
-import { selectTests, type TestSelection } from "./ci-test-selection.ts";
+import { deriveJobInputs } from "./ci-docker-inputs.ts";
+import {
+  buildSelectionGraph,
+  selectTests,
+  type TestSelection,
+} from "./ci-test-selection.ts";
 import { requiresWorkflowFull } from "./ci-workflow-guard.ts";
 import { classifyTestPools } from "./test-shard-plan.ts";
 
@@ -110,44 +115,49 @@ function shouldRunCandidate(opts: {
   );
 }
 
-function shouldRunModels(opts: {
-  readonly draft: boolean;
-  readonly integration: boolean;
-  readonly full: boolean;
-  readonly changed: readonly string[] | null;
-}): boolean {
-  return (
-    !opts.draft &&
-    (opts.integration ||
-      opts.full ||
-      opts.changed?.some(touchesStateModels) === true)
-  );
-}
+const tiers = ["docker", "models", "build"] as const;
+type Tier = (typeof tiers)[number];
 
-function shouldRunDocker(opts: {
-  readonly draft: boolean;
-  readonly integration: boolean;
-  readonly full: boolean;
-  readonly e2e: boolean;
+function changedTiers(opts: {
+  readonly repoRoot: string;
+  readonly baseRoot?: string;
   readonly changed: readonly string[] | null;
-  readonly inputs: ReadonlySet<string> | null;
-}): boolean {
-  return (
-    !opts.draft &&
-    (opts.integration ||
-      opts.full ||
-      opts.e2e ||
-      opts.changed?.some(
-        (path) =>
-          touchesDockerSuite(path) ||
-          (opts.inputs !== null &&
-            matchesDockerJobInput({ path, inputs: opts.inputs }))
-      ) === true)
-  );
+}) {
+  const roots = new Set([opts.repoRoot, opts.baseRoot || opts.repoRoot]);
+
+  const inputs = tiers.map((tier) => ({
+    tier,
+    trees: [...roots].map((repoRoot) => deriveJobInputs({ repoRoot, tier })),
+  }));
+  const selectedTiers = new Set<Tier>();
+  let full = inputs.some(({ trees }) => trees.includes(null));
+  if (!full) {
+    const unitFiles = new Set(
+      [...roots].flatMap((repoRoot) => buildSelectionGraph({ repoRoot }).files)
+    );
+    for (const path of opts.changed ?? []) {
+      let known = isKnownCiInput(path) || unitFiles.has(path);
+      if (touchesDockerSuite(path)) {
+        selectedTiers.add("docker");
+      }
+      if (touchesStateModels(path)) {
+        selectedTiers.add("models");
+      }
+      for (const { tier, trees } of inputs) {
+        if (trees.some((tree) => tree?.has(path))) {
+          known = true;
+          selectedTiers.add(tier);
+        }
+      }
+      full ||= !known;
+    }
+  }
+  return { full, selectedTiers };
 }
 
 export async function planPullRequest(opts: {
   readonly repoRoot: string;
+  readonly baseRoot?: string;
   readonly changed: readonly string[] | null;
   readonly draft: boolean;
   readonly full: boolean;
@@ -164,11 +174,12 @@ export async function planPullRequest(opts: {
 }): Promise<PullRequestPlan> {
   const stablePr = opts.pullRequest !== false && opts.baseRef === "main";
   const forcedFull =
-    opts.full || stablePr || requiresWorkflowFull(opts.changed);
-  const dockerInputs = forcedFull
-    ? new Set<string>()
-    : dockerJobInputs({ repoRoot: opts.repoRoot });
-  const full = forcedFull || dockerInputs === null;
+    opts.full ||
+    stablePr ||
+    requiresWorkflowFull(opts.changed, { deriveUnknown: true });
+  const { full, selectedTiers } = forcedFull
+    ? { full: true, selectedTiers: new Set<Tier>() }
+    : changedTiers(opts);
   const selection =
     opts.selection ??
     selectTests({
@@ -186,14 +197,9 @@ export async function planPullRequest(opts: {
     !opts.draft && (full || opts.changed?.some(touchesRustInput) === true);
   const mac =
     !opts.draft && (integration || stablePr || opts.full || opts.mac === true);
-  const e2e = shouldRunDocker({
-    draft: opts.draft,
-    integration,
-    full,
-    e2e: opts.e2e === true,
-    changed: opts.changed,
-    inputs: dockerInputs,
-  });
+  const tierEnabled = (tier: Tier): boolean =>
+    !opts.draft && (integration || full || selectedTiers.has(tier));
+  const e2e = tierEnabled("docker") || (!opts.draft && opts.e2e === true);
   const macos = mac && pools.macos.length > 0 ? [1, 2, 3] : [];
   const linux = [4, 5, 6, 7, 8];
   const allJobs = full;
@@ -226,13 +232,8 @@ export async function planPullRequest(opts: {
     test_shards: JSON.stringify([...macos, ...linux]),
     selection_mode: selection.mode,
     docker_suite: e2e,
-    state_models: shouldRunModels({
-      draft: opts.draft,
-      integration,
-      full,
-      changed: opts.changed,
-    }),
+    state_models: tierEnabled("models"),
     defer_macos: !mac,
-    build_smoke: !opts.draft && (integration || full),
+    build_smoke: tierEnabled("build"),
   };
 }

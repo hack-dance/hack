@@ -427,11 +427,7 @@ describe("PR matrix policy", () => {
         "tests/native-authored-project-start.test.ts",
       ],
     } as const;
-    for (const changed of [
-      ["docs/a.md"],
-      ["tests/a.test.ts"],
-      ["packages/runtime-core/README.md"],
-    ]) {
+    for (const changed of [["docs/a.md"], ["tests/step-store.test.ts"]]) {
       const plan = await planPullRequest({
         repoRoot,
         changed,
@@ -459,7 +455,7 @@ describe("PR matrix policy", () => {
     expect(await planPullRequest({ ...input, mac: true })).toMatchObject({
       defer_macos: false,
       runtime_core: true,
-      docker_suite: false,
+      docker_suite: true,
       build_smoke: false,
       test_shards: "[1,2,3,4,5,6,7,8]",
     });
@@ -505,8 +501,8 @@ describe("PR matrix policy", () => {
         COMPILER_HOSTS.filter((host) => host.platform === "linux")
       ),
       defer_macos: true,
-      docker_suite: path.startsWith("packages/config-compiler/"),
-      build_smoke: false,
+      docker_suite: true,
+      build_smoke: path.startsWith("packages/config-compiler/"),
       test_shards: "[4,5,6,7,8]",
     });
     expect(await planPullRequest({ ...input, draft: true })).toMatchObject({
@@ -544,7 +540,6 @@ describe("PR matrix policy", () => {
         runtime_core: false,
         defer_macos: true,
         docker_suite: true,
-        build_smoke: false,
       });
       expect(
         await planPullRequest({
@@ -834,7 +829,7 @@ describe("CI tier table (HACK-2493)", () => {
   const rows = [
     {
       name: "ordinary test",
-      paths: ["tests/a.test.ts"],
+      paths: ["tests/step-store.test.ts"],
       docker: false,
       models: false,
       full: false,
@@ -866,14 +861,14 @@ describe("CI tier table (HACK-2493)", () => {
         "scripts/lib/tla-runtime-models.ts",
         "packages/runtime-core/src/main.rs",
       ],
-      docker: false,
+      docker: true,
       models: true,
       full: false,
     },
     {
       name: "Rust",
       paths: ["packages/runtime-core/src/main.rs"],
-      docker: false,
+      docker: true,
       models: false,
       full: false,
     },

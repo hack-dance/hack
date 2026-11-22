@@ -134,7 +134,7 @@ jobs:
                     docker_inputs=true ;;
                 esac
                 case "$path" in
-                  scripts/lib/tla-runtime-models.ts|tests/models/*|.ai/skills/hack-repo-tla/*|tests/python/test_prepared_base_benchmark.py|tests/python/test_native_compose_benchmark.py|tests/python/test_native_frontend_acceptance.py|tests/python/test_application_benchmark_protocol.py) model_inputs=true ;;
+                  scripts/lib/tla-runtime-models.ts|tests/tla-result.test.ts|tests/models/*|.ai/skills/hack-repo-tla/*|tests/python/test_prepared_base_benchmark.py|tests/python/test_native_compose_benchmark.py|tests/python/test_native_frontend_acceptance.py|tests/python/test_application_benchmark_protocol.py) model_inputs=true ;;
                 esac
                 case "$path" in
                   scripts/lib/tla-runtime-models.ts) ;;
@@ -211,17 +211,19 @@ jobs:
             git archive "$base" | tar -x -C "$policy"
             cd "$policy"
             bun --no-env-file install --cwd "$policy" --frozen-lockfile --ignore-scripts
-            bun --no-env-file "$policy/scripts/ci-change-scope.ts" --event="$EVENT_NAME" --repo-root="$GITHUB_WORKSPACE" --ref="$CI_REF" --base-revision="$base"
+            bun --no-env-file "$policy/scripts/ci-change-scope.ts" --event="$EVENT_NAME" --repo-root="$GITHUB_WORKSPACE" --ref="$CI_REF" --base-revision="$base" --base-root="$policy"
             echo 'ci_evidence=scoped' >> "$GITHUB_OUTPUT"
           fi
           # Protected inputs retain full Linux/Docker/build coverage. Ready PRs
           # defer macOS unless targeting main or explicitly labeled. Drafts stay light.
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            mac=false; e2e=false; builds=false
+            mac=false; e2e=false; builds=false; models=false
+            if [ "$(sed -n 's/^scope=//p' "$GITHUB_OUTPUT" | tail -n 1)" = "full" ]; then full=true; fi
             if [ "$PR_DRAFT" != "true" ]; then
               if [ "$PR_BASE_REF" = "main" ] || [ "$PR_FULL" = "true" ] || [ "$PR_MAC" = "true" ]; then mac=true; fi
               if [ "$full" = "true" ] || [ "$PR_E2E" = "true" ] || [ "$docker_inputs" = "true" ]; then e2e=true; fi
-              if [ "$full" = "true" ]; then builds=true; fi
+              if [ "$full" = "true" ] || [ "$(sed -n 's/^build_smoke=//p' "$GITHUB_OUTPUT" | tail -n 1)" = "true" ]; then builds=true; fi
+              if [ "$full" = "true" ] || [ "$model_inputs" = "true" ] || [ "$(sed -n 's/^state_models=//p' "$GITHUB_OUTPUT" | tail -n 1)" = "true" ]; then models=true; fi
             fi
             if [ "$mac" != "true" ]; then
               compiler='[]'; native=false
@@ -249,8 +251,6 @@ jobs:
             # import and execution graph; this boundary may widen, never erase it.
             if [ "$PR_DRAFT" != "true" ] && [ "$(sed -n 's/^docker_suite=//p' "$GITHUB_OUTPUT" | tail -n 1)" = "true" ]; then e2e=true; fi
             printf 'docker_suite=%s\n' "$e2e" >> "$GITHUB_OUTPUT"
-            models=false
-            if [ "$PR_DRAFT" != "true" ] && { [ "$full" = "true" ] || [ "$model_inputs" = "true" ]; }; then models=true; fi
             printf 'state_models=%s\n' "$models" >> "$GITHUB_OUTPUT"
             printf 'build_smoke=%s\n' "$builds" >> "$GITHUB_OUTPUT"
             echo 'Ready PRs defer macOS to integration unless targeting main or labeled ci:mac or ci:full. Protected inputs and unavailable policy/diff retain full Linux, Docker and build tiers. Light PRs retain selected Linux checks; labels opt into heavy tiers. Drafts stay light.' >> "$GITHUB_STEP_SUMMARY"
@@ -815,7 +815,7 @@ jobs:
     # It always runs: incomplete evidence fails, and shards skipped
     # because the change scope excludes the suite pass; failures, a failed scope
     # and any other skip still fail. Prerelease gates separately require every shard.
-    needs: [changes, docker-e2e-shard]
+    needs: [changes, docker-e2e-shard, runtime-images, state-models]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -828,6 +828,10 @@ jobs:
           SCOPE: ${{ needs.changes.outputs.scope }}
           SUITE: ${{ needs.changes.outputs.docker_suite }}
           SHARD_RESULT: ${{ needs.docker-e2e-shard.result }}
+          IMAGES_ENABLED: ${{ needs.changes.outputs.docker_suite }}
+          IMAGES_RESULT: ${{ needs.runtime-images.result }}
+          MODELS_ENABLED: ${{ needs.changes.outputs.state_models }}
+          MODELS_RESULT: ${{ needs.state-models.result }}
         run: |
           if [ "$PR_DRAFT" = "true" ]; then
             echo "skipped: draft — full pull-request evidence is required before merge"
@@ -841,6 +845,14 @@ jobs:
             echo "change scope did not succeed (result: $CHANGES_RESULT)"
             exit 1
           fi
+          case "$IMAGES_ENABLED:$IMAGES_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "Runtime image evidence did not match its plan (enabled: $IMAGES_ENABLED, result: $IMAGES_RESULT)" >&2; exit 1 ;;
+          esac
+          case "$MODELS_ENABLED:$MODELS_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "State model evidence did not match its plan (enabled: $MODELS_ENABLED, result: $MODELS_RESULT)" >&2; exit 1 ;;
+          esac
           if [ "$SUITE" = "false" ] && [ "$SHARD_RESULT" = "skipped" ]; then
             echo "docker-e2e is out of scope for this pull request (scope: $SCOPE)"
             exit 0
@@ -985,7 +997,7 @@ jobs:
     # succeed; when it runs a focus instead, the focused job must. A cancelled
     # result fails, as do a failure, a failed scope or any skip of
     # the job in scope still fails rather than surfacing as a skipped check.
-    needs: [changes, test-shard, test-focus, linux-process-lifetime, config-compiler]
+    needs: [changes, test-shard, test-focus, linux-process-lifetime, config-compiler, runtime-images, state-models]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1004,6 +1016,10 @@ jobs:
           COMPILER_RESULT: ${{ needs.config-compiler.result }}
           LIFETIME_ENABLED: ${{ needs.changes.outputs.docker_suite }}
           LIFETIME_RESULT: ${{ needs.linux-process-lifetime.result }}
+          IMAGES_ENABLED: ${{ needs.changes.outputs.docker_suite }}
+          IMAGES_RESULT: ${{ needs.runtime-images.result }}
+          MODELS_ENABLED: ${{ needs.changes.outputs.state_models }}
+          MODELS_RESULT: ${{ needs.state-models.result }}
         run: |
           if [ "$PR_DRAFT" = "true" ]; then
             echo "skipped: draft — full pull-request evidence is required before merge"
@@ -1028,6 +1044,14 @@ jobs:
           case "$LIFETIME_ENABLED:$LIFETIME_RESULT" in
             true:success|false:skipped) ;;
             *) echo "Linux process lifetime evidence did not match its plan (enabled: $LIFETIME_ENABLED, result: $LIFETIME_RESULT)" >&2; exit 1 ;;
+          esac
+          case "$IMAGES_ENABLED:$IMAGES_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "Runtime image evidence did not match its plan (enabled: $IMAGES_ENABLED, result: $IMAGES_RESULT)" >&2; exit 1 ;;
+          esac
+          case "$MODELS_ENABLED:$MODELS_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "State model evidence did not match its plan (enabled: $MODELS_ENABLED, result: $MODELS_RESULT)" >&2; exit 1 ;;
           esac
           if [ "$SUITE" != "true" ]; then
             if [ -z "$TEST_FOCUS" ]; then

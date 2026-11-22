@@ -1,8 +1,9 @@
-/** Derive real-engine inputs from workflow commands, package scripts and module imports. */
+/** Derive CI tier inputs from workflow commands, file references and module imports. */
 import { readFileSync, statSync } from "node:fs";
 import { posix, resolve } from "node:path";
 import ts from "typescript";
 import { isRecord } from "../src/lib/guards.ts";
+import { composeBuilds, dockerContextInputs } from "./ci-docker-context.ts";
 import {
   buildSelectionGraph,
   selectionModuleInputs,
@@ -13,7 +14,9 @@ type InputOptions = {
   readonly sources?: Readonly<Record<string, string>>;
 };
 const JOBS = ["docker-e2e-shard", "runtime-images", "linux-process-lifetime"];
-const cache = new Map<string, ReadonlySet<string> | null>();
+type Tier = "docker" | "models" | "build";
+type JobInputs = Pick<ReadonlySet<string>, "has">;
+const cache = new Map<string, JobInputs>();
 
 function inputReader(opts: InputOptions) {
   return {
@@ -53,7 +56,8 @@ function inputReader(opts: InputOptions) {
 }
 
 function workflowCommands(
-  source: string | undefined
+  source: string | undefined,
+  tier: Tier
 ): readonly string[] | null {
   if (!source) {
     return null;
@@ -68,13 +72,25 @@ function workflowCommands(
     return null;
   }
   const commands: string[] = [];
-  for (const name of JOBS) {
+  const jobs =
+    tier === "docker"
+      ? JOBS
+      : tier === "models"
+        ? ["state-models"]
+        : ["test-shard"];
+  for (const name of jobs) {
     const job = workflow.jobs[name];
     if (!(isRecord(job) && Array.isArray(job.steps))) {
       continue;
     }
     for (const step of job.steps) {
-      if (isRecord(step) && typeof step.run === "string") {
+      if (
+        isRecord(step) &&
+        typeof step.run === "string" &&
+        (tier !== "build" ||
+          (typeof step.if === "string" &&
+            step.if.includes("outputs.build_smoke")))
+      ) {
         commands.push(step.run);
       }
     }
@@ -139,15 +155,31 @@ function packageScript(opts: {
   return typeof script === "string" ? script : undefined;
 }
 
+function commandDirectory(command: { text: string; cwd: string }) {
+  const changeDirectory = /^cd\s+([.\w/-]+)\s+&&\s*/.exec(command.text);
+  const text = changeDirectory
+    ? command.text.slice(changeDirectory[0].length)
+    : command.text;
+  const cwd = changeDirectory?.[1]
+    ? posix.join(command.cwd, changeDirectory[1])
+    : command.cwd;
+  return { text, cwd };
+}
+
 function collectCommands(opts: {
   readonly commands: readonly string[];
+  readonly cwd?: string;
   readonly reader: ReturnType<typeof inputReader>;
   readonly collector: ReturnType<typeof inputCollector>;
 }): void {
   const scripts = new Set<string>();
-  const queue = opts.commands.map((text) => ({ text, cwd: "." }));
+  const queue = opts.commands.map((text) => ({ text, cwd: opts.cwd ?? "." }));
   while (queue.length) {
-    const { text, cwd } = queue.pop() as { text: string; cwd: string };
+    const command = queue.pop();
+    if (!command) {
+      break;
+    }
+    const { text, cwd } = commandDirectory(command);
     for (const match of text.matchAll(
       /(?:^|[\s"'=])([.\w/-]+\.(?:[cm]?[jt]sx?|sh|py|json|toml|lock|ya?ml))\b/g
     )) {
@@ -212,19 +244,83 @@ function collectLiteralPaths(opts: {
   visit(ast);
 }
 
+function collectFiles(opts: {
+  readonly tier: Tier;
+  readonly collector: ReturnType<typeof inputCollector>;
+  readonly reader: ReturnType<typeof inputReader>;
+  readonly graph: ReturnType<typeof buildSelectionGraph>;
+}) {
+  const { tier, collector, reader, graph } = opts;
+  if (tier === "build") {
+    // Release packaging enumerates these directories rather than naming each file.
+    collector.inputs.add("binaries/gum/");
+    collector.inputs.add("packages/config-compiler/generated/");
+  }
+  const contexts: ReturnType<typeof dockerContextInputs>[] = [];
+  for (let index = 0; index < collector.queue.length; index += 1) {
+    const file = collector.queue[index];
+    if (!file) {
+      continue;
+    }
+    if (/\.[cm]?[jt]sx?$/.test(file)) {
+      const module = selectionModuleInputs({ graph, file });
+      for (const dependency of module.dependencies) {
+        collector.add(dependency);
+      }
+      if (module.source) {
+        collectLiteralPaths({ file, source: module.source, collector });
+      }
+      continue;
+    }
+    const source = reader.read(file);
+    if (!source) {
+      continue;
+    }
+    if (/\.sh$/.test(file)) {
+      collectCommands({
+        commands: [source.replace(/\$\{(?:SCRIPT_DIR|script_dir)\}\//g, "./")],
+        cwd: posix.dirname(file),
+        reader,
+        collector,
+      });
+    }
+    const builds = tier === "docker" ? dockerBuilds(file, source) : [];
+    for (const build of builds) {
+      contexts.push(dockerContextInputs({ ...build, read: reader.read }));
+    }
+  }
+  return contexts;
+}
+
+function dockerBuilds(file: string, source: string) {
+  if (
+    /(?:^|\/)Dockerfile(?:[.-][^/]*)?$/.test(file) &&
+    !file.endsWith(".dockerignore")
+  ) {
+    // The runtime image builder passes the checkout root as its build context.
+    return [{ context: ".", dockerfile: file }];
+  }
+  return /\.ya?ml$/.test(file) ? composeBuilds(file, source) : [];
+}
+
 /**
  * Directory entries end in `/`; local imports and literal execution/data paths
  * retain exact paths. Only source/configuration is parsed; repository code never runs.
  * Missing workflow evidence returns null so the caller selects every job.
  */
-export function dockerJobInputs(
-  opts: InputOptions
-): ReadonlySet<string> | null {
-  if (!opts.sources && cache.has(opts.repoRoot)) {
-    return cache.get(opts.repoRoot) ?? null;
+export function deriveJobInputs(
+  opts: InputOptions & { readonly tier: Tier }
+): JobInputs | null {
+  const key = `${opts.tier}:${opts.repoRoot}`;
+  const saved = opts.sources ? undefined : cache.get(key);
+  if (saved) {
+    return saved;
   }
   const reader = inputReader(opts);
-  const commands = workflowCommands(reader.read(".github/workflows/ci.yml"));
+  const commands = workflowCommands(
+    reader.read(".github/workflows/ci.yml"),
+    opts.tier
+  );
   if (!commands) {
     return null;
   }
@@ -234,38 +330,35 @@ export function dockerJobInputs(
     ...opts,
     ...(opts.sources ? { tests: [] } : {}),
   });
-  const seen = new Set<string>();
-  while (collector.queue.length) {
-    const file = collector.queue.pop() as string;
-    if (seen.has(file)) {
-      continue;
-    }
-    seen.add(file);
-    if (!/\.[cm]?[jt]sx?$/.test(file)) {
-      continue;
-    }
-    const module = selectionModuleInputs({ graph, file });
-    for (const dependency of module.dependencies) {
-      collector.add(dependency);
-    }
-    if (module.source) {
-      collectLiteralPaths({ file, source: module.source, collector });
+  const contexts = collectFiles({ tier: opts.tier, collector, reader, graph });
+  for (const context of contexts) {
+    for (const definition of context.definitions) {
+      collector.inputs.add(definition);
     }
   }
+  const prefixes = [...collector.inputs].filter((path) => path.endsWith("/"));
+  const result = {
+    has(path: string): boolean {
+      return (
+        collector.inputs.has(path) ||
+        prefixes.some((prefix) => path.startsWith(prefix)) ||
+        contexts.some((context) => context.includes(path))
+      );
+    },
+  };
   if (!opts.sources) {
-    cache.set(opts.repoRoot, collector.inputs);
+    cache.set(key, result);
   }
-  return collector.inputs;
+  return result;
+}
+
+export function dockerJobInputs(opts: InputOptions): JobInputs | null {
+  return deriveJobInputs({ ...opts, tier: "docker" });
 }
 
 export function matchesDockerJobInput(opts: {
   readonly path: string;
-  readonly inputs: ReadonlySet<string>;
+  readonly inputs: JobInputs;
 }): boolean {
-  return (
-    opts.inputs.has(opts.path) ||
-    [...opts.inputs].some(
-      (input) => input.endsWith("/") && opts.path.startsWith(input)
-    )
-  );
+  return opts.inputs.has(opts.path);
 }

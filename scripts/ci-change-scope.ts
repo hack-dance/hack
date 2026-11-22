@@ -151,7 +151,7 @@ export function isKnownCiInput(path: string): boolean {
     DOCS_PATHS.some((pattern) => pattern.test(path)) ||
     touchesStateModels(path) ||
     touchesDockerSuite(path) ||
-    /^(?:tests\/|packages\/(?:runtime-core|relay-guest|config-compiler|db)\/|hack-local$)/.test(
+    /^(?:packages\/(?:runtime-core|relay-guest|config-compiler|db)\/|hack-local$)/.test(
       path
     )
   );
@@ -408,6 +408,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     }
     outputs = await planPullRequest({
       repoRoot,
+      baseRoot: argument(argv, "--base-root="),
       changed: paths,
       draft: event === "pull_request" && process.env.PR_DRAFT === "true",
       full: event === "pull_request" && process.env.PR_FULL === "true",

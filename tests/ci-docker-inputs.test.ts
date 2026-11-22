@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test";
-import { resolve } from "node:path";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   dockerJobInputs,
   matchesDockerJobInput,
 } from "../scripts/ci-docker-inputs.ts";
 import { planPullRequest } from "../scripts/ci-pr-plan.ts";
-import { requiresWorkflowFull } from "../scripts/ci-workflow-guard.ts";
 
 const repoRoot = resolve(import.meta.dir, "..");
 const workflow = `jobs:
@@ -109,11 +110,13 @@ test("real shard execution inputs retain Docker when paired with the model regis
   ).toBe(false);
 });
 
-test("unknown paths widen every job tier rather than only unit files", async () => {
-  expect(requiresWorkflowFull(["future/engine.bin"])).toBe(true);
+test.each([
+  "future/engine.bin",
+  "tests/future/engine.bin",
+])("unknown path %s widens every job tier", async (path) => {
   const plan = await planPullRequest({
     repoRoot,
-    changed: ["future/engine.bin"],
+    changed: [path],
     draft: false,
     full: false,
     selection: { mode: "full", reason: "unknown", files: [] },
@@ -129,4 +132,108 @@ test("unknown paths widen every job tier rather than only unit files", async () 
 
 test("missing workflow input evidence is unavailable rather than an empty dependency set", () => {
   expect(dockerJobInputs({ repoRoot: "/fixture", sources: {} })).toBeNull();
+});
+
+test("nested shell files, Compose definitions and unignored context contents are Docker inputs", () => {
+  const inputs = dockerJobInputs({
+    repoRoot: "/fixture",
+    sources: {
+      ...sources,
+      "tests/e2e/scenarios/base.ts": 'const script = "scripts/outer.sh";',
+      "scripts/outer.sh": 'bash "${SCRIPT_DIR}/inner.sh"',
+      "scripts/inner.sh": "docker compose -f fixtures/compose.yaml build",
+      "fixtures/compose.yaml":
+        "services:\n  app:\n    build:\n      context: ./ctx\n      dockerfile: Containerfile\n",
+      "fixtures/ctx/Containerfile":
+        'COPY ["payload", "/dest"]\nADD extras /extras\nCOPY --from=other /external /dest\n',
+      "fixtures/ctx/.dockerignore": "payload\n",
+      "fixtures/ctx/Containerfile.dockerignore":
+        "payload/private\npayload/**/*.tmp\n",
+    },
+  });
+  for (const path of [
+    "scripts/inner.sh",
+    "fixtures/ctx/Containerfile",
+    "fixtures/ctx/.dockerignore",
+    "fixtures/ctx/Containerfile.dockerignore",
+    "fixtures/ctx/payload/deep/data.bin",
+    "fixtures/ctx/extras/deleted.bin",
+  ]) {
+    expect(inputs?.has(path), path).toBe(true);
+  }
+  for (const path of [
+    "fixtures/ctx/payload/private/data.bin",
+    "fixtures/ctx/payload/deep/data.tmp",
+    "fixtures/ctx/external",
+    "fixtures/ctx/unrelated.bin",
+  ]) {
+    expect(inputs?.has(path), path).toBe(false);
+  }
+});
+
+test("base-tree dependencies select Docker after an input is deleted or renamed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ci-tier-rename-"));
+  try {
+    const headRoot = join(root, "head");
+    const baseRoot = join(root, "base");
+    const definition = `${workflow}
+      - run: bun test tests/docker-context.test.ts
+      - run: bun tests/e2e/run.ts
+  state-models:
+    steps:
+      - run: bun test tests/tla-result.test.ts
+  test-shard:
+    steps:
+      - if: matrix.shard == 8 && needs.changes.outputs.build_smoke == 'true'
+        run: bun run build
+`;
+    for (const tree of [headRoot, baseRoot]) {
+      await mkdir(join(tree, "packages/db"), { recursive: true });
+      await Bun.write(join(tree, ".github/workflows/ci.yml"), definition);
+      await Bun.write(join(tree, "tests/tla-result.test.ts"), "export {};");
+    }
+    const previous = "tests/docker-context.test.ts";
+    const renamed = "tests/context-renamed.test.ts";
+    await Bun.write(join(baseRoot, previous), "export {};");
+    await Bun.write(join(headRoot, renamed), "export {};");
+    for (const changes of [[previous], [previous, renamed]]) {
+      const plan = await planPullRequest({
+        repoRoot: headRoot,
+        baseRoot,
+        changed: [...changes, "scripts/lib/tla-runtime-models.ts"],
+        draft: false,
+        full: false,
+        selection: { mode: "selected", reason: "fixture", files: [] },
+      });
+      expect(plan).toMatchObject({
+        scope: "typescript",
+        docker_suite: true,
+        state_models: true,
+        build_smoke: false,
+      });
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test.each([
+  ["packages/config-compiler/src/lib.rs", true, true, true],
+  ["tests/tla-result.test.ts", false, true, false],
+  ["packages/runtime-core/src/lib.rs", true, false, false],
+] as const)("consumers select the affected tiers for %s", async (path, docker, models, build) => {
+  const plan = await planPullRequest({
+    repoRoot,
+    changed: models
+      ? [path, ...(build ? ["scripts/lib/tla-runtime-models.ts"] : [])]
+      : [path],
+    draft: false,
+    full: false,
+    selection: { mode: "selected", reason: "fixture", files: [] },
+  });
+  expect(plan).toMatchObject({
+    docker_suite: docker,
+    state_models: models,
+    build_smoke: build,
+  });
 });

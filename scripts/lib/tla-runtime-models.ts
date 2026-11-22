@@ -1675,7 +1675,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-startup-owner",
     module: "Owner",
-    states: 136,
+    states: 812,
     invariant: "NoUnownedResources",
     action: "ExitUnconfirmed",
     fields: [
@@ -1685,7 +1685,10 @@ const contracts: readonly ModelContract[] = [
       'resources = "present"',
     ],
     additionalControls: [
+      // --wait: the mapping is still saved at started; the release is at ready.
+      { name: "wait", negative: false, states: 394 },
       {
+        // The launcher is released at started before stop.owe committed.
         name: "detached-before-bookkeeping",
         negative: true,
         invariant: "NoPrematureReturn",
@@ -1693,16 +1696,77 @@ const contracts: readonly ModelContract[] = [
         fields: [
           'launcher = "returned"',
           "accepted = TRUE",
-          "readied = TRUE",
+          "startedSeen = TRUE",
+          'mapping = "published"',
           "bookkept = FALSE",
         ],
       },
       {
-        name: "detached-before-ready",
+        // No release gate at all: success before every container started.
+        name: "detached-before-started",
+        negative: true,
+        invariant: "NoPrematureReturn",
+        action: "Return",
+        fields: [
+          'launcher = "returned"',
+          "accepted = TRUE",
+          "startedSeen = FALSE",
+        ],
+      },
+      {
+        // The same gap under --wait: success before ready.
+        name: "detached-before-ready-wait",
         negative: true,
         invariant: "NoPrematureReturn",
         action: "Return",
         fields: ['launcher = "returned"', "accepted = TRUE", "readied = FALSE"],
+      },
+      {
+        // Finding B: the launcher is released before the run mapping is saved.
+        name: "mapping-after-line",
+        negative: true,
+        invariant: "NoReturnWithoutMapping",
+        action: "Notify",
+        fields: [
+          'launcher = "notified"',
+          'mapping = "none"',
+          "startedSeen = TRUE",
+          "bookkept = TRUE",
+        ],
+      },
+      {
+        // Finding B under --wait: released at ready with no mapping saved.
+        name: "mapping-after-line-wait",
+        negative: true,
+        invariant: "NoReturnWithoutMapping",
+        action: "Notify",
+        fields: ['launcher = "notified"', 'mapping = "none"', "readied = TRUE"],
+      },
+      {
+        // The stop lands half-way through a publication and misses its route.
+        name: "stop-mid-publication",
+        negative: true,
+        invariant: "NoHalfPublicationAfterStop",
+        action: "DownStop",
+        fields: [
+          'phase = "stopped"',
+          'pub = "publishing"',
+          'route = "bound"',
+          "recorded = FALSE",
+        ],
+      },
+      {
+        // A down between started and ready does not cancel the owner's wait.
+        name: "down-leaves-owner-waiting",
+        negative: true,
+        invariant: "DownCancelsWait",
+        action: "DownRequest",
+        fields: [
+          'phase = "started"',
+          'down = "requested"',
+          'downAt = "started"',
+          'wait = "waiting"',
+        ],
       },
       {
         name: "refused-inspection",

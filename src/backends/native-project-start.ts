@@ -1688,7 +1688,7 @@ function readyProgress(opts: {
   readonly plan: unknown;
   readonly routed: ReadonlySet<string>;
   readonly httpsPort: number | null;
-}): NativeStartupProgress {
+}): Extract<NativeStartupProgress, { readonly phase: "ready" | "started" }> {
   return {
     phase: "ready",
     services: opts.services,
@@ -2271,7 +2271,18 @@ export type NativeStartupProgress =
     }
   | ({ readonly phase: "dependency-wait" } & NativeDependencyWaitProgress)
   | {
-      readonly phase: "ready";
+      /** Every goal met and every route answering, after a started return. */
+      readonly phase: "all-ready";
+      readonly elapsedMs: number;
+    }
+  | {
+      /** The owner reported ready, but a route check failed; the run keeps running. */
+      readonly phase: "routes-not-answering";
+      readonly detail: string;
+    }
+  | {
+      /** `ready` (with `--wait`), or `started`: every container started. */
+      readonly phase: "ready" | "started";
       readonly services: readonly string[];
       /** The run id, or `unknown` when it fails the run-id pattern. */
       readonly run: string;
@@ -2370,6 +2381,13 @@ type NativeProjectStartOptions = {
     services: {
       readonly started: readonly string[];
       readonly completed: readonly string[];
+      /**
+       * `warming` after a started return (the owner has not reported every goal
+       * met yet), `ready` with `--wait`. One field a script can read.
+       */
+      readonly readiness: "warming" | "ready";
+      /** Routed services whose routes are not checked yet; empty when ready. */
+      readonly warming: readonly string[];
     },
     addresses: readonly string[]
   ) => void | Promise<void>;
@@ -2440,6 +2458,13 @@ type NativeProjectStartOptions = {
    * 300 when omitted.
    */
   readonly startTimeoutSeconds?: number;
+  /**
+   * `hack up --wait` (see `native-up-wait.ts`): return once every goal is met and
+   * every route answers, as before. Otherwise the start returns once every
+   * service has started: the mapping, hooks, down-hook debt and the detached
+   * release happen then, and route checks follow when the owner reports ready.
+   */
+  readonly waitForReady?: boolean;
   readonly dependencies?: Partial<Dependencies>;
   /**
    * Recovers this instance's run when the pool stopped under it (HACK-2456):
@@ -3247,6 +3272,72 @@ async function startNativeProjectAttempt(
           );
           const servicesRequestedAt = performance.now();
           let stopWatching: (() => Promise<void>) | undefined;
+          // `hack up` returns at started unless `--wait`; see `waitForReady`.
+          const returnAtStarted = opts.waitForReady !== true;
+          // The run mapping is saved once every service has started, in both
+          // modes and before the HTTPS lease or anything else acts on the
+          // owner's line, so `down` and recovery find a run killed in the
+          // window. It is an ownership mapping, not a readiness signal.
+          let mapped:
+            | {
+                readonly readyMapping: NativeProjectRun;
+                readonly persistedMapping: NativeProjectRun;
+              }
+            | undefined;
+          const ensureMapping = async () => {
+            if (mapped) {
+              return mapped;
+            }
+            const readyMapping = authoritative(
+              await invokeInspect(),
+              run,
+              review.namespace,
+              restore?.planId ?? review.planId
+            );
+            if (controller.signal.aborted) {
+              throw new ClosedCliError(
+                "Native startup canceled before mapping publication."
+              );
+            }
+            const persistedMapping = selectedMapping({
+              ready: readyMapping,
+              effectiveEnvName: input.effectiveEnvName,
+              profiles,
+              aws: selection.aws,
+              gcloud: selection.gcloud,
+              runtimeMetadata: metadata !== undefined,
+              environmentMarkers,
+            });
+            mappingAttempted = true;
+            await deps.save({
+              ...opts.scope,
+              run: persistedMapping,
+              expected: expectedMapping,
+            });
+            mapping = persistedMapping;
+            mapped = { readyMapping, persistedMapping };
+            return mapped;
+          };
+          // After a started return: the owner reported every goal met, so the
+          // routes it published are checked now and the run is reported ready.
+          const allReady = async () => {
+            try {
+              await verifyHttpsRoutes(
+                https,
+                review.report.plan,
+                routes.services
+              );
+              progress({
+                phase: "all-ready",
+                elapsedMs: performance.now() - servicesRequestedAt,
+              });
+            } catch (error) {
+              progress({
+                phase: "routes-not-answering",
+                detail: error instanceof Error ? error.message : String(error),
+              });
+            }
+          };
           // The runtime removes a failed start's containers before it returns:
           // keep the graph's status as it stands while the start waits.
           const startupStatus = watchNativeStartupStatus({
@@ -3289,6 +3380,11 @@ async function startNativeProjectAttempt(
               privateInput: delivery.payload,
               startupTimeoutMs:
                 budgetSeconds * 1000 + NATIVE_START_FRONTEND_SLACK_MS,
+              returnAtStarted,
+              // The owner's ready line after a started return: routes answer now.
+              onAllReady: () => {
+                void allReady();
+              },
               signal: controller.signal,
               // Down hooks run on the first stop request of a ready graph.
               ...stop?.serve,
@@ -3307,29 +3403,15 @@ async function startNativeProjectAttempt(
                   managedFiles: input.managedFiles,
                 });
               },
+              // Under --wait: every service started, so the mapping is saved now.
+              onStarted: async () => {
+                await ensureMapping();
+              },
               onReady: async () => {
                 // Ready: the startup view is no longer needed.
                 void startupStatus.stop();
-                const readyMapping = authoritative(
-                  await invokeInspect(),
-                  run,
-                  review.namespace,
-                  restore?.planId ?? review.planId
-                );
-                if (controller.signal.aborted) {
-                  throw new ClosedCliError(
-                    "Native startup canceled before mapping publication."
-                  );
-                }
-                const persistedMapping = selectedMapping({
-                  ready: readyMapping,
-                  effectiveEnvName: input.effectiveEnvName,
-                  profiles,
-                  aws: selection.aws,
-                  gcloud: selection.gcloud,
-                  runtimeMetadata: metadata !== undefined,
-                  environmentMarkers,
-                });
+                const { readyMapping, persistedMapping } =
+                  await ensureMapping();
                 // Enrollment must exist before taking a shared lease: release
                 // requires independent proof of this exact graph's cleanup.
                 if (opts.https && routes.services.size > 0) {
@@ -3348,15 +3430,6 @@ async function startNativeProjectAttempt(
                         httpsLease: identity,
                       });
                       httpsIntent = identity;
-                      // This is an ownership mapping, not a readiness signal.
-                      // Recovery must be able to select the run after a lost reply.
-                      mappingAttempted = true;
-                      await deps.save({
-                        ...opts.scope,
-                        run: persistedMapping,
-                        expected: expectedMapping,
-                      });
-                      mapping = persistedMapping;
                     },
                   }).catch((error: unknown) => {
                     httpsAcquisitionFailure = error;
@@ -3382,22 +3455,15 @@ async function startNativeProjectAttempt(
                 // The registered lifetime now describes this startup.
                 await admission?.retire();
                 requireActiveStartup(controller.signal);
-                await verifyHttpsRoutes(
-                  https,
-                  review.report.plan,
-                  routes.services
-                );
+                if (!returnAtStarted) {
+                  await verifyHttpsRoutes(
+                    https,
+                    review.report.plan,
+                    routes.services
+                  );
+                }
                 if (httpsFailure) {
                   throw httpsFailure;
-                }
-                if (!mapping) {
-                  mappingAttempted = true;
-                  await deps.save({
-                    ...opts.scope,
-                    run: persistedMapping,
-                    expected: expectedMapping,
-                  });
-                  mapping = persistedMapping;
                 }
                 if (selectedEnvironment) {
                   await opts
@@ -3428,7 +3494,11 @@ async function startNativeProjectAttempt(
                 requireActiveStartup(controller.signal);
                 const httpsPort = servedHttpsPort(https, opts.https);
                 await opts.onReady?.(
-                  readyServiceSummary(readinessArgs),
+                  {
+                    ...readyServiceSummary(readinessArgs),
+                    readiness: returnAtStarted ? "warming" : "ready",
+                    warming: returnAtStarted ? [...routes.services].sort() : [],
+                  },
                   httpsPort === null
                     ? []
                     : nativeReadyRouteHosts({
@@ -3438,15 +3508,16 @@ async function startNativeProjectAttempt(
                         nativeReadyRouteUrls(hosts, httpsPort)
                       )
                 );
-                progress(
-                  readyProgress({
+                progress({
+                  ...readyProgress({
                     services,
                     run,
                     plan: review.report.plan,
                     routed: routes.services,
                     httpsPort,
-                  })
-                );
+                  }),
+                  ...(returnAtStarted ? { phase: "started" as const } : {}),
+                });
                 // Superseded build images go once the new ones run; this never
                 // fails or delays the start (HACK-2533).
                 void reclaimNativeBuildImagesAfterRebuild({

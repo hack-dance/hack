@@ -132,7 +132,14 @@ function displayNativeServiceRows(
       service: item.service,
       container: item.container,
       exitCode: item.exitCode,
-      state: psServiceState(item),
+      state:
+        result.readiness === "warming" &&
+        item.state === "running" &&
+        item.readiness === "healthy" &&
+        item.health !== "healthy" &&
+        item.health !== "unhealthy"
+          ? "warming"
+          : psServiceState(item),
     })),
     ...[...portServices].map((service) => ({
       service,

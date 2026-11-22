@@ -47,6 +47,11 @@ export type NativeAlreadyRunning =
       readonly kind: "running";
       readonly started: string[];
       readonly completed: string[];
+      /**
+       * Running services whose own goal is not met yet, while the run is
+       * `started-observed` (an `up` that returned at started); empty once ready.
+       */
+      readonly warming: string[];
     }
   /** The graph is live and ready, but these services are not up. */
   | { readonly kind: "partial"; readonly down: string[] };
@@ -59,45 +64,78 @@ function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : 1;
 }
 
+type PsItem = NativeProjectPsResult["items"][number];
+
+/** Running, with a health goal its check has not passed yet (nor failed). */
+function warmingItem(item: PsItem): boolean {
+  return (
+    item.state === "running" &&
+    item.readiness === "healthy" &&
+    item.health !== "healthy" &&
+    item.health !== "unhealthy"
+  );
+}
+
+/** Running with its own goal met (a job's goal is completion, not running). */
+function startedItem(item: PsItem): boolean {
+  if (item.state !== "running" || item.readiness === "completed") {
+    return false;
+  }
+  return item.readiness === "healthy"
+    ? item.health === "healthy"
+    : item.health === null ||
+        item.health === "none" ||
+        item.health === "healthy";
+}
+
+/**
+ * One service of a live run. In `started-observed` (an `up` that returned at
+ * started) a service still waiting on its health check is warming, not down.
+ */
+function classifyItem(
+  item: PsItem,
+  startedRun: boolean
+): "started" | "completed" | "warming" | "down" {
+  if (startedRun && warmingItem(item)) {
+    return "warming";
+  }
+  if (startedItem(item)) {
+    return "started";
+  }
+  return item.readiness === "completed" &&
+    item.state === "exited" &&
+    item.exitCode === 0
+    ? "completed"
+    : "down";
+}
+
 export function classifyNativeAlreadyRunning(
   result: NativeProjectPsResult
 ): NativeAlreadyRunning {
-  if (result.status !== "observed" || result.phase !== "ready-observed") {
+  const startedRun = result.phase === "started-observed";
+  if (
+    result.status !== "observed" ||
+    !(startedRun || result.phase === "ready-observed")
+  ) {
     return { kind: "launch" };
   }
-  const started: string[] = [];
-  const completed: string[] = [];
-  const down: string[] = [];
+  const by = { started: [], completed: [], warming: [], down: [] } as Record<
+    "started" | "completed" | "warming" | "down",
+    string[]
+  >;
   for (const item of result.items) {
-    if (
-      item.state === "running" &&
-      item.readiness !== "completed" &&
-      (item.readiness === "healthy"
-        ? item.health === "healthy"
-        : item.health === null ||
-          item.health === "none" ||
-          item.health === "healthy")
-    ) {
-      started.push(item.service);
-    } else if (
-      item.readiness === "completed" &&
-      item.state === "exited" &&
-      item.exitCode === 0
-    ) {
-      completed.push(item.service);
-    } else {
-      down.push(item.service);
-    }
+    by[classifyItem(item, startedRun)].push(item.service);
   }
-  if (started.length === 0 && completed.length === 0 && down.length === 0) {
+  if (result.items.length === 0) {
     return { kind: "launch" };
   }
-  return down.length > 0
-    ? { kind: "partial", down: down.sort(byCodePoint) }
+  return by.down.length > 0
+    ? { kind: "partial", down: by.down.sort(byCodePoint) }
     : {
         kind: "running",
-        started: started.sort(byCodePoint),
-        completed: completed.sort(byCodePoint),
+        started: by.started.sort(byCodePoint),
+        completed: by.completed.sort(byCodePoint),
+        warming: by.warming.sort(byCodePoint),
       };
 }
 
@@ -124,12 +162,16 @@ export function reportNativeAlreadyRunning(opts: {
   readonly composeProject: string;
   readonly started: readonly string[];
   readonly completed: readonly string[];
+  readonly warming?: readonly string[];
   readonly startedAtMs: number;
   readonly restartCommand: string;
 }): void {
+  const warming = opts.warming ?? [];
   if (!opts.json) {
+    const still =
+      warming.length > 0 ? ` ${warming.join(", ")} still warming.` : "";
     process.stdout.write(
-      `Project is already running. Configuration changes were not applied; run ${opts.restartCommand} to apply edits.\n`
+      `Project is already running.${still} Configuration changes were not applied; run ${opts.restartCommand} to apply edits.\n`
     );
     return;
   }
@@ -144,9 +186,11 @@ export function reportNativeAlreadyRunning(opts: {
         services: {
           started: [...opts.started],
           completed: [...opts.completed],
+          warming: [...warming],
           stopped: [],
           failed: [],
         },
+        readiness: warming.length > 0 ? "warming" : "ready",
         durationMs: Date.now() - opts.startedAtMs,
       },
     }),
@@ -344,6 +388,7 @@ export async function answerNativeAlreadyRunning(opts: {
       }),
       started: observed.state.started,
       completed: observed.state.completed,
+      warming: observed.state.warming,
       startedAtMs,
       restartCommand,
     });

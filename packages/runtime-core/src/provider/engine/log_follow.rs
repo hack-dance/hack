@@ -185,6 +185,9 @@ pub(in crate::provider) struct LogOptions {
     pub tail: u16,
     pub since: Option<String>,
     pub timestamps: bool,
+    /// False: print what exists and stop at its end (`--no-follow`), so an end of
+    /// stream while the service still runs is the normal end, not a transport loss.
+    pub follow: bool,
 }
 
 enum Framing {
@@ -409,6 +412,7 @@ pub(in crate::provider) fn follow_socket(
         .write_all(request(container, &options).as_bytes())
         .map_err(|_| failure())?;
     let timestamps = options.timestamps;
+    let follow = options.follow;
     let deadline = Cell::new(Some(Instant::now() + Duration::from_secs(5)));
     let stopped = Cell::new(false);
     let check_error = RefCell::new(None);
@@ -436,7 +440,7 @@ pub(in crate::provider) fn follow_socket(
     }
     result?;
     // A socket ending while the selected service still runs is transport loss.
-    if check().map_err(|e| e.with_log_phase(LogFailurePhase::FinalCheck))? {
+    if check().map_err(|e| e.with_log_phase(LogFailurePhase::FinalCheck))? && follow {
         return Err(failure());
     }
     Ok(())
@@ -444,7 +448,8 @@ pub(in crate::provider) fn follow_socket(
 
 fn request(container: &str, options: &LogOptions) -> String {
     format!(
-        "GET /v1.53/containers/{container}/logs?follow=1&stdout=1&stderr=1&timestamps={}&tail={}{} HTTP/1.1\r\nHost: hack-local\r\nConnection: close\r\n\r\n",
+        "GET /v1.53/containers/{container}/logs?follow={}&stdout=1&stderr=1&timestamps={}&tail={}{} HTTP/1.1\r\nHost: hack-local\r\nConnection: close\r\n\r\n",
+        u8::from(options.follow),
         u8::from(options.timestamps),
         options.tail,
         options
@@ -459,6 +464,62 @@ fn request(container: &str, options: &LogOptions) -> String {
 mod tests {
     use super::*;
     #[test]
+    fn without_follow_the_existing_output_is_the_whole_read() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+        let tmp = std::env::temp_dir().canonicalize().unwrap();
+        for follow in [false, true] {
+            let root = crate::test_root::private_test_root(&tmp, "hack-log-no-follow");
+            let socket = root.join("engine.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let engine = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_nonblocking(false).unwrap();
+                let mut request = String::new();
+                let mut reader = BufReader::new(&mut stream);
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    request.push_str(&line);
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                }
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n\x01\0\0\0\0\0\0\x02x\n",
+                    )
+                    .unwrap();
+                request
+            });
+            let mut output = Vec::new();
+            let result = follow_socket(
+                &socket,
+                &"a".repeat(64),
+                "web",
+                LogOptions {
+                    tail: 0,
+                    since: None,
+                    timestamps: false,
+                    follow,
+                },
+                // The service keeps running throughout.
+                || Ok(true),
+                &mut output,
+            );
+            let request = engine.join().unwrap();
+            assert!(request.contains(&format!("/logs?follow={}&", u8::from(follow))));
+            if follow {
+                // A follow that ends while the service runs is transport loss.
+                assert!(result.is_err());
+            } else {
+                result.unwrap();
+                assert!(String::from_utf8_lossy(&output).contains(&STANDARD.encode("x\n")));
+            }
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+    }
+    #[test]
     fn request_uses_unix_nanoseconds_for_both_utc_and_offset_generations() {
         for stamp in [
             "2026-01-01T00:00:00.123456789Z",
@@ -468,6 +529,7 @@ mod tests {
                 tail: 1000,
                 since: unix_nanos(stamp),
                 timestamps: false,
+                follow: true,
             };
             assert_eq!(
                 request("container", &options),

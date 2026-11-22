@@ -63,6 +63,14 @@ pub(in crate::provider::graph) fn stable<T>(
     result
 }
 
+/// Phases whose status lists the ports this run's publishers already verified
+/// (`startup_observed_ports`): a start in progress, and a warming one
+/// (`started-observed`), whose services publish one by one as each becomes ready.
+#[cfg(any(target_os = "macos", test))]
+fn reports_startup_ports(phase: &str) -> bool {
+    matches!(phase, "preparing" | "restoring" | STARTED_OBSERVED)
+}
+
 #[cfg(target_os = "macos")]
 pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
     let observer = super::super::engine::Observer::connect(candidate)?;
@@ -80,7 +88,7 @@ fn inspect_with(
         #[cfg(target_os = "macos")]
         let snapshot = {
             let mut snapshot = snapshot;
-            if matches!(snapshot.receipt.phase.as_str(), "preparing" | "restoring") {
+            if reports_startup_ports(&snapshot.receipt.phase) {
                 snapshot.startup_observed_ports = super::super::publication::observed_run_ports(
                     candidate,
                     &snapshot.receipt.owner,
@@ -102,6 +110,16 @@ fn inspect_with(
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn a_warming_graph_lists_the_ports_already_published() {
+        for phase in ["preparing", "restoring", "started-observed"] {
+            assert!(reports_startup_ports(phase), "{phase}");
+        }
+        for phase in ["ready-observed", "failed-retained", "stopped-data-retained"] {
+            assert!(!reports_startup_ports(phase), "{phase}");
+        }
+    }
 
     struct Read<'a> {
         receipt: &'a Receipt,

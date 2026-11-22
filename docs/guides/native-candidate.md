@@ -664,9 +664,49 @@ commands and pipelines. The command keeps the pane's terminal stdin. Failed send
 remove their staged payload; if the pane never executes a successfully sent command,
 the private payload remains until it is consumed or explicitly cleaned up.
 
+### Started and ready
+
+Native `hack up` and `hack restart` return once every container has started,
+by Compose's rule: running, or exited `0` for a job another service waits on, in
+dependency order; `service_healthy` and `service_completed_successfully` edges
+still hold their dependents back. Health checks and route probes keep running
+after that: the run is **warming** until every goal is met and every route
+answers, then **ready**. `--wait` returns at ready, exactly as before, with the
+same lines, exit codes and timeout text.
+
+- **At started:** the run mapping is saved first, then the HTTPS lease, `up.after`,
+  the exit watcher and the down-hook debt; then `up` returns. The closing line
+  counts the routes still warming: `https://web.app.hack  up in 4.6s · native ·
+  2 routes warming`. With `--json`, the result has `readiness: "warming"` (or
+  `"ready"`) and `services.warming`.
+- **`up.after` runs at started,** as with Compose `up -d`. A hook that calls one of
+  the project's URLs needs `hack up --wait`, or `hack open`, which waits.
+- **While warming:**
+  - `hack ps` shows a service still waiting on its health check as `warming`;
+    `ps --json` has `readiness: "warming"`;
+  - `hack open` waits for its service, at most the start budget, and opens nothing
+    if the budget runs out;
+  - `hack exec` and one-off `hack run` wait for the whole project to be ready
+    (one line on stderr), then run, so `hack up -d && hack exec api ...` keeps
+    working;
+  - `hack logs SERVICE` without `-f` prints what exists so far through the
+    lock-free reader (with `--json`, as line events);
+  - `hack down` stops the run with data retained; the owner accepts the stop
+    between start passes, after any publication in progress has committed or
+    been withdrawn. `hack down --remove-data` waits for ready: stop first, then
+    remove;
+  - `hack restart` stops and starts again; a second `hack up` says the project is
+    already running and names the services still warming.
+- **Scripts:** whether `--json` and `--no-interactive` imply `--wait` is one
+  setting, currently off. Pass `--wait` when a script needs live endpoints.
+- **On the Compose backend,** `hack up -d --wait` passes `--wait` to
+  `docker compose up -d`, which waits for running and healthy services.
+  `--wait` needs `-d` (or `--json`) there, and `hack restart --wait` is native-only.
+
 Native `hack up -d` (also `--detach`, `--json`, or both) starts the existing
-frontend and Rust foreground owners in a background session, returning after
-readiness and up-after hooks. The frontend keeps host lifecycle processes and
+frontend and Rust foreground owners in a background session, returning once
+every container has started and up-after hooks ran (see "Started and ready"
+below); `--wait` returns once every service is ready instead. The frontend keeps host lifecycle processes and
 down hooks alive. From any terminal, use `hack ps`, `hack logs`, `hack exec`,
 `hack restart` or `hack down` through the existing authenticated controls.
 When the project is already up, `hack up -d` starts nothing and succeeds: it
@@ -716,8 +756,10 @@ same incarnation checks and retained-uncertainty limits. No daemon adoption,
 automatic replay, or separate graph supervision tick is introduced.
 
 Foreground image-project `up` prints each startup step (input, runtime, images,
-services) and one ready line, `Project is ready (SERVICES; run RUN)`, after the
-graph is ready and its run mapping is published. Under it, `up` lists each routed
+services) and one started line, `Project started (SERVICES; run RUN)`, once every
+container has started and its run mapping is published, then `All services ready`
+once every goal is met and every route answers. With `--wait` it prints one ready
+line, `Project is ready (SERVICES; run RUN)`, at that point instead. Under it, `up` lists each routed
 service's reviewed hostnames as HTTPS URLs (with the `HACK_NATIVE_HTTPS_PORT`
 port unless it is 443) and the published loopback ports. Without the native
 HTTPS frontend it says that routes are not served on this host. Ctrl-C prints the

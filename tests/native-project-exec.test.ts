@@ -99,7 +99,8 @@ test("native exec preserves literal argv, binary output and nonzero completion",
       };
     },
   });
-  expect(count).toBe(4);
+  // One lease-free status read first: is the run still warming (PR B)?
+  expect(count).toBe(5);
   expect(result).toEqual({
     exitCode: 23,
     stdout: Buffer.from([0, 255, 10]),
@@ -340,6 +341,7 @@ test("fresh exec sends environment only through private stdin and clears its buf
   expect(result.exitCode).toBe(7);
   expect(executions).toBe(1);
   expect(calls).toEqual([
+    "status",
     "refresh-dependencies",
     "status",
     "exec-selection",
@@ -455,7 +457,7 @@ test("failed dependency refresh refuses before exec inspection or private prepar
         },
       })
     ).rejects.toThrow("dependency refresh identity or outcome is unconfirmed");
-    expect(calls).toEqual(["refresh-dependencies"]);
+    expect(calls).toEqual(["status", "refresh-dependencies"]);
   }
 });
 

@@ -1,0 +1,54 @@
+---
+title: Owner · started to ready
+---
+stateDiagram-v2
+  direction TB
+  [*] --> serving : Serve
+  state started_at <<choice>>
+  serving --> started_at : Started [containers started]
+  started_at --> warming : [WaitForReady = FALSE]
+  started_at --> starting : [WaitForReady = TRUE]
+  state "warming · up returned" as warming
+  state "starting · up --wait" as starting
+  warming --> ready : Ready [pub = committed]
+  starting --> ready : Ready, then up returns
+  warming --> failed : Fail (PR C)
+  starting --> failed : Fail
+  ready --> failed : Fail (PR C)
+  warming --> stopped : DownRequest, DownStop
+  ready --> stopped : DownRequest, DownStop
+  starting --> stopped : DownRequest, DownStop
+  stopped --> serving : restart: a new run
+  state "failed (PR C)" as failed
+  failed --> [*] : retained or recorded
+  note right of warming
+    up returns here, in order:
+    PublishMapping, Bookkeep,
+    Notify, OwnerAccept, Return
+    INV NoReturnWithoutMapping
+    INV NoPrematureReturn
+  end note
+  note right of stopped
+    DownRequest cancels the wait
+    DownStop waits for the service
+    to commit or withdraw
+    INV DownCancelsWait: no Ready
+    INV DownHooksOnce: hooks once
+    INV NoHalfPublicationAfterStop
+  end note
+  note left of starting
+    --wait: mapping saved here too;
+    bookkeeping and return wait
+    for Ready
+    INV NoReturnWithoutMapping
+  end note
+  classDef live stroke-width:1.6px
+  classDef wait stroke-width:1.6px
+  classDef ok stroke-width:1.6px
+  classDef fail stroke-width:1.6px
+  classDef idle stroke-width:1.6px
+  class serving live
+  class warming,starting wait
+  class ready ok
+  class failed fail
+  class stopped idle

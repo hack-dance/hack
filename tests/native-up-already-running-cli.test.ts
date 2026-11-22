@@ -277,9 +277,11 @@ test(
         services: {
           started: ["db", "web"],
           completed: ["seed"],
+          warming: [],
           stopped: [],
           failed: [],
         },
+        readiness: "ready",
         durationMs: expect.any(Number),
       },
     });
@@ -345,6 +347,7 @@ test("only a live, ready graph whose owner answers counts as already running", (
     kind: "running",
     started: ["web"],
     completed: [],
+    warming: [],
   });
   expect(
     classifyNativeAlreadyRunning({
@@ -357,7 +360,64 @@ test("only a live, ready graph whose owner answers counts as already running", (
         }),
       ],
     })
-  ).toEqual({ kind: "running", started: ["web"], completed: [] });
+  ).toEqual({ kind: "running", started: ["web"], completed: [], warming: [] });
+  // A run that returned at started: a service still waiting on its health
+  // check is warming, so a second `up` says "already running" instead of
+  // refusing it as not up. A service that exited is still down.
+  const started = { ...observed, phase: "started-observed" };
+  expect(
+    classifyNativeAlreadyRunning({
+      ...started,
+      items: [
+        item("web", {
+          state: "running",
+          health: "starting",
+          readiness: "healthy",
+        }),
+        item("db", {
+          state: "running",
+          health: "healthy",
+          readiness: "healthy",
+        }),
+      ],
+    })
+  ).toEqual({
+    kind: "running",
+    started: ["db"],
+    completed: [],
+    warming: ["web"],
+  });
+  expect(
+    classifyNativeAlreadyRunning({
+      ...started,
+      items: [
+        item("web", {
+          state: "running",
+          health: "starting",
+          readiness: "healthy",
+        }),
+      ],
+    })
+  ).toEqual({ kind: "running", started: [], completed: [], warming: ["web"] });
+  expect(
+    classifyNativeAlreadyRunning({
+      ...started,
+      items: [item("web", { state: "exited", code: 1, readiness: "healthy" })],
+    })
+  ).toEqual({ kind: "partial", down: ["web"] });
+  // The same service in a ready run is down, not warming: today's rule.
+  expect(
+    classifyNativeAlreadyRunning({
+      ...observed,
+      items: [
+        item("web", {
+          state: "running",
+          health: "starting",
+          readiness: "healthy",
+        }),
+      ],
+    })
+  ).toEqual({ kind: "partial", down: ["web"] });
   // Anything short of a confirmed ready graph launches as before, so a start
   // that is genuinely unconfirmed still reports its own reason.
   for (const other of [
@@ -418,6 +478,7 @@ test("a ready graph of completed one-shots is a successful no-op", async () => {
   expect(JSON.parse(result.stdout).data.services).toEqual({
     started: [],
     completed: ["seed"],
+    warming: [],
     stopped: [],
     failed: [],
   });

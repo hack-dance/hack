@@ -88,6 +88,11 @@ export type NativeProjectPsResult = {
   readonly status: NativeProjectPsStatus;
   readonly run: string | null;
   readonly phase: string | null;
+  /**
+   * A live run in one field: `warming` (every container started, the owner has
+   * not reported every goal met yet) or `ready`. Absent when there is no live run.
+   */
+  readonly readiness?: "warming" | "ready";
   readonly items: Item[];
   readonly ports?: NativePublishedPort[];
 };
@@ -334,6 +339,8 @@ export async function nativeProjectPs(
   let status: "observed" | "owner_unconfirmed" | "runtime_degraded" =
     "observed";
   let ports = snapshot.ports;
+  // Only a ready run is cross-checked with its owner. A warming run
+  // (`started-observed`) is never asked: its owner is still in its start loop.
   if (snapshot.foreground && snapshot.phase === "ready-observed") {
     try {
       const owner = await (opts.invoke ?? invokeNativeRuntime)({
@@ -372,14 +379,23 @@ export async function nativeProjectPs(
       status = "owner_unconfirmed";
     }
   }
+  const readiness = liveReadiness(snapshot.phase);
   return {
     backend: "native",
     status,
     run: run.run,
     items: snapshot.items,
     phase: snapshot.phase,
+    ...(readiness ? { readiness } : {}),
     ...(ports.length ? { ports } : {}),
   };
+}
+
+function liveReadiness(phase: string): "warming" | "ready" | undefined {
+  if (phase === "started-observed") {
+    return "warming";
+  }
+  return phase === "ready-observed" ? "ready" : undefined;
 }
 
 export async function nativeStartupProjectPs(
@@ -424,6 +440,8 @@ export async function followNativeProjectLogs(
     /** Injected per service when several services share one output. */
     readonly stdout?: Writable;
     readonly stderr?: Writable;
+    /** Print what exists and stop; see `FollowInput.noFollow`. */
+    readonly noFollow?: boolean;
   }
 ): Promise<number> {
   const selected = nativeLogFollowOptions(opts);

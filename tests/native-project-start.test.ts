@@ -261,7 +261,14 @@ async function fixture(withEnvironment = true) {
       }
       expect(opts.args.join(" ")).not.toContain("synthetic-secret");
       try {
-        await opts.onReady();
+        // As the owner does: started first, then ready (see returnAtStarted).
+        if (opts.returnAtStarted) {
+          await opts.onReady();
+          opts.onAllReady?.();
+        } else {
+          await opts.onStarted?.();
+          await opts.onReady();
+        }
         return 0;
       } finally {
         ready = false;
@@ -278,6 +285,9 @@ async function fixture(withEnvironment = true) {
     },
     composeFile: join(root, ".hack/docker-compose.yml"),
     sharedSource: true,
+    // These tests cover the ready-time path (`up --wait`); started returns
+    // are tested on their own below.
+    waitForReady: true,
     before: async () => {
       events.push("before");
       return {
@@ -1550,6 +1560,48 @@ test("cancellation after readiness retains mapping when data is preserved", asyn
   expect(events.at(-1)).toBe("cleanup");
 });
 
+test("without --wait, up returns at started: mapping, hooks and release first, then all-ready", async () => {
+  const { opts, events } = await fixture();
+  const controller = new AbortController();
+  const original = opts.dependencies.serve;
+  opts.dependencies.serve = async (args) => {
+    await original?.(args);
+    // Let the all-ready step (route checks, then its line) finish.
+    await Bun.sleep(20);
+    controller.abort();
+    throw new Error("cancelled after all-ready");
+  };
+  const progress: string[] = [];
+  let reported: unknown;
+  expect(
+    await startNativeProject({
+      ...opts,
+      waitForReady: false,
+      signal: controller.signal,
+      onReady: (services) => {
+        events.push("release");
+        reported = services;
+      },
+      onProgress: (event) => {
+        events.push(`progress:${event.phase}`);
+        progress.push(event.phase);
+      },
+    })
+  ).toBe(130);
+  expect(progress).toContain("started");
+  expect(progress).not.toContain("ready");
+  expect(progress.indexOf("started")).toBeLessThan(
+    progress.indexOf("all-ready")
+  );
+  // The launcher is released at started, after the mapping and up.after.
+  expect(events.indexOf("save")).toBeLessThan(events.indexOf("ready"));
+  expect(events.indexOf("ready")).toBeLessThan(events.indexOf("release"));
+  expect(events.indexOf("release")).toBeLessThan(
+    events.indexOf("progress:all-ready")
+  );
+  expect(reported).toMatchObject({ started: ["web"], readiness: "warming" });
+});
+
 test("foreground reports progress, one ready line after publication, and the stop sequence", async () => {
   const { opts, events } = await fixture();
   const controller = new AbortController();
@@ -1684,7 +1736,12 @@ test("managed values are delivered only to reviewed profile-active services", as
       },
     })
   ).toBe(0);
-  expect(reported).toEqual({ started: ["web"], completed: [] });
+  expect(reported).toEqual({
+    started: ["web"],
+    completed: [],
+    readiness: "ready",
+    warming: [],
+  });
   expect(delivered).toMatchObject({
     version: 1,
     services: { web: { GREETING: "synthetic-secret" } },
@@ -1925,7 +1982,12 @@ test("reviewed dependency caches bind published source and successful completion
       },
     })
   ).toBe(0);
-  expect(reported).toEqual({ started: [], completed: ["web"] });
+  expect(reported).toEqual({
+    started: [],
+    completed: ["web"],
+    readiness: "ready",
+    warming: [],
+  });
 });
 
 test("approved outbound hosts are forwarded exactly and sorted before runtime admission", async () => {
@@ -3008,7 +3070,8 @@ test("routed HTTPS verification precedes readiness and closes after graph cleanu
   expect(events.indexOf("https-start")).toBeLessThan(
     events.indexOf("https-verify")
   );
-  expect(events.indexOf("https-verify")).toBeLessThan(events.indexOf("save"));
+  // The run mapping is saved at started, before the HTTPS lease (PR B).
+  expect(events.indexOf("save")).toBeLessThan(events.indexOf("https-start"));
   expect(events).not.toContain("remove");
   expect(events.indexOf("save")).toBeLessThan(events.indexOf("https-close"));
   expect(events.indexOf("https-close")).toBeLessThan(events.indexOf("cleanup"));
@@ -3053,7 +3116,8 @@ test("shared HTTPS lease is never acquired before graph readiness or without a l
       startNativeProject({ ...opts, https: httpsSelection })
     ).rejects.toThrow("verified running pool");
     expect(acquired).toBe(false);
-    expect(events).not.toContain("save");
+    // Saved at started, before the lease check refuses (PR B).
+    expect(events.filter((event) => event === "save")).toHaveLength(1);
     expect(events.at(-1)).toBe("cleanup");
   }
 });
@@ -3088,7 +3152,8 @@ test("cancellation after lease acquisition releases only the acquired lease and 
   ).toBe(130);
   expect(released).toBe(1);
   expect(verified).toBe(false);
-  expect(events).not.toContain("save");
+  // Saved at started, before the lease (PR B); a later failure keeps it.
+  expect(events.filter((event) => event === "save")).toHaveLength(1);
   expect(events).not.toContain("ready");
   expect(events.at(-1)).toBe("cleanup");
 });
@@ -3146,7 +3211,8 @@ test("HTTPS readiness failure preserves its cause without removing an unpublishe
   await expect(
     startNativeProject({ ...opts, https: httpsSelection })
   ).rejects.toBe(failure);
-  expect(events).not.toContain("save");
+  // Saved at started, before the lease (PR B); a later failure keeps it.
+  expect(events.filter((event) => event === "save")).toHaveLength(1);
   expect(events).not.toContain("remove");
   expect(events).not.toContain("ready");
   expect(events.slice(-2)).toEqual(["https-close", "cleanup"]);
@@ -3583,7 +3649,8 @@ test("HTTPS startup refuses a non-2xx reviewed health response", async () => {
   await expect(
     startNativeProject({ ...opts, https: httpsSelection })
   ).rejects.toThrow("HTTP_STATUS_403");
-  expect(events).not.toContain("save");
+  // Saved at started, before the lease (PR B); a later failure keeps it.
+  expect(events.filter((event) => event === "save")).toHaveLength(1);
   expect(events).toContain("https-close");
 });
 
@@ -4432,7 +4499,9 @@ test("lost shared HTTPS acquire reply retains intent and recovers only after gra
     opts.dependencies.https = async (selection) => {
       intent = leaseIdentity(selection);
       await selection.onIntent?.(intent);
-      expect(events.slice(-2)).toEqual(["intent", "save"]);
+      // The mapping was saved at started, before the lease intent (PR B).
+      expect(events.at(-1)).toBe("intent");
+      expect(events.indexOf("save")).toBeLessThan(events.indexOf("intent"));
       events.push("acquire-sent");
       throw new Error("acquire reply lost");
     };

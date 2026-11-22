@@ -1108,11 +1108,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 return Err(invalid());
             }
             #[cfg(target_os = "macos")]
-            if graph::inspect(candidate, run)?
-                .receipt
-                .relay_startup
-                .is_some()
-            {
+            if graph::foreground_owned(candidate, run)? {
                 return if retained_only {
                     graph::foreground::remove_retained_data(candidate, run)
                 } else {

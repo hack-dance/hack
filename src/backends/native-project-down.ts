@@ -1094,6 +1094,15 @@ function removalRefused(cause?: unknown): Error {
     NATIVE_CODE.test(cause.nativeCode)
       ? ` (${cause.nativeCode})`
       : "";
+  // The owner of a run that returned at started refuses removal until ready.
+  if (
+    cause instanceof NativeRuntimeRequestError &&
+    cause.nativeCode === "graph_starting"
+  ) {
+    return new ClosedCliError(
+      "Native data removal waits for the project to finish starting (graph_starting); nothing was removed. Run `hack down` to stop it with data retained, then `hack down --remove-data`."
+    );
+  }
   return new ClosedCliError(
     `Native data removal is unconfirmed${code}; the run mapping is kept. Run \`hack down --remove-data\` again to resume from re-inspection.`
   );

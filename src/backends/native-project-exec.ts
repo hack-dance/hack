@@ -1,8 +1,10 @@
 import { noteNativeExitConfirmed } from "../lib/background-command/native-exit.ts";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { waitForNativeProjectReady } from "../lib/native-start-wait.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import { prepareNativeExecEnvironment } from "./native-exec-environment.ts";
+import { resolveNativeStartTimeoutSeconds } from "./native-graph-start-budget.ts";
 import {
   nativeInteractiveExec,
   nativeInteractiveRequested,
@@ -125,6 +127,19 @@ export async function nativeProjectExec(opts: {
       "Native exec requires one service and bounded command arguments with an optional absolute workdir."
     );
   }
+  // `up` may have returned at started: wait for ready first, as scripts
+  // written for `up -d && hack exec` expect (bounded by the start budget).
+  await waitForNativeProjectReady({
+    ps: () => nativeProjectPs({ ...opts, includeReadiness: true }),
+    budgetMs:
+      resolveNativeStartTimeoutSeconds({
+        env: process.env,
+        project: undefined,
+      }) * 1000,
+    onWaiting: (line) => {
+      process.stderr.write(`${line}\n`);
+    },
+  });
   const refreshed = await refreshNativeProjectDependencies(opts);
   const before = await nativeProjectPs(opts);
   if (before.status === "provider_pin_changed") {

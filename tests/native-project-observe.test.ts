@@ -247,6 +247,46 @@ test("an owner journal transition returns busy without stale service rows", asyn
   });
 });
 
+test("ps never asks the owner of a warming run, and reports it as warming", async () => {
+  // The owner of a run that returned at started is still in its start loop:
+  // an owner-status request here would never be answered, so this test would hang.
+  const opts = await fixture();
+  const calls: string[] = [];
+  const warming = snapshot(true);
+  warming.receipt.phase = "started-observed";
+  Object.assign(warming.receipt, {
+    started_from: "preparing",
+    readiness: { web: "healthy" },
+  });
+  warming.observations["container:web"] = {
+    state: "running",
+    health: "starting",
+  };
+  const invoke = (request: { args: readonly string[] }) => {
+    calls.push(request.args[1]!);
+    return request.args[1] === "status"
+      ? Promise.resolve(warming)
+      : new Promise<never>(() => undefined);
+  };
+  const result = await nativeProjectPs({
+    ...opts,
+    invoke,
+    includeReadiness: true,
+  });
+  expect(result).toMatchObject({
+    status: "observed",
+    phase: "started-observed",
+    readiness: "warming",
+  });
+  expect(result.items[0]).toMatchObject({
+    service: "web",
+    state: "running",
+    health: "starting",
+    readiness: "healthy",
+  });
+  expect(calls).toEqual(["status"]);
+}, 10_000);
+
 test("ps distinguishes a live foreground owner from historical ready containers", async () => {
   const opts = await fixture();
   const calls: string[] = [];

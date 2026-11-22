@@ -100,6 +100,11 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
   readonly services?: readonly string[];
   readonly noDeps?: boolean;
   readonly forceRecreate?: boolean;
+  /**
+   * `hack up --wait`: `docker compose up -d --wait`, which returns once every
+   * service is running and healthy, as native `--wait` does.
+   */
+  readonly wait?: boolean;
 }
 
 export interface RuntimeDownOptions extends RuntimeBaseOptions {
@@ -579,6 +584,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
           "up",
           "-d",
           "--no-build",
+          ...(opts.wait ? ["--wait"] : []),
           ...(opts.unattended ? ["--pull", "never"] : []),
           ...scope,
         ]);

@@ -576,6 +576,24 @@ test("unattended detached startup rechecks intent before preparation and disable
   ]);
 });
 
+test("--wait passes through to docker compose up -d", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  const code = await backend.up({
+    composeFiles: ["compose.yml"],
+    cwd: "/fixture",
+    detach: true,
+    wait: true,
+  });
+  expect(code).toBe(0);
+  const start = runCalls.find(
+    (call) => call.includes("up") && call.includes("-d")
+  );
+  expect(start).toContain("--wait");
+  expect(runCalls.find((call) => call.includes("--no-start"))).not.toContain(
+    "--wait"
+  );
+});
+
 test("withdrawn unattended intent refuses before create, pull or build phases", async () => {
   const backend = await loadComposeRuntimeBackend();
   await expect(

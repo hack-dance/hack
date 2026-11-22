@@ -364,6 +364,7 @@ hack up [services...] [options]
 | `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
 | `--refresh-images` | Native backend: refresh the project's mutable image tags from the registry. |
 | `--offline` | Native backend: use recorded image resolutions and local archives without contacting a registry. |
+| `--wait` | Return once every service is ready and every route answers (default: once every container has started, routes warming) |
 | `--always` | Mark this project for machine-local autostart and start it |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -430,6 +431,7 @@ hack restart [services...] [options]
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
 | `--json` | Output JSON (machine-readable) |
 | `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
+| `--wait` | Return once every service is ready and every route answers (default: once every container has started, routes warming) |
 | `--recover-frontend` | Recover an interrupted native frontend after proving its owner and effects are gone |
 | `--expect-finalization-attempt <32-hex>` | Require this exact interrupted native frontend attempt |
 | `--expect-frontend-pid <pid>` | Previously observed frontend PID (required only for legacy v1 state) |

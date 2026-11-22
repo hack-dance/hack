@@ -96,6 +96,50 @@ test.each([
   );
 });
 
+test.each([
+  false,
+  true,
+])("the owner reports started in both modes; up returns there unless --wait (wait %s)", async (wait) => {
+  const started = JSON.stringify({
+    kind: "graph_foreground_started",
+    phase: "started-observed",
+    run,
+  });
+  const ready = JSON.stringify({ kind: "graph_foreground_ready", run });
+  const opts = await fixture(`
+    await Bun.write("argv", JSON.stringify(process.argv.slice(2)));
+    console.log(${JSON.stringify(started)});
+    await Bun.sleep(40);
+    console.log(${JSON.stringify(ready)});
+    await Bun.sleep(40);
+  `);
+  const events: string[] = [];
+  expect(
+    await serveNativeProjectGraph({
+      ...opts,
+      returnAtStarted: !wait,
+      onStarted: async () => {
+        events.push("started");
+      },
+      onReady: async () => {
+        events.push("onReady");
+      },
+      onAllReady: () => {
+        events.push("all-ready");
+      },
+    })
+  ).toBe(0);
+  // Without --wait the chain runs at started and the ready line comes after;
+  // with --wait the mapping step runs at started and the chain at ready.
+  expect(events).toEqual(
+    wait ? ["started", "onReady"] : ["onReady", "all-ready"]
+  );
+  const argv: string[] = JSON.parse(
+    await Bun.file(join(opts.projectRoot, "argv")).text()
+  );
+  expect(argv).toContain("--report-started");
+});
+
 async function fixture(program: string) {
   const root = await mkdtemp(join(tmpdir(), "native-process-"));
   roots.push(root);

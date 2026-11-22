@@ -25,7 +25,8 @@ type ServiceStates = ReadonlyMap<string, { state: string; code?: number }>;
 function observed(value: unknown, run: string): ServiceStates | undefined {
   if (
     !(isRecord(value) && value.run === run && isRecord(value.services)) ||
-    value.phase !== "ready-observed"
+    // A run that returned at started is watched from then on, as a ready one.
+    (value.phase !== "ready-observed" && value.phase !== "started-observed")
   ) {
     return;
   }

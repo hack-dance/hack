@@ -1927,6 +1927,24 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
     }))
 }
 
+/// Whether `run` belongs to a foreground relay owner, so its cleanup goes to that
+/// owner. Read with the provider lease when it is free, as before; while the lease is
+/// held (`provider_busy`, for example by a start loop still warming), the receipt is
+/// read without it: the owner, which holds the lease, then performs the cleanup, and
+/// no second lease is taken.
+#[cfg(target_os = "macos")]
+pub fn foreground_owned(candidate: &Candidate, run: &str) -> Result<bool, CandidateError> {
+    match inspect(candidate, run) {
+        Ok(snapshot) => Ok(snapshot.receipt.relay_startup.is_some()),
+        Err(error) if error.code == "provider_busy" => {
+            let owner = state::Owner::load(candidate)?;
+            let (receipt, _) = load_at(directory(candidate, run)?, run, &owner.token)?;
+            Ok(receipt.relay_startup.is_some())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Read-only recovery inspection; historical ready phase is not a current health assertion.
 /// Read-only inspection of one owned graph attempt.
 ///

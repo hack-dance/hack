@@ -404,6 +404,11 @@ type FollowInput = {
   readonly stderr?: Writable;
   readonly project?: string;
   readonly branch?: string;
+  /**
+   * Print what exists and stop (`hack logs` without `-f` while a run warms):
+   * the same lock-free read with `--no-follow`, never resumed.
+   */
+  readonly noFollow?: boolean;
 };
 
 function runtimeEnvironment(): Record<string, string> {
@@ -678,6 +683,10 @@ async function runLogSession(
     });
     selection = { ...selection, container };
     signal.throwIfAborted();
+    if (input.noFollow) {
+      await output.end(0, signal);
+      return 0;
+    }
     const resume = input.resume;
     const next = resume
       ? await abortableLogRead(() => resume(selection, signal), signal)
@@ -742,6 +751,7 @@ async function readSelectedLogs({
           ...(selection.native ? ["--native"] : []),
           ...(input.timestamps ? ["--timestamps"] : []),
           ...(resumed ? ["--from-start"] : []),
+          ...(input.noFollow ? ["--no-follow"] : []),
           ...(opts.since === undefined ? [] : ["--since", String(opts.since)]),
         ],
         {

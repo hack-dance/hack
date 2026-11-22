@@ -113,6 +113,7 @@ fn active_log_transport_does_not_hold_or_wait_for_lifecycle_leases() {
                 &"a".repeat(64),
                 "web",
                 crate::provider::engine::log_follow::LogOptions {
+                    follow: true,
                     tail: 0,
                     since: None,
                     timestamps: false,
@@ -160,6 +161,7 @@ fn stopped_service_idle_timeout_is_not_a_clean_stream_end() {
                 &"a".repeat(64),
                 "web",
                 crate::provider::engine::log_follow::LogOptions {
+                    follow: true,
                     tail: 0,
                     since: None,
                     timestamps: false,

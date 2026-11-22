@@ -2,6 +2,7 @@ import type { Writable } from "node:stream";
 import { resolveNativeStartTimeoutSeconds } from "../backends/native-graph-start-budget.ts";
 import { assertAutostartHostCommandsAllowed } from "../lib/autostart-refusal.ts";
 import { resolveAutostartTrustedTlsBinds } from "../lib/autostart-trust-mounts.ts";
+import { currentCandidateLauncher } from "../lib/candidate-launcher.ts";
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
   assertEnvMigrationFinished,
@@ -7639,7 +7640,10 @@ async function runUpCommand({
     });
   let failedHook: string | undefined;
   let failedHookReason: string | undefined;
-  const retryCommand = printedShellCommand(["hack", ...args.raw.argv]);
+  const retryCommand = printedShellCommand([
+    currentCandidateLauncher().command,
+    ...args.raw.argv,
+  ]);
   const summarizeFailure = json
     ? undefined
     : (name: string, reason?: string) => {

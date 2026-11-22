@@ -99,7 +99,7 @@ pub enum Event<'a> {
     /// holds; health and route goals are not part of it. Emitted exactly once per
     /// attempt, behind the same post-observation deadline and cancellation checks
     /// as `ServiceReady`, never after a failure and always before `Ready` (also when
-    /// both hold on the same pass).
+    /// both hold on the same pass). Only for a driver that `reports_started`.
     AllStarted,
     Ready,
 }
@@ -114,6 +114,12 @@ pub trait Driver {
     }
 
     fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError>;
+    /// Whether this attempt records `AllStarted` (`--report-started`). When false the
+    /// loop neither checks the deadline for it nor records it, exactly as before the
+    /// event existed. The default is no.
+    fn reports_started(&self) -> bool {
+        false
+    }
     fn start(&mut self, service: &str) -> Result<(), CandidateError>;
     fn observe(&mut self, service: &str) -> Result<Observation, CandidateError>;
 
@@ -447,7 +453,7 @@ fn run_with_clock(
             // Every observation above passed the deadline and cancellation checks;
             // the deadline is checked once more right before the event, as for
             // `ServiceReady`.
-            if all_started && !seen.all_started {
+            if all_started && !seen.all_started && driver.reports_started() {
                 before_deadline(deadline, now())?;
                 driver.record(Event::AllStarted)?;
                 seen.all_started = true;
@@ -475,8 +481,13 @@ mod tests {
         states: BTreeMap<String, Observation>,
         fail_journal: bool,
         ambiguous_start: bool,
+        /// `--report-started`.
+        reports: bool,
     }
     impl Driver for Fake {
+        fn reports_started(&self) -> bool {
+            self.reports
+        }
         fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
             self.events.push(serde_json::to_string(&event).unwrap());
             if self.fail_journal {
@@ -501,6 +512,9 @@ mod tests {
         cancel_on_observe: bool,
     }
     impl Driver for CancelledDriver<'_> {
+        fn reports_started(&self) -> bool {
+            self.inner.reports
+        }
         fn check_cancelled(&self) -> Result<(), CandidateError> {
             if self.pending.get() {
                 Err(error("graph_cancelled", "fixture"))
@@ -762,6 +776,9 @@ mod tests {
             observed: Cell<bool>,
         }
         impl Driver for Late {
+            fn reports_started(&self) -> bool {
+                self.inner.reports
+            }
             fn check_cancelled(&self) -> Result<(), CandidateError> {
                 if self.in_cancel_check && self.observed.get() {
                     self.late.set(true);
@@ -801,6 +818,7 @@ mod tests {
                             health: Health::Healthy,
                         },
                     )]),
+                    reports: true,
                     ..Fake::default()
                 },
                 late: late.clone(),
@@ -847,6 +865,9 @@ mod tests {
         slow: usize,
     }
     impl Driver for SlowHealth {
+        fn reports_started(&self) -> bool {
+            self.inner.reports
+        }
         fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
             self.inner.record(event)
         }
@@ -900,7 +921,10 @@ mod tests {
     #[test]
     fn every_service_started_is_reported_before_a_slow_health_goal_and_ready() {
         let mut driver = SlowHealth {
-            inner: web_running(),
+            inner: Fake {
+                reports: true,
+                ..web_running()
+            },
             observations: 0,
             slow: 6,
         };
@@ -933,7 +957,7 @@ mod tests {
     #[test]
     fn every_service_started_is_reported_once_and_before_ready_on_the_same_pass() {
         // Every goal already holds on the first full pass: both events, in order.
-        let mut driver = driver();
+        let mut driver = reporting();
         run(&graph(), &mut driver, Duration::from_secs(1)).unwrap();
         let events = &driver.events;
         let started = events.iter().position(|e| e == ALL_STARTED).unwrap();
@@ -944,7 +968,7 @@ mod tests {
     #[test]
     fn a_failure_before_every_service_started_reports_nothing_started() {
         // `check` waits on `web`'s health, which fails first.
-        let mut driver = driver();
+        let mut driver = reporting();
         driver.states.insert(
             "web".into(),
             Observation::Running {
@@ -962,6 +986,12 @@ mod tests {
     fn driver_with_ambiguous_start() -> Fake {
         Fake {
             ambiguous_start: true,
+            ..reporting()
+        }
+    }
+    fn reporting() -> Fake {
+        Fake {
+            reports: true,
             ..driver()
         }
     }
@@ -969,7 +999,7 @@ mod tests {
     fn a_dependency_edge_keeps_its_condition_for_every_service_started() {
         // `check` may start only once `web` is healthy, so "every service started"
         // waits for that edge even though web's own start already counts.
-        let mut driver = driver();
+        let mut driver = reporting();
         driver.states.insert(
             "web".into(),
             Observation::Running {
@@ -1165,5 +1195,97 @@ mod tests {
             "graph_timeout"
         );
         assert_eq!(driver.starts, ["init"]);
+    }
+}
+
+#[cfg(test)]
+mod started_deadline_tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+    /// One service, running: ready on its first observation. The clock passes the
+    /// deadline at the cancellation check that follows the last observation of the
+    /// final pass, after every check `Ready` needs and before `AllStarted`'s own.
+    struct EdgeOfDeadline {
+        reports: bool,
+        checks: Cell<u32>,
+        late: Rc<Cell<bool>>,
+        events: Vec<String>,
+    }
+    impl Driver for EdgeOfDeadline {
+        fn check_cancelled(&self) -> Result<(), CandidateError> {
+            self.checks.set(self.checks.get() + 1);
+            // 1 loop top, 2-3 before the intent and the start, 4-5 around the first
+            // observation, 6-7 around the final pass's observation.
+            if self.checks.get() == 7 {
+                self.late.set(true);
+            }
+            Ok(())
+        }
+        fn reports_started(&self) -> bool {
+            self.reports
+        }
+        fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
+            self.events.push(serde_json::to_string(&event).unwrap());
+            Ok(())
+        }
+        fn start(&mut self, _: &str) -> Result<(), CandidateError> {
+            Ok(())
+        }
+        fn observe(&mut self, _: &str) -> Result<Observation, CandidateError> {
+            Ok(Observation::Running {
+                health: Health::None,
+            })
+        }
+    }
+    fn attempt(reports: bool) -> (Result<(), CandidateError>, Vec<String>) {
+        let graph = Graph {
+            services: BTreeMap::from([(
+                "web".into(),
+                Service {
+                    dependencies: BTreeMap::new(),
+                    ready: Condition::Started,
+                },
+            )]),
+        };
+        let late = Rc::new(Cell::new(false));
+        let mut driver = EdgeOfDeadline {
+            reports,
+            checks: Cell::new(0),
+            late: Rc::clone(&late),
+            events: Vec::new(),
+        };
+        let start = Instant::now();
+        let clock = move || {
+            if late.get() {
+                start + Duration::from_secs(2)
+            } else {
+                start
+            }
+        };
+        let outcome = run_with_clock(
+            &graph,
+            &mut driver,
+            Duration::from_secs(1),
+            |_| panic!("no wait: ready on the first pass"),
+            clock,
+        );
+        (outcome, driver.events)
+    }
+    #[test]
+    fn a_ready_at_the_deadline_still_succeeds_without_report_started() {
+        let (outcome, events) = attempt(false);
+        outcome.unwrap();
+        assert_eq!(events.last().unwrap(), r#"{"event":"ready"}"#);
+        assert!(!events.iter().any(|e| e.contains("all_started")));
+    }
+    #[test]
+    fn with_report_started_the_same_edge_refuses_before_recording_it() {
+        let (outcome, events) = attempt(true);
+        assert_eq!(outcome.unwrap_err().code, "graph_timeout");
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.contains("all_started") || e.contains(r#""ready""#))
+        );
     }
 }

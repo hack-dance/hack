@@ -109,9 +109,11 @@ const RECOVERY_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 const FOREGROUND_STATES = new Set(["absent", "running", "exited", "uncertain"]);
 /**
- * Graph phases of a run whose services all started, so it has a mapping and an
- * owner to recover when that owner exited: ready, or started with some goal still
- * unmet (`started-observed`, written only under `--report-started`).
+ * Graph phases in which an exited foreground owner is recovered: ready, or every
+ * service started with some goal still unmet (`started-observed`, written only
+ * under `--report-started`). Only a run with a saved mapping gets here. A fresh
+ * start saves its mapping only at ready today, so in the started phase this is a
+ * restored run; PR B saves the mapping at started.
  */
 const RECOVERABLE_LIVE_PHASES: ReadonlySet<string> = new Set([
   "ready-observed",

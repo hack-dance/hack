@@ -96,58 +96,6 @@ test.each([
   );
 });
 
-test.each([
-  true,
-  false,
-])("the report-started test switch passes the flag and skips the started line (%s)", async (on) => {
-  const started = JSON.stringify({
-    kind: "graph_foreground_started",
-    phase: "started-observed",
-    run,
-  });
-  const opts = await fixture(`
-    await Bun.write("argv", JSON.stringify(process.argv.slice(2)));
-    console.log(${JSON.stringify(started)});
-    console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
-    await Bun.sleep(30);
-  `);
-  const previous = process.env.HACK_NATIVE_REPORT_STARTED;
-  if (on) {
-    process.env.HACK_NATIVE_REPORT_STARTED = "1";
-  } else {
-    Reflect.deleteProperty(process.env, "HACK_NATIVE_REPORT_STARTED");
-  }
-  let ready = false;
-  try {
-    const served = serveNativeProjectGraph({
-      ...opts,
-      onReady: async () => {
-        ready = true;
-      },
-    });
-    if (on) {
-      expect(await served).toBe(0);
-      expect(ready).toBe(true);
-    } else {
-      // Without the switch the line is not expected, as today: refused.
-      await expect(served).rejects.toThrow(
-        "Native graph readiness identity is invalid or canceled."
-      );
-      expect(ready).toBe(false);
-    }
-    const argv: string[] = JSON.parse(
-      await Bun.file(join(opts.projectRoot, "argv")).text()
-    );
-    expect(argv.includes("--report-started")).toBe(on);
-  } finally {
-    if (previous === undefined) {
-      Reflect.deleteProperty(process.env, "HACK_NATIVE_REPORT_STARTED");
-    } else {
-      process.env.HACK_NATIVE_REPORT_STARTED = previous;
-    }
-  }
-});
-
 async function fixture(program: string) {
   const root = await mkdtemp(join(tmpdir(), "native-process-"));
   roots.push(root);

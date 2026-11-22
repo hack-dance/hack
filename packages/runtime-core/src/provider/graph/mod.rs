@@ -1099,6 +1099,11 @@ impl Driver for Session<'_, '_> {
         }
         Ok(())
     }
+    fn reports_started(&self) -> bool {
+        self.startup
+            .as_ref()
+            .is_some_and(|startup| startup.reports_started())
+    }
 
     fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
         match event {
